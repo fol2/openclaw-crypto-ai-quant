@@ -627,7 +627,7 @@ class MidsFeed:
 
         self._sidecar = None
         try:
-            from hl_ws_sidecar_client import SidecarWSClient  # type: ignore
+            from exchange.sidecar import SidecarWSClient  # type: ignore
 
             self._sidecar = SidecarWSClient()
         except Exception as e:

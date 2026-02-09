@@ -140,7 +140,7 @@ def _print_candle_health(*, symbol: str) -> None:
     print(f"AI_QUANT_MARKET_DB_PATH={db_path}")
 
     try:
-        from quant_trader_v5.market_data import MarketDataHub
+        from engine.market_data import MarketDataHub
     except Exception as e:
         print(f"import_failed: {e}")
         return
