@@ -15,8 +15,10 @@ venv/
 *.db-wal
 *.db-journal
 *.lock
-# uv lockfile should be tracked (dependency reproducibility)
+# Lockfiles should be tracked (dependency reproducibility)
 !uv.lock
+!Cargo.lock
+!**/Cargo.lock
 *.bak*
 
 # Logs
