@@ -13,5 +13,5 @@ if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/d
 else
   echo "systemd user instance not available; running unified daemon in foreground (paper)."
   cd "${PROJECT_DIR}"
-  exec env AI_QUANT_MODE=paper "${PROJECT_DIR}/venv/bin/python3" -u -m engine.daemon
+  exec env AI_QUANT_MODE=paper "${PROJECT_DIR}/.venv/bin/python3" -u -m engine.daemon
 fi

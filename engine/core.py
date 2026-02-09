@@ -75,6 +75,7 @@ class UnifiedEngine:
         market: MarketDataHub,
         interval: str,
         lookback_bars: int,
+        mode: str | None = None,
         mode_plugin: ModePlugin | None = None,
     ):
         self.trader = trader
@@ -82,6 +83,7 @@ class UnifiedEngine:
         self.market = market
         self.interval = str(interval)
         self.lookback_bars = int(lookback_bars)
+        self.mode = str(mode or os.getenv("AI_QUANT_MODE", "paper") or "paper").strip().lower()
         self.mode_plugin = mode_plugin
 
         self.stats = EngineStats()
@@ -580,7 +582,7 @@ class UnifiedEngine:
                             "ENGINE",
                             "CANDLES_NOT_READY_SAMPLE",
                             data={
-                                "mode": str(self.mode),
+                                "mode": str(getattr(self, "mode", os.getenv("AI_QUANT_MODE", "paper") or "paper")),
                                 "interval": str(self.interval),
                                 "watchlist_n": int(len(watchlist or [])),
                                 "active_symbols_n": int(len(active_symbols or [])),

@@ -28,7 +28,7 @@ from exchange.executor import (
     live_entries_enabled,
     live_mode,
     live_orders_enabled,
-    load_live_secrets,
+    load_live_secrets,  # noqa: F401  (re-exported for engine.daemon)
     utc_iso,
 )
 
@@ -993,6 +993,24 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             except Exception:
                 oms_intent = None
 
+        if oms is not None and oms_intent is None and _env_bool("AI_QUANT_OMS_REQUIRE_INTENT_FOR_ENTRY", True):
+            # Fail-closed for entry orders if we cannot create an OMS intent (prevents untracked duplicates).
+            self._note_entry_fail(sym, "oms_intent_create_failed")
+            mei_alpha_v1.log_audit_event(
+                sym,
+                "OMS_INTENT_CREATE_FAILED",
+                level="warn",
+                data={
+                    "kind": "ADD",
+                    "confidence": str(confidence or "").lower(),
+                    "px_est": float(fill_price_est),
+                    "size": float(add_size),
+                    "notional_est": float(notional),
+                    "leverage": float(leverage),
+                },
+            )
+            return False
+
         # Risk guardrails (kill-switch + rate limits). Best-effort.
         risk = getattr(self, "risk", None)
         if risk is not None:
@@ -1127,6 +1145,28 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             )
             return False
 
+        if risk is not None:
+            try:
+                risk.note_order_sent(
+                    symbol=sym,
+                    action="ADD",
+                    notional_usd=float(notional),
+                    reduce_risk=False,
+                )
+            except Exception as exc:
+                # Best-effort risk tracking; failures here must not block live trading.
+                mei_alpha_v1.log_audit_event(
+                    sym,
+                    "LIVE_RISK_NOTE_ORDER_SENT_ERROR",
+                    level="error",
+                    data={
+                        "action": "ADD",
+                        "notional_usd": float(notional),
+                        "reduce_risk": False,
+                        "error": repr(exc),
+                    },
+                )
+
         try:
             bud = getattr(self, "_entry_budget_remaining", None)
             if bud is not None:
@@ -1239,13 +1279,13 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
 
         return True
 
-    def reduce_position(self, symbol, reduce_size, price, timestamp, reason, *, confidence="N/A", meta: dict | None = None):
+    def reduce_position(self, symbol, reduce_size, price, timestamp, reason, *, confidence="N/A", meta: dict | None = None) -> bool:
         sym = str(symbol or "").strip().upper()
         if sym not in (self.positions or {}):
-            return
+            return False
 
         if not self._can_attempt_exit(sym):
-            return
+            return False
 
         pos = self.positions[sym]
         pos_type = str(pos.get("type") or "").upper()
@@ -1253,9 +1293,9 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         try:
             size = float(pos.get("size") or 0.0)
         except Exception:
-            return
+            return False
         if size <= 0:
-            return
+            return False
 
         try:
             reduce_size_f = float(reduce_size)
@@ -1263,7 +1303,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             reduce_size_f = size
         reduce_size_f = max(0.0, min(size, reduce_size_f))
         if reduce_size_f <= 0:
-            return
+            return False
 
         trade_cfg = self._live_trade_cfg(sym)
         min_notional = float(self._min_notional_usd(sym))
@@ -1293,20 +1333,20 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 close_sz = min_sz
             reduce_size_f = float(close_sz)
             if reduce_size_f <= 0:
-                return
+                return False
             is_full_close = True
         else:
             # Start with a conservative rounding DOWN (never reduce more than requested).
             reduce_size_f = hyperliquid_meta.round_size(sym, reduce_size_f)
             if reduce_size_f <= 0:
-                return
+                return False
 
             is_full_close = False
             notional_est = abs(reduce_size_f) * float(fill_price_est)
             if notional_est < min_notional:
                 boosted = hyperliquid_meta.min_size_for_notional(sym, min_notional, float(fill_price_est))
                 if boosted <= 0:
-                    return
+                    return False
 
                 # If boosting would close the position (or leave dust under min-notional), close fully instead.
                 if boosted >= (size - 1e-12):
@@ -1315,7 +1355,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                         close_sz = boosted
                     reduce_size_f = float(close_sz)
                     if reduce_size_f <= 0:
-                        return
+                        return False
                     is_full_close = True
                 else:
                     remaining_sz = max(0.0, size - boosted)
@@ -1326,7 +1366,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                             close_sz = boosted
                         reduce_size_f = float(close_sz)
                         if reduce_size_f <= 0:
-                            return
+                            return False
                         is_full_close = True
                     else:
                         reduce_size_f = boosted
@@ -1407,7 +1447,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                             "oms_intent_id": getattr(oms_intent, "intent_id", None) if oms_intent is not None else None,
                         },
                     )
-                    return
+                    return False
             except Exception:
                 pass
 
@@ -1433,7 +1473,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     "confidence": str(confidence or "").lower(),
                 },
             )
-            return
+            return False
 
         cloid = getattr(oms_intent, "client_order_id", None)
         is_buy_exit = bool(exit_side == "BUY")
@@ -1471,7 +1511,29 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     "confidence": str(confidence or "").lower(),
                 },
             )
-            return
+            return False
+
+        if risk is not None:
+            try:
+                risk.note_order_sent(
+                    symbol=sym,
+                    action=str(action_kind),
+                    notional_usd=float(notional_est2),
+                    reduce_risk=True,
+                )
+            except Exception as exc:
+                # Best-effort risk tracking; failures here must not block live trading.
+                mei_alpha_v1.log_audit_event(
+                    sym,
+                    "LIVE_RISK_NOTE_ORDER_SENT_ERROR",
+                    level="error",
+                    data={
+                        "action": str(action_kind),
+                        "notional_usd": float(notional_est2),
+                        "reduce_risk": True,
+                        "error": repr(exc),
+                    },
+                )
 
         # Successful send: rate-limit future exit attempts for this symbol for a short cooldown window.
         try:
@@ -1567,6 +1629,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 "meta": meta_final or None,
             },
         )
+        return True
 
     def close_position(self, symbol, price, timestamp, reason, *, meta: dict | None = None):
         sym = str(symbol or "").strip().upper()
@@ -1869,7 +1932,6 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             trade_cfg=trade_cfg,
             thresholds=thr,
         )
-        margin_target = float(sizing.margin_usd)
         leverage = float(sizing.leverage)
 
         # Live clamps: per-order notional cap to avoid over-sizing small accounts.
@@ -1980,6 +2042,26 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 )
             except Exception:
                 oms_intent = None
+
+        if oms is not None and oms_intent is None and _env_bool("AI_QUANT_OMS_REQUIRE_INTENT_FOR_ENTRY", True):
+            # Fail-closed for entry orders if we cannot create an OMS intent (prevents untracked duplicates).
+            self._note_entry_fail(sym, "oms_intent_create_failed")
+            mei_alpha_v1.log_audit_event(
+                sym,
+                "OMS_INTENT_CREATE_FAILED",
+                level="warn",
+                data={
+                    "kind": "OPEN",
+                    "signal": str(signal or "").upper(),
+                    "confidence": str(confidence or "").lower(),
+                    "px_est": float(fill_price_est),
+                    "size": float(size),
+                    "notional_est": float(notional),
+                    "leverage": float(leverage),
+                    "margin_est": float(margin_need),
+                },
+            )
+            return
 
         if oms_intent is not None and getattr(oms_intent, "duplicate", False):
             mei_alpha_v1.log_audit_event(
@@ -2156,6 +2238,28 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 },
             )
             return
+
+        if risk is not None:
+            try:
+                risk.note_order_sent(
+                    symbol=sym,
+                    action="OPEN",
+                    notional_usd=float(notional),
+                    reduce_risk=False,
+                )
+            except Exception as exc:
+                # Best-effort risk tracking; failures here must not block live trading.
+                mei_alpha_v1.log_audit_event(
+                    sym,
+                    "LIVE_RISK_NOTE_ORDER_SENT_ERROR",
+                    level="error",
+                    data={
+                        "action": "OPEN",
+                        "notional_usd": float(notional),
+                        "reduce_risk": False,
+                        "error": repr(exc),
+                    },
+                )
 
         try:
             bud = getattr(self, "_entry_budget_remaining", None)
@@ -3013,296 +3117,3 @@ def run_trader():
         "Deprecated: use `python -m engine.daemon` "
         "with AI_QUANT_MODE=live or AI_QUANT_MODE=dry_live."
     )
-
-    secrets_path = os.getenv("AI_QUANT_SECRETS_PATH", os.path.join(os.path.dirname(__file__), "secrets.json"))
-    secrets = load_live_secrets(secrets_path)
-
-    executor = HyperliquidLiveExecutor(secret_key=secrets.secret_key, main_address=secrets.main_address)
-    trader = LiveTrader(executor=executor)
-    _ensure_live_tables()
-    # WS is great for low-latency fills, but can disconnect. This REST backfill prevents missing fills.
-    rest_info = Info(constants.MAINNET_API_URL, skip_ws=True)
-
-    print(f"🚀 Hyperliquid LIVE Trader Started | mode={mode} | {datetime.datetime.now()}")
-    if mode != "dry_live" and not live_orders_enabled():
-        print(
-            "🟡 Live orders are DISABLED. To enable, set:\n"
-            "  AI_QUANT_LIVE_ENABLE=1\n"
-            "  AI_QUANT_LIVE_CONFIRM=I_UNDERSTAND_THIS_CAN_LOSE_MONEY\n"
-            "and ensure AI_QUANT_HARD_KILL_SWITCH is not set."
-        )
-    elif mode != "dry_live" and not live_entries_enabled():
-        print("🟡 Close-only mode: entries are disabled by AI_QUANT_KILL_SWITCH=1 (exits still allowed).")
-
-    last_heartbeat = 0.0
-    last_state_sync = 0.0
-    last_rest_fills_sync = 0.0
-    last_rest_fills_ms = int(time.time() * 1000) - (2 * 60 * 60 * 1000)  # backfill last 2h on start
-
-    stale_strikes = 0
-    stale_mids_s = float(os.getenv("AI_QUANT_WS_STALE_MIDS_S", "60"))
-    stale_candle_s = float(os.getenv("AI_QUANT_WS_STALE_CANDLE_S", str(60 * 60 * 2)))
-    # NOTE: HL WS `bbo` updates are only sent when the BBO changes on a block, so "age" can be large in quiet
-    # periods and is not a good liveness signal. Default disables BBO staleness checks.
-    stale_bbo_s = float(os.getenv("AI_QUANT_WS_STALE_BBO_S", "0"))
-    last_ws_restart_ts = 0.0
-    ws_restart_count = 0
-    ws_restart_window_started = 0.0
-
-    hot_reload = _env_bool("AI_QUANT_LIVE_HOT_RELOAD", False)
-
-    while True:
-        loop_started_at = time.time()
-        loop_no_data = 0
-        loop_signals = 0
-        try:
-            if hot_reload:
-                importlib.reload(mei_alpha_v1)
-
-            # Periodic account/position reconciliation.
-            if (time.time() - last_state_sync) >= float(os.getenv("AI_QUANT_LIVE_STATE_SYNC_SECS", "10")):
-                last_state_sync = time.time()
-                trader.sync_from_exchange(force=False)
-
-            watchlist = list(mei_alpha_v1.SYMBOLS)
-            watchlist_set = {s.upper() for s in watchlist}
-            active_symbols = list(dict.fromkeys(watchlist + list((trader.positions or {}).keys())))
-            if "BTC" not in {s.upper() for s in active_symbols}:
-                active_symbols.insert(0, "BTC")
-
-            # Ensure WS is running (market + user streams).
-            hyperliquid_ws.hl_ws.ensure_started(
-                symbols=active_symbols,
-                interval=mei_alpha_v1.INTERVAL,
-                candle_limit=mei_alpha_v1.LOOKBACK_HOURS + 50,
-                user=secrets.main_address,
-            )
-
-            # Drain WS events (fills/funding/ledger/order updates).
-            fills = hyperliquid_ws.hl_ws.drain_user_fills(max_items=5000)
-            if fills:
-                inserted = process_user_fills(trader, fills)
-                if inserted:
-                    # A fill likely changed state; do a forced sync.
-                    trader.sync_from_exchange(force=True)
-
-            # REST fill backfill (safety): if WS misses userFills during disconnects, fetch recent fills by time.
-            try:
-                rest_sync_s = float(os.getenv("AI_QUANT_LIVE_REST_FILLS_SYNC_SECS", "60"))
-            except Exception:
-                rest_sync_s = 60.0
-            if rest_sync_s > 0 and (time.time() - last_rest_fills_sync) >= rest_sync_s:
-                last_rest_fills_sync = time.time()
-                now_ms = int(time.time() * 1000)
-                start_ms = max(0, int(last_rest_fills_ms) - (5 * 60 * 1000))  # 5m overlap for safety
-                try:
-                    rest_fills = rest_info.user_fills_by_time(
-                        secrets.main_address,
-                        start_ms,
-                        now_ms,
-                        aggregate_by_time=False,
-                    ) or []
-                    if rest_fills:
-                        inserted = process_user_fills(trader, rest_fills)
-                        if inserted:
-                            trader.sync_from_exchange(force=True)
-                except Exception as e:
-                    print(f"⚠️ REST fills backfill failed: {e}")
-                last_rest_fills_ms = now_ms
-
-            fundings = hyperliquid_ws.hl_ws.drain_user_fundings(max_items=2000)
-            if fundings:
-                process_user_fundings(trader, fundings)
-
-            ledger = hyperliquid_ws.hl_ws.drain_user_ledger_updates(max_items=2000)
-            if ledger:
-                process_ws_events("userNonFundingLedgerUpdates", ledger)
-
-            order_updates = hyperliquid_ws.hl_ws.drain_order_updates(max_items=2000)
-            if order_updates:
-                process_ws_events("orderUpdates", order_updates)
-
-            # BTC anchor context
-            btc_bullish = None
-            btc_df = mei_alpha_v1.get_data("BTC")
-            if btc_df is not None and not btc_df.empty:
-                btc_ema_slow = mei_alpha_v1.ta.trend.ema_indicator(btc_df["Close"], window=50).iloc[-1]
-                if mei_alpha_v1.pd.notna(btc_ema_slow):
-                    btc_bullish = btc_df["Close"].iloc[-1] > btc_ema_slow
-
-            per_symbol_sleep = 0.2 if len(active_symbols) > 25 else 0.5
-            for symbol in active_symbols:
-                df = btc_df if symbol == "BTC" else mei_alpha_v1.get_data(symbol)
-                if df is None:
-                    loop_no_data += 1
-                    time.sleep(per_symbol_sleep)
-                    continue
-
-                sig, conf, now = mei_alpha_v1.analyze(df, symbol, btc_bullish=btc_bullish)
-                now["funding_rate"] = hyperliquid_meta.get_funding_rate(symbol) or 0.0
-
-                mid = hyperliquid_ws.hl_ws.get_mid(symbol, max_age_s=10.0)
-                if mid is None:
-                    bbo = hyperliquid_ws.hl_ws.get_bbo(symbol, max_age_s=15.0)
-                    if bbo is not None:
-                        bid, ask = bbo
-                        if bid > 0 and ask > 0:
-                            mid = (bid + ask) / 2.0
-                current_price = float(mid) if mid is not None else float(now["Close"])
-
-                if symbol in (trader.positions or {}):
-                    mei_alpha_v1.PaperTrader.check_exit_conditions(
-                        trader,
-                        symbol,
-                        current_price,
-                        now.name,
-                        is_anomaly=now.get("is_anomaly", False),
-                        dynamic_tp_mult=now.get("tp_mult"),
-                        indicators=now,
-                    )
-
-                if symbol in watchlist_set and sig != "NEUTRAL":
-                    loop_signals += 1
-                    log_live_signal(
-                        symbol=symbol,
-                        signal=sig,
-                        confidence=conf,
-                        price=current_price,
-                        indicators=now,
-                    )
-                    trader.execute_trade(
-                        symbol,
-                        sig,
-                        current_price,
-                        now.name,
-                        conf,
-                        atr=now.get("ATR", 0.0),
-                        indicators=now,
-                    )
-
-                time.sleep(per_symbol_sleep)
-
-            # Heartbeat / health
-            now_ts = time.time()
-            if now_ts - last_heartbeat >= 60:
-                last_heartbeat = now_ts
-                loop_s = now_ts - loop_started_at
-                ws_health = hyperliquid_ws.hl_ws.health(symbols=active_symbols, interval=mei_alpha_v1.INTERVAL)
-
-                mids_age = ws_health.mids_age_s
-                candle_age = ws_health.candle_age_s
-                bbo_age = ws_health.bbo_age_s
-
-                mids_age_s = "NA" if mids_age is None else f"{mids_age:.1f}s"
-                candle_age_s = "NA" if candle_age is None else f"{candle_age:.1f}s"
-                bbo_age_s = "NA" if bbo_age is None else f"{bbo_age:.1f}s"
-
-                equity = trader.get_live_balance()
-                cash = trader.balance
-
-                try:
-                    snap2 = trader.executor.account_snapshot(force=False)
-                    margin_used = float(snap2.total_margin_used_usd)
-                    avail_margin = max(0.0, float(snap2.account_value_usd) - margin_used)
-                except Exception:
-                    margin_used = None
-                    avail_margin = None
-
-                try:
-                    levs = [float((p or {}).get("leverage") or 1.0) for p in (trader.positions or {}).values()]
-                    max_lev = max(levs) if levs else None
-                except Exception:
-                    max_lev = None
-
-                margin_used_s = "NA" if margin_used is None else f"{margin_used:,.2f}"
-                avail_margin_s = "NA" if avail_margin is None else f"{avail_margin:,.2f}"
-                max_lev_s = "NA" if max_lev is None else f"{max_lev:.0f}x"
-                try:
-                    trade_cfg = (mei_alpha_v1.get_strategy_config("BTC").get("trade") or {})
-                    sl_atr_mult = float(trade_cfg.get("sl_atr_mult", mei_alpha_v1.SL_ATR_MULT))
-                    cd_min = float(trade_cfg.get("reentry_cooldown_min_mins", 0.0) or 0.0)
-                    cd_max = float(trade_cfg.get("reentry_cooldown_max_mins", 0.0) or 0.0)
-                    cfg_sig = f"slATR={sl_atr_mult:g} PESC={cd_min:g}-{cd_max:g}m SSF=on"
-                except Exception:
-                    cfg_sig = "slATR=NA PESC=NA SSF=on"
-
-                print(
-                    f"💓 LIVE OK | {datetime.datetime.now()} | "
-                    f"symbols={len(active_symbols)} | "
-                    f"no_data={loop_no_data} | "
-                    f"signals={loop_signals} | "
-                    f"open_positions={len(trader.positions or {})} | "
-                    f"withdrawable~=${cash:,.2f} | "
-                    f"accountValue=${equity:,.2f} | "
-                    f"marginUsed=${margin_used_s} | "
-                    f"availMargin~=${avail_margin_s} | "
-                    f"maxLev={max_lev_s} | "
-                    f"{cfg_sig} | "
-                    f"mids_age={mids_age_s} | candle_age={candle_age_s} | bbo_age={bbo_age_s} | "
-                    f"loop={loop_s:.1f}s"
-                )
-
-                is_stale = False
-                if mids_age is None or mids_age > stale_mids_s:
-                    is_stale = True
-                # Candle stream can be sparse depending on interval; only enforce staleness if we have seen updates.
-                if candle_age is not None and candle_age > stale_candle_s:
-                    is_stale = True
-                # BBO is optional for decisions (we can fallback to mids); enforce only if enabled.
-                if stale_bbo_s > 0 and bbo_age is not None and bbo_age > stale_bbo_s:
-                    is_stale = True
-
-                if is_stale:
-                    stale_strikes += 1
-                    print(f"⚠️ WS health stale strike {stale_strikes}/2 (will self-heal if it persists)")
-                    if stale_strikes >= 2:
-                        # Prefer restarting the WS client in-process to keep the daemon alive.
-                        now_ts2 = time.time()
-                        if ws_restart_window_started <= 0 or (now_ts2 - ws_restart_window_started) > 600:
-                            ws_restart_window_started = now_ts2
-                            ws_restart_count = 0
-
-                        # Basic cooldown to avoid thrashing.
-                        cooldown_s = float(os.getenv("AI_QUANT_WS_RESTART_COOLDOWN_S", "60"))
-                        if (now_ts2 - last_ws_restart_ts) < max(0.0, cooldown_s):
-                            print("🟡 WS restart cooldown active; will keep waiting.")
-                        else:
-                            ws_restart_count += 1
-                            last_ws_restart_ts = now_ts2
-                            print(f"🔄 Restarting HL WS client (attempt {ws_restart_count}/5 in 10m window)...")
-                            try:
-                                hyperliquid_ws.hl_ws.stop()
-                            except Exception:
-                                pass
-                            try:
-                                hyperliquid_ws.hl_ws = hyperliquid_ws.HyperliquidWS()
-                            except Exception as e:
-                                print(f"⚠️ Failed to recreate HL WS client: {e}")
-
-                            # Re-subscribe immediately to reduce downtime.
-                            try:
-                                hyperliquid_ws.hl_ws.ensure_started(
-                                    symbols=active_symbols,
-                                    interval=mei_alpha_v1.INTERVAL,
-                                    candle_limit=mei_alpha_v1.LOOKBACK_HOURS + 50,
-                                    user=secrets.main_address,
-                                )
-                            except Exception:
-                                pass
-
-                            stale_strikes = 0
-
-                        # If we're stuck in a restart loop, let systemd take over.
-                        if ws_restart_count >= 5:
-                            raise SystemExit(2)
-                else:
-                    stale_strikes = 0
-
-        except Exception as e:
-            print(f"⚠️ LIVE Daemon Error: {e}")
-            import traceback
-
-            traceback.print_exc()
-            time.sleep(10)
-
-        time.sleep(2)

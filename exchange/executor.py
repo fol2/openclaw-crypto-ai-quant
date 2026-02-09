@@ -62,6 +62,22 @@ class LiveSecrets:
 
 
 def load_live_secrets(path: str) -> LiveSecrets:
+    path = os.path.expanduser(str(path or "").strip())
+    # Refuse to use secrets files that are group/world-readable on Unix.
+    # Private keys must be treated as production credentials.
+    st = None
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        raise
+    except Exception:
+        st = None
+    if st is not None and os.name != "nt":
+        if (int(st.st_mode) & 0o077) != 0:
+            raise ValueError(
+                f"Secrets file permissions too open: {path} (expected no group/other permissions; suggested: chmod 600)"
+            )
+
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f) or {}
     secret_key = str(data.get("secret_key") or "").strip()

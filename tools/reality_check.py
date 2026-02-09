@@ -7,11 +7,11 @@ Why this exists:
 - timestamp strings are ISO-8601 ("2026-02-06T..."), so filtering should use datetime(timestamp)
 
 Usage:
-  ./venv/bin/python3 tools/reality_check.py --symbol BTC --hours 2
+  ./.venv/bin/python3 tools/reality_check.py --symbol BTC --hours 2
 
 Optional:
   AI_QUANT_MARKET_DB_PATH=/path/to/market_data.db AI_QUANT_INTERVAL=1m \
-    ./venv/bin/python3 tools/reality_check.py --symbol BTC
+    ./.venv/bin/python3 tools/reality_check.py --symbol BTC
 """
 
 from __future__ import annotations

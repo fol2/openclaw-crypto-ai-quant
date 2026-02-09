@@ -20,5 +20,5 @@ else
     set +a
   fi
   cd "${PROJECT_DIR}"
-  exec "${PROJECT_DIR}/venv/bin/python3" -u -m engine.daemon
+  exec "${PROJECT_DIR}/.venv/bin/python3" -u -m engine.daemon
 fi

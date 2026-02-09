@@ -8,10 +8,10 @@ Local dashboard for monitoring **Live** + **Paper** daemons:
 
 ## Run (manual)
 
-From `workspace/dev/ai_quant/`:
+From the repo root:
 
 ```bash
-venv/bin/python3 -u monitor/server.py
+.venv/bin/python3 -u monitor/server.py
 ```
 
 Open:
