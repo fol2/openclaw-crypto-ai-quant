@@ -1,41 +1,77 @@
-# AI Quant — Dev Tooling (uv / ruff / pytest)
+# AI Quant — Development Guide
 
-This folder is a standalone Python project managed by `uv`:
+This repository contains both Python (trading engine, strategies, monitoring) and Rust (backtester, WS sidecar) components.
 
-- Project config: `dev/ai_quant/pyproject.toml`
-- Lockfile: `dev/ai_quant/uv.lock`
-- Dev venv (uv-managed): `dev/ai_quant/.venv/` (ignored by git)
-- Runtime venv (systemd scripts): `dev/ai_quant/venv/` (unchanged; used by `run_live.sh` / `run_paper.sh`)
+## Python Development (uv / ruff / pytest)
 
-## Setup
+This project is managed by `uv`:
+
+- Project config: `./pyproject.toml`
+- Lockfile: `./uv.lock`
+- Dev venv (uv-managed): `./.venv/` (ignored by git)
+- Runtime venv (systemd scripts): `./venv/` (unchanged; used by `run_live.sh` / `run_paper.sh`)
+
+### Setup
 
 ```bash
-cd workspace/dev/ai_quant
 uv sync --dev
 ```
 
-## Lint / Format
+### Lint / Format
 
 ```bash
-cd workspace/dev/ai_quant
 uv run ruff check quant_trader_v5 tests
 uv run ruff format quant_trader_v5 tests
 ```
 
-## Tests
+### Tests
 
 ```bash
-cd workspace/dev/ai_quant
 uv run pytest
 ```
 
 Notes:
-- `pytest` enforces **100% coverage** for `quant_trader_v5/sqlite_logger.py` and `monitor/heartbeat.py`.
+- `pytest` enforces 100% coverage for `quant_trader_v5/sqlite_logger.py` and `monitor/heartbeat.py`.
 
-## Safety gate
+## Rust Development (Backtester + WS Sidecar)
 
-The live-trader quality gate uses the same Ruff config:
+### Build
 
 ```bash
-bash workspace/scripts/validate_quant.sh
+# Backtester (CPU)
+cd backtester && cargo build --release
+
+# Backtester (GPU, requires CUDA toolkit)
+cd backtester && cargo build --release -p bt-cli --features gpu
+
+# WS Sidecar
+cd ws_sidecar && cargo build --release
 ```
+
+### Test
+
+```bash
+cd backtester && cargo test
+cd ws_sidecar && cargo test
+```
+
+### Lint
+
+```bash
+cargo fmt --check
+cargo clippy -- -D warnings
+```
+
+### Notes
+
+- Cargo.lock files are tracked in version control for reproducibility.
+- GPU builds require NVIDIA CUDA Toolkit installed on the system.
+
+## Project Structure
+
+- `quant_trader_v5/` — Core trading engine (Python)
+- `backtester/` — High-performance backtesting framework (Rust)
+- `ws_sidecar/` — WebSocket data streaming sidecar (Rust)
+- `monitor/` — Read-only web dashboard (Python)
+- `tests/` — Unit and integration tests
+- `strategy_overrides.yaml` — Per-symbol strategy parameters (hot-reloads)
