@@ -53,7 +53,8 @@ def test_line_buffering_writer_emits_lines():
     _ = w.encoding
     _ = w.errors
 
-    assert w.write("hello") == 5
+    written = w.write("hello")
+    assert written == 5
     assert sink.items == []
 
     w.write("\nworld\n")
