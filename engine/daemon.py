@@ -67,12 +67,8 @@ def acquire_lock_or_exit(lock_path: str):
     Uses fcntl when available (Linux). Falls back to a simple pid file otherwise.
     """
     lock_file = open(lock_path, "a+", encoding="utf-8")
-    try:
-        import fcntl
 
-        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except Exception:
-        # Fallback: best-effort pid file.
+    def _write_pid() -> None:
         try:
             lock_file.seek(0)
             lock_file.truncate()
@@ -80,12 +76,32 @@ def acquire_lock_or_exit(lock_path: str):
             lock_file.flush()
         except Exception:
             pass
+
+    try:
+        import fcntl  # Linux/Unix
+    except ImportError:
+        # Best-effort pid file (no true exclusion on platforms without fcntl).
+        _write_pid()
         return lock_file
 
-    lock_file.seek(0)
-    lock_file.truncate()
-    lock_file.write(str(os.getpid()))
-    lock_file.flush()
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        try:
+            lock_file.close()
+        except Exception:
+            # Best-effort cleanup only; we are exiting anyway.
+            pass
+        raise SystemExit(f"Another ai-quant daemon is already running (lock held): {lock_path}")
+    except Exception as e:
+        try:
+            lock_file.close()
+        except Exception:
+            # Best-effort cleanup only; we are exiting anyway.
+            pass
+        raise SystemExit(f"Failed to acquire lock {lock_path}: {e}")
+
+    _write_pid()
     return lock_file
 
 
@@ -594,6 +610,7 @@ def main() -> None:
         market=market,
         interval=interval,
         lookback_bars=lookback_bars,
+        mode=mode,
         mode_plugin=plugin,
     )
     print(f"🚀 Unified engine started. mode={mode}")

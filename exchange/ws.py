@@ -595,19 +595,9 @@ class HyperliquidWS:
             return
 
         if channel == "meta":
-            data = msg.get("data") or {}
-            universe = data.get("universe") or []
+            # We currently don't consume meta payloads (universe/funding) in python.
+            # Keep a timestamp for health/diagnostics so the channel isn't treated as "dead".
             with self._lock:
-                for inst in universe:
-                    name = inst.get("name")
-                    # Note: Meta in WS often contains predicted or current funding info
-                    # depending on the specific API version.
-                    # On HL, 'meta' usually includes current funding info in some fields.
-                    # Actually, for real-time funding, 'activeAssetData' or 'webData2' is better,
-                    # but 'meta' provides a baseline. 
-                    # If meta doesn't have it, we might need another channel.
-                    # Looking at HL docs: the 'meta' channel returns the universe.
-                    pass
                 self._funding_updated_at = now
             return
 

@@ -28,6 +28,8 @@ import os
 import sys
 from datetime import datetime, timezone
 
+import yaml
+
 # ---------------------------------------------------------------------------
 # Type maps for correct YAML serialisation
 # ---------------------------------------------------------------------------
@@ -151,13 +153,12 @@ def load_sweep_results(path: str, sort_by: str = "pnl",
 # ---------------------------------------------------------------------------
 
 def _load_yaml(path: str):
-    """Load YAML preserving comments. Returns (yaml_obj, data)."""
-    from ruamel.yaml import YAML
-    yaml = YAML()
-    yaml.preserve_quotes = True
+    """Load YAML safely. Returns a dict."""
     with open(path, "r", encoding="utf-8") as f:
-        data = yaml.load(f)
-    return yaml, data
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected a mapping at root of YAML: {path}")
+    return data
 
 
 def _set_nested(data: dict, dotpath: str, value):
@@ -304,7 +305,7 @@ def main():
         sys.exit(1)
 
     # Load base config
-    yaml, base_data = _load_yaml(args.base_config)
+    base_data = _load_yaml(args.base_config)
 
     # Optionally show diff
     if args.show_diff:
@@ -340,7 +341,7 @@ def main():
                 f"WR {wr:.1f}% | PF {pf:.2f} | DD {dd:.1f}%\n")
         f.write(f"# Base: {os.path.basename(args.base_config)}\n")
         f.write(f"# Overrides applied: {applied}\n")
-        yaml.dump(base_data, f)
+        yaml.safe_dump(base_data, f, sort_keys=False)
 
     if args.output:
         print(f"\n[generate] Config written to {args.output}", file=sys.stderr)

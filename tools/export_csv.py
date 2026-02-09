@@ -12,7 +12,7 @@ Rows include:
   - "signal measures" from stored audit payloads (RSI/EMA/MACD/ATR/etc.)
 
 Usage:
-  ./venv/bin/python3 tools/export_live_consolidated_csv.py --hours 4
+  python tools/export_csv.py --hours 4
 
 Outputs:
   - exports/live_consolidated_last{hours}h_<timestamp>.csv
@@ -505,14 +505,12 @@ def main() -> None:
         audit = None
         strat_meta = None
         order_meta = None
-        fill_meta = None
         oms_meta = None
         exit_meta = None
         if isinstance(meta, dict):
             audit = meta.get("audit")
             strat_meta = meta.get("strategy")
             order_meta = meta.get("order")
-            fill_meta = meta.get("fill")
             oms_meta = meta.get("oms")
             exit_meta = meta.get("exit")
 

@@ -117,7 +117,15 @@ class RiskManager:
         self._notional_events: deque[tuple[float, float]] = deque()  # (ts_s, notional)
 
         # Min spacing between orders (global)
-        self._min_order_gap_ms = int(max(0, _env_int("AI_QUANT_RISK_MIN_ORDER_GAP_MS", 150)))
+        # Default is disabled (0) to avoid surprising behaviour changes; enable explicitly via env.
+        raw_gap = os.getenv("AI_QUANT_RISK_MIN_ORDER_GAP_MS")
+        if raw_gap is None:
+            self._min_order_gap_ms = 0
+        else:
+            try:
+                self._min_order_gap_ms = int(max(0.0, float(str(raw_gap).strip())))
+            except Exception:
+                self._min_order_gap_ms = 0
         self._last_order_ts_ms: int | None = None
 
         # Drawdown kill-switch

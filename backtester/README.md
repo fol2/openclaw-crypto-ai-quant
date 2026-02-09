@@ -63,7 +63,7 @@ python tools/deploy_sweep.py --sweep-results sweep_results.jsonl --rank 1 \
 3. Requires `--yes` or interactive Y/N confirmation
 4. `--close-live`: market close all exchange positions (3 retries, 5s verify each)
 5. `--close-paper`: insert CLOSE trades in paper DB + clear position_state
-6. Merges overrides into `config/strategy_overrides.yaml` (preserves comments via ruamel.yaml)
+6. Merges overrides into `config/strategy_overrides.yaml` (writes using PyYAML; YAML comments are not preserved)
 7. Backs up YAML as `.bak.<timestamp>`
 8. Updates `strategy_changelog.json` with auto-incremented version
 9. `--restart`: `systemctl --user restart` paper + live services
@@ -79,7 +79,7 @@ python tools/deploy_sweep.py --sweep-results sweep_results.jsonl --rank 1 \
 # Export paper trader state
 python tools/export_state.py --source paper --output state.json
 
-# Export live trader state (requires secrets.json)
+# Export live trader state (requires a secrets file; set AI_QUANT_SECRETS_PATH for non-default locations)
 python tools/export_state.py --source live --output state.json
 ```
 
@@ -171,5 +171,5 @@ mei-backtester replay --init-state /tmp/paper_state.json --trades
 - **Exit before warmup**: `engine.rs` runs exit checks for existing positions **before** the warmup guard (`bar_count < lookback`). This ensures init-state positions are monitored from bar 1. Entries still require warmup completion.
 - **Borrow-safe pattern**: EMA slow history push and bar_count increment use scoped borrows that end before `apply_exit(&mut state)` is called.
 - **init_state.rs**: serde Deserialize structs, `load(path)` validates version=1, `into_sim_state()` converts to `(f64, FxHashMap<String, Position>)` with optional symbol filtering.
-- **deploy_sweep.py**: uses `ruamel.yaml` (not PyYAML) to preserve YAML comments during merge.
+- **deploy_sweep.py**: uses PyYAML `safe_load`/`safe_dump`; YAML comments are not preserved.
 - **export_state.py paper mode**: 4-stage reconstruction — latest balance → identify open positions (OPEN without matching CLOSE) → replay ADD/REDUCE fills → load position_state metadata.
