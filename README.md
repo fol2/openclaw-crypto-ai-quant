@@ -111,6 +111,11 @@ Key configuration sections:
 
 Both the backtester and live engine read from the same YAML file, ensuring consistent parameter values across simulation and production.
 
+For live/dry_live operation, review `.env.example` and `systemd/ai-quant-live.env.example`. Notable safety controls:
+
+- `AI_QUANT_LIVE_ENABLE` + `AI_QUANT_LIVE_CONFIRM`: required to send real orders
+- `AI_QUANT_OMS_REQUIRE_INTENT_FOR_ENTRY`: when enabled (default), entry orders fail-closed if an OMS intent cannot be created (prevents untracked duplicates)
+
 ## Deployment
 
 Systemd service templates are provided in the `systemd/` directory for production deployment:

@@ -90,7 +90,7 @@ def _json_dumps_safe(obj) -> str:
 # Paths
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Strategy Version History: dev/ai_quant/strategy_changelog.json
+# Strategy version history: strategy_changelog.json
 # Universe / Watchlist
 #
 # Default behavior:
@@ -179,7 +179,7 @@ DISCORD_CHANNEL = os.getenv("AI_QUANT_DISCORD_CHANNEL", "")
 
 # Multi-trade allocation (paper perps): margin allocated per position (notional ≈ margin × leverage).
 # Default (code-level): 3% margin per position. Prefer overriding via YAML:
-#   dev/ai_quant/strategy_overrides.yaml
+#   config/strategy_overrides.yaml
 ALLOCATION_PCT = 0.03  # Match Rust backtester default
 
 # --- Hyperliquid (Perps) Costs ---
@@ -215,13 +215,13 @@ def _effective_fee_rate() -> float:
 
 # --- Strategy Overrides (Global + Per-Symbol) ---
 # Strategy overrides live in YAML (preferred):
-#   dev/ai_quant/strategy_overrides.yaml
+#   config/strategy_overrides.yaml
 #
 # Merge order: defaults ← global ← symbols.<SYMBOL>
 # Only the fields you specify are overridden; everything else is inherited.
 #
 # DEPRECATED: TOML overrides are still supported for backward compatibility.
-#   dev/ai_quant/strategy_overrides.toml
+#   config/strategy_overrides.toml
 STRATEGY_YAML_PATH = os.getenv("AI_QUANT_STRATEGY_YAML", os.path.join(_THIS_DIR, "..", "config", "strategy_overrides.yaml"))
 STRATEGY_TOML_PATH = os.getenv("AI_QUANT_STRATEGY_TOML", os.path.join(_THIS_DIR, "..", "config", "strategy_overrides.toml"))
 
