@@ -42,18 +42,20 @@ def _json_dumps_safe(obj) -> str:
 # Developer Notes (READ ME FIRST)
 #
 # This file provides the core strategy + PaperTrader implementation used by the unified daemon:
-#   dev/ai_quant/engine/daemon.py
+#   engine/daemon.py
 #
-# - Strategy tuning should be done via YAML (`strategy_overrides.yaml`) which hot-reloads by file mtime.
+# - Strategy tuning should be done via YAML overrides (hot-reloads by file mtime).
 # - Python code changes require restarting the systemd service(s).
 #
 # Configuration (preferred)
 # - Use YAML overrides instead of editing Python:
-#     dev/ai_quant/strategy_overrides.yaml
+#     config/strategy_overrides.yaml
+#   Override path with: AI_QUANT_STRATEGY_YAML=/path/to/strategy_overrides.yaml
 #   Merge order (deep-merge / inheritance):
 #     defaults (in this file) ← global ← symbols.<SYMBOL>
 # - TOML overrides are deprecated:
-#     dev/ai_quant/strategy_overrides.toml
+#     config/strategy_overrides.toml
+#   Override path with: AI_QUANT_STRATEGY_TOML=/path/to/strategy_overrides.toml
 #
 # Watchlist / Universe
 # - Default watchlist is the top 50 Hyperliquid perps by 24h notional volume (dayNtlVlm).
@@ -81,8 +83,8 @@ def _json_dumps_safe(obj) -> str:
 #   and not latency-sensitive. Disable via: HL_FUNDING_ENABLED=0
 #
 # Backfills / recompute
-# - If you changed fee/leverage logic or introduced ADD/REDUCE, recompute DB balances:
-#     dev/ai_quant/venv/bin/python3 dev/ai_quant/recompute_trades.py
+# - If you changed fee/leverage logic or introduced ADD/REDUCE, you may need to rebuild paper balances
+#   (this repo does not ship a recompute script).
 # --------------------------------------------------------------------------------------
 
 # Paths
@@ -426,24 +428,32 @@ _DEFAULT_STRATEGY_CONFIG = {
 # - hot reloads YAML by file mtime (no module reload required)
 # - provides a unified watchlist source for the unified engine loop
 _strategy_mgr = None
+# Prefer the newest StrategyManager if multiple versions exist.
 try:
-    # Prefer the newest StrategyManager if multiple versions exist.
+    from engine.strategy_manager import StrategyManager as _QTStrategyManager
+except ImportError:
     try:
-        from engine.strategy_manager import StrategyManager as _QTStrategyManager
-    except Exception:
+        from quant_trader_v4.strategy_manager import StrategyManager as _QTStrategyManager
+    except ImportError:
         try:
-            from quant_trader_v4.strategy_manager import StrategyManager as _QTStrategyManager
-        except Exception:
             from quant_trader_v3.strategy_manager import StrategyManager as _QTStrategyManager
+        except ImportError:
+            _QTStrategyManager = None
 
-    _strategy_mgr = _QTStrategyManager.bootstrap(
-        defaults=_DEFAULT_STRATEGY_CONFIG,
-        yaml_path=STRATEGY_YAML_PATH,
-        changelog_path=os.path.join(_THIS_DIR, "..", "strategy_changelog.json"),
-        watchlist_refresh_s=float(os.getenv("AI_QUANT_WATCHLIST_REFRESH_S", "60")),
-    )
-except Exception:
-    _strategy_mgr = None
+if _QTStrategyManager is not None:
+    try:
+        _strategy_mgr = _QTStrategyManager.bootstrap(
+            defaults=_DEFAULT_STRATEGY_CONFIG,
+            yaml_path=STRATEGY_YAML_PATH,
+            changelog_path=os.path.join(_THIS_DIR, "..", "strategy_changelog.json"),
+            watchlist_refresh_s=float(os.getenv("AI_QUANT_WATCHLIST_REFRESH_S", "60")),
+        )
+    except Exception as e:
+        print(
+            "⚠️ StrategyManager bootstrap failed; falling back to legacy overrides. "
+            f"Error: {e}"
+        )
+        _strategy_mgr = None
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -2062,7 +2072,7 @@ class PaperTrader:
         )
         return True
 
-    def reduce_position(self, symbol, reduce_size, price, timestamp, reason, *, confidence="N/A", meta: dict | None = None):
+    def reduce_position(self, symbol, reduce_size, price, timestamp, reason, *, confidence="N/A", meta: dict | None = None) -> bool:
         """Partially closes a position (or fully closes if reduce_size >= remaining size)."""
         if symbol not in self.positions:
             return False
