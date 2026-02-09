@@ -1153,8 +1153,19 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     notional_usd=float(notional),
                     reduce_risk=False,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                # Best-effort risk tracking; failures here must not block live trading.
+                mei_alpha_v1.log_audit_event(
+                    sym,
+                    "LIVE_RISK_NOTE_ORDER_SENT_ERROR",
+                    level="error",
+                    data={
+                        "action": "ADD",
+                        "notional_usd": float(notional),
+                        "reduce_risk": False,
+                        "error": repr(exc),
+                    },
+                )
 
         try:
             bud = getattr(self, "_entry_budget_remaining", None)
@@ -1268,7 +1279,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
 
         return True
 
-    def reduce_position(self, symbol, reduce_size, price, timestamp, reason, *, confidence="N/A", meta: dict | None = None):
+    def reduce_position(self, symbol, reduce_size, price, timestamp, reason, *, confidence="N/A", meta: dict | None = None) -> bool:
         sym = str(symbol or "").strip().upper()
         if sym not in (self.positions or {}):
             return False
@@ -1510,8 +1521,19 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     notional_usd=float(notional_est2),
                     reduce_risk=True,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                # Best-effort risk tracking; failures here must not block live trading.
+                mei_alpha_v1.log_audit_event(
+                    sym,
+                    "LIVE_RISK_NOTE_ORDER_SENT_ERROR",
+                    level="error",
+                    data={
+                        "action": str(action_kind),
+                        "notional_usd": float(notional_est2),
+                        "reduce_risk": True,
+                        "error": repr(exc),
+                    },
+                )
 
         # Successful send: rate-limit future exit attempts for this symbol for a short cooldown window.
         try:
@@ -2225,8 +2247,19 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     notional_usd=float(notional),
                     reduce_risk=False,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                # Best-effort risk tracking; failures here must not block live trading.
+                mei_alpha_v1.log_audit_event(
+                    sym,
+                    "LIVE_RISK_NOTE_ORDER_SENT_ERROR",
+                    level="error",
+                    data={
+                        "action": "OPEN",
+                        "notional_usd": float(notional),
+                        "reduce_risk": False,
+                        "error": repr(exc),
+                    },
+                )
 
         try:
             bud = getattr(self, "_entry_budget_remaining", None)
