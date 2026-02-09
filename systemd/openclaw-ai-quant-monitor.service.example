@@ -1,0 +1,16 @@
+[Unit]
+Description=OpenClaw AI Quant Monitor Dashboard
+After=network-online.target openclaw-ai-quant-ws-sidecar.service
+Wants=network-online.target openclaw-ai-quant-ws-sidecar.service
+
+[Service]
+Type=simple
+WorkingDirectory=$PROJECT_DIR
+EnvironmentFile=-%h/.config/openclaw/ai-quant-monitor.env
+ExecStart=$PROJECT_DIR/venv/bin/python3 -u monitor/server.py
+Restart=always
+RestartSec=5
+KillMode=process
+
+[Install]
+WantedBy=default.target

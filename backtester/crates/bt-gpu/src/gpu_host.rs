@@ -1,0 +1,440 @@
+//! CUDA device initialization, buffer management, and kernel dispatch.
+//!
+//! Uses cudarc (CUDA driver API) instead of wgpu/Vulkan.
+//! PTX is pre-compiled by build.rs via nvcc and embedded at compile time.
+//!
+//! Two kernel modules:
+//! - "sweep" — sweep_engine_kernel (trade logic)
+//! - "indicators" — indicator_kernel + breadth_kernel (indicator computation)
+
+use std::sync::Arc;
+
+use cudarc::driver::{
+    CudaDevice, CudaFunction, CudaSlice, DeviceRepr, LaunchAsync, LaunchConfig, ValidAsZeroBits,
+};
+use cudarc::nvrtc::Ptx;
+
+use bytemuck::Zeroable;
+use crate::buffers::{
+    GpuComboConfig, GpuComboState, GpuParams, GpuRawCandle, GpuResult, GpuSnapshot,
+    GpuIndicatorConfig, IndicatorParams,
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DeviceRepr + ValidAsZeroBits impls for GPU buffer structs
+// ═══════════════════════════════════════════════════════════════════════════
+
+unsafe impl DeviceRepr for GpuSnapshot {}
+unsafe impl DeviceRepr for GpuComboConfig {}
+unsafe impl DeviceRepr for GpuComboState {}
+unsafe impl DeviceRepr for GpuResult {}
+unsafe impl DeviceRepr for GpuParams {}
+unsafe impl DeviceRepr for GpuRawCandle {}
+unsafe impl DeviceRepr for GpuIndicatorConfig {}
+unsafe impl DeviceRepr for IndicatorParams {}
+
+unsafe impl ValidAsZeroBits for GpuSnapshot {}
+unsafe impl ValidAsZeroBits for GpuComboConfig {}
+unsafe impl ValidAsZeroBits for GpuComboState {}
+unsafe impl ValidAsZeroBits for GpuResult {}
+unsafe impl ValidAsZeroBits for GpuParams {}
+unsafe impl ValidAsZeroBits for GpuRawCandle {}
+unsafe impl ValidAsZeroBits for GpuIndicatorConfig {}
+unsafe impl ValidAsZeroBits for IndicatorParams {}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GpuDeviceState — persistent CUDA device (reused across batches)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Persistent CUDA device state with both kernel modules loaded.
+pub struct GpuDeviceState {
+    pub dev: Arc<CudaDevice>,
+}
+
+impl GpuDeviceState {
+    pub fn new() -> Self {
+        let dev = CudaDevice::new(0).expect("No CUDA device found");
+
+        // Load sweep engine PTX (trade logic)
+        let ptx_sweep = include_str!(concat!(env!("OUT_DIR"), "/sweep_engine.ptx"));
+        dev.load_ptx(Ptx::from_src(ptx_sweep), "sweep", &["sweep_engine_kernel"])
+            .expect("Failed to load sweep_engine PTX");
+
+        // Load indicator kernel PTX (indicator computation + breadth)
+        let ptx_ind = include_str!(concat!(env!("OUT_DIR"), "/indicator_kernel.ptx"));
+        dev.load_ptx(Ptx::from_src(ptx_ind), "indicators", &["indicator_kernel", "breadth_kernel"])
+            .expect("Failed to load indicator_kernel PTX");
+
+        let name = dev.name().unwrap_or_else(|_| "unknown".to_string());
+        eprintln!("[GPU] CUDA Device: {}", name);
+
+        Self { dev }
+    }
+
+    /// Query (free, total) VRAM in bytes via cuMemGetInfo.
+    pub fn vram_info(&self) -> (usize, usize) {
+        match cudarc::driver::result::mem_get_info() {
+            Ok((free, total)) => (free, total),
+            Err(_) => {
+                let total = 24 * 1024 * 1024 * 1024usize;
+                (total * 90 / 100, total)
+            }
+        }
+    }
+
+    pub fn total_vram_bytes(&self) -> usize { self.vram_info().1 }
+    pub fn free_vram_bytes(&self) -> usize { self.vram_info().0 }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GPU-side indicator computation buffers
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Buffers for GPU-side indicator computation.
+/// Raw candles uploaded once; snapshots/breadth/btc_bullish allocated in VRAM.
+pub struct IndicatorBuffers {
+    pub candles_gpu: CudaSlice<GpuRawCandle>,
+    pub ind_configs_gpu: CudaSlice<GpuIndicatorConfig>,
+    pub ind_params_gpu: CudaSlice<IndicatorParams>,
+    pub snapshots_gpu: CudaSlice<GpuSnapshot>,
+    pub breadth_gpu: CudaSlice<f32>,
+    pub btc_bullish_gpu: CudaSlice<u32>,
+    pub num_ind_combos: u32,
+    pub num_symbols: u32,
+    pub num_bars: u32,
+}
+
+impl IndicatorBuffers {
+    /// Create indicator buffers: upload raw candles + indicator configs,
+    /// allocate snapshot/breadth/btc_bullish output in VRAM.
+    pub fn new(
+        ds: &GpuDeviceState,
+        candles_gpu: &CudaSlice<GpuRawCandle>,
+        ind_configs: &[GpuIndicatorConfig],
+        num_bars: u32,
+        num_symbols: u32,
+        btc_sym_idx: u32,
+    ) -> Self {
+        let k = ind_configs.len() as u32;
+
+        let ind_configs_gpu = ds.dev.htod_sync_copy(ind_configs).unwrap();
+
+        let params = IndicatorParams {
+            num_ind_combos: k,
+            num_symbols,
+            num_bars,
+            btc_sym_idx,
+            _pad: [0; 4],
+        };
+        let ind_params_gpu = ds.dev.htod_sync_copy(&[params]).unwrap();
+
+        // Allocate output buffers in VRAM (zeroed)
+        let snap_count = (k as usize) * (num_bars as usize) * (num_symbols as usize);
+        let breadth_count = (k as usize) * (num_bars as usize);
+
+        let snapshots_gpu = ds.dev.alloc_zeros::<GpuSnapshot>(snap_count).unwrap();
+        let breadth_gpu = ds.dev.alloc_zeros::<f32>(breadth_count).unwrap();
+        let btc_bullish_gpu = ds.dev.alloc_zeros::<u32>(breadth_count).unwrap();
+
+        Self {
+            candles_gpu: candles_gpu.clone(),
+            ind_configs_gpu,
+            ind_params_gpu,
+            snapshots_gpu,
+            breadth_gpu,
+            btc_bullish_gpu,
+            num_ind_combos: k,
+            num_symbols,
+            num_bars,
+        }
+    }
+}
+
+/// Dispatch indicator_kernel + breadth_kernel on GPU.
+/// After this returns, snapshots/breadth/btc_bullish are ready in VRAM.
+pub fn dispatch_indicator_kernels(
+    ds: &GpuDeviceState,
+    buffers: &mut IndicatorBuffers,
+) {
+    let block_size = 64u32;
+
+    // ── Indicator kernel: K × S threads ─────────────────────────────────
+    let ind_threads = buffers.num_ind_combos * buffers.num_symbols;
+    let ind_grid = (ind_threads + block_size - 1) / block_size;
+
+    let ind_func: CudaFunction = ds.dev
+        .get_func("indicators", "indicator_kernel")
+        .expect("indicator_kernel not found in PTX");
+
+    let ind_cfg = LaunchConfig {
+        grid_dim: (ind_grid, 1, 1),
+        block_dim: (block_size, 1, 1),
+        shared_mem_bytes: 0,
+    };
+
+    unsafe {
+        ind_func.launch(
+            ind_cfg,
+            (
+                &buffers.ind_params_gpu,
+                &buffers.ind_configs_gpu,
+                &buffers.candles_gpu,
+                &mut buffers.snapshots_gpu,
+            ),
+        )
+    }
+    .expect("indicator_kernel launch failed");
+
+    // ── Breadth kernel: K × B threads ───────────────────────────────────
+    let br_threads = buffers.num_ind_combos * buffers.num_bars;
+    let br_grid = (br_threads + block_size - 1) / block_size;
+
+    let br_func: CudaFunction = ds.dev
+        .get_func("indicators", "breadth_kernel")
+        .expect("breadth_kernel not found in PTX");
+
+    let br_cfg = LaunchConfig {
+        grid_dim: (br_grid, 1, 1),
+        block_dim: (block_size, 1, 1),
+        shared_mem_bytes: 0,
+    };
+
+    unsafe {
+        br_func.launch(
+            br_cfg,
+            (
+                &buffers.ind_params_gpu,
+                &buffers.snapshots_gpu,
+                &mut buffers.breadth_gpu,
+                &mut buffers.btc_bullish_gpu,
+            ),
+        )
+    }
+    .expect("breadth_kernel launch failed");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Trade sweep BatchBuffers (uses VRAM-resident snapshots from indicator kernel)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Buffers for one trade sweep dispatch batch.
+/// Snapshots/breadth/btc_bullish come from IndicatorBuffers (already in VRAM).
+pub struct BatchBuffers {
+    pub snapshots: CudaSlice<GpuSnapshot>,
+    pub breadth: CudaSlice<f32>,
+    pub btc_bullish: CudaSlice<u32>,
+    pub configs: CudaSlice<GpuComboConfig>,
+    pub states: CudaSlice<GpuComboState>,
+    pub results: CudaSlice<GpuResult>,
+    pub params: CudaSlice<GpuParams>,
+    pub num_combos: u32,
+    pub num_symbols: u32,
+    pub initial_balance: f32,
+    pub max_sub_per_bar: u32,
+    pub sub_candles: Option<CudaSlice<GpuRawCandle>>,
+    pub sub_counts: Option<CudaSlice<u32>>,
+}
+
+impl BatchBuffers {
+    /// Create trade sweep buffers using VRAM-resident indicator data.
+    /// Snapshots/breadth/btc_bullish are cloned references (VRAM pointers, no copy).
+    pub fn from_indicator_buffers(
+        ds: &GpuDeviceState,
+        ind_bufs: &IndicatorBuffers,
+        configs: &[GpuComboConfig],
+        initial_balance: f32,
+    ) -> Self {
+        let num_combos = configs.len() as u32;
+        let num_bars = ind_bufs.num_bars;
+        let num_symbols = ind_bufs.num_symbols;
+
+        let configs_gpu = ds.dev.htod_sync_copy(configs).unwrap();
+
+        let mut states_host = vec![GpuComboState::zeroed(); configs.len()];
+        for s in &mut states_host {
+            s.balance = initial_balance;
+            s.peak_equity = initial_balance;
+        }
+        let states = ds.dev.htod_sync_copy(&states_host).unwrap();
+        let results = ds.dev.alloc_zeros::<GpuResult>(configs.len()).unwrap();
+
+        let params_host = GpuParams {
+            num_combos,
+            num_symbols,
+            num_bars,
+            chunk_start: 0,
+            chunk_end: num_bars,
+            initial_balance_bits: initial_balance.to_bits(),
+            fee_rate_bits: 0.00035f32.to_bits(),
+            max_sub_per_bar: 0,
+            trade_end_bar: num_bars,
+        };
+        let params = ds.dev.htod_sync_copy(&[params_host]).unwrap();
+
+        Self {
+            snapshots: ind_bufs.snapshots_gpu.clone(),
+            breadth: ind_bufs.breadth_gpu.clone(),
+            btc_bullish: ind_bufs.btc_bullish_gpu.clone(),
+            configs: configs_gpu,
+            states,
+            results,
+            params,
+            num_combos,
+            num_symbols,
+            initial_balance,
+            max_sub_per_bar: 0,
+            sub_candles: None,
+            sub_counts: None,
+        }
+    }
+
+    /// Create GPU buffers from pre-concatenated multi-indicator data (CPU-precomputed path).
+    /// Kept for backwards compatibility.
+    pub fn new_multi(
+        ds: &GpuDeviceState,
+        all_snapshots: &[GpuSnapshot],
+        all_breadth: &[f32],
+        all_btc_bullish: &[u32],
+        configs: &[GpuComboConfig],
+        initial_balance: f32,
+        num_symbols: u32,
+        num_bars: u32,
+    ) -> Self {
+        let num_combos = configs.len() as u32;
+
+        let snapshots = ds.dev.htod_sync_copy(all_snapshots).unwrap();
+        let breadth = ds.dev.htod_sync_copy(all_breadth).unwrap();
+        let btc_bullish = ds.dev.htod_sync_copy(all_btc_bullish).unwrap();
+        let configs_gpu = ds.dev.htod_sync_copy(configs).unwrap();
+
+        let mut states_host = vec![GpuComboState::zeroed(); configs.len()];
+        for s in &mut states_host {
+            s.balance = initial_balance;
+            s.peak_equity = initial_balance;
+        }
+        let states = ds.dev.htod_sync_copy(&states_host).unwrap();
+        let results = ds.dev.alloc_zeros::<GpuResult>(configs.len()).unwrap();
+
+        let params_host = GpuParams {
+            num_combos,
+            num_symbols,
+            num_bars,
+            chunk_start: 0,
+            chunk_end: num_bars,
+            initial_balance_bits: initial_balance.to_bits(),
+            fee_rate_bits: 0.00035f32.to_bits(),
+            max_sub_per_bar: 0,
+            trade_end_bar: num_bars,
+        };
+        let params = ds.dev.htod_sync_copy(&[params_host]).unwrap();
+
+        Self {
+            snapshots,
+            breadth,
+            btc_bullish,
+            configs: configs_gpu,
+            states,
+            results,
+            params,
+            num_combos,
+            num_symbols,
+            initial_balance,
+            max_sub_per_bar: 0,
+            sub_candles: None,
+            sub_counts: None,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Trade sweep dispatch + readback
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Dispatch the trade sweep CUDA kernel and read back results.
+///
+/// `trade_start`/`trade_end` scope which bar indices the trade kernel processes.
+/// Set to `(0, num_bars)` for full range (backwards compatible).
+/// Indicator data must still cover all `num_bars` for snapshot indexing.
+pub fn dispatch_and_readback(
+    ds: &GpuDeviceState,
+    buffers: &mut BatchBuffers,
+    num_bars: u32,
+    chunk_size: u32,
+    trade_start: u32,
+    trade_end: u32,
+) -> Vec<GpuResult> {
+    let block_size = 64u32;
+    let grid_size = (buffers.num_combos + block_size - 1) / block_size;
+
+    let trade_range = trade_end - trade_start;
+    eprintln!(
+        "[gpu] Trade bar range: {}..{} ({} of {} bars)",
+        trade_start, trade_end, trade_range, num_bars,
+    );
+
+    // Dynamic chunk size: smaller when sub-bars active (TDR mitigation)
+    let effective_chunk = if buffers.max_sub_per_bar > 0 { chunk_size.min(50) } else { chunk_size };
+    let num_chunks = (trade_range + effective_chunk - 1) / effective_chunk;
+
+    // Create sentinel buffers if no sub-bar data (cudarc needs valid pointers)
+    let sentinel_candle: CudaSlice<GpuRawCandle>;
+    let sentinel_counts: CudaSlice<u32>;
+    let (sub_candles_ref, sub_counts_ref) = match (&buffers.sub_candles, &buffers.sub_counts) {
+        (Some(sc), Some(sn)) => (sc, sn),
+        _ => {
+            sentinel_candle = ds.dev.alloc_zeros::<GpuRawCandle>(1).unwrap();
+            sentinel_counts = ds.dev.alloc_zeros::<u32>(1).unwrap();
+            (&sentinel_candle, &sentinel_counts)
+        }
+    };
+
+    for chunk_idx in 0..num_chunks {
+        let chunk_start = trade_start + chunk_idx * effective_chunk;
+        let chunk_end = (chunk_start + effective_chunk).min(trade_end);
+
+        let params_host = GpuParams {
+            num_combos: buffers.num_combos,
+            num_symbols: buffers.num_symbols,
+            num_bars,
+            chunk_start,
+            chunk_end,
+            initial_balance_bits: buffers.initial_balance.to_bits(),
+            fee_rate_bits: 0.00035f32.to_bits(),
+            max_sub_per_bar: buffers.max_sub_per_bar,
+            trade_end_bar: trade_end,
+        };
+        ds.dev
+            .htod_sync_copy_into(&[params_host], &mut buffers.params)
+            .unwrap();
+
+        let cfg = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let func: CudaFunction = ds.dev
+            .get_func("sweep", "sweep_engine_kernel")
+            .expect("sweep_engine_kernel not found in PTX");
+
+        unsafe {
+            func.launch(
+                cfg,
+                (
+                    &buffers.params,
+                    &buffers.snapshots,
+                    &buffers.breadth,
+                    &buffers.btc_bullish,
+                    &buffers.configs,
+                    &mut buffers.states,
+                    &mut buffers.results,
+                    sub_candles_ref,
+                    sub_counts_ref,
+                ),
+            )
+        }
+        .expect("Kernel launch failed");
+    }
+
+    ds.dev.dtoh_sync_copy(&buffers.results).unwrap()
+}

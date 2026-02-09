@@ -1,0 +1,151 @@
+from __future__ import annotations
+
+import os
+import re
+import sqlite3
+from contextlib import suppress
+from pathlib import Path
+from typing import Any
+
+
+def _safe_read_text_tail(path: Path, *, max_bytes: int = 256_000) -> str:
+    try:
+        if not path.exists():
+            return ""
+        size = int(path.stat().st_size)
+        start = max(0, size - int(max_bytes))
+        with path.open("rb") as f:
+            f.seek(start, os.SEEK_SET)
+            chunk = f.read()
+        return bytes(chunk).decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+_HB_LOOP_RE = re.compile(r"(?:wall|loop)=([0-9.]+)s", re.IGNORECASE)
+_HB_ERRORS_RE = re.compile(r"errors=([0-9]+)", re.IGNORECASE)
+_HB_SYMBOLS_RE = re.compile(r"symbols=([0-9]+)", re.IGNORECASE)
+_HB_OPEN_POS_RE = re.compile(r"open_pos=([0-9]+)", re.IGNORECASE)
+_HB_WS_CONNECTED_RE = re.compile(r"ws_connected=(True|False)", re.IGNORECASE)
+_HB_WS_THREAD_RE = re.compile(r"ws_thread_alive=(True|False)", re.IGNORECASE)
+_HB_WS_RESTARTS_RE = re.compile(r"ws_restarts=([0-9]+)", re.IGNORECASE)
+
+
+def connect_db_ro(db_path: Path) -> sqlite3.Connection:
+    uri = f"file:{db_path}?mode=ro"
+    con = sqlite3.connect(uri, uri=True, timeout=1.0)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def _fetchone(con: sqlite3.Connection, q: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
+    cur = con.cursor()
+    cur.execute(q, params)
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def _heartbeat_line_from_db(db_path: Path) -> tuple[int, str] | None:
+    if not db_path.exists():
+        return None
+    try:
+        con = connect_db_ro(db_path)
+    except Exception:
+        return None
+    try:
+        row = _fetchone(
+            con,
+            """
+            SELECT ts_ms, message
+            FROM runtime_logs
+            WHERE message LIKE '🫀 engine ok%'
+            ORDER BY ts_ms DESC
+            LIMIT 1
+            """,
+        )
+        if not row:
+            return None
+        try:
+            ts_ms = int(row.get("ts_ms") or 0)
+        except Exception:
+            ts_ms = 0
+        line = str(row.get("message") or "").strip()
+        return ts_ms, line
+    except Exception:
+        return None
+    finally:
+        with suppress(Exception):
+            con.close()
+
+
+def parse_last_heartbeat(db_path: Path, log_path: Path) -> dict[str, Any]:
+    """Parse the latest engine heartbeat line.
+
+    Prefers SQLite (`runtime_logs` table) and falls back to legacy text logs.
+    """
+    hb = _heartbeat_line_from_db(db_path)
+    if hb is not None:
+        ts_ms, last_line = hb
+        out: dict[str, Any] = {
+            "ok": True,
+            "source": "sqlite",
+            "db_path": str(db_path),
+            "ts_ms": ts_ms,
+            "line": last_line,
+        }
+    else:
+        text = _safe_read_text_tail(log_path, max_bytes=512_000)
+        if not text:
+            return {
+                "ok": False,
+                "error": "heartbeat_missing",
+                "db_path": str(db_path),
+                "log_path": str(log_path),
+            }
+
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        last_line: str | None = None
+        for ln in reversed(lines[-5000:]):
+            if "🫀" not in ln:
+                continue
+            if "engine ok" in ln.lower():
+                last_line = ln
+                break
+
+        if not last_line:
+            return {
+                "ok": False,
+                "error": "heartbeat_not_found",
+                "db_path": str(db_path),
+                "log_path": str(log_path),
+            }
+
+        out = {
+            "ok": True,
+            "source": "text_log",
+            "log_path": str(log_path),
+            "line": last_line,
+        }
+
+    loop_m = _HB_LOOP_RE.search(last_line)
+    if loop_m:
+        out["loop_s"] = float(loop_m.group(1))
+    err_m = _HB_ERRORS_RE.search(last_line)
+    if err_m:
+        out["errors"] = int(err_m.group(1))
+    sym_m = _HB_SYMBOLS_RE.search(last_line)
+    if sym_m:
+        out["symbols"] = int(sym_m.group(1))
+    op_m = _HB_OPEN_POS_RE.search(last_line)
+    if op_m:
+        out["open_pos"] = int(op_m.group(1))
+    wsc_m = _HB_WS_CONNECTED_RE.search(last_line)
+    if wsc_m:
+        out["ws_connected"] = wsc_m.group(1).lower() == "true"
+    wst_m = _HB_WS_THREAD_RE.search(last_line)
+    if wst_m:
+        out["ws_thread_alive"] = wst_m.group(1).lower() == "true"
+    wsr_m = _HB_WS_RESTARTS_RE.search(last_line)
+    if wsr_m:
+        out["ws_restarts"] = int(wsr_m.group(1))
+    return out

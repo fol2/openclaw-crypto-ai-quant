@@ -1,0 +1,175 @@
+# Mei Backtester
+
+High-performance Rust backtesting simulator for the Mei Alpha strategy.
+
+## Build
+
+```bash
+cd workspace/dev/ai_quant/backtester
+cargo build --release
+# Binary: target/release/mei-backtester
+```
+
+## Commands
+
+### replay — Single backtest
+
+```bash
+mei-backtester replay [OPTIONS]
+```
+
+### sweep — Parallel parameter sweep
+
+```bash
+mei-backtester sweep --sweep-config sweep.yaml [OPTIONS]
+```
+
+### dump-indicators — CSV indicator export
+
+```bash
+mei-backtester dump-indicators --symbol BTC [OPTIONS]
+```
+
+---
+
+## Config Deploy Pipeline
+
+End-to-end workflow: **sweep → deploy → export → replay with init-state**.
+
+### Step 1: Run sweep to find optimal params
+
+```bash
+mei-backtester sweep --sweep-config sweep.yaml --output sweep_results.jsonl
+```
+
+### Step 2: Deploy best config (`deploy_sweep.py`)
+
+```bash
+# Preview changes (SAFE — no side effects)
+python deploy_sweep.py --sweep-results sweep_results.jsonl --rank 1 --dry-run
+
+# Deploy to paper only (close paper positions + restart)
+python deploy_sweep.py --sweep-results sweep_results.jsonl --rank 1 \
+  --close-paper --restart --yes
+
+# Deploy to both live + paper (DANGEROUS — closes real positions)
+python deploy_sweep.py --sweep-results sweep_results.jsonl --rank 1 \
+  --close-live --close-paper --restart --yes
+```
+
+**What it does:**
+1. Parses JSONL sweep results, picks rank N (default: #1 = best PnL)
+2. Shows config diff: `trade.sl_atr_mult: 2.0 → 1.8` + backtest metrics
+3. Requires `--yes` or interactive Y/N confirmation
+4. `--close-live`: market close all exchange positions (3 retries, 5s verify each)
+5. `--close-paper`: insert CLOSE trades in paper DB + clear position_state
+6. Merges overrides into `strategy_overrides.yaml` (preserves comments via ruamel.yaml)
+7. Backs up YAML as `.bak.<timestamp>`
+8. Updates `strategy_changelog.json` with auto-incremented version
+9. `--restart`: `systemctl --user restart` paper + live services
+
+**Safety:**
+- `--dry-run` shows diff + metrics without changing anything
+- `--close-live` requires explicit flag — never closes live positions by default
+- YAML backup created before every write
+
+### Step 3: Export current state (`export_state.py`)
+
+```bash
+# Export paper trader state
+python export_state.py --source paper --output state.json
+
+# Export live trader state (requires secrets.json)
+python export_state.py --source live --output state.json
+```
+
+**Output format (v1 JSON schema):**
+```json
+{
+  "version": 1,
+  "source": "paper",
+  "exported_at_ms": 1770563327601,
+  "balance": 8745.93,
+  "positions": [
+    {
+      "symbol": "BTC",
+      "side": "long",
+      "size": 0.003,
+      "entry_price": 97000.0,
+      "entry_atr": 1200.0,
+      "trailing_sl": null,
+      "confidence": "medium",
+      "leverage": 5.0,
+      "margin_used": 58.2,
+      "adds_count": 0,
+      "tp1_taken": false,
+      "open_time_ms": 1770400000000,
+      "last_add_time_ms": 0
+    }
+  ]
+}
+```
+
+**Paper export:** reconstructs positions from SQLite trades table (mirrors `PaperTrader.load_state()` logic) + position_state metadata.
+
+**Live export:** uses `HyperliquidLiveExecutor` API for exchange positions + live DB for metadata enrichment (entry_atr, trailing_sl, confidence, adds_count, tp1_taken).
+
+### Step 4: Replay with init-state
+
+```bash
+# Replay from exported state (uses exported balance + positions)
+mei-backtester replay --init-state state.json --trades
+
+# Init-state overrides --initial-balance
+mei-backtester replay --init-state state.json --interval 1h --exit-interval 3m
+```
+
+**Behaviour:**
+- `--init-state` loads balance + positions from the exported JSON file
+- Overrides `--initial-balance` when provided
+- Init-state positions are monitored from the **first bar** (exit check runs before warmup guard)
+- Symbols in init-state but not in candle data are filtered out with a warning
+- `trailing_sl: null` means trailing not yet triggered — backtester computes from scratch
+- **Sweeps always start clean** — `--init-state` only works with `replay`
+
+### Full E2E Example
+
+```bash
+# 1. Sweep for optimal params
+mei-backtester sweep --sweep-config sweep.yaml --output sweep_results.jsonl
+
+# 2. Preview + deploy
+python deploy_sweep.py --sweep-results sweep_results.jsonl --rank 1 --dry-run
+python deploy_sweep.py --sweep-results sweep_results.jsonl --rank 1 \
+  --close-paper --restart --yes
+
+# 3. Wait for paper trader to accumulate positions...
+
+# 4. Export state and validate via backtest
+python export_state.py --source paper --output /tmp/paper_state.json
+mei-backtester replay --init-state /tmp/paper_state.json --trades
+
+# 5. Compare expected vs actual PnL trajectory
+```
+
+---
+
+## File Map
+
+| File | Description |
+|------|-------------|
+| `crates/bt-core/src/engine.rs` | Simulation engine — `run_simulation()` |
+| `crates/bt-core/src/init_state.rs` | JSON state loader for `--init-state` |
+| `crates/bt-core/src/sweep.rs` | Parallel parameter sweep runner |
+| `crates/bt-data/` | Candle DB reader (SQLite) |
+| `crates/bt-cli/src/main.rs` | CLI entry point (clap) |
+| `../export_state.py` | Export live/paper state to JSON |
+| `../deploy_sweep.py` | Deploy sweep results to YAML config |
+
+## Key Implementation Details
+
+- **Exit before warmup**: `engine.rs` runs exit checks for existing positions **before** the warmup guard (`bar_count < lookback`). This ensures init-state positions are monitored from bar 1. Entries still require warmup completion.
+- **Borrow-safe pattern**: EMA slow history push and bar_count increment use scoped borrows that end before `apply_exit(&mut state)` is called.
+- **init_state.rs**: serde Deserialize structs, `load(path)` validates version=1, `into_sim_state()` converts to `(f64, FxHashMap<String, Position>)` with optional symbol filtering.
+- **deploy_sweep.py**: uses `ruamel.yaml` (not PyYAML) to preserve YAML comments during merge.
+- **export_state.py paper mode**: 4-stage reconstruction — latest balance → identify open positions (OPEN without matching CLOSE) → replay ADD/REDUCE fills → load position_state metadata.

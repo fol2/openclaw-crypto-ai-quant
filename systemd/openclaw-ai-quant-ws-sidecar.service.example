@@ -1,0 +1,40 @@
+[Unit]
+Description=OpenClaw AI Quant Hyperliquid WS Sidecar
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$PROJECT_DIR
+EnvironmentFile=-%h/.config/openclaw/ai-quant-universe.env
+ExecStart=$HOME/.local/bin/openclaw-ai-quant-ws-sidecar
+Restart=always
+RestartSec=5
+KillMode=process
+Environment=AI_QUANT_WS_SIDECAR_SOCK=%t/openclaw-ai-quant-ws.sock
+Environment=AI_QUANT_MARKET_DB_PATH=$PROJECT_DIR/market_data.db
+Environment=AI_QUANT_CANDLES_ENABLE=1
+Environment=AI_QUANT_CANDLES_DB_DIR=$PROJECT_DIR/candles_dbs
+Environment=AI_QUANT_CANDLE_VERIFY_SECS=10
+Environment=AI_QUANT_CANDLE_REST_TIMEOUT_S=10
+Environment=AI_QUANT_CANDLE_REST_MIN_GAP_MS=1000
+Environment=AI_QUANT_CANDLE_REST_MAX_INFLIGHT=4
+Environment=AI_QUANT_CANDLE_REST_CHUNK_BARS=1500
+# HL API retains last 5000 bars per interval:
+# 1m=3.5d, 3m=10d, 5m=17d, 15m=52d, 30m=104d, 1h=208d
+Environment=AI_QUANT_CANDLE_HORIZON_1m_D=4
+Environment=AI_QUANT_CANDLE_HORIZON_3m_D=11
+Environment=AI_QUANT_CANDLE_HORIZON_5m_D=18
+Environment=AI_QUANT_CANDLE_HORIZON_15m_D=53
+Environment=AI_QUANT_CANDLE_HORIZON_30m_D=105
+Environment=AI_QUANT_CANDLE_HORIZON_1h_D=209
+Environment=AI_QUANT_SIDECAR_INTERVALS=1m,3m,5m,15m,30m,1h
+Environment=AI_QUANT_WS_ENABLE_BBO=0
+Environment=AI_QUANT_WS_ENABLE_CANDLE=0
+Environment=AI_QUANT_WS_ENABLE_META=0
+Environment=AI_QUANT_WS_CLIENT_TTL_SECS=600
+Environment=AI_QUANT_DB_TIMEOUT_S=30
+Environment=RUST_BACKTRACE=1
+
+[Install]
+WantedBy=default.target

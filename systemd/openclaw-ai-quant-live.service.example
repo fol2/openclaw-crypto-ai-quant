@@ -1,0 +1,27 @@
+[Unit]
+Description=OpenClaw AI Quant Hyperliquid Live Trader Daemon
+After=network-online.target openclaw-ai-quant-ws-sidecar.service
+Wants=network-online.target
+Requires=openclaw-ai-quant-ws-sidecar.service
+
+[Service]
+Type=simple
+WorkingDirectory=$PROJECT_DIR
+EnvironmentFile=-%h/.config/openclaw/ai-quant-universe.env
+EnvironmentFile=-%h/.config/openclaw/ai-quant-live.env
+ExecStart=$PROJECT_DIR/venv/bin/python3 -u -m quant_trader_v5.run_unified_daemon
+Restart=always
+RestartSec=5
+KillMode=process
+Environment=AI_QUANT_LOCK_PATH=$PROJECT_DIR/ai_quant_live.lock
+Environment=AI_QUANT_WS_SOURCE=sidecar
+Environment=AI_QUANT_WS_SIDECAR_SOCK=%t/openclaw-ai-quant-ws.sock
+Environment=AI_QUANT_MARKET_DB_PATH=$PROJECT_DIR/market_data.db
+Environment=AI_QUANT_CANDLES_SOURCE=sidecar
+Environment=AI_QUANT_CANDLES_DB_DIR=$PROJECT_DIR/candles_dbs
+Environment=AI_QUANT_REST_CANDLE_BACKFILL=0
+Environment=AI_QUANT_REST_ENABLE=0
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

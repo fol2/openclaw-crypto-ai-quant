@@ -1,0 +1,1367 @@
+#!/usr/bin/env python3
+import json
+import mimetypes
+import os
+import re
+import sqlite3
+import sys
+import threading
+import time
+from collections import deque
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs, urlparse
+
+
+AIQ_ROOT = Path(__file__).resolve().parents[1]
+MONITOR_DIR = Path(__file__).resolve().parent
+STATIC_DIR = MONITOR_DIR / "static"
+
+if str(AIQ_ROOT) not in sys.path:
+    sys.path.insert(0, str(AIQ_ROOT))
+if str(MONITOR_DIR) not in sys.path:
+    sys.path.insert(0, str(MONITOR_DIR))
+
+from heartbeat import parse_last_heartbeat  # noqa: E402
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return int(default)
+    try:
+        return int(str(raw).strip())
+    except Exception:
+        return int(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return float(default)
+    try:
+        return float(str(raw).strip())
+    except Exception:
+        return float(default)
+
+
+def _json(obj: Any) -> bytes:
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+
+
+def _utc_now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+_INTERVAL_RE = re.compile(r"^([0-9]+)([mhd])$", re.IGNORECASE)
+
+
+def _interval_sort_key(interval: str) -> tuple[int, str]:
+    s = str(interval or "").strip().lower()
+    m = _INTERVAL_RE.match(s)
+    if not m:
+        return (10**9, s)
+    n = int(m.group(1))
+    unit = m.group(2).lower()
+    mult = {"m": 1, "h": 60, "d": 60 * 24}.get(unit, 10**6)
+    return (n * mult, s)
+
+
+def effective_trader_interval() -> str:
+    """Best-effort candle interval used by the live/paper trader (default 1h)."""
+    return str(os.getenv("AI_QUANT_INTERVAL") or "1h").strip() or "1h"
+
+
+_TRADER_INTERVAL_LOCK = threading.RLock()
+_TRADER_INTERVAL_CACHE: dict[str, tuple[int, str]] = {}
+
+
+def effective_trader_interval_for_mode(mode: str) -> str:
+    """Infer trader candle interval per mode when AI_QUANT_INTERVAL isn't set."""
+    env = str(os.getenv("AI_QUANT_INTERVAL") or "").strip()
+    if env:
+        return env
+
+    mode2 = (mode or "paper").strip().lower() or "paper"
+    now_ms = _utc_now_ms()
+    cache_max_age_ms = 30_000
+    with _TRADER_INTERVAL_LOCK:
+        cached = _TRADER_INTERVAL_CACHE.get(mode2)
+        if cached and (now_ms - cached[0]) < cache_max_age_ms:
+            return cached[1]
+
+    iv: str | None = None
+    try:
+        db_path, _log_path = mode_paths(mode2)
+        if db_path.exists():
+            con = connect_db_ro(db_path)
+            try:
+                iv = infer_interval_from_db(con)
+            finally:
+                con.close()
+    except Exception:
+        iv = None
+
+    out = iv or "1h"
+    with _TRADER_INTERVAL_LOCK:
+        _TRADER_INTERVAL_CACHE[mode2] = (now_ms, out)
+    return out
+
+
+def effective_monitor_interval() -> str:
+    """Interval used by the monitor for universe selection (may differ from trader)."""
+    return str(os.getenv("AIQ_MONITOR_INTERVAL") or os.getenv("AI_QUANT_INTERVAL") or "1m").strip() or "1m"
+
+
+_CANDLE_INTERVALS_LOCK = threading.RLock()
+_CANDLE_INTERVALS_CACHE: tuple[int, list[str]] | None = None
+
+
+def list_available_candle_intervals(*, default: str | None = None) -> list[str]:
+    """Return available candle intervals (from per-interval candle DB files) with caching."""
+    global _CANDLE_INTERVALS_CACHE
+
+    now_ms = _utc_now_ms()
+    cache_max_age_ms = 30_000
+    with _CANDLE_INTERVALS_LOCK:
+        cached = _CANDLE_INTERVALS_CACHE
+        if cached and (now_ms - cached[0]) < cache_max_age_ms:
+            intervals = list(cached[1])
+        else:
+            intervals: list[str] = []
+            try:
+                raw_dir = str(os.getenv("AI_QUANT_CANDLES_DB_DIR", "") or "").strip()
+                candles_dir = Path(raw_dir) if raw_dir else (AIQ_ROOT / "candles_dbs")
+                for p in candles_dir.glob("candles_*.db"):
+                    name = p.name
+                    if not name.startswith("candles_") or not name.endswith(".db"):
+                        continue
+                    iv = name[len("candles_") : -len(".db")]
+                    iv = str(iv or "").strip().lower()
+                    if iv:
+                        intervals.append(iv)
+            except Exception:
+                intervals = []
+
+            # De-dupe + stable sort.
+            intervals = sorted({iv for iv in intervals if iv}, key=_interval_sort_key)
+            _CANDLE_INTERVALS_CACHE = (now_ms, list(intervals))
+
+    # Ensure the default interval is offered even if the DB file isn't present yet.
+    d = str(default or "").strip().lower()
+    if d and d not in intervals:
+        intervals = [d] + intervals
+    if not intervals:
+        intervals = ["1m", "1h"]
+    return intervals
+
+def effective_fee_rate() -> float:
+    """Best-effort all-in fee rate (single fill). Used for equity estimation only."""
+    raw = os.getenv("AIQ_MONITOR_FEE_RATE")
+    if raw:
+        try:
+            return max(0.0, float(str(raw).strip()))
+        except Exception:
+            pass
+
+    try:
+        taker = float(os.getenv("HL_PERP_TAKER_FEE_RATE", "0.00045"))
+    except Exception:
+        taker = 0.00045
+    try:
+        maker = float(os.getenv("HL_PERP_MAKER_FEE_RATE", "0.00015"))
+    except Exception:
+        maker = 0.00015
+
+    mode = os.getenv("HL_FEE_MODE", "taker").strip().lower()
+    protocol = maker if mode == "maker" else taker
+
+    try:
+        ref = float(os.getenv("HL_REFERRAL_DISCOUNT_PCT", "0"))
+    except Exception:
+        ref = 0.0
+    ref = max(0.0, min(100.0, ref))
+    discount_mult = 1.0 - (ref / 100.0)
+
+    try:
+        builder = float(os.getenv("HL_BUILDER_FEE_RATE", "0.0"))
+    except Exception:
+        builder = 0.0
+
+    rate = (protocol * discount_mult) + builder
+    try:
+        return max(0.0, float(rate))
+    except Exception:
+        return 0.00045
+
+
+def _iso_utc(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def connect_db_ro(db_path: Path) -> sqlite3.Connection:
+    uri = f"file:{db_path}?mode=ro"
+    con = sqlite3.connect(uri, uri=True, timeout=1.0)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def _fetchall(con: sqlite3.Connection, q: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+    cur = con.cursor()
+    cur.execute(q, params)
+    rows = cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+def _fetchone(con: sqlite3.Connection, q: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
+    cur = con.cursor()
+    cur.execute(q, params)
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def infer_interval_from_db(con: sqlite3.Connection) -> str | None:
+    """Best-effort infer candle interval from the local trading DB."""
+    try:
+        row = _fetchone(con, "SELECT interval FROM candles LIMIT 1")
+        iv = str(row.get("interval") or "").strip().lower() if row else ""
+        return iv or None
+    except Exception:
+        return None
+
+
+def _placeholders(n: int) -> str:
+    return ",".join(["?"] * n) if n > 0 else ""
+
+
+def list_recent_symbols(
+    con: sqlite3.Connection,
+    *,
+    candles_con: sqlite3.Connection | None = None,
+    interval: str,
+    now_ms: int,
+    candle_window_ms: int = 6 * 60 * 60 * 1000,
+    trades_window_h: int = 24,
+    oms_window_h: int = 24,
+    limit: int = 200,
+    has_oms: bool,
+) -> list[str]:
+    symbols: list[str] = []
+
+    ccon = candles_con or con
+    candle_cutoff = now_ms - int(candle_window_ms)
+    rows = _fetchall(
+        ccon,
+        """
+        SELECT symbol, MAX(COALESCE(t_close, t)) AS last_t
+        FROM candles
+        WHERE interval = ?
+          AND COALESCE(t_close, t) >= ?
+        GROUP BY symbol
+        ORDER BY last_t DESC
+        LIMIT ?
+        """,
+        (interval, candle_cutoff, int(limit)),
+    )
+    symbols.extend([str(r["symbol"]).upper() for r in rows if r.get("symbol")])
+
+    trades_cutoff_iso = _iso_utc(datetime.now(timezone.utc) - timedelta(hours=int(trades_window_h)))
+    trade_syms = _fetchall(
+        con,
+        """
+        SELECT DISTINCT symbol
+        FROM trades
+        WHERE timestamp >= ?
+        ORDER BY symbol
+        """,
+        (trades_cutoff_iso,),
+    )
+    symbols.extend([str(r["symbol"]).upper() for r in trade_syms if r.get("symbol")])
+
+    if has_oms:
+        oms_cutoff_ms = now_ms - int(oms_window_h * 60 * 60 * 1000)
+        oms_syms = _fetchall(
+            con,
+            """
+            SELECT DISTINCT symbol
+            FROM oms_intents
+            WHERE created_ts_ms >= ?
+            ORDER BY symbol
+            """,
+            (oms_cutoff_ms,),
+        )
+        symbols.extend([str(r["symbol"]).upper() for r in oms_syms if r.get("symbol")])
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for s in symbols:
+        s2 = (s or "").strip().upper()
+        if not s2 or s2 in seen:
+            continue
+        seen.add(s2)
+        out.append(s2)
+    return out
+
+
+def compute_open_positions(con: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    positions: dict[str, dict[str, Any]] = {}
+    rows = _fetchall(
+        con,
+        """
+        SELECT t.id, t.timestamp, t.symbol, t.type, t.price, t.size, t.confidence, t.entry_atr, t.leverage, t.margin_used
+        FROM trades t
+        JOIN (
+            SELECT symbol, MAX(id) AS open_id
+            FROM trades
+            WHERE action = 'OPEN'
+            GROUP BY symbol
+        ) lo ON lo.symbol = t.symbol AND lo.open_id = t.id
+        LEFT JOIN (
+            SELECT symbol, MAX(id) AS close_id
+            FROM trades
+            WHERE action = 'CLOSE'
+            GROUP BY symbol
+        ) lc ON lc.symbol = t.symbol
+        WHERE lc.close_id IS NULL OR t.id > lc.close_id
+        """,
+    )
+
+    cur = con.cursor()
+    for r in rows:
+        symbol = str(r.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        pos_type = str(r.get("type") or "").strip().upper()
+        if pos_type not in {"LONG", "SHORT"}:
+            continue
+
+        try:
+            open_trade_id = int(r["id"])
+            avg_entry = float(r["price"])
+            net_size = float(r["size"])
+        except Exception:
+            continue
+        if avg_entry <= 0 or net_size <= 0:
+            continue
+
+        entry_atr = 0.0
+        try:
+            entry_atr = float(r.get("entry_atr") or 0.0)
+        except Exception:
+            entry_atr = 0.0
+
+        # Replay ADD/REDUCE to rebuild net position size + avg entry.
+        cur.execute(
+            """
+            SELECT action, price, size, entry_atr
+            FROM trades
+            WHERE symbol = ?
+              AND id > ?
+              AND action IN ('ADD', 'REDUCE')
+            ORDER BY id ASC
+            """,
+            (symbol, open_trade_id),
+        )
+        for act, px, sz, fill_atr in cur.fetchall():
+            try:
+                px = float(px)
+                sz = float(sz)
+            except Exception:
+                continue
+            if px <= 0 or sz <= 0:
+                continue
+            if act == "ADD":
+                new_total = net_size + sz
+                if new_total > 0:
+                    avg_entry = ((avg_entry * net_size) + (px * sz)) / new_total
+                    try:
+                        fill_atr_f = float(fill_atr) if fill_atr is not None else None
+                    except Exception:
+                        fill_atr_f = None
+                    if fill_atr_f and fill_atr_f > 0:
+                        entry_atr = ((entry_atr * net_size) + (fill_atr_f * sz)) / new_total if entry_atr > 0 else fill_atr_f
+                    net_size = new_total
+            elif act == "REDUCE":
+                net_size -= sz
+                if net_size <= 0:
+                    net_size = 0.0
+                    break
+
+        if net_size <= 0:
+            continue
+
+        leverage = 1.0
+        try:
+            leverage = float(r.get("leverage") or 1.0)
+        except Exception:
+            leverage = 1.0
+        if leverage <= 0:
+            leverage = 1.0
+
+        margin_used = None
+        try:
+            margin_used = float(r.get("margin_used")) if r.get("margin_used") is not None else None
+        except Exception:
+            margin_used = None
+        if margin_used is None:
+            try:
+                margin_used = abs(net_size) * avg_entry / leverage
+            except Exception:
+                margin_used = 0.0
+
+        positions[symbol] = {
+            "symbol": symbol,
+            "type": pos_type,
+            "open_trade_id": open_trade_id,
+            "open_timestamp": r.get("timestamp"),
+            "entry_price": avg_entry,
+            "size": net_size,
+            "confidence": r.get("confidence"),
+            "entry_atr": entry_atr,
+            "leverage": leverage,
+            "margin_used": margin_used,
+        }
+
+    return positions
+
+
+def compute_open_position_for_symbol(con: sqlite3.Connection, symbol: str) -> dict[str, Any] | None:
+    sym = (symbol or "").strip().upper()
+    if not sym:
+        return None
+
+    close_row = _fetchone(con, "SELECT MAX(id) AS close_id FROM trades WHERE symbol = ? AND action = 'CLOSE'", (sym,))
+    close_id = 0
+    try:
+        close_id = int(close_row["close_id"]) if close_row and close_row.get("close_id") is not None else 0
+    except Exception:
+        close_id = 0
+
+    open_row = _fetchone(
+        con,
+        """
+        SELECT id, timestamp, symbol, type, price, size, confidence, entry_atr, leverage, margin_used
+        FROM trades
+        WHERE symbol = ?
+          AND action = 'OPEN'
+          AND id > ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (sym, close_id),
+    )
+    if not open_row:
+        return None
+
+    pos_type = str(open_row.get("type") or "").strip().upper()
+    if pos_type not in {"LONG", "SHORT"}:
+        return None
+
+    try:
+        open_trade_id = int(open_row["id"])
+        avg_entry = float(open_row["price"])
+        net_size = float(open_row["size"])
+    except Exception:
+        return None
+    if avg_entry <= 0 or net_size <= 0:
+        return None
+
+    entry_atr = 0.0
+    try:
+        entry_atr = float(open_row.get("entry_atr") or 0.0)
+    except Exception:
+        entry_atr = 0.0
+
+    cur = con.cursor()
+    cur.execute(
+        """
+        SELECT action, price, size, entry_atr
+        FROM trades
+        WHERE symbol = ?
+          AND id > ?
+          AND action IN ('ADD', 'REDUCE')
+        ORDER BY id ASC
+        """,
+        (sym, open_trade_id),
+    )
+    for act, px, sz, fill_atr in cur.fetchall():
+        try:
+            px = float(px)
+            sz = float(sz)
+        except Exception:
+            continue
+        if px <= 0 or sz <= 0:
+            continue
+        if act == "ADD":
+            new_total = net_size + sz
+            if new_total > 0:
+                avg_entry = ((avg_entry * net_size) + (px * sz)) / new_total
+                try:
+                    fill_atr_f = float(fill_atr) if fill_atr is not None else None
+                except Exception:
+                    fill_atr_f = None
+                if fill_atr_f and fill_atr_f > 0:
+                    entry_atr = ((entry_atr * net_size) + (fill_atr_f * sz)) / new_total if entry_atr > 0 else fill_atr_f
+                net_size = new_total
+        elif act == "REDUCE":
+            net_size -= sz
+            if net_size <= 0:
+                return None
+
+    leverage = 1.0
+    try:
+        leverage = float(open_row.get("leverage") or 1.0)
+    except Exception:
+        leverage = 1.0
+    if leverage <= 0:
+        leverage = 1.0
+
+    margin_used = None
+    try:
+        margin_used = float(open_row.get("margin_used")) if open_row.get("margin_used") is not None else None
+    except Exception:
+        margin_used = None
+    if margin_used is None:
+        try:
+            margin_used = abs(net_size) * avg_entry / leverage
+        except Exception:
+            margin_used = 0.0
+
+    return {
+        "symbol": sym,
+        "type": pos_type,
+        "open_trade_id": open_trade_id,
+        "open_timestamp": open_row.get("timestamp"),
+        "entry_price": avg_entry,
+        "size": net_size,
+        "confidence": open_row.get("confidence"),
+        "entry_atr": entry_atr,
+        "leverage": leverage,
+        "margin_used": margin_used,
+    }
+
+
+def fetch_last_rows_by_symbol(
+    con: sqlite3.Connection, table: str, symbol_col: str, id_col: str, symbols: list[str], columns: list[str]
+) -> dict[str, dict[str, Any]]:
+    if not symbols:
+        return {}
+    cols = ", ".join(columns)
+    ph = _placeholders(len(symbols))
+    q = f"""
+    SELECT t.{symbol_col} AS symbol, {cols}
+    FROM {table} t
+    JOIN (
+        SELECT {symbol_col} AS sym, MAX({id_col}) AS max_id
+        FROM {table}
+        WHERE {symbol_col} IN ({ph})
+        GROUP BY {symbol_col}
+    ) m ON m.sym = t.{symbol_col} AND m.max_id = t.{id_col}
+    """
+    rows = _fetchall(con, q, tuple(symbols))
+    out: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        s = str(r.get("symbol") or "").strip().upper()
+        if not s:
+            continue
+        out[s] = {k: v for k, v in r.items() if k != "symbol"}
+    return out
+
+
+def fetch_last_intents_by_symbol(con: sqlite3.Connection, symbols: list[str]) -> dict[str, dict[str, Any]]:
+    if not symbols:
+        return {}
+    ph = _placeholders(len(symbols))
+    q = f"""
+    SELECT i.symbol AS symbol,
+           i.intent_id, i.created_ts_ms, i.action, i.side, i.status,
+           i.confidence, i.reason, i.dedupe_key, i.client_order_id, i.exchange_order_id
+    FROM oms_intents i
+    JOIN (
+        SELECT symbol AS sym, MAX(created_ts_ms) AS max_ts
+        FROM oms_intents
+        WHERE symbol IN ({ph})
+        GROUP BY symbol
+    ) m ON m.sym = i.symbol AND m.max_ts = i.created_ts_ms
+    """
+    rows = _fetchall(con, q, tuple(symbols))
+    out: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        s = str(r.get("symbol") or "").strip().upper()
+        if not s:
+            continue
+        out[s] = {k: v for k, v in r.items() if k != "symbol"}
+    return out
+
+
+@dataclass
+class MidPoint:
+    px: float
+    ts_ms: int
+
+
+class MidsFeed:
+    def __init__(self, *, hist_window_s: int = 3600, hist_sample_ms: int = 1000):
+        self._lock = threading.RLock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+        self._tracked: set[str] = {"BTC"}
+        self._mids: dict[str, MidPoint] = {}
+        self._updated_ts_ms: int | None = None
+
+        self._hist_sample_ms = int(hist_sample_ms)
+        self._hist_window_s = int(hist_window_s)
+        self._hist: dict[str, deque[tuple[int, float]]] = {}
+        self._last_hist_ts: dict[str, int] = {}
+
+        # Polling cadence and OK threshold.
+        self._poll_ms = max(100, _env_int("AIQ_MONITOR_MIDS_POLL_MS", int(self._hist_sample_ms)))
+        self._max_age_s_ok = max(0.0, _env_float("AIQ_MONITOR_MIDS_MAX_AGE_S", 60.0))
+
+        self._ws_ok: bool = False
+        self._ws_last_err: str | None = None
+
+        self._sidecar = None
+        try:
+            from hl_ws_sidecar_client import SidecarWSClient  # type: ignore
+
+            self._sidecar = SidecarWSClient()
+        except Exception as e:
+            self._sidecar = None
+            self._ws_ok = False
+            self._ws_last_err = f"sidecar_client_init_failed: {e}"
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        t = threading.Thread(target=self._run, name="aiq-monitor-mids-sidecar", daemon=True)
+        self._thread = t
+        t.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def set_tracked_symbols(self, symbols: list[str]) -> None:
+        with self._lock:
+            self._tracked = {str(s).strip().upper() for s in symbols if str(s).strip()}
+            if "BTC" not in self._tracked:
+                self._tracked.add("BTC")
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            mids = {s: v.px for s, v in self._mids.items()}
+            updated_ts_ms = self._updated_ts_ms
+            return {
+                "ok": self._ws_ok,
+                "last_error": self._ws_last_err,
+                "updated_ts_ms": updated_ts_ms,
+                "mids": mids,
+            }
+
+    def get_mid(self, symbol: str) -> MidPoint | None:
+        s = str(symbol or "").strip().upper()
+        if not s:
+            return None
+        with self._lock:
+            return self._mids.get(s)
+
+    def history(self, symbol: str, *, window_s: int = 600) -> list[dict[str, Any]]:
+        s = str(symbol or "").strip().upper()
+        if not s:
+            return []
+        now_ms = _utc_now_ms()
+        cutoff = now_ms - int(window_s * 1000)
+        with self._lock:
+            dq = self._hist.get(s)
+            if not dq:
+                return []
+            return [{"ts_ms": ts, "mid": px} for (ts, px) in list(dq) if ts >= cutoff]
+
+    def _run(self) -> None:
+        backoff_s = 1.0
+        while not self._stop.is_set():
+            try:
+                sidecar = self._sidecar
+                if sidecar is None:
+                    raise RuntimeError("sidecar_unavailable")
+
+                with self._lock:
+                    tracked = set(self._tracked)
+
+                # Poll sidecar for mids (no direct outbound Hyperliquid connections from monitor).
+                mids, mids_age_s = sidecar.get_mids(symbols=sorted(tracked), max_age_s=None)
+
+                now_ms = _utc_now_ms()
+                ts_ms = now_ms
+                try:
+                    if mids_age_s is not None:
+                        ts_ms = now_ms - int(float(mids_age_s) * 1000.0)
+                except Exception:
+                    ts_ms = now_ms
+
+                ok = mids_age_s is not None and float(mids_age_s) <= float(self._max_age_s_ok)
+                last_err = None if ok else (f"mids_stale age_s={mids_age_s}" if mids_age_s is not None else "mids_age_s=None")
+
+                with self._lock:
+                    self._ws_ok = bool(ok)
+                    self._ws_last_err = last_err
+                    self._updated_ts_ms = ts_ms
+
+                    # Update tracked symbols only.
+                    tracked_now = set(self._tracked)
+                    for sym in tracked_now:
+                        if sym not in mids:
+                            continue
+                        try:
+                            px = float(mids[sym])
+                        except Exception:
+                            continue
+                        self._mids[sym] = MidPoint(px=px, ts_ms=ts_ms)
+
+                        last_ts = self._last_hist_ts.get(sym) or 0
+                        if (ts_ms - last_ts) >= self._hist_sample_ms:
+                            dq = self._hist.get(sym)
+                            if dq is None:
+                                dq = deque(maxlen=max(30, int(self._hist_window_s * 1000 / self._hist_sample_ms)))
+                                self._hist[sym] = dq
+                            dq.append((ts_ms, px))
+                            self._last_hist_ts[sym] = ts_ms
+            except Exception as e:
+                with self._lock:
+                    self._ws_ok = False
+                    self._ws_last_err = f"sidecar_poll_error: {e}"
+                if self._stop.wait(backoff_s):
+                    break
+                backoff_s = min(60.0, backoff_s * 1.6)
+                continue
+
+            backoff_s = 1.0
+            if self._stop.wait(float(self._poll_ms) / 1000.0):
+                break
+
+
+class DashboardState:
+    def __init__(self):
+        self.mids = MidsFeed(hist_window_s=_env_int("AIQ_MONITOR_HIST_WINDOW_S", 3600))
+        self.mids.start()
+        self._snapshot_lock = threading.RLock()
+        self._snapshots: dict[str, tuple[int, dict[str, Any]]] = {}
+
+    def get_snapshot_cached(self, mode: str, build_fn) -> dict[str, Any]:
+        mode2 = (mode or "").strip().lower()
+        now_ms = _utc_now_ms()
+        with self._snapshot_lock:
+            cached = self._snapshots.get(mode2)
+            if cached and (now_ms - cached[0]) < 900:
+                return cached[1]
+        snap = build_fn()
+        with self._snapshot_lock:
+            self._snapshots[mode2] = (now_ms, snap)
+        return snap
+
+
+STATE = DashboardState()
+
+
+def mode_paths(mode: str) -> tuple[Path, Path]:
+    mode2 = (mode or "").strip().lower()
+    if mode2 == "live":
+        db = Path(os.getenv("AIQ_MONITOR_LIVE_DB", str(AIQ_ROOT / "trading_engine_live.db")))
+        log = Path(os.getenv("AIQ_MONITOR_LIVE_LOG", str(AIQ_ROOT / "live_daemon_log.txt")))
+        return db, log
+    db = Path(os.getenv("AIQ_MONITOR_PAPER_DB", str(AIQ_ROOT / "trading_engine.db")))
+    log = Path(os.getenv("AIQ_MONITOR_PAPER_LOG", str(AIQ_ROOT / "daemon_log.txt")))
+    return db, log
+
+
+def build_marks(mode: str, symbol: str) -> dict[str, Any]:
+    mode2 = (mode or "paper").strip().lower()
+    sym = (symbol or "").strip().upper()
+    now_ms = _utc_now_ms()
+    db_path, _log_path = mode_paths(mode2)
+
+    out: dict[str, Any] = {
+        "ok": True,
+        "now_ts_ms": now_ms,
+        "mode": mode2,
+        "db_path": str(db_path),
+        "symbol": sym,
+        "position": None,
+        "entries": [],
+        "warnings": [],
+    }
+
+    if not sym:
+        out["ok"] = False
+        out["error"] = "missing_symbol"
+        return out
+
+    if not db_path.exists():
+        out["ok"] = False
+        out["error"] = "db_missing"
+        return out
+
+    try:
+        con = connect_db_ro(db_path)
+    except Exception as e:
+        out["ok"] = False
+        out["error"] = f"db_open_failed:{e}"
+        return out
+
+    try:
+        pos = compute_open_position_for_symbol(con, sym)
+        if not pos:
+            return out
+        out["position"] = pos
+
+        try:
+            open_id = int(pos.get("open_trade_id") or 0)
+        except Exception:
+            open_id = 0
+
+        if open_id > 0:
+            out["entries"] = _fetchall(
+                con,
+                """
+                SELECT id, timestamp, action, type, price, size, confidence
+                FROM trades
+                WHERE symbol = ?
+                  AND id >= ?
+                  AND action IN ('OPEN', 'ADD')
+                ORDER BY id ASC
+                """,
+                (sym, open_id),
+            )
+        return out
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
+def build_candles(mode: str, symbol: str, interval: str, limit: int) -> dict[str, Any]:
+    mode2 = (mode or "paper").strip().lower()
+    sym = (symbol or "").strip().upper()
+    interval2 = (interval or effective_trader_interval_for_mode(mode2)).strip().lower()
+    now_ms = _utc_now_ms()
+    db_path, _log_path = mode_paths(mode2)
+
+    lim = int(limit or 200)
+    lim = max(2, min(2000, lim))
+
+    out: dict[str, Any] = {
+        "ok": True,
+        "now_ts_ms": now_ms,
+        "mode": mode2,
+        "db_path": str(db_path),
+        "symbol": sym,
+        "interval": interval2,
+        "limit": lim,
+        "candles": [],
+        "warnings": [],
+    }
+
+    if not sym:
+        out["ok"] = False
+        out["error"] = "missing_symbol"
+        return out
+    if not db_path.exists():
+        out["ok"] = False
+        out["error"] = "db_missing"
+        return out
+
+    # Prefer per-interval candle DB written by the Rust sidecar.
+    candle_db_paths: list[Path] = []
+    try:
+        raw_dir = str(os.getenv("AI_QUANT_CANDLES_DB_DIR", "") or "").strip()
+        candles_dir = Path(raw_dir) if raw_dir else (AIQ_ROOT / "candles_dbs")
+        safe_interval = "".join([(ch.lower() if ch.isalnum() else "_") for ch in interval2]) or "unknown"
+        p = candles_dir / f"candles_{safe_interval}.db"
+        if p.exists():
+            candle_db_paths.append(p)
+    except Exception:
+        pass
+    candle_db_paths.append(db_path)
+
+    try:
+        rows: list[dict[str, Any]] = []
+        for p in candle_db_paths:
+            con = None
+            try:
+                con = connect_db_ro(p)
+                rows = _fetchall(
+                    con,
+                    """
+                    SELECT t, t_close, o, h, l, c, v, n, updated_at
+                    FROM candles
+                    WHERE symbol = ?
+                      AND interval = ?
+                    ORDER BY COALESCE(t_close, t) DESC
+                    LIMIT ?
+                    """,
+                    (sym, interval2, lim),
+                )
+                if rows:
+                    break
+            except Exception:
+                rows = []
+            finally:
+                try:
+                    if con is not None:
+                        con.close()
+                except Exception:
+                    pass
+
+        candles: list[dict[str, Any]] = []
+        for r in reversed(rows):
+            try:
+                candles.append(
+                    {
+                        "t": int(r.get("t") or 0),
+                        "t_close": int(r.get("t_close") or 0),
+                        "o": float(r.get("o") or 0.0),
+                        "h": float(r.get("h") or 0.0),
+                        "l": float(r.get("l") or 0.0),
+                        "c": float(r.get("c") or 0.0),
+                        "v": float(r.get("v") or 0.0),
+                        "n": int(r.get("n") or 0),
+                        "updated_at": r.get("updated_at"),
+                    }
+                )
+            except Exception:
+                continue
+        out["candles"] = candles
+        out["count"] = len(candles)
+        if candles:
+            out["first_t"] = candles[0].get("t")
+            out["last_t_close"] = candles[-1].get("t_close") or candles[-1].get("t")
+        return out
+    finally:
+        pass
+
+
+def build_snapshot(mode: str) -> dict[str, Any]:
+    mode2 = (mode or "paper").strip().lower()
+    now_ms = _utc_now_ms()
+    db_path, log_path = mode_paths(mode2)
+
+    health = parse_last_heartbeat(db_path, log_path)
+
+    snapshot: dict[str, Any] = {
+        "now_ts_ms": now_ms,
+        "mode": mode2,
+        "health": health,
+        "db_path": str(db_path),
+        "symbols": [],
+        "open_positions": [],
+        "recent": {},
+        "warnings": [],
+    }
+
+    trader_interval = effective_trader_interval()
+    snapshot["config"] = {
+        "trader_interval": trader_interval,
+        "candle_interval_default": trader_interval,
+        "candle_intervals": list_available_candle_intervals(default=trader_interval),
+    }
+
+    if not db_path.exists():
+        snapshot["warnings"].append("db_missing")
+        return snapshot
+
+    # Detect OMS presence (live DB has it; paper may not).
+    has_oms = False
+    try:
+        con0 = connect_db_ro(db_path)
+        try:
+            row = _fetchone(con0, "SELECT name FROM sqlite_master WHERE type='table' AND name='oms_intents'")
+            has_oms = bool(row)
+        finally:
+            con0.close()
+    except Exception:
+        has_oms = False
+
+    try:
+        con = connect_db_ro(db_path)
+    except Exception as e:
+        snapshot["warnings"].append(f"db_open_failed:{e}")
+        return snapshot
+
+    try:
+        interval = effective_monitor_interval()
+
+        # If the monitor isn't explicitly configured, try to infer the trader interval
+        # from the DB (useful when live/paper services run with their own env files).
+        if not str(os.getenv("AI_QUANT_INTERVAL") or "").strip():
+            inferred = infer_interval_from_db(con)
+            if inferred:
+                snapshot["config"]["trader_interval"] = inferred
+                snapshot["config"]["candle_interval_default"] = inferred
+                snapshot["config"]["candle_intervals"] = list_available_candle_intervals(default=inferred)
+
+        candles_con = None
+        try:
+            # Candles are now written by the Rust sidecar into per-interval DB files.
+            # Fall back to reading candles from the trading DB if the per-interval DB is missing.
+            raw_dir = str(os.getenv("AI_QUANT_CANDLES_DB_DIR", "") or "").strip()
+            candles_dir = Path(raw_dir) if raw_dir else (AIQ_ROOT / "candles_dbs")
+            safe_interval = "".join([(ch.lower() if ch.isalnum() else "_") for ch in interval]) or "unknown"
+            candles_db_path = candles_dir / f"candles_{safe_interval}.db"
+            if candles_db_path.exists():
+                candles_con = connect_db_ro(candles_db_path)
+        except Exception:
+            candles_con = None
+
+        last_bal = _fetchone(con, "SELECT timestamp, balance FROM trades ORDER BY id DESC LIMIT 1")
+        realised_usd: float | None = None
+        realised_asof: str | None = None
+        if last_bal:
+            realised_asof = last_bal.get("timestamp")
+            try:
+                if last_bal.get("balance") is not None:
+                    realised_usd = float(last_bal["balance"])
+            except Exception:
+                realised_usd = None
+        if realised_usd is None and mode2 != "live":
+            # Paper default if no trades yet.
+            realised_usd = _env_float("AI_QUANT_PAPER_BALANCE", 10000.0)
+
+        open_positions = compute_open_positions(con)
+        open_syms = list(open_positions.keys())
+
+        symbols = list_recent_symbols(con, candles_con=candles_con, interval=interval, now_ms=now_ms, has_oms=has_oms)
+        # Always include open positions first.
+        merged: list[str] = []
+        seen: set[str] = set()
+        for s in open_syms + symbols:
+            s2 = (s or "").strip().upper()
+            if not s2 or s2 in seen:
+                continue
+            seen.add(s2)
+            merged.append(s2)
+        merged = merged[:200]
+
+        # Ensure WS feed tracks the universe we want to display.
+        STATE.mids.set_tracked_symbols(merged[:120])
+
+        last_signal = fetch_last_rows_by_symbol(
+            con,
+            "signals",
+            "symbol",
+            "id",
+            merged,
+            ["t.timestamp AS timestamp", "t.signal AS signal", "t.confidence AS confidence", "t.price AS price", "t.meta_json AS meta_json"],
+        )
+        last_trade = fetch_last_rows_by_symbol(
+            con,
+            "trades",
+            "symbol",
+            "id",
+            merged,
+            [
+                "t.timestamp AS timestamp",
+                "t.type AS type",
+                "t.action AS action",
+                "t.price AS price",
+                "t.size AS size",
+                "t.notional AS notional",
+                "t.pnl AS pnl",
+                "t.reason AS reason",
+                "t.confidence AS confidence",
+                "t.meta_json AS meta_json",
+            ],
+        )
+        last_intent = fetch_last_intents_by_symbol(con, merged) if has_oms else {}
+
+        symbols_out: list[dict[str, Any]] = []
+        # Balances: equity estimate = realised + unreal_pnl - est_close_fees
+        fee_rate = effective_fee_rate()
+        unreal_total = 0.0
+        close_fee_total = 0.0
+        for sym in merged:
+            mp = STATE.mids.get_mid(sym)
+            mid = mp.px if mp else None
+            mid_age_s = (now_ms - mp.ts_ms) / 1000.0 if mp else None
+
+            pos = open_positions.get(sym)
+            pos_out = None
+            if pos:
+                unreal_pnl = None
+                if mid and pos.get("entry_price") and pos.get("size"):
+                    try:
+                        entry = float(pos["entry_price"])
+                        size = float(pos["size"])
+                        if pos.get("type") == "LONG":
+                            unreal_pnl = (mid - entry) * size
+                        else:
+                            unreal_pnl = (entry - mid) * size
+                    except Exception:
+                        unreal_pnl = None
+                # Equity totals (best effort even if mid missing)
+                try:
+                    entry = float(pos.get("entry_price") or 0.0)
+                    size = float(pos.get("size") or 0.0)
+                    mark = float(mid) if mid is not None else entry
+                    if entry > 0 and size > 0 and mark > 0:
+                        if str(pos.get("type") or "").upper() == "LONG":
+                            unreal_total += (mark - entry) * size
+                        else:
+                            unreal_total += (entry - mark) * size
+                        close_fee_total += abs(size) * mark * float(fee_rate or 0.0)
+                except Exception:
+                    pass
+                pos_out = {**pos, "unreal_pnl_est": unreal_pnl}
+
+            symbols_out.append(
+                {
+                    "symbol": sym,
+                    "mid": mid,
+                    "mid_age_s": mid_age_s,
+                    "last_signal": last_signal.get(sym),
+                    "last_trade": last_trade.get(sym),
+                    "last_intent": last_intent.get(sym) if has_oms else None,
+                    "position": pos_out,
+                }
+            )
+
+        equity_est_usd: float | None = None
+        if realised_usd is not None:
+            equity_est_usd = float(realised_usd) + float(unreal_total) - float(close_fee_total)
+
+        snapshot["balances"] = {
+            "realised_usd": realised_usd,
+            "realised_asof": realised_asof,
+            "equity_est_usd": equity_est_usd,
+            "unreal_pnl_est_usd": unreal_total,
+            "est_close_fees_usd": close_fee_total,
+            "fee_rate": fee_rate,
+        }
+
+        recent: dict[str, Any] = {}
+        recent["trades"] = _fetchall(
+            con,
+            """
+            SELECT timestamp, symbol, type, action, price, size, notional, pnl, fee_usd, reason, confidence
+            FROM trades
+            ORDER BY id DESC
+            LIMIT 60
+            """,
+        )
+        recent["signals"] = _fetchall(
+            con,
+            """
+            SELECT timestamp, symbol, signal, confidence, price, rsi, ema_fast, ema_slow
+            FROM signals
+            ORDER BY id DESC
+            LIMIT 60
+            """,
+        )
+        recent["audit_events"] = _fetchall(
+            con,
+            """
+            SELECT timestamp, symbol, event, level, data_json
+            FROM audit_events
+            ORDER BY id DESC
+            LIMIT 60
+            """,
+        )
+        if has_oms:
+            recent["oms_intents"] = _fetchall(
+                con,
+                """
+                SELECT created_ts_ms, symbol, action, side, status, confidence, reason, dedupe_key, client_order_id, exchange_order_id, last_error
+                FROM oms_intents
+                ORDER BY created_ts_ms DESC
+                LIMIT 80
+                """,
+            )
+            recent["oms_fills"] = _fetchall(
+                con,
+                """
+                SELECT ts_ms, symbol, intent_id, action, side, price, size, notional, fee_usd, pnl_usd, matched_via
+                FROM oms_fills
+                ORDER BY ts_ms DESC
+                LIMIT 80
+                """,
+            )
+            recent["oms_open_orders"] = _fetchall(
+                con,
+                """
+                SELECT last_seen_ts_ms, symbol, side, price, remaining_size, reduce_only, client_order_id, exchange_order_id, intent_id
+                FROM oms_open_orders
+                ORDER BY last_seen_ts_ms DESC
+                LIMIT 80
+                """,
+            )
+            recent["oms_reconcile_events"] = _fetchall(
+                con,
+                """
+                SELECT ts_ms, kind, symbol, result
+                FROM oms_reconcile_events
+                ORDER BY ts_ms DESC
+                LIMIT 80
+                """,
+            )
+
+        snapshot["symbols"] = symbols_out
+        snapshot["open_positions"] = list(open_positions.values())
+        snapshot["recent"] = recent
+        snapshot["ws"] = STATE.mids.snapshot()
+        return snapshot
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+        try:
+            if candles_con is not None:
+                candles_con.close()
+        except Exception:
+            pass
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "aiq-monitor/0.1"
+
+    def _send_headers(self, status: int, content_type: str, length: int) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(length))
+        self.end_headers()
+
+    def _send(self, status: int, body: bytes, content_type: str) -> None:
+        self._send_headers(status, content_type, len(body))
+        self.wfile.write(body)
+
+    def _send_json(self, obj: Any, status: int = 200) -> None:
+        self._send(status, _json(obj), "application/json; charset=utf-8")
+
+    def _send_text(self, text: str, status: int = 200) -> None:
+        self._send(status, text.encode("utf-8"), "text/plain; charset=utf-8")
+
+    def _serve_static(self, rel_path: str) -> None:
+        p = (STATIC_DIR / rel_path.lstrip("/")).resolve()
+        if not str(p).startswith(str(STATIC_DIR.resolve())):
+            self._send_text("bad path", status=400)
+            return
+        if not p.exists() or not p.is_file():
+            self._send_text("not found", status=404)
+            return
+        ctype, _ = mimetypes.guess_type(str(p))
+        data = p.read_bytes()
+        self._send(200, data, (ctype or "application/octet-stream") + "; charset=utf-8" if (ctype or "").startswith("text/") else (ctype or "application/octet-stream"))
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        path = parsed.path or "/"
+
+        if path == "/" or path == "/index.html":
+            p = (STATIC_DIR / "index.html").resolve()
+            if p.exists():
+                self._send_headers(200, "text/html; charset=utf-8", p.stat().st_size)
+            else:
+                self._send_headers(404, "text/plain; charset=utf-8", 0)
+            return
+
+        if path.startswith("/static/"):
+            rel = path[len("/static/") :]
+            p = (STATIC_DIR / rel.lstrip("/")).resolve()
+            if str(p).startswith(str(STATIC_DIR.resolve())) and p.exists() and p.is_file():
+                ctype, _ = mimetypes.guess_type(str(p))
+                ct = (ctype or "application/octet-stream") + "; charset=utf-8" if (ctype or "").startswith("text/") else (ctype or "application/octet-stream")
+                self._send_headers(200, ct, p.stat().st_size)
+            else:
+                self._send_headers(404, "text/plain; charset=utf-8", 0)
+            return
+
+        if path.startswith("/api/"):
+            # API responses are dynamic; omit body but respond OK.
+            self._send_headers(200, "application/json; charset=utf-8", 0)
+            return
+
+        self._send_headers(404, "text/plain; charset=utf-8", 0)
+
+    def do_GET(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        path = parsed.path or "/"
+
+        if path == "/" or path == "/index.html":
+            self._serve_static("index.html")
+            return
+        if path.startswith("/static/"):
+            self._serve_static(path[len("/static/") :])
+            return
+
+        if path == "/api/health":
+            self._send_json({"ok": True, "now_ts_ms": _utc_now_ms(), "ws": STATE.mids.snapshot()})
+            return
+
+        if path == "/api/mids":
+            self._send_json(STATE.mids.snapshot())
+            return
+
+        if path == "/api/sparkline":
+            qs = parse_qs(parsed.query or "")
+            symbol = (qs.get("symbol") or [""])[0]
+            window_s = int((qs.get("window_s") or ["600"])[0])
+            self._send_json({"symbol": symbol, "window_s": window_s, "points": STATE.mids.history(symbol, window_s=window_s)})
+            return
+
+        if path == "/api/marks":
+            qs = parse_qs(parsed.query or "")
+            mode = (qs.get("mode") or ["paper"])[0]
+            symbol = (qs.get("symbol") or [""])[0]
+            self._send_json(build_marks(mode, symbol))
+            return
+
+        if path == "/api/candles":
+            qs = parse_qs(parsed.query or "")
+            mode = (qs.get("mode") or ["paper"])[0]
+            symbol = (qs.get("symbol") or [""])[0]
+            interval = (qs.get("interval") or [effective_trader_interval_for_mode(mode)])[0]
+            try:
+                limit = int((qs.get("limit") or ["200"])[0])
+            except Exception:
+                limit = 200
+            self._send_json(build_candles(mode, symbol, interval, limit))
+            return
+
+        if path == "/api/snapshot":
+            qs = parse_qs(parsed.query or "")
+            mode = (qs.get("mode") or ["paper"])[0]
+            snap = STATE.get_snapshot_cached(mode, lambda: build_snapshot(mode))
+            self._send_json(snap)
+            return
+
+        self._send_text("not found", status=404)
+
+    def log_message(self, fmt: str, *args) -> None:
+        # Keep the monitor quiet; use stdout prints only for explicit startup.
+        return
+
+
+def main() -> None:
+    bind = os.getenv("AIQ_MONITOR_BIND", "127.0.0.1")
+    port = _env_int("AIQ_MONITOR_PORT", 61010)
+    srv = ThreadingHTTPServer((bind, port), Handler)
+    print(f"AI Quant Monitor listening on http://{bind}:{port}/")
+    try:
+        srv.serve_forever(poll_interval=0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try:
+            srv.server_close()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    main()
