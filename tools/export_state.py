@@ -117,22 +117,23 @@ def _reconstruct_positions_from_db(db_path: str) -> tuple[float, list[dict]]:
         last_add_time_ms = 0
         entry_adx_threshold = 0.0
 
+        # Parse open_ts to ms (best-effort). position_state rows may be missing in older DBs.
+        open_time_ms = 0
+        if open_ts:
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(open_ts.replace("Z", "+00:00"))
+                open_time_ms = int(dt.timestamp() * 1000)
+            except Exception:
+                # If timestamp parsing fails, leave open_time_ms as 0 and continue export.
+                pass
+
         if ps_row and ps_row["open_trade_id"] == open_id:
             trailing_sl = float(ps_row["trailing_sl"]) if ps_row["trailing_sl"] is not None else None
             adds_count = int(ps_row["adds_count"] or 0)
             tp1_taken = bool(ps_row["tp1_taken"])
             last_add_time_ms = int(ps_row["last_add_time"] or 0)
             entry_adx_threshold = float(ps_row["entry_adx_threshold"] or 0)
-
-            # Parse open_ts to ms
-            open_time_ms = 0
-            if open_ts:
-                try:
-                    from datetime import datetime
-                    dt = datetime.fromisoformat(open_ts.replace("Z", "+00:00"))
-                    open_time_ms = int(dt.timestamp() * 1000)
-                except Exception:
-                    pass
 
         side = "long" if pos_type == "LONG" else "short"
 
