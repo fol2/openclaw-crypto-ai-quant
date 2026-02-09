@@ -1,4 +1,4 @@
-import pandas as pd
+import pandas as pd  # noqa: F401  (re-exported for other modules)
 import ta
 import time
 import datetime
@@ -44,16 +44,16 @@ def _json_dumps_safe(obj) -> str:
 # This file provides the core strategy + PaperTrader implementation used by the unified daemon:
 #   dev/ai_quant/engine/daemon.py
 #
-# - Strategy tuning should be done via YAML (`config/strategy_overrides.yaml`) which hot-reloads by file mtime.
+# - Strategy tuning should be done via YAML (`strategy_overrides.yaml`) which hot-reloads by file mtime.
 # - Python code changes require restarting the systemd service(s).
 #
 # Configuration (preferred)
 # - Use YAML overrides instead of editing Python:
-#     config/strategy_overrides.yaml
+#     dev/ai_quant/strategy_overrides.yaml
 #   Merge order (deep-merge / inheritance):
 #     defaults (in this file) ← global ← symbols.<SYMBOL>
 # - TOML overrides are deprecated:
-#     config/strategy_overrides.toml
+#     dev/ai_quant/strategy_overrides.toml
 #
 # Watchlist / Universe
 # - Default watchlist is the top 50 Hyperliquid perps by 24h notional volume (dayNtlVlm).
@@ -177,7 +177,7 @@ DISCORD_CHANNEL = os.getenv("AI_QUANT_DISCORD_CHANNEL", "")
 
 # Multi-trade allocation (paper perps): margin allocated per position (notional ≈ margin × leverage).
 # Default (code-level): 3% margin per position. Prefer overriding via YAML:
-#   config/strategy_overrides.yaml
+#   dev/ai_quant/strategy_overrides.yaml
 ALLOCATION_PCT = 0.03  # Match Rust backtester default
 
 # --- Hyperliquid (Perps) Costs ---
@@ -213,13 +213,13 @@ def _effective_fee_rate() -> float:
 
 # --- Strategy Overrides (Global + Per-Symbol) ---
 # Strategy overrides live in YAML (preferred):
-#   config/strategy_overrides.yaml
+#   dev/ai_quant/strategy_overrides.yaml
 #
 # Merge order: defaults ← global ← symbols.<SYMBOL>
 # Only the fields you specify are overridden; everything else is inherited.
 #
 # DEPRECATED: TOML overrides are still supported for backward compatibility.
-#   config/strategy_overrides.toml
+#   dev/ai_quant/strategy_overrides.toml
 STRATEGY_YAML_PATH = os.getenv("AI_QUANT_STRATEGY_YAML", os.path.join(_THIS_DIR, "..", "config", "strategy_overrides.yaml"))
 STRATEGY_TOML_PATH = os.getenv("AI_QUANT_STRATEGY_TOML", os.path.join(_THIS_DIR, "..", "config", "strategy_overrides.toml"))
 
@@ -427,7 +427,14 @@ _DEFAULT_STRATEGY_CONFIG = {
 # - provides a unified watchlist source for the unified engine loop
 _strategy_mgr = None
 try:
-    from engine.strategy_manager import StrategyManager as _QTStrategyManager
+    # Prefer the newest StrategyManager if multiple versions exist.
+    try:
+        from engine.strategy_manager import StrategyManager as _QTStrategyManager
+    except Exception:
+        try:
+            from quant_trader_v4.strategy_manager import StrategyManager as _QTStrategyManager
+        except Exception:
+            from quant_trader_v3.strategy_manager import StrategyManager as _QTStrategyManager
 
     _strategy_mgr = _QTStrategyManager.bootstrap(
         defaults=_DEFAULT_STRATEGY_CONFIG,
@@ -1087,7 +1094,8 @@ class PaperTrader:
         # Get latest balance
         cursor.execute("SELECT balance FROM trades ORDER BY id DESC LIMIT 1")
         row = cursor.fetchone()
-        if row: self.balance = row[0]
+        if row:
+            self.balance = row[0]
         
         # Load all currently open positions (even if the symbol isn't in the configured watchlist).
         cursor.execute(
@@ -1412,7 +1420,8 @@ class PaperTrader:
             "Signal Flip": "信號反轉"
         }
         reason_hk = reason_map.get(reason, reason)
-        if "Signal Flip" in reason: reason_hk = reason.replace("Signal Flip", "信號反轉")
+        if "Signal Flip" in reason:
+            reason_hk = reason.replace("Signal Flip", "信號反轉")
 
         msg = f"{emoji} **紙上交易：{action_hk}** | {symbol}\n"
         msg += f"• 類型: `{type}`\n"
@@ -2056,7 +2065,7 @@ class PaperTrader:
     def reduce_position(self, symbol, reduce_size, price, timestamp, reason, *, confidence="N/A", meta: dict | None = None):
         """Partially closes a position (or fully closes if reduce_size >= remaining size)."""
         if symbol not in self.positions:
-            return
+            return False
 
         pos = self.positions[symbol]
         entry = float(pos["entry_price"])
@@ -2067,18 +2076,18 @@ class PaperTrader:
         try:
             size = float(pos["size"])
         except Exception:
-            return
+            return False
         if size <= 0:
-            return
+            return False
 
         try:
             reduce_size = float(reduce_size)
         except Exception:
-            return
+            return False
         reduce_size = max(0.0, min(size, reduce_size))
         reduce_size = hyperliquid_meta.round_size(symbol, reduce_size)
         if reduce_size <= 0:
-            return
+            return False
 
         trade_cfg = get_trade_params(symbol)
         slippage_bps = float(trade_cfg.get("slippage_bps", HL_SLIPPAGE_BPS))
@@ -2105,7 +2114,7 @@ class PaperTrader:
 
         # Never block a full close due to min_notional; only apply it to partial reductions.
         if notional < min_notional and reduce_size < size:
-            return
+            return False
 
         gross_pnl = ((fill_price - entry) * reduce_size) if pos_type == "LONG" else ((entry - fill_price) * reduce_size)
 
@@ -2150,6 +2159,7 @@ class PaperTrader:
             f"notional~=${notional:.2f} lev={leverage:.0f} Δmargin~=${margin_delta:+.2f} | "
             f"Reason: {reason} | GrossPnL={gross_pnl:.2f} | Fee={fee_usd:.4f} | NetPnL={pnl:.2f}"
         )
+        return True
 
     def execute_trade(self, symbol, signal, price, timestamp, confidence, atr=0.0, indicators=None):
         # Normalise indicators: pandas Series → dict (avoids truth-value crash)
@@ -2213,7 +2223,8 @@ class PaperTrader:
                     self.add_to_position(symbol, price, timestamp, confidence, atr=atr, indicators=indicators)
                     return
 
-        if signal == "NEUTRAL": return
+        if signal == "NEUTRAL":
+            return
 
         # Open new position if no position for this symbol
         if symbol not in self.positions:
@@ -2581,7 +2592,8 @@ class PaperTrader:
             except Exception:
                 indicators = {}
         pos = self.positions.get(symbol)
-        if not pos: return
+        if not pos:
+            return
 
         cfg = get_strategy_config(symbol)
         trade_cfg = cfg.get("trade") or {}
@@ -3140,19 +3152,13 @@ class PaperTrader:
                         partial_min_ntl = float(trade_cfg.get("tp_partial_min_notional_usd", 10.0))
 
                         if partial_sz > 0 and (partial_sz * current_price) >= partial_min_ntl and partial_sz < total_sz:
-                            pos["tp1_taken"] = 1
-                            # Lock breakeven (or better) on remaining size.
-                            if pos.get("trailing_sl") is None:
-                                pos["trailing_sl"] = entry
-                            else:
-                                pos["trailing_sl"] = max(float(pos["trailing_sl"]), entry)
                             audit = None
                             if indicators is not None:
                                 try:
                                     audit = indicators.get("audit")
                                 except Exception:
                                     audit = None
-                            self.reduce_position(
+                            ok = self.reduce_position(
                                 symbol,
                                 partial_sz,
                                 current_price,
@@ -3176,6 +3182,15 @@ class PaperTrader:
                                     },
                                 },
                             )
+                            if ok and symbol in self.positions:
+                                pos2 = self.positions.get(symbol) or {}
+                                pos2["tp1_taken"] = 1
+                                # Lock breakeven (or better) on remaining size.
+                                if pos2.get("trailing_sl") is None:
+                                    pos2["trailing_sl"] = entry
+                                else:
+                                    pos2["trailing_sl"] = max(float(pos2["trailing_sl"]), entry)
+                                self.upsert_position_state(symbol)
                             return
 
                 # If partial TP was already taken, don't auto-close remainder at the same TP level.
@@ -3254,18 +3269,13 @@ class PaperTrader:
                         partial_min_ntl = float(trade_cfg.get("tp_partial_min_notional_usd", 10.0))
 
                         if partial_sz > 0 and (partial_sz * current_price) >= partial_min_ntl and partial_sz < total_sz:
-                            pos["tp1_taken"] = 1
-                            if pos.get("trailing_sl") is None:
-                                pos["trailing_sl"] = entry
-                            else:
-                                pos["trailing_sl"] = min(float(pos["trailing_sl"]), entry)
                             audit = None
                             if indicators is not None:
                                 try:
                                     audit = indicators.get("audit")
                                 except Exception:
                                     audit = None
-                            self.reduce_position(
+                            ok = self.reduce_position(
                                 symbol,
                                 partial_sz,
                                 current_price,
@@ -3289,6 +3299,14 @@ class PaperTrader:
                                     },
                                 },
                             )
+                            if ok and symbol in self.positions:
+                                pos2 = self.positions.get(symbol) or {}
+                                pos2["tp1_taken"] = 1
+                                if pos2.get("trailing_sl") is None:
+                                    pos2["trailing_sl"] = entry
+                                else:
+                                    pos2["trailing_sl"] = min(float(pos2["trailing_sl"]), entry)
+                                self.upsert_position_state(symbol)
                             return
 
                 if bool(trade_cfg.get("enable_partial_tp", True)) and int(pos.get("tp1_taken") or 0) == 1:

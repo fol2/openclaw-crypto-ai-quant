@@ -8,7 +8,6 @@ Usage:
 """
 
 import argparse
-import copy
 import json
 import os
 import subprocess
@@ -17,13 +16,17 @@ import sys
 import time
 from datetime import datetime, timezone
 
+import yaml
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
 YAML_PATH = os.path.join(PROJECT_DIR, "config", "strategy_overrides.yaml")
 CHANGELOG_PATH = os.path.join(PROJECT_DIR, "strategy_changelog.json")
 PAPER_DB = os.path.join(PROJECT_DIR, "trading_engine.db")
 LIVE_DB = os.path.join(PROJECT_DIR, "trading_engine_live.db")
-SECRETS_PATH = os.path.join(PROJECT_DIR, "secrets.json")
+SECRETS_PATH = os.path.expanduser(
+    str(os.getenv("AI_QUANT_SECRETS_PATH") or os.path.join(PROJECT_DIR, "secrets.json"))
+)
 
 
 # ---------------------------------------------------------------------------
@@ -44,17 +47,16 @@ def load_sweep_results(path: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# YAML operations (ruamel.yaml preserves comments)
+# YAML operations
 # ---------------------------------------------------------------------------
 
 def _load_yaml(path: str):
-    """Load YAML preserving comments. Returns (yaml_obj, data)."""
-    from ruamel.yaml import YAML
-    yaml = YAML()
-    yaml.preserve_quotes = True
+    """Load YAML safely. Returns a dict."""
     with open(path, "r", encoding="utf-8") as f:
-        data = yaml.load(f)
-    return yaml, data
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected a mapping at root of YAML: {path}")
+    return data
 
 
 def _backup_yaml(path: str):
@@ -324,7 +326,7 @@ def main():
     overrides = {k: float(v) for k, v in overrides.items()}
 
     # Load current YAML
-    yaml, current_data = _load_yaml(YAML_PATH)
+    current_data = _load_yaml(YAML_PATH)
 
     # Show diff + metrics
     show_diff(current_data, overrides)
@@ -371,7 +373,7 @@ def main():
         _set_nested(current_data, path, value)
 
     with open(YAML_PATH, "w", encoding="utf-8") as f:
-        yaml.dump(current_data, f)
+        yaml.safe_dump(current_data, f, sort_keys=False)
 
     print(f"[deploy] YAML updated: {YAML_PATH}", file=sys.stderr)
 

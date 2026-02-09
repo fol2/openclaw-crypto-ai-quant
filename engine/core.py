@@ -580,7 +580,7 @@ class UnifiedEngine:
                             "ENGINE",
                             "CANDLES_NOT_READY_SAMPLE",
                             data={
-                                "mode": str(self.mode),
+                                "mode": str(os.getenv("AI_QUANT_MODE", "paper") or "paper"),
                                 "interval": str(self.interval),
                                 "watchlist_n": int(len(watchlist or [])),
                                 "active_symbols_n": int(len(active_symbols or [])),

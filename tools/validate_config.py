@@ -6,7 +6,6 @@ _DEFAULT_STRATEGY_CONFIG matches Rust backtester defaults for all keys.
 """
 
 import sys
-import os
 import yaml
 from pathlib import Path
 
@@ -15,7 +14,7 @@ _THIS_DIR = Path(__file__).resolve().parent
 _PROJECT_DIR = _THIS_DIR.parent
 sys.path.insert(0, str(_PROJECT_DIR))
 
-from strategy.mei_alpha_v1 import _DEFAULT_STRATEGY_CONFIG
+from strategy.mei_alpha_v1 import _DEFAULT_STRATEGY_CONFIG  # noqa: E402
 
 # --- Rust defaults (from bt-core/src/config.rs) ---
 RUST_DEFAULTS = {
@@ -261,19 +260,19 @@ def main():
         if status != "OK":
             print(f"{key:<50} {py_str:>12} {rust_str:>12} {yaml_str:>12} {status:>10}")
 
-    print(f"\n--- Summary ---")
+    print("\n--- Summary ---")
     print(f"  Total keys:    {len(all_keys)}")
     print(f"  OK:            {ok}")
     print(f"  PY!=RUST:      {len(mismatches)} (defaults differ — YAML overrides both)")
     print(f"  YAML missing:  {len(missing_yaml)}")
 
     if mismatches:
-        print(f"\n--- Python vs Rust default mismatches (not a problem if YAML is explicit) ---")
+        print("\n--- Python vs Rust default mismatches (not a problem if YAML is explicit) ---")
         for key, py_val, rust_val in mismatches:
             print(f"  {key}: Python={py_val}, Rust={rust_val}")
 
     if missing_yaml:
-        print(f"\n--- Keys missing from YAML (relying on code defaults) ---")
+        print("\n--- Keys missing from YAML (relying on code defaults) ---")
         for key in missing_yaml:
             print(f"  {key}")
 

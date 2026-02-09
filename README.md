@@ -57,17 +57,18 @@ AI-powered crypto perpetual futures trading engine for Hyperliquid DEX, with GPU
 git clone https://github.com/fol2/openclaw-crypto-ai-quant.git
 cd openclaw-crypto-ai-quant
 
-# Python setup
-python3 -m venv venv
-source venv/bin/activate
-pip install -e .
-# Or with uv:
-uv sync
+# Python setup (recommended: uv)
+uv sync --dev
+source .venv/bin/activate
 
 # Configure
-cp systemd/ai-quant-live.env.example .env
-cp config/secrets.json.example secrets.json
-# Edit .env and secrets.json with your values
+cp .env.example .env
+# Paper mode does NOT require secrets.
+# For dry_live/live, keep secrets OUTSIDE the repo:
+mkdir -p ~/.config/openclaw
+cp config/secrets.json.example ~/.config/openclaw/ai-quant-secrets.json
+chmod 600 ~/.config/openclaw/ai-quant-secrets.json
+# Edit .env and ~/.config/openclaw/ai-quant-secrets.json with your values
 
 # Run paper trader
 AI_QUANT_MODE=paper python -m engine.daemon
