@@ -88,7 +88,7 @@ Strategy parameter changes affect real trading. Please:
 ## Security
 
 - NEVER commit secrets (private keys, wallet addresses, API keys)
-- Use `config/.env.example` and `config/secrets.json.example` as templates
+- Use `systemd/ai-quant-live.env.example` and `config/secrets.json.example` as templates
 - Report security vulnerabilities privately via GitHub Security Advisories
 
 ## Disclaimer

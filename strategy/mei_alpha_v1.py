@@ -44,16 +44,16 @@ def _json_dumps_safe(obj) -> str:
 # This file provides the core strategy + PaperTrader implementation used by the unified daemon:
 #   dev/ai_quant/engine/daemon.py
 #
-# - Strategy tuning should be done via YAML (`strategy_overrides.yaml`) which hot-reloads by file mtime.
+# - Strategy tuning should be done via YAML (`config/strategy_overrides.yaml`) which hot-reloads by file mtime.
 # - Python code changes require restarting the systemd service(s).
 #
 # Configuration (preferred)
 # - Use YAML overrides instead of editing Python:
-#     dev/ai_quant/strategy_overrides.yaml
+#     config/strategy_overrides.yaml
 #   Merge order (deep-merge / inheritance):
 #     defaults (in this file) ← global ← symbols.<SYMBOL>
 # - TOML overrides are deprecated:
-#     dev/ai_quant/strategy_overrides.toml
+#     config/strategy_overrides.toml
 #
 # Watchlist / Universe
 # - Default watchlist is the top 50 Hyperliquid perps by 24h notional volume (dayNtlVlm).
@@ -177,7 +177,7 @@ DISCORD_CHANNEL = os.getenv("AI_QUANT_DISCORD_CHANNEL", "")
 
 # Multi-trade allocation (paper perps): margin allocated per position (notional ≈ margin × leverage).
 # Default (code-level): 3% margin per position. Prefer overriding via YAML:
-#   dev/ai_quant/strategy_overrides.yaml
+#   config/strategy_overrides.yaml
 ALLOCATION_PCT = 0.03  # Match Rust backtester default
 
 # --- Hyperliquid (Perps) Costs ---
@@ -213,13 +213,13 @@ def _effective_fee_rate() -> float:
 
 # --- Strategy Overrides (Global + Per-Symbol) ---
 # Strategy overrides live in YAML (preferred):
-#   dev/ai_quant/strategy_overrides.yaml
+#   config/strategy_overrides.yaml
 #
 # Merge order: defaults ← global ← symbols.<SYMBOL>
 # Only the fields you specify are overridden; everything else is inherited.
 #
 # DEPRECATED: TOML overrides are still supported for backward compatibility.
-#   dev/ai_quant/strategy_overrides.toml
+#   config/strategy_overrides.toml
 STRATEGY_YAML_PATH = os.getenv("AI_QUANT_STRATEGY_YAML", os.path.join(_THIS_DIR, "..", "config", "strategy_overrides.yaml"))
 STRATEGY_TOML_PATH = os.getenv("AI_QUANT_STRATEGY_TOML", os.path.join(_THIS_DIR, "..", "config", "strategy_overrides.toml"))
 
@@ -427,14 +427,7 @@ _DEFAULT_STRATEGY_CONFIG = {
 # - provides a unified watchlist source for the unified engine loop
 _strategy_mgr = None
 try:
-    # Prefer the newest StrategyManager if multiple versions exist.
-    try:
-        from engine.strategy_manager import StrategyManager as _QTStrategyManager
-    except Exception:
-        try:
-            from quant_trader_v4.strategy_manager import StrategyManager as _QTStrategyManager
-        except Exception:
-            from quant_trader_v3.strategy_manager import StrategyManager as _QTStrategyManager
+    from engine.strategy_manager import StrategyManager as _QTStrategyManager
 
     _strategy_mgr = _QTStrategyManager.bootstrap(
         defaults=_DEFAULT_STRATEGY_CONFIG,

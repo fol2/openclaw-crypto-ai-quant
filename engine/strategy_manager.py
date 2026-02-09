@@ -113,7 +113,7 @@ class StrategyManager:
         """Return the process-wide StrategyManager.
 
         Env vars:
-        - AI_QUANT_STRATEGY_YAML. defaults to ./strategy_overrides.yaml
+        - AI_QUANT_STRATEGY_YAML. defaults to ./config/strategy_overrides.yaml
         - AI_QUANT_STRATEGY_CHANGELOG. optional path to strategy_changelog.json
 
         Defaults are pulled from mei_alpha_v1._DEFAULT_STRATEGY_CONFIG when available.
