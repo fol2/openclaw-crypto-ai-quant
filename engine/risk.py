@@ -1,0 +1,379 @@
+from __future__ import annotations
+
+import os
+import time
+from collections import defaultdict, deque
+from dataclasses import dataclass
+from typing import Any
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _env_str(name: str, default: str = "") -> str:
+    raw = os.getenv(name)
+    return default if raw is None else str(raw)
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        raw = os.getenv(name)
+        if raw is None:
+            return int(default)
+        return int(float(str(raw).strip()))
+    except Exception:
+        return int(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        raw = os.getenv(name)
+        if raw is None:
+            return float(default)
+        return float(str(raw).strip())
+    except Exception:
+        return float(default)
+
+
+class TokenBucket:
+    """Simple token bucket rate limiter.
+
+    - capacity: maximum tokens
+    - refill_per_s: tokens added per second
+    """
+
+    def __init__(self, *, capacity: float, refill_per_s: float):
+        self.capacity = float(max(0.0, capacity))
+        self.refill_per_s = float(max(0.0, refill_per_s))
+        self._tokens = float(self.capacity)
+        self._last_s = time.monotonic()
+
+    def _refill(self) -> None:
+        now = time.monotonic()
+        dt = max(0.0, now - self._last_s)
+        self._last_s = now
+        if dt <= 0 or self.refill_per_s <= 0:
+            return
+        self._tokens = min(self.capacity, self._tokens + (dt * self.refill_per_s))
+
+    def allow(self, *, cost: float = 1.0) -> bool:
+        c = float(max(0.0, cost))
+        self._refill()
+        if self._tokens >= c:
+            self._tokens -= c
+            return True
+        return False
+
+
+@dataclass(frozen=True)
+class RiskDecision:
+    allowed: bool
+    reason: str
+    kill_mode: str | None = None
+
+
+class RiskManager:
+    """Production guardrails: kill-switch + rate limiting + basic circuit breakers.
+
+    Design goals:
+    - Never throw in trading path.
+    - Default behaviour is conservative but not annoying.
+    - Kill-switch is close-only by default: it blocks OPEN/ADD but allows CLOSE/REDUCE.
+    """
+
+    def __init__(self):
+        # Kill switch
+        self._kill_mode: str = "off"  # off | close_only | halt_all
+        self._kill_reason: str | None = None
+        self._kill_since_s: float | None = None
+
+        self._kill_file = _env_str("AI_QUANT_KILL_SWITCH_FILE", "")
+        self._kill_env = _env_str("AI_QUANT_KILL_SWITCH", "").strip()
+        self._kill_mode_env = _env_str("AI_QUANT_KILL_SWITCH_MODE", "close_only").strip().lower()
+
+        # Rate limits (entry orders)
+        entry_per_min = float(max(1.0, _env_float("AI_QUANT_RISK_MAX_ENTRY_ORDERS_PER_MIN", 30.0)))
+        self._entry_bucket = TokenBucket(capacity=entry_per_min, refill_per_s=entry_per_min / 60.0)
+
+        entry_sym_per_min = float(max(1.0, _env_float("AI_QUANT_RISK_MAX_ENTRY_ORDERS_PER_MIN_PER_SYMBOL", 6.0)))
+        self._entry_symbol_per_min = float(entry_sym_per_min)
+        self._entry_symbol_events: dict[str, deque[float]] = defaultdict(deque)
+
+        # Rate limits (exit orders)
+        exit_per_min = float(max(1.0, _env_float("AI_QUANT_RISK_MAX_EXIT_ORDERS_PER_MIN", 120.0)))
+        self._exit_bucket = TokenBucket(capacity=exit_per_min, refill_per_s=exit_per_min / 60.0)
+
+        # Cancels
+        cancel_per_min = float(max(1.0, _env_float("AI_QUANT_RISK_MAX_CANCELS_PER_MIN", 120.0)))
+        self._cancel_bucket = TokenBucket(capacity=cancel_per_min, refill_per_s=cancel_per_min / 60.0)
+
+        # Notional throttle (entry only by default)
+        self._notional_window_s = float(max(10.0, _env_float("AI_QUANT_RISK_NOTIONAL_WINDOW_S", 60.0)))
+        self._max_notional_per_window = float(max(0.0, _env_float("AI_QUANT_RISK_MAX_NOTIONAL_PER_WINDOW_USD", 0.0)))
+        self._notional_events: deque[tuple[float, float]] = deque()  # (ts_s, notional)
+
+        # Min spacing between orders (global)
+        self._min_order_gap_ms = int(max(0, _env_int("AI_QUANT_RISK_MIN_ORDER_GAP_MS", 150)))
+        self._last_order_ts_ms: int | None = None
+
+        # Drawdown kill-switch
+        self._max_drawdown_pct = float(max(0.0, _env_float("AI_QUANT_RISK_MAX_DRAWDOWN_PCT", 0.0)))
+        self._equity_peak: float | None = None
+
+        # Diagnostics
+        self._blocked_counts: dict[str, int] = defaultdict(int)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def kill(self, *, mode: str = "close_only", reason: str = "manual") -> None:
+        m = str(mode or "close_only").strip().lower()
+        if m not in {"close_only", "halt_all"}:
+            m = "close_only"
+        self._kill_mode = m
+        self._kill_reason = str(reason or "manual")
+        self._kill_since_s = time.time()
+
+    def clear_kill(self) -> None:
+        self._kill_mode = "off"
+        self._kill_reason = None
+        self._kill_since_s = None
+
+    @property
+    def kill_mode(self) -> str:
+        return self._kill_mode
+
+    def refresh(self, *, trader: Any | None = None) -> None:
+        """Call periodically (for example every 5-10s) to re-evaluate kill conditions."""
+        try:
+            self._refresh_manual_kill()
+        except Exception:
+            pass
+
+        try:
+            self._refresh_drawdown(trader)
+        except Exception:
+            pass
+
+    def allow_order(
+        self,
+        *,
+        symbol: str,
+        action: str,
+        side: str,
+        notional_usd: float,
+        leverage: float | None,
+        intent_id: str | None = None,
+        reduce_risk: bool = False,
+    ) -> RiskDecision:
+        """Decide whether an order is allowed.
+
+        reduce_risk=True is used for CLOSE/REDUCE. It bypasses some entry-only throttles.
+        """
+        sym = str(symbol or "").strip().upper()
+        ac = str(action or "").strip().upper()
+
+        # Kill switch behaviour.
+        if self._kill_mode == "halt_all":
+            return self._block("halt_all", sym=sym, action=ac, intent_id=intent_id)
+        if self._kill_mode == "close_only" and (not reduce_risk) and ac in {"OPEN", "ADD"}:
+            return self._block("close_only", sym=sym, action=ac, intent_id=intent_id)
+
+        # Order spacing.
+        if self._min_order_gap_ms > 0:
+            now_ms = int(time.time() * 1000)
+            last = self._last_order_ts_ms
+            if last is not None and (now_ms - int(last)) < int(self._min_order_gap_ms):
+                return self._block("min_order_gap", sym=sym, action=ac, intent_id=intent_id)
+
+        # Entry throttles.
+        if (not reduce_risk) and ac in {"OPEN", "ADD"}:
+            if not self._entry_bucket.allow(cost=1.0):
+                return self._block("entry_rate", sym=sym, action=ac, intent_id=intent_id)
+            if not self._allow_symbol_event(sym=sym, is_entry=True):
+                return self._block("entry_rate_symbol", sym=sym, action=ac, intent_id=intent_id)
+            if self._max_notional_per_window > 0:
+                if not self._allow_notional(float(notional_usd or 0.0)):
+                    return self._block("entry_notional_rate", sym=sym, action=ac, intent_id=intent_id)
+
+        # Exit throttles (still limited, but higher by default).
+        if reduce_risk or ac in {"CLOSE", "REDUCE"}:
+            if not self._exit_bucket.allow(cost=1.0):
+                return self._block("exit_rate", sym=sym, action=ac, intent_id=intent_id)
+
+        return RiskDecision(allowed=True, reason="ok", kill_mode=self._kill_mode if self._kill_mode != "off" else None)
+
+    def note_order_sent(
+        self,
+        *,
+        symbol: str,
+        action: str,
+        notional_usd: float,
+        reduce_risk: bool = False,
+    ) -> None:
+        """Record that we actually sent an order (call after a successful submit)."""
+        try:
+            self._last_order_ts_ms = int(time.time() * 1000)
+        except Exception:
+            self._last_order_ts_ms = None
+
+        sym = str(symbol or "").strip().upper()
+        ac = str(action or "").strip().upper()
+
+        # Track per-symbol event counts for entry spam protection.
+        if (not reduce_risk) and ac in {"OPEN", "ADD"}:
+            now = time.time()
+            dq = self._entry_symbol_events[sym]
+            dq.append(now)
+            self._prune_times(dq, window_s=60.0, now_s=now)
+
+        # Track notional.
+        if (not reduce_risk) and ac in {"OPEN", "ADD"} and self._max_notional_per_window > 0:
+            now = time.time()
+            self._notional_events.append((now, float(abs(notional_usd or 0.0))))
+            self._prune_notional(now_s=now)
+
+    def allow_cancel(self, *, symbol: str, exchange_order_id: str | None = None) -> RiskDecision:
+        sym = str(symbol or "").strip().upper()
+        if not self._cancel_bucket.allow(cost=1.0):
+            return self._block("cancel_rate", sym=sym, action="CANCEL", intent_id=exchange_order_id)
+        return RiskDecision(allowed=True, reason="ok", kill_mode=self._kill_mode if self._kill_mode != "off" else None)
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
+    def _refresh_manual_kill(self) -> None:
+        # Env kill
+        raw = _env_str("AI_QUANT_KILL_SWITCH", "").strip()
+        if raw:
+            v = raw.strip().lower()
+            if v in {"1", "true", "yes", "y", "on", "close_only", "close"}:
+                self.kill(mode="close_only", reason="env")
+            elif v in {"halt", "halt_all", "2", "stop", "full"}:
+                self.kill(mode="halt_all", reason="env")
+        else:
+            # If env cleared, do not auto-clear: only clear explicitly.
+            pass
+
+        # File kill
+        kill_file = _env_str("AI_QUANT_KILL_SWITCH_FILE", "").strip() or self._kill_file
+        if kill_file:
+            try:
+                if os.path.exists(kill_file):
+                    mode = "close_only"
+                    try:
+                        with open(kill_file, "r", encoding="utf-8") as f:
+                            txt = (f.read() or "").strip().lower()
+                        if "halt" in txt or "full" in txt:
+                            mode = "halt_all"
+                    except Exception:
+                        pass
+                    self.kill(mode=mode, reason=f"file:{kill_file}")
+            except Exception:
+                pass
+
+    def _refresh_drawdown(self, trader: Any | None) -> None:
+        if self._max_drawdown_pct <= 0:
+            return
+
+        equity = None
+        # Best-effort extract equity from trader.
+        try:
+            if trader is not None:
+                fn = getattr(trader, "get_live_balance", None)
+                if callable(fn):
+                    equity = float(fn() or 0.0)
+        except Exception:
+            equity = None
+
+        try:
+            if equity is None and trader is not None:
+                equity = float(getattr(trader, "_account_value_usd", 0.0) or 0.0)
+        except Exception:
+            equity = None
+
+        if equity is None or equity <= 0:
+            return
+
+        if self._equity_peak is None or equity > float(self._equity_peak):
+            self._equity_peak = float(equity)
+            return
+
+        peak = float(self._equity_peak or 0.0)
+        if peak <= 0:
+            return
+        dd = max(0.0, (peak - equity) / peak) * 100.0
+        if dd >= float(self._max_drawdown_pct):
+            # Close-only kill.
+            self.kill(mode="close_only", reason=f"drawdown:{dd:.2f}%")
+            self._audit(
+                symbol="SYSTEM",
+                event="RISK_KILL_DRAWDOWN",
+                level="warn",
+                data={"drawdown_pct": float(dd), "equity": float(equity), "peak": float(peak)},
+            )
+
+    def _allow_symbol_event(self, *, sym: str, is_entry: bool) -> bool:
+        if not sym:
+            return True
+        if not is_entry:
+            return True
+        now = time.time()
+        dq = self._entry_symbol_events[sym]
+        self._prune_times(dq, window_s=60.0, now_s=now)
+        return len(dq) < int(max(1.0, float(self._entry_symbol_per_min)))
+
+    def _allow_notional(self, add_notional: float) -> bool:
+        now = time.time()
+        self._prune_notional(now_s=now)
+        total = 0.0
+        for _, n in self._notional_events:
+            total += float(n)
+        if (total + float(abs(add_notional or 0.0))) > float(self._max_notional_per_window):
+            return False
+        return True
+
+    def _prune_times(self, dq: deque[float], *, window_s: float, now_s: float) -> None:
+        cutoff = float(now_s) - float(window_s)
+        while dq and float(dq[0]) < cutoff:
+            dq.popleft()
+
+    def _prune_notional(self, *, now_s: float) -> None:
+        cutoff = float(now_s) - float(self._notional_window_s)
+        while self._notional_events and float(self._notional_events[0][0]) < cutoff:
+            self._notional_events.popleft()
+
+    def _block(self, code: str, *, sym: str, action: str, intent_id: str | None) -> RiskDecision:
+        self._blocked_counts[str(code)] += 1
+        reason = str(code)
+        if code in {"close_only", "halt_all"}:
+            # Include the root reason.
+            reason = f"{code}:{self._kill_reason or 'manual'}"
+        self._audit(
+            symbol=sym or "SYSTEM",
+            event="RISK_BLOCK",
+            level="warn",
+            data={
+                "code": str(code),
+                "action": str(action),
+                "intent_id": intent_id,
+                "kill_mode": self._kill_mode,
+                "kill_reason": self._kill_reason,
+            },
+        )
+        return RiskDecision(allowed=False, reason=reason, kill_mode=self._kill_mode if self._kill_mode != "off" else None)
+
+    def _audit(self, *, symbol: str, event: str, level: str, data: dict[str, Any] | None) -> None:
+        try:
+            import strategy.mei_alpha_v1 as mei_alpha_v1
+
+            mei_alpha_v1.log_audit_event(symbol=symbol, event=event, level=level, data=data)
+        except Exception:
+            # Never block trading on audit logging.
+            return

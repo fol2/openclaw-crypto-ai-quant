@@ -25,7 +25,7 @@ http://127.0.0.1:61010/
 Install:
 
 ```bash
-cp monitor/openclaw-ai-quant-monitor.service ~/.config/systemd/user/openclaw-ai-quant-monitor.service
+cp systemd/openclaw-ai-quant-monitor.service.example ~/.config/systemd/user/openclaw-ai-quant-monitor.service
 systemctl --user daemon-reload
 systemctl --user enable --now openclaw-ai-quant-monitor.service
 ```

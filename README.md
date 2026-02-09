@@ -33,7 +33,7 @@ AI-powered crypto perpetual futures trading engine for Hyperliquid DEX, with GPU
                            │ Unix socket
               ┌────────────▼────────────┐
               │    Unified Engine       │
-              │  (quant_trader_v5)      │
+              │      (engine/)          │
               ├─────────┬───────────────┤
               │  Paper   │    Live      │
               │ Trader   │   Trader     │
@@ -65,12 +65,12 @@ pip install -e .
 uv sync
 
 # Configure
-cp .env.example .env
-cp secrets.json.example secrets.json
+cp systemd/ai-quant-live.env.example .env
+cp config/secrets.json.example secrets.json
 # Edit .env and secrets.json with your values
 
 # Run paper trader
-AI_QUANT_MODE=paper python -m quant_trader_v5.run_unified_daemon
+AI_QUANT_MODE=paper python -m engine.daemon
 ```
 
 ## Backtester
@@ -85,11 +85,11 @@ cd backtester && cargo build --release
 ./target/release/mei-backtester replay --candles-db ../candles_dbs/candles_1h.db
 
 # Parameter sweep
-./target/release/mei-backtester sweep --sweep-config sweep_gpu_smoke.yaml
+./target/release/mei-backtester sweep --sweep-config sweeps/smoke.yaml
 
 # GPU sweep (requires CUDA)
 cargo build --release -p bt-cli --features gpu
-./target/release/mei-backtester sweep --gpu --sweep-spec sweep_gpu_60k_allgpu.yaml
+./target/release/mei-backtester sweep --gpu --sweep-spec sweeps/allgpu_60k.yaml
 
 # TPE Bayesian optimization
 ./target/release/mei-backtester sweep --gpu --tpe --tpe-trials 5000 --sweep-spec sweep.yaml
@@ -99,7 +99,7 @@ See [backtester/README.md](backtester/README.md) for detailed documentation.
 
 ## Configuration
 
-Strategy configuration is managed through `strategy_overrides.yaml`, which supports hot-reload at runtime. The unified daemon watches this file and applies changes without restart.
+Strategy configuration is managed through `config/strategy_overrides.yaml`, which supports hot-reload at runtime. The unified daemon watches this file and applies changes without restart.
 
 Key configuration sections:
 
@@ -125,33 +125,48 @@ Copy the relevant templates to `/etc/systemd/system/`, customize paths and envir
 
 ```
 .
-├── mei_alpha_v1.py          # Strategy: signals, confidence, PaperTrader
-├── live_trader.py           # Live order execution via Hyperliquid SDK
-├── execution_live.py        # HyperliquidLiveExecutor
-├── quant_trader_v5/         # Unified engine (paper + live)
-│   ├── engine.py            # Main trading loop
-│   ├── market_data.py       # Candle/mid data hub
-│   ├── strategy_manager.py  # YAML hot-reload
+├── engine/                 # Unified trading engine (Python)
+│   ├── core.py             # Main trading loop (UnifiedEngine)
+│   ├── daemon.py           # Entrypoint daemon
+│   ├── market_data.py      # Candle/mid data hub
+│   ├── strategy_manager.py # YAML hot-reload
+│   ├── oms.py              # Order Management System
+│   ├── rest_client.py      # Hyperliquid REST client
 │   └── ...
-├── backtester/              # Rust backtester (Cargo workspace)
-│   ├── crates/bt-core/      # Simulation engine + indicators
-│   ├── crates/bt-data/      # SQLite candle loader
-│   ├── crates/bt-cli/       # CLI (replay, sweep, dump-indicators)
-│   └── crates/bt-gpu/       # CUDA GPU sweep + TPE
-├── ws_sidecar/              # Rust WS sidecar
-├── monitor/                 # Real-time dashboard
-├── strategy_overrides.yaml  # Strategy config (hot-reloads)
-├── deploy_sweep.py          # Deploy sweep results to YAML
-├── export_state.py          # Export paper/live state to JSON
-├── systemd/                 # Service templates
-└── .env.example             # Environment variable template
+├── strategy/               # Strategy implementations
+│   └── mei_alpha_v1.py     # Signals, confidence, PaperTrader
+├── exchange/               # Exchange adapters
+│   ├── ws.py               # WebSocket client
+│   ├── sidecar.py          # WS sidecar client
+│   ├── meta.py             # Hyperliquid metadata
+│   ├── executor.py         # HyperliquidLiveExecutor
+│   └── market_watch.py     # Market watch
+├── live/                   # Live trading
+│   └── trader.py           # LiveTrader
+├── config/                 # Runtime configuration
+│   └── strategy_overrides.yaml
+├── tools/                  # Operational tools
+│   ├── deploy_sweep.py     # Deploy sweep results to YAML
+│   ├── export_state.py     # Export paper/live state to JSON
+│   └── ...
+├── backtester/             # Rust backtester (Cargo workspace)
+│   ├── crates/bt-core/     # Simulation engine + indicators
+│   ├── crates/bt-data/     # SQLite candle loader
+│   ├── crates/bt-cli/      # CLI (replay, sweep, dump-indicators)
+│   ├── crates/bt-gpu/      # CUDA GPU sweep + TPE
+│   └── sweeps/             # Sweep configs + runner scripts
+├── ws_sidecar/             # Rust WS sidecar
+├── monitor/                # Real-time dashboard
+├── scripts/                # Shell scripts (run_paper.sh, run_live.sh)
+├── systemd/                # Service templates
+└── docs/                   # Documentation
 ```
 
 ## Documentation
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) - System design and component interactions
-- [DEVELOPMENT.md](DEVELOPMENT.md) - Development setup and guidelines
-- [CONTRIBUTING.md](CONTRIBUTING.md) - Contribution guidelines
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) - System design and component interactions
+- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) - Development setup and guidelines
+- [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) - Contribution guidelines
 - [backtester/README.md](backtester/README.md) - Backtester documentation
 - [monitor/README.md](monitor/README.md) - Dashboard documentation
 
