@@ -90,12 +90,14 @@ def acquire_lock_or_exit(lock_path: str):
         try:
             lock_file.close()
         except Exception:
+            # Best-effort cleanup only; we are exiting anyway.
             pass
         raise SystemExit(f"Another ai-quant daemon is already running (lock held): {lock_path}")
     except Exception as e:
         try:
             lock_file.close()
         except Exception:
+            # Best-effort cleanup only; we are exiting anyway.
             pass
         raise SystemExit(f"Failed to acquire lock {lock_path}: {e}")
 
@@ -608,6 +610,7 @@ def main() -> None:
         market=market,
         interval=interval,
         lookback_bars=lookback_bars,
+        mode=mode,
         mode_plugin=plugin,
     )
     print(f"🚀 Unified engine started. mode={mode}")
