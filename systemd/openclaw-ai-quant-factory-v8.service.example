@@ -1,0 +1,24 @@
+[Unit]
+Description=OpenClaw AI Quant Nightly Strategy Factory Cycle (v8 parallel instance)
+After=network-online.target openclaw-ai-quant-ws-sidecar-v8.service
+Wants=network-online.target
+Requires=openclaw-ai-quant-ws-sidecar-v8.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=$PROJECT_DIR
+EnvironmentFile=-%h/.config/openclaw/ai-quant-universe-v8.env
+EnvironmentFile=-%h/.config/openclaw/ai-quant-v8.env
+
+# Use a v8-scoped backtester binary (do not overwrite production).
+Environment=MEI_BACKTESTER_BIN=$PROJECT_DIR/backtester/dist/mei-backtester-gpu
+
+# WSL2 CUDA: ensure libcuda can be found by cudarc.
+Environment=LD_LIBRARY_PATH=/usr/lib/wsl/lib:$LD_LIBRARY_PATH
+
+# Prevent overlapping runs.
+ExecStart=/usr/bin/flock -n %t/openclaw-ai-quant-factory-v8.lock /usr/bin/env bash -lc "cd \"$PROJECT_DIR\" && \"$PROJECT_DIR/.venv/bin/python3\" -u tools/factory_cycle.py --profile daily --strategy-mode primary --gpu --tpe --walk-forward --slippage-stress --concentration-checks --sensitivity-checks --service openclaw-ai-quant-trader-v8 --ws-service openclaw-ai-quant-ws-sidecar-v8 --discord-target 1470924841858236446"
+
+[Install]
+WantedBy=default.target
+
