@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import math
 import os
 import time
 from collections import defaultdict, deque
@@ -162,6 +163,19 @@ class RiskManager:
         self._heat_sl_atr_mult = float(max(0.0, _env_float("AI_QUANT_RISK_HEAT_SL_ATR_MULT", 1.5)))
         self._heat_fallback_atr_pct = float(max(0.0, _env_float("AI_QUANT_RISK_HEAT_FALLBACK_ATR_PCT", 0.005)))
 
+        # Performance degradation soft stop (rolling PF/WR/Sharpe from realised exits).
+        self._perf_stop_enabled = _env_bool("AI_QUANT_RISK_PERF_STOP_ENABLED", False)
+        self._perf_stop_window_trades = int(max(0, _env_int("AI_QUANT_RISK_PERF_STOP_WINDOW_TRADES", 0)))
+        self._perf_stop_window_s = float(max(0.0, _env_float("AI_QUANT_RISK_PERF_STOP_WINDOW_MINUTES", 0.0))) * 60.0
+        self._perf_stop_min_trades = int(max(0, _env_int("AI_QUANT_RISK_PERF_STOP_MIN_TRADES", 0)))
+        self._perf_stop_min_pf = float(max(0.0, _env_float("AI_QUANT_RISK_PERF_STOP_MIN_PF", 0.0)))
+        self._perf_stop_min_wr = float(max(0.0, _env_float("AI_QUANT_RISK_PERF_STOP_MIN_WR", 0.0)))
+        self._perf_stop_min_sharpe: float | None = None
+        self._perf_stop_kill_mode = _env_str("AI_QUANT_RISK_PERF_STOP_KILL_MODE", "close_only").strip().lower()
+        if self._perf_stop_kill_mode not in {"close_only", "halt_all"}:
+            self._perf_stop_kill_mode = "close_only"
+        self._perf_trades: deque[tuple[float, float]] = deque()  # (ts_s, net_pnl_usd)
+
         # Diagnostics
         self._blocked_counts: dict[str, int] = defaultdict(int)
 
@@ -190,6 +204,7 @@ class RiskManager:
         self._daily_realised_pnl_usd = 0.0
         self._daily_fees_usd = 0.0
         self._slippage_bps.clear()
+        self._perf_trades.clear()
         self._kill_mode = "off"
         self._kill_reason = str(reason or "manual_clear")
         self._kill_since_s = None
@@ -260,6 +275,10 @@ class RiskManager:
                 ref_bid=ref_bid,
                 ref_ask=ref_ask,
             )
+        except Exception:
+            return
+        try:
+            self._refresh_perf_stop(ts_ms=ts_ms, symbol=symbol, action=action, pnl_usd=pnl_usd, fee_usd=fee_usd)
         except Exception:
             return
 
@@ -640,6 +659,86 @@ class RiskManager:
         except Exception:
             self._heat_fallback_atr_pct = 0.005
 
+        # Performance degradation soft stop.
+        perf = risk_cfg.get("perf_stop")
+        perf = perf if isinstance(perf, dict) else {}
+
+        enabled = perf.get("enabled")
+        env_enabled = os.getenv("AI_QUANT_RISK_PERF_STOP_ENABLED")
+        if env_enabled is not None and str(env_enabled).strip() != "":
+            enabled = env_enabled
+        try:
+            self._perf_stop_enabled = (
+                bool(enabled)
+                if not isinstance(enabled, str)
+                else str(enabled).strip().lower() in {"1", "true", "yes", "y", "on"}
+            )
+        except Exception:
+            self._perf_stop_enabled = False
+
+        win_n = perf.get("window_trades")
+        env_win_n = os.getenv("AI_QUANT_RISK_PERF_STOP_WINDOW_TRADES")
+        if env_win_n is not None and str(env_win_n).strip() != "":
+            win_n = env_win_n
+        try:
+            self._perf_stop_window_trades = int(max(0, int(float(win_n or 0))))
+        except Exception:
+            self._perf_stop_window_trades = 0
+
+        win_m = perf.get("window_minutes")
+        env_win_m = os.getenv("AI_QUANT_RISK_PERF_STOP_WINDOW_MINUTES")
+        if env_win_m is not None and str(env_win_m).strip() != "":
+            win_m = env_win_m
+        try:
+            self._perf_stop_window_s = float(max(0.0, float(win_m or 0.0))) * 60.0
+        except Exception:
+            self._perf_stop_window_s = 0.0
+
+        min_n = perf.get("min_trades")
+        env_min_n = os.getenv("AI_QUANT_RISK_PERF_STOP_MIN_TRADES")
+        if env_min_n is not None and str(env_min_n).strip() != "":
+            min_n = env_min_n
+        try:
+            self._perf_stop_min_trades = int(max(0, int(float(min_n or 0))))
+        except Exception:
+            self._perf_stop_min_trades = 0
+
+        min_pf = perf.get("min_pf")
+        env_min_pf = os.getenv("AI_QUANT_RISK_PERF_STOP_MIN_PF")
+        if env_min_pf is not None and str(env_min_pf).strip() != "":
+            min_pf = env_min_pf
+        try:
+            self._perf_stop_min_pf = float(max(0.0, float(min_pf or 0.0)))
+        except Exception:
+            self._perf_stop_min_pf = 0.0
+
+        min_wr = perf.get("min_wr")
+        env_min_wr = os.getenv("AI_QUANT_RISK_PERF_STOP_MIN_WR")
+        if env_min_wr is not None and str(env_min_wr).strip() != "":
+            min_wr = env_min_wr
+        try:
+            self._perf_stop_min_wr = float(max(0.0, min(1.0, float(min_wr or 0.0))))
+        except Exception:
+            self._perf_stop_min_wr = 0.0
+
+        min_sh = perf.get("min_sharpe") if "min_sharpe" in perf else None
+        env_min_sh = os.getenv("AI_QUANT_RISK_PERF_STOP_MIN_SHARPE")
+        if env_min_sh is not None and str(env_min_sh).strip() != "":
+            min_sh = env_min_sh
+        try:
+            self._perf_stop_min_sharpe = None if min_sh is None else float(min_sh)
+        except Exception:
+            self._perf_stop_min_sharpe = None
+
+        kill_mode = perf.get("kill_mode")
+        env_km = os.getenv("AI_QUANT_RISK_PERF_STOP_KILL_MODE")
+        if env_km is not None and str(env_km).strip() != "":
+            kill_mode = env_km
+        km = str(kill_mode or "close_only").strip().lower()
+        if km not in {"close_only", "halt_all"}:
+            km = "close_only"
+        self._perf_stop_kill_mode = km
+
     def _refresh_manual_kill(self) -> None:
         # Env kill
         raw = _env_str("AI_QUANT_KILL_SWITCH", "").strip()
@@ -873,6 +972,131 @@ class RiskManager:
                 "slippage_window_fills": int(win),
                 "slippage_median_bps": float(median),
                 "threshold_median_bps": float(self._slippage_guard_max_median_bps),
+            },
+        )
+
+    def _refresh_perf_stop(self, *, ts_ms: int, symbol: str, action: str, pnl_usd: float, fee_usd: float) -> None:
+        if not self._perf_stop_enabled:
+            return
+
+        ac = str(action or "").strip().upper()
+        if ac not in {"CLOSE", "REDUCE"}:
+            return
+
+        t_ms = int(ts_ms or 0)
+        if t_ms <= 0:
+            return
+        now_s = float(t_ms) / 1000.0
+
+        try:
+            pnl = float(pnl_usd or 0.0)
+        except Exception:
+            pnl = 0.0
+        try:
+            fee = float(fee_usd or 0.0)
+        except Exception:
+            fee = 0.0
+        net = float(pnl) - float(fee)
+
+        self._perf_trades.append((now_s, net))
+
+        # Bounded memory: keep more than the evaluation window so time-based windows can work
+        # even with sparse trading.
+        keep = max(2000, int(self._perf_stop_window_trades or 0) * 10, int(self._perf_stop_min_trades or 0) * 10)
+        while len(self._perf_trades) > keep:
+            self._perf_trades.popleft()
+
+        if self._perf_stop_window_s > 0:
+            cutoff_keep = now_s - (float(self._perf_stop_window_s) * 2.0)
+            while self._perf_trades and float(self._perf_trades[0][0]) < cutoff_keep:
+                self._perf_trades.popleft()
+
+        # Build evaluation window.
+        pairs = list(self._perf_trades)
+        if self._perf_stop_window_s > 0:
+            cutoff_eval = now_s - float(self._perf_stop_window_s)
+            pnls = [float(p) for t, p in pairs if float(t) >= cutoff_eval]
+        else:
+            pnls = [float(p) for _, p in pairs]
+
+        win_n = int(self._perf_stop_window_trades or 0)
+        if win_n > 0 and len(pnls) > win_n:
+            pnls = pnls[-win_n:]
+
+        n = int(len(pnls))
+        min_n = int(self._perf_stop_min_trades or 0)
+        if min_n > 0 and n < min_n:
+            return
+        if n <= 0:
+            return
+
+        profits = 0.0
+        losses = 0.0
+        wins = 0
+        for x in pnls:
+            if x > 0:
+                profits += float(x)
+                wins += 1
+            elif x < 0:
+                losses += float(-x)
+
+        pf = (profits / losses) if losses > 0 else (float("inf") if profits > 0 else 0.0)
+        wr = float(wins) / float(n) if n > 0 else 0.0
+
+        mean = sum(pnls) / float(n) if n > 0 else 0.0
+        if n > 1:
+            var = sum((x - mean) ** 2 for x in pnls) / float(n - 1)
+        else:
+            var = 0.0
+        std = float(var**0.5)
+        if std > 0:
+            sharpe = float(mean / std)
+        else:
+            sharpe = float("inf") if mean > 0 else (-float("inf") if mean < 0 else 0.0)
+
+        breaches: list[str] = []
+        if self._perf_stop_min_pf > 0 and float(pf) < float(self._perf_stop_min_pf):
+            breaches.append("pf")
+        if self._perf_stop_min_wr > 0 and float(wr) < float(self._perf_stop_min_wr):
+            breaches.append("wr")
+        if self._perf_stop_min_sharpe is not None and float(sharpe) < float(self._perf_stop_min_sharpe):
+            breaches.append("sharpe")
+
+        if not breaches:
+            return
+
+        mode = str(self._perf_stop_kill_mode or "close_only").strip().lower()
+        if mode not in {"close_only", "halt_all"}:
+            mode = "close_only"
+
+        # Avoid spamming the same kill event.
+        if self._kill_mode == mode and self._kill_reason == "perf_degradation" and self._kill_since_s is not None:
+            return
+
+        def _finite(v: float) -> float | None:
+            try:
+                return float(v) if math.isfinite(float(v)) else None
+            except Exception:
+                return None
+
+        self.kill(mode=mode, reason="perf_degradation")
+        self._audit(
+            symbol=str(symbol or "SYSTEM").strip().upper() or "SYSTEM",
+            event="RISK_KILL_PERF_DEGRADATION",
+            level="warn",
+            data={
+                "breaches": breaches,
+                "window_trades": int(win_n),
+                "window_s": float(self._perf_stop_window_s or 0.0),
+                "n": int(n),
+                "pf": _finite(float(pf)),
+                "wr": float(wr),
+                "sharpe": _finite(float(sharpe)),
+                "mean_net_pnl_usd": float(mean),
+                "std_net_pnl_usd": float(std),
+                "min_pf": float(self._perf_stop_min_pf),
+                "min_wr": float(self._perf_stop_min_wr),
+                "min_sharpe": None if self._perf_stop_min_sharpe is None else float(self._perf_stop_min_sharpe),
             },
         )
 
