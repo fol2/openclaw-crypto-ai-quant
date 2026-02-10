@@ -888,6 +888,14 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             vol_scalar = max(vol_min, min(vol_max, vol_scalar))
             margin_target *= max(0.0, vol_scalar)
 
+        # Optional size multiplier (used for live rollout ramps, etc).
+        try:
+            size_mult = float(trade_cfg.get("size_multiplier", 1.0))
+        except Exception:
+            size_mult = 1.0
+        size_mult = max(0.0, float(size_mult))
+        margin_target *= float(size_mult)
+
         # Live-specific clamps
         min_margin_usd = _safe_float(trade_cfg.get("min_margin_usd"), 0.0)
         if min_margin_usd > 0:
@@ -1256,6 +1264,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 "notional_est": float(notional),
                 "leverage": float(leverage),
                 "margin_est": float(margin_add),
+                "size_multiplier": float(size_mult),
             },
         )
 
@@ -2448,6 +2457,11 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             except Exception:
                 pass
 
+        try:
+            size_mult = float(trade_cfg.get("size_multiplier", 1.0))
+        except Exception:
+            size_mult = 1.0
+
         print(
             f"🚀 LIVE ORDER sent: OPEN {('LONG' if signal == 'BUY' else 'SHORT')} {sym} "
             f"px~={float(fill_price_est):.4f} size={size:.6f} notional~=${notional:.2f} "
@@ -2464,6 +2478,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 "notional_est": float(notional),
                 "leverage": float(leverage),
                 "margin_est": float(margin_need),
+                "size_multiplier": float(size_mult),
             },
         )
 

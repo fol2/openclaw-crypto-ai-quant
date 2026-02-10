@@ -1092,7 +1092,13 @@ class UnifiedEngine:
                         open_pos = 0
 
                     loop_s = time.time() - loop_start
-                    _rc = (mei_alpha_v1.get_strategy_config("BTC") or {}).get("market_regime") or {}
+                    _btc_cfg = mei_alpha_v1.get_strategy_config("BTC") or {}
+                    _rc = (_btc_cfg.get("market_regime") or {}) if isinstance(_btc_cfg, dict) else {}
+                    _tc = (_btc_cfg.get("trade") or {}) if isinstance(_btc_cfg, dict) else {}
+                    try:
+                        _size_mult = float(_tc.get("size_multiplier", 1.0))
+                    except Exception:
+                        _size_mult = 1.0
                     _auto_rev_on = (
                         bool(_rc.get("enable_auto_reverse", False))
                         and self._market_breadth_pct is not None
@@ -1101,6 +1107,7 @@ class UnifiedEngine:
                     print(
                         f"🫀 engine ok. loops={self.stats.loops} errors={self.stats.loop_errors} "
                         f"symbols={len(active_symbols)} open_pos={open_pos} loop={loop_s:.2f}s "
+                        f"size_mult={float(_size_mult):g} "
                         f"ws_connected={h.get('connected')} ws_thread_alive={h.get('thread_alive')} "
                         f"ws_restarts={self.stats.ws_restarts} "
                         f"signal_on_close={int(self._signal_on_candle_close)} entry_iv={self._entry_interval} exit_iv={self._exit_interval} reanalyze_s={self._reanalyze_interval_s:.0f} exit_reanalyze_s={self._exit_reanalyze_interval_s:.0f} "
