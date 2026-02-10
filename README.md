@@ -98,6 +98,25 @@ cargo build --release -p bt-cli --features gpu
 
 See [backtester/README.md](backtester/README.md) for detailed documentation.
 
+## Strategy Factory Artifacts
+
+`factory_run.py` writes all outputs under the artifacts root directory (default: `artifacts/`) using a date-scoped layout:
+
+```
+artifacts/
+  YYYY-MM-DD/
+    run_<run_id>/
+      data_checks/
+      sweeps/
+      configs/
+      replays/
+      reports/
+      logs/
+      run_metadata.json
+```
+
+This layout is designed for reproducibility. A run directory should be self-contained: you can inspect the inputs, commands, and outputs without guessing what was executed.
+
 ## Configuration
 
 Strategy configuration is managed through `config/strategy_overrides.yaml`, which supports hot-reload at runtime. The unified daemon watches this file and applies changes without restart.
