@@ -670,6 +670,9 @@ def main(argv: list[str] | None = None) -> int:
             "funding_db",
             "sweep_spec",
             "gpu",
+            "walk_forward",
+            "walk_forward_splits_json",
+            "walk_forward_min_test_days",
             "tpe",
             "tpe_trials",
             "tpe_batch",
@@ -1083,6 +1086,65 @@ def main(argv: list[str] | None = None) -> int:
         summary = _summarise_replay_report(out_json)
         summary["config_path"] = str(cfg_path)
         summary["config_id"] = candidate_config_ids[str(cfg_path)]
+
+        if bool(getattr(args, "walk_forward", False)):
+            wf_dir = run_dir / "walk_forward" / str(cfg_path.stem)
+            wf_dir.mkdir(parents=True, exist_ok=True)
+            wf_summary_path = wf_dir / "summary.json"
+
+            wf_stdout = wf_dir / "walk_forward.stdout.txt"
+            wf_stderr = wf_dir / "walk_forward.stderr.txt"
+
+            if bool(args.resume) and _is_nonempty_file(wf_summary_path):
+                wf_res = CmdResult(
+                    argv=[],
+                    cwd=str(AIQ_ROOT),
+                    exit_code=0,
+                    elapsed_s=0.0,
+                    stdout_path=str(wf_stdout),
+                    stderr_path=str(wf_stderr),
+                )
+                meta["steps"].append({"name": f"walk_forward_{cfg_path.stem}_skip", **wf_res.__dict__})
+            else:
+                wf_argv = [
+                    "python3",
+                    "tools/walk_forward_validate.py",
+                    "--config",
+                    str(cfg_path),
+                    "--interval",
+                    str(args.interval),
+                    "--min-test-days",
+                    str(int(getattr(args, "walk_forward_min_test_days", 1) or 1)),
+                    "--out-dir",
+                    str(wf_dir),
+                    "--output",
+                    str(wf_summary_path),
+                ]
+                if getattr(args, "walk_forward_splits_json", None):
+                    wf_argv += ["--splits-json", str(args.walk_forward_splits_json)]
+                if args.candles_db:
+                    wf_argv += ["--candles-db", str(args.candles_db)]
+                if args.funding_db:
+                    wf_argv += ["--funding-db", str(args.funding_db)]
+
+                wf_res = _run_cmd(wf_argv, cwd=AIQ_ROOT, stdout_path=wf_stdout, stderr_path=wf_stderr)
+                meta["steps"].append({"name": f"walk_forward_{cfg_path.stem}", **wf_res.__dict__})
+                if wf_res.exit_code != 0:
+                    _write_json(run_dir / "run_metadata.json", meta)
+                    return int(wf_res.exit_code)
+
+            summary["walk_forward_summary_path"] = str(wf_summary_path)
+            try:
+                wf_obj = _load_json(wf_summary_path)
+                agg = wf_obj.get("aggregate", {}) if isinstance(wf_obj, dict) else {}
+                if isinstance(agg, dict):
+                    summary["wf_median_oos_daily_return"] = float(agg.get("median_oos_daily_return", 0.0))
+                    summary["wf_max_oos_drawdown_pct"] = float(agg.get("max_oos_drawdown_pct", 0.0))
+                    summary["wf_walk_forward_score_v1"] = float(agg.get("walk_forward_score_v1", 0.0))
+            except Exception:
+                # Keep the factory pipeline resilient: store the path and continue.
+                summary["wf_error"] = "failed to load walk_forward summary.json"
+
         replay_reports.append(summary)
 
     # ------------------------------------------------------------------
@@ -1194,6 +1256,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Max rank to scan per mode while deduplicating (default depends on --profile).",
+    )
+
+    ap.add_argument("--walk-forward", action="store_true", help="Run walk-forward validation for each candidate.")
+    ap.add_argument("--walk-forward-splits-json", default=None, help="Optional JSON file defining walk-forward splits.")
+    ap.add_argument(
+        "--walk-forward-min-test-days",
+        type=int,
+        default=1,
+        help="Minimum out-of-sample test length in days for walk-forward splits (default: 1).",
     )
 
     return ap
