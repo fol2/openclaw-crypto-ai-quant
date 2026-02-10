@@ -753,7 +753,7 @@ class OmsStore:
                 WHERE symbol = ?
                   AND action = ?
                   AND side = ?
-                  AND status IN ('SENT', 'PARTIAL')
+                  AND status IN ('SENT', 'PARTIAL', 'UNKNOWN')
                   AND sent_ts_ms IS NOT NULL
                   AND sent_ts_ms BETWEEN ? AND ?
                 ORDER BY ABS(sent_ts_ms - ?) ASC
@@ -880,7 +880,7 @@ class OmsStore:
                 """
                 UPDATE oms_intents
                 SET status = 'EXPIRED'
-                WHERE status IN ('SENT', 'PARTIAL')
+                WHERE status IN ('SENT', 'PARTIAL', 'UNKNOWN')
                   AND sent_ts_ms IS NOT NULL
                   AND sent_ts_ms < ?
                 """,
@@ -1083,6 +1083,51 @@ class LiveOms:
 
     def mark_failed(self, intent: IntentHandle, *, error: str) -> None:
         self.store.update_intent(intent.intent_id, status="REJECTED", last_error=str(error or ""))
+
+    def mark_submit_unknown(
+        self,
+        intent: IntentHandle,
+        *,
+        symbol: str,
+        side: str,
+        order_type: str,
+        reduce_only: bool,
+        requested_size: float | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Record an ambiguous submit outcome (for example, a REST timeout).
+
+        This keeps the intent matchable by fill time-proximity even when the exchange order id
+        is unknown. Downstream fill ingestion can then attach the fill to the correct intent and
+        repair `exchange_order_id` from the fill payload.
+        """
+        sent_ms = now_ms()
+        msg = str(error or "submit_unknown")
+
+        sym = str(symbol or "").strip().upper()
+        sd = str(side or "").strip().upper()
+
+        raw_json = json_dumps_safe(
+            {
+                "kind": "submit_unknown",
+                "error": msg,
+            }
+        )
+
+        self.store.update_intent(intent.intent_id, status="UNKNOWN", sent_ts_ms=sent_ms, last_error=msg)
+        self.store.insert_order(
+            intent_id=intent.intent_id,
+            created_ts_ms=sent_ms,
+            symbol=sym,
+            side=sd,
+            order_type=str(order_type),
+            requested_size=None if requested_size is None else float(requested_size),
+            reduce_only=bool(reduce_only),
+            client_order_id=intent.client_order_id,
+            exchange_order_id=None,
+            status="UNKNOWN",
+            raw_json=raw_json,
+        )
 
     def mark_sent(
         self,
