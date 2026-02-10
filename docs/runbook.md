@@ -179,6 +179,36 @@ sqlite3 candles_dbs/candles_5m.db "SELECT COUNT(*) AS dupes FROM (SELECT symbol,
 
 3m adds ~480 rows/day/symbol, 5m adds ~288 rows/day/symbol. With pruning disabled for both, plan disk accordingly and monitor `candles_dbs/candles_{3m,5m}.db` file sizes.
 
+### BBO snapshot database (AQC-206)
+
+Optional, sampled best-bid/best-ask (BBO) snapshots are stored in SQLite for slippage modelling and post-trade analysis.
+
+#### Enablement
+
+- Enable BBO subscriptions: `AI_QUANT_WS_ENABLE_BBO=1`
+- Enable snapshots: `AI_QUANT_BBO_SNAPSHOTS_ENABLE=1`
+
+Tuning knobs:
+- `AI_QUANT_BBO_SNAPSHOTS_DB_PATH` (default: `$AI_QUANT_CANDLES_DB_DIR/bbo_snapshots.db`)
+- `AI_QUANT_BBO_SNAPSHOTS_SAMPLE_MS` (per-symbol insert throttle; default: 1000)
+- `AI_QUANT_BBO_SNAPSHOTS_MAX_QUEUE` (bounded in-memory queue; default: 20000; drops when full)
+- `AI_QUANT_BBO_SNAPSHOTS_RETENTION_HOURS` (time-based retention; default: 24)
+- `AI_QUANT_BBO_SNAPSHOTS_RETENTION_SWEEP_SECS` (sweep interval; default: 600; min: 30)
+
+Snapshots are only written for symbols the sidecar is subscribed to (the union of live client requests and `AI_QUANT_SIDECAR_SYMBOLS`).
+
+#### Verification
+
+```bash
+# Row counts + time range per symbol
+sqlite3 candles_dbs/bbo_snapshots.db \
+  "SELECT symbol, COUNT(*) AS rows, datetime(MIN(ts_ms)/1000, 'unixepoch') AS earliest, datetime(MAX(ts_ms)/1000, 'unixepoch') AS latest FROM bbo_snapshots GROUP BY symbol ORDER BY rows DESC LIMIT 10;"
+
+# Quick retention sanity check (should trend to 0 once retention < 48h)
+sqlite3 candles_dbs/bbo_snapshots.db \
+  "SELECT COUNT(*) AS older_than_48h FROM bbo_snapshots WHERE ts_ms < (strftime('%s','now') - 48*3600) * 1000;"
+```
+
 ### Trading database integrity
 
 ```bash
