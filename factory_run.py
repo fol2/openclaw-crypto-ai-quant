@@ -125,6 +125,103 @@ def _run_cmd(
     )
 
 
+def _gpu_compute_processes(*, stdout_path: Path, stderr_path: Path) -> tuple[CmdResult, list[str]]:
+    """Return a list of running CUDA compute processes (best-effort).
+
+    Uses nvidia-smi compute-apps query; if the command fails, callers should treat the GPU as unavailable.
+    """
+
+    res = _run_cmd(
+        [
+            "nvidia-smi",
+            "--query-compute-apps=pid,process_name,used_memory",
+            "--format=csv,noheader,nounits",
+        ],
+        cwd=AIQ_ROOT,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+    )
+    if res.exit_code != 0:
+        return res, []
+
+    try:
+        lines = [ln.strip() for ln in stdout_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except Exception:
+        lines = []
+    return res, lines
+
+
+def _ensure_gpu_idle_or_exit(*, run_dir: Path, meta: dict[str, Any], wait_s: int, poll_s: int) -> int:
+    """Gate GPU sweeps to avoid interfering with other GPU workloads.
+
+    If `wait_s` is >0, this will poll for an idle GPU until the timeout; otherwise it exits immediately.
+    """
+
+    wait_s = int(wait_s or 0)
+    poll_s = int(poll_s or 0)
+    if wait_s < 0:
+        wait_s = 0
+    if poll_s <= 0:
+        poll_s = 10
+
+    t0 = time.time()
+    deadline = t0 + float(wait_s)
+    attempt = 0
+
+    (run_dir / "logs").mkdir(parents=True, exist_ok=True)
+
+    while True:
+        attempt += 1
+        out_path = run_dir / "logs" / "gpu_check.stdout.txt"
+        err_path = run_dir / "logs" / "gpu_check.stderr.txt"
+        res, procs = _gpu_compute_processes(stdout_path=out_path, stderr_path=err_path)
+        meta["steps"].append({"name": f"gpu_check_attempt{attempt}", **res.__dict__})
+
+        if res.exit_code != 0:
+            meta["gpu_check"] = {
+                "idle": False,
+                "error": f"nvidia-smi failed with exit_code={res.exit_code}",
+                "wait_s": wait_s,
+                "poll_s": poll_s,
+                "attempts": attempt,
+            }
+            _write_json(run_dir / "run_metadata.json", meta)
+            (run_dir / "reports").mkdir(parents=True, exist_ok=True)
+            (run_dir / "reports" / "report.md").write_text(
+                "# Factory Run Report\n\nError: GPU requested but nvidia-smi failed.\n",
+                encoding="utf-8",
+            )
+            return 1
+
+        idle = not bool(procs)
+        meta["gpu_check"] = {
+            "idle": bool(idle),
+            "processes": list(procs),
+            "wait_s": wait_s,
+            "poll_s": poll_s,
+            "attempts": attempt,
+            "waited_s": int(time.time() - t0),
+        }
+        _write_json(run_dir / "run_metadata.json", meta)
+
+        if idle:
+            return 0
+
+        if time.time() >= deadline:
+            (run_dir / "reports").mkdir(parents=True, exist_ok=True)
+            details = "\n".join([f"- {p}" for p in procs]) if procs else "- (unknown)\n"
+            (run_dir / "reports" / "report.md").write_text(
+                "# Factory Run Report\n\n"
+                "Error: GPU appears busy (compute processes detected). Try again later.\n\n"
+                "Detected processes:\n"
+                f"{details}\n",
+                encoding="utf-8",
+            )
+            return 2
+
+        time.sleep(float(max(1, poll_s)))
+
+
 def _git_head_sha() -> str:
     try:
         out = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=str(AIQ_ROOT)).decode("utf-8").strip()
@@ -701,6 +798,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         meta["steps"].append({"name": "sweep_skip", **sweep_res.__dict__})
     else:
+        if bool(args.gpu):
+            rc = _ensure_gpu_idle_or_exit(
+                run_dir=run_dir,
+                meta=meta,
+                wait_s=int(getattr(args, "gpu_wait_s", 0) or 0),
+                poll_s=int(getattr(args, "gpu_poll_s", 0) or 0),
+            )
+            if rc != 0:
+                return int(rc)
+
         sweep_argv = bt_cmd + [
             "sweep",
             "--config",
@@ -1041,6 +1148,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
     ap.add_argument("--sweep-spec", default="backtester/sweeps/smoke.yaml", help="Sweep spec YAML path.")
     ap.add_argument("--gpu", action="store_true", help="Use GPU sweep (requires CUDA build/runtime).")
+    ap.add_argument(
+        "--gpu-wait-s",
+        type=int,
+        default=0,
+        help="Wait up to N seconds for an idle GPU before exiting (default: 0).",
+    )
+    ap.add_argument(
+        "--gpu-poll-s",
+        type=int,
+        default=10,
+        help="Polling interval in seconds while waiting for GPU idle (default: 10).",
+    )
     ap.add_argument("--tpe", action="store_true", help="Use TPE Bayesian optimisation for GPU sweeps (requires --gpu).")
     ap.add_argument("--tpe-trials", type=int, default=None, help="Number of TPE trials (default depends on --profile).")
     ap.add_argument("--tpe-batch", type=int, default=256, help="Trials per GPU batch (default: 256).")
