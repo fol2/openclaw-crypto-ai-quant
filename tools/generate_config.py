@@ -24,6 +24,7 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import sys
 from datetime import datetime, timezone
@@ -82,6 +83,24 @@ STRING_FIELDS = {
 }
 
 
+def _round_half_away_from_zero(x: float) -> int:
+    """Round half values away from zero.
+
+    Python's built-in round() uses bankers rounding (e.g. round(0.5) == 0).
+    For config coercion we prefer the more intuitive behaviour:
+    - 0.5 -> 1
+    - -0.5 -> -1
+    """
+    xf = float(x)
+    if xf >= 0:
+        return int(math.floor(xf + 0.5))
+    return int(math.ceil(xf - 0.5))
+
+
+def _clamp_int(v: int, lo: int, hi: int) -> int:
+    return int(min(int(hi), max(int(lo), int(v))))
+
+
 def coerce_value(param_name: str, raw_value):
     """Convert a raw sweep value to the correct Python type for YAML output."""
     if param_name in STRING_FIELDS:
@@ -89,16 +108,36 @@ def coerce_value(param_name: str, raw_value):
 
     if param_name in CONFIDENCE_FIELDS:
         if isinstance(raw_value, str):
+            s = str(raw_value).strip().lower()
+            if s in {"low", "medium", "high"}:
+                return s
             return raw_value
-        return CONFIDENCE_MAP.get(int(round(raw_value)), "low")
+        try:
+            idx = _round_half_away_from_zero(float(raw_value))
+        except Exception:
+            idx = 0
+        idx = _clamp_int(idx, 0, 2)
+        return CONFIDENCE_MAP.get(idx, "low")
 
     if param_name in BOOL_FIELDS:
         if isinstance(raw_value, bool):
             return raw_value
-        return bool(round(raw_value))
+        if isinstance(raw_value, str):
+            s = str(raw_value).strip().lower()
+            if s in {"1", "true", "yes", "y", "on"}:
+                return True
+            if s in {"0", "false", "no", "n", "off"}:
+                return False
+        try:
+            return float(raw_value) >= 0.5
+        except Exception:
+            return bool(raw_value)
 
     if param_name in INT_FIELDS:
-        return int(round(raw_value))
+        try:
+            return _round_half_away_from_zero(float(raw_value))
+        except Exception:
+            return int(raw_value)
 
     # Default: float (preserve precision)
     if isinstance(raw_value, (int, float)):
