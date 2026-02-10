@@ -38,6 +38,22 @@ def _env_str(name: str, default: str = "") -> str:
     raw = os.getenv(name)
     return default if raw is None else str(raw)
 
+def _redact_target(target: str) -> str:
+    """Best-effort redaction for alert targets.
+
+    Some channels may use webhook URLs or other secrets as "targets". Never print full targets
+    to stdout/stderr.
+    """
+    t = str(target or "").strip()
+    if not t:
+        return ""
+    # Short, human-readable targets are likely safe (#channel, @chat, etc).
+    if len(t) <= 32 and ("://" not in t) and ("/" not in t):
+        return t
+    if len(t) <= 12:
+        return "…"
+    return t[:6] + "…" + t[-4:]
+
 
 def parse_targets(raw: str) -> list[tuple[str, str]]:
     """Parse AI_QUANT_ALERT_TARGETS into [(channel, target), ...].
@@ -78,7 +94,7 @@ def _send_one_sync(*, channel: str, target: str, message: str) -> None:
         return
     if _env_bool("AI_QUANT_ALERT_DRY_RUN", False):
         try:
-            print(f"🟡 ALERT DRY RUN channel={channel} target={target} message={message}")
+            print(f"🟡 ALERT DRY RUN channel={channel} target={_redact_target(target)} message={message}")
         except Exception:
             pass
         return
@@ -120,7 +136,7 @@ def _alert_worker() -> None:
             _send_one_sync(channel=channel, target=target, message=message)
         except Exception as e:
             try:
-                print(f"⚠️ Failed to send alert (channel={channel} target={target}): {e}")
+                print(f"⚠️ Failed to send alert (channel={channel} target={_redact_target(target)}): {e}")
             except Exception:
                 pass
         finally:
@@ -185,4 +201,3 @@ def send_alert(message: str, *, extra: dict[str, Any] | None = None) -> None:
                 print("⚠️ Alert queue full; dropping message")
             except Exception:
                 pass
-
