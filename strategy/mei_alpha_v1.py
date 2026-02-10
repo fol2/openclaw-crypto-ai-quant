@@ -711,6 +711,14 @@ def compute_entry_sizing(
             vol_scalar = max(vol_min, min(vol_max, vol_scalar))
             margin_target *= max(0.0, vol_scalar)
 
+    # Optional size multiplier (used for live rollout ramps, etc).
+    try:
+        size_mult = float(trade_cfg.get("size_multiplier", 1.0))
+    except Exception:
+        size_mult = 1.0
+    size_mult = max(0.0, float(size_mult))
+    margin_target *= float(size_mult)
+
     # Optional floor clamp (primarily for live so you clear min-notional after rounding).
     min_margin = _safe_float(trade_cfg.get("min_margin_usd"), None)
     if min_margin is not None and float(min_margin) > 0:
@@ -1985,6 +1993,14 @@ class PaperTrader:
             vol_max = float(trade_cfg.get("vol_scalar_max", 1.0))
             vol_scalar = max(vol_min, min(vol_max, vol_scalar))
             margin_target *= max(0.0, vol_scalar)
+
+        # Optional size multiplier (used for live rollout ramps, etc).
+        try:
+            size_mult = float(trade_cfg.get("size_multiplier", 1.0))
+        except Exception:
+            size_mult = 1.0
+        size_mult = max(0.0, float(size_mult))
+        margin_target *= float(size_mult)
 
         # Margin cap across all symbols (use live marks if possible).
         current_margin = 0.0
