@@ -14,7 +14,15 @@ use std::time::Instant;
 use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use clap::{Parser, Subcommand};
 
-const VERSION: &str = "0.1.0";
+const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " git:",
+    env!("AIQ_GIT_SHA"),
+    " build:",
+    env!("AIQ_BUILD_UNIX"),
+    " gpu:",
+    env!("AIQ_GPU")
+);
 const DEFAULT_LOOKBACK: usize = 200;
 
 #[derive(Clone, Copy, Debug)]
@@ -2329,10 +2337,10 @@ mod guardrails_tests {
 // ---------------------------------------------------------------------------
 
 fn main() {
+    let cli = Cli::parse();
+
     eprintln!("mei-backtester v{VERSION}");
     eprintln!();
-
-    let cli = Cli::parse();
 
     let result = match cli.command {
         Commands::Replay(args) => cmd_replay(args),

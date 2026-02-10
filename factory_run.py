@@ -329,6 +329,32 @@ def _capture_repro_metadata(*, run_dir: Path, artifacts_root: Path, bt_cmd: list
                 }
             )
 
+    # Capture backtester version (stamped into the binary at build time).
+    try:
+        argv = list(bt_cmd) + ["--version"]
+        out_path = repro_dir / "mei_backtester_version.stdout.txt"
+        err_path = repro_dir / "mei_backtester_version.stderr.txt"
+        res = _run_cmd(argv, cwd=AIQ_ROOT / "backtester", stdout_path=out_path, stderr_path=err_path)
+        meta["repro"]["cmds"].append({"name": "mei_backtester_version", **res.__dict__})
+    except Exception as e:
+        out_path = repro_dir / "mei_backtester_version.stdout.txt"
+        err_path = repro_dir / "mei_backtester_version.stderr.txt"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text("", encoding="utf-8")
+        err_path.write_text(f"{type(e).__name__}: {e}\n", encoding="utf-8")
+        meta["repro"]["cmds"].append(
+            {
+                "name": "mei_backtester_version",
+                "argv": list(bt_cmd) + ["--version"],
+                "cwd": str(AIQ_ROOT / "backtester"),
+                "exit_code": 127,
+                "elapsed_s": 0.0,
+                "stdout_path": str(out_path),
+                "stderr_path": str(err_path),
+                "exception": f"{type(e).__name__}: {e}",
+            }
+        )
+
     # Fingerprint the resolved backtester binary when it is a path.
     bt0 = str(bt_cmd[0]) if bt_cmd else ""
     bt_path = Path(bt0) if bt0 and ("/" in bt0 or bt0.endswith(".exe")) else None
