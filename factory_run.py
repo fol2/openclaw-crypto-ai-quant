@@ -400,6 +400,7 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
     candidate_paths: list[Path] = []
     candidate_config_ids: dict[str, str] = {}
     copied_candidates: list[dict[str, Any]] = []
+    entry_by_path: dict[str, dict[str, Any]] = {}
 
     for it in src_candidates:
         if not isinstance(it, dict):
@@ -422,7 +423,9 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
 
         candidate_paths.append(dst)
         candidate_config_ids[str(dst)] = dst_cfg_id
-        copied_candidates.append({"path": str(dst), "config_id": dst_cfg_id, "source_path": str(src)})
+        entry = {"path": str(dst), "config_id": dst_cfg_id, "source_path": str(src)}
+        copied_candidates.append(entry)
+        entry_by_path[str(dst)] = entry
 
     if not candidate_paths:
         raise ValueError("No candidate configs found to reproduce")
