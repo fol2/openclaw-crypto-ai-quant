@@ -5,9 +5,17 @@ High-performance Rust backtesting simulator for the Mei Alpha strategy.
 ## Build
 
 ```bash
-cd workspace/dev/ai_quant/backtester
-cargo build --release
-# Binary: target/release/mei-backtester
+# From the repo root
+python3 tools/build_mei_backtester.py
+
+# Optional GPU build (requires CUDA toolchain)
+python3 tools/build_mei_backtester.py --gpu
+```
+
+The binary is version-stamped at build time and supports:
+
+```bash
+mei-backtester --version
 ```
 
 ## Commands
