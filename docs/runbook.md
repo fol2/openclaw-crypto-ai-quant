@@ -240,6 +240,39 @@ uv run python tools/check_funding_rates_db.py --lookback-hours 72 --max-gap-hour
 uv run python tools/fetch_funding_rates.py --days 7
 ```
 
+### Universe history database (AQC-205)
+
+Tracks when symbols appear/disappear in the Hyperliquid perp universe to support survivorship-bias-aware backtests.
+
+```bash
+# Sync current universe snapshot (recommended: run hourly via cron)
+uv run python tools/sync_universe_history.py
+
+# Inspect derived listing/delisting bounds
+sqlite3 candles_dbs/universe_history.db \
+    "SELECT symbol, first_seen_ms, last_seen_ms FROM universe_listings ORDER BY last_seen_ms DESC LIMIT 20;"
+```
+
+Backtester integration:
+
+```bash
+# Replay with universe filtering enabled (keeps symbols whose listing interval overlaps the backtest window)
+./target/release/mei-backtester replay \
+    --candles-db candles_dbs/candles_5m.db \
+    --config config/strategy_overrides.yaml \
+    --universe-filter
+
+# Sweep with the same filter
+./target/release/mei-backtester sweep \
+    --candles-db candles_dbs/candles_5m.db \
+    --sweep-spec backtester/sweeps/smoke.yaml \
+    --universe-filter
+```
+
+Notes:
+- The universe filter uses `universe_listings.first_seen_ms` / `last_seen_ms` derived from local snapshots. If you have not been running the sync script for the period you are testing, the filter may exclude symbols unexpectedly.
+- The universe DB defaults to `<candles_db_dir>/universe_history.db`, so it follows your `--candles-db` location (useful when running the backtester from within `backtester/`).
+
 ### WebSocket sidecar health
 
 ```bash

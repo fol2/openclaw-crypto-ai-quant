@@ -30,6 +30,17 @@ mei-backtester sweep --sweep-config sweep.yaml [OPTIONS]
 mei-backtester dump-indicators --symbol BTC [OPTIONS]
 ```
 
+### Universe filter (AQC-205)
+
+If you maintain a universe history DB via `tools/sync_universe_history.py`, you can optionally filter backtests to symbols that were active during the tested period:
+
+```bash
+mei-backtester replay --universe-filter
+mei-backtester sweep --universe-filter
+```
+
+The universe DB defaults to `<candles_db_dir>/universe_history.db`. Override with `--universe-db`.
+
 ---
 
 ## Config Deploy Pipeline
