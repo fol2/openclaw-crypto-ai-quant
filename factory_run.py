@@ -377,6 +377,9 @@ def main(argv: list[str] | None = None) -> int:
     (run_dir / "reports" / "report.md").write_text(report_md, encoding="utf-8")
     _write_json(run_dir / "reports" / "report.json", {"items": replay_reports})
 
+    # Persist metadata before registry ingestion (ingest reads run_metadata.json).
+    _write_json(run_dir / "run_metadata.json", meta)
+
     # ------------------------------------------------------------------
     # 6) Registry index
     # ------------------------------------------------------------------
