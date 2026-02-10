@@ -1104,15 +1104,34 @@ class UnifiedEngine:
                         and self._market_breadth_pct is not None
                         and float(_rc.get("auto_reverse_breadth_low", 20.0)) <= self._market_breadth_pct <= float(_rc.get("auto_reverse_breadth_high", 80.0))
                     )
+                    cfg_id = ""
+                    try:
+                        from .event_logger import current_config_id
+
+                        cfg_id = str(current_config_id() or "")
+                    except Exception:
+                        cfg_id = ""
+
+                    risk = getattr(self.trader, "risk", None)
+                    try:
+                        kill_mode = str(getattr(risk, "kill_mode", "off") or "off").strip().lower()
+                    except Exception:
+                        kill_mode = "off"
+                    try:
+                        kill_reason = str(getattr(risk, "kill_reason", "") or "").strip() or "none"
+                    except Exception:
+                        kill_reason = "none"
                     print(
                         f"🫀 engine ok. loops={self.stats.loops} errors={self.stats.loop_errors} "
                         f"symbols={len(active_symbols)} open_pos={open_pos} loop={loop_s:.2f}s "
                         f"size_mult={float(_size_mult):g} "
                         f"ws_connected={h.get('connected')} ws_thread_alive={h.get('thread_alive')} "
                         f"ws_restarts={self.stats.ws_restarts} "
+                        f"kill={kill_mode} kill_reason={kill_reason} "
                         f"signal_on_close={int(self._signal_on_candle_close)} entry_iv={self._entry_interval} exit_iv={self._exit_interval} reanalyze_s={self._reanalyze_interval_s:.0f} exit_reanalyze_s={self._exit_reanalyze_interval_s:.0f} "
                         f"breadth={f'{self._market_breadth_pct:.1f}%' if self._market_breadth_pct is not None else 'n/a'} "
                         f"auto_rev={'ON' if _auto_rev_on else 'OFF'} "
+                        f"config_id={cfg_id or 'none'} "
                         f"strategy_sha1={str(snap.overrides_sha1 or '')[:8]} version={snap.version or 'n/a'}"
                     )
                     self.stats.last_heartbeat_s = time.time()
