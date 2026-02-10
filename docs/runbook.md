@@ -199,6 +199,39 @@ systemd to restart it with the new persisted mode.
 
 ---
 
+## 1c. Ensemble Runner (AQC-1003)
+
+The engine supports running a small ensemble (2-3 strategies) by launching multiple daemons with different configs.
+
+This is implemented as a process runner (`tools/ensemble_runner.py`), not an in-process multi-strategy engine.
+
+### Key points
+
+- Each strategy has its own sizing budget via config overrides (e.g. `global.trade.size_multiplier`).
+- Global risk caps (portfolio heat/exposure/kill-switch) are enforced by the existing RiskManager logic.
+- Start with `dry_live` until you are confident the ensemble behaves as expected.
+
+### Example
+
+Edit the example spec:
+
+- `config/ensemble.example.yaml`
+
+Dry-run the plan:
+
+```bash
+python tools/ensemble_runner.py --spec config/ensemble.example.yaml
+```
+
+Launch the ensemble in dry-live:
+
+```bash
+python tools/ensemble_runner.py \
+  --spec config/ensemble.example.yaml \
+  --mode dry_live \
+  --yes
+```
+
 ## 2. Roll Back Config
 
 Use when: a bad config was deployed and needs to be reverted to last-known-good.
