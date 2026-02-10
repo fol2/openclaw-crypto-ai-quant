@@ -221,6 +221,9 @@ class LivePlugin:
         self._pending_fills_kill = _env_bool("AI_QUANT_HEALTH_PENDING_FILLS_KILL", True)
         self._pending_fills_kill_mode = str(os.getenv("AI_QUANT_HEALTH_PENDING_FILLS_KILL_MODE", "close_only") or "close_only").strip().lower()
 
+        # One-shot risk reduction per kill event (avoid repeated close-all loops).
+        self._last_drawdown_reduce_kill_since_s: float | None = None
+
         # Signal backfill: repair missing `signals` rows from recent `trades` (live DB).
         # This keeps the monitor "SIGNAL" column populated even if signal logging was missed
         # (older versions, transient DB locks, REST-only ingestion).
@@ -341,6 +344,13 @@ class LivePlugin:
                 self.trader.sync_from_exchange(force=False)
             except Exception:
                 self._log_exc("sync_from_exchange", "trader.sync_from_exchange failed")
+
+            # Optional risk reduction action: close all positions when a drawdown kill triggers,
+            # but only once per distinct kill event.
+            try:
+                self._maybe_reduce_risk_on_drawdown_kill()
+            except Exception:
+                self._log_exc("risk_reduce_drawdown", "reduce-risk on drawdown kill failed")
 
             # Periodic OMS maintenance (expire stale intents).
             try:
@@ -517,6 +527,57 @@ class LivePlugin:
 
     def after_iteration(self) -> None:
         return
+
+    def _maybe_reduce_risk_on_drawdown_kill(self) -> None:
+        risk = self._risk
+        if risk is None:
+            return
+        if str(getattr(risk, "kill_mode", "off") or "off") != "close_only":
+            return
+
+        reason = str(getattr(risk, "kill_reason", "") or "")
+        if not reason.startswith("drawdown:"):
+            return
+
+        policy = str(getattr(risk, "drawdown_reduce_policy", "none") or "none").strip().lower()
+        if policy != "close_all":
+            return
+
+        kill_since = getattr(risk, "kill_since_s", None)
+        if kill_since is None:
+            return
+        if self._last_drawdown_reduce_kill_since_s is not None and float(kill_since) == float(
+            self._last_drawdown_reduce_kill_since_s
+        ):
+            return
+        self._last_drawdown_reduce_kill_since_s = float(kill_since)
+
+        # Best-effort close-all using WS mids as the reference price.
+        try:
+            positions = dict(getattr(self.trader, "positions", None) or {})
+        except Exception:
+            positions = {}
+        if not positions:
+            return
+
+        for sym in sorted(positions.keys()):
+            mid = None
+            try:
+                mid = self._ws.get_mid(sym)
+            except Exception:
+                mid = None
+            if mid is None or float(mid) <= 0:
+                continue
+            try:
+                self.trader.close_position(
+                    sym,
+                    float(mid),
+                    time.time(),
+                    reason="Risk: drawdown kill (close_all)",
+                    meta={"risk": {"kind": "drawdown", "policy": "close_all", "kill_reason": reason}},
+                )
+            except Exception:
+                continue
 
 
 def main() -> None:
