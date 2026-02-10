@@ -160,6 +160,8 @@ pub struct TradeConfig {
     pub enable_partial_tp: bool,
     pub tp_partial_pct: f64,
     pub tp_partial_min_notional_usd: f64,
+    /// ATR multiplier for partial TP level. 0 = use tp_atr_mult (same level as full TP).
+    pub tp_partial_atr_mult: f64,
     pub trailing_start_atr: f64,
     pub trailing_distance_atr: f64,
 
@@ -263,6 +265,7 @@ impl Default for TradeConfig {
             enable_partial_tp: true,
             tp_partial_pct: 0.5,
             tp_partial_min_notional_usd: 10.0,
+            tp_partial_atr_mult: 0.0,
             trailing_start_atr: 1.0,
             trailing_distance_atr: 0.8,
 
@@ -815,6 +818,7 @@ fn trade_to_json(t: &TradeConfig) -> serde_json::Value {
         "enable_partial_tp": t.enable_partial_tp,
         "tp_partial_pct": t.tp_partial_pct,
         "tp_partial_min_notional_usd": t.tp_partial_min_notional_usd,
+        "tp_partial_atr_mult": t.tp_partial_atr_mult,
         "trailing_start_atr": t.trailing_start_atr,
         "trailing_distance_atr": t.trailing_distance_atr,
         "enable_ssf_filter": t.enable_ssf_filter,
