@@ -589,6 +589,8 @@ mod tests {
             entry_atr: 1.0,
             leverage: 3.0,
             margin_used: 3.33,
+            mae_usd: 0.0,
+            mfe_usd: 0.0,
         }
     }
 
