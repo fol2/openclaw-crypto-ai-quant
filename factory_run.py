@@ -371,6 +371,72 @@ def _append_reject_reason(it: dict[str, Any], reason: str) -> None:
     it["reject_reason"] = f"{prev}; {reason}"
 
 
+def _compute_score_v1(
+    it: dict[str, Any],
+    *,
+    min_trades: int,
+    trades_penalty_weight: float,
+) -> dict[str, Any] | None:
+    """Compute stability score_v1 (AQC-504).
+
+    score_v1 = median(OOS_daily_return)
+             - 2.0 * max(OOS_drawdown_pct)
+             - 0.5 * slippage_fragility
+             - penalty_if_trades_too_low
+
+    Notes:
+    - OOS metrics come from walk-forward validation (AQC-501).
+    - slippage_fragility is a balance-normalised PnL drop from slippage stress (AQC-502).
+    """
+
+    # Require walk-forward metrics to avoid comparing incomparable candidates.
+    if "wf_median_oos_daily_return" not in it or "wf_max_oos_drawdown_pct" not in it:
+        return None
+    # Require slippage fragility (otherwise the score is optimistic).
+    if "slippage_fragility" not in it:
+        return None
+
+    try:
+        oos_daily_ret = float(it.get("wf_median_oos_daily_return", 0.0))
+        oos_max_dd = float(it.get("wf_max_oos_drawdown_pct", 0.0))
+        slip_frag = float(it.get("slippage_fragility", 0.0))
+        trades = int(it.get("total_trades", 0))
+    except Exception:
+        return None
+
+    min_trades = int(min_trades)
+    if min_trades < 0:
+        min_trades = 0
+    trades_penalty_weight = float(trades_penalty_weight)
+    if trades_penalty_weight < 0:
+        trades_penalty_weight = 0.0
+
+    deficit = max(0, int(min_trades) - int(trades))
+    trades_penalty = (deficit / float(max(1, min_trades))) * trades_penalty_weight if min_trades > 0 else 0.0
+
+    dd_weight = 2.0
+    slippage_weight = 0.5
+    score = float(oos_daily_ret) - dd_weight * float(oos_max_dd) - slippage_weight * float(slip_frag) - float(trades_penalty)
+
+    return {
+        "version": "score_v1",
+        "score": float(score),
+        "components": {
+            "median_oos_daily_return": float(oos_daily_ret),
+            "max_oos_drawdown_pct": float(oos_max_dd),
+            "slippage_fragility": float(slip_frag),
+            "total_trades": int(trades),
+            "min_trades": int(min_trades),
+            "trades_penalty": float(trades_penalty),
+            "weights": {
+                "drawdown": float(dd_weight),
+                "slippage": float(slippage_weight),
+                "trades_penalty_weight": float(trades_penalty_weight),
+            },
+        },
+    }
+
+
 def _summarise_replay_report(path: Path) -> dict[str, Any]:
     d = _load_json(path)
     return {
@@ -401,28 +467,65 @@ def _render_ranked_report_md(items: list[dict[str, Any]]) -> str:
         lines.append("No non-rejected replay reports were produced.")
         lines.append("")
     else:
-        items_sorted = sorted(kept, key=lambda x: float(x.get("total_pnl", 0.0)), reverse=True)
+        scored = [it for it in kept if isinstance(it.get("score_v1"), (int, float))]
+        unscored = [it for it in kept if not isinstance(it.get("score_v1"), (int, float))]
+        if scored:
+            items_sorted = sorted(scored, key=lambda x: float(x.get("score_v1", float("-inf"))), reverse=True)
 
-        lines.append("## Ranked Candidates (by total_pnl, excluding rejected)")
-        lines.append("")
-        lines.append("| Rank | total_pnl | max_dd_pct | trades | win_rate | profit_factor | config_id | report |")
-        lines.append("| ---: | --------: | ---------: | -----: | -------: | ------------: | :------ | :----- |")
-        for i, it in enumerate(items_sorted, start=1):
-            cfg_id = str(it.get("config_id", ""))
-            cfg_id_short = cfg_id[:12] if len(cfg_id) > 12 else cfg_id
+            lines.append("## Ranked Candidates (by score_v1, excluding rejected)")
+            lines.append("")
             lines.append(
-                "| {rank} | {pnl:.2f} | {dd:.4f} | {trades} | {wr:.4f} | {pf:.4f} | `{cfg_id}` | `{path}` |".format(
-                    rank=i,
-                    pnl=float(it.get("total_pnl", 0.0)),
-                    dd=float(it.get("max_drawdown_pct", 0.0)),
-                    trades=int(it.get("total_trades", 0)),
-                    wr=float(it.get("win_rate", 0.0)),
-                    pf=float(it.get("profit_factor", 0.0)),
-                    cfg_id=cfg_id_short,
-                    path=str(it.get("path", "")),
-                )
+                "| Rank | score_v1 | oos_med_daily_ret | oos_max_dd_pct | slip_frag | trades_pen | trades | total_pnl | config_id | replay |"
             )
-        lines.append("")
+            lines.append(
+                "| ---: | -------: | ---------------: | ------------: | --------: | --------: | -----: | --------: | :------ | :----- |"
+            )
+            for i, it in enumerate(items_sorted, start=1):
+                cfg_id = str(it.get("config_id", ""))
+                cfg_id_short = cfg_id[:12] if len(cfg_id) > 12 else cfg_id
+                comps = it.get("score_v1_components", {})
+                trades_pen = float(comps.get("trades_penalty", 0.0)) if isinstance(comps, dict) else 0.0
+                lines.append(
+                    "| {rank} | {score:.6f} | {oos:.6f} | {dd:.4f} | {slip:.6f} | {tpen:.6f} | {trades} | {pnl:.2f} | `{cfg_id}` | `{path}` |".format(
+                        rank=i,
+                        score=float(it.get("score_v1", 0.0)),
+                        oos=float(it.get("wf_median_oos_daily_return", 0.0)),
+                        dd=float(it.get("wf_max_oos_drawdown_pct", 0.0)),
+                        slip=float(it.get("slippage_fragility", 0.0)),
+                        tpen=float(trades_pen),
+                        trades=int(it.get("total_trades", 0)),
+                        pnl=float(it.get("total_pnl", 0.0)),
+                        cfg_id=cfg_id_short,
+                        path=str(it.get("path", "")),
+                    )
+                )
+            lines.append("")
+            if unscored:
+                lines.append(f"Note: {len(unscored)} candidate(s) had no score_v1 (missing validation artefacts).")
+                lines.append("")
+        else:
+            items_sorted = sorted(kept, key=lambda x: float(x.get("total_pnl", 0.0)), reverse=True)
+
+            lines.append("## Ranked Candidates (by total_pnl, excluding rejected)")
+            lines.append("")
+            lines.append("| Rank | total_pnl | max_dd_pct | trades | win_rate | profit_factor | config_id | report |")
+            lines.append("| ---: | --------: | ---------: | -----: | -------: | ------------: | :------ | :----- |")
+            for i, it in enumerate(items_sorted, start=1):
+                cfg_id = str(it.get("config_id", ""))
+                cfg_id_short = cfg_id[:12] if len(cfg_id) > 12 else cfg_id
+                lines.append(
+                    "| {rank} | {pnl:.2f} | {dd:.4f} | {trades} | {wr:.4f} | {pf:.4f} | `{cfg_id}` | `{path}` |".format(
+                        rank=i,
+                        pnl=float(it.get("total_pnl", 0.0)),
+                        dd=float(it.get("max_drawdown_pct", 0.0)),
+                        trades=int(it.get("total_trades", 0)),
+                        wr=float(it.get("win_rate", 0.0)),
+                        pf=float(it.get("profit_factor", 0.0)),
+                        cfg_id=cfg_id_short,
+                        path=str(it.get("path", "")),
+                    )
+                )
+            lines.append("")
 
     if rejected:
         lines.append("## Rejected Candidates")
@@ -730,6 +833,8 @@ def main(argv: list[str] | None = None) -> int:
             "slippage_stress",
             "slippage_stress_bps",
             "slippage_stress_reject_bps",
+            "score_min_trades",
+            "score_trades_penalty_weight",
             "tpe",
             "tpe_trials",
             "tpe_batch",
@@ -1330,6 +1435,15 @@ def main(argv: list[str] | None = None) -> int:
             except Exception:
                 summary["slippage_error"] = "failed to load slippage_stress summary.json"
 
+        score_obj = _compute_score_v1(
+            summary,
+            min_trades=int(getattr(args, "score_min_trades", 30) or 30),
+            trades_penalty_weight=float(getattr(args, "score_trades_penalty_weight", 0.05) or 0.05),
+        )
+        if score_obj is not None:
+            summary["score_v1"] = float(score_obj.get("score", 0.0))
+            summary["score_v1_components"] = score_obj.get("components", {})
+
         replay_reports.append(summary)
 
     # ------------------------------------------------------------------
@@ -1487,6 +1601,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=5,
         help="Reject if fewer than this many symbols had at least one trade (default: 5).",
+    )
+
+    ap.add_argument(
+        "--score-min-trades",
+        type=int,
+        default=30,
+        help="Minimum trade count used by score_v1 trades penalty (default: 30).",
+    )
+    ap.add_argument(
+        "--score-trades-penalty-weight",
+        type=float,
+        default=0.05,
+        help="Maximum score_v1 trades penalty when trades=0 (default: 0.05).",
     )
 
     return ap
