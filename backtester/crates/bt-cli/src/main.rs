@@ -244,6 +244,12 @@ struct ReplayArgs {
     #[arg(long)]
     universe_db: Option<String>,
 
+    /// Override slippage in basis points for this replay run.
+    ///
+    /// This avoids editing YAML when running slippage stress tests.
+    #[arg(long)]
+    slippage_bps: Option<f64>,
+
     /// Disable auto-scoping. By default, replay auto-scopes all candle DBs to the
     /// shortest overlapping time range for apple-to-apple comparison.
     /// Use --no-auto-scope to disable this and rely on explicit --start-ts / --end-ts.
@@ -697,11 +703,15 @@ fn infer_candle_range_ms(candles: &bt_core::candle::CandleData) -> Option<(i64, 
 
 fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
     let symbol_norm = args.symbol.as_ref().map(|s| s.trim().to_uppercase());
-    let cfg = bt_core::config::load_config(
+    let mut cfg = bt_core::config::load_config(
         &args.config,
         symbol_norm.as_deref(),
         args.live,
     );
+
+    if let Some(bps) = args.slippage_bps {
+        cfg.trade.slippage_bps = bps.max(0.0);
+    }
 
     // Resolve intervals: CLI arg > YAML engine section > default "1h"
     let interval = args.interval.unwrap_or_else(|| {
@@ -776,6 +786,7 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
         cfg.trade.leverage,
         cfg.trade.allocation_pct * 100.0,
     );
+    eprintln!("[replay] slippage_bps={:.2}", cfg.trade.slippage_bps);
 
     // Compute time range: explicit --start-ts / --end-ts, with optional auto-scope.
     let mut scope_dbs: Vec<(&[String], &str)> = Vec::new();
@@ -1011,7 +1022,12 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("\nCompleted in {:.3}s", elapsed.as_secs_f64());
 
     // JSON output
-    let json = serde_json::to_string_pretty(&report)?;
+    let mut json_obj = serde_json::to_value(&report)?;
+    if let serde_json::Value::Object(ref mut map) = json_obj {
+        // Record the effective slippage used for this run, even when overridden via CLI.
+        map.insert("slippage_bps".to_string(), serde_json::json!(cfg.trade.slippage_bps));
+    }
+    let json = serde_json::to_string_pretty(&json_obj)?;
     if let Some(ref path) = args.output {
         let mut f = std::fs::File::create(path)?;
         f.write_all(json.as_bytes())?;
