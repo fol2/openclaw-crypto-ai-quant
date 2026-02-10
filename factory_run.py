@@ -16,6 +16,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -189,9 +191,201 @@ def resolve_run_dir(*, artifacts_root: Path, run_id: str, generated_at_ms: int) 
     return (artifacts_root / run_date / f"run_{run_id}").resolve()
 
 
+def _utc_compact(ts_ms: int) -> str:
+    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(int(ts_ms) / 1000))
+
+
+def _registry_lookup_run_dir(*, artifacts_root: Path, run_id: str) -> Path | None:
+    registry_db = default_registry_db_path(artifacts_root=artifacts_root)
+    if not registry_db.exists():
+        return None
+    uri = f"file:{registry_db}?mode=ro"
+    con = sqlite3.connect(uri, uri=True, timeout=2.0)
+    try:
+        row = con.execute("SELECT run_dir FROM runs WHERE run_id = ? LIMIT 1", (str(run_id),)).fetchone()
+        if not row:
+            return None
+        run_dir = str(row[0] or "").strip()
+        return Path(run_dir).expanduser().resolve() if run_dir else None
+    finally:
+        con.close()
+
+
+def _scan_lookup_run_dir(*, artifacts_root: Path, run_id: str) -> Path | None:
+    """Fallback when registry is missing: scan artifacts for a matching run_id."""
+    target = str(run_id).strip()
+    if not target:
+        return None
+    for date_dir in sorted([p for p in artifacts_root.iterdir() if p.is_dir()]):
+        for run_dir in sorted([p for p in date_dir.iterdir() if p.is_dir() and p.name.startswith("run_")]):
+            meta_path = run_dir / "run_metadata.json"
+            if not meta_path.exists():
+                continue
+            try:
+                meta = _load_json(meta_path)
+            except Exception:
+                continue
+            if str(meta.get("run_id", "")).strip() == target:
+                return run_dir.resolve()
+    return None
+
+
+def _find_existing_run_dir(*, artifacts_root: Path, run_id: str) -> Path:
+    p = _registry_lookup_run_dir(artifacts_root=artifacts_root, run_id=run_id)
+    if p is None:
+        p = _scan_lookup_run_dir(artifacts_root=artifacts_root, run_id=run_id)
+    if p is None:
+        raise FileNotFoundError(f"Could not locate run_id={run_id} under {artifacts_root}")
+    return p
+
+
+def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
+    """Re-run CPU replay/reporting for an existing run_id.
+
+    This creates a new run directory with a derived run_id. It does not modify the original run directory.
+    """
+    source_run_id = str(source_run_id).strip()
+    if not source_run_id:
+        raise SystemExit("--reproduce cannot be empty")
+
+    source_run_dir = _find_existing_run_dir(artifacts_root=artifacts_root, run_id=source_run_id)
+    source_meta = _load_json(source_run_dir / "run_metadata.json")
+    source_args = source_meta.get("args", {}) if isinstance(source_meta.get("args", {}), dict) else {}
+
+    interval = str(source_args.get("interval", "1h"))
+    candles_db = source_args.get("candles_db")
+    funding_db = source_args.get("funding_db")
+
+    generated_at_ms = int(time.time() * 1000)
+    new_run_id = f"repro_{source_run_id}_{_utc_compact(generated_at_ms)}"
+    run_dir = resolve_run_dir(artifacts_root=artifacts_root, run_id=new_run_id, generated_at_ms=generated_at_ms)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "logs").mkdir(parents=True, exist_ok=True)
+
+    meta: dict[str, Any] = {
+        "run_id": new_run_id,
+        "generated_at_ms": generated_at_ms,
+        "run_date_utc": _run_date_utc(generated_at_ms),
+        "run_dir": str(run_dir),
+        "git_head": _git_head_sha(),
+        "args": source_args,
+        "steps": [],
+        "reproduce_of_run_id": source_run_id,
+        "reproduce_source_run_dir": str(source_run_dir),
+        "reproduce_source_git_head": str(source_meta.get("git_head", "")).strip(),
+    }
+
+    # ------------------------------------------------------------------
+    # Copy configs from the source run
+    # ------------------------------------------------------------------
+    src_candidates = source_meta.get("candidate_configs", [])
+    if not isinstance(src_candidates, list) or not src_candidates:
+        raise FileNotFoundError(f"Missing candidate_configs in {source_run_dir / 'run_metadata.json'}")
+
+    configs_dir = run_dir / "configs"
+    configs_dir.mkdir(parents=True, exist_ok=True)
+
+    candidate_paths: list[Path] = []
+    candidate_config_ids: dict[str, str] = {}
+    copied_candidates: list[dict[str, Any]] = []
+
+    for it in src_candidates:
+        if not isinstance(it, dict):
+            continue
+        src_path = str(it.get("path", "")).strip()
+        src_cfg_id = str(it.get("config_id", "")).strip()
+        if not src_path or not src_cfg_id:
+            continue
+
+        src = Path(src_path).expanduser().resolve()
+        if not src.exists():
+            raise FileNotFoundError(f"Missing source config file: {src}")
+
+        dst = (configs_dir / src.name).resolve()
+        shutil.copy2(src, dst)
+
+        dst_cfg_id = config_id_from_yaml_file(dst)
+        if dst_cfg_id != src_cfg_id:
+            raise ValueError(f"config_id mismatch for {dst}: expected {src_cfg_id}, got {dst_cfg_id}")
+
+        candidate_paths.append(dst)
+        candidate_config_ids[str(dst)] = dst_cfg_id
+        copied_candidates.append({"path": str(dst), "config_id": dst_cfg_id, "source_path": str(src)})
+
+    if not candidate_paths:
+        raise ValueError("No candidate configs found to reproduce")
+
+    meta["candidate_configs"] = copied_candidates
+
+    # ------------------------------------------------------------------
+    # CPU replay / validation (v1: run replay once per candidate)
+    # ------------------------------------------------------------------
+    bt_cmd = _resolve_backtester_cmd()
+    replays_dir = run_dir / "replays"
+    replays_dir.mkdir(parents=True, exist_ok=True)
+
+    replay_reports: list[dict[str, Any]] = []
+    for cfg_path in candidate_paths:
+        out_json = replays_dir / f"{cfg_path.stem}.replay.json"
+        replay_argv = bt_cmd + [
+            "replay",
+            "--config",
+            str(cfg_path),
+            "--interval",
+            interval,
+            "--output",
+            str(out_json),
+        ]
+        if candles_db:
+            replay_argv += ["--candles-db", str(candles_db)]
+        if funding_db:
+            replay_argv += ["--funding-db", str(funding_db)]
+
+        replay_res = _run_cmd(
+            replay_argv,
+            cwd=AIQ_ROOT / "backtester",
+            stdout_path=run_dir / "replays" / f"{cfg_path.stem}.stdout.txt",
+            stderr_path=run_dir / "replays" / f"{cfg_path.stem}.stderr.txt",
+        )
+        meta["steps"].append({"name": f"replay_{cfg_path.stem}", **replay_res.__dict__})
+        if replay_res.exit_code != 0:
+            _write_json(run_dir / "run_metadata.json", meta)
+            return int(replay_res.exit_code)
+
+        summary = _summarise_replay_report(out_json)
+        summary["config_path"] = str(cfg_path)
+        summary["config_id"] = candidate_config_ids[str(cfg_path)]
+        replay_reports.append(summary)
+
+    # ------------------------------------------------------------------
+    # Reports + registry
+    # ------------------------------------------------------------------
+    report_md = _render_ranked_report_md(replay_reports)
+    (run_dir / "reports").mkdir(parents=True, exist_ok=True)
+    (run_dir / "reports" / "report.md").write_text(report_md, encoding="utf-8")
+    _write_json(run_dir / "reports" / "report.json", {"items": replay_reports})
+
+    _write_json(run_dir / "run_metadata.json", meta)
+
+    registry_db = default_registry_db_path(artifacts_root=artifacts_root)
+    meta["registry_db"] = str(registry_db)
+    try:
+        res = ingest_run_dir(registry_db=registry_db, run_dir=run_dir)
+        meta["registry_ingest"] = res.__dict__
+    except Exception as e:
+        meta["registry_error"] = str(e)
+        _write_json(run_dir / "run_metadata.json", meta)
+        return 1
+
+    _write_json(run_dir / "run_metadata.json", meta)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Run the nightly strategy factory workflow and store artifacts.")
-    ap.add_argument("--run-id", required=True, help="Unique identifier for this run (used in artifact paths).")
+    mx = ap.add_mutually_exclusive_group(required=True)
+    mx.add_argument("--run-id", help="Unique identifier for this run (used in artifact paths).")
+    mx.add_argument("--reproduce", metavar="RUN_ID", help="Reproduce an existing run_id (CPU replay + reports only).")
     ap.add_argument("--artifacts-dir", default="artifacts", help="Artifacts root directory (default: artifacts).")
 
     ap.add_argument("--config", default="config/strategy_overrides.yaml", help="Base strategy YAML config path.")
@@ -208,11 +402,14 @@ def main(argv: list[str] | None = None) -> int:
 
     args = ap.parse_args(argv)
 
+    artifacts_root = (AIQ_ROOT / str(args.artifacts_dir)).resolve()
+    if args.reproduce:
+        return _reproduce_run(artifacts_root=artifacts_root, source_run_id=str(args.reproduce))
+
     run_id = str(args.run_id).strip()
     if not run_id:
         raise SystemExit("--run-id cannot be empty")
 
-    artifacts_root = (AIQ_ROOT / str(args.artifacts_dir)).resolve()
     generated_at_ms = int(time.time() * 1000)
     run_dir = resolve_run_dir(artifacts_root=artifacts_root, run_id=run_id, generated_at_ms=generated_at_ms)
     run_dir.mkdir(parents=True, exist_ok=True)
