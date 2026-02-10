@@ -555,6 +555,94 @@ def _render_ranked_report_md(items: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _render_validation_report_md(items: list[dict[str, Any]], *, score_min_trades: int) -> str:
+    lines: list[str] = []
+    lines.append("# Validation Report")
+    lines.append("")
+    lines.append("This report lists per-candidate validation signals and human-readable reasons.")
+    lines.append("")
+    if not items:
+        lines.append("No candidates were produced.")
+        lines.append("")
+        return "\n".join(lines)
+
+    def _has_num(v: Any) -> bool:
+        return isinstance(v, (int, float))
+
+    def _sort_key(it: dict[str, Any]) -> tuple[int, float]:
+        if _has_num(it.get("score_v1")):
+            return (2, float(it.get("score_v1", 0.0)))
+        return (1, float(it.get("total_pnl", 0.0)))
+
+    def _reasons(it: dict[str, Any]) -> list[str]:
+        out: list[str] = []
+        rr = str(it.get("reject_reason", "") or "").strip()
+        if rr:
+            out.append(rr)
+
+        try:
+            if "wf_median_oos_daily_return" in it and float(it.get("wf_median_oos_daily_return", 0.0)) < 0.0:
+                out.append("OOS negative (median daily return < 0)")
+        except Exception:
+            pass
+
+        try:
+            if int(it.get("total_trades", 0)) < int(score_min_trades):
+                out.append(f"too few trades (trades < {int(score_min_trades)})")
+        except Exception:
+            pass
+
+        if not _has_num(it.get("score_v1")):
+            out.append("missing score_v1 (enable --walk-forward and --slippage-stress)")
+
+        # Deduplicate while preserving order.
+        seen: set[str] = set()
+        dedup: list[str] = []
+        for r in out:
+            if r in seen:
+                continue
+            seen.add(r)
+            dedup.append(r)
+        return dedup
+
+    items_sorted = sorted(items, key=_sort_key, reverse=True)
+
+    for i, it in enumerate(items_sorted, start=1):
+        cfg_id = str(it.get("config_id", "")).strip()
+        cfg_id_short = cfg_id[:12] if len(cfg_id) > 12 else cfg_id
+        status = "REJECT" if bool(it.get("rejected")) else "ACCEPT"
+
+        lines.append(f"## Candidate {i}: `{cfg_id_short}`")
+        lines.append("")
+        lines.append(f"- Status: {status}")
+        if _has_num(it.get("score_v1")):
+            lines.append(f"- score_v1: {float(it.get('score_v1', 0.0)):.6f}")
+        else:
+            lines.append("- score_v1: n/a")
+        lines.append(f"- total_pnl: {float(it.get('total_pnl', 0.0)):.2f}")
+        lines.append(f"- max_drawdown_pct: {float(it.get('max_drawdown_pct', 0.0)):.4f}")
+        lines.append(f"- trades: {int(it.get('total_trades', 0))}")
+        if _has_num(it.get("wf_median_oos_daily_return")):
+            lines.append(f"- OOS median daily return: {float(it.get('wf_median_oos_daily_return', 0.0)):.6f}")
+        if _has_num(it.get("wf_max_oos_drawdown_pct")):
+            lines.append(f"- OOS max drawdown pct: {float(it.get('wf_max_oos_drawdown_pct', 0.0)):.4f}")
+        if _has_num(it.get("slippage_fragility")):
+            lines.append(f"- slippage fragility: {float(it.get('slippage_fragility', 0.0)):.6f}")
+        if _has_num(it.get("top1_pnl_pct")):
+            lines.append(f"- top1 pnl pct: {float(it.get('top1_pnl_pct', 0.0)):.4f}")
+        if _has_num(it.get("top5_pnl_pct")):
+            lines.append(f"- top5 pnl pct: {float(it.get('top5_pnl_pct', 0.0)):.4f}")
+        if _has_num(it.get("long_pnl_usd")) or _has_num(it.get("short_pnl_usd")):
+            lines.append(
+                f"- long/short pnl: {float(it.get('long_pnl_usd', 0.0)):.2f} / {float(it.get('short_pnl_usd', 0.0)):.2f}"
+            )
+        rs = _reasons(it)
+        lines.append(f"- Reasons: {'; '.join(rs) if rs else 'none'}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def _run_date_utc(generated_at_ms: int) -> str:
     return time.strftime("%Y-%m-%d", time.gmtime(generated_at_ms / 1000))
 
@@ -767,6 +855,11 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
     (run_dir / "reports").mkdir(parents=True, exist_ok=True)
     (run_dir / "reports" / "report.md").write_text(report_md, encoding="utf-8")
     _write_json(run_dir / "reports" / "report.json", {"items": replay_reports})
+
+    validation_md = _render_validation_report_md(
+        replay_reports, score_min_trades=int(getattr(args, "score_min_trades", 30) or 30)
+    )
+    (run_dir / "reports" / "validation_report.md").write_text(validation_md, encoding="utf-8")
 
     _write_json(run_dir / "run_metadata.json", meta)
 
