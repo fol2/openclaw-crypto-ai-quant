@@ -536,7 +536,7 @@ class LivePlugin:
             return
 
         reason = str(getattr(risk, "kill_reason", "") or "")
-        if not reason.startswith("drawdown:"):
+        if not reason.startswith("drawdown"):
             return
 
         policy = str(getattr(risk, "drawdown_reduce_policy", "none") or "none").strip().lower()

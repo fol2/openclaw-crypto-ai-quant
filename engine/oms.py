@@ -2383,6 +2383,7 @@ class LiveOms:
                             "symbol": sym,
                             "action": action,
                             "pos_type": pos_type,
+                            "t_ms": int(t_ms),
                             "price": float(px),
                             "size": float(sz),
                             "notional": float(notional),
@@ -2425,6 +2426,26 @@ class LiveOms:
                     pass
 
             conn.commit()
+
+            # After commit: update in-memory risk state. This must never throw and must only
+            # run for newly-ingested fills (notify_rows is deduped alongside DB inserts).
+            try:
+                risk = getattr(trader, "risk", None)
+                note = getattr(risk, "note_fill", None) if risk is not None else None
+                if callable(note):
+                    for row in notify_rows:
+                        try:
+                            note(
+                                ts_ms=int(row.get("t_ms") or 0),
+                                symbol=str(row.get("symbol") or ""),
+                                action=str(row.get("action") or ""),
+                                pnl_usd=float(row.get("pnl") or 0.0),
+                                fee_usd=float(row.get("fee") or 0.0),
+                            )
+                        except Exception:
+                            continue
+            except Exception:
+                pass
 
             # After commit: send notifications and console logs once per new fill.
             if notify_rows:
