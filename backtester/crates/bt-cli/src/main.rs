@@ -5,27 +5,118 @@
 //!   - `sweep`           — Parallel parameter sweep (Cartesian product of axes)
 //!   - `dump-indicators` — Dump raw indicator values as CSV for debugging
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use clap::{Parser, Subcommand};
 
 const VERSION: &str = "0.1.0";
 const DEFAULT_LOOKBACK: usize = 200;
 
+#[derive(Clone, Copy, Debug)]
+struct TimestampMs(i64);
+
+impl std::str::FromStr for TimestampMs {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        parse_timestamp_ms(s).map(Self)
+    }
+}
+
+fn format_ts_ms(ms: i64) -> String {
+    match DateTime::<Utc>::from_timestamp_millis(ms) {
+        Some(dt) => format!("{ms} ({})", dt.to_rfc3339_opts(SecondsFormat::Millis, true)),
+        None => ms.to_string(),
+    }
+}
+
+fn format_ts_opt(ms: Option<i64>) -> String {
+    match ms {
+        Some(x) => format_ts_ms(x),
+        None => "unbounded".to_string(),
+    }
+}
+
+fn parse_timestamp_ms(input: &str) -> Result<i64, String> {
+    let s = input.trim();
+    if s.is_empty() {
+        return Err("timestamp is empty".to_string());
+    }
+
+    // Epoch parsing: accept seconds (10 digits), milliseconds (13 digits),
+    // and also tolerate micros/nanos by magnitude.
+    let s_no_underscores: String = s.chars().filter(|c| *c != '_').collect();
+    let is_epoch = {
+        let signless = s_no_underscores
+            .strip_prefix('+')
+            .or_else(|| s_no_underscores.strip_prefix('-'))
+            .unwrap_or(&s_no_underscores);
+        !signless.is_empty() && signless.chars().all(|c| c.is_ascii_digit())
+    };
+    if is_epoch {
+        let n: i64 = s_no_underscores
+            .parse()
+            .map_err(|e| format!("invalid epoch timestamp {input:?}: {e}"))?;
+
+        let abs: i128 = (n as i128).abs();
+        if abs < 10_000_000_000_i128 {
+            return n.checked_mul(1000).ok_or_else(|| {
+                "epoch seconds overflow when converting to milliseconds".to_string()
+            });
+        }
+        if abs < 10_000_000_000_000_i128 {
+            return Ok(n);
+        }
+        if abs < 10_000_000_000_000_000_i128 {
+            return Ok(n / 1000);
+        }
+        return Ok(n / 1_000_000);
+    }
+
+    // ISO8601 parsing: prefer RFC3339 with timezone, but also accept date-only (UTC midnight).
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Ok(dt.with_timezone(&Utc).timestamp_millis());
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        let naive = date
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| format!("invalid date {input:?}"))?;
+        let dt = DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc);
+        return Ok(dt.timestamp_millis());
+    }
+
+    Err(format!(
+        "invalid timestamp {input:?}. Expected ISO8601/RFC3339 (e.g. 2024-01-01T00:00:00Z) or epoch seconds/milliseconds"
+    ))
+}
+
 /// Read only the `balance` field from an export_state.py JSON file.
 /// Panics with a descriptive message on any I/O or parse error.
 fn read_balance_from_json(path: &str) -> f64 {
-    let data = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| { eprintln!("[error] Cannot read {:?}: {}", path, e); std::process::exit(1); });
-    let json: serde_json::Value = serde_json::from_str(&data)
-        .unwrap_or_else(|e| { eprintln!("[error] Invalid JSON in {:?}: {}", path, e); std::process::exit(1); });
-    let balance = json.get("balance")
+    let data = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("[error] Cannot read {:?}: {}", path, e);
+        std::process::exit(1);
+    });
+    let json: serde_json::Value = serde_json::from_str(&data).unwrap_or_else(|e| {
+        eprintln!("[error] Invalid JSON in {:?}: {}", path, e);
+        std::process::exit(1);
+    });
+    let balance = json
+        .get("balance")
         .and_then(|v| v.as_f64())
-        .unwrap_or_else(|| { eprintln!("[error] {:?} has no numeric \"balance\" field", path); std::process::exit(1); });
-    eprintln!("[balance-from] Read balance=${:.2} from {:?}", balance, path);
+        .unwrap_or_else(|| {
+            eprintln!("[error] {:?} has no numeric \"balance\" field", path);
+            std::process::exit(1);
+        });
+    eprintln!(
+        "[balance-from] Read balance=${:.2} from {:?}",
+        balance, path
+    );
     balance
 }
 
@@ -129,17 +220,39 @@ struct ReplayArgs {
     #[arg(long)]
     entry_interval: Option<String>,
 
-    /// Start timestamp in milliseconds (inclusive). Only trade on bars >= this time.
-    #[arg(long)]
-    from_ts: Option<i64>,
+    /// Start timestamp (inclusive). Accepts ISO8601/RFC3339 or epoch seconds/milliseconds.
+    /// Alias: --from-ts
+    #[arg(long = "start-ts", alias = "from-ts")]
+    start_ts: Option<TimestampMs>,
 
-    /// End timestamp in milliseconds (inclusive). Only trade on bars <= this time.
+    /// End timestamp (inclusive). Accepts ISO8601/RFC3339 or epoch seconds/milliseconds.
+    /// Alias: --to-ts
+    #[arg(long = "end-ts", alias = "to-ts")]
+    end_ts: Option<TimestampMs>,
+
+    /// Filter the candle universe to symbols active during the backtest window using
+    /// `universe_listings` from a universe history DB (see tools/sync_universe_history.py).
+    ///
+    /// A symbol is considered active when its observed listing interval overlaps with
+    /// the backtest window:
+    ///   first_seen_ms <= to_ts AND last_seen_ms >= from_ts
+    #[arg(long, default_value_t = false)]
+    universe_filter: bool,
+
+    /// Path to the universe history SQLite DB.
+    /// If omitted, auto-resolved as: <candles_db_dir>/universe_history.db
     #[arg(long)]
-    to_ts: Option<i64>,
+    universe_db: Option<String>,
+
+    /// Override slippage in basis points for this replay run.
+    ///
+    /// This avoids editing YAML when running slippage stress tests.
+    #[arg(long)]
+    slippage_bps: Option<f64>,
 
     /// Disable auto-scoping. By default, replay auto-scopes all candle DBs to the
     /// shortest overlapping time range for apple-to-apple comparison.
-    /// Use --no-auto-scope to disable this and rely on explicit --from-ts / --to-ts.
+    /// Use --no-auto-scope to disable this and rely on explicit --start-ts / --end-ts.
     #[arg(long, default_value_t = false)]
     no_auto_scope: bool,
 
@@ -214,17 +327,33 @@ struct SweepArgs {
     #[arg(long)]
     funding_db: Option<String>,
 
-    /// Start timestamp in milliseconds (inclusive). Only trade on bars >= this time.
-    #[arg(long)]
-    from_ts: Option<i64>,
+    /// Start timestamp (inclusive). Accepts ISO8601/RFC3339 or epoch seconds/milliseconds.
+    /// Alias: --from-ts
+    #[arg(long = "start-ts", alias = "from-ts")]
+    start_ts: Option<TimestampMs>,
 
-    /// End timestamp in milliseconds (inclusive). Only trade on bars <= this time.
+    /// End timestamp (inclusive). Accepts ISO8601/RFC3339 or epoch seconds/milliseconds.
+    /// Alias: --to-ts
+    #[arg(long = "end-ts", alias = "to-ts")]
+    end_ts: Option<TimestampMs>,
+
+    /// Filter the candle universe to symbols active during the sweep window using
+    /// `universe_listings` from a universe history DB (see tools/sync_universe_history.py).
+    ///
+    /// A symbol is considered active when its observed listing interval overlaps with
+    /// the sweep window:
+    ///   first_seen_ms <= to_ts AND last_seen_ms >= from_ts
+    #[arg(long, default_value_t = false)]
+    universe_filter: bool,
+
+    /// Path to the universe history SQLite DB.
+    /// If omitted, auto-resolved as: <candles_db_dir>/universe_history.db
     #[arg(long)]
-    to_ts: Option<i64>,
+    universe_db: Option<String>,
 
     /// Disable auto-scoping. By default, sweep auto-scopes all candle DBs to the
     /// shortest overlapping time range for apple-to-apple comparison.
-    /// Use --no-auto-scope to disable this and rely on explicit --from-ts / --to-ts.
+    /// Use --no-auto-scope to disable this and rely on explicit --start-ts / --end-ts.
     #[arg(long, default_value_t = false)]
     no_auto_scope: bool,
 
@@ -280,47 +409,292 @@ struct DumpArgs {
 }
 
 // ---------------------------------------------------------------------------
-// Auto-scope: detect the shortest overlapping time range across all candle DBs
+// Candle DB sets: support partitions via comma-separated paths and/or directories
 // ---------------------------------------------------------------------------
 
-/// Given a list of (db_path, interval) pairs, query each for its time range
-/// and return the narrowest overlap: (max of all min_t, min of all max_t).
-fn compute_auto_scope(
-    dbs: &[(&str, &str)],
-    explicit_from: Option<i64>,
-    explicit_to: Option<i64>,
-) -> (Option<i64>, Option<i64>) {
-    let mut global_from: Option<i64> = explicit_from;
-    let mut global_to: Option<i64> = explicit_to;
+fn expand_db_path(raw: &str) -> Vec<String> {
+    let p = Path::new(raw);
+    if !p.is_dir() {
+        return vec![raw.to_string()];
+    }
 
-    for (db_path, interval) in dbs {
-        match bt_data::sqlite_loader::query_time_range(db_path, interval) {
-            Ok(Some((min_t, max_t))) => {
-                eprintln!(
-                    "[auto-scope] {} ({}): {}..{} ({:.1} days)",
-                    db_path, interval, min_t, max_t,
-                    (max_t - min_t) as f64 / 86_400_000.0,
-                );
-                global_from = Some(global_from.map_or(min_t, |f| f.max(min_t)));
-                global_to = Some(global_to.map_or(max_t, |t| t.min(max_t)));
+    let mut out: Vec<String> = Vec::new();
+    let entries = match fs::read_dir(p) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    for ent in entries.flatten() {
+        let path = ent.path();
+        if path.extension().and_then(|s| s.to_str()).map(|s| s.eq_ignore_ascii_case("db")) != Some(true) {
+            continue;
+        }
+        out.push(path.to_string_lossy().to_string());
+    }
+    out.sort();
+    out
+}
+
+fn resolve_db_paths(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for part in raw.split(',') {
+        let s = part.trim();
+        if s.is_empty() {
+            continue;
+        }
+        let expanded = expand_db_path(s);
+        if expanded.is_empty() {
+            // If the user passed an empty directory, keep the original value so we fail loudly later.
+            if seen.insert(s.to_string()) {
+                out.push(s.to_string());
             }
-            Ok(None) => {
-                eprintln!("[auto-scope] {} ({}): empty — skipping", db_path, interval);
-            }
-            Err(e) => {
-                eprintln!("[auto-scope] {} ({}): error querying range: {}", db_path, interval, e);
+            continue;
+        }
+        for p in expanded {
+            if seen.insert(p.clone()) {
+                out.push(p);
             }
         }
     }
 
-    if let (Some(f), Some(t)) = (global_from, global_to) {
-        eprintln!(
-            "[auto-scope] Common range: {}..{} ({:.1} days)",
-            f, t, (t - f) as f64 / 86_400_000.0,
-        );
+    out
+}
+
+fn format_db_set(paths: &[String]) -> String {
+    if paths.len() <= 1 {
+        return paths.first().cloned().unwrap_or_else(|| "<empty>".to_string());
+    }
+    format!("{} (+{} partitions)", paths[0], paths.len() - 1)
+}
+
+// ---------------------------------------------------------------------------
+// Auto-scope: detect the shortest overlapping time range across all candle DBs
+// ---------------------------------------------------------------------------
+
+/// Given a list of (db_paths, interval) pairs, query each for its time range
+/// and return the narrowest overlap: (max of all min_t, min of all max_t).
+fn query_candle_db_range_multi_or_exit(db_paths: &[String], interval: &str) -> (i64, i64) {
+    match bt_data::sqlite_loader::query_time_range_multi(db_paths, interval) {
+        Ok(Some((min_t, max_t))) => (min_t, max_t),
+        Ok(None) => {
+            eprintln!(
+                "[error] Candle DB set {:?} has no candles for interval={:?}",
+                format_db_set(db_paths),
+                interval,
+            );
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!(
+                "[error] Failed to query candle DB range for {:?} (interval={:?}): {}",
+                format_db_set(db_paths),
+                interval,
+                e
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+fn compute_auto_scope_overlap(dbs: &[(&[String], &str)]) -> (i64, i64) {
+    if dbs.is_empty() {
+        eprintln!("[error] Internal error: auto-scope DB list is empty");
+        std::process::exit(1);
     }
 
-    (global_from, global_to)
+    let mut overlap_from: i64 = i64::MIN;
+    let mut overlap_to: i64 = i64::MAX;
+
+    for (db_paths, interval) in dbs {
+        let (min_t, max_t) = query_candle_db_range_multi_or_exit(db_paths, interval);
+        eprintln!(
+            "[auto-scope] {} ({}): {}..{} ({:.1} days)",
+            format_db_set(db_paths),
+            interval,
+            min_t,
+            max_t,
+            (max_t - min_t) as f64 / 86_400_000.0,
+        );
+        overlap_from = overlap_from.max(min_t);
+        overlap_to = overlap_to.min(max_t);
+    }
+
+    if overlap_from > overlap_to {
+        eprintln!(
+            "[error] No overlapping time range across the selected candle DBs (overlap would be {}..{})",
+            overlap_from, overlap_to
+        );
+        std::process::exit(1);
+    }
+
+    eprintln!(
+        "[auto-scope] Common range: {}..{} ({:.1} days)",
+        overlap_from,
+        overlap_to,
+        (overlap_to - overlap_from) as f64 / 86_400_000.0,
+    );
+
+    (overlap_from, overlap_to)
+}
+
+fn resolve_time_range_or_exit(
+    label: &str,
+    dbs: &[(&[String], &str)],
+    auto_scope: bool,
+    requested_start: Option<i64>,
+    requested_end: Option<i64>,
+) -> (Option<i64>, Option<i64>) {
+    if let (Some(s), Some(e)) = (requested_start, requested_end) {
+        if s > e {
+            eprintln!(
+                "[error] Invalid time range: --start-ts is after --end-ts (start={}, end={})",
+                format_ts_ms(s),
+                format_ts_ms(e),
+            );
+            std::process::exit(1);
+        }
+    }
+
+    if auto_scope {
+        let (scope_from, scope_to) = compute_auto_scope_overlap(dbs);
+
+        if let Some(s) = requested_start {
+            if s < scope_from {
+                eprintln!(
+                    "[error] Requested --start-ts {} is earlier than DB coverage (common start is {})",
+                    format_ts_ms(s),
+                    format_ts_ms(scope_from),
+                );
+                std::process::exit(1);
+            }
+            if s > scope_to {
+                eprintln!(
+                    "[error] Requested --start-ts {} is later than DB coverage (common end is {})",
+                    format_ts_ms(s),
+                    format_ts_ms(scope_to),
+                );
+                std::process::exit(1);
+            }
+        }
+        if let Some(e) = requested_end {
+            if e < scope_from {
+                eprintln!(
+                    "[error] Requested --end-ts {} is earlier than DB coverage (common start is {})",
+                    format_ts_ms(e),
+                    format_ts_ms(scope_from),
+                );
+                std::process::exit(1);
+            }
+            if e > scope_to {
+                eprintln!(
+                    "[error] Requested --end-ts {} is later than DB coverage (common end is {})",
+                    format_ts_ms(e),
+                    format_ts_ms(scope_to),
+                );
+                std::process::exit(1);
+            }
+        }
+
+        let effective_from = requested_start.unwrap_or(scope_from);
+        let effective_to = requested_end.unwrap_or(scope_to);
+        if effective_from > effective_to {
+            eprintln!(
+                "[error] Invalid effective time range: start={} end={}",
+                format_ts_ms(effective_from),
+                format_ts_ms(effective_to),
+            );
+            std::process::exit(1);
+        }
+        eprintln!(
+            "[{label}] Effective time range: {}..{}",
+            format_ts_ms(effective_from),
+            format_ts_ms(effective_to),
+        );
+        return (Some(effective_from), Some(effective_to));
+    }
+
+    // No auto-scope: validate requested bounds against each DB's min/max if a bound was provided.
+    if requested_start.is_some() || requested_end.is_some() {
+        for (db_paths, interval) in dbs {
+            let (min_t, max_t) = query_candle_db_range_multi_or_exit(db_paths, interval);
+            if let Some(s) = requested_start {
+                if s < min_t {
+                    eprintln!(
+                        "[error] Requested --start-ts {} is earlier than DB coverage start {} for {} ({})",
+                        format_ts_ms(s),
+                        format_ts_ms(min_t),
+                        format_db_set(db_paths),
+                        interval,
+                    );
+                    std::process::exit(1);
+                }
+                if s > max_t {
+                    eprintln!(
+                        "[error] Requested --start-ts {} is later than DB coverage end {} for {} ({})",
+                        format_ts_ms(s),
+                        format_ts_ms(max_t),
+                        format_db_set(db_paths),
+                        interval,
+                    );
+                    std::process::exit(1);
+                }
+            }
+            if let Some(e) = requested_end {
+                if e < min_t {
+                    eprintln!(
+                        "[error] Requested --end-ts {} is earlier than DB coverage start {} for {} ({})",
+                        format_ts_ms(e),
+                        format_ts_ms(min_t),
+                        format_db_set(db_paths),
+                        interval,
+                    );
+                    std::process::exit(1);
+                }
+                if e > max_t {
+                    eprintln!(
+                        "[error] Requested --end-ts {} is later than DB coverage end {} for {} ({})",
+                        format_ts_ms(e),
+                        format_ts_ms(max_t),
+                        format_db_set(db_paths),
+                        interval,
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+
+    eprintln!(
+        "[{label}] Effective time range: start={}, end={}",
+        format_ts_opt(requested_start),
+        format_ts_opt(requested_end),
+    );
+    (requested_start, requested_end)
+}
+
+// ---------------------------------------------------------------------------
+// Universe filtering helpers (survivorship bias mitigation)
+// ---------------------------------------------------------------------------
+
+fn default_universe_db_path(candles_db: &str) -> String {
+    let p = Path::new(candles_db);
+    let dir = p.parent().unwrap_or_else(|| Path::new("."));
+    dir.join("universe_history.db").to_string_lossy().to_string()
+}
+
+fn infer_candle_range_ms(candles: &bt_core::candle::CandleData) -> Option<(i64, i64)> {
+    let mut min_t: Option<i64> = None;
+    let mut max_t: Option<i64> = None;
+    for bars in candles.values() {
+        if let Some(first) = bars.first() {
+            min_t = Some(min_t.map_or(first.t, |m| m.min(first.t)));
+        }
+        if let Some(last) = bars.last() {
+            max_t = Some(max_t.map_or(last.t, |m| m.max(last.t)));
+        }
+    }
+    min_t.zip(max_t)
 }
 
 // ---------------------------------------------------------------------------
@@ -478,27 +852,41 @@ fn build_per_symbol_stats(
 // ---------------------------------------------------------------------------
 
 fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let cfg = bt_core::config::load_config(
+    let symbol_norm = args.symbol.as_ref().map(|s| s.trim().to_uppercase());
+    let mut cfg = bt_core::config::load_config(
         &args.config,
-        args.symbol.as_deref(),
+        symbol_norm.as_deref(),
         args.live,
     );
+
+    if let Some(bps) = args.slippage_bps {
+        cfg.trade.slippage_bps = bps.max(0.0);
+    }
 
     // Resolve intervals: CLI arg > YAML engine section > default "1h"
     let interval = args.interval.unwrap_or_else(|| {
         let yaml_iv = &cfg.engine.interval;
-        if yaml_iv.is_empty() { "1h".to_string() } else { yaml_iv.clone() }
+        if yaml_iv.is_empty() {
+            "1h".to_string()
+        } else {
+            yaml_iv.clone()
+        }
     });
 
     // Auto-resolve candle DB path from interval if not explicitly provided
     let candles_db = args.candles_db.unwrap_or_else(|| {
         format!("candles_dbs/candles_{}.db", interval)
     });
+    let candles_db_paths = resolve_db_paths(&candles_db);
 
     // Resolve exit_interval: CLI arg > YAML engine.exit_interval > None
     let exit_interval = args.exit_interval.or_else(|| {
         let yaml_eiv = &cfg.engine.exit_interval;
-        if yaml_eiv.is_empty() { None } else { Some(yaml_eiv.clone()) }
+        if yaml_eiv.is_empty() {
+            None
+        } else {
+            Some(yaml_eiv.clone())
+        }
     });
 
     // Auto-resolve exit candle DB path from exit_interval if not explicitly provided
@@ -511,7 +899,11 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
     // Resolve entry_interval: CLI arg > YAML engine.entry_interval > None
     let entry_interval = args.entry_interval.or_else(|| {
         let yaml_niv = &cfg.engine.entry_interval;
-        if yaml_niv.is_empty() { None } else { Some(yaml_niv.clone()) }
+        if yaml_niv.is_empty() {
+            None
+        } else {
+            Some(yaml_niv.clone())
+        }
     });
 
     // Auto-resolve entry candle DB path from entry_interval if not explicitly provided
@@ -520,10 +912,12 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
         (None, Some(iv)) => (Some(format!("candles_dbs/candles_{}.db", iv)), Some(iv)),
         (None, None) => (None, None),
     };
+    let exit_db_paths = exit_candles_db.as_ref().map(|p| resolve_db_paths(p));
+    let entry_db_paths = entry_candles_db.as_ref().map(|p| resolve_db_paths(p));
 
     eprintln!(
         "[replay] Config loaded from {:?} (live={}, symbol={:?})",
-        args.config, args.live, args.symbol,
+        args.config, args.live, symbol_norm,
     );
     eprintln!(
         "[replay] Indicator interval: {} (db: {})",
@@ -542,37 +936,40 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
         cfg.trade.leverage,
         cfg.trade.allocation_pct * 100.0,
     );
+    eprintln!("[replay] slippage_bps={:.2}", cfg.trade.slippage_bps);
 
-    // Compute time range: explicit --from-ts / --to-ts, or auto-scope (default ON)
-    let (from_ts, to_ts) = if !args.no_auto_scope {
-        let mut dbs: Vec<(&str, &str)> = Vec::new();
-        // Don't scope the indicator DB — it needs full history for warmup.
-        // Only scope the entry/exit DBs that determine the trading window.
-        if let (Some(ref edb), Some(ref eiv)) = (&exit_candles_db, &exit_interval) {
-            dbs.push((edb.as_str(), eiv.as_str()));
-        }
-        if let (Some(ref ndb), Some(ref niv)) = (&entry_candles_db, &entry_interval) {
-            dbs.push((ndb.as_str(), niv.as_str()));
-        }
-        if dbs.is_empty() {
-            // No sub-bar DBs — scope the main indicator DB
-            dbs.push((&candles_db, &interval));
-        }
-        compute_auto_scope(&dbs, args.from_ts, args.to_ts)
-    } else {
-        (args.from_ts, args.to_ts)
-    };
+    // Compute time range: explicit --start-ts / --end-ts, with optional auto-scope.
+    let mut scope_dbs: Vec<(&[String], &str)> = Vec::new();
+    // Don't scope the indicator DB — it needs full history for warmup.
+    // Only scope the entry/exit DBs that determine the trading window.
+    if let (Some(ref paths), Some(ref eiv)) = (&exit_db_paths, &exit_interval) {
+        scope_dbs.push((paths.as_slice(), eiv.as_str()));
+    }
+    if let (Some(ref paths), Some(ref niv)) = (&entry_db_paths, &entry_interval) {
+        scope_dbs.push((paths.as_slice(), niv.as_str()));
+    }
+    if scope_dbs.is_empty() {
+        // No sub-bar DBs — scope the main indicator DB
+        scope_dbs.push((candles_db_paths.as_slice(), interval.as_str()));
+    }
+    let (from_ts, to_ts) = resolve_time_range_or_exit(
+        "replay",
+        &scope_dbs,
+        !args.no_auto_scope,
+        args.start_ts.map(|t| t.0),
+        args.end_ts.map(|t| t.0),
+    );
 
     // Load indicator candles (full history for warmup — no time filter)
-    let candles = bt_data::sqlite_loader::load_candles(&candles_db, &interval)?;
+    let mut candles = bt_data::sqlite_loader::load_candles_multi(&candles_db_paths, &interval)?;
 
     if candles.is_empty() {
         eprintln!("[replay] No candles found. Check --candles-db and --interval.");
         std::process::exit(1);
     }
 
-    // If --symbol specified, verify it exists in the candle data
-    if let Some(ref sym) = args.symbol {
+    // If --symbol specified, verify it exists in the candle data (normalised to uppercase)
+    if let Some(ref sym) = symbol_norm {
         if !candles.contains_key(sym) {
             let mut available: Vec<&String> = candles.keys().collect();
             available.sort();
@@ -584,17 +981,89 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Optional: filter candle universe to active symbols from universe_history.db
+    let mut keep_symbols: Option<HashSet<String>> = None;
+    if args.universe_filter {
+        let (min_t, max_t) = infer_candle_range_ms(&candles).unwrap_or_else(|| {
+            eprintln!("[replay] No candle timestamps found.");
+            std::process::exit(1);
+        });
+        let filter_from = from_ts.unwrap_or(min_t);
+        let filter_to = to_ts.unwrap_or(max_t);
+        if filter_from > filter_to {
+            eprintln!("[replay] Invalid time range: from_ts > to_ts ({} > {})", filter_from, filter_to);
+            std::process::exit(1);
+        }
+
+        let default_universe_seed = candles_db_paths
+            .first()
+            .map(|s| s.as_str())
+            .unwrap_or(candles_db.as_str());
+        let universe_db = args
+            .universe_db
+            .clone()
+            .unwrap_or_else(|| default_universe_db_path(default_universe_seed));
+
+        eprintln!(
+            "[replay] Universe filter enabled: range={}..{}, db={}",
+            filter_from, filter_to, universe_db,
+        );
+        let active = bt_data::sqlite_loader::load_universe_active_symbols(&universe_db, filter_from, filter_to)
+            .unwrap_or_else(|e| { eprintln!("[replay] Universe filter failed: {e}"); std::process::exit(1); });
+        if active.is_empty() {
+            eprintln!("[replay] Universe filter returned 0 active symbols (range={}..{})", filter_from, filter_to);
+            std::process::exit(1);
+        }
+        keep_symbols = Some(active.into_iter().collect());
+    }
+
+    // If --symbol specified, restrict to a single symbol (and validate against universe filter if enabled).
+    if let Some(ref sym) = symbol_norm {
+        if let Some(ref keep) = keep_symbols {
+            if !keep.contains(sym) {
+                eprintln!(
+                    "[replay] Symbol {:?} is not active in the universe history DB for the selected window.",
+                    sym,
+                );
+                std::process::exit(1);
+            }
+        }
+        let mut single = HashSet::new();
+        single.insert(sym.clone());
+        keep_symbols = Some(single);
+    }
+
+    // Apply final symbol filter to indicator candles
+    if let Some(ref keep) = keep_symbols {
+        let before = candles.len();
+        candles.retain(|sym, _| keep.contains(sym));
+        eprintln!("[replay] Symbol universe: {before} -> {} symbols", candles.len());
+        if candles.is_empty() {
+            eprintln!("[replay] No candles left after symbol filtering.");
+            std::process::exit(1);
+        }
+    }
+
     let num_symbols = candles.len();
     let total_bars: usize = candles.values().map(|v| v.len()).sum();
     eprintln!("[replay] Loaded {total_bars} bars across {num_symbols} symbols");
 
     // Optional: load exit candles for two-level simulation (filtered)
     let exit_candles = if let Some(ref exit_db) = exit_candles_db {
+        let exit_paths = exit_db_paths.as_ref().unwrap_or(&candles_db_paths);
         let exit_iv = exit_interval.as_deref().unwrap_or(&interval);
         eprintln!("[replay] Loading exit candles from {:?} (interval={})", exit_db, exit_iv);
-        let ec = bt_data::sqlite_loader::load_candles_filtered(exit_db, exit_iv, from_ts, to_ts)?;
+        let mut ec =
+            bt_data::sqlite_loader::load_candles_filtered_multi(exit_paths, exit_iv, from_ts, to_ts)?;
+        if let Some(ref keep) = keep_symbols {
+            ec.retain(|sym, _| keep.contains(sym));
+        }
         let ec_bars: usize = ec.values().map(|v| v.len()).sum();
-        eprintln!("[replay] Exit candles: {} bars across {} symbols", ec_bars, ec.len());
+        eprintln!(
+            "[replay] Exit candles: {} bars across {} symbols",
+            ec_bars,
+            ec.len()
+        );
         Some(ec)
     } else {
         None
@@ -602,11 +1071,24 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // Optional: load entry candles for sub-bar entry evaluation (filtered)
     let entry_candles = if let Some(ref entry_db) = entry_candles_db {
+        let entry_paths = entry_db_paths.as_ref().unwrap_or(&candles_db_paths);
         let entry_iv = entry_interval.as_deref().unwrap_or(&interval);
         eprintln!("[replay] Loading entry candles from {:?} (interval={})", entry_db, entry_iv);
-        let nc = bt_data::sqlite_loader::load_candles_filtered(entry_db, entry_iv, from_ts, to_ts)?;
+        let mut nc = bt_data::sqlite_loader::load_candles_filtered_multi(
+            entry_paths,
+            entry_iv,
+            from_ts,
+            to_ts,
+        )?;
+        if let Some(ref keep) = keep_symbols {
+            nc.retain(|sym, _| keep.contains(sym));
+        }
         let nc_bars: usize = nc.values().map(|v| v.len()).sum();
-        eprintln!("[replay] Entry candles: {} bars across {} symbols", nc_bars, nc.len());
+        eprintln!(
+            "[replay] Entry candles: {} bars across {} symbols",
+            nc_bars,
+            nc.len()
+        );
         Some(nc)
     } else {
         None
@@ -615,9 +1097,16 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
     // Optional: load funding rates (filtered)
     let funding_rates = if let Some(ref fdb) = args.funding_db {
         eprintln!("[replay] Loading funding rates from {:?}", fdb);
-        let fr = bt_data::sqlite_loader::load_funding_rates_filtered(fdb, from_ts, to_ts)?;
+        let mut fr = bt_data::sqlite_loader::load_funding_rates_filtered(fdb, from_ts, to_ts)?;
+        if let Some(ref keep) = keep_symbols {
+            fr.retain(|sym, _| keep.contains(sym));
+        }
         let fr_count: usize = fr.values().map(|v| v.len()).sum();
-        eprintln!("[replay] Funding rates: {} entries across {} symbols", fr_count, fr.len());
+        eprintln!(
+            "[replay] Funding rates: {} entries across {} symbols",
+            fr_count,
+            fr.len()
+        );
         Some(fr)
     } else {
         None
@@ -633,13 +1122,19 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
     // Load init-state if provided (overrides both --initial-balance and --balance-from)
     let (effective_balance, init_state) = if let Some(ref path) = args.init_state {
         eprintln!("[replay] Loading init-state from {:?}", path);
-        let state_file = bt_core::init_state::load(path)
-            .unwrap_or_else(|e| { eprintln!("[error] {e}"); std::process::exit(1); });
+        let state_file = bt_core::init_state::load(path).unwrap_or_else(|e| {
+            eprintln!("[error] {e}");
+            std::process::exit(1);
+        });
 
         // Collect valid symbols from candle data for filtering
         let sym_strs: Vec<&str> = candles.keys().map(|s| s.as_str()).collect();
         let (balance, positions) = bt_core::init_state::into_sim_state(state_file, Some(&sym_strs));
-        eprintln!("[replay] Init-state: balance=${:.2}, {} position(s)", balance, positions.len());
+        eprintln!(
+            "[replay] Init-state: balance=${:.2}, {} position(s)",
+            balance,
+            positions.len()
+        );
         (balance, Some((balance, positions)))
     } else {
         (base_balance, None)
@@ -681,6 +1176,8 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut json_obj = serde_json::to_value(&report)?;
     if let serde_json::Value::Object(ref mut map) = json_obj {
         map.insert("per_symbol".to_string(), serde_json::to_value(&per_symbol)?);
+        // Record the effective slippage used for this run, even when overridden via CLI.
+        map.insert("slippage_bps".to_string(), serde_json::json!(cfg.trade.slippage_bps));
     }
     let json = serde_json::to_string_pretty(&json_obj)?;
     if let Some(ref path) = args.output {
@@ -702,18 +1199,27 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
     // Resolve intervals: CLI arg > YAML engine section > default "1h"
     let interval = args.interval.unwrap_or_else(|| {
         let yaml_iv = &base_cfg.engine.interval;
-        if yaml_iv.is_empty() { "1h".to_string() } else { yaml_iv.clone() }
+        if yaml_iv.is_empty() {
+            "1h".to_string()
+        } else {
+            yaml_iv.clone()
+        }
     });
 
     // Auto-resolve candle DB path from interval
     let candles_db = args.candles_db.unwrap_or_else(|| {
         format!("candles_dbs/candles_{}.db", interval)
     });
+    let candles_db_paths = resolve_db_paths(&candles_db);
 
     // Resolve exit_interval: CLI arg > YAML engine.exit_interval > None
     let exit_interval = args.exit_interval.or_else(|| {
         let yaml_eiv = &base_cfg.engine.exit_interval;
-        if yaml_eiv.is_empty() { None } else { Some(yaml_eiv.clone()) }
+        if yaml_eiv.is_empty() {
+            None
+        } else {
+            Some(yaml_eiv.clone())
+        }
     });
 
     // Auto-resolve exit candle DB paths
@@ -726,7 +1232,11 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
     // Resolve entry_interval: CLI arg > YAML engine.entry_interval > None
     let entry_interval = args.entry_interval.or_else(|| {
         let yaml_niv = &base_cfg.engine.entry_interval;
-        if yaml_niv.is_empty() { None } else { Some(yaml_niv.clone()) }
+        if yaml_niv.is_empty() {
+            None
+        } else {
+            Some(yaml_niv.clone())
+        }
     });
 
     let (entry_candles_db, entry_interval) = match (args.entry_candles_db, entry_interval) {
@@ -734,6 +1244,8 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
         (None, Some(iv)) => (Some(format!("candles_dbs/candles_{}.db", iv)), Some(iv)),
         (None, None) => (None, None),
     };
+    let exit_db_paths = exit_candles_db.as_ref().map(|p| resolve_db_paths(p));
+    let entry_db_paths = entry_candles_db.as_ref().map(|p| resolve_db_paths(p));
 
     // Resolve effective initial balance: --balance-from overrides --initial-balance
     let initial_balance = if let Some(ref path) = args.balance_from {
@@ -762,29 +1274,83 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("[sweep] Entry interval: {} (db: {})", niv, ndb);
     }
     for axis in &spec.axes {
-        eprintln!("  - {} ({} values: {:?})", axis.path, axis.values.len(), axis.values);
+        eprintln!(
+            "  - {} ({} values: {:?})",
+            axis.path,
+            axis.values.len(),
+            axis.values
+        );
     }
 
-    // Compute time range: explicit --from-ts / --to-ts, or auto-scope
-    let (from_ts, to_ts) = if !args.no_auto_scope {
-        // Always include main DB so its range participates in the intersection
-        let mut dbs: Vec<(&str, &str)> = vec![(&candles_db, &interval)];
-        if let (Some(ref edb), Some(ref eiv)) = (&exit_candles_db, &exit_interval) {
-            dbs.push((edb.as_str(), eiv.as_str()));
-        }
-        if let (Some(ref ndb), Some(ref niv)) = (&entry_candles_db, &entry_interval) {
-            dbs.push((ndb.as_str(), niv.as_str()));
-        }
-        compute_auto_scope(&dbs, args.from_ts, args.to_ts)
-    } else {
-        (args.from_ts, args.to_ts)
-    };
+    // Compute time range: explicit --start-ts / --end-ts, with optional auto-scope.
+    let mut scope_dbs: Vec<(&[String], &str)> =
+        vec![(candles_db_paths.as_slice(), interval.as_str())];
+    if let (Some(ref paths), Some(ref eiv)) = (&exit_db_paths, &exit_interval) {
+        scope_dbs.push((paths.as_slice(), eiv.as_str()));
+    }
+    if let (Some(ref paths), Some(ref niv)) = (&entry_db_paths, &entry_interval) {
+        scope_dbs.push((paths.as_slice(), niv.as_str()));
+    }
+    let (from_ts, to_ts) = resolve_time_range_or_exit(
+        "sweep",
+        &scope_dbs,
+        !args.no_auto_scope,
+        args.start_ts.map(|t| t.0),
+        args.end_ts.map(|t| t.0),
+    );
 
     // Load indicator candles (full history for warmup — no time filter)
-    let candles = bt_data::sqlite_loader::load_candles(&candles_db, &interval)?;
+    let mut candles = bt_data::sqlite_loader::load_candles_multi(&candles_db_paths, &interval)?;
     if candles.is_empty() {
         eprintln!("[sweep] No candles found. Check --candles-db.");
         std::process::exit(1);
+    }
+
+    // Optional: filter candle universe to active symbols from universe_history.db
+    let mut keep_symbols: Option<HashSet<String>> = None;
+    if args.universe_filter {
+        let (min_t, max_t) = infer_candle_range_ms(&candles).unwrap_or_else(|| {
+            eprintln!("[sweep] No candle timestamps found.");
+            std::process::exit(1);
+        });
+        let filter_from = from_ts.unwrap_or(min_t);
+        let filter_to = to_ts.unwrap_or(max_t);
+        if filter_from > filter_to {
+            eprintln!("[sweep] Invalid time range: from_ts > to_ts ({} > {})", filter_from, filter_to);
+            std::process::exit(1);
+        }
+
+        let default_universe_seed = candles_db_paths
+            .first()
+            .map(|s| s.as_str())
+            .unwrap_or(candles_db.as_str());
+        let universe_db = args
+            .universe_db
+            .clone()
+            .unwrap_or_else(|| default_universe_db_path(default_universe_seed));
+
+        eprintln!(
+            "[sweep] Universe filter enabled: range={}..{}, db={}",
+            filter_from, filter_to, universe_db,
+        );
+        let active = bt_data::sqlite_loader::load_universe_active_symbols(&universe_db, filter_from, filter_to)
+            .unwrap_or_else(|e| { eprintln!("[sweep] Universe filter failed: {e}"); std::process::exit(1); });
+        if active.is_empty() {
+            eprintln!("[sweep] Universe filter returned 0 active symbols (range={}..{})", filter_from, filter_to);
+            std::process::exit(1);
+        }
+        keep_symbols = Some(active.into_iter().collect());
+    }
+
+    // Apply final symbol filter to indicator candles
+    if let Some(ref keep) = keep_symbols {
+        let before = candles.len();
+        candles.retain(|sym, _| keep.contains(sym));
+        eprintln!("[sweep] Symbol universe: {before} -> {} symbols", candles.len());
+        if candles.is_empty() {
+            eprintln!("[sweep] No candles left after symbol filtering.");
+            std::process::exit(1);
+        }
     }
 
     let num_symbols = candles.len();
@@ -793,10 +1359,20 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // Load exit candles (filtered)
     let exit_candles = if let Some(ref exit_db) = exit_candles_db {
+        let exit_paths = exit_db_paths.as_ref().unwrap_or(&candles_db_paths);
         let exit_iv = exit_interval.as_deref().unwrap_or(&interval);
-        let ec = bt_data::sqlite_loader::load_candles_filtered(exit_db, exit_iv, from_ts, to_ts)?;
+        eprintln!("[sweep] Loading exit candles from {:?} (interval={})", exit_db, exit_iv);
+        let mut ec =
+            bt_data::sqlite_loader::load_candles_filtered_multi(exit_paths, exit_iv, from_ts, to_ts)?;
+        if let Some(ref keep) = keep_symbols {
+            ec.retain(|sym, _| keep.contains(sym));
+        }
         let ec_bars: usize = ec.values().map(|v| v.len()).sum();
-        eprintln!("[sweep] Exit candles: {} bars across {} symbols", ec_bars, ec.len());
+        eprintln!(
+            "[sweep] Exit candles: {} bars across {} symbols",
+            ec_bars,
+            ec.len()
+        );
         Some(ec)
     } else {
         None
@@ -804,10 +1380,27 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // Load entry candles (filtered)
     let entry_candles = if let Some(ref entry_db) = entry_candles_db {
+        let entry_paths = entry_db_paths.as_ref().unwrap_or(&candles_db_paths);
         let entry_iv = entry_interval.as_deref().unwrap_or(&interval);
-        let nc = bt_data::sqlite_loader::load_candles_filtered(entry_db, entry_iv, from_ts, to_ts)?;
+        eprintln!(
+            "[sweep] Loading entry candles from {:?} (interval={})",
+            entry_db, entry_iv
+        );
+        let mut nc = bt_data::sqlite_loader::load_candles_filtered_multi(
+            entry_paths,
+            entry_iv,
+            from_ts,
+            to_ts,
+        )?;
+        if let Some(ref keep) = keep_symbols {
+            nc.retain(|sym, _| keep.contains(sym));
+        }
         let nc_bars: usize = nc.values().map(|v| v.len()).sum();
-        eprintln!("[sweep] Entry candles: {} bars across {} symbols", nc_bars, nc.len());
+        eprintln!(
+            "[sweep] Entry candles: {} bars across {} symbols",
+            nc_bars,
+            nc.len()
+        );
         Some(nc)
     } else {
         None
@@ -815,9 +1408,16 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // Load funding rates (filtered)
     let funding_rates = if let Some(ref fdb) = args.funding_db {
-        let fr = bt_data::sqlite_loader::load_funding_rates_filtered(fdb, from_ts, to_ts)?;
+        let mut fr = bt_data::sqlite_loader::load_funding_rates_filtered(fdb, from_ts, to_ts)?;
+        if let Some(ref keep) = keep_symbols {
+            fr.retain(|sym, _| keep.contains(sym));
+        }
         let fr_count: usize = fr.values().map(|v| v.len()).sum();
-        eprintln!("[sweep] Funding rates: {} entries across {} symbols", fr_count, fr.len());
+        eprintln!(
+            "[sweep] Funding rates: {} entries across {} symbols",
+            fr_count,
+            fr.len()
+        );
         Some(fr)
     } else {
         None
@@ -854,8 +1454,8 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // GPU sub-bar candles: prefer exit_candles, fallback to entry_candles
     #[cfg(feature = "gpu")]
-    let gpu_sub_candles: Option<&bt_core::candle::CandleData> = exit_candles.as_ref()
-        .or(entry_candles.as_ref());
+    let gpu_sub_candles: Option<&bt_core::candle::CandleData> =
+        exit_candles.as_ref().or(entry_candles.as_ref());
 
     #[cfg(feature = "gpu")]
     if args.tpe {
@@ -1060,15 +1660,20 @@ fn cmd_dump_indicators(args: DumpArgs) -> Result<(), Box<dyn std::error::Error>>
     // Resolve interval: CLI arg > YAML engine section > default "1h"
     let interval = args.interval.unwrap_or_else(|| {
         let yaml_iv = &cfg.engine.interval;
-        if yaml_iv.is_empty() { "1h".to_string() } else { yaml_iv.clone() }
+        if yaml_iv.is_empty() {
+            "1h".to_string()
+        } else {
+            yaml_iv.clone()
+        }
     });
 
     // Auto-resolve candle DB path from interval
-    let candles_db = args.candles_db.unwrap_or_else(|| {
-        format!("candles_dbs/candles_{}.db", interval)
-    });
+    let candles_db = args
+        .candles_db
+        .unwrap_or_else(|| format!("candles_dbs/candles_{}.db", interval));
 
-    let candles = bt_data::sqlite_loader::load_candles(&candles_db, &interval)?;
+    let candles_db_paths = resolve_db_paths(&candles_db);
+    let candles = bt_data::sqlite_loader::load_candles_multi(&candles_db_paths, &interval)?;
 
     let bars = candles.get(&args.symbol).ok_or_else(|| {
         let mut available: Vec<&String> = candles.keys().collect();
@@ -1164,12 +1769,25 @@ fn print_summary(r: &bt_core::report::SimReport, initial_balance: f64) {
     eprintln!("\n=== Backtest Summary ===\n");
     eprintln!("Initial Balance:   ${:.2}", initial_balance);
     eprintln!("Final Balance:     ${:.2}", r.final_balance);
-    eprintln!("Total PnL:         ${:.2} ({:+.2}%)", r.total_pnl, r.total_pnl / initial_balance * 100.0);
+    eprintln!(
+        "Total PnL:         ${:.2} ({:+.2}%)",
+        r.total_pnl,
+        r.total_pnl / initial_balance * 100.0
+    );
     eprintln!("Total Trades:      {}", r.total_trades);
-    eprintln!("Win Rate:          {:.1}% ({}/{})", r.win_rate * 100.0, r.total_wins, r.total_trades);
+    eprintln!(
+        "Win Rate:          {:.1}% ({}/{})",
+        r.win_rate * 100.0,
+        r.total_wins,
+        r.total_trades
+    );
     eprintln!("Profit Factor:     {:.2}", r.profit_factor);
     eprintln!("Sharpe Ratio:      {:.3}", r.sharpe_ratio);
-    eprintln!("Max Drawdown:      ${:.2} ({:.2}%)", r.max_drawdown_usd, r.max_drawdown_pct * 100.0);
+    eprintln!(
+        "Max Drawdown:      ${:.2} ({:.2}%)",
+        r.max_drawdown_usd,
+        r.max_drawdown_pct * 100.0
+    );
     eprintln!("Avg Win:           ${:.2}", r.avg_win);
     eprintln!("Avg Loss:          ${:.2}", r.avg_loss);
     eprintln!("Total Fees:        ${:.2}", r.total_fees);
@@ -1178,16 +1796,27 @@ fn print_summary(r: &bt_core::report::SimReport, initial_balance: f64) {
     if !r.by_confidence.is_empty() {
         eprintln!("\n--- By Confidence ---");
         for b in &r.by_confidence {
-            eprintln!("  {:>8}: {:>4} trades, PnL ${:>8.2}, WR {:.1}%, Avg ${:.2}",
-                b.confidence, b.trades, b.pnl, b.win_rate * 100.0, b.avg_pnl);
+            eprintln!(
+                "  {:>8}: {:>4} trades, PnL ${:>8.2}, WR {:.1}%, Avg ${:.2}",
+                b.confidence,
+                b.trades,
+                b.pnl,
+                b.win_rate * 100.0,
+                b.avg_pnl
+            );
         }
     }
 
     if !r.by_exit_reason.is_empty() {
         eprintln!("\n--- By Exit Reason ---");
         for b in &r.by_exit_reason {
-            eprintln!("  {:>20}: {:>4} trades, PnL ${:>8.2}, WR {:.1}%",
-                b.reason, b.trades, b.pnl, b.win_rate * 100.0);
+            eprintln!(
+                "  {:>20}: {:>4} trades, PnL ${:>8.2}, WR {:.1}%",
+                b.reason,
+                b.trades,
+                b.pnl,
+                b.win_rate * 100.0
+            );
         }
     }
 
@@ -1195,16 +1824,38 @@ fn print_summary(r: &bt_core::report::SimReport, initial_balance: f64) {
     let gs = &r.gate_stats;
     eprintln!("\n--- Gate Stats ---");
     eprintln!("  Total checks:         {}", gs.total_checks);
-    eprintln!("  Signals generated:    {} ({:.1}%)", gs.signals_generated, gs.signal_pct * 100.0);
-    if gs.blocked_by_ranging > 0 { eprintln!("  Blocked by ranging:   {}", gs.blocked_by_ranging); }
-    if gs.blocked_by_anomaly > 0 { eprintln!("  Blocked by anomaly:   {}", gs.blocked_by_anomaly); }
-    if gs.blocked_by_adx_low > 0 { eprintln!("  Blocked by ADX low:   {}", gs.blocked_by_adx_low); }
-    if gs.blocked_by_confidence > 0 { eprintln!("  Blocked by confidence:{}", gs.blocked_by_confidence); }
-    if gs.blocked_by_max_positions > 0 { eprintln!("  Blocked by max pos:   {}", gs.blocked_by_max_positions); }
-    if gs.blocked_by_pesc > 0 { eprintln!("  Blocked by PESC:      {}", gs.blocked_by_pesc); }
-    if gs.blocked_by_ssf > 0 { eprintln!("  Blocked by SSF:       {}", gs.blocked_by_ssf); }
-    if gs.blocked_by_reef > 0 { eprintln!("  Blocked by REEF:      {}", gs.blocked_by_reef); }
-    if gs.blocked_by_margin > 0 { eprintln!("  Blocked by margin:    {}", gs.blocked_by_margin); }
+    eprintln!(
+        "  Signals generated:    {} ({:.1}%)",
+        gs.signals_generated,
+        gs.signal_pct * 100.0
+    );
+    if gs.blocked_by_ranging > 0 {
+        eprintln!("  Blocked by ranging:   {}", gs.blocked_by_ranging);
+    }
+    if gs.blocked_by_anomaly > 0 {
+        eprintln!("  Blocked by anomaly:   {}", gs.blocked_by_anomaly);
+    }
+    if gs.blocked_by_adx_low > 0 {
+        eprintln!("  Blocked by ADX low:   {}", gs.blocked_by_adx_low);
+    }
+    if gs.blocked_by_confidence > 0 {
+        eprintln!("  Blocked by confidence:{}", gs.blocked_by_confidence);
+    }
+    if gs.blocked_by_max_positions > 0 {
+        eprintln!("  Blocked by max pos:   {}", gs.blocked_by_max_positions);
+    }
+    if gs.blocked_by_pesc > 0 {
+        eprintln!("  Blocked by PESC:      {}", gs.blocked_by_pesc);
+    }
+    if gs.blocked_by_ssf > 0 {
+        eprintln!("  Blocked by SSF:       {}", gs.blocked_by_ssf);
+    }
+    if gs.blocked_by_reef > 0 {
+        eprintln!("  Blocked by REEF:      {}", gs.blocked_by_reef);
+    }
+    if gs.blocked_by_margin > 0 {
+        eprintln!("  Blocked by margin:    {}", gs.blocked_by_margin);
+    }
 }
 
 // ---------------------------------------------------------------------------
