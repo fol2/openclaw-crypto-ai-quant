@@ -59,8 +59,13 @@ archive/
 # Exports (trade CSV data)
 exports/
 
-# Sweep results (large JSONL outputs)
-sweep_full/
+# Sweep — track scripts, ignore configs + results
+sweep_full/*.yaml
+sweep_full/*.csv
+sweep_full/*.json
+sweep_full/*.jsonl
+sweep_full/results/
+sweep_full/results_*/
 
 # Linter cache
 .ruff_cache/
