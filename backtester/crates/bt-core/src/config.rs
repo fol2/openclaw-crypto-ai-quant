@@ -966,11 +966,24 @@ fn engine_to_json(e: &EngineConfig) -> serde_json::Value {
 ///
 ///   defaults <- global <- symbols.<symbol> <- live (if `is_live`)
 ///
-/// If `yaml_path` does not exist, returns `StrategyConfig::default()`.
+/// If `yaml_path` does not exist, prints a warning to stderr and returns `StrategyConfig::default()`.
 pub fn load_config(yaml_path: &str, symbol: Option<&str>, is_live: bool) -> StrategyConfig {
     let path = Path::new(yaml_path);
-    if !path.exists() {
-        return StrategyConfig::default();
+    match std::fs::metadata(path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let cwd = std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "<unknown>".to_string());
+            eprintln!(
+                "[config] Warning: YAML config file does not exist: {yaml_path} (cwd: {cwd}). Using defaults."
+            );
+            return StrategyConfig::default();
+        }
+        Err(_) => {
+            // Preserve the previous behaviour: treat other metadata errors as "missing" and fall back silently.
+            return StrategyConfig::default();
+        }
     }
 
     let raw = match std::fs::read_to_string(path) {
