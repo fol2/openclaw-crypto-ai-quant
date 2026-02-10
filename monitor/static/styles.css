@@ -247,6 +247,17 @@ button, input, summary { touch-action: manipulation; }
   font-weight: 500;
 }
 
+.pill.paused {
+  border-color: var(--accent2-border);
+  background: var(--accent2-dim);
+  color: var(--txt);
+}
+
+.pill.running {
+  border-color: var(--ok-border);
+  background: var(--ok-dim);
+}
+
 
 /* ============================================================
    CONNECTION DOT
@@ -260,6 +271,10 @@ button, input, summary { touch-action: manipulation; }
 .dot.ok {
   background: var(--ok);
   box-shadow: 0 0 6px rgba(0,230,118,0.45), 0 0 2px rgba(0,230,118,0.7);
+}
+.dot.warn {
+  background: var(--warn);
+  box-shadow: 0 0 6px rgba(255,167,38,0.45), 0 0 2px rgba(255,167,38,0.7);
 }
 .dot.bad {
   background: var(--accent2);

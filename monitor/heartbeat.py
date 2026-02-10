@@ -29,6 +29,9 @@ _HB_OPEN_POS_RE = re.compile(r"open_pos=([0-9]+)", re.IGNORECASE)
 _HB_WS_CONNECTED_RE = re.compile(r"ws_connected=(True|False)", re.IGNORECASE)
 _HB_WS_THREAD_RE = re.compile(r"ws_thread_alive=(True|False)", re.IGNORECASE)
 _HB_WS_RESTARTS_RE = re.compile(r"ws_restarts=([0-9]+)", re.IGNORECASE)
+_HB_KILL_MODE_RE = re.compile(r"kill=(off|close_only|halt_all)", re.IGNORECASE)
+_HB_KILL_REASON_RE = re.compile(r"kill_reason=([^\s]+)", re.IGNORECASE)
+_HB_CONFIG_ID_RE = re.compile(r"config_id=([0-9a-f]{8,64}|none)", re.IGNORECASE)
 
 
 def connect_db_ro(db_path: Path) -> sqlite3.Connection:
@@ -148,4 +151,15 @@ def parse_last_heartbeat(db_path: Path, log_path: Path) -> dict[str, Any]:
     wsr_m = _HB_WS_RESTARTS_RE.search(last_line)
     if wsr_m:
         out["ws_restarts"] = int(wsr_m.group(1))
+    km_m = _HB_KILL_MODE_RE.search(last_line)
+    if km_m:
+        out["kill_mode"] = km_m.group(1).lower()
+    kr_m = _HB_KILL_REASON_RE.search(last_line)
+    if kr_m:
+        out["kill_reason"] = kr_m.group(1)
+    cid_m = _HB_CONFIG_ID_RE.search(last_line)
+    if cid_m:
+        cid = cid_m.group(1).lower()
+        if cid != "none":
+            out["config_id"] = cid
     return out
