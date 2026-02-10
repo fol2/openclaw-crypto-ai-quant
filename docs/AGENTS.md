@@ -30,7 +30,11 @@ This is a crypto perpetual futures trading engine for Hyperliquid DEX. The syste
 
 ### Candle Database Coverage
 
-Different candle databases cover different time spans. When running backtests across multiple intervals, ALWAYS restrict all runs to the same date range for valid comparisons:
+Hyperliquid only provides roughly the last 5,000 bars per interval for REST backfill (`candleSnapshot`). The figures below are the approximate *backfill window* implied by that limit.
+
+The WS sidecar can retain an append-only local history beyond that window for selected intervals (see `AI_QUANT_CANDLE_PRUNE_DISABLE_INTERVALS`), so do not assume these DBs have fixed coverage. Always query the actual min/max timestamps when choosing backtest ranges.
+
+When running backtests across multiple intervals, ALWAYS restrict all runs to the same date range for valid comparisons:
 
 - `1m`: 3.5 days
 - `3m`: 10 days
