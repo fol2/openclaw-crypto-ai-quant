@@ -69,6 +69,44 @@ def _safe_int(v: Any, default: int | None = None) -> int | None:
         return default
 
 
+def _cloid_matches_prefix(cloid: str | None, prefix: str) -> bool:
+    """Return True if `cloid` belongs to our bot based on a configurable prefix.
+
+    Backwards compatibility:
+    - Historically this project used human-readable `client_order_id` values like `aiq_...`.
+      Hyperliquid's SDK, however, validates cloID as a 16-byte hex string with a `0x` prefix.
+    - Today we encode the ASCII prefix (default: `aiq_`) into the first bytes of the cloid.
+
+    Supported prefix formats:
+    - Raw string prefix: exact `startswith()` match (e.g. `0x6169715f`)
+    - ASCII prefix: decode the cloid hex to bytes and check `bytes.startswith(prefix.encode('ascii'))`
+      (e.g. `aiq_`)
+    """
+    c = str(cloid or "").strip()
+    p = str(prefix or "").strip()
+    if not c or not p:
+        return False
+
+    if c.startswith(p):
+        return True
+
+    # ASCII prefix: decode cloid bytes.
+    if not p.startswith("0x") and c.startswith("0x") and len(c) >= 4:
+        try:
+            b = bytes.fromhex(c[2:])
+        except Exception:
+            return False
+        try:
+            pb = p.encode("ascii")
+        except Exception:
+            pb = p.encode("ascii", errors="ignore")
+        if not pb:
+            return False
+        return b.startswith(pb)
+
+    return False
+
+
 @dataclass(frozen=True)
 class OpenOrder:
     symbol: str
@@ -127,7 +165,9 @@ class LiveOmsReconciler:
         # Staleness
         self.order_ttl_ms = int(max(2_000, _env_int("AI_QUANT_OMS_STALE_ORDER_MS", 30_000)))
         # For orders we cannot map to an intent but have our prefix.
-        self.unknown_order_ttl_ms = int(max(self.order_ttl_ms, _env_int("AI_QUANT_OMS_UNKNOWN_STALE_ORDER_MS", 300_000)))
+        self.unknown_order_ttl_ms = int(
+            max(self.order_ttl_ms, _env_int("AI_QUANT_OMS_UNKNOWN_STALE_ORDER_MS", 300_000))
+        )
 
         self.manage_prefix = _env_str("AI_QUANT_OMS_CLOID_PREFIX", "aiq_").strip() or "aiq_"
         self.cancel_stale = _env_bool("AI_QUANT_OMS_CANCEL_STALE", True)
@@ -220,7 +260,7 @@ class LiveOmsReconciler:
 
             # Only manage our bot orders by default.
             is_ours = False
-            if oo.client_order_id and str(oo.client_order_id).startswith(self.manage_prefix):
+            if oo.client_order_id and _cloid_matches_prefix(str(oo.client_order_id), self.manage_prefix):
                 is_ours = True
             if intent_id is not None:
                 is_ours = True
@@ -415,7 +455,7 @@ class LiveOmsReconciler:
 
         cloid = str(client_order_id or "").strip()
         is_ours = False
-        if cloid and cloid.startswith(self.manage_prefix):
+        if cloid and _cloid_matches_prefix(cloid, self.manage_prefix):
             is_ours = True
         if intent_id is not None:
             is_ours = True
@@ -496,7 +536,9 @@ class LiveOmsReconciler:
             except Exception:
                 pass
 
-        ok, why = self._cancel_exchange_order(symbol=sym, exchange_order_id=oo.exchange_order_id, client_order_id=oo.client_order_id)
+        ok, why = self._cancel_exchange_order(
+            symbol=sym, exchange_order_id=oo.exchange_order_id, client_order_id=oo.client_order_id
+        )
 
         # Audit + DB
         kind = f"{str(reason_kind)}_OK" if ok else f"{str(reason_kind)}_FAIL"
@@ -544,7 +586,9 @@ class LiveOmsReconciler:
                 status = "CANCELLED"
                 if req_sz is not None and req_sz > 0 and filled > 0:
                     status = "PARTIAL_CANCELLED" if filled < (req_sz * 0.999) else "FILLED"
-                self.store.update_intent(intent_id, status=status, last_error=f"{str(reason_kind).lower()}:{oo.exchange_order_id}")
+                self.store.update_intent(
+                    intent_id, status=status, last_error=f"{str(reason_kind).lower()}:{oo.exchange_order_id}"
+                )
 
                 # If we cancelled a full close order, clear the close-spam backoff so the strategy can reattempt.
                 if trader is not None and action == "CLOSE":
@@ -557,7 +601,9 @@ class LiveOmsReconciler:
             except Exception:
                 pass
 
-    def _cancel_exchange_order(self, *, symbol: str, exchange_order_id: str, client_order_id: str | None) -> tuple[bool, str]:
+    def _cancel_exchange_order(
+        self, *, symbol: str, exchange_order_id: str, client_order_id: str | None
+    ) -> tuple[bool, str]:
         """Best-effort cancel using whatever executor API is available."""
         oid = str(exchange_order_id)
 

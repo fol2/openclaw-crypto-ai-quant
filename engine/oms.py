@@ -150,6 +150,67 @@ def _action_side(pos_type: str, action: str) -> str | None:
     return None
 
 
+def _is_valid_hl_cloid(cloid: str | None) -> bool:
+    """Return True if the string looks like a Hyperliquid Cloid (16-byte hex with 0x prefix)."""
+    if not cloid:
+        return False
+    s = str(cloid).strip()
+    if not s.startswith("0x"):
+        return False
+    if len(s) != 34:
+        return False
+    try:
+        bytes.fromhex(s[2:])
+    except Exception:
+        return False
+    return True
+
+
+def _make_hl_cloid(*, seed_hex: str, prefix: str) -> str:
+    """Generate a valid Hyperliquid `cloid` string.
+
+    Hyperliquid's Python SDK validates `cloid` as a 16-byte hex string with a `0x` prefix.
+    We encode an ASCII prefix (default: `aiq_`) into the first bytes for easy identification,
+    and fill the remainder deterministically from `seed_hex` (typically `intent_id`).
+
+    The `prefix` may be:
+    - an ASCII string (e.g. `aiq_`)
+    - a hex string representing raw bytes (e.g. `0x6169715f` for `aiq_`)
+    """
+    try:
+        seed_b = bytes.fromhex(str(seed_hex or "").strip())
+    except Exception:
+        seed_b = uuid.uuid4().bytes
+    # `seed_hex` is expected to be 32 hex chars (16 bytes); truncate/pad defensively.
+    if len(seed_b) < 16:
+        seed_b = (seed_b + (b"\x00" * 16))[:16]
+    elif len(seed_b) > 16:
+        seed_b = seed_b[:16]
+
+    prefix_s = str(prefix or "").strip()
+    prefix_b = b""
+    if prefix_s.startswith("0x"):
+        try:
+            hx = prefix_s[2:]
+            if hx and (len(hx) % 2 == 0):
+                prefix_b = bytes.fromhex(hx)
+        except Exception:
+            prefix_b = b""
+    if not prefix_b:
+        try:
+            prefix_b = prefix_s.encode("ascii", errors="ignore")
+        except Exception:
+            prefix_b = b""
+    # Keep some entropy for uniqueness (avoid letting a too-long prefix consume all 16 bytes).
+    prefix_b = prefix_b[:8]
+
+    need = 16 - len(prefix_b)
+    out_b = prefix_b + (seed_b[:need] if need > 0 else b"")
+    if len(out_b) != 16:
+        out_b = (out_b + (b"\x00" * 16))[:16]
+    return "0x" + out_b.hex()
+
+
 @dataclass(frozen=True)
 class IntentHandle:
     intent_id: str
@@ -256,7 +317,9 @@ class OmsStore:
 
             # Dedupe open intents across restarts per candle (dedupe_key is NULL for most intents).
             cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_oms_intents_dedupe ON oms_intents(dedupe_key)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_oms_intents_symbol_status ON oms_intents(symbol, status, sent_ts_ms)")
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_oms_intents_symbol_status ON oms_intents(symbol, status, sent_ts_ms)"
+            )
             cur.execute("CREATE INDEX IF NOT EXISTS idx_oms_intents_client_order_id ON oms_intents(client_order_id)")
 
             # Open order snapshots (reconcile loop). This is an upsert table (1 row per exch order id).
@@ -278,7 +341,9 @@ class OmsStore:
                 )
                 """
             )
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_oms_open_orders_symbol ON oms_open_orders(symbol, last_seen_ts_ms)")
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_oms_open_orders_symbol ON oms_open_orders(symbol, last_seen_ts_ms)"
+            )
 
             # Reconcile actions log (append-only, small).
             cur.execute(
@@ -386,6 +451,7 @@ class OmsStore:
         *,
         status: str | None = None,
         sent_ts_ms: int | None = None,
+        client_order_id: str | None = None,
         exchange_order_id: str | None = None,
         last_error: str | None = None,
     ) -> None:
@@ -397,6 +463,9 @@ class OmsStore:
         if sent_ts_ms is not None:
             sets.append("sent_ts_ms = ?")
             vals.append(int(sent_ts_ms))
+        if client_order_id is not None:
+            sets.append("client_order_id = ?")
+            vals.append(str(client_order_id))
         if exchange_order_id is not None:
             sets.append("exchange_order_id = ?")
             vals.append(str(exchange_order_id))
@@ -509,7 +578,9 @@ class OmsStore:
         finally:
             conn.close()
 
-    def list_active_intents(self, *, statuses: tuple[str, ...] = ("SENT", "PARTIAL"), limit: int = 5000) -> list[dict[str, Any]]:
+    def list_active_intents(
+        self, *, statuses: tuple[str, ...] = ("SENT", "PARTIAL"), limit: int = 5000
+    ) -> list[dict[str, Any]]:
         conn = self._connect()
         cur = conn.cursor()
         try:
@@ -844,7 +915,9 @@ class LiveOms:
         # OMS writes should be fast and never stall the live engine loop.
         # Use a dedicated timeout knob (defaults to the fill-ingest timeout).
         try:
-            timeout_s = float(os.getenv("AI_QUANT_OMS_STORE_DB_TIMEOUT_S", os.getenv("AI_QUANT_OMS_DB_TIMEOUT_S", "1.0")))
+            timeout_s = float(
+                os.getenv("AI_QUANT_OMS_STORE_DB_TIMEOUT_S", os.getenv("AI_QUANT_OMS_DB_TIMEOUT_S", "1.0"))
+            )
         except Exception:
             timeout_s = 1.0
         timeout_s = float(max(0.05, min(5.0, timeout_s)))
@@ -878,7 +951,9 @@ class LiveOms:
 
         # Orphan/unmatched fill reconciliation (best-effort; for manual fills or legacy gaps).
         try:
-            self._unmatched_reconcile_every_s = float(os.getenv("AI_QUANT_OMS_UNMATCHED_RECONCILE_SECS", "300") or 300.0)
+            self._unmatched_reconcile_every_s = float(
+                os.getenv("AI_QUANT_OMS_UNMATCHED_RECONCILE_SECS", "300") or 300.0
+            )
         except Exception:
             self._unmatched_reconcile_every_s = 300.0
         self._unmatched_reconcile_every_s = float(max(30.0, min(self._unmatched_reconcile_every_s, 6 * 60 * 60.0)))
@@ -894,7 +969,9 @@ class LiveOms:
             self._unmatched_grace_ms = 60000
         self._unmatched_grace_ms = int(max(0, min(self._unmatched_grace_ms, 24 * 60 * 60 * 1000)))
 
-        self._manual_intent_prefix = str(os.getenv("AI_QUANT_OMS_MANUAL_INTENT_PREFIX", "manual_") or "manual_").strip() or "manual_"
+        self._manual_intent_prefix = (
+            str(os.getenv("AI_QUANT_OMS_MANUAL_INTENT_PREFIX", "manual_") or "manual_").strip() or "manual_"
+        )
 
     def create_intent(
         self,
@@ -919,9 +996,11 @@ class LiveOms:
         created_ms = now_ms()
         decision_ms = _coerce_ts_ms(decision_ts)
 
-        # Keep client ids short-ish. If HL expects specific format/length, adjust here.
+        # Hyperliquid validates cloid as a 16-byte hex string with a 0x prefix.
+        # We encode an ASCII prefix (default: aiq_) into the first bytes for identification.
         intent_id = uuid.uuid4().hex
-        client_order_id = f"aiq_{intent_id[:20]}"
+        cloid_prefix = str(os.getenv("AI_QUANT_OMS_CLOID_PREFIX", "aiq_") or "aiq_").strip() or "aiq_"
+        client_order_id = _make_hl_cloid(seed_hex=intent_id, prefix=cloid_prefix)
 
         dedupe_key: str | None = None
         if dedupe_open and ac == "OPEN" and decision_ms is not None:
@@ -976,6 +1055,16 @@ class LiveOms:
             existing = self.store.get_intent_by_dedupe_key(dedupe_key)
             if existing is not None:
                 existing_id, existing_client = existing
+                # Best-effort: older DB rows may contain non-HL cloids. Upgrade in place so future
+                # submissions can pass a valid cloid to the SDK.
+                if not _is_valid_hl_cloid(existing_client):
+                    upgraded = _make_hl_cloid(seed_hex=str(existing_id), prefix=cloid_prefix)
+                    try:
+                        self.store.update_intent(str(existing_id), client_order_id=upgraded)
+                        existing_client = upgraded
+                    except Exception:
+                        # If we cannot update, keep the stored value to avoid lying to the caller.
+                        pass
                 return IntentHandle(
                     intent_id=str(existing_id),
                     client_order_id=existing_client,
@@ -983,7 +1072,9 @@ class LiveOms:
                     duplicate=True,
                 )
 
-        return IntentHandle(intent_id=intent_id, client_order_id=client_order_id, dedupe_key=dedupe_key, duplicate=False)
+        return IntentHandle(
+            intent_id=intent_id, client_order_id=client_order_id, dedupe_key=dedupe_key, duplicate=False
+        )
 
     def mark_would(self, intent: IntentHandle, *, note: str | None = None) -> None:
         # Used for dry_live mode.
@@ -1053,7 +1144,9 @@ class LiveOms:
         sym = str(symbol or "").strip().upper()
         sd = str(side or "").strip().upper()
 
-        self.store.update_intent(intent.intent_id, status="SENT", sent_ts_ms=sent_ms, exchange_order_id=exch, last_error="")
+        self.store.update_intent(
+            intent.intent_id, status="SENT", sent_ts_ms=sent_ms, exchange_order_id=exch, last_error=""
+        )
         self.store.insert_order(
             intent_id=intent.intent_id,
             created_ts_ms=sent_ms,
@@ -1102,7 +1195,9 @@ class LiveOms:
 
     def _maybe_reconcile_unmatched_fills(self, *, trader: Any | None) -> None:
         now_s = time.time()
-        if self._last_unmatched_reconcile_s and (now_s - self._last_unmatched_reconcile_s) < float(self._unmatched_reconcile_every_s):
+        if self._last_unmatched_reconcile_s and (now_s - self._last_unmatched_reconcile_s) < float(
+            self._unmatched_reconcile_every_s
+        ):
             return
         self._last_unmatched_reconcile_s = now_s
         try:
@@ -1347,7 +1442,9 @@ class LiveOms:
                                 obj = {}
                             obj.setdefault("oms", {})
                             if isinstance(obj.get("oms"), dict):
-                                obj["oms"].update({"intent_id": intent_id, "matched_via": matched_via, "exchange_order_id": oid})
+                                obj["oms"].update(
+                                    {"intent_id": intent_id, "matched_via": matched_via, "exchange_order_id": oid}
+                                )
                             obj.setdefault("reconcile", {})
                             if isinstance(obj.get("reconcile"), dict):
                                 obj["reconcile"].update({"unmatched_fill": True})
@@ -1360,7 +1457,16 @@ class LiveOms:
 
                 if len(samples) < 5:
                     try:
-                        samples.append({"symbol": sym_u, "action": action_u, "side": side_u, "t_ms": int(ts_ms), "intent_id": str(intent_id), "matched_via": matched_via})
+                        samples.append(
+                            {
+                                "symbol": sym_u,
+                                "action": action_u,
+                                "side": side_u,
+                                "t_ms": int(ts_ms),
+                                "intent_id": str(intent_id),
+                                "matched_via": matched_via,
+                            }
+                        )
                     except Exception:
                         pass
 
@@ -1384,7 +1490,9 @@ class LiveOms:
                             None,
                             None,
                             "ok",
-                            json_dumps_safe({"scanned": scanned, "matched": matched, "manual": manual, "samples": samples}),
+                            json_dumps_safe(
+                                {"scanned": scanned, "matched": matched, "manual": manual, "samples": samples}
+                            ),
                         ),
                     )
                     conn.commit()
@@ -1429,7 +1537,9 @@ class LiveOms:
         except Exception:
             return None
 
-    def match_intent_for_fill(self, *, fill: dict, symbol: str, action: str, side: str, t_ms: int) -> tuple[str | None, str | None]:
+    def match_intent_for_fill(
+        self, *, fill: dict, symbol: str, action: str, side: str, t_ms: int
+    ) -> tuple[str | None, str | None]:
         """Returns (intent_id, matched_via)."""
         # Layer 1: Exchange Order ID
         oid = self._extract_exchange_order_id_from_fill(fill)
@@ -1454,7 +1564,9 @@ class LiveOms:
                 return intent_id, "client_order_id"
 
         # Layer 3: Time Proximity
-        intent_id = self.store.find_pending_intent(symbol=symbol, action=action, side=side, t_ms=int(t_ms), ttl_ms=int(self.match_ttl_ms))
+        intent_id = self.store.find_pending_intent(
+            symbol=symbol, action=action, side=side, t_ms=int(t_ms), ttl_ms=int(self.match_ttl_ms)
+        )
         if intent_id:
             return intent_id, "time_proximity"
 
@@ -1500,7 +1612,9 @@ class LiveOms:
         # Only backfill signals we believe came from the bot (avoid manual orders).
         reason_s = str(reason or "")
         meta2 = meta if isinstance(meta, dict) else {}
-        bot_likely = bool(intent_id) or reason_s.lower().startswith("signal") or ("order" in meta2) or ("audit" in meta2)
+        bot_likely = (
+            bool(intent_id) or reason_s.lower().startswith("signal") or ("order" in meta2) or ("audit" in meta2)
+        )
         if not bot_likely:
             return False
 
@@ -1579,11 +1693,17 @@ class LiveOms:
         This is a lightweight repair tool for older live DBs where signals were not persisted.
         """
         try:
-            lb_h = float(os.getenv("AI_QUANT_SIGNAL_BACKFILL_LOOKBACK_H", "48")) if lookback_h is None else float(lookback_h)
+            lb_h = (
+                float(os.getenv("AI_QUANT_SIGNAL_BACKFILL_LOOKBACK_H", "48"))
+                if lookback_h is None
+                else float(lookback_h)
+            )
         except Exception:
             lb_h = 48.0
         try:
-            max_n = int(os.getenv("AI_QUANT_SIGNAL_BACKFILL_MAX_TRADES", "2000")) if max_trades is None else int(max_trades)
+            max_n = (
+                int(os.getenv("AI_QUANT_SIGNAL_BACKFILL_MAX_TRADES", "2000")) if max_trades is None else int(max_trades)
+            )
         except Exception:
             max_n = 2000
         max_n = int(max(0, min(max_n, 200000)))
@@ -1728,7 +1848,13 @@ class LiveOms:
         Returns the number of NEW fills inserted into trades (deduped).
         """
         if not fills:
-            self.last_ingest_stats = {"success": True, "total_in": 0, "considered": 0, "inserted_trades": 0, "unmatched_new": 0}
+            self.last_ingest_stats = {
+                "success": True,
+                "total_in": 0,
+                "considered": 0,
+                "inserted_trades": 0,
+                "unmatched_new": 0,
+            }
             return 0
 
         inserted = 0
@@ -1841,7 +1967,9 @@ class LiveOms:
                     intent_id = _oid_intent_cache[_oid]
                     matched_via = "exchange_order_id_batch"
                 else:
-                    intent_id, matched_via = self.match_intent_for_fill(fill=f, symbol=sym, action=action, side=side, t_ms=int(t_ms))
+                    intent_id, matched_via = self.match_intent_for_fill(
+                        fill=f, symbol=sym, action=action, side=side, t_ms=int(t_ms)
+                    )
                     # Populate cache for subsequent partial fills in this batch.
                     if intent_id and _oid:
                         _oid_intent_cache[_oid] = intent_id
@@ -1888,7 +2016,9 @@ class LiveOms:
                         lev = _safe_float(lev_raw, None)
                 if lev is None or lev <= 0:
                     try:
-                        lev = _safe_float(((getattr(trader, "positions", {}) or {}).get(sym) or {}).get("leverage"), None)
+                        lev = _safe_float(
+                            ((getattr(trader, "positions", {}) or {}).get(sym) or {}).get("leverage"), None
+                        )
                     except Exception:
                         lev = None
                 if lev is None or lev <= 0:
@@ -2226,14 +2356,20 @@ class LiveOms:
 
                 # Update in-memory strategy state on opens.
                 try:
-                    if (trade_inserted or oms_fill_inserted) and action == "OPEN" and sym in (getattr(trader, "positions", {}) or {}):
+                    if (
+                        (trade_inserted or oms_fill_inserted)
+                        and action == "OPEN"
+                        and sym in (getattr(trader, "positions", {}) or {})
+                    ):
                         pos = trader.positions[sym]
                         pos["confidence"] = conf
                         if entry_atr is not None and entry_atr > 0:
                             pos["entry_atr"] = float(entry_atr)
                         pos["open_timestamp"] = ts_iso
                         if fill_hash is not None and tid is not None:
-                            cur.execute("SELECT id FROM trades WHERE fill_hash = ? AND fill_tid = ? LIMIT 1", (fill_hash, tid))
+                            cur.execute(
+                                "SELECT id FROM trades WHERE fill_hash = ? AND fill_tid = ? LIMIT 1", (fill_hash, tid)
+                            )
                             row = cur.fetchone()
                             if row and row[0]:
                                 pos["open_trade_id"] = int(row[0])
@@ -2288,7 +2424,7 @@ class LiveOms:
                             f"📥 LIVE FILL {row['action']} {row['pos_type']} {row['symbol']} px={float(row['price']):.4f} "
                             f"size={float(row['size']):.6f} notional=${float(row['notional']):.2f} "
                             f"lev={lev_s} margin~={margin_s} fee=${float(row['fee']):.4f} pnl=${float(row['pnl']):.2f} "
-                            f"conf={row.get('confidence','N/A')} reason={row.get('reason','')}"
+                            f"conf={row.get('confidence', 'N/A')} reason={row.get('reason', '')}"
                         )
                     except Exception:
                         pass
