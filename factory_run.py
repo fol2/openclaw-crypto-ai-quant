@@ -646,6 +646,21 @@ def _render_validation_report_md(items: list[dict[str, Any]], *, score_min_trade
                     lines.append(f"- MC {method} return CI95: [{float(r_ci[0]):.6f}, {float(r_ci[1]):.6f}]")
                 if isinstance(dd_ci, list) and len(dd_ci) == 2:
                     lines.append(f"- MC {method} max DD pct CI95: [{float(dd_ci[0]):.6f}, {float(dd_ci[1]):.6f}]")
+        cu = it.get("cross_universe")
+        if isinstance(cu, dict) and cu:
+            names = sorted([str(k) for k in cu.keys() if str(k).strip()])
+            for name in names[:3]:
+                payload = cu.get(name, {})
+                if not isinstance(payload, dict):
+                    continue
+                lines.append(
+                    "- cross-universe {name}: share_net_pnl={pnl:.4f}, share_trades={tr:.4f}, subset_net_pnl={sub:.2f}".format(
+                        name=name,
+                        pnl=float(payload.get("share_net_pnl_usd", 0.0) or 0.0),
+                        tr=float(payload.get("share_trades", 0.0) or 0.0),
+                        sub=float(payload.get("subset_net_pnl_usd", 0.0) or 0.0),
+                    )
+                )
         if _has_num(it.get("top1_pnl_pct")):
             lines.append(f"- top1 pnl pct: {float(it.get('top1_pnl_pct', 0.0)):.4f}")
         if _has_num(it.get("top5_pnl_pct")):
@@ -951,6 +966,7 @@ def main(argv: list[str] | None = None) -> int:
             "monte_carlo_iters",
             "monte_carlo_seed",
             "monte_carlo_methods",
+            "cross_universe_set",
             "score_min_trades",
             "score_trades_penalty_weight",
             "tpe",
@@ -1447,6 +1463,65 @@ def main(argv: list[str] | None = None) -> int:
             except Exception:
                 summary["monte_carlo_error"] = "failed to load monte_carlo summary.json"
 
+        cu_sets = getattr(args, "cross_universe_set", None)
+        if isinstance(cu_sets, list) and cu_sets:
+            cu_dir = run_dir / "cross_universe" / str(cfg_path.stem)
+            cu_dir.mkdir(parents=True, exist_ok=True)
+            cu_summary_path = cu_dir / "summary.json"
+
+            cu_stdout = cu_dir / "cross_universe.stdout.txt"
+            cu_stderr = cu_dir / "cross_universe.stderr.txt"
+
+            if bool(args.resume) and _is_nonempty_file(cu_summary_path):
+                cu_res = CmdResult(
+                    argv=[],
+                    cwd=str(AIQ_ROOT),
+                    exit_code=0,
+                    elapsed_s=0.0,
+                    stdout_path=str(cu_stdout),
+                    stderr_path=str(cu_stderr),
+                )
+                meta["steps"].append({"name": f"cross_universe_{cfg_path.stem}_skip", **cu_res.__dict__})
+            else:
+                cu_argv = [
+                    "python3",
+                    "tools/cross_universe_validate.py",
+                    "--replay-report",
+                    str(out_json),
+                ]
+                for it in cu_sets:
+                    if it:
+                        cu_argv += ["--symbol-set", str(it)]
+                cu_argv += ["--output", str(cu_summary_path)]
+
+                cu_res = _run_cmd(cu_argv, cwd=AIQ_ROOT, stdout_path=cu_stdout, stderr_path=cu_stderr)
+                meta["steps"].append({"name": f"cross_universe_{cfg_path.stem}", **cu_res.__dict__})
+                if cu_res.exit_code != 0:
+                    _write_json(run_dir / "run_metadata.json", meta)
+                    return int(cu_res.exit_code)
+
+            summary["cross_universe_summary_path"] = str(cu_summary_path)
+            try:
+                cu_obj = _load_json(cu_summary_path)
+                sets_obj = cu_obj.get("sets", []) if isinstance(cu_obj, dict) else []
+                cu_map: dict[str, Any] = {}
+                if isinstance(sets_obj, list):
+                    for s in sets_obj:
+                        if not isinstance(s, dict):
+                            continue
+                        name = str(s.get("name", "")).strip() or "set"
+                        subset = s.get("subset", {}) if isinstance(s.get("subset", {}), dict) else {}
+                        shares = s.get("shares", {}) if isinstance(s.get("shares", {}), dict) else {}
+                        cu_map[name] = {
+                            "subset_net_pnl_usd": float(subset.get("net_pnl_usd", 0.0) or 0.0),
+                            "subset_trades": float(subset.get("trades", 0.0) or 0.0),
+                            "share_net_pnl_usd": float(shares.get("net_pnl_usd", 0.0) or 0.0),
+                            "share_trades": float(shares.get("trades", 0.0) or 0.0),
+                        }
+                summary["cross_universe"] = cu_map
+            except Exception:
+                summary["cross_universe_error"] = "failed to load cross_universe summary.json"
+
         if bool(getattr(args, "concentration_checks", False)):
             cc_dir = run_dir / "concentration" / str(cfg_path.stem)
             cc_dir.mkdir(parents=True, exist_ok=True)
@@ -1901,6 +1976,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--monte-carlo-methods",
         default="bootstrap",
         help="Comma-separated methods: bootstrap,shuffle (default: bootstrap).",
+    )
+
+    ap.add_argument(
+        "--cross-universe-set",
+        action="append",
+        default=[],
+        help="Cross-universe symbol set in NAME=PATH format (repeatable). Compares subset vs full using per_symbol stats.",
     )
 
     ap.add_argument(
