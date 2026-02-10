@@ -204,6 +204,7 @@ def deploy_paper_config(
 
     # Always write the artefact, even in dry-run mode.
     (deploy_dir / "deployed_config.yaml").write_text(yaml_text, encoding="utf-8")
+    (deploy_dir / "prev_config.yaml").write_text(prev_text, encoding="utf-8")
 
     if not dry_run:
         _atomic_write_text(yaml_path, yaml_text)
