@@ -916,7 +916,7 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
     _write_json(run_dir / "reports" / "report.json", {"items": replay_reports})
 
     validation_md = _render_validation_report_md(
-        replay_reports, score_min_trades=int(getattr(args, "score_min_trades", 30) or 30)
+        replay_reports, score_min_trades=int(source_args.get("score_min_trades", 30) or 30)
     )
     (run_dir / "reports" / "validation_report.md").write_text(validation_md, encoding="utf-8")
 
