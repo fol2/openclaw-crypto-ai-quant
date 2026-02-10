@@ -32,9 +32,21 @@ Environment=AI_QUANT_CANDLE_HORIZON_15m_D=53
 Environment=AI_QUANT_CANDLE_HORIZON_30m_D=105
 Environment=AI_QUANT_CANDLE_HORIZON_1h_D=209
 Environment=AI_QUANT_SIDECAR_INTERVALS=1m,3m,5m,15m,30m,1h
+# Enable BBO subscriptions if you want bid/ask updates (and optional BBO snapshots).
 Environment=AI_QUANT_WS_ENABLE_BBO=0
 Environment=AI_QUANT_WS_ENABLE_CANDLE=0
 Environment=AI_QUANT_WS_ENABLE_META=0
+# Optional: sampled BBO snapshot storage for slippage modelling (requires AI_QUANT_WS_ENABLE_BBO=1).
+Environment=AI_QUANT_BBO_SNAPSHOTS_ENABLE=0
+# Default is derived from AI_QUANT_CANDLES_DB_DIR when unset.
+Environment=AI_QUANT_BBO_SNAPSHOTS_DB_PATH=$PROJECT_DIR/candles_dbs/bbo_snapshots.db
+# Per-symbol throttle for snapshot inserts.
+Environment=AI_QUANT_BBO_SNAPSHOTS_SAMPLE_MS=1000
+# Time-based retention to keep storage bounded.
+Environment=AI_QUANT_BBO_SNAPSHOTS_RETENTION_HOURS=24
+Environment=AI_QUANT_BBO_SNAPSHOTS_RETENTION_SWEEP_SECS=600
+# Bounded in-memory queue between the WS processor and the DB writer.
+Environment=AI_QUANT_BBO_SNAPSHOTS_MAX_QUEUE=20000
 Environment=AI_QUANT_WS_CLIENT_TTL_SECS=600
 Environment=AI_QUANT_DB_TIMEOUT_S=30
 Environment=RUST_BACKTRACE=1
