@@ -536,6 +536,7 @@ pub fn run_simulation(
                     entry_atr: cand.atr,
                     leverage,
                     margin_used,
+                    ..Default::default()
                 });
             }
         }
@@ -748,6 +749,7 @@ pub fn run_simulation(
                                         entry_atr: pos.entry_atr,
                                         leverage: pos.leverage,
                                         margin_used: pos.margin_used,
+                                        ..Default::default()
                                     });
                                 }
                             }
@@ -1120,6 +1122,7 @@ fn apply_exit(
             entry_atr: pos.entry_atr,
             leverage: pos.leverage,
             margin_used: pos.margin_used * partial_pct,
+            ..Default::default()
         });
 
         // Reduce position in place
@@ -1166,6 +1169,7 @@ fn apply_exit(
             entry_atr: pos.entry_atr,
             leverage: pos.leverage,
             margin_used: pos.margin_used,
+            ..Default::default()
         });
 
         state.positions.remove(symbol);
@@ -1347,6 +1351,7 @@ fn try_pyramid(
         entry_atr: atr,
         leverage,
         margin_used: add_margin,
+        ..Default::default()
     });
 
     // Update position
@@ -1609,6 +1614,7 @@ fn execute_sub_bar_entry(
         entry_atr: atr,
         leverage,
         margin_used,
+        ..Default::default()
     });
 
     true
