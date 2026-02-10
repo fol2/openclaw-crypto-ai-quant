@@ -377,9 +377,20 @@ def _render_ranked_report_md(items: list[dict[str, Any]]) -> str:
         lines.append("")
         return "\n".join(lines)
 
-    items_sorted = sorted(items, key=lambda x: float(x.get("total_pnl", 0.0)), reverse=True)
+    kept = [it for it in items if not bool(it.get("rejected"))]
+    rejected = [it for it in items if bool(it.get("rejected"))]
 
-    lines.append("## Ranked Candidates (by total_pnl)")
+    if not kept:
+        lines.append("No non-rejected replay reports were produced.")
+        if rejected:
+            lines.append("")
+            lines.append(f"{len(rejected)} candidate(s) were rejected.")
+            lines.append("")
+        return "\n".join(lines)
+
+    items_sorted = sorted(kept, key=lambda x: float(x.get("total_pnl", 0.0)), reverse=True)
+
+    lines.append("## Ranked Candidates (by total_pnl, excluding rejected)")
     lines.append("")
     lines.append("| Rank | total_pnl | max_dd_pct | trades | win_rate | profit_factor | config_id | report |")
     lines.append("| ---: | --------: | ---------: | -----: | -------: | ------------: | :------ | :----- |")
@@ -399,6 +410,32 @@ def _render_ranked_report_md(items: list[dict[str, Any]]) -> str:
             )
         )
     lines.append("")
+
+    if rejected:
+        lines.append("## Rejected Candidates")
+        lines.append("")
+        lines.append(
+            "| total_pnl | config_id | reason | replay | slippage_fragility | reject_bps | pnl_drop_reject_bps | pnl_reject_bps |"
+        )
+        lines.append("| --------: | :------ | :----- | :----- | -----------------: | ---------: | ------------------: | ------------: |")
+        rej_sorted = sorted(rejected, key=lambda x: float(x.get("total_pnl", 0.0)), reverse=True)
+        for it in rej_sorted:
+            cfg_id = str(it.get("config_id", ""))
+            cfg_id_short = cfg_id[:12] if len(cfg_id) > 12 else cfg_id
+            reason = str(it.get("reject_reason", "rejected"))
+            lines.append(
+                "| {pnl:.2f} | `{cfg}` | {reason} | `{path}` | {frag:.6f} | {rbps:.0f} | {drop:.2f} | {pnl_r:.2f} |".format(
+                    pnl=float(it.get("total_pnl", 0.0)),
+                    cfg=cfg_id_short,
+                    reason=reason,
+                    path=str(it.get("path", "")),
+                    frag=float(it.get("slippage_fragility", 0.0)),
+                    rbps=float(it.get("slippage_reject_bps", 0.0)),
+                    drop=float(it.get("pnl_drop_at_reject_bps", 0.0)),
+                    pnl_r=float(it.get("slippage_pnl_at_reject_bps", 0.0)),
+                )
+            )
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -673,6 +710,9 @@ def main(argv: list[str] | None = None) -> int:
             "walk_forward",
             "walk_forward_splits_json",
             "walk_forward_min_test_days",
+            "slippage_stress",
+            "slippage_stress_bps",
+            "slippage_stress_reject_bps",
             "tpe",
             "tpe_trials",
             "tpe_batch",
@@ -1145,6 +1185,76 @@ def main(argv: list[str] | None = None) -> int:
                 # Keep the factory pipeline resilient: store the path and continue.
                 summary["wf_error"] = "failed to load walk_forward summary.json"
 
+        if bool(getattr(args, "slippage_stress", False)):
+            ss_dir = run_dir / "slippage_stress" / str(cfg_path.stem)
+            ss_dir.mkdir(parents=True, exist_ok=True)
+            ss_summary_path = ss_dir / "summary.json"
+
+            ss_stdout = ss_dir / "slippage_stress.stdout.txt"
+            ss_stderr = ss_dir / "slippage_stress.stderr.txt"
+
+            if bool(args.resume) and _is_nonempty_file(ss_summary_path):
+                ss_res = CmdResult(
+                    argv=[],
+                    cwd=str(AIQ_ROOT),
+                    exit_code=0,
+                    elapsed_s=0.0,
+                    stdout_path=str(ss_stdout),
+                    stderr_path=str(ss_stderr),
+                )
+                meta["steps"].append({"name": f"slippage_stress_{cfg_path.stem}_skip", **ss_res.__dict__})
+            else:
+                ss_argv = [
+                    "python3",
+                    "tools/slippage_stress.py",
+                    "--config",
+                    str(cfg_path),
+                    "--interval",
+                    str(args.interval),
+                    "--slippage-bps",
+                    str(getattr(args, "slippage_stress_bps", "10,20,30") or "10,20,30"),
+                    "--reject-flip-bps",
+                    str(float(getattr(args, "slippage_stress_reject_bps", 20.0) or 20.0)),
+                    "--out-dir",
+                    str(ss_dir),
+                    "--output",
+                    str(ss_summary_path),
+                ]
+                if args.candles_db:
+                    ss_argv += ["--candles-db", str(args.candles_db)]
+                if args.funding_db:
+                    ss_argv += ["--funding-db", str(args.funding_db)]
+
+                ss_res = _run_cmd(ss_argv, cwd=AIQ_ROOT, stdout_path=ss_stdout, stderr_path=ss_stderr)
+                meta["steps"].append({"name": f"slippage_stress_{cfg_path.stem}", **ss_res.__dict__})
+                if ss_res.exit_code != 0:
+                    _write_json(run_dir / "run_metadata.json", meta)
+                    return int(ss_res.exit_code)
+
+            summary["slippage_stress_summary_path"] = str(ss_summary_path)
+            try:
+                ss_obj = _load_json(ss_summary_path)
+                agg = ss_obj.get("aggregate", {}) if isinstance(ss_obj, dict) else {}
+                if isinstance(agg, dict):
+                    reject_bps = float(getattr(args, "slippage_stress_reject_bps", 20.0) or 20.0)
+                    summary["slippage_fragility"] = float(agg.get("slippage_fragility", 0.0))
+                    summary["slippage_flip_sign_at_reject_bps"] = bool(agg.get("flip_sign_at_reject_bps", False))
+                    summary["slippage_reject"] = bool(agg.get("reject", False))
+                    summary["slippage_reject_bps"] = float(reject_bps)
+                    summary["pnl_drop_at_reject_bps"] = float(agg.get("pnl_drop_at_reject_bps", 0.0))
+                    summary["slippage_pnl_at_reject_bps"] = float(agg.get("pnl_at_reject_bps", 0.0))
+
+                    # Canonical key for AQC-504 scoring (when using the default 20 bps).
+                    if abs(float(reject_bps) - 20.0) < 1e-9:
+                        summary["pnl_drop_when_slippage_20bps"] = float(summary.get("pnl_drop_at_reject_bps", 0.0))
+                    if bool(summary.get("slippage_reject")):
+                        summary["rejected"] = True
+                        summary["reject_reason"] = (
+                            f"slippage flip at {float(reject_bps):g} bps"
+                        )
+            except Exception:
+                summary["slippage_error"] = "failed to load slippage_stress summary.json"
+
         replay_reports.append(summary)
 
     # ------------------------------------------------------------------
@@ -1265,6 +1375,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="Minimum out-of-sample test length in days for walk-forward splits (default: 1).",
+    )
+
+    ap.add_argument("--slippage-stress", action="store_true", help="Run slippage stress replays for each candidate.")
+    ap.add_argument(
+        "--slippage-stress-bps",
+        default="10,20,30",
+        help="Comma-separated slippage bps levels for stress tests (default: 10,20,30).",
+    )
+    ap.add_argument(
+        "--slippage-stress-reject-bps",
+        type=float,
+        default=20.0,
+        help="Reject when PnL flips sign at this slippage level (default: 20).",
     )
 
     return ap
