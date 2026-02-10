@@ -135,11 +135,14 @@ Use when: suspecting data corruption, missing candles, or stale market data.
 ### Candle database freshness
 
 ```bash
-# Check all candle DBs — look for gaps or stale data
+# Check all candle DBs — look for gaps or stale data (basic)
 for db in candles_dbs/candles_*.db; do
     echo "=== $db ==="
-    sqlite3 "$db" "SELECT COUNT(*) AS rows, MIN(timestamp) AS earliest, MAX(timestamp) AS latest FROM candles LIMIT 1;"
+    sqlite3 "$db" "SELECT COUNT(*) AS rows, MIN(t) AS earliest, MAX(t) AS latest FROM candles LIMIT 1;"
 done
+
+# Automated freshness + gap checks (JSON on stdout; summary on stderr)
+uv run python tools/check_candle_dbs.py --lookback-hours 24
 ```
 
 ### Trading database integrity
