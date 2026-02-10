@@ -1,7 +1,5 @@
 from types import SimpleNamespace
 
-import pytest
-
 from tools.interval_orchestrator import orchestrate_interval_restart
 
 
@@ -84,4 +82,3 @@ def test_orchestrate_restart_leaves_pause_file_on_is_active_failure(tmp_path, mo
 
     assert any(not r.ok for r in res)
     assert pause_file.exists()
-
