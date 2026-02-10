@@ -220,6 +220,13 @@ def _load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _is_nonempty_file(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except Exception:
+        return False
+
+
 def _write_json(path: Path, obj: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -470,6 +477,7 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
         summary["config_path"] = str(cfg_path)
         summary["config_id"] = candidate_config_ids[str(cfg_path)]
         replay_reports.append(summary)
+        _write_json(run_dir / "run_metadata.json", meta)
 
         entry = entry_by_path.get(str(cfg_path))
         if entry is not None:
@@ -507,6 +515,7 @@ def main(argv: list[str] | None = None) -> int:
     mx.add_argument("--run-id", help="Unique identifier for this run (used in artifact paths).")
     mx.add_argument("--reproduce", metavar="RUN_ID", help="Reproduce an existing run_id (CPU replay + reports only).")
     ap.add_argument("--artifacts-dir", default="artifacts", help="Artifacts root directory (default: artifacts).")
+    ap.add_argument("--resume", action="store_true", help="Resume an existing run_id from artifacts.")
 
     ap.add_argument("--config", default="config/strategy_overrides.yaml", help="Base strategy YAML config path.")
     ap.add_argument("--interval", default="1h", help="Main interval for sweep/replay (default: 1h).")
@@ -554,6 +563,8 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     artifacts_root = (AIQ_ROOT / str(args.artifacts_dir)).resolve()
+    if args.reproduce and args.resume:
+        raise SystemExit("--resume cannot be used with --reproduce")
     if args.reproduce:
         return _reproduce_run(artifacts_root=artifacts_root, source_run_id=str(args.reproduce))
 
@@ -561,101 +572,209 @@ def main(argv: list[str] | None = None) -> int:
     if not run_id:
         raise SystemExit("--run-id cannot be empty")
 
-    generated_at_ms = int(time.time() * 1000)
-    run_dir = resolve_run_dir(artifacts_root=artifacts_root, run_id=run_id, generated_at_ms=generated_at_ms)
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "logs").mkdir(parents=True, exist_ok=True)
+    existing_run_dir: Path | None = None
+    try:
+        existing_run_dir = _find_existing_run_dir(artifacts_root=artifacts_root, run_id=run_id)
+    except FileNotFoundError:
+        existing_run_dir = None
 
-    meta: dict[str, Any] = {
-        "run_id": run_id,
-        "generated_at_ms": generated_at_ms,
-        "run_date_utc": _run_date_utc(generated_at_ms),
-        "run_dir": str(run_dir),
-        "git_head": _git_head_sha(),
-        "args": vars(args),
-        "steps": [],
-    }
+    now_ms = int(time.time() * 1000)
 
+    if existing_run_dir is not None:
+        if not bool(args.resume):
+            raise SystemExit(f"run_id already exists; use --resume to continue: {run_id}")
+        run_dir = existing_run_dir
+        (run_dir / "logs").mkdir(parents=True, exist_ok=True)
+        meta_path = run_dir / "run_metadata.json"
+        meta_obj = _load_json(meta_path) if meta_path.exists() else {}
+        meta = meta_obj if isinstance(meta_obj, dict) else {}
+
+        # Safety: do not allow resuming with different core parameters.
+        orig_args = meta.get("args", {}) if isinstance(meta.get("args", {}), dict) else {}
+        guard_keys = {
+            "config",
+            "interval",
+            "candles_db",
+            "funding_db",
+            "sweep_spec",
+            "gpu",
+            "tpe",
+            "tpe_trials",
+            "tpe_batch",
+            "tpe_seed",
+            "top_n",
+            "num_candidates",
+            "sort_by",
+            "shortlist_modes",
+            "shortlist_per_mode",
+            "shortlist_max_rank",
+        }
+        mismatches: list[str] = []
+        for k in sorted(guard_keys):
+            if k not in orig_args:
+                continue
+            if getattr(args, k, None) != orig_args.get(k):
+                mismatches.append(k)
+        if mismatches:
+            raise SystemExit(f"--resume args mismatch for keys: {', '.join(mismatches)}")
+
+        # Use original args when available to keep the run reproducible.
+        for k, v in orig_args.items():
+            if k == "resume":
+                continue
+            if hasattr(args, k):
+                setattr(args, k, v)
+
+        meta.setdefault("run_id", run_id)
+        meta.setdefault("run_dir", str(run_dir))
+        meta.setdefault("steps", [])
+        meta["resumed_at_ms"] = now_ms
+        meta["resumed_git_head"] = _git_head_sha()
+    else:
+        generated_at_ms = now_ms
+        run_dir = resolve_run_dir(artifacts_root=artifacts_root, run_id=run_id, generated_at_ms=generated_at_ms)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "logs").mkdir(parents=True, exist_ok=True)
+
+        args_meta = dict(vars(args))
+        args_meta.pop("resume", None)
+        meta = {
+            "run_id": run_id,
+            "generated_at_ms": generated_at_ms,
+            "run_date_utc": _run_date_utc(generated_at_ms),
+            "run_dir": str(run_dir),
+            "git_head": _git_head_sha(),
+            "args": args_meta,
+            "steps": [],
+        }
+
+    # Resolve backtester cmd once and persist early metadata.
     bt_cmd = _resolve_backtester_cmd()
-    _capture_repro_metadata(run_dir=run_dir, artifacts_root=artifacts_root, bt_cmd=bt_cmd, meta=meta)
+    if "repro" not in meta:
+        _capture_repro_metadata(run_dir=run_dir, artifacts_root=artifacts_root, bt_cmd=bt_cmd, meta=meta)
     _write_json(run_dir / "run_metadata.json", meta)
 
     # ------------------------------------------------------------------
     # 1) Data checks
     # ------------------------------------------------------------------
-    candle_check = _run_cmd(
-        ["python3", "tools/check_candle_dbs.py", "--json-indent", "2"],
-        cwd=AIQ_ROOT,
-        stdout_path=run_dir / "data_checks" / "candle_dbs.json",
-        stderr_path=run_dir / "data_checks" / "candle_dbs.stderr.txt",
-    )
-    meta["steps"].append({"name": "check_candle_dbs", **candle_check.__dict__})
-    if candle_check.exit_code != 0:
-        _write_json(run_dir / "run_metadata.json", meta)
-        return int(candle_check.exit_code)
+    candle_out = run_dir / "data_checks" / "candle_dbs.json"
+    candle_err = run_dir / "data_checks" / "candle_dbs.stderr.txt"
+    if bool(args.resume) and _is_nonempty_file(candle_out):
+        meta["steps"].append(
+            {
+                "name": "check_candle_dbs_skip",
+                "argv": [],
+                "cwd": str(AIQ_ROOT),
+                "exit_code": 0,
+                "elapsed_s": 0.0,
+                "stdout_path": str(candle_out),
+                "stderr_path": str(candle_err),
+            }
+        )
+    else:
+        candle_check = _run_cmd(
+            ["python3", "tools/check_candle_dbs.py", "--json-indent", "2"],
+            cwd=AIQ_ROOT,
+            stdout_path=candle_out,
+            stderr_path=candle_err,
+        )
+        meta["steps"].append({"name": "check_candle_dbs", **candle_check.__dict__})
+        if candle_check.exit_code != 0:
+            _write_json(run_dir / "run_metadata.json", meta)
+            return int(candle_check.exit_code)
+    _write_json(run_dir / "run_metadata.json", meta)
 
-    funding_check = _run_cmd(
-        ["python3", "tools/check_funding_rates_db.py"],
-        cwd=AIQ_ROOT,
-        stdout_path=run_dir / "data_checks" / "funding_rates.json",
-        stderr_path=run_dir / "data_checks" / "funding_rates.stderr.txt",
-    )
-    meta["steps"].append({"name": "check_funding_rates_db", **funding_check.__dict__})
-    if funding_check.exit_code != 0:
-        _write_json(run_dir / "run_metadata.json", meta)
-        return int(funding_check.exit_code)
+    funding_out = run_dir / "data_checks" / "funding_rates.json"
+    funding_err = run_dir / "data_checks" / "funding_rates.stderr.txt"
+    if bool(args.resume) and _is_nonempty_file(funding_out):
+        meta["steps"].append(
+            {
+                "name": "check_funding_rates_db_skip",
+                "argv": [],
+                "cwd": str(AIQ_ROOT),
+                "exit_code": 0,
+                "elapsed_s": 0.0,
+                "stdout_path": str(funding_out),
+                "stderr_path": str(funding_err),
+            }
+        )
+    else:
+        funding_check = _run_cmd(
+            ["python3", "tools/check_funding_rates_db.py"],
+            cwd=AIQ_ROOT,
+            stdout_path=funding_out,
+            stderr_path=funding_err,
+        )
+        meta["steps"].append({"name": "check_funding_rates_db", **funding_check.__dict__})
+        if funding_check.exit_code != 0:
+            _write_json(run_dir / "run_metadata.json", meta)
+            return int(funding_check.exit_code)
+    _write_json(run_dir / "run_metadata.json", meta)
 
     # ------------------------------------------------------------------
     # 2) Sweep
     # ------------------------------------------------------------------
     sweep_out = run_dir / "sweeps" / "sweep_results.jsonl"
-    sweep_argv = bt_cmd + [
-        "sweep",
-        "--config",
-        str(args.config),
-        "--sweep-spec",
-        str(args.sweep_spec),
-        "--interval",
-        str(args.interval),
-        "--output",
-        str(sweep_out),
-        "--top-n",
-        str(int(args.top_n)),
-    ]
-    if args.candles_db:
-        sweep_argv += ["--candles-db", str(args.candles_db)]
-    if args.funding_db:
-        sweep_argv += ["--funding-db", str(args.funding_db)]
-    if bool(args.gpu):
-        sweep_argv += ["--gpu"]
-    if bool(getattr(args, "tpe", False)):
-        if not bool(args.gpu):
-            (run_dir / "reports").mkdir(parents=True, exist_ok=True)
-            (run_dir / "reports" / "report.md").write_text(
-                "# Factory Run Report\n\nError: --tpe requires --gpu.\n", encoding="utf-8"
-            )
-            _write_json(run_dir / "run_metadata.json", meta)
-            return 1
-        sweep_argv += [
-            "--tpe",
-            "--tpe-trials",
-            str(int(getattr(args, "tpe_trials", 5000))),
-            "--tpe-batch",
-            str(int(getattr(args, "tpe_batch", 256))),
-            "--tpe-seed",
-            str(int(getattr(args, "tpe_seed", 42))),
+    if bool(args.resume) and _is_nonempty_file(sweep_out):
+        sweep_res = CmdResult(
+            argv=[],
+            cwd=str(AIQ_ROOT / "backtester"),
+            exit_code=0,
+            elapsed_s=0.0,
+            stdout_path=str(run_dir / "sweeps" / "sweep.stdout.txt"),
+            stderr_path=str(run_dir / "sweeps" / "sweep.stderr.txt"),
+        )
+        meta["steps"].append({"name": "sweep_skip", **sweep_res.__dict__})
+    else:
+        sweep_argv = bt_cmd + [
+            "sweep",
+            "--config",
+            str(args.config),
+            "--sweep-spec",
+            str(args.sweep_spec),
+            "--interval",
+            str(args.interval),
+            "--output",
+            str(sweep_out),
+            "--top-n",
+            str(int(args.top_n)),
         ]
+        if args.candles_db:
+            sweep_argv += ["--candles-db", str(args.candles_db)]
+        if args.funding_db:
+            sweep_argv += ["--funding-db", str(args.funding_db)]
+        if bool(args.gpu):
+            sweep_argv += ["--gpu"]
+        if bool(getattr(args, "tpe", False)):
+            if not bool(args.gpu):
+                (run_dir / "reports").mkdir(parents=True, exist_ok=True)
+                (run_dir / "reports" / "report.md").write_text(
+                    "# Factory Run Report\n\nError: --tpe requires --gpu.\n", encoding="utf-8"
+                )
+                _write_json(run_dir / "run_metadata.json", meta)
+                return 1
+            sweep_argv += [
+                "--tpe",
+                "--tpe-trials",
+                str(int(getattr(args, "tpe_trials", 5000))),
+                "--tpe-batch",
+                str(int(getattr(args, "tpe_batch", 256))),
+                "--tpe-seed",
+                str(int(getattr(args, "tpe_seed", 42))),
+            ]
 
-    sweep_res = _run_cmd(
-        sweep_argv,
-        cwd=AIQ_ROOT / "backtester",
-        stdout_path=run_dir / "sweeps" / "sweep.stdout.txt",
-        stderr_path=run_dir / "sweeps" / "sweep.stderr.txt",
-    )
-    meta["steps"].append({"name": "sweep", **sweep_res.__dict__})
-    if sweep_res.exit_code != 0:
-        _write_json(run_dir / "run_metadata.json", meta)
-        return int(sweep_res.exit_code)
+        sweep_res = _run_cmd(
+            sweep_argv,
+            cwd=AIQ_ROOT / "backtester",
+            stdout_path=run_dir / "sweeps" / "sweep.stdout.txt",
+            stderr_path=run_dir / "sweeps" / "sweep.stderr.txt",
+        )
+        meta["steps"].append({"name": "sweep", **sweep_res.__dict__})
+        if sweep_res.exit_code != 0:
+            _write_json(run_dir / "run_metadata.json", meta)
+            return int(sweep_res.exit_code)
+
+    _write_json(run_dir / "run_metadata.json", meta)
 
     # ------------------------------------------------------------------
     # 3) Candidate config generation
@@ -671,9 +790,37 @@ def main(argv: list[str] | None = None) -> int:
     candidate_config_ids: dict[str, str] = {}
     candidate_entries: list[dict[str, Any]] = []
     entry_by_path: dict[str, dict[str, Any]] = {}
+    skip_generation = False
+
+    if bool(args.resume):
+        existing_entries = meta.get("candidate_configs", [])
+        if isinstance(existing_entries, list) and existing_entries:
+            candidate_entries = [it for it in existing_entries if isinstance(it, dict)]
+            for it in candidate_entries:
+                p = str(it.get("path", "")).strip()
+                if p:
+                    entry_by_path[p] = it
+
+            for it in candidate_entries:
+                p_raw = str(it.get("path", "")).strip()
+                if not p_raw:
+                    continue
+                if "selected" in it and not bool(it.get("selected")):
+                    continue
+                p = Path(p_raw).expanduser().resolve()
+                if not _is_nonempty_file(p):
+                    continue
+                candidate_paths.append(p)
+                cid = str(it.get("config_id", "")).strip()
+                if not cid:
+                    cid = config_id_from_yaml_file(p)
+                    it["config_id"] = cid
+                candidate_config_ids[str(p)] = cid
+
+            skip_generation = bool(candidate_paths)
 
     # Multi-mode shortlist generation (AQC-403). Deduplicate across modes by config_id.
-    if shortlist_per_mode > 0:
+    if not skip_generation and shortlist_per_mode > 0:
         allowed_modes = {"pnl", "dd", "pf", "wr", "sharpe", "trades", "balanced"}
         modes = [m.strip() for m in shortlist_modes_raw.split(",") if m.strip()]
         modes = [m for m in modes if m in allowed_modes]
@@ -745,7 +892,7 @@ def main(argv: list[str] | None = None) -> int:
                     break
 
     # Single-mode generation (legacy): args.num_candidates + args.sort_by.
-    else:
+    elif not skip_generation:
         for rank in range(1, int(args.num_candidates) + 1):
             out_yaml = configs_dir / f"candidate_{args.sort_by}_rank{rank}.yaml"
             gen_argv = [
@@ -795,6 +942,7 @@ def main(argv: list[str] | None = None) -> int:
             entry_by_path[str(out_yaml)] = entry
 
     meta["candidate_configs"] = candidate_entries
+    _write_json(run_dir / "run_metadata.json", meta)
 
     if not candidate_paths:
         (run_dir / "reports").mkdir(parents=True, exist_ok=True)
@@ -825,16 +973,30 @@ def main(argv: list[str] | None = None) -> int:
         if args.funding_db:
             replay_argv += ["--funding-db", str(args.funding_db)]
 
-        replay_res = _run_cmd(
-            replay_argv,
-            cwd=AIQ_ROOT / "backtester",
-            stdout_path=run_dir / "replays" / f"{cfg_path.stem}.stdout.txt",
-            stderr_path=run_dir / "replays" / f"{cfg_path.stem}.stderr.txt",
-        )
-        meta["steps"].append({"name": f"replay_{cfg_path.stem}", **replay_res.__dict__})
-        if replay_res.exit_code != 0:
-            _write_json(run_dir / "run_metadata.json", meta)
-            return int(replay_res.exit_code)
+        replay_stdout = run_dir / "replays" / f"{cfg_path.stem}.stdout.txt"
+        replay_stderr = run_dir / "replays" / f"{cfg_path.stem}.stderr.txt"
+
+        if bool(args.resume) and _is_nonempty_file(out_json):
+            replay_res = CmdResult(
+                argv=[],
+                cwd=str(AIQ_ROOT / "backtester"),
+                exit_code=0,
+                elapsed_s=0.0,
+                stdout_path=str(replay_stdout),
+                stderr_path=str(replay_stderr),
+            )
+            meta["steps"].append({"name": f"replay_{cfg_path.stem}_skip", **replay_res.__dict__})
+        else:
+            replay_res = _run_cmd(
+                replay_argv,
+                cwd=AIQ_ROOT / "backtester",
+                stdout_path=replay_stdout,
+                stderr_path=replay_stderr,
+            )
+            meta["steps"].append({"name": f"replay_{cfg_path.stem}", **replay_res.__dict__})
+            if replay_res.exit_code != 0:
+                _write_json(run_dir / "run_metadata.json", meta)
+                return int(replay_res.exit_code)
 
         summary = _summarise_replay_report(out_json)
         summary["config_path"] = str(cfg_path)
