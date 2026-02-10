@@ -150,6 +150,12 @@ class RiskManager:
         )
         self._slippage_bps: deque[float] = deque()
 
+        # Exposure concentration limit (alts bucket).
+        self._exposure_enabled = _env_bool("AI_QUANT_RISK_EXPOSURE_ENABLED", False)
+        self._exposure_alts_max_longs = int(max(0, _env_int("AI_QUANT_RISK_EXPOSURE_ALTS_MAX_LONGS", 0)))
+        self._exposure_alts_max_shorts = int(max(0, _env_int("AI_QUANT_RISK_EXPOSURE_ALTS_MAX_SHORTS", 0)))
+        self._exposure_exclude_symbols: set[str] = {"BTC"}
+
         # Diagnostics
         self._blocked_counts: dict[str, int] = defaultdict(int)
 
@@ -259,6 +265,7 @@ class RiskManager:
         side: str,
         notional_usd: float,
         leverage: float | None,
+        positions: dict[str, Any] | None = None,
         intent_id: str | None = None,
         reduce_risk: bool = False,
     ) -> RiskDecision:
@@ -284,6 +291,53 @@ class RiskManager:
 
         # Entry throttles.
         if (not reduce_risk) and ac in {"OPEN", "ADD"}:
+            # Exposure concentration: cap alt longs/shorts. Best-effort; if we cannot parse positions,
+            # fail open (do not block trading).
+            try:
+                if self._exposure_enabled and (self._exposure_alts_max_longs > 0 or self._exposure_alts_max_shorts > 0):
+                    if positions is not None:
+                        sym_u = str(sym or "").strip().upper()
+                        pos_map = dict(positions or {})
+                        pos_syms = {str(k or "").strip().upper() for k in pos_map.keys() if str(k or "").strip()}
+                        if sym_u and sym_u not in self._exposure_exclude_symbols and sym_u not in pos_syms:
+                            sd = str(side or "").strip().upper()
+                            want = "LONG" if sd == "BUY" else ("SHORT" if sd == "SELL" else "")
+
+                            def _pos_dir(p: Any) -> str:
+                                if not isinstance(p, dict):
+                                    return ""
+                                t = str(p.get("type") or p.get("pos_type") or "").strip().upper()
+                                if t in {"LONG", "SHORT"}:
+                                    return t
+                                try:
+                                    sz = float(p.get("size") or 0.0)
+                                except Exception:
+                                    sz = 0.0
+                                if sz > 0:
+                                    return "LONG"
+                                if sz < 0:
+                                    return "SHORT"
+                                return ""
+
+                            longs = 0
+                            shorts = 0
+                            for s0, p0 in pos_map.items():
+                                s_u = str(s0 or "").strip().upper()
+                                if not s_u or s_u in self._exposure_exclude_symbols:
+                                    continue
+                                d = _pos_dir(p0)
+                                if d == "LONG":
+                                    longs += 1
+                                elif d == "SHORT":
+                                    shorts += 1
+
+                            if want == "LONG" and self._exposure_alts_max_longs > 0 and longs >= self._exposure_alts_max_longs:
+                                return self._block("exposure_alts_longs", sym=sym_u, action=ac, intent_id=intent_id)
+                            if want == "SHORT" and self._exposure_alts_max_shorts > 0 and shorts >= self._exposure_alts_max_shorts:
+                                return self._block("exposure_alts_shorts", sym=sym_u, action=ac, intent_id=intent_id)
+            except Exception:
+                pass
+
             if not self._entry_bucket.allow(cost=1.0):
                 return self._block("entry_rate", sym=sym, action=ac, intent_id=intent_id)
             if not self._allow_symbol_event(sym=sym, is_entry=True):
@@ -431,6 +485,57 @@ class RiskManager:
             self._slippage_guard_max_median_bps = float(max(0.0, float(max_median or 0.0)))
         except Exception:
             self._slippage_guard_max_median_bps = 0.0
+
+        # Exposure concentration limits.
+        exp = risk_cfg.get("exposure")
+        exp = exp if isinstance(exp, dict) else {}
+
+        enabled = exp.get("enabled")
+        env_enabled = os.getenv("AI_QUANT_RISK_EXPOSURE_ENABLED")
+        if env_enabled is not None and str(env_enabled).strip() != "":
+            enabled = env_enabled
+        try:
+            self._exposure_enabled = (
+                bool(enabled)
+                if not isinstance(enabled, str)
+                else str(enabled).strip().lower() in {"1", "true", "yes", "y", "on"}
+            )
+        except Exception:
+            self._exposure_enabled = False
+
+        max_l = exp.get("alts_max_longs")
+        env_max_l = os.getenv("AI_QUANT_RISK_EXPOSURE_ALTS_MAX_LONGS")
+        if env_max_l is not None and str(env_max_l).strip() != "":
+            max_l = env_max_l
+        try:
+            self._exposure_alts_max_longs = int(max(0, int(float(max_l or 0))))
+        except Exception:
+            self._exposure_alts_max_longs = 0
+
+        max_s = exp.get("alts_max_shorts")
+        env_max_s = os.getenv("AI_QUANT_RISK_EXPOSURE_ALTS_MAX_SHORTS")
+        if env_max_s is not None and str(env_max_s).strip() != "":
+            max_s = env_max_s
+        try:
+            self._exposure_alts_max_shorts = int(max(0, int(float(max_s or 0))))
+        except Exception:
+            self._exposure_alts_max_shorts = 0
+
+        excl = exp.get("exclude_symbols")
+        env_excl = os.getenv("AI_QUANT_RISK_EXPOSURE_EXCLUDE_SYMBOLS")
+        if env_excl is not None and str(env_excl).strip() != "":
+            excl = env_excl
+        out_excl: set[str] = {"BTC"}
+        try:
+            if isinstance(excl, str):
+                parts = [p.strip().upper() for p in str(excl).replace("\n", ",").split(",") if p.strip()]
+                out_excl.update(parts)
+            elif isinstance(excl, list):
+                parts = [str(p).strip().upper() for p in excl if str(p).strip()]
+                out_excl.update(parts)
+        except Exception:
+            pass
+        self._exposure_exclude_symbols = out_excl
 
     def _refresh_manual_kill(self) -> None:
         # Env kill

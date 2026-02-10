@@ -1037,6 +1037,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     side=side,
                     notional_usd=float(notional),
                     leverage=float(leverage),
+                    positions=getattr(self, "positions", None),
                     intent_id=getattr(oms_intent, "intent_id", None),
                     reduce_risk=False,
                 )
@@ -2211,6 +2212,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     side=entry_side,
                     notional_usd=float(notional),
                     leverage=float(leverage),
+                    positions=getattr(self, "positions", None),
                     intent_id=getattr(oms_intent, "intent_id", None),
                     reduce_risk=False,
                 )
