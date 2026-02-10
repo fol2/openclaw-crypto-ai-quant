@@ -361,6 +361,13 @@ _DEFAULT_STRATEGY_CONFIG = {
         "enable_auto_reverse": False,
         "auto_reverse_breadth_low": 10.0,
         "auto_reverse_breadth_high": 90.0,
+        # Global regime gate (engine-only): block entries when the regime is not trend OK.
+        "enable_regime_gate": False,
+        "regime_gate_breadth_low": 20.0,
+        "regime_gate_breadth_high": 80.0,
+        "regime_gate_btc_adx_min": 20.0,
+        "regime_gate_btc_atr_pct_min": 0.003,
+        "regime_gate_fail_open": False,
     },
     "watchlist_exclude": [],
     "thresholds": {

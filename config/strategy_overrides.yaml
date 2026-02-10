@@ -187,6 +187,12 @@ global:
     breadth_block_long_below: 10.0    # default
     auto_reverse_breadth_low: 10.0    # default
     auto_reverse_breadth_high: 90.0   # default
+    enable_regime_gate: false         # default (global entry block when regime is not trend OK)
+    regime_gate_breadth_low: 20.0     # default (inside [low, high] => gate OFF)
+    regime_gate_breadth_high: 80.0    # default
+    regime_gate_btc_adx_min: 20.0     # default
+    regime_gate_btc_atr_pct_min: 0.003 # default
+    regime_gate_fail_open: false      # default (if metrics missing)
 
   watchlist_exclude: []               # engine-only (Rust ignores)
 

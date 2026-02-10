@@ -104,6 +104,12 @@ class UnifiedEngine:
         # Market Breadth: % of watchlist with bullish EMA alignment (computed from cached analysis).
         self._market_breadth_pct: float | None = None
 
+        # Global regime gate (trend vs chop). When OFF, entries are blocked (exits still run).
+        self._regime_gate_on: bool = True
+        self._regime_gate_reason: str = "disabled"
+        self._regime_gate_last_key: int | None = None
+        self._regime_gate_last_logged_on: bool | None = None
+
         # WS staleness control
         self._stale_strikes: int = 0
         self._ws_restart_window_started_s: float = 0.0
@@ -459,6 +465,176 @@ class UnifiedEngine:
         except Exception:
             return
 
+    def _update_regime_gate(
+        self,
+        *,
+        mei_alpha_v1: Any,
+        btc_key_hint: int | None,
+        btc_df: pd.DataFrame | None,
+    ) -> None:
+        """Update the global regime gate state.
+
+        The gate is designed to flip only on a schedule (typically once per main bar),
+        keyed off the BTC candle key. When the gate is OFF, entries are blocked
+        (exits still run).
+        """
+        try:
+            key = int(btc_key_hint) if btc_key_hint is not None else None
+        except Exception:
+            key = None
+
+        # Avoid recomputing every loop; BTC key only changes once per main bar (in close-mode).
+        if key is not None and self._regime_gate_last_key is not None and int(key) == int(self._regime_gate_last_key):
+            return
+        if key is None and self._regime_gate_last_key is None and self.stats.loops > 1:
+            # No key available: keep the previous state to avoid flapping.
+            return
+        self._regime_gate_last_key = key
+
+        cfg = mei_alpha_v1.get_strategy_config("BTC") or {}
+        rc = cfg.get("market_regime") if isinstance(cfg, dict) else None
+        rc = rc if isinstance(rc, dict) else {}
+
+        enabled = bool(rc.get("enable_regime_gate", False))
+        fail_open = bool(rc.get("regime_gate_fail_open", False))
+
+        if not enabled:
+            new_on = True
+            new_reason = "disabled"
+        else:
+            # Breadth chop zone: inside => gate OFF; outside => potential trend regime.
+            try:
+                chop_lo = float(rc.get("regime_gate_breadth_low", rc.get("auto_reverse_breadth_low", 10.0)))
+            except Exception:
+                chop_lo = 10.0
+            try:
+                chop_hi = float(rc.get("regime_gate_breadth_high", rc.get("auto_reverse_breadth_high", 90.0)))
+            except Exception:
+                chop_hi = 90.0
+
+            try:
+                btc_adx_min = float(rc.get("regime_gate_btc_adx_min", 20.0))
+            except Exception:
+                btc_adx_min = 20.0
+            try:
+                btc_atr_pct_min = float(rc.get("regime_gate_btc_atr_pct_min", 0.003))
+            except Exception:
+                btc_atr_pct_min = 0.003
+
+            breadth = self._market_breadth_pct
+            try:
+                b = float(breadth) if breadth is not None else None
+            except Exception:
+                b = None
+
+            if b is None:
+                new_on = bool(fail_open)
+                new_reason = "breadth_missing"
+            elif chop_lo <= b <= chop_hi:
+                new_on = False
+                new_reason = "breadth_chop"
+            else:
+                # BTC metrics: prefer cached analysis output, fall back to lightweight indicator compute.
+                adx: float | None = None
+                atr_pct: float | None = None
+
+                btc_now = None
+                try:
+                    bc = self._analysis_cache.get("BTC")
+                    btc_now = bc.get("now") if isinstance(bc, dict) else None
+                except Exception:
+                    btc_now = None
+
+                if isinstance(btc_now, dict):
+                    try:
+                        adx = float(btc_now.get("ADX") or 0.0)
+                    except Exception:
+                        adx = None
+                    try:
+                        atr = float(btc_now.get("ATR") or 0.0)
+                        close = float(btc_now.get("Close") or 0.0)
+                        if close > 0:
+                            atr_pct = atr / close
+                    except Exception:
+                        atr_pct = None
+
+                if (adx is None or atr_pct is None) and btc_df is not None and (not btc_df.empty):
+                    ind = cfg.get("indicators") if isinstance(cfg, dict) else None
+                    ind = ind if isinstance(ind, dict) else {}
+                    try:
+                        adx_w = int(ind.get("adx_window", 14))
+                    except Exception:
+                        adx_w = 14
+                    try:
+                        atr_w = int(ind.get("atr_window", 14))
+                    except Exception:
+                        atr_w = 14
+
+                    try:
+                        adx_obj = mei_alpha_v1.ta.trend.ADXIndicator(
+                            btc_df["High"],
+                            btc_df["Low"],
+                            btc_df["Close"],
+                            window=int(adx_w),
+                        )
+                        adx_s = adx_obj.adx()
+                        if not adx_s.empty:
+                            adx = float(adx_s.iloc[-1])
+                    except Exception:
+                        pass
+
+                    try:
+                        atr_s = mei_alpha_v1.ta.volatility.average_true_range(
+                            btc_df["High"],
+                            btc_df["Low"],
+                            btc_df["Close"],
+                            window=int(atr_w),
+                        )
+                        if not atr_s.empty:
+                            atr = float(atr_s.iloc[-1])
+                            close = float(btc_df["Close"].iloc[-1])
+                            if close > 0:
+                                atr_pct = atr / close
+                    except Exception:
+                        pass
+
+                if adx is None or atr_pct is None:
+                    new_on = bool(fail_open)
+                    new_reason = "btc_metrics_missing"
+                elif float(adx) < float(btc_adx_min):
+                    new_on = False
+                    new_reason = "btc_adx_low"
+                elif float(atr_pct) < float(btc_atr_pct_min):
+                    new_on = False
+                    new_reason = "btc_atr_low"
+                else:
+                    new_on = True
+                    new_reason = "trend_ok"
+
+        self._regime_gate_on = bool(new_on)
+        self._regime_gate_reason = str(new_reason or "none").strip() or "none"
+
+        if self._regime_gate_last_logged_on is None or bool(self._regime_gate_on) != bool(self._regime_gate_last_logged_on):
+            self._regime_gate_last_logged_on = bool(self._regime_gate_on)
+            try:
+                mei_alpha_v1.log_audit_event(
+                    "ENGINE",
+                    "REGIME_GATE_STATE",
+                    data={
+                        "interval": str(self.interval),
+                        "gate_on": bool(self._regime_gate_on),
+                        "reason": str(self._regime_gate_reason),
+                        "btc_key": key,
+                        "breadth_pct": self._market_breadth_pct,
+                    },
+                )
+            except Exception:
+                pass
+            try:
+                print(f"🧭 regime gate {'ON' if self._regime_gate_on else 'OFF'} reason={self._regime_gate_reason}")
+            except Exception:
+                pass
+
     def run_forever(self) -> None:
         import strategy.mei_alpha_v1 as mei_alpha_v1
 
@@ -644,6 +820,12 @@ class UnifiedEngine:
                         continue
                 self._market_breadth_pct = ((_breadth_pos / _breadth_total) * 100.0) if _breadth_total > 0 else None
 
+                # Regime gate: a global binary switch (trend OK vs chop) that blocks entries when OFF.
+                try:
+                    self._update_regime_gate(mei_alpha_v1=mei_alpha_v1, btc_key_hint=btc_key_hint, btc_df=btc_df)
+                except Exception:
+                    pass
+
                 # Phase 1: Loop active symbols — exits run immediately, entries are collected.
                 _CONF_RANK = {"low": 0, "medium": 1, "high": 2}
                 entry_candidates: list[dict[str, Any]] = []
@@ -797,6 +979,20 @@ class UnifiedEngine:
                                 now_series["_market_breadth_pct"] = self._market_breadth_pct
                                 if _regime_blocked:
                                     now_series["_regime_blocked"] = True
+                            except Exception:
+                                pass
+
+                        # Regime gate: block all entries when the global regime is not "trend OK".
+                        _regime_gate_blocked = False
+                        if sig_u in ("BUY", "SELL") and (not bool(self._regime_gate_on)):
+                            sig_u = "NEUTRAL"
+                            _regime_gate_blocked = True
+                        if now_series is not None:
+                            try:
+                                now_series["_regime_gate_on"] = bool(self._regime_gate_on)
+                                now_series["_regime_gate_reason"] = str(self._regime_gate_reason)
+                                if _regime_gate_blocked:
+                                    now_series["_regime_gate_blocked"] = True
                             except Exception:
                                 pass
 
@@ -1153,6 +1349,7 @@ class UnifiedEngine:
                         f"ws_connected={h.get('connected')} ws_thread_alive={h.get('thread_alive')} "
                         f"ws_restarts={self.stats.ws_restarts} "
                         f"kill={kill_mode} kill_reason={kill_reason} "
+                        f"regime_gate={'on' if self._regime_gate_on else 'off'} regime_reason={self._regime_gate_reason} "
                         f"slip_enabled={slip_enabled} slip_n={slip_n} slip_win={slip_win} slip_thr_bps={slip_thr_bps_s} "
                         f"slip_last_bps={slip_last_bps_s} slip_median_bps={slip_median_bps_s} "
                         f"signal_on_close={int(self._signal_on_candle_close)} entry_iv={self._entry_interval} exit_iv={self._exit_interval} reanalyze_s={self._reanalyze_interval_s:.0f} exit_reanalyze_s={self._exit_reanalyze_interval_s:.0f} "
