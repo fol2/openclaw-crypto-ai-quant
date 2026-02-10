@@ -628,6 +628,12 @@ def _render_validation_report_md(items: list[dict[str, Any]], *, score_min_trade
             lines.append(f"- OOS max drawdown pct: {float(it.get('wf_max_oos_drawdown_pct', 0.0)):.4f}")
         if _has_num(it.get("slippage_fragility")):
             lines.append(f"- slippage fragility: {float(it.get('slippage_fragility', 0.0)):.6f}")
+        if _has_num(it.get("sensitivity_positive_rate")):
+            lines.append(f"- sensitivity positive rate: {float(it.get('sensitivity_positive_rate', 0.0)):.4f}")
+        if _has_num(it.get("sensitivity_median_total_pnl")):
+            lines.append(f"- sensitivity median total_pnl: {float(it.get('sensitivity_median_total_pnl', 0.0)):.2f}")
+        if _has_num(it.get("sensitivity_metric_v1")):
+            lines.append(f"- sensitivity metric v1: {float(it.get('sensitivity_metric_v1', 0.0)):.4f}")
         if _has_num(it.get("top1_pnl_pct")):
             lines.append(f"- top1 pnl pct: {float(it.get('top1_pnl_pct', 0.0)):.4f}")
         if _has_num(it.get("top5_pnl_pct")):
@@ -926,6 +932,9 @@ def main(argv: list[str] | None = None) -> int:
             "slippage_stress",
             "slippage_stress_bps",
             "slippage_stress_reject_bps",
+            "sensitivity_checks",
+            "sensitivity_perturb",
+            "sensitivity_timeout_s",
             "score_min_trades",
             "score_trades_penalty_weight",
             "tpe",
@@ -1528,6 +1537,68 @@ def main(argv: list[str] | None = None) -> int:
             except Exception:
                 summary["slippage_error"] = "failed to load slippage_stress summary.json"
 
+        if bool(getattr(args, "sensitivity_checks", False)):
+            sens_dir = run_dir / "sensitivity" / str(cfg_path.stem)
+            sens_dir.mkdir(parents=True, exist_ok=True)
+            sens_summary_path = sens_dir / "summary.json"
+
+            sens_stdout = sens_dir / "sensitivity.stdout.txt"
+            sens_stderr = sens_dir / "sensitivity.stderr.txt"
+
+            if bool(args.resume) and _is_nonempty_file(sens_summary_path):
+                sens_res = CmdResult(
+                    argv=[],
+                    cwd=str(AIQ_ROOT),
+                    exit_code=0,
+                    elapsed_s=0.0,
+                    stdout_path=str(sens_stdout),
+                    stderr_path=str(sens_stderr),
+                )
+                meta["steps"].append({"name": f"sensitivity_{cfg_path.stem}_skip", **sens_res.__dict__})
+            else:
+                sens_argv = [
+                    "python3",
+                    "tools/sensitivity_check.py",
+                    "--config",
+                    str(cfg_path),
+                    "--interval",
+                    str(args.interval),
+                    "--baseline-replay-report",
+                    str(out_json),
+                    "--out-dir",
+                    str(sens_dir),
+                    "--output",
+                    str(sens_summary_path),
+                    "--timeout-s",
+                    str(int(getattr(args, "sensitivity_timeout_s", 0) or 0)),
+                ]
+                if getattr(args, "sensitivity_perturb", None):
+                    sens_argv += ["--perturb", str(args.sensitivity_perturb)]
+                if args.candles_db:
+                    sens_argv += ["--candles-db", str(args.candles_db)]
+                if args.funding_db:
+                    sens_argv += ["--funding-db", str(args.funding_db)]
+
+                sens_res = _run_cmd(sens_argv, cwd=AIQ_ROOT, stdout_path=sens_stdout, stderr_path=sens_stderr)
+                meta["steps"].append({"name": f"sensitivity_{cfg_path.stem}", **sens_res.__dict__})
+                if sens_res.exit_code != 0:
+                    _write_json(run_dir / "run_metadata.json", meta)
+                    return int(sens_res.exit_code)
+
+            summary["sensitivity_summary_path"] = str(sens_summary_path)
+            try:
+                sens_obj = _load_json(sens_summary_path)
+                agg = sens_obj.get("aggregate", {}) if isinstance(sens_obj, dict) else {}
+                if isinstance(agg, dict):
+                    summary["sensitivity_positive_rate"] = float(agg.get("positive_rate", 0.0))
+                    summary["sensitivity_median_total_pnl"] = float(agg.get("median_total_pnl", 0.0))
+                    summary["sensitivity_median_pnl_ratio_vs_baseline_abs"] = float(
+                        agg.get("median_pnl_ratio_vs_baseline_abs", 0.0)
+                    )
+                    summary["sensitivity_metric_v1"] = float(agg.get("sensitivity_metric_v1", 0.0))
+            except Exception:
+                summary["sensitivity_error"] = "failed to load sensitivity summary.json"
+
         score_obj = _compute_score_v1(
             summary,
             min_trades=int(getattr(args, "score_min_trades", 30) or 30),
@@ -1694,6 +1765,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=5,
         help="Reject if fewer than this many symbols had at least one trade (default: 5).",
+    )
+
+    ap.add_argument(
+        "--sensitivity-checks",
+        action="store_true",
+        help="Run small parameter perturbation replays to estimate config fragility.",
+    )
+    ap.add_argument(
+        "--sensitivity-perturb",
+        default=None,
+        help="Override the perturbation set (comma-separated dotpath:delta items).",
+    )
+    ap.add_argument(
+        "--sensitivity-timeout-s",
+        type=int,
+        default=0,
+        help="Per-variant replay timeout in seconds for sensitivity checks (default: 0).",
     )
 
     ap.add_argument(
