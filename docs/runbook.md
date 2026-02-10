@@ -37,6 +37,14 @@ Configure runtime log retention via:
 AI_QUANT_RUNTIME_LOG_KEEP_DAYS=14
 ```
 
+### Secrets management
+
+Do not store secrets in the repo. Recommended locations:
+
+- Hyperliquid key material: `~/.config/openclaw/ai-quant-secrets.json` (chmod 600)
+- Service environment: `~/.config/openclaw/ai-quant-live.env`
+  - Put alerting targets (e.g. `AI_QUANT_ALERT_TARGETS`) here, especially if using webhook URLs.
+
 ---
 
 ## 1. Pause Trading (Emergency Stop)
