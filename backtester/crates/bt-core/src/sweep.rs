@@ -134,6 +134,7 @@ fn apply_one(cfg: &mut StrategyConfig, path: &str, value: f64) {
         "trade.rsi_exit_lb_lo_profit_low_conf" => cfg.trade.rsi_exit_lb_lo_profit_low_conf = value,
         "trade.rsi_exit_lb_hi_profit_low_conf" => cfg.trade.rsi_exit_lb_hi_profit_low_conf = value,
         "trade.tp_partial_pct" => cfg.trade.tp_partial_pct = value,
+        "trade.tp_partial_atr_mult" => cfg.trade.tp_partial_atr_mult = value,
         "trade.add_min_profit_atr" => cfg.trade.add_min_profit_atr = value,
         "trade.add_fraction_of_base_margin" => cfg.trade.add_fraction_of_base_margin = value,
         "trade.max_adds_per_symbol" => cfg.trade.max_adds_per_symbol = value as usize,

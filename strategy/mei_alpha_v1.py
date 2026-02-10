@@ -274,6 +274,7 @@ _DEFAULT_STRATEGY_CONFIG = {
         "enable_partial_tp": True,
         "tp_partial_pct": 0.5,
         "tp_partial_min_notional_usd": 10.0,
+        "tp_partial_atr_mult": 0.0,  # 0 = use tp_atr_mult (same level). >0 = separate partial TP level.
         "trailing_start_atr": 1.0,
         "trailing_distance_atr": 0.8,
         # v5.037: Make SSF and breakeven configurable (defaults preserve prior behavior).
@@ -2790,6 +2791,14 @@ class PaperTrader:
         tp_mult = dynamic_tp_mult or tp_atr_mult
         tp_price = entry + (atr * tp_mult) if pos_type == 'LONG' else entry - (atr * tp_mult)
 
+        # Separate partial TP level (when configured). 0 = use tp_price (legacy).
+        tp_partial_atr_mult_val = float(trade_cfg.get("tp_partial_atr_mult", 0))
+        tp1_taken = int(pos.get("tp1_taken") or 0)
+        if tp_partial_atr_mult_val > 0 and tp1_taken == 0:
+            tp_check_price = entry + (atr * tp_partial_atr_mult_val) if pos_type == 'LONG' else entry - (atr * tp_partial_atr_mult_val)
+        else:
+            tp_check_price = tp_price
+
         # 4. Smart Exits (v2.8 Refactor)
         smart_exit_reason = None
         if indicators is not None:
@@ -3144,9 +3153,9 @@ class PaperTrader:
                         },
                     },
                 )
-            elif current_price >= tp_price:
+            elif current_price >= tp_check_price:
                 # Take-profit ladder (partial TP once, then trail the remainder).
-                if bool(trade_cfg.get("enable_partial_tp", True)) and int(pos.get("tp1_taken") or 0) == 0:
+                if bool(trade_cfg.get("enable_partial_tp", True)) and tp1_taken == 0:
                     try:
                         pct = float(trade_cfg.get("tp_partial_pct", 0.5))
                     except Exception:
@@ -3203,9 +3212,12 @@ class PaperTrader:
                                 self.upsert_position_state(symbol)
                             return
 
-                # If partial TP was already taken, don't auto-close remainder at the same TP level.
-                if bool(trade_cfg.get("enable_partial_tp", True)) and int(pos.get("tp1_taken") or 0) == 1:
-                    return
+                # If partial TP was already taken:
+                # - tp_partial_atr_mult > 0: fall through to full TP close.
+                # - tp_partial_atr_mult == 0: hold (trailing manages remainder). Legacy behavior.
+                if bool(trade_cfg.get("enable_partial_tp", True)) and tp1_taken == 1:
+                    if tp_partial_atr_mult_val <= 0:
+                        return
 
                 audit = None
                 if indicators is not None:
@@ -3262,8 +3274,8 @@ class PaperTrader:
                         },
                     },
                 )
-            elif current_price <= tp_price:
-                if bool(trade_cfg.get("enable_partial_tp", True)) and int(pos.get("tp1_taken") or 0) == 0:
+            elif current_price <= tp_check_price:
+                if bool(trade_cfg.get("enable_partial_tp", True)) and tp1_taken == 0:
                     try:
                         pct = float(trade_cfg.get("tp_partial_pct", 0.5))
                     except Exception:
@@ -3319,8 +3331,9 @@ class PaperTrader:
                                 self.upsert_position_state(symbol)
                             return
 
-                if bool(trade_cfg.get("enable_partial_tp", True)) and int(pos.get("tp1_taken") or 0) == 1:
-                    return
+                if bool(trade_cfg.get("enable_partial_tp", True)) and tp1_taken == 1:
+                    if tp_partial_atr_mult_val <= 0:
+                        return
 
                 audit = None
                 if indicators is not None:
