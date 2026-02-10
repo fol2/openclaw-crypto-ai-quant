@@ -144,6 +144,10 @@ class HyperliquidLiveExecutor:
         except Exception:
             self._spot_ttl_s = 10.0
 
+        # Last order submit outcome (best-effort). Used by the trader to distinguish hard rejections
+        # from transient transport errors (for example timeouts) so OMS intents can be kept matchable.
+        self.last_order_error: dict | None = None
+
     def user_state(self, *, force: bool = False) -> dict:
         now = time.time()
         if not force and self._state_cache is not None and self._state_cache_at is not None:
@@ -297,10 +301,29 @@ class HyperliquidLiveExecutor:
                 cloid=cloid_obj,
             )
             if not _is_ok_response(res):
+                self.last_order_error = {
+                    "kind": "rejected",
+                    "op": "market_open",
+                    "symbol": sym,
+                    "is_buy": bool(is_buy),
+                    "sz": float(sz_f),
+                    "response": res,
+                }
                 print(f"⚠️ market_open rejected ({sym}, is_buy={is_buy}, sz={sz_f}): {res}")
                 return None
+            self.last_order_error = None
             return res
         except Exception as e:
+            msg = str(e)
+            kind = "timeout" if ("timed out" in msg.lower()) else "exception"
+            self.last_order_error = {
+                "kind": kind,
+                "op": "market_open",
+                "symbol": sym,
+                "is_buy": bool(is_buy),
+                "sz": float(sz_f),
+                "error": repr(e),
+            }
             print(f"⚠️ market_open failed ({sym}, is_buy={is_buy}, sz={sz_f}): {e}")
             return None
 
@@ -367,10 +390,29 @@ class HyperliquidLiveExecutor:
                 cloid=cloid_obj,
             )
             if not _is_ok_response(res):
+                self.last_order_error = {
+                    "kind": "rejected",
+                    "op": "market_close",
+                    "symbol": sym,
+                    "is_buy": bool(is_buy),
+                    "sz": float(sz_f),
+                    "response": res,
+                }
                 print(f"⚠️ market_close rejected ({sym}, sz={sz_f}): {res}")
                 return None
+            self.last_order_error = None
             return res
         except Exception as e:
+            msg = str(e)
+            kind = "timeout" if ("timed out" in msg.lower()) else "exception"
+            self.last_order_error = {
+                "kind": kind,
+                "op": "market_close",
+                "symbol": sym,
+                "is_buy": bool(is_buy),
+                "sz": float(sz_f),
+                "error": repr(e),
+            }
             print(f"⚠️ market_close failed ({sym}, sz={sz_f}): {e}")
             return None
 
@@ -448,6 +490,7 @@ class HyperliquidLiveExecutor:
 
 def live_mode() -> str:
     return str(os.getenv("AI_QUANT_MODE", "paper") or "paper").strip().lower()
+
 
 def live_orders_enabled() -> bool:
     # Hard stop (halts ALL orders, including exits)
