@@ -41,6 +41,31 @@ except ImportError:  # pragma: no cover
 AIQ_ROOT = Path(__file__).resolve().parent
 
 
+PROFILE_DEFAULTS: dict[str, dict[str, int]] = {
+    # Very fast profile for verifying the pipeline end-to-end.
+    "smoke": {
+        "tpe_trials": 2000,
+        "num_candidates": 2,
+        "shortlist_per_mode": 3,
+        "shortlist_max_rank": 20,
+    },
+    # Default weekday run profile.
+    "daily": {
+        "tpe_trials": 5000,
+        "num_candidates": 3,
+        "shortlist_per_mode": 10,
+        "shortlist_max_rank": 50,
+    },
+    # Heavier profile for deeper sweeps and larger shortlists.
+    "deep": {
+        "tpe_trials": 500000,
+        "num_candidates": 5,
+        "shortlist_per_mode": 20,
+        "shortlist_max_rank": 200,
+    },
+}
+
+
 @dataclass(frozen=True)
 class CmdResult:
     argv: list[str]
@@ -510,57 +535,7 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Run the nightly strategy factory workflow and store artifacts.")
-    mx = ap.add_mutually_exclusive_group(required=True)
-    mx.add_argument("--run-id", help="Unique identifier for this run (used in artifact paths).")
-    mx.add_argument("--reproduce", metavar="RUN_ID", help="Reproduce an existing run_id (CPU replay + reports only).")
-    ap.add_argument("--artifacts-dir", default="artifacts", help="Artifacts root directory (default: artifacts).")
-    ap.add_argument("--resume", action="store_true", help="Resume an existing run_id from artifacts.")
-
-    ap.add_argument("--config", default="config/strategy_overrides.yaml", help="Base strategy YAML config path.")
-    ap.add_argument("--interval", default="1h", help="Main interval for sweep/replay (default: 1h).")
-    ap.add_argument("--candles-db", default=None, help="Optional candle DB path override.")
-    ap.add_argument("--funding-db", default=None, help="Optional funding DB path for replay/sweep.")
-
-    ap.add_argument("--sweep-spec", default="backtester/sweeps/smoke.yaml", help="Sweep spec YAML path.")
-    ap.add_argument("--gpu", action="store_true", help="Use GPU sweep (requires CUDA build/runtime).")
-    ap.add_argument("--tpe", action="store_true", help="Use TPE Bayesian optimisation for GPU sweeps (requires --gpu).")
-    ap.add_argument("--tpe-trials", type=int, default=5000, help="Number of TPE trials (default: 5000).")
-    ap.add_argument("--tpe-batch", type=int, default=256, help="Trials per GPU batch (default: 256).")
-    ap.add_argument("--tpe-seed", type=int, default=42, help="RNG seed for TPE reproducibility (default: 42).")
-    ap.add_argument("--top-n", type=int, default=0, help="Only print top N sweep results (0 = no summary).")
-
-    ap.add_argument(
-        "--num-candidates",
-        type=int,
-        default=3,
-        help="How many candidate configs to generate when shortlist is disabled (default: 3).",
-    )
-    ap.add_argument(
-        "--sort-by",
-        default="balanced",
-        choices=["pnl", "dd", "pf", "wr", "sharpe", "trades", "balanced"],
-        help="Sort metric for candidate selection when shortlist is disabled (default: balanced).",
-    )
-    ap.add_argument(
-        "--shortlist-modes",
-        default="dd,balanced",
-        help="Comma-separated sort modes to generate per sweep (default: dd,balanced).",
-    )
-    ap.add_argument(
-        "--shortlist-per-mode",
-        type=int,
-        default=10,
-        help="How many unique configs to keep per mode (default: 10). Set 0 to disable shortlist.",
-    )
-    ap.add_argument(
-        "--shortlist-max-rank",
-        type=int,
-        default=50,
-        help="Max rank to scan per mode while deduplicating (default: 50).",
-    )
-
-    args = ap.parse_args(argv)
+    args = _parse_cli_args(argv)
 
     artifacts_root = (AIQ_ROOT / str(args.artifacts_dir)).resolve()
     if args.reproduce and args.resume:
@@ -1029,6 +1004,87 @@ def main(argv: list[str] | None = None) -> int:
 
     _write_json(run_dir / "run_metadata.json", meta)
     return 0
+
+
+def _apply_profile_defaults(args: argparse.Namespace) -> None:
+    profile = str(getattr(args, "profile", "") or "daily").strip()
+    defaults = PROFILE_DEFAULTS.get(profile)
+    if defaults is None:
+        raise SystemExit(f"Unknown --profile: {profile}")
+
+    for k, v in defaults.items():
+        if not hasattr(args, k):
+            continue
+        if getattr(args, k) is None:
+            setattr(args, k, int(v))
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(description="Run the nightly strategy factory workflow and store artifacts.")
+    mx = ap.add_mutually_exclusive_group(required=True)
+    mx.add_argument("--run-id", help="Unique identifier for this run (used in artifact paths).")
+    mx.add_argument("--reproduce", metavar="RUN_ID", help="Reproduce an existing run_id (CPU replay + reports only).")
+    ap.add_argument("--artifacts-dir", default="artifacts", help="Artifacts root directory (default: artifacts).")
+    ap.add_argument("--resume", action="store_true", help="Resume an existing run_id from artifacts.")
+
+    ap.add_argument(
+        "--profile",
+        default="daily",
+        choices=sorted(PROFILE_DEFAULTS.keys()),
+        help="Preset defaults for trials and candidate counts (default: daily).",
+    )
+
+    ap.add_argument("--config", default="config/strategy_overrides.yaml", help="Base strategy YAML config path.")
+    ap.add_argument("--interval", default="1h", help="Main interval for sweep/replay (default: 1h).")
+    ap.add_argument("--candles-db", default=None, help="Optional candle DB path override.")
+    ap.add_argument("--funding-db", default=None, help="Optional funding DB path for replay/sweep.")
+
+    ap.add_argument("--sweep-spec", default="backtester/sweeps/smoke.yaml", help="Sweep spec YAML path.")
+    ap.add_argument("--gpu", action="store_true", help="Use GPU sweep (requires CUDA build/runtime).")
+    ap.add_argument("--tpe", action="store_true", help="Use TPE Bayesian optimisation for GPU sweeps (requires --gpu).")
+    ap.add_argument("--tpe-trials", type=int, default=None, help="Number of TPE trials (default depends on --profile).")
+    ap.add_argument("--tpe-batch", type=int, default=256, help="Trials per GPU batch (default: 256).")
+    ap.add_argument("--tpe-seed", type=int, default=42, help="RNG seed for TPE reproducibility (default: 42).")
+    ap.add_argument("--top-n", type=int, default=0, help="Only print top N sweep results (0 = no summary).")
+
+    ap.add_argument(
+        "--num-candidates",
+        type=int,
+        default=None,
+        help="How many candidate configs to generate when shortlist is disabled (default depends on --profile).",
+    )
+    ap.add_argument(
+        "--sort-by",
+        default="balanced",
+        choices=["pnl", "dd", "pf", "wr", "sharpe", "trades", "balanced"],
+        help="Sort metric for candidate selection when shortlist is disabled (default: balanced).",
+    )
+    ap.add_argument(
+        "--shortlist-modes",
+        default="dd,balanced",
+        help="Comma-separated sort modes to generate per sweep (default: dd,balanced).",
+    )
+    ap.add_argument(
+        "--shortlist-per-mode",
+        type=int,
+        default=None,
+        help="How many unique configs to keep per mode (default depends on --profile). Set 0 to disable shortlist.",
+    )
+    ap.add_argument(
+        "--shortlist-max-rank",
+        type=int,
+        default=None,
+        help="Max rank to scan per mode while deduplicating (default depends on --profile).",
+    )
+
+    return ap
+
+
+def _parse_cli_args(argv: list[str] | None) -> argparse.Namespace:
+    ap = _build_arg_parser()
+    args = ap.parse_args(argv)
+    _apply_profile_defaults(args)
+    return args
 
 
 if __name__ == "__main__":
