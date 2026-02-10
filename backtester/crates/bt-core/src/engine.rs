@@ -513,6 +513,8 @@ pub fn run_simulation(
                     tp1_taken: false,
                     open_time_ms: cand.ts,
                     last_add_time_ms: cand.ts,
+                    mae_usd: 0.0,
+                    mfe_usd: 0.0,
                 };
                 state.positions.insert(cand.symbol.clone(), pos);
                 entries_this_bar += 1;
@@ -1592,6 +1594,8 @@ fn execute_sub_bar_entry(
         tp1_taken: false,
         open_time_ms: ts,
         last_add_time_ms: ts,
+        mae_usd: 0.0,
+        mfe_usd: 0.0,
     };
     state.positions.insert(sym.to_string(), pos);
 
