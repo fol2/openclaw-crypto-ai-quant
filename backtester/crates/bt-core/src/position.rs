@@ -121,7 +121,7 @@ impl Position {
 // Trade record (log entry for each trade action)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TradeRecord {
     pub timestamp_ms: i64,
     pub symbol: String,
