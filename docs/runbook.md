@@ -115,6 +115,56 @@ journalctl --user -u openclaw-ai-quant-live --since "10 min ago" | grep -i kill
 
 ---
 
+## 1a. Emergency Flatten ("Flat Now") (AQC-808)
+
+Use when: you need to *both* pause entries and flatten positions under a known unwind policy.
+
+Policy (default):
+
+- Write a kill-switch file in `close_only` mode (pause new entries, allow exits).
+- Flatten positions:
+  - Paper: clear `position_state` and insert `SYSTEM CLOSE` trades.
+  - Live (optional): submit market-close (reduce-only IOC) per open position with retries.
+- Leave the kill-switch in place until post-incident review is complete.
+
+### Paper flatten + pause (safe default)
+
+```bash
+python tools/flat_now.py \
+  --kill-file /tmp/ai-quant-kill \
+  --pause-mode close_only \
+  --paper \
+  --yes
+```
+
+### Live flatten + pause (explicit, destructive)
+
+Live flatten requires `--yes`. Secrets are loaded from `AI_QUANT_SECRETS_PATH` (or `./secrets.json`).
+
+```bash
+python tools/flat_now.py \
+  --kill-file /tmp/ai-quant-kill \
+  --pause-mode close_only \
+  --live \
+  --yes
+```
+
+To flatten both paper and live in one command:
+
+```bash
+python tools/flat_now.py \
+  --kill-file /tmp/ai-quant-kill \
+  --pause-mode close_only \
+  --paper \
+  --live \
+  --yes
+```
+
+Notes:
+
+- Avoid `halt_all` when you want exits to run in-engine; it blocks *all* orders including exits.
+- This tool does not clear the kill-switch automatically. Clear it manually once you are confident it is safe.
+
 ## 1b. Strategy Mode Switching (AQC-1002)
 
 The engine supports an optional strategy-mode overlay selected via `AI_QUANT_STRATEGY_MODE`:
