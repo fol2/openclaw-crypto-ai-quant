@@ -142,6 +142,14 @@ class RiskManager:
         self._daily_realised_pnl_usd: float = 0.0
         self._daily_fees_usd: float = 0.0
 
+        # Slippage anomaly guard (entry fills). Uses median of recent fills vs mid/BBO.
+        self._slippage_guard_enabled = _env_bool("AI_QUANT_RISK_SLIPPAGE_GUARD_ENABLED", False)
+        self._slippage_guard_window_fills = int(max(1, _env_int("AI_QUANT_RISK_SLIPPAGE_GUARD_WINDOW_FILLS", 20)))
+        self._slippage_guard_max_median_bps = float(
+            max(0.0, _env_float("AI_QUANT_RISK_SLIPPAGE_GUARD_MAX_MEDIAN_BPS", 0.0))
+        )
+        self._slippage_bps: deque[float] = deque()
+
         # Diagnostics
         self._blocked_counts: dict[str, int] = defaultdict(int)
 
@@ -169,6 +177,7 @@ class RiskManager:
         self._daily_utc_day = None
         self._daily_realised_pnl_usd = 0.0
         self._daily_fees_usd = 0.0
+        self._slippage_bps.clear()
         self._kill_mode = "off"
         self._kill_reason = str(reason or "manual_clear")
         self._kill_since_s = None
@@ -214,6 +223,11 @@ class RiskManager:
         action: str,
         pnl_usd: float,
         fee_usd: float,
+        fill_price: float | None = None,
+        side: str | None = None,
+        ref_mid: float | None = None,
+        ref_bid: float | None = None,
+        ref_ask: float | None = None,
     ) -> None:
         """Update rolling risk state based on a newly-ingested live fill.
 
@@ -221,6 +235,19 @@ class RiskManager:
         """
         try:
             self._refresh_daily_loss(ts_ms=ts_ms, symbol=symbol, action=action, pnl_usd=pnl_usd, fee_usd=fee_usd)
+        except Exception:
+            return
+        try:
+            self._refresh_slippage_guard(
+                ts_ms=ts_ms,
+                symbol=symbol,
+                action=action,
+                fill_price=fill_price,
+                side=side,
+                ref_mid=ref_mid,
+                ref_bid=ref_bid,
+                ref_ask=ref_ask,
+            )
         except Exception:
             return
 
@@ -370,6 +397,41 @@ class RiskManager:
             dl_usd = float(self._max_daily_loss_usd or 0.0)
         self._max_daily_loss_usd = float(max(0.0, dl_usd))
 
+        # Slippage anomaly guard.
+        sg = risk_cfg.get("slippage_guard")
+        sg = sg if isinstance(sg, dict) else {}
+
+        enabled = sg.get("enabled")
+        env_enabled = os.getenv("AI_QUANT_RISK_SLIPPAGE_GUARD_ENABLED")
+        if env_enabled is not None and str(env_enabled).strip() != "":
+            enabled = env_enabled
+        try:
+            self._slippage_guard_enabled = (
+                bool(enabled)
+                if not isinstance(enabled, str)
+                else str(enabled).strip().lower() in {"1", "true", "yes", "y", "on"}
+            )
+        except Exception:
+            self._slippage_guard_enabled = False
+
+        window = sg.get("window_fills")
+        env_window = os.getenv("AI_QUANT_RISK_SLIPPAGE_GUARD_WINDOW_FILLS")
+        if env_window is not None and str(env_window).strip() != "":
+            window = env_window
+        try:
+            self._slippage_guard_window_fills = int(max(1, int(float(window or 20))))
+        except Exception:
+            self._slippage_guard_window_fills = 20
+
+        max_median = sg.get("max_median_bps")
+        env_max_median = os.getenv("AI_QUANT_RISK_SLIPPAGE_GUARD_MAX_MEDIAN_BPS")
+        if env_max_median is not None and str(env_max_median).strip() != "":
+            max_median = env_max_median
+        try:
+            self._slippage_guard_max_median_bps = float(max(0.0, float(max_median or 0.0)))
+        except Exception:
+            self._slippage_guard_max_median_bps = 0.0
+
     def _refresh_manual_kill(self) -> None:
         # Env kill
         raw = _env_str("AI_QUANT_KILL_SWITCH", "").strip()
@@ -507,6 +569,104 @@ class RiskManager:
                     "threshold_usd": float(self._max_daily_loss_usd),
                 },
             )
+
+    def _refresh_slippage_guard(
+        self,
+        *,
+        ts_ms: int,
+        symbol: str,
+        action: str,
+        fill_price: float | None,
+        side: str | None,
+        ref_mid: float | None,
+        ref_bid: float | None,
+        ref_ask: float | None,
+    ) -> None:
+        if (not self._slippage_guard_enabled) or self._slippage_guard_max_median_bps <= 0:
+            return
+
+        ac = str(action or "").strip().upper()
+        if ac not in {"OPEN", "ADD"}:
+            return
+
+        try:
+            px = float(fill_price) if fill_price is not None else 0.0
+        except Exception:
+            px = 0.0
+        if px <= 0:
+            return
+
+        sd = str(side or "").strip().upper()
+        if sd not in {"BUY", "SELL"}:
+            return
+
+        ref_kind = None
+        ref_px = None
+        if sd == "BUY":
+            if ref_ask is not None and float(ref_ask) > 0:
+                ref_kind = "ask"
+                ref_px = float(ref_ask)
+            elif ref_mid is not None and float(ref_mid) > 0:
+                ref_kind = "mid"
+                ref_px = float(ref_mid)
+        else:
+            if ref_bid is not None and float(ref_bid) > 0:
+                ref_kind = "bid"
+                ref_px = float(ref_bid)
+            elif ref_mid is not None and float(ref_mid) > 0:
+                ref_kind = "mid"
+                ref_px = float(ref_mid)
+
+        if ref_px is None or ref_px <= 0:
+            return
+
+        if sd == "BUY":
+            slip_bps = ((px - ref_px) / ref_px) * 10000.0
+        else:
+            slip_bps = ((ref_px - px) / ref_px) * 10000.0
+        slip_bps = float(max(0.0, slip_bps))
+
+        self._slippage_bps.append(slip_bps)
+        while len(self._slippage_bps) > int(self._slippage_guard_window_fills):
+            try:
+                self._slippage_bps.popleft()
+            except Exception:
+                break
+
+        win = int(self._slippage_guard_window_fills)
+        if len(self._slippage_bps) < win:
+            return
+
+        vals = sorted(float(x) for x in self._slippage_bps)
+        if not vals:
+            return
+        mid_i = len(vals) // 2
+        if len(vals) % 2 == 1:
+            median = float(vals[mid_i])
+        else:
+            median = float((vals[mid_i - 1] + vals[mid_i]) / 2.0)
+
+        if median <= float(self._slippage_guard_max_median_bps):
+            return
+
+        # Avoid spamming the same kill event.
+        if self._kill_mode == "close_only" and self._kill_reason == "slippage_guard" and self._kill_since_s is not None:
+            return
+
+        self.kill(mode="close_only", reason="slippage_guard")
+        self._audit(
+            symbol=str(symbol or "SYSTEM").strip().upper() or "SYSTEM",
+            event="RISK_KILL_SLIPPAGE",
+            level="warn",
+            data={
+                "slippage_bps_last": float(slip_bps),
+                "slippage_ref_kind": str(ref_kind or ""),
+                "slippage_ref_px": float(ref_px),
+                "slippage_window_fills": int(win),
+                "slippage_median_bps": float(median),
+                "threshold_median_bps": float(self._slippage_guard_max_median_bps),
+            },
+        )
 
     def _allow_symbol_event(self, *, sym: str, is_entry: bool) -> bool:
         if not sym:
