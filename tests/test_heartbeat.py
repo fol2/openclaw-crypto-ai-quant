@@ -81,6 +81,24 @@ def test_parse_last_heartbeat_sqlite(tmp_path):
     assert out["ws_restarts"] == 0
 
 
+def test_parse_last_heartbeat_parses_kill_and_config_id(tmp_path):
+    db_path = tmp_path / "missing.db"
+    log_path = tmp_path / "engine.log"
+    cid = "a" * 64
+    line = (
+        "2026-02-09T00:00:00Z 🫀 engine ok loop=0.25s errors=0 symbols=3 open_pos=0 "
+        "ws_connected=False ws_thread_alive=True ws_restarts=0 "
+        "kill=close_only kill_reason=drawdown "
+        f"config_id={cid}"
+    )
+    log_path.write_text(f"{line}\n", encoding="utf-8")
+    out = hb.parse_last_heartbeat(db_path, log_path)
+    assert out["ok"] is True
+    assert out["kill_mode"] == "close_only"
+    assert out["kill_reason"] == "drawdown"
+    assert out["config_id"] == cid
+
+
 def test_heartbeat_line_from_db_missing_table(tmp_path):
     # File exists but doesn't have runtime_logs: should fail gracefully and return None.
     db_path = tmp_path / "empty.db"

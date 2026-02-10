@@ -98,6 +98,14 @@ def _current_config_id() -> str:
     return str(cid)
 
 
+def current_config_id() -> str:
+    """Return the current config_id (sha256 of the normalised strategy YAML)."""
+    try:
+        return _current_config_id()
+    except Exception:
+        return ""
+
+
 @dataclass(frozen=True)
 class _EventItem:
     line: str
@@ -239,4 +247,3 @@ def _close_for_tests() -> None:
             return
         _SINK.close()
         _SINK = None
-

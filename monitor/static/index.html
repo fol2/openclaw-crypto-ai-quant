@@ -49,6 +49,31 @@
           <span class="pillv" id="balEq">&mdash;</span>
         </div>
 
+        <div class="pill pill-state" id="statePill" title="Risk kill switch state">
+          <span class="dot" id="stateDot"></span>
+          <span class="pilltxt" id="stateTxt" aria-live="polite">running</span>
+        </div>
+
+        <div class="pill pill-val" id="cfgPill" title="Active config_id (from engine heartbeat)">
+          <span class="pillk">cfg</span>
+          <span class="pillv" id="cfgId">&mdash;</span>
+        </div>
+
+        <div class="pill pill-val" id="pnlTodayPill" title="Today's PnL (UTC day, realised balance delta)">
+          <span class="pillk">pnl</span>
+          <span class="pillv" id="pnlToday">&mdash;</span>
+        </div>
+
+        <div class="pill pill-val" id="ddPill" title="Drawdown from peak realised balance (UTC day)">
+          <span class="pillk">dd</span>
+          <span class="pillv" id="ddNow">&mdash;</span>
+        </div>
+
+        <div class="pill pill-val" id="dataPill" title="Last market data timestamp (WS mids)">
+          <span class="pillk">data</span>
+          <span class="pillv" id="dataTs">&mdash;</span>
+        </div>
+
         <label class="search">
           <span class="kbd">/</span>
           <input id="search" type="search" placeholder="Filter symbols..." autocomplete="off" />
