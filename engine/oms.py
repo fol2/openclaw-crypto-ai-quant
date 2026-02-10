@@ -2384,6 +2384,7 @@ class LiveOms:
                             "action": action,
                             "pos_type": pos_type,
                             "t_ms": int(t_ms),
+                            "side": side,
                             "price": float(px),
                             "size": float(sz),
                             "notional": float(notional),
@@ -2434,6 +2435,23 @@ class LiveOms:
                 note = getattr(risk, "note_fill", None) if risk is not None else None
                 if callable(note):
                     for row in notify_rows:
+                        ref_mid = None
+                        ref_bid = None
+                        ref_ask = None
+                        try:
+                            import exchange.ws as hyperliquid_ws
+
+                            sym_u = str(row.get("symbol") or "").strip().upper()
+                            bbo = hyperliquid_ws.hl_ws.get_bbo(sym_u, max_age_s=10.0)
+                            if bbo is not None:
+                                ref_bid, ref_ask = float(bbo[0]), float(bbo[1])
+                            ref_mid = hyperliquid_ws.hl_ws.get_mid(sym_u, max_age_s=10.0)
+                            if ref_mid is not None:
+                                ref_mid = float(ref_mid)
+                        except Exception:
+                            ref_mid = None
+                            ref_bid = None
+                            ref_ask = None
                         try:
                             note(
                                 ts_ms=int(row.get("t_ms") or 0),
@@ -2441,6 +2459,11 @@ class LiveOms:
                                 action=str(row.get("action") or ""),
                                 pnl_usd=float(row.get("pnl") or 0.0),
                                 fee_usd=float(row.get("fee") or 0.0),
+                                fill_price=float(row.get("price") or 0.0),
+                                side=str(row.get("side") or ""),
+                                ref_mid=ref_mid,
+                                ref_bid=ref_bid,
+                                ref_ask=ref_ask,
                             )
                         except Exception:
                             continue
