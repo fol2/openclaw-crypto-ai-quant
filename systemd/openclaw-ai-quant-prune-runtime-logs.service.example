@@ -1,0 +1,12 @@
+[Unit]
+Description=OpenClaw AI Quant Prune Runtime Logs (SQLite)
+
+[Service]
+Type=oneshot
+WorkingDirectory=$PROJECT_DIR
+EnvironmentFile=-%h/.config/openclaw/ai-quant-live.env
+ExecStart=$PROJECT_DIR/.venv/bin/python3 -u tools/prune_runtime_logs.py
+
+[Install]
+WantedBy=default.target
+

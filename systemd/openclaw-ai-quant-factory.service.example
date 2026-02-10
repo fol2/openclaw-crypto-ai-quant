@@ -1,0 +1,16 @@
+[Unit]
+Description=OpenClaw AI Quant Nightly Strategy Factory Run
+After=network-online.target openclaw-ai-quant-ws-sidecar.service
+Wants=network-online.target
+Requires=openclaw-ai-quant-ws-sidecar.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=$PROJECT_DIR
+EnvironmentFile=-%h/.config/openclaw/ai-quant-universe.env
+EnvironmentFile=-%h/.config/openclaw/ai-quant-live.env
+ExecStart=/usr/bin/env bash -lc "cd \"$PROJECT_DIR\" && \"$PROJECT_DIR/.venv/bin/python3\" -u factory_run.py --run-id nightly_$(date -u +%Y%m%dT%H%M%SZ) --profile daily"
+
+[Install]
+WantedBy=default.target
+
