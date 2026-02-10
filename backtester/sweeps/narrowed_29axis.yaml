@@ -4,7 +4,7 @@
 # 13 OPEN axes → original range preserved
 #
 # Usage: mei-backtester sweep --gpu --tpe --tpe-trials 500000 --tpe-batch 4096 \
-#   --sweep-spec backtester/sweep_narrowed_29axis.yaml \
+#   --sweep-spec backtester/sweeps/narrowed_29axis.yaml \
 #   --balance-from /tmp/live_state.json \
 #   --config strategy_tpe_500k_1h3m_20260208_locked.yaml \
 #   --interval 1h --entry-interval 3m --exit-interval 3m \

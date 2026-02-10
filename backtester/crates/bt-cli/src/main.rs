@@ -388,6 +388,13 @@ struct SweepArgs {
     /// RNG seed for TPE reproducibility (default: 42)
     #[arg(long, default_value_t = 42)]
     tpe_seed: u64,
+
+    /// Override GPU sweep guardrails (unsafe).
+    ///
+    /// By default, GPU sweeps are restricted to "safe" interval combos
+    /// (30m/5m, 1h/5m, 30m/3m, 1h/3m) and a <=19-day scoped window.
+    #[arg(long, default_value_t = false)]
+    allow_unsafe_gpu_sweep: bool,
 }
 
 #[derive(Parser)]
@@ -1131,6 +1138,101 @@ fn write_trade_export_csv(
 }
 
 // ---------------------------------------------------------------------------
+// GPU sweep guardrails
+// ---------------------------------------------------------------------------
+
+const GPU_SAFE_MAX_SCOPE_DAYS: f64 = 19.0;
+
+fn parse_interval_minutes(iv: &str) -> Option<u32> {
+    let s = iv.trim();
+    if s.len() < 2 {
+        return None;
+    }
+    let (num, unit) = s.split_at(s.len() - 1);
+    let n: u32 = num.parse().ok()?;
+    match unit {
+        "m" | "M" => Some(n),
+        "h" | "H" => Some(n.saturating_mul(60)),
+        _ => None,
+    }
+}
+
+fn compute_scope_days(from_ts: Option<i64>, to_ts: Option<i64>) -> Option<f64> {
+    let f = from_ts?;
+    let t = to_ts?;
+    Some((t - f) as f64 / 86_400_000.0)
+}
+
+fn check_gpu_sweep_guardrails(
+    main_interval: &str,
+    exit_interval: Option<&str>,
+    entry_interval: Option<&str>,
+    from_ts: Option<i64>,
+    to_ts: Option<i64>,
+) -> Result<(), String> {
+    let main_min = parse_interval_minutes(main_interval).ok_or_else(|| {
+        format!("Unsupported main interval format: {:?}", main_interval)
+    })?;
+
+    let mut sub_ivs: Vec<&str> = Vec::new();
+    if let Some(iv) = exit_interval {
+        sub_ivs.push(iv);
+    }
+    if let Some(iv) = entry_interval {
+        sub_ivs.push(iv);
+    }
+    sub_ivs.sort_unstable();
+    sub_ivs.dedup();
+
+    if sub_ivs.is_empty() {
+        return Err(format!(
+            "GPU sweep requires sub-bar entry/exit intervals. Got interval={:?}, exit_interval=None, entry_interval=None.",
+            main_interval,
+        ));
+    }
+    if sub_ivs.len() > 1 {
+        return Err(format!(
+            "GPU sweep sub-bar intervals must match. Got interval={:?}, exit_interval={:?}, entry_interval={:?}.",
+            main_interval,
+            exit_interval,
+            entry_interval,
+        ));
+    }
+
+    let sub_iv = sub_ivs[0];
+    let sub_min = parse_interval_minutes(sub_iv).ok_or_else(|| {
+        format!("Unsupported sub-bar interval format: {:?}", sub_iv)
+    })?;
+
+    let is_safe_combo = matches!(
+        (main_min, sub_min),
+        (30, 5) | (60, 5) | (30, 3) | (60, 3)
+    );
+    if !is_safe_combo {
+        return Err(format!(
+            "GPU sweep interval combo {:?}/{:?} is outside the default safe set (30m/5m, 1h/5m, 30m/3m, 1h/3m).",
+            main_interval, sub_iv,
+        ));
+    }
+
+    let days = compute_scope_days(from_ts, to_ts).ok_or_else(|| {
+        "GPU sweep requires a bounded scoped window (auto-scope or explicit --from-ts/--to-ts).".to_string()
+    })?;
+
+    if days > GPU_SAFE_MAX_SCOPE_DAYS {
+        return Err(format!(
+            "GPU sweep scoped window is {:.1} days (> {:.0} days). from_ts={:?}, to_ts={:?}.",
+            days,
+            GPU_SAFE_MAX_SCOPE_DAYS,
+            from_ts,
+            to_ts,
+        ));
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Subcommand implementations
 // ---------------------------------------------------------------------------
 
@@ -1588,6 +1690,28 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
         args.start_ts.map(|t| t.0),
         args.end_ts.map(|t| t.0),
     );
+
+    if !args.no_auto_scope {
+        if let Some(days) = compute_scope_days(from_ts, to_ts) {
+            eprintln!("[auto-scope] Scoped period length: {:.1} days", days);
+        } else {
+            eprintln!("[auto-scope] Scoped period length: unknown (missing bounds)");
+        }
+    }
+
+    if args.gpu && !args.allow_unsafe_gpu_sweep {
+        if let Err(msg) = check_gpu_sweep_guardrails(
+            &interval,
+            exit_interval.as_deref(),
+            entry_interval.as_deref(),
+            from_ts,
+            to_ts,
+        ) {
+            eprintln!("[guardrail] {msg}");
+            eprintln!("[guardrail] Override with --allow-unsafe-gpu-sweep.");
+            std::process::exit(1);
+        }
+    }
 
     // Load indicator candles (full history for warmup — no time filter)
     let mut candles = bt_data::sqlite_loader::load_candles_multi(&candles_db_paths, &interval)?;
@@ -2145,6 +2269,58 @@ fn print_summary(r: &bt_core::report::SimReport, initial_balance: f64) {
     }
     if gs.blocked_by_margin > 0 {
         eprintln!("  Blocked by margin:    {}", gs.blocked_by_margin);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_interval_minutes() {
+        assert_eq!(parse_interval_minutes("3m"), Some(3));
+        assert_eq!(parse_interval_minutes("30m"), Some(30));
+        assert_eq!(parse_interval_minutes("1h"), Some(60));
+        assert_eq!(parse_interval_minutes("2h"), Some(120));
+        assert_eq!(parse_interval_minutes(""), None);
+        assert_eq!(parse_interval_minutes("abc"), None);
+        assert_eq!(parse_interval_minutes("5"), None);
+    }
+
+    #[test]
+    fn test_gpu_guardrails_safe_combo_and_days() {
+        let from_ts = Some(0);
+        let to_ts = Some((10.0 * 86_400_000.0) as i64);
+        assert!(check_gpu_sweep_guardrails("1h", Some("3m"), Some("3m"), from_ts, to_ts).is_ok());
+        assert!(check_gpu_sweep_guardrails("30m", Some("5m"), None, from_ts, to_ts).is_ok());
+    }
+
+    #[test]
+    fn test_gpu_guardrails_rejects_unsafe_combo() {
+        let from_ts = Some(0);
+        let to_ts = Some((10.0 * 86_400_000.0) as i64);
+        let err = check_gpu_sweep_guardrails("15m", Some("5m"), None, from_ts, to_ts).unwrap_err();
+        assert!(err.contains("outside the default safe set"));
+    }
+
+    #[test]
+    fn test_gpu_guardrails_rejects_long_window() {
+        let from_ts = Some(0);
+        let to_ts = Some((25.0 * 86_400_000.0) as i64);
+        let err = check_gpu_sweep_guardrails("1h", Some("3m"), Some("3m"), from_ts, to_ts).unwrap_err();
+        assert!(err.contains("scoped window"));
+    }
+
+    #[test]
+    fn test_gpu_guardrails_rejects_mismatched_sub_intervals() {
+        let from_ts = Some(0);
+        let to_ts = Some((10.0 * 86_400_000.0) as i64);
+        let err = check_gpu_sweep_guardrails("1h", Some("3m"), Some("5m"), from_ts, to_ts).unwrap_err();
+        assert!(err.contains("must match"));
     }
 }
 

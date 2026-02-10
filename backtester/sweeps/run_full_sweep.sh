@@ -117,6 +117,7 @@ for IV in $INTERVALS; do
     if timeout "${TIMEOUT_PER_RUN}" \
         "$BACKTESTER" sweep \
             --gpu \
+            --allow-unsafe-gpu-sweep \
             --tpe \
             --tpe-trials "$TRIALS" \
             --tpe-batch "$BATCH" \
