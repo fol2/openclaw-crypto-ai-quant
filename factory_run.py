@@ -28,6 +28,11 @@ try:
 except ImportError:  # pragma: no cover
     from config_id import config_id_from_yaml_file  # type: ignore[no-redef]
 
+try:
+    from tools.registry_index import default_registry_db_path, ingest_run_dir
+except ImportError:  # pragma: no cover
+    from registry_index import default_registry_db_path, ingest_run_dir  # type: ignore[no-redef]
+
 
 AIQ_ROOT = Path(__file__).resolve().parent
 
@@ -371,6 +376,19 @@ def main(argv: list[str] | None = None) -> int:
     (run_dir / "reports").mkdir(parents=True, exist_ok=True)
     (run_dir / "reports" / "report.md").write_text(report_md, encoding="utf-8")
     _write_json(run_dir / "reports" / "report.json", {"items": replay_reports})
+
+    # ------------------------------------------------------------------
+    # 6) Registry index
+    # ------------------------------------------------------------------
+    registry_db = default_registry_db_path(artifacts_root=artifacts_root)
+    meta["registry_db"] = str(registry_db)
+    try:
+        res = ingest_run_dir(registry_db=registry_db, run_dir=run_dir)
+        meta["registry_ingest"] = res.__dict__
+    except Exception as e:
+        meta["registry_error"] = str(e)
+        _write_json(run_dir / "run_metadata.json", meta)
+        return 1
 
     _write_json(run_dir / "run_metadata.json", meta)
     return 0
