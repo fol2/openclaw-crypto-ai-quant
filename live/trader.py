@@ -2794,12 +2794,46 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                     risk = getattr(trader, "risk", None)
                     note = getattr(risk, "note_fill", None) if risk is not None else None
                     if callable(note):
+                        fill_side = None
+                        try:
+                            dl = str(dir_s or "").strip().lower()
+                            if dl.startswith("open") and "long" in dl:
+                                fill_side = "BUY"
+                            elif dl.startswith("open") and "short" in dl:
+                                fill_side = "SELL"
+                            elif dl.startswith("close") and "long" in dl:
+                                fill_side = "SELL"
+                            elif dl.startswith("close") and "short" in dl:
+                                fill_side = "BUY"
+                        except Exception:
+                            fill_side = None
+
+                        ref_mid = None
+                        ref_bid = None
+                        ref_ask = None
+                        try:
+                            bbo = hyperliquid_ws.hl_ws.get_bbo(sym, max_age_s=10.0)
+                            if bbo is not None:
+                                ref_bid, ref_ask = float(bbo[0]), float(bbo[1])
+                            ref_mid = hyperliquid_ws.hl_ws.get_mid(sym, max_age_s=10.0)
+                            if ref_mid is not None:
+                                ref_mid = float(ref_mid)
+                        except Exception:
+                            ref_mid = None
+                            ref_bid = None
+                            ref_ask = None
+
                         note(
                             ts_ms=int(t_ms),
                             symbol=str(sym),
                             action=str(action),
                             pnl_usd=float(pnl or 0.0),
                             fee_usd=float(fee or 0.0),
+                            fill_price=float(px),
+                            side=str(fill_side or ""),
+                            ref_mid=ref_mid,
+                            ref_bid=ref_bid,
+                            ref_ask=ref_ask,
                         )
                 except Exception:
                     pass
@@ -2900,12 +2934,46 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                 risk = getattr(trader, "risk", None)
                 note = getattr(risk, "note_fill", None) if risk is not None else None
                 if callable(note):
+                    fill_side = None
+                    try:
+                        dl = str(dir_s or "").strip().lower()
+                        if dl.startswith("open") and "long" in dl:
+                            fill_side = "BUY"
+                        elif dl.startswith("open") and "short" in dl:
+                            fill_side = "SELL"
+                        elif dl.startswith("close") and "long" in dl:
+                            fill_side = "SELL"
+                        elif dl.startswith("close") and "short" in dl:
+                            fill_side = "BUY"
+                    except Exception:
+                        fill_side = None
+
+                    ref_mid = None
+                    ref_bid = None
+                    ref_ask = None
+                    try:
+                        bbo = hyperliquid_ws.hl_ws.get_bbo(sym, max_age_s=10.0)
+                        if bbo is not None:
+                            ref_bid, ref_ask = float(bbo[0]), float(bbo[1])
+                        ref_mid = hyperliquid_ws.hl_ws.get_mid(sym, max_age_s=10.0)
+                        if ref_mid is not None:
+                            ref_mid = float(ref_mid)
+                    except Exception:
+                        ref_mid = None
+                        ref_bid = None
+                        ref_ask = None
+
                     note(
                         ts_ms=int(t_ms),
                         symbol=str(sym),
                         action=str(action),
                         pnl_usd=float(pnl or 0.0),
                         fee_usd=float(fee or 0.0),
+                        fill_price=float(px),
+                        side=str(fill_side or ""),
+                        ref_mid=ref_mid,
+                        ref_bid=ref_bid,
+                        ref_ask=ref_ask,
                     )
             except Exception:
                 pass
