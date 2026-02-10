@@ -1301,6 +1301,221 @@ def build_snapshot(mode: str) -> dict[str, Any]:
             pass
 
 
+def _prom_escape(v: str) -> str:
+    return str(v).replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+
+def _prom_labels(labels: dict[str, Any] | None) -> str:
+    if not labels:
+        return ""
+    parts: list[str] = []
+    for k, v in labels.items():
+        key = str(k or "").strip()
+        if not key:
+            continue
+        parts.append(f'{key}="{_prom_escape(str(v))}"')
+    return "{" + ",".join(parts) + "}" if parts else ""
+
+
+def _prom_line(name: str, value: float | int, labels: dict[str, Any] | None = None) -> str:
+    return f"{name}{_prom_labels(labels)} {value}\n"
+
+
+def build_metrics(mode: str) -> dict[str, Any]:
+    mode2 = (mode or "paper").strip().lower()
+    now_ms = _utc_now_ms()
+    db_path, log_path = mode_paths(mode2)
+
+    health = parse_last_heartbeat(db_path, log_path)
+    out: dict[str, Any] = {
+        "ok": True,
+        "now_ts_ms": now_ms,
+        "mode": mode2,
+        "db_path": str(db_path),
+        "health": health,
+        "gauges": {},
+        "counters": {},
+    }
+
+    gauges: dict[str, Any] = {}
+    counters: dict[str, Any] = {}
+
+    # Heartbeat-derived gauges.
+    gauges["engine_up"] = 1 if bool(health.get("ok")) else 0
+    if isinstance(health.get("ts_ms"), int) and int(health.get("ts_ms") or 0) > 0:
+        gauges["heartbeat_age_s"] = max(0.0, (float(now_ms) - float(health["ts_ms"])) / 1000.0)
+    if "open_pos" in health:
+        gauges["open_pos"] = int(health.get("open_pos") or 0)
+    if "ws_connected" in health:
+        gauges["ws_connected"] = 1 if bool(health.get("ws_connected")) else 0
+
+    kill_mode = str(health.get("kill_mode") or "off").strip().lower()
+    gauges["kill_mode"] = 2 if kill_mode == "halt_all" else (1 if kill_mode == "close_only" else 0)
+
+    # Slippage guard gauges (from heartbeat).
+    if "slip_enabled" in health:
+        gauges["slip_enabled"] = 1 if bool(health.get("slip_enabled")) else 0
+    if "slip_n" in health:
+        gauges["slip_n"] = int(health.get("slip_n") or 0)
+    if "slip_win" in health:
+        gauges["slip_win"] = int(health.get("slip_win") or 0)
+    if "slip_thr_bps" in health:
+        gauges["slip_thr_bps"] = float(health.get("slip_thr_bps") or 0.0)
+    if "slip_last_bps" in health:
+        gauges["slip_last_bps"] = float(health.get("slip_last_bps") or 0.0)
+    if "slip_median_bps" in health:
+        gauges["slip_median_bps"] = float(health.get("slip_median_bps") or 0.0)
+
+    if not db_path.exists():
+        out["ok"] = False
+        out["error"] = "db_missing"
+        out["gauges"] = gauges
+        out["counters"] = counters
+        return out
+
+    try:
+        con = connect_db_ro(db_path)
+    except Exception as e:
+        out["ok"] = False
+        out["error"] = f"db_open_failed:{e}"
+        out["gauges"] = gauges
+        out["counters"] = counters
+        return out
+
+    try:
+        row = _fetchone(con, "SELECT name FROM sqlite_master WHERE type='table' AND name='oms_intents'")
+        has_oms = bool(row)
+
+        # Orders + fills.
+        if has_oms:
+            row = _fetchone(con, "SELECT COUNT(*) AS n FROM oms_intents")
+            counters["orders_total"] = int(row.get("n") or 0) if row else 0
+            counters["orders_by_action"] = {str(r["action"]): int(r["n"]) for r in _fetchall(con, "SELECT action, COUNT(*) AS n FROM oms_intents GROUP BY action") if r.get("action")}
+
+            row = _fetchone(con, "SELECT COUNT(*) AS n FROM oms_fills")
+            counters["fills_total"] = int(row.get("n") or 0) if row else 0
+            counters["fills_by_action"] = {str(r["action"]): int(r["n"]) for r in _fetchall(con, "SELECT action, COUNT(*) AS n FROM oms_fills GROUP BY action") if r.get("action")}
+        else:
+            row = _fetchone(con, "SELECT COUNT(*) AS n FROM trades")
+            counters["orders_total"] = int(row.get("n") or 0) if row else 0
+            counters["fills_total"] = int(row.get("n") or 0) if row else 0
+
+        # Daily PnL + drawdown gauges.
+        day = _utc_day(now_ms)
+        if day:
+            like = f"{day}%"
+            row0 = _fetchone(
+                con,
+                "SELECT balance FROM trades WHERE timestamp LIKE ? AND balance IS NOT NULL ORDER BY id ASC LIMIT 1",
+                (like,),
+            )
+            row1 = _fetchone(
+                con,
+                "SELECT balance FROM trades WHERE timestamp LIKE ? AND balance IS NOT NULL ORDER BY id DESC LIMIT 1",
+                (like,),
+            )
+            row_peak = _fetchone(
+                con,
+                "SELECT MAX(balance) AS peak FROM trades WHERE timestamp LIKE ? AND balance IS NOT NULL",
+                (like,),
+            )
+            row_fees = _fetchone(
+                con,
+                "SELECT SUM(COALESCE(fee_usd, 0)) AS fees FROM trades WHERE timestamp LIKE ?",
+                (like,),
+            )
+
+            start_bal = float(row0["balance"]) if row0 and row0.get("balance") is not None else None
+            end_bal = float(row1["balance"]) if row1 and row1.get("balance") is not None else None
+            peak_bal = float(row_peak["peak"]) if row_peak and row_peak.get("peak") is not None else None
+            fees_usd = float(row_fees["fees"]) if row_fees and row_fees.get("fees") is not None else 0.0
+
+            pnl = float(end_bal - start_bal) if start_bal is not None and end_bal is not None else 0.0
+            gauges["pnl_today_usd"] = float(pnl)
+            gauges["fees_today_usd"] = float(fees_usd)
+            gauges["net_pnl_today_usd"] = float(pnl) - float(fees_usd)
+
+            if peak_bal is not None and end_bal is not None and peak_bal > 0:
+                dd = max(0.0, (float(peak_bal) - float(end_bal)) / float(peak_bal)) * 100.0
+                gauges["drawdown_today_pct"] = float(dd)
+
+        # Kill events.
+        row = _fetchone(con, "SELECT COUNT(*) AS n FROM audit_events WHERE event LIKE 'RISK_KILL_%'")
+        counters["kill_events_total"] = int(row.get("n") or 0) if row else 0
+        counters["kill_events_by_event"] = {
+            str(r["event"]): int(r["n"])
+            for r in _fetchall(con, "SELECT event, COUNT(*) AS n FROM audit_events WHERE event LIKE 'RISK_KILL_%' GROUP BY event")
+            if r.get("event")
+        }
+
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+    out["gauges"] = gauges
+    out["counters"] = counters
+    return out
+
+
+def build_prometheus_metrics(mode: str) -> str:
+    m = build_metrics(mode)
+    mode2 = str(m.get("mode") or (mode or "paper")).strip().lower()
+    gauges = m.get("gauges") if isinstance(m.get("gauges"), dict) else {}
+    counters = m.get("counters") if isinstance(m.get("counters"), dict) else {}
+
+    lines: list[str] = []
+
+    # Gauges.
+    for k, v in (gauges or {}).items():
+        name = f"aiq_{str(k)}"
+        try:
+            val = float(v)
+        except Exception:
+            continue
+        lines.append(_prom_line(name, val, {"mode": mode2}).rstrip("\n"))
+
+    def _emit_counter(name_key: str, by_key: str | None, *, label_key: str) -> None:
+        name = f"aiq_{name_key}"
+        total = counters.get(name_key)
+        if total is not None:
+            try:
+                val = float(total)
+            except Exception:
+                val = None
+            if val is not None:
+                lines.append(_prom_line(name, val, {"mode": mode2, label_key: "all"}).rstrip("\n"))
+        if by_key:
+            d = counters.get(by_key)
+            if isinstance(d, dict):
+                for lbl, val0 in d.items():
+                    try:
+                        val = float(val0)
+                    except Exception:
+                        continue
+                    lines.append(_prom_line(name, val, {"mode": mode2, label_key: str(lbl)}).rstrip("\n"))
+
+    _emit_counter("orders_total", "orders_by_action", label_key="action")
+    _emit_counter("fills_total", "fills_by_action", label_key="action")
+    _emit_counter("kill_events_total", "kill_events_by_event", label_key="event")
+
+    # Any other counters.
+    for k, v in (counters or {}).items():
+        if k in {"orders_total", "orders_by_action", "fills_total", "fills_by_action", "kill_events_total", "kill_events_by_event"}:
+            continue
+        if isinstance(v, dict):
+            continue
+        name = f"aiq_{str(k)}"
+        try:
+            val = float(v)
+        except Exception:
+            continue
+        lines.append(_prom_line(name, val, {"mode": mode2}).rstrip("\n"))
+
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "aiq-monitor/0.1"
 
@@ -1361,6 +1576,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send_headers(200, "application/json; charset=utf-8", 0)
             return
 
+        if path == "/metrics":
+            self._send_headers(200, "text/plain; charset=utf-8", 0)
+            return
+
         self._send_headers(404, "text/plain; charset=utf-8", 0)
 
     def do_GET(self) -> None:  # noqa: N802
@@ -1413,6 +1632,18 @@ class Handler(BaseHTTPRequestHandler):
             mode = (qs.get("mode") or ["paper"])[0]
             snap = STATE.get_snapshot_cached(mode, lambda: build_snapshot(mode))
             self._send_json(snap)
+            return
+
+        if path == "/api/metrics":
+            qs = parse_qs(parsed.query or "")
+            mode = (qs.get("mode") or ["paper"])[0]
+            self._send_json(build_metrics(mode))
+            return
+
+        if path == "/metrics":
+            qs = parse_qs(parsed.query or "")
+            mode = (qs.get("mode") or ["paper"])[0]
+            self._send_text(build_prometheus_metrics(mode))
             return
 
         self._send_text("not found", status=404)

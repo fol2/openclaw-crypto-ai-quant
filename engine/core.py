@@ -1121,6 +1121,31 @@ class UnifiedEngine:
                         kill_reason = str(getattr(risk, "kill_reason", "") or "").strip() or "none"
                     except Exception:
                         kill_reason = "none"
+
+                    slip_enabled = 0
+                    slip_n = 0
+                    slip_win = 0
+                    slip_thr_bps_s = "0"
+                    slip_last_bps_s = "none"
+                    slip_median_bps_s = "none"
+                    try:
+                        fn = getattr(risk, "slippage_guard_stats", None) if risk is not None else None
+                        st = fn() if callable(fn) else {}
+                        if isinstance(st, dict):
+                            slip_enabled = 1 if bool(st.get("enabled")) else 0
+                            slip_n = int(st.get("n") or 0)
+                            slip_win = int(st.get("window_fills") or 0)
+                            thr = st.get("threshold_median_bps")
+                            if thr is not None:
+                                slip_thr_bps_s = f"{float(thr):.3f}"
+                            last = st.get("last_bps")
+                            if last is not None:
+                                slip_last_bps_s = f"{float(last):.3f}"
+                            med = st.get("median_bps")
+                            if med is not None:
+                                slip_median_bps_s = f"{float(med):.3f}"
+                    except Exception:
+                        pass
                     print(
                         f"🫀 engine ok. loops={self.stats.loops} errors={self.stats.loop_errors} "
                         f"symbols={len(active_symbols)} open_pos={open_pos} loop={loop_s:.2f}s "
@@ -1128,6 +1153,8 @@ class UnifiedEngine:
                         f"ws_connected={h.get('connected')} ws_thread_alive={h.get('thread_alive')} "
                         f"ws_restarts={self.stats.ws_restarts} "
                         f"kill={kill_mode} kill_reason={kill_reason} "
+                        f"slip_enabled={slip_enabled} slip_n={slip_n} slip_win={slip_win} slip_thr_bps={slip_thr_bps_s} "
+                        f"slip_last_bps={slip_last_bps_s} slip_median_bps={slip_median_bps_s} "
                         f"signal_on_close={int(self._signal_on_candle_close)} entry_iv={self._entry_interval} exit_iv={self._exit_interval} reanalyze_s={self._reanalyze_interval_s:.0f} exit_reanalyze_s={self._exit_reanalyze_interval_s:.0f} "
                         f"breadth={f'{self._market_breadth_pct:.1f}%' if self._market_breadth_pct is not None else 'n/a'} "
                         f"auto_rev={'ON' if _auto_rev_on else 'OFF'} "

@@ -37,7 +37,8 @@ def test_parse_last_heartbeat_text_log_parsing(tmp_path):
     log_path = tmp_path / "engine.log"
     line = (
         "2026-02-09T00:00:00Z 🫀 engine ok wall=1.23s errors=2 symbols=50 open_pos=1 "
-        "ws_connected=True ws_thread_alive=False ws_restarts=3"
+        "ws_connected=True ws_thread_alive=False ws_restarts=3 "
+        "slip_enabled=1 slip_n=3 slip_win=20 slip_thr_bps=5.000 slip_last_bps=10.000 slip_median_bps=7.500"
     )
     log_path.write_text(f"old line\n{line}\n", encoding="utf-8")
     out = hb.parse_last_heartbeat(db_path, log_path)
@@ -50,6 +51,12 @@ def test_parse_last_heartbeat_text_log_parsing(tmp_path):
     assert out["ws_connected"] is True
     assert out["ws_thread_alive"] is False
     assert out["ws_restarts"] == 3
+    assert out["slip_enabled"] is True
+    assert out["slip_n"] == 3
+    assert out["slip_win"] == 20
+    assert out["slip_thr_bps"] == 5.0
+    assert out["slip_last_bps"] == 10.0
+    assert out["slip_median_bps"] == 7.5
 
 
 def test_parse_last_heartbeat_sqlite(tmp_path):
