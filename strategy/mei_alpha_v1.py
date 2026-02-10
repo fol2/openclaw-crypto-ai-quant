@@ -1075,6 +1075,22 @@ def log_audit_event(
             ),
         )
         conn.commit()
+
+        # Best-effort structured event log (JSONL). This must never block trading.
+        try:
+            from engine.event_logger import emit_event
+
+            emit_event(
+                kind="audit",
+                symbol=sym or symbol,
+                data={
+                    "event": str(event or ""),
+                    "level": str(level or "info"),
+                    "data": data or None,
+                },
+            )
+        except Exception:
+            pass
     except Exception:
         # Never let audit logging impact trading logic.
         pass
@@ -1394,6 +1410,32 @@ class PaperTrader:
         trade_id = cursor.lastrowid
         conn.commit()
         conn.close()
+
+        # Best-effort structured event log (JSONL). This must never block trading.
+        try:
+            from engine.event_logger import emit_event
+
+            emit_event(
+                kind="trade_fill",
+                symbol=symbol,
+                data={
+                    "trade_id": int(trade_id or 0),
+                    "action": str(action or ""),
+                    "pos_type": str(type or ""),
+                    "price": float(price or 0.0),
+                    "size": float(size or 0.0),
+                    "notional": float(notional or 0.0),
+                    "pnl_usd": float(pnl or 0.0),
+                    "fee_usd": float(fee_usd or 0.0),
+                    "fee_rate": None if fee_rate is None else float(fee_rate),
+                    "balance": float(self.balance or 0.0),
+                    "reason": str(reason or ""),
+                    "confidence": str(confidence or ""),
+                    "meta_json": meta_json,
+                },
+            )
+        except Exception:
+            pass
 
         if not notify:
             return trade_id
