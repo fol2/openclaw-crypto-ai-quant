@@ -57,7 +57,7 @@ enum Commands {
 #[derive(Parser)]
 struct ReplayArgs {
     /// Path to the strategy YAML config
-    #[arg(long, default_value = "strategy_overrides.yaml")]
+    #[arg(long, default_value = "config/strategy_overrides.yaml")]
     config: String,
 
     /// Path to the SQLite candle database.
@@ -157,7 +157,7 @@ struct ReplayArgs {
 #[derive(Parser)]
 struct SweepArgs {
     /// Path to the strategy YAML config (base config for sweep)
-    #[arg(long, default_value = "strategy_overrides.yaml")]
+    #[arg(long, default_value = "config/strategy_overrides.yaml")]
     config: String,
 
     /// Path to the SQLite candle database.
@@ -257,7 +257,7 @@ struct SweepArgs {
 #[derive(Parser)]
 struct DumpArgs {
     /// Path to the strategy YAML config
-    #[arg(long, default_value = "strategy_overrides.yaml")]
+    #[arg(long, default_value = "config/strategy_overrides.yaml")]
     config: String,
 
     /// Path to the SQLite candle database.
