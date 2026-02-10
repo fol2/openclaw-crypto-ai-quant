@@ -14,8 +14,10 @@ The goal is reproducibility: every run has a `run_id` and a self-contained artif
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import platform
 import shutil
 import sqlite3
 import subprocess
@@ -117,6 +119,101 @@ def _resolve_backtester_cmd() -> list[str]:
 
     # Fallback: build+run via cargo.
     return ["cargo", "run", "-p", "bt-cli", "--bin", "mei-backtester", "--"]
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _file_fingerprint(path: Path) -> dict[str, Any]:
+    p = Path(path).expanduser()
+    if not p.exists():
+        return {"path": str(p), "exists": False}
+
+    out: dict[str, Any] = {"path": str(p), "exists": True, "is_file": p.is_file(), "is_dir": p.is_dir()}
+    if p.is_file():
+        st = p.stat()
+        out.update(
+            {
+                "size_bytes": int(st.st_size),
+                "mtime_ns": int(st.st_mtime_ns),
+                "sha256": _sha256_file(p),
+            }
+        )
+    return out
+
+
+def _capture_repro_metadata(*, run_dir: Path, artifacts_root: Path, bt_cmd: list[str], meta: dict[str, Any]) -> None:
+    repro_dir = run_dir / "repro"
+    repro_dir.mkdir(parents=True, exist_ok=True)
+
+    # Best-effort system/environment metadata. Failures should not block the pipeline.
+    env_keys = [
+        "MEI_BACKTESTER_BIN",
+        "CUDA_VISIBLE_DEVICES",
+        "LD_LIBRARY_PATH",
+        "PYTHONHASHSEED",
+    ]
+    meta["repro"] = {
+        "system": {
+            "platform": platform.platform(),
+            "python_version": sys.version,
+            "argv0": sys.argv[0] if sys.argv else "",
+        },
+        "env": {k: os.getenv(k, "") for k in env_keys},
+        "backtester_cmd": list(bt_cmd),
+        "files": {
+            "pyproject_toml": _file_fingerprint(AIQ_ROOT / "pyproject.toml"),
+            "uv_lock": _file_fingerprint(AIQ_ROOT / "uv.lock"),
+            "sweep_spec": _file_fingerprint(AIQ_ROOT / str(meta.get("args", {}).get("sweep_spec", ""))),
+        },
+        "cmds": [],
+    }
+
+    # Capture versions as command outputs into artifacts.
+    version_cmds: list[tuple[str, list[str]]] = [
+        ("uname", ["uname", "-a"]),
+        ("git_status", ["git", "status", "--porcelain=v1"]),
+        ("cargo_version", ["cargo", "--version"]),
+        ("rustc_version", ["rustc", "--version"]),
+        ("nvidia_smi", ["nvidia-smi", "-L"]),
+        ("nvcc_version", ["nvcc", "--version"]),
+    ]
+
+    for name, argv in version_cmds:
+        out_path = repro_dir / f"{name}.stdout.txt"
+        err_path = repro_dir / f"{name}.stderr.txt"
+        try:
+            res = _run_cmd(argv, cwd=AIQ_ROOT, stdout_path=out_path, stderr_path=err_path)
+            meta["repro"]["cmds"].append({"name": name, **res.__dict__})
+        except Exception as e:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text("", encoding="utf-8")
+            err_path.write_text(f"{type(e).__name__}: {e}\n", encoding="utf-8")
+            meta["repro"]["cmds"].append(
+                {
+                    "name": name,
+                    "argv": list(argv),
+                    "cwd": str(AIQ_ROOT),
+                    "exit_code": 127,
+                    "elapsed_s": 0.0,
+                    "stdout_path": str(out_path),
+                    "stderr_path": str(err_path),
+                    "exception": f"{type(e).__name__}: {e}",
+                }
+            )
+
+    # Fingerprint the resolved backtester binary when it is a path.
+    bt0 = str(bt_cmd[0]) if bt_cmd else ""
+    bt_path = Path(bt0) if bt0 and ("/" in bt0 or bt0.endswith(".exe")) else None
+    if bt_path and bt_path.exists():
+        meta["repro"]["files"]["mei_backtester_bin"] = _file_fingerprint(bt_path)
+
+    meta["repro"]["artifacts_root"] = str(artifacts_root)
 
 
 def _load_json(path: Path) -> Any:
@@ -275,6 +372,10 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
         "reproduce_source_git_head": str(source_meta.get("git_head", "")).strip(),
     }
 
+    bt_cmd = _resolve_backtester_cmd()
+    _capture_repro_metadata(run_dir=run_dir, artifacts_root=artifacts_root, bt_cmd=bt_cmd, meta=meta)
+    _write_json(run_dir / "run_metadata.json", meta)
+
     # ------------------------------------------------------------------
     # Copy configs from the source run
     # ------------------------------------------------------------------
@@ -331,7 +432,6 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
     # ------------------------------------------------------------------
     # CPU replay / validation (v1: run replay once per candidate)
     # ------------------------------------------------------------------
-    bt_cmd = _resolve_backtester_cmd()
     replays_dir = run_dir / "replays"
     replays_dir.mkdir(parents=True, exist_ok=True)
 
@@ -367,6 +467,12 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
         summary["config_path"] = str(cfg_path)
         summary["config_id"] = candidate_config_ids[str(cfg_path)]
         replay_reports.append(summary)
+
+        entry = entry_by_path.get(str(cfg_path))
+        if entry is not None:
+            entry["replay_report_path"] = str(out_json)
+            entry["replay_stdout_path"] = str(replay_res.stdout_path or "")
+            entry["replay_stderr_path"] = str(replay_res.stderr_path or "")
 
     # ------------------------------------------------------------------
     # Reports + registry
@@ -406,6 +512,10 @@ def main(argv: list[str] | None = None) -> int:
 
     ap.add_argument("--sweep-spec", default="backtester/sweeps/smoke.yaml", help="Sweep spec YAML path.")
     ap.add_argument("--gpu", action="store_true", help="Use GPU sweep (requires CUDA build/runtime).")
+    ap.add_argument("--tpe", action="store_true", help="Use TPE Bayesian optimisation for GPU sweeps (requires --gpu).")
+    ap.add_argument("--tpe-trials", type=int, default=5000, help="Number of TPE trials (default: 5000).")
+    ap.add_argument("--tpe-batch", type=int, default=256, help="Trials per GPU batch (default: 256).")
+    ap.add_argument("--tpe-seed", type=int, default=42, help="RNG seed for TPE reproducibility (default: 42).")
     ap.add_argument("--top-n", type=int, default=0, help="Only print top N sweep results (0 = no summary).")
 
     ap.add_argument(
@@ -463,6 +573,10 @@ def main(argv: list[str] | None = None) -> int:
         "steps": [],
     }
 
+    bt_cmd = _resolve_backtester_cmd()
+    _capture_repro_metadata(run_dir=run_dir, artifacts_root=artifacts_root, bt_cmd=bt_cmd, meta=meta)
+    _write_json(run_dir / "run_metadata.json", meta)
+
     # ------------------------------------------------------------------
     # 1) Data checks
     # ------------------------------------------------------------------
@@ -491,7 +605,6 @@ def main(argv: list[str] | None = None) -> int:
     # ------------------------------------------------------------------
     # 2) Sweep
     # ------------------------------------------------------------------
-    bt_cmd = _resolve_backtester_cmd()
     sweep_out = run_dir / "sweeps" / "sweep_results.jsonl"
     sweep_argv = bt_cmd + [
         "sweep",
@@ -512,6 +625,23 @@ def main(argv: list[str] | None = None) -> int:
         sweep_argv += ["--funding-db", str(args.funding_db)]
     if bool(args.gpu):
         sweep_argv += ["--gpu"]
+    if bool(getattr(args, "tpe", False)):
+        if not bool(args.gpu):
+            (run_dir / "reports").mkdir(parents=True, exist_ok=True)
+            (run_dir / "reports" / "report.md").write_text(
+                "# Factory Run Report\n\nError: --tpe requires --gpu.\n", encoding="utf-8"
+            )
+            _write_json(run_dir / "run_metadata.json", meta)
+            return 1
+        sweep_argv += [
+            "--tpe",
+            "--tpe-trials",
+            str(int(getattr(args, "tpe_trials", 5000))),
+            "--tpe-batch",
+            str(int(getattr(args, "tpe_batch", 256))),
+            "--tpe-seed",
+            str(int(getattr(args, "tpe_seed", 42))),
+        ]
 
     sweep_res = _run_cmd(
         sweep_argv,
@@ -537,6 +667,7 @@ def main(argv: list[str] | None = None) -> int:
     candidate_paths: list[Path] = []
     candidate_config_ids: dict[str, str] = {}
     candidate_entries: list[dict[str, Any]] = []
+    entry_by_path: dict[str, dict[str, Any]] = {}
 
     # Multi-mode shortlist generation (AQC-403). Deduplicate across modes by config_id.
     if shortlist_per_mode > 0:
@@ -588,16 +719,24 @@ def main(argv: list[str] | None = None) -> int:
                     candidate_paths.append(out_yaml)
                     kept += 1
 
-                candidate_entries.append(
-                    {
-                        "path": str(out_yaml),
-                        "config_id": cfg_id,
-                        "sort_by": mode,
-                        "rank": int(rank),
-                        "selected": bool(selected),
-                        "deduped": bool(is_dup),
-                    }
-                )
+                entry = {
+                    "path": str(out_yaml),
+                    "config_id": cfg_id,
+                    "sort_by": mode,
+                    "rank": int(rank),
+                    "selected": bool(selected),
+                    "deduped": bool(is_dup),
+                    "interval": str(args.interval),
+                    "base_config_path": str(args.config),
+                    "sweep_spec_path": str(args.sweep_spec),
+                    "sweep_results_path": str(sweep_out),
+                    "sweep_stdout_path": str(sweep_res.stdout_path or ""),
+                    "sweep_stderr_path": str(sweep_res.stderr_path or ""),
+                    "generate_stdout_path": str(gen_res.stdout_path or ""),
+                    "generate_stderr_path": str(gen_res.stderr_path or ""),
+                }
+                candidate_entries.append(entry)
+                entry_by_path[str(out_yaml)] = entry
 
                 if kept >= shortlist_per_mode:
                     break
@@ -633,9 +772,24 @@ def main(argv: list[str] | None = None) -> int:
             candidate_paths.append(out_yaml)
             cfg_id = config_id_from_yaml_file(out_yaml)
             candidate_config_ids[str(out_yaml)] = cfg_id
-            candidate_entries.append(
-                {"path": str(out_yaml), "config_id": cfg_id, "sort_by": str(args.sort_by), "rank": int(rank), "selected": True, "deduped": False}
-            )
+            entry = {
+                "path": str(out_yaml),
+                "config_id": cfg_id,
+                "sort_by": str(args.sort_by),
+                "rank": int(rank),
+                "selected": True,
+                "deduped": False,
+                "interval": str(args.interval),
+                "base_config_path": str(args.config),
+                "sweep_spec_path": str(args.sweep_spec),
+                "sweep_results_path": str(sweep_out),
+                "sweep_stdout_path": str(sweep_res.stdout_path or ""),
+                "sweep_stderr_path": str(sweep_res.stderr_path or ""),
+                "generate_stdout_path": str(gen_res.stdout_path or ""),
+                "generate_stderr_path": str(gen_res.stderr_path or ""),
+            }
+            candidate_entries.append(entry)
+            entry_by_path[str(out_yaml)] = entry
 
     meta["candidate_configs"] = candidate_entries
 
