@@ -31,6 +31,7 @@ _HB_WS_THREAD_RE = re.compile(r"ws_thread_alive=(True|False)", re.IGNORECASE)
 _HB_WS_RESTARTS_RE = re.compile(r"ws_restarts=([0-9]+)", re.IGNORECASE)
 _HB_KILL_MODE_RE = re.compile(r"kill=(off|close_only|halt_all)", re.IGNORECASE)
 _HB_KILL_REASON_RE = re.compile(r"kill_reason=([^\s]+)", re.IGNORECASE)
+_HB_STRATEGY_MODE_RE = re.compile(r"strategy_mode=([^\s]+)", re.IGNORECASE)
 _HB_REGIME_GATE_RE = re.compile(r"regime_gate=(on|off)", re.IGNORECASE)
 _HB_REGIME_REASON_RE = re.compile(r"regime_reason=([^\s]+)", re.IGNORECASE)
 _HB_CONFIG_ID_RE = re.compile(r"config_id=([0-9a-f]{8,64}|none)", re.IGNORECASE)
@@ -165,6 +166,9 @@ def parse_last_heartbeat(db_path: Path, log_path: Path) -> dict[str, Any]:
     kr_m = _HB_KILL_REASON_RE.search(last_line)
     if kr_m:
         out["kill_reason"] = kr_m.group(1)
+    smod_m = _HB_STRATEGY_MODE_RE.search(last_line)
+    if smod_m:
+        out["strategy_mode"] = smod_m.group(1).lower()
     rg_m = _HB_REGIME_GATE_RE.search(last_line)
     if rg_m:
         out["regime_gate"] = rg_m.group(1).lower() == "on"
