@@ -179,6 +179,66 @@ sqlite3 candles_dbs/candles_5m.db "SELECT COUNT(*) AS dupes FROM (SELECT symbol,
 
 3m adds ~480 rows/day/symbol, 5m adds ~288 rows/day/symbol. With pruning disabled for both, plan disk accordingly and monitor `candles_dbs/candles_{3m,5m}.db` file sizes.
 
+### Candle DB partitioning / archival (AQC-204)
+
+If you retain multi-month histories (especially 3m/5m), a single `candles_{interval}.db` file can grow large. Partitioning keeps the "hot" DB small while preserving long history in monthly archive DBs.
+
+This repo uses monthly SQLite partitions created by `tools/partition_candles_db.py`:
+
+- Hot DB (written by the WS sidecar): `candles_dbs/candles_{interval}.db`
+- Archive partitions: `candles_dbs/partitions/{interval}/candles_{interval}_YYYY-MM.db`
+
+#### Partitioning procedure
+
+Prefer to stop the sidecar before applying changes:
+
+```bash
+systemctl --user stop openclaw-ai-quant-ws-sidecar
+```
+
+Dry-run (no writes):
+
+```bash
+uv run python tools/partition_candles_db.py --interval 5m
+```
+
+Apply copy-only:
+
+```bash
+uv run python tools/partition_candles_db.py --interval 5m --keep-days 120 --apply
+```
+
+Apply copy + delete (shrinks the hot DB over time):
+
+```bash
+uv run python tools/partition_candles_db.py --interval 5m --keep-days 120 --apply --delete
+```
+
+Optional: run `VACUUM` after deletion (slow, but compacts the file):
+
+```bash
+uv run python tools/partition_candles_db.py --interval 5m --keep-days 120 --apply --delete --vacuum
+```
+
+Restart the sidecar afterwards:
+
+```bash
+systemctl --user start openclaw-ai-quant-ws-sidecar
+```
+
+#### Backtester usage across partitions
+
+The backtester can load candles from a comma-separated list of DB paths and/or a directory containing partition DBs.
+
+Example (hot DB + partitions dir):
+
+```bash
+./target/release/mei-backtester replay \
+  --interval 5m \
+  --candles-db candles_dbs/candles_5m.db,candles_dbs/partitions/5m \
+  --config config/strategy_overrides.yaml
+```
+
 ### BBO snapshot database (AQC-206)
 
 Optional, sampled best-bid/best-ask (BBO) snapshots are stored in SQLite for slippage modelling and post-trade analysis.

@@ -30,6 +30,24 @@ mei-backtester sweep --sweep-config sweep.yaml [OPTIONS]
 mei-backtester dump-indicators --symbol BTC [OPTIONS]
 ```
 
+### Candle DB sets (AQC-204)
+
+The candle DB flags (`--candles-db`, `--exit-candles-db`, `--entry-candles-db`) accept:
+
+- A single SQLite DB file path
+- A comma-separated list of paths (files and/or directories)
+- A directory containing partition DB files (all `*.db` files are loaded)
+
+Examples:
+
+```bash
+# Hot DB only (single file)
+mei-backtester replay --candles-db candles_dbs/candles_5m.db
+
+# Hot DB + monthly partitions directory
+mei-backtester replay --candles-db candles_dbs/candles_5m.db,candles_dbs/partitions/5m
+```
+
 ### Universe filter (AQC-205)
 
 If you maintain a universe history DB via `tools/sync_universe_history.py`, you can optionally filter backtests to symbols that were active during the tested period:

@@ -20,6 +20,26 @@ pub fn query_time_range(
     Ok(result)
 }
 
+/// Query the min/max timestamp across multiple candle DBs for a given interval.
+///
+/// This is useful when candle history is partitioned into multiple SQLite files.
+pub fn query_time_range_multi(
+    db_paths: &[String],
+    interval: &str,
+) -> Result<Option<(i64, i64)>, Box<dyn std::error::Error>> {
+    let mut min_t: Option<i64> = None;
+    let mut max_t: Option<i64> = None;
+
+    for p in db_paths {
+        if let Some((mn, mx)) = query_time_range(p, interval)? {
+            min_t = Some(min_t.map_or(mn, |v| v.min(mn)));
+            max_t = Some(max_t.map_or(mx, |v| v.max(mx)));
+        }
+    }
+
+    Ok(min_t.zip(max_t))
+}
+
 /// Load all candle rows for a given interval from the SQLite database,
 /// returning them grouped by symbol with bars sorted by open-time ascending.
 ///
@@ -29,6 +49,14 @@ pub fn load_candles(
     interval: &str,
 ) -> Result<CandleData, Box<dyn std::error::Error>> {
     load_candles_filtered(db_path, interval, None, None)
+}
+
+/// Load candles across multiple SQLite databases for a given interval.
+pub fn load_candles_multi(
+    db_paths: &[String],
+    interval: &str,
+) -> Result<CandleData, Box<dyn std::error::Error>> {
+    load_candles_filtered_multi(db_paths, interval, None, None)
 }
 
 /// Like [`load_candles`] but with optional timestamp filters.
@@ -43,7 +71,8 @@ pub fn load_candles_filtered(
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
 
     // Tune for bulk read performance
-    conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = OFF;")?;
+    // Best-effort: archived partitions may be read-only or not in WAL mode.
+    let _ = conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = OFF;");
 
     // Build dynamic WHERE clause
     let mut where_parts = vec!["interval = ?1".to_string()];
@@ -132,6 +161,32 @@ pub fn load_candles_filtered(
     Ok(data)
 }
 
+/// Like [`load_candles_filtered`], but merges results across multiple databases.
+///
+/// If partitions overlap, duplicate bars are deduped by `(symbol, t)` after merging.
+pub fn load_candles_filtered_multi(
+    db_paths: &[String],
+    interval: &str,
+    from_ts: Option<i64>,
+    to_ts: Option<i64>,
+) -> Result<CandleData, Box<dyn std::error::Error>> {
+    let mut merged: CandleData = CandleData::default();
+    for p in db_paths {
+        let part = load_candles_filtered(p, interval, from_ts, to_ts)?;
+        for (sym, bars) in part {
+            merged.entry(sym).or_default().extend(bars);
+        }
+    }
+
+    // Normalise ordering and dedupe within each symbol.
+    for bars in merged.values_mut() {
+        bars.sort_by_key(|b| b.t);
+        bars.dedup_by_key(|b| b.t);
+    }
+
+    Ok(merged)
+}
+
 /// Load the distinct list of symbols available for a given interval.
 pub fn load_symbols(
     db_path: &str,
@@ -208,7 +263,8 @@ pub fn load_funding_rates_filtered(
     let start = Instant::now();
 
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = OFF;")?;
+    // Best-effort: archived DBs may be read-only or not in WAL mode.
+    let _ = conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = OFF;");
 
     let mut where_parts: Vec<String> = Vec::new();
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -279,4 +335,113 @@ pub fn load_funding_rates_filtered(
     );
 
     Ok(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn tmp_db_path(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("bt_data_{tag}_{nanos}.db"))
+    }
+
+    fn init_candles_db(path: &PathBuf) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS candles (
+                symbol TEXT NOT NULL,
+                interval TEXT NOT NULL,
+                t INTEGER NOT NULL,
+                t_close INTEGER,
+                o REAL,
+                h REAL,
+                l REAL,
+                c REAL,
+                v REAL,
+                n INTEGER,
+                updated_at TEXT,
+                PRIMARY KEY (symbol, interval, t)
+            );
+            CREATE INDEX IF NOT EXISTS idx_candles_symbol_interval_t
+            ON candles(symbol, interval, t);
+            "#,
+        )
+        .unwrap();
+    }
+
+    fn insert_bar(conn: &Connection, symbol: &str, interval: &str, t: i64) {
+        conn.execute(
+            "INSERT OR REPLACE INTO candles (symbol, interval, t, t_close, o, h, l, c, v, n, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, 1.0, 1.0, 1.0, 1.0, 0.0, 0, 'test')",
+            (symbol, interval, t, t + 1),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn query_time_range_multi_unions_partitions() {
+        let p1 = tmp_db_path("range1");
+        let p2 = tmp_db_path("range2");
+
+        init_candles_db(&p1);
+        init_candles_db(&p2);
+
+        {
+            let c1 = Connection::open(&p1).unwrap();
+            insert_bar(&c1, "BTC", "5m", 1000);
+            insert_bar(&c1, "BTC", "5m", 2000);
+        }
+        {
+            let c2 = Connection::open(&p2).unwrap();
+            insert_bar(&c2, "BTC", "5m", 3000);
+            insert_bar(&c2, "BTC", "5m", 4000);
+        }
+
+        let paths = vec![p1.to_string_lossy().to_string(), p2.to_string_lossy().to_string()];
+        let got = query_time_range_multi(&paths, "5m").unwrap();
+        assert_eq!(got, Some((1000, 4000)));
+
+        let _ = std::fs::remove_file(&p1);
+        let _ = std::fs::remove_file(&p2);
+    }
+
+    #[test]
+    fn load_candles_filtered_multi_merges_and_dedupes() {
+        let p1 = tmp_db_path("merge1");
+        let p2 = tmp_db_path("merge2");
+
+        init_candles_db(&p1);
+        init_candles_db(&p2);
+
+        {
+            let c1 = Connection::open(&p1).unwrap();
+            insert_bar(&c1, "BTC", "5m", 1000);
+            insert_bar(&c1, "BTC", "5m", 2000);
+        }
+        {
+            let c2 = Connection::open(&p2).unwrap();
+            insert_bar(&c2, "BTC", "5m", 2000); // duplicate
+            insert_bar(&c2, "BTC", "5m", 3000);
+            insert_bar(&c2, "ETH", "5m", 1500);
+        }
+
+        let paths = vec![p1.to_string_lossy().to_string(), p2.to_string_lossy().to_string()];
+        let data = load_candles_filtered_multi(&paths, "5m", None, None).unwrap();
+
+        let btc = data.get("BTC").unwrap();
+        let eth = data.get("ETH").unwrap();
+        assert_eq!(btc.iter().map(|b| b.t).collect::<Vec<_>>(), vec![1000, 2000, 3000]);
+        assert_eq!(eth.iter().map(|b| b.t).collect::<Vec<_>>(), vec![1500]);
+
+        let _ = std::fs::remove_file(&p1);
+        let _ = std::fs::remove_file(&p2);
+    }
 }
