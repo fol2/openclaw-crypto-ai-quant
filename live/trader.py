@@ -2789,6 +2789,20 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                     withdrawable_usd=float(trader.balance or 0.0),
                     breadth_pct=_ctx_breadth_pct,
                 )
+                # Best-effort risk update (daily loss tracking, etc).
+                try:
+                    risk = getattr(trader, "risk", None)
+                    note = getattr(risk, "note_fill", None) if risk is not None else None
+                    if callable(note):
+                        note(
+                            ts_ms=int(t_ms),
+                            symbol=str(sym),
+                            action=str(action),
+                            pnl_usd=float(pnl or 0.0),
+                            fee_usd=float(fee or 0.0),
+                        )
+                except Exception:
+                    pass
                 try:
                     lev_s = "NA" if lev is None or lev <= 0 else f"{float(lev):.0f}x"
                 except Exception:
@@ -2881,6 +2895,20 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                 withdrawable_usd=float(trader.balance or 0.0),
                 breadth_pct=_ctx_breadth_pct,
             )
+            # Best-effort risk update (daily loss tracking, etc).
+            try:
+                risk = getattr(trader, "risk", None)
+                note = getattr(risk, "note_fill", None) if risk is not None else None
+                if callable(note):
+                    note(
+                        ts_ms=int(t_ms),
+                        symbol=str(sym),
+                        action=str(action),
+                        pnl_usd=float(pnl or 0.0),
+                        fee_usd=float(fee or 0.0),
+                    )
+            except Exception:
+                pass
             try:
                 lev_s = "NA" if lev is None or lev <= 0 else f"{float(lev):.0f}x"
             except Exception:
