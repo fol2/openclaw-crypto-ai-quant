@@ -19,6 +19,7 @@ import exchange.meta as hyperliquid_meta
 import exchange.ws as hyperliquid_ws
 
 import strategy.mei_alpha_v1 as mei_alpha_v1
+
 try:
     _DB_TIMEOUT_S = float(os.getenv("AI_QUANT_DB_TIMEOUT_S", "30"))
 except Exception:
@@ -89,6 +90,7 @@ def _send_discord_message_sync(*, target: str, message: str) -> None:
         )
     except Exception as e:
         print(f"⚠️ Failed to send Discord message (target={target}): {e}")
+
 
 _DISCORD_QUEUE_LOCK = threading.RLock()
 _DISCORD_QUEUE_MAX = 200
@@ -182,7 +184,7 @@ def _notify_live_fill(
         emoji = "💰" if pnl_usd >= 0 else "🛑"
 
     action_hk = action_map.get(action, action)
-    fee_rate_str = "" if fee_rate is None else f" ({fee_rate*100:.4f}%)"
+    fee_rate_str = "" if fee_rate is None else f" ({fee_rate * 100:.4f}%)"
     fee_token_str = f" {fee_token}" if fee_token else ""
 
     msg = f"{emoji} **LIVE：{action_hk}** | {symbol}\n"
@@ -399,12 +401,10 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 "confidence": prev.get("confidence") or "N/A",
                 "entry_atr": float(entry_atr),
                 "entry_adx_threshold": float(prev.get("entry_adx_threshold") or st.get("entry_adx_threshold") or 0),
-                "trailing_sl": prev.get("trailing_sl") if prev.get("trailing_sl") is not None else st.get("trailing_sl"),
-                "last_funding_time": int(
-                    prev.get("last_funding_time")
-                    or st.get("last_funding_time")
-                    or now_ms
-                ),
+                "trailing_sl": prev.get("trailing_sl")
+                if prev.get("trailing_sl") is not None
+                else st.get("trailing_sl"),
+                "last_funding_time": int(prev.get("last_funding_time") or st.get("last_funding_time") or now_ms),
                 "leverage": float(lp.get("leverage") or prev.get("leverage") or 1.0),
                 "margin_used": float(lp.get("margin_used") or prev.get("margin_used") or 0.0),
                 "adds_count": int(prev.get("adds_count") or st.get("adds_count") or 0),
@@ -463,7 +463,9 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         if not pos:
             return
         try:
-            timeout_s = float(os.getenv("AI_QUANT_POSITION_STATE_DB_TIMEOUT_S", os.getenv("AI_QUANT_AUDIT_DB_TIMEOUT_S", "0.2")))
+            timeout_s = float(
+                os.getenv("AI_QUANT_POSITION_STATE_DB_TIMEOUT_S", os.getenv("AI_QUANT_AUDIT_DB_TIMEOUT_S", "0.2"))
+            )
         except Exception:
             timeout_s = 0.2
         timeout_s = float(max(0.01, min(2.0, timeout_s)))
@@ -512,7 +514,9 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
 
     def clear_position_state(self, symbol):
         try:
-            timeout_s = float(os.getenv("AI_QUANT_POSITION_STATE_DB_TIMEOUT_S", os.getenv("AI_QUANT_AUDIT_DB_TIMEOUT_S", "0.2")))
+            timeout_s = float(
+                os.getenv("AI_QUANT_POSITION_STATE_DB_TIMEOUT_S", os.getenv("AI_QUANT_AUDIT_DB_TIMEOUT_S", "0.2"))
+            )
         except Exception:
             timeout_s = 0.2
         timeout_s = float(max(0.01, min(2.0, timeout_s)))
@@ -539,7 +543,9 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         doesn't leave stale rows forever (unlike the old transition-based clear).
         """
         try:
-            timeout_s = float(os.getenv("AI_QUANT_POSITION_STATE_DB_TIMEOUT_S", os.getenv("AI_QUANT_AUDIT_DB_TIMEOUT_S", "0.2")))
+            timeout_s = float(
+                os.getenv("AI_QUANT_POSITION_STATE_DB_TIMEOUT_S", os.getenv("AI_QUANT_AUDIT_DB_TIMEOUT_S", "0.2"))
+            )
         except Exception:
             timeout_s = 0.2
         timeout_s = float(max(0.01, min(2.0, timeout_s)))
@@ -817,7 +823,9 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 prev_macd_h = float(indicators.get("prev_MACD_hist", 0) or 0.0)
             except Exception:
                 prev_macd_h = 0.0
-            momentum_expanding = (pos_type == "LONG" and macd_h > prev_macd_h) or (pos_type == "SHORT" and macd_h < prev_macd_h)
+            momentum_expanding = (pos_type == "LONG" and macd_h > prev_macd_h) or (
+                pos_type == "SHORT" and macd_h < prev_macd_h
+            )
             if not momentum_expanding:
                 return False
 
@@ -1123,15 +1131,58 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 slippage_pct=self._live_slippage_pct(),
             )
         if not result:
-            self._note_entry_fail(sym, "market_open rejected")
-            if oms_intent is not None and oms is not None:
+            exec_err = getattr(self.executor, "last_order_error", None) or {}
+            err_kind = str(exec_err.get("kind") or "").strip().lower()
+            err_detail = exec_err.get("error") or exec_err.get("response")
+            err_s = None
+            try:
+                err_s = json.dumps(err_detail, separators=(",", ":"), sort_keys=True, default=str)
+            except Exception:
+                err_s = str(err_detail) if err_detail is not None else None
+            err_s = (err_s[:800] if isinstance(err_s, str) else None) or None
+
+            if err_kind in {"timeout", "exception"}:
+                # Transport errors are ambiguous: the order may have been accepted even if the response timed out.
+                self._note_entry_fail(sym, f"market_open {err_kind}")
+                if risk is not None:
+                    try:
+                        risk.note_order_sent(
+                            symbol=sym,
+                            action="ADD",
+                            notional_usd=float(notional),
+                            reduce_risk=False,
+                        )
+                    except Exception:
+                        pass
                 try:
-                    oms.mark_failed(oms_intent, error="market_open rejected")
+                    bud = getattr(self, "_entry_budget_remaining", None)
+                    if bud is not None:
+                        setattr(self, "_entry_budget_remaining", max(0, int(bud) - 1))
                 except Exception:
                     pass
+                if oms_intent is not None and oms is not None:
+                    try:
+                        oms.mark_submit_unknown(
+                            oms_intent,
+                            symbol=sym,
+                            side=side,
+                            order_type="market_open",
+                            reduce_only=False,
+                            requested_size=float(add_size),
+                            error=err_s or err_kind,
+                        )
+                    except Exception:
+                        pass
+            else:
+                self._note_entry_fail(sym, "market_open rejected")
+                if oms_intent is not None and oms is not None:
+                    try:
+                        oms.mark_failed(oms_intent, error="market_open rejected")
+                    except Exception:
+                        pass
             mei_alpha_v1.log_audit_event(
                 sym,
-                "LIVE_ORDER_FAIL_MARKET_OPEN",
+                "LIVE_ORDER_SUBMIT_UNKNOWN" if err_kind in {"timeout", "exception"} else "LIVE_ORDER_FAIL_MARKET_OPEN",
                 level="warn",
                 data={
                     "kind": "ADD",
@@ -1141,6 +1192,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     "notional_est": float(notional),
                     "leverage": float(leverage),
                     "margin_est": float(margin_add),
+                    "submit_err_kind": err_kind or None,
+                    "submit_err": err_s,
                 },
             )
             return False
@@ -1217,7 +1270,9 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 old_sz = 0.0
             new_total = old_sz + add_size
             if new_total > 0:
-                pos["entry_atr"] = ((float(pos.get("entry_atr") or 0.0) * old_sz) + (current_atr * add_size)) / new_total
+                pos["entry_atr"] = (
+                    (float(pos.get("entry_atr") or 0.0) * old_sz) + (current_atr * add_size)
+                ) / new_total
         elif current_atr > 0:
             pos["entry_atr"] = current_atr
 
@@ -1279,7 +1334,9 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
 
         return True
 
-    def reduce_position(self, symbol, reduce_size, price, timestamp, reason, *, confidence="N/A", meta: dict | None = None) -> bool:
+    def reduce_position(
+        self, symbol, reduce_size, price, timestamp, reason, *, confidence="N/A", meta: dict | None = None
+    ) -> bool:
         sym = str(symbol or "").strip().upper()
         if sym not in (self.positions or {}):
             return False
@@ -1495,20 +1552,62 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 slippage_pct=self._live_slippage_pct(),
             )
         if not result:
-            if oms_intent is not None and oms is not None:
+            exec_err = getattr(self.executor, "last_order_error", None) or {}
+            err_kind = str(exec_err.get("kind") or "").strip().lower()
+            err_detail = exec_err.get("error") or exec_err.get("response")
+            err_s = None
+            try:
+                err_s = json.dumps(err_detail, separators=(",", ":"), sort_keys=True, default=str)
+            except Exception:
+                err_s = str(err_detail) if err_detail is not None else None
+            err_s = (err_s[:800] if isinstance(err_s, str) else None) or None
+
+            if err_kind in {"timeout", "exception"}:
+                # Transport errors are ambiguous: the order may have been accepted even if the response timed out.
                 try:
-                    oms.mark_failed(oms_intent, error="market_close rejected")
+                    self._last_exit_attempt_at_s[sym] = time.time()
                 except Exception:
                     pass
+                if risk is not None:
+                    try:
+                        risk.note_order_sent(
+                            symbol=sym,
+                            action=str(action_kind),
+                            notional_usd=float(notional_est2),
+                            reduce_risk=True,
+                        )
+                    except Exception:
+                        pass
+                if oms_intent is not None and oms is not None:
+                    try:
+                        oms.mark_submit_unknown(
+                            oms_intent,
+                            symbol=sym,
+                            side=exit_side,
+                            order_type="market_close",
+                            reduce_only=True,
+                            requested_size=float(reduce_size_f),
+                            error=err_s or err_kind,
+                        )
+                    except Exception:
+                        pass
+            else:
+                if oms_intent is not None and oms is not None:
+                    try:
+                        oms.mark_failed(oms_intent, error="market_close rejected")
+                    except Exception:
+                        pass
             mei_alpha_v1.log_audit_event(
                 sym,
-                "LIVE_ORDER_FAIL_MARKET_CLOSE",
+                "LIVE_ORDER_SUBMIT_UNKNOWN" if err_kind in {"timeout", "exception"} else "LIVE_ORDER_FAIL_MARKET_CLOSE",
                 level="warn",
                 data={
                     "kind": "CLOSE" if is_full_close else "REDUCE",
                     "size": float(reduce_size_f),
                     "reason": str(reason or ""),
                     "confidence": str(confidence or "").lower(),
+                    "submit_err_kind": err_kind or None,
+                    "submit_err": err_s,
                 },
             )
             return False
@@ -1668,22 +1767,33 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
 
         pos = (self.positions or {}).get(sym)
         if pos:
-            is_flip = (pos.get("type") == "LONG" and signal == "SELL") or (pos.get("type") == "SHORT" and signal == "BUY")
+            is_flip = (pos.get("type") == "LONG" and signal == "SELL") or (
+                pos.get("type") == "SHORT" and signal == "BUY"
+            )
             if is_flip:
                 self.close_position(
                     sym,
                     price,
                     timestamp,
-                    reason=f"Signal Flip ({confidence})" + (" [REVERSED]" if (indicators if indicators is not None else {}).get("_reversed_entry") is True else ""),
+                    reason=f"Signal Flip ({confidence})"
+                    + (
+                        " [REVERSED]"
+                        if (indicators if indicators is not None else {}).get("_reversed_entry") is True
+                        else ""
+                    ),
                     meta={
                         "audit": audit if isinstance(audit, dict) else None,
-                        "breadth_pct": float((indicators if indicators is not None else {}).get("_market_breadth_pct")) if (indicators if indicators is not None else {}).get("_market_breadth_pct") is not None else None,
+                        "breadth_pct": float((indicators if indicators is not None else {}).get("_market_breadth_pct"))
+                        if (indicators if indicators is not None else {}).get("_market_breadth_pct") is not None
+                        else None,
                         "exit": {"kind": "SIGNAL_FLIP", "confidence": str(confidence or "")},
                     },
                 )
                 return
 
-            is_same_dir = (pos.get("type") == "LONG" and signal == "BUY") or (pos.get("type") == "SHORT" and signal == "SELL")
+            is_same_dir = (pos.get("type") == "LONG" and signal == "BUY") or (
+                pos.get("type") == "SHORT" and signal == "SELL"
+            )
             if is_same_dir:
                 self.add_to_position(sym, price, timestamp, confidence, atr=atr, indicators=indicators)
                 return
@@ -1698,8 +1808,12 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             max_open_positions = int(trade_cfg.get("max_open_positions", 1))
         except Exception:
             max_open_positions = 1
-        open_syms = sorted([str(s or "").strip().upper() for s in (self.positions or {}).keys() if str(s or "").strip()])
-        pending_syms = sorted([str(s or "").strip().upper() for s in (self._pending_open_sent_at_s or {}).keys() if str(s or "").strip()])
+        open_syms = sorted(
+            [str(s or "").strip().upper() for s in (self.positions or {}).keys() if str(s or "").strip()]
+        )
+        pending_syms = sorted(
+            [str(s or "").strip().upper() for s in (self._pending_open_sent_at_s or {}).keys() if str(s or "").strip()]
+        )
         open_n = int(len(open_syms))
         pending_n = int(len(pending_syms))
         total_n = open_n + pending_n
@@ -2031,7 +2145,9 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     requested_notional=float(notional),
                     leverage=float(leverage),
                     decision_ts=timestamp,
-                    reason="Signal Trigger [REVERSED]" if (indicators if indicators is not None else {}).get("_reversed_entry") is True else "Signal Trigger",
+                    reason="Signal Trigger [REVERSED]"
+                    if (indicators if indicators is not None else {}).get("_reversed_entry") is True
+                    else "Signal Trigger",
                     confidence=str(confidence or ""),
                     entry_atr=float(atr or 0.0),
                     meta={
@@ -2125,7 +2241,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 except Exception:
                     pass
             print(
-                f"🟡 LIVE {why}: would OPEN {sym} {('LONG' if signal=='BUY' else 'SHORT')} "
+                f"🟡 LIVE {why}: would OPEN {sym} {('LONG' if signal == 'BUY' else 'SHORT')} "
                 f"size={size:.6f} notional~=${notional:.2f} margin~=${margin_need:.2f} lev={leverage:.0f} conf={confidence}"
             )
             mei_alpha_v1.log_audit_event(
@@ -2217,15 +2333,63 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 slippage_pct=self._live_slippage_pct(),
             )
         if not result:
-            self._note_entry_fail(sym, "market_open rejected")
-            if oms_intent is not None and oms is not None:
+            exec_err = getattr(self.executor, "last_order_error", None) or {}
+            err_kind = str(exec_err.get("kind") or "").strip().lower()
+            err_detail = exec_err.get("error") or exec_err.get("response")
+            err_s = None
+            try:
+                err_s = json.dumps(err_detail, separators=(",", ":"), sort_keys=True, default=str)
+            except Exception:
+                err_s = str(err_detail) if err_detail is not None else None
+            err_s = (err_s[:800] if isinstance(err_s, str) else None) or None
+
+            if err_kind in {"timeout", "exception"}:
+                # Transport errors are ambiguous: the order may have been accepted even if the response timed out.
+                self._note_entry_fail(sym, f"market_open {err_kind}")
+                if risk is not None:
+                    try:
+                        risk.note_order_sent(
+                            symbol=sym,
+                            action="OPEN",
+                            notional_usd=float(notional),
+                            reduce_risk=False,
+                        )
+                    except Exception:
+                        pass
                 try:
-                    oms.mark_failed(oms_intent, error="market_open rejected")
+                    bud = getattr(self, "_entry_budget_remaining", None)
+                    if bud is not None:
+                        setattr(self, "_entry_budget_remaining", max(0, int(bud) - 1))
                 except Exception:
                     pass
+                if oms_intent is not None and oms is not None:
+                    try:
+                        oms.mark_submit_unknown(
+                            oms_intent,
+                            symbol=sym,
+                            side=entry_side,
+                            order_type="market_open",
+                            reduce_only=False,
+                            requested_size=float(size),
+                            error=err_s or err_kind,
+                        )
+                    except Exception:
+                        pass
+                # Conservatively count this as a pending open so we don't exceed capacity in-loop.
+                try:
+                    self._pending_open_sent_at_s[sym] = time.time()
+                except Exception:
+                    pass
+            else:
+                self._note_entry_fail(sym, "market_open rejected")
+                if oms_intent is not None and oms is not None:
+                    try:
+                        oms.mark_failed(oms_intent, error="market_open rejected")
+                    except Exception:
+                        pass
             mei_alpha_v1.log_audit_event(
                 sym,
-                "LIVE_ORDER_FAIL_MARKET_OPEN",
+                "LIVE_ORDER_SUBMIT_UNKNOWN" if err_kind in {"timeout", "exception"} else "LIVE_ORDER_FAIL_MARKET_OPEN",
                 level="warn",
                 data={
                     "signal": str(signal or "").upper(),
@@ -2235,6 +2399,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     "notional_est": float(notional),
                     "leverage": float(leverage),
                     "margin_est": float(margin_need),
+                    "submit_err_kind": err_kind or None,
+                    "submit_err": err_s,
                 },
             )
             return
@@ -2283,7 +2449,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 pass
 
         print(
-            f"🚀 LIVE ORDER sent: OPEN {('LONG' if signal=='BUY' else 'SHORT')} {sym} "
+            f"🚀 LIVE ORDER sent: OPEN {('LONG' if signal == 'BUY' else 'SHORT')} {sym} "
             f"px~={float(fill_price_est):.4f} size={size:.6f} notional~=${notional:.2f} "
             f"lev={leverage:.0f} margin~=${margin_need:.2f} conf={confidence}"
         )
@@ -2316,7 +2482,9 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 "confidence": confidence,
                 "entry_atr": float(atr or 0.0),
                 "leverage": leverage,
-                "reason": "Signal Trigger [REVERSED]" if (indicators if indicators is not None else {}).get("_reversed_entry") is True else "Signal Trigger",
+                "reason": "Signal Trigger [REVERSED]"
+                if (indicators if indicators is not None else {}).get("_reversed_entry") is True
+                else "Signal Trigger",
                 "breadth_pct": _breadth_pct,
                 "meta": {
                     "audit": audit if isinstance(audit, dict) else None,
@@ -3076,7 +3244,9 @@ def log_live_signal(*, symbol: str, signal: str, confidence: str, price: float, 
     try:
         # Signal logging is observability only; keep sqlite busy waits short.
         try:
-            timeout_s = float(os.getenv("AI_QUANT_SIGNAL_DB_TIMEOUT_S", os.getenv("AI_QUANT_AUDIT_DB_TIMEOUT_S", "0.2")))
+            timeout_s = float(
+                os.getenv("AI_QUANT_SIGNAL_DB_TIMEOUT_S", os.getenv("AI_QUANT_AUDIT_DB_TIMEOUT_S", "0.2"))
+            )
         except Exception:
             timeout_s = 0.2
         timeout_s = float(max(0.01, min(2.0, timeout_s)))
@@ -3113,7 +3283,4 @@ def log_live_signal(*, symbol: str, signal: str, confidence: str, price: float, 
 
 
 def run_trader():
-    raise SystemExit(
-        "Deprecated: use `python -m engine.daemon` "
-        "with AI_QUANT_MODE=live or AI_QUANT_MODE=dry_live."
-    )
+    raise SystemExit("Deprecated: use `python -m engine.daemon` with AI_QUANT_MODE=live or AI_QUANT_MODE=dry_live.")
