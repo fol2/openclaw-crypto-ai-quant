@@ -161,6 +161,21 @@ def _render_ranked_report_md(items: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _run_date_utc(generated_at_ms: int) -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime(generated_at_ms / 1000))
+
+
+def resolve_run_dir(*, artifacts_root: Path, run_id: str, generated_at_ms: int) -> Path:
+    """Resolve a standard run directory path under the artifacts root.
+
+    Layout:
+      artifacts_root/YYYY-MM-DD/run_<run_id>/
+    """
+
+    run_date = _run_date_utc(generated_at_ms)
+    return (artifacts_root / run_date / f"run_{run_id}").resolve()
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Run the nightly strategy factory workflow and store artifacts.")
     ap.add_argument("--run-id", required=True, help="Unique identifier for this run (used in artifact paths).")
@@ -185,12 +200,16 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--run-id cannot be empty")
 
     artifacts_root = (AIQ_ROOT / str(args.artifacts_dir)).resolve()
-    run_dir = artifacts_root / f"run_{run_id}"
+    generated_at_ms = int(time.time() * 1000)
+    run_dir = resolve_run_dir(artifacts_root=artifacts_root, run_id=run_id, generated_at_ms=generated_at_ms)
     run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "logs").mkdir(parents=True, exist_ok=True)
 
     meta: dict[str, Any] = {
         "run_id": run_id,
-        "generated_at_ms": int(time.time() * 1000),
+        "generated_at_ms": generated_at_ms,
+        "run_date_utc": _run_date_utc(generated_at_ms),
+        "run_dir": str(run_dir),
         "git_head": _git_head_sha(),
         "args": vars(args),
         "steps": [],
@@ -342,4 +361,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
