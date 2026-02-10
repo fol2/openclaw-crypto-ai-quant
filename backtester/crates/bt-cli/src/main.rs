@@ -5,6 +5,7 @@
 //!   - `sweep`           — Parallel parameter sweep (Cartesian product of axes)
 //!   - `dump-indicators` — Dump raw indicator values as CSV for debugging
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -323,6 +324,156 @@ fn compute_auto_scope(
 }
 
 // ---------------------------------------------------------------------------
+// Replay JSON extensions
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct PerSymbolStats {
+    /// Number of close/reduce events (same definition as report.total_trades, but per symbol).
+    trades: u32,
+    wins: u32,
+    losses: u32,
+    win_rate: f64,
+
+    /// Sum of realised PnL from close/reduce events (fees excluded; matches report.by_symbol pnl logic).
+    realised_pnl_usd: f64,
+
+    /// Sum of funding PnL events for this symbol (from TradeRecord action=FUNDING).
+    funding_pnl_usd: f64,
+
+    /// Sum of all fees charged for this symbol (opens/adds/closes).
+    fees_usd: f64,
+
+    /// Net PnL estimate: realised_pnl_usd + funding_pnl_usd - fees_usd.
+    ///
+    /// Note: realised PnL already reflects the simulator's fill price slippage; do not subtract
+    /// estimated_slippage_usd from this again.
+    net_pnl_usd: f64,
+
+    /// Max drawdown of cumulative net PnL contributions for this symbol (pnl - fee) over time.
+    max_drawdown_usd: f64,
+
+    /// Estimated execution slippage paid in USD (diagnostic; approximate).
+    estimated_slippage_usd: f64,
+
+    /// Total number of trade log records for this symbol (including opens/adds/funding).
+    fills: u32,
+    funding_events: u32,
+}
+
+#[derive(Default)]
+struct PerSymbolAcc {
+    trades: u32,
+    wins: u32,
+    losses: u32,
+    realised_pnl_usd: f64,
+    funding_pnl_usd: f64,
+    fees_usd: f64,
+    estimated_slippage_usd: f64,
+    fills: u32,
+    funding_events: u32,
+    deltas: Vec<(i64, f64)>,
+}
+
+fn compute_max_drawdown_from_deltas(deltas: &[(i64, f64)]) -> f64 {
+    let mut cumulative = 0.0_f64;
+    let mut peak = 0.0_f64;
+    let mut max_dd = 0.0_f64;
+
+    for &(_ts, delta) in deltas {
+        cumulative += delta;
+        if cumulative > peak {
+            peak = cumulative;
+        }
+        let dd = peak - cumulative;
+        if dd > max_dd {
+            max_dd = dd;
+        }
+    }
+
+    max_dd
+}
+
+fn estimate_slippage_usd(tr: &bt_core::position::TradeRecord, entry_slippage_bps: f64) -> f64 {
+    if tr.action == "FUNDING" {
+        return 0.0;
+    }
+
+    // The engine currently applies configured slippage to entries/adds, and a fixed half-bps
+    // to exits (see bt-core engine apply_exit). Keep this estimate consistent with that behaviour.
+    let bps = if tr.is_close() { 0.5 } else { entry_slippage_bps };
+    if bps <= 0.0 {
+        return 0.0;
+    }
+
+    tr.notional * (bps / 10_000.0)
+}
+
+fn build_per_symbol_stats(
+    trades: &[bt_core::position::TradeRecord],
+    slippage_bps: f64,
+) -> BTreeMap<String, PerSymbolStats> {
+    let slippage_bps = slippage_bps.max(0.0);
+
+    let mut acc: BTreeMap<String, PerSymbolAcc> = BTreeMap::new();
+
+    for tr in trades {
+        let a = acc.entry(tr.symbol.clone()).or_default();
+        a.fills += 1;
+        a.fees_usd += tr.fee_usd;
+        a.estimated_slippage_usd += estimate_slippage_usd(tr, slippage_bps);
+        a.deltas.push((tr.timestamp_ms, tr.pnl - tr.fee_usd));
+
+        if tr.action == "FUNDING" {
+            a.funding_events += 1;
+            a.funding_pnl_usd += tr.pnl;
+            continue;
+        }
+
+        if tr.is_close() {
+            a.trades += 1;
+            a.realised_pnl_usd += tr.pnl;
+            if tr.pnl > 0.0 {
+                a.wins += 1;
+            } else if tr.pnl < 0.0 {
+                a.losses += 1;
+            }
+        }
+    }
+
+    acc.into_iter()
+        .map(|(symbol, a)| {
+            let win_rate = if a.trades > 0 {
+                a.wins as f64 / a.trades as f64
+            } else {
+                0.0
+            };
+
+            let net_pnl_usd = a.realised_pnl_usd + a.funding_pnl_usd - a.fees_usd;
+            let max_drawdown_usd = compute_max_drawdown_from_deltas(&a.deltas);
+
+            (
+                symbol,
+                PerSymbolStats {
+                    trades: a.trades,
+                    wins: a.wins,
+                    losses: a.losses,
+                    win_rate,
+                    realised_pnl_usd: a.realised_pnl_usd,
+                    funding_pnl_usd: a.funding_pnl_usd,
+                    fees_usd: a.fees_usd,
+                    net_pnl_usd,
+                    max_drawdown_usd,
+                    estimated_slippage_usd: a.estimated_slippage_usd,
+                    fills: a.fills,
+                    funding_events: a.funding_events,
+                },
+            )
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Subcommand implementations
 // ---------------------------------------------------------------------------
 
@@ -526,7 +677,12 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("\nCompleted in {:.3}s", elapsed.as_secs_f64());
 
     // JSON output
-    let json = serde_json::to_string_pretty(&report)?;
+    let per_symbol = build_per_symbol_stats(&sim.trades, cfg.trade.slippage_bps);
+    let mut json_obj = serde_json::to_value(&report)?;
+    if let serde_json::Value::Object(ref mut map) = json_obj {
+        map.insert("per_symbol".to_string(), serde_json::to_value(&per_symbol)?);
+    }
+    let json = serde_json::to_string_pretty(&json_obj)?;
     if let Some(ref path) = args.output {
         let mut f = std::fs::File::create(path)?;
         f.write_all(json.as_bytes())?;
@@ -1070,5 +1226,72 @@ fn main() {
     if let Err(e) = result {
         eprintln!("\n[error] {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use bt_core::config::Confidence;
+    use bt_core::position::TradeRecord;
+
+    fn tr(
+        ts: i64,
+        symbol: &str,
+        action: &str,
+        notional: f64,
+        pnl: f64,
+        fee_usd: f64,
+    ) -> TradeRecord {
+        TradeRecord {
+            timestamp_ms: ts,
+            symbol: symbol.to_string(),
+            action: action.to_string(),
+            price: 0.0,
+            size: 0.0,
+            notional,
+            reason: String::new(),
+            confidence: Confidence::Low,
+            pnl,
+            fee_usd,
+            balance: 0.0,
+            entry_atr: 0.0,
+            leverage: 1.0,
+            margin_used: 0.0,
+        }
+    }
+
+    #[test]
+    fn per_symbol_stats_include_fees_funding_and_drawdown() {
+        let trades = vec![
+            tr(1, "BTC", "OPEN_LONG", 100.0, 0.0, 1.0),
+            tr(2, "BTC", "FUNDING", 100.0, -0.5, 0.0),
+            tr(3, "BTC", "CLOSE_LONG", 100.0, 10.0, 1.0),
+            tr(1, "ETH", "OPEN_SHORT", 200.0, 0.0, 0.5),
+            tr(2, "ETH", "CLOSE_SHORT", 200.0, -5.0, 0.5),
+        ];
+
+        let out = build_per_symbol_stats(&trades, 10.0);
+        let btc = out.get("BTC").unwrap();
+        assert_eq!(btc.fills, 3);
+        assert_eq!(btc.funding_events, 1);
+        assert_eq!(btc.trades, 1);
+        assert_eq!(btc.wins, 1);
+        assert_eq!(btc.losses, 0);
+        assert!((btc.realised_pnl_usd - 10.0).abs() < 1e-9);
+        assert!((btc.funding_pnl_usd - (-0.5)).abs() < 1e-9);
+        assert!((btc.fees_usd - 2.0).abs() < 1e-9);
+        assert!((btc.net_pnl_usd - 7.5).abs() < 1e-9);
+        assert!((btc.max_drawdown_usd - 1.5).abs() < 1e-9);
+
+        let eth = out.get("ETH").unwrap();
+        assert_eq!(eth.fills, 2);
+        assert_eq!(eth.funding_events, 0);
+        assert_eq!(eth.trades, 1);
+        assert_eq!(eth.wins, 0);
+        assert_eq!(eth.losses, 1);
+        assert!((eth.net_pnl_usd - (-6.0)).abs() < 1e-9);
+        assert!((eth.max_drawdown_usd - 6.0).abs() < 1e-9);
     }
 }
