@@ -129,8 +129,11 @@ class RiskManager:
         self._last_order_ts_ms: int | None = None
 
         # Drawdown kill-switch
+        # NOTE: This value can be sourced from YAML (preferred) or env. It is refreshed periodically
+        # in refresh() so operators can tune risk controls without code changes.
         self._max_drawdown_pct = float(max(0.0, _env_float("AI_QUANT_RISK_MAX_DRAWDOWN_PCT", 0.0)))
         self._equity_peak: float | None = None
+        self._drawdown_reduce_policy: str = "none"  # none | close_all
 
         # Diagnostics
         self._blocked_counts: dict[str, int] = defaultdict(int)
@@ -143,21 +146,46 @@ class RiskManager:
         m = str(mode or "close_only").strip().lower()
         if m not in {"close_only", "halt_all"}:
             m = "close_only"
+        r = str(reason or "manual")
+        # Idempotent: avoid resetting kill_since_s on every refresh loop when the reason is stable
+        # (e.g. kill file present, drawdown still breached).
+        if self._kill_mode == m and self._kill_reason == r and self._kill_since_s is not None:
+            return
         self._kill_mode = m
-        self._kill_reason = str(reason or "manual")
+        self._kill_reason = r
         self._kill_since_s = time.time()
 
-    def clear_kill(self) -> None:
+    def clear_kill(self, *, reason: str = "manual_clear") -> None:
+        # Reset any cached state so we do not immediately re-trigger on stale peaks once the
+        # operator explicitly resumes.
+        self._equity_peak = None
         self._kill_mode = "off"
-        self._kill_reason = None
+        self._kill_reason = str(reason or "manual_clear")
         self._kill_since_s = None
 
     @property
     def kill_mode(self) -> str:
         return self._kill_mode
 
+    @property
+    def kill_reason(self) -> str | None:
+        return self._kill_reason
+
+    @property
+    def kill_since_s(self) -> float | None:
+        return self._kill_since_s
+
+    @property
+    def drawdown_reduce_policy(self) -> str:
+        return self._drawdown_reduce_policy
+
     def refresh(self, *, trader: Any | None = None) -> None:
         """Call periodically (for example every 5-10s) to re-evaluate kill conditions."""
+        try:
+            self._refresh_risk_config()
+        except Exception:
+            pass
+
         try:
             self._refresh_manual_kill()
         except Exception:
@@ -256,13 +284,64 @@ class RiskManager:
     # Internals
     # ------------------------------------------------------------------
 
+    def _refresh_risk_config(self) -> None:
+        """Pull risk controls from YAML (preferred) with env var overrides.
+
+        This is best-effort and must never throw.
+        """
+        cfg: dict[str, Any] = {}
+        try:
+            from .strategy_manager import StrategyManager
+
+            cfg = StrategyManager.get().get_config("__GLOBAL__") or {}
+        except Exception:
+            cfg = {}
+
+        risk_cfg = cfg.get("risk") if isinstance(cfg, dict) else None
+        risk_cfg = risk_cfg if isinstance(risk_cfg, dict) else {}
+
+        # Drawdown threshold: YAML risk.max_drawdown_pct, overridden by env when set.
+        try:
+            dd = risk_cfg.get("max_drawdown_pct")
+            dd_pct = float(dd) if dd is not None else None
+        except Exception:
+            dd_pct = None
+        env_dd = os.getenv("AI_QUANT_RISK_MAX_DRAWDOWN_PCT")
+        if env_dd is not None and str(env_dd).strip() != "":
+            try:
+                dd_pct = float(str(env_dd).strip())
+            except Exception:
+                pass
+        if dd_pct is None:
+            dd_pct = float(self._max_drawdown_pct or 0.0)
+        self._max_drawdown_pct = float(max(0.0, dd_pct))
+
+        # Optional: reduce-risk policy on drawdown kill.
+        pol = risk_cfg.get("drawdown_reduce_policy")
+        env_pol = os.getenv("AI_QUANT_RISK_DRAWDOWN_REDUCE_POLICY")
+        if env_pol is not None and str(env_pol).strip() != "":
+            pol = env_pol
+        pol_s = str(pol or "none").strip().lower()
+        if pol_s not in {"none", "close_all"}:
+            pol_s = "none"
+        self._drawdown_reduce_policy = pol_s
+
     def _refresh_manual_kill(self) -> None:
         # Env kill
         raw = _env_str("AI_QUANT_KILL_SWITCH", "").strip()
         if raw:
             v = raw.strip().lower()
+            if v in {"clear", "resume", "off", "unpause"}:
+                self.clear_kill(reason="env_clear")
+                return
             if v in {"1", "true", "yes", "y", "on", "close_only", "close"}:
-                self.kill(mode="close_only", reason="env")
+                mode = "close_only"
+                try:
+                    if self._kill_mode_env in {"close_only", "halt_all"}:
+                        mode = self._kill_mode_env
+                except Exception:
+                    mode = "close_only"
+                self.kill(mode=mode, reason="env")
             elif v in {"halt", "halt_all", "2", "stop", "full"}:
                 self.kill(mode="halt_all", reason="env")
         else:
@@ -278,8 +357,13 @@ class RiskManager:
                     try:
                         with open(kill_file, "r", encoding="utf-8") as f:
                             txt = (f.read() or "").strip().lower()
+                        if any(tok in txt for tok in ("clear", "resume", "off", "unpause")):
+                            self.clear_kill(reason=f"file_clear:{kill_file}")
+                            return
                         if "halt" in txt or "full" in txt:
                             mode = "halt_all"
+                        elif "close" in txt:
+                            mode = "close_only"
                     except Exception:
                         pass
                     self.kill(mode=mode, reason=f"file:{kill_file}")
