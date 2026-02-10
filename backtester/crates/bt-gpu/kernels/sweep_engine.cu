@@ -114,7 +114,7 @@ struct __align__(16) GpuComboConfig {
     unsigned int add_cooldown_minutes;  float add_min_profit_atr;  unsigned int add_min_confidence;
     unsigned int entry_min_confidence;  unsigned int _p4;
     unsigned int enable_partial_tp;  float tp_partial_pct;  float tp_partial_min_notional_usd;
-    float trailing_start_atr;  float trailing_distance_atr;  unsigned int _p5;
+    float trailing_start_atr;  float trailing_distance_atr;  float tp_partial_atr_mult;
     unsigned int enable_ssf_filter;  unsigned int enable_breakeven_stop;  float breakeven_start_atr;
     float breakeven_buffer_atr;
     float trailing_start_atr_low_conf;  float trailing_distance_atr_low_conf;
@@ -534,32 +534,56 @@ __device__ unsigned int check_tp(const GpuPosition& pos, const GpuSnapshot& snap
     float entry = pos.entry_price;
     float atr = (pos.entry_atr > 0.0f) ? pos.entry_atr : (entry * 0.005f);
 
-    float tp_price;
-    if (pos.active == POS_LONG) {
-        tp_price = entry + (atr * tp_mult);
-    } else {
-        tp_price = entry - (atr * tp_mult);
-    }
+    // ── Full TP price (always based on tp_mult) ──────────────────────────────
+    float tp_price = (pos.active == POS_LONG)
+        ? (entry + (atr * tp_mult))
+        : (entry - (atr * tp_mult));
 
-    bool tp_hit = false;
-    if (pos.active == POS_LONG) { tp_hit = snap.close >= tp_price; }
-    else { tp_hit = snap.close <= tp_price; }
-
-    if (!tp_hit) { return 0u; }
-
+    // ── Partial TP path ──────────────────────────────────────────────────────
     if (cfg->enable_partial_tp != 0u) {
         if (pos.tp1_taken == 0u) {
-            float pct = fmaxf(fminf(cfg->tp_partial_pct, 1.0f), 0.0f);
-            if (pct > 0.0f && pct < 1.0f) {
-                float remaining = pos.size * (1.0f - pct) * snap.close;
-                if (remaining < cfg->tp_partial_min_notional_usd) { return 0u; }
-                return 1u; // Partial
+            // Determine partial TP level: use dedicated mult if set, otherwise same as full TP.
+            float partial_mult = (cfg->tp_partial_atr_mult > 0.0f) ? cfg->tp_partial_atr_mult : tp_mult;
+            float partial_tp_price = (pos.active == POS_LONG)
+                ? (entry + (atr * partial_mult))
+                : (entry - (atr * partial_mult));
+            bool partial_hit = (pos.active == POS_LONG)
+                ? (snap.close >= partial_tp_price)
+                : (snap.close <= partial_tp_price);
+
+            if (partial_hit) {
+                float pct = fmaxf(fminf(cfg->tp_partial_pct, 1.0f), 0.0f);
+                if (pct > 0.0f && pct < 1.0f) {
+                    float remaining = pos.size * (1.0f - pct) * snap.close;
+                    if (remaining < cfg->tp_partial_min_notional_usd) { return 0u; }
+                    return 1u; // Partial
+                }
+                // pct == 0 or pct >= 1.0 falls through to full close check.
+            } else {
+                // Partial TP not hit yet.
+                // When tp_partial_atr_mult == 0, partial == full, so full can't be hit either.
+                if (cfg->tp_partial_atr_mult <= 0.0f) { return 0u; }
+                // When tp_partial_atr_mult > 0, fall through to check full TP
+                // (handles edge case where partial_mult > tp_mult).
             }
         } else {
-            return 0u; // tp1 already taken, let trailing manage
+            // tp1 already taken.
+            if (cfg->tp_partial_atr_mult > 0.0f) {
+                bool tp_hit = (pos.active == POS_LONG)
+                    ? (snap.close >= tp_price)
+                    : (snap.close <= tp_price);
+                if (tp_hit) { return 2u; }
+            }
+            // Same level (tp_partial_atr_mult == 0) or full TP not hit: trailing manages.
+            return 0u;
         }
     }
 
+    // ── Full TP check (partial TP disabled, or pct edge case) ────────────────
+    bool tp_hit = (pos.active == POS_LONG)
+        ? (snap.close >= tp_price)
+        : (snap.close <= tp_price);
+    if (!tp_hit) { return 0u; }
     return 2u; // Full close
 }
 
@@ -871,7 +895,7 @@ extern "C" __global__ void sweep_engine_kernel(
             // Indicators come from the main bar snapshot (1h resolution)
             // ================================================================
 
-            // ── Sub-bar exits (per symbol, chronological, break on exit) ─────
+            // ── Sub-bar exits (per symbol, chronological) ───────────────────
             for (unsigned int sym = 0u; sym < ns; sym++) {
                 if (state.positions[sym].active == POS_EMPTY) { continue; }
 
@@ -889,15 +913,25 @@ extern "C" __global__ void sweep_engine_kernel(
                     hybrid.high = sc.high;
                     hybrid.low = sc.low;
                     hybrid.open = sc.open;
-                    hybrid.volume = sc.volume;
                     hybrid.t_sec = sc.t_sec;
 
                     const GpuPosition& pos = state.positions[sym];
                     if (pos.active == POS_EMPTY) { break; } // exited in earlier sub-bar
                     float p_atr = profit_atr(pos, hybrid.close);
 
-                    // Glitch guard
-                    if (hybrid.atr > 0.0f && fabsf(hybrid.close - hybrid.prev_close) > hybrid.atr * cfg.glitch_atr_mult) {
+                    // Glitch guard (CPU semantics): block exits on extreme deviations, but still update trailing
+                    bool block_exits = false;
+                    if (cfg.block_exits_on_extreme_dev != 0u && hybrid.prev_close > 0.0f) {
+                        float price_change_pct = fabsf(hybrid.close - hybrid.prev_close) / hybrid.prev_close;
+                        block_exits = (price_change_pct > cfg.glitch_price_dev_pct)
+                            || (hybrid.atr > 0.0f
+                                && fabsf(hybrid.close - hybrid.prev_close) > hybrid.atr * cfg.glitch_atr_mult);
+                    }
+                    if (block_exits) {
+                        float new_tsl = compute_trailing(pos, hybrid, &cfg, p_atr);
+                        if (new_tsl > 0.0f) {
+                            state.positions[sym].trailing_sl = new_tsl;
+                        }
                         continue;
                     }
 
@@ -924,7 +958,7 @@ extern "C" __global__ void sweep_engine_kernel(
                     unsigned int tp_result = check_tp(pos, hybrid, &cfg, tp_mult);
                     if (tp_result == 1u) {
                         apply_partial_close(&state, sym, hybrid, cfg.tp_partial_pct, fee_rate);
-                        break;
+                        continue;
                     }
                     if (tp_result == 2u) {
                         apply_close(&state, sym, hybrid, false, fee_rate);
@@ -970,7 +1004,6 @@ extern "C" __global__ void sweep_engine_kernel(
                     hybrid.high = sc.high;
                     hybrid.low = sc.low;
                     hybrid.open = sc.open;
-                    hybrid.volume = sc.volume;
                     hybrid.t_sec = sc.t_sec;
 
                     const GpuPosition& pos = state.positions[sym];
@@ -1103,7 +1136,6 @@ extern "C" __global__ void sweep_engine_kernel(
                     hybrid.high = sc.high;
                     hybrid.low = sc.low;
                     hybrid.open = sc.open;
-                    hybrid.volume = sc.volume;
                     hybrid.t_sec = sc.t_sec;
 
                     // Margin cap
@@ -1184,8 +1216,19 @@ extern "C" __global__ void sweep_engine_kernel(
 
                 float p_atr = profit_atr(pos, snap.close);
 
-                // Glitch guard
-                if (snap.atr > 0.0f && fabsf(snap.close - snap.prev_close) > snap.atr * cfg.glitch_atr_mult) {
+                // Glitch guard (CPU semantics): block exits on extreme deviations, but still update trailing
+                bool block_exits = false;
+                if (cfg.block_exits_on_extreme_dev != 0u && snap.prev_close > 0.0f) {
+                    float price_change_pct = fabsf(snap.close - snap.prev_close) / snap.prev_close;
+                    block_exits = (price_change_pct > cfg.glitch_price_dev_pct)
+                        || (snap.atr > 0.0f
+                            && fabsf(snap.close - snap.prev_close) > snap.atr * cfg.glitch_atr_mult);
+                }
+                if (block_exits) {
+                    float new_tsl = compute_trailing(pos, snap, &cfg, p_atr);
+                    if (new_tsl > 0.0f) {
+                        state.positions[sym].trailing_sl = new_tsl;
+                    }
                     continue;
                 }
 
