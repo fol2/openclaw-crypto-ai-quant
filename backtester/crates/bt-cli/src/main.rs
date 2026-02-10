@@ -175,6 +175,12 @@ struct ReplayArgs {
     #[arg(long)]
     output: Option<PathBuf>,
 
+    /// Export trade rows as CSV for analysis (deterministic ordering, includes trade_id).
+    ///
+    /// The export is one row per exit event (CLOSE_* / REDUCE_*), with entry fields repeated.
+    #[arg(long)]
+    export_trades: Option<PathBuf>,
+
     /// Only backtest this single symbol (otherwise all symbols in DB)
     #[arg(long)]
     symbol: Option<String>,
@@ -848,6 +854,283 @@ fn build_per_symbol_stats(
 }
 
 // ---------------------------------------------------------------------------
+// Trade export (CSV)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+struct TradeExportRow {
+    trade_id: String,
+    position_id: u64,
+    entry_ts_ms: i64,
+    exit_ts_ms: i64,
+    symbol: String,
+    side: String,
+    entry_price: f64,
+    exit_price: f64,
+    exit_size: f64,
+    pnl_usd: f64,
+    fee_usd: f64,
+    mae_pct: f64,
+    mfe_pct: f64,
+    reason_code: String,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Side {
+    Long,
+    Short,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveTrade {
+    position_id: u64,
+    entry_ts_ms: i64,
+    entry_price: f64,
+    side: Side,
+    max_high: f64,
+    min_low: f64,
+    exit_seq: u32,
+    open_count_for_symbol: u32,
+}
+
+fn csv_escape(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+fn reason_code_string(code: bt_core::reason_codes::ReasonCode) -> String {
+    // ReasonCode serialises to a snake_case string; reuse that canonical representation.
+    serde_json::to_string(&code)
+        .unwrap_or_else(|_| "\"unknown\"".to_string())
+        .trim_matches('"')
+        .to_string()
+}
+
+fn update_extremes(active: &mut ActiveTrade, bar: &bt_core::candle::OhlcvBar) {
+    if bar.h > active.max_high {
+        active.max_high = bar.h;
+    }
+    if bar.l < active.min_low {
+        active.min_low = bar.l;
+    }
+}
+
+fn build_trade_export_rows(
+    candles: &bt_core::candle::CandleData,
+    trades: &[bt_core::position::TradeRecord],
+) -> Vec<TradeExportRow> {
+    // Assign a stable position_id per OPEN event in the trade log order.
+    let mut next_position_id: u64 = 1;
+    let mut open_counts: BTreeMap<String, u32> = BTreeMap::new();
+    let mut position_ids: BTreeMap<(String, u32), u64> = BTreeMap::new();
+    for tr in trades {
+        if tr.action.starts_with("OPEN_") {
+            let c = open_counts.entry(tr.symbol.clone()).or_insert(0);
+            *c += 1;
+            position_ids.insert((tr.symbol.clone(), *c), next_position_id);
+            next_position_id += 1;
+        }
+    }
+
+    // Collect relevant events per symbol with stable ordering.
+    let mut per_symbol: BTreeMap<String, Vec<(i64, usize)>> = BTreeMap::new();
+    for (idx, tr) in trades.iter().enumerate() {
+        let action = tr.action.as_str();
+        if action.starts_with("OPEN_")
+            || action.starts_with("ADD_")
+            || action.starts_with("CLOSE_")
+            || action.starts_with("REDUCE_")
+        {
+            per_symbol
+                .entry(tr.symbol.clone())
+                .or_default()
+                .push((tr.timestamp_ms, idx));
+        }
+    }
+    for events in per_symbol.values_mut() {
+        events.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    }
+
+    let mut rows: Vec<TradeExportRow> = Vec::new();
+
+    for (symbol, events) in per_symbol {
+        let bars = match candles.get(&symbol) {
+            Some(b) => b,
+            None => continue,
+        };
+
+        let mut candle_i: usize = 0;
+        let mut active: Option<ActiveTrade> = None;
+
+        for (ts, idx) in events {
+            let tr = &trades[idx];
+
+            // Advance candles strictly before this trade timestamp.
+            while candle_i < bars.len() && bars[candle_i].t < ts {
+                if let Some(ref mut a) = active {
+                    update_extremes(a, &bars[candle_i]);
+                }
+                candle_i += 1;
+            }
+
+            // OPEN must start the trade before we include the candle at ts.
+            if tr.action.starts_with("OPEN_") {
+                let open_count_for_symbol = active
+                    .as_ref()
+                    .map(|a| a.open_count_for_symbol)
+                    .unwrap_or(0)
+                    + 1;
+
+                let position_id = position_ids
+                    .get(&(symbol.clone(), open_count_for_symbol))
+                    .copied()
+                    .unwrap_or(0);
+
+                let side = if tr.action.ends_with("_LONG") {
+                    Side::Long
+                } else {
+                    Side::Short
+                };
+
+                let mut a = ActiveTrade {
+                    position_id,
+                    entry_ts_ms: tr.timestamp_ms,
+                    entry_price: tr.price,
+                    side,
+                    max_high: tr.price,
+                    min_low: tr.price,
+                    exit_seq: 0,
+                    open_count_for_symbol,
+                };
+
+                // Include the entry candle bar at this timestamp.
+                while candle_i < bars.len() && bars[candle_i].t == ts {
+                    update_extremes(&mut a, &bars[candle_i]);
+                    candle_i += 1;
+                }
+
+                active = Some(a);
+                continue;
+            }
+
+            // For non-OPEN events, include the candle bar at ts before processing the event.
+            while candle_i < bars.len() && bars[candle_i].t == ts {
+                if let Some(ref mut a) = active {
+                    update_extremes(a, &bars[candle_i]);
+                }
+                candle_i += 1;
+            }
+
+            // ADD events update the position but do not emit a trade row.
+            if tr.action.starts_with("ADD_") {
+                continue;
+            }
+
+            // Exit events emit a row.
+            if tr.action.starts_with("CLOSE_") || tr.action.starts_with("REDUCE_") {
+                let Some(ref mut a) = active else {
+                    continue;
+                };
+
+                a.exit_seq += 1;
+
+                let (mae_pct, mfe_pct) = if a.entry_price.abs() > 1e-12 {
+                    match a.side {
+                        Side::Long => (
+                            (a.min_low - a.entry_price) / a.entry_price,
+                            (a.max_high - a.entry_price) / a.entry_price,
+                        ),
+                        Side::Short => (
+                            (a.entry_price - a.max_high) / a.entry_price,
+                            (a.entry_price - a.min_low) / a.entry_price,
+                        ),
+                    }
+                } else {
+                    (0.0, 0.0)
+                };
+
+                let rc = bt_core::reason_codes::classify_reason_code(&tr.action, &tr.reason);
+
+                rows.push(TradeExportRow {
+                    trade_id: format!("{}:{}", a.position_id, a.exit_seq),
+                    position_id: a.position_id,
+                    entry_ts_ms: a.entry_ts_ms,
+                    exit_ts_ms: tr.timestamp_ms,
+                    symbol: symbol.clone(),
+                    side: match a.side {
+                        Side::Long => "LONG".to_string(),
+                        Side::Short => "SHORT".to_string(),
+                    },
+                    entry_price: a.entry_price,
+                    exit_price: tr.price,
+                    exit_size: tr.size,
+                    pnl_usd: tr.pnl,
+                    fee_usd: tr.fee_usd,
+                    mae_pct,
+                    mfe_pct,
+                    reason_code: reason_code_string(rc),
+                    reason: tr.reason.clone(),
+                });
+
+                if tr.action.starts_with("CLOSE_") {
+                    active = None;
+                }
+            }
+        }
+    }
+
+    // Deterministic output order.
+    rows.sort_by(|a, b| {
+        a.exit_ts_ms
+            .cmp(&b.exit_ts_ms)
+            .then_with(|| a.symbol.cmp(&b.symbol))
+            .then_with(|| a.trade_id.cmp(&b.trade_id))
+    });
+
+    rows
+}
+
+fn write_trade_export_csv(
+    path: &PathBuf,
+    rows: &[TradeExportRow],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut f = std::fs::File::create(path)?;
+
+    writeln!(
+        f,
+        "trade_id,position_id,entry_ts_ms,exit_ts_ms,symbol,side,entry_price,exit_price,exit_size,pnl_usd,fee_usd,mae_pct,mfe_pct,reason_code,reason"
+    )?;
+
+    for r in rows {
+        writeln!(
+            f,
+            "{},{},{},{},{},{},{:.8},{:.8},{:.8},{:.8},{:.8},{:.8},{:.8},{},{}",
+            csv_escape(&r.trade_id),
+            r.position_id,
+            r.entry_ts_ms,
+            r.exit_ts_ms,
+            csv_escape(&r.symbol),
+            csv_escape(&r.side),
+            r.entry_price,
+            r.exit_price,
+            r.exit_size,
+            r.pnl_usd,
+            r.fee_usd,
+            r.mae_pct,
+            r.mfe_pct,
+            csv_escape(&r.reason_code),
+            csv_escape(&r.reason),
+        )?;
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Subcommand implementations
 // ---------------------------------------------------------------------------
 
@@ -1170,6 +1453,13 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
     // Print summary to stderr
     print_summary(&report, effective_balance);
     eprintln!("\nCompleted in {:.3}s", elapsed.as_secs_f64());
+
+    // Optional trade-level CSV export (one row per exit event).
+    if let Some(ref path) = args.export_trades {
+        let rows = build_trade_export_rows(&candles, &sim.trades);
+        write_trade_export_csv(path, &rows)?;
+        eprintln!("[replay] Trade CSV written to {}", path.display());
+    }
 
     // JSON output
     let per_symbol = build_per_symbol_stats(&sim.trades, cfg.trade.slippage_bps);
@@ -1884,8 +2174,10 @@ fn main() {
 mod tests {
     use super::*;
 
+    use bt_core::candle::{CandleData, OhlcvBar};
     use bt_core::config::Confidence;
     use bt_core::position::TradeRecord;
+    use std::collections::HashSet;
 
     fn tr(
         ts: i64,
@@ -1944,5 +2236,100 @@ mod tests {
         assert_eq!(eth.losses, 1);
         assert!((eth.net_pnl_usd - (-6.0)).abs() < 1e-9);
         assert!((eth.max_drawdown_usd - 6.0).abs() < 1e-9);
+    }
+
+    fn tr_full(
+        ts: i64,
+        symbol: &str,
+        action: &str,
+        price: f64,
+        size: f64,
+        notional: f64,
+        pnl: f64,
+        fee_usd: f64,
+        reason: &str,
+    ) -> TradeRecord {
+        TradeRecord {
+            timestamp_ms: ts,
+            symbol: symbol.to_string(),
+            action: action.to_string(),
+            price,
+            size,
+            notional,
+            reason: reason.to_string(),
+            confidence: Confidence::Low,
+            pnl,
+            fee_usd,
+            balance: 0.0,
+            entry_atr: 0.0,
+            leverage: 1.0,
+            margin_used: 0.0,
+        }
+    }
+
+    fn bar(t: i64, h: f64, l: f64) -> OhlcvBar {
+        OhlcvBar {
+            t,
+            t_close: t,
+            o: 0.0,
+            h,
+            l,
+            c: 0.0,
+            v: 0.0,
+            n: 0,
+        }
+    }
+
+    #[test]
+    fn trade_export_is_deterministic_and_has_unique_trade_ids() {
+        let mut candles: CandleData = CandleData::default();
+        candles.insert(
+            "BTC".to_string(),
+            vec![bar(0, 110.0, 90.0), bar(3_600_000, 120.0, 80.0)],
+        );
+
+        let trades = vec![
+            tr_full(
+                0,
+                "BTC",
+                "OPEN_LONG",
+                100.0,
+                1.0,
+                100.0,
+                0.0,
+                1.0,
+                "High entry",
+            ),
+            tr_full(
+                3_600_000,
+                "BTC",
+                "CLOSE_LONG",
+                105.0,
+                1.0,
+                105.0,
+                5.0,
+                1.0,
+                "Take Profit",
+            ),
+        ];
+
+        let rows1 = build_trade_export_rows(&candles, &trades);
+        let rows2 = build_trade_export_rows(&candles, &trades);
+        assert_eq!(rows1, rows2);
+
+        assert_eq!(rows1.len(), 1);
+        let r = &rows1[0];
+        assert_eq!(r.trade_id, "1:1");
+        assert_eq!(r.position_id, 1);
+        assert_eq!(r.symbol, "BTC");
+        assert_eq!(r.side, "LONG");
+        assert!((r.mae_pct - (-0.2)).abs() < 1e-9);
+        assert!((r.mfe_pct - 0.2).abs() < 1e-9);
+        assert_eq!(r.reason_code, "exit_take_profit");
+
+        let mut ids = HashSet::new();
+        for row in &rows1 {
+            assert!(ids.insert(row.trade_id.clone()), "duplicate trade_id");
+        }
     }
 }
