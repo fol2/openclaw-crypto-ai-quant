@@ -239,6 +239,36 @@ Example (hot DB + partitions dir):
   --config config/strategy_overrides.yaml
 ```
 
+### BBO snapshot database (AQC-206)
+
+Optional, sampled best-bid/best-ask (BBO) snapshots are stored in SQLite for slippage modelling and post-trade analysis.
+
+#### Enablement
+
+- Enable BBO subscriptions: `AI_QUANT_WS_ENABLE_BBO=1`
+- Enable snapshots: `AI_QUANT_BBO_SNAPSHOTS_ENABLE=1`
+
+Tuning knobs:
+- `AI_QUANT_BBO_SNAPSHOTS_DB_PATH` (default: `$AI_QUANT_CANDLES_DB_DIR/bbo_snapshots.db`)
+- `AI_QUANT_BBO_SNAPSHOTS_SAMPLE_MS` (per-symbol insert throttle; default: 1000)
+- `AI_QUANT_BBO_SNAPSHOTS_MAX_QUEUE` (bounded in-memory queue; default: 20000; drops when full)
+- `AI_QUANT_BBO_SNAPSHOTS_RETENTION_HOURS` (time-based retention; default: 24)
+- `AI_QUANT_BBO_SNAPSHOTS_RETENTION_SWEEP_SECS` (sweep interval; default: 600; min: 30)
+
+Snapshots are only written for symbols the sidecar is subscribed to (the union of live client requests and `AI_QUANT_SIDECAR_SYMBOLS`).
+
+#### Verification
+
+```bash
+# Row counts + time range per symbol
+sqlite3 candles_dbs/bbo_snapshots.db \
+  "SELECT symbol, COUNT(*) AS rows, datetime(MIN(ts_ms)/1000, 'unixepoch') AS earliest, datetime(MAX(ts_ms)/1000, 'unixepoch') AS latest FROM bbo_snapshots GROUP BY symbol ORDER BY rows DESC LIMIT 10;"
+
+# Quick retention sanity check (should trend to 0 once retention < 48h)
+sqlite3 candles_dbs/bbo_snapshots.db \
+  "SELECT COUNT(*) AS older_than_48h FROM bbo_snapshots WHERE ts_ms < (strftime('%s','now') - 48*3600) * 1000;"
+```
+
 ### Trading database integrity
 
 ```bash
@@ -269,6 +299,39 @@ uv run python tools/check_funding_rates_db.py --lookback-hours 72 --max-gap-hour
 # Backfill if stale
 uv run python tools/fetch_funding_rates.py --days 7
 ```
+
+### Universe history database (AQC-205)
+
+Tracks when symbols appear/disappear in the Hyperliquid perp universe to support survivorship-bias-aware backtests.
+
+```bash
+# Sync current universe snapshot (recommended: run hourly via cron)
+uv run python tools/sync_universe_history.py
+
+# Inspect derived listing/delisting bounds
+sqlite3 candles_dbs/universe_history.db \
+    "SELECT symbol, first_seen_ms, last_seen_ms FROM universe_listings ORDER BY last_seen_ms DESC LIMIT 20;"
+```
+
+Backtester integration:
+
+```bash
+# Replay with universe filtering enabled (keeps symbols whose listing interval overlaps the backtest window)
+./target/release/mei-backtester replay \
+    --candles-db candles_dbs/candles_5m.db \
+    --config config/strategy_overrides.yaml \
+    --universe-filter
+
+# Sweep with the same filter
+./target/release/mei-backtester sweep \
+    --candles-db candles_dbs/candles_5m.db \
+    --sweep-spec backtester/sweeps/smoke.yaml \
+    --universe-filter
+```
+
+Notes:
+- The universe filter uses `universe_listings.first_seen_ms` / `last_seen_ms` derived from local snapshots. If you have not been running the sync script for the period you are testing, the filter may exclude symbols unexpectedly.
+- The universe DB defaults to `<candles_db_dir>/universe_history.db`, so it follows your `--candles-db` location (useful when running the backtester from within `backtester/`).
 
 ### WebSocket sidecar health
 

@@ -211,6 +211,32 @@ pub fn load_symbols(
     Ok(symbols)
 }
 
+/// Load symbols considered "active" during the given time range using a universe
+/// history SQLite database (see `tools/sync_universe_history.py`).
+///
+/// A symbol is considered active when its observed listing interval overlaps with
+/// the backtest window:
+///   first_seen_ms <= to_ts AND last_seen_ms >= from_ts
+pub fn load_universe_active_symbols(
+    db_path: &str,
+    from_ts: i64,
+    to_ts: i64,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+
+    let mut stmt = conn.prepare(
+        "SELECT symbol FROM universe_listings \
+         WHERE first_seen_ms <= ?2 AND last_seen_ms >= ?1 \
+         ORDER BY symbol",
+    )?;
+
+    let symbols: Vec<String> = stmt
+        .query_map([from_ts, to_ts], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(symbols)
+}
+
 /// Load funding rates from a SQLite database, returning them grouped by
 /// symbol as sorted Vec<(timestamp_ms, rate)>.
 ///
