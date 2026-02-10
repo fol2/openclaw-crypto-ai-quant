@@ -327,7 +327,9 @@ __device__ SignalResult generate_signal(const GpuSnapshot& snap, const GpuComboC
     if (gates_pass) {
         unsigned int signal = SIG_NEUTRAL;
         unsigned int confidence = CONF_MEDIUM;
-        float adx_threshold = snap.adx;
+        // Mirror bt-core: use the ADX threshold that gated the entry, not the
+        // current ADX value (used by smart exits for "Trend Exhaustion").
+        float adx_threshold = cfg->min_adx;
 
         // EMA crossover direction
         bool ema_bullish = snap.ema_fast > snap.ema_slow;
@@ -397,7 +399,7 @@ __device__ SignalResult generate_signal(const GpuSnapshot& snap, const GpuComboC
             SignalResult result;
             result.signal = signal;
             result.confidence = CONF_LOW;
-            result.entry_adx_thresh_bits = __float_as_uint(snap.adx);
+            result.entry_adx_thresh_bits = __float_as_uint(cfg->slow_drift_min_adx);
             return result;
         }
     }
@@ -567,48 +569,79 @@ __device__ unsigned int check_tp(const GpuPosition& pos, const GpuSnapshot& snap
 
 __device__ bool check_smart_exits(const GpuPosition& pos, const GpuSnapshot& snap,
                                   const GpuComboConfig* cfg, float p_atr) {
-    // 1. Trend breakdown (EMA cross)
-    if (pos.active == POS_LONG && snap.ema_fast < snap.ema_slow) { return true; }
-    if (pos.active == POS_SHORT && snap.ema_fast > snap.ema_slow) { return true; }
+    // Smart exit conditions mirror bt-core's `exits::smart_exits::check`.
+    float entry = pos.entry_price;
+    float entry_atr = (pos.entry_atr > 0.0f) ? pos.entry_atr : (entry * 0.005f);
 
-    // 2. Trend exhaustion (ADX < threshold)
-    float adx_thresh = cfg->smart_exit_adx_exhaustion_lt;
-    if (pos.confidence == CONF_LOW && cfg->smart_exit_adx_exhaustion_lt_low_conf > 0.0f) {
-        adx_thresh = cfg->smart_exit_adx_exhaustion_lt_low_conf;
+    bool is_long = (pos.active == POS_LONG);
+    bool is_low_conf = (pos.confidence == CONF_LOW);
+
+    // 1. Trend Breakdown (EMA Cross) with TBB buffer
+    float ema_dev = 0.0f;
+    if (snap.ema_slow > 0.0f) {
+        ema_dev = fabsf(snap.ema_fast - snap.ema_slow) / snap.ema_slow;
     }
-    if (pos.entry_adx_threshold > 0.0f && snap.adx < (pos.entry_adx_threshold * 0.5f)) {
-        if (snap.adx < adx_thresh) { return true; }
+    bool is_weak_cross = (ema_dev < 0.001f) && (snap.adx > 25.0f);
+    bool ema_cross_exit = is_long
+        ? (snap.ema_fast < snap.ema_slow && !is_weak_cross)
+        : (snap.ema_fast > snap.ema_slow && !is_weak_cross);
+
+    // 2. Trend Exhaustion (ADX below threshold)
+    float adx_exhaustion_lt;
+    if (pos.entry_adx_threshold > 0.0f) {
+        adx_exhaustion_lt = pos.entry_adx_threshold;
+    } else if (is_low_conf && cfg->smart_exit_adx_exhaustion_lt_low_conf > 0.0f) {
+        adx_exhaustion_lt = cfg->smart_exit_adx_exhaustion_lt_low_conf;
+    } else {
+        adx_exhaustion_lt = cfg->smart_exit_adx_exhaustion_lt;
+    }
+    adx_exhaustion_lt = fmaxf(adx_exhaustion_lt, 0.0f);
+    bool exhausted = (adx_exhaustion_lt > 0.0f) && (snap.adx < adx_exhaustion_lt);
+
+    if (ema_cross_exit || exhausted) {
+        return true;
     }
 
-    // 3. EMA macro breakdown
-    if (pos.active == POS_LONG && snap.close < snap.ema_macro) { return true; }
-    if (pos.active == POS_SHORT && snap.close > snap.ema_macro) { return true; }
+    // 3. EMA Macro Breakdown (only if require_macro_alignment is enabled)
+    if (cfg->require_macro_alignment != 0u && snap.ema_macro > 0.0f) {
+        if (is_long && snap.close < snap.ema_macro) { return true; }
+        if (!is_long && snap.close > snap.ema_macro) { return true; }
+    }
 
-    // 5. TSME (Trend Saturation Momentum Exit)
-    if (snap.adx > 50.0f && p_atr >= cfg->tsme_min_profit_atr) {
-        bool macd_contracting = fabsf(snap.macd_hist) < fabsf(snap.prev_macd_hist);
-        bool adx_declining = true;
+    // 4. Stagnation Exit (low-vol + underwater)
+    if (snap.atr < (entry_atr * 0.70f)) {
+        bool is_underwater = is_long ? (snap.close < entry) : (snap.close > entry);
+        if (is_underwater) { return true; }
+    }
+
+    // 6. TSME (Trend Saturation Momentum Exit)
+    if (snap.adx > 50.0f) {
+        bool gate_profit_ok = p_atr >= cfg->tsme_min_profit_atr;
+        bool gate_slope_ok = true;
         if (cfg->tsme_require_adx_slope_negative != 0u) {
-            adx_declining = snap.adx_slope < 0.0f;
+            gate_slope_ok = snap.adx_slope < 0.0f;
         }
-        if (macd_contracting && adx_declining) { return true; }
+        if (gate_profit_ok && gate_slope_ok) {
+            bool is_exhausted = is_long
+                ? (snap.macd_hist < snap.prev_macd_hist && snap.prev_macd_hist < snap.prev2_macd_hist)
+                : (snap.macd_hist > snap.prev_macd_hist && snap.prev_macd_hist > snap.prev2_macd_hist);
+            if (is_exhausted) { return true; }
+        }
     }
 
-    // 6. MMDE (4-bar MACD divergence)
-    if (pos.active == POS_LONG) {
-        if (snap.macd_hist < snap.prev_macd_hist
-            && snap.prev_macd_hist < snap.prev2_macd_hist
-            && snap.prev2_macd_hist < snap.prev3_macd_hist
-            && p_atr > 0.5f) { return true; }
-    }
-    if (pos.active == POS_SHORT) {
-        if (snap.macd_hist > snap.prev_macd_hist
-            && snap.prev_macd_hist > snap.prev2_macd_hist
-            && snap.prev2_macd_hist > snap.prev3_macd_hist
-            && p_atr > 0.5f) { return true; }
+    // 7. MMDE (MACD Persistent Divergence Exit)
+    if (p_atr > 1.5f && snap.adx > 35.0f) {
+        bool is_diverging = is_long
+            ? (snap.macd_hist < snap.prev_macd_hist
+                && snap.prev_macd_hist < snap.prev2_macd_hist
+                && snap.prev2_macd_hist < snap.prev3_macd_hist)
+            : (snap.macd_hist > snap.prev_macd_hist
+                && snap.prev_macd_hist > snap.prev2_macd_hist
+                && snap.prev2_macd_hist > snap.prev3_macd_hist);
+        if (is_diverging) { return true; }
     }
 
-    // 7. RSI overextension
+    // 8. RSI Overextension Exit
     if (cfg->enable_rsi_overextension_exit != 0u) {
         float ub, lb;
         if (pos.confidence == CONF_LOW && cfg->rsi_exit_ub_lo_profit_low_conf > 0.0f) {
@@ -629,8 +662,8 @@ __device__ bool check_smart_exits(const GpuPosition& pos, const GpuSnapshot& sna
             }
         }
         if (ub > 0.0f && lb > 0.0f) {
-            if (pos.active == POS_LONG && snap.rsi > ub) { return true; }
-            if (pos.active == POS_SHORT && snap.rsi < lb) { return true; }
+            if (is_long && snap.rsi > ub) { return true; }
+            if (!is_long && snap.rsi < lb) { return true; }
         }
     }
 
@@ -896,9 +929,15 @@ extern "C" __global__ void sweep_engine_kernel(
                     if (pos.active == POS_EMPTY) { break; } // exited in earlier sub-bar
                     float p_atr = profit_atr(pos, hybrid.close);
 
-                    // Glitch guard
-                    if (hybrid.atr > 0.0f && fabsf(hybrid.close - hybrid.prev_close) > hybrid.atr * cfg.glitch_atr_mult) {
-                        continue;
+                    // Glitch guard (matches bt-core: only active when enabled)
+                    if (cfg.block_exits_on_extreme_dev != 0u && hybrid.prev_close > 0.0f) {
+                        float price_change_pct = fabsf(hybrid.close - hybrid.prev_close) / hybrid.prev_close;
+                        bool is_glitch = price_change_pct > cfg.glitch_price_dev_pct
+                            || (hybrid.atr > 0.0f
+                                && fabsf(hybrid.close - hybrid.prev_close) > hybrid.atr * cfg.glitch_atr_mult);
+                        if (is_glitch) {
+                            continue;
+                        }
                     }
 
                     // Stop loss
@@ -973,52 +1012,8 @@ extern "C" __global__ void sweep_engine_kernel(
                     hybrid.volume = sc.volume;
                     hybrid.t_sec = sc.t_sec;
 
-                    const GpuPosition& pos = state.positions[sym];
-
-                    // Pyramiding (immediate, not ranked)
-                    if (pos.active != POS_EMPTY && cfg.enable_pyramiding != 0u) {
-                        if (pos.adds_count < cfg.max_adds_per_symbol) {
-                            float p_atr_pyr = profit_atr(pos, hybrid.close);
-                            if (p_atr_pyr >= cfg.add_min_profit_atr) {
-                                unsigned int elapsed_sec = hybrid.t_sec - pos.last_add_time_sec;
-                                if (elapsed_sec >= cfg.add_cooldown_minutes * 60u) {
-                                    float equity = state.balance;
-                                    float base_margin = equity * cfg.allocation_pct;
-                                    float add_margin = base_margin * cfg.add_fraction_of_base_margin;
-                                    float lev = pos.leverage;
-                                    float add_notional = add_margin * lev;
-                                    float add_size = add_notional / hybrid.close;
-
-                                    if (add_notional < cfg.min_notional_usd) {
-                                        if (cfg.bump_to_min_notional != 0u && hybrid.close > 0.0f) {
-                                            add_notional = cfg.min_notional_usd;
-                                            add_size = add_notional / hybrid.close;
-                                        } else {
-                                            continue;
-                                        }
-                                    }
-
-                                    float fee = add_notional * fee_rate;
-                                    state.balance -= fee;
-                                    state.total_fees += fee;
-
-                                    float old_size = pos.size;
-                                    float new_size = old_size + add_size;
-                                    float new_entry = (pos.entry_price * old_size + hybrid.close * add_size) / new_size;
-                                    state.positions[sym].entry_price = new_entry;
-                                    state.positions[sym].size = new_size;
-                                    state.positions[sym].margin_used += add_margin;
-                                    state.positions[sym].adds_count += 1u;
-                                    state.positions[sym].last_add_time_sec = hybrid.t_sec;
-                                }
-                            }
-                        }
-                        continue;
-                    }
-
-                    if (pos.active != POS_EMPTY) { continue; }
-
                     // Gates, signal generation, filters (using hybrid snapshot with indicator values)
+                    GpuPosition pos = state.positions[sym];
                     bool gates_ok = check_gates(hybrid, &cfg, btc_bull, hybrid.ema_slow_slope_pct);
                     SignalResult sig_result = generate_signal(hybrid, &cfg, gates_ok, hybrid.ema_slow_slope_pct);
                     unsigned int signal = sig_result.signal;
@@ -1034,9 +1029,59 @@ extern "C" __global__ void sweep_engine_kernel(
                     signal = apply_regime_filter(signal, &cfg, breadth_pct);
                     if (signal == SIG_NEUTRAL) { continue; }
 
+                    unsigned int desired_type = (signal == SIG_BUY) ? POS_LONG : POS_SHORT;
+
+                    // Signal flip: close opposite position first, then allow entry (matches bt-core).
+                    if (pos.active != POS_EMPTY && pos.active != desired_type) {
+                        apply_close(&state, sym, hybrid, true, fee_rate);
+                        pos = state.positions[sym];
+                    }
+
+                    // Pyramiding: only when the signal agrees with current position (matches bt-core).
+                    if (pos.active != POS_EMPTY) {
+                        if (cfg.enable_pyramiding != 0u && pos.active == desired_type) {
+                            if (pos.adds_count < cfg.max_adds_per_symbol) {
+                                float p_atr_pyr = profit_atr(pos, hybrid.close);
+                                if (p_atr_pyr >= cfg.add_min_profit_atr) {
+                                    unsigned int elapsed_sec = hybrid.t_sec - pos.last_add_time_sec;
+                                    if (elapsed_sec >= cfg.add_cooldown_minutes * 60u) {
+                                        float equity = state.balance;
+                                        float base_margin = equity * cfg.allocation_pct;
+                                        float add_margin = base_margin * cfg.add_fraction_of_base_margin;
+                                        float lev = pos.leverage;
+                                        float add_notional = add_margin * lev;
+                                        float add_size = add_notional / hybrid.close;
+
+                                        if (add_notional < cfg.min_notional_usd) {
+                                            if (cfg.bump_to_min_notional != 0u && hybrid.close > 0.0f) {
+                                                add_notional = cfg.min_notional_usd;
+                                                add_size = add_notional / hybrid.close;
+                                            } else {
+                                                continue;
+                                            }
+                                        }
+
+                                        float fee = add_notional * fee_rate;
+                                        state.balance -= fee;
+                                        state.total_fees += fee;
+
+                                        float old_size = pos.size;
+                                        float new_size = old_size + add_size;
+                                        float new_entry = (pos.entry_price * old_size + hybrid.close * add_size) / new_size;
+                                        state.positions[sym].entry_price = new_entry;
+                                        state.positions[sym].size = new_size;
+                                        state.positions[sym].margin_used += add_margin;
+                                        state.positions[sym].adds_count += 1u;
+                                        state.positions[sym].last_add_time_sec = hybrid.t_sec;
+                                    }
+                                }
+                            }
+                        }
+                        continue; // Still in a position (or pyramiding handled); no new entry candidate.
+                    }
+
                     if (!conf_meets_min(confidence, cfg.entry_min_confidence)) { continue; }
 
-                    unsigned int desired_type = (signal == SIG_BUY) ? POS_LONG : POS_SHORT;
                     if (is_pesc_blocked(&state, sym, desired_type, hybrid.t_sec, hybrid.adx, &cfg)) { continue; }
 
                     if (cfg.enable_ssf_filter != 0u) {
@@ -1184,9 +1229,15 @@ extern "C" __global__ void sweep_engine_kernel(
 
                 float p_atr = profit_atr(pos, snap.close);
 
-                // Glitch guard
-                if (snap.atr > 0.0f && fabsf(snap.close - snap.prev_close) > snap.atr * cfg.glitch_atr_mult) {
-                    continue;
+                // Glitch guard (matches bt-core: only active when enabled)
+                if (cfg.block_exits_on_extreme_dev != 0u && snap.prev_close > 0.0f) {
+                    float price_change_pct = fabsf(snap.close - snap.prev_close) / snap.prev_close;
+                    bool is_glitch = price_change_pct > cfg.glitch_price_dev_pct
+                        || (snap.atr > 0.0f
+                            && fabsf(snap.close - snap.prev_close) > snap.atr * cfg.glitch_atr_mult);
+                    if (is_glitch) {
+                        continue;
+                    }
                 }
 
                 // Stop loss
@@ -1236,50 +1287,7 @@ extern "C" __global__ void sweep_engine_kernel(
                 const GpuSnapshot& snap = snapshots[cfg.snapshot_offset + bar * ns + sym];
                 if (snap.valid == 0u) { continue; }
 
-                const GpuPosition& pos = state.positions[sym];
-
-                // Pyramiding (same-direction add) -- not ranked, immediate
-                if (pos.active != POS_EMPTY && cfg.enable_pyramiding != 0u) {
-                    if (pos.adds_count < cfg.max_adds_per_symbol) {
-                        float p_atr_pyr = profit_atr(pos, snap.close);
-                        if (p_atr_pyr >= cfg.add_min_profit_atr) {
-                            unsigned int elapsed_sec = snap.t_sec - pos.last_add_time_sec;
-                            if (elapsed_sec >= cfg.add_cooldown_minutes * 60u) {
-                                float equity = state.balance;
-                                float base_margin = equity * cfg.allocation_pct;
-                                float add_margin = base_margin * cfg.add_fraction_of_base_margin;
-                                float lev = pos.leverage;
-                                float add_notional = add_margin * lev;
-                                float add_size = add_notional / snap.close;
-
-                                if (add_notional < cfg.min_notional_usd) {
-                                    if (cfg.bump_to_min_notional != 0u && snap.close > 0.0f) {
-                                        add_notional = cfg.min_notional_usd;
-                                        add_size = add_notional / snap.close;
-                                    } else {
-                                        continue;
-                                    }
-                                }
-
-                                float fee = add_notional * fee_rate;
-                                state.balance -= fee;
-                                state.total_fees += fee;
-
-                                float old_size = pos.size;
-                                float new_size = old_size + add_size;
-                                float new_entry = (pos.entry_price * old_size + snap.close * add_size) / new_size;
-                                state.positions[sym].entry_price = new_entry;
-                                state.positions[sym].size = new_size;
-                                state.positions[sym].margin_used += add_margin;
-                                state.positions[sym].adds_count += 1u;
-                                state.positions[sym].last_add_time_sec = snap.t_sec;
-                            }
-                        }
-                    }
-                    continue;
-                }
-
-                if (pos.active != POS_EMPTY) { continue; }
+                GpuPosition pos = state.positions[sym];
 
                 bool gates_ok = check_gates(snap, &cfg, btc_bull, snap.ema_slow_slope_pct);
                 SignalResult sig_result = generate_signal(snap, &cfg, gates_ok, snap.ema_slow_slope_pct);
@@ -1296,9 +1304,59 @@ extern "C" __global__ void sweep_engine_kernel(
                 signal = apply_regime_filter(signal, &cfg, breadth_pct);
                 if (signal == SIG_NEUTRAL) { continue; }
 
+                unsigned int desired_type = (signal == SIG_BUY) ? POS_LONG : POS_SHORT;
+
+                // Signal flip: close opposite position first, then allow entry (matches bt-core).
+                if (pos.active != POS_EMPTY && pos.active != desired_type) {
+                    apply_close(&state, sym, snap, true, fee_rate);
+                    pos = state.positions[sym];
+                }
+
+                // Pyramiding: only when the signal agrees with current position (matches bt-core).
+                if (pos.active != POS_EMPTY) {
+                    if (cfg.enable_pyramiding != 0u && pos.active == desired_type) {
+                        if (pos.adds_count < cfg.max_adds_per_symbol) {
+                            float p_atr_pyr = profit_atr(pos, snap.close);
+                            if (p_atr_pyr >= cfg.add_min_profit_atr) {
+                                unsigned int elapsed_sec = snap.t_sec - pos.last_add_time_sec;
+                                if (elapsed_sec >= cfg.add_cooldown_minutes * 60u) {
+                                    float equity = state.balance;
+                                    float base_margin = equity * cfg.allocation_pct;
+                                    float add_margin = base_margin * cfg.add_fraction_of_base_margin;
+                                    float lev = pos.leverage;
+                                    float add_notional = add_margin * lev;
+                                    float add_size = add_notional / snap.close;
+
+                                    if (add_notional < cfg.min_notional_usd) {
+                                        if (cfg.bump_to_min_notional != 0u && snap.close > 0.0f) {
+                                            add_notional = cfg.min_notional_usd;
+                                            add_size = add_notional / snap.close;
+                                        } else {
+                                            continue;
+                                        }
+                                    }
+
+                                    float fee = add_notional * fee_rate;
+                                    state.balance -= fee;
+                                    state.total_fees += fee;
+
+                                    float old_size = pos.size;
+                                    float new_size = old_size + add_size;
+                                    float new_entry = (pos.entry_price * old_size + snap.close * add_size) / new_size;
+                                    state.positions[sym].entry_price = new_entry;
+                                    state.positions[sym].size = new_size;
+                                    state.positions[sym].margin_used += add_margin;
+                                    state.positions[sym].adds_count += 1u;
+                                    state.positions[sym].last_add_time_sec = snap.t_sec;
+                                }
+                            }
+                        }
+                    }
+                    continue; // Still in a position (or pyramiding handled); no new entry candidate.
+                }
+
                 if (!conf_meets_min(confidence, cfg.entry_min_confidence)) { continue; }
 
-                unsigned int desired_type = (signal == SIG_BUY) ? POS_LONG : POS_SHORT;
                 if (is_pesc_blocked(&state, sym, desired_type, snap.t_sec, snap.adx, &cfg)) { continue; }
 
                 if (cfg.enable_ssf_filter != 0u) {
@@ -1350,6 +1408,18 @@ extern "C" __global__ void sweep_engine_kernel(
             }
 
             // == Phase 4: Execute ranked entries =============================
+            // Use equity (balance + unrealised PnL) for sizing/headroom, mirroring bt-core.
+            float equity_for_sizing = state.balance;
+            for (unsigned int s = 0u; s < ns; s++) {
+                const GpuPosition& p = state.positions[s];
+                if (p.active != POS_EMPTY) {
+                    const GpuSnapshot& psnap = snapshots[cfg.snapshot_offset + bar * ns + s];
+                    if (psnap.valid != 0u) {
+                        equity_for_sizing += profit_usd(p, psnap.close);
+                    }
+                }
+            }
+
             for (unsigned int i = 0u; i < num_cands; i++) {
                 if (state.entries_this_bar >= cfg.max_entry_orders_per_loop) { break; }
                 if (state.num_open >= cfg.max_open_positions) { break; }
@@ -1363,10 +1433,10 @@ extern "C" __global__ void sweep_engine_kernel(
                         total_margin += state.positions[s].margin_used;
                     }
                 }
-                float headroom = state.balance * cfg.max_total_margin_pct - total_margin;
+                float headroom = equity_for_sizing * cfg.max_total_margin_pct - total_margin;
                 if (headroom <= 0.0f) { continue; }
 
-                SizingResult sizing = compute_entry_size(state.balance, snap.close, cand.confidence,
+                SizingResult sizing = compute_entry_size(equity_for_sizing, snap.close, cand.confidence,
                                                          cand.atr, snap, &cfg);
                 float size = sizing.size;
                 float margin = sizing.margin;

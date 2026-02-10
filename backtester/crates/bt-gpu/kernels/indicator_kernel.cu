@@ -82,25 +82,26 @@ __device__ void ring_push(float* buf, unsigned int& pos, unsigned int& len, unsi
 
 __device__ float ring_mean(const float* buf, unsigned int pos, unsigned int len, unsigned int cap) {
     if (len == 0) return 0.0f;
-    float sum = 0.0f;
+    double sum = 0.0;
     unsigned int start = (len < cap) ? 0 : pos;
     for (unsigned int i = 0; i < len; i++) {
-        sum += buf[(start + i) % cap];
+        sum += (double)buf[(start + i) % cap];
     }
-    return sum / (float)len;
+    return (float)(sum / (double)len);
 }
 
 __device__ float ring_std_pop(const float* buf, unsigned int pos, unsigned int len, unsigned int cap) {
     if (len == 0) return 0.0f;
-    float mean = ring_mean(buf, pos, len, cap);
-    float var_sum = 0.0f;
+    float mean_f = ring_mean(buf, pos, len, cap);
+    double mean = (double)mean_f;
+    double var_sum = 0.0;
     unsigned int start = (len < cap) ? 0 : pos;
     for (unsigned int i = 0; i < len; i++) {
         float v = buf[(start + i) % cap];
-        float d = v - mean;
+        double d = (double)v - mean;
         var_sum += d * d;
     }
-    return sqrtf(var_sum / (float)len);
+    return sqrtf((float)(var_sum / (double)len));
 }
 
 __device__ float ring_min(const float* buf, unsigned int pos, unsigned int len, unsigned int cap) {
@@ -160,27 +161,30 @@ __global__ void indicator_kernel(
     unsigned int snap_base = ind_idx * nb * ns;
 
     // === EMA state ===
-    float ema_fast_val = 0.0f, ema_slow_val = 0.0f, ema_macro_val = 0.0f;
-    float alpha_fast = 2.0f / ((float)cfg.ema_fast_window + 1.0f);
-    float alpha_slow = 2.0f / ((float)cfg.ema_slow_window + 1.0f);
-    float alpha_macro = 2.0f / ((float)cfg.ema_macro_window + 1.0f);
+    double ema_fast_val = 0.0, ema_slow_val = 0.0, ema_macro_val = 0.0;
+    double alpha_fast = 2.0 / ((double)cfg.ema_fast_window + 1.0);
+    double alpha_slow = 2.0 / ((double)cfg.ema_slow_window + 1.0);
+    double alpha_macro = 2.0 / ((double)cfg.ema_macro_window + 1.0);
     unsigned int ema_fast_count = 0, ema_slow_count = 0, ema_macro_count = 0;
 
     // === ADX state ===
     float adx_prev_high = 0.0f, adx_prev_low = 0.0f, adx_prev_close = 0.0f;
-    float sm_plus_dm = 0.0f, sm_minus_dm = 0.0f, sm_tr = 0.0f;
-    float adx_value = 0.0f, adx_sum = 0.0f;
+    double sm_plus_dm = 0.0, sm_minus_dm = 0.0, sm_tr = 0.0;
+    double adx_value = 0.0, adx_sum = 0.0;
     unsigned int adx_count = 0, adx_dx_count = 0;
     unsigned int adx_phase = 0; // 0=init, 1=accum, 2=dx_accum, 3=warm
 
     // === ATR state ===
-    float atr_value = 0.0f, atr_sum = 0.0f, atr_prev_close = 0.0f;
+    double atr_value = 0.0, atr_sum = 0.0;
+    float atr_prev_close = 0.0f;
     unsigned int atr_count = 0;
     unsigned int atr_has_prev = 0, atr_warm = 0;
 
     // === RSI state ===
-    float rsi_prev_close = 0.0f, rsi_avg_gain = 0.0f, rsi_avg_loss = 0.0f;
-    float rsi_gain_sum = 0.0f, rsi_loss_sum = 0.0f, rsi_value = 50.0f;
+    float rsi_prev_close = 0.0f;
+    double rsi_avg_gain = 0.0, rsi_avg_loss = 0.0;
+    double rsi_gain_sum = 0.0, rsi_loss_sum = 0.0;
+    float rsi_value = 50.0f;
     unsigned int rsi_count = 0;
     unsigned int rsi_has_prev = 0, rsi_warm = 0;
 
@@ -200,10 +204,10 @@ __global__ void indicator_kernel(
     unsigned int avg_atr_cap = (cfg.avg_atr_window < MAX_RING) ? cfg.avg_atr_window : MAX_RING;
 
     // === MACD state (fixed 12/26/9) ===
-    float macd_fast_val = 0.0f, macd_slow_val = 0.0f, macd_signal_val = 0.0f;
-    float macd_alpha_fast = 2.0f / 13.0f;   // EMA(12)
-    float macd_alpha_slow = 2.0f / 27.0f;   // EMA(26)
-    float macd_alpha_signal = 2.0f / 10.0f;  // EMA(9)
+    double macd_fast_val = 0.0, macd_slow_val = 0.0, macd_signal_val = 0.0;
+    double macd_alpha_fast = 2.0 / 13.0;    // EMA(12)
+    double macd_alpha_slow = 2.0 / 27.0;    // EMA(26)
+    double macd_alpha_signal = 2.0 / 10.0;  // EMA(9)
     unsigned int macd_count = 0;
 
     // === Stoch RSI state ===
@@ -252,16 +256,16 @@ __global__ void indicator_kernel(
         }
 
         // ─── EMA ───────────────────────────────────────────────────────
-        if (ema_fast_count == 0) { ema_fast_val = c.close; }
-        else { ema_fast_val = alpha_fast * c.close + (1.0f - alpha_fast) * ema_fast_val; }
+        if (ema_fast_count == 0) { ema_fast_val = (double)c.close; }
+        else { ema_fast_val = alpha_fast * (double)c.close + (1.0 - alpha_fast) * ema_fast_val; }
         ema_fast_count++;
 
-        if (ema_slow_count == 0) { ema_slow_val = c.close; }
-        else { ema_slow_val = alpha_slow * c.close + (1.0f - alpha_slow) * ema_slow_val; }
+        if (ema_slow_count == 0) { ema_slow_val = (double)c.close; }
+        else { ema_slow_val = alpha_slow * (double)c.close + (1.0 - alpha_slow) * ema_slow_val; }
         ema_slow_count++;
 
-        if (ema_macro_count == 0) { ema_macro_val = c.close; }
-        else { ema_macro_val = alpha_macro * c.close + (1.0f - alpha_macro) * ema_macro_val; }
+        if (ema_macro_count == 0) { ema_macro_val = (double)c.close; }
+        else { ema_macro_val = alpha_macro * (double)c.close + (1.0 - alpha_macro) * ema_macro_val; }
         ema_macro_count++;
 
         // ─── ADX (Wilder smoothing) ────────────────────────────────────
@@ -311,7 +315,7 @@ __global__ void indicator_kernel(
             float plus_dm = (up_move > down_move && up_move > 0.0f) ? up_move : 0.0f;
             float minus_dm = (down_move > up_move && down_move > 0.0f) ? down_move : 0.0f;
             float tr = fmaxf(c.high - c.low, fmaxf(fabsf(c.high - adx_prev_close), fabsf(c.low - adx_prev_close)));
-            float w = (float)cfg.adx_window;
+            double w = (double)cfg.adx_window;
             sm_plus_dm = sm_plus_dm - sm_plus_dm / w + plus_dm;
             sm_minus_dm = sm_minus_dm - sm_minus_dm / w + minus_dm;
             sm_tr = sm_tr - sm_tr / w + tr;
@@ -332,10 +336,10 @@ __global__ void indicator_kernel(
 
             if (adx_dx_count >= cfg.adx_window) {
                 adx_value = adx_sum / w;
-                cur_adx = adx_value;
+                cur_adx = (float)adx_value;
                 adx_phase = 3;
             } else {
-                cur_adx = adx_sum / (float)adx_dx_count;
+                cur_adx = (float)(adx_sum / (double)adx_dx_count);
             }
         } else { // adx_phase == 3 (warm)
             float up_move = c.high - adx_prev_high;
@@ -343,7 +347,7 @@ __global__ void indicator_kernel(
             float plus_dm = (up_move > down_move && up_move > 0.0f) ? up_move : 0.0f;
             float minus_dm = (down_move > up_move && down_move > 0.0f) ? down_move : 0.0f;
             float tr = fmaxf(c.high - c.low, fmaxf(fabsf(c.high - adx_prev_close), fabsf(c.low - adx_prev_close)));
-            float w = (float)cfg.adx_window;
+            double w = (double)cfg.adx_window;
             sm_plus_dm = sm_plus_dm - sm_plus_dm / w + plus_dm;
             sm_minus_dm = sm_minus_dm - sm_minus_dm / w + minus_dm;
             sm_tr = sm_tr - sm_tr / w + tr;
@@ -353,8 +357,8 @@ __global__ void indicator_kernel(
             float di_sum = di_pos + di_neg;
             float dx = (di_sum > 0.0f) ? (fabsf(di_pos - di_neg) / di_sum * 100.0f) : 0.0f;
 
-            adx_value = (adx_value * (w - 1.0f) + dx) / w;
-            cur_adx = adx_value;
+            adx_value = (adx_value * (w - 1.0) + (double)dx) / w;
+            cur_adx = (float)adx_value;
             cur_adx_pos = di_pos;
             cur_adx_neg = di_neg;
 
@@ -366,12 +370,12 @@ __global__ void indicator_kernel(
         float adx_slope = cur_adx - prev_adx;
 
         // ─── ATR (Wilder smoothing) ────────────────────────────────────
-        float tr_val;
+        double tr_val;
         if (atr_has_prev == 0) {
-            tr_val = c.high - c.low;
+            tr_val = (double)(c.high - c.low);
             atr_has_prev = 1;
         } else {
-            tr_val = fmaxf(c.high - c.low, fmaxf(fabsf(c.high - atr_prev_close), fabsf(c.low - atr_prev_close)));
+            tr_val = (double)fmaxf(c.high - c.low, fmaxf(fabsf(c.high - atr_prev_close), fabsf(c.low - atr_prev_close)));
         }
         atr_prev_close = c.close;
 
@@ -379,20 +383,20 @@ __global__ void indicator_kernel(
             atr_sum += tr_val;
             atr_count++;
             if (atr_count >= cfg.atr_window) {
-                atr_value = atr_sum / (float)cfg.atr_window;
+                atr_value = atr_sum / (double)cfg.atr_window;
                 atr_warm = 1;
             } else {
-                atr_value = atr_sum / (float)atr_count;
+                atr_value = atr_sum / (double)atr_count;
             }
         } else {
-            float w = (float)cfg.atr_window;
-            atr_value = (atr_value * (w - 1.0f) + tr_val) / w;
+            double w = (double)cfg.atr_window;
+            atr_value = (atr_value * (w - 1.0) + tr_val) / w;
         }
 
-        float atr_slope_val = atr_value - prev_atr;
+        float atr_slope_val = (float)atr_value - prev_atr;
 
         // Avg ATR (rolling mean)
-        ring_push(avg_atr_ring, avg_atr_pos, avg_atr_len, avg_atr_cap, atr_value);
+        ring_push(avg_atr_ring, avg_atr_pos, avg_atr_len, avg_atr_cap, (float)atr_value);
         float avg_atr_val = ring_mean(avg_atr_ring, avg_atr_pos, avg_atr_len, avg_atr_cap);
 
         // ─── RSI (Wilder smoothing) ────────────────────────────────────
@@ -411,24 +415,24 @@ __global__ void indicator_kernel(
                 rsi_loss_sum += loss;
                 rsi_count++;
                 if (rsi_count >= cfg.rsi_window) {
-                    rsi_avg_gain = rsi_gain_sum / (float)cfg.rsi_window;
-                    rsi_avg_loss = rsi_loss_sum / (float)cfg.rsi_window;
+                    rsi_avg_gain = rsi_gain_sum / (double)cfg.rsi_window;
+                    rsi_avg_loss = rsi_loss_sum / (double)cfg.rsi_window;
                     rsi_warm = 1;
                 } else {
                     rsi_value = 50.0f;
                     goto rsi_done;
                 }
             } else {
-                float w = (float)cfg.rsi_window;
-                rsi_avg_gain = (rsi_avg_gain * (w - 1.0f) + gain) / w;
-                rsi_avg_loss = (rsi_avg_loss * (w - 1.0f) + loss) / w;
+                double w = (double)cfg.rsi_window;
+                rsi_avg_gain = (rsi_avg_gain * (w - 1.0) + (double)gain) / w;
+                rsi_avg_loss = (rsi_avg_loss * (w - 1.0) + (double)loss) / w;
             }
 
-            if (rsi_avg_loss == 0.0f) {
+            if (rsi_avg_loss == 0.0) {
                 rsi_value = 100.0f;
             } else {
-                float rs = rsi_avg_gain / rsi_avg_loss;
-                rsi_value = 100.0f - 100.0f / (1.0f + rs);
+                double rs = rsi_avg_gain / rsi_avg_loss;
+                rsi_value = (float)(100.0 - 100.0 / (1.0 + rs));
             }
         }
         rsi_done:
@@ -458,17 +462,17 @@ __global__ void indicator_kernel(
         // ─── MACD (fixed 12/26/9) ─────────────────────────────────────
         float macd_hist_val;
         if (macd_count == 0) {
-            macd_fast_val = c.close;
-            macd_slow_val = c.close;
-            float macd_line = 0.0f;
+            macd_fast_val = (double)c.close;
+            macd_slow_val = (double)c.close;
+            double macd_line = 0.0;
             macd_signal_val = macd_line;
             macd_hist_val = 0.0f;
         } else {
-            macd_fast_val = macd_alpha_fast * c.close + (1.0f - macd_alpha_fast) * macd_fast_val;
-            macd_slow_val = macd_alpha_slow * c.close + (1.0f - macd_alpha_slow) * macd_slow_val;
-            float macd_line = macd_fast_val - macd_slow_val;
-            macd_signal_val = macd_alpha_signal * macd_line + (1.0f - macd_alpha_signal) * macd_signal_val;
-            macd_hist_val = macd_line - macd_signal_val;
+            macd_fast_val = macd_alpha_fast * (double)c.close + (1.0 - macd_alpha_fast) * macd_fast_val;
+            macd_slow_val = macd_alpha_slow * (double)c.close + (1.0 - macd_alpha_slow) * macd_slow_val;
+            double macd_line = macd_fast_val - macd_slow_val;
+            macd_signal_val = macd_alpha_signal * macd_line + (1.0 - macd_alpha_signal) * macd_signal_val;
+            macd_hist_val = (float)(macd_line - macd_signal_val);
         }
         macd_count++;
 
@@ -503,7 +507,13 @@ __global__ void indicator_kernel(
         unsigned int vol_trend_flag = (vol_short_sma > vol_sma_val) ? 1u : 0u;
 
         // ─── EMA slow slope ───────────────────────────────────────────
-        ring_push(ema_slow_hist, ema_slow_hist_pos, ema_slow_hist_len, ema_slow_hist_cap, ema_slow_val);
+	        ring_push(
+	            ema_slow_hist,
+	            ema_slow_hist_pos,
+	            ema_slow_hist_len,
+	            ema_slow_hist_cap,
+	            (float)ema_slow_val
+	        );
         float ema_slow_slope_pct = 0.0f;
         if (ema_slow_hist_len >= cfg.slow_drift_slope_window && c.close > 0.0f) {
             // current = newest value (at len-1), past = oldest in window
@@ -520,14 +530,14 @@ __global__ void indicator_kernel(
         snap.open = c.open;
         snap.volume = c.volume;
         snap.t_sec = c.t_sec;
-        snap.ema_fast = ema_fast_val;
-        snap.ema_slow = ema_slow_val;
-        snap.ema_macro = ema_macro_val;
+        snap.ema_fast = (float)ema_fast_val;
+        snap.ema_slow = (float)ema_slow_val;
+        snap.ema_macro = (float)ema_macro_val;
         snap.adx = cur_adx;
         snap.adx_slope = adx_slope;
         snap.adx_pos = cur_adx_pos;
         snap.adx_neg = cur_adx_neg;
-        snap.atr = atr_value;
+        snap.atr = (float)atr_value;
         snap.atr_slope = atr_slope_val;
         snap.avg_atr = avg_atr_val;
         snap.bb_upper = bb_upper;
@@ -559,10 +569,10 @@ __global__ void indicator_kernel(
         prev2_macd_hist = prev_macd_hist;
         prev_macd_hist = macd_hist_val;
         prev_adx = cur_adx;
-        prev_atr = atr_value;
+        prev_atr = (float)atr_value;
         prev_close = c.close;
-        prev_ema_fast = ema_fast_val;
-        prev_ema_slow = ema_slow_val;
+        prev_ema_fast = (float)ema_fast_val;
+        prev_ema_slow = (float)ema_slow_val;
         bar_count++;
     }
 }
