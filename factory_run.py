@@ -441,6 +441,7 @@ def _summarise_replay_report(path: Path) -> dict[str, Any]:
     d = _load_json(path)
     return {
         "path": str(path),
+        "initial_balance": float(d.get("initial_balance", 0.0)),
         "final_balance": float(d.get("final_balance", 0.0)),
         "total_pnl": float(d.get("total_pnl", 0.0)),
         "total_trades": int(d.get("total_trades", 0)),
@@ -634,6 +635,17 @@ def _render_validation_report_md(items: list[dict[str, Any]], *, score_min_trade
             lines.append(f"- sensitivity median total_pnl: {float(it.get('sensitivity_median_total_pnl', 0.0)):.2f}")
         if _has_num(it.get("sensitivity_metric_v1")):
             lines.append(f"- sensitivity metric v1: {float(it.get('sensitivity_metric_v1', 0.0)):.4f}")
+        mc_ci = it.get("monte_carlo_ci")
+        if isinstance(mc_ci, dict) and mc_ci:
+            method = "bootstrap" if "bootstrap" in mc_ci else sorted([str(k) for k in mc_ci.keys()])[0]
+            payload = mc_ci.get(method, {})
+            if isinstance(payload, dict):
+                r_ci = payload.get("return_pct_ci95")
+                dd_ci = payload.get("max_drawdown_pct_ci95")
+                if isinstance(r_ci, list) and len(r_ci) == 2:
+                    lines.append(f"- MC {method} return CI95: [{float(r_ci[0]):.6f}, {float(r_ci[1]):.6f}]")
+                if isinstance(dd_ci, list) and len(dd_ci) == 2:
+                    lines.append(f"- MC {method} max DD pct CI95: [{float(dd_ci[0]):.6f}, {float(dd_ci[1]):.6f}]")
         if _has_num(it.get("top1_pnl_pct")):
             lines.append(f"- top1 pnl pct: {float(it.get('top1_pnl_pct', 0.0)):.4f}")
         if _has_num(it.get("top5_pnl_pct")):
@@ -935,6 +947,10 @@ def main(argv: list[str] | None = None) -> int:
             "sensitivity_checks",
             "sensitivity_perturb",
             "sensitivity_timeout_s",
+            "monte_carlo",
+            "monte_carlo_iters",
+            "monte_carlo_seed",
+            "monte_carlo_methods",
             "score_min_trades",
             "score_trades_penalty_weight",
             "tpe",
@@ -1308,6 +1324,13 @@ def main(argv: list[str] | None = None) -> int:
     replay_reports: list[dict[str, Any]] = []
     for cfg_path in candidate_paths:
         out_json = replays_dir / f"{cfg_path.stem}.replay.json"
+
+        trades_csv: Path | None = None
+        if bool(getattr(args, "monte_carlo", False)):
+            trades_dir = run_dir / "trades"
+            trades_dir.mkdir(parents=True, exist_ok=True)
+            trades_csv = trades_dir / f"{cfg_path.stem}.trades.csv"
+
         replay_argv = bt_cmd + [
             "replay",
             "--config",
@@ -1321,11 +1344,13 @@ def main(argv: list[str] | None = None) -> int:
             replay_argv += ["--candles-db", str(args.candles_db)]
         if args.funding_db:
             replay_argv += ["--funding-db", str(args.funding_db)]
+        if trades_csv is not None:
+            replay_argv += ["--export-trades", str(trades_csv)]
 
         replay_stdout = run_dir / "replays" / f"{cfg_path.stem}.stdout.txt"
         replay_stderr = run_dir / "replays" / f"{cfg_path.stem}.stderr.txt"
 
-        if bool(args.resume) and _is_nonempty_file(out_json):
+        if bool(args.resume) and _is_nonempty_file(out_json) and (trades_csv is None or _is_nonempty_file(trades_csv)):
             replay_res = CmdResult(
                 argv=[],
                 cwd=str(AIQ_ROOT / "backtester"),
@@ -1350,6 +1375,77 @@ def main(argv: list[str] | None = None) -> int:
         summary = _summarise_replay_report(out_json)
         summary["config_path"] = str(cfg_path)
         summary["config_id"] = candidate_config_ids[str(cfg_path)]
+
+        if bool(getattr(args, "monte_carlo", False)) and trades_csv is not None:
+            mc_dir = run_dir / "monte_carlo" / str(cfg_path.stem)
+            mc_dir.mkdir(parents=True, exist_ok=True)
+            mc_summary_path = mc_dir / "summary.json"
+
+            mc_stdout = mc_dir / "monte_carlo.stdout.txt"
+            mc_stderr = mc_dir / "monte_carlo.stderr.txt"
+
+            if bool(args.resume) and _is_nonempty_file(mc_summary_path):
+                mc_res = CmdResult(
+                    argv=[],
+                    cwd=str(AIQ_ROOT),
+                    exit_code=0,
+                    elapsed_s=0.0,
+                    stdout_path=str(mc_stdout),
+                    stderr_path=str(mc_stderr),
+                )
+                meta["steps"].append({"name": f"monte_carlo_{cfg_path.stem}_skip", **mc_res.__dict__})
+            else:
+                if not _is_nonempty_file(trades_csv):
+                    summary["monte_carlo_error"] = "missing trade export CSV (rerun replay without --resume)"
+                else:
+                    init_bal = float(summary.get("initial_balance", 0.0) or 0.0)
+                    mc_argv = [
+                        "python3",
+                        "tools/monte_carlo_bootstrap.py",
+                        "--trades-csv",
+                        str(trades_csv),
+                        "--initial-balance",
+                        str(init_bal),
+                        "--iters",
+                        str(int(getattr(args, "monte_carlo_iters", 2000) or 2000)),
+                        "--seed",
+                        str(int(getattr(args, "monte_carlo_seed", 42) or 42)),
+                        "--methods",
+                        str(getattr(args, "monte_carlo_methods", "bootstrap") or "bootstrap"),
+                        "--output",
+                        str(mc_summary_path),
+                    ]
+
+                    mc_res = _run_cmd(mc_argv, cwd=AIQ_ROOT, stdout_path=mc_stdout, stderr_path=mc_stderr)
+                    meta["steps"].append({"name": f"monte_carlo_{cfg_path.stem}", **mc_res.__dict__})
+                    if mc_res.exit_code != 0:
+                        _write_json(run_dir / "run_metadata.json", meta)
+                        return int(mc_res.exit_code)
+
+            summary["monte_carlo_summary_path"] = str(mc_summary_path)
+            try:
+                mc_obj = _load_json(mc_summary_path)
+                dists = mc_obj.get("distributions", {}) if isinstance(mc_obj, dict) else {}
+                mc_ci: dict[str, Any] = {}
+                if isinstance(dists, dict):
+                    for method, payload in dists.items():
+                        if not isinstance(payload, dict):
+                            continue
+                        ret = payload.get("return_pct", {}) if isinstance(payload.get("return_pct", {}), dict) else {}
+                        dd = (
+                            payload.get("max_drawdown_pct", {})
+                            if isinstance(payload.get("max_drawdown_pct", {}), dict)
+                            else {}
+                        )
+                        mc_ci[str(method)] = {
+                            "return_pct_ci95": [float(ret.get("p02_5", 0.0)), float(ret.get("p97_5", 0.0))],
+                            "max_drawdown_pct_ci95": [float(dd.get("p02_5", 0.0)), float(dd.get("p97_5", 0.0))],
+                            "return_pct_median": float(ret.get("p50", 0.0)),
+                            "max_drawdown_pct_median": float(dd.get("p50", 0.0)),
+                        }
+                summary["monte_carlo_ci"] = mc_ci
+            except Exception:
+                summary["monte_carlo_error"] = "failed to load monte_carlo summary.json"
 
         if bool(getattr(args, "concentration_checks", False)):
             cc_dir = run_dir / "concentration" / str(cfg_path.stem)
@@ -1782,6 +1878,29 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="Per-variant replay timeout in seconds for sensitivity checks (default: 0).",
+    )
+
+    ap.add_argument(
+        "--monte-carlo",
+        action="store_true",
+        help="Run Monte Carlo/bootstrap analysis on trade outcomes (confidence intervals for return and drawdown).",
+    )
+    ap.add_argument(
+        "--monte-carlo-iters",
+        type=int,
+        default=2000,
+        help="Number of Monte Carlo iterations per candidate (default: 2000).",
+    )
+    ap.add_argument(
+        "--monte-carlo-seed",
+        type=int,
+        default=42,
+        help="RNG seed for Monte Carlo reproducibility (default: 42).",
+    )
+    ap.add_argument(
+        "--monte-carlo-methods",
+        default="bootstrap",
+        help="Comma-separated methods: bootstrap,shuffle (default: bootstrap).",
     )
 
     ap.add_argument(
