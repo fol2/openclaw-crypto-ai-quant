@@ -156,6 +156,12 @@ class RiskManager:
         self._exposure_alts_max_shorts = int(max(0, _env_int("AI_QUANT_RISK_EXPOSURE_ALTS_MAX_SHORTS", 0)))
         self._exposure_exclude_symbols: set[str] = {"BTC"}
 
+        # Portfolio heat limit (risk budget).
+        self._heat_enabled = _env_bool("AI_QUANT_RISK_HEAT_ENABLED", False)
+        self._heat_max_pct = float(max(0.0, _env_float("AI_QUANT_RISK_HEAT_MAX_PCT", 0.0)))
+        self._heat_sl_atr_mult = float(max(0.0, _env_float("AI_QUANT_RISK_HEAT_SL_ATR_MULT", 1.5)))
+        self._heat_fallback_atr_pct = float(max(0.0, _env_float("AI_QUANT_RISK_HEAT_FALLBACK_ATR_PCT", 0.005)))
+
         # Diagnostics
         self._blocked_counts: dict[str, int] = defaultdict(int)
 
@@ -265,6 +271,10 @@ class RiskManager:
         side: str,
         notional_usd: float,
         leverage: float | None,
+        equity_usd: float | None = None,
+        entry_price: float | None = None,
+        entry_atr: float | None = None,
+        sl_atr_mult: float | None = None,
         positions: dict[str, Any] | None = None,
         intent_id: str | None = None,
         reduce_risk: bool = False,
@@ -335,6 +345,53 @@ class RiskManager:
                                 return self._block("exposure_alts_longs", sym=sym_u, action=ac, intent_id=intent_id)
                             if want == "SHORT" and self._exposure_alts_max_shorts > 0 and shorts >= self._exposure_alts_max_shorts:
                                 return self._block("exposure_alts_shorts", sym=sym_u, action=ac, intent_id=intent_id)
+            except Exception:
+                pass
+
+            # Portfolio heat limit: cap total open risk (based on stop distance) as % of equity.
+            # Best-effort; if we cannot compute a reasonable estimate, fail open (do not block trading).
+            try:
+                if self._heat_enabled and self._heat_max_pct > 0 and positions is not None:
+                    eq = float(equity_usd or 0.0)
+                    if eq > 0:
+                        sl_mult = float(sl_atr_mult if sl_atr_mult is not None else self._heat_sl_atr_mult)
+                        if sl_mult <= 0:
+                            sl_mult = float(self._heat_sl_atr_mult or 1.5)
+                        fallback_atr_pct = float(self._heat_fallback_atr_pct or 0.0)
+
+                        heat_usd = self._portfolio_heat_usd(
+                            positions=dict(positions or {}),
+                            sl_atr_mult=sl_mult,
+                            fallback_atr_pct=fallback_atr_pct,
+                        )
+
+                        add_usd = self._order_heat_usd_est(
+                            side=str(side or ""),
+                            notional_usd=float(notional_usd or 0.0),
+                            entry_price=entry_price,
+                            entry_atr=entry_atr,
+                            sl_atr_mult=sl_mult,
+                            fallback_atr_pct=fallback_atr_pct,
+                        )
+
+                        heat_pct = (float(heat_usd) / eq) * 100.0 if heat_usd > 0 else 0.0
+                        add_pct = (float(add_usd) / eq) * 100.0 if add_usd > 0 else 0.0
+                        total_pct = float(heat_pct + add_pct)
+
+                        if total_pct > float(self._heat_max_pct):
+                            self._audit(
+                                symbol=sym or "SYSTEM",
+                                event="RISK_BLOCK_HEAT",
+                                level="warn",
+                                data={
+                                    "heat_pct": float(heat_pct),
+                                    "heat_add_pct_est": float(add_pct),
+                                    "heat_total_pct_est": float(total_pct),
+                                    "threshold_pct": float(self._heat_max_pct),
+                                    "equity_usd": float(eq),
+                                },
+                            )
+                            return self._block("portfolio_heat", sym=sym, action=ac, intent_id=intent_id)
             except Exception:
                 pass
 
@@ -536,6 +593,52 @@ class RiskManager:
         except Exception:
             pass
         self._exposure_exclude_symbols = out_excl
+
+        # Portfolio heat limit.
+        heat = risk_cfg.get("heat")
+        heat = heat if isinstance(heat, dict) else {}
+
+        enabled = heat.get("enabled")
+        env_enabled = os.getenv("AI_QUANT_RISK_HEAT_ENABLED")
+        if env_enabled is not None and str(env_enabled).strip() != "":
+            enabled = env_enabled
+        try:
+            self._heat_enabled = (
+                bool(enabled)
+                if not isinstance(enabled, str)
+                else str(enabled).strip().lower() in {"1", "true", "yes", "y", "on"}
+            )
+        except Exception:
+            self._heat_enabled = False
+
+        max_pct = heat.get("max_pct")
+        env_max_pct = os.getenv("AI_QUANT_RISK_HEAT_MAX_PCT")
+        if env_max_pct is not None and str(env_max_pct).strip() != "":
+            max_pct = env_max_pct
+        try:
+            self._heat_max_pct = float(max(0.0, float(max_pct or 0.0)))
+        except Exception:
+            self._heat_max_pct = 0.0
+
+        sl_mult = heat.get("sl_atr_mult")
+        env_sl_mult = os.getenv("AI_QUANT_RISK_HEAT_SL_ATR_MULT")
+        if env_sl_mult is not None and str(env_sl_mult).strip() != "":
+            sl_mult = env_sl_mult
+        try:
+            self._heat_sl_atr_mult = float(max(0.0, float(sl_mult or 1.5)))
+        except Exception:
+            self._heat_sl_atr_mult = 1.5
+
+        fb_atr = heat.get("fallback_atr_pct")
+        env_fb_atr = os.getenv("AI_QUANT_RISK_HEAT_FALLBACK_ATR_PCT")
+        if env_fb_atr is not None and str(env_fb_atr).strip() != "":
+            fb_atr = env_fb_atr
+        try:
+            if fb_atr is None:
+                fb_atr = 0.005
+            self._heat_fallback_atr_pct = float(max(0.0, float(fb_atr)))
+        except Exception:
+            self._heat_fallback_atr_pct = 0.005
 
     def _refresh_manual_kill(self) -> None:
         # Env kill
@@ -792,6 +895,122 @@ class RiskManager:
         if (total + float(abs(add_notional or 0.0))) > float(self._max_notional_per_window):
             return False
         return True
+
+    def _portfolio_heat_usd(
+        self,
+        *,
+        positions: dict[str, Any],
+        sl_atr_mult: float,
+        fallback_atr_pct: float,
+    ) -> float:
+        total = 0.0
+        for _, p0 in (positions or {}).items():
+            total += self._position_risk_usd(
+                pos=p0,
+                sl_atr_mult=sl_atr_mult,
+                fallback_atr_pct=fallback_atr_pct,
+            )
+        return float(max(0.0, total))
+
+    def _position_risk_usd(self, *, pos: Any, sl_atr_mult: float, fallback_atr_pct: float) -> float:
+        if not isinstance(pos, dict):
+            return 0.0
+        t = str(pos.get("type") or pos.get("pos_type") or "").strip().upper()
+        if t not in {"LONG", "SHORT"}:
+            try:
+                sz = float(pos.get("size") or 0.0)
+            except Exception:
+                sz = 0.0
+            t = "LONG" if sz > 0 else ("SHORT" if sz < 0 else "")
+        if t not in {"LONG", "SHORT"}:
+            return 0.0
+
+        try:
+            entry = float(pos.get("entry_price") or 0.0)
+        except Exception:
+            entry = 0.0
+        if entry <= 0:
+            return 0.0
+
+        try:
+            size = float(abs(float(pos.get("size") or 0.0)))
+        except Exception:
+            size = 0.0
+        if size <= 0:
+            return 0.0
+
+        try:
+            atr = float(pos.get("entry_atr") or 0.0)
+        except Exception:
+            atr = 0.0
+        if atr <= 0 and fallback_atr_pct > 0:
+            atr = float(entry) * float(max(0.0, fallback_atr_pct))
+
+        try:
+            sl_price = float(pos.get("trailing_sl") or 0.0)
+        except Exception:
+            sl_price = 0.0
+        if sl_price <= 0 and atr > 0 and sl_atr_mult > 0:
+            if t == "LONG":
+                sl_price = entry - (atr * sl_atr_mult)
+            else:
+                sl_price = entry + (atr * sl_atr_mult)
+
+        dist = 0.0
+        if sl_price > 0:
+            if t == "LONG":
+                dist = float(max(0.0, entry - sl_price))
+            else:
+                dist = float(max(0.0, sl_price - entry))
+        return float(max(0.0, dist) * size)
+
+    def _order_heat_usd_est(
+        self,
+        *,
+        side: str,
+        notional_usd: float,
+        entry_price: float | None,
+        entry_atr: float | None,
+        sl_atr_mult: float,
+        fallback_atr_pct: float,
+    ) -> float:
+        # Estimate the *incremental* heat of a new OPEN/ADD based on entry ATR and stop multiple.
+        try:
+            notional = float(abs(notional_usd or 0.0))
+        except Exception:
+            notional = 0.0
+        if notional <= 0:
+            return 0.0
+
+        try:
+            px = float(entry_price or 0.0)
+        except Exception:
+            px = 0.0
+        if px <= 0:
+            return 0.0
+
+        try:
+            atr = float(entry_atr or 0.0)
+        except Exception:
+            atr = 0.0
+        if atr <= 0 and fallback_atr_pct > 0:
+            atr = float(px) * float(max(0.0, fallback_atr_pct))
+        if atr <= 0 or sl_atr_mult <= 0:
+            return 0.0
+
+        sd = str(side or "").strip().upper()
+        if sd not in {"BUY", "SELL"}:
+            return 0.0
+
+        try:
+            size = float(notional) / float(px)
+        except Exception:
+            size = 0.0
+        if size <= 0:
+            return 0.0
+
+        risk_dist = float(max(0.0, atr * float(sl_atr_mult)))
+        return float(max(0.0, risk_dist * size))
 
     def _prune_times(self, dq: deque[float], *, window_s: float, now_s: float) -> None:
         cutoff = float(now_s) - float(window_s)
