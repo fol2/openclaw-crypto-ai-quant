@@ -1007,11 +1007,66 @@
   function renderHealth(snap) {
     const h = snap?.health || {};
     $("#openCount").textContent = `open ${fmt.int(h.open_pos ?? snap?.open_positions?.length ?? 0)}`;
-    $("#hbAge").textContent = h.ok ? `hb ok` : `hb missing`;
+    const hbAgeS = (h && h.ts_ms && snap?.now_ts_ms) ? Math.max(0, (Number(snap.now_ts_ms) - Number(h.ts_ms)) / 1000) : null;
+    const ws = snap?.ws || {};
+    const wsAgeS = (ws && ws.updated_ts_ms && snap?.now_ts_ms) ? Math.max(0, (Number(snap.now_ts_ms) - Number(ws.updated_ts_ms)) / 1000) : null;
+    const hbTxt = h.ok ? (hbAgeS === null ? "hb ok" : `hb ${fmt.age(hbAgeS)}`) : "hb missing";
+    const wsTxt = wsAgeS === null ? "data \u2014" : `data ${fmt.age(wsAgeS)}`;
+    $("#hbAge").textContent = `${hbTxt} \u00b7 ${wsTxt}`;
     const loopS = h.loop_s ?? h.wall_s;
     $("#loopWall").textContent = h.ok ? `loop ${fmt.num(loopS, 2)}s` : "loop \u2014";
     $("#wsRestarts").textContent = h.ok ? `wsR ${fmt.int(h.ws_restarts)}` : "wsR \u2014";
     $("#errs").textContent = h.ok ? `err ${fmt.int(h.errors)}` : "err \u2014";
+
+    // Risk state (PAUSED when kill_mode is active).
+    const km = String(h.kill_mode || "off").toLowerCase();
+    const kr = String(h.kill_reason || "").trim();
+    const statePill = $("#statePill");
+    const stateDot = $("#stateDot");
+    const stateTxt = $("#stateTxt");
+    if (statePill && stateDot && stateTxt) {
+      stateDot.classList.remove("ok", "bad", "warn");
+      statePill.classList.remove("paused", "running");
+      if (!h.ok) {
+        stateDot.classList.add("warn");
+        stateTxt.textContent = "no hb";
+        statePill.title = "Heartbeat missing; state unknown";
+      } else {
+        const paused = (km === "close_only" || km === "halt_all");
+        statePill.classList.toggle("paused", paused);
+        statePill.classList.toggle("running", !paused);
+        stateDot.classList.toggle("bad", paused);
+        stateDot.classList.toggle("ok", !paused);
+        const label = paused ? (km === "halt_all" ? "HALT" : "PAUSED") : "RUNNING";
+        stateTxt.textContent = label.toLowerCase();
+        statePill.title = paused ? `PAUSED: ${km}${kr ? ` (${kr})` : ""}` : "Running";
+      }
+    }
+
+    // Config ID (from engine heartbeat).
+    const cfg = String(h.config_id || "").trim();
+    const cfgShort = cfg ? cfg.slice(0, 12) : "\u2014";
+    const cfgEl = $("#cfgId");
+    const cfgPill = $("#cfgPill");
+    if (cfgEl) cfgEl.textContent = cfgShort;
+    if (cfgPill) cfgPill.title = cfg ? `config_id: ${cfg}` : "config_id unavailable";
+
+    // Today's PnL + drawdown (UTC day).
+    const d = snap?.daily || {};
+    const pnl = d.pnl_usd;
+    const dd = d.drawdown_pct;
+    const pnlEl = $("#pnlToday");
+    const ddEl = $("#ddNow");
+    if (pnlEl) pnlEl.textContent = (pnl === null || pnl === undefined || Number.isNaN(Number(pnl))) ? "\u2014" : `$${fmt.num(pnl, 2)}`;
+    if (ddEl) ddEl.textContent = (dd === null || dd === undefined || Number.isNaN(Number(dd))) ? "\u2014" : `${fmt.num(dd, 1)}%`;
+
+    // Last data timestamp (WS mids).
+    const dataTs = ws?.updated_ts_ms ? Number(ws.updated_ts_ms) : null;
+    const dataEl = $("#dataTs");
+    const dataPill = $("#dataPill");
+    if (dataEl) dataEl.textContent = dataTs ? fmt.hmsFromMs(dataTs) : "\u2014";
+    if (dataPill) dataPill.title = dataTs ? `Last WS mids update: ${fmt.iso(dataTs)} (${fmt.ago(wsAgeS)})` : "WS mids timestamp unavailable";
+
     const b = snap?.balances || {};
     const realised = b.realised_usd;
     const equity = b.equity_est_usd;

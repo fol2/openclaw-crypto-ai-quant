@@ -202,6 +202,13 @@ def _iso_utc(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
+def _utc_day(now_ms: int) -> str:
+    try:
+        return datetime.fromtimestamp(int(now_ms) / 1000.0, tz=timezone.utc).date().isoformat()
+    except Exception:
+        return ""
+
+
 def connect_db_ro(db_path: Path) -> sqlite3.Connection:
     uri = f"file:{db_path}?mode=ro"
     con = sqlite3.connect(uri, uri=True, timeout=1.0)
@@ -1142,6 +1149,74 @@ def build_snapshot(mode: str) -> dict[str, Any]:
             "est_close_fees_usd": close_fee_total,
             "fee_rate": fee_rate,
         }
+
+        # Daily metrics (UTC day) for the dashboard summary.
+        day = _utc_day(now_ms)
+        daily: dict[str, Any] = {
+            "utc_day": day,
+            "trades": 0,
+            "start_balance": None,
+            "end_balance": None,
+            "pnl_usd": 0.0,
+            "fees_usd": 0.0,
+            "net_pnl_usd": 0.0,
+            "peak_realised_balance": None,
+            "drawdown_pct": 0.0,
+        }
+        if day:
+            like = f"{day}%"
+            row0 = _fetchone(
+                con,
+                "SELECT balance FROM trades WHERE timestamp LIKE ? AND balance IS NOT NULL ORDER BY id ASC LIMIT 1",
+                (like,),
+            )
+            row1 = _fetchone(
+                con,
+                "SELECT balance FROM trades WHERE timestamp LIKE ? AND balance IS NOT NULL ORDER BY id DESC LIMIT 1",
+                (like,),
+            )
+            row_peak = _fetchone(
+                con,
+                "SELECT MAX(balance) AS peak FROM trades WHERE timestamp LIKE ? AND balance IS NOT NULL",
+                (like,),
+            )
+            row_cnt = _fetchone(con, "SELECT COUNT(*) AS n FROM trades WHERE timestamp LIKE ?", (like,))
+            row_fees = _fetchone(
+                con,
+                "SELECT SUM(COALESCE(fee_usd, 0)) AS fees FROM trades WHERE timestamp LIKE ?",
+                (like,),
+            )
+
+            start_bal = float(row0["balance"]) if row0 and row0.get("balance") is not None else None
+            end_bal = float(row1["balance"]) if row1 and row1.get("balance") is not None else None
+            peak_bal = float(row_peak["peak"]) if row_peak and row_peak.get("peak") is not None else None
+            try:
+                daily["trades"] = int(row_cnt["n"]) if row_cnt and row_cnt.get("n") is not None else 0
+            except Exception:
+                daily["trades"] = 0
+            try:
+                daily["fees_usd"] = float(row_fees["fees"]) if row_fees and row_fees.get("fees") is not None else 0.0
+            except Exception:
+                daily["fees_usd"] = 0.0
+
+            daily["start_balance"] = start_bal
+            daily["end_balance"] = end_bal
+            daily["peak_realised_balance"] = peak_bal
+
+            pnl = 0.0
+            if start_bal is not None and end_bal is not None:
+                pnl = float(end_bal) - float(start_bal)
+            daily["pnl_usd"] = float(pnl)
+            daily["net_pnl_usd"] = float(pnl) - float(daily.get("fees_usd") or 0.0)
+
+            # Drawdown: compare current equity estimate to the daily peak realised balance.
+            peak = float(peak_bal) if peak_bal is not None and peak_bal > 0 else None
+            cur = float(equity_est_usd) if equity_est_usd is not None else (float(realised_usd) if realised_usd is not None else None)
+            if peak is not None and cur is not None and peak > 0:
+                dd = max(0.0, (peak - cur) / peak) * 100.0
+                daily["drawdown_pct"] = float(dd)
+
+        snapshot["daily"] = daily
 
         recent: dict[str, Any] = {}
         recent["trades"] = _fetchall(
