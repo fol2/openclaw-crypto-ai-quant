@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import os
 import time
 from collections import defaultdict, deque
@@ -135,6 +136,12 @@ class RiskManager:
         self._equity_peak: float | None = None
         self._drawdown_reduce_policy: str = "none"  # none | close_all
 
+        # Daily realised PnL kill-switch (UTC day).
+        self._max_daily_loss_usd = float(max(0.0, _env_float("AI_QUANT_RISK_MAX_DAILY_LOSS_USD", 0.0)))
+        self._daily_utc_day: str | None = None
+        self._daily_realised_pnl_usd: float = 0.0
+        self._daily_fees_usd: float = 0.0
+
         # Diagnostics
         self._blocked_counts: dict[str, int] = defaultdict(int)
 
@@ -159,6 +166,9 @@ class RiskManager:
         # Reset any cached state so we do not immediately re-trigger on stale peaks once the
         # operator explicitly resumes.
         self._equity_peak = None
+        self._daily_utc_day = None
+        self._daily_realised_pnl_usd = 0.0
+        self._daily_fees_usd = 0.0
         self._kill_mode = "off"
         self._kill_reason = str(reason or "manual_clear")
         self._kill_since_s = None
@@ -195,6 +205,24 @@ class RiskManager:
             self._refresh_drawdown(trader)
         except Exception:
             pass
+
+    def note_fill(
+        self,
+        *,
+        ts_ms: int,
+        symbol: str,
+        action: str,
+        pnl_usd: float,
+        fee_usd: float,
+    ) -> None:
+        """Update rolling risk state based on a newly-ingested live fill.
+
+        This is designed to be called only for NEW fills (after DB dedupe), and must never throw.
+        """
+        try:
+            self._refresh_daily_loss(ts_ms=ts_ms, symbol=symbol, action=action, pnl_usd=pnl_usd, fee_usd=fee_usd)
+        except Exception:
+            return
 
     def allow_order(
         self,
@@ -326,6 +354,22 @@ class RiskManager:
             pol_s = "none"
         self._drawdown_reduce_policy = pol_s
 
+        # Daily loss threshold (USD): YAML risk.max_daily_loss_usd, overridden by env when set.
+        try:
+            dl = risk_cfg.get("max_daily_loss_usd")
+            dl_usd = float(dl) if dl is not None else None
+        except Exception:
+            dl_usd = None
+        env_dl = os.getenv("AI_QUANT_RISK_MAX_DAILY_LOSS_USD")
+        if env_dl is not None and str(env_dl).strip() != "":
+            try:
+                dl_usd = float(str(env_dl).strip())
+            except Exception:
+                pass
+        if dl_usd is None:
+            dl_usd = float(self._max_daily_loss_usd or 0.0)
+        self._max_daily_loss_usd = float(max(0.0, dl_usd))
+
     def _refresh_manual_kill(self) -> None:
         # Env kill
         raw = _env_str("AI_QUANT_KILL_SWITCH", "").strip()
@@ -403,12 +447,65 @@ class RiskManager:
         dd = max(0.0, (peak - equity) / peak) * 100.0
         if dd >= float(self._max_drawdown_pct):
             # Close-only kill.
-            self.kill(mode="close_only", reason=f"drawdown:{dd:.2f}%")
+            self.kill(mode="close_only", reason="drawdown")
             self._audit(
                 symbol="SYSTEM",
                 event="RISK_KILL_DRAWDOWN",
                 level="warn",
-                data={"drawdown_pct": float(dd), "equity": float(equity), "peak": float(peak)},
+                data={
+                    "drawdown_pct": float(dd),
+                    "threshold_pct": float(self._max_drawdown_pct),
+                    "equity": float(equity),
+                    "peak": float(peak),
+                },
+            )
+
+    def _refresh_daily_loss(self, *, ts_ms: int, symbol: str, action: str, pnl_usd: float, fee_usd: float) -> None:
+        if self._max_daily_loss_usd <= 0:
+            return
+
+        ac = str(action or "").strip().upper()
+        if ac not in {"CLOSE", "REDUCE"}:
+            return
+
+        t_ms = int(ts_ms or 0)
+        if t_ms <= 0:
+            return
+
+        day = datetime.datetime.fromtimestamp(t_ms / 1000.0, tz=datetime.timezone.utc).date().isoformat()
+        if not day:
+            return
+
+        if self._daily_utc_day != day:
+            # Reset at UTC day boundary.
+            self._daily_utc_day = day
+            self._daily_realised_pnl_usd = 0.0
+            self._daily_fees_usd = 0.0
+
+        try:
+            self._daily_realised_pnl_usd += float(pnl_usd or 0.0)
+        except Exception:
+            pass
+        try:
+            self._daily_fees_usd += float(fee_usd or 0.0)
+        except Exception:
+            pass
+
+        net = float(self._daily_realised_pnl_usd) - float(self._daily_fees_usd)
+        if net <= -float(self._max_daily_loss_usd):
+            # Kill reason must be stable within the day so kill_since_s remains useful.
+            self.kill(mode="close_only", reason=f"daily_loss:{day}")
+            self._audit(
+                symbol=str(symbol or "SYSTEM").strip().upper() or "SYSTEM",
+                event="RISK_KILL_DAILY_LOSS",
+                level="warn",
+                data={
+                    "utc_day": str(day),
+                    "realised_pnl_usd": float(self._daily_realised_pnl_usd),
+                    "fees_usd": float(self._daily_fees_usd),
+                    "net_pnl_usd": float(net),
+                    "threshold_usd": float(self._max_daily_loss_usd),
+                },
             )
 
     def _allow_symbol_event(self, *, sym: str, is_entry: bool) -> bool:
