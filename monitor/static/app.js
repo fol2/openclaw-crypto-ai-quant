@@ -1043,6 +1043,33 @@
       }
     }
 
+    // Regime gate (trend OK vs chop).
+    const rgOn = (typeof h.regime_gate === "boolean") ? h.regime_gate : null;
+    const rgReason = String(h.regime_reason || "").trim();
+    const rgPill = $("#regimePill");
+    const rgDot = $("#regimeDot");
+    const rgTxt = $("#regimeTxt");
+    if (rgPill && rgDot && rgTxt) {
+      rgDot.classList.remove("ok", "bad", "warn");
+      rgPill.classList.remove("paused", "running");
+      if (!h.ok) {
+        rgDot.classList.add("warn");
+        rgTxt.textContent = "gate";
+        rgPill.title = "Heartbeat missing; regime gate unknown";
+      } else if (rgOn === null) {
+        rgDot.classList.add("warn");
+        rgTxt.textContent = "gate —";
+        rgPill.title = "Regime gate not reported by engine";
+      } else {
+        rgPill.classList.toggle("running", rgOn);
+        rgPill.classList.toggle("paused", !rgOn);
+        rgDot.classList.toggle("ok", rgOn);
+        rgDot.classList.toggle("bad", !rgOn);
+        rgTxt.textContent = rgOn ? "gate on" : "gate off";
+        rgPill.title = rgOn ? `Regime gate ON (${rgReason || "trend_ok"})` : `Regime gate OFF (${rgReason || "n/a"})`;
+      }
+    }
+
     // Config ID (from engine heartbeat).
     const cfg = String(h.config_id || "").trim();
     const cfgShort = cfg ? cfg.slice(0, 12) : "\u2014";

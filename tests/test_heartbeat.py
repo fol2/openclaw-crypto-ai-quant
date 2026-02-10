@@ -38,6 +38,7 @@ def test_parse_last_heartbeat_text_log_parsing(tmp_path):
     line = (
         "2026-02-09T00:00:00Z 🫀 engine ok wall=1.23s errors=2 symbols=50 open_pos=1 "
         "ws_connected=True ws_thread_alive=False ws_restarts=3 "
+        "regime_gate=off regime_reason=breadth_chop "
         "slip_enabled=1 slip_n=3 slip_win=20 slip_thr_bps=5.000 slip_last_bps=10.000 slip_median_bps=7.500"
     )
     log_path.write_text(f"old line\n{line}\n", encoding="utf-8")
@@ -51,6 +52,8 @@ def test_parse_last_heartbeat_text_log_parsing(tmp_path):
     assert out["ws_connected"] is True
     assert out["ws_thread_alive"] is False
     assert out["ws_restarts"] == 3
+    assert out["regime_gate"] is False
+    assert out["regime_reason"] == "breadth_chop"
     assert out["slip_enabled"] is True
     assert out["slip_n"] == 3
     assert out["slip_win"] == 20
@@ -96,6 +99,7 @@ def test_parse_last_heartbeat_parses_kill_and_config_id(tmp_path):
         "2026-02-09T00:00:00Z 🫀 engine ok loop=0.25s errors=0 symbols=3 open_pos=0 "
         "ws_connected=False ws_thread_alive=True ws_restarts=0 "
         "kill=close_only kill_reason=drawdown "
+        "regime_gate=on regime_reason=trend_ok "
         f"config_id={cid}"
     )
     log_path.write_text(f"{line}\n", encoding="utf-8")
@@ -103,6 +107,8 @@ def test_parse_last_heartbeat_parses_kill_and_config_id(tmp_path):
     assert out["ok"] is True
     assert out["kill_mode"] == "close_only"
     assert out["kill_reason"] == "drawdown"
+    assert out["regime_gate"] is True
+    assert out["regime_reason"] == "trend_ok"
     assert out["config_id"] == cid
 
 
