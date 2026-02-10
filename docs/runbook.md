@@ -13,6 +13,30 @@ Procedures for common operational scenarios. When the bot misbehaves, follow the
 
 All services are systemd user units. Manage with `systemctl --user <action> <unit>`.
 
+### Optional timers (nightly factory + log pruning)
+
+Example service/timer templates live under `systemd/`:
+
+- `openclaw-ai-quant-factory.{service,timer}.example` runs `factory_run.py` nightly.
+- `openclaw-ai-quant-prune-runtime-logs.{service,timer}.example` prunes SQLite `runtime_logs` daily.
+
+Install (example):
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp systemd/openclaw-ai-quant-factory.* ~/.config/systemd/user/
+cp systemd/openclaw-ai-quant-prune-runtime-logs.* ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now openclaw-ai-quant-factory.timer
+systemctl --user enable --now openclaw-ai-quant-prune-runtime-logs.timer
+```
+
+Configure runtime log retention via:
+
+```
+AI_QUANT_RUNTIME_LOG_KEEP_DAYS=14
+```
+
 ---
 
 ## 1. Pause Trading (Emergency Stop)
