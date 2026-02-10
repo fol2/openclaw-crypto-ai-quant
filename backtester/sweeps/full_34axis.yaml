@@ -1,5 +1,5 @@
 # Full 34-axis TPE sweep spec
-# Usage: mei-backtester sweep --gpu --tpe --tpe-trials 500000 --tpe-batch 4096 --sweep-spec sweep_full_34axis.yaml
+# Usage: mei-backtester sweep --gpu --allow-unsafe-gpu-sweep --tpe --tpe-trials 500000 --tpe-batch 4096 --sweep-spec sweeps/full_34axis.yaml
 #
 # Grid equivalent: 2.71e+24 combos (impossible)
 # TPE 500K trials with batch=4096: ~4.4s per interval
