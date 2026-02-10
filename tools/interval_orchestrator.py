@@ -12,7 +12,6 @@ This module provides an orchestrated restart flow that:
 from __future__ import annotations
 
 import argparse
-import os
 import subprocess
 import time
 from dataclasses import dataclass
@@ -154,4 +153,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

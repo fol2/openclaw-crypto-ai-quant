@@ -22,7 +22,6 @@ import os
 import sqlite3
 import statistics
 import subprocess
-import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
