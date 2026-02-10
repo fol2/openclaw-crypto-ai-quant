@@ -40,6 +40,11 @@ try:
 except ImportError:  # pragma: no cover
     from deploy_validate import validate_yaml_text  # type: ignore[no-redef]
 
+try:
+    from tools.interval_orchestrator import orchestrate_interval_restart
+except ImportError:  # pragma: no cover
+    from interval_orchestrator import orchestrate_interval_restart  # type: ignore[no-redef]
+
 
 AIQ_ROOT = Path(__file__).resolve().parent.parent
 
@@ -132,6 +137,11 @@ def deploy_paper_config(
     service: str,
     dry_run: bool,
     validate: bool,
+    ws_service: str = "openclaw-ai-quant-ws-sidecar",
+    pause_file: Path | None = None,
+    pause_mode: str = "close_only",
+    resume_on_success: bool = True,
+    verify_sleep_s: float = 2.0,
 ) -> Path:
     """Deploy config_id to yaml_path and return the deploy directory path."""
     config_id = str(config_id).strip()
@@ -212,12 +222,22 @@ def deploy_paper_config(
     restart_mode = str(restart or "auto").strip().lower()
     do_restart = (restart_mode == "always") or (restart_mode == "auto" and restart_required)
     if do_restart and not dry_run:
-        rr = _restart_systemd_user_service(str(service))
-        event["restart"]["result"] = rr.__dict__
-        if rr.attempted and rr.exit_code != 0:
+        results = orchestrate_interval_restart(
+            ws_service=str(ws_service),
+            trader_service=str(service),
+            pause_file=pause_file,
+            pause_mode=str(pause_mode or "close_only"),
+            resume_on_success=bool(resume_on_success),
+            verify_sleep_s=float(verify_sleep_s),
+        )
+        event["restart"]["result"] = {"results": [r.__dict__ for r in results]}
+        if any(not bool(r.ok) for r in results):
             # Record the event and fail fast to avoid silent deploys without a functioning engine.
             (deploy_dir / "deploy_event.json").write_text(json.dumps(event, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            raise RuntimeError(f"service restart failed: {service} (exit_code={rr.exit_code})")
+            failed = next((r for r in results if not bool(r.ok)), None)
+            if failed is None:
+                raise RuntimeError(f"service restart failed: {service}")
+            raise RuntimeError(f"service restart failed: {failed.service} (exit_code={failed.exit_code})")
 
     (deploy_dir / "deploy_event.json").write_text(json.dumps(event, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return deploy_dir
@@ -245,6 +265,33 @@ def main(argv: list[str] | None = None) -> int:
         default="openclaw-ai-quant-trader",
         help="systemd user service name for paper trader (default: openclaw-ai-quant-trader).",
     )
+    ap.add_argument(
+        "--ws-service",
+        default="openclaw-ai-quant-ws-sidecar",
+        help="systemd user service name for WS sidecar (default: openclaw-ai-quant-ws-sidecar).",
+    )
+    ap.add_argument(
+        "--pause-file",
+        default="",
+        help="Optional kill-switch file path to pause trading during restart (requires AI_QUANT_KILL_SWITCH_FILE).",
+    )
+    ap.add_argument(
+        "--pause-mode",
+        default="close_only",
+        choices=["close_only", "halt_all"],
+        help="Pause mode to write into pause file (default: close_only).",
+    )
+    ap.add_argument(
+        "--leave-paused",
+        action="store_true",
+        help="Do not clear the pause file after a successful restart.",
+    )
+    ap.add_argument(
+        "--verify-sleep-s",
+        type=float,
+        default=2.0,
+        help="Seconds to wait before verifying service health (default: 2).",
+    )
     ap.add_argument("--dry-run", action="store_true", help="Write artefacts but do not modify the YAML or restart.")
     ap.add_argument(
         "--no-validate",
@@ -254,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     out_dir = Path(args.out_dir).expanduser().resolve() if str(args.out_dir).strip() else None
+    pause_file = Path(args.pause_file).expanduser().resolve() if str(args.pause_file).strip() else None
     try:
         deploy_paper_config(
             config_id=str(args.config_id),
@@ -265,6 +313,11 @@ def main(argv: list[str] | None = None) -> int:
             service=str(args.service),
             dry_run=bool(args.dry_run),
             validate=not bool(args.no_validate),
+            ws_service=str(args.ws_service),
+            pause_file=pause_file,
+            pause_mode=str(args.pause_mode),
+            resume_on_success=not bool(args.leave_paused),
+            verify_sleep_s=float(args.verify_sleep_s),
         )
         return 0
     except KeyError as e:
