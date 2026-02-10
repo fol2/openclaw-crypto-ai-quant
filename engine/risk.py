@@ -225,6 +225,38 @@ class RiskManager:
     def drawdown_reduce_policy(self) -> str:
         return self._drawdown_reduce_policy
 
+    def slippage_guard_stats(self) -> dict[str, Any]:
+        """Best-effort slippage guard snapshot for monitoring/metrics."""
+        try:
+            vals = list(self._slippage_bps)
+            n = int(len(vals))
+            last = float(vals[-1]) if n > 0 else None
+            median = None
+            if n > 0:
+                s = sorted(float(x) for x in vals)
+                mid_i = n // 2
+                if n % 2 == 1:
+                    median = float(s[mid_i])
+                else:
+                    median = float((s[mid_i - 1] + s[mid_i]) / 2.0)
+            return {
+                "enabled": bool(self._slippage_guard_enabled),
+                "n": int(n),
+                "window_fills": int(self._slippage_guard_window_fills),
+                "last_bps": last,
+                "median_bps": median,
+                "threshold_median_bps": float(self._slippage_guard_max_median_bps),
+            }
+        except Exception:
+            return {
+                "enabled": bool(getattr(self, "_slippage_guard_enabled", False)),
+                "n": 0,
+                "window_fills": int(getattr(self, "_slippage_guard_window_fills", 0) or 0),
+                "last_bps": None,
+                "median_bps": None,
+                "threshold_median_bps": float(getattr(self, "_slippage_guard_max_median_bps", 0.0) or 0.0),
+            }
+
     def refresh(self, *, trader: Any | None = None) -> None:
         """Call periodically (for example every 5-10s) to re-evaluate kill conditions."""
         try:
