@@ -23,6 +23,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+try:
+    from tools.config_id import config_id_from_yaml_file
+except ImportError:  # pragma: no cover
+    from config_id import config_id_from_yaml_file  # type: ignore[no-redef]
+
 
 AIQ_ROOT = Path(__file__).resolve().parent
 
@@ -143,17 +148,20 @@ def _render_ranked_report_md(items: list[dict[str, Any]]) -> str:
 
     lines.append("## Ranked Candidates (by total_pnl)")
     lines.append("")
-    lines.append("| Rank | total_pnl | max_dd_pct | trades | win_rate | profit_factor | report |")
-    lines.append("| ---: | --------: | ---------: | -----: | -------: | ------------: | :----- |")
+    lines.append("| Rank | total_pnl | max_dd_pct | trades | win_rate | profit_factor | config_id | report |")
+    lines.append("| ---: | --------: | ---------: | -----: | -------: | ------------: | :------ | :----- |")
     for i, it in enumerate(items_sorted, start=1):
+        cfg_id = str(it.get("config_id", ""))
+        cfg_id_short = cfg_id[:12] if len(cfg_id) > 12 else cfg_id
         lines.append(
-            "| {rank} | {pnl:.2f} | {dd:.4f} | {trades} | {wr:.4f} | {pf:.4f} | `{path}` |".format(
+            "| {rank} | {pnl:.2f} | {dd:.4f} | {trades} | {wr:.4f} | {pf:.4f} | `{cfg_id}` | `{path}` |".format(
                 rank=i,
                 pnl=float(it.get("total_pnl", 0.0)),
                 dd=float(it.get("max_drawdown_pct", 0.0)),
                 trades=int(it.get("total_trades", 0)),
                 wr=float(it.get("win_rate", 0.0)),
                 pf=float(it.get("profit_factor", 0.0)),
+                cfg_id=cfg_id_short,
                 path=str(it.get("path", "")),
             )
         )
@@ -283,6 +291,7 @@ def main(argv: list[str] | None = None) -> int:
     configs_dir.mkdir(parents=True, exist_ok=True)
 
     candidate_paths: list[Path] = []
+    candidate_config_ids: dict[str, str] = {}
     for rank in range(1, int(args.num_candidates) + 1):
         out_yaml = configs_dir / f"candidate_{args.sort_by}_rank{rank}.yaml"
         gen_argv = [
@@ -310,6 +319,11 @@ def main(argv: list[str] | None = None) -> int:
             _write_json(run_dir / "run_metadata.json", meta)
             return int(gen_res.exit_code)
         candidate_paths.append(out_yaml)
+        candidate_config_ids[str(out_yaml)] = config_id_from_yaml_file(out_yaml)
+
+    meta["candidate_configs"] = [
+        {"path": p, "config_id": candidate_config_ids[p]} for p in sorted(candidate_config_ids.keys())
+    ]
 
     # ------------------------------------------------------------------
     # 4) CPU replay / validation (minimal v1: run replay once per candidate)
@@ -345,7 +359,10 @@ def main(argv: list[str] | None = None) -> int:
             _write_json(run_dir / "run_metadata.json", meta)
             return int(replay_res.exit_code)
 
-        replay_reports.append(_summarise_replay_report(out_json))
+        summary = _summarise_replay_report(out_json)
+        summary["config_path"] = str(cfg_path)
+        summary["config_id"] = candidate_config_ids[str(cfg_path)]
+        replay_reports.append(summary)
 
     # ------------------------------------------------------------------
     # 5) Final report

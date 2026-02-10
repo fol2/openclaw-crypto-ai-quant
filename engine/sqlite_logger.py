@@ -86,6 +86,13 @@ class _SqliteLogSink:
 
         self._q: queue.Queue[_LogItem] = queue.Queue(maxsize=self._max_queue)
         self._stop = threading.Event()
+
+        # Create the DB + schema synchronously so readers never observe a DB
+        # file without the expected tables (reduces test/runtime races).
+        with suppress(Exception):
+            con = self._open_con()
+            con.close()
+
         self._t = threading.Thread(target=self._run, name="sqlite_log_sink", daemon=True)
         self._t.start()
         atexit.register(self.close)
