@@ -21,6 +21,21 @@ def _env_bool(name: str, default: bool = False) -> bool:
         return bool(default)
     return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
 
+def _norm_mode_key(raw: str) -> str:
+    s = str(raw or "").strip().lower()
+    if not s:
+        return ""
+    # Allow a few friendly aliases.
+    if s in {"mode1", "m1"}:
+        return "primary"
+    if s in {"mode2", "m2"}:
+        return "fallback"
+    if s in {"mode3", "m3", "safety", "safe"}:
+        return "conservative"
+    if s in {"halt", "pause", "paused"}:
+        return "flat"
+    return s
+
 
 def _parse_symbol_list(raw: str) -> list[str]:
     out: list[str] = []
@@ -254,6 +269,30 @@ class StrategyManager:
                     deep_merge(cfg, (live_over.get("symbols") or {}).get(sym) or {})
                 else:
                     deep_merge(cfg, live_over)
+
+        # Optional strategy-mode overlays (e.g., Primary/Fallback/Conservative/Flat).
+        # The mode is selected via env var so operators can switch quickly without editing YAML.
+        # YAML structure:
+        #   modes:
+        #     primary:
+        #       global: {...}
+        #       symbols: { BTC: {...}, ... }
+        mode_key = _norm_mode_key(_env_str("AI_QUANT_STRATEGY_MODE", ""))
+        if mode_key:
+            modes = overrides.get("modes") or {}
+            if isinstance(modes, dict):
+                mode_over = modes.get(mode_key)
+                if mode_over is None:
+                    mode_over = modes.get(str(mode_key).upper())
+                if mode_over is None:
+                    mode_over = modes.get(str(mode_key).lower())
+                if isinstance(mode_over, dict):
+                    if "global" in mode_over or "symbols" in mode_over:
+                        deep_merge(cfg, mode_over.get("global") or {})
+                        deep_merge(cfg, (mode_over.get("symbols") or {}).get(sym) or {})
+                    else:
+                        # Shorthand: modes.<mode>: {trade: {...}, filters: {...}, ...}
+                        deep_merge(cfg, mode_over)
 
         for key in ("trade", "indicators", "filters", "thresholds"):
             if not isinstance(cfg.get(key), dict):
