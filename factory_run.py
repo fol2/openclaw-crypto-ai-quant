@@ -354,6 +354,23 @@ def _write_json(path: Path, obj: Any) -> None:
     path.write_text(json.dumps(obj, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _append_reject_reason(it: dict[str, Any], reason: str) -> None:
+    reason = str(reason or "").strip()
+    if not reason:
+        return
+    if not bool(it.get("rejected")):
+        it["rejected"] = True
+        it["reject_reason"] = reason
+        return
+    prev = str(it.get("reject_reason", "") or "").strip()
+    if not prev:
+        it["reject_reason"] = reason
+        return
+    if reason in prev:
+        return
+    it["reject_reason"] = f"{prev}; {reason}"
+
+
 def _summarise_replay_report(path: Path) -> dict[str, Any]:
     d = _load_json(path)
     return {
@@ -703,6 +720,10 @@ def main(argv: list[str] | None = None) -> int:
             "funding_db",
             "sweep_spec",
             "gpu",
+            "concentration_checks",
+            "conc_max_top1_pnl_pct",
+            "conc_max_top5_pnl_pct",
+            "conc_min_symbols_traded",
             "walk_forward",
             "walk_forward_splits_json",
             "walk_forward_min_test_days",
@@ -1123,6 +1144,67 @@ def main(argv: list[str] | None = None) -> int:
         summary["config_path"] = str(cfg_path)
         summary["config_id"] = candidate_config_ids[str(cfg_path)]
 
+        if bool(getattr(args, "concentration_checks", False)):
+            cc_dir = run_dir / "concentration" / str(cfg_path.stem)
+            cc_dir.mkdir(parents=True, exist_ok=True)
+            cc_summary_path = cc_dir / "summary.json"
+
+            cc_stdout = cc_dir / "concentration.stdout.txt"
+            cc_stderr = cc_dir / "concentration.stderr.txt"
+
+            if bool(args.resume) and _is_nonempty_file(cc_summary_path):
+                cc_res = CmdResult(
+                    argv=[],
+                    cwd=str(AIQ_ROOT),
+                    exit_code=0,
+                    elapsed_s=0.0,
+                    stdout_path=str(cc_stdout),
+                    stderr_path=str(cc_stderr),
+                )
+                meta["steps"].append({"name": f"concentration_{cfg_path.stem}_skip", **cc_res.__dict__})
+            else:
+                cc_argv = [
+                    "python3",
+                    "tools/concentration_checks.py",
+                    "--replay-report",
+                    str(out_json),
+                    "--output",
+                    str(cc_summary_path),
+                    "--max-top1-pnl-pct",
+                    str(float(getattr(args, "conc_max_top1_pnl_pct", 0.65) or 0.65)),
+                    "--max-top5-pnl-pct",
+                    str(float(getattr(args, "conc_max_top5_pnl_pct", 0.90) or 0.90)),
+                    "--min-symbols-traded",
+                    str(int(getattr(args, "conc_min_symbols_traded", 5) or 5)),
+                ]
+
+                cc_res = _run_cmd(cc_argv, cwd=AIQ_ROOT, stdout_path=cc_stdout, stderr_path=cc_stderr)
+                meta["steps"].append({"name": f"concentration_{cfg_path.stem}", **cc_res.__dict__})
+                if cc_res.exit_code != 0:
+                    _write_json(run_dir / "run_metadata.json", meta)
+                    return int(cc_res.exit_code)
+
+            summary["concentration_summary_path"] = str(cc_summary_path)
+            try:
+                cc_obj = _load_json(cc_summary_path)
+                summary["concentration_reject"] = bool(cc_obj.get("reject", False)) if isinstance(cc_obj, dict) else False
+                metrics = cc_obj.get("metrics", {}) if isinstance(cc_obj, dict) else {}
+                if isinstance(metrics, dict):
+                    summary["symbols_traded"] = int(metrics.get("symbols_traded", 0) or 0)
+                    summary["top1_pnl_pct"] = float(metrics.get("top1_pnl_pct", 0.0) or 0.0)
+                    summary["top5_pnl_pct"] = float(metrics.get("top5_pnl_pct", 0.0) or 0.0)
+                    summary["long_pnl_usd"] = float(metrics.get("long_pnl_usd", 0.0) or 0.0)
+                    summary["short_pnl_usd"] = float(metrics.get("short_pnl_usd", 0.0) or 0.0)
+
+                if bool(summary.get("concentration_reject")):
+                    reasons = cc_obj.get("reject_reasons", []) if isinstance(cc_obj, dict) else []
+                    if isinstance(reasons, list) and reasons:
+                        _append_reject_reason(summary, "concentration: " + ", ".join([str(r) for r in reasons]))
+                    else:
+                        _append_reject_reason(summary, "concentration")
+            except Exception:
+                summary["concentration_error"] = "failed to load concentration summary.json"
+
         if bool(getattr(args, "walk_forward", False)):
             wf_dir = run_dir / "walk_forward" / str(cfg_path.stem)
             wf_dir.mkdir(parents=True, exist_ok=True)
@@ -1244,10 +1326,7 @@ def main(argv: list[str] | None = None) -> int:
                     if abs(float(reject_bps) - 20.0) < 1e-9:
                         summary["pnl_drop_when_slippage_20bps"] = float(summary.get("pnl_drop_at_reject_bps", 0.0))
                     if bool(summary.get("slippage_reject")):
-                        summary["rejected"] = True
-                        summary["reject_reason"] = (
-                            f"slippage flip at {float(reject_bps):g} bps"
-                        )
+                        _append_reject_reason(summary, f"slippage flip at {float(reject_bps):g} bps")
             except Exception:
                 summary["slippage_error"] = "failed to load slippage_stress summary.json"
 
@@ -1384,6 +1463,30 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=20.0,
         help="Reject when PnL flips sign at this slippage level (default: 20).",
+    )
+
+    ap.add_argument(
+        "--concentration-checks",
+        action="store_true",
+        help="Run concentration/diversification checks from replay output (per-symbol breakdown).",
+    )
+    ap.add_argument(
+        "--conc-max-top1-pnl-pct",
+        type=float,
+        default=0.65,
+        help="Reject if top-1 symbol contributes more than this fraction of positive PnL (default: 0.65).",
+    )
+    ap.add_argument(
+        "--conc-max-top5-pnl-pct",
+        type=float,
+        default=0.90,
+        help="Reject if top-5 symbols contribute more than this fraction of positive PnL (default: 0.90).",
+    )
+    ap.add_argument(
+        "--conc-min-symbols-traded",
+        type=int,
+        default=5,
+        help="Reject if fewer than this many symbols had at least one trade (default: 5).",
     )
 
     return ap
