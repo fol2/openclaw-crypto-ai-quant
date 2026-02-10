@@ -35,6 +35,11 @@ try:
 except ImportError:  # pragma: no cover
     from registry_index import default_registry_db_path  # type: ignore[no-redef]
 
+try:
+    from tools.deploy_validate import validate_yaml_text
+except ImportError:  # pragma: no cover
+    from deploy_validate import validate_yaml_text  # type: ignore[no-redef]
+
 
 AIQ_ROOT = Path(__file__).resolve().parent.parent
 
@@ -126,6 +131,7 @@ def deploy_paper_config(
     restart: str,
     service: str,
     dry_run: bool,
+    validate: bool,
 ) -> Path:
     """Deploy config_id to yaml_path and return the deploy directory path."""
     config_id = str(config_id).strip()
@@ -140,6 +146,12 @@ def deploy_paper_config(
     computed_id = config_id_from_yaml_text(yaml_text)
     if computed_id != config_id:
         raise ValueError(f"registry yaml_text hash mismatch: expected {config_id}, got {computed_id}")
+
+    if bool(validate):
+        errs = validate_yaml_text(yaml_text)
+        if errs:
+            msg = "Invalid config YAML (deployment validation failed):\n" + "\n".join([f"- {e}" for e in errs])
+            raise ValueError(msg)
 
     prev_text = _read_text(yaml_path)
     prev_interval = _load_yaml_engine_interval(prev_text)
@@ -233,6 +245,11 @@ def main(argv: list[str] | None = None) -> int:
         help="systemd user service name for paper trader (default: openclaw-ai-quant-trader).",
     )
     ap.add_argument("--dry-run", action="store_true", help="Write artefacts but do not modify the YAML or restart.")
+    ap.add_argument(
+        "--no-validate",
+        action="store_true",
+        help="Skip deployment-time YAML validation (not recommended).",
+    )
     args = ap.parse_args(argv)
 
     out_dir = Path(args.out_dir).expanduser().resolve() if str(args.out_dir).strip() else None
@@ -246,12 +263,14 @@ def main(argv: list[str] | None = None) -> int:
             restart=str(args.restart),
             service=str(args.service),
             dry_run=bool(args.dry_run),
+            validate=not bool(args.no_validate),
         )
         return 0
     except KeyError as e:
         raise SystemExit(str(e))
+    except Exception as e:
+        raise SystemExit(f"{type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
