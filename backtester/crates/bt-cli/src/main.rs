@@ -2277,7 +2277,7 @@ fn print_summary(r: &bt_core::report::SimReport, initial_balance: f64) {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+mod guardrails_tests {
     use super::*;
 
     #[test]
