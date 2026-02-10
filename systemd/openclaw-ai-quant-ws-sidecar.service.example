@@ -20,8 +20,11 @@ Environment=AI_QUANT_CANDLE_REST_TIMEOUT_S=10
 Environment=AI_QUANT_CANDLE_REST_MIN_GAP_MS=1000
 Environment=AI_QUANT_CANDLE_REST_MAX_INFLIGHT=4
 Environment=AI_QUANT_CANDLE_REST_CHUNK_BARS=1500
-# HL API retains last 5000 bars per interval:
+# Hyperliquid /info candleSnapshot backfill is limited to the last ~5,000 bars per interval:
 # 1m=3.5d, 3m=10d, 5m=17d, 15m=52d, 30m=104d, 1h=208d
+#
+# For 3m/5m we want a growing, append-only local history beyond the 5,000-bar backfill window.
+Environment=AI_QUANT_CANDLE_PRUNE_DISABLE_INTERVALS=3m,5m
 Environment=AI_QUANT_CANDLE_HORIZON_1m_D=4
 Environment=AI_QUANT_CANDLE_HORIZON_3m_D=11
 Environment=AI_QUANT_CANDLE_HORIZON_5m_D=18
