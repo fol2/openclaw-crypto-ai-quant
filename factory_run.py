@@ -382,34 +382,30 @@ def _render_ranked_report_md(items: list[dict[str, Any]]) -> str:
 
     if not kept:
         lines.append("No non-rejected replay reports were produced.")
-        if rejected:
-            lines.append("")
-            lines.append(f"{len(rejected)} candidate(s) were rejected.")
-            lines.append("")
-        return "\n".join(lines)
+        lines.append("")
+    else:
+        items_sorted = sorted(kept, key=lambda x: float(x.get("total_pnl", 0.0)), reverse=True)
 
-    items_sorted = sorted(kept, key=lambda x: float(x.get("total_pnl", 0.0)), reverse=True)
-
-    lines.append("## Ranked Candidates (by total_pnl, excluding rejected)")
-    lines.append("")
-    lines.append("| Rank | total_pnl | max_dd_pct | trades | win_rate | profit_factor | config_id | report |")
-    lines.append("| ---: | --------: | ---------: | -----: | -------: | ------------: | :------ | :----- |")
-    for i, it in enumerate(items_sorted, start=1):
-        cfg_id = str(it.get("config_id", ""))
-        cfg_id_short = cfg_id[:12] if len(cfg_id) > 12 else cfg_id
-        lines.append(
-            "| {rank} | {pnl:.2f} | {dd:.4f} | {trades} | {wr:.4f} | {pf:.4f} | `{cfg_id}` | `{path}` |".format(
-                rank=i,
-                pnl=float(it.get("total_pnl", 0.0)),
-                dd=float(it.get("max_drawdown_pct", 0.0)),
-                trades=int(it.get("total_trades", 0)),
-                wr=float(it.get("win_rate", 0.0)),
-                pf=float(it.get("profit_factor", 0.0)),
-                cfg_id=cfg_id_short,
-                path=str(it.get("path", "")),
+        lines.append("## Ranked Candidates (by total_pnl, excluding rejected)")
+        lines.append("")
+        lines.append("| Rank | total_pnl | max_dd_pct | trades | win_rate | profit_factor | config_id | report |")
+        lines.append("| ---: | --------: | ---------: | -----: | -------: | ------------: | :------ | :----- |")
+        for i, it in enumerate(items_sorted, start=1):
+            cfg_id = str(it.get("config_id", ""))
+            cfg_id_short = cfg_id[:12] if len(cfg_id) > 12 else cfg_id
+            lines.append(
+                "| {rank} | {pnl:.2f} | {dd:.4f} | {trades} | {wr:.4f} | {pf:.4f} | `{cfg_id}` | `{path}` |".format(
+                    rank=i,
+                    pnl=float(it.get("total_pnl", 0.0)),
+                    dd=float(it.get("max_drawdown_pct", 0.0)),
+                    trades=int(it.get("total_trades", 0)),
+                    wr=float(it.get("win_rate", 0.0)),
+                    pf=float(it.get("profit_factor", 0.0)),
+                    cfg_id=cfg_id_short,
+                    path=str(it.get("path", "")),
+                )
             )
-        )
-    lines.append("")
+        lines.append("")
 
     if rejected:
         lines.append("## Rejected Candidates")
