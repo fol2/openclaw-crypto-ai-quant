@@ -138,12 +138,46 @@ Use when: suspecting data corruption, missing candles, or stale market data.
 # Check all candle DBs — look for gaps or stale data (basic)
 for db in candles_dbs/candles_*.db; do
     echo "=== $db ==="
-    sqlite3 "$db" "SELECT COUNT(*) AS rows, MIN(t) AS earliest, MAX(t) AS latest FROM candles LIMIT 1;"
+    sqlite3 "$db" "SELECT COUNT(*) AS rows, datetime(MIN(t)/1000, 'unixepoch') AS earliest, datetime(MAX(t)/1000, 'unixepoch') AS latest, datetime(MAX(t_close)/1000, 'unixepoch') AS latest_close FROM candles;"
 done
 
 # Automated freshness + gap checks (JSON on stdout; summary on stderr)
 uv run python tools/check_candle_dbs.py --lookback-hours 24
 ```
+
+### Candle retention beyond 5,000 bars (AQC-203)
+
+Hyperliquid only backfills roughly the last 5,000 bars per interval via `/info` (`candleSnapshot`). To build multi-month 3m/5m histories, the WS sidecar can keep the local candle DB append-only (no pruning) for selected intervals.
+
+#### Migration / rollout
+
+1. Deploy a `openclaw-ai-quant-ws-sidecar` build that includes AQC-203.
+2. Ensure the service environment contains:
+   - `AI_QUANT_CANDLE_PRUNE_DISABLE_INTERVALS=3m,5m`
+   - Set an empty value to re-enable pruning for all intervals: `AI_QUANT_CANDLE_PRUNE_DISABLE_INTERVALS=`
+3. Restart the sidecar service:
+   - `systemctl --user restart openclaw-ai-quant-ws-sidecar`
+
+No schema changes are required. Existing DB files are reused.
+
+Notes:
+- `Append-only beyond 5,000` is prospective. You cannot backfill older-than-5,000 bars from Hyperliquid, but once collected the sidecar will retain them locally.
+
+#### Verification
+
+```bash
+# Per-symbol row counts should exceed 5,000 over time
+sqlite3 candles_dbs/candles_3m.db "SELECT symbol, COUNT(*) AS rows FROM candles GROUP BY symbol ORDER BY rows DESC LIMIT 10;"
+sqlite3 candles_dbs/candles_5m.db "SELECT symbol, COUNT(*) AS rows FROM candles GROUP BY symbol ORDER BY rows DESC LIMIT 10;"
+
+# Duplicate check (should be 0; PK is (symbol, interval, t))
+sqlite3 candles_dbs/candles_3m.db "SELECT COUNT(*) AS dupes FROM (SELECT symbol, interval, t, COUNT(*) AS c FROM candles GROUP BY symbol, interval, t HAVING c > 1);"
+sqlite3 candles_dbs/candles_5m.db "SELECT COUNT(*) AS dupes FROM (SELECT symbol, interval, t, COUNT(*) AS c FROM candles GROUP BY symbol, interval, t HAVING c > 1);"
+```
+
+#### Disk growth expectations
+
+3m adds ~480 rows/day/symbol, 5m adds ~288 rows/day/symbol. With pruning disabled for both, plan disk accordingly and monitor `candles_dbs/candles_{3m,5m}.db` file sizes.
 
 ### Trading database integrity
 
