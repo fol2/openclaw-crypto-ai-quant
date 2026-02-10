@@ -1,10 +1,10 @@
 {
   "config_id": "",
-  "total_pnl": 287.790283203125,
-  "final_balance": 10261.2666015625,
-  "total_trades": 37,
-  "total_wins": 22,
-  "win_rate": 0.5945945945945946,
-  "profit_factor": 2.856849416554063,
-  "max_drawdown_pct": 0.010197675786912441
+  "total_pnl": 185.345458984375,
+  "final_balance": 10155.7734375,
+  "total_trades": 42,
+  "total_wins": 18,
+  "win_rate": 0.42857142857142855,
+  "profit_factor": 2.0036275615356853,
+  "max_drawdown_pct": 0.010198135860264301
 }

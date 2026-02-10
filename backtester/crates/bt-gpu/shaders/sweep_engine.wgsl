@@ -316,7 +316,8 @@ fn generate_signal(snap: GpuSnapshot, cfg: ptr<function, GpuComboConfig>,
     if gates_pass {
         var signal = SIG_NEUTRAL;
         var confidence = CONF_MEDIUM;
-        let adx_threshold = snap.adx;
+        // Mirror bt-core: use the ADX threshold that gated the entry, not the current ADX value.
+        let adx_threshold = (*cfg).min_adx;
 
         // EMA crossover direction
         let ema_bullish = snap.ema_fast > snap.ema_slow;
@@ -379,7 +380,7 @@ fn generate_signal(snap: GpuSnapshot, cfg: ptr<function, GpuComboConfig>,
             if snap.rsi <= (*cfg).slow_drift_rsi_short_max { signal = SIG_SELL; }
         }
         if signal != SIG_NEUTRAL {
-            return vec3<u32>(signal, CONF_LOW, bitcast<u32>(snap.adx));
+            return vec3<u32>(signal, CONF_LOW, bitcast<u32>((*cfg).slow_drift_min_adx));
         }
     }
 
@@ -548,48 +549,81 @@ fn check_tp(pos: GpuPosition, snap: GpuSnapshot, cfg: ptr<function, GpuComboConf
 
 fn check_smart_exits(pos: GpuPosition, snap: GpuSnapshot, cfg: ptr<function, GpuComboConfig>,
                      p_atr: f32) -> bool {
-    // 1. Trend breakdown (EMA cross)
-    if pos.pos_type == POS_LONG && snap.ema_fast < snap.ema_slow { return true; }
-    if pos.pos_type == POS_SHORT && snap.ema_fast > snap.ema_slow { return true; }
+    // Smart exit conditions mirror bt-core's `exits::smart_exits::check`.
+    let entry = pos.entry_price;
+    let entry_atr = select(entry * 0.005, pos.entry_atr, pos.entry_atr > 0.0);
 
-    // 2. Trend exhaustion (ADX < threshold)
-    var adx_thresh = (*cfg).smart_exit_adx_exhaustion_lt;
-    if pos.confidence == CONF_LOW && (*cfg).smart_exit_adx_exhaustion_lt_low_conf > 0.0 {
-        adx_thresh = (*cfg).smart_exit_adx_exhaustion_lt_low_conf;
+    let is_long = pos.pos_type == POS_LONG;
+    let is_low_conf = pos.confidence == CONF_LOW;
+
+    // 1. Trend Breakdown (EMA Cross) with TBB buffer
+    var ema_dev = 0.0;
+    if snap.ema_slow > 0.0 {
+        ema_dev = abs(snap.ema_fast - snap.ema_slow) / snap.ema_slow;
     }
-    if pos.entry_adx_threshold > 0.0 && snap.adx < (pos.entry_adx_threshold * 0.5) {
-        if snap.adx < adx_thresh { return true; }
+    let is_weak_cross = (ema_dev < 0.001) && (snap.adx > 25.0);
+    let ema_cross_exit = select(
+        snap.ema_fast > snap.ema_slow && !is_weak_cross,  // SHORT
+        snap.ema_fast < snap.ema_slow && !is_weak_cross,  // LONG
+        is_long
+    );
+
+    // 2. Trend Exhaustion (ADX below threshold)
+    var adx_exhaustion_lt = (*cfg).smart_exit_adx_exhaustion_lt;
+    if pos.entry_adx_threshold > 0.0 {
+        adx_exhaustion_lt = pos.entry_adx_threshold;
+    } else if is_low_conf && (*cfg).smart_exit_adx_exhaustion_lt_low_conf > 0.0 {
+        adx_exhaustion_lt = (*cfg).smart_exit_adx_exhaustion_lt_low_conf;
+    }
+    adx_exhaustion_lt = max(adx_exhaustion_lt, 0.0);
+    let exhausted = (adx_exhaustion_lt > 0.0) && (snap.adx < adx_exhaustion_lt);
+
+    if ema_cross_exit || exhausted { return true; }
+
+    // 3. EMA Macro Breakdown (only if require_macro_alignment is enabled)
+    if (*cfg).require_macro_alignment != 0u && snap.ema_macro > 0.0 {
+        if is_long && snap.close < snap.ema_macro { return true; }
+        if !is_long && snap.close > snap.ema_macro { return true; }
     }
 
-    // 3. EMA macro breakdown
-    if pos.pos_type == POS_LONG && snap.close < snap.ema_macro { return true; }
-    if pos.pos_type == POS_SHORT && snap.close > snap.ema_macro { return true; }
+    // 4. Stagnation Exit (low-vol + underwater)
+    if snap.atr < (entry_atr * 0.70) {
+        let is_underwater = select(snap.close > entry, snap.close < entry, is_long);
+        if is_underwater { return true; }
+    }
 
-    // 5. TSME (Trend Saturation Momentum Exit)
-    if snap.adx > 50.0 && p_atr >= (*cfg).tsme_min_profit_atr {
-        let macd_contracting = abs(snap.macd_hist) < abs(snap.prev_macd_hist);
-        var adx_declining = true;
+    // 6. TSME (Trend Saturation Momentum Exit)
+    if snap.adx > 50.0 {
+        let gate_profit_ok = p_atr >= (*cfg).tsme_min_profit_atr;
+        var gate_slope_ok = true;
         if (*cfg).tsme_require_adx_slope_negative != 0u {
-            adx_declining = snap.adx_slope < 0.0;
+            gate_slope_ok = snap.adx_slope < 0.0;
         }
-        if macd_contracting && adx_declining { return true; }
+        if gate_profit_ok && gate_slope_ok {
+            let is_exhausted = select(
+                snap.macd_hist > snap.prev_macd_hist && snap.prev_macd_hist > snap.prev2_macd_hist,  // SHORT
+                snap.macd_hist < snap.prev_macd_hist && snap.prev_macd_hist < snap.prev2_macd_hist,  // LONG
+                is_long
+            );
+            if is_exhausted { return true; }
+        }
     }
 
-    // 6. MMDE (4-bar MACD divergence)
-    if pos.pos_type == POS_LONG {
-        if snap.macd_hist < snap.prev_macd_hist
-           && snap.prev_macd_hist < snap.prev2_macd_hist
-           && snap.prev2_macd_hist < snap.prev3_macd_hist
-           && p_atr > 0.5 { return true; }
-    }
-    if pos.pos_type == POS_SHORT {
-        if snap.macd_hist > snap.prev_macd_hist
-           && snap.prev_macd_hist > snap.prev2_macd_hist
-           && snap.prev2_macd_hist > snap.prev3_macd_hist
-           && p_atr > 0.5 { return true; }
+    // 7. MMDE (MACD Persistent Divergence Exit)
+    if p_atr > 1.5 && snap.adx > 35.0 {
+        let is_diverging = select(
+            snap.macd_hist > snap.prev_macd_hist
+                && snap.prev_macd_hist > snap.prev2_macd_hist
+                && snap.prev2_macd_hist > snap.prev3_macd_hist, // SHORT
+            snap.macd_hist < snap.prev_macd_hist
+                && snap.prev_macd_hist < snap.prev2_macd_hist
+                && snap.prev2_macd_hist < snap.prev3_macd_hist, // LONG
+            is_long
+        );
+        if is_diverging { return true; }
     }
 
-    // 7. RSI overextension
+    // 8. RSI overextension
     if (*cfg).enable_rsi_overextension_exit != 0u {
         var ub: f32; var lb: f32;
         if pos.confidence == CONF_LOW && (*cfg).rsi_exit_ub_lo_profit_low_conf > 0.0 {
@@ -610,8 +644,8 @@ fn check_smart_exits(pos: GpuPosition, snap: GpuSnapshot, cfg: ptr<function, Gpu
             }
         }
         if ub > 0.0 && lb > 0.0 {
-            if pos.pos_type == POS_LONG && snap.rsi > ub { return true; }
-            if pos.pos_type == POS_SHORT && snap.rsi < lb { return true; }
+            if is_long && snap.rsi > ub { return true; }
+            if !is_long && snap.rsi < lb { return true; }
         }
     }
 
@@ -802,9 +836,14 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
 
             let p_atr = profit_atr(pos, snap.close);
 
-            // Glitch guard
-            if snap.atr > 0.0 && abs(snap.close - snap.prev_close) > snap.atr * cfg.glitch_atr_mult {
-                continue; // Skip this bar for this symbol
+            // Glitch guard (matches bt-core: only active when enabled)
+            if cfg.block_exits_on_extreme_dev != 0u && snap.prev_close > 0.0 {
+                let price_change_pct = abs(snap.close - snap.prev_close) / snap.prev_close;
+                let is_glitch = price_change_pct > cfg.glitch_price_dev_pct
+                    || (snap.atr > 0.0 && abs(snap.close - snap.prev_close) > snap.atr * cfg.glitch_atr_mult);
+                if is_glitch {
+                    continue; // Skip this bar for this symbol
+                }
             }
 
             // Stop loss
