@@ -1318,6 +1318,11 @@ class UnifiedEngine:
                     except Exception:
                         kill_reason = "none"
 
+                    try:
+                        strategy_mode = str(os.getenv("AI_QUANT_STRATEGY_MODE", "") or "").strip().lower() or "none"
+                    except Exception:
+                        strategy_mode = "none"
+
                     slip_enabled = 0
                     slip_n = 0
                     slip_win = 0
@@ -1349,6 +1354,7 @@ class UnifiedEngine:
                         f"ws_connected={h.get('connected')} ws_thread_alive={h.get('thread_alive')} "
                         f"ws_restarts={self.stats.ws_restarts} "
                         f"kill={kill_mode} kill_reason={kill_reason} "
+                        f"strategy_mode={strategy_mode} "
                         f"regime_gate={'on' if self._regime_gate_on else 'off'} regime_reason={self._regime_gate_reason} "
                         f"slip_enabled={slip_enabled} slip_n={slip_n} slip_win={slip_win} slip_thr_bps={slip_thr_bps_s} "
                         f"slip_last_bps={slip_last_bps_s} slip_median_bps={slip_median_bps_s} "

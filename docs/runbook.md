@@ -83,6 +83,40 @@ journalctl --user -u openclaw-ai-quant-live --since "10 min ago" | grep -i kill
 
 ---
 
+## 1b. Strategy Mode Switching (AQC-1002)
+
+The engine supports an optional strategy-mode overlay selected via `AI_QUANT_STRATEGY_MODE`:
+
+- `primary`: 30m/5m
+- `fallback`: 1h/5m
+- `conservative`: 1h/15m
+- `flat`: safety profile (use with a kill-switch when needed)
+
+Mode overlays are defined under `modes:` in `config/strategy_overrides.yaml`.
+
+### Manual mode change
+
+```bash
+export AI_QUANT_STRATEGY_MODE=fallback
+
+# Restart is required if the mode changes global.engine.interval.
+systemctl --user restart openclaw-ai-quant-live
+```
+
+### Automatic step-down on kill events
+
+When enabled (`AI_QUANT_MODE_SWITCH_ENABLE=1`), the live daemon steps down one mode on each new kill event
+and persists the selected mode to `AI_QUANT_STRATEGY_MODE_FILE` (default: `artifacts/state/strategy_mode.txt`).
+
+If your systemd unit is configured to auto-restart on exit, you can also enable:
+
+- `AI_QUANT_MODE_SWITCH_EXIT_ON_RESTART_REQUIRED=1`
+
+This makes the daemon exit when switching to/from `primary` (where an interval change is likely), allowing
+systemd to restart it with the new persisted mode.
+
+---
+
 ## 2. Roll Back Config
 
 Use when: a bad config was deployed and needs to be reverted to last-known-good.
