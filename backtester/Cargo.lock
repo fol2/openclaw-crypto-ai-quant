@@ -114,6 +114,7 @@ dependencies = [
  "bt-core",
  "bt-data",
  "bytemuck",
+ "clap",
  "cudarc",
  "rand",
  "rayon",
