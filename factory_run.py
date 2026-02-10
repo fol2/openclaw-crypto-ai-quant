@@ -282,6 +282,17 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
     if not isinstance(src_candidates, list) or not src_candidates:
         raise FileNotFoundError(f"Missing candidate_configs in {source_run_dir / 'run_metadata.json'}")
 
+    # Prefer reproducing only the candidates that were actually selected for replay.
+    # Older runs may not have `selected`, so fall back to all entries.
+    src_candidates_all = src_candidates
+    src_candidates = [
+        it
+        for it in src_candidates_all
+        if isinstance(it, dict) and ("selected" not in it or bool(it.get("selected")))
+    ]
+    if not src_candidates:
+        src_candidates = [it for it in src_candidates_all if isinstance(it, dict)]
+
     configs_dir = run_dir / "configs"
     configs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -397,8 +408,35 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--gpu", action="store_true", help="Use GPU sweep (requires CUDA build/runtime).")
     ap.add_argument("--top-n", type=int, default=0, help="Only print top N sweep results (0 = no summary).")
 
-    ap.add_argument("--num-candidates", type=int, default=3, help="How many candidate configs to generate (default: 3).")
-    ap.add_argument("--sort-by", default="balanced", choices=["pnl", "dd", "pf", "wr", "sharpe", "trades", "balanced"])
+    ap.add_argument(
+        "--num-candidates",
+        type=int,
+        default=3,
+        help="How many candidate configs to generate when shortlist is disabled (default: 3).",
+    )
+    ap.add_argument(
+        "--sort-by",
+        default="balanced",
+        choices=["pnl", "dd", "pf", "wr", "sharpe", "trades", "balanced"],
+        help="Sort metric for candidate selection when shortlist is disabled (default: balanced).",
+    )
+    ap.add_argument(
+        "--shortlist-modes",
+        default="dd,balanced",
+        help="Comma-separated sort modes to generate per sweep (default: dd,balanced).",
+    )
+    ap.add_argument(
+        "--shortlist-per-mode",
+        type=int,
+        default=10,
+        help="How many unique configs to keep per mode (default: 10). Set 0 to disable shortlist.",
+    )
+    ap.add_argument(
+        "--shortlist-max-rank",
+        type=int,
+        default=50,
+        help="Max rank to scan per mode while deduplicating (default: 50).",
+    )
 
     args = ap.parse_args(argv)
 
@@ -492,40 +530,120 @@ def main(argv: list[str] | None = None) -> int:
     configs_dir = run_dir / "configs"
     configs_dir.mkdir(parents=True, exist_ok=True)
 
+    shortlist_per_mode = int(getattr(args, "shortlist_per_mode", 0) or 0)
+    shortlist_max_rank = int(getattr(args, "shortlist_max_rank", 0) or 0)
+    shortlist_modes_raw = str(getattr(args, "shortlist_modes", "") or "").strip()
+
     candidate_paths: list[Path] = []
     candidate_config_ids: dict[str, str] = {}
-    for rank in range(1, int(args.num_candidates) + 1):
-        out_yaml = configs_dir / f"candidate_{args.sort_by}_rank{rank}.yaml"
-        gen_argv = [
-            "python3",
-            "tools/generate_config.py",
-            "--sweep-results",
-            str(sweep_out),
-            "--base-config",
-            str(args.config),
-            "--sort-by",
-            str(args.sort_by),
-            "--rank",
-            str(rank),
-            "-o",
-            str(out_yaml),
-        ]
-        gen_res = _run_cmd(
-            gen_argv,
-            cwd=AIQ_ROOT,
-            stdout_path=run_dir / "configs" / f"generate_config_rank{rank}.stdout.txt",
-            stderr_path=run_dir / "configs" / f"generate_config_rank{rank}.stderr.txt",
-        )
-        meta["steps"].append({"name": f"generate_config_rank{rank}", **gen_res.__dict__})
-        if gen_res.exit_code != 0:
-            _write_json(run_dir / "run_metadata.json", meta)
-            return int(gen_res.exit_code)
-        candidate_paths.append(out_yaml)
-        candidate_config_ids[str(out_yaml)] = config_id_from_yaml_file(out_yaml)
+    candidate_entries: list[dict[str, Any]] = []
 
-    meta["candidate_configs"] = [
-        {"path": p, "config_id": candidate_config_ids[p]} for p in sorted(candidate_config_ids.keys())
-    ]
+    # Multi-mode shortlist generation (AQC-403). Deduplicate across modes by config_id.
+    if shortlist_per_mode > 0:
+        allowed_modes = {"pnl", "dd", "pf", "wr", "sharpe", "trades", "balanced"}
+        modes = [m.strip() for m in shortlist_modes_raw.split(",") if m.strip()]
+        modes = [m for m in modes if m in allowed_modes]
+        if not modes:
+            modes = ["dd", "balanced"]
+        if shortlist_max_rank <= 0:
+            shortlist_max_rank = max(10, shortlist_per_mode * 5)
+
+        seen_ids: set[str] = set()
+        for mode in modes:
+            kept = 0
+            for rank in range(1, shortlist_max_rank + 1):
+                out_yaml = configs_dir / f"candidate_{mode}_rank{rank}.yaml"
+                gen_argv = [
+                    "python3",
+                    "tools/generate_config.py",
+                    "--sweep-results",
+                    str(sweep_out),
+                    "--base-config",
+                    str(args.config),
+                    "--sort-by",
+                    str(mode),
+                    "--rank",
+                    str(rank),
+                    "-o",
+                    str(out_yaml),
+                ]
+                gen_res = _run_cmd(
+                    gen_argv,
+                    cwd=AIQ_ROOT,
+                    stdout_path=run_dir / "configs" / f"generate_config_{mode}_rank{rank}.stdout.txt",
+                    stderr_path=run_dir / "configs" / f"generate_config_{mode}_rank{rank}.stderr.txt",
+                )
+                meta["steps"].append({"name": f"generate_config_{mode}_rank{rank}", **gen_res.__dict__})
+                if gen_res.exit_code != 0:
+                    _write_json(run_dir / "run_metadata.json", meta)
+                    return int(gen_res.exit_code)
+
+                cfg_id = config_id_from_yaml_file(out_yaml)
+                candidate_config_ids[str(out_yaml)] = cfg_id
+
+                is_dup = cfg_id in seen_ids
+                selected = (not is_dup) and kept < shortlist_per_mode
+                if selected:
+                    seen_ids.add(cfg_id)
+                    candidate_paths.append(out_yaml)
+                    kept += 1
+
+                candidate_entries.append(
+                    {
+                        "path": str(out_yaml),
+                        "config_id": cfg_id,
+                        "sort_by": mode,
+                        "rank": int(rank),
+                        "selected": bool(selected),
+                        "deduped": bool(is_dup),
+                    }
+                )
+
+                if kept >= shortlist_per_mode:
+                    break
+
+    # Single-mode generation (legacy): args.num_candidates + args.sort_by.
+    else:
+        for rank in range(1, int(args.num_candidates) + 1):
+            out_yaml = configs_dir / f"candidate_{args.sort_by}_rank{rank}.yaml"
+            gen_argv = [
+                "python3",
+                "tools/generate_config.py",
+                "--sweep-results",
+                str(sweep_out),
+                "--base-config",
+                str(args.config),
+                "--sort-by",
+                str(args.sort_by),
+                "--rank",
+                str(rank),
+                "-o",
+                str(out_yaml),
+            ]
+            gen_res = _run_cmd(
+                gen_argv,
+                cwd=AIQ_ROOT,
+                stdout_path=run_dir / "configs" / f"generate_config_rank{rank}.stdout.txt",
+                stderr_path=run_dir / "configs" / f"generate_config_rank{rank}.stderr.txt",
+            )
+            meta["steps"].append({"name": f"generate_config_rank{rank}", **gen_res.__dict__})
+            if gen_res.exit_code != 0:
+                _write_json(run_dir / "run_metadata.json", meta)
+                return int(gen_res.exit_code)
+            candidate_paths.append(out_yaml)
+            cfg_id = config_id_from_yaml_file(out_yaml)
+            candidate_config_ids[str(out_yaml)] = cfg_id
+            candidate_entries.append(
+                {"path": str(out_yaml), "config_id": cfg_id, "sort_by": str(args.sort_by), "rank": int(rank), "selected": True, "deduped": False}
+            )
+
+    meta["candidate_configs"] = candidate_entries
+
+    if not candidate_paths:
+        (run_dir / "reports").mkdir(parents=True, exist_ok=True)
+        (run_dir / "reports" / "report.md").write_text("# Factory Run Report\n\nNo candidate configs were selected.\n", encoding="utf-8")
+        _write_json(run_dir / "run_metadata.json", meta)
+        return 1
 
     # ------------------------------------------------------------------
     # 4) CPU replay / validation (minimal v1: run replay once per candidate)
