@@ -92,9 +92,7 @@ def _get_db_symbols(con: sqlite3.Connection) -> list[str]:
     return out
 
 
-def _iter_rows(
-    con: sqlite3.Connection, *, symbol: str, start_ms: int, end_ms: int
-) -> Iterable[tuple[int, float]]:
+def _iter_rows(con: sqlite3.Connection, *, symbol: str, start_ms: int, end_ms: int) -> Iterable[tuple[int, float]]:
     cur = con.execute(
         """
         SELECT time, funding_rate
@@ -334,7 +332,9 @@ def check_funding_rates_db(
                 if diff_ms <= expected_ms + tol_ms:
                     continue
 
-                severity = Status.FAIL if diff_ms > max_gap_fail_ms else Status.WARN if diff_ms > max_gap_warn_ms else None
+                severity = (
+                    Status.FAIL if diff_ms > max_gap_fail_ms else Status.WARN if diff_ms > max_gap_warn_ms else None
+                )
                 if severity is None:
                     continue
 
@@ -673,4 +673,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
