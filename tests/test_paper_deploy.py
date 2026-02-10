@@ -1,8 +1,6 @@
 import json
 import sqlite3
 
-import pytest
-
 from tools.config_id import config_id_from_yaml_text
 from tools.paper_deploy import deploy_paper_config
 
@@ -24,7 +22,31 @@ def _init_registry_db(path, *, config_id, yaml_text):
 
 
 def test_paper_deploy_writes_yaml_and_deploy_event(tmp_path):
-    yaml_text = "global:\\n  engine:\\n    interval: 1h\\n"
+    yaml_text = (
+        "global:\n"
+        "  trade:\n"
+        "    allocation_pct: 0.20\n"
+        "    leverage: 3.0\n"
+        "    sl_atr_mult: 2.0\n"
+        "    tp_atr_mult: 6.0\n"
+        "    slippage_bps: 10.0\n"
+        "    max_open_positions: 20\n"
+        "    max_total_margin_pct: 0.60\n"
+        "    min_notional_usd: 10.0\n"
+        "    min_atr_pct: 0.003\n"
+        "    bump_to_min_notional: true\n"
+        "  indicators:\n"
+        "    adx_window: 14\n"
+        "    ema_fast_window: 20\n"
+        "    ema_slow_window: 50\n"
+        "    bb_window: 20\n"
+        "    atr_window: 14\n"
+        "  thresholds:\n"
+        "    entry:\n"
+        "      min_adx: 22.0\n"
+        "  engine:\n"
+        "    interval: 1h\n"
+    )
     cid = config_id_from_yaml_text(yaml_text)
 
     artifacts_dir = tmp_path / "artifacts"
@@ -44,6 +66,7 @@ def test_paper_deploy_writes_yaml_and_deploy_event(tmp_path):
         restart="never",
         service="does-not-matter",
         dry_run=False,
+        validate=True,
     )
 
     assert deploy_dir.exists()
@@ -57,7 +80,31 @@ def test_paper_deploy_writes_yaml_and_deploy_event(tmp_path):
 
 
 def test_paper_deploy_dry_run_does_not_modify_yaml(tmp_path):
-    yaml_text = "global:\\n  engine:\\n    interval: 1h\\n"
+    yaml_text = (
+        "global:\n"
+        "  trade:\n"
+        "    allocation_pct: 0.20\n"
+        "    leverage: 3.0\n"
+        "    sl_atr_mult: 2.0\n"
+        "    tp_atr_mult: 6.0\n"
+        "    slippage_bps: 10.0\n"
+        "    max_open_positions: 20\n"
+        "    max_total_margin_pct: 0.60\n"
+        "    min_notional_usd: 10.0\n"
+        "    min_atr_pct: 0.003\n"
+        "    bump_to_min_notional: true\n"
+        "  indicators:\n"
+        "    adx_window: 14\n"
+        "    ema_fast_window: 20\n"
+        "    ema_slow_window: 50\n"
+        "    bb_window: 20\n"
+        "    atr_window: 14\n"
+        "  thresholds:\n"
+        "    entry:\n"
+        "      min_adx: 22.0\n"
+        "  engine:\n"
+        "    interval: 1h\n"
+    )
     cid = config_id_from_yaml_text(yaml_text)
 
     artifacts_dir = tmp_path / "artifacts"
@@ -78,7 +125,7 @@ def test_paper_deploy_dry_run_does_not_modify_yaml(tmp_path):
         restart="never",
         service="does-not-matter",
         dry_run=True,
+        validate=True,
     )
 
     assert target_yaml.read_text(encoding="utf-8") == original
-
