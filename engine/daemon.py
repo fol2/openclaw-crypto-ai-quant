@@ -28,6 +28,7 @@ from .strategy_manager import StrategyManager
 from .oms import LiveOms
 from .oms_reconciler import LiveOmsReconciler
 from .risk import RiskManager
+from . import alerting
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -205,6 +206,17 @@ class LivePlugin:
         self._health_enabled = _env_bool("AI_QUANT_HEALTH_GUARD", True)
         self._health_alert_cooldown_s = float(os.getenv("AI_QUANT_HEALTH_ALERT_COOLDOWN_S", "300"))
         self._health_last_alert_s: dict[str, float] = {}
+        self._health_active: dict[str, bool] = {}
+        self._health_last_seen_s: dict[str, float] = {}
+        try:
+            self._health_resolve_after_s = float(os.getenv("AI_QUANT_HEALTH_RESOLVE_AFTER_S", "600"))
+        except Exception:
+            self._health_resolve_after_s = 600.0
+        self._health_resolve_after_s = float(max(0.0, self._health_resolve_after_s))
+
+        # Alert-on-change tracking (avoid spam).
+        self._last_kill_mode: str | None = None
+        self._last_kill_reason: str | None = None
 
         self._fill_ingest_fail_streak = 0
         self._fill_ingest_fail_to_kill = int(float(os.getenv("AI_QUANT_HEALTH_FILL_INGEST_FAILS_TO_KILL", "5")))
@@ -274,6 +286,17 @@ class LivePlugin:
         if not self._health_enabled:
             return
         now = time.time()
+        try:
+            self._health_last_seen_s[str(key)] = float(now)
+        except Exception:
+            pass
+
+        k = str(key)
+        was_active = bool(self._health_active.get(k, False))
+        self._health_active[k] = True
+        if was_active:
+            return
+
         last = float(self._health_last_alert_s.get(key, 0.0) or 0.0)
         if (now - last) < float(self._health_alert_cooldown_s or 0.0):
             return
@@ -293,6 +316,14 @@ class LivePlugin:
                 event="HEALTH_ALERT",
                 level="warn",
                 data={"key": str(key), "message": str(message), "kill": bool(kill), "kill_mode": str(kill_mode)},
+            )
+        except Exception:
+            pass
+
+        try:
+            alerting.send_alert(
+                msg,
+                extra={"kind": "health", "key": str(key), "kill": bool(kill), "kill_mode": str(kill_mode)},
             )
         except Exception:
             pass
@@ -317,8 +348,104 @@ class LivePlugin:
             except Exception:
                 pass
 
+    def _maybe_resolve_health_alerts(self, *, now_s: float) -> None:
+        if not self._health_enabled:
+            return
+        if float(self._health_resolve_after_s or 0.0) <= 0:
+            return
+
+        for key, active in list((self._health_active or {}).items()):
+            if not active:
+                continue
+            last_seen = float(self._health_last_seen_s.get(key, 0.0) or 0.0)
+            if last_seen <= 0:
+                continue
+            if (float(now_s) - float(last_seen)) < float(self._health_resolve_after_s):
+                continue
+
+            self._health_active[key] = False
+            msg = f"✅ HEALTH[{key}] resolved"
+            try:
+                print(msg)
+            except Exception:
+                pass
+
+            try:
+                import strategy.mei_alpha_v1 as mei_alpha_v1
+
+                mei_alpha_v1.log_audit_event(symbol="SYSTEM", event="HEALTH_RESOLVED", level="info", data={"key": str(key)})
+            except Exception:
+                pass
+
+            try:
+                alerting.send_alert(msg, extra={"kind": "health_resolved", "key": str(key)})
+            except Exception:
+                pass
+
+            # Best-effort Discord notification (same channel as live fills).
+            try:
+                if hasattr(self._lt, "_live_notify_enabled") and callable(getattr(self._lt, "_live_notify_enabled")):
+                    if self._lt._live_notify_enabled():
+                        target = self._lt._live_discord_target()
+                        if target:
+                            self._lt._send_discord_message(target=target, message=msg)
+            except Exception:
+                pass
+
+    def _maybe_alert_kill_state_change(self) -> None:
+        risk = self._risk
+        if risk is None:
+            return
+        try:
+            km = str(getattr(risk, "kill_mode", "off") or "off").strip().lower()
+        except Exception:
+            km = "off"
+        try:
+            kr = str(getattr(risk, "kill_reason", "") or "").strip() or "none"
+        except Exception:
+            kr = "none"
+
+        if self._last_kill_mode is None and self._last_kill_reason is None:
+            self._last_kill_mode = km
+            self._last_kill_reason = kr
+            if km != "off":
+                try:
+                    alerting.send_alert(
+                        f"🛑 RISK state: kill={km} reason={kr}",
+                        extra={"kind": "risk", "kill_mode": km, "kill_reason": kr},
+                    )
+                except Exception:
+                    pass
+            return
+
+        old_km = str(self._last_kill_mode or "off")
+        old_kr = str(self._last_kill_reason or "none")
+        if km == old_km and kr == old_kr:
+            return
+
+        self._last_kill_mode = km
+        self._last_kill_reason = kr
+
+        msg = f"🛑 RISK state change: kill={old_km}->{km} reason={old_kr}->{kr}"
+        if km == "off":
+            msg = f"✅ RISK resumed: reason={old_kr}"
+
+        try:
+            alerting.send_alert(msg, extra={"kind": "risk", "kill_mode": km, "kill_reason": kr})
+        except Exception:
+            pass
+
     def before_iteration(self) -> None:
         now = time.time()
+
+        try:
+            self._maybe_resolve_health_alerts(now_s=float(now))
+        except Exception:
+            pass
+        try:
+            self._maybe_alert_kill_state_change()
+        except Exception:
+            pass
 
         # Reset per-loop entry budget on the trader (best-effort).
         try:
@@ -449,6 +576,11 @@ class LivePlugin:
                         kill=bool(self._fill_ingest_kill),
                         kill_mode=str(self._fill_ingest_kill_mode or "close_only"),
                     )
+
+        try:
+            self._maybe_alert_kill_state_change()
+        except Exception:
+            pass
 
         try:
             fundings = self._ws.drain_user_fundings(max_items=2000)
@@ -675,6 +807,10 @@ def main() -> None:
         mode_plugin=plugin,
     )
     print(f"🚀 Unified engine started. mode={mode}")
+    try:
+        alerting.send_alert(f"🚀 Unified engine started. mode={mode}", extra={"kind": "restart", "mode": str(mode)})
+    except Exception:
+        pass
     engine.run_forever()
 
 
