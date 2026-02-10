@@ -99,7 +99,7 @@ struct GpuComboConfig {
     add_cooldown_minutes: u32, add_min_profit_atr: f32, add_min_confidence: u32,
     entry_min_confidence: u32, _p4: u32,
     enable_partial_tp: u32, tp_partial_pct: f32, tp_partial_min_notional_usd: f32,
-    trailing_start_atr: f32, trailing_distance_atr: f32, _p5: u32,
+    trailing_start_atr: f32, trailing_distance_atr: f32, tp_partial_atr_mult: f32,
     enable_ssf_filter: u32, enable_breakeven_stop: u32, breakeven_start_atr: f32,
     breakeven_buffer_atr: f32,
     trailing_start_atr_low_conf: f32, trailing_distance_atr_low_conf: f32,

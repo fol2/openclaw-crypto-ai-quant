@@ -254,7 +254,7 @@ pub struct GpuComboConfig {
     pub tp_partial_min_notional_usd: f32,
     pub trailing_start_atr: f32,
     pub trailing_distance_atr: f32,
-    pub _pad5: u32,
+    pub tp_partial_atr_mult: f32,
 
     // SSF + breakeven [46-49]
     pub enable_ssf_filter: u32,
@@ -553,7 +553,7 @@ impl GpuComboConfig {
             tp_partial_min_notional_usd: tc.tp_partial_min_notional_usd as f32,
             trailing_start_atr: tc.trailing_start_atr as f32,
             trailing_distance_atr: tc.trailing_distance_atr as f32,
-            _pad5: 0,
+            tp_partial_atr_mult: tc.tp_partial_atr_mult as f32,
 
             enable_ssf_filter: tc.enable_ssf_filter as u32,
             enable_breakeven_stop: tc.enable_breakeven_stop as u32,
