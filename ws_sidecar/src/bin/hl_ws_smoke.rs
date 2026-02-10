@@ -1,16 +1,18 @@
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use std::time::{Duration, Instant};
+use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
-use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     // rustls 0.23+ requires selecting a crypto provider at process start.
-    let _ = rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider());
+    let _ =
+        rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider());
 
-    let ws_url = std::env::var("HL_WS_URL").unwrap_or_else(|_| "wss://api.hyperliquid.xyz/ws".to_string());
+    let ws_url =
+        std::env::var("HL_WS_URL").unwrap_or_else(|_| "wss://api.hyperliquid.xyz/ws".to_string());
 
     let mut req = ws_url.as_str().into_client_request()?;
     req.headers_mut().insert(

@@ -1,22 +1,22 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
 use std::path::Path;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{mpsc as tokio_mpsc, RwLock, Semaphore};
+use tokio::sync::{RwLock, Semaphore, mpsc as tokio_mpsc};
+use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
-use tokio_tungstenite::tungstenite::Message;
 use url::Url;
 
 #[derive(Clone)]
@@ -41,6 +41,9 @@ struct Config {
     rest_max_inflight: usize,
     rest_chunk_bars: usize,
     candle_horizon_ms: HashMap<String, i64>,
+    // Prune control: disable time-based deletes for selected intervals to build an append-only
+    // history beyond Hyperliquid's last-5,000-bar API retention window.
+    candle_prune_disable_intervals: HashSet<String>,
 
     candle_persist_secs: u64,
     max_event_queue: usize,
@@ -76,7 +79,10 @@ fn env_bool(key: &str, default: bool) -> bool {
 }
 
 fn env_u64(key: &str, default: u64) -> u64 {
-    match env::var(key).ok().and_then(|v| v.trim().parse::<u64>().ok()) {
+    match env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    {
         Some(v) => v,
         None => default,
     }
@@ -105,10 +111,7 @@ fn default_sock_path() -> String {
 fn default_candles_db_dir(market_db_path: &str) -> String {
     let p = Path::new(market_db_path);
     if let Some(parent) = p.parent() {
-        return parent
-            .join("candles_dbs")
-            .to_string_lossy()
-            .to_string();
+        return parent.join("candles_dbs").to_string_lossy().to_string();
     }
     "candles_dbs".to_string()
 }
@@ -130,7 +133,8 @@ fn interval_to_ms(interval: &str) -> i64 {
 }
 
 fn load_config() -> Config {
-    let ws_url = env::var("HL_WS_URL").unwrap_or_else(|_| "wss://api.hyperliquid.xyz/ws".to_string());
+    let ws_url =
+        env::var("HL_WS_URL").unwrap_or_else(|_| "wss://api.hyperliquid.xyz/ws".to_string());
     let info_url = env_string("AI_QUANT_INFO_URL", "https://api.hyperliquid.xyz/info");
 
     let sock_path = env::var("AI_QUANT_WS_SIDECAR_SOCK").unwrap_or_else(|_| default_sock_path());
@@ -139,8 +143,8 @@ fn load_config() -> Config {
     let market_db_path = env::var("AI_QUANT_MARKET_DB_PATH")
         .or_else(|_| env::var("AI_QUANT_DB_PATH"))
         .unwrap_or_else(|_| "market_data.db".to_string());
-    let candles_db_dir =
-        env::var("AI_QUANT_CANDLES_DB_DIR").unwrap_or_else(|_| default_candles_db_dir(&market_db_path));
+    let candles_db_dir = env::var("AI_QUANT_CANDLES_DB_DIR")
+        .unwrap_or_else(|_| default_candles_db_dir(&market_db_path));
 
     let enable_meta = env_bool("AI_QUANT_WS_ENABLE_META", true);
     let enable_candle_ws = env_bool("AI_QUANT_WS_ENABLE_CANDLE", true);
@@ -174,6 +178,14 @@ fn load_config() -> Config {
     candle_horizon_ms.insert("30m".to_string(), (h_30m_d as i64) * 24 * 60 * 60 * 1000);
     candle_horizon_ms.insert("1h".to_string(), (h_1h_d as i64) * 24 * 60 * 60 * 1000);
 
+    // Retention: by default we keep 3m/5m append-only so the local SQLite DB can grow beyond
+    // Hyperliquid's last-5,000-bar backfill window. Set an empty value to re-enable pruning:
+    //   AI_QUANT_CANDLE_PRUNE_DISABLE_INTERVALS=
+    let prune_disable_raw = env_string("AI_QUANT_CANDLE_PRUNE_DISABLE_INTERVALS", "3m,5m");
+    let candle_prune_disable_intervals: HashSet<String> = parse_intervals_csv(&prune_disable_raw)
+        .into_iter()
+        .collect();
+
     let candle_persist_secs = env_u64("HL_WS_CANDLE_PERSIST_SECS", 60);
     let max_event_queue = env_usize("HL_WS_MAX_EVENT_QUEUE", 5000);
     // Incoming message queue between the WS reader and the JSON processor. When full, new messages
@@ -188,10 +200,12 @@ fn load_config() -> Config {
 
     let client_ttl_secs = env_u64("AI_QUANT_WS_CLIENT_TTL_SECS", 90);
 
-    let always_symbols: HashSet<String> = parse_symbols_csv(&env_string("AI_QUANT_SIDECAR_SYMBOLS", ""))
-        .into_iter()
-        .collect();
-    let always_intervals: Vec<String> = parse_intervals_csv(&env_string("AI_QUANT_SIDECAR_INTERVALS", ""));
+    let always_symbols: HashSet<String> =
+        parse_symbols_csv(&env_string("AI_QUANT_SIDECAR_SYMBOLS", ""))
+            .into_iter()
+            .collect();
+    let always_intervals: Vec<String> =
+        parse_intervals_csv(&env_string("AI_QUANT_SIDECAR_INTERVALS", ""));
     let always_candle_limit: usize = env_usize("AI_QUANT_SIDECAR_CANDLE_LIMIT", 2000);
 
     Config {
@@ -213,6 +227,7 @@ fn load_config() -> Config {
         rest_max_inflight,
         rest_chunk_bars,
         candle_horizon_ms,
+        candle_prune_disable_intervals,
 
         candle_persist_secs,
         max_event_queue,
@@ -328,7 +343,9 @@ impl SubKey {
         match self {
             SubKey::AllMids => json!({"type":"allMids"}),
             SubKey::Meta => json!({"type":"meta"}),
-            SubKey::Candle { coin, interval } => json!({"type":"candle","coin":coin,"interval":interval}),
+            SubKey::Candle { coin, interval } => {
+                json!({"type":"candle","coin":coin,"interval":interval})
+            }
             SubKey::Bbo { coin } => json!({"type":"bbo","coin":coin}),
             SubKey::UserFills { user } => json!({"type":"userFills","user":user}),
             SubKey::OrderUpdates { user } => json!({"type":"orderUpdates","user":user}),
@@ -496,26 +513,69 @@ fn parse_symbols_csv(raw: &str) -> Vec<String> {
     out
 }
 
+fn canonical_interval(raw: &str) -> String {
+    let mut s = raw.trim().to_ascii_lowercase();
+    // Common alias: "1hr" -> "1h".
+    if s.ends_with("hr") {
+        let base = s.trim_end_matches("hr");
+        if !base.is_empty() {
+            s = format!("{base}h");
+        }
+    }
+    s
+}
+
 fn parse_intervals_csv(raw: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for part in raw.split(',') {
-        let mut s = part.trim().to_ascii_lowercase();
+        let s = canonical_interval(part);
         if s.is_empty() {
             continue;
-        }
-        // Common alias: "1hr" -> "1h".
-        if s.ends_with("hr") {
-            let base = s.trim_end_matches("hr");
-            if !base.is_empty() {
-                s = format!("{base}h");
-            }
         }
         if seen.insert(s.clone()) {
             out.push(s);
         }
     }
     out
+}
+
+fn prune_enabled_for_interval_key(
+    prune_disable_intervals: &HashSet<String>,
+    interval_key: &str,
+) -> bool {
+    !interval_key.is_empty() && !prune_disable_intervals.contains(interval_key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_interval_lowercases_and_normalises_hr() {
+        assert_eq!(canonical_interval("3M"), "3m");
+        assert_eq!(canonical_interval(" 1HR "), "1h");
+        assert_eq!(canonical_interval("15m"), "15m");
+    }
+
+    #[test]
+    fn parse_intervals_csv_dedupes_and_canonicalises() {
+        assert_eq!(
+            parse_intervals_csv("1h,1HR, 5m ,5M"),
+            vec!["1h".to_string(), "5m".to_string()]
+        );
+        assert_eq!(parse_intervals_csv(""), Vec::<String>::new());
+    }
+
+    #[test]
+    fn prune_enabled_for_interval_key_respects_disable_list() {
+        let mut disabled: HashSet<String> = HashSet::new();
+        disabled.insert("3m".to_string());
+
+        assert!(!prune_enabled_for_interval_key(&disabled, ""));
+        assert!(!prune_enabled_for_interval_key(&disabled, "3m"));
+        assert!(prune_enabled_for_interval_key(&disabled, "5m"));
+    }
 }
 
 #[derive(Default)]
@@ -539,9 +599,17 @@ struct CandleDbStat {
     close_span_ms_mode: Option<i64>,
 }
 
-fn compute_db_stat(db_path: &str, symbol: &str, interval: &str, bars_wanted: usize) -> Result<CandleDbStat> {
+fn compute_db_stat(
+    db_path: &str,
+    symbol: &str,
+    interval: &str,
+    bars_wanted: usize,
+) -> Result<CandleDbStat> {
     let sym_u = symbol.trim().to_ascii_uppercase();
-    let interval_s = interval.trim().to_string();
+    let interval_s = canonical_interval(interval);
+    if interval_s.is_empty() {
+        return Err(anyhow!("interval is empty"));
+    }
 
     let mut st = CandleDbStat::default();
     st.symbol = sym_u.clone();
@@ -570,7 +638,15 @@ fn compute_db_stat(db_path: &str, symbol: &str, interval: &str, bars_wanted: usi
         "#,
     )?;
 
-    let mut rows: Vec<(i64, Option<i64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>)> = Vec::new();
+    let mut rows: Vec<(
+        i64,
+        Option<i64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+    )> = Vec::new();
     let mut iter = stmt.query((sym_u.clone(), interval_s.clone(), limit as i64))?;
     while let Some(row) = iter.next()? {
         let t: i64 = row.get(0)?;
@@ -602,7 +678,10 @@ fn compute_db_stat(db_path: &str, symbol: &str, interval: &str, bars_wanted: usi
             st.null_ohlcv += 1;
         }
         if let Some(tc) = t_close {
-            span_freq.entry(tc.saturating_sub(*t)).and_modify(|n| *n += 1).or_insert(1);
+            span_freq
+                .entry(tc.saturating_sub(*t))
+                .and_modify(|n| *n += 1)
+                .or_insert(1);
         }
     }
     if !span_freq.is_empty() {
@@ -647,9 +726,7 @@ fn compute_db_stat(db_path: &str, symbol: &str, interval: &str, bars_wanted: usi
     }
 
     // Freshness.
-    let last_close = st
-        .max_t_close
-        .or_else(|| st.max_t.map(|t| t + interval_ms));
+    let last_close = st.max_t_close.or_else(|| st.max_t.map(|t| t + interval_ms));
     if let Some(lc) = last_close {
         st.last_close_age_s = Some(((now_ms - lc).max(0) as f64) / 1000.0);
     }
@@ -888,7 +965,10 @@ async fn fetch_candle_snapshot(
     end_ms: i64,
 ) -> Result<Vec<Value>> {
     let coin = symbol.trim().to_ascii_uppercase();
-    let interval_s = interval.trim().to_string();
+    let interval_s = canonical_interval(interval);
+    if interval_s.is_empty() {
+        return Err(anyhow!("interval is empty"));
+    }
     let payload = json!({
         "type": "candleSnapshot",
         "req": {
@@ -929,7 +1009,9 @@ async fn fetch_candle_snapshot(
                         backoff = Some(
                             retry_after
                                 .map(Duration::from_secs)
-                                .unwrap_or_else(|| Duration::from_secs((attempt as u64).saturating_mul(2).max(1)))
+                                .unwrap_or_else(|| {
+                                    Duration::from_secs((attempt as u64).saturating_mul(2).max(1))
+                                })
                                 .min(Duration::from_secs(60)),
                         );
                     }
@@ -967,12 +1049,16 @@ async fn rest_backfill_range(
     start_ms: i64,
     end_ms: i64,
 ) -> Result<usize> {
-    let interval_ms = interval_to_ms(interval).max(1);
-    let chunk_bars = cfg.rest_chunk_bars.max(100);
-    let chunk_ms = interval_ms.saturating_mul(chunk_bars as i64).max(interval_ms);
-
     let sym_u = symbol.trim().to_ascii_uppercase();
-    let interval_s = interval.trim().to_string();
+    let interval_s = canonical_interval(interval);
+    if interval_s.is_empty() {
+        return Err(anyhow!("interval is empty"));
+    }
+    let interval_ms = interval_to_ms(&interval_s).max(1);
+    let chunk_bars = cfg.rest_chunk_bars.max(100);
+    let chunk_ms = interval_ms
+        .saturating_mul(chunk_bars as i64)
+        .max(interval_ms);
 
     let mut cur = start_ms;
     let mut total: usize = 0;
@@ -980,7 +1066,8 @@ async fn rest_backfill_range(
 
     while cur < end_ms {
         let chunk_end = (cur + chunk_ms).min(end_ms);
-        let candles = fetch_candle_snapshot(http, cfg, pacer, &sym_u, &interval_s, cur, chunk_end).await?;
+        let candles =
+            fetch_candle_snapshot(http, cfg, pacer, &sym_u, &interval_s, cur, chunk_end).await?;
 
         for item in candles.iter() {
             let obj = match item.as_object() {
@@ -1054,9 +1141,9 @@ async fn compute_db_health(
     now_ms: i64,
     min_required_count: i64,
 ) -> CandleHealth {
-    let db_path = db_path_for_interval(cfg, interval);
+    let interval_s = canonical_interval(interval);
+    let db_path = db_path_for_interval(cfg, &interval_s);
     let sym_u = symbol.trim().to_ascii_uppercase();
-    let interval_s = interval.trim().to_string();
     let timeout = Duration::from_secs(cfg.db_timeout_s.max(1));
 
     let res = tokio::task::spawn_blocking(move || -> Result<(Option<i64>, Option<i64>, i64, Option<i64>)> {
@@ -1192,8 +1279,12 @@ async fn candle_manager_loop(cfg: Config, state: Arc<RwLock<State>>, db: DbWorke
                     }
 
                     for (interval, lim_max) in interval_max_lim {
-                        let interval_ms = interval_to_ms(&interval).max(1);
-                        let horizon_cfg = horizon_ms_for_interval(&cfg, &interval);
+                        let interval_k = canonical_interval(&interval);
+                        if !prune_enabled_for_interval_key(&cfg.candle_prune_disable_intervals, &interval_k) {
+                            continue;
+                        }
+                        let interval_ms = interval_to_ms(&interval_k).max(1);
+                        let horizon_cfg = horizon_ms_for_interval(&cfg, &interval_k);
                         let lim_ms: i64 = if lim_max > 0 {
                             interval_ms.saturating_mul(lim_max as i64)
                         } else {
@@ -1202,8 +1293,8 @@ async fn candle_manager_loop(cfg: Config, state: Arc<RwLock<State>>, db: DbWorke
                         let horizon = horizon_cfg.max(lim_ms);
                         let buffer = buffer_ms_for_horizon(horizon);
                         let cutoff = now_ms.saturating_sub(horizon.saturating_add(buffer.saturating_mul(2)));
-                        let db_path = db_path_for_interval(&cfg, &interval);
-                        let interval_s = interval.clone();
+                        let db_path = db_path_for_interval(&cfg, &interval_k);
+                        let interval_s = interval_k.clone();
                         let timeout = Duration::from_secs(cfg.db_timeout_s.max(1));
                         let _ = tokio::task::spawn_blocking(move || {
                             if let Some(parent) = Path::new(&db_path).parent() {
@@ -1218,7 +1309,11 @@ async fn candle_manager_loop(cfg: Config, state: Arc<RwLock<State>>, db: DbWorke
                     }
                 }
 
-                for (sym, interval, lim) in keys {
+                for (sym, interval_raw, lim) in keys {
+                    let interval = canonical_interval(&interval_raw);
+                    if interval.is_empty() {
+                        continue;
+                    }
                     let interval_ms = interval_to_ms(&interval).max(1);
                     let horizon_cfg = horizon_ms_for_interval(&cfg, &interval);
 
@@ -1465,10 +1560,7 @@ async fn ws_loop(
             }
         };
 
-        eprintln!(
-            "ws connected: attempt={attempt} status={}",
-            resp.status()
-        );
+        eprintln!("ws connected: attempt={attempt} status={}", resp.status());
 
         {
             let mut st = state.write().await;
@@ -1704,7 +1796,11 @@ async fn handle_ws_message(
                 return Ok(());
             }
             let data = v.get("data").ok_or_else(|| anyhow!("bad bbo"))?;
-            let sym = data.get("coin").and_then(|s| s.as_str()).unwrap_or("").to_ascii_uppercase();
+            let sym = data
+                .get("coin")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_ascii_uppercase();
             if sym.is_empty() {
                 return Ok(());
             }
@@ -1738,8 +1834,16 @@ async fn handle_ws_message(
                 return Ok(());
             }
             let data = v.get("data").ok_or_else(|| anyhow!("bad candle"))?;
-            let sym = data.get("s").and_then(|s| s.as_str()).unwrap_or("").to_ascii_uppercase();
-            let interval = data.get("i").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            let sym = data
+                .get("s")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_ascii_uppercase();
+            let interval = data
+                .get("i")
+                .and_then(|s| s.as_str())
+                .map(canonical_interval)
+                .unwrap_or_default();
             let t = data.get("t").and_then(parse_i64).unwrap_or(0);
             if sym.is_empty() || interval.is_empty() || t == 0 {
                 return Ok(());
@@ -1783,7 +1887,9 @@ async fn handle_ws_message(
                 let last_persist = st.candle_last_persist_at.get(&key).copied();
                 let persist_interval = Duration::from_secs(cfg.candle_persist_secs.max(1));
                 let changed_t = last_t.map(|x| x != candle.t).unwrap_or(true);
-                let due = last_persist.map(|p| now.duration_since(p) >= persist_interval).unwrap_or(true);
+                let due = last_persist
+                    .map(|p| now.duration_since(p) >= persist_interval)
+                    .unwrap_or(true);
                 let sp = changed_t || due;
                 if sp {
                     st.candle_last_persist_at.insert(key.clone(), now);
@@ -1812,7 +1918,10 @@ async fn handle_ws_message(
                 Some(arr) => arr,
                 None => return Ok(()),
             };
-            let is_snapshot = data.get("isSnapshot").and_then(|b| b.as_bool()).unwrap_or(false);
+            let is_snapshot = data
+                .get("isSnapshot")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
             if fills.is_empty() {
                 return Ok(());
             }
@@ -1837,7 +1946,8 @@ async fn handle_ws_message(
             while st.order_updates.len() >= cfg.max_event_queue {
                 let _ = st.order_updates.pop_front();
             }
-            st.order_updates.push_back(json!({"t": now_epoch_s_f64(), "data": data}));
+            st.order_updates
+                .push_back(json!({"t": now_epoch_s_f64(), "data": data}));
         }
         "userFundings" => {
             let data = v.get("data").cloned().unwrap_or(Value::Null);
@@ -1845,7 +1955,8 @@ async fn handle_ws_message(
             while st.user_fundings.len() >= cfg.max_event_queue {
                 let _ = st.user_fundings.pop_front();
             }
-            st.user_fundings.push_back(json!({"t": now_epoch_s_f64(), "data": data}));
+            st.user_fundings
+                .push_back(json!({"t": now_epoch_s_f64(), "data": data}));
         }
         "userNonFundingLedgerUpdates" => {
             let data = v.get("data").cloned().unwrap_or(Value::Null);
@@ -1853,7 +1964,8 @@ async fn handle_ws_message(
             while st.user_ledger_updates.len() >= cfg.max_event_queue {
                 let _ = st.user_ledger_updates.pop_front();
             }
-            st.user_ledger_updates.push_back(json!({"t": now_epoch_s_f64(), "data": data}));
+            st.user_ledger_updates
+                .push_back(json!({"t": now_epoch_s_f64(), "data": data}));
         }
         _ => {}
     }
@@ -1886,7 +1998,10 @@ async fn write_resp<W: AsyncWrite + Unpin>(w: &mut W, resp: &RpcResponse) -> Res
 }
 
 fn get_param_string(params: &Value, key: &str) -> Option<String> {
-    params.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
+    params
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 fn get_param_f64(params: &Value, key: &str) -> Option<f64> {
@@ -1901,7 +2016,12 @@ fn get_param_usize(params: &Value, key: &str) -> Option<usize> {
     params.get(key).and_then(|v| v.as_u64()).map(|u| u as usize)
 }
 
-async fn handle_client(stream: UnixStream, cfg: Config, state: Arc<RwLock<State>>, cmd_tx: tokio_mpsc::UnboundedSender<WsCommand>) -> Result<()> {
+async fn handle_client(
+    stream: UnixStream,
+    cfg: Config,
+    state: Arc<RwLock<State>>,
+    cmd_tx: tokio_mpsc::UnboundedSender<WsCommand>,
+) -> Result<()> {
     let (r, mut w) = stream.into_split();
     let mut lines = BufReader::new(r).lines();
 
@@ -1937,7 +2057,14 @@ async fn handle_client(stream: UnixStream, cfg: Config, state: Arc<RwLock<State>
                     })
                     .unwrap_or_else(Vec::new);
 
-                let interval = get_param_string(&params, "interval").unwrap_or_else(|| "1h".to_string());
+                let interval_raw =
+                    get_param_string(&params, "interval").unwrap_or_else(|| "1h".to_string());
+                let interval = canonical_interval(&interval_raw);
+                let interval = if interval.is_empty() {
+                    "1h".to_string()
+                } else {
+                    interval
+                };
                 let candle_limit = params
                     .get("candle_limit")
                     .and_then(|v| v.as_u64())
@@ -1948,10 +2075,17 @@ async fn handle_client(stream: UnixStream, cfg: Config, state: Arc<RwLock<State>
                     .unwrap_or_else(|| "default".to_string())
                     .trim()
                     .to_string();
-                let client_id = if client_id.is_empty() { "default".to_string() } else { client_id };
+                let client_id = if client_id.is_empty() {
+                    "default".to_string()
+                } else {
+                    client_id
+                };
 
                 // Optional user: only update when a non-null string is provided (do not clear on null).
-                let user_str = params.get("user").and_then(|v| v.as_str()).map(|s| s.trim().to_ascii_lowercase());
+                let user_str = params
+                    .get("user")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_ascii_lowercase());
 
                 let mut changed = false;
                 {
@@ -1977,13 +2111,16 @@ async fn handle_client(stream: UnixStream, cfg: Config, state: Arc<RwLock<State>
                         sym_set.insert(sym.clone());
                     }
 
-                    let entry = st.clients.entry(client_id.clone()).or_insert_with(|| ClientDesired {
-                        symbols: HashSet::new(),
-                        interval: interval.clone(),
-                        candle_limit,
-                        user: None,
-                        last_seen: now,
-                    });
+                    let entry =
+                        st.clients
+                            .entry(client_id.clone())
+                            .or_insert_with(|| ClientDesired {
+                                symbols: HashSet::new(),
+                                interval: interval.clone(),
+                                candle_limit,
+                                user: None,
+                                last_seen: now,
+                            });
                     entry.last_seen = now;
 
                     if entry.interval != interval {
@@ -2066,11 +2203,21 @@ async fn handle_client(stream: UnixStream, cfg: Config, state: Arc<RwLock<State>
                 if changed {
                     let _ = cmd_tx.send(WsCommand::RefreshSubs);
                 }
-                RpcResponse { id: req.id, ok: true, result: Some(json!({"ok":true})), error: None }
+                RpcResponse {
+                    id: req.id,
+                    ok: true,
+                    result: Some(json!({"ok":true})),
+                    error: None,
+                }
             }
             "restart" => {
                 let _ = cmd_tx.send(WsCommand::Restart);
-                RpcResponse { id: req.id, ok: true, result: Some(json!({"ok":true})), error: None }
+                RpcResponse {
+                    id: req.id,
+                    ok: true,
+                    result: Some(json!({"ok":true})),
+                    error: None,
+                }
             }
             "health" => {
                 let symbols = params
@@ -2084,7 +2231,14 @@ async fn handle_client(stream: UnixStream, cfg: Config, state: Arc<RwLock<State>
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_else(Vec::new);
-                let interval = get_param_string(&params, "interval").unwrap_or_else(|| "1h".to_string());
+                let interval_raw =
+                    get_param_string(&params, "interval").unwrap_or_else(|| "1h".to_string());
+                let interval = canonical_interval(&interval_raw);
+                let interval = if interval.is_empty() {
+                    "1h".to_string()
+                } else {
+                    interval
+                };
 
                 let st = state.read().await;
                 let mids_age_s = st.mids_updated_at.map(|t| t.elapsed().as_secs_f64());
@@ -2167,7 +2321,14 @@ async fn handle_client(stream: UnixStream, cfg: Config, state: Arc<RwLock<State>
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_else(Vec::new);
-                let interval = get_param_string(&params, "interval").unwrap_or_else(|| "1h".to_string());
+                let interval_raw =
+                    get_param_string(&params, "interval").unwrap_or_else(|| "1h".to_string());
+                let interval = canonical_interval(&interval_raw);
+                let interval = if interval.is_empty() {
+                    "1h".to_string()
+                } else {
+                    interval
+                };
 
                 let st = state.read().await;
                 let mut not_ready: Vec<String> = Vec::new();
@@ -2197,7 +2358,14 @@ async fn handle_client(stream: UnixStream, cfg: Config, state: Arc<RwLock<State>
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_else(Vec::new);
-                let interval = get_param_string(&params, "interval").unwrap_or_else(|| "1h".to_string());
+                let interval_raw =
+                    get_param_string(&params, "interval").unwrap_or_else(|| "1h".to_string());
+                let interval = canonical_interval(&interval_raw);
+                let interval = if interval.is_empty() {
+                    "1h".to_string()
+                } else {
+                    interval
+                };
 
                 let st = state.read().await;
                 let mut out: Vec<Value> = Vec::new();
@@ -2234,33 +2402,65 @@ async fn handle_client(stream: UnixStream, cfg: Config, state: Arc<RwLock<State>
                     }
                 }
 
-                let ws_candle_disabled_s = st
-                    .ws_candle_disabled_until
-                    .map(|t| if t > Instant::now() { (t - Instant::now()).as_secs_f64() } else { 0.0 });
+                let ws_candle_disabled_s = st.ws_candle_disabled_until.map(|t| {
+                    if t > Instant::now() {
+                        (t - Instant::now()).as_secs_f64()
+                    } else {
+                        0.0
+                    }
+                });
 
                 RpcResponse {
                     id: req.id,
                     ok: true,
-                    result: Some(json!({"ws_candle_disabled_s": ws_candle_disabled_s, "items": out})),
+                    result: Some(
+                        json!({"ws_candle_disabled_s": ws_candle_disabled_s, "items": out}),
+                    ),
                     error: None,
                 }
             }
             "get_mid" => {
-                let sym = get_param_string(&params, "symbol").unwrap_or_default().trim().to_ascii_uppercase();
+                let sym = get_param_string(&params, "symbol")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_ascii_uppercase();
                 let max_age = get_param_f64(&params, "max_age_s");
                 let st = state.read().await;
                 let px = st.mids.get(&sym).copied();
                 if px.is_none() {
-                    RpcResponse { id: req.id, ok: true, result: Some(Value::Null), error: None }
+                    RpcResponse {
+                        id: req.id,
+                        ok: true,
+                        result: Some(Value::Null),
+                        error: None,
+                    }
                 } else if let Some(max_age) = max_age {
-                    let age = st.mids_updated_at.map(|t| t.elapsed().as_secs_f64()).unwrap_or(f64::INFINITY);
+                    let age = st
+                        .mids_updated_at
+                        .map(|t| t.elapsed().as_secs_f64())
+                        .unwrap_or(f64::INFINITY);
                     if age > max_age {
-                        RpcResponse { id: req.id, ok: true, result: Some(Value::Null), error: None }
+                        RpcResponse {
+                            id: req.id,
+                            ok: true,
+                            result: Some(Value::Null),
+                            error: None,
+                        }
                     } else {
-                        RpcResponse { id: req.id, ok: true, result: Some(json!(px.unwrap())), error: None }
+                        RpcResponse {
+                            id: req.id,
+                            ok: true,
+                            result: Some(json!(px.unwrap())),
+                            error: None,
+                        }
                     }
                 } else {
-                    RpcResponse { id: req.id, ok: true, result: Some(json!(px.unwrap())), error: None }
+                    RpcResponse {
+                        id: req.id,
+                        ok: true,
+                        result: Some(json!(px.unwrap())),
+                        error: None,
+                    }
                 }
             }
             "get_mids" => {
@@ -2325,50 +2525,117 @@ async fn handle_client(stream: UnixStream, cfg: Config, state: Arc<RwLock<State>
                 }
             }
             "get_bbo" => {
-                let sym = get_param_string(&params, "symbol").unwrap_or_default().trim().to_ascii_uppercase();
+                let sym = get_param_string(&params, "symbol")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_ascii_uppercase();
                 let max_age = get_param_f64(&params, "max_age_s");
                 let st = state.read().await;
                 let bbo = st.bbo.get(&sym).copied();
                 if bbo.is_none() {
-                    RpcResponse { id: req.id, ok: true, result: Some(Value::Null), error: None }
+                    RpcResponse {
+                        id: req.id,
+                        ok: true,
+                        result: Some(Value::Null),
+                        error: None,
+                    }
                 } else if let Some(max_age) = max_age {
-                    let age = st.bbo_updated_at.get(&sym).map(|t| t.elapsed().as_secs_f64()).unwrap_or(f64::INFINITY);
+                    let age = st
+                        .bbo_updated_at
+                        .get(&sym)
+                        .map(|t| t.elapsed().as_secs_f64())
+                        .unwrap_or(f64::INFINITY);
                     if age > max_age {
-                        RpcResponse { id: req.id, ok: true, result: Some(Value::Null), error: None }
+                        RpcResponse {
+                            id: req.id,
+                            ok: true,
+                            result: Some(Value::Null),
+                            error: None,
+                        }
                     } else {
                         let (bid, ask) = bbo.unwrap();
-                        RpcResponse { id: req.id, ok: true, result: Some(json!([bid, ask])), error: None }
+                        RpcResponse {
+                            id: req.id,
+                            ok: true,
+                            result: Some(json!([bid, ask])),
+                            error: None,
+                        }
                     }
                 } else {
                     let (bid, ask) = bbo.unwrap();
-                    RpcResponse { id: req.id, ok: true, result: Some(json!([bid, ask])), error: None }
+                    RpcResponse {
+                        id: req.id,
+                        ok: true,
+                        result: Some(json!([bid, ask])),
+                        error: None,
+                    }
                 }
             }
             "get_latest_candle_times" => {
-                let sym = get_param_string(&params, "symbol").unwrap_or_default().trim().to_ascii_uppercase();
-                let interval = get_param_string(&params, "interval").unwrap_or_else(|| "1h".to_string());
+                let sym = get_param_string(&params, "symbol")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_ascii_uppercase();
+                let interval_raw =
+                    get_param_string(&params, "interval").unwrap_or_else(|| "1h".to_string());
+                let interval = canonical_interval(&interval_raw);
+                let interval = if interval.is_empty() {
+                    "1h".to_string()
+                } else {
+                    interval
+                };
                 let st = state.read().await;
                 let key = (sym.clone(), interval.clone());
                 let q = st.candles.get(&key);
                 if let Some(q) = q {
                     if let Some(last) = q.back() {
-                        RpcResponse { id: req.id, ok: true, result: Some(json!([last.t, last.t_close])), error: None }
+                        RpcResponse {
+                            id: req.id,
+                            ok: true,
+                            result: Some(json!([last.t, last.t_close])),
+                            error: None,
+                        }
                     } else {
-                        RpcResponse { id: req.id, ok: true, result: Some(json!([Value::Null, Value::Null])), error: None }
+                        RpcResponse {
+                            id: req.id,
+                            ok: true,
+                            result: Some(json!([Value::Null, Value::Null])),
+                            error: None,
+                        }
                     }
                 } else {
-                    RpcResponse { id: req.id, ok: true, result: Some(json!([Value::Null, Value::Null])), error: None }
+                    RpcResponse {
+                        id: req.id,
+                        ok: true,
+                        result: Some(json!([Value::Null, Value::Null])),
+                        error: None,
+                    }
                 }
             }
             "get_last_closed_candle_times" => {
-                let sym = get_param_string(&params, "symbol").unwrap_or_default().trim().to_ascii_uppercase();
-                let interval = get_param_string(&params, "interval").unwrap_or_else(|| "1h".to_string());
+                let sym = get_param_string(&params, "symbol")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_ascii_uppercase();
+                let interval_raw =
+                    get_param_string(&params, "interval").unwrap_or_else(|| "1h".to_string());
+                let interval = canonical_interval(&interval_raw);
+                let interval = if interval.is_empty() {
+                    "1h".to_string()
+                } else {
+                    interval
+                };
                 let grace_ms = get_param_i64(&params, "grace_ms").unwrap_or(2000).max(0);
                 let st = state.read().await;
                 let key = (sym.clone(), interval.clone());
                 let q = st.candles.get(&key);
                 if q.is_none() || q.unwrap().is_empty() {
-                    RpcResponse { id: req.id, ok: true, result: Some(json!([Value::Null, Value::Null])), error: None }
+                    RpcResponse {
+                        id: req.id,
+                        ok: true,
+                        result: Some(json!([Value::Null, Value::Null])),
+                        error: None,
+                    }
                 } else {
                     let q = q.unwrap();
                     let now_ms = now_ms_i64();
@@ -2376,10 +2643,15 @@ async fn handle_client(stream: UnixStream, cfg: Config, state: Arc<RwLock<State>
                     let mut chosen = last;
                     if let Some(tclose) = last.t_close {
                         if now_ms < (tclose - grace_ms) && q.len() >= 2 {
-                            chosen = &q[q.len()-2];
+                            chosen = &q[q.len() - 2];
                         }
                     }
-                    RpcResponse { id: req.id, ok: true, result: Some(json!([chosen.t, chosen.t_close])), error: None }
+                    RpcResponse {
+                        id: req.id,
+                        ok: true,
+                        result: Some(json!([chosen.t, chosen.t_close])),
+                        error: None,
+                    }
                 }
             }
             "drain_user_fills" => {
@@ -2394,7 +2666,12 @@ async fn handle_client(stream: UnixStream, cfg: Config, state: Arc<RwLock<State>
                         }
                     }
                 }
-                RpcResponse { id: req.id, ok: true, result: Some(json!(out)), error: None }
+                RpcResponse {
+                    id: req.id,
+                    ok: true,
+                    result: Some(json!(out)),
+                    error: None,
+                }
             }
             "drain_order_updates" => {
                 let max_items = get_param_usize(&params, "max_items");
@@ -2408,7 +2685,12 @@ async fn handle_client(stream: UnixStream, cfg: Config, state: Arc<RwLock<State>
                         }
                     }
                 }
-                RpcResponse { id: req.id, ok: true, result: Some(json!(out)), error: None }
+                RpcResponse {
+                    id: req.id,
+                    ok: true,
+                    result: Some(json!(out)),
+                    error: None,
+                }
             }
             "drain_user_fundings" => {
                 let max_items = get_param_usize(&params, "max_items");
@@ -2422,7 +2704,12 @@ async fn handle_client(stream: UnixStream, cfg: Config, state: Arc<RwLock<State>
                         }
                     }
                 }
-                RpcResponse { id: req.id, ok: true, result: Some(json!(out)), error: None }
+                RpcResponse {
+                    id: req.id,
+                    ok: true,
+                    result: Some(json!(out)),
+                    error: None,
+                }
             }
             "drain_user_ledger_updates" => {
                 let max_items = get_param_usize(&params, "max_items");
@@ -2436,7 +2723,12 @@ async fn handle_client(stream: UnixStream, cfg: Config, state: Arc<RwLock<State>
                         }
                     }
                 }
-                RpcResponse { id: req.id, ok: true, result: Some(json!(out)), error: None }
+                RpcResponse {
+                    id: req.id,
+                    ok: true,
+                    result: Some(json!(out)),
+                    error: None,
+                }
             }
             _ => RpcResponse {
                 id: req.id,
@@ -2466,12 +2758,22 @@ async fn main() -> Result<()> {
                 println!("{}", cli_usage());
                 return Ok(());
             }
-            let interval = kv
+            let interval_raw = kv
                 .get("interval")
                 .or_else(|| kv.get("i"))
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "1h".to_string());
-            let symbols_raw = kv.get("symbols").or_else(|| kv.get("s")).cloned().unwrap_or_default();
+            let interval = canonical_interval(&interval_raw);
+            let interval = if interval.is_empty() {
+                "1h".to_string()
+            } else {
+                interval
+            };
+            let symbols_raw = kv
+                .get("symbols")
+                .or_else(|| kv.get("s"))
+                .cloned()
+                .unwrap_or_default();
             if symbols_raw.trim().is_empty() {
                 println!("{}", cli_usage());
                 return Ok(());
@@ -2481,9 +2783,17 @@ async fn main() -> Result<()> {
                 .get("bars")
                 .or_else(|| kv.get("b"))
                 .and_then(|s| s.parse::<usize>().ok())
-                .or_else(|| env::var("AI_QUANT_LOOKBACK_BARS").ok().and_then(|s| s.parse::<usize>().ok()))
+                .or_else(|| {
+                    env::var("AI_QUANT_LOOKBACK_BARS")
+                        .ok()
+                        .and_then(|s| s.parse::<usize>().ok())
+                })
                 .unwrap_or(200);
-            let db_dir = kv.get("db-dir").or_else(|| kv.get("db_dir")).cloned().unwrap_or_else(|| cfg.candles_db_dir.clone());
+            let db_dir = kv
+                .get("db-dir")
+                .or_else(|| kv.get("db_dir"))
+                .cloned()
+                .unwrap_or_else(|| cfg.candles_db_dir.clone());
             let mut cfg2 = cfg.clone();
             cfg2.candles_db_dir = db_dir;
             let db_path = db_path_for_interval(&cfg2, &interval);
@@ -2524,7 +2834,10 @@ async fn main() -> Result<()> {
                 }
             }
             if want_json {
-                println!("{}", serde_json::to_string_pretty(&json!({"db_path": db_path, "items": out}))?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({"db_path": db_path, "items": out}))?
+                );
             }
             return Ok(());
         } else if cmd == "help" || cmd == "--help" || cmd == "-h" {
@@ -2535,11 +2848,26 @@ async fn main() -> Result<()> {
 
     // rustls 0.23+ requires selecting a crypto provider at process start.
     // This avoids a runtime panic inside tokio-tungstenite's rustls integration.
-    let _ = rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider());
+    let _ =
+        rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider());
     println!(
         "ws-sidecar starting: ws_url={} info_url={} sock={} candles_db_dir={} candles_enable={} candle_ws_enable={}",
-        cfg.ws_url, cfg.info_url, cfg.sock_path, cfg.candles_db_dir, cfg.candles_enable, cfg.enable_candle_ws
+        cfg.ws_url,
+        cfg.info_url,
+        cfg.sock_path,
+        cfg.candles_db_dir,
+        cfg.candles_enable,
+        cfg.enable_candle_ws
     );
+    if !cfg.candle_prune_disable_intervals.is_empty() {
+        let mut intervals: Vec<String> =
+            cfg.candle_prune_disable_intervals.iter().cloned().collect();
+        intervals.sort();
+        println!(
+            "ws-sidecar candle retention: pruning disabled for intervals: {} (append-only; monitor disk usage)",
+            intervals.join(",")
+        );
+    }
 
     // Remove any stale socket file.
     if Path::new(&cfg.sock_path).exists() {
