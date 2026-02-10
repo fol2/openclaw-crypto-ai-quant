@@ -166,6 +166,9 @@ uv run python tools/reality_check.py --symbol BTC --hours 2
 sqlite3 candles_dbs/funding_rates.db \
     "SELECT symbol, COUNT(*) AS rows, MAX(time) AS latest FROM funding_rates GROUP BY symbol ORDER BY latest DESC LIMIT 10;"
 
+# Automated freshness + anomaly checks (JSON on stdout; summary on stderr)
+uv run python tools/check_funding_rates_db.py --lookback-hours 72 --max-gap-hours 4
+
 # Backfill if stale
 uv run python tools/fetch_funding_rates.py --days 7
 ```
