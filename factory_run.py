@@ -1043,8 +1043,18 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
     else:
+        candle_argv = ["python3", "tools/check_candle_dbs.py", "--json-indent", "2"]
+        if args.candles_db:
+            try:
+                p = Path(str(args.candles_db)).expanduser()
+                if p.is_dir():
+                    candle_argv += ["--db-glob", str((p / "candles_*.db").resolve())]
+                else:
+                    candle_argv += ["--db-glob", str(p.resolve())]
+            except Exception:
+                candle_argv += ["--db-glob", str(args.candles_db)]
         candle_check = _run_cmd(
-            ["python3", "tools/check_candle_dbs.py", "--json-indent", "2"],
+            candle_argv,
             cwd=AIQ_ROOT,
             stdout_path=candle_out,
             stderr_path=candle_err,
@@ -1070,8 +1080,11 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
     else:
+        funding_argv = ["python3", "tools/check_funding_rates_db.py"]
+        if args.funding_db:
+            funding_argv += ["--db", str(args.funding_db)]
         funding_check = _run_cmd(
-            ["python3", "tools/check_funding_rates_db.py"],
+            funding_argv,
             cwd=AIQ_ROOT,
             stdout_path=funding_out,
             stderr_path=funding_err,
@@ -1788,6 +1801,10 @@ def main(argv: list[str] | None = None) -> int:
     (run_dir / "reports").mkdir(parents=True, exist_ok=True)
     (run_dir / "reports" / "report.md").write_text(report_md, encoding="utf-8")
     _write_json(run_dir / "reports" / "report.json", {"items": replay_reports})
+    validation_md = _render_validation_report_md(
+        replay_reports, score_min_trades=int(getattr(args, "score_min_trades", 30) or 30)
+    )
+    (run_dir / "reports" / "validation_report.md").write_text(validation_md, encoding="utf-8")
 
     # Persist metadata before registry ingestion (ingest reads run_metadata.json).
     _write_json(run_dir / "run_metadata.json", meta)
