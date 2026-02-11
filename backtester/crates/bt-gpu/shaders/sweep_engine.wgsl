@@ -804,8 +804,8 @@ fn is_pesc_blocked(state: ptr<function, GpuComboState>, sym: u32, desired_type: 
 // ── Dynamic TP Multiplier ───────────────────────────────────────────────────
 
 fn get_tp_mult(snap: GpuSnapshot, cfg: ptr<function, GpuComboConfig>) -> f32 {
-    if snap.adx > (*cfg).tp_strong_adx_gt { return 7.0; }
-    if snap.adx < (*cfg).tp_weak_adx_lt { return 3.0; }
+    // Parity with CPU: always use the configured TP ATR multiplier.
+    // Dynamic TP scaling based on ADX is intentionally disabled on GPU.
     return (*cfg).tp_atr_mult;
 }
 
