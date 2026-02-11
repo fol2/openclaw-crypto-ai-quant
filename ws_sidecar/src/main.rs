@@ -29,6 +29,13 @@ struct Config {
     enable_meta: bool,
     enable_candle_ws: bool,
     enable_bbo: bool,
+    // Optional BBO snapshot storage for slippage modelling.
+    bbo_snapshots_enable: bool,
+    bbo_snapshots_db_path: String,
+    bbo_snapshots_sample_ms: u64,
+    bbo_snapshots_retention_hours: u64,
+    bbo_snapshots_retention_sweep_secs: u64,
+    bbo_snapshots_max_queue: usize,
     reconnect_secs: u64,
     ping_secs: u64,
     sub_send_ms: u64,
@@ -150,6 +157,23 @@ fn load_config() -> Config {
     let enable_candle_ws = env_bool("AI_QUANT_WS_ENABLE_CANDLE", true);
     let enable_bbo = env_bool("AI_QUANT_WS_ENABLE_BBO", true);
 
+    let bbo_snapshots_enable = env_bool("AI_QUANT_BBO_SNAPSHOTS_ENABLE", false);
+    let default_bbo_snapshots_db_path =
+        format!("{}/bbo_snapshots.db", candles_db_dir.trim_end_matches('/'));
+    let bbo_snapshots_db_path = env_string(
+        "AI_QUANT_BBO_SNAPSHOTS_DB_PATH",
+        &default_bbo_snapshots_db_path,
+    );
+    // Per-symbol insert throttle. Values <= 0 are clamped to 1ms.
+    let bbo_snapshots_sample_ms = env_u64("AI_QUANT_BBO_SNAPSHOTS_SAMPLE_MS", 1000).max(1);
+    // Storage is bounded by time-based retention. Values <= 0 are clamped to 1 hour.
+    let bbo_snapshots_retention_hours =
+        env_u64("AI_QUANT_BBO_SNAPSHOTS_RETENTION_HOURS", 24).max(1);
+    // Retention sweeps run on a timer. Values <= 0 are clamped to 30s.
+    let bbo_snapshots_retention_sweep_secs =
+        env_u64("AI_QUANT_BBO_SNAPSHOTS_RETENTION_SWEEP_SECS", 600).max(30);
+    let bbo_snapshots_max_queue = env_usize("AI_QUANT_BBO_SNAPSHOTS_MAX_QUEUE", 20000).max(1);
+
     let reconnect_secs = env_u64("HL_WS_RECONNECT_SECS", 5);
     let ping_secs = env_u64("HL_WS_PING_SECS", 50);
     // Throttle subscription requests to avoid starving reads and to reduce server-side flood risk.
@@ -216,6 +240,12 @@ fn load_config() -> Config {
         enable_meta,
         enable_candle_ws,
         enable_bbo,
+        bbo_snapshots_enable,
+        bbo_snapshots_db_path,
+        bbo_snapshots_sample_ms,
+        bbo_snapshots_retention_hours,
+        bbo_snapshots_retention_sweep_secs,
+        bbo_snapshots_max_queue,
         reconnect_secs,
         ping_secs,
         sub_send_ms,
@@ -450,6 +480,189 @@ fn ensure_db(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn ensure_bbo_snapshots_db(conn: &Connection) -> Result<()> {
+    // Pragmas (best-effort).
+    let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS bbo_snapshots (
+            symbol TEXT NOT NULL,
+            ts_ms INTEGER NOT NULL,
+            bid REAL NOT NULL,
+            ask REAL NOT NULL,
+            mid REAL NOT NULL,
+            updated_at TEXT,
+            PRIMARY KEY (symbol, ts_ms)
+        );
+        CREATE INDEX IF NOT EXISTS idx_bbo_snapshots_ts_ms
+        ON bbo_snapshots(ts_ms);
+        "#,
+    )?;
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct BboSnapshotJob {
+    symbol: String,
+    ts_ms: i64,
+    bid: f64,
+    ask: f64,
+    mid: f64,
+}
+
+#[derive(Debug)]
+enum BboSnapshotMsg {
+    Insert(BboSnapshotJob),
+    Sweep,
+}
+
+#[derive(Clone)]
+struct BboSnapshotStore {
+    tx: tokio_mpsc::Sender<BboSnapshotMsg>,
+}
+
+impl BboSnapshotStore {
+    fn start(cfg: &Config) -> Self {
+        let max_queue = cfg.bbo_snapshots_max_queue.max(1);
+        let (tx, mut rx) = tokio_mpsc::channel::<BboSnapshotMsg>(max_queue);
+
+        let db_path = cfg.bbo_snapshots_db_path.clone();
+        let timeout = Duration::from_secs(cfg.db_timeout_s.max(1));
+        let retention_hours = cfg.bbo_snapshots_retention_hours.max(1);
+
+        std::thread::spawn(move || {
+            if let Some(parent) = Path::new(&db_path).parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+
+            let conn = match Connection::open(&db_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("bbo snapshots db open failed: {e}");
+                    return;
+                }
+            };
+            let _ = conn.busy_timeout(timeout);
+            if let Err(e) = ensure_bbo_snapshots_db(&conn) {
+                eprintln!("bbo snapshots db init failed: {e}");
+                return;
+            }
+
+            let mut stmt = match conn.prepare(
+                r#"
+                INSERT INTO bbo_snapshots (symbol, ts_ms, bid, ask, mid, updated_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                ON CONFLICT(symbol, ts_ms) DO UPDATE SET
+                    bid = excluded.bid,
+                    ask = excluded.ask,
+                    mid = excluded.mid,
+                    updated_at = excluded.updated_at
+                "#,
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("bbo snapshots db prepare failed: {e}");
+                    return;
+                }
+            };
+
+            while let Some(msg) = rx.blocking_recv() {
+                match msg {
+                    BboSnapshotMsg::Insert(job) => {
+                        let updated_at =
+                            Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                        let res = stmt.execute((
+                            job.symbol, job.ts_ms, job.bid, job.ask, job.mid, updated_at,
+                        ));
+                        if let Err(e) = res {
+                            if !e.to_string().to_ascii_lowercase().contains("locked") {
+                                eprintln!("bbo snapshots db write failed: {e}");
+                            }
+                        }
+                    }
+                    BboSnapshotMsg::Sweep => {
+                        let retention_ms = (retention_hours as i64).saturating_mul(3_600_000);
+                        let cutoff_ts_ms = now_ms_i64().saturating_sub(retention_ms);
+                        match sweep_bbo_snapshots_db(&conn, cutoff_ts_ms) {
+                            Ok(n) => {
+                                if n > 0 {
+                                    eprintln!("bbo snapshots retention sweep deleted_rows={n}");
+                                }
+                            }
+                            Err(e) => {
+                                if !e.to_string().to_ascii_lowercase().contains("locked") {
+                                    eprintln!("bbo snapshots retention sweep failed: {e}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        Self { tx }
+    }
+}
+
+struct BboSnapshotSampler {
+    tx: tokio_mpsc::Sender<BboSnapshotMsg>,
+    sample_every: Duration,
+    last_sampled_at: HashMap<String, Instant>,
+    drops_full: u64,
+    drops_closed: u64,
+}
+
+impl BboSnapshotSampler {
+    fn new(sample_ms: u64, tx: tokio_mpsc::Sender<BboSnapshotMsg>) -> Self {
+        Self {
+            tx,
+            sample_every: Duration::from_millis(sample_ms.max(1)),
+            last_sampled_at: HashMap::new(),
+            drops_full: 0,
+            drops_closed: 0,
+        }
+    }
+
+    fn on_bbo(&mut self, symbol: &str, bid: f64, ask: f64, now: Instant) {
+        if let Some(prev) = self.last_sampled_at.get_mut(symbol) {
+            if now.duration_since(*prev) < self.sample_every {
+                return;
+            }
+            *prev = now;
+        } else {
+            self.last_sampled_at.insert(symbol.to_string(), now);
+        }
+
+        let ts_ms = now_ms_i64();
+        let mid = (bid + ask) / 2.0;
+        let msg = BboSnapshotMsg::Insert(BboSnapshotJob {
+            symbol: symbol.to_string(),
+            ts_ms,
+            bid,
+            ask,
+            mid,
+        });
+
+        match self.tx.try_send(msg) {
+            Ok(_) => {}
+            Err(tokio_mpsc::error::TrySendError::Full(_)) => {
+                self.drops_full = self.drops_full.saturating_add(1);
+            }
+            Err(tokio_mpsc::error::TrySendError::Closed(_)) => {
+                self.drops_closed = self.drops_closed.saturating_add(1);
+            }
+        }
+    }
+}
+
+fn sweep_bbo_snapshots_db(conn: &Connection, cutoff_ts_ms: i64) -> Result<usize> {
+    Ok(conn.execute(
+        "DELETE FROM bbo_snapshots WHERE ts_ms < ?1",
+        (cutoff_ts_ms,),
+    )?)
+}
+
 fn sanitize_interval(interval: &str) -> String {
     let mut out = String::new();
     for ch in interval.chars() {
@@ -550,6 +763,28 @@ fn prune_enabled_for_interval_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn set_env(key: &str, val: &str) -> Option<String> {
+        let prev = env::var(key).ok();
+        unsafe {
+            env::set_var(key, val);
+        }
+        prev
+    }
+
+    fn restore_env(key: &str, prev: Option<String>) {
+        match prev {
+            Some(v) => unsafe {
+                env::set_var(key, v);
+            },
+            None => unsafe {
+                env::remove_var(key);
+            },
+        }
+    }
 
     #[test]
     fn canonical_interval_lowercases_and_normalises_hr() {
@@ -575,6 +810,60 @@ mod tests {
         assert!(!prune_enabled_for_interval_key(&disabled, ""));
         assert!(!prune_enabled_for_interval_key(&disabled, "3m"));
         assert!(prune_enabled_for_interval_key(&disabled, "5m"));
+    }
+
+    #[test]
+    fn load_config_clamps_bbo_snapshot_env_vars() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let prev_sample = set_env("AI_QUANT_BBO_SNAPSHOTS_SAMPLE_MS", "0");
+        let prev_retention = set_env("AI_QUANT_BBO_SNAPSHOTS_RETENTION_HOURS", "0");
+        let prev_sweep = set_env("AI_QUANT_BBO_SNAPSHOTS_RETENTION_SWEEP_SECS", "1");
+        let prev_queue = set_env("AI_QUANT_BBO_SNAPSHOTS_MAX_QUEUE", "0");
+
+        let cfg = load_config();
+
+        assert_eq!(cfg.bbo_snapshots_sample_ms, 1);
+        assert_eq!(cfg.bbo_snapshots_retention_hours, 1);
+        assert_eq!(cfg.bbo_snapshots_retention_sweep_secs, 30);
+        assert_eq!(cfg.bbo_snapshots_max_queue, 1);
+
+        restore_env("AI_QUANT_BBO_SNAPSHOTS_SAMPLE_MS", prev_sample);
+        restore_env("AI_QUANT_BBO_SNAPSHOTS_RETENTION_HOURS", prev_retention);
+        restore_env("AI_QUANT_BBO_SNAPSHOTS_RETENTION_SWEEP_SECS", prev_sweep);
+        restore_env("AI_QUANT_BBO_SNAPSHOTS_MAX_QUEUE", prev_queue);
+    }
+
+    #[test]
+    fn sweep_bbo_snapshots_db_deletes_old_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_bbo_snapshots_db(&conn).unwrap();
+
+        for (sym, ts_ms) in [
+            ("BTC", 1000i64),
+            ("BTC", 2000),
+            ("BTC", 3000),
+            ("ETH", 1500),
+        ] {
+            conn.execute(
+                "INSERT INTO bbo_snapshots (symbol, ts_ms, bid, ask, mid) VALUES (?1, ?2, 1.0, 2.0, 1.5)",
+                (sym, ts_ms),
+            )
+            .unwrap();
+        }
+
+        let deleted = sweep_bbo_snapshots_db(&conn, 2500).unwrap();
+        assert_eq!(deleted, 3);
+
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM bbo_snapshots", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 1);
+
+        let ts: i64 = conn
+            .query_row("SELECT ts_ms FROM bbo_snapshots", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(ts, 3000);
     }
 }
 
@@ -1517,6 +1806,7 @@ async fn ws_loop(
     cfg: Config,
     state: Arc<RwLock<State>>,
     db: DbWorkers,
+    bbo_snapshots: Option<BboSnapshotStore>,
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<WsCommand>,
 ) -> Result<()> {
     // Validate URL early (connect_async takes &str; this is just a sanity check).
@@ -1575,9 +1865,14 @@ async fn ws_loop(
         let cfg_proc = cfg.clone();
         let state_proc = state.clone();
         let db_proc = db.clone();
+        let bbo_tx = bbo_snapshots.as_ref().map(|s| s.tx.clone());
         let processor = tokio::spawn(async move {
+            let mut bbo_sampler =
+                bbo_tx.map(|tx| BboSnapshotSampler::new(cfg_proc.bbo_snapshots_sample_ms, tx));
             while let Some(txt) = msg_rx.recv().await {
-                let _ = handle_ws_message(&cfg_proc, &state_proc, &db_proc, &txt).await;
+                let _ =
+                    handle_ws_message(&cfg_proc, &state_proc, &db_proc, bbo_sampler.as_mut(), &txt)
+                        .await;
             }
         });
 
@@ -1766,6 +2061,7 @@ async fn handle_ws_message(
     cfg: &Config,
     state: &Arc<RwLock<State>>,
     db: &DbWorkers,
+    bbo_sampler: Option<&mut BboSnapshotSampler>,
     txt: &str,
 ) -> Result<()> {
     let v: Value = serde_json::from_str(txt).context("ws json parse")?;
@@ -1814,6 +2110,11 @@ async fn handle_ws_message(
             let bid = bbo.get(0).and_then(|x| x.get("px")).and_then(parse_f64);
             let ask = bbo.get(1).and_then(|x| x.get("px")).and_then(parse_f64);
             if let (Some(bid), Some(ask)) = (bid, ask) {
+                if cfg.bbo_snapshots_enable {
+                    if let Some(s) = bbo_sampler {
+                        s.on_bbo(&sym, bid, ask, now);
+                    }
+                }
                 let mut st = state.write().await;
                 st.bbo.insert(sym.clone(), (bid, ask));
                 st.bbo_updated_at.insert(sym, now);
@@ -2869,6 +3170,22 @@ async fn main() -> Result<()> {
         );
     }
 
+    if cfg.bbo_snapshots_enable {
+        println!(
+            "ws-sidecar bbo snapshots: enabled=yes db_path={} sample_ms={} retention_hours={} retention_sweep_secs={} max_queue={}",
+            cfg.bbo_snapshots_db_path,
+            cfg.bbo_snapshots_sample_ms,
+            cfg.bbo_snapshots_retention_hours,
+            cfg.bbo_snapshots_retention_sweep_secs,
+            cfg.bbo_snapshots_max_queue,
+        );
+        if !cfg.enable_bbo {
+            eprintln!(
+                "ws-sidecar warning: AI_QUANT_BBO_SNAPSHOTS_ENABLE=1 but AI_QUANT_WS_ENABLE_BBO=0; no snapshots will be written"
+            );
+        }
+    }
+
     // Remove any stale socket file.
     if Path::new(&cfg.sock_path).exists() {
         let _ = fs::remove_file(&cfg.sock_path);
@@ -2878,6 +3195,28 @@ async fn main() -> Result<()> {
     }
 
     let db = DbWorkers::new(&cfg);
+
+    let bbo_snapshots = if cfg.bbo_snapshots_enable {
+        let store = BboSnapshotStore::start(&cfg);
+        let sweep_secs = cfg.bbo_snapshots_retention_sweep_secs.max(30);
+        let sweep_tx = store.tx.clone();
+        tokio::spawn(async move {
+            // Run an initial sweep quickly to cap any existing DB.
+            let _ = sweep_tx.send(BboSnapshotMsg::Sweep).await;
+
+            let mut tick = tokio::time::interval(Duration::from_secs(sweep_secs));
+            tick.tick().await; // arm
+            loop {
+                tick.tick().await;
+                if sweep_tx.send(BboSnapshotMsg::Sweep).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Some(store)
+    } else {
+        None
+    };
 
     let state: Arc<RwLock<State>> = Arc::new(RwLock::new(State::default()));
     let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel::<WsCommand>();
@@ -2915,8 +3254,9 @@ async fn main() -> Result<()> {
         let cfg2 = cfg.clone();
         let state2 = state.clone();
         let db2 = db.clone();
+        let bbo_snapshots2 = bbo_snapshots.clone();
         tokio::spawn(async move {
-            let _ = ws_loop(cfg2, state2, db2, cmd_rx).await;
+            let _ = ws_loop(cfg2, state2, db2, bbo_snapshots2, cmd_rx).await;
         });
     }
 
