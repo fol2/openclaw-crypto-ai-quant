@@ -2113,8 +2113,7 @@ fn cmd_dump_indicators(args: DumpArgs) -> Result<(), Box<dyn std::error::Error>>
         args.config,
     );
 
-    let use_stoch_rsi = cfg.filters.use_stoch_rsi_filter;
-    let mut bank = bt_core::indicators::IndicatorBank::new(&cfg.indicators, use_stoch_rsi);
+    let mut bank = make_indicator_bank(&cfg);
 
     let mut writer: Box<dyn Write> = if let Some(ref path) = args.output {
         Box::new(std::io::BufWriter::new(std::fs::File::create(path)?))
@@ -2181,6 +2180,14 @@ fn cmd_dump_indicators(args: DumpArgs) -> Result<(), Box<dyn std::error::Error>>
     }
 
     Ok(())
+}
+
+fn make_indicator_bank(cfg: &bt_core::config::StrategyConfig) -> bt_core::indicators::IndicatorBank {
+    bt_core::indicators::IndicatorBank::new_with_ave_window(
+        &cfg.indicators,
+        cfg.filters.use_stoch_rsi_filter,
+        cfg.effective_ave_avg_atr_window(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2359,7 +2366,7 @@ mod tests {
     use super::*;
 
     use bt_core::candle::{CandleData, OhlcvBar};
-    use bt_core::config::Confidence;
+    use bt_core::config::{Confidence, StrategyConfig};
     use bt_core::position::TradeRecord;
     use std::collections::HashSet;
 
@@ -2387,6 +2394,40 @@ mod tests {
             leverage: 1.0,
             margin_used: 0.0,
         }
+    }
+
+    #[test]
+    fn test_dump_indicators_bank_uses_threshold_ave_window() {
+        let mut cfg = StrategyConfig::default();
+        cfg.indicators.ave_avg_atr_window = 2;
+        cfg.thresholds.entry.ave_avg_atr_window = 4;
+
+        let mut bank = make_indicator_bank(&cfg);
+        for i in 0..3 {
+            bank.update(&OhlcvBar {
+                t: i * 60_000,
+                t_close: i * 60_000 + 59_999,
+                o: 100.0 + i as f64,
+                h: 101.0 + i as f64,
+                l: 99.0 + i as f64,
+                c: 100.5 + i as f64,
+                v: 10_000.0,
+                n: 100,
+            });
+        }
+        assert!(!bank.avg_atr.full());
+
+        bank.update(&OhlcvBar {
+            t: 3 * 60_000,
+            t_close: 3 * 60_000 + 59_999,
+            o: 103.0,
+            h: 104.0,
+            l: 102.0,
+            c: 103.5,
+            v: 10_000.0,
+            n: 100,
+        });
+        assert!(bank.avg_atr.full());
     }
 
     #[test]
