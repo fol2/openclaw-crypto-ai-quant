@@ -7,6 +7,7 @@ Wants=network-online.target openclaw-ai-quant-ws-sidecar-v8.service
 Type=simple
 WorkingDirectory=$PROJECT_DIR
 EnvironmentFile=-%h/.config/openclaw/ai-quant-monitor-v8.env
+Environment=AI_QUANT_WS_SIDECAR_SOCK=%t/openclaw-ai-quant-ws-v8.sock
 ExecStart=$PROJECT_DIR/.venv/bin/python3 -u monitor/server.py
 Restart=always
 RestartSec=5
@@ -14,4 +15,3 @@ KillMode=process
 
 [Install]
 WantedBy=default.target
-

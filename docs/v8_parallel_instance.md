@@ -64,7 +64,7 @@ Then edit:
 
 - `~/.config/openclaw/ai-quant-universe-v8.env` (symbols / intervals)
 - `~/.config/openclaw/ai-quant-v8.env` (Discord channel, kill-switch file, retention)
-- `~/.config/openclaw/ai-quant-monitor-v8.env` (port + v8 WS socket)
+- `~/.config/openclaw/ai-quant-monitor-v8.env` (bind + port)
 
 ## 4) Install v8 systemd User Units
 
@@ -113,4 +113,3 @@ Artifacts:
 - `artifacts/YYYY-MM-DD/run_<run_id>/`
 - `artifacts/registry/registry.sqlite`
 - `artifacts/deployments/paper/.../deploy_event.json`
-
