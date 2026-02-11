@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+STRICT_MODE="${AQC_GPU_PARITY_STRICT:-0}"
+
+# On WSL2, libcuda is often exposed via this path.
+if [[ -d /usr/lib/wsl/lib ]]; then
+    export LD_LIBRARY_PATH="/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}"
+fi
+
+cd "${ROOT_DIR}/backtester"
+echo "[gpu-parity-gate] Running tiny GPU runtime parity fixture (strict=${STRICT_MODE})..."
+
+LOG_FILE="$(mktemp)"
+trap 'rm -f "${LOG_FILE}"' EXIT
+
+if ! cargo test -p bt-gpu --test gpu_runtime_parity_tiny_fixture -- --nocapture 2>&1 | tee "${LOG_FILE}"; then
+    echo "[gpu-parity-gate] FAIL: tiny GPU runtime parity fixture failed."
+    exit 1
+fi
+
+if grep -Fq "[gpu-parity] SKIP: CUDA unavailable" "${LOG_FILE}"; then
+    echo "::warning::[gpu-parity-gate] CUDA unavailable on this runner; GPU parity assertions were not enforced."
+    case "${STRICT_MODE}" in
+        1 | true | TRUE | yes | YES | on | ON)
+            echo "[gpu-parity-gate] STRICT MODE: AQC_GPU_PARITY_STRICT=${STRICT_MODE}; failing because CUDA is unavailable."
+            exit 1
+            ;;
+        *)
+            echo "[gpu-parity-gate] Non-strict mode: continuing with warning only."
+            ;;
+    esac
+    exit 0
+fi
+
+echo "[gpu-parity-gate] PASS: GPU parity assertions executed."

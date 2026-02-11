@@ -1,8 +1,8 @@
 # GPU/CPU Parity Fixtures
 
-This directory contains small, fixed fixtures used to track GPU sweep vs CPU replay drift in a CPU-only test.
+This directory contains small, fixed fixtures used to track GPU sweep vs CPU replay drift.
 
-The expected GPU output is generated on a CUDA machine and committed, so CI does not require a GPU.
+The expected GPU output is generated on a CUDA machine and committed.
 
 ## What the parity test checks
 - Loads `candles_1h.json` and runs a single CPU simulation using `strategy.yaml`.
@@ -41,3 +41,15 @@ cd backtester
 cargo test -p bt-core --test gpu_cpu_parity
 ```
 
+4. Run the tiny GPU runtime parity fixture (requires CUDA toolkit + runtime):
+```bash
+cd backtester
+cargo test -p bt-gpu --test gpu_runtime_parity_tiny_fixture -- --nocapture
+```
+
+## CI gate
+- `scripts/ci_gpu_parity_gate.sh` is the command-level parity gate used in CI.
+- It runs the tiny GPU fixture and emits an explicit warning when CUDA is unavailable.
+- By default (`AQC_GPU_PARITY_STRICT=0`), CUDA-unavailable runners continue with warning-only semantics.
+- Set `AQC_GPU_PARITY_STRICT=1` to fail fast when CUDA is unavailable.
+- Workflow: `.github/workflows/gpu-parity-gate.yml`.
