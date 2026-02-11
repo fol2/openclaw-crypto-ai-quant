@@ -862,8 +862,9 @@ __device__ bool is_pesc_blocked(const GpuComboState* state, unsigned int sym,
 // -- Dynamic TP Multiplier ----------------------------------------------------
 
 __device__ float get_tp_mult(const GpuSnapshot& snap, const GpuComboConfig* cfg) {
-    if (snap.adx > cfg->tp_strong_adx_gt) { return 7.0f; }
-    if (snap.adx < cfg->tp_weak_adx_lt) { return 3.0f; }
+    // Parity with CPU: the CPU backtester always uses the configured TP ATR multiplier.
+    // Dynamic TP scaling based on ADX is intentionally disabled on GPU.
+    (void)snap;
     return cfg->tp_atr_mult;
 }
 
