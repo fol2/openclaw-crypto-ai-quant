@@ -708,7 +708,8 @@ fn apply_close(state: ptr<function, GpuComboState>, sym: u32, snap: GpuSnapshot,
     if pos.pos_type == POS_EMPTY { return; }
 
     let fee_rate = get_fee_rate();
-    let slip = select(-0.5, 0.5, pos.pos_type == POS_LONG);
+    // CPU parity: LONG exit = close * (1 - 0.5/10000), SHORT exit = close * (1 + 0.5/10000).
+    let slip = select(0.5, -0.5, pos.pos_type == POS_LONG);
     let fill_price = snap.close * (1.0 + slip / 10000.0);
     let notional = pos.size * fill_price;
     let fee = notional * fee_rate;
@@ -748,7 +749,8 @@ fn apply_partial_close(state: ptr<function, GpuComboState>, sym: u32, snap: GpuS
 
     let fee_rate = get_fee_rate();
     let exit_size = pos.size * pct;
-    let slip = select(-0.5, 0.5, pos.pos_type == POS_LONG);
+    // CPU parity: LONG exit = close * (1 - 0.5/10000), SHORT exit = close * (1 + 0.5/10000).
+    let slip = select(0.5, -0.5, pos.pos_type == POS_LONG);
     let fill_price = snap.close * (1.0 + slip / 10000.0);
     let notional = exit_size * fill_price;
     let fee = notional * fee_rate;

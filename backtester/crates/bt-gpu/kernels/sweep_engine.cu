@@ -839,18 +839,8 @@ __device__ void apply_close(GpuComboState* state, unsigned int sym, const GpuSna
     const GpuPosition& pos = state->positions[sym];
     if (pos.active == POS_EMPTY) { return; }
 
-    float slip = (pos.active == POS_LONG) ? 0.5f : -0.5f;
-    // WGSL: select(-0.5, 0.5, pos.pos_type == POS_LONG) means: if LONG then 0.5 else -0.5
-    // For exit: LONG sells (slip down = negative for the seller, but this is exit slippage)
-    // Following exact WGSL: slip = select(-0.5, 0.5, POS_LONG) => LONG gets -0.5 adverse
-    // Wait, re-read: select(false_val, true_val, cond) => cond ? true_val : false_val
-    // select(-0.5, 0.5, pos.pos_type == POS_LONG) => LONG ? 0.5 : -0.5
-    // So for exit close: LONG exit has +0.5 bps slip, SHORT exit has -0.5 bps slip
-    // This matches: LONG sells at slightly lower (worse), SHORT buys at slightly higher (worse)
-    // Actually wait: fill_price = close * (1 + slip/10000). LONG exit (selling):
-    //   slip=0.5 => fill higher? That's favorable for LONG exit. Hmm.
-    // The WGSL is the source of truth; we replicate it exactly.
-    slip = (pos.active == POS_LONG) ? 0.5f : -0.5f;
+    // CPU parity: LONG exit = close * (1 - 0.5/10000), SHORT exit = close * (1 + 0.5/10000).
+    float slip = (pos.active == POS_LONG) ? -0.5f : 0.5f;
 
     float fill_price = snap.close * (1.0f + slip / 10000.0f);
     float notional = pos.size * fill_price;
@@ -888,7 +878,8 @@ __device__ void apply_partial_close(GpuComboState* state, unsigned int sym, cons
     if (pos.active == POS_EMPTY) { return; }
 
     float exit_size = pos.size * pct;
-    float slip = (pos.active == POS_LONG) ? 0.5f : -0.5f;
+    // CPU parity: LONG exit = close * (1 - 0.5/10000), SHORT exit = close * (1 + 0.5/10000).
+    float slip = (pos.active == POS_LONG) ? -0.5f : 0.5f;
     float fill_price = snap.close * (1.0f + slip / 10000.0f);
     float notional = exit_size * fill_price;
     float fee = notional * fee_rate;
