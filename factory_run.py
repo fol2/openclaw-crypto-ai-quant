@@ -995,7 +995,14 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
             str(out_json),
         ]
         if candles_db_bt:
-            replay_argv += ["--candles-db", str(candles_db_bt)]
+            replay_argv += [
+                "--candles-db",
+                str(candles_db_bt),
+                "--exit-candles-db",
+                str(candles_db_bt),
+                "--entry-candles-db",
+                str(candles_db_bt),
+            ]
         if funding_db_bt:
             replay_argv += ["--funding-db", str(funding_db_bt)]
 
@@ -1287,7 +1294,14 @@ def main(argv: list[str] | None = None) -> int:
             str(int(args.top_n)),
         ]
         if bt_candles_db:
-            sweep_argv += ["--candles-db", str(bt_candles_db)]
+            sweep_argv += [
+                "--candles-db",
+                str(bt_candles_db),
+                "--exit-candles-db",
+                str(bt_candles_db),
+                "--entry-candles-db",
+                str(bt_candles_db),
+            ]
         if bt_funding_db:
             sweep_argv += ["--funding-db", str(bt_funding_db)]
         if bool(args.gpu):
@@ -1523,7 +1537,14 @@ def main(argv: list[str] | None = None) -> int:
             str(out_json),
         ]
         if bt_candles_db:
-            replay_argv += ["--candles-db", str(bt_candles_db)]
+            replay_argv += [
+                "--candles-db",
+                str(bt_candles_db),
+                "--exit-candles-db",
+                str(bt_candles_db),
+                "--entry-candles-db",
+                str(bt_candles_db),
+            ]
         if bt_funding_db:
             replay_argv += ["--funding-db", str(bt_funding_db)]
         if trades_csv is not None:

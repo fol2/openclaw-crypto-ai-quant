@@ -150,7 +150,14 @@ def main(argv: list[str] | None = None) -> int:
             str(replay_out),
         ]
         if args.candles_db:
-            replay_argv += ["--candles-db", str(args.candles_db)]
+            replay_argv += [
+                "--candles-db",
+                str(args.candles_db),
+                "--exit-candles-db",
+                str(args.candles_db),
+                "--entry-candles-db",
+                str(args.candles_db),
+            ]
         if args.funding_db:
             replay_argv += ["--funding-db", str(args.funding_db)]
 
