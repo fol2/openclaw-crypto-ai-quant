@@ -10,7 +10,7 @@ use rayon::prelude::*;
 use serde::Deserialize;
 
 use crate::candle::{CandleData, FundingRateData};
-use crate::config::{Confidence, StrategyConfig};
+use crate::config::{Confidence, MacdMode, StrategyConfig};
 use crate::engine;
 use crate::report::{self, SimReport};
 
@@ -113,6 +113,7 @@ fn apply_one(cfg: &mut StrategyConfig, path: &str, value: f64) {
         "trade.min_atr_pct" => cfg.trade.min_atr_pct = value,
         "trade.slippage_bps" => cfg.trade.slippage_bps = value,
         "trade.min_notional_usd" => cfg.trade.min_notional_usd = value,
+        "trade.use_bbo_for_fills" => cfg.trade.use_bbo_for_fills = value != 0.0,
         "trade.bump_to_min_notional" => cfg.trade.bump_to_min_notional = value != 0.0,
         "trade.max_total_margin_pct" => cfg.trade.max_total_margin_pct = value,
         "trade.reentry_cooldown_minutes" => cfg.trade.reentry_cooldown_minutes = value as usize,
@@ -134,6 +135,7 @@ fn apply_one(cfg: &mut StrategyConfig, path: &str, value: f64) {
         "trade.rsi_exit_lb_lo_profit_low_conf" => cfg.trade.rsi_exit_lb_lo_profit_low_conf = value,
         "trade.rsi_exit_lb_hi_profit_low_conf" => cfg.trade.rsi_exit_lb_hi_profit_low_conf = value,
         "trade.tp_partial_pct" => cfg.trade.tp_partial_pct = value,
+        "trade.tp_partial_min_notional_usd" => cfg.trade.tp_partial_min_notional_usd = value,
         "trade.add_min_profit_atr" => cfg.trade.add_min_profit_atr = value,
         "trade.add_fraction_of_base_margin" => cfg.trade.add_fraction_of_base_margin = value,
         "trade.max_adds_per_symbol" => cfg.trade.max_adds_per_symbol = value as usize,
@@ -201,6 +203,13 @@ fn apply_one(cfg: &mut StrategyConfig, path: &str, value: f64) {
         "thresholds.entry.slow_drift_min_adx" => cfg.thresholds.entry.slow_drift_min_adx = value,
         "thresholds.entry.slow_drift_rsi_long_min" => cfg.thresholds.entry.slow_drift_rsi_long_min = value,
         "thresholds.entry.slow_drift_rsi_short_max" => cfg.thresholds.entry.slow_drift_rsi_short_max = value,
+        "thresholds.entry.macd_hist_entry_mode" => {
+            cfg.thresholds.entry.macd_hist_entry_mode = match value as u8 {
+                0 => MacdMode::Accel,
+                1 => MacdMode::Sign,
+                _ => MacdMode::None,
+            };
+        }
 
         // === Thresholds — ranging ===
         "thresholds.ranging.min_signals" => cfg.thresholds.ranging.min_signals = value as usize,
