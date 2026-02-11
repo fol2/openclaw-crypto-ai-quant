@@ -21,6 +21,11 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_TOP_K = (1, 3, 5, 10)
+REQUIRED_BASELINE_METRICS = (
+    "max_abs_total_pnl_diff",
+    "mean_abs_total_pnl_diff",
+    "trade_count_mismatch_count",
+)
 
 
 @dataclass(frozen=True)
@@ -315,10 +320,22 @@ def _baseline_comparison(lane_a: dict[str, Any], args: argparse.Namespace) -> di
             "improved_or_equal": current_value <= baseline_value,
         }
 
+    missing_required_metrics = [metric for metric in REQUIRED_BASELINE_METRICS if metric not in provided_non_null]
+    if missing_required_metrics:
+        return {
+            "status": "incomplete",
+            "checks": checks,
+            "required_metrics": list(REQUIRED_BASELINE_METRICS),
+            "missing_required_metrics": missing_required_metrics,
+            "all_improved_or_equal": False,
+        }
+
     improved_all = all(c["improved_or_equal"] for c in checks.values())
     return {
         "status": "provided",
         "checks": checks,
+        "required_metrics": list(REQUIRED_BASELINE_METRICS),
+        "missing_required_metrics": [],
         "all_improved_or_equal": improved_all,
     }
 
@@ -432,12 +449,26 @@ def main() -> int:
                 f"trade_count_mismatch_count={parity['trade_count_mismatch_count']} "
                 f"ranking_all_pass={ranking['all_pass']}"
             )
-        if baseline.get("status") == "provided":
-            print(f"[baseline] lane_a_all_improved_or_equal={baseline.get('all_improved_or_equal')}")
+        if baseline.get("status") != "not_provided":
+            missing_metrics = baseline.get("missing_required_metrics", [])
+            missing_display = ",".join(str(item) for item in missing_metrics) if missing_metrics else "-"
+            print(
+                f"[baseline] lane_a_status={baseline.get('status')} "
+                f"lane_a_all_improved_or_equal={baseline.get('all_improved_or_equal')} "
+                f"missing_required_metrics={missing_display}"
+            )
         print(f"[report] wrote {output_path}")
 
     all_assertions_pass = lane_a["ranking"]["all_pass"] and lane_b["ranking"]["all_pass"]
-    if args.fail_on_assert and not all_assertions_pass:
+    baseline_status = baseline.get("status")
+    if baseline_status == "not_provided":
+        baseline_assertion_pass = True
+    elif baseline_status == "provided":
+        baseline_assertion_pass = bool(baseline.get("all_improved_or_equal"))
+    else:
+        baseline_assertion_pass = False
+
+    if args.fail_on_assert and not (all_assertions_pass and baseline_assertion_pass):
         return 1
     return 0
 
