@@ -123,6 +123,45 @@ def _send_one_sync(*, channel: str, target: str, message: str) -> None:
     )
 
 
+def send_openclaw_message(*, channel: str, target: str, message: str, timeout_s: float = 6.0) -> None:
+    """Send a single OpenClaw message synchronously.
+
+    This keeps compatibility with older call sites that previously imported
+    `send_openclaw_message` from a removed module.
+    """
+    msg = str(message or "").strip()
+    if not msg:
+        return
+    ch = str(channel or "").strip()
+    tgt = str(target or "").strip()
+    if not ch or not tgt:
+        return
+
+    try:
+        timeout = float(timeout_s)
+    except Exception:
+        timeout = 6.0
+    timeout = max(1.0, min(30.0, timeout))
+
+    subprocess.run(
+        [
+            "openclaw",
+            "message",
+            "send",
+            "--channel",
+            ch,
+            "--target",
+            tgt,
+            "--message",
+            msg,
+        ],
+        capture_output=True,
+        check=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
 _ALERT_QUEUE_LOCK = threading.RLock()
 _ALERT_QUEUE_MAX = max(10, min(5000, _env_int("AI_QUANT_ALERT_QUEUE_MAX", 200)))
 _ALERT_QUEUE: queue.Queue[tuple[str, str, str]] = queue.Queue(maxsize=_ALERT_QUEUE_MAX)

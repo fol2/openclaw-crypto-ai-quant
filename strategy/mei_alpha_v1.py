@@ -6,13 +6,13 @@ import copy
 import json
 import os
 import sqlite3
-import subprocess
 import tomllib
 import yaml
 from dataclasses import dataclass
 
 import exchange.ws as hyperliquid_ws
 import exchange.meta as hyperliquid_meta
+from engine.alerting import send_openclaw_message
 
 
 def _json_default(o):
@@ -1455,8 +1455,25 @@ class PaperTrader:
         if not notify:
             return trade_id
 
-        # Calculate Equity (mark-to-market)
+        # Calculate equity + realised/unrealised breakdown for notification display.
         equity = self.get_live_balance()
+        cash_realised = float(self.balance or 0.0)
+        unrealised = float(equity or 0.0) - cash_realised
+        try:
+            baseline_usd = float(PAPER_BALANCE)
+        except Exception:
+            baseline_usd = 0.0
+        if baseline_usd <= 1e-9:
+            baseline_usd = 0.0
+
+        def _pct(v: float, *, is_return: bool = False) -> str:
+            if baseline_usd <= 0:
+                return "n/a"
+            if is_return:
+                p = ((float(v) - baseline_usd) / baseline_usd) * 100.0
+            else:
+                p = (float(v) / baseline_usd) * 100.0
+            return f"{p:+.2f}%"
         
         # --- DIRECT NOTIFICATION (CANTONESE) ---
         action_map = {
@@ -1490,7 +1507,13 @@ class PaperTrader:
         if "Signal Flip" in reason:
             reason_hk = reason.replace("Signal Flip", "信號反轉")
 
-        msg = f"{emoji} **紙上交易：{action_hk}** | {symbol}\n"
+        discord_label = str(
+            os.getenv("AI_QUANT_DISCORD_LABEL", "") or os.getenv("AI_QUANT_INSTANCE_TAG", "")
+        ).strip()
+        header = f"{emoji} **紙上交易：{action_hk}** | {symbol}"
+        if discord_label:
+            header = f"[{discord_label}] {header}"
+        msg = f"{header}\n"
         msg += f"• 類型: `{type}`\n"
         msg += f"• 價格: `${price:,.4f}`\n"
         msg += f"• 規模: `{size:.4f}` (`${notional:,.2f} USD`)\n"
@@ -1516,8 +1539,9 @@ class PaperTrader:
         if action in {"CLOSE", "REDUCE"}: 
             msg += f"• 損益 (PnL): **${pnl:,.2f}**\n"
         
-        msg += f"• **淨值 (Equity, est.):** `${equity:,.2f}`\n"
-        msg += f"• **現金 (Cash, realized):** `${self.balance:,.2f}`"
+        msg += f"• **淨值 (Equity, est.):** `${equity:,.2f}` ({_pct(float(equity or 0.0), is_return=True)})\n"
+        msg += f"• **未實現 (Unrealised):** `${unrealised:,.2f}` ({_pct(float(unrealised), is_return=False)})\n"
+        msg += f"• **現金 (Cash, realised):** `${cash_realised:,.2f}` ({_pct(float(cash_realised), is_return=True)})"
 
         try:
             try:
@@ -1525,12 +1549,12 @@ class PaperTrader:
             except Exception:
                 timeout_s = 6.0
             timeout_s = max(1.0, min(30.0, timeout_s))
-            subprocess.run([
-                "openclaw", "message", "send", 
-                "--channel", "discord", 
-                "--target", DISCORD_CHANNEL, 
-                "--message", msg
-            ], capture_output=True, check=True, timeout=timeout_s)
+            send_openclaw_message(
+                channel="discord",
+                target=DISCORD_CHANNEL,
+                message=msg,
+                timeout_s=timeout_s,
+            )
         except Exception as e:
             print(f"Failed to send Discord message: {e}")
         return trade_id
