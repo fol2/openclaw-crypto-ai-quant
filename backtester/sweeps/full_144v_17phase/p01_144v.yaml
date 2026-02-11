@@ -1,0 +1,45 @@
+# p01_144v
+# Auto-generated from full_144v coverage.
+# Values are reduced for phase-grid practicality.
+initial_balance: 10000.0
+lookback: 200
+axes:
+- path: indicators.adx_window
+  values:
+  - 8.0
+  - 14.0
+  - 18.0
+- path: market_regime.enable_regime_filter
+  values:
+  - 0.0
+  - 1.0
+- path: thresholds.entry.ave_avg_atr_window
+  values:
+  - 30.0
+  - 60.0
+  - 80.0
+- path: thresholds.entry.slow_drift_rsi_long_min
+  values:
+  - 35.0
+  - 65.0
+- path: trade.adx_sizing_full_adx
+  values:
+  - 28.0
+  - 52.0
+- path: trade.exit_cooldown_s
+  values:
+  - 10.0
+  - 20.0
+- path: trade.min_atr_pct
+  values:
+  - 0.0
+  - 0.003
+  - 0.005
+- path: trade.reverse_entry_signal
+  values:
+  - 0.0
+  - 1.0
+- path: trade.vol_scalar_min
+  values:
+  - 0.35
+  - 0.65
