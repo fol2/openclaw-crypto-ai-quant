@@ -137,7 +137,7 @@ struct __align__(16) GpuComboConfig {
     unsigned int enable_vol_buffered_trailing;  float tsme_min_profit_atr;
     unsigned int tsme_require_adx_slope_negative;  unsigned int _p7;
     float min_atr_pct;  unsigned int reverse_entry_signal;  unsigned int block_exits_on_extreme_dev;
-    float glitch_price_dev_pct;  float glitch_atr_mult;  unsigned int _p8;
+    float glitch_price_dev_pct;  float glitch_atr_mult;  unsigned int ave_enabled;
     unsigned int max_open_positions;  unsigned int max_entry_orders_per_loop;
     unsigned int enable_slow_drift_entries;  unsigned int slow_drift_require_macd_sign;
     unsigned int enable_ranging_filter;  unsigned int enable_anomaly_filter;  unsigned int enable_extension_filter;
@@ -264,6 +264,7 @@ struct GateResult {
     bool vol_confirm;
     bool bullish_alignment;
     bool bearish_alignment;
+    float effective_min_adx;
 };
 
 __device__ GateResult check_gates(const GpuSnapshot& snap, const GpuComboConfig* cfg, float ema_slope) {
@@ -275,6 +276,7 @@ __device__ GateResult check_gates(const GpuSnapshot& snap, const GpuComboConfig*
     result.vol_confirm = true;
     result.bullish_alignment = snap.ema_fast > snap.ema_slow;
     result.bearish_alignment = snap.ema_fast < snap.ema_slow;
+    result.effective_min_adx = cfg->min_adx;
 
     // Ranging filter (vote system simplified: ADX + BB width)
     if (cfg->enable_ranging_filter != 0u) {
@@ -307,12 +309,12 @@ __device__ GateResult check_gates(const GpuSnapshot& snap, const GpuComboConfig*
 
     // Volume confirmation
     if (cfg->require_volume_confirmation != 0u) {
-        if (snap.vol_sma > 0.0f) {
-            bool vol_ok = snap.volume > snap.vol_sma;
-            if (cfg->vol_confirm_include_prev != 0u) {
-                vol_ok = vol_ok || (snap.volume > snap.vol_sma * 0.8f);
-            }
-            result.vol_confirm = vol_ok;
+        bool vol_ok = snap.volume > snap.vol_sma;
+        bool vol_trend = snap.vol_trend != 0u;
+        if (cfg->vol_confirm_include_prev != 0u) {
+            result.vol_confirm = vol_ok || vol_trend;
+        } else {
+            result.vol_confirm = vol_ok && vol_trend;
         }
     }
 
@@ -330,8 +332,20 @@ __device__ GateResult check_gates(const GpuSnapshot& snap, const GpuComboConfig*
         result.bearish_alignment = result.bearish_alignment && (snap.ema_slow < snap.ema_macro);
     }
 
+    float effective_min_adx = cfg->min_adx;
+    if (snap.adx_slope > 0.5f) {
+        effective_min_adx = fminf(effective_min_adx, 25.0f);
+    }
+    if (cfg->ave_enabled != 0u && snap.avg_atr > 0.0f) {
+        float atr_ratio = snap.atr / snap.avg_atr;
+        if (atr_ratio > cfg->ave_atr_ratio_gt) {
+            effective_min_adx *= fmaxf(cfg->ave_adx_mult, 1.0f);
+        }
+    }
+    result.effective_min_adx = effective_min_adx;
+
     result.all_gates_pass =
-        snap.adx >= cfg->min_adx
+        snap.adx > result.effective_min_adx
         && !result.is_ranging
         && !result.is_anomaly
         && !result.is_extended
@@ -377,7 +391,7 @@ __device__ SignalResult generate_signal(const GpuSnapshot& snap, const GpuComboC
     if (gates.all_gates_pass) {
         unsigned int signal = SIG_NEUTRAL;
         unsigned int confidence = CONF_MEDIUM;
-        float adx_threshold = snap.adx;
+        float adx_threshold = gates.effective_min_adx;
 
         if (gates.bullish_alignment && snap.close > snap.ema_fast && btc_ok_long) {
             signal = SIG_BUY;
@@ -658,45 +672,65 @@ __device__ unsigned int check_tp(const GpuPosition& pos, const GpuSnapshot& snap
 
 __device__ bool check_smart_exits(const GpuPosition& pos, const GpuSnapshot& snap,
                                   const GpuComboConfig* cfg, float p_atr) {
-    // 1. Trend breakdown (EMA cross)
-    if (pos.active == POS_LONG && snap.ema_fast < snap.ema_slow) { return true; }
-    if (pos.active == POS_SHORT && snap.ema_fast > snap.ema_slow) { return true; }
+    // 1. Trend breakdown (EMA cross) with weak-cross suppression.
+    float ema_dev = 0.0f;
+    if (snap.ema_slow > 0.0f) {
+        ema_dev = fabsf(snap.ema_fast - snap.ema_slow) / snap.ema_slow;
+    }
+    bool is_weak_cross = ema_dev < 0.001f && snap.adx > 25.0f;
+    bool ema_cross_exit = false;
+    if (pos.active == POS_LONG) {
+        ema_cross_exit = snap.ema_fast < snap.ema_slow && !is_weak_cross;
+    } else if (pos.active == POS_SHORT) {
+        ema_cross_exit = snap.ema_fast > snap.ema_slow && !is_weak_cross;
+    }
 
     // 2. Trend exhaustion (ADX < threshold)
-    float adx_thresh = cfg->smart_exit_adx_exhaustion_lt;
-    if (pos.confidence == CONF_LOW && cfg->smart_exit_adx_exhaustion_lt_low_conf > 0.0f) {
-        adx_thresh = cfg->smart_exit_adx_exhaustion_lt_low_conf;
+    float adx_exhaustion_lt = cfg->smart_exit_adx_exhaustion_lt;
+    if (pos.entry_adx_threshold > 0.0f) {
+        adx_exhaustion_lt = pos.entry_adx_threshold;
+    } else if (pos.confidence == CONF_LOW && cfg->smart_exit_adx_exhaustion_lt_low_conf > 0.0f) {
+        adx_exhaustion_lt = cfg->smart_exit_adx_exhaustion_lt_low_conf;
     }
-    if (pos.entry_adx_threshold > 0.0f && snap.adx < (pos.entry_adx_threshold * 0.5f)) {
-        if (snap.adx < adx_thresh) { return true; }
-    }
+    adx_exhaustion_lt = fmaxf(adx_exhaustion_lt, 0.0f);
+    bool exhausted = adx_exhaustion_lt > 0.0f && snap.adx < adx_exhaustion_lt;
+    if (ema_cross_exit || exhausted) { return true; }
 
-    // 3. EMA macro breakdown
-    if (pos.active == POS_LONG && snap.close < snap.ema_macro) { return true; }
-    if (pos.active == POS_SHORT && snap.close > snap.ema_macro) { return true; }
+    // 3. EMA macro breakdown (CPU parity: gated by require_macro_alignment)
+    if (cfg->require_macro_alignment != 0u && snap.ema_macro > 0.0f) {
+        if (pos.active == POS_LONG && snap.close < snap.ema_macro) { return true; }
+        if (pos.active == POS_SHORT && snap.close > snap.ema_macro) { return true; }
+    }
 
     // 5. TSME (Trend Saturation Momentum Exit)
     if (snap.adx > 50.0f && p_atr >= cfg->tsme_min_profit_atr) {
-        bool macd_contracting = fabsf(snap.macd_hist) < fabsf(snap.prev_macd_hist);
         bool adx_declining = true;
         if (cfg->tsme_require_adx_slope_negative != 0u) {
             adx_declining = snap.adx_slope < 0.0f;
         }
-        if (macd_contracting && adx_declining) { return true; }
+        bool is_exhausted = false;
+        if (pos.active == POS_LONG) {
+            is_exhausted = snap.macd_hist < snap.prev_macd_hist
+                && snap.prev_macd_hist < snap.prev2_macd_hist;
+        } else if (pos.active == POS_SHORT) {
+            is_exhausted = snap.macd_hist > snap.prev_macd_hist
+                && snap.prev_macd_hist > snap.prev2_macd_hist;
+        }
+        if (is_exhausted && adx_declining) { return true; }
     }
 
     // 6. MMDE (4-bar MACD divergence)
-    if (pos.active == POS_LONG) {
-        if (snap.macd_hist < snap.prev_macd_hist
-            && snap.prev_macd_hist < snap.prev2_macd_hist
-            && snap.prev2_macd_hist < snap.prev3_macd_hist
-            && p_atr > 0.5f) { return true; }
-    }
-    if (pos.active == POS_SHORT) {
-        if (snap.macd_hist > snap.prev_macd_hist
-            && snap.prev_macd_hist > snap.prev2_macd_hist
-            && snap.prev2_macd_hist > snap.prev3_macd_hist
-            && p_atr > 0.5f) { return true; }
+    if (p_atr > 1.5f && snap.adx > 35.0f) {
+        if (pos.active == POS_LONG) {
+            if (snap.macd_hist < snap.prev_macd_hist
+                && snap.prev_macd_hist < snap.prev2_macd_hist
+                && snap.prev2_macd_hist < snap.prev3_macd_hist) { return true; }
+        }
+        if (pos.active == POS_SHORT) {
+            if (snap.macd_hist > snap.prev_macd_hist
+                && snap.prev_macd_hist > snap.prev2_macd_hist
+                && snap.prev2_macd_hist > snap.prev3_macd_hist) { return true; }
+        }
     }
 
     // 7. RSI overextension

@@ -114,8 +114,8 @@ struct GpuComboConfig {
     enable_vol_buffered_trailing: u32, tsme_min_profit_atr: f32,
     tsme_require_adx_slope_negative: u32, _p7: u32,
     min_atr_pct: f32, reverse_entry_signal: u32, block_exits_on_extreme_dev: u32,
-    glitch_price_dev_pct: f32, glitch_atr_mult: f32, _p8: u32,
-    max_open_positions: u32, max_entry_orders_per_loop: u32, _p9: u32, _p10: u32,
+    glitch_price_dev_pct: f32, glitch_atr_mult: f32, ave_enabled: u32,
+    max_open_positions: u32, max_entry_orders_per_loop: u32, enable_slow_drift_entries: u32, slow_drift_require_macd_sign: u32,
     enable_ranging_filter: u32, enable_anomaly_filter: u32, enable_extension_filter: u32,
     require_adx_rising: u32, adx_rising_saturation: f32, require_volume_confirmation: u32,
     vol_confirm_include_prev: u32, use_stoch_rsi_filter: u32,
@@ -134,7 +134,7 @@ struct GpuComboConfig {
     slow_drift_rsi_long_min: f32, slow_drift_rsi_short_max: f32,
     ranging_adx_lt: f32, ranging_bb_width_ratio_lt: f32,
     anomaly_bb_width_ratio_gt: f32, slow_drift_ranging_slope_override: f32,
-    _p11: u32, _p12: u32,
+    snapshot_offset: u32, breadth_offset: u32,
     tp_strong_adx_gt: f32, tp_weak_adx_lt: f32,
 }
 
@@ -242,10 +242,29 @@ fn apply_regime_filter(signal: u32, cfg: ptr<function, GpuComboConfig>, breadth_
 
 // ── Gate Checks ─────────────────────────────────────────────────────────────
 
+struct GateResult {
+    all_gates_pass: bool,
+    effective_min_adx: f32,
+}
+
 fn check_gates(snap: GpuSnapshot, cfg: ptr<function, GpuComboConfig>,
-               btc_bull: u32, ema_slope: f32) -> bool {
-    // ADX minimum
-    if snap.adx < (*cfg).min_adx { return false; }
+               btc_bull: u32, ema_slope: f32) -> GateResult {
+    var result = GateResult(false, (*cfg).min_adx);
+
+    var effective_min_adx = (*cfg).min_adx;
+    if snap.adx_slope > 0.5 {
+        effective_min_adx = min(effective_min_adx, 25.0);
+    }
+    if (*cfg).ave_enabled != 0u && snap.avg_atr > 0.0 {
+        let atr_ratio = snap.atr / snap.avg_atr;
+        if atr_ratio > (*cfg).ave_atr_ratio_gt {
+            effective_min_adx *= max((*cfg).ave_adx_mult, 1.0);
+        }
+    }
+    result.effective_min_adx = effective_min_adx;
+
+    // ADX minimum (strict > for CPU parity)
+    if snap.adx <= effective_min_adx { return result; }
 
     // Ranging filter (vote system simplified: ADX + BB width)
     if (*cfg).enable_ranging_filter != 0u {
@@ -256,39 +275,41 @@ fn check_gates(snap: GpuSnapshot, cfg: ptr<function, GpuComboConfig>,
         if votes >= 2u {
             // Check slow-drift ranging override
             if abs(ema_slope) < (*cfg).slow_drift_ranging_slope_override {
-                return false;
+                return result;
             }
         }
     }
 
     // Anomaly filter
     if (*cfg).enable_anomaly_filter != 0u {
-        if snap.bb_width_ratio > (*cfg).anomaly_bb_width_ratio_gt { return false; }
+        if snap.bb_width_ratio > (*cfg).anomaly_bb_width_ratio_gt { return result; }
     }
 
     // Extension filter
     if (*cfg).enable_extension_filter != 0u {
         if snap.close > 0.0 && snap.ema_fast > 0.0 {
             let dist = abs(snap.close - snap.ema_fast) / snap.ema_fast;
-            if dist > (*cfg).max_dist_ema_fast { return false; }
+            if dist > (*cfg).max_dist_ema_fast { return result; }
         }
     }
 
     // Volume confirmation
     if (*cfg).require_volume_confirmation != 0u {
-        if snap.vol_sma > 0.0 {
-            var vol_ok = snap.volume > snap.vol_sma;
-            if (*cfg).vol_confirm_include_prev != 0u {
-                vol_ok = vol_ok || (snap.volume > snap.vol_sma * 0.8);
-            }
-            if !vol_ok { return false; }
+        let vol_ok = snap.volume > snap.vol_sma;
+        let vol_trend = snap.vol_trend != 0u;
+        var vol_confirm = false;
+        if (*cfg).vol_confirm_include_prev != 0u {
+            vol_confirm = vol_ok || vol_trend;
+        } else {
+            vol_confirm = vol_ok && vol_trend;
         }
+        if !vol_confirm { return result; }
     }
 
     // ADX rising (trend direction)
     if (*cfg).require_adx_rising != 0u {
         if snap.adx < (*cfg).adx_rising_saturation {
-            if snap.adx_slope <= 0.0 { return false; }
+            if snap.adx_slope <= 0.0 { return result; }
         }
     }
 
@@ -299,24 +320,25 @@ fn check_gates(snap: GpuSnapshot, cfg: ptr<function, GpuComboConfig>,
 
     // Macro EMA alignment
     if (*cfg).require_macro_alignment != 0u {
-        if snap.close < snap.ema_macro { return false; }
+        if snap.close < snap.ema_macro { return result; }
     }
 
-    return true;
+    result.all_gates_pass = true;
+    return result;
 }
 
 // ── Signal Generation ───────────────────────────────────────────────────────
 
 fn generate_signal(snap: GpuSnapshot, cfg: ptr<function, GpuComboConfig>,
-                   gates_pass: bool, ema_slope: f32) -> vec3<u32> {
+                   gates: GateResult, ema_slope: f32) -> vec3<u32> {
     // Returns (signal, confidence, entry_adx_threshold)
     // encoded in vec3<u32>
 
     // Mode 1: Standard trend
-    if gates_pass {
+    if gates.all_gates_pass {
         var signal = SIG_NEUTRAL;
         var confidence = CONF_MEDIUM;
-        let adx_threshold = snap.adx;
+        let adx_threshold = gates.effective_min_adx;
 
         // EMA crossover direction
         let ema_bullish = snap.ema_fast > snap.ema_slow;
@@ -379,7 +401,7 @@ fn generate_signal(snap: GpuSnapshot, cfg: ptr<function, GpuComboConfig>,
             if snap.rsi <= (*cfg).slow_drift_rsi_short_max { signal = SIG_SELL; }
         }
         if signal != SIG_NEUTRAL {
-            return vec3<u32>(signal, CONF_LOW, bitcast<u32>(snap.adx));
+            return vec3<u32>(signal, CONF_LOW, bitcast<u32>((*cfg).slow_drift_min_adx));
         }
     }
 
@@ -548,45 +570,65 @@ fn check_tp(pos: GpuPosition, snap: GpuSnapshot, cfg: ptr<function, GpuComboConf
 
 fn check_smart_exits(pos: GpuPosition, snap: GpuSnapshot, cfg: ptr<function, GpuComboConfig>,
                      p_atr: f32) -> bool {
-    // 1. Trend breakdown (EMA cross)
-    if pos.pos_type == POS_LONG && snap.ema_fast < snap.ema_slow { return true; }
-    if pos.pos_type == POS_SHORT && snap.ema_fast > snap.ema_slow { return true; }
+    // 1. Trend breakdown (EMA cross) with weak-cross suppression.
+    var ema_dev = 0.0;
+    if snap.ema_slow > 0.0 {
+        ema_dev = abs(snap.ema_fast - snap.ema_slow) / snap.ema_slow;
+    }
+    let is_weak_cross = ema_dev < 0.001 && snap.adx > 25.0;
+    var ema_cross_exit = false;
+    if pos.pos_type == POS_LONG {
+        ema_cross_exit = snap.ema_fast < snap.ema_slow && !is_weak_cross;
+    } else if pos.pos_type == POS_SHORT {
+        ema_cross_exit = snap.ema_fast > snap.ema_slow && !is_weak_cross;
+    }
 
     // 2. Trend exhaustion (ADX < threshold)
-    var adx_thresh = (*cfg).smart_exit_adx_exhaustion_lt;
-    if pos.confidence == CONF_LOW && (*cfg).smart_exit_adx_exhaustion_lt_low_conf > 0.0 {
-        adx_thresh = (*cfg).smart_exit_adx_exhaustion_lt_low_conf;
+    var adx_exhaustion_lt = (*cfg).smart_exit_adx_exhaustion_lt;
+    if pos.entry_adx_threshold > 0.0 {
+        adx_exhaustion_lt = pos.entry_adx_threshold;
+    } else if pos.confidence == CONF_LOW && (*cfg).smart_exit_adx_exhaustion_lt_low_conf > 0.0 {
+        adx_exhaustion_lt = (*cfg).smart_exit_adx_exhaustion_lt_low_conf;
     }
-    if pos.entry_adx_threshold > 0.0 && snap.adx < (pos.entry_adx_threshold * 0.5) {
-        if snap.adx < adx_thresh { return true; }
-    }
+    adx_exhaustion_lt = max(adx_exhaustion_lt, 0.0);
+    let exhausted = adx_exhaustion_lt > 0.0 && snap.adx < adx_exhaustion_lt;
+    if ema_cross_exit || exhausted { return true; }
 
-    // 3. EMA macro breakdown
-    if pos.pos_type == POS_LONG && snap.close < snap.ema_macro { return true; }
-    if pos.pos_type == POS_SHORT && snap.close > snap.ema_macro { return true; }
+    // 3. EMA macro breakdown (CPU parity: gated by require_macro_alignment)
+    if (*cfg).require_macro_alignment != 0u && snap.ema_macro > 0.0 {
+        if pos.pos_type == POS_LONG && snap.close < snap.ema_macro { return true; }
+        if pos.pos_type == POS_SHORT && snap.close > snap.ema_macro { return true; }
+    }
 
     // 5. TSME (Trend Saturation Momentum Exit)
     if snap.adx > 50.0 && p_atr >= (*cfg).tsme_min_profit_atr {
-        let macd_contracting = abs(snap.macd_hist) < abs(snap.prev_macd_hist);
         var adx_declining = true;
         if (*cfg).tsme_require_adx_slope_negative != 0u {
             adx_declining = snap.adx_slope < 0.0;
         }
-        if macd_contracting && adx_declining { return true; }
+        var is_exhausted = false;
+        if pos.pos_type == POS_LONG {
+            is_exhausted = snap.macd_hist < snap.prev_macd_hist
+                && snap.prev_macd_hist < snap.prev2_macd_hist;
+        } else if pos.pos_type == POS_SHORT {
+            is_exhausted = snap.macd_hist > snap.prev_macd_hist
+                && snap.prev_macd_hist > snap.prev2_macd_hist;
+        }
+        if is_exhausted && adx_declining { return true; }
     }
 
     // 6. MMDE (4-bar MACD divergence)
-    if pos.pos_type == POS_LONG {
-        if snap.macd_hist < snap.prev_macd_hist
-           && snap.prev_macd_hist < snap.prev2_macd_hist
-           && snap.prev2_macd_hist < snap.prev3_macd_hist
-           && p_atr > 0.5 { return true; }
-    }
-    if pos.pos_type == POS_SHORT {
-        if snap.macd_hist > snap.prev_macd_hist
-           && snap.prev_macd_hist > snap.prev2_macd_hist
-           && snap.prev2_macd_hist > snap.prev3_macd_hist
-           && p_atr > 0.5 { return true; }
+    if p_atr > 1.5 && snap.adx > 35.0 {
+        if pos.pos_type == POS_LONG {
+            if snap.macd_hist < snap.prev_macd_hist
+               && snap.prev_macd_hist < snap.prev2_macd_hist
+               && snap.prev2_macd_hist < snap.prev3_macd_hist { return true; }
+        }
+        if pos.pos_type == POS_SHORT {
+            if snap.macd_hist > snap.prev_macd_hist
+               && snap.prev_macd_hist > snap.prev2_macd_hist
+               && snap.prev2_macd_hist > snap.prev3_macd_hist { return true; }
+        }
     }
 
     // 7. RSI overextension
@@ -903,10 +945,10 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
             if pos.pos_type != POS_EMPTY { continue; }
 
             // Check gates
-            let gates_ok = check_gates(snap, &cfg, btc_bull, snap.ema_slow_slope_pct);
+            let gates = check_gates(snap, &cfg, btc_bull, snap.ema_slow_slope_pct);
 
             // Generate signal
-            let sig_result = generate_signal(snap, &cfg, gates_ok, snap.ema_slow_slope_pct);
+            let sig_result = generate_signal(snap, &cfg, gates, snap.ema_slow_slope_pct);
             var signal = sig_result.x;
             let confidence = sig_result.y;
             let entry_adx_thresh = bitcast<f32>(sig_result.z);

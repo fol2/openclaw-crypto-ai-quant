@@ -301,7 +301,7 @@ pub struct GpuComboConfig {
     pub block_exits_on_extreme_dev: u32,
     pub glitch_price_dev_pct: f32,
     pub glitch_atr_mult: f32,
-    pub _pad8: u32,
+    pub ave_enabled: u32,
 
     // Rate limits + entry flags [78-81]
     pub max_open_positions: u32,
@@ -595,7 +595,7 @@ impl GpuComboConfig {
             block_exits_on_extreme_dev: tc.block_exits_on_extreme_dev as u32,
             glitch_price_dev_pct: tc.glitch_price_dev_pct as f32,
             glitch_atr_mult: tc.glitch_atr_mult as f32,
-            _pad8: 0,
+            ave_enabled: et.ave_enabled as u32,
 
             max_open_positions: tc.max_open_positions as u32,
             max_entry_orders_per_loop: tc.max_entry_orders_per_loop as u32,
