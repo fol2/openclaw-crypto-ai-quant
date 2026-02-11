@@ -75,6 +75,10 @@ struct EntryCandidate {
 struct SimState {
     balance: f64,
     positions: FxHashMap<String, Position>,
+    /// Per-symbol successful entry/add timestamps (ms) for entry cooldown.
+    last_entry_attempt_ms: FxHashMap<String, i64>,
+    /// Per-symbol successful exit timestamps (ms) for exit cooldown.
+    last_exit_attempt_ms: FxHashMap<String, i64>,
     indicators: FxHashMap<String, IndicatorBank>,
     /// EMA slow history per symbol (for slow-drift slope computation).
     ema_slow_history: FxHashMap<String, Vec<f64>>,
@@ -149,6 +153,8 @@ pub fn run_simulation(
     let mut state = SimState {
         balance: init_balance,
         positions: init_positions,
+        last_entry_attempt_ms: FxHashMap::default(),
+        last_exit_attempt_ms: FxHashMap::default(),
         indicators: FxHashMap::default(),
         ema_slow_history: FxHashMap::default(),
         bar_counts: FxHashMap::default(),
@@ -161,9 +167,10 @@ pub fn run_simulation(
 
     // Pre-create indicator banks for every symbol
     for sym in candles.keys() {
-        state
-            .indicators
-            .insert(sym.clone(), IndicatorBank::new(&cfg.indicators, use_stoch_rsi));
+        state.indicators.insert(
+            sym.clone(),
+            IndicatorBank::new(&cfg.indicators, use_stoch_rsi),
+        );
     }
 
     // Build exit candle index: symbol → sorted Vec<(timestamp_ms, index)>
@@ -171,7 +178,8 @@ pub fn run_simulation(
     let exit_bar_index: Option<FxHashMap<String, Vec<(i64, usize)>>> = exit_candles.map(|ec| {
         let mut idx: FxHashMap<String, Vec<(i64, usize)>> = FxHashMap::default();
         for (sym, bars) in ec {
-            let entries: Vec<(i64, usize)> = bars.iter().enumerate().map(|(i, b)| (b.t, i)).collect();
+            let entries: Vec<(i64, usize)> =
+                bars.iter().enumerate().map(|(i, b)| (b.t, i)).collect();
             idx.insert(sym.clone(), entries);
         }
         idx
@@ -181,7 +189,8 @@ pub fn run_simulation(
     let entry_bar_index: Option<FxHashMap<String, Vec<(i64, usize)>>> = entry_candles.map(|ec| {
         let mut idx: FxHashMap<String, Vec<(i64, usize)>> = FxHashMap::default();
         for (sym, bars) in ec {
-            let entries: Vec<(i64, usize)> = bars.iter().enumerate().map(|(i, b)| (b.t, i)).collect();
+            let entries: Vec<(i64, usize)> =
+                bars.iter().enumerate().map(|(i, b)| (b.t, i)).collect();
             idx.insert(sym.clone(), entries);
         }
         idx
@@ -240,10 +249,14 @@ pub fn run_simulation(
             // Skip exits and entries for bars outside [from_ts, to_ts].
             // Indicators are already updated above (needed for warmup).
             if let Some(ft) = from_ts {
-                if ts < ft { continue; }
+                if ts < ft {
+                    continue;
+                }
             }
             if let Some(tt) = to_ts {
-                if ts > tt { continue; }
+                if ts > tt {
+                    continue;
+                }
             }
 
             // ── Exit check for existing position ────────────────────────
@@ -251,18 +264,14 @@ pub fn run_simulation(
             // monitored from the very first bar (without init-state,
             // positions are empty during warmup so this is a no-op).
             if let Some(pos) = state.positions.get(sym_str) {
-                let exit_result = exits::check_all_exits(pos, &snap, cfg, ts);
-                if exit_result.should_exit {
-                    apply_exit(
-                        &mut state,
-                        sym_str,
-                        &exit_result,
-                        &snap,
-                        ts,
-                    );
-                } else {
-                    // Update trailing stop if applicable
-                    update_trailing_stop(&mut state, sym_str, &snap, cfg);
+                if !is_exit_cooldown_active(&state, sym_str, ts, cfg) {
+                    let exit_result = exits::check_all_exits(pos, &snap, cfg, ts);
+                    if exit_result.should_exit {
+                        apply_exit(&mut state, sym_str, &exit_result, &snap, ts);
+                    } else {
+                        // Update trailing stop if applicable
+                        update_trailing_stop(&mut state, sym_str, &snap, cfg);
+                    }
                 }
             }
 
@@ -435,13 +444,11 @@ pub fn run_simulation(
             indicator_bar_candidates.sort_by(|a, b| {
                 let score_a = (a.confidence as i32) * 100 + a.adx as i32;
                 let score_b = (b.confidence as i32) * 100 + b.adx as i32;
-                score_b.cmp(&score_a)
-                    .then_with(|| a.symbol.cmp(&b.symbol))
+                score_b.cmp(&score_a).then_with(|| a.symbol.cmp(&b.symbol))
             });
 
-            let equity = state.balance + unrealized_pnl(
-                &state.positions, &state.indicators, ts, candles, &bar_index,
-            );
+            let equity = state.balance
+                + unrealized_pnl(&state.positions, &state.indicators, ts, candles, &bar_index);
 
             for cand in &indicator_bar_candidates {
                 if entries_this_bar >= cfg.trade.max_entry_orders_per_loop {
@@ -455,6 +462,9 @@ pub fn run_simulation(
                 if state.positions.contains_key(&cand.symbol) {
                     continue;
                 }
+                if is_entry_cooldown_active(&state, &cand.symbol, cand.ts, cfg) {
+                    continue;
+                }
 
                 let total_margin: f64 = state.positions.values().map(|p| p.margin_used).sum();
                 let margin_headroom = equity * cfg.trade.max_total_margin_pct - total_margin;
@@ -463,8 +473,15 @@ pub fn run_simulation(
                     continue;
                 }
 
-                let (size, margin_used, leverage) =
-                    compute_entry_size(&cand.symbol, equity, cand.snap.close, cand.confidence, cand.atr, &cand.snap, cfg);
+                let (size, margin_used, leverage) = compute_entry_size(
+                    &cand.symbol,
+                    equity,
+                    cand.snap.close,
+                    cand.confidence,
+                    cand.atr,
+                    &cand.snap,
+                    cfg,
+                );
                 let (mut size, mut margin_used) = if margin_used > margin_headroom {
                     let ratio = margin_headroom / margin_used;
                     (size * ratio, margin_headroom)
@@ -515,6 +532,7 @@ pub fn run_simulation(
                     last_add_time_ms: cand.ts,
                 };
                 state.positions.insert(cand.symbol.clone(), pos);
+                note_entry_attempt(&mut state, &cand.symbol, cand.ts);
                 entries_this_bar += 1;
 
                 let action = match desired_type {
@@ -557,13 +575,16 @@ pub fn run_simulation(
 
                 for sym in &exit_syms {
                     if let Some(sym_exit_idx) = ec_idx.get(sym.as_str()) {
-                        let start = match sym_exit_idx.binary_search_by_key(&(ts + 1), |(t, _)| *t) {
+                        let start = match sym_exit_idx.binary_search_by_key(&(ts + 1), |(t, _)| *t)
+                        {
                             Ok(i) => i,
                             Err(i) => i,
                         };
 
                         if let Some(exit_bars) = ec.get(sym.as_str()) {
-                            let base_snap = state.indicators.get(sym.as_str())
+                            let base_snap = state
+                                .indicators
+                                .get(sym.as_str())
                                 .map(|bank| bank.latest_snap())
                                 .unwrap_or_else(|| make_minimal_snap(0.0, ts));
 
@@ -575,13 +596,28 @@ pub fn run_simulation(
                                     break; // Already exited
                                 }
                                 if let Some(sub_bar) = exit_bars.get(bar_i) {
+                                    if is_exit_cooldown_active(&state, sym.as_str(), sub_ts, cfg) {
+                                        continue;
+                                    }
                                     let sub_snap = make_exit_snap(&base_snap, sub_bar);
                                     let pos = state.positions.get(sym.as_str()).unwrap();
-                                    let exit_result = exits::check_all_exits(pos, &sub_snap, cfg, sub_ts);
+                                    let exit_result =
+                                        exits::check_all_exits(pos, &sub_snap, cfg, sub_ts);
                                     if exit_result.should_exit {
-                                        apply_exit(&mut state, sym.as_str(), &exit_result, &sub_snap, sub_ts);
+                                        apply_exit(
+                                            &mut state,
+                                            sym.as_str(),
+                                            &exit_result,
+                                            &sub_snap,
+                                            sub_ts,
+                                        );
                                     } else {
-                                        update_trailing_stop(&mut state, sym.as_str(), &sub_snap, cfg);
+                                        update_trailing_stop(
+                                            &mut state,
+                                            sym.as_str(),
+                                            &sub_snap,
+                                            cfg,
+                                        );
                                     }
                                 }
                             }
@@ -597,9 +633,8 @@ pub fn run_simulation(
         // Signals at each sub-bar tick are collected across all symbols,
         // ranked by score, then executed — matching the indicator-bar ranking.
         if let (Some(enc), Some(ref enc_idx)) = (entry_candles, &entry_bar_index) {
-            let sub_equity = state.balance + unrealized_pnl(
-                &state.positions, &state.indicators, ts, candles, &bar_index,
-            );
+            let sub_equity = state.balance
+                + unrealized_pnl(&state.positions, &state.indicators, ts, candles, &bar_index);
 
             // Build a merged timeline of unique sub-bar timestamps across all symbols
             // within this indicator bar's range (ts+1 .. next_ts].
@@ -647,16 +682,25 @@ pub fn run_simulation(
                             let (_, bar_i) = sym_entry_idx[idx];
                             if let Some(entry_bars) = enc.get(sym.as_str()) {
                                 if let Some(sub_bar) = entry_bars.get(bar_i) {
-                                    let base_snap = state.indicators.get(sym.as_str())
+                                    let base_snap = state
+                                        .indicators
+                                        .get(sym.as_str())
                                         .map(|bank| bank.latest_snap())
                                         .unwrap_or_else(|| make_minimal_snap(0.0, *sub_ts));
                                     let sub_snap = make_exit_snap(&base_snap, sub_bar);
-                                    let slope = sub_bar_slopes.get(sym.as_str()).copied().unwrap_or(0.0);
+                                    let slope =
+                                        sub_bar_slopes.get(sym.as_str()).copied().unwrap_or(0.0);
 
                                     // Evaluate signal (same logic as try_sub_bar_entry but collect instead)
                                     if let Some(cand) = evaluate_sub_bar_candidate(
-                                        &state, sym.as_str(), &sub_snap, cfg,
-                                        btc_bullish, breadth_pct, slope, *sub_ts,
+                                        &state,
+                                        sym.as_str(),
+                                        &sub_snap,
+                                        cfg,
+                                        btc_bullish,
+                                        breadth_pct,
+                                        slope,
+                                        *sub_ts,
                                     ) {
                                         sub_candidates.push(cand);
                                     }
@@ -671,8 +715,7 @@ pub fn run_simulation(
                     sub_candidates.sort_by(|a, b| {
                         let score_a = (a.confidence as i32) * 100 + a.adx as i32;
                         let score_b = (b.confidence as i32) * 100 + b.adx as i32;
-                        score_b.cmp(&score_a)
-                            .then_with(|| a.symbol.cmp(&b.symbol))
+                        score_b.cmp(&score_a).then_with(|| a.symbol.cmp(&b.symbol))
                     });
 
                     for cand in &sub_candidates {
@@ -688,9 +731,16 @@ pub fn run_simulation(
                         }
 
                         let opened = execute_sub_bar_entry(
-                            &mut state, &cand.symbol, &cand.snap, cfg,
-                            cand.confidence, cand.atr, cand.entry_adx_threshold,
-                            cand.signal, cand.ts, sub_equity,
+                            &mut state,
+                            &cand.symbol,
+                            &cand.snap,
+                            cfg,
+                            cand.confidence,
+                            cand.atr,
+                            cand.entry_adx_threshold,
+                            cand.signal,
+                            cand.ts,
+                            sub_equity,
                         );
                         if opened {
                             entries_this_bar += 1;
@@ -723,7 +773,9 @@ pub fn run_simulation(
                                 if let Some(rate) = lookup_funding_rate(rates, boundary) {
                                     // Funding: shorts receive, longs pay (when rate > 0)
                                     // delta = -signed_size * price * rate
-                                    let price = state.indicators.get(&sym)
+                                    let price = state
+                                        .indicators
+                                        .get(&sym)
                                         .map(|b| b.prev_close)
                                         .unwrap_or(pos.entry_price);
                                     let signed_size = match pos.pos_type {
@@ -759,10 +811,9 @@ pub fn run_simulation(
         }
 
         // Record equity curve point
-        let unrealized = unrealized_pnl_simple(&state.positions, &timestamps, ts, candles, &bar_index);
-        state
-            .equity_curve
-            .push((ts, state.balance + unrealized));
+        let unrealized =
+            unrealized_pnl_simple(&state.positions, &timestamps, ts, candles, &bar_index);
+        state.equity_curve.push((ts, state.balance + unrealized));
     }
 
     // -- Force-close all remaining positions at last known price --
@@ -772,7 +823,13 @@ pub fn run_simulation(
             let last_price = last_price_for_symbol(candles, &sym);
             let exit = ExitResult::exit("End of Backtest", last_price);
             let snap = make_minimal_snap(last_price, *timestamps.last().unwrap_or(&0));
-            apply_exit(&mut state, &sym, &exit, &snap, *timestamps.last().unwrap_or(&0));
+            apply_exit(
+                &mut state,
+                &sym,
+                &exit,
+                &snap,
+                *timestamps.last().unwrap_or(&0),
+            );
         }
     }
 
@@ -992,6 +1049,53 @@ fn is_pesc_blocked(
 }
 
 // ---------------------------------------------------------------------------
+// Entry/Exit cooldowns
+// ---------------------------------------------------------------------------
+
+fn is_entry_cooldown_active(state: &SimState, symbol: &str, ts: i64, cfg: &StrategyConfig) -> bool {
+    is_symbol_cooldown_active(
+        &state.last_entry_attempt_ms,
+        symbol,
+        ts,
+        cfg.trade.entry_cooldown_s as i64,
+    )
+}
+
+fn is_exit_cooldown_active(state: &SimState, symbol: &str, ts: i64, cfg: &StrategyConfig) -> bool {
+    is_symbol_cooldown_active(
+        &state.last_exit_attempt_ms,
+        symbol,
+        ts,
+        cfg.trade.exit_cooldown_s as i64,
+    )
+}
+
+fn note_entry_attempt(state: &mut SimState, symbol: &str, ts: i64) {
+    state.last_entry_attempt_ms.insert(symbol.to_string(), ts);
+}
+
+fn note_exit_attempt(state: &mut SimState, symbol: &str, ts: i64) {
+    state.last_exit_attempt_ms.insert(symbol.to_string(), ts);
+}
+
+fn is_symbol_cooldown_active(
+    last_attempts_ms: &FxHashMap<String, i64>,
+    symbol: &str,
+    ts: i64,
+    cooldown_s: i64,
+) -> bool {
+    if cooldown_s <= 0 {
+        return false;
+    }
+    let last_ts = match last_attempts_ms.get(symbol) {
+        Some(v) => *v,
+        None => return false,
+    };
+    let cooldown_ms = cooldown_s.saturating_mul(1000);
+    ts.saturating_sub(last_ts) < cooldown_ms
+}
+
+// ---------------------------------------------------------------------------
 // Entry sizing
 // ---------------------------------------------------------------------------
 
@@ -1026,7 +1130,11 @@ fn compute_entry_size(
         } else {
             1.0
         };
-        let vol_scalar_raw = if vol_ratio > 0.0 { 1.0 / vol_ratio } else { 1.0 };
+        let vol_scalar_raw = if vol_ratio > 0.0 {
+            1.0 / vol_ratio
+        } else {
+            1.0
+        };
         let vol_scalar = vol_scalar_raw.clamp(tc.vol_scalar_min, tc.vol_scalar_max);
 
         margin *= conf_mult * adx_mult * vol_scalar;
@@ -1096,10 +1204,10 @@ fn apply_exit(
         state.balance += pnl - fee_usd;
 
         // Record PESC info (partial exits also count)
-        state.last_close.insert(
-            symbol.to_string(),
-            (ts, pos.pos_type, exit.reason.clone()),
-        );
+        state
+            .last_close
+            .insert(symbol.to_string(), (ts, pos.pos_type, exit.reason.clone()));
+        note_exit_attempt(state, symbol, ts);
 
         let action = match pos.pos_type {
             PositionType::Long => "REDUCE_LONG",
@@ -1142,10 +1250,10 @@ fn apply_exit(
         state.balance += pnl - fee_usd;
 
         // Record PESC info
-        state.last_close.insert(
-            symbol.to_string(),
-            (ts, pos.pos_type, exit.reason.clone()),
-        );
+        state
+            .last_close
+            .insert(symbol.to_string(), (ts, pos.pos_type, exit.reason.clone()));
+        note_exit_attempt(state, symbol, ts);
 
         let action = match pos.pos_type {
             PositionType::Long => "CLOSE_LONG",
@@ -1201,20 +1309,18 @@ fn update_trailing_stop(
     };
 
     match pos.trailing_sl {
-        Some(current_sl) => {
-            match pos.pos_type {
-                PositionType::Long => {
-                    if new_sl > current_sl {
-                        pos.trailing_sl = Some(new_sl);
-                    }
-                }
-                PositionType::Short => {
-                    if new_sl < current_sl {
-                        pos.trailing_sl = Some(new_sl);
-                    }
+        Some(current_sl) => match pos.pos_type {
+            PositionType::Long => {
+                if new_sl > current_sl {
+                    pos.trailing_sl = Some(new_sl);
                 }
             }
-        }
+            PositionType::Short => {
+                if new_sl < current_sl {
+                    pos.trailing_sl = Some(new_sl);
+                }
+            }
+        },
         None => {
             pos.trailing_sl = Some(new_sl);
         }
@@ -1224,9 +1330,7 @@ fn update_trailing_stop(
     if cfg.trade.enable_breakeven_stop && profit_atr >= cfg.trade.breakeven_start_atr {
         let be_price = match pos.pos_type {
             PositionType::Long => pos.entry_price + cfg.trade.breakeven_buffer_atr * pos.entry_atr,
-            PositionType::Short => {
-                pos.entry_price - cfg.trade.breakeven_buffer_atr * pos.entry_atr
-            }
+            PositionType::Short => pos.entry_price - cfg.trade.breakeven_buffer_atr * pos.entry_atr,
         };
         match pos.pos_type {
             PositionType::Long => {
@@ -1291,6 +1395,9 @@ fn try_pyramid(
     if profit_atr < tc.add_min_profit_atr {
         return;
     }
+    if is_entry_cooldown_active(state, symbol, ts, cfg) {
+        return;
+    }
 
     // Compute add size
     let equity = state.balance + unrealized_pnl_for_positions(&state.positions, snap.close);
@@ -1353,6 +1460,7 @@ fn try_pyramid(
     if let Some(p) = state.positions.get_mut(symbol) {
         p.add_to_position(fill_price, add_size, add_margin, ts);
     }
+    note_entry_attempt(state, symbol, ts);
 }
 
 // ---------------------------------------------------------------------------
@@ -1529,6 +1637,9 @@ fn execute_sub_bar_entry(
     if state.positions.contains_key(sym) {
         return false;
     }
+    if is_entry_cooldown_active(state, sym, ts, cfg) {
+        return false;
+    }
 
     let desired_type = match signal {
         Signal::Buy => PositionType::Long,
@@ -1589,6 +1700,7 @@ fn execute_sub_bar_entry(
         last_add_time_ms: ts,
     };
     state.positions.insert(sym.to_string(), pos);
+    note_entry_attempt(state, sym, ts);
 
     let action = match desired_type {
         PositionType::Long => "OPEN_LONG",
@@ -1714,8 +1826,14 @@ mod tests {
         cfg.market_regime.enable_regime_filter = true;
         cfg.market_regime.breadth_block_short_above = 80.0;
         cfg.market_regime.breadth_block_long_below = 20.0;
-        assert_eq!(apply_regime_filter(Signal::Sell, &cfg, 85.0), Signal::Neutral);
-        assert_eq!(apply_regime_filter(Signal::Buy, &cfg, 15.0), Signal::Neutral);
+        assert_eq!(
+            apply_regime_filter(Signal::Sell, &cfg, 85.0),
+            Signal::Neutral
+        );
+        assert_eq!(
+            apply_regime_filter(Signal::Buy, &cfg, 15.0),
+            Signal::Neutral
+        );
         assert_eq!(apply_regime_filter(Signal::Buy, &cfg, 50.0), Signal::Buy);
         assert_eq!(apply_regime_filter(Signal::Sell, &cfg, 50.0), Signal::Sell);
     }
@@ -1739,7 +1857,9 @@ mod tests {
     fn test_empty_candles() {
         let candles = FxHashMap::default();
         let cfg = StrategyConfig::default();
-        let result = run_simulation(&candles, &cfg, 1000.0, 50, None, None, None, None, None, None);
+        let result = run_simulation(
+            &candles, &cfg, 1000.0, 50, None, None, None, None, None, None,
+        );
         assert_eq!(result.trades.len(), 0);
         assert!((result.final_balance - 1000.0).abs() < 1e-9);
     }
@@ -1767,6 +1887,8 @@ mod tests {
         let state = SimState {
             balance: 1000.0,
             positions: FxHashMap::default(),
+            last_entry_attempt_ms: FxHashMap::default(),
+            last_exit_attempt_ms: FxHashMap::default(),
             indicators: FxHashMap::default(),
             ema_slow_history: FxHashMap::default(),
             bar_counts: FxHashMap::default(),
@@ -1778,5 +1900,102 @@ mod tests {
         };
         // No indicators → 50%
         assert!((compute_market_breadth(&state) - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_entry_cooldown_tracks_successful_entry_add_attempts() {
+        let mut cfg = StrategyConfig::default();
+        cfg.trade.entry_cooldown_s = 20;
+
+        let mut state = SimState {
+            balance: 1000.0,
+            positions: FxHashMap::default(),
+            last_entry_attempt_ms: FxHashMap::default(),
+            last_exit_attempt_ms: FxHashMap::default(),
+            indicators: FxHashMap::default(),
+            ema_slow_history: FxHashMap::default(),
+            bar_counts: FxHashMap::default(),
+            last_close: FxHashMap::default(),
+            trades: vec![],
+            signals: vec![],
+            equity_curve: vec![],
+            gate_stats: GateStats::default(),
+        };
+
+        assert!(!is_entry_cooldown_active(&state, "ETH", 1_000, &cfg));
+        note_entry_attempt(&mut state, "ETH", 1_000);
+        assert!(is_entry_cooldown_active(&state, "ETH", 20_999, &cfg));
+        assert!(!is_entry_cooldown_active(&state, "ETH", 21_000, &cfg));
+    }
+
+    #[test]
+    fn test_exit_cooldown_tracks_successful_exit_attempts() {
+        let mut cfg = StrategyConfig::default();
+        cfg.trade.exit_cooldown_s = 15;
+
+        let mut state = SimState {
+            balance: 1000.0,
+            positions: FxHashMap::default(),
+            last_entry_attempt_ms: FxHashMap::default(),
+            last_exit_attempt_ms: FxHashMap::default(),
+            indicators: FxHashMap::default(),
+            ema_slow_history: FxHashMap::default(),
+            bar_counts: FxHashMap::default(),
+            last_close: FxHashMap::default(),
+            trades: vec![],
+            signals: vec![],
+            equity_curve: vec![],
+            gate_stats: GateStats::default(),
+        };
+
+        assert!(!is_exit_cooldown_active(&state, "ETH", 5_000, &cfg));
+        note_exit_attempt(&mut state, "ETH", 5_000);
+        assert!(is_exit_cooldown_active(&state, "ETH", 19_999, &cfg));
+        assert!(!is_exit_cooldown_active(&state, "ETH", 20_000, &cfg));
+    }
+
+    #[test]
+    fn test_apply_exit_records_exit_cooldown_timestamp() {
+        let mut state = SimState {
+            balance: 1000.0,
+            positions: FxHashMap::default(),
+            last_entry_attempt_ms: FxHashMap::default(),
+            last_exit_attempt_ms: FxHashMap::default(),
+            indicators: FxHashMap::default(),
+            ema_slow_history: FxHashMap::default(),
+            bar_counts: FxHashMap::default(),
+            last_close: FxHashMap::default(),
+            trades: vec![],
+            signals: vec![],
+            equity_curve: vec![],
+            gate_stats: GateStats::default(),
+        };
+
+        state.positions.insert(
+            "ETH".to_string(),
+            Position {
+                symbol: "ETH".to_string(),
+                pos_type: PositionType::Long,
+                entry_price: 100.0,
+                size: 1.0,
+                confidence: Confidence::High,
+                entry_atr: 1.0,
+                entry_adx_threshold: 0.0,
+                trailing_sl: None,
+                leverage: 1.0,
+                margin_used: 100.0,
+                adds_count: 0,
+                tp1_taken: false,
+                open_time_ms: 0,
+                last_add_time_ms: 0,
+            },
+        );
+
+        let snap = make_minimal_snap(101.0, 10_000);
+        let exit = ExitResult::exit("Take Profit", 101.0);
+        apply_exit(&mut state, "ETH", &exit, &snap, 10_000);
+
+        assert_eq!(state.last_exit_attempt_ms.get("ETH"), Some(&10_000));
+        assert!(!state.positions.contains_key("ETH"));
     }
 }
