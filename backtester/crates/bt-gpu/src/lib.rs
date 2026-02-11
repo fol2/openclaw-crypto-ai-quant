@@ -338,3 +338,61 @@ pub fn run_gpu_sweep(
     });
     all_results
 }
+
+#[cfg(test)]
+mod tests {
+    fn extract_fn_block<'a>(source: &'a str, signature: &str) -> &'a str {
+        let start = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("Function signature not found: {signature}"));
+        let brace_start = source[start..]
+            .find('{')
+            .map(|idx| start + idx)
+            .expect("Function body start not found");
+
+        let mut depth = 0usize;
+        for (idx, ch) in source[brace_start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let end = brace_start + idx + 1;
+                        return &source[start..end];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("Function body end not found: {signature}");
+    }
+
+    #[test]
+    fn tp_mult_kernel_sources_are_fixed_to_trade_tp_atr_mult() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        let cu_src = std::fs::read_to_string(root.join("kernels/sweep_engine.cu"))
+            .expect("Failed to read CUDA sweep engine source");
+        let cu_fn = extract_fn_block(&cu_src, "__device__ float get_tp_mult(");
+        assert!(
+            cu_fn.contains("return cfg->tp_atr_mult;"),
+            "CUDA get_tp_mult must return cfg->tp_atr_mult"
+        );
+        assert!(
+            !cu_fn.contains("return 7.0f;") && !cu_fn.contains("return 3.0f;"),
+            "CUDA get_tp_mult must not hardcode ADX TP multipliers"
+        );
+
+        let wgsl_src = std::fs::read_to_string(root.join("shaders/sweep_engine.wgsl"))
+            .expect("Failed to read WGSL sweep engine source");
+        let wgsl_fn = extract_fn_block(&wgsl_src, "fn get_tp_mult(");
+        assert!(
+            wgsl_fn.contains("return (*cfg).tp_atr_mult;"),
+            "WGSL get_tp_mult must return (*cfg).tp_atr_mult"
+        );
+        assert!(
+            !wgsl_fn.contains("return 7.0;") && !wgsl_fn.contains("return 3.0;"),
+            "WGSL get_tp_mult must not hardcode ADX TP multipliers"
+        );
+    }
+}
