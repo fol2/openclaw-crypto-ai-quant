@@ -145,7 +145,7 @@ if (tp_result == 1u) {
 }
 ```
 
-This is a real behavioral divergence.
+This is a real behavioural divergence.
 
 ---
 
