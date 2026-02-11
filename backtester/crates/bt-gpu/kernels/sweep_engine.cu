@@ -1036,14 +1036,38 @@ extern "C" __global__ void sweep_engine_kernel(
             }
 
             // ── Sub-bar entries (per-tick collection + ranking) ───────────────
-            // Find max sub-bar count across all symbols for this bar
-            unsigned int bar_max_sub = 0u;
+            // Merge per-symbol sub-bars on timestamp (CPU-style shared tick timeline)
+            // instead of assuming slot index alignment.
+            unsigned int sub_cursor[MAX_SYMBOLS];
             for (unsigned int sym = 0u; sym < ns; sym++) {
-                unsigned int c = sub_counts[bar * ns + sym];
-                if (c > bar_max_sub) { bar_max_sub = c; }
+                sub_cursor[sym] = 0u;
             }
 
-            for (unsigned int sub_i = 0u; sub_i < bar_max_sub; sub_i++) {
+            while (state.entries_this_bar < cfg.max_entry_orders_per_loop) {
+                bool have_tick = false;
+                unsigned int tick_t_sec = 0xffffffffu;
+
+                // Find next earliest sub-bar timestamp across all symbols.
+                for (unsigned int sym = 0u; sym < ns; sym++) {
+                    unsigned int limit = sub_counts[bar * ns + sym];
+                    unsigned int cur = sub_cursor[sym];
+                    while (cur < limit) {
+                        const GpuRawCandle& probe = sub_candles[(bar * max_sub + cur) * ns + sym];
+                        if (probe.close > 0.0f) { break; } // skip padded/missing slots
+                        cur += 1u;
+                    }
+                    sub_cursor[sym] = cur;
+                    if (cur >= limit) { continue; }
+
+                    const GpuRawCandle& sc = sub_candles[(bar * max_sub + cur) * ns + sym];
+                    if (!have_tick || sc.t_sec < tick_t_sec) {
+                        tick_t_sec = sc.t_sec;
+                        have_tick = true;
+                    }
+                }
+
+                if (!have_tick) { break; }
+
                 EntryCandidate candidates[MAX_CANDIDATES];
                 unsigned int num_cands = 0u;
 
@@ -1051,11 +1075,12 @@ extern "C" __global__ void sweep_engine_kernel(
                     if (num_cands >= MAX_CANDIDATES) { break; }
                     if (state.entries_this_bar >= cfg.max_entry_orders_per_loop) { break; }
 
-                    // Check if this symbol has a sub-bar at this slot
-                    if (sub_i >= sub_counts[bar * ns + sym]) { continue; }
+                    unsigned int cur = sub_cursor[sym];
+                    unsigned int limit = sub_counts[bar * ns + sym];
+                    if (cur >= limit) { continue; }
 
-                    const GpuRawCandle& sc = sub_candles[(bar * max_sub + sub_i) * ns + sym];
-                    if (sc.close <= 0.0f) { continue; }
+                    const GpuRawCandle& sc = sub_candles[(bar * max_sub + cur) * ns + sym];
+                    if (sc.close <= 0.0f || sc.t_sec != tick_t_sec) { continue; }
 
                     const GpuSnapshot& ind_snap = snapshots[cfg.snapshot_offset + bar * ns + sym];
                     if (ind_snap.valid == 0u) { continue; }
@@ -1188,9 +1213,10 @@ extern "C" __global__ void sweep_engine_kernel(
                     if (state.num_open >= cfg.max_open_positions) { break; }
 
                     const EntryCandidate& cand = candidates[i];
+                    unsigned int fill_slot = sub_cursor[cand.sym_idx];
 
                     // Re-read sub-bar candle for fill price
-                    const GpuRawCandle& sc = sub_candles[(bar * max_sub + sub_i) * ns + cand.sym_idx];
+                    const GpuRawCandle& sc = sub_candles[(bar * max_sub + fill_slot) * ns + cand.sym_idx];
                     const GpuSnapshot& ind_snap = snapshots[cfg.snapshot_offset + bar * ns + cand.sym_idx];
 
                     GpuSnapshot hybrid = ind_snap;
@@ -1260,6 +1286,18 @@ extern "C" __global__ void sweep_engine_kernel(
 
                     state.num_open += 1u;
                     state.entries_this_bar += 1u;
+                }
+
+                // Advance symbols that had a candle at this tick.
+                for (unsigned int sym = 0u; sym < ns; sym++) {
+                    unsigned int cur = sub_cursor[sym];
+                    unsigned int limit = sub_counts[bar * ns + sym];
+                    if (cur >= limit) { continue; }
+
+                    const GpuRawCandle& sc = sub_candles[(bar * max_sub + cur) * ns + sym];
+                    if (sc.close > 0.0f && sc.t_sec == tick_t_sec) {
+                        sub_cursor[sym] = cur + 1u;
+                    }
                 }
             }
 
