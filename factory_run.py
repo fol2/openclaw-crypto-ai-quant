@@ -41,6 +41,66 @@ except ImportError:  # pragma: no cover
 AIQ_ROOT = Path(__file__).resolve().parent
 
 
+def _resolve_path_for_backtester(path_str: str | None) -> str | None:
+    """Resolve a CLI path into an absolute path usable from the backtester cwd.
+
+    The Rust backtester is executed with `cwd=AIQ_ROOT/backtester`, but callers frequently pass paths that are:
+    - repo-root relative (e.g. `config/...`, `backtester/sweeps/...`)
+    - backtester-dir relative (e.g. `sweeps/smoke.yaml`)
+
+    Normalise these to absolute paths to avoid "file not found" issues caused by the backtester cwd.
+    """
+
+    if path_str is None:
+        return None
+    raw = str(path_str).strip()
+    if not raw:
+        return None
+    if raw == "-":
+        return raw
+
+    try:
+        p = Path(raw).expanduser()
+        if p.is_absolute():
+            return str(p.resolve())
+
+        # Prefer repo-root relative.
+        cand_root = (AIQ_ROOT / p).resolve()
+        if cand_root.exists():
+            return str(cand_root)
+
+        # Common when operators run from within backtester/ or copy examples.
+        cand_bt = (AIQ_ROOT / "backtester" / p).resolve()
+        if cand_bt.exists():
+            return str(cand_bt)
+
+        # Best-effort: respect current working directory if the path exists there.
+        cand_cwd = (Path.cwd() / p).resolve()
+        if cand_cwd.exists():
+            return str(cand_cwd)
+
+        # Default to repo-root absolute even if it doesn't exist (so errors are explicit).
+        return str(cand_root)
+    except Exception:
+        return raw
+
+
+def _resolve_nvidia_smi_bin() -> str:
+    """Return the best-effort path to nvidia-smi.
+
+    On WSL2, `nvidia-smi` is often located at `/usr/lib/wsl/lib/nvidia-smi` and may not be on `PATH` for systemd
+    services.
+    """
+
+    p = shutil.which("nvidia-smi")
+    if p:
+        return str(p)
+    wsl = Path("/usr/lib/wsl/lib/nvidia-smi")
+    if wsl.exists():
+        return str(wsl)
+    return "nvidia-smi"
+
+
 PROFILE_DEFAULTS: dict[str, dict[str, int]] = {
     # Very fast profile for verifying the pipeline end-to-end.
     "smoke": {
@@ -133,7 +193,7 @@ def _gpu_compute_processes(*, stdout_path: Path, stderr_path: Path) -> tuple[Cmd
 
     res = _run_cmd(
         [
-            "nvidia-smi",
+            _resolve_nvidia_smi_bin(),
             "--query-compute-apps=pid,process_name,used_memory",
             "--format=csv,noheader,nounits",
         ],
@@ -280,6 +340,14 @@ def _capture_repro_metadata(*, run_dir: Path, artifacts_root: Path, bt_cmd: list
         "LD_LIBRARY_PATH",
         "PYTHONHASHSEED",
     ]
+    raw_sweep_spec = str(meta.get("args", {}).get("sweep_spec", "") or "").strip()
+    sweep_spec_fp: dict[str, Any]
+    if raw_sweep_spec:
+        resolved = _resolve_path_for_backtester(raw_sweep_spec)
+        sweep_spec_fp = _file_fingerprint(Path(resolved) if resolved else (AIQ_ROOT / raw_sweep_spec))
+    else:
+        sweep_spec_fp = {"path": "", "exists": False}
+
     meta["repro"] = {
         "system": {
             "platform": platform.platform(),
@@ -291,7 +359,7 @@ def _capture_repro_metadata(*, run_dir: Path, artifacts_root: Path, bt_cmd: list
         "files": {
             "pyproject_toml": _file_fingerprint(AIQ_ROOT / "pyproject.toml"),
             "uv_lock": _file_fingerprint(AIQ_ROOT / "uv.lock"),
-            "sweep_spec": _file_fingerprint(AIQ_ROOT / str(meta.get("args", {}).get("sweep_spec", ""))),
+            "sweep_spec": sweep_spec_fp,
         },
         "cmds": [],
     }
@@ -302,7 +370,7 @@ def _capture_repro_metadata(*, run_dir: Path, artifacts_root: Path, bt_cmd: list
         ("git_status", ["git", "status", "--porcelain=v1"]),
         ("cargo_version", ["cargo", "--version"]),
         ("rustc_version", ["rustc", "--version"]),
-        ("nvidia_smi", ["nvidia-smi", "-L"]),
+        ("nvidia_smi", [_resolve_nvidia_smi_bin(), "-L"]),
         ("nvcc_version", ["nvcc", "--version"]),
     ]
 
@@ -781,6 +849,8 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
     interval = str(source_args.get("interval", "1h"))
     candles_db = source_args.get("candles_db")
     funding_db = source_args.get("funding_db")
+    candles_db_bt = _resolve_path_for_backtester(str(candles_db)) if candles_db else None
+    funding_db_bt = _resolve_path_for_backtester(str(funding_db)) if funding_db else None
 
     generated_at_ms = int(time.time() * 1000)
     new_run_id = f"repro_{source_run_id}_{_utc_compact(generated_at_ms)}"
@@ -879,10 +949,10 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
             "--output",
             str(out_json),
         ]
-        if candles_db:
-            replay_argv += ["--candles-db", str(candles_db)]
-        if funding_db:
-            replay_argv += ["--funding-db", str(funding_db)]
+        if candles_db_bt:
+            replay_argv += ["--candles-db", str(candles_db_bt)]
+        if funding_db_bt:
+            replay_argv += ["--funding-db", str(funding_db_bt)]
 
         replay_res = _run_cmd(
             replay_argv,
@@ -1051,6 +1121,17 @@ def main(argv: list[str] | None = None) -> int:
         _capture_repro_metadata(run_dir=run_dir, artifacts_root=artifacts_root, bt_cmd=bt_cmd, meta=meta)
     _write_json(run_dir / "run_metadata.json", meta)
 
+    # The backtester is executed with cwd=AIQ_ROOT/backtester, so normalise common repo-relative paths.
+    bt_config = _resolve_path_for_backtester(str(args.config)) or str(args.config)
+    bt_sweep_spec = _resolve_path_for_backtester(str(args.sweep_spec)) or str(args.sweep_spec)
+    bt_candles_db = _resolve_path_for_backtester(str(args.candles_db)) if args.candles_db else None
+    bt_funding_db = _resolve_path_for_backtester(str(args.funding_db)) if args.funding_db else None
+    bt_wf_splits_json = (
+        _resolve_path_for_backtester(str(getattr(args, "walk_forward_splits_json", "")))
+        if getattr(args, "walk_forward_splits_json", None)
+        else None
+    )
+
     # ------------------------------------------------------------------
     # 1) Data checks
     # ------------------------------------------------------------------
@@ -1070,15 +1151,15 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         candle_argv = ["python3", "tools/check_candle_dbs.py", "--json-indent", "2"]
-        if args.candles_db:
+        if bt_candles_db:
             try:
-                p = Path(str(args.candles_db)).expanduser()
+                p = Path(str(bt_candles_db)).expanduser()
                 if p.is_dir():
                     candle_argv += ["--db-glob", str((p / "candles_*.db").resolve())]
                 else:
                     candle_argv += ["--db-glob", str(p.resolve())]
             except Exception:
-                candle_argv += ["--db-glob", str(args.candles_db)]
+                candle_argv += ["--db-glob", str(bt_candles_db)]
         candle_check = _run_cmd(
             candle_argv,
             cwd=AIQ_ROOT,
@@ -1107,8 +1188,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         funding_argv = ["python3", "tools/check_funding_rates_db.py"]
-        if args.funding_db:
-            funding_argv += ["--db", str(args.funding_db)]
+        if bt_funding_db:
+            funding_argv += ["--db", str(bt_funding_db)]
         funding_check = _run_cmd(
             funding_argv,
             cwd=AIQ_ROOT,
@@ -1149,9 +1230,9 @@ def main(argv: list[str] | None = None) -> int:
         sweep_argv = bt_cmd + [
             "sweep",
             "--config",
-            str(args.config),
+            str(bt_config),
             "--sweep-spec",
-            str(args.sweep_spec),
+            str(bt_sweep_spec),
             "--interval",
             str(args.interval),
             "--output",
@@ -1159,10 +1240,10 @@ def main(argv: list[str] | None = None) -> int:
             "--top-n",
             str(int(args.top_n)),
         ]
-        if args.candles_db:
-            sweep_argv += ["--candles-db", str(args.candles_db)]
-        if args.funding_db:
-            sweep_argv += ["--funding-db", str(args.funding_db)]
+        if bt_candles_db:
+            sweep_argv += ["--candles-db", str(bt_candles_db)]
+        if bt_funding_db:
+            sweep_argv += ["--funding-db", str(bt_funding_db)]
         if bool(args.gpu):
             sweep_argv += ["--gpu"]
         if bool(getattr(args, "tpe", False)):
@@ -1395,10 +1476,10 @@ def main(argv: list[str] | None = None) -> int:
             "--output",
             str(out_json),
         ]
-        if args.candles_db:
-            replay_argv += ["--candles-db", str(args.candles_db)]
-        if args.funding_db:
-            replay_argv += ["--funding-db", str(args.funding_db)]
+        if bt_candles_db:
+            replay_argv += ["--candles-db", str(bt_candles_db)]
+        if bt_funding_db:
+            replay_argv += ["--funding-db", str(bt_funding_db)]
         if trades_csv is not None:
             replay_argv += ["--export-trades", str(trades_csv)]
 
@@ -1655,12 +1736,12 @@ def main(argv: list[str] | None = None) -> int:
                     "--output",
                     str(wf_summary_path),
                 ]
-                if getattr(args, "walk_forward_splits_json", None):
-                    wf_argv += ["--splits-json", str(args.walk_forward_splits_json)]
-                if args.candles_db:
-                    wf_argv += ["--candles-db", str(args.candles_db)]
-                if args.funding_db:
-                    wf_argv += ["--funding-db", str(args.funding_db)]
+                if bt_wf_splits_json:
+                    wf_argv += ["--splits-json", str(bt_wf_splits_json)]
+                if bt_candles_db:
+                    wf_argv += ["--candles-db", str(bt_candles_db)]
+                if bt_funding_db:
+                    wf_argv += ["--funding-db", str(bt_funding_db)]
 
                 wf_res = _run_cmd(wf_argv, cwd=AIQ_ROOT, stdout_path=wf_stdout, stderr_path=wf_stderr)
                 meta["steps"].append({"name": f"walk_forward_{cfg_path.stem}", **wf_res.__dict__})
@@ -1715,10 +1796,10 @@ def main(argv: list[str] | None = None) -> int:
                     "--output",
                     str(ss_summary_path),
                 ]
-                if args.candles_db:
-                    ss_argv += ["--candles-db", str(args.candles_db)]
-                if args.funding_db:
-                    ss_argv += ["--funding-db", str(args.funding_db)]
+                if bt_candles_db:
+                    ss_argv += ["--candles-db", str(bt_candles_db)]
+                if bt_funding_db:
+                    ss_argv += ["--funding-db", str(bt_funding_db)]
 
                 ss_res = _run_cmd(ss_argv, cwd=AIQ_ROOT, stdout_path=ss_stdout, stderr_path=ss_stderr)
                 meta["steps"].append({"name": f"slippage_stress_{cfg_path.stem}", **ss_res.__dict__})
@@ -1784,10 +1865,10 @@ def main(argv: list[str] | None = None) -> int:
                 ]
                 if getattr(args, "sensitivity_perturb", None):
                     sens_argv += ["--perturb", str(args.sensitivity_perturb)]
-                if args.candles_db:
-                    sens_argv += ["--candles-db", str(args.candles_db)]
-                if args.funding_db:
-                    sens_argv += ["--funding-db", str(args.funding_db)]
+                if bt_candles_db:
+                    sens_argv += ["--candles-db", str(bt_candles_db)]
+                if bt_funding_db:
+                    sens_argv += ["--funding-db", str(bt_funding_db)]
 
                 sens_res = _run_cmd(sens_argv, cwd=AIQ_ROOT, stdout_path=sens_stdout, stderr_path=sens_stderr)
                 meta["steps"].append({"name": f"sensitivity_{cfg_path.stem}", **sens_res.__dict__})
