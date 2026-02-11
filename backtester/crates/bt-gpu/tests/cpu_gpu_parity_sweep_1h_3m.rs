@@ -98,7 +98,16 @@ fn cpu_gpu_parity_sweep_1h_3m_tiny_fixture() {
         lookback: 0,
     };
 
-    let cpu = bt_core::sweep::run_sweep(&cfg, &spec, &candles, Some(&exit_candles), None, None);
+    let cpu = bt_core::sweep::run_sweep(
+        &cfg,
+        &spec,
+        &candles,
+        Some(&exit_candles),
+        None,
+        None,
+        None,
+        None,
+    );
     assert_eq!(cpu.len(), 1);
     let cpu_rpt = &cpu[0].report;
     assert_eq!(cpu_rpt.total_trades, 1, "Fixture should produce exactly one trade on CPU");

@@ -298,6 +298,9 @@ fn apply_one(cfg: &mut StrategyConfig, path: &str, value: f64) {
 /// Run a parameter sweep: generate all config combinations, run each in parallel.
 ///
 /// Results are sorted by `total_pnl` descending (best first).
+///
+/// `from_ts`/`to_ts` are forwarded to the simulation engine to restrict trading to a
+/// specific time window.
 pub fn run_sweep(
     base_cfg: &StrategyConfig,
     spec: &SweepSpec,
@@ -305,6 +308,8 @@ pub fn run_sweep(
     exit_candles: Option<&CandleData>,
     entry_candles: Option<&CandleData>,
     funding_rates: Option<&FundingRateData>,
+    from_ts: Option<i64>,
+    to_ts: Option<i64>,
 ) -> Vec<SweepResult> {
     let combos = generate_combinations(&spec.axes);
     let total = combos.len();
@@ -336,8 +341,8 @@ pub fn run_sweep(
                 entry_candles_arc.as_deref(),
                 funding_rates_arc.as_deref(),
                 None, // sweeps always start clean (no init-state)
-                None, // from_ts: CPU sweep doesn't scope (GPU sweep does via trade kernel)
-                None, // to_ts
+                from_ts,
+                to_ts,
             );
 
             let rpt = report::build_report(
