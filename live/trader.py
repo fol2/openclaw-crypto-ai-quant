@@ -11,13 +11,13 @@ import json
 import os
 import queue
 import sqlite3
-import subprocess
 import threading
 import time
 
 import exchange.meta as hyperliquid_meta
 import exchange.ws as hyperliquid_ws
 
+from engine.openclaw_cli import send_openclaw_message
 import strategy.mei_alpha_v1 as mei_alpha_v1
 
 try:
@@ -55,6 +55,42 @@ def _env_str(name: str, default: str = "") -> str:
     return default if raw is None else str(raw)
 
 
+def _pct_str_from_baseline(value_usd: float, *, baseline_usd: float, is_return: bool) -> str:
+    try:
+        b = float(baseline_usd)
+    except Exception:
+        b = 0.0
+    if b <= 1e-9:
+        return "n/a"
+    try:
+        v = float(value_usd)
+    except Exception:
+        v = 0.0
+    if is_return:
+        p = ((v - b) / b) * 100.0
+    else:
+        p = (v / b) * 100.0
+    return f"{p:+.2f}%"
+
+
+def _discord_label() -> str:
+    label = _env_str("AI_QUANT_DISCORD_LABEL", "").strip()
+    if label:
+        return label
+    return _env_str("AI_QUANT_INSTANCE_TAG", "").strip()
+
+
+def _decorate_discord_message(message: str) -> str:
+    msg = str(message)
+    label = _discord_label()
+    if not label:
+        return msg
+    prefix = f"[{label}]"
+    if msg.startswith(prefix):
+        return msg
+    return f"{prefix} {msg}"
+
+
 def _live_discord_target() -> str | None:
     target = _env_str("AI_QUANT_DISCORD_CHANNEL_LIVE", "").strip()
     return target or None
@@ -71,22 +107,11 @@ def _send_discord_message_sync(*, target: str, message: str) -> None:
         except Exception:
             timeout_s = 6.0
         timeout_s = max(1.0, min(30.0, timeout_s))
-        subprocess.run(
-            [
-                "openclaw",
-                "message",
-                "send",
-                "--channel",
-                "discord",
-                "--target",
-                str(target),
-                "--message",
-                str(message),
-            ],
-            capture_output=True,
-            check=True,
-            text=True,
-            timeout=timeout_s,
+        send_openclaw_message(
+            channel="discord",
+            target=str(target),
+            message=_decorate_discord_message(str(message)),
+            timeout_s=timeout_s,
         )
     except Exception as e:
         print(f"⚠️ Failed to send Discord message (target={target}): {e}")
@@ -176,6 +201,15 @@ def _notify_live_fill(
     if not target:
         return
 
+    # Baseline for percentage display in notifications.
+    # Priority: explicit notification baseline -> paper balance env -> current account value.
+    baseline_usd = _safe_float(_env_str("AI_QUANT_NOTIFY_BASELINE_USD", ""), 0.0)
+    if baseline_usd <= 1e-9:
+        baseline_usd = _safe_float(_env_str("AI_QUANT_PAPER_BALANCE", ""), 0.0)
+    if baseline_usd <= 1e-9:
+        baseline_usd = _safe_float(account_value_usd, 0.0)
+    unrealised_usd = float(account_value_usd or 0.0) - float(withdrawable_usd or 0.0)
+
     action_map = {"OPEN": "開倉", "ADD": "加倉", "REDUCE": "部分平倉", "CLOSE": "平倉"}
     emoji = "🟦"
     if action in {"OPEN", "ADD"}:
@@ -217,8 +251,18 @@ def _notify_live_fill(
         msg += f"• 信心 (Conf): `{confidence}`\n"
     if breadth_pct is not None:
         msg += f"• 廣度 (Breadth): `{breadth_pct:.1f}%`\n"
-    msg += f"• **AccountValue:** `${account_value_usd:,.2f}`\n"
-    msg += f"• **Withdrawable:** `${withdrawable_usd:,.2f}`"
+    msg += (
+        f"• **AccountValue:** `${account_value_usd:,.2f}` "
+        f"({_pct_str_from_baseline(float(account_value_usd or 0.0), baseline_usd=baseline_usd, is_return=True)})\n"
+    )
+    msg += (
+        f"• **Unrealised (est.):** `${unrealised_usd:,.2f}` "
+        f"({_pct_str_from_baseline(float(unrealised_usd or 0.0), baseline_usd=baseline_usd, is_return=False)})\n"
+    )
+    msg += (
+        f"• **Withdrawable (realised):** `${withdrawable_usd:,.2f}` "
+        f"({_pct_str_from_baseline(float(withdrawable_usd or 0.0), baseline_usd=baseline_usd, is_return=True)})"
+    )
 
     _send_discord_message(target=target, message=msg)
 
