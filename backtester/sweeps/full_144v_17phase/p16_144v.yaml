@@ -4,41 +4,42 @@
 initial_balance: 10000.0
 lookback: 200
 axes:
-- path: filters.require_adx_rising
+- path: market_regime.auto_reverse_breadth_high
+  values:
+  - 63.0
+  - 90.0
+  - 100.0
+- path: thresholds.entry.high_conf_volume_mult
+  values:
+  - 1.75
+  - 2.5
+  - 3.25
+- path: thresholds.ranging.rsi_low
+  values:
+  - 32.9
+  - 47.0
+  - 61.1
+- path: trade.allocation_pct
+  values:
+  - 0.05
+  - 0.15
+  - 0.3
+- path: trade.enable_dynamic_sizing
   values:
   - 0.0
   - 1.0
-- path: indicators.ave_avg_atr_window
+- path: trade.max_entry_orders_per_loop
   values:
-  - 35.0
-  - 65.0
-- path: market_regime.breadth_block_long_below
-  values:
-  - 7.0
-  - 10.0
-  - 13.0
-- path: thresholds.entry.slow_drift_min_slope_pct
-  values:
-  - 0.00042
-  - 0.00078
-- path: trade.add_cooldown_minutes
-  values:
-  - 42.0
-  - 78.0
-- path: trade.enable_vol_buffered_trailing
-  values:
-  - 0.0
-  - 1.0
-- path: trade.leverage_medium
-  values:
-  - 2.0
   - 4.0
-  - 5.0
-- path: trade.reentry_cooldown_max_mins
+  - 6.0
+  - 8.0
+- path: trade.rsi_exit_profit_atr_switch
   values:
-  - 126.0
-  - 234.0
+  - 1.05
+  - 1.5
+  - 1.95
 - path: trade.vol_baseline_pct
   values:
   - 0.007
+  - 0.01
   - 0.013

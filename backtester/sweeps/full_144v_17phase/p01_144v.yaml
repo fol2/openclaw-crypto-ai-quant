@@ -7,39 +7,40 @@ axes:
 - path: indicators.adx_window
   values:
   - 8.0
+  - 12.0
   - 14.0
   - 18.0
-- path: market_regime.enable_regime_filter
+- path: thresholds.entry.max_dist_ema_fast
+  values:
+  - 0.02
+  - 0.04
+  - 0.05
+- path: thresholds.stoch_rsi.block_short_if_k_lt
+  values:
+  - 0.105
+  - 0.15
+  - 0.195
+- path: trade.breakeven_start_atr
+  values:
+  - 0.3
+  - 0.7
+  - 1.0
+- path: trade.enable_pyramiding
   values:
   - 0.0
   - 1.0
-- path: thresholds.entry.ave_avg_atr_window
+- path: trade.max_total_margin_pct
   values:
+  - 0.42
+  - 0.6
+  - 0.78
+- path: trade.rsi_exit_ub_hi_profit_low_conf
+  values:
+  - 0.0
   - 30.0
-  - 60.0
-  - 80.0
-- path: thresholds.entry.slow_drift_rsi_long_min
-  values:
-  - 35.0
-  - 65.0
-- path: trade.adx_sizing_full_adx
-  values:
-  - 28.0
-  - 52.0
-- path: trade.exit_cooldown_s
-  values:
-  - 10.0
-  - 20.0
-- path: trade.min_atr_pct
-  values:
-  - 0.0
-  - 0.003
-  - 0.005
-- path: trade.reverse_entry_signal
-  values:
-  - 0.0
-  - 1.0
+  - 50.0
 - path: trade.vol_scalar_min
   values:
   - 0.35
+  - 0.5
   - 0.65

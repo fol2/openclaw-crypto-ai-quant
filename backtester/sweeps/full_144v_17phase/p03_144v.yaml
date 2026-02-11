@@ -4,38 +4,46 @@
 initial_balance: 10000.0
 lookback: 200
 axes:
-- path: indicators.bb_width_avg_window
-  values:
-  - 15.0
-  - 35.0
-  - 50.0
-- path: thresholds.anomaly.price_change_pct_gt
-  values:
-  - 0.07
-  - 0.13
-- path: thresholds.entry.max_dist_ema_fast
-  values:
-  - 0.02
-  - 0.04
-  - 0.05
-- path: thresholds.ranging.adx_below
-  values:
-  - 14.7
-  - 27.3
-- path: trade.block_exits_on_extreme_dev
+- path: filters.enable_extension_filter
   values:
   - 0.0
   - 1.0
-- path: trade.glitch_price_dev_pct
+- path: filters.use_stoch_rsi_filter
   values:
-  - 0.28
-  - 0.52
-- path: trade.rsi_exit_lb_hi_profit
+  - 0.0
+  - 1.0
+- path: indicators.bb_width_avg_window
+  values:
+  - 15.0
+  - 25.0
+  - 40.0
+  - 50.0
+- path: thresholds.entry.pullback_confidence
+  values:
+  - 0.0
+  - 1.0
+  - 2.0
+- path: thresholds.tp_and_momentum.adx_weak_lt
   values:
   - 21.0
   - 30.0
   - 39.0
-- path: trade.rsi_exit_lb_lo_profit
+- path: trade.confidence_mult_low
   values:
-  - 14.0
-  - 26.0
+  - 0.35
+  - 0.5
+  - 0.65
+- path: trade.enable_rsi_overextension_exit
+  values:
+  - 0.0
+  - 1.0
+- path: trade.min_notional_usd
+  values:
+  - 7.0
+  - 10.0
+  - 13.0
+- path: trade.rsi_exit_ub_lo_profit_low_conf
+  values:
+  - 0.0
+  - 30.0
+  - 50.0
