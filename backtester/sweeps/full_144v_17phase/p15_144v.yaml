@@ -1,0 +1,44 @@
+# p15_144v
+# Auto-generated from full_144v coverage.
+# Values are reduced for phase-grid practicality.
+initial_balance: 10000.0
+lookback: 200
+axes:
+- path: filters.enable_ranging_filter
+  values:
+  - 0.0
+  - 1.0
+- path: filters.vol_confirm_include_prev
+  values:
+  - 0.0
+  - 1.0
+- path: market_regime.auto_reverse_breadth_low
+  values:
+  - 7.0
+  - 10.0
+  - 13.0
+- path: thresholds.entry.slow_drift_min_adx
+  values:
+  - 7.0
+  - 13.0
+- path: thresholds.tp_and_momentum.rsi_short_weak
+  values:
+  - 30.8
+  - 57.2
+- path: trade.enable_ssf_filter
+  values:
+  - 0.0
+  - 1.0
+- path: trade.leverage
+  values:
+  - 1.0
+  - 3.0
+  - 5.0
+- path: trade.reef_short_rsi_extreme_lt
+  values:
+  - 17.5
+  - 32.5
+- path: trade.use_bbo_for_fills
+  values:
+  - 0.0
+  - 1.0

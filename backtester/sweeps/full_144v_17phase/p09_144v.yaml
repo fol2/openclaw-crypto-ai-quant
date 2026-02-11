@@ -1,0 +1,41 @@
+# p09_144v
+# Auto-generated from full_144v coverage.
+# Values are reduced for phase-grid practicality.
+initial_balance: 10000.0
+lookback: 200
+axes:
+- path: indicators.stoch_rsi_smooth1
+  values:
+  - 2.0
+  - 4.0
+  - 5.0
+- path: thresholds.entry.enable_slow_drift_entries
+  values:
+  - 0.0
+  - 1.0
+- path: thresholds.stoch_rsi.block_short_if_k_lt
+  values:
+  - 0.105
+  - 0.195
+- path: trade.add_fraction_of_base_margin
+  values:
+  - 0.25
+  - 0.75
+  - 1.0
+- path: trade.enable_dynamic_leverage
+  values:
+  - 0.0
+  - 1.0
+- path: trade.max_total_margin_pct
+  values:
+  - 0.42
+  - 0.78
+- path: trade.tp_atr_mult
+  values:
+  - 3.0
+  - 5.5
+  - 8.0
+- path: trade.tp_partial_min_notional_usd
+  values:
+  - 7.0
+  - 13.0

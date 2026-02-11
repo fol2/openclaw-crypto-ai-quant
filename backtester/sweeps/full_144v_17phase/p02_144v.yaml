@@ -1,0 +1,41 @@
+# p02_144v
+# Auto-generated from full_144v coverage.
+# Values are reduced for phase-grid practicality.
+initial_balance: 10000.0
+lookback: 200
+axes:
+- path: indicators.atr_window
+  values:
+  - 10.0
+  - 16.0
+  - 20.0
+- path: thresholds.anomaly.ema_fast_dev_pct_gt
+  values:
+  - 0.35
+  - 0.65
+- path: thresholds.entry.macd_hist_entry_mode
+  values:
+  - 0.0
+  - 1.0
+  - 2.0
+- path: thresholds.entry.slow_drift_rsi_short_max
+  values:
+  - 35.0
+  - 65.0
+- path: trade.adx_sizing_min_mult
+  values:
+  - 0.42
+  - 0.78
+- path: trade.glitch_atr_mult
+  values:
+  - 8.4
+  - 15.6
+- path: trade.reentry_cooldown_min_mins
+  values:
+  - 30.0
+  - 60.0
+  - 90.0
+- path: trade.rsi_exit_lb_hi_profit_low_conf
+  values:
+  - 0.0
+  - 50.0
