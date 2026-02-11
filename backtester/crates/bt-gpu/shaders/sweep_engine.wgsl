@@ -97,7 +97,7 @@ struct GpuComboConfig {
     vol_scalar_max: f32, _p3: u32,
     enable_pyramiding: u32, max_adds_per_symbol: u32, add_fraction_of_base_margin: f32,
     add_cooldown_minutes: u32, add_min_profit_atr: f32, add_min_confidence: u32,
-    entry_min_confidence: u32, _p4: u32,
+    entry_min_confidence: u32, enable_slow_drift_entries: u32,
     enable_partial_tp: u32, tp_partial_pct: f32, tp_partial_min_notional_usd: f32,
     trailing_start_atr: f32, trailing_distance_atr: f32, _p5: u32,
     enable_ssf_filter: u32, enable_breakeven_stop: u32, breakeven_start_atr: f32,

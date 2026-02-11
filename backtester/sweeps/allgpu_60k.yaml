@@ -22,6 +22,12 @@ axes:
     values: [1.0, 1.5, 2.0, 2.5]
   - path: trade.trailing_distance_atr
     values: [0.5, 1.0]
+  - path: trade.enable_partial_tp
+    values: [0.0, 1.0]
+  - path: trade.tp_partial_pct
+    values: [0.3, 0.5, 0.7]
+  - path: trade.tp_partial_atr_mult
+    values: [0.0, 1.0, 2.0, 3.0, 4.0]
 
 lookback: 200
 initial_balance: 10000

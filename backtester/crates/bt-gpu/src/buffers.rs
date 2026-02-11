@@ -246,7 +246,7 @@ pub struct GpuComboConfig {
     pub add_min_profit_atr: f32,
     pub add_min_confidence: u32, // 0=Low, 1=Medium, 2=High
     pub entry_min_confidence: u32,
-    pub _pad4: u32,
+    pub enable_slow_drift_entries: u32,
 
     // Partial TP [40-45]
     pub enable_partial_tp: u32,
@@ -254,7 +254,7 @@ pub struct GpuComboConfig {
     pub tp_partial_min_notional_usd: f32,
     pub trailing_start_atr: f32,
     pub trailing_distance_atr: f32,
-    pub _pad5: u32,
+    pub tp_partial_atr_mult: f32,
 
     // SSF + breakeven [46-49]
     pub enable_ssf_filter: u32,
@@ -546,14 +546,14 @@ impl GpuComboConfig {
             add_min_profit_atr: tc.add_min_profit_atr as f32,
             add_min_confidence: tc.add_min_confidence as u32,
             entry_min_confidence: tc.entry_min_confidence as u32,
-            _pad4: 0,
+            enable_slow_drift_entries: et.enable_slow_drift_entries as u32,
 
             enable_partial_tp: tc.enable_partial_tp as u32,
             tp_partial_pct: tc.tp_partial_pct as f32,
             tp_partial_min_notional_usd: tc.tp_partial_min_notional_usd as f32,
             trailing_start_atr: tc.trailing_start_atr as f32,
             trailing_distance_atr: tc.trailing_distance_atr as f32,
-            _pad5: 0,
+            tp_partial_atr_mult: tc.tp_partial_atr_mult as f32,
 
             enable_ssf_filter: tc.enable_ssf_filter as u32,
             enable_breakeven_stop: tc.enable_breakeven_stop as u32,
