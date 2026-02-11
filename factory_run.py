@@ -85,6 +85,34 @@ def _resolve_path_for_backtester(path_str: str | None) -> str | None:
         return raw
 
 
+def _normalise_candles_db_arg_for_backtester(arg: str | None) -> str | None:
+    """Normalise --candles-db so directory inputs do not include funding DBs.
+
+    The backtester expands a directory into all `*.db` files, which can accidentally include `funding_rates.db` and
+    cause failures ("no such table: candles"). When a directory is supplied, convert it to `candles_*.db`.
+    """
+
+    if arg is None:
+        return None
+    raw = str(arg).strip()
+    if not raw:
+        return None
+
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    out: list[str] = []
+    for part in parts:
+        resolved = _resolve_path_for_backtester(part) or part
+        try:
+            p = Path(resolved)
+            if p.is_dir():
+                resolved = str(p / "candles_*.db")
+        except Exception:
+            pass
+        out.append(str(resolved))
+
+    return ",".join(out)
+
+
 def _resolve_nvidia_smi_bin() -> str:
     """Return the best-effort path to nvidia-smi.
 
@@ -849,7 +877,7 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
     interval = str(source_args.get("interval", "1h"))
     candles_db = source_args.get("candles_db")
     funding_db = source_args.get("funding_db")
-    candles_db_bt = _resolve_path_for_backtester(str(candles_db)) if candles_db else None
+    candles_db_bt = _normalise_candles_db_arg_for_backtester(str(candles_db)) if candles_db else None
     funding_db_bt = _resolve_path_for_backtester(str(funding_db)) if funding_db else None
 
     generated_at_ms = int(time.time() * 1000)
@@ -1124,7 +1152,7 @@ def main(argv: list[str] | None = None) -> int:
     # The backtester is executed with cwd=AIQ_ROOT/backtester, so normalise common repo-relative paths.
     bt_config = _resolve_path_for_backtester(str(args.config)) or str(args.config)
     bt_sweep_spec = _resolve_path_for_backtester(str(args.sweep_spec)) or str(args.sweep_spec)
-    bt_candles_db = _resolve_path_for_backtester(str(args.candles_db)) if args.candles_db else None
+    bt_candles_db = _normalise_candles_db_arg_for_backtester(str(args.candles_db)) if args.candles_db else None
     bt_funding_db = _resolve_path_for_backtester(str(args.funding_db)) if args.funding_db else None
     bt_wf_splits_json = (
         _resolve_path_for_backtester(str(getattr(args, "walk_forward_splits_json", "")))
