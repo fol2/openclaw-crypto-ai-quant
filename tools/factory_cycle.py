@@ -37,7 +37,7 @@ if str(AIQ_ROOT) not in sys.path:
     sys.path.insert(0, str(AIQ_ROOT))
 
 import factory_run  # noqa: E402  (needs sys.path fix above)
-from engine.openclaw_cli import send_openclaw_message
+from engine.alerting import send_openclaw_message
 
 try:
     from tools.paper_deploy import deploy_paper_config
@@ -671,8 +671,7 @@ def _latest_paper_deploy_event_for_service(*, artifacts_dir: Path, service: str)
     root = (Path(artifacts_dir) / "deployments" / "paper").expanduser().resolve()
     if not root.exists():
         return None
-    latest: dict[str, Any] | None = None
-    latest_ts = float("-inf")
+    events: list[dict[str, Any]] = []
     for ev_path in root.glob("**/deploy_event.json"):
         try:
             ev = json.loads(ev_path.read_text(encoding="utf-8"))
@@ -686,11 +685,80 @@ def _latest_paper_deploy_event_for_service(*, artifacts_dir: Path, service: str)
             continue
         ts = _parse_iso_to_epoch_s(str(ev.get("ts_utc", "") or ""))
         if ts is None:
-            ts = float("-inf")
-        if ts >= latest_ts:
-            latest = {"event": ev, "path": str(ev_path), "ts_epoch_s": float(ts)}
-            latest_ts = float(ts)
-    return latest
+            continue
+        cfg = str(((ev.get("what") or {}).get("config_id") or "")).strip()
+        events.append(
+            {
+                "event": ev,
+                "path": str(ev_path),
+                "ts_epoch_s": float(ts),
+                "config_id": cfg,
+            }
+        )
+
+    if not events:
+        return None
+    events.sort(key=lambda it: (float(it.get("ts_epoch_s", 0.0) or 0.0), str(it.get("path", ""))))
+    return events[-1]
+
+
+def _stable_promotion_since_s(*, artifacts_dir: Path, service: str, config_id: str) -> float | None:
+    """Return a stable gate start for the latest contiguous deploy segment of service+config_id."""
+    cfg = str(config_id or "").strip()
+    if not cfg:
+        return None
+    root = (Path(artifacts_dir) / "deployments" / "paper").expanduser().resolve()
+    if not root.exists():
+        return None
+
+    events: list[dict[str, Any]] = []
+    for ev_path in root.glob("**/deploy_event.json"):
+        try:
+            ev = json.loads(ev_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        rs = ev.get("restart", {}) if isinstance(ev.get("restart"), dict) else {}
+        svc = str(rs.get("service", "") or "").strip()
+        if svc != str(service).strip():
+            continue
+        cfg_id = str(((ev.get("what") or {}).get("config_id") or "")).strip()
+        ts = _parse_iso_to_epoch_s(str(ev.get("ts_utc", "") or ""))
+        if ts is None:
+            continue
+        events.append(
+            {
+                "ts_epoch_s": float(ts),
+                "config_id": str(cfg_id),
+                "path": str(ev_path),
+            }
+        )
+
+    if not events:
+        return None
+
+    events.sort(key=lambda it: (float(it.get("ts_epoch_s", 0.0) or 0.0), str(it.get("path", ""))))
+
+    last_idx: int | None = None
+    for i in range(len(events) - 1, -1, -1):
+        if str(events[i].get("config_id", "")).strip() == cfg:
+            last_idx = i
+            break
+    if last_idx is None:
+        return None
+
+    start_idx = int(last_idx)
+    while start_idx > 0:
+        prev_cfg = str(events[start_idx - 1].get("config_id", "")).strip()
+        if prev_cfg != cfg:
+            break
+        start_idx -= 1
+
+    try:
+        return float(events[start_idx].get("ts_epoch_s", 0.0) or 0.0)
+    except Exception:
+        return None
 
 
 def _promotion_rank_key(item: dict[str, Any]) -> tuple[float, float, float]:
@@ -1284,7 +1352,13 @@ def main(argv: list[str] | None = None) -> int:
                 ev = latest.get("event", {}) if isinstance(latest.get("event"), dict) else {}
                 config_id = str(((ev.get("what") or {}).get("config_id") or "")).strip()
                 ts_utc = str(ev.get("ts_utc", "") or "").strip()
-                since_s = _parse_iso_to_epoch_s(ts_utc)
+                deploy_since_s = _parse_iso_to_epoch_s(ts_utc)
+                stable_since_s = _stable_promotion_since_s(
+                    artifacts_dir=artifacts_dir,
+                    service=str(target.service),
+                    config_id=config_id,
+                )
+                since_s = stable_since_s if stable_since_s is not None else deploy_since_s
                 paper_db = _paper_db_for_service(str(target.service), explicit_db)
                 if not config_id or since_s is None or paper_db is None:
                     reasons: list[str] = []
@@ -1300,6 +1374,7 @@ def main(argv: list[str] | None = None) -> int:
                             "ok": False,
                             "config_id": config_id,
                             "deploy_ts_utc": ts_utc,
+                            "since_epoch_s": None,
                             "reasons": reasons,
                             "metrics": {},
                         }
@@ -1315,6 +1390,7 @@ def main(argv: list[str] | None = None) -> int:
                             "config_id": config_id,
                             "deploy_ts_utc": ts_utc,
                             "paper_db": str(paper_db),
+                            "since_epoch_s": float(since_s),
                             "reasons": [f"registry lookup failed: {type(e).__name__}: {e}"],
                             "metrics": {},
                         }
@@ -1333,6 +1409,7 @@ def main(argv: list[str] | None = None) -> int:
                         "config_id": config_id,
                         "deploy_ts_utc": ts_utc,
                         "paper_db": str(paper_db),
+                        "since_epoch_s": float(since_s),
                         "reasons": list(gate.reasons),
                         "metrics": dict(gate.metrics),
                         "deploy_event_path": str(latest.get("path", "")),
@@ -1389,6 +1466,13 @@ def main(argv: list[str] | None = None) -> int:
                 incumbent_cfg_evt = str(((ev_inc.get("what") or {}).get("config_id") or "")).strip()
                 if incumbent_cfg_evt:
                     incumbent_cfg_id = incumbent_cfg_evt
+                incumbent_stable_since_s = _stable_promotion_since_s(
+                    artifacts_dir=artifacts_dir,
+                    service=str(live_service),
+                    config_id=str(incumbent_cfg_id),
+                )
+                if incumbent_stable_since_s is not None:
+                    incumbent_since_s = float(incumbent_stable_since_s)
                 if incumbent_cfg_id:
                     try:
                         incumbent_yaml_text = _lookup_config_yaml_text(registry_db=registry_db, config_id=incumbent_cfg_id)

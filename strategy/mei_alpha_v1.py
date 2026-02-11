@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 import exchange.ws as hyperliquid_ws
 import exchange.meta as hyperliquid_meta
-from engine.openclaw_cli import send_openclaw_message
+from engine.alerting import send_openclaw_message
 
 
 def _json_default(o):
