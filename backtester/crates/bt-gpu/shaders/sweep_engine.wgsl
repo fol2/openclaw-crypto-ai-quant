@@ -804,6 +804,7 @@ fn is_pesc_blocked(state: ptr<function, GpuComboState>, sym: u32, desired_type: 
     }
 
     let cooldown_sec = u32(cooldown_mins * 60.0);
+    if current_sec < close_ts { return true; }
     let elapsed = current_sec - close_ts;
     return elapsed < cooldown_sec;
 }
@@ -1076,9 +1077,11 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     // Pack result (on last chunk)
     if params.chunk_end >= params.num_bars {
         let total_losses = select(0u, state.total_trades - state.total_wins, state.total_trades >= state.total_wins);
+        let initial_balance = bitcast<f32>(params.initial_balance_bits);
         results[combo_id] = GpuResult(
             state.balance,
-            state.total_pnl,
+            // Match CPU semantics: net PnL = final_balance - initial_balance.
+            state.balance - initial_balance,
             state.total_fees,
             state.total_trades,
             state.total_wins,

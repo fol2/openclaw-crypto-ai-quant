@@ -935,6 +935,7 @@ __device__ bool is_pesc_blocked(const GpuComboState* state, unsigned int sym,
     }
 
     unsigned int cooldown_sec = (unsigned int)(cooldown_mins * 60.0f);
+    if (current_sec < close_ts) { return true; }
     unsigned int elapsed = current_sec - close_ts;
     return elapsed < cooldown_sec;
 }
@@ -1636,9 +1637,11 @@ extern "C" __global__ void sweep_engine_kernel(
         unsigned int total_losses = (state.total_trades >= state.total_wins)
                                     ? (state.total_trades - state.total_wins)
                                     : 0u;
+        float initial_balance = __uint_as_float(params->initial_balance_bits);
         GpuResult res;
         res.final_balance = state.balance;
-        res.total_pnl = state.total_pnl;
+        // Match CPU semantics: net PnL = final_balance - initial_balance.
+        res.total_pnl = state.balance - initial_balance;
         res.total_fees = state.total_fees;
         res.total_trades = state.total_trades;
         res.total_wins = state.total_wins;
