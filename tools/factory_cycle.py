@@ -15,8 +15,10 @@ parallel v8 instance, without touching production `master`.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -35,13 +37,18 @@ if str(AIQ_ROOT) not in sys.path:
     sys.path.insert(0, str(AIQ_ROOT))
 
 import factory_run  # noqa: E402  (needs sys.path fix above)
+from engine.alerting import send_openclaw_message
 
 try:
     from tools.paper_deploy import deploy_paper_config
+    from tools.config_id import config_id_from_yaml_text
     from tools.registry_index import default_registry_db_path
+    from tools.promote_to_live import GateConfig, evaluate_paper_gates
 except ImportError:  # pragma: no cover
     from paper_deploy import deploy_paper_config  # type: ignore[no-redef]
+    from config_id import config_id_from_yaml_text  # type: ignore[no-redef]
     from registry_index import default_registry_db_path  # type: ignore[no-redef]
+    from promote_to_live import GateConfig, evaluate_paper_gates  # type: ignore[no-redef]
 
 def _utc_compact() -> str:
     return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -153,6 +160,39 @@ class Candidate:
     reject_reason: str
 
 
+@dataclass(frozen=True)
+class DeployTarget:
+    slot: int
+    service: str
+    yaml_path: Path
+
+
+def _parse_iso_to_epoch_s(ts: str) -> float | None:
+    s = str(ts or "").strip()
+    if not s:
+        return None
+    try:
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        import datetime
+
+        dt = datetime.datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return float(dt.timestamp())
+    except Exception:
+        return None
+
+
+def _split_csv(raw: str) -> list[str]:
+    out: list[str] = []
+    for part in str(raw or "").split(","):
+        s = str(part or "").strip()
+        if s and s not in out:
+            out.append(s)
+    return out
+
+
 def _parse_candidate(it: dict[str, Any]) -> Candidate | None:
     try:
         config_id = str(it.get("config_id", "")).strip()
@@ -176,6 +216,353 @@ def _parse_candidate(it: dict[str, Any]) -> Candidate | None:
         return None
 
 
+def _candidate_sort_key(c: Candidate) -> tuple[float, float]:
+    score = float(c.score_v1) if c.score_v1 is not None else float("-inf")
+    return (score, float(c.total_pnl))
+
+
+def _format_float(v: Any, *, ndigits: int = 3, default: str = "n/a") -> str:
+    try:
+        return f"{float(v):.{ndigits}f}"
+    except Exception:
+        return default
+
+
+def _short_id(v: str, n: int = 12) -> str:
+    s = str(v or "").strip()
+    return s[:n] if s else "n/a"
+
+
+def _short_path(v: str, parts: int = 3) -> str:
+    s = str(v or "").strip()
+    if not s:
+        return "n/a"
+    p = Path(s)
+    xs = p.parts
+    if len(xs) <= int(parts):
+        return s
+    return str(Path(*xs[-int(parts) :]))
+
+
+def _format_candidate_row(c: Candidate, *, idx: int, include_reason: bool = False) -> str:
+    icon = "❌" if include_reason else "✅"
+    row = (
+        f"{icon} #{idx} `{_short_id(c.config_id)}` "
+        f"pf={_format_float(c.profit_factor, ndigits=3)} "
+        f"dd={_format_float(float(c.max_drawdown_pct) * 100.0, ndigits=2)}% "
+        f"pnl={_format_float(c.total_pnl, ndigits=2)} "
+        f"trades={int(c.total_trades)} "
+        f"score={_format_float(c.score_v1, ndigits=4)}"
+    )
+    if include_reason:
+        reason = str(c.reject_reason or "").strip() or "unknown"
+        if len(reason) > 96:
+            reason = reason[:93] + "..."
+        row += f" | reason={reason}"
+    return row
+
+
+def _send_discord_chunks(*, target: str, lines: list[str], max_chars: int = 1800) -> None:
+    tgt = str(target or "").strip()
+    if not tgt:
+        return
+    clean = [str(x).rstrip() for x in lines if str(x).strip()]
+    if not clean:
+        return
+    chunks: list[str] = []
+    cur = ""
+    for line in clean:
+        if not cur:
+            cur = line
+            continue
+        candidate = cur + "\n" + line
+        if len(candidate) <= int(max_chars):
+            cur = candidate
+            continue
+        chunks.append(cur)
+        cur = line
+    if cur:
+        chunks.append(cur)
+    for chunk in chunks:
+        _send_discord(target=tgt, message=chunk)
+
+
+def _nested_get(obj: dict[str, Any], path: tuple[str, ...], default: Any = None) -> Any:
+    cur: Any = obj
+    for key in path:
+        if not isinstance(cur, dict):
+            return default
+        if key not in cur:
+            return default
+        cur = cur[key]
+    return cur
+
+
+def _yaml_config_id(yaml_text: str) -> str:
+    txt = str(yaml_text or "").strip()
+    if not txt:
+        return ""
+    try:
+        return str(config_id_from_yaml_text(txt))
+    except Exception:
+        return hashlib.sha256(txt.encode("utf-8")).hexdigest()
+
+
+def _yaml_summary(yaml_text: str) -> dict[str, str]:
+    txt = str(yaml_text or "").strip()
+    if not txt:
+        return {}
+    try:
+        obj = yaml.safe_load(txt) or {}
+        if not isinstance(obj, dict):
+            return {}
+    except Exception:
+        return {}
+
+    out: dict[str, str] = {}
+    iv = str(_nested_get(obj, ("global", "engine", "interval"), "") or "").strip()
+    if iv:
+        out["interval"] = iv
+    for k, path, nd in [
+        ("allocation_pct", ("global", "trade", "allocation_pct"), 4),
+        ("leverage", ("global", "trade", "leverage"), 3),
+        ("sl_atr_mult", ("global", "trade", "sl_atr_mult"), 3),
+        ("tp_atr_mult", ("global", "trade", "tp_atr_mult"), 3),
+    ]:
+        v = _nested_get(obj, path, None)
+        if v is None:
+            continue
+        out[k] = _format_float(v, ndigits=nd, default="n/a")
+    return out
+
+
+def _diff_yaml_summaries(prev: dict[str, str], nxt: dict[str, str]) -> list[str]:
+    keys = ["interval", "allocation_pct", "leverage", "sl_atr_mult", "tp_atr_mult"]
+    lines: list[str] = []
+    for k in keys:
+        a = str(prev.get(k, "n/a"))
+        b = str(nxt.get(k, "n/a"))
+        if a == b:
+            continue
+        lines.append(f"- {k}: {a} -> {b}")
+    return lines
+
+
+def _systemctl_show_value(*, service: str, prop: str) -> str:
+    try:
+        proc = subprocess.run(
+            ["systemctl", "--user", "show", "-p", str(prop), "--value", str(service)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=8.0,
+        )
+        if int(proc.returncode) != 0:
+            return ""
+        return str(proc.stdout or "").strip()
+    except Exception:
+        return ""
+
+
+def _service_active_state(service: str) -> str:
+    try:
+        proc = subprocess.run(
+            ["systemctl", "--user", "is-active", str(service)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=8.0,
+        )
+        return str(proc.stdout or "").strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _pid_environ(pid: int) -> dict[str, str]:
+    if pid <= 0:
+        return {}
+    path = Path("/proc") / str(pid) / "environ"
+    if not path.exists():
+        return {}
+    try:
+        raw = path.read_bytes()
+    except Exception:
+        return {}
+    out: dict[str, str] = {}
+    for chunk in raw.split(b"\x00"):
+        if b"=" not in chunk:
+            continue
+        k, v = chunk.split(b"=", 1)
+        key = k.decode("utf-8", errors="ignore").strip()
+        if not key:
+            continue
+        out[key] = v.decode("utf-8", errors="ignore")
+    return out
+
+
+def _latest_heartbeat_fields(service: str) -> dict[str, str]:
+    try:
+        proc = subprocess.run(
+            ["journalctl", "--user", "-u", str(service), "-n", "120", "--no-pager"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=12.0,
+        )
+    except Exception:
+        return {}
+    if int(proc.returncode) != 0:
+        return {}
+    lines = str(proc.stdout or "").splitlines()
+    hb = ""
+    for line in reversed(lines):
+        if "engine ok." in line:
+            hb = line
+            break
+    if not hb:
+        return {}
+    out: dict[str, str] = {}
+    for m in re.finditer(r"([a-zA-Z0-9_]+)=([^\s]+)", hb):
+        key = str(m.group(1) or "").strip()
+        val = str(m.group(2) or "").strip()
+        if key:
+            out[key] = val
+    return out
+
+
+def _health_service_list(default_service: str) -> list[str]:
+    raw = str(os.getenv("AI_QUANT_FACTORY_HEALTH_SERVICES", "") or "").strip()
+    if not raw:
+        return [str(default_service).strip()]
+    out: list[str] = []
+    for part in raw.split(","):
+        s = str(part or "").strip()
+        if s and s not in out:
+            out.append(s)
+    return out or [str(default_service).strip()]
+
+
+def _service_snapshot_line(service: str) -> str:
+    active = _service_active_state(service)
+    pid_raw = _systemctl_show_value(service=service, prop="MainPID")
+    try:
+        pid = int(pid_raw or "0")
+    except Exception:
+        pid = 0
+    env = _pid_environ(pid)
+    hb = _latest_heartbeat_fields(service)
+    mode = str(env.get("AI_QUANT_STRATEGY_MODE", "n/a") or "n/a")
+    label = str(env.get("AI_QUANT_DISCORD_LABEL", "n/a") or "n/a")
+    chan = str(env.get("AI_QUANT_DISCORD_CHANNEL", "n/a") or "n/a")
+    cfg = str(hb.get("config_id", "n/a") or "n/a")
+    cfg_s = cfg[:12] if cfg and cfg != "n/a" else "n/a"
+    wsr = str(hb.get("ws_restarts", "n/a") or "n/a")
+    open_pos = str(hb.get("open_pos", "n/a") or "n/a")
+    return (
+        f"• {service} | active={active} mode={mode} "
+        f"label={label} channel={chan} cfg={cfg_s} pos={open_pos} ws={wsr}"
+    )
+
+
+def _service_runtime_env(service: str) -> dict[str, str]:
+    env = _service_environment(str(service))
+    pid_raw = _systemctl_show_value(service=str(service), prop="MainPID")
+    try:
+        pid = int(pid_raw or "0")
+    except Exception:
+        pid = 0
+    if pid > 0:
+        env_rt = _pid_environ(pid)
+        if env_rt:
+            env.update(env_rt)
+    return env
+
+
+def _service_discord_route(service: str) -> tuple[str, str]:
+    env = _service_runtime_env(str(service))
+    target = str(env.get("AI_QUANT_DISCORD_CHANNEL", "") or "").strip()
+    label = str(env.get("AI_QUANT_DISCORD_LABEL", "") or env.get("AI_QUANT_INSTANCE_TAG", "") or "").strip()
+    return (target, label)
+
+
+def _format_metrics_brief(metrics: dict[str, Any]) -> str:
+    m = metrics if isinstance(metrics, dict) else {}
+    parts: list[str] = []
+    pf = m.get("profit_factor", None)
+    dd = m.get("max_drawdown_pct", None)
+    pnl = m.get("total_pnl", None)
+    trades = m.get("total_trades", m.get("close_trades", None))
+    elapsed_h = m.get("elapsed_h", None)
+    if pf is not None:
+        parts.append(f"pf={_format_float(pf, ndigits=3)}")
+    if dd is not None:
+        parts.append(f"dd={_format_float(dd, ndigits=2)}%")
+    if pnl is not None:
+        parts.append(f"pnl={_format_float(pnl, ndigits=2)}")
+    if trades is not None:
+        try:
+            parts.append(f"trades={int(trades)}")
+        except Exception:
+            pass
+    if elapsed_h is not None:
+        parts.append(f"h={_format_float(elapsed_h, ndigits=1)}")
+    return " ".join(parts) if parts else "n/a"
+
+
+def _user_config_change_lines(
+    *,
+    run_id: str,
+    lane_label: str,
+    lane_kind: str,
+    previous_cfg: str,
+    next_cfg: str,
+    source_note: str,
+    metrics: dict[str, Any],
+    diff_lines: list[str],
+) -> list[str]:
+    lines = [
+        "🧭 Strategy Config Updated",
+        f"`lane` {lane_label or 'n/a'}  `type` {lane_kind}",
+        f"`config` `{_short_id(previous_cfg)}` → `{_short_id(next_cfg)}`",
+        f"`trigger` nightly factory `{run_id}` ({source_note})",
+        f"`validation` {_format_metrics_brief(metrics)}",
+    ]
+    if diff_lines:
+        lines.append("Key parameter changes:")
+        lines.extend(diff_lines[:6])
+    else:
+        lines.append("Key parameter changes: none")
+    lines.append("This update applies from the next engine cycle after service restart.")
+    return lines
+
+
+def _build_candidates_messages(*, run_id: str, parsed: list[Candidate]) -> list[list[str]]:
+    ok = [c for c in parsed if not bool(c.rejected)]
+    rej = [c for c in parsed if bool(c.rejected)]
+    ok.sort(key=_candidate_sort_key, reverse=True)
+    rej.sort(key=_candidate_sort_key, reverse=True)
+
+    out: list[list[str]] = []
+    head = [
+        f"📊 Candidates • `{run_id}`",
+        f"`deployable` {len(ok)}  `rejected` {len(rej)}  `total` {len(parsed)}",
+    ]
+    if ok:
+        lines = head + ["Top deployable:"] + [
+            _format_candidate_row(c, idx=i + 1, include_reason=False) for i, c in enumerate(ok[:5])
+        ]
+        out.append(lines)
+    else:
+        out.append(head + ["Top deployable: none"])
+
+    if rej:
+        out.append(
+            [f"🧹 Rejected • `{run_id}`", "Top rejected:"] +
+            [_format_candidate_row(c, idx=i + 1, include_reason=True) for i, c in enumerate(rej[:5])]
+        )
+    return out
+
+
 def _select_best_candidate(items: list[dict[str, Any]]) -> Candidate | None:
     parsed = [c for c in (_parse_candidate(it) for it in items) if c is not None]
     parsed_ok = [c for c in parsed if not bool(c.rejected)]
@@ -189,6 +576,258 @@ def _select_best_candidate(items: list[dict[str, Any]]) -> Candidate | None:
     else:
         parsed_ok.sort(key=lambda c: float(c.total_pnl), reverse=True)
     return parsed_ok[0]
+
+
+def _select_deployable_candidates(parsed: list[Candidate], *, limit: int) -> list[Candidate]:
+    if int(limit) <= 0:
+        return []
+    ok = [c for c in parsed if not bool(c.rejected)]
+    if not ok:
+        return []
+    ok.sort(key=_candidate_sort_key, reverse=True)
+    return ok[: int(limit)]
+
+
+def _resolve_deploy_targets(
+    *,
+    service: str,
+    yaml_path: str,
+    candidate_services: str,
+    candidate_yaml_paths: str,
+    candidate_count: int,
+) -> list[DeployTarget]:
+    services = _split_csv(candidate_services) or [str(service).strip()]
+    yaml_raw = _split_csv(candidate_yaml_paths) or [str(yaml_path).strip()]
+    if len(services) != len(yaml_raw):
+        raise ValueError(
+            f"candidate target mismatch: services={len(services)} yaml_paths={len(yaml_raw)}. "
+            "Provide equal-length --candidate-services and --candidate-yaml-paths."
+        )
+    out: list[DeployTarget] = []
+    for i, (svc, yp) in enumerate(zip(services, yaml_raw), start=1):
+        out.append(
+            DeployTarget(
+                slot=int(i),
+                service=str(svc).strip(),
+                yaml_path=Path(str(yp)).expanduser().resolve(),
+            )
+        )
+    lim = max(1, int(candidate_count))
+    return out[:lim]
+
+
+def _service_environment(service: str) -> dict[str, str]:
+    raw = _systemctl_show_value(service=str(service), prop="Environment")
+    out: dict[str, str] = {}
+    for part in str(raw or "").split():
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        key = str(k or "").strip()
+        if key:
+            out[key] = str(v or "")
+    return out
+
+
+def _parse_service_path_map(raw: str) -> dict[str, Path]:
+    out: dict[str, Path] = {}
+    for part in _split_csv(raw):
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        key = str(k or "").strip()
+        val = str(v or "").strip()
+        if not key or not val:
+            continue
+        out[key] = Path(val).expanduser().resolve()
+    return out
+
+
+def _paper_db_for_service(service: str, explicit: dict[str, Path]) -> Path | None:
+    if service in explicit:
+        return explicit[service]
+    env = _service_environment(service)
+    db_raw = str(env.get("AI_QUANT_DB_PATH", "") or "").strip()
+    if not db_raw:
+        return None
+    return Path(db_raw).expanduser().resolve()
+
+
+def _lookup_config_yaml_text(*, registry_db: Path, config_id: str) -> str:
+    con = sqlite3.connect(str(registry_db), timeout=2.0)
+    try:
+        row = con.execute("SELECT yaml_text FROM configs WHERE config_id = ? LIMIT 1", (str(config_id),)).fetchone()
+        if not row:
+            raise KeyError(f"config_id not found in registry: {config_id}")
+        txt = str(row[0] or "")
+        if not txt.strip():
+            raise ValueError(f"empty yaml_text for config_id: {config_id}")
+        return txt
+    finally:
+        con.close()
+
+
+def _latest_paper_deploy_event_for_service(*, artifacts_dir: Path, service: str) -> dict[str, Any] | None:
+    root = (Path(artifacts_dir) / "deployments" / "paper").expanduser().resolve()
+    if not root.exists():
+        return None
+    events: list[dict[str, Any]] = []
+    for ev_path in root.glob("**/deploy_event.json"):
+        try:
+            ev = json.loads(ev_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        rs = ev.get("restart", {}) if isinstance(ev.get("restart"), dict) else {}
+        svc = str(rs.get("service", "") or "").strip()
+        if svc != str(service).strip():
+            continue
+        ts = _parse_iso_to_epoch_s(str(ev.get("ts_utc", "") or ""))
+        if ts is None:
+            continue
+        cfg = str(((ev.get("what") or {}).get("config_id") or "")).strip()
+        events.append(
+            {
+                "event": ev,
+                "path": str(ev_path),
+                "ts_epoch_s": float(ts),
+                "config_id": cfg,
+            }
+        )
+
+    if not events:
+        return None
+    events.sort(key=lambda it: (float(it.get("ts_epoch_s", 0.0) or 0.0), str(it.get("path", ""))))
+    return events[-1]
+
+
+def _stable_promotion_since_s(*, artifacts_dir: Path, service: str, config_id: str) -> float | None:
+    """Return a stable gate start for the latest contiguous deploy segment of service+config_id."""
+    cfg = str(config_id or "").strip()
+    if not cfg:
+        return None
+    root = (Path(artifacts_dir) / "deployments" / "paper").expanduser().resolve()
+    if not root.exists():
+        return None
+
+    events: list[dict[str, Any]] = []
+    for ev_path in root.glob("**/deploy_event.json"):
+        try:
+            ev = json.loads(ev_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        rs = ev.get("restart", {}) if isinstance(ev.get("restart"), dict) else {}
+        svc = str(rs.get("service", "") or "").strip()
+        if svc != str(service).strip():
+            continue
+        cfg_id = str(((ev.get("what") or {}).get("config_id") or "")).strip()
+        ts = _parse_iso_to_epoch_s(str(ev.get("ts_utc", "") or ""))
+        if ts is None:
+            continue
+        events.append(
+            {
+                "ts_epoch_s": float(ts),
+                "config_id": str(cfg_id),
+                "path": str(ev_path),
+            }
+        )
+
+    if not events:
+        return None
+
+    events.sort(key=lambda it: (float(it.get("ts_epoch_s", 0.0) or 0.0), str(it.get("path", ""))))
+
+    last_idx: int | None = None
+    for i in range(len(events) - 1, -1, -1):
+        if str(events[i].get("config_id", "")).strip() == cfg:
+            last_idx = i
+            break
+    if last_idx is None:
+        return None
+
+    start_idx = int(last_idx)
+    while start_idx > 0:
+        prev_cfg = str(events[start_idx - 1].get("config_id", "")).strip()
+        if prev_cfg != cfg:
+            break
+        start_idx -= 1
+
+    try:
+        return float(events[start_idx].get("ts_epoch_s", 0.0) or 0.0)
+    except Exception:
+        return None
+
+
+def _promotion_rank_key(item: dict[str, Any]) -> tuple[float, float, float]:
+    m = item.get("metrics", {}) if isinstance(item.get("metrics"), dict) else {}
+    pf = float(m.get("profit_factor", 0.0) or 0.0)
+    close_n = float(m.get("close_trades", 0) or 0)
+    elapsed_h = float(m.get("elapsed_h", 0.0) or 0.0)
+    return (pf, close_n, elapsed_h)
+
+
+def _compare_candidate_vs_incumbent(
+    *,
+    candidate: dict[str, Any],
+    incumbent: dict[str, Any],
+    min_pf_delta: float,
+    max_dd_regression_pct: float,
+) -> tuple[bool, list[str]]:
+    cand_m = candidate.get("metrics", {}) if isinstance(candidate.get("metrics"), dict) else {}
+    inc_m = incumbent.get("metrics", {}) if isinstance(incumbent.get("metrics"), dict) else {}
+
+    cand_pf = float(cand_m.get("profit_factor", 0.0) or 0.0)
+    inc_pf = float(inc_m.get("profit_factor", 0.0) or 0.0)
+    cand_dd = float(cand_m.get("max_drawdown_pct", 0.0) or 0.0)
+    inc_dd = float(inc_m.get("max_drawdown_pct", 0.0) or 0.0)
+    cand_kill = int(cand_m.get("kill_events", 0) or 0)
+    inc_kill = int(inc_m.get("kill_events", 0) or 0)
+
+    reasons: list[str] = []
+    if cand_pf + 1e-9 < (inc_pf + float(min_pf_delta)):
+        reasons.append(
+            f"profit_factor regression: cand={cand_pf:.3f} < inc+delta={inc_pf + float(min_pf_delta):.3f}"
+        )
+    if (cand_dd - inc_dd) > float(max_dd_regression_pct):
+        reasons.append(
+            f"drawdown regression: cand={cand_dd:.3f}% > inc+tol={inc_dd + float(max_dd_regression_pct):.3f}%"
+        )
+    if cand_kill > inc_kill:
+        reasons.append(f"kill_events regression: cand={cand_kill} > inc={inc_kill}")
+    return (not reasons, reasons)
+
+
+def _restart_summary_from_deploy_event(deploy_event_path: Path) -> tuple[str, list[str]]:
+    restart_summary = "unknown"
+    restart_details: list[str] = []
+    if not deploy_event_path.exists():
+        return (restart_summary, restart_details)
+    try:
+        ev = json.loads(deploy_event_path.read_text(encoding="utf-8"))
+        rs = ev.get("restart", {}) if isinstance(ev, dict) else {}
+        rr = rs.get("result", {}) if isinstance(rs, dict) else {}
+        results = rr.get("results", []) if isinstance(rr, dict) else []
+        restart_mode = str(rs.get("mode", "unknown") or "unknown")
+        restart_summary = f"mode={restart_mode}"
+        if isinstance(results, list) and results:
+            ok_cnt = 0
+            for r in results:
+                if not isinstance(r, dict):
+                    continue
+                svc = str(r.get("service", "unknown") or "unknown")
+                ok = bool(r.get("ok", False))
+                if ok:
+                    ok_cnt += 1
+                restart_details.append(f"- restart {svc}: {'ok' if ok else 'fail'}")
+            restart_summary += f" results_ok={ok_cnt}/{len(results)}"
+        else:
+            restart_summary += " results=n/a"
+    except Exception:
+        restart_summary = "parse_failed"
+    return (restart_summary, restart_details)
 
 
 def _query_run_dir(*, registry_db: Path, run_id: str) -> Path:
@@ -228,13 +867,7 @@ def _send_discord(*, target: str, message: str) -> None:
         timeout_s = 6.0
     timeout_s = max(1.0, min(30.0, timeout_s))
     try:
-        subprocess.run(
-            ["openclaw", "message", "send", "--channel", "discord", "--target", tgt, "--message", msg],
-            capture_output=True,
-            check=True,
-            text=True,
-            timeout=timeout_s,
-        )
+        send_openclaw_message(channel="discord", target=tgt, message=msg, timeout_s=timeout_s)
     except Exception:
         # Notifications must never block the pipeline.
         return
@@ -276,6 +909,28 @@ def main(argv: list[str] | None = None) -> int:
         default=str(AIQ_ROOT / "config" / "strategy_overrides.yaml"),
         help="Target strategy overrides YAML path for deployment (default: config/strategy_overrides.yaml).",
     )
+    ap.add_argument(
+        "--candidate-services",
+        default="",
+        help=(
+            "Optional CSV service list for top-N candidate deployment "
+            "(e.g. svc_paper1,svc_paper2,svc_paper3)."
+        ),
+    )
+    ap.add_argument(
+        "--candidate-yaml-paths",
+        default="",
+        help=(
+            "Optional CSV YAML path list for top-N candidate deployment "
+            "(same length/order as --candidate-services)."
+        ),
+    )
+    ap.add_argument(
+        "--candidate-count",
+        type=int,
+        default=1,
+        help="Maximum number of deployable candidates to deploy each cycle (default: 1).",
+    )
     ap.add_argument("--deploy-reason", default="", help="Reason recorded in the paper deploy artefact.")
     ap.add_argument(
         "--restart",
@@ -295,6 +950,59 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--leave-paused", action="store_true", help="Do not clear the pause file after a successful restart.")
     ap.add_argument("--verify-sleep-s", type=float, default=2.0, help="Seconds to wait before verifying service health.")
     ap.add_argument("--dry-run", action="store_true", help="Do not modify YAML or restart services; still runs factory.")
+    ap.add_argument(
+        "--enable-livepaper-promotion",
+        action="store_true",
+        help="Enable gate-based promotion from paper candidate services to livepaper service.",
+    )
+    ap.add_argument(
+        "--livepaper-service",
+        default="",
+        help="systemd user service name for livepaper promotion target (required when promotion is enabled).",
+    )
+    ap.add_argument(
+        "--livepaper-yaml-path",
+        default="",
+        help="YAML path for livepaper promotion target (required when promotion is enabled).",
+    )
+    ap.add_argument(
+        "--paper-db-map",
+        default="",
+        help="Optional CSV service=paper_db_path mapping for promotion gates.",
+    )
+    ap.add_argument("--promotion-min-trades", type=int, default=20, help="Gate: minimum CLOSE trades OR min-hours.")
+    ap.add_argument("--promotion-min-hours", type=float, default=24.0, help="Gate: minimum runtime hours OR min-trades.")
+    ap.add_argument("--promotion-min-profit-factor", type=float, default=1.2, help="Gate: minimum paper profit factor.")
+    ap.add_argument("--promotion-max-drawdown-pct", type=float, default=10.0, help="Gate: maximum paper drawdown percent.")
+    ap.add_argument(
+        "--promotion-max-config-slippage-bps",
+        type=float,
+        default=20.0,
+        help="Gate: maximum config trade.slippage_bps (<=0 disables this gate).",
+    )
+    ap.add_argument(
+        "--promotion-max-kill-events",
+        type=int,
+        default=0,
+        help="Gate: maximum allowed RISK_KILL* events during paper window.",
+    )
+    ap.add_argument(
+        "--promotion-ignore-live-comparison",
+        action="store_true",
+        help="Disable incumbent comparison guard (default: require candidate not worse than current livepaper).",
+    )
+    ap.add_argument(
+        "--promotion-min-pf-delta",
+        type=float,
+        default=0.0,
+        help="Incumbent guard: candidate profit_factor must be >= incumbent + this delta.",
+    )
+    ap.add_argument(
+        "--promotion-max-dd-regression-pct",
+        type=float,
+        default=0.0,
+        help="Incumbent guard: candidate drawdown may exceed incumbent by at most this percentage-point tolerance.",
+    )
 
     ap.add_argument(
         "--discord-target",
@@ -306,6 +1014,13 @@ def main(argv: list[str] | None = None) -> int:
     run_id = str(args.run_id).strip() or f"nightly_{_utc_compact()}"
     artifacts_dir = Path(str(args.artifacts_dir)).expanduser().resolve()
     base_cfg_path = Path(str(args.config)).expanduser().resolve()
+    deploy_targets = _resolve_deploy_targets(
+        service=str(args.service),
+        yaml_path=str(args.yaml_path),
+        candidate_services=str(args.candidate_services),
+        candidate_yaml_paths=str(args.candidate_yaml_paths),
+        candidate_count=int(args.candidate_count),
+    )
 
     # Materialise strategy-mode overlay into an effective base YAML (required for Rust backtester parity).
     effective_cfg_path = base_cfg_path
@@ -359,11 +1074,38 @@ def main(argv: list[str] | None = None) -> int:
     if bool(args.sensitivity_checks):
         factory_argv.append("--sensitivity-checks")
 
+    _send_discord_chunks(
+        target=str(args.discord_target),
+        lines=[
+            f"🧪 Factory START • `{run_id}`",
+            f"`profile` {args.profile}  `mode` {str(args.strategy_mode or 'none').strip() or 'none'}  `interval` {interval}",
+            f"`gpu/tpe/wf` {int(bool(args.gpu))}/{int(bool(args.tpe))}/{int(bool(args.walk_forward))}",
+            (
+                "`checks` stress="
+                f"{int(bool(args.slippage_stress))} concentration={int(bool(args.concentration_checks))} "
+                f"sensitivity={int(bool(args.sensitivity_checks))} resume={int(bool(args.resume))}"
+            ),
+            f"`data` candles={_short_path(str(args.candles_db), parts=4)} funding={_short_path(str(args.funding_db), parts=4)}",
+            f"`deploy` ws={args.ws_service} restart={args.restart}",
+            f"`paper targets` {', '.join([t.service for t in deploy_targets]) or 'none'}",
+            (
+                f"`live promotion` enabled={int(bool(args.enable_livepaper_promotion))} "
+                f"live_service={str(args.livepaper_service or '').strip() or 'n/a'} "
+                f"live_yaml={_short_path(str(args.livepaper_yaml_path or ''), parts=4)}"
+            ),
+            (
+                f"`live guard` enabled={int(not bool(args.promotion_ignore_live_comparison))} "
+                f"min_pf_delta={_format_float(args.promotion_min_pf_delta, ndigits=3)} "
+                f"max_dd_regress={_format_float(args.promotion_max_dd_regression_pct, ndigits=3)}%"
+            ),
+        ],
+    )
+
     rc = int(factory_run.main(factory_argv))
     if rc != 0:
         _send_discord(
             target=str(args.discord_target),
-            message=f"Factory cycle FAILED run_id={run_id} (exit={rc}). Check systemd logs / artifacts.",
+            message=f"❌ Factory FAILED • `{run_id}`  exit={rc}  (check logs/artifacts)",
         )
         return rc
 
@@ -375,11 +1117,15 @@ def main(argv: list[str] | None = None) -> int:
     if not isinstance(items, list):
         items = []
 
-    best = _select_best_candidate(items)
-    if best is None:
+    parsed = [c for c in (_parse_candidate(it) for it in items) if c is not None]
+    for lines in _build_candidates_messages(run_id=run_id, parsed=parsed):
+        _send_discord_chunks(target=str(args.discord_target), lines=lines)
+
+    deployable = _select_deployable_candidates(parsed, limit=max(1, len(deploy_targets)))
+    if not deployable:
         _send_discord(
             target=str(args.discord_target),
-            message=f"Factory cycle OK but produced no deployable candidates (all rejected). run_id={run_id}",
+            message=f"⚠️ Factory OK • `{run_id}` but no deployable candidates (all rejected)",
         )
         return 2
 
@@ -387,67 +1133,572 @@ def main(argv: list[str] | None = None) -> int:
         "version": "factory_cycle_selection_v1",
         "run_id": run_id,
         "run_dir": str(run_dir),
-        "selected": best.__dict__,
+        "selected": deployable[0].__dict__,
+        "selected_candidates": [c.__dict__ for c in deployable],
+        "selected_targets": [{"slot": t.slot, "service": t.service, "yaml_path": str(t.yaml_path)} for t in deploy_targets],
         "effective_config_path": str(effective_cfg_path),
         "interval": str(interval),
         "deployed": False,
+        "deployments": [],
     }
     (run_dir / "reports" / "selection.json").write_text(json.dumps(selection, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     if bool(args.no_deploy):
         _send_discord(
             target=str(args.discord_target),
-            message=f"Factory cycle OK (no-deploy). run_id={run_id} selected={best.config_id[:12]}",
+            message=(
+                f"✅ Factory OK (no-deploy) • `{run_id}` "
+                f"`selected` {','.join([c.config_id[:12] for c in deployable[:len(deploy_targets)]])}"
+            ),
         )
         return 0
 
     pause_file = Path(args.pause_file).expanduser().resolve() if str(args.pause_file).strip() else None
-    reason = str(args.deploy_reason).strip() or f"auto factory_cycle run_id={run_id} profile={args.profile}"
+    reason_base = str(args.deploy_reason).strip() or f"auto factory_cycle run_id={run_id} profile={args.profile}"
 
-    try:
-        deploy_dir = deploy_paper_config(
-            config_id=str(best.config_id),
-            artifacts_dir=artifacts_dir,
-            yaml_path=Path(str(args.yaml_path)),
-            out_dir=None,
-            reason=reason,
-            restart=str(args.restart),
-            service=str(args.service),
-            dry_run=bool(args.dry_run),
-            validate=True,
-            ws_service=str(args.ws_service),
-            pause_file=pause_file,
-            pause_mode=str(args.pause_mode),
-            resume_on_success=not bool(args.leave_paused),
-            verify_sleep_s=float(args.verify_sleep_s),
-        )
-    except Exception as e:
-        _send_discord(
-            target=str(args.discord_target),
-            message=f"Factory cycle deploy FAILED run_id={run_id} config_id={best.config_id[:12]} error={type(e).__name__}: {e}",
-        )
-        raise
+    deployments: list[dict[str, Any]] = []
+    deployed_any = False
+    for i, target in enumerate(deploy_targets):
+        if i >= len(deployable):
+            deployments.append(
+                {
+                    "slot": int(target.slot),
+                    "service": str(target.service),
+                    "yaml_path": str(target.yaml_path),
+                    "status": "skipped",
+                    "reason": "no_deployable_candidate",
+                }
+            )
+            continue
 
-    if not bool(args.dry_run):
+        cand = deployable[i]
+        prev_yaml_text = target.yaml_path.read_text(encoding="utf-8") if target.yaml_path.exists() else ""
+        prev_cfg_id = _yaml_config_id(prev_yaml_text)
+        next_yaml_text = Path(cand.config_path).expanduser().resolve().read_text(encoding="utf-8")
+        changed_cfg = str(prev_cfg_id) != str(cand.config_id)
+        prev_summary = _yaml_summary(prev_yaml_text)
+        next_summary = _yaml_summary(next_yaml_text)
+        diff_lines = _diff_yaml_summaries(prev_summary, next_summary)
+        selection_lines = [
+            f"🎯 Selection • `{run_id}` • slot={target.slot}",
+            (
+                f"`target` {target.service}  `rank` {i + 1}/{len(deployable)}"
+            ),
+            (
+                f"`config` `{cand.config_id[:12]}`  "
+                f"`pf` {_format_float(cand.profit_factor, ndigits=3)}  "
+                f"`dd` {_format_float(cand.max_drawdown_pct * 100.0, ndigits=2)}%  "
+                f"`pnl` {_format_float(cand.total_pnl, ndigits=2)}  "
+                f"`trades` {cand.total_trades}  "
+                f"`score` {_format_float(cand.score_v1, ndigits=4)}"
+            ),
+            f"`previous` `{prev_cfg_id[:12] if prev_cfg_id else 'none'}`  `yaml` {_short_path(str(target.yaml_path), parts=4)}",
+        ]
+        if diff_lines:
+            selection_lines.append("Key parameter changes:")
+            selection_lines.extend(diff_lines[:8])
+        else:
+            selection_lines.append("Key parameter changes: none")
+        _send_discord_chunks(target=str(args.discord_target), lines=selection_lines)
+
+        out_dir = (
+            artifacts_dir
+            / "deployments"
+            / "paper"
+            / str(target.service)
+            / f"{_utc_compact()}_{cand.config_id[:12]}"
+        ).resolve()
+        reason = (
+            f"{reason_base}; slot={target.slot}; target={target.service}; "
+            f"rank={i + 1}; config={cand.config_id[:12]}"
+        )
         try:
-            _mark_deployed(registry_db=registry_db, run_id=run_id, config_id=str(best.config_id))
-        except Exception:
-            pass
+            deploy_dir = deploy_paper_config(
+                config_id=str(cand.config_id),
+                artifacts_dir=artifacts_dir,
+                yaml_path=target.yaml_path,
+                out_dir=out_dir,
+                reason=reason,
+                restart=str(args.restart),
+                service=str(target.service),
+                dry_run=bool(args.dry_run),
+                validate=True,
+                ws_service=str(args.ws_service),
+                pause_file=pause_file,
+                pause_mode=str(args.pause_mode),
+                resume_on_success=not bool(args.leave_paused),
+                verify_sleep_s=float(args.verify_sleep_s),
+            )
+        except Exception as e:
+            _send_discord(
+                target=str(args.discord_target),
+                message=(
+                    f"❌ Deploy FAILED • `{run_id}` slot={target.slot} "
+                    f"service={target.service} config={cand.config_id[:12]} "
+                    f"error={type(e).__name__}: {e}"
+                ),
+            )
+            raise
 
-    selection["deployed"] = not bool(args.dry_run)
-    selection["deploy_dir"] = str(deploy_dir)
+        if not bool(args.dry_run):
+            try:
+                _mark_deployed(registry_db=registry_db, run_id=run_id, config_id=str(cand.config_id))
+            except Exception:
+                pass
+            deployed_any = True
+
+        deploy_event_path = Path(deploy_dir) / "deploy_event.json"
+        restart_summary, restart_details = _restart_summary_from_deploy_event(deploy_event_path)
+        deployments.append(
+            {
+                "slot": int(target.slot),
+                "service": str(target.service),
+                "yaml_path": str(target.yaml_path),
+                "status": "ok",
+                "config_id": str(cand.config_id),
+                "deploy_dir": str(deploy_dir),
+                "restart_summary": str(restart_summary),
+            }
+        )
+        _send_discord_chunks(
+            target=str(args.discord_target),
+            lines=[
+                f"✅ Deployed • `{run_id}` • slot={target.slot}",
+                f"`service` {target.service}  `config` `{_short_id(cand.config_id)}`",
+                (
+                    f"`pf` {_format_float(cand.profit_factor, ndigits=3)}  "
+                    f"`dd` {_format_float(cand.max_drawdown_pct * 100.0, ndigits=2)}%  "
+                    f"`pnl` {_format_float(cand.total_pnl, ndigits=2)}  "
+                    f"`trades` {cand.total_trades}  "
+                    f"`score` {_format_float(cand.score_v1, ndigits=4)}"
+                ),
+                f"`yaml` {_short_path(str(target.yaml_path), parts=4)}  `artifact` {_short_path(str(deploy_dir), parts=4)}",
+                f"`restart` {restart_summary}",
+                *restart_details[:8],
+            ],
+        )
+
+        if changed_cfg and (not bool(args.dry_run)):
+            user_target, user_label = _service_discord_route(str(target.service))
+            if user_target:
+                user_lines = _user_config_change_lines(
+                    run_id=str(run_id),
+                    lane_label=str(user_label or target.service),
+                    lane_kind="paper candidate lane",
+                    previous_cfg=str(prev_cfg_id),
+                    next_cfg=str(cand.config_id),
+                    source_note=f"candidate rank {i + 1}/{len(deployable)}",
+                    metrics={
+                        "profit_factor": float(cand.profit_factor),
+                        "max_drawdown_pct": float(cand.max_drawdown_pct) * 100.0,
+                        "total_pnl": float(cand.total_pnl),
+                        "total_trades": int(cand.total_trades),
+                    },
+                    diff_lines=list(diff_lines),
+                )
+                _send_discord_chunks(target=str(user_target), lines=user_lines)
+
+    selection["deployed"] = bool(deployed_any)
+    selection["deployments"] = deployments
     (run_dir / "reports" / "selection.json").write_text(json.dumps(selection, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    msg = (
-        f"Factory cycle DEPLOYED run_id={run_id}\n"
-        f"- config_id: {best.config_id}\n"
-        f"- score_v1: {best.score_v1 if best.score_v1 is not None else 'n/a'}\n"
-        f"- total_pnl: {best.total_pnl:.2f}\n"
-        f"- pf: {best.profit_factor:.3f}\n"
-        f"- dd: {best.max_drawdown_pct * 100:.2f}%\n"
-        f"- trades: {best.total_trades}\n"
-    )
-    _send_discord(target=str(args.discord_target), message=msg)
+    if bool(args.enable_livepaper_promotion):
+        promotion: dict[str, Any] = {
+            "enabled": True,
+            "ok": False,
+            "gates": [],
+            "selected": None,
+            "deploy_dir": "",
+            "reason": "",
+        }
+        live_service = str(args.livepaper_service or "").strip()
+        live_yaml_raw = str(args.livepaper_yaml_path or "").strip()
+        if (not live_service) or (not live_yaml_raw):
+            promotion["reason"] = "missing livepaper target (--livepaper-service / --livepaper-yaml-path)"
+            _send_discord(
+                target=str(args.discord_target),
+                message=(
+                    f"⏭️ Promotion skipped • `{run_id}`: "
+                    f"{promotion['reason']}"
+                ),
+            )
+        else:
+            gate_cfg = GateConfig(
+                min_trades=int(args.promotion_min_trades),
+                min_hours=float(args.promotion_min_hours),
+                min_profit_factor=float(args.promotion_min_profit_factor),
+                max_drawdown_pct=float(args.promotion_max_drawdown_pct),
+                max_config_slippage_bps=(
+                    None
+                    if float(args.promotion_max_config_slippage_bps) <= 0
+                    else float(args.promotion_max_config_slippage_bps)
+                ),
+                max_kill_events=int(args.promotion_max_kill_events),
+            )
+            explicit_db = _parse_service_path_map(str(args.paper_db_map))
+            gate_rows: list[dict[str, Any]] = []
+            for target in deploy_targets:
+                latest = _latest_paper_deploy_event_for_service(artifacts_dir=artifacts_dir, service=str(target.service))
+                if latest is None:
+                    gate_rows.append(
+                        {
+                            "service": str(target.service),
+                            "ok": False,
+                            "reasons": ["no deploy_event found for service"],
+                            "metrics": {},
+                        }
+                    )
+                    continue
+                ev = latest.get("event", {}) if isinstance(latest.get("event"), dict) else {}
+                config_id = str(((ev.get("what") or {}).get("config_id") or "")).strip()
+                ts_utc = str(ev.get("ts_utc", "") or "").strip()
+                deploy_since_s = _parse_iso_to_epoch_s(ts_utc)
+                stable_since_s = _stable_promotion_since_s(
+                    artifacts_dir=artifacts_dir,
+                    service=str(target.service),
+                    config_id=config_id,
+                )
+                since_s = stable_since_s if stable_since_s is not None else deploy_since_s
+                paper_db = _paper_db_for_service(str(target.service), explicit_db)
+                if not config_id or since_s is None or paper_db is None:
+                    reasons: list[str] = []
+                    if not config_id:
+                        reasons.append("missing config_id in deploy_event")
+                    if since_s is None:
+                        reasons.append(f"invalid deploy ts_utc={ts_utc!r}")
+                    if paper_db is None:
+                        reasons.append("paper_db unavailable (set --paper-db-map or AI_QUANT_DB_PATH)")
+                    gate_rows.append(
+                        {
+                            "service": str(target.service),
+                            "ok": False,
+                            "config_id": config_id,
+                            "deploy_ts_utc": ts_utc,
+                            "since_epoch_s": None,
+                            "reasons": reasons,
+                            "metrics": {},
+                        }
+                    )
+                    continue
+                try:
+                    yaml_text = _lookup_config_yaml_text(registry_db=registry_db, config_id=config_id)
+                except Exception as e:
+                    gate_rows.append(
+                        {
+                            "service": str(target.service),
+                            "ok": False,
+                            "config_id": config_id,
+                            "deploy_ts_utc": ts_utc,
+                            "paper_db": str(paper_db),
+                            "since_epoch_s": float(since_s),
+                            "reasons": [f"registry lookup failed: {type(e).__name__}: {e}"],
+                            "metrics": {},
+                        }
+                    )
+                    continue
+                gate = evaluate_paper_gates(
+                    paper_db=paper_db,
+                    since_epoch_s=float(since_s),
+                    cfg=gate_cfg,
+                    config_yaml_text=yaml_text,
+                )
+                gate_rows.append(
+                    {
+                        "service": str(target.service),
+                        "ok": bool(gate.passed),
+                        "config_id": config_id,
+                        "deploy_ts_utc": ts_utc,
+                        "paper_db": str(paper_db),
+                        "since_epoch_s": float(since_s),
+                        "reasons": list(gate.reasons),
+                        "metrics": dict(gate.metrics),
+                        "deploy_event_path": str(latest.get("path", "")),
+                    }
+                )
+
+            promotion["gates"] = gate_rows
+            gate_lines = [f"🛂 Promotion Gates • `{run_id}`"]
+            for row in gate_rows:
+                svc = str(row.get("service", "unknown") or "unknown")
+                cid = str(row.get("config_id", "") or "")
+                ok = bool(row.get("ok", False))
+                mt = row.get("metrics", {}) if isinstance(row.get("metrics"), dict) else {}
+                gate_lines.append(
+                    (
+                        f"{'✅' if ok else '❌'} {svc} "
+                        f"`{cid[:12] if cid else 'n/a'}` "
+                        f"pf={_format_float(mt.get('profit_factor', None), ndigits=3)} "
+                        f"dd={_format_float(mt.get('max_drawdown_pct', None), ndigits=2)}% "
+                        f"trades={int(mt.get('close_trades', 0) or 0)} "
+                        f"h={_format_float(mt.get('elapsed_h', None), ndigits=1)} "
+                        f"kill={int(mt.get('kill_events', 0) or 0)}"
+                    )
+                )
+                if not ok:
+                    reasons = row.get("reasons", [])
+                    if isinstance(reasons, list):
+                        for r in reasons[:2]:
+                            gate_lines.append(f"↳ {str(r)}")
+            _send_discord_chunks(target=str(args.discord_target), lines=gate_lines)
+
+            live_yaml_path = Path(live_yaml_raw).expanduser().resolve()
+            live_prev_text = live_yaml_path.read_text(encoding="utf-8") if live_yaml_path.exists() else ""
+            live_prev_cfg = _yaml_config_id(live_prev_text)
+            incumbent_row: dict[str, Any] = {
+                "service": str(live_service),
+                "ok": False,
+                "config_id": str(live_prev_cfg),
+                "deploy_ts_utc": "",
+                "paper_db": "",
+                "reasons": [],
+                "metrics": {},
+                "deploy_event_path": "",
+            }
+            incumbent_latest = _latest_paper_deploy_event_for_service(artifacts_dir=artifacts_dir, service=str(live_service))
+            incumbent_since_s: float | None = None
+            incumbent_cfg_id = str(live_prev_cfg or "").strip()
+            incumbent_yaml_text = str(live_prev_text or "")
+            if incumbent_latest is not None:
+                ev_inc = incumbent_latest.get("event", {}) if isinstance(incumbent_latest.get("event"), dict) else {}
+                incumbent_row["deploy_event_path"] = str(incumbent_latest.get("path", ""))
+                incumbent_row["deploy_ts_utc"] = str(ev_inc.get("ts_utc", "") or "")
+                incumbent_since_s = _parse_iso_to_epoch_s(str(incumbent_row["deploy_ts_utc"]))
+                incumbent_cfg_evt = str(((ev_inc.get("what") or {}).get("config_id") or "")).strip()
+                if incumbent_cfg_evt:
+                    incumbent_cfg_id = incumbent_cfg_evt
+                incumbent_stable_since_s = _stable_promotion_since_s(
+                    artifacts_dir=artifacts_dir,
+                    service=str(live_service),
+                    config_id=str(incumbent_cfg_id),
+                )
+                if incumbent_stable_since_s is not None:
+                    incumbent_since_s = float(incumbent_stable_since_s)
+                if incumbent_cfg_id:
+                    try:
+                        incumbent_yaml_text = _lookup_config_yaml_text(registry_db=registry_db, config_id=incumbent_cfg_id)
+                    except Exception:
+                        # Keep live YAML text fallback when registry history is unavailable.
+                        incumbent_yaml_text = str(live_prev_text or "")
+
+            # If there is no deploy event yet, evaluate livepaper on a rolling min-hours window.
+            if incumbent_since_s is None:
+                incumbent_since_s = float(time.time()) - max(1.0, float(args.promotion_min_hours)) * 3600.0
+                incumbent_row["reasons"] = ["incumbent deploy_event missing; used rolling window fallback"]
+
+            incumbent_paper_db = _paper_db_for_service(str(live_service), explicit_db)
+            if incumbent_paper_db is None:
+                incumbent_row["reasons"] = list(incumbent_row.get("reasons", [])) + [
+                    "incumbent paper_db unavailable (set --paper-db-map or AI_QUANT_DB_PATH)"
+                ]
+            elif not str(incumbent_yaml_text or "").strip():
+                incumbent_row["reasons"] = list(incumbent_row.get("reasons", [])) + [
+                    "incumbent config YAML unavailable"
+                ]
+            else:
+                gate_inc = evaluate_paper_gates(
+                    paper_db=incumbent_paper_db,
+                    since_epoch_s=float(incumbent_since_s),
+                    cfg=gate_cfg,
+                    config_yaml_text=str(incumbent_yaml_text),
+                )
+                incumbent_row["ok"] = bool(gate_inc.passed)
+                incumbent_row["metrics"] = dict(gate_inc.metrics)
+                incumbent_row["reasons"] = list(incumbent_row.get("reasons", [])) + list(gate_inc.reasons)
+                incumbent_row["paper_db"] = str(incumbent_paper_db)
+                incumbent_row["config_id"] = str(incumbent_cfg_id)
+
+            promotion["incumbent"] = incumbent_row
+            inc_metrics = incumbent_row.get("metrics", {}) if isinstance(incumbent_row.get("metrics"), dict) else {}
+            _send_discord_chunks(
+                target=str(args.discord_target),
+                lines=[
+                    f"🧷 Incumbent • `{run_id}`",
+                    (
+                        f"{'✅' if bool(incumbent_row.get('ok', False)) else '❌'} {live_service} "
+                        f"`{str(incumbent_row.get('config_id', '') or '')[:12] or 'n/a'}` "
+                        f"pf={_format_float(inc_metrics.get('profit_factor', None), ndigits=3)} "
+                        f"dd={_format_float(inc_metrics.get('max_drawdown_pct', None), ndigits=2)}% "
+                        f"trades={int(inc_metrics.get('close_trades', 0) or 0)} "
+                        f"h={_format_float(inc_metrics.get('elapsed_h', None), ndigits=1)} "
+                        f"kill={int(inc_metrics.get('kill_events', 0) or 0)}"
+                    ),
+                    *[f"↳ {r}" for r in list(incumbent_row.get("reasons", []))[:2]],
+                ],
+            )
+
+            passed_rows = [r for r in gate_rows if bool(r.get("ok", False))]
+            if not passed_rows:
+                promotion["reason"] = "no paper candidates passed promotion gates"
+                _send_discord(
+                    target=str(args.discord_target),
+                    message=f"⏭️ Promotion skipped • `{run_id}`: {promotion['reason']}",
+                )
+            else:
+                passed_rows.sort(key=_promotion_rank_key, reverse=True)
+                chosen: dict[str, Any] | None = None
+                if bool(args.promotion_ignore_live_comparison):
+                    chosen = passed_rows[0]
+                else:
+                    # If incumbent itself fails base gates, allow failover to the best passing candidate.
+                    if not bool(incumbent_row.get("ok", False)):
+                        chosen = passed_rows[0]
+                        _send_discord(
+                            target=str(args.discord_target),
+                            message=(
+                                f"⚠️ Promotion guard bypass • `{run_id}`: "
+                                "incumbent failed base gate; failover permitted."
+                            ),
+                        )
+                    else:
+                        cmp_lines = [
+                            f"⚖️ Live Comparison • `{run_id}`",
+                            (
+                                f"rule: cand_pf >= inc_pf + {float(args.promotion_min_pf_delta):.3f}, "
+                                f"cand_dd <= inc_dd + {float(args.promotion_max_dd_regression_pct):.3f}, "
+                                "cand_kill <= inc_kill"
+                            ),
+                        ]
+                        for cand in passed_rows:
+                            cid = str(cand.get("config_id", "") or "").strip()
+                            if cid and cid == str(live_prev_cfg):
+                                chosen = cand
+                                cmp_lines.append(f"✅ `{cid[:12]}` pass (already incumbent)")
+                                break
+                            better, reasons_cmp = _compare_candidate_vs_incumbent(
+                                candidate=cand,
+                                incumbent=incumbent_row,
+                                min_pf_delta=float(args.promotion_min_pf_delta),
+                                max_dd_regression_pct=float(args.promotion_max_dd_regression_pct),
+                            )
+                            if better:
+                                chosen = cand
+                                cmp_lines.append(f"✅ `{cid[:12] if cid else 'n/a'}` pass")
+                                break
+                            cmp_lines.append(
+                                f"❌ `{cid[:12] if cid else 'n/a'}` fail: {'; '.join([str(x) for x in reasons_cmp[:2]])}"
+                            )
+                        _send_discord_chunks(target=str(args.discord_target), lines=cmp_lines)
+
+                if chosen is None:
+                    promotion["reason"] = "no passing candidate beat incumbent livepaper performance"
+                    _send_discord(
+                        target=str(args.discord_target),
+                        message=f"⏭️ Promotion skipped • `{run_id}`: {promotion['reason']}",
+                    )
+                    selection["promotion"] = promotion
+                    (run_dir / "reports" / "selection.json").write_text(
+                        json.dumps(selection, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8",
+                    )
+                    health_services = _health_service_list(str(args.service))
+                    snapshot_lines = [f"🩺 Health Snapshot • `{run_id}`"] + [
+                        _service_snapshot_line(svc) for svc in health_services
+                    ]
+                    _send_discord_chunks(target=str(args.discord_target), lines=snapshot_lines)
+                    return 0
+
+                chosen_cfg = str(chosen.get("config_id", "") or "").strip()
+                if chosen_cfg and chosen_cfg == live_prev_cfg:
+                    promotion["ok"] = True
+                    promotion["selected"] = chosen
+                    promotion["reason"] = "livepaper already running selected config"
+                    _send_discord(
+                        target=str(args.discord_target),
+                        message=(
+                            f"✅ Promotion no-op • `{run_id}` "
+                            f"service={live_service} config={chosen_cfg[:12]}"
+                        ),
+                    )
+                elif chosen_cfg:
+                    chosen_yaml = _lookup_config_yaml_text(registry_db=registry_db, config_id=chosen_cfg)
+                    live_next_summary = _yaml_summary(chosen_yaml)
+                    live_prev_summary = _yaml_summary(live_prev_text)
+                    live_diff = _diff_yaml_summaries(live_prev_summary, live_next_summary)
+                    out_dir_live = (
+                        artifacts_dir / "deployments" / "livepaper" / f"{_utc_compact()}_{chosen_cfg[:12]}"
+                    ).resolve()
+                    reason_live = (
+                        f"auto livepaper promotion run_id={run_id}; "
+                        f"source_service={chosen.get('service', 'unknown')}; config={chosen_cfg[:12]}"
+                    )
+                    deploy_dir_live = deploy_paper_config(
+                        config_id=chosen_cfg,
+                        artifacts_dir=artifacts_dir,
+                        yaml_path=live_yaml_path,
+                        out_dir=out_dir_live,
+                        reason=reason_live,
+                        restart=str(args.restart),
+                        service=live_service,
+                        dry_run=bool(args.dry_run),
+                        validate=True,
+                        ws_service=str(args.ws_service),
+                        pause_file=pause_file,
+                        pause_mode=str(args.pause_mode),
+                        resume_on_success=not bool(args.leave_paused),
+                        verify_sleep_s=float(args.verify_sleep_s),
+                    )
+                    promotion["ok"] = True
+                    promotion["selected"] = chosen
+                    promotion["deploy_dir"] = str(deploy_dir_live)
+                    promotion["reason"] = "promoted"
+                    rs_live, rd_live = _restart_summary_from_deploy_event(Path(deploy_dir_live) / "deploy_event.json")
+                    promo_lines = [
+                        f"🚀 PROMOTED • `{run_id}`",
+                        f"`to` {live_service}  `from` {chosen.get('service', 'unknown')}",
+                        f"`config` `{_short_id(chosen_cfg)}`  `previous` `{_short_id(live_prev_cfg)}`",
+                        f"`live_yaml` {_short_path(str(live_yaml_path), parts=4)}",
+                    ]
+                    if live_diff:
+                        promo_lines.append("Key parameter changes:")
+                        promo_lines.extend(live_diff[:8])
+                    else:
+                        promo_lines.append("Key parameter changes: none")
+                    promo_lines.extend(
+                        [
+                            f"`artifact` {_short_path(str(deploy_dir_live), parts=4)}",
+                            f"`restart` {rs_live}",
+                            *rd_live[:8],
+                        ]
+                    )
+                    _send_discord_chunks(target=str(args.discord_target), lines=promo_lines)
+
+                    if not bool(args.dry_run):
+                        live_target, live_label = _service_discord_route(str(live_service))
+                        if live_target:
+                            chosen_metrics = chosen.get("metrics", {}) if isinstance(chosen.get("metrics"), dict) else {}
+                            user_lines_live = _user_config_change_lines(
+                                run_id=str(run_id),
+                                lane_label=str(live_label or live_service),
+                                lane_kind="live proven lane",
+                                previous_cfg=str(live_prev_cfg),
+                                next_cfg=str(chosen_cfg),
+                                source_note=f"promoted from {chosen.get('service', 'candidate')}",
+                                metrics={
+                                    "profit_factor": chosen_metrics.get("profit_factor", None),
+                                    "max_drawdown_pct": chosen_metrics.get("max_drawdown_pct", None),
+                                    "close_trades": chosen_metrics.get("close_trades", None),
+                                    "elapsed_h": chosen_metrics.get("elapsed_h", None),
+                                },
+                                diff_lines=list(live_diff),
+                            )
+                            _send_discord_chunks(target=str(live_target), lines=user_lines_live)
+                else:
+                    promotion["reason"] = "chosen promotion row missing config_id"
+                    _send_discord(
+                        target=str(args.discord_target),
+                        message=f"⏭️ Promotion skipped • `{run_id}`: {promotion['reason']}",
+                    )
+        selection["promotion"] = promotion
+        (run_dir / "reports" / "selection.json").write_text(
+            json.dumps(selection, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+    health_services = _health_service_list(str(args.service))
+    snapshot_lines = [f"🩺 Health Snapshot • `{run_id}`"] + [
+        _service_snapshot_line(svc) for svc in health_services
+    ]
+    _send_discord_chunks(target=str(args.discord_target), lines=snapshot_lines)
     return 0
 
 

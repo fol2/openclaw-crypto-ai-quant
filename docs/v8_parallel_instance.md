@@ -82,11 +82,34 @@ done
 systemctl --user daemon-reload
 ```
 
+Create per-instance strategy YAML files (candidate lanes + proven lane):
+
+```bash
+cp "$PROJECT_DIR/config/strategy_overrides.yaml" "$PROJECT_DIR/config/strategy_overrides.paper1.yaml"
+cp "$PROJECT_DIR/config/strategy_overrides.yaml" "$PROJECT_DIR/config/strategy_overrides.paper2.yaml"
+cp "$PROJECT_DIR/config/strategy_overrides.yaml" "$PROJECT_DIR/config/strategy_overrides.paper3.yaml"
+cp "$PROJECT_DIR/config/strategy_overrides.yaml" "$PROJECT_DIR/config/strategy_overrides.livepaper.yaml"
+```
+
+Set each trader service to its own YAML via `AI_QUANT_STRATEGY_YAML`:
+
+- `openclaw-ai-quant-trader-v8-paper1` → `strategy_overrides.paper1.yaml`
+- `openclaw-ai-quant-trader-v8-paper2` → `strategy_overrides.paper2.yaml`
+- `openclaw-ai-quant-trader-v8-paper3` → `strategy_overrides.paper3.yaml`
+- `openclaw-ai-quant-trader-v8-livepaper` → `strategy_overrides.livepaper.yaml`
+
+The factory service should run with:
+
+- `--candidate-count 3`
+- `--candidate-services paper1,paper2,paper3`
+- `--candidate-yaml-paths ...paper1.yaml,...paper2.yaml,...paper3.yaml`
+- `--enable-livepaper-promotion --livepaper-service ... --livepaper-yaml-path ...livepaper.yaml`
+
 Enable and start (v8 only):
 
 ```bash
 systemctl --user enable --now openclaw-ai-quant-ws-sidecar-v8.service
-systemctl --user enable --now openclaw-ai-quant-trader-v8.service
+systemctl --user enable --now openclaw-ai-quant-trader-v8-paper1.service
 systemctl --user enable --now openclaw-ai-quant-monitor-v8.service
 
 systemctl --user enable --now openclaw-ai-quant-funding-v8.timer
@@ -104,7 +127,7 @@ Logs:
 
 ```bash
 journalctl --user -u openclaw-ai-quant-ws-sidecar-v8.service -f
-journalctl --user -u openclaw-ai-quant-trader-v8.service -f
+journalctl --user -u openclaw-ai-quant-trader-v8-paper1.service -f
 journalctl --user -u openclaw-ai-quant-factory-v8.service -f
 ```
 
