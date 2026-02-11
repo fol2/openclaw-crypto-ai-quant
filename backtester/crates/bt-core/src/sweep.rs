@@ -100,6 +100,11 @@ pub fn apply_one_pub(cfg: &mut StrategyConfig, path: &str, value: f64) {
     apply_one(cfg, path, value);
 }
 
+fn set_ave_avg_atr_window(cfg: &mut StrategyConfig, window: usize) {
+    cfg.thresholds.entry.ave_avg_atr_window = window;
+    cfg.indicators.ave_avg_atr_window = window;
+}
+
 fn apply_one(cfg: &mut StrategyConfig, path: &str, value: f64) {
     match path {
         // === Trade config ===
@@ -194,7 +199,7 @@ fn apply_one(cfg: &mut StrategyConfig, path: &str, value: f64) {
         "thresholds.entry.max_dist_ema_fast" => cfg.thresholds.entry.max_dist_ema_fast = value,
         "thresholds.entry.ave_atr_ratio_gt" => cfg.thresholds.entry.ave_atr_ratio_gt = value,
         "thresholds.entry.ave_adx_mult" => cfg.thresholds.entry.ave_adx_mult = value,
-        "thresholds.entry.ave_avg_atr_window" => cfg.thresholds.entry.ave_avg_atr_window = value as usize,
+        "thresholds.entry.ave_avg_atr_window" => set_ave_avg_atr_window(cfg, value as usize),
         "thresholds.entry.pullback_min_adx" => cfg.thresholds.entry.pullback_min_adx = value,
         "thresholds.entry.pullback_rsi_long_min" => cfg.thresholds.entry.pullback_rsi_long_min = value,
         "thresholds.entry.pullback_rsi_short_max" => cfg.thresholds.entry.pullback_rsi_short_max = value,
@@ -287,7 +292,8 @@ fn apply_one(cfg: &mut StrategyConfig, path: &str, value: f64) {
         "indicators.stoch_rsi_window" => cfg.indicators.stoch_rsi_window = value as usize,
         "indicators.stoch_rsi_smooth1" => cfg.indicators.stoch_rsi_smooth1 = value as usize,
         "indicators.stoch_rsi_smooth2" => cfg.indicators.stoch_rsi_smooth2 = value as usize,
-        "indicators.ave_avg_atr_window" => cfg.indicators.ave_avg_atr_window = value as usize,
+        // Backward-compatible alias for legacy sweep configs.
+        "indicators.ave_avg_atr_window" => set_ave_avg_atr_window(cfg, value as usize),
 
         // === Market regime ===
         "market_regime.breadth_block_short_above" => cfg.market_regime.breadth_block_short_above = value,
@@ -483,6 +489,32 @@ mod tests {
         let cfg = apply_overrides(&base, &overrides);
         assert_eq!(cfg.indicators.ema_slow_window, 100);
         assert_eq!(cfg.indicators.ema_fast_window, 30);
+    }
+
+    #[test]
+    fn test_apply_overrides_ave_window_legacy_alias_path() {
+        let mut base = StrategyConfig::default();
+        base.indicators.ave_avg_atr_window = 13;
+        base.thresholds.entry.ave_avg_atr_window = 21;
+
+        let overrides = vec![("indicators.ave_avg_atr_window".to_string(), 77.0)];
+        let cfg = apply_overrides(&base, &overrides);
+
+        assert_eq!(cfg.indicators.ave_avg_atr_window, 77);
+        assert_eq!(cfg.thresholds.entry.ave_avg_atr_window, 77);
+    }
+
+    #[test]
+    fn test_apply_overrides_ave_window_threshold_path_keeps_alias_sync() {
+        let mut base = StrategyConfig::default();
+        base.indicators.ave_avg_atr_window = 9;
+        base.thresholds.entry.ave_avg_atr_window = 15;
+
+        let overrides = vec![("thresholds.entry.ave_avg_atr_window".to_string(), 31.0)];
+        let cfg = apply_overrides(&base, &overrides);
+
+        assert_eq!(cfg.thresholds.entry.ave_avg_atr_window, 31);
+        assert_eq!(cfg.indicators.ave_avg_atr_window, 31);
     }
 
     #[test]
