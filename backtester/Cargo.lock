@@ -92,6 +92,7 @@ dependencies = [
 name = "bt-core"
 version = "0.1.0"
 dependencies = [
+ "bt-signals",
  "rayon",
  "rustc-hash",
  "serde",
@@ -123,6 +124,13 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tpe",
+]
+
+[[package]]
+name = "bt-signals"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
