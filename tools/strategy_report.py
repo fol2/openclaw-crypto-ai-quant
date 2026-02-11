@@ -3,6 +3,7 @@ import json
 import time
 import datetime
 import re
+import subprocess
 
 paper_db_path = '/home/fol2hk/.openclaw/workspace/dev/ai_quant/trading_engine.db'
 live_db_path = '/home/fol2hk/.openclaw/workspace/dev/ai_quant/trading_engine_live.db'
@@ -128,7 +129,7 @@ def get_oms_health(db_path):
         cursor.execute("SELECT COUNT(*) as cnt FROM oms_open_orders")
         stats['open_orders'] = cursor.fetchone()['cnt']
         
-        # Reconcile events (cancels) - 'kind' instead of 'type' in schema? Schema says 'kind'.
+        # Reconcile events (cancels)
         cursor.execute("SELECT COUNT(*) as cnt FROM oms_reconcile_events WHERE ts_ms >= ? AND kind='CANCEL_LOOP'", (start_ms,))
         stats['cancel_loops'] = cursor.fetchone()['cnt']
         
@@ -141,12 +142,31 @@ def get_oms_health(db_path):
     except Exception as e:
         return {"error": str(e)}
 
+def get_market_watch():
+    try:
+        # Run market_watch.py --json --db <candles_db_path>
+        # Assumes market_watch.py is in dev/ai_quant/exchange/
+        script_path = '/home/fol2hk/.openclaw/workspace/dev/ai_quant/exchange/market_watch.py'
+        result = subprocess.run(
+            ['python3', script_path, '--interval', '1m', '--json', '--db', candles_db_path],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        if result.returncode == 0:
+            return json.loads(result.stdout)
+        else:
+            return {"error": f"market_watch failed: {result.stderr}"}
+    except Exception as e:
+        return {"error": f"market_watch exception: {str(e)}"}
+
 results = {
     "paper_hb": get_heartbeat(paper_db_path),
     "live_hb": get_heartbeat(live_db_path),
     "paper_perf": get_performance(paper_db_path),
     "live_perf": get_performance(live_db_path),
     "oms": get_oms_health(live_db_path),
+    "market_watch": get_market_watch(),
     "positions": []
 }
 

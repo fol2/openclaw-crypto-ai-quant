@@ -141,3 +141,11 @@ axes:
   # NARROW: P10=0.63, P90=0.88
   - path: trade.breakeven_start_atr
     values: [0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.90]
+
+  # Partial TP (CPU sweep optimal: enabled, pct=0.7, mult=1.0)
+  - path: trade.enable_partial_tp
+    values: [0.0, 1.0]
+  - path: trade.tp_partial_pct
+    values: [0.5, 0.6, 0.7, 0.8]
+  - path: trade.tp_partial_atr_mult
+    values: [0.0, 0.5, 1.0, 1.5, 2.0, 3.0]
