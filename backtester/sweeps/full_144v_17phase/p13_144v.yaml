@@ -1,0 +1,44 @@
+# p13_144v
+# Auto-generated from full_144v coverage.
+# Values are reduced for phase-grid practicality.
+initial_balance: 10000.0
+lookback: 200
+axes:
+- path: filters.enable_anomaly_filter
+  values:
+  - 0.0
+  - 1.0
+- path: filters.require_volume_confirmation
+  values:
+  - 0.0
+  - 1.0
+- path: indicators.vol_trend_window
+  values:
+  - 3.0
+  - 7.0
+  - 10.0
+- path: thresholds.entry.pullback_rsi_long_min
+  values:
+  - 35.0
+  - 65.0
+- path: thresholds.tp_and_momentum.rsi_long_weak
+  values:
+  - 39.2
+  - 72.8
+- path: trade.confidence_mult_medium
+  values:
+  - 0.3
+  - 0.7
+  - 1.0
+- path: trade.enable_reef_filter
+  values:
+  - 0.0
+  - 1.0
+- path: trade.reef_long_rsi_extreme_gt
+  values:
+  - 52.5
+  - 97.5
+- path: trade.tsme_min_profit_atr
+  values:
+  - 0.7
+  - 1.3

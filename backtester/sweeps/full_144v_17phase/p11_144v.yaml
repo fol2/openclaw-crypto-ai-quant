@@ -1,0 +1,41 @@
+# p11_144v
+# Auto-generated from full_144v coverage.
+# Values are reduced for phase-grid practicality.
+initial_balance: 10000.0
+lookback: 200
+axes:
+- path: indicators.stoch_rsi_window
+  values:
+  - 10.0
+  - 16.0
+  - 20.0
+- path: thresholds.entry.pullback_min_adx
+  values:
+  - 15.4
+  - 28.6
+- path: thresholds.tp_and_momentum.adx_weak_lt
+  values:
+  - 21.0
+  - 39.0
+- path: trade.allocation_pct
+  values:
+  - 0.05
+  - 0.2
+  - 0.3
+- path: trade.enable_partial_tp
+  values:
+  - 0.0
+  - 1.0
+- path: trade.reef_adx_threshold
+  values:
+  - 31.5
+  - 58.5
+- path: trade.trailing_distance_atr_low_conf
+  values:
+  - 0.0
+  - 1.0
+- path: trade.trailing_start_atr
+  values:
+  - 0.5
+  - 1.25
+  - 2.0

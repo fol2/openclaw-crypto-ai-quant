@@ -1,0 +1,44 @@
+# p12_144v
+# Auto-generated from full_144v coverage.
+# Values are reduced for phase-grid practicality.
+initial_balance: 10000.0
+lookback: 200
+axes:
+- path: filters.adx_rising_saturation
+  values:
+  - 28.0
+  - 52.0
+- path: filters.require_macro_alignment
+  values:
+  - 0.0
+  - 1.0
+- path: indicators.vol_sma_window
+  values:
+  - 10.0
+  - 20.0
+  - 30.0
+- path: thresholds.entry.pullback_require_macd_sign
+  values:
+  - 0.0
+  - 1.0
+- path: thresholds.tp_and_momentum.rsi_long_strong
+  values:
+  - 36.4
+  - 67.6
+- path: trade.breakeven_start_atr
+  values:
+  - 0.3
+  - 0.7
+  - 1.0
+- path: trade.enable_pyramiding
+  values:
+  - 0.0
+  - 1.0
+- path: trade.reef_long_rsi_block_gt
+  values:
+  - 49.0
+  - 91.0
+- path: trade.trailing_start_atr_low_conf
+  values:
+  - 0.0
+  - 1.0

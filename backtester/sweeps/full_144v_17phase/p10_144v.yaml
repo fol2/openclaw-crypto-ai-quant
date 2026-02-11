@@ -1,0 +1,41 @@
+# p10_144v
+# Auto-generated from full_144v coverage.
+# Values are reduced for phase-grid practicality.
+initial_balance: 10000.0
+lookback: 200
+axes:
+- path: indicators.stoch_rsi_smooth2
+  values:
+  - 2.0
+  - 4.0
+  - 5.0
+- path: thresholds.entry.high_conf_volume_mult
+  values:
+  - 1.75
+  - 3.25
+- path: thresholds.tp_and_momentum.adx_strong_gt
+  values:
+  - 28.0
+  - 52.0
+- path: trade.add_min_confidence
+  values:
+  - 0.0
+  - 1.0
+  - 2.0
+- path: trade.enable_dynamic_sizing
+  values:
+  - 0.0
+  - 1.0
+- path: trade.min_notional_usd
+  values:
+  - 7.0
+  - 13.0
+- path: trade.tp_partial_pct
+  values:
+  - 0.35
+  - 0.65
+- path: trade.trailing_distance_atr
+  values:
+  - 0.3
+  - 0.8
+  - 1.2
