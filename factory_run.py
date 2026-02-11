@@ -89,7 +89,8 @@ def _normalise_candles_db_arg_for_backtester(arg: str | None) -> str | None:
     """Normalise --candles-db so directory inputs do not include funding DBs.
 
     The backtester expands a directory into all `*.db` files, which can accidentally include `funding_rates.db` and
-    cause failures ("no such table: candles"). When a directory is supplied, convert it to `candles_*.db`.
+    cause failures ("no such table: candles"). The backtester does not support glob patterns, so when a directory is
+    supplied, expand it into an explicit comma-separated list of `candles_*.db` files.
     """
 
     if arg is None:
@@ -100,17 +101,33 @@ def _normalise_candles_db_arg_for_backtester(arg: str | None) -> str | None:
 
     parts = [p.strip() for p in raw.split(",") if p.strip()]
     out: list[str] = []
+    seen: set[str] = set()
+
     for part in parts:
         resolved = _resolve_path_for_backtester(part) or part
         try:
             p = Path(resolved)
             if p.is_dir():
-                resolved = str(p / "candles_*.db")
+                expanded = [
+                    str(ent.resolve())
+                    for ent in p.iterdir()
+                    if ent.is_file() and ent.name.startswith("candles_") and ent.suffix.lower() == ".db"
+                ]
+                expanded.sort()
+                for x in expanded:
+                    if x not in seen:
+                        out.append(x)
+                        seen.add(x)
+                if expanded:
+                    continue
         except Exception:
             pass
-        out.append(str(resolved))
 
-    return ",".join(out)
+        if resolved not in seen:
+            out.append(str(resolved))
+            seen.add(str(resolved))
+
+    return ",".join(out) if out else None
 
 
 def _resolve_nvidia_smi_bin() -> str:
