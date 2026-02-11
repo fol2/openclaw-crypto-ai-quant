@@ -303,6 +303,7 @@ impl BatchBuffers {
         configs: &[GpuComboConfig],
         initial_balance: f32,
         num_symbols: u32,
+        btc_sym_idx: u32,
         num_bars: u32,
     ) -> Self {
         let num_combos = configs.len() as u32;
@@ -324,7 +325,7 @@ impl BatchBuffers {
             num_combos,
             num_symbols,
             num_bars,
-            btc_sym_idx: u32::MAX,
+            btc_sym_idx,
             chunk_start: 0,
             chunk_end: num_bars,
             initial_balance_bits: initial_balance.to_bits(),
@@ -344,7 +345,7 @@ impl BatchBuffers {
             params,
             num_combos,
             num_symbols,
-            btc_sym_idx: u32::MAX,
+            btc_sym_idx,
             initial_balance,
             max_sub_per_bar: 0,
             sub_candles: None,
