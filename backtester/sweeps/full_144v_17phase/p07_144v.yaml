@@ -4,38 +4,46 @@
 initial_balance: 10000.0
 lookback: 200
 axes:
-- path: indicators.ema_slow_window
-  values:
-  - 10.0
-  - 30.0
-  - 50.0
-- path: thresholds.entry.btc_adx_override
-  values:
-  - 28.0
-  - 52.0
-- path: thresholds.ranging.rsi_low
-  values:
-  - 32.9
-  - 61.1
-- path: thresholds.tp_and_momentum.tp_mult_strong
-  values:
-  - 4.9
-  - 7.0
-  - 9.1
-- path: trade.confidence_mult_low
-  values:
-  - 0.35
-  - 0.65
-- path: trade.max_entry_orders_per_loop
-  values:
-  - 4.0
-  - 8.0
-- path: trade.rsi_exit_ub_lo_profit_low_conf
+- path: filters.require_macro_alignment
   values:
   - 0.0
-  - 50.0
-- path: trade.smart_exit_adx_exhaustion_lt
+  - 1.0
+- path: indicators.rsi_window
+  values:
+  - 10.0
+  - 14.0
+  - 16.0
+  - 20.0
+- path: thresholds.entry.ave_enabled
+  values:
+  - 0.0
+  - 1.0
+- path: thresholds.entry.slow_drift_min_adx
+  values:
+  - 7.0
+  - 10.0
+  - 13.0
+- path: thresholds.tp_and_momentum.rsi_short_weak
+  values:
+  - 30.8
+  - 44.0
+  - 57.2
+- path: trade.exit_cooldown_s
+  values:
+  - 10.0
+  - 15.0
+  - 20.0
+- path: trade.reef_short_rsi_block_lt
+  values:
+  - 21.0
+  - 30.0
+  - 39.0
+- path: trade.smart_exit_adx_exhaustion_lt_low_conf
   values:
   - 0.0
   - 15.0
   - 30.0
+- path: trade.tsme_require_adx_slope_negative
+  values:
+  - 0.0
+  - 1.0

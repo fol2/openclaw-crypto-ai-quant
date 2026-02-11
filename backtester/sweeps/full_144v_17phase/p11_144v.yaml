@@ -4,38 +4,42 @@
 initial_balance: 10000.0
 lookback: 200
 axes:
-- path: indicators.stoch_rsi_window
+- path: indicators.stoch_rsi_smooth1
+  values:
+  - 2.0
+  - 4.0
+  - 5.0
+- path: thresholds.anomaly.price_change_pct_gt
+  values:
+  - 0.07
+  - 0.1
+  - 0.13
+- path: thresholds.entry.slow_drift_require_macd_sign
+  values:
+  - 0.0
+  - 1.0
+- path: thresholds.entry.slow_drift_slope_window
   values:
   - 10.0
-  - 16.0
-  - 20.0
-- path: thresholds.entry.pullback_min_adx
+  - 25.0
+  - 40.0
+- path: trade.add_fraction_of_base_margin
   values:
-  - 15.4
-  - 28.6
-- path: thresholds.tp_and_momentum.adx_weak_lt
+  - 0.25
+  - 0.75
+  - 1.0
+- path: trade.leverage_high
   values:
-  - 21.0
-  - 39.0
-- path: trade.allocation_pct
+  - 3.5
+  - 5.0
+  - 6.5
+- path: trade.reentry_cooldown_minutes
   values:
-  - 0.05
-  - 0.2
+  - 42.0
+  - 60.0
+  - 78.0
+- path: trade.trailing_distance_atr
+  values:
   - 0.3
-- path: trade.enable_partial_tp
-  values:
-  - 0.0
-  - 1.0
-- path: trade.reef_adx_threshold
-  values:
-  - 31.5
-  - 58.5
-- path: trade.trailing_distance_atr_low_conf
-  values:
-  - 0.0
-  - 1.0
-- path: trade.trailing_start_atr
-  values:
-  - 0.5
-  - 1.25
-  - 2.0
+  - 0.7
+  - 1.2

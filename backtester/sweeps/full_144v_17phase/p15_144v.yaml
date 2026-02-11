@@ -4,41 +4,42 @@
 initial_balance: 10000.0
 lookback: 200
 axes:
-- path: filters.enable_ranging_filter
+- path: indicators.vol_trend_window
   values:
-  - 0.0
-  - 1.0
-- path: filters.vol_confirm_include_prev
-  values:
-  - 0.0
-  - 1.0
-- path: market_regime.auto_reverse_breadth_low
-  values:
+  - 3.0
   - 7.0
   - 10.0
-  - 13.0
-- path: thresholds.entry.slow_drift_min_adx
+- path: thresholds.entry.btc_adx_override
   values:
-  - 7.0
-  - 13.0
-- path: thresholds.tp_and_momentum.rsi_short_weak
+  - 28.0
+  - 40.0
+  - 52.0
+- path: thresholds.ranging.rsi_high
   values:
-  - 30.8
-  - 57.2
-- path: trade.enable_ssf_filter
+  - 37.1
+  - 53.0
+  - 68.9
+- path: trade.adx_sizing_min_mult
+  values:
+  - 0.42
+  - 0.6
+  - 0.78
+- path: trade.enable_dynamic_leverage
   values:
   - 0.0
   - 1.0
-- path: trade.leverage
+- path: trade.max_adds_per_symbol
   values:
-  - 1.0
+  - 0.0
+  - 2.0
   - 3.0
-  - 5.0
-- path: trade.reef_short_rsi_extreme_lt
-  values:
-  - 17.5
-  - 32.5
-- path: trade.use_bbo_for_fills
+- path: trade.rsi_exit_lb_lo_profit_low_conf
   values:
   - 0.0
+  - 30.0
+  - 50.0
+- path: trade.tsme_min_profit_atr
+  values:
+  - 0.7
   - 1.0
+  - 1.3

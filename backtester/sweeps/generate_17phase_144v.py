@@ -3,7 +3,7 @@
 
 Design goals:
 - Keep full axis coverage from `full_144v.yaml` (every axis appears once).
-- Keep total grid size near the legacy 17-phase scale (~18k combos per interval).
+- Keep total grid size near a practical target (default ~100k combos per interval).
 - Preserve broader resolution (3-point min/mid/max) on core axes from `full_34axis`
   plus selected high-impact risk/exit/regime dimensions.
 """
@@ -44,16 +44,36 @@ def _uniq(values: list[float]) -> list[float]:
     return out
 
 
-def _reduce_values(path: str, values: list[float], *, keep_three: set[str]) -> list[float]:
-    vals = _uniq([float(v) for v in values])
-    if not vals:
-        raise ValueError(f"axis has empty values: {path}")
-    if len(vals) <= 2:
-        return vals
-    if path in keep_three:
-        mid = vals[len(vals) // 2]
-        return _uniq([vals[0], mid, vals[-1]])
-    return _uniq([vals[0], vals[-1]])
+def _sample_points(vals: list[float], n: int) -> list[float]:
+    raw = _uniq(vals)
+    if len(raw) == 0:
+        return []
+    n = int(max(1, n))
+    if len(raw) <= n:
+        return raw
+
+    idxs: list[int] = []
+    for i in range(n):
+        pos = round(i * (len(raw) - 1) / (n - 1))
+        idxs.append(int(pos))
+    idxs = sorted(set(idxs))
+    out = [raw[i] for i in idxs]
+    if len(out) == n:
+        return out
+
+    # Fill missing slots deterministically from left to right.
+    need = n - len(out)
+    used = set(out)
+    for v in raw:
+        if v in used:
+            continue
+        out.append(v)
+        used.add(v)
+        need -= 1
+        if need == 0:
+            break
+    out.sort()
+    return out
 
 
 def _combo_count(axes: list[Axis]) -> int:
@@ -72,30 +92,12 @@ def _dump_yaml(path: Path, obj: dict[str, Any]) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def build(
-    *,
-    full_144v_path: Path,
-    full_34_path: Path,
-    out_dir: Path,
-    source_spec_ref: str,
-    reference_spec_ref: str,
-    phase_count: int = 17,
-    max_axes_per_phase: int = 9,
-) -> dict[str, Any]:
-    src_144 = _load_yaml(full_144v_path)
-    src_34 = _load_yaml(full_34_path)
-
-    axes_144 = src_144.get("axes", [])
-    axes_34 = src_34.get("axes", [])
-    if not isinstance(axes_144, list) or not isinstance(axes_34, list):
-        raise ValueError("sweep specs must define `axes` as a list")
-
+def _build_initial_keep_three(axes_34: list[dict[str, Any]]) -> set[str]:
     baseline_paths = {
         str(item.get("path", "")).strip()
         for item in axes_34
         if isinstance(item, dict) and str(item.get("path", "")).strip()
     }
-
     extra_keep_three = {
         "trade.smart_exit_adx_exhaustion_lt",
         "trade.smart_exit_adx_exhaustion_lt_low_conf",
@@ -110,18 +112,17 @@ def build(
         "market_regime.auto_reverse_breadth_high",
         "indicators.ema_macro_window",
     }
-
     enum_three = {
         "trade.entry_min_confidence",
         "trade.add_min_confidence",
         "thresholds.entry.pullback_confidence",
         "thresholds.entry.macd_hist_entry_mode",
     }
+    return baseline_paths | extra_keep_three | enum_three
 
-    keep_three = baseline_paths | extra_keep_three | enum_three
 
-    reduced: list[Axis] = []
-    seen_paths: set[str] = set()
+def _collect_axis_source(axes_144: list[dict[str, Any]]) -> dict[str, list[float]]:
+    out: dict[str, list[float]] = {}
     for item in axes_144:
         if not isinstance(item, dict):
             continue
@@ -129,35 +130,191 @@ def build(
         raw_values = item.get("values", [])
         if not path or not isinstance(raw_values, list):
             continue
-        if path in seen_paths:
+        if path in out:
             raise ValueError(f"duplicate axis path in full_144v: {path}")
-        seen_paths.add(path)
-        values = _reduce_values(path, [float(v) for v in raw_values], keep_three=keep_three)
-        reduced.append(Axis(path=path, values=values))
+        vals = _uniq([float(v) for v in raw_values])
+        if len(vals) == 0:
+            raise ValueError(f"axis has empty values: {path}")
+        out[path] = vals
+    return out
 
-    if len(reduced) == 0:
-        raise ValueError("no axes found in full_144v")
 
+def _build_points_map(
+    axis_source: dict[str, list[float]],
+    keep_three: set[str],
+) -> dict[str, int]:
+    points: dict[str, int] = {}
+    for path, vals in axis_source.items():
+        if len(vals) <= 2:
+            points[path] = len(vals)
+        elif path in keep_three:
+            points[path] = 3
+        else:
+            points[path] = 2
+    return points
+
+
+def _reduced_axes(axis_source: dict[str, list[float]], points_map: dict[str, int]) -> list[Axis]:
+    out: list[Axis] = []
+    for path, full_values in sorted(axis_source.items()):
+        n = int(points_map.get(path, 2))
+        vals = _sample_points(full_values, n)
+        out.append(Axis(path=path, values=vals))
+    return out
+
+
+def _partition_phases(reduced: list[Axis], phase_count: int, max_axes_per_phase: int) -> list[list[Axis]]:
     phases: list[list[Axis]] = [[] for _ in range(phase_count)]
     phase_weights = [0.0 for _ in range(phase_count)]
 
     items = sorted(reduced, key=lambda a: (-len(a.values), a.path))
     for axis in items:
-        # Prefer the least-loaded phase while respecting max axes per phase.
         choices = [i for i, arr in enumerate(phases) if len(arr) < max_axes_per_phase]
         if not choices:
-            # Safety fallback: if constraints are impossible, place in absolute least-loaded phase.
             choices = list(range(phase_count))
         idx = min(choices, key=lambda i: (phase_weights[i], len(phases[i])))
         phases[idx].append(axis)
         phase_weights[idx] += math.log(len(axis.values))
+    return phases
+
+
+def _phase_total_combo(phases: list[list[Axis]]) -> int:
+    total = 0
+    for arr in phases:
+        total += _combo_count(arr)
+    return int(total)
+
+
+def _compute_total_combo(
+    *,
+    axis_source: dict[str, list[float]],
+    points_map: dict[str, int],
+    phase_count: int,
+    max_axes_per_phase: int,
+) -> int:
+    reduced = _reduced_axes(axis_source, points_map)
+    phases = _partition_phases(reduced, phase_count, max_axes_per_phase)
+    return _phase_total_combo(phases)
+
+
+def _auto_tune_points_map(
+    *,
+    axis_source: dict[str, list[float]],
+    points_seed: dict[str, int],
+    phase_count: int,
+    max_axes_per_phase: int,
+    target_combo: int,
+) -> tuple[dict[str, int], int]:
+    points_map = dict(points_seed)
+    current = _compute_total_combo(
+        axis_source=axis_source,
+        points_map=points_map,
+        phase_count=phase_count,
+        max_axes_per_phase=max_axes_per_phase,
+    )
+    if current >= target_combo:
+        return points_map, current
+
+    while current < target_combo:
+        upgrades: list[tuple[str, int]] = []
+        for path, vals in axis_source.items():
+            cur = int(points_map.get(path, 2))
+            max_allowed = min(len(vals), 4)
+            if cur < max_allowed:
+                upgrades.append((path, cur + 1))
+
+        if not upgrades:
+            break
+
+        best_above_path: str | None = None
+        best_above_points: int | None = None
+        best_above_combo: int | None = None
+        best_below_path: str | None = None
+        best_below_points: int | None = None
+        best_below_combo = current
+
+        for path, new_points in upgrades:
+            trial_points = dict(points_map)
+            trial_points[path] = int(new_points)
+            trial_combo = _compute_total_combo(
+                axis_source=axis_source,
+                points_map=trial_points,
+                phase_count=phase_count,
+                max_axes_per_phase=max_axes_per_phase,
+            )
+            if trial_combo >= target_combo:
+                if best_above_combo is None or trial_combo < best_above_combo:
+                    best_above_combo = trial_combo
+                    best_above_path = path
+                    best_above_points = int(new_points)
+            elif trial_combo > best_below_combo:
+                best_below_combo = trial_combo
+                best_below_path = path
+                best_below_points = int(new_points)
+
+        if best_above_path is not None and best_above_combo is not None and best_above_points is not None:
+            points_map[best_above_path] = best_above_points
+            current = best_above_combo
+            break
+        if best_below_path is None or best_below_points is None:
+            break
+        points_map[best_below_path] = best_below_points
+        current = best_below_combo
+
+    return points_map, current
+
+
+def build(
+    *,
+    full_144v_path: Path,
+    full_34_path: Path,
+    out_dir: Path,
+    source_spec_ref: str,
+    reference_spec_ref: str,
+    phase_count: int = 17,
+    max_axes_per_phase: int = 9,
+    target_combo: int = 100000,
+) -> dict[str, Any]:
+    src_144 = _load_yaml(full_144v_path)
+    src_34 = _load_yaml(full_34_path)
+
+    axes_144 = src_144.get("axes", [])
+    axes_34 = src_34.get("axes", [])
+    if not isinstance(axes_144, list) or not isinstance(axes_34, list):
+        raise ValueError("sweep specs must define `axes` as a list")
+
+    axis_source = _collect_axis_source(axes_144)
+    if len(axis_source) == 0:
+        raise ValueError("no axes found in full_144v")
+
+    keep_three_seed = _build_initial_keep_three(axes_34)
+    points_seed = _build_points_map(axis_source, keep_three_seed)
+    base_total = _compute_total_combo(
+        axis_source=axis_source,
+        points_map=points_seed,
+        phase_count=phase_count,
+        max_axes_per_phase=max_axes_per_phase,
+    )
+
+    points_map = dict(points_seed)
+    achieved_target_combo = base_total
+    if int(target_combo) > 0:
+        points_map, achieved_target_combo = _auto_tune_points_map(
+            axis_source=axis_source,
+            points_seed=points_seed,
+            phase_count=phase_count,
+            max_axes_per_phase=max_axes_per_phase,
+            target_combo=int(target_combo),
+        )
+
+    reduced = _reduced_axes(axis_source, points_map)
+    phases = _partition_phases(reduced, phase_count, max_axes_per_phase)
+    total_combo = _phase_total_combo(phases)
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
     manifest_phases: list[dict[str, Any]] = []
-    total_combo = 0
     all_paths_written: set[str] = set()
-
     for i, arr in enumerate(phases, start=1):
         arr_sorted = sorted(arr, key=lambda a: a.path)
         spec = {
@@ -174,10 +331,8 @@ def build(
         phase_file.write_text(header + yaml.safe_dump(spec, sort_keys=False), encoding="utf-8")
 
         combo = _combo_count(arr_sorted)
-        total_combo += combo
         for axis in arr_sorted:
             all_paths_written.add(axis.path)
-
         manifest_phases.append(
             {
                 "id": _phase_id(i),
@@ -186,6 +341,7 @@ def build(
                 "combo": combo,
                 "two_value_axes": sum(1 for a in arr_sorted if len(a.values) == 2),
                 "three_value_axes": sum(1 for a in arr_sorted if len(a.values) == 3),
+                "four_value_axes": sum(1 for a in arr_sorted if len(a.values) == 4),
                 "paths": [a.path for a in arr_sorted],
             }
         )
@@ -201,11 +357,17 @@ def build(
         "reference_spec": str(reference_spec_ref),
         "phase_count": int(phase_count),
         "total_axes": len(reduced),
+        "base_combo": int(base_total),
+        "target_combo": int(target_combo),
+        "achieved_combo": int(achieved_target_combo),
         "total_combo": int(total_combo),
+        "four_value_axes_total": int(sum(1 for a in reduced if len(a.values) == 4)),
+        "three_value_axes_total": int(sum(1 for a in reduced if len(a.values) == 3)),
+        "two_value_axes_total": int(sum(1 for a in reduced if len(a.values) == 2)),
         "notes": [
             "All full_144v axes are included once across the 17 phases.",
-            "Most axes use 2-point min/max values; selected key axes use 3-point min/mid/max.",
-            "This keeps runtime near the legacy 17-phase scale while preserving 144v coverage.",
+            "Most axes use 2-point min/max values; selected axes use 3-point or 4-point samples.",
+            "Auto-tuning promotes additional 3/4-point axes until the target combo is reached.",
         ],
         "phases": manifest_phases,
     }
@@ -232,6 +394,12 @@ def main() -> int:
     )
     ap.add_argument("--phase-count", type=int, default=17, help="Number of phases (default: 17).")
     ap.add_argument("--max-axes-per-phase", type=int, default=9, help="Max axes per phase.")
+    ap.add_argument(
+        "--target-combo",
+        type=int,
+        default=100000,
+        help="Target total combos per interval (0 disables auto-tuning).",
+    )
     args = ap.parse_args()
 
     root = Path(__file__).resolve().parents[2]
@@ -247,16 +415,18 @@ def main() -> int:
         reference_spec_ref=str(args.full_34),
         phase_count=int(args.phase_count),
         max_axes_per_phase=int(args.max_axes_per_phase),
+        target_combo=int(args.target_combo),
     )
 
     print(
         f"Generated {manifest['phase_count']} phases, "
-        f"{manifest['total_axes']} axes, total_combo={manifest['total_combo']}"
+        f"{manifest['total_axes']} axes, total_combo={manifest['total_combo']} "
+        f"(target={manifest['target_combo']}, base={manifest['base_combo']})"
     )
     for ph in manifest["phases"]:
         print(
             f"{ph['id']}: axes={ph['axis_count']} combo={ph['combo']} "
-            f"(2v={ph['two_value_axes']}, 3v={ph['three_value_axes']})"
+            f"(2v={ph['two_value_axes']}, 3v={ph['three_value_axes']}, 4v={ph['four_value_axes']})"
         )
     return 0
 

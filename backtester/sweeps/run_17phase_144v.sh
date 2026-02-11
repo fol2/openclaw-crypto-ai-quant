@@ -3,9 +3,9 @@ set -euo pipefail
 
 # 17-phase 144v sweep runner (grid).
 #
-# Default scale:
+# Default scale (from manifest):
 # - 17 phases
-# - 17,280 combos per interval
+# - ~100k combos per interval (targeted)
 # - Intervals: 3m, 5m, 15m, 30m
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
