@@ -90,7 +90,11 @@ pub fn run_tpe_sweep(
     let mut axis_opts: Vec<AxisOptimizer> = Vec::new();
     for axis in &spec.axes {
         let min_val = axis.values.iter().cloned().fold(f64::INFINITY, f64::min);
-        let max_val = axis.values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let max_val = axis
+            .values
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
 
         if (max_val - min_val).abs() < 1e-12 {
             // Single-value axis: skip TPE, always use this value
@@ -145,11 +149,7 @@ pub fn run_tpe_sweep(
     }
 
     // -- 2. Init GPU, upload raw candles ------------------------------------------
-    let symbols: Vec<String> = {
-        let mut s: Vec<String> = candles.keys().cloned().collect();
-        s.sort();
-        s
-    };
+    let symbols = crate::sorted_symbols_with_kernel_cap(candles, "[TPE]");
     let num_symbols = symbols.len();
     let btc_sym_idx = symbols
         .iter()
@@ -161,19 +161,22 @@ pub fn run_tpe_sweep(
     let num_bars = raw.num_bars as u32;
 
     // Compute trade bar range from time scope
-    let (trade_start, trade_end) = raw_candles::find_trade_bar_range(&raw.timestamps, from_ts, to_ts);
+    let (trade_start, trade_end) =
+        raw_candles::find_trade_bar_range(&raw.timestamps, from_ts, to_ts);
     eprintln!(
         "[TPE] Trade bar range: {}..{} ({} of {} bars)",
-        trade_start, trade_end, trade_end - trade_start, num_bars,
+        trade_start,
+        trade_end,
+        trade_end - trade_start,
+        num_bars,
     );
 
     let device_state = gpu_host::GpuDeviceState::new();
     let candles_gpu = device_state.dev.htod_sync_copy(&raw.candles).unwrap();
 
     // Prepare sub-bar candles for GPU (if provided)
-    let sub_bar_result = sub_candles.map(|sc| {
-        raw_candles::prepare_sub_bar_candles(&raw.timestamps, sc, &symbols)
-    });
+    let sub_bar_result =
+        sub_candles.map(|sc| raw_candles::prepare_sub_bar_candles(&raw.timestamps, sc, &symbols));
     let sub_candles_gpu: Option<cudarc::driver::CudaSlice<buffers::GpuRawCandle>> =
         sub_bar_result.as_ref().and_then(|sbr| {
             if sbr.max_sub_per_bar == 0 || sbr.candles.is_empty() {
@@ -376,11 +379,7 @@ pub fn run_tpe_sweep(
                 1e18 // very bad → TPE steers away
             } else {
                 // TPE minimizes, so negate PnL. Also penalize if <20 trades (overfit).
-                let trade_penalty = if result.total_trades < 20 {
-                    0.5
-                } else {
-                    1.0
-                };
+                let trade_penalty = if result.total_trades < 20 { 0.5 } else { 1.0 };
                 -(pnl * trade_penalty)
             };
 
@@ -450,9 +449,8 @@ pub fn run_tpe_sweep(
             let t_prune = Instant::now();
 
             // Sort by objective ascending (best = most negative = highest PnL first)
-            observation_cache.sort_by(|a, b| {
-                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
-            });
+            observation_cache
+                .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
             observation_cache.truncate(PRUNED_OBSERVATIONS);
             obs_count = observation_cache.len();
 
@@ -556,7 +554,14 @@ fn evaluate_trade_only_batch(
     trade_bufs.sub_candles = sub_candles_gpu.cloned();
     trade_bufs.sub_counts = sub_counts_gpu.cloned();
 
-    gpu_host::dispatch_and_readback(ds, &mut trade_bufs, num_bars, BAR_CHUNK_SIZE, trade_start, trade_end)
+    gpu_host::dispatch_and_readback(
+        ds,
+        &mut trade_bufs,
+        num_bars,
+        BAR_CHUNK_SIZE,
+        trade_start,
+        trade_end,
+    )
 }
 
 /// Evaluate a batch of trials where indicator params may vary per trial.
@@ -671,7 +676,8 @@ fn evaluate_mixed_batch_arena(
         for (trial_idx, &unique_slot) in trial_to_unique.iter().enumerate() {
             if unique_slot >= group_start && unique_slot < group_end {
                 let local_slot = unique_slot - group_start;
-                let mut gpu_cfg = buffers::GpuComboConfig::from_strategy_config(&trial_cfgs[trial_idx]);
+                let mut gpu_cfg =
+                    buffers::GpuComboConfig::from_strategy_config(&trial_cfgs[trial_idx]);
                 gpu_cfg.snapshot_offset = (local_slot * snapshot_stride) as u32;
                 gpu_cfg.breadth_offset = (local_slot * breadth_stride) as u32;
                 gpu_configs.push(gpu_cfg);
@@ -845,7 +851,11 @@ fn dispatch_trade_arena(
     };
 
     // Dynamic chunk size: smaller when sub-bars active (TDR mitigation)
-    let effective_chunk = if max_sub_per_bar > 0 { BAR_CHUNK_SIZE.min(50) } else { BAR_CHUNK_SIZE };
+    let effective_chunk = if max_sub_per_bar > 0 {
+        BAR_CHUNK_SIZE.min(50)
+    } else {
+        BAR_CHUNK_SIZE
+    };
     let trade_range = trade_end - trade_start;
     let num_chunks = (trade_range + effective_chunk - 1) / effective_chunk;
 
