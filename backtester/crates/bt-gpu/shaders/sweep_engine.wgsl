@@ -1050,6 +1050,26 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         }
     }
 
+    // Force-close any remaining positions at end-of-backtest (CPU parity).
+    if params.chunk_end >= params.num_bars && params.num_bars > 0u && state.num_open > 0u {
+        let eob_bar = params.num_bars - 1u;
+        for (var sym = 0u; sym < ns; sym++) {
+            if state.positions[sym].pos_type == POS_EMPTY { continue; }
+
+            var scan_bar = i32(eob_bar);
+            loop {
+                if scan_bar < 0 { break; }
+
+                let eob_snap = snapshots[u32(scan_bar) * ns + sym];
+                if eob_snap.valid != 0u {
+                    apply_close(&state, sym, eob_snap, false);
+                    break;
+                }
+                scan_bar = scan_bar - 1;
+            }
+        }
+    }
+
     // Write back state
     states[combo_id] = state;
 

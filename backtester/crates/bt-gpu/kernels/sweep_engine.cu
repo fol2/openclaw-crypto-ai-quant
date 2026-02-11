@@ -1607,6 +1607,27 @@ extern "C" __global__ void sweep_engine_kernel(
         }
     }
 
+    // Force-close any remaining positions at end-of-backtest (CPU parity).
+    if (params->chunk_end >= params->trade_end_bar
+        && params->trade_end_bar > 0u
+        && state.num_open > 0u) {
+        unsigned int eob_bar = params->trade_end_bar - 1u;
+        for (unsigned int sym = 0u; sym < ns; sym++) {
+            if (state.positions[sym].active == POS_EMPTY) { continue; }
+
+            int scan_bar = (int)eob_bar;
+            while (scan_bar >= 0) {
+                const GpuSnapshot& eob_snap =
+                    snapshots[cfg.snapshot_offset + ((unsigned int)scan_bar) * ns + sym];
+                if (eob_snap.valid != 0u) {
+                    apply_close(&state, sym, eob_snap, false, fee_rate);
+                    break;
+                }
+                scan_bar -= 1;
+            }
+        }
+    }
+
     // Write back state
     states[combo_id] = state;
 
