@@ -9,37 +9,37 @@ axes:
   - 7.0
   - 10.0
   - 13.0
-- path: thresholds.entry.macd_hist_entry_mode
+- path: thresholds.entry.ave_avg_atr_window
   values:
-  - 0.0
+  - 30.0
+  - 50.0
+  - 80.0
+- path: thresholds.ranging.min_signals
+  values:
   - 1.0
   - 2.0
-- path: thresholds.stoch_rsi.block_long_if_k_gt
+  - 3.0
+- path: trade.adx_sizing_full_adx
   values:
-  - 0.595
-  - 0.85
-  - 1.105
-- path: trade.breakeven_buffer_atr
-  values:
-  - 0.035
-  - 0.05
-  - 0.065
-- path: trade.enable_partial_tp
+  - 28.0
+  - 40.0
+  - 52.0
+- path: trade.enable_breakeven_stop
   values:
   - 0.0
   - 1.0
-- path: trade.max_open_positions
+- path: trade.leverage_medium
+  values:
+  - 2.0
+  - 4.0
+  - 5.0
+- path: trade.rsi_exit_lb_lo_profit
   values:
   - 14.0
   - 20.0
   - 26.0
-- path: trade.rsi_exit_ub_hi_profit
+- path: trade.trailing_start_atr_low_conf
   values:
-  - 49.0
-  - 70.0
-  - 91.0
-- path: trade.vol_scalar_max
-  values:
-  - 0.7
+  - 0.0
+  - 0.5
   - 1.0
-  - 1.3

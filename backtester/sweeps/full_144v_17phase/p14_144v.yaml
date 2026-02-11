@@ -9,37 +9,37 @@ axes:
   - 10.0
   - 20.0
   - 30.0
-- path: thresholds.entry.ave_avg_atr_window
+- path: thresholds.anomaly.price_change_pct_gt
   values:
-  - 30.0
-  - 50.0
-  - 80.0
-- path: thresholds.ranging.min_signals
+  - 0.07
+  - 0.1
+  - 0.13
+- path: thresholds.entry.slow_drift_require_macd_sign
   values:
+  - 0.0
   - 1.0
-  - 2.0
-  - 3.0
-- path: trade.adx_sizing_full_adx
+- path: thresholds.entry.slow_drift_slope_window
   values:
-  - 28.0
+  - 10.0
+  - 25.0
   - 40.0
-  - 52.0
-- path: trade.enable_breakeven_stop
+- path: trade.add_fraction_of_base_margin
   values:
-  - 0.0
+  - 0.25
+  - 0.75
   - 1.0
-- path: trade.leverage_medium
+- path: trade.leverage_high
   values:
-  - 2.0
-  - 4.0
+  - 3.5
   - 5.0
-- path: trade.rsi_exit_lb_lo_profit
+  - 6.5
+- path: trade.reentry_cooldown_minutes
   values:
-  - 14.0
-  - 20.0
-  - 26.0
-- path: trade.trailing_start_atr_low_conf
+  - 42.0
+  - 60.0
+  - 78.0
+- path: trade.trailing_distance_atr
   values:
-  - 0.0
-  - 0.5
-  - 1.0
+  - 0.3
+  - 0.7
+  - 1.2
