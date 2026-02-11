@@ -9,3 +9,4 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 rayon = "1"
 rustc-hash = "2"
+risk-core = { path = "../risk-core" }
