@@ -1,11 +1,6 @@
 //! Confidence level utilities.
-//!
-//! The canonical [`Confidence`] enum lives in [`crate::config`] so that it can
-//! be shared across the entire crate (config parsing, signal generation, trade
-//! sizing, etc.).  This module re-exports it for convenience and provides any
-//! signal-specific helpers.
 
-pub use crate::config::Confidence;
+use crate::Confidence;
 
 impl Confidence {
     /// Ordering value used for min-confidence gating.

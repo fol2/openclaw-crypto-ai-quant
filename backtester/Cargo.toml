@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/bt-signals",
     "crates/bt-core",
     "crates/bt-data",
     "crates/bt-cli",
