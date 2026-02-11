@@ -19,6 +19,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,7 +27,14 @@ from typing import Any
 
 import yaml
 
-import factory_run
+AIQ_ROOT = Path(__file__).resolve().parents[1]
+
+# When invoked as `python3 tools/factory_cycle.py`, sys.path[0] is `tools/`.
+# Ensure the repo root is importable so `import factory_run` works consistently.
+if str(AIQ_ROOT) not in sys.path:
+    sys.path.insert(0, str(AIQ_ROOT))
+
+import factory_run  # noqa: E402  (needs sys.path fix above)
 
 try:
     from tools.paper_deploy import deploy_paper_config
@@ -34,10 +42,6 @@ try:
 except ImportError:  # pragma: no cover
     from paper_deploy import deploy_paper_config  # type: ignore[no-redef]
     from registry_index import default_registry_db_path  # type: ignore[no-redef]
-
-
-AIQ_ROOT = Path(__file__).resolve().parents[1]
-
 
 def _utc_compact() -> str:
     return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
