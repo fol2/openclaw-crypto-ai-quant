@@ -1,0 +1,44 @@
+# p16_144v
+# Auto-generated from full_144v coverage.
+# Values are reduced for phase-grid practicality.
+initial_balance: 10000.0
+lookback: 200
+axes:
+- path: filters.require_adx_rising
+  values:
+  - 0.0
+  - 1.0
+- path: indicators.ave_avg_atr_window
+  values:
+  - 35.0
+  - 65.0
+- path: market_regime.breadth_block_long_below
+  values:
+  - 7.0
+  - 10.0
+  - 13.0
+- path: thresholds.entry.slow_drift_min_slope_pct
+  values:
+  - 0.00042
+  - 0.00078
+- path: trade.add_cooldown_minutes
+  values:
+  - 42.0
+  - 78.0
+- path: trade.enable_vol_buffered_trailing
+  values:
+  - 0.0
+  - 1.0
+- path: trade.leverage_medium
+  values:
+  - 2.0
+  - 4.0
+  - 5.0
+- path: trade.reentry_cooldown_max_mins
+  values:
+  - 126.0
+  - 234.0
+- path: trade.vol_baseline_pct
+  values:
+  - 0.007
+  - 0.013

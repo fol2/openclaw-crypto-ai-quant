@@ -1,0 +1,44 @@
+# p17_144v
+# Auto-generated from full_144v coverage.
+# Values are reduced for phase-grid practicality.
+initial_balance: 10000.0
+lookback: 200
+axes:
+- path: filters.require_btc_alignment
+  values:
+  - 0.0
+  - 1.0
+- path: market_regime.breadth_block_short_above
+  values:
+  - 63.0
+  - 90.0
+  - 100.0
+- path: market_regime.enable_auto_reverse
+  values:
+  - 0.0
+  - 1.0
+- path: thresholds.entry.slow_drift_require_macd_sign
+  values:
+  - 0.0
+  - 1.0
+- path: trade.add_min_profit_atr
+  values:
+  - 0.35
+  - 0.65
+- path: trade.entry_cooldown_s
+  values:
+  - 14.0
+  - 26.0
+- path: trade.max_adds_per_symbol
+  values:
+  - 0.0
+  - 2.0
+  - 3.0
+- path: trade.reentry_cooldown_minutes
+  values:
+  - 42.0
+  - 78.0
+- path: trade.vol_scalar_max
+  values:
+  - 0.7
+  - 1.3

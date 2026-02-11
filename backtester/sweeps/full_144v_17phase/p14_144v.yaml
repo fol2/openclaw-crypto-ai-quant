@@ -1,0 +1,44 @@
+# p14_144v
+# Auto-generated from full_144v coverage.
+# Values are reduced for phase-grid practicality.
+initial_balance: 10000.0
+lookback: 200
+axes:
+- path: filters.enable_extension_filter
+  values:
+  - 0.0
+  - 1.0
+- path: filters.use_stoch_rsi_filter
+  values:
+  - 0.0
+  - 1.0
+- path: market_regime.auto_reverse_breadth_high
+  values:
+  - 63.0
+  - 90.0
+  - 100.0
+- path: thresholds.entry.pullback_rsi_short_max
+  values:
+  - 35.0
+  - 65.0
+- path: thresholds.tp_and_momentum.rsi_short_strong
+  values:
+  - 33.6
+  - 62.4
+- path: trade.enable_rsi_overextension_exit
+  values:
+  - 0.0
+  - 1.0
+- path: trade.entry_min_confidence
+  values:
+  - 0.0
+  - 1.0
+  - 2.0
+- path: trade.reef_short_rsi_block_lt
+  values:
+  - 21.0
+  - 39.0
+- path: trade.tsme_require_adx_slope_negative
+  values:
+  - 0.0
+  - 1.0

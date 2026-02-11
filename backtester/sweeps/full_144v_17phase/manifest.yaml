@@ -1,0 +1,272 @@
+source_spec: backtester/sweeps/full_144v.yaml
+reference_spec: backtester/sweeps/full_34axis.yaml
+phase_count: 17
+total_axes: 143
+total_combo: 17280
+notes:
+- All full_144v axes are included once across the 17 phases.
+- Most axes use 2-point min/max values; selected key axes use 3-point min/mid/max.
+- This keeps runtime near the legacy 17-phase scale while preserving 144v coverage.
+phases:
+- id: p01_144v
+  file: p01_144v.yaml
+  axis_count: 9
+  combo: 1728
+  two_value_axes: 6
+  three_value_axes: 3
+  paths:
+  - indicators.adx_window
+  - market_regime.enable_regime_filter
+  - thresholds.entry.ave_avg_atr_window
+  - thresholds.entry.slow_drift_rsi_long_min
+  - trade.adx_sizing_full_adx
+  - trade.exit_cooldown_s
+  - trade.min_atr_pct
+  - trade.reverse_entry_signal
+  - trade.vol_scalar_min
+- id: p02_144v
+  file: p02_144v.yaml
+  axis_count: 8
+  combo: 864
+  two_value_axes: 5
+  three_value_axes: 3
+  paths:
+  - indicators.atr_window
+  - thresholds.anomaly.ema_fast_dev_pct_gt
+  - thresholds.entry.macd_hist_entry_mode
+  - thresholds.entry.slow_drift_rsi_short_max
+  - trade.adx_sizing_min_mult
+  - trade.glitch_atr_mult
+  - trade.reentry_cooldown_min_mins
+  - trade.rsi_exit_lb_hi_profit_low_conf
+- id: p03_144v
+  file: p03_144v.yaml
+  axis_count: 8
+  combo: 864
+  two_value_axes: 5
+  three_value_axes: 3
+  paths:
+  - indicators.bb_width_avg_window
+  - thresholds.anomaly.price_change_pct_gt
+  - thresholds.entry.max_dist_ema_fast
+  - thresholds.ranging.adx_below
+  - trade.block_exits_on_extreme_dev
+  - trade.glitch_price_dev_pct
+  - trade.rsi_exit_lb_hi_profit
+  - trade.rsi_exit_lb_lo_profit
+- id: p04_144v
+  file: p04_144v.yaml
+  axis_count: 8
+  combo: 864
+  two_value_axes: 5
+  three_value_axes: 3
+  paths:
+  - indicators.bb_window
+  - thresholds.entry.ave_adx_mult
+  - thresholds.entry.min_adx
+  - thresholds.ranging.bb_width_ratio_below
+  - trade.breakeven_buffer_atr
+  - trade.leverage_high
+  - trade.rsi_exit_lb_lo_profit_low_conf
+  - trade.rsi_exit_profit_atr_switch
+- id: p05_144v
+  file: p05_144v.yaml
+  axis_count: 8
+  combo: 864
+  two_value_axes: 5
+  three_value_axes: 3
+  paths:
+  - indicators.ema_fast_window
+  - thresholds.entry.ave_atr_ratio_gt
+  - thresholds.entry.pullback_confidence
+  - thresholds.ranging.min_signals
+  - trade.bump_to_min_notional
+  - trade.leverage_low
+  - trade.rsi_exit_ub_hi_profit
+  - trade.rsi_exit_ub_hi_profit_low_conf
+- id: p06_144v
+  file: p06_144v.yaml
+  axis_count: 8
+  combo: 864
+  two_value_axes: 5
+  three_value_axes: 3
+  paths:
+  - indicators.ema_macro_window
+  - thresholds.entry.ave_enabled
+  - thresholds.entry.slow_drift_slope_window
+  - thresholds.ranging.rsi_high
+  - trade.confidence_mult_high
+  - trade.leverage_max_cap
+  - trade.rsi_exit_ub_lo_profit
+  - trade.sl_atr_mult
+- id: p07_144v
+  file: p07_144v.yaml
+  axis_count: 8
+  combo: 864
+  two_value_axes: 5
+  three_value_axes: 3
+  paths:
+  - indicators.ema_slow_window
+  - thresholds.entry.btc_adx_override
+  - thresholds.ranging.rsi_low
+  - thresholds.tp_and_momentum.tp_mult_strong
+  - trade.confidence_mult_low
+  - trade.max_entry_orders_per_loop
+  - trade.rsi_exit_ub_lo_profit_low_conf
+  - trade.smart_exit_adx_exhaustion_lt
+- id: p08_144v
+  file: p08_144v.yaml
+  axis_count: 8
+  combo: 864
+  two_value_axes: 5
+  three_value_axes: 3
+  paths:
+  - indicators.rsi_window
+  - thresholds.entry.enable_pullback_entries
+  - thresholds.stoch_rsi.block_long_if_k_gt
+  - thresholds.tp_and_momentum.tp_mult_weak
+  - trade.enable_breakeven_stop
+  - trade.max_open_positions
+  - trade.slippage_bps
+  - trade.smart_exit_adx_exhaustion_lt_low_conf
+- id: p09_144v
+  file: p09_144v.yaml
+  axis_count: 8
+  combo: 864
+  two_value_axes: 5
+  three_value_axes: 3
+  paths:
+  - indicators.stoch_rsi_smooth1
+  - thresholds.entry.enable_slow_drift_entries
+  - thresholds.stoch_rsi.block_short_if_k_lt
+  - trade.add_fraction_of_base_margin
+  - trade.enable_dynamic_leverage
+  - trade.max_total_margin_pct
+  - trade.tp_atr_mult
+  - trade.tp_partial_min_notional_usd
+- id: p10_144v
+  file: p10_144v.yaml
+  axis_count: 8
+  combo: 864
+  two_value_axes: 5
+  three_value_axes: 3
+  paths:
+  - indicators.stoch_rsi_smooth2
+  - thresholds.entry.high_conf_volume_mult
+  - thresholds.tp_and_momentum.adx_strong_gt
+  - trade.add_min_confidence
+  - trade.enable_dynamic_sizing
+  - trade.min_notional_usd
+  - trade.tp_partial_pct
+  - trade.trailing_distance_atr
+- id: p11_144v
+  file: p11_144v.yaml
+  axis_count: 8
+  combo: 864
+  two_value_axes: 5
+  three_value_axes: 3
+  paths:
+  - indicators.stoch_rsi_window
+  - thresholds.entry.pullback_min_adx
+  - thresholds.tp_and_momentum.adx_weak_lt
+  - trade.allocation_pct
+  - trade.enable_partial_tp
+  - trade.reef_adx_threshold
+  - trade.trailing_distance_atr_low_conf
+  - trade.trailing_start_atr
+- id: p12_144v
+  file: p12_144v.yaml
+  axis_count: 9
+  combo: 1152
+  two_value_axes: 7
+  three_value_axes: 2
+  paths:
+  - filters.adx_rising_saturation
+  - filters.require_macro_alignment
+  - indicators.vol_sma_window
+  - thresholds.entry.pullback_require_macd_sign
+  - thresholds.tp_and_momentum.rsi_long_strong
+  - trade.breakeven_start_atr
+  - trade.enable_pyramiding
+  - trade.reef_long_rsi_block_gt
+  - trade.trailing_start_atr_low_conf
+- id: p13_144v
+  file: p13_144v.yaml
+  axis_count: 9
+  combo: 1152
+  two_value_axes: 7
+  three_value_axes: 2
+  paths:
+  - filters.enable_anomaly_filter
+  - filters.require_volume_confirmation
+  - indicators.vol_trend_window
+  - thresholds.entry.pullback_rsi_long_min
+  - thresholds.tp_and_momentum.rsi_long_weak
+  - trade.confidence_mult_medium
+  - trade.enable_reef_filter
+  - trade.reef_long_rsi_extreme_gt
+  - trade.tsme_min_profit_atr
+- id: p14_144v
+  file: p14_144v.yaml
+  axis_count: 9
+  combo: 1152
+  two_value_axes: 7
+  three_value_axes: 2
+  paths:
+  - filters.enable_extension_filter
+  - filters.use_stoch_rsi_filter
+  - market_regime.auto_reverse_breadth_high
+  - thresholds.entry.pullback_rsi_short_max
+  - thresholds.tp_and_momentum.rsi_short_strong
+  - trade.enable_rsi_overextension_exit
+  - trade.entry_min_confidence
+  - trade.reef_short_rsi_block_lt
+  - trade.tsme_require_adx_slope_negative
+- id: p15_144v
+  file: p15_144v.yaml
+  axis_count: 9
+  combo: 1152
+  two_value_axes: 7
+  three_value_axes: 2
+  paths:
+  - filters.enable_ranging_filter
+  - filters.vol_confirm_include_prev
+  - market_regime.auto_reverse_breadth_low
+  - thresholds.entry.slow_drift_min_adx
+  - thresholds.tp_and_momentum.rsi_short_weak
+  - trade.enable_ssf_filter
+  - trade.leverage
+  - trade.reef_short_rsi_extreme_lt
+  - trade.use_bbo_for_fills
+- id: p16_144v
+  file: p16_144v.yaml
+  axis_count: 9
+  combo: 1152
+  two_value_axes: 7
+  three_value_axes: 2
+  paths:
+  - filters.require_adx_rising
+  - indicators.ave_avg_atr_window
+  - market_regime.breadth_block_long_below
+  - thresholds.entry.slow_drift_min_slope_pct
+  - trade.add_cooldown_minutes
+  - trade.enable_vol_buffered_trailing
+  - trade.leverage_medium
+  - trade.reentry_cooldown_max_mins
+  - trade.vol_baseline_pct
+- id: p17_144v
+  file: p17_144v.yaml
+  axis_count: 9
+  combo: 1152
+  two_value_axes: 7
+  three_value_axes: 2
+  paths:
+  - filters.require_btc_alignment
+  - market_regime.breadth_block_short_above
+  - market_regime.enable_auto_reverse
+  - thresholds.entry.slow_drift_require_macd_sign
+  - trade.add_min_profit_atr
+  - trade.entry_cooldown_s
+  - trade.max_adds_per_symbol
+  - trade.reentry_cooldown_minutes
+  - trade.vol_scalar_max
