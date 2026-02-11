@@ -1171,6 +1171,7 @@ def main(argv: list[str] | None = None) -> int:
     bt_sweep_spec = _resolve_path_for_backtester(str(args.sweep_spec)) or str(args.sweep_spec)
     bt_candles_db = _normalise_candles_db_arg_for_backtester(str(args.candles_db)) if args.candles_db else None
     bt_funding_db = _resolve_path_for_backtester(str(args.funding_db)) if args.funding_db else None
+    candles_db_for_checks = _resolve_path_for_backtester(str(args.candles_db)) if args.candles_db else None
     bt_wf_splits_json = (
         _resolve_path_for_backtester(str(getattr(args, "walk_forward_splits_json", "")))
         if getattr(args, "walk_forward_splits_json", None)
@@ -1196,15 +1197,15 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         candle_argv = ["python3", "tools/check_candle_dbs.py", "--json-indent", "2"]
-        if bt_candles_db:
+        if candles_db_for_checks:
             try:
-                p = Path(str(bt_candles_db)).expanduser()
+                p = Path(str(candles_db_for_checks)).expanduser()
                 if p.is_dir():
                     candle_argv += ["--db-glob", str((p / "candles_*.db").resolve())]
                 else:
                     candle_argv += ["--db-glob", str(p.resolve())]
             except Exception:
-                candle_argv += ["--db-glob", str(bt_candles_db)]
+                candle_argv += ["--db-glob", str(candles_db_for_checks)]
         candle_check = _run_cmd(
             candle_argv,
             cwd=AIQ_ROOT,
