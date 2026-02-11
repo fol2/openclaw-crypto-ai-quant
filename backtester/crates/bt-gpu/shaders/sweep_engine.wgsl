@@ -432,10 +432,16 @@ fn compute_sl_price(pos: GpuPosition, snap: GpuSnapshot, cfg: ptr<function, GpuC
     return sl_price;
 }
 
+fn stop_loss_hit(pos_type: u32, price: f32, sl_price: f32) -> bool {
+    // Mirrors bt-core::exits::stop_loss::check_stop_loss:
+    // LONG exits when price <= SL, SHORT exits when price >= SL.
+    if pos_type == POS_LONG { return price <= sl_price; }
+    return price >= sl_price;
+}
+
 fn check_stop_loss(pos: GpuPosition, snap: GpuSnapshot, cfg: ptr<function, GpuComboConfig>) -> bool {
     let sl = compute_sl_price(pos, snap, cfg);
-    if pos.pos_type == POS_LONG { return snap.close <= sl; }
-    return snap.close >= sl;
+    return stop_loss_hit(pos.pos_type, snap.close, sl);
 }
 
 // ── Trailing Stop ───────────────────────────────────────────────────────────
