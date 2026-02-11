@@ -853,8 +853,9 @@ __device__ bool is_pesc_blocked(const GpuComboState* state, unsigned int sym,
 // -- Dynamic TP Multiplier ----------------------------------------------------
 
 __device__ float get_tp_mult(const GpuSnapshot& snap, const GpuComboConfig* cfg) {
-    if (snap.adx > cfg->tp_strong_adx_gt) { return 7.0f; }
-    if (snap.adx < cfg->tp_weak_adx_lt) { return 3.0f; }
+    // Parity with CPU: the CPU backtester always uses the configured TP ATR multiplier.
+    // Dynamic TP scaling based on ADX is intentionally disabled on GPU.
+    (void)snap;
     return cfg->tp_atr_mult;
 }
 
@@ -901,6 +902,67 @@ extern "C" __global__ void sweep_engine_kernel(
 
                 const GpuSnapshot& ind_snap = snapshots[cfg.snapshot_offset + bar * ns + sym];
                 if (ind_snap.valid == 0u) { continue; }
+
+                // CPU semantics: always evaluate exits once on the indicator-bar snapshot at `ts`
+                // (using the main bar OHLCV), then scan sub-bars in (ts, next_ts].
+                //
+                // Note: even if glitch guard blocks exits on the indicator bar, trailing is still
+                // updated and sub-bar scanning proceeds.
+                {
+                    const GpuPosition& pos = state.positions[sym];
+                    if (pos.active != POS_EMPTY) {
+                        float p_atr = profit_atr(pos, ind_snap.close);
+
+                        // Glitch guard (CPU semantics): block exits on extreme deviations, but still update trailing.
+                        bool block_exits = false;
+                        if (cfg.block_exits_on_extreme_dev != 0u && ind_snap.prev_close > 0.0f) {
+                            float price_change_pct = fabsf(ind_snap.close - ind_snap.prev_close) / ind_snap.prev_close;
+                            block_exits = (price_change_pct > cfg.glitch_price_dev_pct)
+                                || (ind_snap.atr > 0.0f
+                                    && fabsf(ind_snap.close - ind_snap.prev_close) > ind_snap.atr * cfg.glitch_atr_mult);
+                        }
+
+                        if (block_exits) {
+                            float new_tsl = compute_trailing(pos, ind_snap, &cfg, p_atr);
+                            if (new_tsl > 0.0f) {
+                                state.positions[sym].trailing_sl = new_tsl;
+                            }
+                        } else {
+                            // Stop loss
+                            if (check_stop_loss(pos, ind_snap, &cfg)) {
+                                apply_close(&state, sym, ind_snap, false, fee_rate);
+                            } else {
+                                // Update trailing stop
+                                float new_tsl = compute_trailing(pos, ind_snap, &cfg, p_atr);
+                                if (new_tsl > 0.0f) {
+                                    state.positions[sym].trailing_sl = new_tsl;
+                                }
+
+                                // Trailing stop exit
+                                if (state.positions[sym].active != POS_EMPTY
+                                    && check_trailing_exit(state.positions[sym], ind_snap)) {
+                                    apply_close(&state, sym, ind_snap, false, fee_rate);
+                                } else if (state.positions[sym].active != POS_EMPTY) {
+                                    // Take profit
+                                    float tp_mult = get_tp_mult(ind_snap, &cfg);
+                                    unsigned int tp_result = check_tp(state.positions[sym], ind_snap, &cfg, tp_mult);
+                                    if (tp_result == 1u) {
+                                        apply_partial_close(&state, sym, ind_snap, cfg.tp_partial_pct, fee_rate);
+                                    } else if (tp_result == 2u) {
+                                        apply_close(&state, sym, ind_snap, false, fee_rate);
+                                    } else {
+                                        // Smart exits
+                                        if (check_smart_exits(state.positions[sym], ind_snap, &cfg, p_atr)) {
+                                            apply_close(&state, sym, ind_snap, false, fee_rate);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (state.positions[sym].active == POS_EMPTY) { continue; }
 
                 unsigned int n_sub = sub_counts[bar * ns + sym];
                 for (unsigned int sub_i = 0u; sub_i < n_sub; sub_i++) {
