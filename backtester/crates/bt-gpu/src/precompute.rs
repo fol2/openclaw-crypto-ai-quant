@@ -29,6 +29,14 @@ pub struct PrecomputeResult {
     pub ema_slow_slopes: Vec<f32>,
 }
 
+fn make_indicator_bank(cfg: &StrategyConfig) -> IndicatorBank {
+    IndicatorBank::new_with_ave_window(
+        &cfg.indicators,
+        cfg.filters.use_stoch_rsi_filter,
+        cfg.effective_ave_avg_atr_window(),
+    )
+}
+
 /// Precompute indicator snapshots for all symbols across all timestamps.
 pub fn precompute_snapshots(
     candles: &CandleData,
@@ -69,7 +77,7 @@ pub fn precompute_snapshots(
     // Initialize indicator banks per symbol
     let mut banks: Vec<IndicatorBank> = symbols
         .iter()
-        .map(|_| IndicatorBank::new(&cfg.indicators, cfg.filters.use_stoch_rsi_filter))
+        .map(|_| make_indicator_bank(cfg))
         .collect();
 
     // EMA slow history per symbol (for slope computation)
@@ -200,5 +208,45 @@ pub fn precompute_snapshots(
         num_symbols,
         timestamps: all_ts,
         ema_slow_slopes,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bt_core::candle::OhlcvBar;
+
+    #[test]
+    fn test_precompute_bank_uses_threshold_ave_window() {
+        let mut cfg = StrategyConfig::default();
+        cfg.indicators.ave_avg_atr_window = 2;
+        cfg.thresholds.entry.ave_avg_atr_window = 4;
+
+        let mut bank = make_indicator_bank(&cfg);
+        for i in 0..3 {
+            bank.update(&OhlcvBar {
+                t: i * 60_000,
+                t_close: i * 60_000 + 59_999,
+                o: 100.0 + i as f64,
+                h: 101.0 + i as f64,
+                l: 99.0 + i as f64,
+                c: 100.5 + i as f64,
+                v: 10_000.0,
+                n: 100,
+            });
+        }
+        assert!(!bank.avg_atr.full());
+
+        bank.update(&OhlcvBar {
+            t: 3 * 60_000,
+            t_close: 3 * 60_000 + 59_999,
+            o: 103.0,
+            h: 104.0,
+            l: 102.0,
+            c: 103.5,
+            v: 10_000.0,
+            n: 100,
+        });
+        assert!(bank.avg_atr.full());
     }
 }

@@ -662,6 +662,13 @@ impl Default for StrategyConfig {
     }
 }
 
+impl StrategyConfig {
+    /// Canonical AVE average ATR window for runtime indicator paths.
+    pub fn effective_ave_avg_atr_window(&self) -> usize {
+        self.thresholds.entry.ave_avg_atr_window
+    }
+}
+
 // ---------------------------------------------------------------------------
 // YAML overlay structure
 // ---------------------------------------------------------------------------
@@ -1044,6 +1051,14 @@ mod tests {
         assert!((cfg.thresholds.entry.min_adx - 22.0).abs() < f64::EPSILON);
         assert_eq!(cfg.thresholds.entry.macd_hist_entry_mode, MacdMode::Accel);
         assert!((cfg.thresholds.stoch_rsi.block_long_if_k_gt - 0.85).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_effective_ave_window_uses_thresholds_entry() {
+        let mut cfg = StrategyConfig::default();
+        cfg.indicators.ave_avg_atr_window = 7;
+        cfg.thresholds.entry.ave_avg_atr_window = 33;
+        assert_eq!(cfg.effective_ave_avg_atr_window(), 33);
     }
 
     #[test]

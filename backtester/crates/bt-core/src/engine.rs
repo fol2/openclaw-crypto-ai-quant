@@ -96,7 +96,7 @@ fn make_indicator_bank(cfg: &StrategyConfig, use_stoch_rsi: bool) -> IndicatorBa
     IndicatorBank::new_with_ave_window(
         &cfg.indicators,
         use_stoch_rsi,
-        cfg.thresholds.entry.ave_avg_atr_window,
+        cfg.effective_ave_avg_atr_window(),
     )
 }
 
