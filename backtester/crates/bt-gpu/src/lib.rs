@@ -41,6 +41,24 @@ pub use layout::GpuSweepResult;
 /// Bar chunk size for TDR mitigation in trade kernel.
 const BAR_CHUNK_SIZE: u32 = 500;
 
+/// Build deterministic symbol ordering and enforce GPU kernel symbol cap.
+pub(crate) fn sorted_symbols_with_kernel_cap(
+    candles: &CandleData,
+    log_prefix: &str,
+) -> Vec<String> {
+    let mut symbols: Vec<String> = candles.keys().cloned().collect();
+    symbols.sort();
+    if symbols.len() > buffers::GPU_MAX_SYMBOLS {
+        eprintln!(
+            "{log_prefix} Warning: {} symbols loaded, truncating to {} (kernel state limit)",
+            symbols.len(),
+            buffers::GPU_MAX_SYMBOLS,
+        );
+        symbols.truncate(buffers::GPU_MAX_SYMBOLS);
+    }
+    symbols
+}
+
 /// Run a GPU-accelerated parameter sweep.
 ///
 /// **All-GPU pipeline**: Raw candles uploaded once → indicator kernel computes
@@ -71,15 +89,13 @@ pub fn run_gpu_sweep(
     let indicator_combos = axis_split::generate_combinations(&indicator_axes);
     let trade_combos = axis_split::generate_combinations(&trade_axes);
 
-    let symbols: Vec<String> = {
-        let mut s: Vec<String> = candles.keys().cloned().collect();
-        s.sort();
-        s
-    };
+    let symbols = sorted_symbols_with_kernel_cap(candles, "[GPU]");
     let num_symbols = symbols.len();
 
     // BTC symbol index for breadth kernel
-    let btc_sym_idx = symbols.iter().position(|s| s == "BTC")
+    let btc_sym_idx = symbols
+        .iter()
+        .position(|s| s == "BTC")
         .or_else(|| symbols.iter().position(|s| s == "BTCUSDT"))
         .unwrap_or(0) as u32;
 
@@ -88,7 +104,8 @@ pub fn run_gpu_sweep(
     let num_bars = raw.num_bars as u32;
 
     // Compute trade bar range from time scope
-    let (trade_start, trade_end) = raw_candles::find_trade_bar_range(&raw.timestamps, from_ts, to_ts);
+    let (trade_start, trade_end) =
+        raw_candles::find_trade_bar_range(&raw.timestamps, from_ts, to_ts);
 
     eprintln!(
         "[GPU] {} ind × {} trade = {} total combos, {} bars × {} symbols",
@@ -103,13 +120,16 @@ pub fn run_gpu_sweep(
     let device_state = gpu_host::GpuDeviceState::new();
     let candles_gpu = device_state.dev.htod_sync_copy(&raw.candles).unwrap();
 
-    let candle_upload_mb = (raw.candles.len() * std::mem::size_of::<buffers::GpuRawCandle>()) as f64 / 1e6;
-    eprintln!("[GPU] Raw candles uploaded: {:.1} MB (one-time)", candle_upload_mb);
+    let candle_upload_mb =
+        (raw.candles.len() * std::mem::size_of::<buffers::GpuRawCandle>()) as f64 / 1e6;
+    eprintln!(
+        "[GPU] Raw candles uploaded: {:.1} MB (one-time)",
+        candle_upload_mb
+    );
 
     // Prepare sub-bar candles for GPU (if provided)
-    let sub_bar_result = sub_candles.map(|sc| {
-        raw_candles::prepare_sub_bar_candles(&raw.timestamps, sc, &symbols)
-    });
+    let sub_bar_result =
+        sub_candles.map(|sc| raw_candles::prepare_sub_bar_candles(&raw.timestamps, sc, &symbols));
     let sub_candles_gpu: Option<cudarc::driver::CudaSlice<buffers::GpuRawCandle>> =
         sub_bar_result.as_ref().and_then(|sbr| {
             if sbr.max_sub_per_bar == 0 || sbr.candles.is_empty() {
@@ -132,7 +152,10 @@ pub fn run_gpu_sweep(
         .unwrap_or(0);
 
     if max_sub_per_bar > 0 {
-        eprintln!("[GPU] Sub-bar candles: max_sub={}, GPU buffer uploaded", max_sub_per_bar);
+        eprintln!(
+            "[GPU] Sub-bar candles: max_sub={}, GPU buffer uploaded",
+            max_sub_per_bar
+        );
     }
 
     // ── 3. Calculate VRAM budget ─────────────────────────────────────────
@@ -141,14 +164,12 @@ pub fn run_gpu_sweep(
 
     // Per-indicator-combo VRAM cost (snapshots + breadth + btc_bullish)
     let snapshot_elements = (num_bars as usize) * num_symbols;
-    let snapshot_bytes_per_ind: usize =
-        snapshot_elements * std::mem::size_of::<buffers::GpuSnapshot>() // 160 each
+    let snapshot_bytes_per_ind: usize = snapshot_elements * std::mem::size_of::<buffers::GpuSnapshot>() // 160 each
         + (num_bars as usize) * std::mem::size_of::<f32>()             // breadth
-        + (num_bars as usize) * std::mem::size_of::<u32>();            // btc_bullish
+        + (num_bars as usize) * std::mem::size_of::<u32>(); // btc_bullish
 
     // Per-trade-combo VRAM cost (config + state + result)
-    let combo_bytes: usize =
-        std::mem::size_of::<buffers::GpuComboConfig>()
+    let combo_bytes: usize = std::mem::size_of::<buffers::GpuComboConfig>()
         + std::mem::size_of::<buffers::GpuComboState>()
         + std::mem::size_of::<buffers::GpuResult>()
         + 32; // params overhead
@@ -184,7 +205,9 @@ pub fn run_gpu_sweep(
     eprintln!(
         "[GPU] Per-ind snapshot: {:.1} MB, batch size: {} ind/batch (VRAM limit: {}, snap cap: {})",
         snapshot_bytes_per_ind as f64 / 1e6,
-        batch_size, max_ind_by_vram, max_ind_by_snapshot,
+        batch_size,
+        max_ind_by_vram,
+        max_ind_by_snapshot,
     );
     eprintln!("[GPU] Pipeline: ALL-GPU (indicator + breadth + trade kernels)");
 
@@ -326,7 +349,10 @@ pub fn run_gpu_sweep(
 
         done += chunk.len();
         if total_ind > 1 {
-            eprintln!("[GPU] Progress: {}/{} indicator configs done", done, total_ind);
+            eprintln!(
+                "[GPU] Progress: {}/{} indicator configs done",
+                done, total_ind
+            );
         }
         // ind_bufs + trade_bufs dropped here → frees VRAM for next batch
     }
@@ -341,6 +367,8 @@ pub fn run_gpu_sweep(
 
 #[cfg(test)]
 mod tests {
+    use bt_core::candle::{CandleData, OhlcvBar};
+
     fn extract_fn_block<'a>(source: &'a str, signature: &str) -> &'a str {
         let start = source
             .find(signature)
@@ -394,5 +422,64 @@ mod tests {
             !wgsl_fn.contains("return 7.0;") && !wgsl_fn.contains("return 3.0;"),
             "WGSL get_tp_mult must not hardcode ADX TP multipliers"
         );
+    }
+
+    #[test]
+    fn sorted_symbols_with_kernel_cap_truncates_deterministically() {
+        let mut candles: CandleData = CandleData::default();
+        for idx in 0..(crate::buffers::GPU_MAX_SYMBOLS + 9) {
+            candles.insert(
+                format!("SYM{:03}", idx),
+                vec![OhlcvBar {
+                    t: 0,
+                    t_close: 0,
+                    o: 1.0,
+                    h: 1.0,
+                    l: 1.0,
+                    c: 1.0,
+                    v: 1.0,
+                    n: 1,
+                }],
+            );
+        }
+
+        let out = crate::sorted_symbols_with_kernel_cap(&candles, "[test]");
+        assert_eq!(out.len(), crate::buffers::GPU_MAX_SYMBOLS);
+        assert_eq!(out.first().map(String::as_str), Some("SYM000"));
+        assert_eq!(out.last().map(String::as_str), Some("SYM051"));
+    }
+
+    #[test]
+    fn sorted_symbols_with_kernel_cap_keeps_all_when_within_limit() {
+        let mut candles: CandleData = CandleData::default();
+        candles.insert(
+            "BTC".to_string(),
+            vec![OhlcvBar {
+                t: 0,
+                t_close: 0,
+                o: 1.0,
+                h: 1.0,
+                l: 1.0,
+                c: 1.0,
+                v: 1.0,
+                n: 1,
+            }],
+        );
+        candles.insert(
+            "ETH".to_string(),
+            vec![OhlcvBar {
+                t: 0,
+                t_close: 0,
+                o: 1.0,
+                h: 1.0,
+                l: 1.0,
+                c: 1.0,
+                v: 1.0,
+                n: 1,
+            }],
+        );
+
+        let out = crate::sorted_symbols_with_kernel_cap(&candles, "[test]");
+        assert_eq!(out, vec!["BTC".to_string(), "ETH".to_string()]);
     }
 }

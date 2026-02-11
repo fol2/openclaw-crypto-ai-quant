@@ -5,6 +5,9 @@
 
 use bytemuck::{Pod, Zeroable};
 
+/// Hard symbol ceiling imposed by GPU kernel state layout.
+pub const GPU_MAX_SYMBOLS: usize = 52;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // GpuSnapshot — precomputed indicator values per (bar, symbol)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -355,8 +358,8 @@ pub struct GpuComboConfig {
     pub ranging_bb_width_ratio_lt: f32,
     pub anomaly_bb_width_ratio_gt: f32,
     pub slow_drift_ranging_slope_override: f32,
-    pub snapshot_offset: u32,  // byte offset into concatenated snapshots array (in elements, not bytes)
-    pub breadth_offset: u32,   // offset into concatenated breadth/btc_bullish arrays (in elements)
+    pub snapshot_offset: u32, // byte offset into concatenated snapshots array (in elements, not bytes)
+    pub breadth_offset: u32,  // offset into concatenated breadth/btc_bullish arrays (in elements)
 
     // TP momentum [126-127]
     pub tp_strong_adx_gt: f32,
@@ -375,13 +378,13 @@ const _: () = assert!(std::mem::size_of::<GpuComboConfig>() == 512);
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuPosition {
-    pub active: u32,       // 0=empty, 1=LONG, 2=SHORT
+    pub active: u32, // 0=empty, 1=LONG, 2=SHORT
     pub entry_price: f32,
     pub size: f32,
-    pub confidence: u32,   // 0=Low, 1=Medium, 2=High
+    pub confidence: u32, // 0=Low, 1=Medium, 2=High
     pub entry_atr: f32,
     pub entry_adx_threshold: f32,
-    pub trailing_sl: f32,  // 0.0 = not set
+    pub trailing_sl: f32, // 0.0 = not set
     pub leverage: f32,
     pub margin_used: f32,
     pub adds_count: u32,
@@ -417,7 +420,7 @@ pub struct GpuComboState {
 
     // PESC state (per-symbol)
     pub pesc_close_time_sec: [u32; 52],
-    pub pesc_close_type: [u32; 52],  // 0=none, 1=LONG, 2=SHORT
+    pub pesc_close_type: [u32; 52],   // 0=none, 1=LONG, 2=SHORT
     pub pesc_close_reason: [u32; 52], // 0=none, 1=signal_flip, 2=other
 
     // Result accumulators
