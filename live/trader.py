@@ -17,7 +17,7 @@ import time
 import exchange.meta as hyperliquid_meta
 import exchange.ws as hyperliquid_ws
 
-from engine.openclaw_cli import send_openclaw_message
+from engine.alerting import send_openclaw_message
 import strategy.mei_alpha_v1 as mei_alpha_v1
 
 try:
