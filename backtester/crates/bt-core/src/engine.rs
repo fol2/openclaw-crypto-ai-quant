@@ -92,6 +92,14 @@ struct SimState {
     gate_stats: GateStats,
 }
 
+fn make_indicator_bank(cfg: &StrategyConfig, use_stoch_rsi: bool) -> IndicatorBank {
+    IndicatorBank::new_with_ave_window(
+        &cfg.indicators,
+        use_stoch_rsi,
+        cfg.thresholds.entry.ave_avg_atr_window,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
@@ -167,10 +175,9 @@ pub fn run_simulation(
 
     // Pre-create indicator banks for every symbol
     for sym in candles.keys() {
-        state.indicators.insert(
-            sym.clone(),
-            IndicatorBank::new(&cfg.indicators, use_stoch_rsi),
-        );
+        state
+            .indicators
+            .insert(sym.clone(), make_indicator_bank(cfg, use_stoch_rsi));
     }
 
     // Build exit candle index: symbol → sorted Vec<(timestamp_ms, index)>
@@ -1862,6 +1869,41 @@ mod tests {
         );
         assert_eq!(result.trades.len(), 0);
         assert!((result.final_balance - 1000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_indicator_bank_uses_threshold_ave_window() {
+        let mut cfg = StrategyConfig::default();
+        cfg.indicators.ave_avg_atr_window = 2;
+        cfg.thresholds.entry.ave_avg_atr_window = 4;
+
+        let mut bank = make_indicator_bank(&cfg, false);
+
+        for i in 0..3 {
+            bank.update(&OhlcvBar {
+                t: i * 60_000,
+                t_close: i * 60_000 + 59_999,
+                o: 100.0 + i as f64,
+                h: 101.0 + i as f64,
+                l: 99.0 + i as f64,
+                c: 100.5 + i as f64,
+                v: 10_000.0,
+                n: 100,
+            });
+        }
+        assert!(!bank.avg_atr.full());
+
+        bank.update(&OhlcvBar {
+            t: 3 * 60_000,
+            t_close: 3 * 60_000 + 59_999,
+            o: 103.0,
+            h: 104.0,
+            l: 102.0,
+            c: 103.5,
+            v: 10_000.0,
+            n: 100,
+        });
+        assert!(bank.avg_atr.full());
     }
 
     #[test]
