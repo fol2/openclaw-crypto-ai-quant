@@ -7,6 +7,7 @@
 //! - On CUDA-capable machines: the test must pass.
 //! - On machines without CUDA runtime/device: the test prints a skip message
 //!   and returns without failing.
+//! - On CUDA misconfiguration: the test fails loudly.
 
 use std::any::Any;
 use std::collections::BTreeMap;
@@ -61,16 +62,7 @@ fn panic_payload_to_string(payload: Box<dyn Any + Send>) -> String {
 }
 
 fn is_cuda_unavailable_error(err: &DriverError) -> bool {
-    matches!(
-        err.0,
-        CUresult::CUDA_ERROR_NO_DEVICE
-            | CUresult::CUDA_ERROR_INVALID_DEVICE
-            | CUresult::CUDA_ERROR_NOT_INITIALIZED
-            | CUresult::CUDA_ERROR_DEINITIALIZED
-            | CUresult::CUDA_ERROR_SYSTEM_NOT_READY
-            | CUresult::CUDA_ERROR_SYSTEM_DRIVER_MISMATCH
-            | CUresult::CUDA_ERROR_STUB_LIBRARY
-    )
+    matches!(err.0, CUresult::CUDA_ERROR_NO_DEVICE | CUresult::CUDA_ERROR_INVALID_DEVICE)
 }
 
 fn probe_cuda_runtime() -> CudaProbe {

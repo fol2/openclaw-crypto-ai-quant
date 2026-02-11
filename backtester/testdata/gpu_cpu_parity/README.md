@@ -49,5 +49,7 @@ cargo test -p bt-gpu --test gpu_runtime_parity_tiny_fixture -- --nocapture
 
 ## CI gate
 - `scripts/ci_gpu_parity_gate.sh` is the command-level parity gate used in CI.
-- It skips cleanly only when CUDA toolkit/runtime is unavailable.
+- It runs the tiny GPU fixture and emits an explicit warning when CUDA is unavailable.
+- By default (`AQC_GPU_PARITY_STRICT=0`), CUDA-unavailable runners continue with warning-only semantics.
+- Set `AQC_GPU_PARITY_STRICT=1` to fail fast when CUDA is unavailable.
 - Workflow: `.github/workflows/gpu-parity-gate.yml`.
