@@ -5,6 +5,7 @@ members = [
     "crates/bt-data",
     "crates/bt-cli",
     "crates/bt-gpu",
+    "crates/risk-core",
 ]
 
 [workspace.dependencies]
