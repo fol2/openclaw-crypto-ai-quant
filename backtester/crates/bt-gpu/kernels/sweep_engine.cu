@@ -902,6 +902,11 @@ __device__ void apply_partial_close(GpuComboState* state, unsigned int sym, cons
         state->gross_loss += fabsf(pnl);
     }
 
+    // PESC tracking (partial exits also count as non-signal-flip closes)
+    state->pesc_close_time_sec[sym] = snap.t_sec;
+    state->pesc_close_type[sym] = pos.active;
+    state->pesc_close_reason[sym] = PESC_OTHER;
+
     // Reduce position
     state->positions[sym].size -= exit_size;
     state->positions[sym].margin_used *= (1.0f - pct);
@@ -1154,47 +1159,7 @@ extern "C" __global__ void sweep_engine_kernel(
 
                     const GpuPosition& pos = state.positions[sym];
 
-                    // Pyramiding (immediate, not ranked)
-                    if (pos.active != POS_EMPTY && cfg.enable_pyramiding != 0u) {
-                        if (pos.adds_count < cfg.max_adds_per_symbol) {
-                            float p_atr_pyr = profit_atr(pos, hybrid.close);
-                            if (p_atr_pyr >= cfg.add_min_profit_atr) {
-                                unsigned int elapsed_sec = hybrid.t_sec - pos.last_add_time_sec;
-                                if (elapsed_sec >= cfg.add_cooldown_minutes * 60u) {
-                                    float equity = state.balance;
-                                    float base_margin = equity * cfg.allocation_pct;
-                                    float add_margin = base_margin * cfg.add_fraction_of_base_margin;
-                                    float lev = pos.leverage;
-                                    float add_notional = add_margin * lev;
-                                    float add_size = add_notional / hybrid.close;
-
-                                    if (add_notional < cfg.min_notional_usd) {
-                                        if (cfg.bump_to_min_notional != 0u && hybrid.close > 0.0f) {
-                                            add_notional = cfg.min_notional_usd;
-                                            add_size = add_notional / hybrid.close;
-                                        } else {
-                                            continue;
-                                        }
-                                    }
-
-                                    float fee = add_notional * fee_rate;
-                                    state.balance -= fee;
-                                    state.total_fees += fee;
-
-                                    float old_size = pos.size;
-                                    float new_size = old_size + add_size;
-                                    float new_entry = (pos.entry_price * old_size + hybrid.close * add_size) / new_size;
-                                    state.positions[sym].entry_price = new_entry;
-                                    state.positions[sym].size = new_size;
-                                    state.positions[sym].margin_used += add_margin;
-                                    state.positions[sym].adds_count += 1u;
-                                    state.positions[sym].last_add_time_sec = hybrid.t_sec;
-                                }
-                            }
-                        }
-                        continue;
-                    }
-
+                    // CPU parity: sub-bar ranked entry path never executes immediate pyramiding.
                     if (pos.active != POS_EMPTY) { continue; }
 
                     // Gates, signal generation, filters (using hybrid snapshot with indicator values)

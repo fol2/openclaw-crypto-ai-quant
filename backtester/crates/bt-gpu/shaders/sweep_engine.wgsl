@@ -772,6 +772,11 @@ fn apply_partial_close(state: ptr<function, GpuComboState>, sym: u32, snap: GpuS
         (*state).gross_loss += abs(pnl);
     }
 
+    // PESC tracking (partial exits also count as non-signal-flip closes)
+    (*state).pesc_close_time_sec[sym] = snap.t_sec;
+    (*state).pesc_close_type[sym] = pos.pos_type;
+    (*state).pesc_close_reason[sym] = PESC_OTHER;
+
     // Reduce position
     (*state).positions[sym].size -= exit_size;
     (*state).positions[sym].margin_used *= (1.0 - pct);
@@ -892,50 +897,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
 
             let pos = state.positions[sym];
 
-            // Pyramiding (same-direction add) — not ranked, immediate
-            if pos.pos_type != POS_EMPTY && cfg.enable_pyramiding != 0u {
-                // Simplified pyramid check
-                if pos.adds_count < cfg.max_adds_per_symbol {
-                    let p_atr = profit_atr(pos, snap.close);
-                    if p_atr >= cfg.add_min_profit_atr {
-                        let elapsed_sec = snap.t_sec - pos.last_add_time_sec;
-                        if elapsed_sec >= cfg.add_cooldown_minutes * 60u {
-                            // Execute pyramid add
-                            let equity = state.balance;
-                            let base_margin = equity * cfg.allocation_pct;
-                            let add_margin = base_margin * cfg.add_fraction_of_base_margin;
-                            let lev = pos.leverage;
-                            var add_notional = add_margin * lev;
-                            var add_size = add_notional / snap.close;
-
-                            if add_notional < cfg.min_notional_usd {
-                                if cfg.bump_to_min_notional != 0u && snap.close > 0.0 {
-                                    add_notional = cfg.min_notional_usd;
-                                    add_size = add_notional / snap.close;
-                                } else {
-                                    continue;
-                                }
-                            }
-
-                            let fee = add_notional * fee_rate;
-                            state.balance -= fee;
-                            state.total_fees += fee;
-
-                            // Update position
-                            let old_size = pos.size;
-                            let new_size = old_size + add_size;
-                            let new_entry = (pos.entry_price * old_size + snap.close * add_size) / new_size;
-                            state.positions[sym].entry_price = new_entry;
-                            state.positions[sym].size = new_size;
-                            state.positions[sym].margin_used += add_margin;
-                            state.positions[sym].adds_count += 1u;
-                            state.positions[sym].last_add_time_sec = snap.t_sec;
-                        }
-                    }
-                }
-                continue; // Skip entry evaluation for symbols with positions
-            }
-
+            // CPU parity: ranked entry path never executes immediate pyramiding.
             if pos.pos_type != POS_EMPTY { continue; }
 
             // Check gates
