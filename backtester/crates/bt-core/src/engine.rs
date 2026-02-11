@@ -10,6 +10,10 @@ use crate::exits::{self, ExitResult};
 use crate::indicators::{IndicatorBank, IndicatorSnapshot};
 use crate::position::{Position, PositionType, SignalRecord, TradeRecord};
 use crate::signals::{entry, gates};
+use risk_core::{
+    compute_entry_sizing, compute_pyramid_sizing, evaluate_exposure_guard, ConfidenceTier,
+    EntrySizingInput, ExposureBlockReason, ExposureGuardInput, PyramidSizingInput,
+};
 use rustc_hash::FxHashMap;
 
 // ---------------------------------------------------------------------------
@@ -461,10 +465,23 @@ pub fn run_simulation(
                 if entries_this_bar >= cfg.trade.max_entry_orders_per_loop {
                     break;
                 }
-                if state.positions.len() >= cfg.trade.max_open_positions {
+                let total_margin: f64 = state.positions.values().map(|p| p.margin_used).sum();
+                let exposure = evaluate_exposure_guard(ExposureGuardInput {
+                    open_positions: state.positions.len(),
+                    max_open_positions: Some(cfg.trade.max_open_positions),
+                    total_margin_used: total_margin,
+                    equity,
+                    max_total_margin_pct: cfg.trade.max_total_margin_pct,
+                    allow_zero_margin_headroom: false,
+                });
+                if matches!(
+                    exposure.blocked_reason,
+                    Some(ExposureBlockReason::MaxOpenPositions)
+                ) {
                     state.gate_stats.blocked_by_max_positions += 1;
                     break;
                 }
+
                 // Skip if a position was opened for this symbol (e.g. via signal flip above)
                 if state.positions.contains_key(&cand.symbol) {
                     continue;
@@ -472,13 +489,19 @@ pub fn run_simulation(
                 if is_entry_cooldown_active(&state, &cand.symbol, cand.ts, cfg) {
                     continue;
                 }
-
-                let total_margin: f64 = state.positions.values().map(|p| p.margin_used).sum();
-                let margin_headroom = equity * cfg.trade.max_total_margin_pct - total_margin;
-                if margin_headroom <= 0.0 {
+                let margin_check = evaluate_exposure_guard(ExposureGuardInput {
+                    open_positions: state.positions.len(),
+                    max_open_positions: None,
+                    total_margin_used: total_margin,
+                    equity,
+                    max_total_margin_pct: cfg.trade.max_total_margin_pct,
+                    allow_zero_margin_headroom: false,
+                });
+                if !margin_check.allowed {
                     state.gate_stats.blocked_by_margin += 1;
                     continue;
                 }
+                let margin_headroom = margin_check.margin_headroom;
 
                 let (size, margin_used, leverage) = compute_entry_size(
                     &cand.symbol,
@@ -733,8 +756,24 @@ pub fn run_simulation(
                         if state.positions.contains_key(&cand.symbol) {
                             continue;
                         }
-                        if state.positions.len() >= cfg.trade.max_open_positions {
-                            break;
+                        let total_margin: f64 =
+                            state.positions.values().map(|p| p.margin_used).sum();
+                        let exposure = evaluate_exposure_guard(ExposureGuardInput {
+                            open_positions: state.positions.len(),
+                            max_open_positions: Some(cfg.trade.max_open_positions),
+                            total_margin_used: total_margin,
+                            equity: sub_equity,
+                            max_total_margin_pct: cfg.trade.max_total_margin_pct,
+                            allow_zero_margin_headroom: false,
+                        });
+                        if !exposure.allowed {
+                            if matches!(
+                                exposure.blocked_reason,
+                                Some(ExposureBlockReason::MaxOpenPositions)
+                            ) {
+                                break;
+                            }
+                            continue;
                         }
 
                         let opened = execute_sub_bar_entry(
@@ -1102,6 +1141,14 @@ fn is_symbol_cooldown_active(
     ts.saturating_sub(last_ts) < cooldown_ms
 }
 
+fn to_confidence_tier(confidence: Confidence) -> ConfidenceTier {
+    match confidence {
+        Confidence::Low => ConfidenceTier::Low,
+        Confidence::Medium => ConfidenceTier::Medium,
+        Confidence::High => ConfidenceTier::High,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Entry sizing
 // ---------------------------------------------------------------------------
@@ -1116,57 +1163,31 @@ fn compute_entry_size(
     cfg: &StrategyConfig,
 ) -> (f64, f64, f64) {
     let tc = &cfg.trade;
+    let sizing = compute_entry_sizing(EntrySizingInput {
+        equity,
+        price,
+        atr,
+        adx: snap.adx,
+        confidence: to_confidence_tier(confidence),
+        allocation_pct: tc.allocation_pct,
+        enable_dynamic_sizing: tc.enable_dynamic_sizing,
+        confidence_mult_high: tc.confidence_mult_high,
+        confidence_mult_medium: tc.confidence_mult_medium,
+        confidence_mult_low: tc.confidence_mult_low,
+        adx_sizing_min_mult: tc.adx_sizing_min_mult,
+        adx_sizing_full_adx: tc.adx_sizing_full_adx,
+        vol_baseline_pct: tc.vol_baseline_pct,
+        vol_scalar_min: tc.vol_scalar_min,
+        vol_scalar_max: tc.vol_scalar_max,
+        enable_dynamic_leverage: tc.enable_dynamic_leverage,
+        leverage: tc.leverage,
+        leverage_low: tc.leverage_low,
+        leverage_medium: tc.leverage_medium,
+        leverage_high: tc.leverage_high,
+        leverage_max_cap: tc.leverage_max_cap,
+    });
 
-    // Base margin
-    let mut margin = equity * tc.allocation_pct;
-
-    if tc.enable_dynamic_sizing {
-        // Confidence multiplier
-        let conf_mult = match confidence {
-            Confidence::High => tc.confidence_mult_high,
-            Confidence::Medium => tc.confidence_mult_medium,
-            Confidence::Low => tc.confidence_mult_low,
-        };
-
-        // ADX sizing multiplier: linear interpolation
-        let adx_mult = (snap.adx / tc.adx_sizing_full_adx).clamp(tc.adx_sizing_min_mult, 1.0);
-
-        // Volatility scalar: ATR/price normalized by vol_baseline_pct, then inverted
-        let vol_ratio = if tc.vol_baseline_pct > 0.0 && price > 0.0 {
-            (atr / price) / tc.vol_baseline_pct
-        } else {
-            1.0
-        };
-        let vol_scalar_raw = if vol_ratio > 0.0 {
-            1.0 / vol_ratio
-        } else {
-            1.0
-        };
-        let vol_scalar = vol_scalar_raw.clamp(tc.vol_scalar_min, tc.vol_scalar_max);
-
-        margin *= conf_mult * adx_mult * vol_scalar;
-    }
-
-    // Leverage
-    let leverage = if tc.enable_dynamic_leverage {
-        let base_lev = match confidence {
-            Confidence::High => tc.leverage_high,
-            Confidence::Medium => tc.leverage_medium,
-            Confidence::Low => tc.leverage_low,
-        };
-        if tc.leverage_max_cap > 0.0 {
-            base_lev.min(tc.leverage_max_cap)
-        } else {
-            base_lev
-        }
-    } else {
-        tc.leverage
-    };
-
-    let notional = margin * leverage;
-    let size = if price > 0.0 { notional / price } else { 0.0 };
-
-    (size, margin, leverage)
+    (sizing.size, sizing.margin_used, sizing.leverage)
 }
 
 // ---------------------------------------------------------------------------
@@ -1408,29 +1429,34 @@ fn try_pyramid(
 
     // Compute add size
     let equity = state.balance + unrealized_pnl_for_positions(&state.positions, snap.close);
-    let base_margin = equity * tc.allocation_pct;
-    let add_margin = base_margin * tc.add_fraction_of_base_margin;
-
     let leverage = pos.leverage;
-    let mut add_notional = add_margin * leverage;
-    let mut add_size = if snap.close > 0.0 {
-        add_notional / snap.close
-    } else {
-        return;
+    let add_sizing = match compute_pyramid_sizing(PyramidSizingInput {
+        equity,
+        price: snap.close,
+        leverage,
+        allocation_pct: tc.allocation_pct,
+        add_fraction_of_base_margin: tc.add_fraction_of_base_margin,
+        min_notional_usd: tc.min_notional_usd,
+        bump_to_min_notional: tc.bump_to_min_notional,
+    }) {
+        Some(v) => v,
+        None => return,
     };
-
-    if add_notional < tc.min_notional_usd {
-        if tc.bump_to_min_notional && snap.close > 0.0 {
-            add_notional = tc.min_notional_usd;
-            add_size = add_notional / snap.close;
-        } else {
-            return;
-        }
-    }
+    let add_margin = add_sizing.add_margin;
+    let add_notional = add_sizing.add_notional;
+    let add_size = add_sizing.add_size;
 
     // Margin cap check
     let total_margin: f64 = state.positions.values().map(|p| p.margin_used).sum();
-    if total_margin + add_margin > equity * tc.max_total_margin_pct {
+    let exposure = evaluate_exposure_guard(ExposureGuardInput {
+        open_positions: state.positions.len(),
+        max_open_positions: None,
+        total_margin_used: total_margin + add_margin,
+        equity,
+        max_total_margin_pct: tc.max_total_margin_pct,
+        allow_zero_margin_headroom: true,
+    });
+    if !exposure.allowed {
         return;
     }
 
@@ -1656,10 +1682,18 @@ fn execute_sub_bar_entry(
 
     // Margin cap check
     let total_margin: f64 = state.positions.values().map(|p| p.margin_used).sum();
-    let margin_headroom = equity * cfg.trade.max_total_margin_pct - total_margin;
-    if margin_headroom <= 0.0 {
+    let exposure = evaluate_exposure_guard(ExposureGuardInput {
+        open_positions: state.positions.len(),
+        max_open_positions: Some(cfg.trade.max_open_positions),
+        total_margin_used: total_margin,
+        equity,
+        max_total_margin_pct: cfg.trade.max_total_margin_pct,
+        allow_zero_margin_headroom: false,
+    });
+    if !exposure.allowed {
         return false;
     }
+    let margin_headroom = exposure.margin_headroom;
 
     // Sizing
     let (size, margin_used, leverage) =

@@ -93,6 +93,7 @@ name = "bt-core"
 version = "0.1.0"
 dependencies = [
  "rayon",
+ "risk-core",
  "rustc-hash",
  "serde",
  "serde_json",
@@ -590,6 +591,10 @@ dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
 ]
+
+[[package]]
+name = "risk-core"
+version = "0.1.0"
 
 [[package]]
 name = "rusqlite"
