@@ -370,7 +370,7 @@ Patch `backtester/crates/bt-gpu/kernels/sweep_engine.cu`:
 +    }
 +
 +    if (cfg->enable_partial_tp != 0u) {
-+        // TP1 already taken => trailing manages remainder (CPU behavior).
++        // TP1 already taken => trailing manages remainder (CPU behaviour).
 +        if (pos.tp1_taken != 0u) {
 +            return 0u;
 +        }

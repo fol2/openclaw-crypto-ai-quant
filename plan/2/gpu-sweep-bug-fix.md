@@ -28,7 +28,7 @@ Example:
 config: String,
 ```
 
-Why this matters: your repo’s unified file is `config/strategy_overrides.yaml`. The old default points at a file that often doesn’t exist relative to CWD, and `load_config()` returns defaults silently → “GPU sweep is broken” looking behavior.
+Why this matters: your repo’s unified file is `config/strategy_overrides.yaml`. The old default points at a file that often doesn’t exist relative to CWD, and `load_config()` returns defaults silently → “GPU sweep is broken” looking behaviour.
 
 ### B) bt-core: warn loudly if config missing
 
@@ -91,7 +91,7 @@ This change alone usually collapses the “GPU vs CPU wildly different” issue 
 
 ---
 
-## Fix 3 — kernel parity fixes (volume + partial TP behavior)
+## Fix 3 — kernel parity fixes (volume + partial TP behaviour)
 
 ### A) Remove the 3 volume overrides
 
@@ -118,7 +118,7 @@ The essential logic:
   * if partial enabled and not taken:
 
     * if `tp_partial_atr_mult > 0` use that
-    * else use the passed `tp_mult` (old behavior)
+    * else use the passed `tp_mult` (old behaviour)
   * otherwise use `tp_mult`
 
 Then compute `tp_price` from `tp_mult_eff`.
