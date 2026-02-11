@@ -452,10 +452,16 @@ __device__ float compute_sl_price(const GpuPosition& pos, const GpuSnapshot& sna
     return sl_price;
 }
 
+__device__ bool stop_loss_hit(unsigned int pos_type, float price, float sl_price) {
+    // Mirrors bt-core::exits::stop_loss::check_stop_loss:
+    // LONG exits when price <= SL, SHORT exits when price >= SL.
+    if (pos_type == POS_LONG) { return price <= sl_price; }
+    return price >= sl_price;
+}
+
 __device__ bool check_stop_loss(const GpuPosition& pos, const GpuSnapshot& snap, const GpuComboConfig* cfg) {
     float sl = compute_sl_price(pos, snap, cfg);
-    if (pos.active == POS_LONG) { return snap.close <= sl; }
-    return snap.close >= sl;
+    return stop_loss_hit(pos.active, snap.close, sl);
 }
 
 // -- Trailing Stop ------------------------------------------------------------
@@ -748,17 +754,6 @@ __device__ void apply_close(GpuComboState* state, unsigned int sym, const GpuSna
     if (pos.active == POS_EMPTY) { return; }
 
     float slip = (pos.active == POS_LONG) ? 0.5f : -0.5f;
-    // WGSL: select(-0.5, 0.5, pos.pos_type == POS_LONG) means: if LONG then 0.5 else -0.5
-    // For exit: LONG sells (slip down = negative for the seller, but this is exit slippage)
-    // Following exact WGSL: slip = select(-0.5, 0.5, POS_LONG) => LONG gets -0.5 adverse
-    // Wait, re-read: select(false_val, true_val, cond) => cond ? true_val : false_val
-    // select(-0.5, 0.5, pos.pos_type == POS_LONG) => LONG ? 0.5 : -0.5
-    // So for exit close: LONG exit has +0.5 bps slip, SHORT exit has -0.5 bps slip
-    // This matches: LONG sells at slightly lower (worse), SHORT buys at slightly higher (worse)
-    // Actually wait: fill_price = close * (1 + slip/10000). LONG exit (selling):
-    //   slip=0.5 => fill higher? That's favorable for LONG exit. Hmm.
-    // The WGSL is the source of truth; we replicate it exactly.
-    slip = (pos.active == POS_LONG) ? 0.5f : -0.5f;
 
     float fill_price = snap.close * (1.0f + slip / 10000.0f);
     float notional = pos.size * fill_price;
@@ -859,12 +854,11 @@ __device__ bool is_pesc_blocked(const GpuComboState* state, unsigned int sym,
     return elapsed < cooldown_sec;
 }
 
-// -- Dynamic TP Multiplier ----------------------------------------------------
+// -- TP Multiplier (must mirror bt-core fixed tp_atr_mult semantics) ---------
 
-__device__ float get_tp_mult(const GpuSnapshot& snap, const GpuComboConfig* cfg) {
+__device__ float get_tp_mult(const GpuSnapshot&, const GpuComboConfig* cfg) {
     // Parity with CPU: the CPU backtester always uses the configured TP ATR multiplier.
     // Dynamic TP scaling based on ADX is intentionally disabled on GPU.
-    (void)snap;
     return cfg->tp_atr_mult;
 }
 
@@ -964,7 +958,9 @@ extern "C" __global__ void sweep_engine_kernel(
                     unsigned int tp_result = check_tp(pos, hybrid, &cfg, tp_mult);
                     if (tp_result == 1u) {
                         apply_partial_close(&state, sym, hybrid, cfg.tp_partial_pct, fee_rate);
-                        break;
+                        // CPU sub-bar semantics keep scanning later sub-bars after a partial TP.
+                        // Remaining size can still hit SL/TS/other exits within the same bar window.
+                        continue;
                     }
                     if (tp_result == 2u) {
                         apply_close(&state, sym, hybrid, false, fee_rate);

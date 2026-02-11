@@ -62,10 +62,7 @@ pub fn find_trade_bar_range(
 ///
 /// This is O(bars × symbols) data layout with zero computation.
 /// Missing (bar, symbol) pairs get close=0 (indicator kernel skips them).
-pub fn prepare_raw_candles(
-    candles: &CandleData,
-    symbols: &[String],
-) -> RawCandleResult {
+pub fn prepare_raw_candles(candles: &CandleData, symbols: &[String]) -> RawCandleResult {
     let num_symbols = symbols.len();
 
     // Build unified timeline from all symbols
@@ -124,9 +121,13 @@ pub fn prepare_raw_candles(
 
 /// Prepare sub-bar candles aligned to main bar ranges for GPU upload.
 ///
-/// For each main bar `i`, sub-bars fall in the half-open range `(ts[i-1], ts[i]]`
-/// (first bar uses `(-inf, ts[0]]`). Sub-bars are sorted chronologically and
-/// packed into a rectangular layout padded with zeroed candles.
+/// For each main bar `i`, sub-bars fall in the half-open range `(ts[i], ts[i+1]]`
+/// (last bar uses `(ts[last], +inf)`). This matches bt-core's sub-bar scan:
+/// it evaluates sub-bars *after* the current indicator bar using the current
+/// indicator snapshot. Sub-bars at or before `ts[0]` are ignored.
+///
+/// Sub-bars are sorted chronologically and packed into a rectangular layout
+/// padded with zeroed candles.
 ///
 /// Layout: `candles[(bar_idx * max_sub + sub_idx) * num_symbols + sym_idx]`
 ///
@@ -150,9 +151,9 @@ pub fn prepare_sub_bar_candles(
         };
     }
 
-    // For each (bar, symbol), collect sorted sub-bar timestamps
-    // Main bar i covers range (main_ts[i-1], main_ts[i]] in ms
-    // First bar covers (-inf, main_ts[0]]
+    // For each (bar, symbol), collect sorted sub-bar timestamps.
+    // Main bar i covers (main_ts[i], main_ts[i+1]] in ms.
+    // Last bar covers (main_ts[last], +inf).
 
     // Step 1: For each symbol, sort sub-bars by timestamp and assign to main bars via binary search
     // sub_bars_by_bar_sym[bar_idx][sym_idx] = Vec<&Bar>
@@ -162,13 +163,20 @@ pub fn prepare_sub_bar_candles(
     for (sym_idx, sym) in symbols.iter().enumerate() {
         if let Some(bars) = sub_candles.get(sym) {
             for bar in bars {
-                // Find which main bar this sub-bar belongs to.
-                // Sub-bar at time `t` belongs to the main bar whose timestamp is the
-                // smallest main_ts >= t. (main_ts[i] is the close time of bar i)
+                // Find which main bar this sub-bar belongs to for CPU-parity windows:
+                //   (main_ts[i], main_ts[i+1]].
+                //
+                // We use lower_bound(main_ts, t) - 1:
+                // - t == main_ts[k]   -> bar k-1
+                // - main_ts[k] < t <= main_ts[k+1] -> bar k
+                // - t > main_ts[last] -> last bar
+                // - t <= main_ts[0]   -> ignored
                 let main_idx = match main_timestamps.binary_search(&bar.t) {
-                    Ok(i) => i,                    // exact match
-                    Err(i) if i < num_bars => i,   // insert position = next main bar
-                    Err(_) => continue,            // beyond last main bar, skip
+                    Ok(0) => continue,
+                    Ok(i) => i - 1,
+                    Err(0) => continue,
+                    Err(i) if i >= num_bars => num_bars - 1,
+                    Err(i) => i - 1,
                 };
                 sub_bars_by_bar_sym[main_idx][sym_idx].push(bar);
             }
@@ -240,5 +248,62 @@ pub fn prepare_sub_bar_candles(
         max_sub_per_bar: max_sub,
         num_bars,
         num_symbols,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bt_core::candle::OhlcvBar;
+
+    #[test]
+    fn prepare_sub_bars_matches_cpu_exit_windows() {
+        let main_timestamps = vec![1_000, 2_000, 3_000];
+        let symbols = vec!["ETH".to_string()];
+
+        // Regression guard for AQC-168:
+        // if these windows drift from bt-core, GPU sub-bar exits evaluate SL using
+        // the wrong indicator snapshot and can flip sl_atr_mult directional behaviour.
+        // Include boundary cases: <= first ts (ignored), exact boundaries, between boundaries,
+        // and beyond the last timestamp (should map to last bar).
+        let sub_times = vec![900_i64, 1_000, 1_500, 2_000, 2_500, 3_000, 3_500];
+        let mut sub: CandleData = CandleData::default();
+        sub.insert(
+            "ETH".to_string(),
+            sub_times
+                .iter()
+                .map(|&t| OhlcvBar {
+                    t,
+                    t_close: t,
+                    o: t as f64,
+                    h: t as f64,
+                    l: t as f64,
+                    c: t as f64,
+                    v: 1.0,
+                    n: 1,
+                })
+                .collect(),
+        );
+
+        let out = prepare_sub_bar_candles(&main_timestamps, &sub, &symbols);
+
+        // Expected CPU-parity assignment:
+        // bar0 (1000,2000] -> 1500,2000
+        // bar1 (2000,3000] -> 2500,3000
+        // bar2 (3000,+inf) -> 3500
+        assert_eq!(out.sub_counts, vec![2, 2, 1]);
+
+        let max_sub = out.max_sub_per_bar as usize;
+        let ns = symbols.len();
+        let close_at = |bar_idx: usize, sub_idx: usize| -> i64 {
+            let idx = (bar_idx * max_sub + sub_idx) * ns;
+            out.candles[idx].close as i64
+        };
+
+        assert_eq!(close_at(0, 0), 1_500);
+        assert_eq!(close_at(0, 1), 2_000);
+        assert_eq!(close_at(1, 0), 2_500);
+        assert_eq!(close_at(1, 1), 3_000);
+        assert_eq!(close_at(2, 0), 3_500);
     }
 }
