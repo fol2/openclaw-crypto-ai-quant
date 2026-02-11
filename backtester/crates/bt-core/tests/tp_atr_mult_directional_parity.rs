@@ -1,8 +1,8 @@
-//! Deterministic tp_atr_mult directional parity regression.
+//! Deterministic tp_atr_mult fixture sanity regression.
 //!
-//! This test replays a fixed synthetic 1h/3m fixture on CPU and verifies the
-//! first->last `trade.tp_atr_mult` PnL direction matches a frozen GPU baseline
-//! captured from the CUDA sweep engine.
+//! This CPU-only test keeps the synthetic fixture stable and ensures it still
+//! reacts to low->high `trade.tp_atr_mult` changes. Runtime CPU/GPU directional
+//! parity is validated in `bt-gpu/tests/tp_atr_mult_directional_parity.rs`.
 
 use std::path::PathBuf;
 
@@ -12,20 +12,11 @@ use bt_core::{config, engine};
 const INITIAL_BALANCE: f64 = 1000.0;
 const TP_AXIS_VALUES: [f64; 4] = [3.0, 4.0, 5.0, 6.0];
 
-// Frozen GPU baseline captured on 2026-02-11 via:
-// python3 /tmp/synthetic_signal_capture_experiment.py --axes trade.tp_atr_mult
-const FROZEN_GPU_PNL: [f64; 4] = [
-    21.040_504_455_566_406,
-    24.039_110_183_715_82,
-    30.036_478_042_602_54,
-    36.033_767_700_195_31,
-];
-
 fn build_tp_isolation_fixture() -> (CandleData, CandleData) {
     let closes = [100.0, 100.7, 101.3, 101.9, 102.5, 103.1, 103.7, 104.3];
     let rel_path = [
-        0.05, 0.10, 0.20, 0.35, 0.55, 0.80, 1.10, 1.45, 1.75, 2.05, 2.20, 2.35, 2.45, 2.50,
-        2.35, 2.10, 1.85, 1.60, 1.35, 1.20,
+        0.05, 0.10, 0.20, 0.35, 0.55, 0.80, 1.10, 1.45, 1.75, 2.05, 2.20, 2.35, 2.45, 2.50, 2.35,
+        2.10, 1.85, 1.60, 1.35, 1.20,
     ];
 
     let mut main: CandleData = CandleData::default();
@@ -89,7 +80,7 @@ fn sign(x: f64) -> i8 {
 }
 
 #[test]
-fn tp_atr_mult_first_to_last_direction_matches_frozen_gpu_baseline() {
+fn tp_atr_mult_fixture_reacts_to_low_to_high_changes() {
     let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let cfg_path = crate_root.join("../../testdata/gpu_cpu_parity/tp_atr_mult_strategy.yaml");
 
@@ -118,25 +109,11 @@ fn tp_atr_mult_first_to_last_direction_matches_frozen_gpu_baseline() {
         cpu_pnl_by_axis_value.push(sim.final_balance - INITIAL_BALANCE);
     }
 
-    let cpu_delta = cpu_pnl_by_axis_value[cpu_pnl_by_axis_value.len() - 1] - cpu_pnl_by_axis_value[0];
-    let gpu_delta = FROZEN_GPU_PNL[FROZEN_GPU_PNL.len() - 1] - FROZEN_GPU_PNL[0];
-
+    let cpu_delta =
+        cpu_pnl_by_axis_value[cpu_pnl_by_axis_value.len() - 1] - cpu_pnl_by_axis_value[0];
     assert_ne!(
         sign(cpu_delta),
         0,
         "CPU fixture did not react to tp_atr_mult (first->last delta is ~0)."
-    );
-    assert_ne!(
-        sign(gpu_delta),
-        0,
-        "Frozen GPU fixture is degenerate (first->last delta is ~0)."
-    );
-    assert_eq!(
-        sign(cpu_delta),
-        sign(gpu_delta),
-        "Directional parity regression for tp_atr_mult: cpu_delta={:.6}, gpu_delta={:.6}, cpu={:?}",
-        cpu_delta,
-        gpu_delta,
-        cpu_pnl_by_axis_value
     );
 }
