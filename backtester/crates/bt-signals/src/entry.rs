@@ -1,18 +1,12 @@
 //! Signal generation — 3 entry modes in priority order.
 //!
 //! Faithfully mirrors `mei_alpha_v1.analyze()` lines 3539-3690.
-//! After gates are evaluated (see [`super::gates`]), this module decides
-//! signal direction and confidence through three cascading entry modes:
-//!
-//! 1. **Standard trend entry** — strongest conviction, requires all gates pass.
-//! 2. **Pullback continuation** — catches trend re-entries after a pull back.
-//! 3. **Slow drift** — captures low-volatility grind regimes.
-//!
-//! Each mode is tried only if the previous one returned `Neutral`.
 
-use crate::config::{Confidence, MacdMode, Signal, StrategyConfig};
-use crate::indicators::IndicatorSnapshot;
 use super::gates::GateResult;
+use crate::{
+    Confidence, IndicatorSnapshotLike, MacdMode, Signal, SignalConfigLike, SnapshotView,
+    ThresholdsView,
+};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -28,22 +22,28 @@ use super::gates::GateResult;
 /// # Arguments
 /// * `snap`               - Current bar indicator snapshot.
 /// * `gates`              - Pre-computed gate result from [`super::gates::check_gates`].
-/// * `cfg`                - Full strategy configuration.
+/// * `cfg`                - Signal-relevant strategy config view.
 /// * `ema_slow_slope_pct` - Pre-computed EMA-slow slope used by slow-drift mode:
 ///                          `(ema_slow_now - ema_slow_prev_N) / close_now`.
-pub fn generate_signal(
-    snap: &IndicatorSnapshot,
+pub fn generate_signal<S, C>(
+    snap: &S,
     gates: &GateResult,
-    cfg: &StrategyConfig,
+    cfg: &C,
     ema_slow_slope_pct: f64,
-) -> (Signal, Confidence, f64) {
-    let thr_entry = &cfg.thresholds.entry;
+) -> (Signal, Confidence, f64)
+where
+    S: IndicatorSnapshotLike,
+    C: SignalConfigLike,
+{
+    let snap = snap.snapshot_view();
+    let thresholds = cfg.thresholds_view();
+    let thr_entry = thresholds.entry;
 
     // =================================================================
     // Mode 1: Standard trend entry  (Python lines 3539-3605)
     // =================================================================
     if gates.all_gates_pass {
-        if let Some((sig, conf)) = try_standard_entry(snap, gates, cfg) {
+        if let Some((sig, conf)) = try_standard_entry(&snap, gates, &thresholds) {
             return (sig, conf, gates.effective_min_adx);
         }
     }
@@ -59,7 +59,7 @@ pub fn generate_signal(
             && snap.adx >= thr_entry.pullback_min_adx;
 
         if pullback_gates_ok {
-            if let Some((sig, conf)) = try_pullback_entry(snap, gates, cfg) {
+            if let Some((sig, conf)) = try_pullback_entry(&snap, gates, &thresholds) {
                 return (sig, conf, thr_entry.pullback_min_adx);
             }
         }
@@ -76,7 +76,9 @@ pub fn generate_signal(
             && snap.adx >= thr_entry.slow_drift_min_adx;
 
         if slow_gates_ok {
-            if let Some((sig, conf)) = try_slow_drift_entry(snap, gates, cfg, ema_slow_slope_pct) {
+            if let Some((sig, conf)) =
+                try_slow_drift_entry(&snap, gates, &thresholds, ema_slow_slope_pct)
+            {
                 return (sig, conf, thr_entry.slow_drift_min_adx);
             }
         }
@@ -104,12 +106,12 @@ pub fn generate_signal(
 ///
 /// Python lines 3564-3605.
 fn try_standard_entry(
-    snap: &IndicatorSnapshot,
+    snap: &SnapshotView,
     gates: &GateResult,
-    cfg: &StrategyConfig,
+    thresholds: &ThresholdsView,
 ) -> Option<(Signal, Confidence)> {
-    let thr_entry = &cfg.thresholds.entry;
-    let stoch_thr = &cfg.thresholds.stoch_rsi;
+    let thr_entry = thresholds.entry;
+    let stoch_thr = thresholds.stoch_rsi;
     let macd_mode = thr_entry.macd_hist_entry_mode;
     let high_conf_mult = thr_entry.high_conf_volume_mult;
 
@@ -174,11 +176,11 @@ fn try_standard_entry(
 ///
 /// Python lines 3607-3657.
 fn try_pullback_entry(
-    snap: &IndicatorSnapshot,
+    snap: &SnapshotView,
     gates: &GateResult,
-    cfg: &StrategyConfig,
+    thresholds: &ThresholdsView,
 ) -> Option<(Signal, Confidence)> {
-    let thr_entry = &cfg.thresholds.entry;
+    let thr_entry = thresholds.entry;
 
     let prev_close = snap.prev_close;
     let prev_ema_fast = snap.prev_ema_fast;
@@ -230,12 +232,12 @@ fn try_pullback_entry(
 ///
 /// Python lines 3659-3690.
 fn try_slow_drift_entry(
-    snap: &IndicatorSnapshot,
+    snap: &SnapshotView,
     gates: &GateResult,
-    cfg: &StrategyConfig,
+    thresholds: &ThresholdsView,
     ema_slow_slope_pct: f64,
 ) -> Option<(Signal, Confidence)> {
-    let thr_entry = &cfg.thresholds.entry;
+    let thr_entry = thresholds.entry;
     let min_slope = thr_entry.slow_drift_min_slope_pct;
 
     // Long drift: slope >= +threshold, price above EMA_slow.
@@ -311,15 +313,14 @@ fn check_macd_short(mode: MacdMode, macd_hist: f64, prev_macd_hist: f64) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{MacdMode, StrategyConfig};
-    use crate::indicators::IndicatorSnapshot;
-    use crate::signals::gates::check_gates;
+    use crate::gates::check_gates;
+    use crate::{MacdMode, SignalConfigView, SnapshotView};
 
     // -- Helpers --
 
     /// Build a snapshot that should trigger a standard BUY with default config.
-    fn bullish_snap() -> IndicatorSnapshot {
-        IndicatorSnapshot {
+    fn bullish_snap() -> SnapshotView {
+        SnapshotView {
             close: 100.0,
             high: 101.0,
             low: 99.0,
@@ -359,8 +360,8 @@ mod tests {
     }
 
     /// Build a snapshot that should trigger a standard SELL with default config.
-    fn bearish_snap() -> IndicatorSnapshot {
-        IndicatorSnapshot {
+    fn bearish_snap() -> SnapshotView {
+        SnapshotView {
             close: 95.0,
             high: 96.0,
             low: 94.0,
@@ -401,8 +402,8 @@ mod tests {
 
     /// Convenience: run gates + signal generation in one call.
     fn run_full(
-        snap: &IndicatorSnapshot,
-        cfg: &StrategyConfig,
+        snap: &SnapshotView,
+        cfg: &SignalConfigView,
         btc_bullish: Option<bool>,
         slope: f64,
     ) -> (Signal, Confidence) {
@@ -416,7 +417,7 @@ mod tests {
     #[test]
     fn test_standard_buy() {
         let snap = bullish_snap();
-        let cfg = StrategyConfig::default();
+        let cfg = SignalConfigView::default();
         let (sig, conf) = run_full(&snap, &cfg, Some(true), 0.001);
         assert_eq!(sig, Signal::Buy);
         assert_eq!(conf, Confidence::Medium);
@@ -425,7 +426,7 @@ mod tests {
     #[test]
     fn test_standard_sell() {
         let snap = bearish_snap();
-        let cfg = StrategyConfig::default();
+        let cfg = SignalConfigView::default();
         let (sig, conf) = run_full(&snap, &cfg, Some(false), -0.001);
         assert_eq!(sig, Signal::Sell);
         assert!(matches!(conf, Confidence::Medium));
@@ -435,7 +436,7 @@ mod tests {
     fn test_high_volume_upgrades_confidence() {
         let mut snap = bullish_snap();
         snap.volume = 3000.0; // > vol_sma(800) * 2.5 = 2000
-        let cfg = StrategyConfig::default();
+        let cfg = SignalConfigView::default();
         let (sig, conf) = run_full(&snap, &cfg, Some(true), 0.001);
         assert_eq!(sig, Signal::Buy);
         assert_eq!(conf, Confidence::High);
@@ -446,7 +447,7 @@ mod tests {
         let mut snap = bullish_snap();
         snap.adx = 15.0; // below min_adx
         snap.adx_slope = -1.0;
-        let cfg = StrategyConfig::default();
+        let cfg = SignalConfigView::default();
         let (sig, _) = run_full(&snap, &cfg, Some(true), 0.0);
         assert_eq!(sig, Signal::Neutral);
     }
@@ -455,7 +456,7 @@ mod tests {
     fn test_neutral_when_rsi_below_dre_limit() {
         let mut snap = bullish_snap();
         snap.rsi = 40.0; // well below DRE rsi_long_limit
-        let cfg = StrategyConfig::default();
+        let cfg = SignalConfigView::default();
         let (sig, _) = run_full(&snap, &cfg, Some(true), 0.0);
         assert_eq!(sig, Signal::Neutral);
     }
@@ -465,7 +466,7 @@ mod tests {
         let mut snap = bullish_snap();
         snap.macd_hist = 0.2;
         snap.prev_macd_hist = 0.3; // hist declining -> accel fails for long
-        let cfg = StrategyConfig::default();
+        let cfg = SignalConfigView::default();
         let (sig, _) = run_full(&snap, &cfg, Some(true), 0.001);
         assert_eq!(sig, Signal::Neutral);
     }
@@ -475,7 +476,7 @@ mod tests {
         let mut snap = bullish_snap();
         snap.macd_hist = 0.1;
         snap.prev_macd_hist = 0.5; // accel would fail, but sign mode only checks > 0
-        let mut cfg = StrategyConfig::default();
+        let mut cfg = SignalConfigView::default();
         cfg.thresholds.entry.macd_hist_entry_mode = MacdMode::Sign;
         let (sig, _) = run_full(&snap, &cfg, Some(true), 0.001);
         assert_eq!(sig, Signal::Buy);
@@ -486,7 +487,7 @@ mod tests {
         let mut snap = bullish_snap();
         snap.macd_hist = -0.5; // would fail both accel and sign
         snap.prev_macd_hist = 0.5;
-        let mut cfg = StrategyConfig::default();
+        let mut cfg = SignalConfigView::default();
         cfg.thresholds.entry.macd_hist_entry_mode = MacdMode::None;
         let (sig, _) = run_full(&snap, &cfg, Some(true), 0.001);
         assert_eq!(sig, Signal::Buy);
@@ -496,7 +497,7 @@ mod tests {
     fn test_stoch_rsi_blocks_long() {
         let mut snap = bullish_snap();
         snap.stoch_rsi_k = 0.90; // above block_long_if_k_gt (0.85)
-        let cfg = StrategyConfig::default();
+        let cfg = SignalConfigView::default();
         let (sig, _) = run_full(&snap, &cfg, Some(true), 0.001);
         assert_eq!(sig, Signal::Neutral);
     }
@@ -505,7 +506,7 @@ mod tests {
     fn test_stoch_rsi_blocks_short() {
         let mut snap = bearish_snap();
         snap.stoch_rsi_k = 0.10; // below block_short_if_k_lt (0.15)
-        let cfg = StrategyConfig::default();
+        let cfg = SignalConfigView::default();
         let (sig, _) = run_full(&snap, &cfg, Some(false), -0.001);
         assert_eq!(sig, Signal::Neutral);
     }
@@ -513,7 +514,7 @@ mod tests {
     #[test]
     fn test_btc_bearish_blocks_long() {
         let snap = bullish_snap();
-        let mut cfg = StrategyConfig::default();
+        let mut cfg = SignalConfigView::default();
         cfg.filters.require_btc_alignment = true;
         let (sig, _) = run_full(&snap, &cfg, Some(false), 0.001);
         assert_eq!(sig, Signal::Neutral, "BTC bearish should block ETH long");
@@ -534,7 +535,7 @@ mod tests {
         snap.rsi = 52.0;
         snap.macd_hist = 0.2;
         snap.prev_macd_hist = 0.3; // decelerating -> standard accel blocks
-        let mut cfg = StrategyConfig::default();
+        let mut cfg = SignalConfigView::default();
         cfg.thresholds.entry.enable_pullback_entries = true;
         cfg.thresholds.entry.pullback_min_adx = 20.0;
         cfg.thresholds.entry.pullback_rsi_long_min = 50.0;
@@ -557,7 +558,7 @@ mod tests {
         snap.prev_macd_hist = -0.1; // decel for short accel mode
         snap.adx = 25.0;
         snap.adx_slope = -0.5; // not rising, not saturated -> is_trending_up = false
-        let mut cfg = StrategyConfig::default();
+        let mut cfg = SignalConfigView::default();
         cfg.thresholds.entry.enable_pullback_entries = true;
         cfg.thresholds.entry.pullback_min_adx = 20.0;
         cfg.thresholds.entry.pullback_rsi_short_max = 50.0;
@@ -573,7 +574,7 @@ mod tests {
         let mut snap = bullish_snap();
         snap.prev_close = 100.0;
         snap.close = 115.0; // 15% -> anomaly
-        let mut cfg = StrategyConfig::default();
+        let mut cfg = SignalConfigView::default();
         cfg.thresholds.entry.enable_pullback_entries = true;
         let (sig, _) = run_full(&snap, &cfg, Some(true), 0.0);
         assert_eq!(sig, Signal::Neutral);
@@ -591,7 +592,7 @@ mod tests {
         snap.prev_macd_hist = 0.3;
         snap.adx = 15.0; // below pullback_min_adx
         snap.adx_slope = -1.0;
-        let mut cfg = StrategyConfig::default();
+        let mut cfg = SignalConfigView::default();
         cfg.thresholds.entry.enable_pullback_entries = true;
         cfg.thresholds.entry.pullback_min_adx = 20.0;
         let (sig, _) = run_full(&snap, &cfg, Some(true), 0.0);
@@ -609,18 +610,24 @@ mod tests {
         snap.macd_hist = 0.1;
         snap.close = 98.0;
         snap.ema_slow = 97.0;
-        let mut cfg = StrategyConfig::default();
+        let mut cfg = SignalConfigView::default();
         cfg.thresholds.entry.enable_slow_drift_entries = true;
         cfg.thresholds.entry.slow_drift_min_adx = 10.0;
         cfg.thresholds.entry.slow_drift_rsi_long_min = 50.0;
         cfg.thresholds.entry.slow_drift_min_slope_pct = 0.0006;
         let slope = 0.001; // above 0.0006
         let gates = check_gates(&snap, &cfg, "ETH", Some(true), slope);
-        assert!(!gates.all_gates_pass, "Standard gates should fail (low ADX)");
+        assert!(
+            !gates.all_gates_pass,
+            "Standard gates should fail (low ADX)"
+        );
         let (sig, conf, adx_thr) = generate_signal(&snap, &gates, &cfg, slope);
         assert_eq!(sig, Signal::Buy);
         assert_eq!(conf, Confidence::Low);
-        assert!((adx_thr - 10.0).abs() < 1e-9, "slow drift should use slow_drift_min_adx");
+        assert!(
+            (adx_thr - 10.0).abs() < 1e-9,
+            "slow drift should use slow_drift_min_adx"
+        );
     }
 
     #[test]
@@ -633,13 +640,13 @@ mod tests {
         snap.close = 96.0;
         snap.ema_slow = 99.0;
         snap.ema_fast = 97.0;
-        let mut cfg = StrategyConfig::default();
+        let mut cfg = SignalConfigView::default();
         cfg.thresholds.entry.enable_slow_drift_entries = true;
         cfg.thresholds.entry.slow_drift_min_adx = 10.0;
         cfg.thresholds.entry.slow_drift_rsi_short_max = 50.0;
         cfg.thresholds.entry.slow_drift_min_slope_pct = 0.0006;
         let slope = -0.001; // below -0.0006
-        // Use btc_bullish=Some(false) so btc_ok_short = true (required for short signal)
+                            // Use btc_bullish=Some(false) so btc_ok_short = true (required for short signal)
         let gates = check_gates(&snap, &cfg, "ETH", Some(false), slope);
         let (sig, conf, _) = generate_signal(&snap, &gates, &cfg, slope);
         assert_eq!(sig, Signal::Sell);
@@ -654,7 +661,7 @@ mod tests {
         snap.close = 98.0;
         snap.ema_slow = 97.0;
         snap.macd_hist = 0.1;
-        let mut cfg = StrategyConfig::default();
+        let mut cfg = SignalConfigView::default();
         cfg.thresholds.entry.enable_slow_drift_entries = true;
         cfg.thresholds.entry.slow_drift_min_slope_pct = 0.0006;
         let slope = 0.0003; // below 0.0006
@@ -671,7 +678,7 @@ mod tests {
         snap.macd_hist = -0.1; // negative -> fails MACD sign for long
         snap.close = 98.0;
         snap.ema_slow = 97.0;
-        let mut cfg = StrategyConfig::default();
+        let mut cfg = SignalConfigView::default();
         cfg.thresholds.entry.enable_slow_drift_entries = true;
         cfg.thresholds.entry.slow_drift_min_adx = 10.0;
         cfg.thresholds.entry.slow_drift_require_macd_sign = true;
@@ -691,7 +698,7 @@ mod tests {
         snap.prev_ema_fast = 98.5;
         snap.close = 100.0;
         snap.ema_fast = 99.0;
-        let mut cfg = StrategyConfig::default();
+        let mut cfg = SignalConfigView::default();
         cfg.thresholds.entry.enable_pullback_entries = true;
         let (sig, conf) = run_full(&snap, &cfg, Some(true), 0.001);
         // Standard fires first with Medium confidence (not Low from pullback)
@@ -711,7 +718,7 @@ mod tests {
         snap.prev_macd_hist = 0.3; // standard blocked by MACD decel
         snap.adx = 25.0;
         snap.adx_slope = 0.5;
-        let mut cfg = StrategyConfig::default();
+        let mut cfg = SignalConfigView::default();
         cfg.thresholds.entry.enable_pullback_entries = true;
         cfg.thresholds.entry.pullback_min_adx = 20.0;
         cfg.thresholds.entry.pullback_rsi_long_min = 50.0;
@@ -731,7 +738,7 @@ mod tests {
         snap.rsi = 50.0; // neutral zone -> ranging + below DRE limit
         snap.adx = 18.0;
         snap.bb_width_ratio = 0.7;
-        let cfg = StrategyConfig::default();
+        let cfg = SignalConfigView::default();
         let (sig, _) = run_full(&snap, &cfg, Some(true), 0.0);
         assert_eq!(sig, Signal::Neutral);
     }
