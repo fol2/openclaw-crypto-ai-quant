@@ -24,6 +24,11 @@ class Axis:
     path: str
     values: list[float]
 
+# Axes that are valid config keys but not meaningful to optimise in bt-core sweeps.
+NO_OP_SWEEP_AXES = {
+    "trade.use_bbo_for_fills",
+}
+
 
 def _load_yaml(path: Path) -> dict[str, Any]:
     obj = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -129,6 +134,8 @@ def _collect_axis_source(axes_144: list[dict[str, Any]]) -> dict[str, list[float
         path = str(item.get("path", "")).strip()
         raw_values = item.get("values", [])
         if not path or not isinstance(raw_values, list):
+            continue
+        if path in NO_OP_SWEEP_AXES:
             continue
         if path in out:
             raise ValueError(f"duplicate axis path in full_144v: {path}")
@@ -365,7 +372,8 @@ def build(
         "three_value_axes_total": int(sum(1 for a in reduced if len(a.values) == 3)),
         "two_value_axes_total": int(sum(1 for a in reduced if len(a.values) == 2)),
         "notes": [
-            "All full_144v axes are included once across the 17 phases.",
+            "All sweepable full_144v axes are included once across the 17 phases.",
+            "Known no-op axes are excluded from sweep output (currently: trade.use_bbo_for_fills).",
             "Most axes use 2-point min/max values; selected axes use 3-point or 4-point samples.",
             "Auto-tuning promotes additional 3/4-point axes until the target combo is reached.",
         ],

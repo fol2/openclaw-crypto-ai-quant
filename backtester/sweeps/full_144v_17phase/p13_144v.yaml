@@ -4,42 +4,42 @@
 initial_balance: 10000.0
 lookback: 200
 axes:
-- path: indicators.stoch_rsi_window
+- path: indicators.ema_macro_window
   values:
-  - 10.0
-  - 14.0
-  - 20.0
-- path: thresholds.entry.ave_atr_ratio_gt
-  values:
-  - 1.05
-  - 1.5
-  - 1.95
-- path: thresholds.ranging.bb_width_ratio_below
-  values:
-  - 0.56
-  - 0.8
-  - 1.04
-- path: trade.add_min_profit_atr
+  - 140.0
+  - 200.0
+  - 260.0
+- path: thresholds.anomaly.ema_fast_dev_pct_gt
   values:
   - 0.35
   - 0.5
   - 0.65
-- path: trade.bump_to_min_notional
+- path: thresholds.entry.pullback_require_macd_sign
   values:
   - 0.0
   - 1.0
-- path: trade.leverage_max_cap
+- path: thresholds.entry.slow_drift_rsi_short_max
   values:
-  - 0.0
-  - 0.5
-  - 1.0
-- path: trade.rsi_exit_lb_hi_profit_low_conf
-  values:
-  - 0.0
-  - 30.0
+  - 35.0
   - 50.0
-- path: trade.trailing_start_atr
+  - 65.0
+- path: trade.add_cooldown_minutes
   values:
+  - 42.0
+  - 60.0
+  - 78.0
+- path: trade.leverage
+  values:
+  - 1.0
+  - 3.0
+  - 5.0
+- path: trade.reentry_cooldown_min_mins
+  values:
+  - 30.0
+  - 60.0
+  - 90.0
+- path: trade.tp_partial_pct
+  values:
+  - 0.35
   - 0.5
-  - 1.25
-  - 2.0
+  - 0.65

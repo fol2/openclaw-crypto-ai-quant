@@ -4,7 +4,11 @@
 initial_balance: 10000.0
 lookback: 200
 axes:
-- path: filters.require_macro_alignment
+- path: filters.enable_ranging_filter
+  values:
+  - 0.0
+  - 1.0
+- path: filters.vol_confirm_include_prev
   values:
   - 0.0
   - 1.0
@@ -14,36 +18,32 @@ axes:
   - 14.0
   - 16.0
   - 20.0
-- path: thresholds.entry.ave_enabled
+- path: thresholds.entry.pullback_min_adx
+  values:
+  - 15.4
+  - 22.0
+  - 28.6
+- path: thresholds.tp_and_momentum.rsi_long_strong
+  values:
+  - 36.4
+  - 52.0
+  - 67.6
+- path: trade.confidence_mult_medium
+  values:
+  - 0.3
+  - 0.7
+  - 1.0
+- path: trade.enable_ssf_filter
   values:
   - 0.0
   - 1.0
-- path: thresholds.entry.slow_drift_min_adx
+- path: trade.reef_adx_threshold
   values:
-  - 7.0
-  - 10.0
-  - 13.0
-- path: thresholds.tp_and_momentum.rsi_short_weak
+  - 31.5
+  - 45.0
+  - 58.5
+- path: trade.sl_atr_mult
   values:
-  - 30.8
-  - 44.0
-  - 57.2
-- path: trade.exit_cooldown_s
-  values:
-  - 10.0
-  - 15.0
-  - 20.0
-- path: trade.reef_short_rsi_block_lt
-  values:
-  - 21.0
-  - 30.0
-  - 39.0
-- path: trade.smart_exit_adx_exhaustion_lt_low_conf
-  values:
-  - 0.0
-  - 15.0
-  - 30.0
-- path: trade.tsme_require_adx_slope_negative
-  values:
-  - 0.0
   - 1.0
+  - 2.0
+  - 3.0
