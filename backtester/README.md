@@ -67,6 +67,57 @@ mei-backtester sweep --universe-filter
 
 The universe DB defaults to `<candles_db_dir>/universe_history.db`. Override with `--universe-db`.
 
+### GPU smoke parity lanes (AQC-176)
+
+For 1h/3m smoke comparisons, use explicit parity lanes:
+
+- Lane A (`--parity-mode identical-symbol-universe`): CPU and GPU are pre-aligned to the same alphabetical symbol universe before scoring parity.
+- Lane B (`--parity-mode production`): production behaviour; GPU runtime may truncate symbol universe to the kernel state cap (52 symbols).
+
+Example commands:
+
+```bash
+# Lane A (identical symbol universe)
+mei-backtester sweep \
+  --parity-mode identical-symbol-universe \
+  --sweep-spec backtester/sweeps/smoke.yaml \
+  --interval 1h --entry-interval 3m --exit-interval 3m \
+  --output /tmp/lane_a_cpu.jsonl
+
+mei-backtester sweep \
+  --parity-mode identical-symbol-universe \
+  --gpu \
+  --sweep-spec backtester/sweeps/smoke.yaml \
+  --interval 1h --entry-interval 3m --exit-interval 3m \
+  --output /tmp/lane_a_gpu.jsonl
+
+# Lane B (production truncation behaviour)
+mei-backtester sweep \
+  --parity-mode production \
+  --sweep-spec backtester/sweeps/smoke.yaml \
+  --interval 1h --entry-interval 3m --exit-interval 3m \
+  --output /tmp/lane_b_cpu.jsonl
+
+mei-backtester sweep \
+  --parity-mode production \
+  --gpu \
+  --sweep-spec backtester/sweeps/smoke.yaml \
+  --interval 1h --entry-interval 3m --exit-interval 3m \
+  --output /tmp/lane_b_gpu.jsonl
+```
+
+Generate a unified lane report (includes ranking assertions):
+
+```bash
+python tools/compare_sweep_outputs.py \
+  --lane-a-cpu /tmp/lane_a_cpu.jsonl \
+  --lane-a-gpu /tmp/lane_a_gpu.jsonl \
+  --lane-b-cpu /tmp/lane_b_cpu.jsonl \
+  --lane-b-gpu /tmp/lane_b_gpu.jsonl \
+  --output /tmp/gpu_smoke_parity_report.json \
+  --print-summary
+```
+
 ---
 
 ## Config Deploy Pipeline

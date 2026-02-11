@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 const VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
@@ -152,6 +152,14 @@ enum Commands {
     Sweep(SweepArgs),
     /// Dump indicator values for debugging/validation
     DumpIndicators(DumpArgs),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum SweepParityMode {
+    /// Default production behaviour. GPU may truncate symbols to the kernel limit.
+    Production,
+    /// Enforce an identical pre-scored symbol universe for CPU and GPU lane comparisons.
+    IdenticalSymbolUniverse,
 }
 
 #[derive(Parser)]
@@ -376,6 +384,14 @@ struct SweepArgs {
     #[arg(long)]
     balance_from: Option<String>,
 
+    /// Symbol-universe parity mode for smoke comparisons.
+    ///
+    /// - `production`: default runtime behaviour (GPU may truncate to kernel symbol cap).
+    /// - `identical-symbol-universe`: pre-truncate symbols before sweep scoring so CPU/GPU
+    ///   evaluate the exact same universe (lane A parity mode).
+    #[arg(long, value_enum, default_value_t = SweepParityMode::Production)]
+    parity_mode: SweepParityMode,
+
     /// Use GPU-accelerated sweep (requires building with `--features gpu`)
     #[arg(long, default_value_t = false)]
     gpu: bool,
@@ -446,7 +462,12 @@ fn expand_db_path(raw: &str) -> Vec<String> {
     };
     for ent in entries.flatten() {
         let path = ent.path();
-        if path.extension().and_then(|s| s.to_str()).map(|s| s.eq_ignore_ascii_case("db")) != Some(true) {
+        if path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.eq_ignore_ascii_case("db"))
+            != Some(true)
+        {
             continue;
         }
         out.push(path.to_string_lossy().to_string());
@@ -484,7 +505,10 @@ fn resolve_db_paths(raw: &str) -> Vec<String> {
 
 fn format_db_set(paths: &[String]) -> String {
     if paths.len() <= 1 {
-        return paths.first().cloned().unwrap_or_else(|| "<empty>".to_string());
+        return paths
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "<empty>".to_string());
     }
     format!("{} (+{} partitions)", paths[0], paths.len() - 1)
 }
@@ -701,7 +725,9 @@ fn resolve_time_range_or_exit(
 fn default_universe_db_path(candles_db: &str) -> String {
     let p = Path::new(candles_db);
     let dir = p.parent().unwrap_or_else(|| Path::new("."));
-    dir.join("universe_history.db").to_string_lossy().to_string()
+    dir.join("universe_history.db")
+        .to_string_lossy()
+        .to_string()
 }
 
 fn infer_candle_range_ms(candles: &bt_core::candle::CandleData) -> Option<(i64, i64)> {
@@ -716,6 +742,30 @@ fn infer_candle_range_ms(candles: &bt_core::candle::CandleData) -> Option<(i64, 
         }
     }
     min_t.zip(max_t)
+}
+
+const GPU_KERNEL_SYMBOL_CAP: usize = 52;
+
+fn apply_alphabetical_symbol_cap(
+    candles: &mut bt_core::candle::CandleData,
+    cap: usize,
+) -> Option<(usize, usize)> {
+    if cap == 0 {
+        let before = candles.len();
+        candles.clear();
+        return Some((before, 0));
+    }
+
+    let before = candles.len();
+    if before <= cap {
+        return None;
+    }
+
+    let mut symbols: Vec<String> = candles.keys().cloned().collect();
+    symbols.sort();
+    let keep: HashSet<String> = symbols.into_iter().take(cap).collect();
+    candles.retain(|sym, _| keep.contains(sym));
+    Some((before, candles.len()))
 }
 
 // ---------------------------------------------------------------------------
@@ -796,7 +846,11 @@ fn estimate_slippage_usd(tr: &bt_core::position::TradeRecord, entry_slippage_bps
 
     // The engine currently applies configured slippage to entries/adds, and a fixed half-bps
     // to exits (see bt-core engine apply_exit). Keep this estimate consistent with that behaviour.
-    let bps = if tr.is_close() { 0.5 } else { entry_slippage_bps };
+    let bps = if tr.is_close() {
+        0.5
+    } else {
+        entry_slippage_bps
+    };
     if bps <= 0.0 {
         return 0.0;
     }
@@ -1178,9 +1232,8 @@ fn check_gpu_sweep_guardrails(
     from_ts: Option<i64>,
     to_ts: Option<i64>,
 ) -> Result<(), String> {
-    let main_min = parse_interval_minutes(main_interval).ok_or_else(|| {
-        format!("Unsupported main interval format: {:?}", main_interval)
-    })?;
+    let main_min = parse_interval_minutes(main_interval)
+        .ok_or_else(|| format!("Unsupported main interval format: {:?}", main_interval))?;
 
     let mut sub_ivs: Vec<&str> = Vec::new();
     if let Some(iv) = exit_interval {
@@ -1208,14 +1261,10 @@ fn check_gpu_sweep_guardrails(
     }
 
     let sub_iv = sub_ivs[0];
-    let sub_min = parse_interval_minutes(sub_iv).ok_or_else(|| {
-        format!("Unsupported sub-bar interval format: {:?}", sub_iv)
-    })?;
+    let sub_min = parse_interval_minutes(sub_iv)
+        .ok_or_else(|| format!("Unsupported sub-bar interval format: {:?}", sub_iv))?;
 
-    let is_safe_combo = matches!(
-        (main_min, sub_min),
-        (30, 5) | (60, 5) | (30, 3) | (60, 3)
-    );
+    let is_safe_combo = matches!((main_min, sub_min), (30, 5) | (60, 5) | (30, 3) | (60, 3));
     if !is_safe_combo {
         return Err(format!(
             "GPU sweep interval combo {:?}/{:?} is outside the default safe set (30m/5m, 1h/5m, 30m/3m, 1h/3m).",
@@ -1224,16 +1273,14 @@ fn check_gpu_sweep_guardrails(
     }
 
     let days = compute_scope_days(from_ts, to_ts).ok_or_else(|| {
-        "GPU sweep requires a bounded scoped window (auto-scope or explicit --from-ts/--to-ts).".to_string()
+        "GPU sweep requires a bounded scoped window (auto-scope or explicit --from-ts/--to-ts)."
+            .to_string()
     })?;
 
     if days > GPU_SAFE_MAX_SCOPE_DAYS {
         return Err(format!(
             "GPU sweep scoped window is {:.1} days (> {:.0} days). from_ts={:?}, to_ts={:?}.",
-            days,
-            GPU_SAFE_MAX_SCOPE_DAYS,
-            from_ts,
-            to_ts,
+            days, GPU_SAFE_MAX_SCOPE_DAYS, from_ts, to_ts,
         ));
     }
 
@@ -1246,11 +1293,7 @@ fn check_gpu_sweep_guardrails(
 
 fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
     let symbol_norm = args.symbol.as_ref().map(|s| s.trim().to_uppercase());
-    let mut cfg = bt_core::config::load_config(
-        &args.config,
-        symbol_norm.as_deref(),
-        args.live,
-    );
+    let mut cfg = bt_core::config::load_config(&args.config, symbol_norm.as_deref(), args.live);
 
     if let Some(bps) = args.slippage_bps {
         cfg.trade.slippage_bps = bps.max(0.0);
@@ -1267,9 +1310,9 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Auto-resolve candle DB path from interval if not explicitly provided
-    let candles_db = args.candles_db.unwrap_or_else(|| {
-        format!("candles_dbs/candles_{}.db", interval)
-    });
+    let candles_db = args
+        .candles_db
+        .unwrap_or_else(|| format!("candles_dbs/candles_{}.db", interval));
     let candles_db_paths = resolve_db_paths(&candles_db);
 
     // Resolve exit_interval: CLI arg > YAML engine.exit_interval > None
@@ -1384,7 +1427,10 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
         let filter_from = from_ts.unwrap_or(min_t);
         let filter_to = to_ts.unwrap_or(max_t);
         if filter_from > filter_to {
-            eprintln!("[replay] Invalid time range: from_ts > to_ts ({} > {})", filter_from, filter_to);
+            eprintln!(
+                "[replay] Invalid time range: from_ts > to_ts ({} > {})",
+                filter_from, filter_to
+            );
             std::process::exit(1);
         }
 
@@ -1401,10 +1447,20 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
             "[replay] Universe filter enabled: range={}..{}, db={}",
             filter_from, filter_to, universe_db,
         );
-        let active = bt_data::sqlite_loader::load_universe_active_symbols(&universe_db, filter_from, filter_to)
-            .unwrap_or_else(|e| { eprintln!("[replay] Universe filter failed: {e}"); std::process::exit(1); });
+        let active = bt_data::sqlite_loader::load_universe_active_symbols(
+            &universe_db,
+            filter_from,
+            filter_to,
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("[replay] Universe filter failed: {e}");
+            std::process::exit(1);
+        });
         if active.is_empty() {
-            eprintln!("[replay] Universe filter returned 0 active symbols (range={}..{})", filter_from, filter_to);
+            eprintln!(
+                "[replay] Universe filter returned 0 active symbols (range={}..{})",
+                filter_from, filter_to
+            );
             std::process::exit(1);
         }
         keep_symbols = Some(active.into_iter().collect());
@@ -1430,7 +1486,10 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(ref keep) = keep_symbols {
         let before = candles.len();
         candles.retain(|sym, _| keep.contains(sym));
-        eprintln!("[replay] Symbol universe: {before} -> {} symbols", candles.len());
+        eprintln!(
+            "[replay] Symbol universe: {before} -> {} symbols",
+            candles.len()
+        );
         if candles.is_empty() {
             eprintln!("[replay] No candles left after symbol filtering.");
             std::process::exit(1);
@@ -1445,9 +1504,13 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
     let exit_candles = if let Some(ref exit_db) = exit_candles_db {
         let exit_paths = exit_db_paths.as_ref().unwrap_or(&candles_db_paths);
         let exit_iv = exit_interval.as_deref().unwrap_or(&interval);
-        eprintln!("[replay] Loading exit candles from {:?} (interval={})", exit_db, exit_iv);
-        let mut ec =
-            bt_data::sqlite_loader::load_candles_filtered_multi(exit_paths, exit_iv, from_ts, to_ts)?;
+        eprintln!(
+            "[replay] Loading exit candles from {:?} (interval={})",
+            exit_db, exit_iv
+        );
+        let mut ec = bt_data::sqlite_loader::load_candles_filtered_multi(
+            exit_paths, exit_iv, from_ts, to_ts,
+        )?;
         if let Some(ref keep) = keep_symbols {
             ec.retain(|sym, _| keep.contains(sym));
         }
@@ -1466,7 +1529,10 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
     let entry_candles = if let Some(ref entry_db) = entry_candles_db {
         let entry_paths = entry_db_paths.as_ref().unwrap_or(&candles_db_paths);
         let entry_iv = entry_interval.as_deref().unwrap_or(&interval);
-        eprintln!("[replay] Loading entry candles from {:?} (interval={})", entry_db, entry_iv);
+        eprintln!(
+            "[replay] Loading entry candles from {:?} (interval={})",
+            entry_db, entry_iv
+        );
         let mut nc = bt_data::sqlite_loader::load_candles_filtered_multi(
             entry_paths,
             entry_iv,
@@ -1577,7 +1643,10 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
     if let serde_json::Value::Object(ref mut map) = json_obj {
         map.insert("per_symbol".to_string(), serde_json::to_value(&per_symbol)?);
         // Record the effective slippage used for this run, even when overridden via CLI.
-        map.insert("slippage_bps".to_string(), serde_json::json!(cfg.trade.slippage_bps));
+        map.insert(
+            "slippage_bps".to_string(),
+            serde_json::json!(cfg.trade.slippage_bps),
+        );
     }
     let json = serde_json::to_string_pretty(&json_obj)?;
     if let Some(ref path) = args.output {
@@ -1607,9 +1676,9 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Auto-resolve candle DB path from interval
-    let candles_db = args.candles_db.unwrap_or_else(|| {
-        format!("candles_dbs/candles_{}.db", interval)
-    });
+    let candles_db = args
+        .candles_db
+        .unwrap_or_else(|| format!("candles_dbs/candles_{}.db", interval));
     let candles_db_paths = resolve_db_paths(&candles_db);
 
     // Resolve exit_interval: CLI arg > YAML engine.exit_interval > None
@@ -1738,7 +1807,10 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
         let filter_from = from_ts.unwrap_or(min_t);
         let filter_to = to_ts.unwrap_or(max_t);
         if filter_from > filter_to {
-            eprintln!("[sweep] Invalid time range: from_ts > to_ts ({} > {})", filter_from, filter_to);
+            eprintln!(
+                "[sweep] Invalid time range: from_ts > to_ts ({} > {})",
+                filter_from, filter_to
+            );
             std::process::exit(1);
         }
 
@@ -1755,10 +1827,20 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
             "[sweep] Universe filter enabled: range={}..{}, db={}",
             filter_from, filter_to, universe_db,
         );
-        let active = bt_data::sqlite_loader::load_universe_active_symbols(&universe_db, filter_from, filter_to)
-            .unwrap_or_else(|e| { eprintln!("[sweep] Universe filter failed: {e}"); std::process::exit(1); });
+        let active = bt_data::sqlite_loader::load_universe_active_symbols(
+            &universe_db,
+            filter_from,
+            filter_to,
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("[sweep] Universe filter failed: {e}");
+            std::process::exit(1);
+        });
         if active.is_empty() {
-            eprintln!("[sweep] Universe filter returned 0 active symbols (range={}..{})", filter_from, filter_to);
+            eprintln!(
+                "[sweep] Universe filter returned 0 active symbols (range={}..{})",
+                filter_from, filter_to
+            );
             std::process::exit(1);
         }
         keep_symbols = Some(active.into_iter().collect());
@@ -1768,12 +1850,52 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(ref keep) = keep_symbols {
         let before = candles.len();
         candles.retain(|sym, _| keep.contains(sym));
-        eprintln!("[sweep] Symbol universe: {before} -> {} symbols", candles.len());
+        eprintln!(
+            "[sweep] Symbol universe: {before} -> {} symbols",
+            candles.len()
+        );
         if candles.is_empty() {
             eprintln!("[sweep] No candles left after symbol filtering.");
             std::process::exit(1);
         }
     }
+
+    match args.parity_mode {
+        SweepParityMode::Production => {
+            eprintln!(
+                "[sweep] Parity mode: production (lane B). GPU runtime may truncate symbols to the kernel cap ({}).",
+                GPU_KERNEL_SYMBOL_CAP,
+            );
+        }
+        SweepParityMode::IdenticalSymbolUniverse => {
+            match apply_alphabetical_symbol_cap(&mut candles, GPU_KERNEL_SYMBOL_CAP) {
+                Some((before, after)) => {
+                    eprintln!(
+                        "[sweep] Parity mode: identical-symbol-universe (lane A). Symbol universe: {before} -> {after} (alphabetical cap={}).",
+                        GPU_KERNEL_SYMBOL_CAP,
+                    );
+                }
+                None => {
+                    eprintln!(
+                        "[sweep] Parity mode: identical-symbol-universe (lane A). No cap needed ({} symbols <= {}).",
+                        candles.len(),
+                        GPU_KERNEL_SYMBOL_CAP,
+                    );
+                }
+            }
+            if candles.is_empty() {
+                eprintln!("[sweep] No candles left after lane A parity symbol-cap.");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let aux_symbol_filter: Option<HashSet<String>> =
+        if keep_symbols.is_some() || args.parity_mode == SweepParityMode::IdenticalSymbolUniverse {
+            Some(candles.keys().cloned().collect())
+        } else {
+            None
+        };
 
     let num_symbols = candles.len();
     let total_bars: usize = candles.values().map(|v| v.len()).sum();
@@ -1783,10 +1905,14 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
     let exit_candles = if let Some(ref exit_db) = exit_candles_db {
         let exit_paths = exit_db_paths.as_ref().unwrap_or(&candles_db_paths);
         let exit_iv = exit_interval.as_deref().unwrap_or(&interval);
-        eprintln!("[sweep] Loading exit candles from {:?} (interval={})", exit_db, exit_iv);
-        let mut ec =
-            bt_data::sqlite_loader::load_candles_filtered_multi(exit_paths, exit_iv, from_ts, to_ts)?;
-        if let Some(ref keep) = keep_symbols {
+        eprintln!(
+            "[sweep] Loading exit candles from {:?} (interval={})",
+            exit_db, exit_iv
+        );
+        let mut ec = bt_data::sqlite_loader::load_candles_filtered_multi(
+            exit_paths, exit_iv, from_ts, to_ts,
+        )?;
+        if let Some(ref keep) = aux_symbol_filter {
             ec.retain(|sym, _| keep.contains(sym));
         }
         let ec_bars: usize = ec.values().map(|v| v.len()).sum();
@@ -1814,7 +1940,7 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
             from_ts,
             to_ts,
         )?;
-        if let Some(ref keep) = keep_symbols {
+        if let Some(ref keep) = aux_symbol_filter {
             nc.retain(|sym, _| keep.contains(sym));
         }
         let nc_bars: usize = nc.values().map(|v| v.len()).sum();
@@ -1831,7 +1957,7 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
     // Load funding rates (filtered)
     let funding_rates = if let Some(ref fdb) = args.funding_db {
         let mut fr = bt_data::sqlite_loader::load_funding_rates_filtered(fdb, from_ts, to_ts)?;
-        if let Some(ref keep) = keep_symbols {
+        if let Some(ref keep) = aux_symbol_filter {
             fr.retain(|sym, _| keep.contains(sym));
         }
         let fr_count: usize = fr.values().map(|v| v.len()).sum();
@@ -2182,7 +2308,9 @@ fn cmd_dump_indicators(args: DumpArgs) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-fn make_indicator_bank(cfg: &bt_core::config::StrategyConfig) -> bt_core::indicators::IndicatorBank {
+fn make_indicator_bank(
+    cfg: &bt_core::config::StrategyConfig,
+) -> bt_core::indicators::IndicatorBank {
     bt_core::indicators::IndicatorBank::new_with_ave_window(
         &cfg.indicators,
         cfg.filters.use_stoch_rsi_filter,
@@ -2326,7 +2454,8 @@ mod guardrails_tests {
     fn test_gpu_guardrails_rejects_long_window() {
         let from_ts = Some(0);
         let to_ts = Some((25.0 * 86_400_000.0) as i64);
-        let err = check_gpu_sweep_guardrails("1h", Some("3m"), Some("3m"), from_ts, to_ts).unwrap_err();
+        let err =
+            check_gpu_sweep_guardrails("1h", Some("3m"), Some("3m"), from_ts, to_ts).unwrap_err();
         assert!(err.contains("scoped window"));
     }
 
@@ -2334,7 +2463,8 @@ mod guardrails_tests {
     fn test_gpu_guardrails_rejects_mismatched_sub_intervals() {
         let from_ts = Some(0);
         let to_ts = Some((10.0 * 86_400_000.0) as i64);
-        let err = check_gpu_sweep_guardrails("1h", Some("3m"), Some("5m"), from_ts, to_ts).unwrap_err();
+        let err =
+            check_gpu_sweep_guardrails("1h", Some("3m"), Some("5m"), from_ts, to_ts).unwrap_err();
         assert!(err.contains("must match"));
     }
 }
@@ -2369,6 +2499,44 @@ mod tests {
     use bt_core::config::{Confidence, StrategyConfig};
     use bt_core::position::TradeRecord;
     use std::collections::HashSet;
+
+    fn one_bar() -> Vec<OhlcvBar> {
+        vec![OhlcvBar {
+            t: 0,
+            t_close: 0,
+            o: 1.0,
+            h: 1.0,
+            l: 1.0,
+            c: 1.0,
+            v: 1.0,
+            n: 1,
+        }]
+    }
+
+    #[test]
+    fn apply_alphabetical_symbol_cap_truncates_in_sort_order() {
+        let mut candles: CandleData = CandleData::default();
+        candles.insert("SOL".to_string(), one_bar());
+        candles.insert("BTC".to_string(), one_bar());
+        candles.insert("ETH".to_string(), one_bar());
+        candles.insert("ADA".to_string(), one_bar());
+
+        let changed = apply_alphabetical_symbol_cap(&mut candles, 2);
+        assert_eq!(changed, Some((4, 2)));
+        let mut symbols: Vec<String> = candles.keys().cloned().collect();
+        symbols.sort();
+        assert_eq!(symbols, vec!["ADA".to_string(), "BTC".to_string()]);
+    }
+
+    #[test]
+    fn apply_alphabetical_symbol_cap_noop_when_within_cap() {
+        let mut candles: CandleData = CandleData::default();
+        candles.insert("BTC".to_string(), one_bar());
+        candles.insert("ETH".to_string(), one_bar());
+        let changed = apply_alphabetical_symbol_cap(&mut candles, 2);
+        assert_eq!(changed, None);
+        assert_eq!(candles.len(), 2);
+    }
 
     fn tr(
         ts: i64,
