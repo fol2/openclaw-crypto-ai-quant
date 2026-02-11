@@ -10,37 +10,37 @@ axes:
   - 12.0
   - 14.0
   - 18.0
-- path: thresholds.entry.max_dist_ema_fast
+- path: thresholds.entry.btc_adx_override
   values:
-  - 0.02
-  - 0.04
-  - 0.05
-- path: thresholds.stoch_rsi.block_short_if_k_lt
+  - 28.0
+  - 40.0
+  - 52.0
+- path: thresholds.ranging.rsi_high
   values:
-  - 0.105
-  - 0.15
-  - 0.195
-- path: trade.breakeven_start_atr
-  values:
-  - 0.3
-  - 0.7
-  - 1.0
-- path: trade.enable_pyramiding
-  values:
-  - 0.0
-  - 1.0
-- path: trade.max_total_margin_pct
+  - 37.1
+  - 53.0
+  - 68.9
+- path: trade.adx_sizing_min_mult
   values:
   - 0.42
   - 0.6
   - 0.78
-- path: trade.rsi_exit_ub_hi_profit_low_conf
+- path: trade.enable_dynamic_leverage
+  values:
+  - 0.0
+  - 1.0
+- path: trade.max_adds_per_symbol
+  values:
+  - 0.0
+  - 2.0
+  - 3.0
+- path: trade.rsi_exit_lb_lo_profit_low_conf
   values:
   - 0.0
   - 30.0
   - 50.0
-- path: trade.vol_scalar_min
+- path: trade.tsme_min_profit_atr
   values:
-  - 0.35
-  - 0.5
-  - 0.65
+  - 0.7
+  - 1.0
+  - 1.3

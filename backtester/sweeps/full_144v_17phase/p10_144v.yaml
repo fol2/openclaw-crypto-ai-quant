@@ -4,42 +4,46 @@
 initial_balance: 10000.0
 lookback: 200
 axes:
-- path: indicators.ema_macro_window
-  values:
-  - 140.0
-  - 200.0
-  - 260.0
-- path: thresholds.anomaly.ema_fast_dev_pct_gt
-  values:
-  - 0.35
-  - 0.5
-  - 0.65
-- path: thresholds.entry.pullback_require_macd_sign
+- path: filters.require_macro_alignment
   values:
   - 0.0
   - 1.0
-- path: thresholds.entry.slow_drift_rsi_short_max
+- path: indicators.stoch_rsi_window
   values:
-  - 35.0
-  - 50.0
-  - 65.0
-- path: trade.add_cooldown_minutes
+  - 10.0
+  - 14.0
+  - 16.0
+  - 20.0
+- path: thresholds.entry.ave_enabled
   values:
-  - 42.0
-  - 60.0
-  - 78.0
-- path: trade.leverage
-  values:
+  - 0.0
   - 1.0
-  - 3.0
-  - 5.0
-- path: trade.reentry_cooldown_min_mins
+- path: thresholds.entry.slow_drift_min_adx
   values:
+  - 7.0
+  - 10.0
+  - 13.0
+- path: thresholds.tp_and_momentum.rsi_short_weak
+  values:
+  - 30.8
+  - 44.0
+  - 57.2
+- path: trade.exit_cooldown_s
+  values:
+  - 10.0
+  - 15.0
+  - 20.0
+- path: trade.reef_short_rsi_block_lt
+  values:
+  - 21.0
   - 30.0
-  - 60.0
-  - 90.0
-- path: trade.tp_partial_pct
+  - 39.0
+- path: trade.smart_exit_adx_exhaustion_lt_low_conf
   values:
-  - 0.35
-  - 0.5
-  - 0.65
+  - 0.0
+  - 15.0
+  - 30.0
+- path: trade.tsme_require_adx_slope_negative
+  values:
+  - 0.0
+  - 1.0

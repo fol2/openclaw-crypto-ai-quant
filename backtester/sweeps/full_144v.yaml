@@ -778,10 +778,6 @@ axes:
   values:
   - 0.0
   - 1.0
-- path: trade.use_bbo_for_fills
-  values:
-  - 0.0
-  - 1.0
 - path: trade.vol_baseline_pct
   values:
   - 0.007

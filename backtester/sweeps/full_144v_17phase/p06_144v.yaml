@@ -4,7 +4,11 @@
 initial_balance: 10000.0
 lookback: 200
 axes:
-- path: filters.require_btc_alignment
+- path: filters.enable_extension_filter
+  values:
+  - 0.0
+  - 1.0
+- path: filters.use_stoch_rsi_filter
   values:
   - 0.0
   - 1.0
@@ -14,36 +18,32 @@ axes:
   - 25.0
   - 35.0
   - 50.0
-- path: market_regime.enable_regime_filter
-  values:
-  - 0.0
-  - 1.0
-- path: thresholds.entry.pullback_rsi_short_max
-  values:
-  - 35.0
-  - 50.0
-  - 65.0
-- path: thresholds.tp_and_momentum.rsi_short_strong
-  values:
-  - 33.6
-  - 48.0
-  - 62.4
-- path: trade.entry_min_confidence
+- path: thresholds.entry.pullback_confidence
   values:
   - 0.0
   - 1.0
   - 2.0
-- path: trade.reef_long_rsi_extreme_gt
+- path: thresholds.tp_and_momentum.adx_weak_lt
   values:
-  - 52.5
-  - 75.0
-  - 97.5
-- path: trade.reverse_entry_signal
+  - 21.0
+  - 30.0
+  - 39.0
+- path: trade.confidence_mult_low
+  values:
+  - 0.35
+  - 0.5
+  - 0.65
+- path: trade.enable_rsi_overextension_exit
   values:
   - 0.0
   - 1.0
-- path: trade.smart_exit_adx_exhaustion_lt
+- path: trade.min_notional_usd
+  values:
+  - 7.0
+  - 10.0
+  - 13.0
+- path: trade.rsi_exit_ub_lo_profit_low_conf
   values:
   - 0.0
-  - 15.0
   - 30.0
+  - 50.0
