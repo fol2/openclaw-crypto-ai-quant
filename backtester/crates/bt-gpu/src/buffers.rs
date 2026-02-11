@@ -138,7 +138,7 @@ pub struct GpuIndicatorConfig {
 const _: () = assert!(std::mem::size_of::<GpuIndicatorConfig>() == 80);
 
 impl GpuIndicatorConfig {
-    /// Build from a StrategyConfig's indicator section.
+    /// Build from StrategyConfig using canonical runtime indicator windows.
     pub fn from_strategy_config(cfg: &bt_core::config::StrategyConfig, lookback: usize) -> Self {
         let ic = &cfg.indicators;
         Self {
@@ -155,7 +155,7 @@ impl GpuIndicatorConfig {
             stoch_rsi_window: ic.stoch_rsi_window as u32,
             stoch_rsi_smooth1: ic.stoch_rsi_smooth1 as u32,
             stoch_rsi_smooth2: ic.stoch_rsi_smooth2 as u32,
-            avg_atr_window: ic.ave_avg_atr_window as u32,
+            avg_atr_window: cfg.effective_ave_avg_atr_window() as u32,
             slow_drift_slope_window: cfg.thresholds.entry.slow_drift_slope_window as u32,
             lookback: lookback as u32,
             use_stoch_rsi: cfg.filters.use_stoch_rsi_filter as u32,
@@ -653,5 +653,21 @@ impl GpuComboConfig {
             tp_strong_adx_gt: tp.adx_strong_gt as f32,
             tp_weak_adx_lt: tp.adx_weak_lt as f32,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GpuIndicatorConfig;
+    use bt_core::config::StrategyConfig;
+
+    #[test]
+    fn test_gpu_indicator_config_uses_threshold_ave_window() {
+        let mut cfg = StrategyConfig::default();
+        cfg.indicators.ave_avg_atr_window = 3;
+        cfg.thresholds.entry.ave_avg_atr_window = 17;
+
+        let out = GpuIndicatorConfig::from_strategy_config(&cfg, 200);
+        assert_eq!(out.avg_atr_window, 17);
     }
 }
