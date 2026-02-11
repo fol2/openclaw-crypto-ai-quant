@@ -22,3 +22,11 @@ def test_resolve_path_for_backtester_resolves_backtester_relative_sweep_specs() 
     assert pp.exists()
     assert pp.name == "smoke.yaml"
 
+
+def test_normalise_candles_db_dir_for_backtester_uses_candles_glob(tmp_path) -> None:
+    (tmp_path / "candles_1m.db").write_text("", encoding="utf-8")
+    (tmp_path / "funding_rates.db").write_text("", encoding="utf-8")
+
+    out = factory_run._normalise_candles_db_arg_for_backtester(str(tmp_path))
+    assert out is not None
+    assert out.endswith("candles_*.db")
