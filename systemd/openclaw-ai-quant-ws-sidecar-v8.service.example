@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=$PROJECT_DIR
 EnvironmentFile=-%h/.config/openclaw/ai-quant-universe-v8.env
-ExecStart=$HOME/.local/bin/openclaw-ai-quant-ws-sidecar-v8
+ExecStart=%h/.local/bin/openclaw-ai-quant-ws-sidecar-v8
 Restart=always
 RestartSec=5
 KillMode=process
@@ -49,4 +49,3 @@ Environment=RUST_BACKTRACE=1
 
 [Install]
 WantedBy=default.target
-
