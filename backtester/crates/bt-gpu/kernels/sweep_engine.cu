@@ -112,7 +112,7 @@ struct __align__(16) GpuComboConfig {
     float vol_scalar_max;  unsigned int _p3;
     unsigned int enable_pyramiding;  unsigned int max_adds_per_symbol;  float add_fraction_of_base_margin;
     unsigned int add_cooldown_minutes;  float add_min_profit_atr;  unsigned int add_min_confidence;
-    unsigned int entry_min_confidence;  unsigned int _p4;
+    unsigned int entry_min_confidence;  unsigned int enable_slow_drift_entries;
     unsigned int enable_partial_tp;  float tp_partial_pct;  float tp_partial_min_notional_usd;
     float trailing_start_atr;  float trailing_distance_atr;  unsigned int _p5;
     unsigned int enable_ssf_filter;  unsigned int enable_breakeven_stop;  float breakeven_start_atr;
@@ -259,8 +259,10 @@ __device__ bool check_gates(const GpuSnapshot& snap, const GpuComboConfig* cfg,
         if (snap.bb_width_ratio < cfg->ranging_bb_width_ratio_lt) { votes += 1u; }
         if (snap.rsi > 47.0f && snap.rsi < 53.0f) { votes += 1u; }
         if (votes >= 2u) {
-            // Check slow-drift ranging override
-            if (fabsf(ema_slope) < cfg->slow_drift_ranging_slope_override) {
+            // Parity with CPU: only allow slow-drift "un-range" when slow drift entries are enabled.
+            if (cfg->enable_slow_drift_entries != 0u) {
+                if (fabsf(ema_slope) < cfg->slow_drift_ranging_slope_override) { return false; }
+            } else {
                 return false;
             }
         }
@@ -319,7 +321,7 @@ struct SignalResult {
 };
 
 __device__ SignalResult generate_signal(const GpuSnapshot& snap, const GpuComboConfig* cfg,
-                                        bool gates_pass, float ema_slope) {
+                                        bool gates_pass, unsigned int btc_bull, float ema_slope) {
     // Returns (signal, confidence, entry_adx_threshold_as_bits)
     SignalResult neutral = {SIG_NEUTRAL, 0u, 0u};
 
@@ -329,12 +331,14 @@ __device__ SignalResult generate_signal(const GpuSnapshot& snap, const GpuComboC
         unsigned int confidence = CONF_MEDIUM;
         float adx_threshold = snap.adx;
 
-        // EMA crossover direction
+        // Standard entry direction (parity with CPU):
+        // - LONG requires bullish alignment AND close > ema_fast
+        // - SHORT requires bearish alignment AND close < ema_fast
         bool ema_bullish = snap.ema_fast > snap.ema_slow;
         bool ema_bearish = snap.ema_fast < snap.ema_slow;
 
-        if (ema_bullish) { signal = SIG_BUY; }
-        if (ema_bearish) { signal = SIG_SELL; }
+        if (ema_bullish && snap.close > snap.ema_fast) { signal = SIG_BUY; }
+        else if (ema_bearish && snap.close < snap.ema_fast) { signal = SIG_SELL; }
         if (signal == SIG_NEUTRAL) { return neutral; }
 
         // DRE (Dynamic RSI Elasticity)
@@ -346,8 +350,8 @@ __device__ SignalResult generate_signal(const GpuSnapshot& snap, const GpuComboC
         float rsi_short_limit = cfg->dre_short_rsi_limit_low + weight * (cfg->dre_short_rsi_limit_high - cfg->dre_short_rsi_limit_low);
 
         // RSI gate
-        if (signal == SIG_BUY && snap.rsi > rsi_long_limit) { return neutral; }
-        if (signal == SIG_SELL && snap.rsi < rsi_short_limit) { return neutral; }
+        if (signal == SIG_BUY && snap.rsi <= rsi_long_limit) { return neutral; }
+        if (signal == SIG_SELL && snap.rsi >= rsi_short_limit) { return neutral; }
 
         // MACD gate
         if (cfg->macd_mode == MACD_ACCEL) {
@@ -362,6 +366,15 @@ __device__ SignalResult generate_signal(const GpuSnapshot& snap, const GpuComboC
         if (cfg->use_stoch_rsi_filter != 0u) {
             if (signal == SIG_BUY && snap.stoch_k > 0.85f) { return neutral; }
             if (signal == SIG_SELL && snap.stoch_k < 0.15f) { return neutral; }
+        }
+
+        // BTC alignment (parity with CPU minimal semantics).
+        if (cfg->require_btc_alignment != 0u) {
+            bool adx_override = snap.adx > cfg->btc_adx_override;
+            if (!adx_override) {
+                if (signal == SIG_BUY && btc_bull != 1u) { return neutral; }
+                if (signal == SIG_SELL && btc_bull != 0u) { return neutral; }
+            }
         }
 
         // AVE (Adaptive Volatility Entry): upgrade confidence
@@ -386,7 +399,9 @@ __device__ SignalResult generate_signal(const GpuSnapshot& snap, const GpuComboC
 
     // Mode 2: Pullback (simplified -- disabled in most sweeps)
     // Mode 3: Slow drift
-    if (fabsf(ema_slope) >= cfg->slow_drift_min_slope_pct && snap.adx >= cfg->slow_drift_min_adx) {
+    if (cfg->enable_slow_drift_entries != 0u
+        && fabsf(ema_slope) >= cfg->slow_drift_min_slope_pct
+        && snap.adx >= cfg->slow_drift_min_adx) {
         unsigned int signal = SIG_NEUTRAL;
         if (ema_slope > 0.0f) {
             if (snap.rsi >= cfg->slow_drift_rsi_long_min) { signal = SIG_BUY; }
@@ -1020,7 +1035,7 @@ extern "C" __global__ void sweep_engine_kernel(
 
                     // Gates, signal generation, filters (using hybrid snapshot with indicator values)
                     bool gates_ok = check_gates(hybrid, &cfg, btc_bull, hybrid.ema_slow_slope_pct);
-                    SignalResult sig_result = generate_signal(hybrid, &cfg, gates_ok, hybrid.ema_slow_slope_pct);
+                    SignalResult sig_result = generate_signal(hybrid, &cfg, gates_ok, btc_bull, hybrid.ema_slow_slope_pct);
                     unsigned int signal = sig_result.signal;
                     unsigned int confidence = sig_result.confidence;
                     float entry_adx_thresh = __uint_as_float(sig_result.entry_adx_thresh_bits);
@@ -1282,7 +1297,7 @@ extern "C" __global__ void sweep_engine_kernel(
                 if (pos.active != POS_EMPTY) { continue; }
 
                 bool gates_ok = check_gates(snap, &cfg, btc_bull, snap.ema_slow_slope_pct);
-                SignalResult sig_result = generate_signal(snap, &cfg, gates_ok, snap.ema_slow_slope_pct);
+                SignalResult sig_result = generate_signal(snap, &cfg, gates_ok, btc_bull, snap.ema_slow_slope_pct);
                 unsigned int signal = sig_result.signal;
                 unsigned int confidence = sig_result.confidence;
                 float entry_adx_thresh = __uint_as_float(sig_result.entry_adx_thresh_bits);
