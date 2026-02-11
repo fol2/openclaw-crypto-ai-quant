@@ -4,41 +4,42 @@
 initial_balance: 10000.0
 lookback: 200
 axes:
-- path: filters.enable_anomaly_filter
+- path: indicators.stoch_rsi_window
   values:
-  - 0.0
-  - 1.0
-- path: filters.require_volume_confirmation
-  values:
-  - 0.0
-  - 1.0
-- path: indicators.vol_trend_window
-  values:
-  - 3.0
-  - 7.0
   - 10.0
-- path: thresholds.entry.pullback_rsi_long_min
+  - 14.0
+  - 20.0
+- path: thresholds.entry.ave_atr_ratio_gt
   values:
-  - 35.0
-  - 65.0
-- path: thresholds.tp_and_momentum.rsi_long_weak
+  - 1.05
+  - 1.5
+  - 1.95
+- path: thresholds.ranging.bb_width_ratio_below
   values:
-  - 39.2
-  - 72.8
-- path: trade.confidence_mult_medium
+  - 0.56
+  - 0.8
+  - 1.04
+- path: trade.add_min_profit_atr
   values:
-  - 0.3
-  - 0.7
-  - 1.0
-- path: trade.enable_reef_filter
+  - 0.35
+  - 0.5
+  - 0.65
+- path: trade.bump_to_min_notional
   values:
   - 0.0
   - 1.0
-- path: trade.reef_long_rsi_extreme_gt
+- path: trade.leverage_max_cap
   values:
-  - 52.5
-  - 97.5
-- path: trade.tsme_min_profit_atr
+  - 0.0
+  - 0.5
+  - 1.0
+- path: trade.rsi_exit_lb_hi_profit_low_conf
   values:
-  - 0.7
-  - 1.3
+  - 0.0
+  - 30.0
+  - 50.0
+- path: trade.trailing_start_atr
+  values:
+  - 0.5
+  - 1.25
+  - 2.0

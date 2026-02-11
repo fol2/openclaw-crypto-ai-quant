@@ -4,38 +4,46 @@
 initial_balance: 10000.0
 lookback: 200
 axes:
-- path: indicators.ema_macro_window
-  values:
-  - 140.0
-  - 200.0
-  - 260.0
-- path: thresholds.entry.ave_enabled
+- path: filters.require_btc_alignment
   values:
   - 0.0
   - 1.0
-- path: thresholds.entry.slow_drift_slope_window
+- path: indicators.ema_slow_window
   values:
   - 10.0
   - 25.0
-  - 40.0
-- path: thresholds.ranging.rsi_high
-  values:
-  - 37.1
-  - 68.9
-- path: trade.confidence_mult_high
-  values:
-  - 0.7
-  - 1.3
-- path: trade.leverage_max_cap
+  - 35.0
+  - 50.0
+- path: market_regime.enable_regime_filter
   values:
   - 0.0
   - 1.0
-- path: trade.rsi_exit_ub_lo_profit
+- path: thresholds.entry.pullback_rsi_short_max
   values:
-  - 56.0
-  - 100.0
-- path: trade.sl_atr_mult
+  - 35.0
+  - 50.0
+  - 65.0
+- path: thresholds.tp_and_momentum.rsi_short_strong
   values:
+  - 33.6
+  - 48.0
+  - 62.4
+- path: trade.entry_min_confidence
+  values:
+  - 0.0
   - 1.0
   - 2.0
-  - 3.0
+- path: trade.reef_long_rsi_extreme_gt
+  values:
+  - 52.5
+  - 75.0
+  - 97.5
+- path: trade.reverse_entry_signal
+  values:
+  - 0.0
+  - 1.0
+- path: trade.smart_exit_adx_exhaustion_lt
+  values:
+  - 0.0
+  - 15.0
+  - 30.0

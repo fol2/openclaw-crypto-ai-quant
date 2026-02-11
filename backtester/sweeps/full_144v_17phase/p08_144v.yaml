@@ -4,38 +4,46 @@
 initial_balance: 10000.0
 lookback: 200
 axes:
-- path: indicators.rsi_window
+- path: filters.adx_rising_saturation
   values:
+  - 28.0
+  - 40.0
+  - 52.0
+- path: market_regime.breadth_block_long_below
+  values:
+  - 7.0
   - 10.0
-  - 16.0
-  - 20.0
+  - 13.0
 - path: thresholds.entry.enable_pullback_entries
   values:
   - 0.0
   - 1.0
-- path: thresholds.stoch_rsi.block_long_if_k_gt
+- path: thresholds.entry.slow_drift_min_slope_pct
   values:
-  - 0.595
-  - 1.105
-- path: thresholds.tp_and_momentum.tp_mult_weak
+  - 0.00042
+  - 0.0006
+  - 0.00078
+- path: thresholds.tp_and_momentum.tp_mult_strong
   values:
-  - 2.1
+  - 4.9
+  - 7.0
+  - 9.1
+- path: trade.glitch_atr_mult
+  values:
+  - 8.4
+  - 12.0
+  - 15.6
+- path: trade.reef_short_rsi_extreme_lt
+  values:
+  - 17.5
+  - 25.0
+  - 32.5
+- path: trade.tp_atr_mult
+  values:
   - 3.0
-  - 3.9
-- path: trade.enable_breakeven_stop
+  - 5.5
+  - 8.0
+- path: trade.use_bbo_for_fills
   values:
   - 0.0
   - 1.0
-- path: trade.max_open_positions
-  values:
-  - 14.0
-  - 26.0
-- path: trade.slippage_bps
-  values:
-  - 7.0
-  - 13.0
-- path: trade.smart_exit_adx_exhaustion_lt_low_conf
-  values:
-  - 0.0
-  - 15.0
-  - 30.0
