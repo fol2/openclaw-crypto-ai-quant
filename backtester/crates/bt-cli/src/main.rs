@@ -833,6 +833,8 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
         exit_candles.as_ref(),
         entry_candles.as_ref(),
         funding_rates.as_ref(),
+        from_ts,
+        to_ts,
     );
     let sweep_elapsed = sweep_start.elapsed();
 
