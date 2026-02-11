@@ -5,6 +5,9 @@
 
 use bytemuck::{Pod, Zeroable};
 
+/// Hard symbol ceiling imposed by GPU kernel state layout.
+pub const GPU_MAX_SYMBOLS: usize = 52;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // GpuSnapshot — precomputed indicator values per (bar, symbol)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -300,11 +303,11 @@ pub struct GpuComboConfig {
     pub glitch_atr_mult: f32,
     pub _pad8: u32,
 
-    // Rate limits [78-81]
+    // Rate limits + entry flags [78-81]
     pub max_open_positions: u32,
     pub max_entry_orders_per_loop: u32,
-    pub _pad9: u32,
-    pub _pad10: u32,
+    pub enable_slow_drift_entries: u32,
+    pub slow_drift_require_macd_sign: u32,
 
     // Filters (gates) [82-91]
     pub enable_ranging_filter: u32,
@@ -475,6 +478,7 @@ pub struct GpuParams {
     pub num_combos: u32,
     pub num_symbols: u32,
     pub num_bars: u32,
+    pub btc_sym_idx: u32,         // u32::MAX when unavailable
     pub chunk_start: u32,
     pub chunk_end: u32,
     pub initial_balance_bits: u32, // f32 bits
@@ -483,7 +487,7 @@ pub struct GpuParams {
     pub trade_end_bar: u32,        // last bar index for result write-back (scoped trade range)
 }
 
-const _: () = assert!(std::mem::size_of::<GpuParams>() == 36);
+const _: () = assert!(std::mem::size_of::<GpuParams>() == 40);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Conversion helpers
@@ -595,8 +599,8 @@ impl GpuComboConfig {
 
             max_open_positions: tc.max_open_positions as u32,
             max_entry_orders_per_loop: tc.max_entry_orders_per_loop as u32,
-            _pad9: 0,
-            _pad10: 0,
+            enable_slow_drift_entries: et.enable_slow_drift_entries as u32,
+            slow_drift_require_macd_sign: et.slow_drift_require_macd_sign as u32,
 
             enable_ranging_filter: fc.enable_ranging_filter as u32,
             enable_anomaly_filter: fc.enable_anomaly_filter as u32,

@@ -80,7 +80,8 @@ pub fn precompute_snapshots(
     let total_slots = num_bars * num_symbols;
     let mut snapshots = vec![GpuSnapshot::zeroed(); total_slots];
     let mut breadth = vec![50.0f32; num_bars];
-    let mut btc_bullish = vec![0u32; num_bars];
+    // 0 = bearish, 1 = bullish, 2 = unavailable.
+    let mut btc_bullish = vec![2u32; num_bars];
     let mut ema_slow_slopes = vec![0.0f32; total_slots];
 
     // BTC symbol index
@@ -183,11 +184,7 @@ pub fn precompute_snapshots(
         if let Some(&bi) = btc_idx {
             let bank = &banks[bi];
             if bank.bar_count >= 2 {
-                btc_bullish[bar_idx] = if bank.prev_close > bank.prev_ema_slow {
-                    1
-                } else {
-                    0
-                };
+                btc_bullish[bar_idx] = if bank.prev_close > bank.prev_ema_slow { 1 } else { 0 };
             }
         }
     }

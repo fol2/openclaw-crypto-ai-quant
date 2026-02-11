@@ -20,7 +20,9 @@
 // -- Constants ----------------------------------------------------------------
 
 #define MAX_SYMBOLS      52u
-#define MAX_CANDIDATES   8u
+// Candidate buffer must cover the full project symbol universe to keep
+// ranking parity with CPU (no early truncation while scanning symbols).
+#define MAX_CANDIDATES   64u
 
 // Position type constants
 #define POS_EMPTY   0u
@@ -41,6 +43,11 @@
 #define MACD_ACCEL  0u
 #define MACD_SIGN   1u
 #define MACD_NONE   2u
+
+// BTC alignment state (from breadth kernel)
+#define BTC_BULL_BEARISH 0u
+#define BTC_BULL_BULLISH 1u
+#define BTC_BULL_UNKNOWN 2u
 
 // PESC close reasons
 #define PESC_NONE        0u
@@ -63,6 +70,7 @@ struct GpuParams {
     unsigned int num_combos;
     unsigned int num_symbols;
     unsigned int num_bars;
+    unsigned int btc_sym_idx;
     unsigned int chunk_start;
     unsigned int chunk_end;
     unsigned int initial_balance_bits;
@@ -130,7 +138,8 @@ struct __align__(16) GpuComboConfig {
     unsigned int tsme_require_adx_slope_negative;  unsigned int _p7;
     float min_atr_pct;  unsigned int reverse_entry_signal;  unsigned int block_exits_on_extreme_dev;
     float glitch_price_dev_pct;  float glitch_atr_mult;  unsigned int _p8;
-    unsigned int max_open_positions;  unsigned int max_entry_orders_per_loop;  unsigned int _p9;  unsigned int _p10;
+    unsigned int max_open_positions;  unsigned int max_entry_orders_per_loop;
+    unsigned int enable_slow_drift_entries;  unsigned int slow_drift_require_macd_sign;
     unsigned int enable_ranging_filter;  unsigned int enable_anomaly_filter;  unsigned int enable_extension_filter;
     unsigned int require_adx_rising;  float adx_rising_saturation;  unsigned int require_volume_confirmation;
     unsigned int vol_confirm_include_prev;  unsigned int use_stoch_rsi_filter;
@@ -247,10 +256,25 @@ __device__ unsigned int apply_regime_filter(unsigned int signal, const GpuComboC
 
 // -- Gate Checks --------------------------------------------------------------
 
-__device__ bool check_gates(const GpuSnapshot& snap, const GpuComboConfig* cfg,
-                            unsigned int btc_bull, float ema_slope) {
-    // ADX minimum
-    if (snap.adx < cfg->min_adx) { return false; }
+struct GateResult {
+    bool all_gates_pass;
+    bool is_ranging;
+    bool is_anomaly;
+    bool is_extended;
+    bool vol_confirm;
+    bool bullish_alignment;
+    bool bearish_alignment;
+};
+
+__device__ GateResult check_gates(const GpuSnapshot& snap, const GpuComboConfig* cfg, float ema_slope) {
+    GateResult result;
+    result.all_gates_pass = false;
+    result.is_ranging = false;
+    result.is_anomaly = false;
+    result.is_extended = false;
+    result.vol_confirm = true;
+    result.bullish_alignment = snap.ema_fast > snap.ema_slow;
+    result.bearish_alignment = snap.ema_fast < snap.ema_slow;
 
     // Ranging filter (vote system simplified: ADX + BB width)
     if (cfg->enable_ranging_filter != 0u) {
@@ -258,24 +282,26 @@ __device__ bool check_gates(const GpuSnapshot& snap, const GpuComboConfig* cfg,
         if (snap.adx < cfg->ranging_adx_lt) { votes += 1u; }
         if (snap.bb_width_ratio < cfg->ranging_bb_width_ratio_lt) { votes += 1u; }
         if (snap.rsi > 47.0f && snap.rsi < 53.0f) { votes += 1u; }
-        if (votes >= 2u) {
-            // Check slow-drift ranging override
-            if (fabsf(ema_slope) < cfg->slow_drift_ranging_slope_override) {
-                return false;
-            }
+        result.is_ranging = votes >= 2u;
+
+        // Slow-drift override for ranging gate (CPU parity).
+        if (cfg->enable_slow_drift_entries != 0u
+            && result.is_ranging
+            && fabsf(ema_slope) >= cfg->slow_drift_ranging_slope_override) {
+            result.is_ranging = false;
         }
     }
 
     // Anomaly filter
     if (cfg->enable_anomaly_filter != 0u) {
-        if (snap.bb_width_ratio > cfg->anomaly_bb_width_ratio_gt) { return false; }
+        result.is_anomaly = snap.bb_width_ratio > cfg->anomaly_bb_width_ratio_gt;
     }
 
     // Extension filter
     if (cfg->enable_extension_filter != 0u) {
         if (snap.close > 0.0f && snap.ema_fast > 0.0f) {
             float dist = fabsf(snap.close - snap.ema_fast) / snap.ema_fast;
-            if (dist > cfg->max_dist_ema_fast) { return false; }
+            result.is_extended = dist > cfg->max_dist_ema_fast;
         }
     }
 
@@ -286,28 +312,33 @@ __device__ bool check_gates(const GpuSnapshot& snap, const GpuComboConfig* cfg,
             if (cfg->vol_confirm_include_prev != 0u) {
                 vol_ok = vol_ok || (snap.volume > snap.vol_sma * 0.8f);
             }
-            if (!vol_ok) { return false; }
+            result.vol_confirm = vol_ok;
         }
     }
 
     // ADX rising (trend direction)
+    bool is_trending_up = true;
     if (cfg->require_adx_rising != 0u) {
-        if (snap.adx < cfg->adx_rising_saturation) {
-            if (snap.adx_slope <= 0.0f) { return false; }
+        if (snap.adx < cfg->adx_rising_saturation && snap.adx_slope <= 0.0f) {
+            is_trending_up = false;
         }
     }
 
-    // BTC alignment
-    if (cfg->require_btc_alignment != 0u) {
-        // Skip if symbol is BTC itself (handled at engine level)
-    }
-
-    // Macro EMA alignment
+    // Macro alignment is directional.
     if (cfg->require_macro_alignment != 0u) {
-        if (snap.close < snap.ema_macro) { return false; }
+        result.bullish_alignment = result.bullish_alignment && (snap.ema_slow > snap.ema_macro);
+        result.bearish_alignment = result.bearish_alignment && (snap.ema_slow < snap.ema_macro);
     }
 
-    return true;
+    result.all_gates_pass =
+        snap.adx >= cfg->min_adx
+        && !result.is_ranging
+        && !result.is_anomaly
+        && !result.is_extended
+        && result.vol_confirm
+        && is_trending_up;
+
+    return result;
 }
 
 // -- Signal Generation --------------------------------------------------------
@@ -319,22 +350,40 @@ struct SignalResult {
 };
 
 __device__ SignalResult generate_signal(const GpuSnapshot& snap, const GpuComboConfig* cfg,
-                                        bool gates_pass, float ema_slope) {
+                                        const GateResult& gates, unsigned int btc_bull,
+                                        bool is_btc_symbol, float ema_slope) {
     // Returns (signal, confidence, entry_adx_threshold_as_bits)
     SignalResult neutral = {SIG_NEUTRAL, 0u, 0u};
 
+    bool btc_ok_long = true;
+    bool btc_ok_short = true;
+    if (cfg->require_btc_alignment != 0u
+        && !is_btc_symbol
+        && !(snap.adx > cfg->btc_adx_override)) {
+        if (btc_bull == BTC_BULL_BULLISH) {
+            btc_ok_long = true;
+            btc_ok_short = false;
+        } else if (btc_bull == BTC_BULL_BEARISH) {
+            btc_ok_long = false;
+            btc_ok_short = true;
+        } else {
+            // CPU parity: unknown BTC state does not block entries.
+            btc_ok_long = true;
+            btc_ok_short = true;
+        }
+    }
+
     // Mode 1: Standard trend
-    if (gates_pass) {
+    if (gates.all_gates_pass) {
         unsigned int signal = SIG_NEUTRAL;
         unsigned int confidence = CONF_MEDIUM;
         float adx_threshold = snap.adx;
 
-        // EMA crossover direction
-        bool ema_bullish = snap.ema_fast > snap.ema_slow;
-        bool ema_bearish = snap.ema_fast < snap.ema_slow;
-
-        if (ema_bullish) { signal = SIG_BUY; }
-        if (ema_bearish) { signal = SIG_SELL; }
+        if (gates.bullish_alignment && snap.close > snap.ema_fast && btc_ok_long) {
+            signal = SIG_BUY;
+        } else if (gates.bearish_alignment && snap.close < snap.ema_fast && btc_ok_short) {
+            signal = SIG_SELL;
+        }
         if (signal == SIG_NEUTRAL) { return neutral; }
 
         // DRE (Dynamic RSI Elasticity)
@@ -346,8 +395,8 @@ __device__ SignalResult generate_signal(const GpuSnapshot& snap, const GpuComboC
         float rsi_short_limit = cfg->dre_short_rsi_limit_low + weight * (cfg->dre_short_rsi_limit_high - cfg->dre_short_rsi_limit_low);
 
         // RSI gate
-        if (signal == SIG_BUY && snap.rsi > rsi_long_limit) { return neutral; }
-        if (signal == SIG_SELL && snap.rsi < rsi_short_limit) { return neutral; }
+        if (signal == SIG_BUY && snap.rsi <= rsi_long_limit) { return neutral; }
+        if (signal == SIG_SELL && snap.rsi >= rsi_short_limit) { return neutral; }
 
         // MACD gate
         if (cfg->macd_mode == MACD_ACCEL) {
@@ -384,21 +433,39 @@ __device__ SignalResult generate_signal(const GpuSnapshot& snap, const GpuComboC
         return result;
     }
 
-    // Mode 2: Pullback (simplified -- disabled in most sweeps)
     // Mode 3: Slow drift
-    if (fabsf(ema_slope) >= cfg->slow_drift_min_slope_pct && snap.adx >= cfg->slow_drift_min_adx) {
-        unsigned int signal = SIG_NEUTRAL;
-        if (ema_slope > 0.0f) {
-            if (snap.rsi >= cfg->slow_drift_rsi_long_min) { signal = SIG_BUY; }
-        } else {
-            if (snap.rsi <= cfg->slow_drift_rsi_short_max) { signal = SIG_SELL; }
-        }
-        if (signal != SIG_NEUTRAL) {
-            SignalResult result;
-            result.signal = signal;
-            result.confidence = CONF_LOW;
-            result.entry_adx_thresh_bits = __float_as_uint(snap.adx);
-            return result;
+    bool slow_gates_ok =
+        !gates.is_anomaly
+        && !gates.is_extended
+        && !gates.is_ranging
+        && gates.vol_confirm
+        && snap.adx >= cfg->slow_drift_min_adx;
+
+    if (cfg->enable_slow_drift_entries != 0u && slow_gates_ok) {
+        if (gates.bullish_alignment
+            && snap.close > snap.ema_slow
+            && btc_ok_long
+            && ema_slope >= cfg->slow_drift_min_slope_pct) {
+            bool macd_ok = (cfg->slow_drift_require_macd_sign == 0u) || (snap.macd_hist > 0.0f);
+            if (macd_ok && snap.rsi >= cfg->slow_drift_rsi_long_min) {
+                SignalResult result;
+                result.signal = SIG_BUY;
+                result.confidence = CONF_LOW;
+                result.entry_adx_thresh_bits = __float_as_uint(cfg->slow_drift_min_adx);
+                return result;
+            }
+        } else if (gates.bearish_alignment
+                   && snap.close < snap.ema_slow
+                   && btc_ok_short
+                   && ema_slope <= -cfg->slow_drift_min_slope_pct) {
+            bool macd_ok = (cfg->slow_drift_require_macd_sign == 0u) || (snap.macd_hist < 0.0f);
+            if (macd_ok && snap.rsi <= cfg->slow_drift_rsi_short_max) {
+                SignalResult result;
+                result.signal = SIG_SELL;
+                result.confidence = CONF_LOW;
+                result.entry_adx_thresh_bits = __float_as_uint(cfg->slow_drift_min_adx);
+                return result;
+            }
         }
     }
 
@@ -1114,8 +1181,16 @@ extern "C" __global__ void sweep_engine_kernel(
                     if (pos.active != POS_EMPTY) { continue; }
 
                     // Gates, signal generation, filters (using hybrid snapshot with indicator values)
-                    bool gates_ok = check_gates(hybrid, &cfg, btc_bull, hybrid.ema_slow_slope_pct);
-                    SignalResult sig_result = generate_signal(hybrid, &cfg, gates_ok, hybrid.ema_slow_slope_pct);
+                    GateResult gates = check_gates(hybrid, &cfg, hybrid.ema_slow_slope_pct);
+                    bool is_btc_symbol = (sym == params->btc_sym_idx);
+                    SignalResult sig_result = generate_signal(
+                        hybrid,
+                        &cfg,
+                        gates,
+                        btc_bull,
+                        is_btc_symbol,
+                        hybrid.ema_slow_slope_pct
+                    );
                     unsigned int signal = sig_result.signal;
                     unsigned int confidence = sig_result.confidence;
                     float entry_adx_thresh = __uint_as_float(sig_result.entry_adx_thresh_bits);
@@ -1386,8 +1461,16 @@ extern "C" __global__ void sweep_engine_kernel(
 
                 if (pos.active != POS_EMPTY) { continue; }
 
-                bool gates_ok = check_gates(snap, &cfg, btc_bull, snap.ema_slow_slope_pct);
-                SignalResult sig_result = generate_signal(snap, &cfg, gates_ok, snap.ema_slow_slope_pct);
+                GateResult gates = check_gates(snap, &cfg, snap.ema_slow_slope_pct);
+                bool is_btc_symbol = (sym == params->btc_sym_idx);
+                SignalResult sig_result = generate_signal(
+                    snap,
+                    &cfg,
+                    gates,
+                    btc_bull,
+                    is_btc_symbol,
+                    snap.ema_slow_slope_pct
+                );
                 unsigned int signal = sig_result.signal;
                 unsigned int confidence = sig_result.confidence;
                 float entry_adx_thresh = __uint_as_float(sig_result.entry_adx_thresh_bits);
