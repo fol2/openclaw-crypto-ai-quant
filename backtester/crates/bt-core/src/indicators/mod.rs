@@ -187,6 +187,14 @@ pub struct IndicatorSnapshot {
 
 impl IndicatorBank {
     pub fn new(cfg: &crate::config::IndicatorsConfig, use_stoch_rsi: bool) -> Self {
+        Self::new_with_ave_window(cfg, use_stoch_rsi, cfg.ave_avg_atr_window)
+    }
+
+    pub fn new_with_ave_window(
+        cfg: &crate::config::IndicatorsConfig,
+        use_stoch_rsi: bool,
+        ave_avg_atr_window: usize,
+    ) -> Self {
         Self {
             ema_slow: ema::Ema::new(cfg.ema_slow_window),
             ema_fast: ema::Ema::new(cfg.ema_fast_window),
@@ -208,7 +216,7 @@ impl IndicatorBank {
             macd: macd::MacdIndicator::new(12, 26, 9),
             vol_sma: volume::VolSma::new(cfg.vol_sma_window),
             vol_trend: volume::VolTrend::new(cfg.vol_trend_window),
-            avg_atr: RingBuf::new(cfg.ave_avg_atr_window),
+            avg_atr: RingBuf::new(ave_avg_atr_window),
             prev_close: 0.0,
             prev_adx: 0.0,
             prev_atr: 0.0,
