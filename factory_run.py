@@ -1290,9 +1290,10 @@ def main(argv: list[str] | None = None) -> int:
             str(args.interval),
             "--output",
             str(sweep_out),
-            "--top-n",
-            str(int(args.top_n)),
         ]
+        top_n = int(args.top_n or 0)
+        if top_n > 0:
+            sweep_argv += ["--top-n", str(top_n)]
         if bt_candles_db:
             sweep_argv += [
                 "--candles-db",
