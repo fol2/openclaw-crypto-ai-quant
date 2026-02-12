@@ -31,13 +31,34 @@ import yaml
 
 AIQ_ROOT = Path(__file__).resolve().parents[1]
 
+
+def _env_float(env_name: str, *, default: float | None = None) -> float | None:
+    raw = str(os.getenv(env_name, "") or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except Exception:
+        raise SystemExit(f"{env_name} must be a float when set")
+
+
+def _env_int(env_name: str, *, default: int | None = None) -> int | None:
+    raw = str(os.getenv(env_name, "") or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except Exception:
+        raise SystemExit(f"{env_name} must be an integer when set")
+
+
 # When invoked as `python3 tools/factory_cycle.py`, sys.path[0] is `tools/`.
 # Ensure the repo root is importable so `import factory_run` works consistently.
 if str(AIQ_ROOT) not in sys.path:
     sys.path.insert(0, str(AIQ_ROOT))
 
 import factory_run  # noqa: E402  (needs sys.path fix above)
-from engine.openclaw_cli import send_openclaw_message
+from engine.alerting import send_openclaw_message  # noqa: E402
 
 try:
     from tools.paper_deploy import deploy_paper_config
@@ -49,6 +70,7 @@ except ImportError:  # pragma: no cover
     from config_id import config_id_from_yaml_text  # type: ignore[no-redef]
     from registry_index import default_registry_db_path  # type: ignore[no-redef]
     from promote_to_live import GateConfig, evaluate_paper_gates  # type: ignore[no-redef]
+
 
 def _utc_compact() -> str:
     return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -458,10 +480,7 @@ def _service_snapshot_line(service: str) -> str:
     cfg_s = cfg[:12] if cfg and cfg != "n/a" else "n/a"
     wsr = str(hb.get("ws_restarts", "n/a") or "n/a")
     open_pos = str(hb.get("open_pos", "n/a") or "n/a")
-    return (
-        f"• {service} | active={active} mode={mode} "
-        f"label={label} channel={chan} cfg={cfg_s} pos={open_pos} ws={wsr}"
-    )
+    return f"• {service} | active={active} mode={mode} label={label} channel={chan} cfg={cfg_s} pos={open_pos} ws={wsr}"
 
 
 def _service_runtime_env(service: str) -> dict[str, str]:
@@ -548,17 +567,19 @@ def _build_candidates_messages(*, run_id: str, parsed: list[Candidate]) -> list[
         f"`deployable` {len(ok)}  `rejected` {len(rej)}  `total` {len(parsed)}",
     ]
     if ok:
-        lines = head + ["Top deployable:"] + [
-            _format_candidate_row(c, idx=i + 1, include_reason=False) for i, c in enumerate(ok[:5])
-        ]
+        lines = (
+            head
+            + ["Top deployable:"]
+            + [_format_candidate_row(c, idx=i + 1, include_reason=False) for i, c in enumerate(ok[:5])]
+        )
         out.append(lines)
     else:
         out.append(head + ["Top deployable: none"])
 
     if rej:
         out.append(
-            [f"🧹 Rejected • `{run_id}`", "Top rejected:"] +
-            [_format_candidate_row(c, idx=i + 1, include_reason=True) for i, c in enumerate(rej[:5])]
+            [f"🧹 Rejected • `{run_id}`", "Top rejected:"]
+            + [_format_candidate_row(c, idx=i + 1, include_reason=True) for i, c in enumerate(rej[:5])]
         )
     return out
 
@@ -671,8 +692,7 @@ def _latest_paper_deploy_event_for_service(*, artifacts_dir: Path, service: str)
     root = (Path(artifacts_dir) / "deployments" / "paper").expanduser().resolve()
     if not root.exists():
         return None
-    latest: dict[str, Any] | None = None
-    latest_ts = float("-inf")
+    events: list[dict[str, Any]] = []
     for ev_path in root.glob("**/deploy_event.json"):
         try:
             ev = json.loads(ev_path.read_text(encoding="utf-8"))
@@ -686,11 +706,80 @@ def _latest_paper_deploy_event_for_service(*, artifacts_dir: Path, service: str)
             continue
         ts = _parse_iso_to_epoch_s(str(ev.get("ts_utc", "") or ""))
         if ts is None:
-            ts = float("-inf")
-        if ts >= latest_ts:
-            latest = {"event": ev, "path": str(ev_path), "ts_epoch_s": float(ts)}
-            latest_ts = float(ts)
-    return latest
+            continue
+        cfg = str(((ev.get("what") or {}).get("config_id") or "")).strip()
+        events.append(
+            {
+                "event": ev,
+                "path": str(ev_path),
+                "ts_epoch_s": float(ts),
+                "config_id": cfg,
+            }
+        )
+
+    if not events:
+        return None
+    events.sort(key=lambda it: (float(it.get("ts_epoch_s", 0.0) or 0.0), str(it.get("path", ""))))
+    return events[-1]
+
+
+def _stable_promotion_since_s(*, artifacts_dir: Path, service: str, config_id: str) -> float | None:
+    """Return a stable gate start for the latest contiguous deploy segment of service+config_id."""
+    cfg = str(config_id or "").strip()
+    if not cfg:
+        return None
+    root = (Path(artifacts_dir) / "deployments" / "paper").expanduser().resolve()
+    if not root.exists():
+        return None
+
+    events: list[dict[str, Any]] = []
+    for ev_path in root.glob("**/deploy_event.json"):
+        try:
+            ev = json.loads(ev_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        rs = ev.get("restart", {}) if isinstance(ev.get("restart"), dict) else {}
+        svc = str(rs.get("service", "") or "").strip()
+        if svc != str(service).strip():
+            continue
+        cfg_id = str(((ev.get("what") or {}).get("config_id") or "")).strip()
+        ts = _parse_iso_to_epoch_s(str(ev.get("ts_utc", "") or ""))
+        if ts is None:
+            continue
+        events.append(
+            {
+                "ts_epoch_s": float(ts),
+                "config_id": str(cfg_id),
+                "path": str(ev_path),
+            }
+        )
+
+    if not events:
+        return None
+
+    events.sort(key=lambda it: (float(it.get("ts_epoch_s", 0.0) or 0.0), str(it.get("path", ""))))
+
+    last_idx: int | None = None
+    for i in range(len(events) - 1, -1, -1):
+        if str(events[i].get("config_id", "")).strip() == cfg:
+            last_idx = i
+            break
+    if last_idx is None:
+        return None
+
+    start_idx = int(last_idx)
+    while start_idx > 0:
+        prev_cfg = str(events[start_idx - 1].get("config_id", "")).strip()
+        if prev_cfg != cfg:
+            break
+        start_idx -= 1
+
+    try:
+        return float(events[start_idx].get("ts_epoch_s", 0.0) or 0.0)
+    except Exception:
+        return None
 
 
 def _promotion_rank_key(item: dict[str, Any]) -> tuple[float, float, float]:
@@ -720,9 +809,7 @@ def _compare_candidate_vs_incumbent(
 
     reasons: list[str] = []
     if cand_pf + 1e-9 < (inc_pf + float(min_pf_delta)):
-        reasons.append(
-            f"profit_factor regression: cand={cand_pf:.3f} < inc+delta={inc_pf + float(min_pf_delta):.3f}"
-        )
+        reasons.append(f"profit_factor regression: cand={cand_pf:.3f} < inc+delta={inc_pf + float(min_pf_delta):.3f}")
     if (cand_dd - inc_dd) > float(max_dd_regression_pct):
         reasons.append(
             f"drawdown regression: cand={cand_dd:.3f}% > inc+tol={inc_dd + float(max_dd_regression_pct):.3f}%"
@@ -826,6 +913,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--interval", default="", help="Main interval for sweep/replay (default: from effective YAML).")
     ap.add_argument("--candles-db", default="candles_dbs", help="Candle DB path (dir or glob).")
     ap.add_argument("--funding-db", default="candles_dbs/funding_rates.db", help="Funding DB path.")
+    ap.add_argument(
+        "--max-age-fail-hours",
+        type=float,
+        default=_env_float("AI_QUANT_FUNDING_MAX_AGE_FAIL_HOURS"),
+        help="Override checker fail-age threshold (hours) for stale funding symbols.",
+    )
+    ap.add_argument(
+        "--funding-max-stale-symbols",
+        type=int,
+        default=_env_int("AI_QUANT_FUNDING_MAX_STALE_SYMBOLS", default=0),
+        help="Allow this many stale symbols to continue as WARN instead of FAIL.",
+    )
 
     ap.add_argument("--gpu", action="store_true", help="Use GPU sweep (requires CUDA build/runtime).")
     ap.add_argument("--tpe", action="store_true", help="Use TPE Bayesian optimisation for GPU sweeps (requires --gpu).")
@@ -833,7 +932,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--slippage-stress", action="store_true", help="Enable slippage stress validation.")
     ap.add_argument("--concentration-checks", action="store_true", help="Enable concentration checks.")
     ap.add_argument("--sensitivity-checks", action="store_true", help="Enable sensitivity checks.")
-    ap.add_argument("--resume", action="store_true", help="Resume an existing run-id from artifacts (factory_run --resume).")
+    ap.add_argument(
+        "--resume", action="store_true", help="Resume an existing run-id from artifacts (factory_run --resume)."
+    )
 
     ap.add_argument("--no-deploy", action="store_true", help="Run factory only; do not deploy.")
     ap.add_argument(
@@ -844,17 +945,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--candidate-services",
         default="",
-        help=(
-            "Optional CSV service list for top-N candidate deployment "
-            "(e.g. svc_paper1,svc_paper2,svc_paper3)."
-        ),
+        help=("Optional CSV service list for top-N candidate deployment (e.g. svc_paper1,svc_paper2,svc_paper3)."),
     )
     ap.add_argument(
         "--candidate-yaml-paths",
         default="",
         help=(
-            "Optional CSV YAML path list for top-N candidate deployment "
-            "(same length/order as --candidate-services)."
+            "Optional CSV YAML path list for top-N candidate deployment (same length/order as --candidate-services)."
         ),
     )
     ap.add_argument(
@@ -871,7 +968,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Restart policy for deployment (default: auto).",
     )
     ap.add_argument("--service", default="openclaw-ai-quant-trader", help="systemd user service name for paper trader.")
-    ap.add_argument("--ws-service", default="openclaw-ai-quant-ws-sidecar", help="systemd user service name for WS sidecar.")
+    ap.add_argument(
+        "--ws-service", default="openclaw-ai-quant-ws-sidecar", help="systemd user service name for WS sidecar."
+    )
     ap.add_argument("--pause-file", default="", help="Optional kill-switch file path to pause trading during restart.")
     ap.add_argument(
         "--pause-mode",
@@ -879,9 +978,15 @@ def main(argv: list[str] | None = None) -> int:
         choices=["close_only", "halt_all"],
         help="Pause mode to write into pause file (default: close_only).",
     )
-    ap.add_argument("--leave-paused", action="store_true", help="Do not clear the pause file after a successful restart.")
-    ap.add_argument("--verify-sleep-s", type=float, default=2.0, help="Seconds to wait before verifying service health.")
-    ap.add_argument("--dry-run", action="store_true", help="Do not modify YAML or restart services; still runs factory.")
+    ap.add_argument(
+        "--leave-paused", action="store_true", help="Do not clear the pause file after a successful restart."
+    )
+    ap.add_argument(
+        "--verify-sleep-s", type=float, default=2.0, help="Seconds to wait before verifying service health."
+    )
+    ap.add_argument(
+        "--dry-run", action="store_true", help="Do not modify YAML or restart services; still runs factory."
+    )
     ap.add_argument(
         "--enable-livepaper-promotion",
         action="store_true",
@@ -903,9 +1008,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional CSV service=paper_db_path mapping for promotion gates.",
     )
     ap.add_argument("--promotion-min-trades", type=int, default=20, help="Gate: minimum CLOSE trades OR min-hours.")
-    ap.add_argument("--promotion-min-hours", type=float, default=24.0, help="Gate: minimum runtime hours OR min-trades.")
+    ap.add_argument(
+        "--promotion-min-hours", type=float, default=24.0, help="Gate: minimum runtime hours OR min-trades."
+    )
     ap.add_argument("--promotion-min-profit-factor", type=float, default=1.2, help="Gate: minimum paper profit factor.")
-    ap.add_argument("--promotion-max-drawdown-pct", type=float, default=10.0, help="Gate: maximum paper drawdown percent.")
+    ap.add_argument(
+        "--promotion-max-drawdown-pct", type=float, default=10.0, help="Gate: maximum paper drawdown percent."
+    )
     ap.add_argument(
         "--promotion-max-config-slippage-bps",
         type=float,
@@ -973,6 +1082,12 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             interval = "1h"
 
+    def _read_metadata(path: Path) -> dict[str, Any]:
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
     factory_argv: list[str] = [
         "--run-id",
         run_id,
@@ -988,6 +1103,12 @@ def main(argv: list[str] | None = None) -> int:
         str(args.candles_db),
         "--funding-db",
         str(args.funding_db),
+    ]
+    if args.max_age_fail_hours is not None:
+        factory_argv += ["--max-age-fail-hours", str(float(args.max_age_fail_hours))]
+    if args.funding_max_stale_symbols is not None and int(args.funding_max_stale_symbols) > 0:
+        factory_argv += ["--funding-max-stale-symbols", str(int(args.funding_max_stale_symbols))]
+    factory_argv += [
         "--sweep-spec",
         str(args.sweep_spec),
     ]
@@ -1018,6 +1139,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"sensitivity={int(bool(args.sensitivity_checks))} resume={int(bool(args.resume))}"
             ),
             f"`data` candles={_short_path(str(args.candles_db), parts=4)} funding={_short_path(str(args.funding_db), parts=4)}",
+            f"`funding` fail_age={_format_float(args.max_age_fail_hours, default='n/a', ndigits=1)} "
+            f"stale_allow={_format_float(args.funding_max_stale_symbols, default='0', ndigits=0)}",
             f"`deploy` ws={args.ws_service} restart={args.restart}",
             f"`paper targets` {', '.join([t.service for t in deploy_targets]) or 'none'}",
             (
@@ -1043,6 +1166,17 @@ def main(argv: list[str] | None = None) -> int:
 
     registry_db = default_registry_db_path(artifacts_root=artifacts_dir)
     run_dir = _query_run_dir(registry_db=registry_db, run_id=run_id)
+    run_meta = _read_metadata(run_dir / "run_metadata.json")
+    funding_signal = run_meta.get("funding_check_degraded")
+    if isinstance(funding_signal, dict) and str(funding_signal.get("status") or "") == "warn":
+        symbols = ",".join([str(s) for s in funding_signal.get("symbols", []) if str(s).strip()])
+        _send_discord(
+            target=str(args.discord_target),
+            message=(
+                f"⚠️ Factory WARN (funding data) • `{run_id}`  "
+                f"symbols={symbols or 'stale'}  allowed={funding_signal.get('allowed_symbols', 0)}"
+            ),
+        )
     report_path = run_dir / "reports" / "report.json"
     rep = json.loads(report_path.read_text(encoding="utf-8"))
     items = rep.get("items", []) if isinstance(rep, dict) else []
@@ -1067,20 +1201,24 @@ def main(argv: list[str] | None = None) -> int:
         "run_dir": str(run_dir),
         "selected": deployable[0].__dict__,
         "selected_candidates": [c.__dict__ for c in deployable],
-        "selected_targets": [{"slot": t.slot, "service": t.service, "yaml_path": str(t.yaml_path)} for t in deploy_targets],
+        "selected_targets": [
+            {"slot": t.slot, "service": t.service, "yaml_path": str(t.yaml_path)} for t in deploy_targets
+        ],
         "effective_config_path": str(effective_cfg_path),
         "interval": str(interval),
         "deployed": False,
         "deployments": [],
     }
-    (run_dir / "reports" / "selection.json").write_text(json.dumps(selection, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (run_dir / "reports" / "selection.json").write_text(
+        json.dumps(selection, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
     if bool(args.no_deploy):
         _send_discord(
             target=str(args.discord_target),
             message=(
                 f"✅ Factory OK (no-deploy) • `{run_id}` "
-                f"`selected` {','.join([c.config_id[:12] for c in deployable[:len(deploy_targets)]])}"
+                f"`selected` {','.join([c.config_id[:12] for c in deployable[: len(deploy_targets)]])}"
             ),
         )
         return 0
@@ -1113,9 +1251,7 @@ def main(argv: list[str] | None = None) -> int:
         diff_lines = _diff_yaml_summaries(prev_summary, next_summary)
         selection_lines = [
             f"🎯 Selection • `{run_id}` • slot={target.slot}",
-            (
-                f"`target` {target.service}  `rank` {i + 1}/{len(deployable)}"
-            ),
+            (f"`target` {target.service}  `rank` {i + 1}/{len(deployable)}"),
             (
                 f"`config` `{cand.config_id[:12]}`  "
                 f"`pf` {_format_float(cand.profit_factor, ndigits=3)}  "
@@ -1134,15 +1270,10 @@ def main(argv: list[str] | None = None) -> int:
         _send_discord_chunks(target=str(args.discord_target), lines=selection_lines)
 
         out_dir = (
-            artifacts_dir
-            / "deployments"
-            / "paper"
-            / str(target.service)
-            / f"{_utc_compact()}_{cand.config_id[:12]}"
+            artifacts_dir / "deployments" / "paper" / str(target.service) / f"{_utc_compact()}_{cand.config_id[:12]}"
         ).resolve()
         reason = (
-            f"{reason_base}; slot={target.slot}; target={target.service}; "
-            f"rank={i + 1}; config={cand.config_id[:12]}"
+            f"{reason_base}; slot={target.slot}; target={target.service}; rank={i + 1}; config={cand.config_id[:12]}"
         )
         try:
             deploy_dir = deploy_paper_config(
@@ -1232,7 +1363,9 @@ def main(argv: list[str] | None = None) -> int:
 
     selection["deployed"] = bool(deployed_any)
     selection["deployments"] = deployments
-    (run_dir / "reports" / "selection.json").write_text(json.dumps(selection, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (run_dir / "reports" / "selection.json").write_text(
+        json.dumps(selection, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
     if bool(args.enable_livepaper_promotion):
         promotion: dict[str, Any] = {
@@ -1249,10 +1382,7 @@ def main(argv: list[str] | None = None) -> int:
             promotion["reason"] = "missing livepaper target (--livepaper-service / --livepaper-yaml-path)"
             _send_discord(
                 target=str(args.discord_target),
-                message=(
-                    f"⏭️ Promotion skipped • `{run_id}`: "
-                    f"{promotion['reason']}"
-                ),
+                message=(f"⏭️ Promotion skipped • `{run_id}`: {promotion['reason']}"),
             )
         else:
             gate_cfg = GateConfig(
@@ -1270,7 +1400,9 @@ def main(argv: list[str] | None = None) -> int:
             explicit_db = _parse_service_path_map(str(args.paper_db_map))
             gate_rows: list[dict[str, Any]] = []
             for target in deploy_targets:
-                latest = _latest_paper_deploy_event_for_service(artifacts_dir=artifacts_dir, service=str(target.service))
+                latest = _latest_paper_deploy_event_for_service(
+                    artifacts_dir=artifacts_dir, service=str(target.service)
+                )
                 if latest is None:
                     gate_rows.append(
                         {
@@ -1284,7 +1416,13 @@ def main(argv: list[str] | None = None) -> int:
                 ev = latest.get("event", {}) if isinstance(latest.get("event"), dict) else {}
                 config_id = str(((ev.get("what") or {}).get("config_id") or "")).strip()
                 ts_utc = str(ev.get("ts_utc", "") or "").strip()
-                since_s = _parse_iso_to_epoch_s(ts_utc)
+                deploy_since_s = _parse_iso_to_epoch_s(ts_utc)
+                stable_since_s = _stable_promotion_since_s(
+                    artifacts_dir=artifacts_dir,
+                    service=str(target.service),
+                    config_id=config_id,
+                )
+                since_s = stable_since_s if stable_since_s is not None else deploy_since_s
                 paper_db = _paper_db_for_service(str(target.service), explicit_db)
                 if not config_id or since_s is None or paper_db is None:
                     reasons: list[str] = []
@@ -1300,6 +1438,7 @@ def main(argv: list[str] | None = None) -> int:
                             "ok": False,
                             "config_id": config_id,
                             "deploy_ts_utc": ts_utc,
+                            "since_epoch_s": None,
                             "reasons": reasons,
                             "metrics": {},
                         }
@@ -1315,6 +1454,7 @@ def main(argv: list[str] | None = None) -> int:
                             "config_id": config_id,
                             "deploy_ts_utc": ts_utc,
                             "paper_db": str(paper_db),
+                            "since_epoch_s": float(since_s),
                             "reasons": [f"registry lookup failed: {type(e).__name__}: {e}"],
                             "metrics": {},
                         }
@@ -1333,6 +1473,7 @@ def main(argv: list[str] | None = None) -> int:
                         "config_id": config_id,
                         "deploy_ts_utc": ts_utc,
                         "paper_db": str(paper_db),
+                        "since_epoch_s": float(since_s),
                         "reasons": list(gate.reasons),
                         "metrics": dict(gate.metrics),
                         "deploy_event_path": str(latest.get("path", "")),
@@ -1377,7 +1518,9 @@ def main(argv: list[str] | None = None) -> int:
                 "metrics": {},
                 "deploy_event_path": "",
             }
-            incumbent_latest = _latest_paper_deploy_event_for_service(artifacts_dir=artifacts_dir, service=str(live_service))
+            incumbent_latest = _latest_paper_deploy_event_for_service(
+                artifacts_dir=artifacts_dir, service=str(live_service)
+            )
             incumbent_since_s: float | None = None
             incumbent_cfg_id = str(live_prev_cfg or "").strip()
             incumbent_yaml_text = str(live_prev_text or "")
@@ -1389,9 +1532,18 @@ def main(argv: list[str] | None = None) -> int:
                 incumbent_cfg_evt = str(((ev_inc.get("what") or {}).get("config_id") or "")).strip()
                 if incumbent_cfg_evt:
                     incumbent_cfg_id = incumbent_cfg_evt
+                incumbent_stable_since_s = _stable_promotion_since_s(
+                    artifacts_dir=artifacts_dir,
+                    service=str(live_service),
+                    config_id=str(incumbent_cfg_id),
+                )
+                if incumbent_stable_since_s is not None:
+                    incumbent_since_s = float(incumbent_stable_since_s)
                 if incumbent_cfg_id:
                     try:
-                        incumbent_yaml_text = _lookup_config_yaml_text(registry_db=registry_db, config_id=incumbent_cfg_id)
+                        incumbent_yaml_text = _lookup_config_yaml_text(
+                            registry_db=registry_db, config_id=incumbent_cfg_id
+                        )
                     except Exception:
                         # Keep live YAML text fallback when registry history is unavailable.
                         incumbent_yaml_text = str(live_prev_text or "")
@@ -1520,10 +1672,7 @@ def main(argv: list[str] | None = None) -> int:
                     promotion["reason"] = "livepaper already running selected config"
                     _send_discord(
                         target=str(args.discord_target),
-                        message=(
-                            f"✅ Promotion no-op • `{run_id}` "
-                            f"service={live_service} config={chosen_cfg[:12]}"
-                        ),
+                        message=(f"✅ Promotion no-op • `{run_id}` service={live_service} config={chosen_cfg[:12]}"),
                     )
                 elif chosen_cfg:
                     chosen_yaml = _lookup_config_yaml_text(registry_db=registry_db, config_id=chosen_cfg)
@@ -1581,7 +1730,9 @@ def main(argv: list[str] | None = None) -> int:
                     if not bool(args.dry_run):
                         live_target, live_label = _service_discord_route(str(live_service))
                         if live_target:
-                            chosen_metrics = chosen.get("metrics", {}) if isinstance(chosen.get("metrics"), dict) else {}
+                            chosen_metrics = (
+                                chosen.get("metrics", {}) if isinstance(chosen.get("metrics"), dict) else {}
+                            )
                             user_lines_live = _user_config_change_lines(
                                 run_id=str(run_id),
                                 lane_label=str(live_label or live_service),
@@ -1611,9 +1762,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     health_services = _health_service_list(str(args.service))
-    snapshot_lines = [f"🩺 Health Snapshot • `{run_id}`"] + [
-        _service_snapshot_line(svc) for svc in health_services
-    ]
+    snapshot_lines = [f"🩺 Health Snapshot • `{run_id}`"] + [_service_snapshot_line(svc) for svc in health_services]
     _send_discord_chunks(target=str(args.discord_target), lines=snapshot_lines)
     return 0
 
