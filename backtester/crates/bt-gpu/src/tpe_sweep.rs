@@ -155,7 +155,8 @@ pub fn run_tpe_sweep(
         .iter()
         .position(|s| s == "BTC")
         .or_else(|| symbols.iter().position(|s| s == "BTCUSDT"))
-        .unwrap_or(0) as u32;
+        .map(|idx| idx as u32)
+        .unwrap_or(u32::MAX);
 
     let raw = raw_candles::prepare_raw_candles(candles, &symbols);
     let num_bars = raw.num_bars as u32;
@@ -698,6 +699,7 @@ fn evaluate_mixed_batch_arena(
             &gpu_configs,
             initial_balance,
             num_symbols,
+            btc_sym_idx,
             num_bars,
             max_sub_per_bar,
             sub_candles_gpu,
@@ -813,6 +815,7 @@ fn dispatch_trade_arena(
     gpu_configs: &[buffers::GpuComboConfig],
     initial_balance: f32,
     num_symbols: u32,
+    btc_sym_idx: u32,
     num_bars: u32,
     max_sub_per_bar: u32,
     sub_candles_gpu: Option<&CudaSlice<buffers::GpuRawCandle>>,
@@ -867,6 +870,7 @@ fn dispatch_trade_arena(
             num_combos,
             num_symbols,
             num_bars,
+            btc_sym_idx,
             chunk_start,
             chunk_end,
             initial_balance_bits: initial_balance.to_bits(),

@@ -21,8 +21,9 @@ pub enum Signal {
 }
 
 /// Confidence tier for entry and add filters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum Confidence {
+    #[default]
     Low = 0,
     Medium = 1,
     High = 2,

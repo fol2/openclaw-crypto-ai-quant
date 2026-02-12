@@ -122,6 +122,8 @@ pub fn into_sim_state(
             tp1_taken: ip.tp1_taken,
             open_time_ms: ip.open_time_ms,
             last_add_time_ms: ip.last_add_time_ms,
+            mae_usd: 0.0,
+            mfe_usd: 0.0,
         };
         positions.insert(ip.symbol, pos);
     }

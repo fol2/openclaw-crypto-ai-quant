@@ -165,7 +165,7 @@ enum SweepParityMode {
 #[derive(Parser)]
 struct ReplayArgs {
     /// Path to the strategy YAML config
-    #[arg(long, default_value = "strategy_overrides.yaml")]
+    #[arg(long, default_value = "config/strategy_overrides.yaml")]
     config: String,
 
     /// Path to the SQLite candle database.
@@ -293,7 +293,7 @@ struct ReplayArgs {
 #[derive(Parser)]
 struct SweepArgs {
     /// Path to the strategy YAML config (base config for sweep)
-    #[arg(long, default_value = "strategy_overrides.yaml")]
+    #[arg(long, default_value = "config/strategy_overrides.yaml")]
     config: String,
 
     /// Path to the SQLite candle database.
@@ -424,7 +424,7 @@ struct SweepArgs {
 #[derive(Parser)]
 struct DumpArgs {
     /// Path to the strategy YAML config
-    #[arg(long, default_value = "strategy_overrides.yaml")]
+    #[arg(long, default_value = "config/strategy_overrides.yaml")]
     config: String,
 
     /// Path to the SQLite candle database.
@@ -2137,6 +2137,8 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
         exit_candles.as_ref(),
         entry_candles.as_ref(),
         funding_rates.as_ref(),
+        from_ts,
+        to_ts,
     );
     let sweep_elapsed = sweep_start.elapsed();
 
@@ -2561,6 +2563,8 @@ mod tests {
             entry_atr: 0.0,
             leverage: 1.0,
             margin_used: 0.0,
+            mae_usd: 0.0,
+            mfe_usd: 0.0,
         }
     }
 
@@ -2657,6 +2661,8 @@ mod tests {
             entry_atr: 0.0,
             leverage: 1.0,
             margin_used: 0.0,
+            mae_usd: 0.0,
+            mfe_usd: 0.0,
         }
     }
 
