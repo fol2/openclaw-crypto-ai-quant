@@ -513,6 +513,8 @@ pub fn run_simulation(
                     tp1_taken: false,
                     open_time_ms: cand.ts,
                     last_add_time_ms: cand.ts,
+                    mae_usd: 0.0,
+                    mfe_usd: 0.0,
                 };
                 state.positions.insert(cand.symbol.clone(), pos);
                 entries_this_bar += 1;
@@ -536,6 +538,7 @@ pub fn run_simulation(
                     entry_atr: cand.atr,
                     leverage,
                     margin_used,
+                    ..Default::default()
                 });
             }
         }
@@ -748,6 +751,7 @@ pub fn run_simulation(
                                         entry_atr: pos.entry_atr,
                                         leverage: pos.leverage,
                                         margin_used: pos.margin_used,
+                                        ..Default::default()
                                     });
                                 }
                             }
@@ -1120,14 +1124,15 @@ fn apply_exit(
             entry_atr: pos.entry_atr,
             leverage: pos.leverage,
             margin_used: pos.margin_used * partial_pct,
+            ..Default::default()
         });
 
         // Reduce position in place
         if let Some(p) = state.positions.get_mut(symbol) {
             p.reduce_by_fraction(partial_pct);
-            if exit.reason.contains("Partial TP") {
-                p.tp1_taken = true;
-            }
+            // Partial exits represent TP1 in the current engine contract.
+            // Do not couple this state transition to human-readable reason text.
+            p.tp1_taken = true;
         }
     } else {
         // Full exit
@@ -1166,6 +1171,7 @@ fn apply_exit(
             entry_atr: pos.entry_atr,
             leverage: pos.leverage,
             margin_used: pos.margin_used,
+            ..Default::default()
         });
 
         state.positions.remove(symbol);
@@ -1347,6 +1353,7 @@ fn try_pyramid(
         entry_atr: atr,
         leverage,
         margin_used: add_margin,
+        ..Default::default()
     });
 
     // Update position
@@ -1587,6 +1594,8 @@ fn execute_sub_bar_entry(
         tp1_taken: false,
         open_time_ms: ts,
         last_add_time_ms: ts,
+        mae_usd: 0.0,
+        mfe_usd: 0.0,
     };
     state.positions.insert(sym.to_string(), pos);
 
@@ -1609,6 +1618,7 @@ fn execute_sub_bar_entry(
         entry_atr: atr,
         leverage,
         margin_used,
+        ..Default::default()
     });
 
     true
@@ -1778,5 +1788,81 @@ mod tests {
         };
         // No indicators → 50%
         assert!((compute_market_breadth(&state) - 50.0).abs() < 1e-9);
+    }
+
+    fn make_state_with_open_long(symbol: &str) -> SimState {
+        let mut positions = FxHashMap::default();
+        positions.insert(
+            symbol.to_string(),
+            Position {
+                symbol: symbol.to_string(),
+                pos_type: PositionType::Long,
+                entry_price: 100.0,
+                size: 1.0,
+                confidence: Confidence::High,
+                entry_atr: 1.0,
+                entry_adx_threshold: 20.0,
+                trailing_sl: None,
+                leverage: 3.0,
+                margin_used: 33.333_333,
+                adds_count: 0,
+                tp1_taken: false,
+                open_time_ms: 0,
+                last_add_time_ms: 0,
+                mae_usd: 0.0,
+                mfe_usd: 0.0,
+            },
+        );
+
+        SimState {
+            balance: 1_000.0,
+            positions,
+            indicators: FxHashMap::default(),
+            ema_slow_history: FxHashMap::default(),
+            bar_counts: FxHashMap::default(),
+            last_close: FxHashMap::default(),
+            trades: vec![],
+            signals: vec![],
+            equity_curve: vec![],
+            gate_stats: GateStats::default(),
+        }
+    }
+
+    #[test]
+    fn test_apply_exit_partial_take_profit_marks_tp1_taken() {
+        let symbol = "BTC";
+        let mut state = make_state_with_open_long(symbol);
+        let snap = make_minimal_snap(105.0, 1_700_000_000_000);
+        let exit = ExitResult::partial_exit("Take Profit (Partial)", 105.0, 0.5);
+
+        apply_exit(&mut state, symbol, &exit, &snap, snap.t);
+
+        let pos = state
+            .positions
+            .get(symbol)
+            .expect("position should remain after partial exit");
+        assert!(pos.tp1_taken);
+        assert!((pos.size - 0.5).abs() < 1e-12);
+        assert_eq!(state.trades.len(), 1);
+        assert_eq!(state.trades[0].action, "REDUCE_LONG");
+    }
+
+    #[test]
+    fn test_apply_exit_partial_marks_tp1_taken_without_reason_match() {
+        let symbol = "ETH";
+        let mut state = make_state_with_open_long(symbol);
+        let snap = make_minimal_snap(103.0, 1_700_000_000_001);
+        let exit = ExitResult::partial_exit("Risk Trim", 103.0, 0.25);
+
+        apply_exit(&mut state, symbol, &exit, &snap, snap.t);
+
+        let pos = state
+            .positions
+            .get(symbol)
+            .expect("position should remain after partial exit");
+        assert!(pos.tp1_taken);
+        assert!((pos.size - 0.75).abs() < 1e-12);
+        assert_eq!(state.trades.len(), 1);
+        assert_eq!(state.trades[0].action, "REDUCE_LONG");
     }
 }

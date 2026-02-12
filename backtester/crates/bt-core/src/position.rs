@@ -48,6 +48,12 @@ pub struct Position {
     pub tp1_taken: bool,
     pub open_time_ms: i64,
     pub last_add_time_ms: i64,
+    /// Most adverse excursion (minimum unrealised PnL) observed while the position was open.
+    /// Stored as a signed USD value (typically <= 0.0).
+    pub mae_usd: f64,
+    /// Most favourable excursion (maximum unrealised PnL) observed while the position was open.
+    /// Stored as a signed USD value (typically >= 0.0).
+    pub mfe_usd: f64,
 }
 
 impl Position {
@@ -115,13 +121,24 @@ impl Position {
         self.adds_count += 1;
         self.last_add_time_ms = time_ms;
     }
+
+    /// Update MAE/MFE based on the current mark price.
+    pub fn update_excursions(&mut self, current_price: f64) {
+        let u = self.profit_usd(current_price);
+        if u > self.mfe_usd {
+            self.mfe_usd = u;
+        }
+        if u < self.mae_usd {
+            self.mae_usd = u;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Trade record (log entry for each trade action)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TradeRecord {
     pub timestamp_ms: i64,
     pub symbol: String,
@@ -139,6 +156,12 @@ pub struct TradeRecord {
     pub entry_atr: f64,
     pub leverage: f64,
     pub margin_used: f64,
+    /// Most adverse excursion (minimum unrealised PnL) observed while the position was open.
+    /// Only meaningful for close/reduce records.
+    pub mae_usd: f64,
+    /// Most favourable excursion (maximum unrealised PnL) observed while the position was open.
+    /// Only meaningful for close/reduce records.
+    pub mfe_usd: f64,
 }
 
 impl TradeRecord {
@@ -198,6 +221,8 @@ mod tests {
             tp1_taken: false,
             open_time_ms: 0,
             last_add_time_ms: 0,
+            mae_usd: 0.0,
+            mfe_usd: 0.0,
         }
     }
 
@@ -276,6 +301,8 @@ mod tests {
             entry_atr: 1.0,
             leverage: 3.0,
             margin_used: 33.33,
+            mae_usd: 0.0,
+            mfe_usd: 0.0,
         };
         assert!(tr.is_close());
         assert!(!tr.is_open());

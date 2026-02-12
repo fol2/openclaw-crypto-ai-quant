@@ -274,6 +274,7 @@ _DEFAULT_STRATEGY_CONFIG = {
         "enable_partial_tp": True,
         "tp_partial_pct": 0.5,
         "tp_partial_min_notional_usd": 10.0,
+        "tp_partial_atr_mult": 0.0,  # 0 = use tp_atr_mult (same level). >0 = separate partial TP level.
         "trailing_start_atr": 1.0,
         "trailing_distance_atr": 0.8,
         # v5.037: Make SSF and breakeven configurable (defaults preserve prior behavior).
@@ -1131,13 +1132,13 @@ class PaperTrader:
         ensure_db()
         conn = sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT_S)
         cursor = conn.cursor()
-        
+
         # Get latest balance
         cursor.execute("SELECT balance FROM trades ORDER BY id DESC LIMIT 1")
         row = cursor.fetchone()
         if row:
             self.balance = row[0]
-        
+
         # Load all currently open positions (even if the symbol isn't in the configured watchlist).
         cursor.execute(
             """
@@ -1417,7 +1418,7 @@ class PaperTrader:
         timestamp = timestamp_override or datetime.datetime.now().isoformat()
         notional = price * size
         meta_json = _json_dumps_safe(meta) if meta else None
-        
+
         cursor.execute('''
             INSERT INTO trades (timestamp, symbol, type, action, price, size, notional, reason, confidence, pnl, fee_usd, fee_rate, balance, entry_atr, leverage, margin_used, meta_json)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1457,7 +1458,7 @@ class PaperTrader:
 
         # Calculate Equity (mark-to-market)
         equity = self.get_live_balance()
-        
+
         # --- DIRECT NOTIFICATION (CANTONESE) ---
         action_map = {
             "OPEN": "開倉",
@@ -1475,7 +1476,7 @@ class PaperTrader:
             emoji = "💰" if pnl > 0 else "🛑"
         elif action == "FUNDING":
             emoji = "💸"
-        
+
         # Translate Reason for the notification
         reason_map = {
             "Signal Trigger": "信號觸發",
@@ -1513,9 +1514,9 @@ class PaperTrader:
             rate_str = "" if fee_rate is None else f" ({fee_rate*100:.4f}%)"
             msg += f"• 手續費 (Fee): `${fee_usd:,.4f}`{rate_str}\n"
         msg += f"• 原因: *{reason_hk}*\n"
-        if action in {"CLOSE", "REDUCE"}: 
+        if action in {"CLOSE", "REDUCE"}:
             msg += f"• 損益 (PnL): **${pnl:,.2f}**\n"
-        
+
         msg += f"• **淨值 (Equity, est.):** `${equity:,.2f}`\n"
         msg += f"• **現金 (Cash, realized):** `${self.balance:,.2f}`"
 
@@ -1526,9 +1527,9 @@ class PaperTrader:
                 timeout_s = 6.0
             timeout_s = max(1.0, min(30.0, timeout_s))
             subprocess.run([
-                "openclaw", "message", "send", 
-                "--channel", "discord", 
-                "--target", DISCORD_CHANNEL, 
+                "openclaw", "message", "send",
+                "--channel", "discord",
+                "--target", DISCORD_CHANNEL,
                 "--message", msg
             ], capture_output=True, check=True, timeout=timeout_s)
         except Exception as e:
@@ -1683,7 +1684,7 @@ class PaperTrader:
                 interval=INTERVAL,
                 candle_limit=LOOKBACK_HOURS + 50,
             )
-            
+
             unrealized_pnl = 0.0
             est_close_fees = 0.0
             fee_rate = _effective_fee_rate()
@@ -1920,7 +1921,7 @@ class PaperTrader:
         if sl_price <= 0:
             sl_mult = float(trade_cfg.get("sl_atr_mult", 1.5))
             sl_price = entry - (current_atr * sl_mult) if pos_type == "LONG" else entry + (current_atr * sl_mult)
-        
+
         dist_to_sl_atr = abs(mark - sl_price) / current_atr if current_atr > 0 else 0
         if dist_to_sl_atr < 0.5:
             return False
@@ -2259,8 +2260,8 @@ class PaperTrader:
                 INSERT INTO signals (timestamp, symbol, signal, confidence, price, rsi, ema_fast, ema_slow, meta_json)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
-                datetime.datetime.now().isoformat(), 
-                symbol, signal, confidence, price, 
+                datetime.datetime.now().isoformat(),
+                symbol, signal, confidence, price,
                 indicators.get('RSI', 0) if indicators is not None else 0,
                 indicators.get('EMA_fast', 0) if indicators is not None else 0,
                 indicators.get('EMA_slow', 0) if indicators is not None else 0,
@@ -2273,7 +2274,7 @@ class PaperTrader:
         if pos:
             is_flip = (pos['type'] == 'LONG' and signal == 'SELL') or \
                       (pos['type'] == 'SHORT' and signal == 'BUY')
-            
+
             if is_flip:
                 audit = None
                 if indicators is not None:
@@ -2717,7 +2718,7 @@ class PaperTrader:
                 except Exception:
                     pass
         adx_exhaustion_lt = float(max(0.0, adx_exhaustion_lt))
-        
+
         # Exits should generally still run during high-volatility candles (more realistic).
         # If you want to freeze exits during anomaly flags, toggle this in YAML:
         #   global.filters.block_exits_on_anomaly: true
@@ -2731,11 +2732,11 @@ class PaperTrader:
 
         entry = pos['entry_price']
         atr = pos.get('entry_atr', 0.0)
-        
+
         # Fallback for legacy trades with no ATR
         if atr <= 0:
             atr = entry * 0.005 # Default to 0.5% volatility if unknown
-            
+
         # Optional glitch guardrail (defaults off): blocks exits if price is *extremely* far from entry.
         # Prefer using WS mids/BBO for robustness instead of freezing exits by default.
         if bool(trade_cfg.get("block_exits_on_extreme_dev", False)):
@@ -2745,10 +2746,10 @@ class PaperTrader:
                 return
 
         pos_type = pos['type']
-        
+
         # 1. Standard ATR-based Stop Loss
         current_sl_atr_mult = sl_atr_mult
-        
+
         # v3.3: ADX Slope-Adjusted Stop (ASE)
         # If trend is weakening (ADX slope < 0) and position is underwater, tighten stop by 20%
         is_underwater = (pos_type == 'LONG' and current_price < entry) or (pos_type == 'SHORT' and current_price > entry)
@@ -2761,14 +2762,14 @@ class PaperTrader:
         is_tailwind = (pos_type == 'LONG' and funding_rate < 0) or (pos_type == 'SHORT' and funding_rate > 0)
         if is_tailwind and abs(funding_rate) > 0.00005:
             current_sl_atr_mult *= 1.2
-            
+
         # v5.016: ADX-Adaptive Stop Expansion (DASE)
         adx_val = indicators.get('ADX', 0) if indicators is not None else 0
         if adx_val > 40.0:
             px_delta_atr = abs(current_price - entry) / atr if atr > 0 else 0
             if px_delta_atr > 0.5:
                 current_sl_atr_mult *= 1.15
-        
+
         # v5.019: 強趨勢止損保護 (Stop Loss Buffer - SLB)
         # 如果 ADX > 45 (進入飽和/強趨勢區)，將整體止損空間放寬 10%。
         # 配合 DASE，提升喺極端波動（插針）中嘅生存率。
@@ -2782,7 +2783,7 @@ class PaperTrader:
             min_trailing_dist = 0.7
 
         sl_price = entry - (atr * current_sl_atr_mult) if pos_type == 'LONG' else entry + (atr * current_sl_atr_mult)
-        
+
         # 1.1 Breakeven Stop (configurable)
         be_enabled = bool(trade_cfg.get("enable_breakeven_stop", True))
         try:
@@ -2801,12 +2802,12 @@ class PaperTrader:
             else:
                 if (entry - current_price) >= (atr * be_start_atr):
                     sl_price = min(sl_price, entry - (atr * be_buffer_atr))
-        
+
         # 2. Trailing Stop Logic (v3.1 Optimization)
         # Use tighter trailing distance when in high profit or when trend weakens
         effective_trailing_dist = trailing_distance_atr
         profit_atr = (current_price - entry) / atr if pos_type == 'LONG' else (entry - current_price) / atr
-        
+
         # v5.015: 波動率緩衝移動止損 (Volatility-Buffered Trailing Stop)
         # 如果 bb_width_ratio > 1.2 (代表波動率正在顯著擴張)，放寬移動止損距離 25%，減少被插針掃出的機會。
         if bool(trade_cfg.get("enable_vol_buffered_trailing", True)) and indicators is not None:
@@ -2825,12 +2826,12 @@ class PaperTrader:
             adx_val = indicators.get('ADX', 0) if indicators is not None else 0
             adx_slope = indicators.get('ADX_slope', 0) if indicators is not None else 0
             atr_slope = indicators.get('ATR_slope', 0) if indicators is not None else 0
-            
+
             if adx_val > 35 and adx_slope > 0:
                 tighten_mult = 1.0 # 不收緊
             elif atr_slope > 0.0:
                 tighten_mult = 0.75
-            
+
             effective_trailing_dist = trailing_distance_atr * tighten_mult
         elif indicators is not None and indicators.get('ADX', 50) < 25:
              effective_trailing_dist = trailing_distance_atr * 0.7 # Tighten by 30% if trend fades
@@ -2855,6 +2856,14 @@ class PaperTrader:
         tp_mult = dynamic_tp_mult or tp_atr_mult
         tp_price = entry + (atr * tp_mult) if pos_type == 'LONG' else entry - (atr * tp_mult)
 
+        # Separate partial TP level (when configured). 0 = use tp_price (legacy).
+        tp_partial_atr_mult_val = float(trade_cfg.get("tp_partial_atr_mult", 0))
+        tp1_taken = int(pos.get("tp1_taken") or 0)
+        if tp_partial_atr_mult_val > 0 and tp1_taken == 0:
+            tp_check_price = entry + (atr * tp_partial_atr_mult_val) if pos_type == 'LONG' else entry - (atr * tp_partial_atr_mult_val)
+        else:
+            tp_check_price = tp_price
+
         # 4. Smart Exits (v2.8 Refactor)
         smart_exit_reason = None
         if indicators is not None:
@@ -2863,7 +2872,7 @@ class PaperTrader:
             ema_m = indicators.get('EMA_macro', 0)
             adx = indicators.get('ADX', 0)
             rsi = indicators.get('RSI', 50)
-            
+
             # Trend Breakdown (v2.5) / v4.0: Trend Breakdown Buffer (TBB)
             # Relax the EMA cross exit if the cross is very shallow (< 0.1%) and ADX is still strong (> 25).
             ema_dev = abs(ema_f - ema_s) / ema_s if ema_s > 0 else 0
@@ -2880,7 +2889,7 @@ class PaperTrader:
                     smart_exit_reason = "Trend Breakdown (EMA Cross)"
                 else:
                     smart_exit_reason = f"Trend Exhaustion (ADX < {adx_exhaustion_lt:g})"
-            
+
             # EMA Macro Breakdown (v2.6)
             # Only enforce if macro alignment is required by config.
             # If counter-trend entries are allowed, we shouldn't exit just because it's counter-trend.
@@ -2906,7 +2915,7 @@ class PaperTrader:
                 is_headwind = (pos_type == 'LONG' and funding_rate > 0) or (pos_type == 'SHORT' and funding_rate < 0)
                 if is_headwind:
                     price_diff_atr = abs(current_price - entry) / (atr or 1.0)
-                    
+
                     # v4.1: Adaptive Funding Ladder (AFL) - More granular sensitivity
                     if abs(funding_rate) > 0.0001: # Extreme funding (> 0.01%/hr)
                         headwind_threshold = 0.15
@@ -2921,13 +2930,13 @@ class PaperTrader:
                         headwind_threshold = 0.95
                     else:
                         headwind_threshold = 0.80
-                    
+
                     # v3.0: Volatility-Adjusted Sensitivity
                     # If current volatility (ATR) is higher than entry volatility, tighten leash
                     current_atr = indicators.get('ATR', atr)
                     if current_atr > (atr * 1.2):
                         headwind_threshold *= 0.6 # Reduce threshold by 40% if vol expands against us
-                    
+
                     # v3.2/v3.7: Time-Decay Headwind (TDH) with Floor
                     open_ts = pos.get("open_timestamp")
                     if open_ts:
@@ -2940,12 +2949,12 @@ class PaperTrader:
                                 duration_hrs = (datetime.datetime.now() - open_dt).total_seconds() / 3600
                             else:
                                 duration_hrs = (datetime.datetime.now(datetime.timezone.utc) - open_dt).total_seconds() / 3600
-                            
+
                             if duration_hrs > 1.0: # Start decay after 1 hour
                                 # v3.7: Extend window to 12h and add 0.35 ATR floor
-                                decay_factor = max(0.0, 1.0 - (duration_hrs - 1.0) / 11.0) 
+                                decay_factor = max(0.0, 1.0 - (duration_hrs - 1.0) / 11.0)
                                 headwind_threshold = max(0.35, headwind_threshold * decay_factor)
-                            
+
                             # v5.003: Trend Loyalty Funding Buffer (TLFB)
                             # 如果趨勢排列 (EMA Fast/Slow) 仍然正確且 ADX > 25，
                             # 則將 Funding Headwind 門檻保底設為 0.75 ATR，無視時間衰減。
@@ -2970,7 +2979,7 @@ class PaperTrader:
                         headwind_threshold *= 1.5
                         # v3.7: MFE Floor - 只要動量仲改善緊，起碼留 0.5 ATR 空間
                         headwind_threshold = max(0.50, headwind_threshold)
-                    
+
                     # v3.7: ADX-Boosted Funding Threshold (ABF)
                     # 如果趨勢極強 (ADX > 35)，放寬 Funding 離場閾值 40%
                     adx = indicators.get('ADX', 0)
@@ -3102,7 +3111,7 @@ class PaperTrader:
                 p_macd_h = indicators.get('prev_MACD_hist', 0)
                 pp_macd_h = indicators.get('prev2_MACD_hist', 0)
                 ppp_macd_h = indicators.get('prev3_MACD_hist', 0)
-                
+
                 is_diverging = False
                 if pos_type == 'LONG':
                     if macd_h < p_macd_h < pp_macd_h < ppp_macd_h:
@@ -3110,7 +3119,7 @@ class PaperTrader:
                 else:
                     if macd_h > p_macd_h > pp_macd_h > ppp_macd_h:
                         is_diverging = True
-                
+
                 if is_diverging:
                     smart_exit_reason = f"MACD Persistent Divergence (Profit: {profit_atr:.2f} ATR)"
 
@@ -3209,9 +3218,9 @@ class PaperTrader:
                         },
                     },
                 )
-            elif current_price >= tp_price:
+            elif current_price >= tp_check_price:
                 # Take-profit ladder (partial TP once, then trail the remainder).
-                if bool(trade_cfg.get("enable_partial_tp", True)) and int(pos.get("tp1_taken") or 0) == 0:
+                if bool(trade_cfg.get("enable_partial_tp", True)) and tp1_taken == 0:
                     try:
                         pct = float(trade_cfg.get("tp_partial_pct", 0.5))
                     except Exception:
@@ -3268,9 +3277,12 @@ class PaperTrader:
                                 self.upsert_position_state(symbol)
                             return
 
-                # If partial TP was already taken, don't auto-close remainder at the same TP level.
-                if bool(trade_cfg.get("enable_partial_tp", True)) and int(pos.get("tp1_taken") or 0) == 1:
-                    return
+                # If partial TP was already taken:
+                # - tp_partial_atr_mult > 0: fall through to full TP close.
+                # - tp_partial_atr_mult == 0: hold (trailing manages remainder). Legacy behavior.
+                if bool(trade_cfg.get("enable_partial_tp", True)) and tp1_taken == 1:
+                    if tp_partial_atr_mult_val <= 0:
+                        return
 
                 audit = None
                 if indicators is not None:
@@ -3327,8 +3339,8 @@ class PaperTrader:
                         },
                     },
                 )
-            elif current_price <= tp_price:
-                if bool(trade_cfg.get("enable_partial_tp", True)) and int(pos.get("tp1_taken") or 0) == 0:
+            elif current_price <= tp_check_price:
+                if bool(trade_cfg.get("enable_partial_tp", True)) and tp1_taken == 0:
                     try:
                         pct = float(trade_cfg.get("tp_partial_pct", 0.5))
                     except Exception:
@@ -3384,8 +3396,9 @@ class PaperTrader:
                                 self.upsert_position_state(symbol)
                             return
 
-                if bool(trade_cfg.get("enable_partial_tp", True)) and int(pos.get("tp1_taken") or 0) == 1:
-                    return
+                if bool(trade_cfg.get("enable_partial_tp", True)) and tp1_taken == 1:
+                    if tp_partial_atr_mult_val <= 0:
+                        return
 
                 audit = None
                 if indicators is not None:
@@ -3667,7 +3680,7 @@ def analyze(df, symbol, btc_bullish=None):
     stoch_d = None
     rsi_long_limit = None
     rsi_short_limit = None
-    
+
     # 5) Mean Reversion / Extension Filter (Don't chase if too far from EMA)
     enable_ext_filter = bool(flt.get("enable_extension_filter", True))
     max_dist = float(thr_entry.get("max_dist_ema_fast", 0.04))
@@ -3693,7 +3706,7 @@ def analyze(df, symbol, btc_bullish=None):
         if adx_max <= adx_min:
             adx_max = adx_min + 1.0
         weight = max(0.0, min(1.0, (adx_val - adx_min) / (adx_max - adx_min)))
-        
+
         rsi_long_limit = float(tp["rsi_long_weak"]) + weight * (float(tp["rsi_long_strong"]) - float(tp["rsi_long_weak"]))
         rsi_short_limit = float(tp["rsi_short_weak"]) + weight * (float(tp["rsi_short_strong"]) - float(tp["rsi_short_weak"]))
 
