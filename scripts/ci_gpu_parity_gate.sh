@@ -12,6 +12,20 @@ fi
 cd "${ROOT_DIR}/backtester"
 echo "[gpu-parity-gate] Running tiny GPU runtime parity fixture (strict=${STRICT_MODE})..."
 
+if ! command -v nvcc >/dev/null 2>&1; then
+    echo "::warning::[gpu-parity-gate] nvcc not found on this runner; skipping GPU parity gate."
+    case "${STRICT_MODE}" in
+        1 | true | TRUE | yes | YES | on | ON)
+            echo "[gpu-parity-gate] STRICT MODE: AQC_GPU_PARITY_STRICT=${STRICT_MODE}; failing because nvcc is unavailable."
+            exit 1
+            ;;
+        *)
+            echo "[gpu-parity-gate] Non-strict mode: continuing with warning only."
+            exit 0
+            ;;
+    esac
+fi
+
 LOG_FILE="$(mktemp)"
 trap 'rm -f "${LOG_FILE}"' EXIT
 
