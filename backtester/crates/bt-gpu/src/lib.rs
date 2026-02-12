@@ -90,6 +90,11 @@ pub fn run_gpu_sweep(
         .or_else(|| symbols.iter().position(|s| s == "BTCUSDT"))
         .map(|idx| idx as u32)
         .unwrap_or(u32::MAX);
+    let paxg_sym_idx = symbols
+        .iter()
+        .position(|s| s.eq_ignore_ascii_case("PAXG"))
+        .map(|idx| idx as u32)
+        .unwrap_or(u32::MAX);
 
     // ── 1. Prepare raw candles (CPU, layout only, ~10ms) ─────────────────
     let raw = raw_candles::prepare_raw_candles(candles, &symbols);
@@ -224,6 +229,7 @@ pub fn run_gpu_sweep(
             num_bars,
             num_symbols as u32,
             btc_sym_idx,
+            paxg_sym_idx,
         );
         gpu_host::dispatch_indicator_kernels(&device_state, &mut ind_bufs);
 

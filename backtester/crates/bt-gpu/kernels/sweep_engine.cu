@@ -71,6 +71,7 @@ struct GpuParams {
     unsigned int num_symbols;
     unsigned int num_bars;
     unsigned int btc_sym_idx;
+    unsigned int paxg_sym_idx;
     unsigned int chunk_start;
     unsigned int chunk_end;
     unsigned int initial_balance_bits;
@@ -183,7 +184,7 @@ struct EntryCandidate {
     unsigned int sym_idx;
     unsigned int signal;
     unsigned int confidence;
-    float score;
+    int score;
     float adx;
     float atr;
     float entry_adx_threshold;
@@ -671,7 +672,8 @@ __device__ unsigned int check_tp(const GpuPosition& pos, const GpuSnapshot& snap
 // -- Smart Exits --------------------------------------------------------------
 
 __device__ bool check_smart_exits(const GpuPosition& pos, const GpuSnapshot& snap,
-                                  const GpuComboConfig* cfg, float p_atr) {
+                                  const GpuComboConfig* cfg, float p_atr,
+                                  unsigned int sym_idx, unsigned int paxg_sym_idx) {
     // 1. Trend breakdown (EMA cross) with weak-cross suppression.
     float ema_dev = 0.0f;
     if (snap.ema_slow > 0.0f) {
@@ -701,6 +703,13 @@ __device__ bool check_smart_exits(const GpuPosition& pos, const GpuSnapshot& sna
         if (pos.active == POS_LONG && snap.close < snap.ema_macro) { return true; }
         if (pos.active == POS_SHORT && snap.close > snap.ema_macro) { return true; }
     }
+
+    // 4. Stagnation exit (low-volatility + underwater, skip PAXG).
+    float entry = pos.entry_price;
+    float atr = (pos.entry_atr > 0.0f) ? pos.entry_atr : (entry * 0.005f);
+    bool is_underwater = (pos.active == POS_LONG) ? (snap.close < entry) : (snap.close > entry);
+    bool is_paxg = (paxg_sym_idx != 0xFFFFFFFFu) && (sym_idx == paxg_sym_idx);
+    if (snap.atr < (atr * 0.70f) && is_underwater && !is_paxg) { return true; }
 
     // 5. TSME (Trend Saturation Momentum Exit)
     if (snap.adx > 50.0f && p_atr >= cfg->tsme_min_profit_atr) {
@@ -1042,7 +1051,13 @@ extern "C" __global__ void sweep_engine_kernel(
                                         apply_close(&state, sym, ind_snap, false, fee_rate);
                                     } else {
                                         // Smart exits
-                                        if (check_smart_exits(state.positions[sym], ind_snap, &cfg, p_atr)) {
+                                        if (check_smart_exits(
+                                                state.positions[sym],
+                                                ind_snap,
+                                                &cfg,
+                                                p_atr,
+                                                sym,
+                                                params->paxg_sym_idx)) {
                                             apply_close(&state, sym, ind_snap, false, fee_rate);
                                         }
                                     }
@@ -1118,7 +1133,7 @@ extern "C" __global__ void sweep_engine_kernel(
                     }
 
                     // Smart exits
-                    if (check_smart_exits(pos, hybrid, &cfg, p_atr)) {
+                    if (check_smart_exits(pos, hybrid, &cfg, p_atr, sym, params->paxg_sym_idx)) {
                         apply_close(&state, sym, hybrid, false, fee_rate);
                         break;
                     }
@@ -1214,8 +1229,7 @@ extern "C" __global__ void sweep_engine_kernel(
                         }
                     }
 
-                    float conf_rank = (float)(confidence);
-                    float score = conf_rank * 100.0f + hybrid.adx;
+                    int score = (int)(confidence) * 100 + (int)(hybrid.adx);
 
                     EntryCandidate cand;
                     cand.sym_idx = sym;
@@ -1233,7 +1247,9 @@ extern "C" __global__ void sweep_engine_kernel(
                 for (unsigned int i = 1u; i < num_cands; i++) {
                     EntryCandidate key = candidates[i];
                     unsigned int j = i;
-                    while (j > 0u && candidates[j - 1u].score < key.score) {
+                    while (j > 0u && (candidates[j - 1u].score < key.score
+                                      || (candidates[j - 1u].score == key.score
+                                          && candidates[j - 1u].sym_idx > key.sym_idx))) {
                         candidates[j] = candidates[j - 1u];
                         j -= 1u;
                     }
@@ -1383,7 +1399,7 @@ extern "C" __global__ void sweep_engine_kernel(
                 }
 
                 // Smart exits
-                if (check_smart_exits(pos, snap, &cfg, p_atr)) {
+                if (check_smart_exits(pos, snap, &cfg, p_atr, sym, params->paxg_sym_idx)) {
                     apply_close(&state, sym, snap, false, fee_rate);
                     continue;
                 }
@@ -1494,8 +1510,7 @@ extern "C" __global__ void sweep_engine_kernel(
                     }
                 }
 
-                float conf_rank = (float)(confidence);
-                float score = conf_rank * 100.0f + snap.adx;
+                int score = (int)(confidence) * 100 + (int)(snap.adx);
 
                 EntryCandidate cand;
                 cand.sym_idx = sym;
@@ -1513,7 +1528,9 @@ extern "C" __global__ void sweep_engine_kernel(
             for (unsigned int i = 1u; i < num_cands; i++) {
                 EntryCandidate key = candidates[i];
                 unsigned int j = i;
-                while (j > 0u && candidates[j - 1u].score < key.score) {
+                while (j > 0u && (candidates[j - 1u].score < key.score
+                                  || (candidates[j - 1u].score == key.score
+                                      && candidates[j - 1u].sym_idx > key.sym_idx))) {
                     candidates[j] = candidates[j - 1u];
                     j -= 1u;
                 }

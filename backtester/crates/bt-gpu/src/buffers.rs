@@ -471,7 +471,7 @@ const _: () = assert!(std::mem::size_of::<GpuResult>() == 48);
 
 /// Global parameters passed as uniform to the compute shader.
 ///
-/// 32 bytes.
+/// 44 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuParams {
@@ -479,6 +479,7 @@ pub struct GpuParams {
     pub num_symbols: u32,
     pub num_bars: u32,
     pub btc_sym_idx: u32,         // u32::MAX when unavailable
+    pub paxg_sym_idx: u32,        // u32::MAX when unavailable
     pub chunk_start: u32,
     pub chunk_end: u32,
     pub initial_balance_bits: u32, // f32 bits
@@ -487,7 +488,7 @@ pub struct GpuParams {
     pub trade_end_bar: u32,        // last bar index for result write-back (scoped trade range)
 }
 
-const _: () = assert!(std::mem::size_of::<GpuParams>() == 40);
+const _: () = assert!(std::mem::size_of::<GpuParams>() == 44);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Conversion helpers

@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "generated_at_utc": "2026-02-11T12:08:58.694695Z",
+  "generated_at_utc": "2026-02-12T21:13:36.261538Z",
   "axis_order": [
     "trade.sl_atr_mult",
     "trade.tp_atr_mult",
@@ -63,8 +63,8 @@
       "baseline": {
         "cpu_total_pnl": -7.8422069774806005,
         "cpu_total_trades": 2,
-        "gpu_total_pnl": -33.73639678955078,
-        "gpu_total_trades": 3
+        "gpu_total_pnl": -7.841796875,
+        "gpu_total_trades": 2
       },
       "cpu": {
         "1.5": {
@@ -93,45 +93,45 @@
         }
       },
       "gpu": {
-        "3": {
-          "total_pnl": -23.058401107788086,
-          "total_trades": 1.0,
-          "win_rate": 0.0,
-          "max_drawdown_pct": 0.002374556614086032
+        "1.5": {
+          "total_pnl": -7.841796875,
+          "total_trades": 2.0,
+          "win_rate": 0.5,
+          "max_drawdown_pct": 0.001598437549546361
         },
         "2": {
-          "total_pnl": -28.42026138305664,
+          "total_pnl": -8.8251953125,
           "total_trades": 2.0,
-          "win_rate": 0.0,
-          "max_drawdown_pct": 0.0029803775250911713
-        },
-        "1.5": {
-          "total_pnl": -33.73639678955078,
-          "total_trades": 3.0,
-          "win_rate": 0.0,
-          "max_drawdown_pct": 0.0035183592699468136
+          "win_rate": 0.5,
+          "max_drawdown_pct": 0.00175994704477489
         },
         "2.5": {
-          "total_pnl": -34.31666564941406,
+          "total_pnl": -11.77734375,
           "total_trades": 2.0,
-          "win_rate": 0.0,
-          "max_drawdown_pct": 0.003569793188944459
+          "win_rate": 0.5,
+          "max_drawdown_pct": 0.0020548503380268812
+        },
+        "3": {
+          "total_pnl": -15.7119140625,
+          "total_trades": 2.0,
+          "win_rate": 0.5,
+          "max_drawdown_pct": 0.002384321531280875
         }
       },
       "cpu_triggered": true,
       "gpu_triggered": true,
       "agreement": {
         "pnl_direction": {
-          "matches": 1.0,
-          "mismatches": 2.0,
+          "matches": 3.0,
+          "mismatches": 0.0,
           "comparisons": 3.0,
-          "ratio": 0.3333333333333333
+          "ratio": 1.0
         },
         "trades_direction": {
-          "matches": 1.0,
-          "mismatches": 2.0,
+          "matches": 3.0,
+          "mismatches": 0.0,
           "comparisons": 3.0,
-          "ratio": 0.3333333333333333
+          "ratio": 1.0
         }
       },
       "expectation": {
@@ -141,26 +141,23 @@
         "first_value_key": "1.5",
         "last_value_key": "3",
         "cpu_delta_last_minus_first": -7.869539849387365,
-        "gpu_delta_last_minus_first": 10.677995681762695,
+        "gpu_delta_last_minus_first": -7.8701171875,
         "cpu_delta_sign": -1,
-        "gpu_delta_sign": 1,
+        "gpu_delta_sign": -1,
         "cpu_relation_ok": true,
         "gpu_relation_ok": true,
-        "direction_match": false,
+        "direction_match": true,
         "direction_check_required": true,
         "triggered_check_required": true,
         "triggered_ok": true,
-        "passed": false
+        "passed": true
       },
-      "status": "fail",
-      "pass": false,
+      "status": "pass",
+      "pass": true,
       "notes": [
         "Expectation: Changing SL multiplier should alter aggregate PnL.",
-        "Expectation check: total_pnl change from 1.5 -> 3; CPU delta=-7.869540, GPU delta=10.677996.",
-        "Direction mismatch: CPU/GPU first->last delta directions do not match (CPU=decrease, GPU=increase).",
-        "CPU and GPU both reacted to axis changes.",
-        "Low CPU/GPU PnL-direction agreement (33.3%, mismatches=2).",
-        "Low CPU/GPU trade-direction agreement (33.3%, mismatches=2)."
+        "Expectation check: total_pnl change from 1.5 -> 3; CPU delta=-7.869540, GPU delta=-7.870117.",
+        "CPU and GPU both reacted to axis changes."
       ]
     },
     {
@@ -192,8 +189,8 @@
       "baseline": {
         "cpu_total_pnl": 42.37166019168944,
         "cpu_total_trades": 3,
-        "gpu_total_pnl": 99.31733703613281,
-        "gpu_total_trades": 4
+        "gpu_total_pnl": 42.3720703125,
+        "gpu_total_trades": 3
       },
       "cpu": {
         "6": {
@@ -222,29 +219,29 @@
         }
       },
       "gpu": {
-        "3": {
-          "total_pnl": 99.31733703613281,
-          "total_trades": 4.0,
+        "6": {
+          "total_pnl": 42.646484375,
+          "total_trades": 1.0,
           "win_rate": 1.0,
           "max_drawdown_pct": 8.427734428551048e-05
+        },
+        "3": {
+          "total_pnl": 42.3720703125,
+          "total_trades": 3.0,
+          "win_rate": 0.6666666666666666,
+          "max_drawdown_pct": 0.0008005928248167038
         },
         "4": {
-          "total_pnl": 60.1925048828125,
+          "total_pnl": 33.8740234375,
           "total_trades": 2.0,
           "win_rate": 1.0,
-          "max_drawdown_pct": 8.427734428551048e-05
-        },
-        "6": {
-          "total_pnl": 43.46601867675781,
-          "total_trades": 1.0,
-          "win_rate": 1.0,
-          "max_drawdown_pct": 8.427734428551048e-05
+          "max_drawdown_pct": 0.0010967499110847712
         },
         "5": {
-          "total_pnl": 35.572174072265625,
-          "total_trades": 1.0,
-          "win_rate": 1.0,
-          "max_drawdown_pct": 8.427734428551048e-05
+          "total_pnl": 31.60546875,
+          "total_trades": 2.0,
+          "win_rate": 0.5,
+          "max_drawdown_pct": 0.001421913388185203
         }
       },
       "cpu_triggered": true,
@@ -257,10 +254,10 @@
           "ratio": 1.0
         },
         "trades_direction": {
-          "matches": 1.0,
-          "mismatches": 2.0,
+          "matches": 3.0,
+          "mismatches": 0.0,
           "comparisons": 3.0,
-          "ratio": 0.3333333333333333
+          "ratio": 1.0
         }
       },
       "expectation": {
@@ -270,25 +267,23 @@
         "first_value_key": "3",
         "last_value_key": "6",
         "cpu_delta_last_minus_first": 0.27490468867472373,
-        "gpu_delta_last_minus_first": -55.851318359375,
+        "gpu_delta_last_minus_first": 0.2744140625,
         "cpu_delta_sign": 1,
-        "gpu_delta_sign": -1,
+        "gpu_delta_sign": 1,
         "cpu_relation_ok": true,
         "gpu_relation_ok": true,
-        "direction_match": false,
+        "direction_match": true,
         "direction_check_required": true,
         "triggered_check_required": true,
         "triggered_ok": true,
-        "passed": false
+        "passed": true
       },
-      "status": "fail",
-      "pass": false,
+      "status": "pass",
+      "pass": true,
       "notes": [
         "Expectation: Changing TP multiplier should alter aggregate PnL.",
-        "Expectation check: total_pnl change from 3 -> 6; CPU delta=0.274905, GPU delta=-55.851318.",
-        "Direction mismatch: CPU/GPU first->last delta directions do not match (CPU=increase, GPU=decrease).",
-        "CPU and GPU both reacted to axis changes.",
-        "Low CPU/GPU trade-direction agreement (33.3%, mismatches=2)."
+        "Expectation check: total_pnl change from 3 -> 6; CPU delta=0.274905, GPU delta=0.274414.",
+        "CPU and GPU both reacted to axis changes."
       ]
     },
     {
@@ -319,8 +314,8 @@
       "baseline": {
         "cpu_total_pnl": 37.772085511353,
         "cpu_total_trades": 4,
-        "gpu_total_pnl": 23.235511779785156,
-        "gpu_total_trades": 2
+        "gpu_total_pnl": 23.4814453125,
+        "gpu_total_trades": 4
       },
       "cpu": {
         "0.2": {
@@ -344,22 +339,22 @@
       },
       "gpu": {
         "0.2": {
-          "total_pnl": 46.47021484375,
-          "total_trades": 2.0,
+          "total_pnl": 46.9658203125,
+          "total_trades": 4.0,
           "win_rate": 1.0,
-          "max_drawdown_pct": 0.001945003867149353
+          "max_drawdown_pct": 0.0044493116438388824
         },
         "0.15": {
-          "total_pnl": 34.852962493896484,
-          "total_trades": 2.0,
+          "total_pnl": 35.2216796875,
+          "total_trades": 4.0,
           "win_rate": 1.0,
-          "max_drawdown_pct": 0.0014594204258173704
+          "max_drawdown_pct": 0.003336929949000478
         },
         "0.1": {
-          "total_pnl": 23.235511779785156,
-          "total_trades": 2.0,
+          "total_pnl": 23.4814453125,
+          "total_trades": 4.0,
           "win_rate": 1.0,
-          "max_drawdown_pct": 0.0009732620092108846
+          "max_drawdown_pct": 0.0022246812004595995
         }
       },
       "cpu_triggered": true,
@@ -385,7 +380,7 @@
         "first_value_key": "0.1",
         "last_value_key": "0.2",
         "cpu_delta_last_minus_first": 37.82853737795631,
-        "gpu_delta_last_minus_first": 23.234703063964844,
+        "gpu_delta_last_minus_first": 23.484375,
         "cpu_delta_sign": 1,
         "gpu_delta_sign": 1,
         "cpu_relation_ok": true,
@@ -400,7 +395,7 @@
       "pass": true,
       "notes": [
         "Expectation: Higher allocation should increase PnL under positive trend fixture.",
-        "Expectation check: total_pnl increase from 0.1 -> 0.2; CPU delta=37.828537, GPU delta=23.234703.",
+        "Expectation check: total_pnl increase from 0.1 -> 0.2; CPU delta=37.828537, GPU delta=23.484375.",
         "CPU and GPU both reacted to axis changes."
       ]
     },
@@ -432,8 +427,8 @@
       "baseline": {
         "cpu_total_pnl": 18.997699601479326,
         "cpu_total_trades": 2,
-        "gpu_total_pnl": 11.68556022644043,
-        "gpu_total_trades": 1
+        "gpu_total_pnl": 11.81640625,
+        "gpu_total_trades": 2
       },
       "cpu": {
         "2": {
@@ -456,33 +451,33 @@
         }
       },
       "gpu": {
-        "2": {
-          "total_pnl": 16.58474349975586,
+        "2.5": {
+          "total_pnl": 18.2265625,
           "total_trades": 1.0,
           "win_rate": 1.0,
           "max_drawdown_pct": 0.0004896509926766157
+        },
+        "2": {
+          "total_pnl": 11.9072265625,
+          "total_trades": 2.0,
+          "win_rate": 0.5,
+          "max_drawdown_pct": 0.0011133800726383924
         },
         "1.5": {
-          "total_pnl": 11.68556022644043,
-          "total_trades": 1.0,
+          "total_pnl": 11.81640625,
+          "total_trades": 2.0,
           "win_rate": 1.0,
-          "max_drawdown_pct": 0.0004896509926766157
-        },
-        "2.5": {
-          "total_pnl": 0.0,
-          "total_trades": 0.0,
-          "win_rate": 0.0,
-          "max_drawdown_pct": 0.0004896509926766157
+          "max_drawdown_pct": 0.0011186071205884218
         }
       },
       "cpu_triggered": true,
       "gpu_triggered": true,
       "agreement": {
         "pnl_direction": {
-          "matches": 2.0,
-          "mismatches": 0.0,
+          "matches": 1.0,
+          "mismatches": 1.0,
           "comparisons": 2.0,
-          "ratio": 1.0
+          "ratio": 0.5
         },
         "trades_direction": {
           "matches": 2.0,
@@ -498,12 +493,12 @@
         "first_value_key": "1.5",
         "last_value_key": "2.5",
         "cpu_delta_last_minus_first": -0.7718091422029829,
-        "gpu_delta_last_minus_first": -11.68556022644043,
+        "gpu_delta_last_minus_first": 6.41015625,
         "cpu_delta_sign": -1,
-        "gpu_delta_sign": -1,
+        "gpu_delta_sign": 1,
         "cpu_relation_ok": true,
         "gpu_relation_ok": true,
-        "direction_match": true,
+        "direction_match": false,
         "direction_check_required": false,
         "triggered_check_required": true,
         "triggered_ok": true,
@@ -513,7 +508,7 @@
       "pass": true,
       "notes": [
         "Expectation: Trailing activation threshold should change realised PnL.",
-        "Expectation check: total_pnl change from 1.5 -> 2.5; CPU delta=-0.771809, GPU delta=-11.685560.",
+        "Expectation check: total_pnl change from 1.5 -> 2.5; CPU delta=-0.771809, GPU delta=6.410156.",
         "CPU and GPU both reacted to axis changes."
       ]
     },
@@ -544,8 +539,8 @@
       "baseline": {
         "cpu_total_pnl": 18.997699601479326,
         "cpu_total_trades": 2,
-        "gpu_total_pnl": 11.68556022644043,
-        "gpu_total_trades": 1
+        "gpu_total_pnl": 11.81640625,
+        "gpu_total_trades": 2
       },
       "cpu": {
         "0.5": {
@@ -562,27 +557,27 @@
         }
       },
       "gpu": {
-        "0.5": {
-          "total_pnl": 11.68556022644043,
-          "total_trades": 1.0,
-          "win_rate": 1.0,
-          "max_drawdown_pct": 0.0004896509926766157
-        },
         "1": {
-          "total_pnl": 7.766153812408447,
-          "total_trades": 1.0,
+          "total_pnl": 12.1376953125,
+          "total_trades": 2.0,
           "win_rate": 1.0,
-          "max_drawdown_pct": 0.0004896509926766157
+          "max_drawdown_pct": 0.0007000009063631296
+        },
+        "0.5": {
+          "total_pnl": 11.81640625,
+          "total_trades": 2.0,
+          "win_rate": 1.0,
+          "max_drawdown_pct": 0.0011186071205884218
         }
       },
       "cpu_triggered": true,
       "gpu_triggered": true,
       "agreement": {
         "pnl_direction": {
-          "matches": 1.0,
-          "mismatches": 0.0,
+          "matches": 0.0,
+          "mismatches": 1.0,
           "comparisons": 1.0,
-          "ratio": 1.0
+          "ratio": 0.0
         },
         "trades_direction": {
           "matches": 1.0,
@@ -598,12 +593,12 @@
         "first_value_key": "0.5",
         "last_value_key": "1",
         "cpu_delta_last_minus_first": -6.8593450558601035,
-        "gpu_delta_last_minus_first": -3.9194064140319824,
+        "gpu_delta_last_minus_first": 0.3212890625,
         "cpu_delta_sign": -1,
-        "gpu_delta_sign": -1,
+        "gpu_delta_sign": 1,
         "cpu_relation_ok": true,
         "gpu_relation_ok": true,
-        "direction_match": true,
+        "direction_match": false,
         "direction_check_required": false,
         "triggered_check_required": true,
         "triggered_ok": true,
@@ -613,8 +608,9 @@
       "pass": true,
       "notes": [
         "Expectation: Trailing distance should change realised PnL.",
-        "Expectation check: total_pnl change from 0.5 -> 1; CPU delta=-6.859345, GPU delta=-3.919406.",
-        "CPU and GPU both reacted to axis changes."
+        "Expectation check: total_pnl change from 0.5 -> 1; CPU delta=-6.859345, GPU delta=0.321289.",
+        "CPU and GPU both reacted to axis changes.",
+        "Low CPU/GPU PnL-direction agreement (0.0%, mismatches=1)."
       ]
     },
     {
@@ -644,7 +640,7 @@
       "baseline": {
         "cpu_total_pnl": 33.87308174958525,
         "cpu_total_trades": 2,
-        "gpu_total_pnl": 60.1925048828125,
+        "gpu_total_pnl": 33.8740234375,
         "gpu_total_trades": 2
       },
       "cpu": {
@@ -663,16 +659,16 @@
       },
       "gpu": {
         "0": {
-          "total_pnl": 60.1925048828125,
+          "total_pnl": 33.8740234375,
           "total_trades": 2.0,
           "win_rate": 1.0,
-          "max_drawdown_pct": 8.427734428551048e-05
+          "max_drawdown_pct": 0.0010967499110847712
         },
         "1": {
-          "total_pnl": 42.6555290222168,
-          "total_trades": 5.0,
+          "total_pnl": 24.4736328125,
+          "total_trades": 4.0,
           "win_rate": 1.0,
-          "max_drawdown_pct": 8.427734428551048e-05
+          "max_drawdown_pct": 0.0010967408306896687
         }
       },
       "cpu_triggered": true,
@@ -698,7 +694,7 @@
         "first_value_key": "0",
         "last_value_key": "1",
         "cpu_delta_last_minus_first": 2.0,
-        "gpu_delta_last_minus_first": 3.0,
+        "gpu_delta_last_minus_first": 2.0,
         "cpu_delta_sign": 1,
         "gpu_delta_sign": 1,
         "cpu_relation_ok": true,
@@ -713,7 +709,7 @@
       "pass": true,
       "notes": [
         "Expectation: Enabling partial TP should change trade count in partial-only fixture.",
-        "Expectation check: total_trades change from 0 -> 1; CPU delta=2.000000, GPU delta=3.000000.",
+        "Expectation check: total_trades change from 0 -> 1; CPU delta=2.000000, GPU delta=2.000000.",
         "CPU and GPU both reacted to axis changes."
       ]
     },
@@ -745,8 +741,8 @@
       "baseline": {
         "cpu_total_pnl": 29.173016512953836,
         "cpu_total_trades": 4,
-        "gpu_total_pnl": 51.42342758178711,
-        "gpu_total_trades": 5
+        "gpu_total_pnl": 29.1728515625,
+        "gpu_total_trades": 4
       },
       "cpu": {
         "0.25": {
@@ -770,22 +766,22 @@
       },
       "gpu": {
         "0.25": {
-          "total_pnl": 51.42342758178711,
-          "total_trades": 5.0,
+          "total_pnl": 29.1728515625,
+          "total_trades": 4.0,
           "win_rate": 1.0,
-          "max_drawdown_pct": 8.427734428551048e-05
+          "max_drawdown_pct": 0.0010967454873025417
         },
         "0.5": {
-          "total_pnl": 42.6555290222168,
-          "total_trades": 5.0,
+          "total_pnl": 24.4736328125,
+          "total_trades": 4.0,
           "win_rate": 1.0,
-          "max_drawdown_pct": 8.427734428551048e-05
+          "max_drawdown_pct": 0.0010967408306896687
         },
         "0.75": {
-          "total_pnl": 33.88880157470703,
-          "total_trades": 5.0,
+          "total_pnl": 19.7724609375,
+          "total_trades": 4.0,
           "win_rate": 1.0,
-          "max_drawdown_pct": 8.427734428551048e-05
+          "max_drawdown_pct": 0.0010968338465318084
         }
       },
       "cpu_triggered": true,
@@ -811,7 +807,7 @@
         "first_value_key": "0.25",
         "last_value_key": "0.75",
         "cpu_delta_last_minus_first": -9.402048606356402,
-        "gpu_delta_last_minus_first": -17.534626007080078,
+        "gpu_delta_last_minus_first": -9.400390625,
         "cpu_delta_sign": -1,
         "gpu_delta_sign": -1,
         "cpu_relation_ok": true,
@@ -826,7 +822,7 @@
       "pass": true,
       "notes": [
         "Expectation: Partial TP percentage should change realised PnL.",
-        "Expectation check: total_pnl change from 0.25 -> 0.75; CPU delta=-9.402049, GPU delta=-17.534626.",
+        "Expectation check: total_pnl change from 0.25 -> 0.75; CPU delta=-9.402049, GPU delta=-9.400391.",
         "CPU and GPU both reacted to axis changes."
       ]
     },
@@ -858,8 +854,8 @@
       "baseline": {
         "cpu_total_pnl": 27.833429082773364,
         "cpu_total_trades": 4,
-        "gpu_total_pnl": 49.21603775024414,
-        "gpu_total_trades": 5
+        "gpu_total_pnl": 27.833984375,
+        "gpu_total_trades": 4
       },
       "cpu": {
         "2": {
@@ -883,22 +879,22 @@
       },
       "gpu": {
         "2": {
-          "total_pnl": 57.32126235961914,
-          "total_trades": 5.0,
+          "total_pnl": 33.2080078125,
+          "total_trades": 4.0,
           "win_rate": 1.0,
-          "max_drawdown_pct": 8.427734428551048e-05
+          "max_drawdown_pct": 0.0010967948473989964
         },
         "1": {
-          "total_pnl": 51.42342758178711,
-          "total_trades": 5.0,
+          "total_pnl": 29.1728515625,
+          "total_trades": 4.0,
           "win_rate": 1.0,
-          "max_drawdown_pct": 8.427734428551048e-05
+          "max_drawdown_pct": 0.0010967454873025417
         },
         "0.5": {
-          "total_pnl": 49.21603775024414,
-          "total_trades": 5.0,
+          "total_pnl": 27.833984375,
+          "total_trades": 4.0,
           "win_rate": 1.0,
-          "max_drawdown_pct": 8.427734428551048e-05
+          "max_drawdown_pct": 0.0010967995040118694
         }
       },
       "cpu_triggered": true,
@@ -924,7 +920,7 @@
         "first_value_key": "0.5",
         "last_value_key": "2",
         "cpu_delta_last_minus_first": 5.373798143444219,
-        "gpu_delta_last_minus_first": 8.105224609375,
+        "gpu_delta_last_minus_first": 5.3740234375,
         "cpu_delta_sign": 1,
         "gpu_delta_sign": 1,
         "cpu_relation_ok": true,
@@ -939,7 +935,7 @@
       "pass": true,
       "notes": [
         "Expectation: Partial TP ATR trigger level should change realised PnL.",
-        "Expectation check: total_pnl change from 0.5 -> 2; CPU delta=5.373798, GPU delta=8.105225.",
+        "Expectation check: total_pnl change from 0.5 -> 2; CPU delta=5.373798, GPU delta=5.374023.",
         "CPU and GPU both reacted to axis changes."
       ]
     },
@@ -972,8 +968,8 @@
       "baseline": {
         "cpu_total_pnl": 44.21331988086058,
         "cpu_total_trades": 4,
-        "gpu_total_pnl": 23.37112045288086,
-        "gpu_total_trades": 1
+        "gpu_total_pnl": 38.515625,
+        "gpu_total_trades": 2
       },
       "cpu": {
         "0.8": {
@@ -1002,27 +998,27 @@
         }
       },
       "gpu": {
-        "0.8": {
-          "total_pnl": 92.7215347290039,
-          "total_trades": 3.0,
-          "win_rate": 1.0,
-          "max_drawdown_pct": 0.0038750143721699715
-        },
         "0.6": {
-          "total_pnl": 69.76686096191406,
-          "total_trades": 2.0,
+          "total_pnl": 96.369140625,
+          "total_trades": 4.0,
           "win_rate": 1.0,
-          "max_drawdown_pct": 0.0029179498087614775
+          "max_drawdown_pct": 0.0037924896460026503
+        },
+        "0.8": {
+          "total_pnl": 93.7177734375,
+          "total_trades": 6.0,
+          "win_rate": 1.0,
+          "max_drawdown_pct": 0.00887847226113081
         },
         "0.4": {
-          "total_pnl": 46.66897964477539,
-          "total_trades": 2.0,
+          "total_pnl": 72.9375,
+          "total_trades": 4.0,
           "win_rate": 1.0,
           "max_drawdown_pct": 0.001953472150489688
         },
         "0.2": {
-          "total_pnl": 23.37112045288086,
-          "total_trades": 1.0,
+          "total_pnl": 38.515625,
+          "total_trades": 2.0,
           "win_rate": 1.0,
           "max_drawdown_pct": 0.000979014323092997
         }
@@ -1031,10 +1027,10 @@
       "gpu_triggered": true,
       "agreement": {
         "pnl_direction": {
-          "matches": 3.0,
-          "mismatches": 0.0,
+          "matches": 2.0,
+          "mismatches": 1.0,
           "comparisons": 3.0,
-          "ratio": 1.0
+          "ratio": 0.6666666666666666
         },
         "trades_direction": {
           "matches": 2.0,
@@ -1050,7 +1046,7 @@
         "first_value_key": "0.2",
         "last_value_key": "0.8",
         "cpu_delta_last_minus_first": 106.86116760393816,
-        "gpu_delta_last_minus_first": 69.35041427612305,
+        "gpu_delta_last_minus_first": 55.2021484375,
         "cpu_delta_sign": 1,
         "gpu_delta_sign": 1,
         "cpu_relation_ok": true,
@@ -1065,7 +1061,7 @@
       "pass": true,
       "notes": [
         "Expectation: More margin headroom should increase realised PnL in profitable multi-symbol fixture.",
-        "Expectation check: total_pnl increase from 0.2 -> 0.8; CPU delta=106.861168, GPU delta=69.350414.",
+        "Expectation check: total_pnl increase from 0.2 -> 0.8; CPU delta=106.861168, GPU delta=55.202148.",
         "CPU and GPU both reacted to axis changes."
       ]
     },
@@ -1097,8 +1093,8 @@
       "baseline": {
         "cpu_total_pnl": 26.629841555723033,
         "cpu_total_trades": 2,
-        "gpu_total_pnl": 14.022671699523926,
-        "gpu_total_trades": 1
+        "gpu_total_pnl": 23.1005859375,
+        "gpu_total_trades": 2
       },
       "cpu": {
         "4": {
@@ -1122,20 +1118,20 @@
       },
       "gpu": {
         "4": {
-          "total_pnl": 41.58327102661133,
-          "total_trades": 3.0,
+          "total_pnl": 41.9931640625,
+          "total_trades": 6.0,
           "win_rate": 1.0,
-          "max_drawdown_pct": 0.001740728272125125
+          "max_drawdown_pct": 0.003982445690780878
         },
         "2": {
-          "total_pnl": 27.88251495361328,
-          "total_trades": 2.0,
+          "total_pnl": 37.0078125,
+          "total_trades": 4.0,
           "win_rate": 1.0,
-          "max_drawdown_pct": 0.001167751383036375
+          "max_drawdown_pct": 0.0016837856965139508
         },
         "1": {
-          "total_pnl": 14.022671699523926,
-          "total_trades": 1.0,
+          "total_pnl": 23.1005859375,
+          "total_trades": 2.0,
           "win_rate": 1.0,
           "max_drawdown_pct": 0.0005875154747627676
         }
@@ -1163,7 +1159,7 @@
         "first_value_key": "1",
         "last_value_key": "4",
         "cpu_delta_last_minus_first": 4.0,
-        "gpu_delta_last_minus_first": 2.0,
+        "gpu_delta_last_minus_first": 4.0,
         "cpu_delta_sign": 1,
         "gpu_delta_sign": 1,
         "cpu_relation_ok": true,
@@ -1178,7 +1174,7 @@
       "pass": true,
       "notes": [
         "Expectation: Allowing more concurrent positions should increase executed trades.",
-        "Expectation check: total_trades increase from 1 -> 4; CPU delta=4.000000, GPU delta=2.000000.",
+        "Expectation check: total_trades increase from 1 -> 4; CPU delta=4.000000, GPU delta=4.000000.",
         "CPU and GPU both reacted to axis changes."
       ]
     },
@@ -1211,8 +1207,8 @@
       "baseline": {
         "cpu_total_pnl": 42.37166019168944,
         "cpu_total_trades": 3,
-        "gpu_total_pnl": 99.31733703613281,
-        "gpu_total_trades": 4
+        "gpu_total_pnl": 42.3720703125,
+        "gpu_total_trades": 3
       },
       "cpu": {
         "5": {
@@ -1242,28 +1238,28 @@
       },
       "gpu": {
         "5": {
-          "total_pnl": 503.77923583984375,
-          "total_trades": 4.0,
-          "win_rate": 1.0,
-          "max_drawdown_pct": 0.0004216796951368451
+          "total_pnl": 212.6279296875,
+          "total_trades": 3.0,
+          "win_rate": 0.6666666666666666,
+          "max_drawdown_pct": 0.00400279788300395
         },
         "3": {
-          "total_pnl": 300.1029052734375,
-          "total_trades": 4.0,
-          "win_rate": 1.0,
-          "max_drawdown_pct": 0.000252929690759629
+          "total_pnl": 127.3466796875,
+          "total_trades": 3.0,
+          "win_rate": 0.6666666666666666,
+          "max_drawdown_pct": 0.0024016506504267454
         },
         "2": {
-          "total_pnl": 199.3504638671875,
-          "total_trades": 4.0,
-          "win_rate": 1.0,
-          "max_drawdown_pct": 0.00016865234647411853
+          "total_pnl": 84.8203125,
+          "total_trades": 3.0,
+          "win_rate": 0.6666666666666666,
+          "max_drawdown_pct": 0.001601086463779211
         },
         "1": {
-          "total_pnl": 99.31733703613281,
-          "total_trades": 4.0,
-          "win_rate": 1.0,
-          "max_drawdown_pct": 8.427734428551048e-05
+          "total_pnl": 42.3720703125,
+          "total_trades": 3.0,
+          "win_rate": 0.6666666666666666,
+          "max_drawdown_pct": 0.0008005928248167038
         }
       },
       "cpu_triggered": true,
@@ -1289,7 +1285,7 @@
         "first_value_key": "1",
         "last_value_key": "5",
         "cpu_delta_last_minus_first": 170.25705865776945,
-        "gpu_delta_last_minus_first": 404.46189880371094,
+        "gpu_delta_last_minus_first": 170.255859375,
         "cpu_delta_sign": 1,
         "gpu_delta_sign": 1,
         "cpu_relation_ok": true,
@@ -1304,7 +1300,7 @@
       "pass": true,
       "notes": [
         "Expectation: Higher leverage should increase realised PnL in profitable fixture.",
-        "Expectation check: total_pnl increase from 1 -> 5; CPU delta=170.257059, GPU delta=404.461899.",
+        "Expectation check: total_pnl increase from 1 -> 5; CPU delta=170.257059, GPU delta=170.255859.",
         "CPU and GPU both reacted to axis changes."
       ]
     },
@@ -1336,8 +1332,8 @@
       "baseline": {
         "cpu_total_pnl": 18.225890459276343,
         "cpu_total_trades": 1,
-        "gpu_total_pnl": 0.0,
-        "gpu_total_trades": 0
+        "gpu_total_pnl": 18.2265625,
+        "gpu_total_trades": 1
       },
       "cpu": {
         "0": {
@@ -1360,33 +1356,33 @@
         }
       },
       "gpu": {
-        "200": {
-          "total_pnl": 12.706146240234375,
-          "total_trades": 7.0,
-          "win_rate": 0.5714285714285714,
-          "max_drawdown_pct": 0.0006745511782355607
-        },
         "0": {
-          "total_pnl": 0.0,
-          "total_trades": 0.0,
-          "win_rate": 0.0,
+          "total_pnl": 18.2265625,
+          "total_trades": 1.0,
+          "win_rate": 1.0,
           "max_drawdown_pct": 0.0004896509926766157
         },
         "20": {
-          "total_pnl": 0.0,
-          "total_trades": 0.0,
-          "win_rate": 0.0,
+          "total_pnl": 18.2265625,
+          "total_trades": 1.0,
+          "win_rate": 1.0,
           "max_drawdown_pct": 0.0004896509926766157
+        },
+        "200": {
+          "total_pnl": 7.099609375,
+          "total_trades": 7.0,
+          "win_rate": 0.5714285714285714,
+          "max_drawdown_pct": 0.0006845166790299118
         }
       },
       "cpu_triggered": true,
       "gpu_triggered": true,
       "agreement": {
         "pnl_direction": {
-          "matches": 1.0,
-          "mismatches": 1.0,
+          "matches": 2.0,
+          "mismatches": 0.0,
           "comparisons": 2.0,
-          "ratio": 0.5
+          "ratio": 1.0
         },
         "trades_direction": {
           "matches": 2.0,
@@ -1402,7 +1398,7 @@
         "first_value_key": "0",
         "last_value_key": "200",
         "cpu_delta_last_minus_first": 6.0,
-        "gpu_delta_last_minus_first": 7.0,
+        "gpu_delta_last_minus_first": 6.0,
         "cpu_delta_sign": 1,
         "gpu_delta_sign": 1,
         "cpu_relation_ok": true,
@@ -1417,7 +1413,7 @@
       "pass": true,
       "notes": [
         "Expectation: Raising ADX exhaustion threshold should alter exit churn.",
-        "Expectation check: total_trades change from 0 -> 200; CPU delta=6.000000, GPU delta=7.000000.",
+        "Expectation check: total_trades change from 0 -> 200; CPU delta=6.000000, GPU delta=6.000000.",
         "CPU and GPU both reacted to axis changes."
       ]
     },
@@ -1449,8 +1445,8 @@
       "baseline": {
         "cpu_total_pnl": 28.431809203364537,
         "cpu_total_trades": 1,
-        "gpu_total_pnl": 0.0,
-        "gpu_total_trades": 0
+        "gpu_total_pnl": 28.4326171875,
+        "gpu_total_trades": 1
       },
       "cpu": {
         "0": {
@@ -1473,33 +1469,33 @@
         }
       },
       "gpu": {
-        "200": {
-          "total_pnl": 9.451690673828125,
+        "0": {
+          "total_pnl": 28.4326171875,
           "total_trades": 1.0,
           "win_rate": 1.0,
-          "max_drawdown_pct": 0.0004893505829386413
-        },
-        "0": {
-          "total_pnl": 0.0,
-          "total_trades": 0.0,
-          "win_rate": 0.0,
           "max_drawdown_pct": 0.0004941324586980045
         },
         "20": {
-          "total_pnl": 0.0,
-          "total_trades": 0.0,
-          "win_rate": 0.0,
+          "total_pnl": 28.4326171875,
+          "total_trades": 1.0,
+          "win_rate": 1.0,
           "max_drawdown_pct": 0.0004941324586980045
+        },
+        "200": {
+          "total_pnl": 26.2646484375,
+          "total_trades": 2.0,
+          "win_rate": 1.0,
+          "max_drawdown_pct": 0.0004893555887974799
         }
       },
       "cpu_triggered": true,
       "gpu_triggered": true,
       "agreement": {
         "pnl_direction": {
-          "matches": 1.0,
-          "mismatches": 1.0,
+          "matches": 2.0,
+          "mismatches": 0.0,
           "comparisons": 2.0,
-          "ratio": 0.5
+          "ratio": 1.0
         },
         "trades_direction": {
           "matches": 2.0,
@@ -1561,8 +1557,8 @@
       "baseline": {
         "cpu_total_pnl": 42.37166019168944,
         "cpu_total_trades": 3,
-        "gpu_total_pnl": 99.31733703613281,
-        "gpu_total_trades": 4
+        "gpu_total_pnl": 42.3720703125,
+        "gpu_total_trades": 3
       },
       "cpu": {
         "0": {
@@ -1580,10 +1576,10 @@
       },
       "gpu": {
         "0": {
-          "total_pnl": 99.31733703613281,
-          "total_trades": 4.0,
-          "win_rate": 1.0,
-          "max_drawdown_pct": 8.427734428551048e-05
+          "total_pnl": 42.3720703125,
+          "total_trades": 3.0,
+          "win_rate": 0.6666666666666666,
+          "max_drawdown_pct": 0.0008005928248167038
         },
         "1": {
           "total_pnl": 0.0,
@@ -1615,7 +1611,7 @@
         "first_value_key": "0",
         "last_value_key": "1",
         "cpu_delta_last_minus_first": -3.0,
-        "gpu_delta_last_minus_first": -4.0,
+        "gpu_delta_last_minus_first": -3.0,
         "cpu_delta_sign": -1,
         "gpu_delta_sign": -1,
         "cpu_relation_ok": true,
@@ -1630,9 +1626,9 @@
         "false_value_key": "0",
         "true_value_key": "1",
         "cpu_trade_delta_true_minus_false": -3.0,
-        "gpu_trade_delta_true_minus_false": -4.0,
+        "gpu_trade_delta_true_minus_false": -3.0,
         "cpu_pnl_delta_true_minus_false": -42.37166019168944,
-        "gpu_pnl_delta_true_minus_false": -99.31733703613281,
+        "gpu_pnl_delta_true_minus_false": -42.3720703125,
         "trade_direction_match": true,
         "trade_changed_both_engines": true,
         "consistent_trade_direction": true
@@ -1641,7 +1637,7 @@
       "pass": true,
       "notes": [
         "Expectation: Macro alignment gate false/true should alter captured trades.",
-        "Expectation check: total_trades change from 0 -> 1; CPU delta=-3.000000, GPU delta=-4.000000.",
+        "Expectation check: total_trades change from 0 -> 1; CPU delta=-3.000000, GPU delta=-3.000000.",
         "CPU and GPU both reacted to axis changes.",
         "Macro gate false->true trade-direction change is consistent across CPU and GPU."
       ]
@@ -1651,21 +1647,21 @@
     "trade.sl_atr_mult": {
       "scenario": "sl_isolation",
       "pnl_direction": {
-        "matches": 1.0,
-        "mismatches": 2.0,
+        "matches": 3.0,
+        "mismatches": 0.0,
         "comparisons": 3.0,
-        "ratio": 0.3333333333333333
+        "ratio": 1.0
       },
       "trades_direction": {
-        "matches": 1.0,
-        "mismatches": 2.0,
+        "matches": 3.0,
+        "mismatches": 0.0,
         "comparisons": 3.0,
-        "ratio": 0.3333333333333333
+        "ratio": 1.0
       },
-      "pnl_direction_mismatches": 2,
-      "trades_direction_mismatches": 2,
-      "status": "fail",
-      "pass": false
+      "pnl_direction_mismatches": 0,
+      "trades_direction_mismatches": 0,
+      "status": "pass",
+      "pass": true
     },
     "trade.tp_atr_mult": {
       "scenario": "tp_isolation",
@@ -1676,15 +1672,15 @@
         "ratio": 1.0
       },
       "trades_direction": {
-        "matches": 1.0,
-        "mismatches": 2.0,
+        "matches": 3.0,
+        "mismatches": 0.0,
         "comparisons": 3.0,
-        "ratio": 0.3333333333333333
+        "ratio": 1.0
       },
       "pnl_direction_mismatches": 0,
-      "trades_direction_mismatches": 2,
-      "status": "fail",
-      "pass": false
+      "trades_direction_mismatches": 0,
+      "status": "pass",
+      "pass": true
     },
     "trade.allocation_pct": {
       "scenario": "allocation_dual",
@@ -1708,10 +1704,10 @@
     "trade.trailing_start_atr": {
       "scenario": "trailing_single",
       "pnl_direction": {
-        "matches": 2.0,
-        "mismatches": 0.0,
+        "matches": 1.0,
+        "mismatches": 1.0,
         "comparisons": 2.0,
-        "ratio": 1.0
+        "ratio": 0.5
       },
       "trades_direction": {
         "matches": 2.0,
@@ -1719,7 +1715,7 @@
         "comparisons": 2.0,
         "ratio": 1.0
       },
-      "pnl_direction_mismatches": 0,
+      "pnl_direction_mismatches": 1,
       "trades_direction_mismatches": 0,
       "status": "pass",
       "pass": true
@@ -1727,10 +1723,10 @@
     "trade.trailing_distance_atr": {
       "scenario": "trailing_single",
       "pnl_direction": {
-        "matches": 1.0,
-        "mismatches": 0.0,
+        "matches": 0.0,
+        "mismatches": 1.0,
         "comparisons": 1.0,
-        "ratio": 1.0
+        "ratio": 0.0
       },
       "trades_direction": {
         "matches": 1.0,
@@ -1738,7 +1734,7 @@
         "comparisons": 1.0,
         "ratio": 1.0
       },
-      "pnl_direction_mismatches": 0,
+      "pnl_direction_mismatches": 1,
       "trades_direction_mismatches": 0,
       "status": "pass",
       "pass": true
@@ -1803,10 +1799,10 @@
     "trade.max_total_margin_pct": {
       "scenario": "margin_cap_isolation",
       "pnl_direction": {
-        "matches": 3.0,
-        "mismatches": 0.0,
+        "matches": 2.0,
+        "mismatches": 1.0,
         "comparisons": 3.0,
-        "ratio": 1.0
+        "ratio": 0.6666666666666666
       },
       "trades_direction": {
         "matches": 2.0,
@@ -1814,7 +1810,7 @@
         "comparisons": 3.0,
         "ratio": 0.6666666666666666
       },
-      "pnl_direction_mismatches": 0,
+      "pnl_direction_mismatches": 1,
       "trades_direction_mismatches": 1,
       "status": "pass",
       "pass": true
@@ -1860,10 +1856,10 @@
     "trade.smart_exit_adx_exhaustion_lt": {
       "scenario": "smart_exit_high_conf",
       "pnl_direction": {
-        "matches": 1.0,
-        "mismatches": 1.0,
+        "matches": 2.0,
+        "mismatches": 0.0,
         "comparisons": 2.0,
-        "ratio": 0.5
+        "ratio": 1.0
       },
       "trades_direction": {
         "matches": 2.0,
@@ -1871,7 +1867,7 @@
         "comparisons": 2.0,
         "ratio": 1.0
       },
-      "pnl_direction_mismatches": 1,
+      "pnl_direction_mismatches": 0,
       "trades_direction_mismatches": 0,
       "status": "pass",
       "pass": true
@@ -1879,10 +1875,10 @@
     "trade.smart_exit_adx_exhaustion_lt_low_conf": {
       "scenario": "smart_exit_low_conf",
       "pnl_direction": {
-        "matches": 1.0,
-        "mismatches": 1.0,
+        "matches": 2.0,
+        "mismatches": 0.0,
         "comparisons": 2.0,
-        "ratio": 0.5
+        "ratio": 1.0
       },
       "trades_direction": {
         "matches": 2.0,
@@ -1890,7 +1886,7 @@
         "comparisons": 2.0,
         "ratio": 1.0
       },
-      "pnl_direction_mismatches": 1,
+      "pnl_direction_mismatches": 0,
       "trades_direction_mismatches": 0,
       "status": "pass",
       "pass": true
@@ -1919,28 +1915,23 @@
     {
       "axis": "trade.sl_atr_mult",
       "scenario": "sl_isolation",
-      "status": "fail",
-      "pass": false,
+      "status": "pass",
+      "pass": true,
       "notes": [
         "Expectation: Changing SL multiplier should alter aggregate PnL.",
-        "Expectation check: total_pnl change from 1.5 -> 3; CPU delta=-7.869540, GPU delta=10.677996.",
-        "Direction mismatch: CPU/GPU first->last delta directions do not match (CPU=decrease, GPU=increase).",
-        "CPU and GPU both reacted to axis changes.",
-        "Low CPU/GPU PnL-direction agreement (33.3%, mismatches=2).",
-        "Low CPU/GPU trade-direction agreement (33.3%, mismatches=2)."
+        "Expectation check: total_pnl change from 1.5 -> 3; CPU delta=-7.869540, GPU delta=-7.870117.",
+        "CPU and GPU both reacted to axis changes."
       ]
     },
     {
       "axis": "trade.tp_atr_mult",
       "scenario": "tp_isolation",
-      "status": "fail",
-      "pass": false,
+      "status": "pass",
+      "pass": true,
       "notes": [
         "Expectation: Changing TP multiplier should alter aggregate PnL.",
-        "Expectation check: total_pnl change from 3 -> 6; CPU delta=0.274905, GPU delta=-55.851318.",
-        "Direction mismatch: CPU/GPU first->last delta directions do not match (CPU=increase, GPU=decrease).",
-        "CPU and GPU both reacted to axis changes.",
-        "Low CPU/GPU trade-direction agreement (33.3%, mismatches=2)."
+        "Expectation check: total_pnl change from 3 -> 6; CPU delta=0.274905, GPU delta=0.274414.",
+        "CPU and GPU both reacted to axis changes."
       ]
     },
     {
@@ -1950,7 +1941,7 @@
       "pass": true,
       "notes": [
         "Expectation: Higher allocation should increase PnL under positive trend fixture.",
-        "Expectation check: total_pnl increase from 0.1 -> 0.2; CPU delta=37.828537, GPU delta=23.234703.",
+        "Expectation check: total_pnl increase from 0.1 -> 0.2; CPU delta=37.828537, GPU delta=23.484375.",
         "CPU and GPU both reacted to axis changes."
       ]
     },
@@ -1961,7 +1952,7 @@
       "pass": true,
       "notes": [
         "Expectation: Trailing activation threshold should change realised PnL.",
-        "Expectation check: total_pnl change from 1.5 -> 2.5; CPU delta=-0.771809, GPU delta=-11.685560.",
+        "Expectation check: total_pnl change from 1.5 -> 2.5; CPU delta=-0.771809, GPU delta=6.410156.",
         "CPU and GPU both reacted to axis changes."
       ]
     },
@@ -1972,8 +1963,9 @@
       "pass": true,
       "notes": [
         "Expectation: Trailing distance should change realised PnL.",
-        "Expectation check: total_pnl change from 0.5 -> 1; CPU delta=-6.859345, GPU delta=-3.919406.",
-        "CPU and GPU both reacted to axis changes."
+        "Expectation check: total_pnl change from 0.5 -> 1; CPU delta=-6.859345, GPU delta=0.321289.",
+        "CPU and GPU both reacted to axis changes.",
+        "Low CPU/GPU PnL-direction agreement (0.0%, mismatches=1)."
       ]
     },
     {
@@ -1983,7 +1975,7 @@
       "pass": true,
       "notes": [
         "Expectation: Enabling partial TP should change trade count in partial-only fixture.",
-        "Expectation check: total_trades change from 0 -> 1; CPU delta=2.000000, GPU delta=3.000000.",
+        "Expectation check: total_trades change from 0 -> 1; CPU delta=2.000000, GPU delta=2.000000.",
         "CPU and GPU both reacted to axis changes."
       ]
     },
@@ -1994,7 +1986,7 @@
       "pass": true,
       "notes": [
         "Expectation: Partial TP percentage should change realised PnL.",
-        "Expectation check: total_pnl change from 0.25 -> 0.75; CPU delta=-9.402049, GPU delta=-17.534626.",
+        "Expectation check: total_pnl change from 0.25 -> 0.75; CPU delta=-9.402049, GPU delta=-9.400391.",
         "CPU and GPU both reacted to axis changes."
       ]
     },
@@ -2005,7 +1997,7 @@
       "pass": true,
       "notes": [
         "Expectation: Partial TP ATR trigger level should change realised PnL.",
-        "Expectation check: total_pnl change from 0.5 -> 2; CPU delta=5.373798, GPU delta=8.105225.",
+        "Expectation check: total_pnl change from 0.5 -> 2; CPU delta=5.373798, GPU delta=5.374023.",
         "CPU and GPU both reacted to axis changes."
       ]
     },
@@ -2016,7 +2008,7 @@
       "pass": true,
       "notes": [
         "Expectation: More margin headroom should increase realised PnL in profitable multi-symbol fixture.",
-        "Expectation check: total_pnl increase from 0.2 -> 0.8; CPU delta=106.861168, GPU delta=69.350414.",
+        "Expectation check: total_pnl increase from 0.2 -> 0.8; CPU delta=106.861168, GPU delta=55.202148.",
         "CPU and GPU both reacted to axis changes."
       ]
     },
@@ -2027,7 +2019,7 @@
       "pass": true,
       "notes": [
         "Expectation: Allowing more concurrent positions should increase executed trades.",
-        "Expectation check: total_trades increase from 1 -> 4; CPU delta=4.000000, GPU delta=2.000000.",
+        "Expectation check: total_trades increase from 1 -> 4; CPU delta=4.000000, GPU delta=4.000000.",
         "CPU and GPU both reacted to axis changes."
       ]
     },
@@ -2038,7 +2030,7 @@
       "pass": true,
       "notes": [
         "Expectation: Higher leverage should increase realised PnL in profitable fixture.",
-        "Expectation check: total_pnl increase from 1 -> 5; CPU delta=170.257059, GPU delta=404.461899.",
+        "Expectation check: total_pnl increase from 1 -> 5; CPU delta=170.257059, GPU delta=170.255859.",
         "CPU and GPU both reacted to axis changes."
       ]
     },
@@ -2049,7 +2041,7 @@
       "pass": true,
       "notes": [
         "Expectation: Raising ADX exhaustion threshold should alter exit churn.",
-        "Expectation check: total_trades change from 0 -> 200; CPU delta=6.000000, GPU delta=7.000000.",
+        "Expectation check: total_trades change from 0 -> 200; CPU delta=6.000000, GPU delta=6.000000.",
         "CPU and GPU both reacted to axis changes."
       ]
     },
@@ -2071,7 +2063,7 @@
       "pass": true,
       "notes": [
         "Expectation: Macro alignment gate false/true should alter captured trades.",
-        "Expectation check: total_trades change from 0 -> 1; CPU delta=-3.000000, GPU delta=-4.000000.",
+        "Expectation check: total_trades change from 0 -> 1; CPU delta=-3.000000, GPU delta=-3.000000.",
         "CPU and GPU both reacted to axis changes.",
         "Macro gate false->true trade-direction change is consistent across CPU and GPU."
       ]
@@ -2081,8 +2073,8 @@
     "total_axes": 14,
     "selected_axes": 14,
     "executed_axes": 14,
-    "pass_axes": 12,
-    "fail_axes": 2,
+    "pass_axes": 14,
+    "fail_axes": 0,
     "pending_axes": 0
   }
 }

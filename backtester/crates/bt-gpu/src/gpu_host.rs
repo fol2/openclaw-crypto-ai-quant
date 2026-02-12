@@ -103,6 +103,7 @@ pub struct IndicatorBuffers {
     pub num_symbols: u32,
     pub num_bars: u32,
     pub btc_sym_idx: u32,
+    pub paxg_sym_idx: u32,
 }
 
 impl IndicatorBuffers {
@@ -115,6 +116,7 @@ impl IndicatorBuffers {
         num_bars: u32,
         num_symbols: u32,
         btc_sym_idx: u32,
+        paxg_sym_idx: u32,
     ) -> Self {
         let k = ind_configs.len() as u32;
 
@@ -148,6 +150,7 @@ impl IndicatorBuffers {
             num_symbols,
             num_bars,
             btc_sym_idx,
+            paxg_sym_idx,
         }
     }
 }
@@ -232,6 +235,7 @@ pub struct BatchBuffers {
     pub num_combos: u32,
     pub num_symbols: u32,
     pub btc_sym_idx: u32,
+    pub paxg_sym_idx: u32,
     pub initial_balance: f32,
     pub max_sub_per_bar: u32,
     pub sub_candles: Option<CudaSlice<GpuRawCandle>>,
@@ -266,6 +270,7 @@ impl BatchBuffers {
             num_symbols,
             num_bars,
             btc_sym_idx: ind_bufs.btc_sym_idx,
+            paxg_sym_idx: ind_bufs.paxg_sym_idx,
             chunk_start: 0,
             chunk_end: num_bars,
             initial_balance_bits: initial_balance.to_bits(),
@@ -286,6 +291,7 @@ impl BatchBuffers {
             num_combos,
             num_symbols,
             btc_sym_idx: ind_bufs.btc_sym_idx,
+            paxg_sym_idx: ind_bufs.paxg_sym_idx,
             initial_balance,
             max_sub_per_bar: 0,
             sub_candles: None,
@@ -326,6 +332,7 @@ impl BatchBuffers {
             num_symbols,
             num_bars,
             btc_sym_idx,
+            paxg_sym_idx: u32::MAX,
             chunk_start: 0,
             chunk_end: num_bars,
             initial_balance_bits: initial_balance.to_bits(),
@@ -346,6 +353,7 @@ impl BatchBuffers {
             num_combos,
             num_symbols,
             btc_sym_idx,
+            paxg_sym_idx: u32::MAX,
             initial_balance,
             max_sub_per_bar: 0,
             sub_candles: None,
@@ -405,6 +413,7 @@ pub fn dispatch_and_readback(
             num_symbols: buffers.num_symbols,
             num_bars,
             btc_sym_idx: buffers.btc_sym_idx,
+            paxg_sym_idx: buffers.paxg_sym_idx,
             chunk_start,
             chunk_end,
             initial_balance_bits: buffers.initial_balance.to_bits(),

@@ -165,6 +165,11 @@ pub fn run_tpe_sweep(
         .or_else(|| symbols.iter().position(|s| s == "BTCUSDT"))
         .map(|idx| idx as u32)
         .unwrap_or(u32::MAX);
+    let paxg_sym_idx = symbols
+        .iter()
+        .position(|s| s.eq_ignore_ascii_case("PAXG"))
+        .map(|idx| idx as u32)
+        .unwrap_or(u32::MAX);
 
     let raw = raw_candles::prepare_raw_candles(candles, &symbols);
     let num_bars = raw.num_bars as u32;
@@ -339,6 +344,7 @@ pub fn run_tpe_sweep(
                 num_bars,
                 num_symbols as u32,
                 btc_sym_idx,
+                paxg_sym_idx,
                 spec.lookback,
                 spec.initial_balance as f32,
                 arena_cap,
@@ -362,6 +368,7 @@ pub fn run_tpe_sweep(
                 num_bars,
                 num_symbols as u32,
                 btc_sym_idx,
+                paxg_sym_idx,
                 spec.lookback,
                 spec.initial_balance as f32,
                 max_sub_per_bar,
@@ -518,6 +525,7 @@ fn evaluate_trade_only_batch(
     num_bars: u32,
     num_symbols: u32,
     btc_sym_idx: u32,
+    paxg_sym_idx: u32,
     lookback: usize,
     initial_balance: f32,
     max_sub_per_bar: u32,
@@ -537,6 +545,7 @@ fn evaluate_trade_only_batch(
         num_bars,
         num_symbols,
         btc_sym_idx,
+        paxg_sym_idx,
     );
     gpu_host::dispatch_indicator_kernels(ds, &mut ind_bufs);
 
@@ -585,6 +594,7 @@ fn evaluate_mixed_batch_arena(
     num_bars: u32,
     num_symbols: u32,
     btc_sym_idx: u32,
+    paxg_sym_idx: u32,
     lookback: usize,
     initial_balance: f32,
     arena_cap: usize,
@@ -702,6 +712,7 @@ fn evaluate_mixed_batch_arena(
             initial_balance,
             num_symbols,
             btc_sym_idx,
+            paxg_sym_idx,
             num_bars,
             max_sub_per_bar,
             sub_candles_gpu,
@@ -818,6 +829,7 @@ fn dispatch_trade_arena(
     initial_balance: f32,
     num_symbols: u32,
     btc_sym_idx: u32,
+    paxg_sym_idx: u32,
     num_bars: u32,
     max_sub_per_bar: u32,
     sub_candles_gpu: Option<&CudaSlice<buffers::GpuRawCandle>>,
@@ -869,6 +881,7 @@ fn dispatch_trade_arena(
             num_symbols,
             num_bars,
             btc_sym_idx,
+            paxg_sym_idx,
             chunk_start,
             chunk_end,
             initial_balance_bits: initial_balance.to_bits(),
