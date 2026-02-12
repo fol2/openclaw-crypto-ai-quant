@@ -104,6 +104,7 @@ The factory service should run with:
 - `--candidate-services paper1,paper2,paper3`
 - `--candidate-yaml-paths ...paper1.yaml,...paper2.yaml,...paper3.yaml`
 - `--enable-livepaper-promotion --livepaper-service ... --livepaper-yaml-path ...livepaper.yaml`
+- `--max-age-fail-hours` and `--funding-max-stale-symbols` (or matching `AI_QUANT_FUNDING_*` env vars) for isolated stale-funding tolerance.
 
 Enable and start (v8 only):
 
