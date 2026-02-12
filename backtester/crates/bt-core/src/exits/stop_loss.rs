@@ -190,6 +190,8 @@ mod tests {
             adds_count: 0,
             open_time_ms: 0,
             last_add_time_ms: 0,
+            mae_usd: 0.0,
+            mfe_usd: 0.0,
         }
     }
 

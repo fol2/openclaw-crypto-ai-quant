@@ -92,12 +92,14 @@ pub fn run_gpu_sweep(
     let symbols = sorted_symbols_with_kernel_cap(candles, "[GPU]");
     let num_symbols = symbols.len();
 
-    // BTC symbol index for breadth kernel
+    // BTC symbol index for breadth kernel.
+    // Use u32::MAX sentinel when unavailable, so kernels can treat alignment as unknown.
     let btc_sym_idx = symbols
         .iter()
         .position(|s| s == "BTC")
         .or_else(|| symbols.iter().position(|s| s == "BTCUSDT"))
-        .unwrap_or(0) as u32;
+        .map(|idx| idx as u32)
+        .unwrap_or(u32::MAX);
 
     // ── 1. Prepare raw candles (CPU, layout only, ~10ms) ─────────────────
     let raw = raw_candles::prepare_raw_candles(candles, &symbols);

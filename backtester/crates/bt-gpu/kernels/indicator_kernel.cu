@@ -17,6 +17,7 @@
 
 #define MAX_RING 256u   // max rolling window size (covers all practical configs)
 #define MAX_SYMBOLS 52u
+#define BTC_BULL_UNKNOWN 2u
 
 // -- Structs (match Rust #[repr(C)] exactly) ----------------------------------
 
@@ -586,7 +587,7 @@ __global__ void indicator_kernel(
 //
 // Output:
 //   breadth[ind_idx * num_bars + bar] = market breadth %
-//   btc_bullish[ind_idx * num_bars + bar] = 1 if BTC bullish, 0 otherwise
+//   btc_bullish[ind_idx * num_bars + bar] = 1 bullish, 0 bearish, 2 unavailable
 
 extern "C"
 __global__ void breadth_kernel(
@@ -622,8 +623,12 @@ __global__ void breadth_kernel(
     unsigned int btc_idx = params->btc_sym_idx;
     if (btc_idx < ns) {
         GpuSnapshot btc = snapshots[snap_base + bar_idx * ns + btc_idx];
-        btc_bullish[out_idx] = (btc.bar_count >= 2 && btc.prev_close > btc.prev_ema_slow) ? 1u : 0u;
+        if (btc.bar_count >= 2) {
+            btc_bullish[out_idx] = (btc.prev_close > btc.prev_ema_slow) ? 1u : 0u;
+        } else {
+            btc_bullish[out_idx] = BTC_BULL_UNKNOWN;
+        }
     } else {
-        btc_bullish[out_idx] = 0u;
+        btc_bullish[out_idx] = BTC_BULL_UNKNOWN;
     }
 }
