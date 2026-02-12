@@ -159,13 +159,30 @@ SORT_KEYS = {
 }
 
 
+def _safe_float(v, default: float = 0.0) -> float:
+    try:
+        x = float(v)
+    except Exception:
+        return float(default)
+    if not math.isfinite(x):
+        return float(default)
+    return float(x)
+
+
+def _safe_int(v, default: int = 0) -> int:
+    try:
+        return int(float(v))
+    except Exception:
+        return int(default)
+
+
 def balanced_score(r: dict) -> float:
     """Composite score: normalised PnL + PF + Sharpe - DD penalty."""
-    pnl = r.get("total_pnl", 0)
-    pf = min(r.get("profit_factor", 0), 10.0)  # cap PF to avoid 8-trade outliers
-    sharpe = r.get("sharpe_ratio", 0)
-    dd = r.get("max_drawdown_pct", 1)
-    trades = r.get("total_trades", 0)
+    pnl = _safe_float(r.get("total_pnl", 0.0), 0.0)
+    pf = min(_safe_float(r.get("profit_factor", 0.0), 0.0), 10.0)  # cap PF to avoid 8-trade outliers
+    sharpe = _safe_float(r.get("sharpe_ratio", 0.0), 0.0)
+    dd = _safe_float(r.get("max_drawdown_pct", 1.0), 1.0)
+    trades = _safe_int(r.get("total_trades", 0), 0)
     trade_penalty = 0.5 if trades < 20 else 1.0
     return (pnl * 0.3 + pf * 20 + sharpe * 15 - dd * 100) * trade_penalty
 
@@ -251,13 +268,13 @@ def normalise_overrides(raw_overrides) -> list[tuple[str, float]]:
 # ---------------------------------------------------------------------------
 
 def format_row(r: dict, rank: int) -> str:
-    pnl = r.get("total_pnl", 0)
-    bal = r.get("final_balance", 0)
-    trades = r.get("total_trades", 0)
-    wr = r.get("win_rate", 0) * 100
-    pf = r.get("profit_factor", 0)
-    dd = r.get("max_drawdown_pct", 0) * 100
-    sharpe = r.get("sharpe_ratio", 0)
+    pnl = _safe_float(r.get("total_pnl", 0.0), 0.0)
+    bal = _safe_float(r.get("final_balance", 0.0), 0.0)
+    trades = _safe_int(r.get("total_trades", 0), 0)
+    wr = _safe_float(r.get("win_rate", 0.0), 0.0) * 100
+    pf = _safe_float(r.get("profit_factor", 0.0), 0.0)
+    dd = _safe_float(r.get("max_drawdown_pct", 0.0), 0.0) * 100
+    sharpe = _safe_float(r.get("sharpe_ratio", 0.0), 0.0)
     bscore = balanced_score(r)
     return (f"  #{rank:<3d}  PnL ${pnl:>9.2f}  Bal ${bal:>9.2f}  "
             f"Trades {trades:>4d}  WR {wr:>5.1f}%  PF {pf:>5.2f}  "
@@ -368,11 +385,11 @@ def main():
     # Update header comment
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     cfg_id = config_id_from_obj(base_data)
-    pnl = selected.get("total_pnl", 0)
-    trades = selected.get("total_trades", 0)
-    wr = selected.get("win_rate", 0) * 100
-    pf = selected.get("profit_factor", 0)
-    dd = selected.get("max_drawdown_pct", 0) * 100
+    pnl = _safe_float(selected.get("total_pnl", 0.0), 0.0)
+    trades = _safe_int(selected.get("total_trades", 0), 0)
+    wr = _safe_float(selected.get("win_rate", 0.0), 0.0) * 100
+    pf = _safe_float(selected.get("profit_factor", 0.0), 0.0)
+    dd = _safe_float(selected.get("max_drawdown_pct", 0.0), 0.0) * 100
 
     # Write output
     if args.output:

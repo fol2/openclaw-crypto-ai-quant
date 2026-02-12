@@ -150,6 +150,121 @@ def _normalise_candles_db_arg_for_backtester(arg: str | None) -> str | None:
     return ",".join(out) if out else None
 
 
+def _split_csv(raw: str) -> list[str]:
+    """Split a comma-separated value list into unique, deduplicated entries."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in str(raw or "").split(","):
+        token = str(item or "").strip()
+        if not token:
+            continue
+        if token not in seen:
+            out.append(token)
+            seen.add(token)
+    return out
+
+
+def _factory_candle_check_intervals(default: str = "1m,3m,5m,15m,30m,1h") -> list[str]:
+    """Return candle intervals configured for data health checks."""
+    raw = os.getenv("AI_QUANT_FACTORY_CANDLE_CHECK_INTERVALS", default)
+    return _split_csv(raw)
+
+
+def _iter_candle_db_paths(raw_candles_db: str) -> list[Path]:
+    """Return concrete candle DB paths from a path or comma-separated list."""
+    out: list[Path] = []
+    seen: set[str] = set()
+
+    for item in _split_csv(raw_candles_db):
+        try:
+            p = Path(item).expanduser()
+            if not p.is_absolute():
+                p = (Path.cwd() / p).resolve()
+            if p.is_dir():
+                for child in sorted(p.iterdir()):
+                    if not child.is_file():
+                        continue
+                    name = child.name
+                    if not (name.startswith("candles_") and name.endswith(".db")):
+                        continue
+                    rp = str(child.resolve())
+                    if rp not in seen:
+                        out.append(child.resolve())
+                        seen.add(rp)
+                continue
+
+            if p.is_file():
+                rp = str(p.resolve())
+                if rp not in seen:
+                    out.append(Path(rp))
+                    seen.add(rp)
+        except Exception:
+            continue
+
+    return out
+
+
+def _candle_db_interval(db_path: Path) -> str:
+    name = db_path.name
+    if name.startswith("candles_") and name.endswith(".db"):
+        return name[len("candles_") : -len(".db")]
+    return ""
+
+
+def _symbols_from_candle_db(db_path: Path) -> list[str]:
+    try:
+        con = sqlite3.connect(str(db_path))
+        try:
+            rows = con.execute("SELECT DISTINCT symbol FROM candles ORDER BY symbol").fetchall()
+            return [str(r[0]).strip() for r in rows if str(r[0]).strip()]
+        finally:
+            con.close()
+    except Exception:
+        return []
+
+
+def _run_stat_check(
+    *,
+    sidecar_bin: str,
+    interval: str,
+    db_path: Path,
+    symbols: list[str],
+    out_path: Path,
+    err_path: Path,
+) -> tuple[int, list[dict[str, Any]], str, str]:
+    symbols_csv = ",".join(symbols)
+    argv = [
+        sidecar_bin,
+        "stat",
+        "--interval",
+        interval,
+        "--symbols",
+        symbols_csv,
+        "--db-dir",
+        str(db_path.parent),
+        "--json",
+    ]
+    res = _run_cmd(argv, cwd=AIQ_ROOT, stdout_path=out_path, stderr_path=err_path)
+    payload = _load_json_payload(out_path)
+    items = payload.get("items")
+    if not isinstance(items, list):
+        items = []
+    bad = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        gap = int(it.get("gap_bars", 0) or 0)
+        nulls = int(it.get("null_ohlcv", 0) or 0)
+        rows = int(it.get("rows", 0) or 0)
+        wanted = int(it.get("bars_wanted", rows) or 0)
+        out_of_order = bool(it.get("out_of_order"))
+        if gap != 0 or nulls != 0 or rows < wanted or out_of_order:
+            bad.append(str(it.get("symbol") or ""))
+
+    fail_reason = "pass" if not bad and res.exit_code == 0 else "fail"
+    return res.exit_code, items, bad, fail_reason
+
+
 def _resolve_nvidia_smi_bin() -> str:
     """Return the best-effort path to nvidia-smi.
 
@@ -1274,26 +1389,172 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
     else:
-        candle_argv = ["python3", "tools/check_candle_dbs.py", "--json-indent", "2"]
-        if candles_db_for_checks:
-            try:
-                p = Path(str(candles_db_for_checks)).expanduser()
-                if p.is_dir():
-                    candle_argv += ["--db-glob", str((p / "candles_*.db").resolve())]
-                else:
-                    candle_argv += ["--db-glob", str(p.resolve())]
-            except Exception:
-                candle_argv += ["--db-glob", str(candles_db_for_checks)]
-        candle_check = _run_cmd(
-            candle_argv,
-            cwd=AIQ_ROOT,
-            stdout_path=candle_out,
-            stderr_path=candle_err,
+        check_intervals = _factory_candle_check_intervals(default="1m,3m,5m,15m,30m,1h")
+        sidecar_bin = shutil.which("openclaw-ai-quant-ws-sidecar") or "openclaw-ai-quant-ws-sidecar"
+        check_targets: list[dict[str, Any]] = []
+        check_failed = False
+        check_errors: list[str] = []
+
+        if not candles_db_for_checks:
+            candles_db_for_checks = str(AIQ_ROOT / "candles_dbs")
+        db_paths = _iter_candle_db_paths(str(candles_db_for_checks))
+        if not db_paths:
+            err_text = f"no candle DBs resolved from --candles-db={candles_db_for_checks}\n"
+            check_targets.append(
+                {
+                    "interval": "n/a",
+                    "db_path": str(candles_db_for_checks),
+                    "db_dir": str(Path(candles_db_for_checks).expanduser()),
+                    "symbols": [],
+                    "status": "FAIL",
+                    "reason": "no_db_paths",
+                }
+            )
+            candle_err.write_text(err_text, encoding="utf-8")
+            check_failed = True
+        else:
+            for db_path in db_paths:
+                interval = _candle_db_interval(db_path)
+                if not interval:
+                    continue
+                if check_intervals and interval not in check_intervals:
+                    continue
+
+                symbols = _symbols_from_candle_db(db_path)
+                out_path = run_dir / "data_checks" / f"candle_{interval}_{db_path.stem}.json"
+                err_path = run_dir / "data_checks" / f"candle_{interval}_{db_path.stem}.stderr.txt"
+
+                if not symbols:
+                    check_targets.append(
+                        {
+                            "interval": interval,
+                            "db_path": str(db_path),
+                            "symbol_count": 0,
+                            "symbols": [],
+                            "status": "PASS",
+                            "reason": "no_symbols",
+                            "items": [],
+                        }
+                    )
+                    continue
+
+                stat_exit, stat_items, bad_symbols, fail_reason = _run_stat_check(
+                    sidecar_bin=sidecar_bin,
+                    interval=interval,
+                    db_path=db_path,
+                    symbols=symbols,
+                    out_path=out_path,
+                    err_path=err_path,
+                )
+                fail_interval = (stat_exit != 0) or (fail_reason != "pass")
+                if fail_interval:
+                    check_failed = True
+
+                check_targets.append(
+                    {
+                        "interval": interval,
+                        "db_path": str(db_path),
+                        "db_dir": str(db_path.parent),
+                        "symbol_count": len(symbols),
+                        "symbols": symbols[:500],
+                        "status": "FAIL" if fail_interval else "PASS",
+                        "exit_code": int(stat_exit),
+                        "failed_symbols": bad_symbols,
+                        "items": stat_items,
+                    }
+                )
+                if err_path.is_file():
+                    try:
+                        err_text = err_path.read_text(encoding="utf-8")
+                        if err_text.strip():
+                            check_errors.append(f"[{interval}] {err_path}\n{err_text.strip()}\n")
+                    except Exception:
+                        pass
+
+                if fail_interval:
+                    check_targets[-1]["status"] = "FAIL"
+
+                if fail_interval and bad_symbols:
+                    check_targets[-1]["failed_symbols"] = bad_symbols
+
+        if check_errors:
+            check_err_text = "".join(check_errors)
+            candle_err.parent.mkdir(parents=True, exist_ok=True)
+            candle_err.write_text(check_err_text, encoding="utf-8")
+
+        _write_json(
+            candle_out,
+            {
+                "status": "FAIL" if check_failed else "PASS",
+                "checks": check_targets,
+                "intervals": check_intervals,
+                "candle_db_root": str(candles_db_for_checks),
+            },
         )
-        meta["steps"].append({"name": "check_candle_dbs", **candle_check.__dict__})
-        if candle_check.exit_code != 0:
+        if check_failed:
+            for interval_check in check_targets:
+                interval = str(interval_check.get("interval", ""))
+                symbols_csv = ",".join(interval_check.get("symbols", []))
+                meta["steps"].append(
+                    {
+                        "name": f"check_candle_dbs_rust_{interval}",
+                        "cwd": str(AIQ_ROOT),
+                        "argv": [
+                            sidecar_bin,
+                            "stat",
+                            "--interval",
+                            interval,
+                            "--symbols",
+                            symbols_csv,
+                            "--db-dir",
+                            str(Path(interval_check.get("db_path", "")).parent)
+                            if interval_check.get("db_path")
+                            else str(AIQ_ROOT),
+                        ],
+                        "exit_code": int(1 if str(interval_check.get("status", "FAIL")) == "FAIL" else 0),
+                        "elapsed_s": 0.0,
+                        "stdout_path": str(candle_out),
+                        "stderr_path": str(candle_err),
+                        "status": str(interval_check.get("status", "PASS")),
+                        "items": interval_check.get("items", []),
+                        "failed_symbols": interval_check.get("failed_symbols", []),
+                    }
+                )
+
+            if not candle_err.exists():
+                # Keep metadata consistent; create empty file even when all failing intervals had no stderr details.
+                candle_err.parent.mkdir(parents=True, exist_ok=True)
+                candle_err.write_text("", encoding="utf-8")
+
+            meta["steps"].append(
+                {
+                    "name": "check_candle_dbs",
+                    "argv": [],
+                    "cwd": str(AIQ_ROOT),
+                    "exit_code": 1,
+                    "elapsed_s": 0.0,
+                    "stdout_path": str(candle_out),
+                    "stderr_path": str(candle_err),
+                    "status": "FAIL",
+                }
+            )
             _write_json(run_dir / "run_metadata.json", meta)
-            return int(candle_check.exit_code)
+            return 1
+
+        meta["steps"].append(
+            {
+                "name": "check_candle_dbs",
+                "argv": [],
+                "cwd": str(AIQ_ROOT),
+                "exit_code": 0,
+                "elapsed_s": 0.0,
+                "stdout_path": str(candle_out),
+                "stderr_path": str(candle_err),
+                "status": "PASS",
+                "checks": check_targets,
+                "intervals": check_intervals,
+            }
+        )
     _write_json(run_dir / "run_metadata.json", meta)
 
     funding_out = run_dir / "data_checks" / "funding_rates.json"
@@ -1452,6 +1713,8 @@ def main(argv: list[str] | None = None) -> int:
                 "--tpe-seed",
                 str(int(getattr(args, "tpe_seed", 42))),
             ]
+        if os.getenv("AI_QUANT_FACTORY_ALLOW_UNSAFE_GPU_SWEEP", "").strip().lower() in {"1", "true", "yes", "on"}:
+            sweep_argv += ["--allow-unsafe-gpu-sweep"]
 
         sweep_res = _run_cmd(
             sweep_argv,
