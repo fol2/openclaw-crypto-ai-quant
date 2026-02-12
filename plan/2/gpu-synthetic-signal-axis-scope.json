@@ -1,0 +1,777 @@
+{
+  "generated_at": "2026-02-12",
+  "scope": {
+    "strategy_overrides_leaf_count": 148,
+    "sweep_supported_count": 141,
+    "overlap_count": 140,
+    "not_supported_in_sweep_count": 8,
+    "sweep_extra_not_in_config_count": 1,
+    "validated_axes_count": 14,
+    "pending_axes_count": 126
+  },
+  "supported_paths": [
+    "filters.adx_rising_saturation",
+    "filters.enable_anomaly_filter",
+    "filters.enable_extension_filter",
+    "filters.enable_ranging_filter",
+    "filters.require_adx_rising",
+    "filters.require_btc_alignment",
+    "filters.require_macro_alignment",
+    "filters.require_volume_confirmation",
+    "filters.use_stoch_rsi_filter",
+    "filters.vol_confirm_include_prev",
+    "indicators.adx_window",
+    "indicators.atr_window",
+    "indicators.bb_width_avg_window",
+    "indicators.bb_window",
+    "indicators.ema_fast_window",
+    "indicators.ema_macro_window",
+    "indicators.ema_slow_window",
+    "indicators.rsi_window",
+    "indicators.stoch_rsi_smooth1",
+    "indicators.stoch_rsi_smooth2",
+    "indicators.stoch_rsi_window",
+    "indicators.vol_sma_window",
+    "indicators.vol_trend_window",
+    "market_regime.auto_reverse_breadth_high",
+    "market_regime.auto_reverse_breadth_low",
+    "market_regime.breadth_block_long_below",
+    "market_regime.breadth_block_short_above",
+    "market_regime.enable_auto_reverse",
+    "market_regime.enable_regime_filter",
+    "thresholds.anomaly.ema_fast_dev_pct_gt",
+    "thresholds.anomaly.price_change_pct_gt",
+    "thresholds.entry.ave_adx_mult",
+    "thresholds.entry.ave_atr_ratio_gt",
+    "thresholds.entry.ave_avg_atr_window",
+    "thresholds.entry.ave_enabled",
+    "thresholds.entry.btc_adx_override",
+    "thresholds.entry.enable_pullback_entries",
+    "thresholds.entry.enable_slow_drift_entries",
+    "thresholds.entry.high_conf_volume_mult",
+    "thresholds.entry.max_dist_ema_fast",
+    "thresholds.entry.min_adx",
+    "thresholds.entry.pullback_confidence",
+    "thresholds.entry.pullback_min_adx",
+    "thresholds.entry.pullback_require_macd_sign",
+    "thresholds.entry.pullback_rsi_long_min",
+    "thresholds.entry.pullback_rsi_short_max",
+    "thresholds.entry.slow_drift_min_adx",
+    "thresholds.entry.slow_drift_min_slope_pct",
+    "thresholds.entry.slow_drift_require_macd_sign",
+    "thresholds.entry.slow_drift_rsi_long_min",
+    "thresholds.entry.slow_drift_rsi_short_max",
+    "thresholds.entry.slow_drift_slope_window",
+    "thresholds.ranging.adx_below",
+    "thresholds.ranging.bb_width_ratio_below",
+    "thresholds.ranging.min_signals",
+    "thresholds.ranging.rsi_high",
+    "thresholds.ranging.rsi_low",
+    "thresholds.stoch_rsi.block_long_if_k_gt",
+    "thresholds.stoch_rsi.block_short_if_k_lt",
+    "thresholds.tp_and_momentum.adx_strong_gt",
+    "thresholds.tp_and_momentum.adx_weak_lt",
+    "thresholds.tp_and_momentum.rsi_long_strong",
+    "thresholds.tp_and_momentum.rsi_long_weak",
+    "thresholds.tp_and_momentum.rsi_short_strong",
+    "thresholds.tp_and_momentum.rsi_short_weak",
+    "thresholds.tp_and_momentum.tp_mult_strong",
+    "thresholds.tp_and_momentum.tp_mult_weak",
+    "trade.add_cooldown_minutes",
+    "trade.add_fraction_of_base_margin",
+    "trade.add_min_confidence",
+    "trade.add_min_profit_atr",
+    "trade.adx_sizing_full_adx",
+    "trade.adx_sizing_min_mult",
+    "trade.allocation_pct",
+    "trade.block_exits_on_extreme_dev",
+    "trade.breakeven_buffer_atr",
+    "trade.breakeven_start_atr",
+    "trade.bump_to_min_notional",
+    "trade.confidence_mult_high",
+    "trade.confidence_mult_low",
+    "trade.confidence_mult_medium",
+    "trade.enable_breakeven_stop",
+    "trade.enable_dynamic_leverage",
+    "trade.enable_dynamic_sizing",
+    "trade.enable_partial_tp",
+    "trade.enable_pyramiding",
+    "trade.enable_reef_filter",
+    "trade.enable_rsi_overextension_exit",
+    "trade.enable_ssf_filter",
+    "trade.enable_vol_buffered_trailing",
+    "trade.entry_cooldown_s",
+    "trade.entry_min_confidence",
+    "trade.exit_cooldown_s",
+    "trade.glitch_atr_mult",
+    "trade.glitch_price_dev_pct",
+    "trade.leverage",
+    "trade.leverage_high",
+    "trade.leverage_low",
+    "trade.leverage_max_cap",
+    "trade.leverage_medium",
+    "trade.max_adds_per_symbol",
+    "trade.max_entry_orders_per_loop",
+    "trade.max_open_positions",
+    "trade.max_total_margin_pct",
+    "trade.min_atr_pct",
+    "trade.min_notional_usd",
+    "trade.reef_adx_threshold",
+    "trade.reef_long_rsi_block_gt",
+    "trade.reef_long_rsi_extreme_gt",
+    "trade.reef_short_rsi_block_lt",
+    "trade.reef_short_rsi_extreme_lt",
+    "trade.reentry_cooldown_max_mins",
+    "trade.reentry_cooldown_min_mins",
+    "trade.reentry_cooldown_minutes",
+    "trade.reverse_entry_signal",
+    "trade.rsi_exit_lb_hi_profit",
+    "trade.rsi_exit_lb_hi_profit_low_conf",
+    "trade.rsi_exit_lb_lo_profit",
+    "trade.rsi_exit_lb_lo_profit_low_conf",
+    "trade.rsi_exit_profit_atr_switch",
+    "trade.rsi_exit_ub_hi_profit",
+    "trade.rsi_exit_ub_hi_profit_low_conf",
+    "trade.rsi_exit_ub_lo_profit",
+    "trade.rsi_exit_ub_lo_profit_low_conf",
+    "trade.sl_atr_mult",
+    "trade.slippage_bps",
+    "trade.smart_exit_adx_exhaustion_lt",
+    "trade.smart_exit_adx_exhaustion_lt_low_conf",
+    "trade.tp_atr_mult",
+    "trade.tp_partial_atr_mult",
+    "trade.tp_partial_pct",
+    "trade.trailing_distance_atr",
+    "trade.trailing_distance_atr_low_conf",
+    "trade.trailing_start_atr",
+    "trade.trailing_start_atr_low_conf",
+    "trade.tsme_min_profit_atr",
+    "trade.tsme_require_adx_slope_negative",
+    "trade.vol_baseline_pct",
+    "trade.vol_scalar_max",
+    "trade.vol_scalar_min"
+  ],
+  "validated_paths": [
+    "filters.require_macro_alignment",
+    "trade.allocation_pct",
+    "trade.enable_partial_tp",
+    "trade.leverage",
+    "trade.max_open_positions",
+    "trade.max_total_margin_pct",
+    "trade.sl_atr_mult",
+    "trade.smart_exit_adx_exhaustion_lt",
+    "trade.smart_exit_adx_exhaustion_lt_low_conf",
+    "trade.tp_atr_mult",
+    "trade.tp_partial_atr_mult",
+    "trade.tp_partial_pct",
+    "trade.trailing_distance_atr",
+    "trade.trailing_start_atr"
+  ],
+  "not_supported_in_sweep": [
+    "engine.entry_interval",
+    "engine.exit_interval",
+    "engine.interval",
+    "engine.loop_target_s",
+    "engine.signal_on_candle_close",
+    "thresholds.entry.macd_hist_entry_mode",
+    "trade.tp_partial_min_notional_usd",
+    "trade.use_bbo_for_fills"
+  ],
+  "extra_sweep_paths_not_in_config": [
+    "indicators.ave_avg_atr_window"
+  ],
+  "rows": [
+    {
+      "path": "engine.entry_interval",
+      "status": "unsupported_in_sweep"
+    },
+    {
+      "path": "engine.exit_interval",
+      "status": "unsupported_in_sweep"
+    },
+    {
+      "path": "engine.interval",
+      "status": "unsupported_in_sweep"
+    },
+    {
+      "path": "engine.loop_target_s",
+      "status": "unsupported_in_sweep"
+    },
+    {
+      "path": "engine.signal_on_candle_close",
+      "status": "unsupported_in_sweep"
+    },
+    {
+      "path": "filters.adx_rising_saturation",
+      "status": "pending"
+    },
+    {
+      "path": "filters.enable_anomaly_filter",
+      "status": "pending"
+    },
+    {
+      "path": "filters.enable_extension_filter",
+      "status": "pending"
+    },
+    {
+      "path": "filters.enable_ranging_filter",
+      "status": "pending"
+    },
+    {
+      "path": "filters.require_adx_rising",
+      "status": "pending"
+    },
+    {
+      "path": "filters.require_btc_alignment",
+      "status": "pending"
+    },
+    {
+      "path": "filters.require_macro_alignment",
+      "status": "pass"
+    },
+    {
+      "path": "filters.require_volume_confirmation",
+      "status": "pending"
+    },
+    {
+      "path": "filters.use_stoch_rsi_filter",
+      "status": "pending"
+    },
+    {
+      "path": "filters.vol_confirm_include_prev",
+      "status": "pending"
+    },
+    {
+      "path": "indicators.adx_window",
+      "status": "pending"
+    },
+    {
+      "path": "indicators.atr_window",
+      "status": "pending"
+    },
+    {
+      "path": "indicators.bb_width_avg_window",
+      "status": "pending"
+    },
+    {
+      "path": "indicators.bb_window",
+      "status": "pending"
+    },
+    {
+      "path": "indicators.ema_fast_window",
+      "status": "pending"
+    },
+    {
+      "path": "indicators.ema_macro_window",
+      "status": "pending"
+    },
+    {
+      "path": "indicators.ema_slow_window",
+      "status": "pending"
+    },
+    {
+      "path": "indicators.rsi_window",
+      "status": "pending"
+    },
+    {
+      "path": "indicators.stoch_rsi_smooth1",
+      "status": "pending"
+    },
+    {
+      "path": "indicators.stoch_rsi_smooth2",
+      "status": "pending"
+    },
+    {
+      "path": "indicators.stoch_rsi_window",
+      "status": "pending"
+    },
+    {
+      "path": "indicators.vol_sma_window",
+      "status": "pending"
+    },
+    {
+      "path": "indicators.vol_trend_window",
+      "status": "pending"
+    },
+    {
+      "path": "market_regime.auto_reverse_breadth_high",
+      "status": "pending"
+    },
+    {
+      "path": "market_regime.auto_reverse_breadth_low",
+      "status": "pending"
+    },
+    {
+      "path": "market_regime.breadth_block_long_below",
+      "status": "pending"
+    },
+    {
+      "path": "market_regime.breadth_block_short_above",
+      "status": "pending"
+    },
+    {
+      "path": "market_regime.enable_auto_reverse",
+      "status": "pending"
+    },
+    {
+      "path": "market_regime.enable_regime_filter",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.anomaly.ema_fast_dev_pct_gt",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.anomaly.price_change_pct_gt",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.entry.ave_adx_mult",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.entry.ave_atr_ratio_gt",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.entry.ave_avg_atr_window",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.entry.ave_enabled",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.entry.btc_adx_override",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.entry.enable_pullback_entries",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.entry.enable_slow_drift_entries",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.entry.high_conf_volume_mult",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.entry.macd_hist_entry_mode",
+      "status": "unsupported_in_sweep"
+    },
+    {
+      "path": "thresholds.entry.max_dist_ema_fast",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.entry.min_adx",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.entry.pullback_confidence",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.entry.pullback_min_adx",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.entry.pullback_require_macd_sign",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.entry.pullback_rsi_long_min",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.entry.pullback_rsi_short_max",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.entry.slow_drift_min_adx",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.entry.slow_drift_min_slope_pct",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.entry.slow_drift_require_macd_sign",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.entry.slow_drift_rsi_long_min",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.entry.slow_drift_rsi_short_max",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.entry.slow_drift_slope_window",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.ranging.adx_below",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.ranging.bb_width_ratio_below",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.ranging.min_signals",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.ranging.rsi_high",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.ranging.rsi_low",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.stoch_rsi.block_long_if_k_gt",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.stoch_rsi.block_short_if_k_lt",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.tp_and_momentum.adx_strong_gt",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.tp_and_momentum.adx_weak_lt",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.tp_and_momentum.rsi_long_strong",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.tp_and_momentum.rsi_long_weak",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.tp_and_momentum.rsi_short_strong",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.tp_and_momentum.rsi_short_weak",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.tp_and_momentum.tp_mult_strong",
+      "status": "pending"
+    },
+    {
+      "path": "thresholds.tp_and_momentum.tp_mult_weak",
+      "status": "pending"
+    },
+    {
+      "path": "trade.add_cooldown_minutes",
+      "status": "pending"
+    },
+    {
+      "path": "trade.add_fraction_of_base_margin",
+      "status": "pending"
+    },
+    {
+      "path": "trade.add_min_confidence",
+      "status": "pending"
+    },
+    {
+      "path": "trade.add_min_profit_atr",
+      "status": "pending"
+    },
+    {
+      "path": "trade.adx_sizing_full_adx",
+      "status": "pending"
+    },
+    {
+      "path": "trade.adx_sizing_min_mult",
+      "status": "pending"
+    },
+    {
+      "path": "trade.allocation_pct",
+      "status": "pass"
+    },
+    {
+      "path": "trade.block_exits_on_extreme_dev",
+      "status": "pending"
+    },
+    {
+      "path": "trade.breakeven_buffer_atr",
+      "status": "pending"
+    },
+    {
+      "path": "trade.breakeven_start_atr",
+      "status": "pending"
+    },
+    {
+      "path": "trade.bump_to_min_notional",
+      "status": "pending"
+    },
+    {
+      "path": "trade.confidence_mult_high",
+      "status": "pending"
+    },
+    {
+      "path": "trade.confidence_mult_low",
+      "status": "pending"
+    },
+    {
+      "path": "trade.confidence_mult_medium",
+      "status": "pending"
+    },
+    {
+      "path": "trade.enable_breakeven_stop",
+      "status": "pending"
+    },
+    {
+      "path": "trade.enable_dynamic_leverage",
+      "status": "pending"
+    },
+    {
+      "path": "trade.enable_dynamic_sizing",
+      "status": "pending"
+    },
+    {
+      "path": "trade.enable_partial_tp",
+      "status": "pass"
+    },
+    {
+      "path": "trade.enable_pyramiding",
+      "status": "pending"
+    },
+    {
+      "path": "trade.enable_reef_filter",
+      "status": "pending"
+    },
+    {
+      "path": "trade.enable_rsi_overextension_exit",
+      "status": "pending"
+    },
+    {
+      "path": "trade.enable_ssf_filter",
+      "status": "pending"
+    },
+    {
+      "path": "trade.enable_vol_buffered_trailing",
+      "status": "pending"
+    },
+    {
+      "path": "trade.entry_cooldown_s",
+      "status": "pending"
+    },
+    {
+      "path": "trade.entry_min_confidence",
+      "status": "pending"
+    },
+    {
+      "path": "trade.exit_cooldown_s",
+      "status": "pending"
+    },
+    {
+      "path": "trade.glitch_atr_mult",
+      "status": "pending"
+    },
+    {
+      "path": "trade.glitch_price_dev_pct",
+      "status": "pending"
+    },
+    {
+      "path": "trade.leverage",
+      "status": "pass"
+    },
+    {
+      "path": "trade.leverage_high",
+      "status": "pending"
+    },
+    {
+      "path": "trade.leverage_low",
+      "status": "pending"
+    },
+    {
+      "path": "trade.leverage_max_cap",
+      "status": "pending"
+    },
+    {
+      "path": "trade.leverage_medium",
+      "status": "pending"
+    },
+    {
+      "path": "trade.max_adds_per_symbol",
+      "status": "pending"
+    },
+    {
+      "path": "trade.max_entry_orders_per_loop",
+      "status": "pending"
+    },
+    {
+      "path": "trade.max_open_positions",
+      "status": "pass"
+    },
+    {
+      "path": "trade.max_total_margin_pct",
+      "status": "pass"
+    },
+    {
+      "path": "trade.min_atr_pct",
+      "status": "pending"
+    },
+    {
+      "path": "trade.min_notional_usd",
+      "status": "pending"
+    },
+    {
+      "path": "trade.reef_adx_threshold",
+      "status": "pending"
+    },
+    {
+      "path": "trade.reef_long_rsi_block_gt",
+      "status": "pending"
+    },
+    {
+      "path": "trade.reef_long_rsi_extreme_gt",
+      "status": "pending"
+    },
+    {
+      "path": "trade.reef_short_rsi_block_lt",
+      "status": "pending"
+    },
+    {
+      "path": "trade.reef_short_rsi_extreme_lt",
+      "status": "pending"
+    },
+    {
+      "path": "trade.reentry_cooldown_max_mins",
+      "status": "pending"
+    },
+    {
+      "path": "trade.reentry_cooldown_min_mins",
+      "status": "pending"
+    },
+    {
+      "path": "trade.reentry_cooldown_minutes",
+      "status": "pending"
+    },
+    {
+      "path": "trade.reverse_entry_signal",
+      "status": "pending"
+    },
+    {
+      "path": "trade.rsi_exit_lb_hi_profit",
+      "status": "pending"
+    },
+    {
+      "path": "trade.rsi_exit_lb_hi_profit_low_conf",
+      "status": "pending"
+    },
+    {
+      "path": "trade.rsi_exit_lb_lo_profit",
+      "status": "pending"
+    },
+    {
+      "path": "trade.rsi_exit_lb_lo_profit_low_conf",
+      "status": "pending"
+    },
+    {
+      "path": "trade.rsi_exit_profit_atr_switch",
+      "status": "pending"
+    },
+    {
+      "path": "trade.rsi_exit_ub_hi_profit",
+      "status": "pending"
+    },
+    {
+      "path": "trade.rsi_exit_ub_hi_profit_low_conf",
+      "status": "pending"
+    },
+    {
+      "path": "trade.rsi_exit_ub_lo_profit",
+      "status": "pending"
+    },
+    {
+      "path": "trade.rsi_exit_ub_lo_profit_low_conf",
+      "status": "pending"
+    },
+    {
+      "path": "trade.sl_atr_mult",
+      "status": "pass"
+    },
+    {
+      "path": "trade.slippage_bps",
+      "status": "pending"
+    },
+    {
+      "path": "trade.smart_exit_adx_exhaustion_lt",
+      "status": "pass"
+    },
+    {
+      "path": "trade.smart_exit_adx_exhaustion_lt_low_conf",
+      "status": "pass"
+    },
+    {
+      "path": "trade.tp_atr_mult",
+      "status": "pass"
+    },
+    {
+      "path": "trade.tp_partial_atr_mult",
+      "status": "pass"
+    },
+    {
+      "path": "trade.tp_partial_min_notional_usd",
+      "status": "unsupported_in_sweep"
+    },
+    {
+      "path": "trade.tp_partial_pct",
+      "status": "pass"
+    },
+    {
+      "path": "trade.trailing_distance_atr",
+      "status": "pass"
+    },
+    {
+      "path": "trade.trailing_distance_atr_low_conf",
+      "status": "pending"
+    },
+    {
+      "path": "trade.trailing_start_atr",
+      "status": "pass"
+    },
+    {
+      "path": "trade.trailing_start_atr_low_conf",
+      "status": "pending"
+    },
+    {
+      "path": "trade.tsme_min_profit_atr",
+      "status": "pending"
+    },
+    {
+      "path": "trade.tsme_require_adx_slope_negative",
+      "status": "pending"
+    },
+    {
+      "path": "trade.use_bbo_for_fills",
+      "status": "unsupported_in_sweep"
+    },
+    {
+      "path": "trade.vol_baseline_pct",
+      "status": "pending"
+    },
+    {
+      "path": "trade.vol_scalar_max",
+      "status": "pending"
+    },
+    {
+      "path": "trade.vol_scalar_min",
+      "status": "pending"
+    }
+  ]
+}

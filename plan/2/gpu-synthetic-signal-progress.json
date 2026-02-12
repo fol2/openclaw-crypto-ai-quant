@@ -2075,6 +2075,28 @@
     "executed_axes": 14,
     "pass_axes": 14,
     "fail_axes": 0,
-    "pending_axes": 0
+    "pending_axes": 0,
+    "full_scope_target_axes": 148,
+    "full_scope_sweep_supported_axes": 141,
+    "full_scope_supported_overlap_axes": 140,
+    "full_scope_validated_axes": 14,
+    "full_scope_pending_axes": 126,
+    "full_scope_unsupported_axes": 8,
+    "full_scope_sweep_extras": 1,
+    "full_scope_sweep_status_document": "gpu-synthetic-signal-axis-scope.md",
+    "full_scope_not_supported_paths": [
+      "engine.entry_interval",
+      "engine.exit_interval",
+      "engine.interval",
+      "engine.loop_target_s",
+      "engine.signal_on_candle_close",
+      "thresholds.entry.macd_hist_entry_mode",
+      "trade.tp_partial_min_notional_usd",
+      "trade.use_bbo_for_fills"
+    ],
+    "full_scope_extra_paths": [
+      "indicators.ave_avg_atr_window"
+    ],
+    "full_scope_report_path": "gpu-synthetic-signal-axis-scope.md"
   }
 }

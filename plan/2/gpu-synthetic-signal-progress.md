@@ -9,6 +9,11 @@ Deterministic synthetic fixtures used to verify whether CPU and GPU both react t
 - Pass: 14
 - Fail: 0
 - Pending: 0
+- Full sweep scope from `config/strategy_overrides.yaml`: 148 leaf parameters
+- Sweep-supported overlap: 140 (covered by `bt-core` sweep mapping)
+- Remaining sweep-supported axes not yet validated: 126
+- Not supported by sweep mapping yet: 8
+- Full axis status table: `gpu-synthetic-signal-axis-scope.md`
 
 ## Coverage Matrix
 
