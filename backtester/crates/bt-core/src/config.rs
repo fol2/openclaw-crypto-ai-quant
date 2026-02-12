@@ -71,6 +71,8 @@ pub struct TradeConfig {
     pub enable_partial_tp: bool,
     pub tp_partial_pct: f64,
     pub tp_partial_min_notional_usd: f64,
+    /// ATR multiplier for partial TP level. 0 = use tp_atr_mult (same level as full TP).
+    pub tp_partial_atr_mult: f64,
     pub trailing_start_atr: f64,
     pub trailing_distance_atr: f64,
 
@@ -174,6 +176,7 @@ impl Default for TradeConfig {
             enable_partial_tp: true,
             tp_partial_pct: 0.5,
             tp_partial_min_notional_usd: 10.0,
+            tp_partial_atr_mult: 0.0,
             trailing_start_atr: 1.0,
             trailing_distance_atr: 0.8,
 
@@ -733,6 +736,7 @@ fn trade_to_json(t: &TradeConfig) -> serde_json::Value {
         "enable_partial_tp": t.enable_partial_tp,
         "tp_partial_pct": t.tp_partial_pct,
         "tp_partial_min_notional_usd": t.tp_partial_min_notional_usd,
+        "tp_partial_atr_mult": t.tp_partial_atr_mult,
         "trailing_start_atr": t.trailing_start_atr,
         "trailing_distance_atr": t.trailing_distance_atr,
         "enable_ssf_filter": t.enable_ssf_filter,
@@ -880,11 +884,24 @@ fn engine_to_json(e: &EngineConfig) -> serde_json::Value {
 ///
 ///   defaults <- global <- symbols.<symbol> <- live (if `is_live`)
 ///
-/// If `yaml_path` does not exist, returns `StrategyConfig::default()`.
+/// If `yaml_path` does not exist, prints a warning to stderr and returns `StrategyConfig::default()`.
 pub fn load_config(yaml_path: &str, symbol: Option<&str>, is_live: bool) -> StrategyConfig {
     let path = Path::new(yaml_path);
-    if !path.exists() {
-        return StrategyConfig::default();
+    match std::fs::metadata(path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let cwd = std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "<unknown>".to_string());
+            eprintln!(
+                "[config] Warning: YAML config file does not exist: {yaml_path} (cwd: {cwd}). Using defaults."
+            );
+            return StrategyConfig::default();
+        }
+        Err(_) => {
+            // Preserve the previous behaviour: treat other metadata errors as "missing" and fall back silently.
+            return StrategyConfig::default();
+        }
     }
 
     let raw = match std::fs::read_to_string(path) {

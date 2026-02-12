@@ -15,7 +15,10 @@ pub struct SubBarResult {
     /// Flat candle array: `candles[(bar_idx * max_sub + sub_idx) * num_symbols + sym_idx]`
     /// Missing slots have close=0.
     pub candles: Vec<GpuRawCandle>,
-    /// Per (bar, symbol) count of valid sub-bars: `sub_counts[bar_idx * num_symbols + sym_idx]`
+    /// Per (bar, symbol) count of packed sub-bar slots: `sub_counts[bar_idx * num_symbols + sym_idx]`.
+    ///
+    /// This is the per-bar union tick count (same value for every symbol). Symbols that have
+    /// no candle for a given tick are padded with a zeroed `GpuRawCandle` (close=0).
     pub sub_counts: Vec<u32>,
     /// Maximum number of sub-bars per main bar (rectangle width).
     pub max_sub_per_bar: u32,
@@ -121,13 +124,16 @@ pub fn prepare_raw_candles(candles: &CandleData, symbols: &[String]) -> RawCandl
 
 /// Prepare sub-bar candles aligned to main bar ranges for GPU upload.
 ///
-/// For each main bar `i`, sub-bars fall in the half-open range `(ts[i], ts[i+1]]`
-/// (last bar uses `(ts[last], +inf)`). This matches bt-core's sub-bar scan:
-/// it evaluates sub-bars *after* the current indicator bar using the current
-/// indicator snapshot. Sub-bars at or before `ts[0]` are ignored.
+/// For each main bar `i`, sub-bars fall in the half-open range `(ts[i], ts[i+1]]`,
+/// where `ts[last+1]` is treated as `+inf`.
 ///
-/// Sub-bars are sorted chronologically and packed into a rectangular layout
-/// padded with zeroed candles.
+/// This matches CPU semantics used by the backtest engine:
+/// - Sub-bars with `t <= ts[0]` are dropped (no "previous" main bar exists).
+/// - Sub-bars with `t > ts[last]` are assigned to the last main bar.
+///
+/// Within each main bar, we build the **union** of sub-bar timestamps across all symbols.
+/// The buffer is packed so `sub_idx` refers to the same timestamp for every symbol.
+/// Missing (bar, symbol, tick) slots are padded with a zeroed `GpuRawCandle` (close=0).
 ///
 /// Layout: `candles[(bar_idx * max_sub + sub_idx) * num_symbols + sym_idx]`
 ///
@@ -151,11 +157,15 @@ pub fn prepare_sub_bar_candles(
         };
     }
 
-    // For each (bar, symbol), collect sorted sub-bar timestamps.
-    // Main bar i covers (main_ts[i], main_ts[i+1]] in ms.
-    // Last bar covers (main_ts[last], +inf).
-
-    // Step 1: For each symbol, sort sub-bars by timestamp and assign to main bars via binary search
+    // For each (bar, symbol), collect sorted sub-bars.
+    //
+    // CPU semantics: main bar i covers (main_ts[i], next_ts] in ms, where next_ts is
+    // main_ts[i+1] or +inf for the last bar. This means:
+    // - t == main_ts[i] belongs to bar (i-1)
+    // - t <= main_ts[0] is dropped
+    // - t > main_ts[last] is assigned to the last bar
+    //
+    // Step 1: For each symbol, sort sub-bars by timestamp and assign to main bars.
     // sub_bars_by_bar_sym[bar_idx][sym_idx] = Vec<&Bar>
     let mut sub_bars_by_bar_sym: Vec<Vec<Vec<&bt_core::candle::OhlcvBar>>> =
         vec![vec![Vec::new(); num_symbols]; num_bars];
@@ -163,35 +173,45 @@ pub fn prepare_sub_bar_candles(
     for (sym_idx, sym) in symbols.iter().enumerate() {
         if let Some(bars) = sub_candles.get(sym) {
             for bar in bars {
-                // Find which main bar this sub-bar belongs to for CPU-parity windows:
-                //   (main_ts[i], main_ts[i+1]].
+                // Assign sub-bar at time `t` to the previous main bar index:
+                // Find the first main timestamp >= t, then subtract 1.
                 //
-                // We use lower_bound(main_ts, t) - 1:
-                // - t == main_ts[k]   -> bar k-1
-                // - main_ts[k] < t <= main_ts[k+1] -> bar k
-                // - t > main_ts[last] -> last bar
-                // - t <= main_ts[0]   -> ignored
-                let main_idx = match main_timestamps.binary_search(&bar.t) {
-                    Ok(0) => continue,
-                    Ok(i) => i - 1,
-                    Err(0) => continue,
-                    Err(i) if i >= num_bars => num_bars - 1,
-                    Err(i) => i - 1,
-                };
+                // Example: main_ts = [100, 200, 300]
+                // - t in (100, 200] -> bar 0
+                // - t in (200, 300] -> bar 1
+                // - t > 300         -> bar 2
+                //
+                // Drop t <= main_ts[0] (no previous bar exists).
+                let p = main_timestamps.partition_point(|&ts| ts < bar.t); // 0..=num_bars
+                if p == 0 {
+                    continue;
+                }
+                let main_idx = if p >= num_bars { num_bars - 1 } else { p - 1 };
                 sub_bars_by_bar_sym[main_idx][sym_idx].push(bar);
             }
         }
     }
 
-    // Step 2: Find max sub-bars per main bar (across all symbols)
-    let mut max_sub: u32 = 0;
+    // Sort per (bar, symbol) slice once up-front (needed for deterministic packing).
     for bar_idx in 0..num_bars {
         for sym_idx in 0..num_symbols {
-            let count = sub_bars_by_bar_sym[bar_idx][sym_idx].len() as u32;
-            if count > max_sub {
-                max_sub = count;
-            }
+            sub_bars_by_bar_sym[bar_idx][sym_idx].sort_by_key(|b| b.t);
         }
+    }
+
+    // Step 2: For each bar, build the union of sub-bar timestamps across all symbols.
+    // This defines the per-bar "tick timeline" used by the GPU kernel for ranked entry processing.
+    let mut union_ts_by_bar: Vec<Vec<i64>> = vec![Vec::new(); num_bars];
+    let mut max_sub: usize = 0;
+    for bar_idx in 0..num_bars {
+        let mut union_ts: Vec<i64> = Vec::new();
+        for sym_idx in 0..num_symbols {
+            union_ts.extend(sub_bars_by_bar_sym[bar_idx][sym_idx].iter().map(|b| b.t));
+        }
+        union_ts.sort_unstable();
+        union_ts.dedup();
+        max_sub = max_sub.max(union_ts.len());
+        union_ts_by_bar[bar_idx] = union_ts;
     }
 
     if max_sub == 0 {
@@ -205,30 +225,44 @@ pub fn prepare_sub_bar_candles(
     }
 
     // Step 3: Allocate rectangular buffer and fill
-    let total_slots = num_bars * (max_sub as usize) * num_symbols;
+    let total_slots = num_bars * max_sub * num_symbols;
     let mut flat = vec![GpuRawCandle::zeroed(); total_slots];
     let mut sub_counts = vec![0u32; num_bars * num_symbols];
 
     for bar_idx in 0..num_bars {
+        let union_ts = &union_ts_by_bar[bar_idx];
+        let union_len = union_ts.len() as u32;
+
         for sym_idx in 0..num_symbols {
-            let subs = &mut sub_bars_by_bar_sym[bar_idx][sym_idx];
-            // Sort chronologically (should already be sorted, but ensure)
-            subs.sort_by_key(|b| b.t);
+            // Replicate union tick count across all symbols for this bar.
+            sub_counts[bar_idx * num_symbols + sym_idx] = union_len;
 
-            let count = subs.len();
-            sub_counts[bar_idx * num_symbols + sym_idx] = count as u32;
+            // Fill only the union timeline; remaining slots up to max_sub stay zeroed.
+            let subs = &sub_bars_by_bar_sym[bar_idx][sym_idx];
+            if subs.is_empty() || union_ts.is_empty() {
+                continue;
+            }
 
-            for (sub_idx, bar) in subs.iter().enumerate() {
-                let flat_idx = (bar_idx * (max_sub as usize) + sub_idx) * num_symbols + sym_idx;
-                flat[flat_idx] = GpuRawCandle {
-                    open: bar.o as f32,
-                    high: bar.h as f32,
-                    low: bar.l as f32,
-                    close: bar.c as f32,
-                    volume: bar.v as f32,
-                    t_sec: (bar.t / 1000) as u32,
-                    _pad: [0; 2],
-                };
+            // Two-pointer merge: both `union_ts` and `subs` are sorted by timestamp.
+            let mut p = 0usize;
+            for (sub_idx, &t) in union_ts.iter().enumerate() {
+                while p < subs.len() && subs[p].t < t {
+                    p += 1;
+                }
+                if p < subs.len() && subs[p].t == t {
+                    let bar = subs[p];
+                    let flat_idx = (bar_idx * max_sub + sub_idx) * num_symbols + sym_idx;
+                    flat[flat_idx] = GpuRawCandle {
+                        open: bar.o as f32,
+                        high: bar.h as f32,
+                        low: bar.l as f32,
+                        close: bar.c as f32,
+                        volume: bar.v as f32,
+                        t_sec: (bar.t / 1000) as u32,
+                        _pad: [0; 2],
+                    };
+                    p += 1;
+                }
             }
         }
     }
@@ -245,7 +279,7 @@ pub fn prepare_sub_bar_candles(
     SubBarResult {
         candles: flat,
         sub_counts,
-        max_sub_per_bar: max_sub,
+        max_sub_per_bar: max_sub as u32,
         num_bars,
         num_symbols,
     }

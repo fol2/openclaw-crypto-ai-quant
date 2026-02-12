@@ -9,5 +9,5 @@ pub mod position;
 pub mod engine;
 pub mod init_state;
 pub mod sweep;
-pub mod report;
 pub mod reason_codes;
+pub mod report;

@@ -3,7 +3,9 @@
 Local dashboard for monitoring **Live** + **Paper** daemons:
 
 - Reads SQLite DBs + daemon runtime logs (no secrets).
-- Reads mid ticks from the local Rust **WS sidecar** (no direct Hyperliquid WS/REST calls).
+- Reads mid ticks from the local Rust **WS sidecar** (no direct Hyperliquid WS calls).
+- Optionally fetches **Live** balances from Hyperliquid REST `user_state` (read-only) so the UI shows
+  `accountValue` and `withdrawable` directly instead of relying on DB-derived estimates.
 - No order placement. No cancels. Read-only.
 
 ## Run (manual)
@@ -49,6 +51,16 @@ Optional overrides:
 
 - `AIQ_MONITOR_LIVE_DB` (default `trading_engine_live.db`)
 - `AIQ_MONITOR_PAPER_DB` (default `trading_engine.db`)
+
+Hyperliquid balance (Live mode only):
+
+- `AIQ_MONITOR_HL_BALANCE_ENABLE` (default `true`)
+- `AIQ_MONITOR_HL_BALANCE_TTL_S` (default `5`)
+- `AIQ_MONITOR_HL_TIMEOUT_S` (default `4`)
+- `AIQ_MONITOR_HL_BASE_URL` (optional; overrides Hyperliquid Info base URL)
+- `HL_INFO_BASE_URL` (optional; alternative base URL override)
+- `AIQ_MONITOR_HL_MAIN_ADDRESS` / `AIQ_MONITOR_MAIN_ADDRESS` (recommended; wallet address to query)
+- `AIQ_MONITOR_SECRETS_PATH` / `AI_QUANT_SECRETS_PATH` (optional; used only to read `main_address`)
 
 Notes:
 

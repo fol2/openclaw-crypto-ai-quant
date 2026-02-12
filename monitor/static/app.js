@@ -1094,26 +1094,66 @@
     if (dataEl) dataEl.textContent = dataTs ? fmt.hmsFromMs(dataTs) : "\u2014";
     if (dataPill) dataPill.title = dataTs ? `Last WS mids update: ${fmt.iso(dataTs)} (${fmt.ago(wsAgeS)})` : "WS mids timestamp unavailable";
 
+    const mode = snap?.mode || state.mode;
     const b = snap?.balances || {};
+    const src = b.balance_source || (mode === "live" ? "unknown" : "paper");
     const realised = b.realised_usd;
     const equity = b.equity_est_usd;
     const unreal = b.unreal_pnl_est_usd;
     const fees = b.est_close_fees_usd;
+    const marginUsedEst = b.margin_used_est_usd;
+    const marginUsedHl = b.total_margin_used_usd;
     const fr = b.fee_rate;
+    const acct = b.account_value_usd;
     const realEl = $("#balReal");
     const eqEl = $("#balEq");
     if (realEl) realEl.textContent = realised === null || realised === undefined ? "\u2014" : `$${fmt.num(realised, 2)}`;
     if (eqEl) eqEl.textContent = equity === null || equity === undefined ? "\u2014" : `$${fmt.num(equity, 2)}`;
     const realPill = $("#balRealPill");
     const eqPill = $("#balEqPill");
-    if (realPill) realPill.title = realised === null || realised === undefined ? "Realised cash unavailable" : `Realised cash as of ${b.realised_asof || "\u2014"}`;
+    const realK = $("#balRealPill .pillk");
+    const eqK = $("#balEqPill .pillk");
+    if (realK) realK.textContent = mode === "live" ? "withdrawable" : "realised";
+    if (eqK) eqK.textContent = mode === "live" ? "accountValue" : "equity";
+    if (realPill) {
+      if (mode === "live") {
+        if (realised === null || realised === undefined) realPill.title = "Withdrawable unavailable";
+        else {
+          const asof = b.realised_asof || "\u2014";
+          const av = (typeof acct === "number" && Number.isFinite(acct)) ? `$${fmt.num(acct, 2)}` : "\u2014";
+          const mu = (typeof marginUsedHl === "number" && Number.isFinite(marginUsedHl))
+            ? `$${fmt.num(marginUsedHl, 2)}`
+            : ((typeof marginUsedEst === "number" && Number.isFinite(marginUsedEst)) ? `$${fmt.num(marginUsedEst, 2)}` : "\u2014");
+          if (src === "hyperliquid") {
+            realPill.title = `Withdrawable (Hyperliquid) as of ${asof}\n$${fmt.num(realised, 2)}\nAccountValue: ${av}\nMargin used: ${mu}`;
+          } else {
+            realPill.title = `Withdrawable (estimate) as of ${asof}\n$${fmt.num(realised, 2)}\nAccountValue snapshot: ${av}\nMargin used est: ${mu}\nwithdrawable \u2248 accountValue \u2212 marginUsed`;
+          }
+        }
+      } else {
+        realPill.title = realised === null || realised === undefined ? "Realised cash unavailable" : `Realised cash as of ${b.realised_asof || "\u2014"}`;
+      }
+    }
     if (eqPill) {
-      if (equity === null || equity === undefined || realised === null || realised === undefined) { eqPill.title = "Equity estimate unavailable"; }
-      else {
+      if (equity === null || equity === undefined) { eqPill.title = mode === "live" ? "AccountValue unavailable" : "Equity estimate unavailable"; }
+      else if (mode === "live") {
+        const asof = b.realised_asof || "\u2014";
         const pct = (typeof fr === "number" && Number.isFinite(fr)) ? `${(fr * 100).toFixed(3)}%` : "\u2014";
         const u = (typeof unreal === "number" && Number.isFinite(unreal)) ? fmt.num(unreal, 2) : "\u2014";
         const f2 = (typeof fees === "number" && Number.isFinite(fees)) ? fmt.num(fees, 2) : "\u2014";
-        eqPill.title = `Equity est. now = realised + uPnL \u2212 close fees\n$${fmt.num(realised, 2)} + $${u} \u2212 $${f2} (fee ${pct})`;
+        if (src === "hyperliquid") {
+          eqPill.title = `AccountValue (Hyperliquid) as of ${asof}\n$${fmt.num(equity, 2)}\nuPnL est (local mids): $${u}\nEst close fees: $${f2} (fee ${pct})`;
+        } else {
+          eqPill.title = `AccountValue (DB snapshot) as of ${asof}\n$${fmt.num(equity, 2)}\nuPnL est (local mids): $${u}\nEst close fees: $${f2} (fee ${pct})`;
+        }
+      } else {
+        if (realised === null || realised === undefined) { eqPill.title = "Equity estimate unavailable"; }
+        else {
+          const pct = (typeof fr === "number" && Number.isFinite(fr)) ? `${(fr * 100).toFixed(3)}%` : "\u2014";
+          const u = (typeof unreal === "number" && Number.isFinite(unreal)) ? fmt.num(unreal, 2) : "\u2014";
+          const f2 = (typeof fees === "number" && Number.isFinite(fees)) ? fmt.num(fees, 2) : "\u2014";
+          eqPill.title = `Equity est. now = realised + uPnL \u2212 close fees\n$${fmt.num(realised, 2)} + $${u} \u2212 $${f2} (fee ${pct})`;
+        }
       }
     }
   }
