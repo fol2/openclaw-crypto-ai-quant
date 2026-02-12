@@ -3,6 +3,11 @@ name = "bt-gpu"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Convenience flag to match workspace CLI feature naming.
+# bt-gpu is inherently GPU-backed and always compiles CUDA kernels in build.rs.
+gpu = []
+
 [dependencies]
 bt-core = { path = "../bt-core" }
 bt-data = { path = "../bt-data" }

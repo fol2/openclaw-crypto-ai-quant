@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from bisect import bisect_left
 import json
 import mimetypes
 import os
@@ -46,6 +47,20 @@ def _env_float(name: str, default: float) -> float:
         return float(str(raw).strip())
     except Exception:
         return float(default)
+
+def _env_str(name: str, default: str = "") -> str:
+    raw = os.getenv(name)
+    if raw is None:
+        return str(default or "")
+    s = str(raw).strip()
+    return s if s else str(default or "")
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _json(obj: Any) -> bytes:
@@ -207,6 +222,124 @@ def _utc_day(now_ms: int) -> str:
         return datetime.fromtimestamp(int(now_ms) / 1000.0, tz=timezone.utc).date().isoformat()
     except Exception:
         return ""
+
+
+def _parse_iso_ts_ms(ts: str | None) -> int | None:
+    """Best-effort parse ISO timestamp to epoch milliseconds."""
+    raw = str(ts or "").strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        # datetime.fromisoformat() does not accept a bare Z suffix.
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(raw)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    try:
+        return int(dt.timestamp() * 1000)
+    except Exception:
+        return None
+
+
+_HL_ADDR_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
+_HL_BAL_LOCK = threading.RLock()
+_HL_BAL_CACHE: tuple[int, dict[str, Any]] | None = None
+_HL_ADDR_CACHE: tuple[int, str] | None = None
+
+
+def _infer_hl_main_address() -> str | None:
+    """Infer the Hyperliquid main address for balance reads (best-effort, read-only)."""
+    # Prefer explicit env to avoid reading any local secrets file.
+    raw = _env_str("AIQ_MONITOR_HL_MAIN_ADDRESS", "") or _env_str("AIQ_MONITOR_MAIN_ADDRESS", "")
+    if raw and _HL_ADDR_RE.match(raw):
+        return raw
+
+    # Fall back to a secrets file path (we only read main_address).
+    secrets_path = _env_str("AIQ_MONITOR_SECRETS_PATH", "") or _env_str("AI_QUANT_SECRETS_PATH", "")
+    if not secrets_path:
+        secrets_path = str(AIQ_ROOT / "secrets.json")
+    secrets_path = os.path.expanduser(str(secrets_path))
+
+    try:
+        p = Path(secrets_path)
+    except Exception:
+        return None
+    if not p.exists():
+        return None
+
+    try:
+        data = json.loads(p.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return None
+    addr = str((data or {}).get("main_address") or "").strip()
+    return addr if _HL_ADDR_RE.match(addr) else None
+
+
+def fetch_hl_balance() -> dict[str, Any] | None:
+    """Fetch Hyperliquid balances via REST (cached)."""
+    global _HL_BAL_CACHE, _HL_ADDR_CACHE
+
+    if not _env_bool("AIQ_MONITOR_HL_BALANCE_ENABLE", True):
+        return None
+
+    now_ms = _utc_now_ms()
+
+    ttl_s = _env_float("AIQ_MONITOR_HL_BALANCE_TTL_S", 5.0)
+    ttl_ms = int(max(0.5, float(ttl_s)) * 1000.0)
+
+    with _HL_BAL_LOCK:
+        cached = _HL_BAL_CACHE
+        if cached and (now_ms - cached[0]) < ttl_ms:
+            return dict(cached[1])
+
+        addr_cached = _HL_ADDR_CACHE
+        if addr_cached and (now_ms - addr_cached[0]) < 30_000:
+            main_address = addr_cached[1]
+        else:
+            main_address = _infer_hl_main_address()
+            if main_address:
+                _HL_ADDR_CACHE = (now_ms, main_address)
+
+    if not main_address:
+        return None
+
+    timeout_s = _env_float("AIQ_MONITOR_HL_TIMEOUT_S", 4.0)
+    base_url = _env_str("AIQ_MONITOR_HL_BASE_URL", "") or _env_str("HL_INFO_BASE_URL", "") or ""
+
+    try:
+        from hyperliquid.info import Info  # type: ignore
+        from hyperliquid.utils import constants  # type: ignore
+
+        info = Info(base_url or constants.MAINNET_API_URL, skip_ws=True, timeout=float(timeout_s))
+        st = info.user_state(main_address) or {}
+        margin = st.get("marginSummary") or {}
+        account_value = float(margin.get("accountValue") or 0.0)
+        total_margin_used = float(margin.get("totalMarginUsed") or 0.0)
+        withdrawable = float(st.get("withdrawable") or 0.0)
+        out = {
+            "ok": True,
+            "source": "hyperliquid_rest",
+            "main_address": main_address,
+            "account_value_usd": account_value,
+            "withdrawable_usd": withdrawable,
+            "total_margin_used_usd": total_margin_used,
+            "ts_ms": now_ms,
+        }
+    except Exception as e:
+        out = {
+            "ok": False,
+            "source": "hyperliquid_rest",
+            "main_address": main_address,
+            "error": str(e),
+            "ts_ms": now_ms,
+        }
+
+    with _HL_BAL_LOCK:
+        _HL_BAL_CACHE = (now_ms, dict(out))
+    return dict(out)
 
 
 def connect_db_ro(db_path: Path) -> sqlite3.Connection:
@@ -689,6 +822,47 @@ class MidsFeed:
                 return []
             return [{"ts_ms": ts, "mid": px} for (ts, px) in list(dq) if ts >= cutoff]
 
+    def mid_near_ts(self, symbol: str, ts_ms: int, *, max_diff_ms: int = 600_000) -> float | None:
+        """Return the mid nearest to the given timestamp from the in-memory history."""
+        s = str(symbol or "").strip().upper()
+        if not s:
+            return None
+        try:
+            tgt = int(ts_ms)
+        except Exception:
+            return None
+        if tgt <= 0:
+            return None
+        try:
+            md = int(max_diff_ms)
+        except Exception:
+            md = 600_000
+        md = max(0, md)
+
+        with self._lock:
+            dq = self._hist.get(s)
+            if not dq:
+                return None
+            items = list(dq)
+        if not items:
+            return None
+
+        ts_list = [t for (t, _px) in items]
+        i = bisect_left(ts_list, tgt)
+        best: tuple[int, float] | None = None
+        best_diff = 10**18
+        for j in (i - 1, i):
+            if j < 0 or j >= len(items):
+                continue
+            t, px = items[j]
+            diff = abs(int(t) - tgt)
+            if diff < best_diff:
+                best_diff = diff
+                best = (int(t), float(px))
+        if best is None or best_diff > md:
+            return None
+        return float(best[1])
+
     def _run(self) -> None:
         backoff_s = 1.0
         while not self._stop.is_set():
@@ -1025,16 +1199,56 @@ def build_snapshot(mode: str) -> dict[str, Any]:
         except Exception:
             candles_con = None
 
-        last_bal = _fetchone(con, "SELECT timestamp, balance FROM trades ORDER BY id DESC LIMIT 1")
-        realised_usd: float | None = None
-        realised_asof: str | None = None
-        if last_bal:
-            realised_asof = last_bal.get("timestamp")
+        # Balance snapshots:
+        # - Paper: trades.balance is simulated realised cash.
+        # - Live: trades.balance is exchange accountValue (equity) captured at ingest time.
+        # Pick the latest value by id, and choose an "as of" timestamp from the batch
+        # (multiple rows can share the same balance because we snapshot once per ingest batch).
+        bal_rows = _fetchall(
+            con,
+            """
+            SELECT timestamp, balance
+            FROM trades
+            WHERE balance IS NOT NULL
+            ORDER BY id DESC
+            LIMIT 60
+            """,
+        )
+        balance_asof_usd: float | None = None
+        balance_asof_ts: str | None = None
+        if bal_rows:
             try:
-                if last_bal.get("balance") is not None:
-                    realised_usd = float(last_bal["balance"])
+                if bal_rows[0].get("balance") is not None:
+                    balance_asof_usd = float(bal_rows[0]["balance"])
             except Exception:
-                realised_usd = None
+                balance_asof_usd = None
+
+            # Best-effort: "as of" is the latest timestamp among rows sharing the same balance.
+            if balance_asof_usd is not None:
+                best_ms = -1
+                best_ts = None
+                for r in bal_rows:
+                    try:
+                        b = float(r.get("balance")) if r.get("balance") is not None else None
+                    except Exception:
+                        b = None
+                    if b is None or abs(float(b) - float(balance_asof_usd)) > 1e-9:
+                        continue
+                    ms = _parse_iso_ts_ms(r.get("timestamp"))
+                    if ms is not None and ms > best_ms:
+                        best_ms = int(ms)
+                        best_ts = str(r.get("timestamp") or "").strip() or None
+                balance_asof_ts = best_ts or (str(bal_rows[0].get("timestamp") or "").strip() or None)
+            else:
+                balance_asof_ts = str(bal_rows[0].get("timestamp") or "").strip() or None
+
+        # UI fields:
+        # - Paper: realised_usd is realised cash.
+        # - Live fallback: realised_usd will be set to a withdrawable estimate later; the DB snapshot stores accountValue.
+        realised_usd: float | None = balance_asof_usd
+        realised_asof: str | None = balance_asof_ts
+        account_value_asof_usd: float | None = balance_asof_usd if mode2 == "live" else None
+
         if realised_usd is None and mode2 != "live":
             # Paper default if no trades yet.
             realised_usd = _env_float("AI_QUANT_PAPER_BALANCE", 10000.0)
@@ -1086,10 +1300,24 @@ def build_snapshot(mode: str) -> dict[str, Any]:
         )
         last_intent = fetch_last_intents_by_symbol(con, merged) if has_oms else {}
 
+        hl_bal = fetch_hl_balance() if mode2 == "live" else None
+        hl_bal_public: dict[str, Any] | None = None
+        if isinstance(hl_bal, dict):
+            # Avoid returning wallet addresses in the HTTP API response.
+            hl_bal_public = {k: v for (k, v) in hl_bal.items() if k != "main_address"}
+        use_hl_bal = bool(isinstance(hl_bal, dict) and bool(hl_bal.get("ok")))
+        if mode2 == "live" and isinstance(hl_bal, dict) and not use_hl_bal:
+            err = str(hl_bal.get("error") or "").strip()
+            if err:
+                snapshot["warnings"].append(f"hl_balance_error:{err}")
+
         symbols_out: list[dict[str, Any]] = []
-        # Balances: equity estimate = realised + unreal_pnl - est_close_fees
+        # Balances:
+        # - Paper: equity estimate = realised + uPnL - estimated close fees.
+        # - Live: prefer Hyperliquid REST user_state (accountValue + withdrawable). Fall back to DB snapshots.
         fee_rate = effective_fee_rate()
         unreal_total = 0.0
+        margin_used_total = 0.0
         close_fee_total = 0.0
         for sym in merged:
             mp = STATE.mids.get_mid(sym)
@@ -1114,6 +1342,9 @@ def build_snapshot(mode: str) -> dict[str, Any]:
                 try:
                     entry = float(pos.get("entry_price") or 0.0)
                     size = float(pos.get("size") or 0.0)
+                    lev = float(pos.get("leverage") or 1.0)
+                    if lev <= 0:
+                        lev = 1.0
                     mark = float(mid) if mid is not None else entry
                     if entry > 0 and size > 0 and mark > 0:
                         if str(pos.get("type") or "").upper() == "LONG":
@@ -1121,6 +1352,7 @@ def build_snapshot(mode: str) -> dict[str, Any]:
                         else:
                             unreal_total += (entry - mark) * size
                         close_fee_total += abs(size) * mark * float(fee_rate or 0.0)
+                        margin_used_total += abs(size) * mark / float(lev or 1.0)
                 except Exception:
                     pass
                 pos_out = {**pos, "unreal_pnl_est": unreal_pnl}
@@ -1138,16 +1370,64 @@ def build_snapshot(mode: str) -> dict[str, Any]:
             )
 
         equity_est_usd: float | None = None
-        if realised_usd is not None:
-            equity_est_usd = float(realised_usd) + float(unreal_total) - float(close_fee_total)
+        balance_source = "db"
+        account_value_usd: float | None = None
+        withdrawable_usd: float | None = None
+        total_margin_used_usd: float | None = None
+
+        if mode2 == "live":
+            if use_hl_bal and isinstance(hl_bal, dict):
+                balance_source = "hyperliquid"
+                try:
+                    account_value_usd = float(hl_bal.get("account_value_usd") or 0.0)
+                except Exception:
+                    account_value_usd = None
+                try:
+                    withdrawable_usd = float(hl_bal.get("withdrawable_usd") or 0.0)
+                except Exception:
+                    withdrawable_usd = None
+                try:
+                    total_margin_used_usd = float(hl_bal.get("total_margin_used_usd") or 0.0)
+                except Exception:
+                    total_margin_used_usd = None
+
+                equity_est_usd = account_value_usd
+                realised_usd = withdrawable_usd
+                realised_asof = _iso_utc(datetime.now(timezone.utc))
+            else:
+                # Fallback: DB snapshot stores exchange accountValue (equity) captured at ingest time.
+                balance_source = "db_snapshot"
+                account_value_usd = account_value_asof_usd
+                equity_est_usd = account_value_usd
+                # Best-effort withdrawable estimate if only accountValue is available.
+                if account_value_usd is not None:
+                    try:
+                        withdrawable_usd = float(account_value_usd) - float(margin_used_total)
+                        if withdrawable_usd < 0:
+                            withdrawable_usd = 0.0
+                    except Exception:
+                        withdrawable_usd = None
+                realised_usd = withdrawable_usd
+        else:
+            # Paper: realised cash + mark-to-market uPnL (minus estimated close fees).
+            balance_source = "paper_estimate"
+            if realised_usd is not None:
+                equity_est_usd = float(realised_usd) + float(unreal_total) - float(close_fee_total)
 
         snapshot["balances"] = {
+            "balance_source": balance_source,
             "realised_usd": realised_usd,
             "realised_asof": realised_asof,
             "equity_est_usd": equity_est_usd,
+            "account_value_usd": account_value_usd if mode2 == "live" else None,
+            "withdrawable_usd": withdrawable_usd if mode2 == "live" else None,
+            "total_margin_used_usd": total_margin_used_usd if mode2 == "live" else None,
             "unreal_pnl_est_usd": unreal_total,
             "est_close_fees_usd": close_fee_total,
+            "margin_used_est_usd": margin_used_total if mode2 == "live" else None,
             "fee_rate": fee_rate,
+            "account_value_asof_usd": account_value_asof_usd,
+            "hl_balance": hl_bal_public if mode2 == "live" else None,
         }
 
         # Daily metrics (UTC day) for the dashboard summary.
