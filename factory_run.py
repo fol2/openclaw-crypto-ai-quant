@@ -41,6 +41,26 @@ except ImportError:  # pragma: no cover
 AIQ_ROOT = Path(__file__).resolve().parent
 
 
+def _env_float(env_name: str, *, default: float | None = None) -> float | None:
+    raw = str(os.getenv(env_name, "") or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except Exception:
+        raise SystemExit(f"{env_name} must be a float when set")
+
+
+def _env_int(env_name: str, *, default: int | None = None) -> int | None:
+    raw = str(os.getenv(env_name, "") or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except Exception:
+        raise SystemExit(f"{env_name} must be an integer when set")
+
+
 def _resolve_path_for_backtester(path_str: str | None) -> str | None:
     """Resolve a CLI path into an absolute path usable from the backtester cwd.
 
@@ -144,6 +164,50 @@ def _resolve_nvidia_smi_bin() -> str:
     if wsl.exists():
         return str(wsl)
     return "nvidia-smi"
+
+
+def _load_json_payload(path: Path) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _funding_check_degraded_allowance(
+    funding_check_json: dict[str, Any],
+    *,
+    max_stale_symbols: int,
+) -> tuple[bool, dict[str, Any] | None]:
+    if max_stale_symbols < 1:
+        return False, None
+
+    issues = funding_check_json.get("issues")
+    if not isinstance(issues, list):
+        return False, None
+
+    fail_issues = [i for i in issues if str(i.get("severity") or "") == "FAIL"]
+    if not fail_issues:
+        return False, None
+
+    stale_fail_issues = [i for i in fail_issues if str(i.get("type") or "") == "stale"]
+    if len(stale_fail_issues) != len(fail_issues):
+        return False, None
+
+    stale_symbols = sorted(
+        {str(i.get("symbol") or "").strip() for i in stale_fail_issues if str(i.get("symbol") or "").strip()}
+    )
+    if len(stale_symbols) == 0:
+        return False, None
+    if len(stale_symbols) > int(max_stale_symbols):
+        return False, None
+
+    total_fail = len(fail_issues)
+    return True, {
+        "symbols": stale_symbols,
+        "count": len(stale_symbols),
+        "fail_issues": total_fail,
+        "status": str(funding_check_json.get("status") or ""),
+    }
 
 
 PROFILE_DEFAULTS: dict[str, dict[str, int]] = {
@@ -555,7 +619,12 @@ def _compute_score_v1(
 
     dd_weight = 2.0
     slippage_weight = 0.5
-    score = float(oos_daily_ret) - dd_weight * float(oos_max_dd) - slippage_weight * float(slip_frag) - float(trades_penalty)
+    score = (
+        float(oos_daily_ret)
+        - dd_weight * float(oos_max_dd)
+        - slippage_weight * float(slip_frag)
+        - float(trades_penalty)
+    )
 
     return {
         "version": "score_v1",
@@ -673,7 +742,9 @@ def _render_ranked_report_md(items: list[dict[str, Any]]) -> str:
         lines.append(
             "| total_pnl | config_id | reason | replay | slippage_fragility | reject_bps | pnl_drop_reject_bps | pnl_reject_bps |"
         )
-        lines.append("| --------: | :------ | :----- | :----- | -----------------: | ---------: | ------------------: | ------------: |")
+        lines.append(
+            "| --------: | :------ | :----- | :----- | -----------------: | ---------: | ------------------: | ------------: |"
+        )
         rej_sorted = sorted(rejected, key=lambda x: float(x.get("total_pnl", 0.0)), reverse=True)
         for it in rej_sorted:
             cfg_id = str(it.get("config_id", ""))
@@ -931,9 +1002,7 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
     # Older runs may not have `selected`, so fall back to all entries.
     src_candidates_all = src_candidates
     src_candidates = [
-        it
-        for it in src_candidates_all
-        if isinstance(it, dict) and ("selected" not in it or bool(it.get("selected")))
+        it for it in src_candidates_all if isinstance(it, dict) and ("selected" not in it or bool(it.get("selected")))
     ]
     if not src_candidates:
         src_candidates = [it for it in src_candidates_all if isinstance(it, dict)]
@@ -1095,6 +1164,8 @@ def main(argv: list[str] | None = None) -> int:
             "interval",
             "candles_db",
             "funding_db",
+            "max_age_fail_hours",
+            "funding_max_stale_symbols",
             "sweep_spec",
             "gpu",
             "concentration_checks",
@@ -1243,16 +1314,73 @@ def main(argv: list[str] | None = None) -> int:
         funding_argv = ["python3", "tools/check_funding_rates_db.py"]
         if bt_funding_db:
             funding_argv += ["--db", str(bt_funding_db)]
+        if args.max_age_fail_hours is not None:
+            funding_argv += ["--max-age-fail-hours", str(float(args.max_age_fail_hours))]
         funding_check = _run_cmd(
             funding_argv,
             cwd=AIQ_ROOT,
             stdout_path=funding_out,
             stderr_path=funding_err,
         )
-        meta["steps"].append({"name": "check_funding_rates_db", **funding_check.__dict__})
+        funding_check_step = {"name": "check_funding_rates_db", **funding_check.__dict__}
         if funding_check.exit_code != 0:
-            _write_json(run_dir / "run_metadata.json", meta)
-            return int(funding_check.exit_code)
+            if funding_check.exit_code != 2:
+                meta["steps"].append(funding_check_step)
+                _write_json(run_dir / "run_metadata.json", meta)
+                return int(funding_check.exit_code)
+
+            funding_json = _load_json_payload(funding_out)
+            allow_stale = int(args.funding_max_stale_symbols or 0)
+            can_degrade, degrade_meta = _funding_check_degraded_allowance(
+                funding_json,
+                max_stale_symbols=allow_stale,
+            )
+            if not can_degrade:
+                meta["steps"].append(funding_check_step)
+                _write_json(run_dir / "run_metadata.json", meta)
+                return int(funding_check.exit_code)
+
+            if isinstance(degrade_meta, dict):
+                funding_check_step["funding_check_degrade_meta"] = {
+                    "warn_legacy_exit_code": funding_check.exit_code,
+                    "allowed_stale_symbols": allow_stale,
+                    "symbols": list(degrade_meta.get("symbols", [])),
+                    "fail_issues": int(degrade_meta.get("fail_issues", 0)),
+                    "status": str(degrade_meta.get("status") or ""),
+                }
+            else:
+                funding_check_step["funding_check_degrade_meta"] = {
+                    "warn_legacy_exit_code": funding_check.exit_code,
+                    "allowed_stale_symbols": allow_stale,
+                }
+            funding_check_step["funding_check_degraded"] = True
+            funding_check_step["exit_code_original"] = funding_check.exit_code
+            funding_check_step["exit_code"] = 0
+
+            meta["funding_check_degraded"] = {
+                "status": "warn",
+                "symbols": funding_check_step.get("funding_check_degrade_meta", {}).get("symbols", []),
+                "allowed_symbols": allow_stale,
+            }
+            funding_check = CmdResult(
+                argv=funding_check_step["argv"],
+                cwd=funding_check_step["cwd"],
+                exit_code=int(funding_check_step["exit_code"]),
+                elapsed_s=float(funding_check_step["elapsed_s"]),
+                stdout_path=str(funding_check_step["stdout_path"]),
+                stderr_path=str(funding_check_step["stderr_path"]),
+            )
+        else:
+            meta.pop("funding_check_degraded", None)
+
+        if bool(funding_check_step.get("funding_check_degraded")):
+            (run_dir / "logs" / "factory_run_warn.log").write_text(
+                "WARN: funding check passed with stale-symbol allowance\n",
+                encoding="utf-8",
+            )
+
+        meta["steps"].append(funding_check_step)
+
     _write_json(run_dir / "run_metadata.json", meta)
 
     # ------------------------------------------------------------------
@@ -1508,7 +1636,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if not candidate_paths:
         (run_dir / "reports").mkdir(parents=True, exist_ok=True)
-        (run_dir / "reports" / "report.md").write_text("# Factory Run Report\n\nNo candidate configs were selected.\n", encoding="utf-8")
+        (run_dir / "reports" / "report.md").write_text(
+            "# Factory Run Report\n\nNo candidate configs were selected.\n", encoding="utf-8"
+        )
         _write_json(run_dir / "run_metadata.json", meta)
         return 1
 
@@ -1753,7 +1883,9 @@ def main(argv: list[str] | None = None) -> int:
             summary["concentration_summary_path"] = str(cc_summary_path)
             try:
                 cc_obj = _load_json(cc_summary_path)
-                summary["concentration_reject"] = bool(cc_obj.get("reject", False)) if isinstance(cc_obj, dict) else False
+                summary["concentration_reject"] = (
+                    bool(cc_obj.get("reject", False)) if isinstance(cc_obj, dict) else False
+                )
                 metrics = cc_obj.get("metrics", {}) if isinstance(cc_obj, dict) else {}
                 if isinstance(metrics, dict):
                     summary["symbols_traded"] = int(metrics.get("symbols_traded", 0) or 0)
@@ -2033,6 +2165,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--interval", default="1h", help="Main interval for sweep/replay (default: 1h).")
     ap.add_argument("--candles-db", default=None, help="Optional candle DB path override.")
     ap.add_argument("--funding-db", default=None, help="Optional funding DB path for replay/sweep.")
+    ap.add_argument(
+        "--max-age-fail-hours",
+        type=float,
+        default=_env_float("AI_QUANT_FUNDING_MAX_AGE_FAIL_HOURS"),
+        help="Override funding check fail age (hours) for stale data. Default: checker default (typically 12h).",
+    )
+    ap.add_argument(
+        "--funding-max-stale-symbols",
+        type=int,
+        default=_env_int("AI_QUANT_FUNDING_MAX_STALE_SYMBOLS", default=0),
+        help="Allow this many stale symbols to pass as WARN before treating funding check as FAIL.",
+    )
 
     ap.add_argument("--sweep-spec", default="backtester/sweeps/smoke.yaml", help="Sweep spec YAML path.")
     ap.add_argument("--gpu", action="store_true", help="Use GPU sweep (requires CUDA build/runtime).")

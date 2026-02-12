@@ -40,4 +40,3 @@ def test_profile_does_not_override_explicit_values() -> None:
     assert args.shortlist_per_mode == 7
     assert args.shortlist_max_rank == 77
     assert args.num_candidates == 9
-
