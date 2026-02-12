@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import os
 import queue
-import subprocess
 import threading
 from typing import Any
+
+from .openclaw_cli import send_openclaw_message
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -37,6 +38,25 @@ def _env_float(name: str, default: float) -> float:
 def _env_str(name: str, default: str = "") -> str:
     raw = os.getenv(name)
     return default if raw is None else str(raw)
+
+
+def _instance_label() -> str:
+    label = _env_str("AI_QUANT_DISCORD_LABEL", "").strip()
+    if label:
+        return label
+    return _env_str("AI_QUANT_INSTANCE_TAG", "").strip()
+
+
+def _decorate_message(message: str) -> str:
+    msg = str(message)
+    label = _instance_label()
+    if not label:
+        return msg
+    prefix = f"[{label}]"
+    if msg.startswith(prefix):
+        return msg
+    return f"{prefix} {msg}"
+
 
 def _redact_target(target: str) -> str:
     """Best-effort redaction for alert targets.
@@ -90,11 +110,12 @@ def enabled() -> bool:
 
 
 def _send_one_sync(*, channel: str, target: str, message: str) -> None:
-    if not str(message or "").strip():
+    msg = _decorate_message(str(message or "").strip())
+    if not msg:
         return
     if _env_bool("AI_QUANT_ALERT_DRY_RUN", False):
         try:
-            print(f"🟡 ALERT DRY RUN channel={channel} target={_redact_target(target)} message={message}")
+            print(f"🟡 ALERT DRY RUN channel={channel} target={_redact_target(target)} message={msg}")
         except Exception:
             pass
         return
@@ -104,23 +125,7 @@ def _send_one_sync(*, channel: str, target: str, message: str) -> None:
     except Exception:
         timeout_s = 6.0
 
-    subprocess.run(
-        [
-            "openclaw",
-            "message",
-            "send",
-            "--channel",
-            str(channel),
-            "--target",
-            str(target),
-            "--message",
-            str(message),
-        ],
-        capture_output=True,
-        check=True,
-        text=True,
-        timeout=timeout_s,
-    )
+    send_openclaw_message(channel=str(channel), target=str(target), message=msg, timeout_s=timeout_s)
 
 
 def send_openclaw_message(*, channel: str, target: str, message: str, timeout_s: float = 6.0) -> None:
