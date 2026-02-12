@@ -1,6 +1,6 @@
-# v6.001 — Unified config: backtester + engine share this file
+# v6.100 — Unified config: backtester + engine share this file
 # ALL params explicit. Both systems read identical values from this YAML.
-# Swept optimal values from 60K-combo apple-to-apple sweep (3m entry/exit, 11-day period).
+# v6.100: tp_partial_atr_mult sweep optimal (1h/3m, 13-day, $253 balance).
 global:
   trade:
     # --- Core sizing ---
@@ -46,12 +46,13 @@ global:
 
     # --- Partial TP ---
     enable_partial_tp: true           # default
-    tp_partial_pct: 0.5               # default
+    tp_partial_pct: 0.7               # SWEPT v6.100 (was 0.5)
+    tp_partial_atr_mult: 1.0          # SWEPT v6.100 (new — partial TP at 1×ATR)
     tp_partial_min_notional_usd: 10.0 # default
 
     # --- Trailing ---
     trailing_start_atr: 1.0           # SWEPT optimal (was 0.9)
-    trailing_distance_atr: 0.8        # SWEPT optimal (was 0.75)
+    trailing_distance_atr: 0.5        # SWEPT v6.100 (was 0.8)
     trailing_start_atr_low_conf: 0.0  # default (0 = use main value)
     trailing_distance_atr_low_conf: 0.0 # default (0 = use main value)
     enable_vol_buffered_trailing: true # default
@@ -75,8 +76,8 @@ global:
 
     # --- SSF + Breakeven ---
     enable_ssf_filter: true           # default
-    enable_breakeven_stop: true       # SWEPT optimal (was false)
-    breakeven_start_atr: 0.7          # default
+    enable_breakeven_stop: false       # SWEPT v6.100 (was true)
+    breakeven_start_atr: 0.5          # SWEPT v6.100 (was 0.7)
     breakeven_buffer_atr: 0.05        # default
 
     # --- RSI Overextension exit ---

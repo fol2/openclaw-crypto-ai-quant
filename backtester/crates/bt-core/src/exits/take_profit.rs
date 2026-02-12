@@ -4,10 +4,16 @@
 //! 3080-3165 (LONG TP block), and 3195-3277 (SHORT TP block).
 //!
 //! Partial TP ladder:
-//!   1. If `enable_partial_tp` AND `tp1_taken == false` AND price hits TP
+//!   1. If `enable_partial_tp` AND `tp1_taken == false` AND price hits partial TP level
 //!      -> Reduce by `tp_partial_pct`, caller should set `trailing_sl = entry` (breakeven)
-//!   2. If `tp1_taken == true` AND price still at TP -> Hold (let trailing handle remainder)
-//!   3. If partial TP disabled or `tp_partial_pct >= 1.0` -> full Close
+//!   2. If `tp1_taken == true` AND `tp_partial_atr_mult > 0` AND price hits full TP
+//!      -> Close remainder at full TP
+//!   3. If `tp1_taken == true` AND `tp_partial_atr_mult == 0` -> Hold (trailing manages)
+//!   4. If partial TP disabled or `tp_partial_pct >= 1.0` -> full Close
+//!
+//! When `tp_partial_atr_mult > 0`, partial TP fires at a separate (closer) level
+//! and full TP remains available for the remainder. When `tp_partial_atr_mult == 0`
+//! (default), partial and full TP share the same price — preserving legacy behavior.
 
 use crate::config::StrategyConfig;
 use crate::exits::ExitAction;
@@ -34,13 +40,77 @@ pub fn check_tp(
         entry * 0.005
     };
 
-    // ── TP price computation ─────────────────────────────────────────────
+    // ── Full TP price (always based on tp_mult) ──────────────────────────
     let tp_price = match pos.pos_type {
         PositionType::Long => entry + (atr * tp_mult),
         PositionType::Short => entry - (atr * tp_mult),
     };
 
-    // ── Check if TP is hit ───────────────────────────────────────────────
+    // ── Partial TP path ──────────────────────────────────────────────────
+    if trade.enable_partial_tp {
+        if !pos.tp1_taken {
+            // Determine partial TP level: use dedicated mult if set, otherwise same as full TP.
+            let partial_mult = if trade.tp_partial_atr_mult > 0.0 {
+                trade.tp_partial_atr_mult
+            } else {
+                tp_mult
+            };
+            let partial_tp_price = match pos.pos_type {
+                PositionType::Long => entry + (atr * partial_mult),
+                PositionType::Short => entry - (atr * partial_mult),
+            };
+            let partial_hit = match pos.pos_type {
+                PositionType::Long => snap.close >= partial_tp_price,
+                PositionType::Short => snap.close <= partial_tp_price,
+            };
+
+            if partial_hit {
+                let pct = trade.tp_partial_pct.clamp(0.0, 1.0);
+
+                if pct > 0.0 && pct < 1.0 {
+                    let remaining_notional = pos.size * (1.0 - pct) * snap.close;
+                    if remaining_notional < trade.tp_partial_min_notional_usd {
+                        return ExitAction::Hold;
+                    }
+
+                    // Partial reduce.  The caller is responsible for:
+                    //   - setting `pos.tp1_taken = true`
+                    //   - locking `pos.trailing_sl` to at least `entry` (breakeven)
+                    return ExitAction::Reduce {
+                        reason: "Take Profit (Partial)".to_string(),
+                        fraction: pct,
+                    };
+                }
+                // pct == 0 or pct >= 1.0 falls through to full close check.
+            } else {
+                // Partial TP not hit yet.
+                // When tp_partial_atr_mult == 0, partial == full, so full can't be hit either.
+                if trade.tp_partial_atr_mult <= 0.0 {
+                    return ExitAction::Hold;
+                }
+                // When tp_partial_atr_mult > 0, fall through to check full TP
+                // (handles edge case where partial_mult > tp_mult).
+            }
+        } else {
+            // tp1 already taken.
+            if trade.tp_partial_atr_mult > 0.0 {
+                // Separate partial level: check if full TP hit for remaining position.
+                let tp_hit = match pos.pos_type {
+                    PositionType::Long => snap.close >= tp_price,
+                    PositionType::Short => snap.close <= tp_price,
+                };
+                if tp_hit {
+                    return ExitAction::Close {
+                        reason: "Take Profit".to_string(),
+                    };
+                }
+            }
+            // Same level (tp_partial_atr_mult == 0) or full TP not hit: trailing manages.
+            return ExitAction::Hold;
+        }
+    }
+
+    // ── Full TP check (partial TP disabled, or pct edge case) ────────────
     let tp_hit = match pos.pos_type {
         PositionType::Long => snap.close >= tp_price,
         PositionType::Short => snap.close <= tp_price,
@@ -50,37 +120,6 @@ pub fn check_tp(
         return ExitAction::Hold;
     }
 
-    // ── Partial TP path ──────────────────────────────────────────────────
-    if trade.enable_partial_tp {
-        // First TP level not yet taken.
-        if !pos.tp1_taken {
-            let pct = trade.tp_partial_pct.clamp(0.0, 1.0);
-
-            if pct > 0.0 && pct < 1.0 {
-                // Check if the remaining position after reduction would meet
-                // the minimum notional requirement. If not, skip partial TP
-                // and let trailing manage instead (matches Python behavior).
-                let remaining_notional = pos.size * (1.0 - pct) * snap.close;
-                if remaining_notional < trade.tp_partial_min_notional_usd {
-                    return ExitAction::Hold;
-                }
-
-                // Partial reduce.  The caller is responsible for:
-                //   - setting `pos.tp1_taken = true`
-                //   - locking `pos.trailing_sl` to at least `entry` (breakeven)
-                return ExitAction::Reduce {
-                    reason: "Take Profit (Partial)".to_string(),
-                    fraction: pct,
-                };
-            }
-            // pct == 0 or pct >= 1.0 falls through to full close.
-        } else {
-            // tp1 already taken -> hold (let trailing stop manage remainder).
-            return ExitAction::Hold;
-        }
-    }
-
-    // ── Full TP close ────────────────────────────────────────────────────
     ExitAction::Close {
         reason: "Take Profit".to_string(),
     }
@@ -149,6 +188,8 @@ mod tests {
             adds_count: 0,
             open_time_ms: 0,
             last_add_time_ms: 0,
+            mae_usd: 0.0,
+            mfe_usd: 0.0,
         }
     }
 
@@ -214,6 +255,92 @@ mod tests {
         match check_tp(&pos, &snap, &cfg, 5.0, 5.0) {
             ExitAction::Reduce { .. } => {} // partial TP
             other => panic!("Expected Reduce for SHORT partial TP, got {:?}", other),
+        }
+    }
+
+    // ── Tests for tp_partial_atr_mult (separate partial TP level) ────────
+
+    #[test]
+    fn separate_partial_tp_hold_below_partial_level() {
+        // tp_partial_atr_mult=3.0, price at 2 ATR profit → Hold
+        let pos = default_pos(100.0, PositionType::Long);
+        let snap = default_snap(102.0);
+        let mut cfg = default_cfg();
+        cfg.trade.tp_partial_atr_mult = 3.0;
+        match check_tp(&pos, &snap, &cfg, 5.0, 2.0) {
+            ExitAction::Hold => {}
+            other => panic!("Expected Hold below partial level, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn separate_partial_tp_reduce_at_partial_level() {
+        // tp_partial_atr_mult=3.0, price at 3 ATR profit → Reduce
+        let pos = default_pos(100.0, PositionType::Long);
+        let snap = default_snap(103.0); // ATR=1.0, partial at 103.0
+        let mut cfg = default_cfg();
+        cfg.trade.tp_partial_atr_mult = 3.0;
+        match check_tp(&pos, &snap, &cfg, 5.0, 3.0) {
+            ExitAction::Reduce { fraction, .. } => {
+                assert!((fraction - 0.5).abs() < 0.01);
+            }
+            other => panic!("Expected Reduce at partial level, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn separate_partial_tp_full_close_after_tp1_taken() {
+        // tp_partial_atr_mult=3.0, tp1_taken=true, price at 5 ATR → Close
+        let mut pos = default_pos(100.0, PositionType::Long);
+        pos.tp1_taken = true;
+        let snap = default_snap(105.0);
+        let mut cfg = default_cfg();
+        cfg.trade.tp_partial_atr_mult = 3.0;
+        match check_tp(&pos, &snap, &cfg, 5.0, 5.0) {
+            ExitAction::Close { reason } => {
+                assert_eq!(reason, "Take Profit");
+            }
+            other => panic!("Expected Close at full TP after tp1_taken, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn separate_partial_tp_hold_after_tp1_below_full() {
+        // tp_partial_atr_mult=3.0, tp1_taken=true, price at 4 ATR (below full TP=5) → Hold
+        let mut pos = default_pos(100.0, PositionType::Long);
+        pos.tp1_taken = true;
+        let snap = default_snap(104.0);
+        let mut cfg = default_cfg();
+        cfg.trade.tp_partial_atr_mult = 3.0;
+        match check_tp(&pos, &snap, &cfg, 5.0, 4.0) {
+            ExitAction::Hold => {}
+            other => panic!("Expected Hold between partial and full TP, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn separate_partial_tp_short_reduce() {
+        // SHORT: tp_partial_atr_mult=3.0, price at 3 ATR profit → Reduce
+        let pos = default_pos(100.0, PositionType::Short);
+        let snap = default_snap(97.0); // ATR=1.0, partial at 97.0
+        let mut cfg = default_cfg();
+        cfg.trade.tp_partial_atr_mult = 3.0;
+        match check_tp(&pos, &snap, &cfg, 5.0, 3.0) {
+            ExitAction::Reduce { .. } => {}
+            other => panic!("Expected Reduce for SHORT partial TP, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn zero_partial_atr_mult_preserves_legacy_behavior() {
+        // tp_partial_atr_mult=0.0 (default), tp1_taken=true → Hold (trailing manages)
+        let mut pos = default_pos(100.0, PositionType::Long);
+        pos.tp1_taken = true;
+        let snap = default_snap(105.0);
+        let cfg = default_cfg(); // tp_partial_atr_mult defaults to 0.0
+        match check_tp(&pos, &snap, &cfg, 5.0, 5.0) {
+            ExitAction::Hold => {}
+            other => panic!("Expected Hold (legacy) after tp1_taken, got {:?}", other),
         }
     }
 }

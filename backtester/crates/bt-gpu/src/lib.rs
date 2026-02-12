@@ -89,15 +89,29 @@ pub fn run_gpu_sweep(
     let indicator_combos = axis_split::generate_combinations(&indicator_axes);
     let trade_combos = axis_split::generate_combinations(&trade_axes);
 
-    let symbols = sorted_symbols_with_kernel_cap(candles, "[GPU]");
+    let mut symbols: Vec<String> = {
+        let mut s: Vec<String> = candles.keys().cloned().collect();
+        s.sort();
+        s
+    };
+    if symbols.len() > buffers::GPU_MAX_SYMBOLS {
+        eprintln!(
+            "[GPU] Warning: {} symbols loaded, truncating to {} (kernel state limit)",
+            symbols.len(),
+            buffers::GPU_MAX_SYMBOLS,
+        );
+        symbols.truncate(buffers::GPU_MAX_SYMBOLS);
+    }
     let num_symbols = symbols.len();
 
-    // BTC symbol index for breadth kernel
+    // BTC symbol index for breadth kernel.
+    // Use u32::MAX sentinel when unavailable, so kernels can treat alignment as unknown.
     let btc_sym_idx = symbols
         .iter()
         .position(|s| s == "BTC")
         .or_else(|| symbols.iter().position(|s| s == "BTCUSDT"))
-        .unwrap_or(0) as u32;
+        .map(|idx| idx as u32)
+        .unwrap_or(u32::MAX);
 
     // ── 1. Prepare raw candles (CPU, layout only, ~10ms) ─────────────────
     let raw = raw_candles::prepare_raw_candles(candles, &symbols);
