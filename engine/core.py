@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import os
+import json
 import time
 import traceback
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Iterable, Mapping, Protocol
 
 import pandas as pd
 
@@ -33,8 +34,178 @@ def _interval_to_ms(interval: str) -> int:
             return int(float(s[:-1]) * 24.0 * 60.0 * 60.0 * 1000.0)
         # Fallback: assume seconds.
         return int(float(s) * 1000.0)
-    except Exception:
-        return 0
+        except Exception:
+            return 0
+
+
+@dataclass
+class KernelDecision:
+    symbol: str
+    action: str
+    signal: str
+    confidence: str
+    score: float = 0.0
+    now_series: dict[str, Any] | None = None
+    target_size: float | None = None
+    entry_key: int | None = None
+    reason: str | None = None
+    open_pos_count: int = 0
+
+    @classmethod
+    def from_raw(cls, raw: Mapping[str, Any] | Any) -> "KernelDecision | None":
+        if not isinstance(raw, Mapping):
+            return None
+
+        sym = str(raw.get("symbol", "")).strip().upper()
+        if not sym:
+            return None
+
+        act = str(raw.get("action", "")).strip().upper()
+        if not act:
+            return None
+
+        signal = str(raw.get("signal", act)).strip().upper()
+        confidence = str(raw.get("confidence", "N/A"))
+
+        try:
+            score = float(raw.get("score", 0.0) or 0.0)
+        except Exception:
+            score = 0.0
+
+        now_series = raw.get("now_series")
+        if not isinstance(now_series, dict):
+            now_series = {}
+
+        target_size = raw.get("target_size")
+        try:
+            target_size = float(target_size) if target_size is not None else None
+        except Exception:
+            target_size = None
+
+        entry_key = raw.get("entry_key", raw.get("entry_candle_key", raw.get("candle_key")))
+        try:
+            entry_key = int(entry_key) if entry_key is not None else None
+        except Exception:
+            entry_key = None
+
+        reason = raw.get("reason")
+        if isinstance(reason, str):
+            reason = reason.strip() or None
+        else:
+            reason = None
+
+        try:
+            open_pos_count = int(raw.get("open_pos_count", 0) or 0)
+        except Exception:
+            open_pos_count = 0
+
+        return cls(
+            symbol=sym,
+            action=act,
+            signal=signal,
+            confidence=confidence,
+            score=score,
+            now_series=now_series,
+            target_size=target_size,
+            entry_key=entry_key,
+            reason=reason,
+            open_pos_count=open_pos_count,
+        )
+
+
+class DecisionProvider(Protocol):
+    def get_decisions(
+        self,
+        *,
+        symbols: list[str],
+        watchlist: list[str],
+        open_symbols: list[str],
+        market: Any,
+        interval: str,
+        lookback_bars: int,
+        mode: str,
+        not_ready_symbols: set[str],
+        strategy: Any,
+        now_ms: int,
+    ) -> Iterable[KernelDecision]:
+        ...
+
+
+class KernelDecisionFileProvider:
+    def __init__(self, path: str | None):
+        self.path = str(path).strip() if path else None
+
+    def _load_raw(self) -> list[dict[str, Any]]:
+        path = self.path
+        if not path:
+            return []
+
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                raw = json.load(fh)
+        except FileNotFoundError:
+            return []
+        except Exception:
+            return []
+
+        if isinstance(raw, dict):
+            if isinstance(raw.get("decisions"), list):
+                return [item for item in raw["decisions"] if isinstance(item, Mapping)]
+            if "symbol" in raw:
+                return [raw]  # single-item payload
+            return []
+
+        if isinstance(raw, list):
+            return [item for item in raw if isinstance(item, Mapping)]
+
+        return []
+
+    def get_decisions(
+        self,
+        *,
+        symbols: list[str],
+        watchlist: list[str],
+        open_symbols: list[str],
+        market: Any,
+        interval: str,
+        lookback_bars: int,
+        mode: str,
+        not_ready_symbols: set[str],
+        strategy: Any,
+        now_ms: int,
+    ) -> Iterable[KernelDecision]:
+        del symbols, watchlist, open_symbols, market, interval, lookback_bars, mode, not_ready_symbols, strategy, now_ms
+        for raw in self._load_raw():
+            dec = KernelDecision.from_raw(raw)
+            if dec is None:
+                continue
+            yield dec
+
+
+class NoopDecisionProvider:
+    def get_decisions(
+        self,
+        *,
+        symbols: list[str],
+        watchlist: list[str],
+        open_symbols: list[str],
+        market: Any,
+        interval: str,
+        lookback_bars: int,
+        mode: str,
+        not_ready_symbols: set[str],
+        strategy: Any,
+        now_ms: int,
+    ) -> Iterable[KernelDecision]:
+        del symbols, watchlist, open_symbols, market, interval, lookback_bars, mode, not_ready_symbols, strategy, now_ms
+        return []
+
+
+def _build_default_decision_provider() -> DecisionProvider:
+    path = os.getenv("AI_QUANT_KERNEL_DECISION_FILE")
+    if path:
+        return KernelDecisionFileProvider(path)
+    return NoopDecisionProvider()
 
 
 class ModePlugin(Protocol):
@@ -77,6 +248,7 @@ class UnifiedEngine:
         lookback_bars: int,
         mode: str | None = None,
         mode_plugin: ModePlugin | None = None,
+        decision_provider: DecisionProvider | None = None,
     ):
         self.trader = trader
         self.strategy = strategy
@@ -85,6 +257,7 @@ class UnifiedEngine:
         self.lookback_bars = int(lookback_bars)
         self.mode = str(mode or os.getenv("AI_QUANT_MODE", "paper") or "paper").strip().lower()
         self.mode_plugin = mode_plugin
+        self.decision_provider = decision_provider or _build_default_decision_provider()
 
         self.stats = EngineStats()
 
@@ -635,6 +808,111 @@ class UnifiedEngine:
             except Exception:
                 pass
 
+    def _decision_execute_trade(
+        self,
+        symbol: str,
+        signal: str,
+        price: float,
+        timestamp: int,
+        confidence: str,
+        *,
+        atr: float = 0.0,
+        indicators=None,
+        action: str = "",
+        target_size: float | None = None,
+        reason: str | None = None,
+    ) -> None:
+        act = str(action or "").strip().upper()
+        if act not in {"OPEN", "ADD", "CLOSE", "REDUCE"}:
+            return
+
+        try:
+            target_size_f = float(target_size) if target_size is not None else None
+        except Exception:
+            target_size_f = None
+
+        try:
+            return self.trader.execute_trade(
+                symbol,
+                signal,
+                price,
+                timestamp,
+                confidence,
+                atr=atr,
+                indicators=indicators,
+                action=act,
+                target_size=target_size_f,
+                reason=reason,
+            )
+        except TypeError:
+            # Fallback for older runners that only support signal-only execute_trade.
+            pass
+
+        sym = str(symbol or "").strip().upper()
+        if not sym:
+            return
+
+        if act == "ADD":
+            fn = getattr(self.trader, "add_to_position", None)
+            if callable(fn):
+                try:
+                    return fn(sym, price, timestamp, confidence, atr=atr, indicators=indicators, target_size=target_size_f)
+                except TypeError:
+                    return fn(sym, price, timestamp, confidence, atr=atr, indicators=indicators)
+            return
+
+        if act in {"CLOSE", "REDUCE"}:
+            if sym not in ((self.trader.positions or {}) if isinstance(getattr(self.trader, "positions", None), dict) else {}):
+                return
+            pos = (self.trader.positions or {}).get(sym, {})
+            try:
+                pos_size = float(pos.get("size") or 0.0)
+            except Exception:
+                pos_size = 0.0
+            try:
+                reduce_sz = float(target_size_f) if target_size_f is not None else pos_size
+            except Exception:
+                reduce_sz = pos_size
+            reduce_sz = float(max(0.0, min(pos_size, reduce_sz)))
+
+            if act == "CLOSE":
+                fn = getattr(self.trader, "close_position", None)
+                if callable(fn):
+                    try:
+                        return fn(
+                            sym,
+                            price,
+                            timestamp,
+                            reason=str(reason or "Kernel CLOSE"),
+                            meta={"reason": str(reason or "").strip() or None},
+                        )
+                    except TypeError:
+                        return fn(sym, price, timestamp, str(reason or "Kernel CLOSE"))
+                return
+            fn = getattr(self.trader, "reduce_position", None)
+            if callable(fn):
+                return fn(
+                    sym,
+                    reduce_sz,
+                    price,
+                    timestamp,
+                    str(reason or "Kernel REDUCE"),
+                    confidence=confidence,
+                    meta={"reason": str(reason or "").strip() or None},
+                )
+            return
+
+        # Legacy "OPEN" fallback: if the trader does not support action-aware execute_trade.
+        return self.trader.execute_trade(
+            sym,
+            signal,
+            price,
+            timestamp,
+            confidence,
+            atr=atr,
+            indicators=indicators,
+        )
+
     def run_forever(self) -> None:
         import strategy.mei_alpha_v1 as mei_alpha_v1
 
@@ -826,383 +1104,182 @@ class UnifiedEngine:
                 except Exception:
                     pass
 
-                # Phase 1: Loop active symbols — exits run immediately, entries are collected.
-                _CONF_RANK = {"low": 0, "medium": 1, "high": 2}
-                entry_candidates: list[dict[str, Any]] = []
-
-                for symbol in active_symbols:
+                # Phase 1: Keep exit logic for open positions.
+                for sym_u in sorted((self.trader.positions or {}).keys()):
                     try:
-                        sym_u = str(symbol or "").upper().strip()
-                        if not sym_u:
-                            continue
+                        cached = self._analysis_cache.get(str(sym_u).upper()) or {}
+                        if not isinstance(cached, dict):
+                            cached = {}
 
-                        pos_open = sym_u in (self.trader.positions or {})
-                        is_watch = sym_u in watch_set
-
-                        # Use a cheap key hint first. Avoid pulling candles unless it changed.
-                        key_hint = self._candle_key_hint(sym_u)
-
-                        cached = self._analysis_cache.get(sym_u)
-                        cached_key = cached.get("key") if isinstance(cached, dict) else None
-
-                        is_entry_boundary = self._reanalyze_due(sym_u)
+                        now_series = cached.get("now") if isinstance(cached.get("now"), dict) else {}
+                        if not isinstance(now_series, dict):
+                            now_series = {}
                         is_exit_boundary = self._exit_reanalyze_due(sym_u)
-                        need_analyze = is_entry_boundary or (cached is None) or (key_hint is None) or (cached_key != key_hint)
-
-                        sig = None
-                        conf = None
-                        now_series = None
-
-                        if sym_u in not_ready_set and pos_open and (not need_analyze):
-                            # Candle backfill in progress (or unhealthy): don't recompute indicators every loop.
-                            # For open positions we still run exits using cached indicators + fresh price.
-                            sig = cached.get("sig") if isinstance(cached, dict) else None
-                            conf = cached.get("conf") if isinstance(cached, dict) else None
-                            now_series = cached.get("now") if isinstance(cached, dict) else None
-                            if now_series is None:
-                                now_series = {"Close": None, "is_anomaly": False}
-                            if sig is None:
-                                sig = "NEUTRAL"
-                            if conf is None:
-                                conf = "N/A"
-
-                        elif need_analyze:
-                            # Only fetch candles when we truly need a recompute.
-                            if sym_u == "BTC" and btc_df_raw is not None:
-                                df_raw = btc_df_raw
-                            else:
-                                df_raw = self.market.get_candles_df(sym_u, interval=self.interval, min_rows=self.lookback_bars)
-
-                            df = self._prepare_df_for_analysis(df_raw)
-                            if df is None or df.empty or len(df) < int(self.lookback_bars):
-                                # If we have an open position but cannot fetch candles (WS down, missing DB seed, invalid symbol),
-                                # still run exit checks using the best available (cached) indicators + fresh price.
-                                if pos_open:
-                                    cached_now = cached.get("now") if isinstance(cached, dict) else None
-                                    now_series = cached_now if cached_now is not None else {"Close": None, "is_anomaly": False}
-                                    sig = "NEUTRAL"
-                                    conf = "N/A"
-                                else:
-                                    continue
-
-                            key = self._analysis_key(df)
-                            if now_series is None:
-                                sig, conf, now_series = mei_alpha_v1.analyze(df.copy(), sym_u, btc_bullish=btc_bullish)
-
-                            self._analysis_cache[sym_u] = {
-                                "key": int(key) if key is not None else (int(key_hint) if key_hint is not None else None),
-                                "sig": str(sig),
-                                "conf": str(conf),
-                                "now": now_series,
-                                "computed_at_s": time.time(),
-                            }
-                            self._mark_analyzed(sym_u)
-                            cached = self._analysis_cache[sym_u]
-                        else:
-                            sig = cached.get("sig") if isinstance(cached, dict) else None
-                            conf = cached.get("conf") if isinstance(cached, dict) else None
-                            now_series = cached.get("now") if isinstance(cached, dict) else None
-
-                        if now_series is None:
+                        if not is_exit_boundary:
                             continue
 
-                        sig_u = str(sig or "").upper()
-
-                        # Reverse entry signal: manual toggle OR auto-reverse based on Breadth.
-                        _reversed_entry = False
-                        if sig_u in ("BUY", "SELL"):
+                        if self._rest_enabled and hyperliquid_meta is not None:
                             try:
-                                _full_cfg = mei_alpha_v1.get_strategy_config(sym_u) or {}
-                                _trade_cfg = _full_cfg.get("trade") or {}
-                                _regime_cfg = _full_cfg.get("market_regime") or {}
-
-                                _should_reverse = bool(_trade_cfg.get("reverse_entry_signal", False))
-
-                                # Auto-reverse: override manual flag based on Breadth zone.
-                                if bool(_regime_cfg.get("enable_auto_reverse", False)) and self._market_breadth_pct is not None:
-                                    _ar_lo = float(_regime_cfg.get("auto_reverse_breadth_low", 10.0))
-                                    _ar_hi = float(_regime_cfg.get("auto_reverse_breadth_high", 90.0))
-                                    _b = float(self._market_breadth_pct)
-                                    # Choppy zone → reverse ON; Trending zone → reverse OFF.
-                                    _should_reverse = (_ar_lo <= _b <= _ar_hi)
-
-                                if _should_reverse:
-                                    _orig_sig = sig_u
-                                    sig_u = "SELL" if sig_u == "BUY" else "BUY"
-                                    _reversed_entry = True
-                                    print(f"🔁 {sym_u} signal REVERSED: {_orig_sig} → {sig_u} (Breadth={self._market_breadth_pct:.1f}%)" if self._market_breadth_pct is not None else f"🔁 {sym_u} signal REVERSED: {_orig_sig} → {sig_u}")
+                                now_series["funding_rate"] = float(hyperliquid_meta.get_funding_rate(sym_u) or 0.0)
                             except Exception:
-                                pass
-                        if _reversed_entry and now_series is not None:
-                            try:
-                                now_series["_reversed_entry"] = True
-                            except Exception:
-                                pass
-
-                        # Market Regime Bias: block entries against the market tide.
-                        _regime_blocked = False
-                        if sig_u in ("BUY", "SELL") and self._market_breadth_pct is not None:
-                            try:
-                                _regime_cfg = (mei_alpha_v1.get_strategy_config(sym_u) or {}).get("market_regime") or {}
-                                if bool(_regime_cfg.get("enable_regime_filter", False)):
-                                    _breadth = float(self._market_breadth_pct)
-                                    _block_short_above = float(_regime_cfg.get("breadth_block_short_above", 90.0))
-                                    _block_long_below = float(_regime_cfg.get("breadth_block_long_below", 10.0))
-                                    if sig_u == "SELL" and _breadth > _block_short_above:
-                                        print(f"🌊 {sym_u} SELL blocked by Market Regime: Breadth={_breadth:.1f}% > {_block_short_above:.0f}%")
-                                        sig_u = "NEUTRAL"
-                                        _regime_blocked = True
-                                    elif sig_u == "BUY" and _breadth < _block_long_below:
-                                        print(f"🌊 {sym_u} BUY blocked by Market Regime: Breadth={_breadth:.1f}% < {_block_long_below:.0f}%")
-                                        sig_u = "NEUTRAL"
-                                        _regime_blocked = True
-                            except Exception:
-                                pass
-
-                        # ATR Floor: enforce minimum ATR as % of price to prevent noise stops.
-                        if now_series is not None:
-                            try:
-                                _atr_raw = float(now_series.get("ATR") or 0.0)
-                                _close_px = float(now_series.get("Close") or 0.0)
-                                _min_atr_pct = float((mei_alpha_v1.get_trade_params(sym_u) or {}).get("min_atr_pct", 0.003) or 0.003)
-                                if _close_px > 0 and _min_atr_pct > 0:
-                                    _atr_floor = _close_px * _min_atr_pct
-                                    if _atr_raw < _atr_floor:
-                                        now_series["ATR"] = _atr_floor
-                                        now_series["_atr_floored"] = True
-                            except Exception:
-                                pass
-
-                        # Inject breadth + regime info into now_series for audit trail.
-                        if now_series is not None:
-                            try:
-                                now_series["_market_breadth_pct"] = self._market_breadth_pct
-                                if _regime_blocked:
-                                    now_series["_regime_blocked"] = True
-                            except Exception:
-                                pass
-
-                        # Regime gate: block all entries when the global regime is not "trend OK".
-                        _regime_gate_blocked = False
-                        if sig_u in ("BUY", "SELL") and (not bool(self._regime_gate_on)):
-                            sig_u = "NEUTRAL"
-                            _regime_gate_blocked = True
-                        if now_series is not None:
-                            try:
-                                now_series["_regime_gate_on"] = bool(self._regime_gate_on)
-                                now_series["_regime_gate_reason"] = str(self._regime_gate_reason)
-                                if _regime_gate_blocked:
-                                    now_series["_regime_gate_blocked"] = True
-                            except Exception:
-                                pass
-
-                        # Optional gate debugging (even when NEUTRAL).
-                        if self._debug_gates_every_s > 0 and self._debug_gates_symbols:
-                            try:
-                                want = ("*" in self._debug_gates_symbols) or (sym_u in self._debug_gates_symbols)
-                            except Exception:
-                                want = False
-                            if want:
-                                now_s = time.time()
-                                last_t = None
-                                try:
-                                    last_t = cached.get("debug_last_print_s") if isinstance(cached, dict) else None
-                                except Exception:
-                                    last_t = None
-                                if (last_t is None) or ((now_s - float(last_t)) >= float(self._debug_gates_every_s)):
-                                    try:
-                                        audit = None
-                                        try:
-                                            audit = now_series.get("audit") if hasattr(now_series, "get") else None
-                                        except Exception:
-                                            audit = None
-                                        if isinstance(audit, dict):
-                                            gates = audit.get("gates")
-                                            tags = audit.get("tags")
-                                            print(f"🔎 gates {sym_u} sig={sig_u} conf={conf} gates={gates} tags={tags}")
-                                        else:
-                                            print(f"🔎 gates {sym_u} sig={sig_u} conf={conf} audit_missing=1")
-                                    except Exception:
-                                        pass
-                                    if isinstance(cached, dict):
-                                        cached["debug_last_print_s"] = now_s
-
-                        # Exits: run for open positions at exit-interval boundaries (aligned with backtester).
-                        if pos_open and is_exit_boundary:
-                            if self._rest_enabled and hyperliquid_meta is not None:
-                                try:
-                                    now_series["funding_rate"] = float(hyperliquid_meta.get_funding_rate(sym_u) or 0.0)
-                                except Exception:
-                                    now_series["funding_rate"] = 0.0
-                            else:
                                 now_series["funding_rate"] = 0.0
+                        else:
+                            now_series["funding_rate"] = 0.0
 
-                            self._attach_strategy_snapshot(symbol=sym_u, now_series=now_series)
+                        self._attach_strategy_snapshot(symbol=sym_u, now_series=now_series)
 
-                            # Exit price sourcing: "mid" = WS mid price;
-                            # any other value (e.g. "3m", "1m") = latest candle close from that interval DB.
-                            # Reads from YAML engine.exit_interval (hot-reloadable via _refresh_engine_config).
-                            quote = None
-                            _exit_iv = self._exit_interval  # e.g. "3m", "mid"
-                            if _exit_iv and _exit_iv != "mid":
-                                try:
-                                    df_exit = self.market.get_candles_df(sym_u, interval=_exit_iv, min_rows=1)
-                                    if df_exit is not None and not df_exit.empty:
-                                        current_price = float(df_exit["Close"].iloc[-1])
-                                    else:
-                                        # Fallback to mid price when candle unavailable
-                                        quote = self.market.get_mid_price(sym_u, max_age_s=10.0, interval=self.interval)
-                                        current_price = float(quote.price) if quote is not None else float(now_series.get("Close"))
-                                except Exception:
-                                    quote = self.market.get_mid_price(sym_u, max_age_s=10.0, interval=self.interval)
-                                    current_price = float(quote.price) if quote is not None else float(now_series.get("Close"))
-                            else:
-                                quote = self.market.get_mid_price(sym_u, max_age_s=10.0, interval=self.interval)
-                                current_price = float(quote.price) if quote is not None else float(now_series.get("Close"))
-
+                        quote = None
+                        _exit_iv = self._exit_interval
+                        if _exit_iv and _exit_iv != "mid":
                             try:
-                                audit = now_series.get("audit")
-                                if isinstance(audit, dict):
-                                    audit2 = dict(audit)
-                                    if _exit_iv and _exit_iv != "mid" and quote is None:
-                                        audit2["quote"] = {"source": f"candle_{_exit_iv}_close", "age_s": 0.0}
-                                    elif quote is not None:
-                                        audit2["quote"] = {
+                                df_exit = self.market.get_candles_df(sym_u, interval=_exit_iv, min_rows=1)
+                                if df_exit is not None and not df_exit.empty:
+                                    current_price = float(df_exit["Close"].iloc[-1])
+                                else:
+                                    quote = self.market.get_mid_price(sym_u, max_age_s=10.0, interval=self.interval)
+                                    current_price = float(quote.price) if quote is not None else float(now_series.get("Close") or 0.0)
+                            except Exception:
+                                quote = self.market.get_mid_price(sym_u, max_age_s=10.0, interval=self.interval)
+                                current_price = float(quote.price) if quote is not None else float(now_series.get("Close") or 0.0)
+                        else:
+                            quote = self.market.get_mid_price(sym_u, max_age_s=10.0, interval=self.interval)
+                            current_price = float(quote.price) if quote is not None else float(now_series.get("Close") or 0.0)
+
+                        try:
+                            if isinstance(now_series, dict):
+                                if quote is not None:
+                                    try:
+                                        now_series["quote"] = {
                                             "source": str(getattr(quote, "source", "")),
                                             "age_s": float(getattr(quote, "age_s", 0.0) or 0.0),
                                         }
-                                    now_series["audit"] = audit2
-                            except Exception:
-                                pass
-
-                            try:
-                                self.trader.check_exit_conditions(
-                                    sym_u,
-                                    current_price,
-                                    now_ms(),
-                                    is_anomaly=bool(now_series.get("is_anomaly", False)),
-                                    dynamic_tp_mult=now_series.get("tp_mult"),
-                                    indicators=now_series,
-                                )
-                            except AttributeError:
-                                mei_alpha_v1.PaperTrader.check_exit_conditions(
-                                    self.trader,
-                                    sym_u,
-                                    current_price,
-                                    now_ms(),
-                                    is_anomaly=bool(now_series.get("is_anomaly", False)),
-                                    dynamic_tp_mult=now_series.get("tp_mult"),
-                                    indicators=now_series,
-                                )
-
-                        # Optional NEUTRAL sampling: record gates/tags periodically for a few symbols.
-                        if is_watch and sig_u == "NEUTRAL" and neutral_sample_syms and (sym_u in neutral_sample_syms):
-                            try:
-                                audit = now_series.get("audit")
-                                if isinstance(audit, dict):
-                                    mei_alpha_v1.log_audit_event(
-                                        sym_u,
-                                        "ANALYZE_NEUTRAL_SAMPLE",
-                                        data={
-                                            "interval": str(self.interval),
-                                            "candle_key": int(key_hint) if key_hint is not None else None,
-                                            "audit": audit,
-                                        },
-                                    )
-                            except Exception:
-                                pass
-                            try:
-                                neutral_sample_syms.discard(sym_u)
-                            except Exception:
-                                pass
-
-                        # Entries: only watchlist symbols, only when signal is not neutral.
-                        # Collect valid entry candidates; actual execution is deferred to
-                        # the ranking phase after all symbols have been evaluated.
-                        if (not is_watch) or sig_u == "NEUTRAL":
-                            continue
-
-                        # Determine the key used for entry de-dup.
-                        entry_key = None
-                        try:
-                            entry_key = int(key_hint) if key_hint is not None else int((cached or {}).get("key"))  # type: ignore[arg-type]
-                        except Exception:
-                            entry_key = None
-
-                        open_pos_count = 0
-                        try:
-                            open_pos_count = int(len(self.trader.positions or {}))
-                        except Exception:
-                            open_pos_count = 0
-
-                        # Timing guard: don't enter on an old candle-close signal (common after restarts).
-                        if entry_key is not None:
-                            now_ts = now_ms()
-                            if self._entry_is_too_late(entry_key=int(entry_key), now_ts_ms=int(now_ts)):
-                                try:
-                                    delay_s = max(0.0, (float(now_ts) - float(entry_key)) / 1000.0)
-                                    max_s = float(self._entry_max_delay_ms) / 1000.0
-                                    print(
-                                        f"🕒 skip {sym_u} entry: stale candle-close signal "
-                                        f"delay={delay_s:.0f}s > max={max_s:.0f}s key={int(entry_key)}"
-                                    )
-                                except Exception:
-                                    print(f"🕒 skip {sym_u} entry: stale candle-close signal key={int(entry_key)}")
-                                self._last_entry_key[sym_u] = int(entry_key)
-                                self._last_entry_key_open_pos_count[sym_u] = open_pos_count
-                                continue
-
-                            last_key = self._last_entry_key.get(sym_u)
-                            if last_key is not None and int(last_key) == int(entry_key):
-                                if self._entry_retry_on_capacity:
-                                    last_open_count = self._last_entry_key_open_pos_count.get(sym_u)
-                                    if last_open_count is not None and open_pos_count < int(last_open_count):
-                                        self._last_entry_key_open_pos_count[sym_u] = open_pos_count
-                                    else:
-                                        continue
-                                else:
-                                    continue
-
-                        entry_candidates.append({
-                            "symbol": sym_u,
-                            "signal": sig_u,
-                            "confidence": conf,
-                            "adx": float(now_series.get("ADX", 0) or 0),
-                            "entry_key": entry_key,
-                            "now_series": now_series,
-                            "open_pos_count": open_pos_count,
-                        })
-
+                                    except Exception:
+                                        pass
+                            self.trader.check_exit_conditions(
+                                sym_u,
+                                current_price,
+                                now_ms(),
+                                is_anomaly=bool(now_series.get("is_anomaly", False)),
+                                dynamic_tp_mult=now_series.get("tp_mult"),
+                                indicators=now_series,
+                            )
+                        except AttributeError:
+                            mei_alpha_v1.PaperTrader.check_exit_conditions(
+                                self.trader,
+                                sym_u,
+                                current_price,
+                                now_ms(),
+                                is_anomaly=bool(now_series.get("is_anomaly", False)),
+                                dynamic_tp_mult=now_series.get("tp_mult"),
+                                indicators=now_series,
+                            )
                     except SystemExit:
                         raise
                     except Exception:
-                        print(f"⚠️ Engine symbol error: {symbol}\n{traceback.format_exc()}")
+                        print(f"⚠️ Engine exit logic error: {sym_u}\n{traceback.format_exc()}")
                         continue
 
-                # Phase 2: Rank entry candidates by score (conf_rank * 100 + ADX),
-                # tiebreak by symbol name (ascending). Execute in descending score order.
-                if entry_candidates:
-                    # Two-pass stable sort: first by symbol asc (tiebreak),
-                    # then by score desc (primary). Python's sort is stable,
-                    # so equal-score items retain alphabetical order.
-                    entry_candidates.sort(key=lambda c: c["symbol"])
-                    entry_candidates.sort(
-                        key=lambda c: _CONF_RANK.get(c["confidence"], 0) * 100 + c["adx"],
-                        reverse=True,
-                    )
+                # Phase 2: Execute explicit kernel decisions (OPEN/ADD/CLOSE/REDUCE) ordered by score.
+                decision_exec: list[KernelDecision] = []
+                try:
+                    for dec in self.decision_provider.get_decisions(
+                        symbols=watchlist,
+                        watchlist=watchlist,
+                        open_symbols=open_syms,
+                        market=self.market,
+                        interval=self.interval,
+                        lookback_bars=self.lookback_bars,
+                        mode=self.mode,
+                        not_ready_symbols=not_ready_set,
+                        strategy=self.strategy,
+                        now_ms=now_ms(),
+                    ):
+                        if dec is None:
+                            continue
+                        sym_u = str(dec.symbol).upper().strip()
+                        if not sym_u:
+                            continue
 
-                    for cand in entry_candidates:
+                        act = str(dec.action or "").strip().upper()
+                        if act not in {"OPEN", "ADD", "CLOSE", "REDUCE"}:
+                            continue
+
+                        now_series = dec.now_series if isinstance(dec.now_series, dict) else {}
                         try:
-                            sym_u = cand["symbol"]
-                            sig_u = cand["signal"]
-                            conf = cand["confidence"]
-                            entry_key = cand["entry_key"]
-                            now_series = cand["now_series"]
-                            open_pos_count = cand["open_pos_count"]
+                            now_series = dict(now_series)
+                        except Exception:
+                            now_series = {}
 
-                            # Entry price sourcing: use entry_interval candle close
-                            # (aligned with backtester), fallback to mid-price.
-                            quote = None
+                        if not isinstance(now_series, dict):
+                            now_series = {}
+                        if not now_series:
+                            now_series = {"Close": None, "is_anomaly": False}
+
+                        self._attach_strategy_snapshot(symbol=sym_u, now_series=now_series)
+
+                        # Store the latest kernel output for reuse by downstream checks / audit.
+                        self._analysis_cache[sym_u] = {
+                            "key": int(dec.entry_key) if dec.entry_key is not None else None,
+                            "sig": str(dec.signal),
+                            "conf": str(dec.confidence),
+                            "now": dict(now_series),
+                            "computed_at_s": time.time(),
+                            "action": act,
+                        }
+
+                        # Open-side decisions are always watchlist-controlled.
+                        if act in {"OPEN", "ADD"} and not sym_u in watch_set:
+                            continue
+
+                        # Skip decision entries where candle keys are not ready.
+                        if act in {"OPEN", "ADD"} and sym_u in not_ready_set:
+                            print(f"🕒 skip {sym_u} {act}: candles not ready")
+                            continue
+
+                        decision_exec.append(dec)
+                except Exception:
+                    print(f"⚠️ Engine decision provider error: {traceback.format_exc()}")
+
+                decision_exec.sort(
+                    key=lambda item: (
+                        -(item.score or 0.0),
+                        str(item.symbol),
+                    )
+                )
+
+                for dec in decision_exec:
+                    try:
+                        sym_u = str(dec.symbol).upper().strip()
+                        act = str(dec.action or "").strip().upper()
+                        if act not in {"OPEN", "ADD", "CLOSE", "REDUCE"}:
+                            continue
+
+                        signal = str(dec.signal or "").upper().strip()
+                        conf = str(dec.confidence or "N/A")
+                        entry_key = dec.entry_key
+                        open_pos_count = int(dec.open_pos_count or 0)
+
+                        now_series = dec.now_series if isinstance(dec.now_series, dict) else {}
+                        try:
+                            now_series = dict(now_series)
+                        except Exception:
+                            now_series = {}
+                        if not isinstance(now_series, dict):
+                            now_series = {}
+                        if not now_series:
+                            now_series = {"Close": None, "is_anomaly": False}
+                        self._attach_strategy_snapshot(symbol=sym_u, now_series=now_series)
+
+                        if self._rest_enabled and hyperliquid_meta is not None:
+                            try:
+                                now_series["funding_rate"] = float(hyperliquid_meta.get_funding_rate(sym_u) or 0.0)
+                            except Exception:
+                                now_series["funding_rate"] = 0.0
+                        else:
+                            now_series["funding_rate"] = 0.0
+
+                        quote = None
+                        if act in {"OPEN", "ADD"}:
                             _entry_iv = self._entry_interval
                             if _entry_iv and _entry_iv != self.interval and _entry_iv != "mid":
                                 try:
@@ -1211,26 +1288,37 @@ class UnifiedEngine:
                                         current_price = float(df_entry["Close"].iloc[-1])
                                     else:
                                         quote = self.market.get_mid_price(sym_u, max_age_s=10.0, interval=self.interval)
-                                        current_price = float(quote.price) if quote is not None else float(now_series.get("Close"))
+                                        current_price = float(quote.price) if quote is not None else float(now_series.get("Close") or 0.0)
                                 except Exception:
                                     quote = self.market.get_mid_price(sym_u, max_age_s=10.0, interval=self.interval)
-                                    current_price = float(quote.price) if quote is not None else float(now_series.get("Close"))
+                                    current_price = float(quote.price) if quote is not None else float(now_series.get("Close") or 0.0)
                             else:
                                 quote = self.market.get_mid_price(sym_u, max_age_s=10.0, interval=self.interval)
-                                current_price = float(quote.price) if quote is not None else float(now_series.get("Close"))
+                                current_price = float(quote.price) if quote is not None else float(now_series.get("Close") or 0.0)
+                        else:
+                            quote = self.market.get_mid_price(sym_u, max_age_s=10.0, interval=self.interval)
+                            current_price = float(quote.price) if quote is not None else float(now_series.get("Close") or 0.0)
 
-                            # If no key, fall back to executing immediately (legacy behavior).
-                            if entry_key is None:
-                                self.trader.execute_trade(
-                                    sym_u,
-                                    sig_u,
-                                    current_price,
-                                    now_ms(),
-                                    conf,
-                                    atr=float(now_series.get("ATR") or 0.0),
-                                    indicators=now_series,
-                                )
-                                continue
+                        if act in {"OPEN", "ADD"}:
+                            if entry_key is not None:
+                                now_ts = now_ms()
+                                if self._entry_is_too_late(entry_key=int(entry_key), now_ts_ms=int(now_ts)):
+                                    print(
+                                        f"🕒 skip {sym_u} {act}: stale candle-close signal "
+                                        f"key={int(entry_key)}"
+                                    )
+                                    continue
+
+                                last_key = self._last_entry_key.get(sym_u)
+                                if last_key is not None and int(last_key) == int(entry_key):
+                                    if self._entry_retry_on_capacity:
+                                        last_open_count = self._last_entry_key_open_pos_count.get(sym_u)
+                                        if last_open_count is not None and int(len(self.trader.positions or {})) < int(last_open_count):
+                                            self._last_entry_key_open_pos_count[sym_u] = int(open_pos_count)
+                                        else:
+                                            continue
+                                    else:
+                                        continue
 
                             if self._rest_enabled and hyperliquid_meta is not None:
                                 try:
@@ -1241,39 +1329,51 @@ class UnifiedEngine:
                                 now_series["funding_rate"] = 0.0
 
                             self._attach_strategy_snapshot(symbol=sym_u, now_series=now_series)
+                            if entry_key is not None:
+                                self._last_entry_key[sym_u] = int(entry_key)
+                                self._last_entry_key_open_pos_count[sym_u] = open_pos_count
 
-                            try:
-                                audit = now_series.get("audit")
-                                if isinstance(audit, dict):
-                                    audit2 = dict(audit)
-                                    if _entry_iv and _entry_iv != self.interval and _entry_iv != "mid" and quote is None:
-                                        audit2["quote"] = {"source": f"candle_{_entry_iv}_close", "age_s": 0.0}
-                                    elif quote is not None:
-                                        audit2["quote"] = {
+                            if isinstance(now_series, dict):
+                                try:
+                                    if quote is not None:
+                                        now_series["quote"] = {
                                             "source": str(getattr(quote, "source", "")),
                                             "age_s": float(getattr(quote, "age_s", 0.0) or 0.0),
                                         }
-                                    now_series["audit"] = audit2
-                            except Exception:
-                                pass
+                                except Exception:
+                                    pass
 
-                            self._last_entry_key[sym_u] = int(entry_key)
-                            self._last_entry_key_open_pos_count[sym_u] = open_pos_count
-
-                            self.trader.execute_trade(
+                            self._decision_execute_trade(
                                 sym_u,
-                                sig_u,
+                                signal,
                                 current_price,
-                                int(entry_key),
+                                int(entry_key or now_ms()),
                                 conf,
                                 atr=float(now_series.get("ATR") or 0.0),
                                 indicators=now_series,
+                                action=act,
+                                target_size=dec.target_size,
+                                reason=dec.reason,
                             )
-                        except SystemExit:
-                            raise
-                        except Exception:
-                            print(f"⚠️ Engine ranked-entry error: {cand.get('symbol')}\n{traceback.format_exc()}")
-                            continue
+
+                        elif act in {"CLOSE", "REDUCE"}:
+                            self._decision_execute_trade(
+                                sym_u,
+                                signal,
+                                current_price,
+                                now_ms(),
+                                conf,
+                                atr=float(now_series.get("ATR") or 0.0),
+                                indicators=now_series,
+                                action=act,
+                                target_size=dec.target_size,
+                                reason=dec.reason,
+                            )
+                    except SystemExit:
+                        raise
+                    except Exception:
+                        print(f"⚠️ Engine decision execution error: {dec.symbol}\n{traceback.format_exc()}")
+                        continue
 
                 if self.mode_plugin is not None:
                     self.mode_plugin.after_iteration()
