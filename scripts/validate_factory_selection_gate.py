@@ -20,6 +20,8 @@ REQUIRED_SELECTED_KEYS = (
     "sweep_stage",
     "replay_stage",
     "validation_gate",
+    "candidate_mode",
+    "schema_version",
     "canonical_cpu_verified",
     "replay_report_path",
     "replay_equivalence_report_path",
@@ -190,6 +192,17 @@ def validate_selection_path(path: Path, *, stage: str, allow_legacy: bool = Fals
         for key in REQUIRED_SELECTED_KEYS:
             if key not in selected:
                 _error(f"selected candidate missing required key: {key}", errors)
+        if not bool(selected.get("candidate_mode", False)):
+            _error("selected candidate is not candidate_mode=true", errors)
+        schema_version = selected.get("schema_version")
+        if isinstance(schema_version, bool) or schema_version is None:
+            _error("selected candidate schema_version must be 1", errors)
+        else:
+            try:
+                if int(schema_version) != 1:
+                    _error(f"selected candidate schema_version is not 1: {schema_version!r}")
+            except Exception:
+                _error("selected candidate schema_version must be 1", errors)
 
         run_dir = bundle_paths.get("run_dir")
         _validate_selected_paths(selected=selected, run_dir=run_dir, errors=errors)

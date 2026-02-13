@@ -46,6 +46,8 @@ def test_replay_metadata_attachment_records_validation_stage() -> None:
     assert summary["replay_equivalence_failure_code"] == ""
     assert entry["replay_equivalence_error"] == ""
     assert entry["replay_equivalence_diffs"] == []
+    assert summary["schema_version"] == 1
+    assert entry["schema_version"] == 1
     assert entry["pipeline_stage"] == "candidate_validation"
     assert entry["sweep_stage"] == "gpu"
     assert entry["replay_stage"] == "cpu_replay"
@@ -67,6 +69,7 @@ def test_replay_metadata_attachment_marks_unverified_when_not_pass() -> None:
     assert entry["canonical_cpu_verified"] is False
     assert entry["replay_equivalence_mode"] == "live"
     assert entry["replay_equivalence_failure_code"] == "mismatch"
+    assert summary.get("schema_version", 1) == 1
 
 
 def test_replay_metadata_attachment_preserves_candidate_mode() -> None:

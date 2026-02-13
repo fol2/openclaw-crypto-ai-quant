@@ -633,6 +633,8 @@ Use this section for all automated rollouts. Do not deploy to live without a suc
 - Confirm replay equivalence proof exists for promotion candidates:
   - `selected.canonical_cpu_verified == true`
   - `selected.replay_equivalence_status == "pass"`
+  - `selected.candidate_mode == true`
+  - `selected.schema_version == 1`
   - `selected.replay_equivalence_report_path` file exists
   - `selected.replay_equivalence_count` is recorded
 
@@ -708,6 +710,8 @@ Use this checklist before moving from `smoke` to `real` and before approving any
   - `evidence_bundle_paths.selection_md`
   - `selected.canonical_cpu_verified == true`
   - `selected.pipeline_stage`, `selected.sweep_stage`, `selected.replay_stage`, `selected.validation_gate`
+  - `selected.candidate_mode == true`
+  - `selected.schema_version == 1`
   - `selected.replay_equivalence_report_path` exists and path exists
   - `selected.replay_report_path` exists and path exists
   - `selected.replay_equivalence_count` is an integer >= 0

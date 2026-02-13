@@ -171,6 +171,11 @@ def test_select_deployable_candidates_prefers_stage_and_cpu_verified_candidates(
             "replay_stage": "cpu_replay",
             "validation_gate": "replay_only",
             "canonical_cpu_verified": True,
+            "replay_report_path": "/tmp/replay.json",
+            "replay_equivalence_report_path": "/tmp/replay_eq.json",
+            "replay_equivalence_status": "pass",
+            "replay_equivalence_count": 0,
+            "schema_version": 1,
             "candidate_mode": True,
         },
         {
@@ -199,6 +204,17 @@ def test_unverified_staged_candidates_are_not_deployable() -> None:
             "total_trades": 1,
             "profit_factor": 1.0,
             "max_drawdown_pct": 0.1,
+            "pipeline_stage": "candidate_validation",
+            "sweep_stage": "gpu",
+            "replay_stage": "cpu_replay",
+            "validation_gate": "replay_only",
+            "canonical_cpu_verified": True,
+            "replay_report_path": "/tmp/legacy_replay.json",
+            "replay_equivalence_report_path": "/tmp/legacy_replay_eq.json",
+            "replay_equivalence_status": "pass",
+            "replay_equivalence_count": 0,
+            "schema_version": 1,
+            "candidate_mode": True,
         },
         {
             "config_id": "cand_unverified",
@@ -212,6 +228,10 @@ def test_unverified_staged_candidates_are_not_deployable() -> None:
             "replay_stage": "cpu_replay",
             "validation_gate": "replay_only",
             "canonical_cpu_verified": False,
+            "replay_report_path": "/tmp/replay.json",
+            "replay_equivalence_report_path": "/tmp/replay_eq.json",
+            "replay_equivalence_status": "pass",
+            "replay_equivalence_count": 0,
             "candidate_mode": True,
         },
     ]
@@ -235,6 +255,7 @@ def test_candidate_mode_requires_complete_stage_metadata() -> None:
             "sweep_stage": "gpu",
             "validation_gate": "replay_only",
             "canonical_cpu_verified": True,
+            "schema_version": 1,
             "candidate_mode": True,
         },
         {
@@ -249,6 +270,11 @@ def test_candidate_mode_requires_complete_stage_metadata() -> None:
             "replay_stage": "cpu_replay",
             "validation_gate": "replay_only",
             "canonical_cpu_verified": True,
+            "replay_report_path": "/tmp/complete_replay.json",
+            "replay_equivalence_report_path": "/tmp/complete_replay_equiv.json",
+            "replay_equivalence_status": "pass",
+            "replay_equivalence_count": 0,
+            "schema_version": 1,
             "candidate_mode": True,
         },
     ]
@@ -257,3 +283,26 @@ def test_candidate_mode_requires_complete_stage_metadata() -> None:
     selected = _select_deployable_candidates([p for p in parsed if p is not None], limit=2)
     assert len(selected) == 1
     assert selected[0].config_id == "complete"
+
+
+def test_require_ssot_evidence_can_be_disabled_for_selection() -> None:
+    candidate = {
+        "config_id": "legacy_proofless",
+        "config_path": "/tmp/legacy_proofless.yaml",
+        "total_pnl": 10.0,
+        "total_trades": 3,
+        "profit_factor": 1.7,
+        "max_drawdown_pct": 0.2,
+        "pipeline_stage": "candidate_validation",
+        "sweep_stage": "gpu",
+        "replay_stage": "cpu_replay",
+        "validation_gate": "replay_only",
+        "canonical_cpu_verified": True,
+        "schema_version": 1,
+        "candidate_mode": True,
+    }
+    parsed = _parse_candidate(candidate)
+    assert parsed is not None
+    selected = _select_deployable_candidates([parsed], limit=1, require_ssot_evidence=False)
+    assert len(selected) == 1
+    assert selected[0].config_id == "legacy_proofless"

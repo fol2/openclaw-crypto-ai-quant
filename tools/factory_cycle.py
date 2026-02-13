@@ -42,6 +42,13 @@ def _env_float(env_name: str, *, default: float | None = None) -> float | None:
         raise SystemExit(f"{env_name} must be a float when set")
 
 
+def _env_bool(env_name: str, *, default: bool = False) -> bool:
+    raw = os.getenv(env_name, "").strip().lower()
+    if not raw:
+        return bool(default)
+    return raw in {"1", "true", "yes", "y", "on"}
+
+
 def _env_int(env_name: str, *, default: int | None = None) -> int | None:
     raw = str(os.getenv(env_name, "") or "").strip()
     if not raw:
@@ -186,6 +193,11 @@ class Candidate:
     validation_gate: str
     canonical_cpu_verified: bool
     candidate_mode: bool
+    schema_version: int
+    replay_report_path: str
+    replay_equivalence_report_path: str
+    replay_equivalence_status: str
+    replay_equivalence_count: int
     has_stage_metadata: bool
 
 
@@ -235,6 +247,21 @@ def _parse_candidate(it: dict[str, Any]) -> Candidate | None:
         sweep_stage = str(it.get("sweep_stage", "")).strip()
         replay_stage = str(it.get("replay_stage", "")).strip()
         validation_gate = str(it.get("validation_gate", "")).strip()
+        replay_report_path = str(it.get("replay_report_path", "")).strip()
+        replay_equivalence_report_path = str(it.get("replay_equivalence_report_path", "")).strip()
+        replay_equivalence_status = str(it.get("replay_equivalence_status", "")).strip().lower()
+        try:
+            replay_equivalence_count = int(it.get("replay_equivalence_count", 0))
+        except Exception:
+            replay_equivalence_count = -1
+        try:
+            raw_schema_version = it.get("schema_version", None)
+            if isinstance(raw_schema_version, bool):
+                schema_version = 0
+            else:
+                schema_version = int(raw_schema_version)
+        except Exception:
+            schema_version = 0
 
         if not candidate_mode:
             pipeline_stage = pipeline_stage or "legacy"
@@ -262,6 +289,11 @@ def _parse_candidate(it: dict[str, Any]) -> Candidate | None:
             validation_gate=validation_gate or "replay_only",
             canonical_cpu_verified=bool(it.get("canonical_cpu_verified", True)),
             candidate_mode=candidate_mode,
+            schema_version=schema_version,
+            replay_report_path=replay_report_path,
+            replay_equivalence_report_path=replay_equivalence_report_path,
+            replay_equivalence_status=replay_equivalence_status,
+            replay_equivalence_count=replay_equivalence_count,
         )
     except Exception:
         return None
@@ -273,10 +305,26 @@ def _candidate_stage_complete(c: Candidate) -> bool:
     return bool(c.pipeline_stage) and bool(c.sweep_stage) and bool(c.replay_stage) and bool(c.validation_gate)
 
 
-def _candidate_deployable(c: Candidate) -> bool:
+def _candidate_evidence_complete(c: Candidate) -> bool:
     if not c.candidate_mode:
-        return True
-    return c.canonical_cpu_verified and _candidate_stage_complete(c)
+        return False
+    return (
+        _candidate_stage_complete(c)
+        and bool(c.canonical_cpu_verified)
+        and c.replay_equivalence_status == "pass"
+        and int(c.schema_version) == 1
+        and c.replay_equivalence_count >= 0
+        and bool(c.replay_report_path)
+        and bool(c.replay_equivalence_report_path)
+    )
+
+
+def _candidate_deployable(c: Candidate, *, require_ssot_evidence: bool = True) -> bool:
+    if not c.candidate_mode:
+        return not require_ssot_evidence
+    if not require_ssot_evidence:
+        return c.canonical_cpu_verified and _candidate_stage_complete(c)
+    return _candidate_evidence_complete(c)
 
 
 def _candidate_sort_key(c: Candidate) -> tuple[float, float]:
@@ -364,6 +412,35 @@ def _send_discord_chunks(*, target: str, lines: list[str], max_chars: int = 1800
         chunks.append(cur)
     for chunk in chunks:
         _send_discord(target=tgt, message=chunk)
+
+
+def _write_selection_markdown(*, run_dir: Path, selection: dict[str, Any]) -> None:
+    selected = selection.get("selected")
+    if not isinstance(selected, dict):
+        selected = {}
+    selected_id = str(selected.get("config_id", "")).strip()
+    selected_pf = float(selected.get("profit_factor", 0.0) or 0.0)
+    selected_dd = float(selected.get("max_drawdown_pct", 0.0) or 0.0) * 100.0
+    selected_pnl = float(selected.get("total_pnl", 0.0) or 0.0)
+    selected_trades = int(selected.get("total_trades", 0) or 0)
+    selected_score = selected.get("score_v1", "n/a")
+
+    lines = [
+        "# Factory Selection",
+        "",
+        f"- run_id: `{selection.get('run_id', '')}`",
+        f"- selection_stage: {selection.get('selection_stage', 'selected')}",
+        f"- deploy_stage: {selection.get('deploy_stage', '')}",
+        f"- promotion_stage: {selection.get('promotion_stage', '')}",
+        f"- selected: `{selected_id or 'none'}`",
+        f"- selected_profit_factor: {selected_pf:.3f}",
+        f"- selected_max_drawdown_pct: {selected_dd:.3f}",
+        f"- selected_total_pnl: {selected_pnl:.3f}",
+        f"- selected_total_trades: {selected_trades}",
+        f"- selected_score_v1: {selected_score}",
+        "",
+    ]
+    (run_dir / "reports" / "selection.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _nested_get(obj: dict[str, Any], path: tuple[str, ...], default: Any = None) -> Any:
@@ -641,7 +718,9 @@ def _build_candidates_messages(*, run_id: str, parsed: list[Candidate]) -> list[
     return out
 
 
-def _select_best_candidate(items: list[dict[str, Any]]) -> Candidate | None:
+def _select_best_candidate(
+    items: list[dict[str, Any]], *, require_ssot_evidence: bool = True
+) -> Candidate | None:
     parsed = [c for c in (_parse_candidate(it) for it in items) if c is not None]
     parsed_ok = [c for c in parsed if not bool(c.rejected)]
     if not parsed_ok:
@@ -649,7 +728,7 @@ def _select_best_candidate(items: list[dict[str, Any]]) -> Candidate | None:
 
     # Prefer score_v1 when present. If score_v1 is missing for all candidates, fall back to total_pnl.
     any_score = any(c.score_v1 is not None for c in parsed_ok)
-    filtered = [c for c in parsed_ok if _candidate_deployable(c)]
+    filtered = [c for c in parsed_ok if _candidate_deployable(c, require_ssot_evidence=require_ssot_evidence)]
     if not filtered:
         return None
     parsed_ok = filtered
@@ -660,13 +739,15 @@ def _select_best_candidate(items: list[dict[str, Any]]) -> Candidate | None:
     return parsed_ok[0]
 
 
-def _select_deployable_candidates(parsed: list[Candidate], *, limit: int) -> list[Candidate]:
+def _select_deployable_candidates(
+    parsed: list[Candidate], *, limit: int, require_ssot_evidence: bool = True
+) -> list[Candidate]:
     if int(limit) <= 0:
         return []
     ok = [c for c in parsed if not bool(c.rejected)]
     if not ok:
         return []
-    ok = [c for c in ok if _candidate_deployable(c)]
+    ok = [c for c in ok if _candidate_deployable(c, require_ssot_evidence=require_ssot_evidence)]
     if not ok:
         return []
     ok.sort(key=_candidate_sort_key_with_stage, reverse=True)
@@ -999,6 +1080,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--resume", action="store_true", help="Resume an existing run-id from artifacts (factory_run --resume)."
     )
+    ap.add_argument(
+        "--require-ssot-evidence",
+        dest="require_ssot_evidence",
+        action="store_true",
+        help="Require candidate proof metadata before deployment/promotion.",
+    )
+    ap.add_argument(
+        "--no-require-ssot-evidence",
+        dest="require_ssot_evidence",
+        action="store_false",
+        help="Allow deployment/promotion using non-proof candidates (legacy/testing only).",
+    )
+    ap.set_defaults(require_ssot_evidence=_env_bool("AI_QUANT_REQUIRE_SSOT_EVIDENCE", default=True))
 
     ap.add_argument("--no-deploy", action="store_true", help="Run factory only; do not deploy.")
     ap.add_argument(
@@ -1251,7 +1345,9 @@ def main(argv: list[str] | None = None) -> int:
     for lines in _build_candidates_messages(run_id=run_id, parsed=parsed):
         _send_discord_chunks(target=str(args.discord_target), lines=lines)
 
-    deployable = _select_deployable_candidates(parsed, limit=max(1, len(deploy_targets)))
+    deployable = _select_deployable_candidates(
+        parsed, limit=max(1, len(deploy_targets)), require_ssot_evidence=bool(args.require_ssot_evidence)
+    )
     if not deployable:
         _send_discord(
             target=str(args.discord_target),
@@ -1303,6 +1399,7 @@ def main(argv: list[str] | None = None) -> int:
         (run_dir / "reports" / "selection.json").write_text(
             json.dumps(selection, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
+        _write_selection_markdown(run_dir=run_dir, selection=selection)
         return 0
 
     pause_file = Path(args.pause_file).expanduser().resolve() if str(args.pause_file).strip() else None
@@ -1449,6 +1546,7 @@ def main(argv: list[str] | None = None) -> int:
     (run_dir / "reports" / "selection.json").write_text(
         json.dumps(selection, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+    _write_selection_markdown(run_dir=run_dir, selection=selection)
 
     if bool(args.enable_livepaper_promotion):
         promotion: dict[str, Any] = {

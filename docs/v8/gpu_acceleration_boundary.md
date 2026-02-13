@@ -72,6 +72,8 @@ Candidate output compatibility is validated by reading/rejecting rows that do no
 - `selection_gate_summary_json` (machine-readable output emitted by
   `scripts/run_factory_stage_gate.sh` or `scripts/validate_factory_selection_gate.py`)
 - Selected candidate must include `canonical_cpu_verified = true` and replay proof fields:
+  - `candidate_mode = true`
+  - `schema_version = 1`
   - `replay_stage`
   - `replay_equivalence_report_path`
   - `replay_equivalence_status = pass`
