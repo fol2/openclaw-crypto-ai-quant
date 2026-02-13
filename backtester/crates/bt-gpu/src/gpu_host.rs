@@ -269,7 +269,8 @@ impl BatchBuffers {
             chunk_start: 0,
             chunk_end: num_bars,
             initial_balance_bits: initial_balance.to_bits(),
-            fee_rate_bits: 0.00035f32.to_bits(),
+            maker_fee_rate_bits: 0.00035f32.to_bits(),
+            taker_fee_rate_bits: 0.00035f32.to_bits(),
             max_sub_per_bar: 0,
             trade_end_bar: num_bars,
         };
@@ -329,7 +330,8 @@ impl BatchBuffers {
             chunk_start: 0,
             chunk_end: num_bars,
             initial_balance_bits: initial_balance.to_bits(),
-            fee_rate_bits: 0.00035f32.to_bits(),
+            maker_fee_rate_bits: 0.00035f32.to_bits(),
+            taker_fee_rate_bits: 0.00035f32.to_bits(),
             max_sub_per_bar: 0,
             trade_end_bar: num_bars,
         };
@@ -408,7 +410,8 @@ pub fn dispatch_and_readback(
             chunk_start,
             chunk_end,
             initial_balance_bits: buffers.initial_balance.to_bits(),
-            fee_rate_bits: 0.00035f32.to_bits(),
+            maker_fee_rate_bits: 0.00035f32.to_bits(),
+            taker_fee_rate_bits: 0.00035f32.to_bits(),
             max_sub_per_bar: buffers.max_sub_per_bar,
             trade_end_bar: trade_end,
         };

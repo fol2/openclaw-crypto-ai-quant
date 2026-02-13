@@ -7,11 +7,11 @@
 //! 3) All monetary and size values are rounded to a stable 1e-12 resolution before
 //!    being written into state so that repeated replays remain stable.
 
+use crate::accounting;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 const KERNEL_SCHEMA_VERSION: u32 = 1;
-const PRECISION_SCALE: f64 = 1_000_000_000_000.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -158,7 +158,8 @@ pub struct KernelParams {
     pub default_notional_usd: f64,
     pub min_notional_usd: f64,
     pub max_notional_usd: f64,
-    pub fee_bps: f64,
+    pub maker_fee_bps: f64,
+    pub taker_fee_bps: f64,
     pub allow_pyramid: bool,
     pub allow_reverse: bool,
 }
@@ -170,7 +171,8 @@ impl Default for KernelParams {
             default_notional_usd: 10_000.0,
             min_notional_usd: 10.0,
             max_notional_usd: 100_000.0,
-            fee_bps: 5.0,
+            maker_fee_bps: accounting::DEFAULT_MAKER_FEE_BPS,
+            taker_fee_bps: accounting::DEFAULT_TAKER_FEE_BPS,
             allow_pyramid: true,
             allow_reverse: true,
         }
@@ -178,7 +180,7 @@ impl Default for KernelParams {
 }
 
 fn quantise(value: f64) -> f64 {
-    (value * PRECISION_SCALE).round() / PRECISION_SCALE
+    accounting::quantize(value)
 }
 
 fn check_versions(
@@ -219,14 +221,6 @@ fn with_intent_id(step: u64, offset: u64) -> u64 {
     step.saturating_mul(1000).saturating_add(offset)
 }
 
-fn position_mark_to_close_pnl(side: PositionSide, avg_entry_price: f64, exit_price: f64, quantity: f64) -> f64 {
-    let gross = (exit_price - avg_entry_price) * quantity;
-    match side {
-        PositionSide::Long => gross,
-        PositionSide::Short => -gross,
-    }
-}
-
 fn apply_open(
     state: &mut StrategyState,
     symbol: &str,
@@ -252,17 +246,16 @@ fn apply_open(
         return None;
     }
 
-    let fee_usd = notional * fee_rate;
-    let cost = notional + fee_usd;
-    if cost > state.cash_usd {
+    let open = accounting::apply_open_fill(notional, fee_rate);
+    if open.notional + open.fee_usd > state.cash_usd {
         diagnostics
             .warnings
             .push(format!("skip open for {symbol}: insufficient cash"));
         return None;
     }
 
-    let quantity = quantise(notional / price);
-    let notional = quantise(notional);
+    let quantity = quantise(open.notional / price);
+    let notional = open.notional;
 
     if quantity <= 0.0 {
         diagnostics
@@ -271,7 +264,7 @@ fn apply_open(
         return None;
     }
 
-    state.cash_usd = quantise(state.cash_usd - cost);
+    state.cash_usd = quantise(state.cash_usd + open.cash_delta);
     if let Some(existing) = state.positions.get_mut(symbol) {
         if existing.side == side {
             // Weighted average with additional stake.
@@ -283,11 +276,11 @@ fn apply_open(
             let avg_entry = if existing_notional <= 0.0 {
                 price
             } else {
-                (existing.avg_entry_price * existing_notional + price * added_notional) / total_notional
+                (existing.avg_entry_price * existing_qty + price * quantity) / total_qty
             };
-            existing.notional_usd = quantise(total_notional);
-            existing.quantity = quantise(total_qty);
-            existing.avg_entry_price = quantise(avg_entry);
+            existing.notional_usd = accounting::quantize(total_notional);
+            existing.quantity = accounting::quantize(total_qty);
+            existing.avg_entry_price = accounting::quantize(avg_entry);
             existing.updated_at_ms = timestamp_ms;
         } else {
             return None;
@@ -326,7 +319,7 @@ fn apply_open(
         quantity,
         price: quantise(price),
         notional_usd: notional,
-        fee_usd: quantise(fee_usd),
+        fee_usd: open.fee_usd,
         pnl_usd: 0.0,
     };
 
@@ -365,17 +358,16 @@ fn apply_close(
         return None;
     }
 
-    let quantity = quantise(position.quantity);
-    let notional = quantise(quantity * price);
-    let fee = quantise(notional * fee_rate);
-    let pnl = quantise(position_mark_to_close_pnl(
-        side,
+    let quantity = accounting::quantize(position.quantity);
+    let close = accounting::apply_close_fill(
+        side == PositionSide::Long,
         position.avg_entry_price,
         price,
         quantity,
-    ));
+        fee_rate,
+    );
 
-    state.cash_usd = quantise(state.cash_usd + notional - fee);
+    state.cash_usd = quantise(state.cash_usd + close.cash_delta);
 
     let intent = OrderIntent {
         schema_version: KERNEL_SCHEMA_VERSION,
@@ -385,7 +377,7 @@ fn apply_close(
         side,
         quantity,
         price: quantise(price),
-        notional_usd: notional,
+        notional_usd: close.notional,
         fee_rate,
     };
     let fill = FillEvent {
@@ -395,9 +387,9 @@ fn apply_close(
         side,
         quantity,
         price: quantise(price),
-        notional_usd: notional,
-        fee_usd: fee,
-        pnl_usd: pnl,
+        notional_usd: close.notional,
+        fee_usd: close.fee_usd,
+        pnl_usd: close.pnl,
     };
     Some((intent, fill))
 }
@@ -436,7 +428,11 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
     next_state.step = next_state.step.saturating_add(1);
     next_state.timestamp_ms = event.timestamp_ms;
 
-    let fee_rate = params.fee_bps / 10_000.0;
+    let fee_model = accounting::FeeModel {
+        maker_fee_bps: params.maker_fee_bps,
+        taker_fee_bps: params.taker_fee_bps,
+    };
+    let fee_rate = fee_model.role_rate(accounting::FeeRole::Taker);
     let notional = event
         .notional_hint_usd
         .unwrap_or(params.default_notional_usd)
@@ -594,13 +590,15 @@ mod tests {
             default_notional_usd: 10_000.0,
             min_notional_usd: 100.0,
             max_notional_usd: 10_000.0,
+            taker_fee_bps: accounting::DEFAULT_TAKER_FEE_BPS,
+            maker_fee_bps: accounting::DEFAULT_MAKER_FEE_BPS,
             ..KernelParams::default()
         };
         let mut event = event_with_signal("BTC", MarketSignal::Buy);
         event.notional_hint_usd = Some(10_000.0);
 
         let result = step(&state, &event, &params);
-        let expected_cost = 10_000.0 * (1.0 + 5.0 / 10_000.0);
+        let expected_cost = 10_000.0 * (1.0 + accounting::DEFAULT_TAKER_FEE_RATE);
         let expected_qty = 10_000.0 / 10_000.0;
 
         assert_eq!(result.state.positions.len(), 1);
@@ -608,6 +606,36 @@ mod tests {
         assert_eq!(pos.side, PositionSide::Long);
         assert!((pos.quantity - expected_qty).abs() < 1e-12);
         assert!((result.state.cash_usd - (100_000.0 - expected_cost)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn round_trip_close_pnl_matches_shared_accounting() {
+        let initial_state = init_state();
+        let params = KernelParams::default();
+        let mut open_event = event_with_signal("BTC", MarketSignal::Buy);
+        open_event.notional_hint_usd = Some(10_000.0);
+
+        let open_result = step(&initial_state, &open_event, &params);
+        let open_fill = accounting::apply_open_fill(10_000.0, accounting::DEFAULT_TAKER_FEE_RATE);
+        assert!((open_fill.cash_delta + open_fill.notional).abs() < 1e-12);
+        assert!((open_result.state.cash_usd - (initial_state.cash_usd + open_fill.cash_delta)).abs() < 1e-12);
+
+        let close_event = MarketEvent {
+            schema_version: 1,
+            event_id: 101,
+            timestamp_ms: 2_000,
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Sell,
+            price: 10_200.0,
+            notional_hint_usd: None,
+        };
+        let close_state = open_result.state;
+        let close_result = step(&close_state, &close_event, &params);
+
+        let expected_close = accounting::apply_close_fill(true, 10_000.0, 10_200.0, 1.0, accounting::DEFAULT_TAKER_FEE_RATE);
+        let expected_cash = initial_state.cash_usd + open_fill.cash_delta + expected_close.cash_delta;
+        assert!((close_result.state.cash_usd - expected_cash).abs() < 1e-12);
+        assert!((close_result.fills[0].pnl_usd - expected_close.pnl).abs() < 1e-12);
     }
 
     #[test]
