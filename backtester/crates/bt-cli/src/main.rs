@@ -1614,7 +1614,7 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
     );
     let elapsed = start.elapsed();
 
-    let report = bt_core::report::build_report(
+    let mut report = bt_core::report::build_report(
         &sim.trades,
         &sim.signals,
         &sim.equity_curve,
@@ -1625,6 +1625,8 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
         args.trades,
         args.equity_curve,
     );
+
+    report.decision_diagnostics = Some(sim.decision_diagnostics);
 
     // Print summary to stderr
     print_summary(&report, effective_balance);
