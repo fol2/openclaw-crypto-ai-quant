@@ -49,11 +49,14 @@ struct GpuParams {
     num_combos: u32,
     num_symbols: u32,
     num_bars: u32,
+    btc_sym_idx: u32,
     chunk_start: u32,
     chunk_end: u32,
     initial_balance_bits: u32,
-    fee_rate_bits: u32,
-    _pad: u32,
+    maker_fee_rate_bits: u32,
+    taker_fee_rate_bits: u32,
+    max_sub_per_bar: u32,
+    trade_end_bar: u32,
 }
 
 struct GpuSnapshot {
@@ -177,8 +180,8 @@ struct EntryCandidate {
 
 // ── Helper functions ────────────────────────────────────────────────────────
 
-fn get_fee_rate() -> f32 {
-    return bitcast<f32>(params.fee_rate_bits);
+fn get_taker_fee_rate() -> f32 {
+    return bitcast<f32>(params.taker_fee_rate_bits);
 }
 
 fn profit_atr(pos: GpuPosition, price: f32) -> f32 {
@@ -705,7 +708,7 @@ fn apply_close(state: ptr<function, GpuComboState>, sym: u32, snap: GpuSnapshot,
     let pos = (*state).positions[sym];
     if pos.pos_type == POS_EMPTY { return; }
 
-    let fee_rate = get_fee_rate();
+    let fee_rate = get_taker_fee_rate();
     let slip = select(-0.5, 0.5, pos.pos_type == POS_LONG);
     let fill_price = snap.close * (1.0 + slip / 10000.0);
     let notional = pos.size * fill_price;
@@ -744,7 +747,7 @@ fn apply_partial_close(state: ptr<function, GpuComboState>, sym: u32, snap: GpuS
     let pos = (*state).positions[sym];
     if pos.pos_type == POS_EMPTY { return; }
 
-    let fee_rate = get_fee_rate();
+    let fee_rate = get_taker_fee_rate();
     let exit_size = pos.size * pct;
     let slip = select(-0.5, 0.5, pos.pos_type == POS_LONG);
     let fill_price = snap.close * (1.0 + slip / 10000.0);
@@ -825,7 +828,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
 
     var state = states[combo_id];
     var cfg = configs[combo_id];
-    let fee_rate = get_fee_rate();
+    let fee_rate = get_taker_fee_rate();
     let ns = params.num_symbols;
 
     for (var bar = params.chunk_start; bar < params.chunk_end; bar++) {
