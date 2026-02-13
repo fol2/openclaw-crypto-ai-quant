@@ -92,3 +92,35 @@ def test_factory_run_replay_equivalence_runs_as_warning_when_not_strict(monkeypa
 
     assert ok
     assert summary["replay_equivalence_status"] == "fail"
+
+
+def test_factory_run_replay_equivalence_not_run_without_baseline(monkeypatch, tmp_path) -> None:
+    replay = tmp_path / "replay.json"
+    _write_trace(replay, TRACE)
+
+    monkeypatch.delenv("AI_QUANT_REPLAY_EQUIVALENCE_BASELINE", raising=False)
+    monkeypatch.setenv("AI_QUANT_REPLAY_EQUIVALENCE_STRICT", "0")
+
+    summary: dict = {}
+    ok = _run_replay_equivalence_check(right_report=replay, summary=summary)
+
+    assert ok
+    assert summary["replay_equivalence_status"] == "not_run"
+    assert summary["replay_equivalence_count"] == 0
+    assert summary["replay_equivalence_diffs"] == []
+
+
+def test_factory_run_replay_equivalence_missing_baseline_fails_in_strict_mode(monkeypatch, tmp_path) -> None:
+    baseline = tmp_path / "missing.json"
+    replay = tmp_path / "replay.json"
+    _write_trace(replay, TRACE)
+
+    monkeypatch.setenv("AI_QUANT_REPLAY_EQUIVALENCE_BASELINE", str(baseline))
+    monkeypatch.setenv("AI_QUANT_REPLAY_EQUIVALENCE_STRICT", "1")
+
+    summary: dict = {}
+    ok = _run_replay_equivalence_check(right_report=replay, summary=summary)
+
+    assert not ok
+    assert summary["replay_equivalence_status"] == "missing_baseline"
+    assert summary["replay_equivalence_count"] == 0

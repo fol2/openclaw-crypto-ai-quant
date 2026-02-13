@@ -1848,35 +1848,20 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
 
         # Persist the strategy decision for live monitoring (signals are not orders).
         # This keeps the monitor UI "SIGNAL" column populated for live mode.
-        # When kernel OPEN actions recurse into legacy signal routing, avoid duplicate logs.
-        if not _from_kernel_open:
-            log_live_signal(
-                symbol=sym,
-                signal=str(signal or "").strip().upper(),
-                confidence=confidence,
-                price=price,
-                indicators=indicators,
-            )
+        log_live_signal(
+            symbol=sym,
+            signal=str(signal or "").strip().upper(),
+            confidence=confidence,
+            price=price,
+            indicators=indicators,
+        )
 
         act = str(action or "").strip().upper()
         if act in {"OPEN", "ADD", "CLOSE", "REDUCE"}:
             if act == "OPEN":
                 if sym in (self.positions or {}):
-                    # Do not attempt to add in response to a kernel OPEN action.
-                    # OPEN should only route to open flow when no position already exists.
+                    # OPEN action only maps to new-entry flow when no position exists.
                     return
-                return self.execute_trade(
-                    sym,
-                    signal,
-                    price,
-                    timestamp,
-                    confidence,
-                    atr=atr,
-                    indicators=indicators,
-                    target_size=target_size,
-                    reason=reason,
-                    _from_kernel_open=True,
-                )
             elif act == "ADD":
                 return self.add_to_position(
                     sym,

@@ -20,7 +20,15 @@ def test_sweep_output_mode_defaults_to_full_for_cpu() -> None:
 
 def test_replay_metadata_attachment_records_validation_stage() -> None:
     args = argparse.Namespace(gpu=True, tpe=False, walk_forward=True, slippage_stress=False)
-    summary: dict[str, object] = {}
+    summary: dict[str, object] = {
+        "replay_equivalence_status": "pass",
+        "replay_equivalence_count": 1,
+        "replay_equivalence_error": "",
+        "replay_equivalence_report_path": "/tmp/replay_equivalence.json",
+        "replay_equivalence_diffs": [],
+        "path": "/tmp/replay.json",
+        "config_path": "/tmp/cfg.yaml",
+    }
     entry: dict[str, object] = {}
     factory_run._attach_replay_metadata(summary=summary, entry=entry, args=args, replay_stage="cpu_replay")
 
@@ -28,7 +36,23 @@ def test_replay_metadata_attachment_records_validation_stage() -> None:
     assert summary["sweep_stage"] == "gpu"
     assert summary["replay_stage"] == "cpu_replay"
     assert summary["canonical_cpu_verified"] is True
+    assert summary["replay_report_path"] == "/tmp/replay.json"
+    assert summary["config_path"] == "/tmp/cfg.yaml"
+    assert summary["replay_equivalence_report_path"] == "/tmp/replay_equivalence.json"
+    assert summary["replay_equivalence_count"] == 1
+    assert entry["replay_equivalence_error"] == ""
+    assert entry["replay_equivalence_diffs"] == []
     assert entry["pipeline_stage"] == "candidate_validation"
     assert entry["sweep_stage"] == "gpu"
     assert entry["replay_stage"] == "cpu_replay"
     assert entry["canonical_cpu_verified"] is True
+
+
+def test_replay_metadata_attachment_marks_unverified_when_not_pass() -> None:
+    args = argparse.Namespace(gpu=True, tpe=False, walk_forward=True, slippage_stress=False)
+    summary: dict[str, object] = {"replay_equivalence_status": "fail", "replay_equivalence_count": 2}
+    entry: dict[str, object] = {}
+    factory_run._attach_replay_metadata(summary=summary, entry=entry, args=args, replay_stage="cpu_replay")
+
+    assert summary["canonical_cpu_verified"] is False
+    assert entry["canonical_cpu_verified"] is False

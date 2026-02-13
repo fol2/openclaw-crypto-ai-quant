@@ -56,6 +56,27 @@ python3 factory_run.py --run-id <id> ...
 Candidate output compatibility is validated by reading/rejecting rows that do not satisfy:
 `schemas/gpu_candidate_schema.json` when `--output-mode=candidate` rows are used.
 
+## Promotion evidence that must exist before rollout
+
+- `selection.json` must include:
+  - `selection_stage = "selected"`
+  - `deploy_stage = no_deploy|skipped` (dry/smoke) or not `pending` (real)
+  - `promotion_stage = skipped|approved` (dry/smoke) or not `pending` (real)
+  - `evidence_bundle_paths` with canonical file set:
+    - `run_dir`
+    - `run_metadata_json`
+    - `selection_json`
+    - `report_json`
+    - `report_md`
+    - `selection_md`
+- Selected candidate must include `canonical_cpu_verified = true` and replay proof fields:
+  - `replay_stage`
+  - `replay_equivalence_report_path`
+  - `replay_equivalence_status = pass`
+  - `replay_equivalence_count`
+- `tools/validate_factory_selection_gate.py` is the machine-readable gate used by
+  `scripts/run_factory_stage_gate.sh`; every dry/smoke/real execution must pass it.
+
 ## CPU / GPU / TPE / grid confidence level
 
 - CPU/CUDA/TPE/Grid sweeps are considered aligned when:

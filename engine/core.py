@@ -1101,6 +1101,10 @@ class UnifiedEngine:
         target_size: float | None = None,
         reason: str | None = None,
     ) -> None:
+        sym = str(symbol or "").strip().upper()
+        if not sym:
+            return
+
         act = str(action or "").strip().upper()
         if act not in {"OPEN", "ADD", "CLOSE", "REDUCE"}:
             return
@@ -1124,12 +1128,58 @@ class UnifiedEngine:
                 reason=reason,
             )
         except TypeError:
-            # Fallback for older runners that only support signal-only execute_trade.
-            pass
+            # Fall back only to explicit action handlers to avoid silently degrading to signal-only legacy routing.
+            if act == "OPEN":
+                return
+            if act == "ADD":
+                fn = getattr(self.trader, "add_to_position", None)
+                if callable(fn):
+                    try:
+                        return fn(sym, price, timestamp, confidence, atr=atr, indicators=indicators, target_size=target_size_f)
+                    except TypeError:
+                        return fn(sym, price, timestamp, confidence, atr=atr, indicators=indicators)
+                return
 
-        sym = str(symbol or "").strip().upper()
-        if not sym:
-            return
+            if act in {"CLOSE", "REDUCE"}:
+                if sym not in ((self.trader.positions or {}) if isinstance(getattr(self.trader, "positions", None), dict) else {}):
+                    return
+                pos = (self.trader.positions or {}).get(sym, {})
+                try:
+                    pos_size = float(pos.get("size") or 0.0)
+                except Exception:
+                    pos_size = 0.0
+                try:
+                    reduce_sz = float(target_size_f) if target_size_f is not None else pos_size
+                except Exception:
+                    reduce_sz = pos_size
+                reduce_sz = float(max(0.0, min(pos_size, reduce_sz)))
+
+                if act == "CLOSE":
+                    fn = getattr(self.trader, "close_position", None)
+                    if callable(fn):
+                        try:
+                            return fn(
+                                sym,
+                                price,
+                                timestamp,
+                                reason=str(reason or "Kernel CLOSE"),
+                                meta={"reason": str(reason or "").strip() or None},
+                            )
+                        except TypeError:
+                            return fn(sym, price, timestamp, str(reason or "Kernel CLOSE"))
+                    return
+                fn = getattr(self.trader, "reduce_position", None)
+                if callable(fn):
+                    return fn(
+                        sym,
+                        reduce_sz,
+                        price,
+                        timestamp,
+                        str(reason or "Kernel REDUCE"),
+                        confidence=confidence,
+                        meta={"reason": str(reason or "").strip() or None},
+                    )
+                return
 
         if act == "ADD":
             fn = getattr(self.trader, "add_to_position", None)

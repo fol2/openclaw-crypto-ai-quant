@@ -168,7 +168,7 @@ PY
         return 1
     fi
 
-python3 - "$selection_json" "$stage" "$allow_deploy" <<'PY'
+    if ! python3 - "${selection_json}" "$stage" "$allow_deploy" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -203,6 +203,18 @@ else:
 
 print("[stage-gate] verified", path.as_posix())
 PY
+    then
+        echo "[stage-gate] ERROR: selection preconditions not met for ${stage}"
+        return 1
+    fi
+
+    if ! python3 scripts/validate_factory_selection_gate.py \
+        --selection-json "$selection_json" \
+        --stage "$stage" \
+        --status-message "[stage-gate] selection evidence check"; then
+        echo "[stage-gate] ERROR: selection evidence validation failed for ${stage}"
+        return 1
+    fi
 
 python3 - "$selection_json" "$run_stage_dir" "$EVIDENCE_PATH" "$stage" "${run_id}" <<'PY'
 import json

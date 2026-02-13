@@ -825,19 +825,33 @@ def _attach_replay_metadata(
     args: Any,
     replay_stage: str = "cpu_replay",
 ) -> None:
+    verified = str(summary.get("replay_equivalence_status", "")).strip().lower() == "pass"
     stage_fields = {
         "pipeline_stage": "candidate_validation",
         "sweep_stage": _infer_sweep_stage_from_args(args),
         "replay_stage": replay_stage,
         "validation_gate": _infer_validation_gate_from_args(args),
-        "canonical_cpu_verified": True,
+        "canonical_cpu_verified": bool(verified),
     }
     if entry is not None:
         for k, v in stage_fields.items():
             summary[k] = v
             entry[k] = v
-        entry["replay_report_path"] = str(summary.get("path"))
-        entry["config_path"] = summary.get("config_path", "")
+        replay_report_path = str(summary.get("path", ""))
+        config_path = str(summary.get("config_path", ""))
+        summary["replay_report_path"] = replay_report_path
+        entry["replay_report_path"] = replay_report_path
+        summary["config_path"] = config_path
+        entry["config_path"] = config_path
+        for proof_field in [
+            "replay_equivalence_status",
+            "replay_equivalence_count",
+            "replay_equivalence_error",
+            "replay_equivalence_report_path",
+            "replay_equivalence_diffs",
+        ]:
+            if proof_field in summary:
+                entry[proof_field] = summary[proof_field]
     else:
         summary.update(stage_fields)
 
@@ -863,6 +877,78 @@ def _replay_equivalence_max_diffs() -> int:
     return int(_env_int("AI_QUANT_REPLAY_EQUIVALENCE_MAX_DIFFS", default=25) or 25)
 
 
+def _validate_candidate_schema_row(row: Any) -> tuple[bool, list[str]]:
+    errors: list[str] = []
+    if not isinstance(row, dict):
+        return False, ["row is not an object"]
+
+    candidate_mode = bool(row.get("candidate_mode", False))
+    if not candidate_mode:
+        errors.append("candidate_mode is not true")
+
+    output_mode = str(row.get("output_mode", "")).strip()
+    if output_mode != "candidate":
+        errors.append(f"output_mode is not candidate: {output_mode!r}")
+
+    cfg_id = row.get("config_id")
+    if not isinstance(cfg_id, str) or not cfg_id.strip():
+        errors.append("config_id is required and must be a non-empty string")
+
+    overrides = row.get("overrides")
+    if not isinstance(overrides, dict):
+        errors.append("overrides must be an object")
+    else:
+        for key, value in overrides.items():
+            if isinstance(value, (dict, list, tuple)):
+                errors.append(f"overrides[{key!r}] has unsupported type: {type(value).__name__}")
+                break
+
+    required_keys = [
+        "total_pnl",
+        "total_trades",
+        "profit_factor",
+        "max_drawdown_pct",
+    ]
+    for key in required_keys:
+        if key not in row:
+            errors.append(f"missing {key}")
+            continue
+
+        raw = row.get(key)
+        if not isinstance(raw, (int, float)) or key == "total_trades" and raw < 0:
+            errors.append(f"{key} must be numeric and non-negative when applicable")
+
+    return (len(errors) == 0), errors
+
+
+def _validate_candidate_output_schema(path: Path) -> tuple[bool, list[str]]:
+    if not path.is_file():
+        return False, [f"sweep output file missing: {path}"]
+    if path.stat().st_size <= 0:
+        return False, [f"sweep output file empty: {path}"]
+
+    errors: list[str] = []
+    for line_no, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        try:
+            row = json.loads(raw_line)
+        except Exception as exc:
+            errors.append(f"line {line_no}: invalid json: {exc}")
+            continue
+
+        ok, row_errors = _validate_candidate_schema_row(row)
+        if ok:
+            continue
+        for err in row_errors:
+            errors.append(f"line {line_no}: {err}")
+
+    if errors:
+        return False, errors
+    return True, []
+
+
 def _run_replay_equivalence_check(
     *,
     right_report: Path,
@@ -870,11 +956,17 @@ def _run_replay_equivalence_check(
 ) -> bool:
     baseline = _replay_equivalence_baseline_path()
     if baseline is None:
-        return True
+        summary["replay_equivalence_status"] = "not_run"
+        summary["replay_equivalence_error"] = "AI_QUANT_REPLAY_EQUIVALENCE_BASELINE not configured"
+        summary["replay_equivalence_diffs"] = []
+        summary["replay_equivalence_count"] = 0
+        return not _replay_equivalence_strict()
 
     if not baseline.exists():
         summary["replay_equivalence_status"] = "missing_baseline"
         summary["replay_equivalence_error"] = f"missing baseline report: {baseline}"
+        summary["replay_equivalence_diffs"] = []
+        summary["replay_equivalence_count"] = 0
         return not _replay_equivalence_strict()
 
     try:
@@ -882,6 +974,8 @@ def _run_replay_equivalence_check(
     except Exception as exc:
         summary["replay_equivalence_status"] = "tool_unavailable"
         summary["replay_equivalence_error"] = f"failed to import comparator: {type(exc).__name__}: {exc}"
+        summary["replay_equivalence_diffs"] = []
+        summary["replay_equivalence_count"] = 0
         return not _replay_equivalence_strict()
 
     try:
@@ -894,6 +988,8 @@ def _run_replay_equivalence_check(
     except Exception as exc:
         summary["replay_equivalence_status"] = "comparison_error"
         summary["replay_equivalence_error"] = f"{type(exc).__name__}: {exc}"
+        summary["replay_equivalence_diffs"] = []
+        summary["replay_equivalence_count"] = 0
         return not _replay_equivalence_strict()
 
     report_path = right_report.with_name(f"{right_report.stem}.replay_equivalence.json")
@@ -1928,6 +2024,26 @@ def main(argv: list[str] | None = None) -> int:
         if sweep_res.exit_code != 0:
             _write_json(run_dir / "run_metadata.json", meta)
             return int(sweep_res.exit_code)
+        if sweep_output_mode == "candidate" and not fallback_to_legacy_output:
+            ok, schema_errors = _validate_candidate_output_schema(sweep_out)
+            if not ok:
+                _write_json(
+                    run_dir / "run_metadata.json",
+                    {
+                        **meta,
+                        "candidate_schema_validation": {
+                            "status": "fail",
+                            "path": str(sweep_out),
+                            "errors": schema_errors,
+                        },
+                    },
+                )
+                return 2
+            meta["candidate_schema_validation"] = {
+                "status": "pass",
+                "path": str(sweep_out),
+                "errors": [],
+            }
 
     _write_json(run_dir / "run_metadata.json", meta)
 
