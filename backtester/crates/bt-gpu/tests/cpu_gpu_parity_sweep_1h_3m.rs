@@ -32,7 +32,6 @@ fn bar_3m(t: i64, close: f64) -> OhlcvBar {
 }
 
 #[test]
-#[ignore]
 fn cpu_gpu_parity_sweep_1h_3m_tiny_fixture() {
     if let Err(e) = CudaDevice::new(0) {
         eprintln!("Skipping: CUDA unavailable: {:?}", e);

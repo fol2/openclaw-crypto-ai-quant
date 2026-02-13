@@ -118,6 +118,23 @@ python tools/compare_sweep_outputs.py \
   --print-summary
 ```
 
+Use the scripted variant to run all four sweeps and generate the report in one step:
+
+```bash
+./scripts/ci_gpu_smoke_parity_gate.sh
+```
+
+Optional environment knobs:
+
+```bash
+export AQC_GPU_PARITY_STRICT=1
+export AQC_PARITY_CONFIG_PATH=/absolute/path/to/config/strategy_overrides.yaml
+export AQC_PARITY_BASELINE_ANY_MISMATCH_COUNT=288
+export AQC_PARITY_BASELINE_MAX_ABS_PNL_DIFF=25225.25
+export AQC_PARITY_BASELINE_MEAN_ABS_PNL_DIFF=8552.34
+export AQC_PARITY_BASELINE_TRADE_COUNT_MISMATCH_COUNT=288
+```
+
 ---
 
 ## Config Deploy Pipeline
