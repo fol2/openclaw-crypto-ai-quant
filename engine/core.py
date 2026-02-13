@@ -65,13 +65,12 @@ class KernelDecision:
         if act not in {"OPEN", "ADD", "CLOSE", "REDUCE"}:
             return None
 
-        signal = _normalise_kernel_signal(raw.get("signal"))
-        if signal not in {"BUY", "SELL", "NEUTRAL"}:
-            signal = _normalise_kernel_side(raw.get("side"))
-        if signal not in {"BUY", "SELL", "NEUTRAL"}:
-            signal = str(raw.get("signal", act)).strip().upper()
-            if not signal:
-                signal = "NEUTRAL"
+        signal = _normalise_kernel_intent_signal(
+            raw.get("signal"),
+            raw_action=raw.get("action"),
+            raw_kind=raw.get("kind"),
+            raw_side=raw.get("side"),
+        )
         confidence = str(raw.get("confidence", "N/A"))
 
         try:
@@ -217,6 +216,32 @@ def _normalise_kernel_side(raw_side: Any) -> str:
     return str(raw_side or "NEUTRAL").strip().upper()
 
 
+def _normalise_kernel_intent_signal(
+    raw_signal: Any,
+    *,
+    raw_action: Any,
+    raw_kind: Any,
+    raw_side: Any,
+) -> str:
+    has_signal = not (raw_signal is None or str(raw_signal).strip() == "")
+
+    signal = _normalise_kernel_signal(raw_signal)
+    if signal in {"BUY", "SELL", "NEUTRAL"}:
+        return signal
+
+    if raw_side is not None and str(raw_side).strip() != "":
+        side = _normalise_kernel_side(raw_side)
+        if side in {"BUY", "SELL", "NEUTRAL"}:
+            return side
+
+    if not has_signal:
+        action = _normalise_kernel_action(raw_action, raw_kind)
+        if action:
+            return action
+
+    return "NEUTRAL"
+
+
 def _normalise_kernel_action(raw_action: Any, raw_kind: Any = None) -> str:
     action = str(raw_action or "").strip().upper()
     if action in {"OPEN", "ADD", "CLOSE", "REDUCE"}:
@@ -238,6 +263,16 @@ def _normalise_kernel_action(raw_action: Any, raw_kind: Any = None) -> str:
 
 
 def _normalise_kernel_target_size(raw_size: Any, raw_notional: Any, raw_price: Any) -> float | None:
+    try:
+        notional = float(raw_notional)
+        if notional > 0.0:
+            price = float(raw_price)
+            if price <= 0.0:
+                return None
+            return notional / price
+    except Exception:
+        pass
+
     try:
         quantity = float(raw_size)
         if quantity > 0.0:
@@ -333,7 +368,12 @@ class KernelDecisionRustBindingProvider:
         if not symbol:
             return None
 
-        signal = _normalise_kernel_signal(raw.get("signal") or raw.get("action"))
+        signal = _normalise_kernel_intent_signal(
+            raw.get("signal"),
+            raw_action=raw.get("action"),
+            raw_kind=raw.get("kind"),
+            raw_side=raw.get("side"),
+        )
         if signal not in {"BUY", "SELL", "NEUTRAL"}:
             return None
 
