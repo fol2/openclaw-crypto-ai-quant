@@ -61,11 +61,17 @@ class KernelDecision:
         if not sym:
             return None
 
-        act = str(raw.get("action", "")).strip().upper()
-        if not act:
+        act = _normalise_kernel_action(raw.get("action"), raw_kind=raw.get("kind"))
+        if act not in {"OPEN", "ADD", "CLOSE", "REDUCE"}:
             return None
 
-        signal = str(raw.get("signal", act)).strip().upper()
+        signal = _normalise_kernel_signal(raw.get("signal"))
+        if signal not in {"BUY", "SELL", "NEUTRAL"}:
+            signal = _normalise_kernel_side(raw.get("side"))
+        if signal not in {"BUY", "SELL", "NEUTRAL"}:
+            signal = str(raw.get("signal", act)).strip().upper()
+            if not signal:
+                signal = "NEUTRAL"
         confidence = str(raw.get("confidence", "N/A"))
 
         try:
@@ -77,13 +83,18 @@ class KernelDecision:
         if not isinstance(now_series, dict):
             now_series = {}
 
-        target_size = raw.get("target_size")
-        try:
-            target_size = float(target_size) if target_size is not None else None
-        except Exception:
-            target_size = None
+        target_size = _normalise_kernel_target_size(raw.get("quantity"), raw.get("notional_usd"), raw.get("price"))
+        if target_size is None:
+            target_size = _normalise_kernel_target_size(
+                raw.get("target_size"),
+                raw.get("notional_hint_usd"),
+                raw.get("price"),
+            )
 
-        entry_key = raw.get("entry_key", raw.get("entry_candle_key", raw.get("candle_key")))
+        entry_key = raw.get(
+            "entry_key",
+            raw.get("intent_id", raw.get("entry_candle_key", raw.get("candle_key"))),
+        )
         try:
             entry_key = int(entry_key) if entry_key is not None else None
         except Exception:
@@ -206,6 +217,50 @@ def _normalise_kernel_side(raw_side: Any) -> str:
     return str(raw_side or "NEUTRAL").strip().upper()
 
 
+def _normalise_kernel_action(raw_action: Any, raw_kind: Any = None) -> str:
+    action = str(raw_action or "").strip().upper()
+    if action in {"OPEN", "ADD", "CLOSE", "REDUCE"}:
+        return action
+    if action == "REVERSE":
+        return "CLOSE"
+
+    kind = str(raw_kind or "").strip().lower()
+    if kind == "open":
+        return "OPEN"
+    if kind == "add":
+        return "ADD"
+    if kind == "close":
+        return "CLOSE"
+    if kind == "reverse":
+        return "CLOSE"
+
+    return ""
+
+
+def _normalise_kernel_target_size(raw_size: Any, raw_notional: Any, raw_price: Any) -> float | None:
+    try:
+        quantity = float(raw_size)
+        if quantity > 0.0:
+            return quantity
+    except Exception:
+        pass
+
+    try:
+        notional = float(raw_notional)
+        if notional <= 0.0:
+            return None
+    except Exception:
+        return None
+
+    try:
+        price = float(raw_price)
+        if price <= 0.0:
+            return None
+        return notional / price
+    except Exception:
+        return None
+
+
 def _normalise_kernel_price(raw_price: Any, default: float = 0.0) -> float:
     try:
         price = float(raw_price)
@@ -326,59 +381,27 @@ class KernelDecisionRustBindingProvider:
         if not symbol:
             return None
 
-        kind = str(decision.get("kind", "")).strip().lower()
-        if kind not in {"open", "add", "close", "hold", "reverse"}:
-            return None
-
-        side = _normalise_kernel_side(decision.get("side"))
-        signal = side if side in {"BUY", "SELL"} else str(event_raw.get("signal", "NEUTRAL")).strip().upper()
-        if signal not in {"BUY", "SELL", "NEUTRAL"}:
-            return None
-
-        action = {
-            "open": "OPEN",
-            "add": "ADD",
-            "close": "CLOSE",
-            "hold": "",
-            "reverse": "OPEN",
-        }.get(kind, "")
-        if not action:
-            return None
-
-        now_series = event_raw.get("now_series")
-        if not isinstance(now_series, dict):
-            now_series = dict(event_raw.get("now_series") or {})
-            if not isinstance(now_series, dict):
-                now_series = {}
-
-        confidence = str(event_raw.get("confidence", "N/A"))
-
-        quantity = float(decision.get("quantity", 0.0) or 0.0)
-        try:
-            price = float(decision.get("price", 0.0) or 0.0)
-        except Exception:
-            price = 0.0
-        target_size = None
-        try:
-            if price > 0.0:
-                target_size = quantity
-            else:
-                target_size = None
-        except Exception:
-            target_size = None
-
-        return KernelDecision(
-            symbol=symbol,
-            action=action,
-            signal=signal,
-            confidence=confidence,
-            score=0.0,
-            now_series=now_series,
-            target_size=target_size,
-            entry_key=int(decision.get("intent_id", 0)) or None,
-            reason=f"kernel:{kind}",
-            open_pos_count=0,
+        result = KernelDecision.from_raw(
+            {
+                "symbol": symbol,
+                "kind": decision.get("kind"),
+                "side": decision.get("side"),
+                "quantity": decision.get("quantity"),
+                "price": decision.get("price"),
+                "notional_usd": decision.get("notional_usd"),
+                "notional_hint_usd": decision.get("notional_hint_usd"),
+                "intent_id": decision.get("intent_id"),
+                "signal": event_raw.get("signal"),
+                "confidence": event_raw.get("confidence", "N/A"),
+                "now_series": event_raw.get("now_series"),
+                "entry_key": event_raw.get("entry_key"),
+            }
         )
+        if result is None:
+            return None
+
+        result.reason = f"kernel:{str(decision.get('kind', 'unknown')).strip().lower()}"
+        return result
 
     def get_decisions(
         self,
