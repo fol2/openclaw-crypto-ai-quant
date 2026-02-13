@@ -451,13 +451,40 @@ class NoopDecisionProvider:
 def _build_default_decision_provider() -> DecisionProvider:
     path = os.getenv("AI_QUANT_KERNEL_DECISION_FILE")
     provider_mode = str(os.getenv("AI_QUANT_KERNEL_DECISION_PROVIDER", "") or "").strip().lower()
-    if provider_mode == "rust":
-        return KernelDecisionRustBindingProvider(path=path)
-    if provider_mode == "none":
+
+    if provider_mode in {"none", "noop"}:
         return NoopDecisionProvider()
-    if path:
+
+    if provider_mode == "file":
+        if not path:
+            raise RuntimeError(
+                "AI_QUANT_KERNEL_DECISION_PROVIDER=file requires AI_QUANT_KERNEL_DECISION_FILE to be set."
+            )
         return KernelDecisionFileProvider(path)
-    return NoopDecisionProvider()
+
+    if provider_mode == "rust":
+        try:
+            return KernelDecisionRustBindingProvider(path=path)
+        except Exception as exc:
+            raise RuntimeError(
+                "AI_QUANT_KERNEL_DECISION_PROVIDER=rust is configured, but the Rust decision kernel "
+                "extension is unavailable. Set AI_QUANT_KERNEL_DECISION_PROVIDER=none or provide "
+                "AI_QUANT_KERNEL_DECISION_FILE."
+            ) from exc
+
+    if path:
+        try:
+            return KernelDecisionRustBindingProvider(path=path)
+        except Exception:
+            return KernelDecisionFileProvider(path)
+
+    try:
+        return KernelDecisionRustBindingProvider(path=None)
+    except Exception as exc:
+        raise RuntimeError(
+            "Decision provider auto-mode cannot start because neither the Rust decision kernel extension "
+            "is available and AI_QUANT_KERNEL_DECISION_FILE is not configured."
+        ) from exc
 
 
 class ModePlugin(Protocol):

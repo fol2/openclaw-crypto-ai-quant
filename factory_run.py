@@ -51,6 +51,13 @@ def _env_float(env_name: str, *, default: float | None = None) -> float | None:
         raise SystemExit(f"{env_name} must be a float when set")
 
 
+def _env_bool(env_name: str, default: bool = False) -> bool:
+    raw = os.getenv(env_name, "").strip().lower()
+    if not raw:
+        return bool(default)
+    return raw in {"1", "true", "yes", "y", "on"}
+
+
 def _env_int(env_name: str, *, default: int | None = None) -> int | None:
     raw = str(os.getenv(env_name, "") or "").strip()
     if not raw:
@@ -835,6 +842,78 @@ def _attach_replay_metadata(
         summary.update(stage_fields)
 
 
+def _replay_equivalence_baseline_path() -> Path | None:
+    raw = os.getenv("AI_QUANT_REPLAY_EQUIVALENCE_BASELINE", "").strip()
+    if not raw:
+        return None
+
+    resolved = _resolve_path_for_backtester(raw)
+    return Path(resolved)
+
+
+def _replay_equivalence_strict() -> bool:
+    return _env_bool("AI_QUANT_REPLAY_EQUIVALENCE_STRICT", False)
+
+
+def _replay_equivalence_tolerance() -> float:
+    return _env_float("AI_QUANT_REPLAY_EQUIVALENCE_TOLERANCE", default=1e-12)
+
+
+def _replay_equivalence_max_diffs() -> int:
+    return int(_env_int("AI_QUANT_REPLAY_EQUIVALENCE_MAX_DIFFS", default=25) or 25)
+
+
+def _run_replay_equivalence_check(
+    *,
+    right_report: Path,
+    summary: dict[str, Any],
+) -> bool:
+    baseline = _replay_equivalence_baseline_path()
+    if baseline is None:
+        return True
+
+    if not baseline.exists():
+        summary["replay_equivalence_status"] = "missing_baseline"
+        summary["replay_equivalence_error"] = f"missing baseline report: {baseline}"
+        return not _replay_equivalence_strict()
+
+    try:
+        from tools import replay_equivalence
+    except Exception as exc:
+        summary["replay_equivalence_status"] = "tool_unavailable"
+        summary["replay_equivalence_error"] = f"failed to import comparator: {type(exc).__name__}: {exc}"
+        return not _replay_equivalence_strict()
+
+    try:
+        ok, diffs, rep = replay_equivalence.compare_files(
+            str(baseline),
+            str(right_report),
+            tolerance=_replay_equivalence_tolerance(),
+            max_diffs=_replay_equivalence_max_diffs(),
+        )
+    except Exception as exc:
+        summary["replay_equivalence_status"] = "comparison_error"
+        summary["replay_equivalence_error"] = f"{type(exc).__name__}: {exc}"
+        return not _replay_equivalence_strict()
+
+    report_path = right_report.with_name(f"{right_report.stem}.replay_equivalence.json")
+    report_payload = {
+        "left_report": str(_replay_equivalence_baseline_path() or right_report),
+        "right_report": str(right_report),
+        "ok": ok,
+        "diffs": diffs,
+        "summary": rep,
+    }
+    report_path.write_text(json.dumps(report_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    summary["replay_equivalence_report_path"] = str(report_path)
+    summary["replay_equivalence_status"] = "pass" if ok else "fail"
+    summary["replay_equivalence_diffs"] = diffs
+    summary["replay_equivalence_count"] = len(diffs)
+
+    return ok or not _replay_equivalence_strict()
+
+
 def _render_ranked_report_md(items: list[dict[str, Any]]) -> str:
     lines: list[str] = []
     lines.append("# Factory Run Report")
@@ -1274,6 +1353,9 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
         summary = _summarise_replay_report(out_json)
         summary["config_path"] = str(cfg_path)
         summary["config_id"] = candidate_config_ids[str(cfg_path)]
+        if not _run_replay_equivalence_check(right_report=out_json, summary=summary):
+            _write_json(run_dir / "run_metadata.json", meta)
+            return 1
         replay_entry = entry_by_path.get(str(cfg_path))
         _attach_replay_metadata(summary=summary, entry=replay_entry, args=args)
         entry = entry_by_path.get(str(cfg_path))
@@ -2105,6 +2187,9 @@ def main(argv: list[str] | None = None) -> int:
         summary = _summarise_replay_report(out_json)
         summary["config_path"] = str(cfg_path)
         summary["config_id"] = candidate_config_ids[str(cfg_path)]
+        if not _run_replay_equivalence_check(right_report=out_json, summary=summary):
+            _write_json(run_dir / "run_metadata.json", meta)
+            return 1
         replay_entry = entry_by_path.get(str(cfg_path))
         _attach_replay_metadata(summary=summary, entry=replay_entry, args=args)
         if replay_entry is None:

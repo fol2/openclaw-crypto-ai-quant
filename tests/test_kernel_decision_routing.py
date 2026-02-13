@@ -8,7 +8,14 @@ import importlib
 import pytest
 from unittest.mock import Mock
 
-from engine.core import KernelDecision, UnifiedEngine, KernelDecisionRustBindingProvider
+from engine.core import (
+    KernelDecision,
+    UnifiedEngine,
+    KernelDecisionRustBindingProvider,
+    KernelDecisionFileProvider,
+    NoopDecisionProvider,
+    _build_default_decision_provider,
+)
 from live.trader import LiveTrader
 
 
@@ -116,7 +123,7 @@ class FakeTrader:
 
 def test_unified_engine_routes_kernel_decisions_to_trader(monkeypatch) -> None:
     monkeypatch.setattr("engine.core.time.sleep", lambda *_: (_ for _ in ()).throw(SystemExit))
-    monkeypatch.setattr("engine.core.mei_alpha_v1.get_strategy_config", lambda _symbol: {})
+    monkeypatch.setattr("strategy.mei_alpha_v1.get_strategy_config", lambda _symbol: {})
 
     strategy = FakeStrategyManager()
     market = FakeMarket()
@@ -168,6 +175,18 @@ class DummyExecutor:
         self.update_leverage_calls: list[tuple[str, float, bool]] = []
         self.market_open_calls: list[tuple] = []
         self.last_order_error = {}
+
+    def account_snapshot(self, force: bool = False):  # pragma: no cover - tiny test stub
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            account_value_usd=100000.0,
+            withdrawable_usd=100000.0,
+            total_margin_used_usd=0.0,
+        )
+
+    def get_positions(self, force: bool = False):  # pragma: no cover - tiny test stub
+        return {}
 
     def update_leverage(self, symbol, leverage, is_cross=True):
         self.update_leverage_calls.append((str(symbol).strip().upper(), float(leverage), bool(is_cross)))
@@ -223,7 +242,8 @@ def test_live_execute_trade_action_routing(monkeypatch) -> None:
         reason="kernel-close",
     )
     assert mock_close.call_count == 1
-    assert mock_close.call_args.args == ("BTC", 101.0, 1700000000000, "kernel-close")
+    assert mock_close.call_args.args == ("BTC", 101.0, 1700000000000)
+    assert mock_close.call_args.kwargs.get("reason") == "kernel-close"
     assert mock_add.call_count == 0
 
     trader.execute_trade(
@@ -252,13 +272,8 @@ def test_live_execute_trade_action_routing(monkeypatch) -> None:
         reason="kernel-reduce",
     )
     assert mock_reduce.call_count == 1
-    assert mock_reduce.call_args.args == (
-        "BTC",
-        0.5,
-        101.0,
-        1700000000000,
-        "kernel-reduce",
-    )
+    assert mock_reduce.call_args.args == ("BTC", 0.5, 101.0, 1700000000000)
+    assert mock_reduce.call_args.kwargs.get("reason") == "kernel-reduce"
 
 
 def test_live_execute_trade_open_action_uses_open_kernel_path(monkeypatch) -> None:
@@ -396,6 +411,7 @@ def test_rust_binding_provider_converts_kernel_intents(monkeypatch, tmp_path) ->
                 {
                     "schema_version": 1,
                     "symbol": "ETH",
+                    "action": "OPEN",
                     "signal": "BUY",
                     "price": 100.0,
                     "timestamp_ms": 1700000000000,
@@ -469,3 +485,79 @@ def test_bt_runtime_binding_invalid_json_returns_explicit_error_code() -> None:
     assert response.get("ok") is False
     error = response.get("error", {})
     assert error.get("code") == "INVALID_JSON"
+
+
+def test_build_default_decision_provider_prefers_rust_when_available(monkeypatch, tmp_path) -> None:
+    payload_path = tmp_path / "events.json"
+    payload_path.write_text("[]", encoding="utf-8")
+    monkeypatch.delenv("AI_QUANT_KERNEL_DECISION_PROVIDER", raising=False)
+    monkeypatch.delenv("AI_QUANT_KERNEL_DECISION_FILE", raising=False)
+    monkeypatch.setattr("engine.core._load_kernel_runtime_module", lambda *_args, **_kwargs: _FakeKernelRuntime())
+
+    provider = _build_default_decision_provider()
+    assert isinstance(provider, KernelDecisionRustBindingProvider)
+
+
+def test_build_default_decision_provider_falls_back_to_file_if_rust_not_available(monkeypatch, tmp_path) -> None:
+    payload_path = tmp_path / "events.json"
+    payload_path.write_text(
+                json.dumps(
+                [
+                    {
+                        "schema_version": 1,
+                        "symbol": "ETH",
+                        "action": "OPEN",
+                        "signal": "BUY",
+                        "price": 100.0,
+                        "timestamp_ms": 1700000000000,
+                        "notional_hint_usd": 2500.0,
+                    }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("AI_QUANT_KERNEL_DECISION_PROVIDER", raising=False)
+    monkeypatch.setenv("AI_QUANT_KERNEL_DECISION_FILE", str(payload_path))
+    monkeypatch.setattr(
+        "engine.core._load_kernel_runtime_module",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ImportError("missing bt_runtime")),
+    )
+
+    provider = _build_default_decision_provider()
+    assert isinstance(provider, KernelDecisionFileProvider)
+    decisions = list(
+        provider.get_decisions(
+            symbols=["ETH"],
+            watchlist=["ETH"],
+            open_symbols=[],
+            market=None,
+            interval="1m",
+            lookback_bars=50,
+            mode="paper",
+            not_ready_symbols=set(),
+            strategy=None,
+            now_ms=1700000000000,
+        )
+        )
+    assert len(decisions) == 1
+    assert decisions[0].action == "OPEN"
+
+
+def test_build_default_decision_provider_needs_file_or_kernel_when_no_provider_available(monkeypatch) -> None:
+    monkeypatch.delenv("AI_QUANT_KERNEL_DECISION_PROVIDER", raising=False)
+    monkeypatch.delenv("AI_QUANT_KERNEL_DECISION_FILE", raising=False)
+    monkeypatch.setattr(
+        "engine.core._load_kernel_runtime_module",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ImportError("missing bt_runtime")),
+    )
+
+    with pytest.raises(RuntimeError, match="Decision provider auto-mode cannot start"):
+        _build_default_decision_provider()
+
+
+def test_build_default_decision_provider_respects_noop_mode(monkeypatch) -> None:
+    monkeypatch.setenv("AI_QUANT_KERNEL_DECISION_PROVIDER", "none")
+    monkeypatch.delenv("AI_QUANT_KERNEL_DECISION_FILE", raising=False)
+
+    provider = _build_default_decision_provider()
+    assert isinstance(provider, NoopDecisionProvider)
