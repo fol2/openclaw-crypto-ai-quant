@@ -8,6 +8,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 
 use crate::config::Confidence;
+use crate::engine::DecisionKernelTrace;
 use crate::engine::GateStats;
 use crate::position::{SignalRecord, TradeRecord};
 use crate::reason_codes::{classify_reason_code, ReasonCode};
@@ -49,6 +50,9 @@ pub struct SimReport {
 
     // Gate stats
     pub gate_stats: GateStatsReport,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision_diagnostics: Option<Vec<DecisionKernelTrace>>,
 
     // Optional (large payloads, gated by flags)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -318,6 +322,7 @@ pub fn build_report(
         by_symbol,
         by_side,
         gate_stats: gate_report,
+        decision_diagnostics: None,
         equity_curve: eq_curve,
         trades: trade_entries,
     }
