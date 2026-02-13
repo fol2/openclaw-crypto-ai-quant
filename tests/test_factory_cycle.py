@@ -139,6 +139,7 @@ def test_parse_candidate_legacy_fields_are_backward_compatible() -> None:
     assert cand.replay_stage == ""
     assert cand.validation_gate == "replay_only"
     assert cand.canonical_cpu_verified is True
+    assert cand.candidate_mode is False
     assert cand.has_stage_metadata is False
 
 
@@ -156,6 +157,7 @@ def test_select_deployable_candidates_prefers_stage_and_cpu_verified_candidates(
             "replay_stage": "",
             "validation_gate": "replay_only",
             "canonical_cpu_verified": False,
+            "candidate_mode": True,
         },
         {
             "config_id": "cand_2",
@@ -169,6 +171,7 @@ def test_select_deployable_candidates_prefers_stage_and_cpu_verified_candidates(
             "replay_stage": "cpu_replay",
             "validation_gate": "replay_only",
             "canonical_cpu_verified": True,
+            "candidate_mode": True,
         },
         {
             "config_id": "cand_3",
@@ -177,6 +180,7 @@ def test_select_deployable_candidates_prefers_stage_and_cpu_verified_candidates(
             "total_trades": 1,
             "profit_factor": 1.0,
             "max_drawdown_pct": 0.1,
+            "candidate_mode": False,
         },
     ]
     parsed = [_parse_candidate(c) for c in candidates]
@@ -208,6 +212,7 @@ def test_unverified_staged_candidates_are_not_deployable() -> None:
             "replay_stage": "cpu_replay",
             "validation_gate": "replay_only",
             "canonical_cpu_verified": False,
+            "candidate_mode": True,
         },
     ]
     parsed = [_parse_candidate(c) for c in candidates]
@@ -215,3 +220,40 @@ def test_unverified_staged_candidates_are_not_deployable() -> None:
     selected = _select_deployable_candidates([p for p in parsed if p is not None], limit=2)
     assert len(selected) == 1
     assert selected[0].config_id == "cand_legacy"
+
+
+def test_candidate_mode_requires_complete_stage_metadata() -> None:
+    candidates = [
+        {
+            "config_id": "incomplete",
+            "config_path": "/tmp/incomplete.yaml",
+            "total_pnl": 10.0,
+            "total_trades": 2,
+            "profit_factor": 1.8,
+            "max_drawdown_pct": 0.2,
+            "pipeline_stage": "candidate_validation",
+            "sweep_stage": "gpu",
+            "validation_gate": "replay_only",
+            "canonical_cpu_verified": True,
+            "candidate_mode": True,
+        },
+        {
+            "config_id": "complete",
+            "config_path": "/tmp/complete.yaml",
+            "total_pnl": 9.0,
+            "total_trades": 3,
+            "profit_factor": 1.7,
+            "max_drawdown_pct": 0.2,
+            "pipeline_stage": "candidate_validation",
+            "sweep_stage": "gpu",
+            "replay_stage": "cpu_replay",
+            "validation_gate": "replay_only",
+            "canonical_cpu_verified": True,
+            "candidate_mode": True,
+        },
+    ]
+    parsed = [_parse_candidate(c) for c in candidates]
+    assert all(p is not None for p in parsed)
+    selected = _select_deployable_candidates([p for p in parsed if p is not None], limit=2)
+    assert len(selected) == 1
+    assert selected[0].config_id == "complete"

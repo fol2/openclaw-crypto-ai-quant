@@ -67,3 +67,17 @@ def test_replay_metadata_attachment_marks_unverified_when_not_pass() -> None:
     assert entry["canonical_cpu_verified"] is False
     assert entry["replay_equivalence_mode"] == "live"
     assert entry["replay_equivalence_failure_code"] == "mismatch"
+
+
+def test_replay_metadata_attachment_preserves_candidate_mode() -> None:
+    args = argparse.Namespace(gpu=True, tpe=False, walk_forward=False, slippage_stress=False)
+    summary: dict[str, object] = {
+        "replay_equivalence_status": "pass",
+        "replay_equivalence_mode": "backtest",
+    }
+    entry: dict[str, object] = {"candidate_mode": True}
+
+    factory_run._attach_replay_metadata(summary=summary, entry=entry, args=args, replay_stage="cpu_replay")
+
+    assert summary["candidate_mode"] is True
+    assert entry["candidate_mode"] is True
