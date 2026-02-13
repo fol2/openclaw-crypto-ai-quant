@@ -775,6 +775,66 @@ def _summarise_replay_report(path: Path) -> dict[str, Any]:
     }
 
 
+def _sweep_output_mode_from_args(args: Any) -> str:
+    if bool(getattr(args, "tpe", False)) or bool(getattr(args, "gpu", False)):
+        return "candidate"
+    return "full"
+
+
+def _infer_sweep_stage_from_args(args: Any) -> str:
+    if bool(getattr(args, "tpe", False)):
+        return "gpu_tpe"
+    if bool(getattr(args, "gpu", False)):
+        return "gpu"
+    return "cpu"
+
+
+def _infer_validation_gate_from_args(args: Any) -> str:
+    wf = bool(getattr(args, "walk_forward", False))
+    ss = bool(getattr(args, "slippage_stress", False))
+    if wf and ss:
+        return "score_v1+walk_forward+slippage"
+    if wf:
+        return "score_v1+walk_forward"
+    if ss:
+        return "score_v1+slippage"
+    return "replay_only"
+
+
+def _stage_defaults_for_candidate(*, args: Any) -> dict[str, Any]:
+    return {
+        "pipeline_stage": "candidate_generation",
+        "sweep_stage": _infer_sweep_stage_from_args(args),
+        "replay_stage": "",
+        "validation_gate": _infer_validation_gate_from_args(args),
+        "canonical_cpu_verified": False,
+    }
+
+
+def _attach_replay_metadata(
+    summary: dict[str, Any],
+    entry: dict[str, Any] | None,
+    *,
+    args: Any,
+    replay_stage: str = "cpu_replay",
+) -> None:
+    stage_fields = {
+        "pipeline_stage": "candidate_validation",
+        "sweep_stage": _infer_sweep_stage_from_args(args),
+        "replay_stage": replay_stage,
+        "validation_gate": _infer_validation_gate_from_args(args),
+        "canonical_cpu_verified": True,
+    }
+    if entry is not None:
+        for k, v in stage_fields.items():
+            summary[k] = v
+            entry[k] = v
+        entry["replay_report_path"] = str(summary.get("path"))
+        entry["config_path"] = summary.get("config_path", "")
+    else:
+        summary.update(stage_fields)
+
+
 def _render_ranked_report_md(items: list[dict[str, Any]]) -> str:
     lines: list[str] = []
     lines.append("# Factory Run Report")
@@ -1130,6 +1190,8 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
     copied_candidates: list[dict[str, Any]] = []
     entry_by_path: dict[str, dict[str, Any]] = {}
 
+    source_args_obj = argparse.Namespace(**source_args) if isinstance(source_args, dict) else argparse.Namespace()
+    source_stage_defaults = _stage_defaults_for_candidate(args=source_args_obj)
     for it in src_candidates:
         if not isinstance(it, dict):
             continue
@@ -1151,7 +1213,15 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
 
         candidate_paths.append(dst)
         candidate_config_ids[str(dst)] = dst_cfg_id
-        entry = {"path": str(dst), "config_id": dst_cfg_id, "source_path": str(src)}
+        entry = dict(source_stage_defaults)
+        entry.update(
+            {k: v for k, v in it.items() if isinstance(v, (str, int, float, bool, dict, list, tuple, type(None)))}
+        )
+        entry["path"] = str(dst)
+        entry["config_id"] = dst_cfg_id
+        entry["source_path"] = str(src)
+        entry.setdefault("replay_stage", "")
+        entry.setdefault("canonical_cpu_verified", False)
         copied_candidates.append(entry)
         entry_by_path[str(dst)] = entry
 
@@ -1204,10 +1274,13 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
         summary = _summarise_replay_report(out_json)
         summary["config_path"] = str(cfg_path)
         summary["config_id"] = candidate_config_ids[str(cfg_path)]
+        replay_entry = entry_by_path.get(str(cfg_path))
+        _attach_replay_metadata(summary=summary, entry=replay_entry, args=args)
+        entry = entry_by_path.get(str(cfg_path))
+        _attach_replay_metadata(summary=summary, entry=entry, args=source_args_obj)
         replay_reports.append(summary)
         _write_json(run_dir / "run_metadata.json", meta)
 
-        entry = entry_by_path.get(str(cfg_path))
         if entry is not None:
             entry["replay_report_path"] = str(out_json)
             entry["replay_stdout_path"] = str(replay_res.stdout_path or "")
@@ -1679,6 +1752,8 @@ def main(argv: list[str] | None = None) -> int:
             str(args.interval),
             "--output",
             str(sweep_out),
+            "--output-mode",
+            _sweep_output_mode_from_args(args),
         ]
         top_n = int(args.top_n or 0)
         if top_n > 0:
@@ -1716,13 +1791,58 @@ def main(argv: list[str] | None = None) -> int:
         if os.getenv("AI_QUANT_FACTORY_ALLOW_UNSAFE_GPU_SWEEP", "").strip().lower() in {"1", "true", "yes", "on"}:
             sweep_argv += ["--allow-unsafe-gpu-sweep"]
 
+        sweep_output_mode = _sweep_output_mode_from_args(args)
+        fallback_to_legacy_output = False
         sweep_res = _run_cmd(
             sweep_argv,
             cwd=AIQ_ROOT / "backtester",
             stdout_path=run_dir / "sweeps" / "sweep.stdout.txt",
             stderr_path=run_dir / "sweeps" / "sweep.stderr.txt",
         )
-        meta["steps"].append({"name": "sweep", **sweep_res.__dict__})
+        if sweep_res.exit_code != 0:
+            try:
+                sweep_stderr = (
+                    Path(sweep_res.stderr_path or "").read_text(encoding="utf-8") if sweep_res.stderr_path else ""
+                )
+            except Exception:
+                sweep_stderr = ""
+            unsupported_output_mode = "--output-mode" in str(sweep_argv) and (
+                "unexpected argument '--output-mode'" in sweep_stderr
+                or "unexpected argument `--output-mode'" in sweep_stderr
+                or "unrecognized argument '--output-mode'" in sweep_stderr
+                or "invalid argument '--output-mode'" in sweep_stderr
+            )
+            if unsupported_output_mode:
+                fallback_to_legacy_output = True
+                filtered_argv = []
+                skip_next = False
+                for idx, token in enumerate(sweep_argv):
+                    if skip_next:
+                        skip_next = False
+                        continue
+                    if token == "--output-mode":
+                        if idx + 1 < len(sweep_argv):
+                            skip_next = True
+                        continue
+                    filtered_argv.append(token)
+
+                sweep_res = _run_cmd(
+                    filtered_argv,
+                    cwd=AIQ_ROOT / "backtester",
+                    stdout_path=run_dir / "sweeps" / "sweep.stdout.txt",
+                    stderr_path=run_dir / "sweeps" / "sweep.stderr.txt",
+                )
+                if sweep_res.exit_code == 0:
+                    fallback_to_legacy_output = True
+
+        meta["steps"].append(
+            {
+                "name": "sweep",
+                "fallback_to_legacy_output_mode": fallback_to_legacy_output,
+                "sweep_output_mode_request": sweep_output_mode,
+                **sweep_res.__dict__,
+            }
+        )
         if sweep_res.exit_code != 0:
             _write_json(run_dir / "run_metadata.json", meta)
             return int(sweep_res.exit_code)
@@ -1744,12 +1864,23 @@ def main(argv: list[str] | None = None) -> int:
     candidate_entries: list[dict[str, Any]] = []
     entry_by_path: dict[str, dict[str, Any]] = {}
     skip_generation = False
+    default_entry_stage = _stage_defaults_for_candidate(args=args)
 
     if bool(args.resume):
         existing_entries = meta.get("candidate_configs", [])
         if isinstance(existing_entries, list) and existing_entries:
             candidate_entries = [it for it in existing_entries if isinstance(it, dict)]
             for it in candidate_entries:
+                defaults = dict(default_entry_stage)
+                for k, v in it.items():
+                    if isinstance(v, (str, int, float, bool, dict, list, tuple, type(None))):
+                        defaults[k] = v
+                defaults.setdefault("canonical_cpu_verified", False)
+                defaults.setdefault("pipeline_stage", "candidate_generation")
+                defaults.setdefault("sweep_stage", _infer_sweep_stage_from_args(args))
+                defaults.setdefault("replay_stage", "")
+                defaults.setdefault("validation_gate", _infer_validation_gate_from_args(args))
+                it.update(defaults)
                 p = str(it.get("path", "")).strip()
                 if p:
                     entry_by_path[p] = it
@@ -1823,6 +1954,7 @@ def main(argv: list[str] | None = None) -> int:
                     kept += 1
 
                 entry = {
+                    **default_entry_stage,
                     "path": str(out_yaml),
                     "config_id": cfg_id,
                     "sort_by": mode,
@@ -1876,6 +2008,7 @@ def main(argv: list[str] | None = None) -> int:
             cfg_id = config_id_from_yaml_file(out_yaml)
             candidate_config_ids[str(out_yaml)] = cfg_id
             entry = {
+                **default_entry_stage,
                 "path": str(out_yaml),
                 "config_id": cfg_id,
                 "sort_by": str(args.sort_by),
@@ -1972,6 +2105,10 @@ def main(argv: list[str] | None = None) -> int:
         summary = _summarise_replay_report(out_json)
         summary["config_path"] = str(cfg_path)
         summary["config_id"] = candidate_config_ids[str(cfg_path)]
+        replay_entry = entry_by_path.get(str(cfg_path))
+        _attach_replay_metadata(summary=summary, entry=replay_entry, args=args)
+        if replay_entry is None:
+            summary["config_path"] = str(cfg_path)
 
         if bool(getattr(args, "monte_carlo", False)) and trades_csv is not None:
             mc_dir = run_dir / "monte_carlo" / str(cfg_path.stem)

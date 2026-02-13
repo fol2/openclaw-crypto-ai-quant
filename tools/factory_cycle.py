@@ -180,6 +180,12 @@ class Candidate:
     profit_factor: float
     rejected: bool
     reject_reason: str
+    pipeline_stage: str
+    sweep_stage: str
+    replay_stage: str
+    validation_gate: str
+    canonical_cpu_verified: bool
+    has_stage_metadata: bool
 
 
 @dataclass(frozen=True)
@@ -233,6 +239,15 @@ def _parse_candidate(it: dict[str, Any]) -> Candidate | None:
             profit_factor=float(it.get("profit_factor", 0.0)),
             rejected=bool(it.get("rejected", False)),
             reject_reason=str(it.get("reject_reason", "") or "").strip(),
+            has_stage_metadata=any(
+                k in it
+                for k in ("pipeline_stage", "sweep_stage", "replay_stage", "validation_gate", "canonical_cpu_verified")
+            ),
+            pipeline_stage=str(it.get("pipeline_stage", "")).strip() or "legacy",
+            sweep_stage=str(it.get("sweep_stage", "")).strip() or "legacy",
+            replay_stage=str(it.get("replay_stage", "")).strip() or "",
+            validation_gate=str(it.get("validation_gate", "")).strip() or "replay_only",
+            canonical_cpu_verified=bool(it.get("canonical_cpu_verified", True)),
         )
     except Exception:
         return None
@@ -241,6 +256,20 @@ def _parse_candidate(it: dict[str, Any]) -> Candidate | None:
 def _candidate_sort_key(c: Candidate) -> tuple[float, float]:
     score = float(c.score_v1) if c.score_v1 is not None else float("-inf")
     return (score, float(c.total_pnl))
+
+
+def _stage_rank(c: Candidate) -> int:
+    if not bool(c.has_stage_metadata):
+        return 0
+    if c.canonical_cpu_verified and c.replay_stage:
+        return 2
+    if c.canonical_cpu_verified:
+        return 1
+    return 0
+
+
+def _candidate_sort_key_with_stage(c: Candidate) -> tuple[int, float, float]:
+    return (int(_stage_rank(c)), float(c.score_v1) if c.score_v1 is not None else float("-inf"), float(c.total_pnl))
 
 
 def _format_float(v: Any, *, ndigits: int = 3, default: str = "n/a") -> str:
@@ -592,10 +621,14 @@ def _select_best_candidate(items: list[dict[str, Any]]) -> Candidate | None:
 
     # Prefer score_v1 when present. If score_v1 is missing for all candidates, fall back to total_pnl.
     any_score = any(c.score_v1 is not None for c in parsed_ok)
+    filtered = [c for c in parsed_ok if (not c.has_stage_metadata) or c.canonical_cpu_verified]
+    if not filtered:
+        return None
+    parsed_ok = filtered
     if any_score:
-        parsed_ok.sort(key=lambda c: float(c.score_v1 or float("-inf")), reverse=True)
+        parsed_ok.sort(key=_candidate_sort_key_with_stage, reverse=True)
     else:
-        parsed_ok.sort(key=lambda c: float(c.total_pnl), reverse=True)
+        parsed_ok.sort(key=lambda c: (int(_stage_rank(c)), float(c.total_pnl)), reverse=True)
     return parsed_ok[0]
 
 
@@ -605,7 +638,10 @@ def _select_deployable_candidates(parsed: list[Candidate], *, limit: int) -> lis
     ok = [c for c in parsed if not bool(c.rejected)]
     if not ok:
         return []
-    ok.sort(key=_candidate_sort_key, reverse=True)
+    ok = [c for c in ok if (not c.has_stage_metadata) or c.canonical_cpu_verified]
+    if not ok:
+        return []
+    ok.sort(key=_candidate_sort_key_with_stage, reverse=True)
     return ok[: int(limit)]
 
 
@@ -1199,11 +1235,24 @@ def main(argv: list[str] | None = None) -> int:
         "version": "factory_cycle_selection_v1",
         "run_id": run_id,
         "run_dir": str(run_dir),
+        "evidence_bundle_paths": {
+            "run_dir": str(run_dir),
+            "run_metadata_json": str(run_dir / "run_metadata.json"),
+            "selection_json": str(run_dir / "reports" / "selection.json"),
+            "report_json": str(run_dir / "reports" / "report.json"),
+            "report_md": str(run_dir / "reports" / "report.md"),
+            "selection_md": str(run_dir / "reports" / "selection.md"),
+            "configs_dir": str(run_dir / "configs"),
+            "replays_dir": str(run_dir / "replays"),
+        },
         "selected": deployable[0].__dict__,
         "selected_candidates": [c.__dict__ for c in deployable],
         "selected_targets": [
             {"slot": t.slot, "service": t.service, "yaml_path": str(t.yaml_path)} for t in deploy_targets
         ],
+        "selection_stage": "selected",
+        "deploy_stage": "pending",
+        "promotion_stage": "pending",
         "effective_config_path": str(effective_cfg_path),
         "interval": str(interval),
         "deployed": False,
@@ -1220,6 +1269,11 @@ def main(argv: list[str] | None = None) -> int:
                 f"✅ Factory OK (no-deploy) • `{run_id}` "
                 f"`selected` {','.join([c.config_id[:12] for c in deployable[: len(deploy_targets)]])}"
             ),
+        )
+        selection["deploy_stage"] = "no_deploy"
+        selection["promotion_stage"] = "skipped"
+        (run_dir / "reports" / "selection.json").write_text(
+            json.dumps(selection, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
         return 0
 
@@ -1362,6 +1416,7 @@ def main(argv: list[str] | None = None) -> int:
                 _send_discord_chunks(target=str(user_target), lines=user_lines)
 
     selection["deployed"] = bool(deployed_any)
+    selection["deploy_stage"] = "deployed" if deployed_any else "skipped"
     selection["deployments"] = deployments
     (run_dir / "reports" / "selection.json").write_text(
         json.dumps(selection, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -1380,6 +1435,7 @@ def main(argv: list[str] | None = None) -> int:
         live_yaml_raw = str(args.livepaper_yaml_path or "").strip()
         if (not live_service) or (not live_yaml_raw):
             promotion["reason"] = "missing livepaper target (--livepaper-service / --livepaper-yaml-path)"
+            selection["promotion_stage"] = "skipped_missing_target"
             _send_discord(
                 target=str(args.discord_target),
                 message=(f"⏭️ Promotion skipped • `{run_id}`: {promotion['reason']}"),
@@ -1597,6 +1653,7 @@ def main(argv: list[str] | None = None) -> int:
             passed_rows = [r for r in gate_rows if bool(r.get("ok", False))]
             if not passed_rows:
                 promotion["reason"] = "no paper candidates passed promotion gates"
+                selection["promotion_stage"] = "no_passing_candidate"
                 _send_discord(
                     target=str(args.discord_target),
                     message=f"⏭️ Promotion skipped • `{run_id}`: {promotion['reason']}",
@@ -1649,6 +1706,7 @@ def main(argv: list[str] | None = None) -> int:
 
                 if chosen is None:
                     promotion["reason"] = "no passing candidate beat incumbent livepaper performance"
+                    selection["promotion_stage"] = "blocked_by_comparison"
                     _send_discord(
                         target=str(args.discord_target),
                         message=f"⏭️ Promotion skipped • `{run_id}`: {promotion['reason']}",
@@ -1670,11 +1728,13 @@ def main(argv: list[str] | None = None) -> int:
                     promotion["ok"] = True
                     promotion["selected"] = chosen
                     promotion["reason"] = "livepaper already running selected config"
+                    selection["promotion_stage"] = "noop"
                     _send_discord(
                         target=str(args.discord_target),
                         message=(f"✅ Promotion no-op • `{run_id}` service={live_service} config={chosen_cfg[:12]}"),
                     )
                 elif chosen_cfg:
+                    selection["promotion_stage"] = "promoted"
                     chosen_yaml = _lookup_config_yaml_text(registry_db=registry_db, config_id=chosen_cfg)
                     live_next_summary = _yaml_summary(chosen_yaml)
                     live_prev_summary = _yaml_summary(live_prev_text)
@@ -1751,6 +1811,7 @@ def main(argv: list[str] | None = None) -> int:
                             _send_discord_chunks(target=str(live_target), lines=user_lines_live)
                 else:
                     promotion["reason"] = "chosen promotion row missing config_id"
+                    selection["promotion_stage"] = "invalid_candidate"
                     _send_discord(
                         target=str(args.discord_target),
                         message=f"⏭️ Promotion skipped • `{run_id}`: {promotion['reason']}",
