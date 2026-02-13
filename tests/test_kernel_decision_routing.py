@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import json
 import types
 from dataclasses import dataclass
+import importlib
 
 import pytest
 from unittest.mock import Mock
 
-from engine.core import KernelDecision, UnifiedEngine
+from engine.core import KernelDecision, UnifiedEngine, KernelDecisionRustBindingProvider
 from live.trader import LiveTrader
 
 
@@ -305,3 +307,165 @@ def test_live_execute_trade_open_action_uses_open_kernel_path(monkeypatch) -> No
     assert mock_close.call_count == 0
     assert mock_reduce.call_count == 0
     assert len(trader.executor.market_open_calls) == 1
+
+
+class _FakeKernelRuntime:
+    def __init__(self) -> None:
+        self.default_state = {
+            "schema_version": 1,
+            "timestamp_ms": 1700000000000,
+            "step": 1,
+            "cash_usd": 10_000.0,
+            "positions": {},
+        }
+        self.default_params = {
+            "schema_version": 1,
+            "default_notional_usd": 10_000.0,
+            "min_notional_usd": 10.0,
+            "max_notional_usd": 100_000.0,
+            "maker_fee_bps": 3.5,
+            "taker_fee_bps": 3.5,
+            "allow_pyramid": True,
+            "allow_reverse": True,
+        }
+
+    def default_kernel_state_json(self, initial_cash_usd: float, timestamp_ms: int) -> str:
+        state = dict(self.default_state)
+        state["cash_usd"] = float(initial_cash_usd)
+        state["timestamp_ms"] = int(timestamp_ms)
+        return json.dumps(state)
+
+    def default_kernel_params_json(self) -> str:
+        return json.dumps(self.default_params)
+
+    def step_decision(self, state_json: str, event_json: str, _params_json: str) -> str:
+        event = json.loads(event_json)
+        if not isinstance(event, dict):
+            return json.dumps({"ok": False, "error": {"code": "INVALID_EVENT", "message": "invalid", "details": []}})
+
+        symbol = str(event.get("symbol", "")).strip().upper()
+        if not symbol:
+            return json.dumps({"ok": False, "error": {"code": "INVALID_EVENT", "message": "missing symbol", "details": []}})
+
+        price = float(event.get("price", 0.0))
+        quantity = 0.25
+        notional = price * quantity
+        intent_id = 1001
+
+        state = json.loads(state_json)
+        if not isinstance(state, dict):
+            state = dict(self.default_state)
+
+        state["step"] = int(state.get("step", 0)) + 1
+        state["timestamp_ms"] = int(event.get("timestamp_ms", 0))
+
+        decision = {
+            "schema_version": 1,
+            "state": state,
+            "intents": [
+                {
+                    "schema_version": 1,
+                    "intent_id": intent_id,
+                    "symbol": symbol,
+                    "kind": "open",
+                    "side": "long",
+                    "quantity": quantity,
+                    "price": price,
+                    "notional_usd": notional,
+                    "fee_rate": 0.0,
+                }
+            ],
+            "fills": [],
+            "diagnostics": {
+                "schema_version": 1,
+                "errors": [],
+                "warnings": [],
+                "intent_count": 1,
+                "fill_count": 0,
+                "step": 2,
+            },
+        }
+        return json.dumps({"ok": True, "decision": decision})
+
+
+def test_rust_binding_provider_converts_kernel_intents(monkeypatch, tmp_path) -> None:
+    payload_path = tmp_path / "events.json"
+    payload_path.write_text(
+        json.dumps(
+            [
+                {
+                    "schema_version": 1,
+                    "symbol": "ETH",
+                    "signal": "BUY",
+                    "price": 100.0,
+                    "timestamp_ms": 1700000000000,
+                    "notional_hint_usd": 2500.0,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("engine.core._load_kernel_runtime_module", lambda *_args, **_kwargs: _FakeKernelRuntime())
+
+    provider = KernelDecisionRustBindingProvider(path=str(payload_path))
+    decisions = list(
+        provider.get_decisions(
+            symbols=["ETH"],
+            watchlist=["ETH"],
+            open_symbols=[],
+            market=None,
+            interval="1m",
+            lookback_bars=50,
+            mode="paper",
+            not_ready_symbols=set(),
+            strategy=None,
+            now_ms=1700000000000,
+        )
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].action == "OPEN"
+    assert decisions[0].symbol == "ETH"
+    assert decisions[0].target_size == 0.25
+    assert decisions[0].confidence == "N/A"
+
+
+def test_bt_runtime_binding_returns_schema_mismatch_error_code() -> None:
+    try:
+        bt_runtime = importlib.import_module("bt_runtime")
+    except Exception:
+        pytest.skip("bt_runtime extension is not available in the test environment")
+
+    state_json = bt_runtime.default_kernel_state_json(10_000.0, 1_700_000_000_000)
+    event_json = json.dumps(
+        {
+            "schema_version": 2,
+            "event_id": 1,
+            "timestamp_ms": 1_700_000_000_100,
+            "symbol": "ETH",
+            "signal": "BUY",
+            "price": 100.0,
+            "notional_hint_usd": 1000.0,
+        }
+    )
+    params_json = bt_runtime.default_kernel_params_json()
+
+    response = json.loads(bt_runtime.step_decision(state_json, event_json, params_json))
+    assert isinstance(response, dict)
+    assert response.get("ok") is False
+    error = response.get("error", {})
+    assert error.get("code") == "SCHEMA_VERSION_MISMATCH"
+
+
+def test_bt_runtime_binding_invalid_json_returns_explicit_error_code() -> None:
+    try:
+        bt_runtime = importlib.import_module("bt_runtime")
+    except Exception:
+        pytest.skip("bt_runtime extension is not available in the test environment")
+
+    response = json.loads(bt_runtime.step_decision("{not-json", "{} {}", "{}"))
+    assert isinstance(response, dict)
+    assert response.get("ok") is False
+    error = response.get("error", {})
+    assert error.get("code") == "INVALID_JSON"
