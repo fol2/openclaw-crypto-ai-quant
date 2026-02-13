@@ -23,7 +23,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from .core import UnifiedEngine
+from .core import UnifiedEngine, _build_default_decision_provider
 from .market_data import MarketDataHub
 from .strategy_manager import StrategyManager
 from .oms import LiveOms
@@ -973,6 +973,7 @@ def main() -> None:
         lookback_bars=lookback_bars,
         mode=mode,
         mode_plugin=plugin,
+        decision_provider=_build_default_decision_provider(),
     )
     print(f"🚀 Unified engine started. mode={mode}")
     try:
