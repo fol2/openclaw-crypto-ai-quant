@@ -22,6 +22,8 @@ def test_replay_metadata_attachment_records_validation_stage() -> None:
     args = argparse.Namespace(gpu=True, tpe=False, walk_forward=True, slippage_stress=False)
     summary: dict[str, object] = {
         "replay_equivalence_status": "pass",
+        "replay_equivalence_mode": "backtest",
+        "replay_equivalence_failure_code": "",
         "replay_equivalence_count": 1,
         "replay_equivalence_error": "",
         "replay_equivalence_report_path": "/tmp/replay_equivalence.json",
@@ -39,7 +41,9 @@ def test_replay_metadata_attachment_records_validation_stage() -> None:
     assert summary["replay_report_path"] == "/tmp/replay.json"
     assert summary["config_path"] == "/tmp/cfg.yaml"
     assert summary["replay_equivalence_report_path"] == "/tmp/replay_equivalence.json"
+    assert summary["replay_equivalence_mode"] == "backtest"
     assert summary["replay_equivalence_count"] == 1
+    assert summary["replay_equivalence_failure_code"] == ""
     assert entry["replay_equivalence_error"] == ""
     assert entry["replay_equivalence_diffs"] == []
     assert entry["pipeline_stage"] == "candidate_validation"
@@ -50,9 +54,16 @@ def test_replay_metadata_attachment_records_validation_stage() -> None:
 
 def test_replay_metadata_attachment_marks_unverified_when_not_pass() -> None:
     args = argparse.Namespace(gpu=True, tpe=False, walk_forward=True, slippage_stress=False)
-    summary: dict[str, object] = {"replay_equivalence_status": "fail", "replay_equivalence_count": 2}
+    summary: dict[str, object] = {
+        "replay_equivalence_status": "fail",
+        "replay_equivalence_mode": "live",
+        "replay_equivalence_failure_code": "mismatch",
+        "replay_equivalence_count": 2,
+    }
     entry: dict[str, object] = {}
     factory_run._attach_replay_metadata(summary=summary, entry=entry, args=args, replay_stage="cpu_replay")
 
     assert summary["canonical_cpu_verified"] is False
     assert entry["canonical_cpu_verified"] is False
+    assert entry["replay_equivalence_mode"] == "live"
+    assert entry["replay_equivalence_failure_code"] == "mismatch"

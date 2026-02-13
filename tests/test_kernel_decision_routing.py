@@ -4,6 +4,7 @@ import json
 import types
 from dataclasses import dataclass
 import importlib
+from collections.abc import Mapping
 
 import pytest
 from unittest.mock import Mock
@@ -384,7 +385,20 @@ def test_live_execute_trade_open_action_uses_open_kernel_path(monkeypatch) -> No
 
 
 class _FakeKernelRuntime:
-    def __init__(self) -> None:
+    def __init__(self, intents: list[dict[str, Any]] | None = None) -> None:
+        self._decision_intents = intents or [
+            {
+                "schema_version": 1,
+                "intent_id": 1001,
+                "symbol": "ETH",
+                "kind": "open",
+                "side": "long",
+                "quantity": 0.25,
+                "price": 400.0,
+                "notional_usd": 100.0,
+                "fee_rate": 0.0,
+            }
+        ]
         self.default_state = {
             "schema_version": 1,
             "timestamp_ms": 1700000000000,
@@ -422,8 +436,6 @@ class _FakeKernelRuntime:
             return json.dumps({"ok": False, "error": {"code": "INVALID_EVENT", "message": "missing symbol", "details": []}})
 
         price = float(event.get("price", 0.0))
-        quantity = 0.25
-        notional = price * quantity
         intent_id = 1001
 
         state = json.loads(state_json)
@@ -433,33 +445,83 @@ class _FakeKernelRuntime:
         state["step"] = int(state.get("step", 0)) + 1
         state["timestamp_ms"] = int(event.get("timestamp_ms", 0))
 
+        intents = []
+        for offset, raw_intent in enumerate(self._decision_intents, start=1):
+            if not isinstance(raw_intent, Mapping):
+                continue
+            intent = dict(raw_intent)
+            intent["schema_version"] = 1
+            intent["symbol"] = symbol
+            intent.setdefault("intent_id", intent_id + offset - 1)
+            intent.setdefault("side", "long")
+            intent.setdefault("quantity", 0.25)
+            intent.setdefault("price", price)
+            if "notional_usd" not in intent:
+                try:
+                    intent["notional_usd"] = float(intent["quantity"]) * float(intent["price"])
+                except Exception:
+                    intent["notional_usd"] = float(price) * 0.25
+            intent.setdefault("fee_rate", 0.0)
+            intents.append(intent)
+
         decision = {
             "schema_version": 1,
             "state": state,
-            "intents": [
-                {
-                    "schema_version": 1,
-                    "intent_id": intent_id,
-                    "symbol": symbol,
-                    "kind": "open",
-                    "side": "long",
-                    "quantity": quantity,
-                    "price": price,
-                    "notional_usd": notional,
-                    "fee_rate": 0.0,
-                }
-            ],
+            "intents": intents,
             "fills": [],
             "diagnostics": {
                 "schema_version": 1,
                 "errors": [],
                 "warnings": [],
-                "intent_count": 1,
+                "intent_count": len(intents),
                 "fill_count": 0,
                 "step": 2,
             },
         }
         return json.dumps({"ok": True, "decision": decision})
+
+
+@pytest.mark.parametrize(
+    (
+        "raw",
+        "expected_action",
+        "expected_signal",
+        "expected_size",
+        "expected_entry_key",
+    ),
+    [
+        ({"symbol": "ETH", "action": "OPEN", "signal": "BUY", "target_size": 2.5, "entry_key": "11"}, "OPEN", "BUY", 2.5, 11),
+        ({"symbol": "ETH", "action": "add", "signal": "SELL", "target_size": 0.5, "candle_key": "22"}, "ADD", "SELL", 0.5, 22),
+        ({"symbol": "ETH", "action": "CLOSE", "signal": "NEUTRAL", "target_size": 1.2, "entry_candle_key": "33"}, "CLOSE", "NEUTRAL", 1.2, 33),
+        ({"symbol": "ETH", "action": "REVERSE", "signal": "BUY", "target_size": 1.8}, "CLOSE", "BUY", 1.8, None),
+        ({"symbol": "ETH", "action": "OPEN", "target_size": 2.0}, "OPEN", "OPEN", 2.0, None),
+        ({"symbol": "ETH", "action": "OPEN", "target_size": "2", "notional_hint_usd": 100, "price": 200}, "OPEN", "OPEN", 0.5, None),
+        ({"symbol": "ETH", "kind": "open", "side": "long", "quantity": 3.0, "price": 200, "intent_id": "401"}, "OPEN", "BUY", 3.0, 401),
+        ({"symbol": "ETH", "kind": "add", "side": "short", "notional_usd": 120, "price": 200}, "ADD", "SELL", 0.6, None),
+        ({"symbol": "ETH", "kind": "close", "side": "long", "quantity": 2.4, "price": 100}, "CLOSE", "BUY", 2.4, None),
+        ({"symbol": "ETH", "kind": "reverse", "side": "short", "quantity": 1.5, "price": 10, "notional_usd": 15}, "CLOSE", "SELL", 1.5, None),
+        ({"symbol": "ETH", "kind": "hold", "side": "long", "quantity": 1.0, "price": 10}, None, None, None, None),
+        ({"symbol": "ETH", "kind": "open", "side": "long", "notional_usd": 0.0, "price": 10, "quantity": 0}, "OPEN", "BUY", None, None),
+        ({"symbol": "", "kind": "open", "side": "long", "quantity": 1, "price": 10}, None, None, None, None),
+    ],
+)
+def test_kernel_decision_from_raw_supports_legacy_and_canonical_input_schemas(
+    raw,
+    expected_action,
+    expected_signal,
+    expected_size,
+    expected_entry_key,
+) -> None:
+    dec = KernelDecision.from_raw(raw)
+    if expected_action is None:
+        assert dec is None
+        return
+
+    assert dec is not None
+    assert dec.action == expected_action
+    assert dec.signal == expected_signal
+    assert dec.target_size == expected_size
+    assert dec.entry_key == expected_entry_key
 
 
 def test_rust_binding_provider_converts_kernel_intents(monkeypatch, tmp_path) -> None:
@@ -504,6 +566,105 @@ def test_rust_binding_provider_converts_kernel_intents(monkeypatch, tmp_path) ->
     assert decisions[0].symbol == "ETH"
     assert decisions[0].target_size == 0.25
     assert decisions[0].confidence == "N/A"
+
+
+@pytest.mark.parametrize(
+    ("intents", "expected_actions", "expected_sizes"),
+    [
+        (
+            [{"kind": "open", "side": "long", "quantity": 1.0, "price": 100.0}],
+            ["OPEN"],
+            [1.0],
+        ),
+        (
+            [{"kind": "add", "side": "short", "quantity": 0.5, "price": 80.0}],
+            ["ADD"],
+            [0.5],
+        ),
+        (
+            [{"kind": "close", "side": "long", "quantity": 2.0, "price": 110.0}],
+            ["CLOSE"],
+            [2.0],
+        ),
+        (
+            [{"kind": "reverse", "side": "short", "quantity": 1.0, "price": 95.0}],
+            ["CLOSE"],
+            [1.0],
+        ),
+        (
+            [{"kind": "hold", "side": "long", "quantity": 1.0, "price": 90.0}],
+            [],
+            [],
+        ),
+        (
+            [{"kind": "open", "side": "long", "quantity": 2.0, "notional_usd": 100.0, "price": 50.0}],
+            ["OPEN"],
+            [2.0],
+        ),
+        (
+            [{"kind": "open", "side": "long", "notional_usd": 90.0, "price": 30.0}],
+            ["OPEN"],
+            [3.0],
+        ),
+        (
+            [{"kind": "open", "side": "long", "notional_usd": 90.0, "price": 0.0}],
+            ["OPEN"],
+            [None],
+        ),
+        (
+            [
+                {"kind": "open", "side": "long", "quantity": 1.0, "price": 40.0},
+                {"kind": "close", "side": "long", "quantity": 1.0, "price": 41.0},
+                {"kind": "reverse", "side": "long", "quantity": 2.0, "price": 42.0},
+            ],
+            ["OPEN", "CLOSE", "CLOSE"],
+            [1.0, 1.0, 2.0],
+        ),
+    ],
+)
+def test_rust_binding_provider_converts_kernel_intents_with_canonical_variants(
+    monkeypatch, tmp_path, intents, expected_actions, expected_sizes
+) -> None:
+    payload_path = tmp_path / "events.json"
+    payload_path.write_text(
+        json.dumps(
+            [
+                {
+                    "schema_version": 1,
+                    "symbol": "ETH",
+                    "signal": "BUY",
+                    "price": 100.0,
+                    "timestamp_ms": 1700000000000,
+                    "notional_hint_usd": 2500.0,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "engine.core._load_kernel_runtime_module",
+        lambda *_args, **_kwargs: _FakeKernelRuntime(intents=intents),
+    )
+
+    provider = KernelDecisionRustBindingProvider(path=str(payload_path))
+    decisions = list(
+        provider.get_decisions(
+            symbols=["ETH"],
+            watchlist=["ETH"],
+            open_symbols=[],
+            market=None,
+            interval="1m",
+            lookback_bars=50,
+            mode="paper",
+            not_ready_symbols=set(),
+            strategy=None,
+            now_ms=1700000000000,
+        )
+    )
+
+    assert [d.action for d in decisions] == expected_actions
+    assert [d.target_size for d in decisions] == expected_sizes
 
 
 def test_bt_runtime_binding_returns_schema_mismatch_error_code() -> None:
