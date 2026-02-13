@@ -14,6 +14,17 @@ from typing import Any
 
 
 REQUIRED_SELECTION_KEYS = ("selection_stage", "deploy_stage", "promotion_stage")
+REQUIRED_SELECTED_KEYS = (
+    "config_id",
+    "pipeline_stage",
+    "sweep_stage",
+    "replay_stage",
+    "validation_gate",
+    "canonical_cpu_verified",
+    "replay_report_path",
+    "replay_equivalence_report_path",
+    "replay_equivalence_status",
+)
 
 REQUIRED_BUNDLE_PATHS = (
     "run_dir",
@@ -68,6 +79,54 @@ def _expect_file_path(payload: dict[str, Any], key: str, *, errors: list[str]) -
         _error(f"evidence_bundle_paths.{key} does not exist: {raw}", errors)
         return None
     return p
+
+
+def _normalise_path(path: str | Path) -> str:
+    try:
+        return str(Path(path).expanduser().resolve())
+    except Exception:
+        return str(path)
+
+
+def _is_nonnegative_int(raw: Any) -> bool:
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return False
+    return raw >= 0
+
+
+def _validate_selected_paths(
+    *,
+    selected: dict[str, Any],
+    run_dir: Path | None,
+    errors: list[str],
+) -> None:
+    selected_paths = (
+        ("replay_report_path", "replay report"),
+        ("replay_equivalence_report_path", "replay equivalence report"),
+    )
+    for key, label in selected_paths:
+        raw = selected.get(key)
+        if not isinstance(raw, str) or not raw.strip():
+            _error(f"selected candidate missing required key: {key}", errors)
+            continue
+        p = Path(raw)
+        if not p.exists():
+            _error(f"selected {label} path does not exist: {raw}", errors)
+            continue
+        if run_dir is not None:
+            try:
+                resolved = p.resolve()
+                run_root = run_dir.resolve()
+                if not (resolved == run_root or resolved.is_relative_to(run_root)):
+                    _error(f"selected {label} path is outside run_dir: {raw}", errors)
+            except Exception:
+                _error(f"selected {label} path failed run_dir ancestry check: {raw}", errors)
+
+    config_path = selected.get("config_path")
+    if isinstance(config_path, str) and config_path.strip():
+        config_path_obj = Path(config_path)
+        if not config_path_obj.exists():
+            _error(f"selected config_path does not exist: {config_path}", errors)
 
 
 def validate_selection_path(path: Path, *, stage: str, allow_legacy: bool = False) -> list[str]:
@@ -128,23 +187,24 @@ def validate_selection_path(path: Path, *, stage: str, allow_legacy: bool = Fals
         if not canonical_cpu_verified:
             _error("selected candidate is not canonical_cpu_verified", errors)
 
-        required_candidate_keys = ("pipeline_stage", "sweep_stage", "replay_stage", "validation_gate", "canonical_cpu_verified")
-        for key in required_candidate_keys:
+        for key in REQUIRED_SELECTED_KEYS:
             if key not in selected:
                 _error(f"selected candidate missing required key: {key}", errors)
+
+        run_dir = bundle_paths.get("run_dir")
+        _validate_selected_paths(selected=selected, run_dir=run_dir, errors=errors)
+
+        replay_count = selected.get("replay_equivalence_count")
+        if not _is_nonnegative_int(replay_count):
+            _error("selected candidate replay_equivalence_count must be a non-negative integer", errors)
+
+        if str(selected.get("config_id", "")).strip() == "":
+            _error("selected candidate config_id is empty", errors)
+
         if str(selected.get("replay_stage", "")).strip() == "":
             _error("selected candidate has empty replay_stage", errors)
 
-        # Proof artefact pointers must be present and exist.
-        for key in ("replay_report_path", "replay_equivalence_report_path"):
-            raw = selected.get(key)
-            if not isinstance(raw, str) or not raw.strip():
-                _error(f"selected candidate missing required key: {key}", errors)
-                continue
-            rep = Path(raw)
-            if not rep.exists():
-                _error(f"selected candidate {key} path does not exist: {raw}", errors)
-
+        # Canonical replay equivalence must report pass for promoted/selected candidates.
         replay_status = str(selected.get("replay_equivalence_status", "")).strip().lower()
         if replay_status != "pass":
             _error(f"selected candidate replay_equivalence_status is not pass: {replay_status!r}", errors)
@@ -168,6 +228,26 @@ def validate_selection_path(path: Path, *, stage: str, allow_legacy: bool = Fals
                         _error(f"selected.config_id {cid!r} not found in run_metadata candidate_configs", errors)
                     elif not _as_bool(row.get("canonical_cpu_verified"), default=True):
                         _error(f"selected.candidate_metadata canonical_cpu_verified is false for config {cid!r}", errors)
+                    else:
+                        # Optional consistency check for canonical proof pointers.
+                        candidate_replay_report = str(row.get("replay_report_path", "")).strip()
+                        candidate_equivalence_report = str(row.get("replay_equivalence_report_path", "")).strip()
+                        if candidate_replay_report:
+                            norm_row = _normalise_path(candidate_replay_report)
+                            norm_sel = _normalise_path(str(selected.get("replay_report_path", "") or ""))
+                            if norm_row != norm_sel:
+                                _error("selected replay_report_path does not match run_metadata candidate metadata", errors)
+                        if candidate_equivalence_report:
+                            norm_row = _normalise_path(candidate_equivalence_report)
+                            norm_sel = _normalise_path(
+                                str(selected.get("replay_equivalence_report_path", "") or "")
+                            )
+                            if norm_row != norm_sel:
+                                _error(
+                                    "selected replay_equivalence_report_path does not match run_metadata candidate metadata",
+                                    errors,
+                                )
+        return errors
 
     return errors
 

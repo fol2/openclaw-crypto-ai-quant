@@ -2067,6 +2067,7 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
             for r in results.iter().take(top_n) {
                 let json = if args.output_mode.is_candidate() {
                     serde_json::json!({
+                        "schema_version": 1,
                         "config_id": r.config_id,
                         "output_mode": args.output_mode.as_str(),
                         "overrides": r.overrides,
@@ -2144,6 +2145,7 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
             for r in &results {
                 let json = if args.output_mode.is_candidate() {
                     serde_json::json!({
+                        "schema_version": 1,
                         "config_id": r.config_id,
                         "output_mode": args.output_mode.as_str(),
                         "overrides": r.overrides,
@@ -2224,12 +2226,13 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
             }
-            let line = if args.output_mode.is_candidate() {
-                serde_json::json!({
-                    "config_id": r.config_id,
-                    "output_mode": args.output_mode.as_str(),
-                    "overrides": obj.get("overrides").cloned().unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
-                    "total_pnl": r.report.total_pnl,
+                let line = if args.output_mode.is_candidate() {
+                    serde_json::json!({
+                        "schema_version": 1,
+                        "config_id": r.config_id,
+                        "output_mode": args.output_mode.as_str(),
+                        "overrides": obj.get("overrides").cloned().unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
+                        "total_pnl": r.report.total_pnl,
                     "total_trades": r.report.total_trades,
                     "profit_factor": r.report.profit_factor,
                     "max_drawdown_pct": r.report.max_drawdown_pct,

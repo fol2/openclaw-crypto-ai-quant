@@ -689,6 +689,31 @@ Each stage entry includes:
 - `selected.canonical_cpu_verified`
 - `selected.replay_equivalence_status`
 
+### Hard gate acceptance (recommended before promotion)
+
+Use this checklist before moving from `smoke` to `real` and before approving any real deployment:
+
+- `selection.json` must pass:
+
+  ```bash
+  python3 scripts/validate_factory_selection_gate.py \
+    --selection-json artifacts/<run_id>/reports/selection.json \
+    --stage smoke
+  ```
+
+- `selection.json` must contain:
+  - `evidence_bundle_paths.run_metadata_json` (existing and readable)
+  - `evidence_bundle_paths.report_json`
+  - `evidence_bundle_paths.selection_json`
+  - `evidence_bundle_paths.selection_md`
+  - `selected.canonical_cpu_verified == true`
+  - `selected.pipeline_stage`, `selected.sweep_stage`, `selected.replay_stage`, `selected.validation_gate`
+  - `selected.replay_equivalence_report_path` exists and path exists
+  - `selected.replay_report_path` exists and path exists
+  - `selected.replay_equivalence_count` is an integer >= 0
+
+- `run_metadata.json` must contain the same `selected.config_id` row, and replay proof paths must match when present.
+
 Retain this manifest with the promotion ticket.
 
 ---

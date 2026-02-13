@@ -41,6 +41,7 @@ def _base_payload(tmp_path: Path, *, stage: str = "smoke", config_id: str = "cfg
         "replay_report_path": str(run_dir / "replay.json"),
         "replay_equivalence_report_path": str(run_dir / "replay_equivalence.json"),
         "replay_equivalence_status": "pass",
+        "replay_equivalence_count": 0,
     }
     _write_json(run_dir / "replay.json", {"decision_diagnostics": []})
     _write_json(run_dir / "replay_equivalence.json", {"ok": True})
@@ -84,11 +85,45 @@ def test_validate_selection_path_rejects_non_verified_candidate(tmp_path: Path) 
     payload["deploy_stage"] = "pending"
     payload["promotion_stage"] = "pending"
     payload["selected"]["replay_equivalence_status"] = "fail"
+    payload["selected"]["replay_equivalence_count"] = 2
+    payload["selected"]["replay_equivalence_diffs"] = ["a", "b"]
     _write_json(tmp_path / "selection.json", payload)
 
     errors = validate_selection_path(tmp_path / "selection.json", stage="real")
     assert any("not canonical_cpu_verified" in err for err in errors)
     assert any("replay_equivalence_status is not pass" in err for err in errors)
+
+
+def test_validate_selection_path_rejects_missing_replay_proof_fields(tmp_path: Path) -> None:
+    payload = _base_payload(tmp_path, stage="smoke")
+    del payload["selected"]["replay_equivalence_report_path"]
+    _write_json(tmp_path / "selection.json", payload)
+
+    errors = validate_selection_path(tmp_path / "selection.json", stage="smoke")
+    assert any("selected candidate missing required key: replay_equivalence_report_path" in err for err in errors)
+
+
+def test_validate_selection_path_rejects_report_path_mismatch_with_run_metadata(tmp_path: Path) -> None:
+    payload = _base_payload(tmp_path, stage="smoke")
+    run_dir = Path(payload["evidence_bundle_paths"]["run_dir"])  # type: ignore[assignment]
+    run_metadata = {
+        "candidate_configs": [
+            {
+                "config_id": payload["selected"]["config_id"],
+                "canonical_cpu_verified": True,
+                "replay_report_path": str(run_dir / "replay_candidate_a.json"),
+                "replay_equivalence_report_path": str(run_dir / "replay_equivalence_candidate_a.json"),
+            }
+        ]
+    }
+    _write_json(run_dir / "run_metadata.json", run_metadata)
+    _write_json(run_dir / "replay_candidate_a.json", {"decision_diagnostics": []})
+    _write_json(run_dir / "replay_equivalence_candidate_a.json", {"ok": True})
+
+    _write_json(tmp_path / "selection.json", payload)
+    errors = validate_selection_path(tmp_path / "selection.json", stage="smoke")
+    assert any("selected replay_report_path does not match run_metadata candidate metadata" in err for err in errors)
+    assert any("selected replay_equivalence_report_path does not match run_metadata candidate metadata" in err for err in errors)
 
 
 def test_validate_selection_path_allows_legacy_mode(tmp_path: Path) -> None:
