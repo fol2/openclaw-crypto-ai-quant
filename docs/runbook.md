@@ -612,6 +612,80 @@ uv run python tools/export_csv.py
 
 ---
 
+## 7. Factory Stage Gate (dry -> smoke -> real)
+
+Use when: promoting configuration candidates from nightly factory output.
+
+Use this section for all automated rollouts. Do not deploy to live without a successful gate sequence.
+
+### Precondition
+
+- Keep the strategy config under version control.
+- Ensure `factory_cycle` can write selection/evidence files to `artifacts/`.
+- Confirm the following keys are present in `reports/selection.json` after each stage:
+  - `selection_stage`
+  - `deploy_stage`
+  - `promotion_stage`
+- Confirm candidate evidence is attached in:
+  - `candidate_configs` inside `run_metadata.json`
+  - `items` inside `reports/report.json`
+  - `evidence_bundle_paths` in `selection.json`
+
+### Stage command
+
+```bash
+./scripts/run_factory_stage_gate.sh \
+  --run-prefix v8_factory_gate \
+  --dry-profile smoke \
+  --smoke-profile smoke \
+  --real-profile daily \
+  --config config/strategy_overrides.yaml \
+  --artifacts-dir artifacts
+```
+
+### Stage definitions
+
+1. Dry stage (`dry`)
+   - Runs `factory_cycle` with `--no-deploy`.
+   - Expected:
+     - `selection_stage == "selected"`
+     - `deploy_stage == "no_deploy"` (or `"skipped"`)
+     - `promotion_stage == "skipped"`
+2. Smoke stage (`smoke`)
+   - Runs `factory_cycle` with `--no-deploy`.
+   - Expected:
+     - `selection_stage == "selected"`
+     - `deploy_stage == "no_deploy"` (or `"skipped"`)
+     - `promotion_stage == "skipped"`
+3. Real stage (`real`)
+   - Runs `factory_cycle` without `--no-deploy` unless deployment is intentionally blocked.
+   - If deployment is intentionally blocked, behaviour must match dry/smoke.
+   - Expected:
+     - `selection_stage == "selected"`
+     - `deploy_stage != "pending"`
+     - `promotion_stage != "pending"`
+
+### Evidence bundle
+
+`run_factory_stage_gate.sh` writes a consolidated manifest:
+
+```text
+artifacts/<run-prefix>_<timestamp>.evidence.json
+```
+
+Each stage entry includes:
+
+- `run_id`
+- `stage`
+- `selection_stage`
+- `deploy_stage`
+- `promotion_stage`
+- `evidence_bundle_paths`
+
+Retain this manifest with the promotion ticket.
+
+---
+
 ## Quick Reference: Environment Variables (Risk)
 
 | Variable | Default | Description |

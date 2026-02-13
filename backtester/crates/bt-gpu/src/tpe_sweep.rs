@@ -419,6 +419,7 @@ pub fn run_tpe_sweep(
 
             let gpu_sweep_result = GpuSweepResult {
                 config_id,
+                output_mode: "gpu_tpe".to_string(),
                 total_pnl: pnl,
                 final_balance: result.final_balance as f64,
                 total_trades: result.total_trades,

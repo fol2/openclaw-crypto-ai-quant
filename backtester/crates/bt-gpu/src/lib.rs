@@ -338,6 +338,7 @@ pub fn run_gpu_sweep(
 
             all_results.push(GpuSweepResult {
                 config_id,
+                output_mode: "gpu".to_string(),
                 total_pnl: result.total_pnl as f64,
                 final_balance: result.final_balance as f64,
                 total_trades: result.total_trades,
