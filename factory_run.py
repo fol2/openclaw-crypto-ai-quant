@@ -58,6 +58,19 @@ def _env_bool(env_name: str, default: bool = False) -> bool:
     return raw in {"1", "true", "yes", "y", "on"}
 
 
+def _env_bool_optional(env_name: str) -> bool | None:
+    if env_name not in os.environ:
+        return None
+    raw = str(os.getenv(env_name, "")).strip().lower()
+    if not raw:
+        return None
+    if raw in {"1", "true", "yes", "y", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise SystemExit(f"{env_name} must be a boolean when set")
+
+
 def _env_int(env_name: str, *, default: int | None = None) -> int | None:
     raw = str(os.getenv(env_name, "") or "").strip()
     if not raw:
@@ -66,6 +79,54 @@ def _env_int(env_name: str, *, default: int | None = None) -> int | None:
         return int(raw)
     except Exception:
         raise SystemExit(f"{env_name} must be an integer when set")
+
+
+def _env_int_optional(env_name: str) -> int | None:
+    if env_name not in os.environ:
+        return None
+    raw = str(os.getenv(env_name, "")).strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except Exception:
+        raise SystemExit(f"{env_name} must be an integer when set")
+
+
+def _env_float_optional(env_name: str) -> float | None:
+    if env_name not in os.environ:
+        return None
+    raw = str(os.getenv(env_name, "")).strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except Exception:
+        raise SystemExit(f"{env_name} must be a float when set")
+
+
+_REPLAY_EQUIVALENCE_MODES = ("live", "paper", "backtest")
+
+
+def _normalise_replay_equivalence_mode(raw: str) -> str:
+    mode = str(raw or "").strip().lower()
+    if not mode:
+        return "backtest"
+    if mode == "dry_live":
+        return "live"
+    if mode in _REPLAY_EQUIVALENCE_MODES:
+        return mode
+    return "backtest"
+
+
+def _replay_equivalence_mode() -> str:
+    raw_mode = os.getenv("AI_QUANT_REPLAY_EQUIVALENCE_MODE", "").strip()
+    if raw_mode:
+        return _normalise_replay_equivalence_mode(raw_mode)
+    raw_mode = os.getenv("AI_QUANT_MODE", "").strip()
+    if raw_mode:
+        return _normalise_replay_equivalence_mode(raw_mode)
+    return "backtest"
 
 
 def _resolve_path_for_backtester(path_str: str | None) -> str | None:
@@ -845,10 +906,13 @@ def _attach_replay_metadata(
         entry["config_path"] = config_path
         for proof_field in [
             "replay_equivalence_status",
+            "replay_equivalence_mode",
+            "replay_equivalence_strict",
             "replay_equivalence_count",
             "replay_equivalence_error",
             "replay_equivalence_report_path",
             "replay_equivalence_diffs",
+            "replay_equivalence_failure_code",
         ]:
             if proof_field in summary:
                 entry[proof_field] = summary[proof_field]
@@ -856,8 +920,17 @@ def _attach_replay_metadata(
         summary.update(stage_fields)
 
 
-def _replay_equivalence_baseline_path() -> Path | None:
-    raw = os.getenv("AI_QUANT_REPLAY_EQUIVALENCE_BASELINE", "").strip()
+def _replay_equivalence_env_var(env_name: str, mode: str) -> str | None:
+    mode = _normalise_replay_equivalence_mode(mode)
+    raw = os.getenv(f"AI_QUANT_REPLAY_EQUIVALENCE_{mode.upper()}_{env_name}", "").strip()
+    if raw:
+        return raw
+    raw = os.getenv(f"AI_QUANT_REPLAY_EQUIVALENCE_{env_name}", "").strip()
+    return raw or None
+
+
+def _replay_equivalence_baseline_path(*, mode: str) -> Path | None:
+    raw = _replay_equivalence_env_var("BASELINE", mode=mode)
     if not raw:
         return None
 
@@ -865,16 +938,36 @@ def _replay_equivalence_baseline_path() -> Path | None:
     return Path(resolved)
 
 
-def _replay_equivalence_strict() -> bool:
+def _replay_equivalence_strict(*, mode: str) -> bool:
+    mode = _normalise_replay_equivalence_mode(mode)
+    scoped = _env_bool_optional(f"AI_QUANT_REPLAY_EQUIVALENCE_{mode.upper()}_STRICT")
+    if scoped is not None:
+        return scoped
     return _env_bool("AI_QUANT_REPLAY_EQUIVALENCE_STRICT", False)
 
 
-def _replay_equivalence_tolerance() -> float:
+def _replay_equivalence_tolerance(*, mode: str) -> float:
+    mode = _normalise_replay_equivalence_mode(mode)
+    scoped = _env_float_optional(f"AI_QUANT_REPLAY_EQUIVALENCE_{mode.upper()}_TOLERANCE")
+    if scoped is not None:
+        return float(scoped)
     return _env_float("AI_QUANT_REPLAY_EQUIVALENCE_TOLERANCE", default=1e-12)
 
 
-def _replay_equivalence_max_diffs() -> int:
+def _replay_equivalence_max_diffs(*, mode: str) -> int:
+    mode = _normalise_replay_equivalence_mode(mode)
+    scoped = _env_int_optional(f"AI_QUANT_REPLAY_EQUIVALENCE_{mode.upper()}_MAX_DIFFS")
+    if scoped is not None:
+        return int(scoped or 25)
     return int(_env_int("AI_QUANT_REPLAY_EQUIVALENCE_MAX_DIFFS", default=25) or 25)
+
+
+def _replay_equivalence_failure_code(status: str) -> str:
+    if status == "pass":
+        return ""
+    if status == "fail":
+        return "mismatch"
+    return status
 
 
 def _validate_candidate_schema_row(row: Any) -> tuple[bool, list[str]]:
@@ -954,60 +1047,72 @@ def _run_replay_equivalence_check(
     right_report: Path,
     summary: dict[str, Any],
 ) -> bool:
-    baseline = _replay_equivalence_baseline_path()
+    mode = _replay_equivalence_mode()
+    summary["replay_equivalence_mode"] = mode
+    strict = _replay_equivalence_strict(mode=mode)
+    summary["replay_equivalence_strict"] = strict
+
+    baseline = _replay_equivalence_baseline_path(mode=mode)
     if baseline is None:
         summary["replay_equivalence_status"] = "not_run"
+        summary["replay_equivalence_failure_code"] = _replay_equivalence_failure_code("not_run")
         summary["replay_equivalence_error"] = "AI_QUANT_REPLAY_EQUIVALENCE_BASELINE not configured"
         summary["replay_equivalence_diffs"] = []
         summary["replay_equivalence_count"] = 0
-        return not _replay_equivalence_strict()
+        return not strict
 
     if not baseline.exists():
         summary["replay_equivalence_status"] = "missing_baseline"
+        summary["replay_equivalence_failure_code"] = _replay_equivalence_failure_code("missing_baseline")
         summary["replay_equivalence_error"] = f"missing baseline report: {baseline}"
         summary["replay_equivalence_diffs"] = []
         summary["replay_equivalence_count"] = 0
-        return not _replay_equivalence_strict()
+        return not strict
 
     try:
         from tools import replay_equivalence
     except Exception as exc:
         summary["replay_equivalence_status"] = "tool_unavailable"
+        summary["replay_equivalence_failure_code"] = _replay_equivalence_failure_code("tool_unavailable")
         summary["replay_equivalence_error"] = f"failed to import comparator: {type(exc).__name__}: {exc}"
         summary["replay_equivalence_diffs"] = []
         summary["replay_equivalence_count"] = 0
-        return not _replay_equivalence_strict()
+        return not strict
 
     try:
         ok, diffs, rep = replay_equivalence.compare_files(
             str(baseline),
             str(right_report),
-            tolerance=_replay_equivalence_tolerance(),
-            max_diffs=_replay_equivalence_max_diffs(),
+            tolerance=_replay_equivalence_tolerance(mode=mode),
+            max_diffs=_replay_equivalence_max_diffs(mode=mode),
         )
     except Exception as exc:
         summary["replay_equivalence_status"] = "comparison_error"
+        summary["replay_equivalence_failure_code"] = _replay_equivalence_failure_code("comparison_error")
         summary["replay_equivalence_error"] = f"{type(exc).__name__}: {exc}"
         summary["replay_equivalence_diffs"] = []
         summary["replay_equivalence_count"] = 0
-        return not _replay_equivalence_strict()
+        return not strict
 
     report_path = right_report.with_name(f"{right_report.stem}.replay_equivalence.json")
     report_payload = {
-        "left_report": str(_replay_equivalence_baseline_path() or right_report),
+        "left_report": str(baseline or right_report),
         "right_report": str(right_report),
         "ok": ok,
         "diffs": diffs,
         "summary": rep,
+        "mode": mode,
+        "strict": strict,
     }
     report_path.write_text(json.dumps(report_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     summary["replay_equivalence_report_path"] = str(report_path)
     summary["replay_equivalence_status"] = "pass" if ok else "fail"
+    summary["replay_equivalence_failure_code"] = _replay_equivalence_failure_code(summary["replay_equivalence_status"])
     summary["replay_equivalence_diffs"] = diffs
     summary["replay_equivalence_count"] = len(diffs)
 
-    return ok or not _replay_equivalence_strict()
+    return ok or not strict
 
 
 def _render_ranked_report_md(items: list[dict[str, Any]]) -> str:
