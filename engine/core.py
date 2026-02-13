@@ -4,6 +4,7 @@ import os
 import json
 import time
 import traceback
+import importlib
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Protocol
 
@@ -34,8 +35,8 @@ def _interval_to_ms(interval: str) -> int:
             return int(float(s[:-1]) * 24.0 * 60.0 * 60.0 * 1000.0)
         # Fallback: assume seconds.
         return int(float(s) * 1000.0)
-        except Exception:
-            return 0
+    except Exception:
+        return 0
 
 
 @dataclass
@@ -182,6 +183,252 @@ class KernelDecisionFileProvider:
             yield dec
 
 
+def _load_kernel_runtime_module(module_name: str = "bt_runtime"):
+    """Import and return the Rust runtime binding module."""
+    return importlib.import_module(module_name)
+
+
+def _normalise_kernel_signal(raw_signal: Any) -> str:
+    sig = str(raw_signal or "").strip().upper()
+    if sig == "LONG":
+        return "BUY"
+    if sig == "SHORT":
+        return "SELL"
+    return sig
+
+
+def _normalise_kernel_side(raw_side: Any) -> str:
+    side = str(raw_side or "").strip().lower()
+    if side == "long":
+        return "BUY"
+    if side == "short":
+        return "SELL"
+    return str(raw_side or "NEUTRAL").strip().upper()
+
+
+def _normalise_kernel_price(raw_price: Any, default: float = 0.0) -> float:
+    try:
+        price = float(raw_price)
+        if price > 0.0:
+            return price
+    except Exception:
+        pass
+    return default
+
+
+def _normalise_kernel_notional(raw_notional: Any, raw_size: Any, price: float) -> float:
+    try:
+        raw_value = float(raw_notional)
+        if raw_value > 0.0:
+            return raw_value
+    except Exception:
+        pass
+    try:
+        size_value = float(raw_size)
+        if size_value > 0.0 and price > 0.0:
+            return size_value * price
+    except Exception:
+        pass
+    return 0.0
+
+
+def _normalise_kernel_event_id(raw_id: Any, fallback: int) -> int:
+    try:
+        parsed = int(raw_id)
+        if parsed >= 0:
+            return parsed
+    except Exception:
+        pass
+    return fallback
+
+
+class KernelDecisionRustBindingProvider:
+    """Call the Rust decision kernel via the `bt_runtime` extension."""
+
+    def __init__(self, module_name: str = "bt_runtime", path: str | None = None) -> None:
+        self._runtime = _load_kernel_runtime_module(module_name)
+        self._path = str(path).strip() if path else None
+        self._state_json = self._runtime.default_kernel_state_json(10_000.0, now_ms())
+        self._params_json = self._runtime.default_kernel_params_json()
+        self._event_id = 1
+
+    def _load_raw_events(self) -> list[dict[str, Any]]:
+        if not self._path:
+            return []
+        try:
+            with open(self._path, "r", encoding="utf-8") as fh:
+                raw = json.load(fh)
+        except FileNotFoundError:
+            return []
+        except Exception:
+            return []
+
+        if isinstance(raw, dict):
+            if isinstance(raw.get("events"), list):
+                return [item for item in raw["events"] if isinstance(item, Mapping)]
+            if "schema_version" in raw and "symbol" in raw:
+                return [raw]
+            return []
+        if isinstance(raw, list):
+            return [item for item in raw if isinstance(item, Mapping)]
+        return []
+
+    def _build_market_event(self, raw: Mapping[str, Any], *, now_ms_value: int) -> str | None:
+        symbol = str(raw.get("symbol", "")).strip().upper()
+        if not symbol:
+            return None
+
+        signal = _normalise_kernel_signal(raw.get("signal") or raw.get("action"))
+        if signal not in {"BUY", "SELL", "NEUTRAL"}:
+            return None
+
+        price = _normalise_kernel_price(
+            raw.get("price"),
+            default=0.0,
+        )
+        if price <= 0.0:
+            return None
+
+        notional_hint = _normalise_kernel_notional(
+            raw.get("notional_hint_usd"),
+            raw.get("target_size"),
+            price,
+        )
+
+        timestamp_ms = raw.get("timestamp_ms")
+        try:
+            timestamp_ms = int(timestamp_ms)
+            if timestamp_ms <= 0:
+                timestamp_ms = now_ms_value
+        except Exception:
+            timestamp_ms = now_ms_value
+
+        event_id = _normalise_kernel_event_id(raw.get("event_id"), self._event_id)
+        self._event_id = max(self._event_id, event_id + 1)
+
+        payload = {
+            "schema_version": 1,
+            "event_id": event_id,
+            "timestamp_ms": timestamp_ms,
+            "symbol": symbol,
+            "signal": signal.lower(),
+            "price": price,
+            "notional_hint_usd": notional_hint if notional_hint > 0.0 else None,
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
+    def _intent_to_decision(
+        self,
+        decision: Mapping[str, Any],
+        event_raw: Mapping[str, Any],
+    ) -> KernelDecision | None:
+        symbol = str(decision.get("symbol", "")).strip().upper()
+        if not symbol:
+            return None
+
+        kind = str(decision.get("kind", "")).strip().lower()
+        if kind not in {"open", "add", "close", "hold", "reverse"}:
+            return None
+
+        side = _normalise_kernel_side(decision.get("side"))
+        signal = side if side in {"BUY", "SELL"} else str(event_raw.get("signal", "NEUTRAL")).strip().upper()
+        if signal not in {"BUY", "SELL", "NEUTRAL"}:
+            return None
+
+        action = {
+            "open": "OPEN",
+            "add": "ADD",
+            "close": "CLOSE",
+            "hold": "",
+            "reverse": "OPEN",
+        }.get(kind, "")
+        if not action:
+            return None
+
+        now_series = event_raw.get("now_series")
+        if not isinstance(now_series, dict):
+            now_series = dict(event_raw.get("now_series") or {})
+            if not isinstance(now_series, dict):
+                now_series = {}
+
+        confidence = str(event_raw.get("confidence", "N/A"))
+
+        quantity = float(decision.get("quantity", 0.0) or 0.0)
+        try:
+            price = float(decision.get("price", 0.0) or 0.0)
+        except Exception:
+            price = 0.0
+        target_size = None
+        try:
+            if price > 0.0:
+                target_size = quantity
+            else:
+                target_size = None
+        except Exception:
+            target_size = None
+
+        return KernelDecision(
+            symbol=symbol,
+            action=action,
+            signal=signal,
+            confidence=confidence,
+            score=0.0,
+            now_series=now_series,
+            target_size=target_size,
+            entry_key=int(decision.get("intent_id", 0)) or None,
+            reason=f"kernel:{kind}",
+            open_pos_count=0,
+        )
+
+    def get_decisions(
+        self,
+        *,
+        symbols: list[str],
+        watchlist: list[str],
+        open_symbols: list[str],
+        market: Any,
+        interval: str,
+        lookback_bars: int,
+        mode: str,
+        not_ready_symbols: set[str],
+        strategy: Any,
+        now_ms: int,
+    ) -> Iterable[KernelDecision]:
+        del symbols, watchlist, open_symbols, market, interval, lookback_bars, mode, not_ready_symbols, strategy
+        raw_events = self._load_raw_events()
+        if not raw_events:
+            return []
+
+        decisions: list[KernelDecision] = []
+        state_json = self._state_json
+
+        for raw in raw_events:
+            event_json = self._build_market_event(raw, now_ms_value=int(now_ms or 0))
+            if event_json is None:
+                continue
+            response = self._runtime.step_decision(state_json, event_json, self._params_json)
+            try:
+                envelope = json.loads(response)
+            except Exception:
+                continue
+            if not bool(envelope.get("ok", False)):
+                continue
+            decision_payload = envelope.get("decision")
+            if not isinstance(decision_payload, dict):
+                continue
+
+            state_json = json.dumps(decision_payload.get("state"), ensure_ascii=False)
+            self._state_json = state_json
+            for raw_intent in decision_payload.get("intents", []):
+                if not isinstance(raw_intent, Mapping):
+                    continue
+                dec = self._intent_to_decision(raw_intent, raw)
+                if dec is not None:
+                    decisions.append(dec)
+
+        return decisions
+
+
 class NoopDecisionProvider:
     def get_decisions(
         self,
@@ -203,6 +450,11 @@ class NoopDecisionProvider:
 
 def _build_default_decision_provider() -> DecisionProvider:
     path = os.getenv("AI_QUANT_KERNEL_DECISION_FILE")
+    provider_mode = str(os.getenv("AI_QUANT_KERNEL_DECISION_PROVIDER", "") or "").strip().lower()
+    if provider_mode == "rust":
+        return KernelDecisionRustBindingProvider(path=path)
+    if provider_mode == "none":
+        return NoopDecisionProvider()
     if path:
         return KernelDecisionFileProvider(path)
     return NoopDecisionProvider()

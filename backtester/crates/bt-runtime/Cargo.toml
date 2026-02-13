@@ -1,0 +1,13 @@
+[package]
+name = "bt-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "bt_runtime"
+crate-type = ["cdylib"]
+
+[dependencies]
+bt-core = { path = "../bt-core" }
+pyo3 = { version = "0.22", features = ["extension-module"] }
+serde_json = { workspace = true }
