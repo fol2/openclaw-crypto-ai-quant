@@ -37,6 +37,8 @@ def _base_payload(tmp_path: Path, *, stage: str = "smoke", config_id: str = "cfg
         "sweep_stage": "gpu",
         "replay_stage": "cpu_replay",
         "validation_gate": "replay_only",
+        "candidate_mode": True,
+        "schema_version": 1,
         "canonical_cpu_verified": True,
         "replay_report_path": str(run_dir / "replay.json"),
         "replay_equivalence_report_path": str(run_dir / "replay_equivalence.json"),
@@ -92,6 +94,17 @@ def test_validate_selection_path_rejects_non_verified_candidate(tmp_path: Path) 
     errors = validate_selection_path(tmp_path / "selection.json", stage="real")
     assert any("not canonical_cpu_verified" in err for err in errors)
     assert any("replay_equivalence_status is not pass" in err for err in errors)
+
+
+def test_validate_selection_path_rejects_legacy_candidate_mode(tmp_path: Path) -> None:
+    payload = _base_payload(tmp_path, stage="real")
+    payload["selected"]["candidate_mode"] = False
+    payload["deploy_stage"] = "pending"
+    payload["promotion_stage"] = "pending"
+    _write_json(tmp_path / "selection.json", payload)
+
+    errors = validate_selection_path(tmp_path / "selection.json", stage="real")
+    assert any("selected candidate is not candidate_mode=true" in err for err in errors)
 
 
 def test_validate_selection_path_rejects_missing_replay_proof_fields(tmp_path: Path) -> None:

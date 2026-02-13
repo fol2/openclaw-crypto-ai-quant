@@ -877,6 +877,7 @@ def _stage_defaults_for_candidate(*, args: Any) -> dict[str, Any]:
         "validation_gate": _infer_validation_gate_from_args(args),
         "canonical_cpu_verified": False,
         "candidate_mode": True,
+        "schema_version": 1,
     }
 
 
@@ -889,6 +890,13 @@ def _attach_replay_metadata(
 ) -> None:
     verified = str(summary.get("replay_equivalence_status", "")).strip().lower() == "pass"
     candidate_mode = bool(entry.get("candidate_mode", False)) if isinstance(entry, dict) else False
+    schema_version = 1
+    if isinstance(entry, dict) and "schema_version" in entry:
+        try:
+            raw_schema_version = entry.get("schema_version")
+            schema_version = int(raw_schema_version) if not isinstance(raw_schema_version, bool) else raw_schema_version
+        except Exception:
+            schema_version = raw_schema_version
     stage_fields = {
         "pipeline_stage": "candidate_validation",
         "sweep_stage": _infer_sweep_stage_from_args(args),
@@ -896,6 +904,7 @@ def _attach_replay_metadata(
         "validation_gate": _infer_validation_gate_from_args(args),
         "canonical_cpu_verified": bool(verified),
         "candidate_mode": candidate_mode,
+        "schema_version": schema_version,
     }
     if entry is not None:
         for k, v in stage_fields.items():
