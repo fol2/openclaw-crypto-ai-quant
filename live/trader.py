@@ -788,7 +788,18 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             return False
         return live_entries_enabled()
 
-    def add_to_position(self, symbol, price, timestamp, confidence, *, atr=0.0, indicators=None) -> bool:
+    def add_to_position(
+        self,
+        symbol,
+        price,
+        timestamp,
+        confidence,
+        *,
+        atr=0.0,
+        indicators=None,
+        target_size: float | None = None,
+        reason: str | None = None,
+    ) -> bool:
         sym = str(symbol or "").strip().upper()
         if sym not in (self.positions or {}):
             return False
@@ -950,7 +961,15 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         if max_notional > 0 and max_notional < min_notional:
             return False
 
+        try:
+            explicit_notional = float(target_size) if target_size is not None else None
+        except Exception:
+            explicit_notional = None
+
         desired_notional = margin_target * leverage
+        if explicit_notional is not None and explicit_notional > 0:
+            desired_notional = explicit_notional
+
         # Boost small adds up to the minimum notional (if within max_notional).
         if desired_notional < min_notional:
             desired_notional = min_notional
@@ -1013,6 +1032,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             except Exception:
                 audit_for_oms = None
 
+        _add_reason = str(reason or "Pyramid Add")
         oms = getattr(self, "oms", None)
         oms_intent = None
         order_meta = {
@@ -1041,7 +1061,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     requested_notional=float(notional),
                     leverage=float(leverage),
                     decision_ts=timestamp,
-                    reason="Pyramid Add",
+                    reason=_add_reason,
                     confidence=str(confidence or ""),
                     entry_atr=float(current_atr or 0.0),
                     meta={
@@ -1356,7 +1376,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 "confidence": confidence,
                 "entry_atr": current_atr,
                 "leverage": leverage,
-                "reason": "Pyramid Add",
+                "reason": _add_reason,
                 "breadth_pct": _breadth_pct_add,
                 "meta": {
                     "audit": audit if isinstance(audit, dict) else None,
@@ -1800,7 +1820,21 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             return
         self.reduce_position(sym, sz, price, timestamp, reason, confidence="N/A", meta=meta)
 
-    def execute_trade(self, symbol, signal, price, timestamp, confidence, atr=0.0, indicators=None):
+    def execute_trade(
+        self,
+        symbol,
+        signal,
+        price,
+        timestamp,
+        confidence,
+        atr=0.0,
+        indicators=None,
+        *,
+        action: str | None = None,
+        target_size: float | None = None,
+        reason: str | None = None,
+        _from_kernel_open: bool = False,
+    ):
         sym = str(symbol or "").strip().upper()
         if not sym:
             return
@@ -1813,15 +1847,77 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 audit = None
 
         # Persist the strategy decision for live monitoring (signals are not orders).
-        # This keeps the monitor UI "SIGNAL" column populated for live mode, even when
-        # execution is handled via OMS.
-        log_live_signal(
-            symbol=sym,
-            signal=str(signal or "").strip().upper(),
-            confidence=confidence,
-            price=price,
-            indicators=indicators,
-        )
+        # This keeps the monitor UI "SIGNAL" column populated for live mode.
+        # When kernel OPEN actions recurse into legacy signal routing, avoid duplicate logs.
+        if not _from_kernel_open:
+            log_live_signal(
+                symbol=sym,
+                signal=str(signal or "").strip().upper(),
+                confidence=confidence,
+                price=price,
+                indicators=indicators,
+            )
+
+        act = str(action or "").strip().upper()
+        if act in {"OPEN", "ADD", "CLOSE", "REDUCE"}:
+            if act == "OPEN":
+                if sym in (self.positions or {}):
+                    # Do not attempt to add in response to a kernel OPEN action.
+                    # OPEN should only route to open flow when no position already exists.
+                    return
+                return self.execute_trade(
+                    sym,
+                    signal,
+                    price,
+                    timestamp,
+                    confidence,
+                    atr=atr,
+                    indicators=indicators,
+                    target_size=target_size,
+                    reason=reason,
+                    _from_kernel_open=True,
+                )
+            elif act == "ADD":
+                return self.add_to_position(
+                    sym,
+                    price,
+                    timestamp,
+                    confidence,
+                    atr=atr,
+                    indicators=indicators,
+                    target_size=target_size,
+                    reason=reason,
+                )
+            elif act == "CLOSE":
+                return self.close_position(
+                    sym,
+                    price,
+                    timestamp,
+                    reason=str(reason or "Kernel CLOSE"),
+                )
+            elif act == "REDUCE":
+                if sym not in (self.positions or {}):
+                    return
+                if target_size is not None:
+                    try:
+                        reduce_size = float(target_size)
+                    except Exception:
+                        reduce_size = None
+                else:
+                    reduce_size = None
+                if reduce_size is None:
+                    try:
+                        reduce_size = float((self.positions or {}).get(sym, {}).get("size") or 0.0)
+                    except Exception:
+                        reduce_size = 0.0
+                return self.reduce_position(
+                    sym,
+                    reduce_size,
+                    price,
+                    timestamp,
+                    reason=str(reason or "Kernel REDUCE"),
+                    confidence=confidence,
+                )
 
         pos = (self.positions or {}).get(sym)
         if pos:
@@ -2136,6 +2232,12 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             return
 
         desired_notional = float(sizing.desired_notional_usd)
+        try:
+            explicit_notional = float(target_size) if target_size is not None else None
+        except Exception:
+            explicit_notional = None
+        if explicit_notional is not None and explicit_notional > 0:
+            desired_notional = explicit_notional
         if desired_notional < min_notional:
             desired_notional = min_notional
         desired_notional = min(desired_notional, max_notional)
