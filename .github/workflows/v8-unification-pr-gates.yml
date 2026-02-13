@@ -33,7 +33,11 @@ jobs:
               - 'tests/test_replay_equivalence.py'
               - 'tests/test_factory_replay_harness.py'
               - 'tests/test_kernel_decision_routing.py'
+              - 'tests/test_factory_sweep_candidate_schema.py'
+              - 'tests/test_factory_run_stage_metadata.py'
+              - 'tests/test_validate_factory_selection_gate.py'
               - 'docs/v8/gpu_acceleration_boundary.md'
+              - 'docs/runbook.md'
               - '.github/workflows/v8-unification-pr-gates.yml'
 
       - name: Set up Python
@@ -58,7 +62,10 @@ jobs:
           uv run pytest tests/test_kernel_decision_routing.py \
             tests/test_replay_equivalence.py \
             tests/test_factory_replay_harness.py \
-            tests/test_gpu_candidate_schema.py
+            tests/test_factory_sweep_candidate_schema.py \
+            tests/test_gpu_candidate_schema.py \
+            tests/test_factory_run_stage_metadata.py \
+            tests/test_validate_factory_selection_gate.py
 
       - name: Skip when unification files are unchanged
         if: steps.changes.outputs.unification != 'true'

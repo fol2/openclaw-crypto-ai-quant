@@ -121,6 +121,28 @@ class FakeTrader:
         return None
 
 
+class LegacyKernelTrader:
+    def __init__(self, has_position: bool = False) -> None:
+        self.positions: dict[str, dict[str, object]] = {"ETH": {"type": "LONG", "size": 1.0}} if has_position else {}
+        self.execute_trade_calls: int = 0
+        self.add_calls: int = 0
+        self.close_calls: int = 0
+        self.reduce_calls: int = 0
+
+    def execute_trade(self, symbol, signal, price, timestamp, confidence, atr=0.0, indicators=None, *args, **kwargs) -> None:
+        self.execute_trade_calls += 1
+        raise TypeError("legacy action signature")
+
+    def add_to_position(self, *args, **kwargs) -> None:
+        self.add_calls += 1
+
+    def close_position(self, *args, **kwargs) -> None:
+        self.close_calls += 1
+
+    def reduce_position(self, *args, **kwargs) -> None:
+        self.reduce_calls += 1
+
+
 def test_unified_engine_routes_kernel_decisions_to_trader(monkeypatch) -> None:
     monkeypatch.setattr("engine.core.time.sleep", lambda *_: (_ for _ in ()).throw(SystemExit))
     monkeypatch.setattr("strategy.mei_alpha_v1.get_strategy_config", lambda _symbol: {})
@@ -168,6 +190,43 @@ def test_unified_engine_routes_kernel_decisions_to_trader(monkeypatch) -> None:
 
     assert [c[0] for c in trader.calls] == ["OPEN", "REDUCE"]
     assert [c[2] for c in trader.calls] == [12.5, 0.75]
+
+
+def test_unified_engine_explicit_action_fallback_for_legacy_execute_trade(monkeypatch) -> None:
+    monkeypatch.setattr("engine.core.time.sleep", lambda *_: (_ for _ in ()).throw(SystemExit))
+    monkeypatch.setattr("strategy.mei_alpha_v1.get_strategy_config", lambda _symbol: {})
+
+    strategy = FakeStrategyManager()
+    market = FakeMarket()
+    trader = LegacyKernelTrader()
+    decisions = [
+        KernelDecision.from_raw(
+            {"symbol": "ETH", "action": "ADD", "signal": "BUY", "confidence": "high", "score": 1.0, "target_size": 1.0}
+        ),
+        KernelDecision.from_raw(
+            {"symbol": "ETH", "action": "OPEN", "signal": "BUY", "confidence": "high", "score": 1.0, "target_size": 1.0}
+        ),
+    ]
+    provider = FakeDecisionProvider([d for d in decisions if d is not None])
+    engine = UnifiedEngine(
+        trader=trader,
+        strategy=strategy,
+        market=market,
+        interval="1m",
+        lookback_bars=50,
+        mode="paper",
+        mode_plugin=None,
+        decision_provider=provider,
+    )
+
+    with pytest.raises(SystemExit):
+        engine.run_forever()
+
+    # Legacy execute_trade() raising TypeError must not silently route OPEN as signal-only execute_trade.
+    assert trader.add_calls == 1
+    assert trader.reduce_calls == 0
+    assert trader.close_calls == 0
+    assert trader.execute_trade_calls >= 1
 
 
 class DummyExecutor:

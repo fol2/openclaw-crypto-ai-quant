@@ -630,6 +630,11 @@ Use this section for all automated rollouts. Do not deploy to live without a suc
   - `candidate_configs` inside `run_metadata.json`
   - `items` inside `reports/report.json`
   - `evidence_bundle_paths` in `selection.json`
+- Confirm replay equivalence proof exists for promotion candidates:
+  - `selected.canonical_cpu_verified == true`
+  - `selected.replay_equivalence_status == "pass"`
+  - `selected.replay_equivalence_report_path` file exists
+  - `selected.replay_equivalence_count` is recorded
 
 ### Stage command
 
@@ -681,6 +686,8 @@ Each stage entry includes:
 - `deploy_stage`
 - `promotion_stage`
 - `evidence_bundle_paths`
+- `selected.canonical_cpu_verified`
+- `selected.replay_equivalence_status`
 
 Retain this manifest with the promotion ticket.
 
