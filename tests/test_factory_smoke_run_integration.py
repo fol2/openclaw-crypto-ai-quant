@@ -49,13 +49,26 @@ def _mk_candles_db(path: Path, *, symbol: str, interval: str) -> None:
         now_ms = int(time.time() * 1000)
         anchor = (now_ms // interval_ms) * interval_ms
 
-        # Generate >24h of contiguous bars so the default factory data check window passes.
-        start = anchor - (48 * interval_ms)
+        # Generate enough contiguous history so default factory data checks pass (200 bars).
+        bars_needed = 240
+        start = anchor - ((bars_needed - 1) * interval_ms)
         rows = []
         for t in range(int(start), int(anchor) + interval_ms, interval_ms):
-            rows.append((symbol, interval, int(t), int(t + interval_ms)))
+            rows.append(
+                (
+                    symbol,
+                    interval,
+                    int(t),
+                    int(t + interval_ms),
+                    float(100 + (t - start) / interval_ms),
+                    float(101 + (t - start) / interval_ms),
+                    float(99 + (t - start) / interval_ms),
+                    float(100 + (t - start) / interval_ms),
+                    1.0,
+                )
+            )
         con.executemany(
-            "INSERT OR REPLACE INTO candles (symbol, interval, t, t_close) VALUES (?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO candles (symbol, interval, t, t_close, o, h, l, c, v) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         con.commit()
@@ -105,28 +118,21 @@ def main() -> int:
         if not out:
             return 2
         # Keep total_trades >= 20 because tools/generate_config.py filters by --min-trades (default 20).
-        rows = [
-            {
-                "total_pnl": 10.0,
-                "final_balance": 10010.0,
-                "total_trades": 25,
-                "win_rate": 0.60,
-                "profit_factor": 1.20,
-                "max_drawdown_pct": 0.05,
-                "sharpe_ratio": 0.10,
-                "overrides": [["trade.leverage", 3.0], ["indicators.ema_fast_window", 21.0]],
-            },
-            {
-                "total_pnl": 8.0,
-                "final_balance": 10008.0,
-                "total_trades": 25,
-                "win_rate": 0.55,
-                "profit_factor": 1.10,
-                "max_drawdown_pct": 0.04,
-                "sharpe_ratio": 0.08,
-                "overrides": [["trade.leverage", 4.0], ["indicators.ema_fast_window", 22.0]],
-            },
-        ]
+        rows = []
+        for idx in range(30):
+            n = idx + 1
+            rows.append(
+                {
+                    "total_pnl": 10.0 - (idx * 0.15),
+                    "final_balance": 10000.0 + 10.0 - (idx * 0.15),
+                    "total_trades": 25,
+                    "win_rate": 0.60 - (idx * 0.002),
+                    "profit_factor": 1.20 - (idx * 0.005),
+                    "max_drawdown_pct": 0.05 - (idx * 0.0005),
+                    "sharpe_ratio": 0.10 - (idx * 0.001),
+                    "overrides": [["trade.leverage", float(3.0 + idx)], ["indicators.ema_fast_window", float(21.0 + idx)]],
+                }
+            )
         with open(out, "w", encoding="utf-8") as f:
             for r in rows:
                 f.write(json.dumps(r) + "\\n")
@@ -242,3 +248,17 @@ def test_factory_smoke_run_produces_artifacts(tmp_path, monkeypatch) -> None:
     assert isinstance(meta.get("registry_db"), str)
     assert Path(str(meta.get("registry_db"))).exists()
     assert (artifacts_root / "registry" / "registry.sqlite").exists()
+
+    candidates = meta.get("candidate_configs", [])
+    assert isinstance(candidates, list)
+    assert candidates, "candidate metadata should be recorded"
+    assert candidates[0].get("sweep_stage") in {"cpu", "gpu", "gpu_tpe"}
+    assert candidates[0].get("validation_gate") in {"replay_only", "score_v1+walk_forward", "score_v1+walk_forward+slippage"}
+    assert "canonical_cpu_verified" in candidates[0]
+
+    report = json.loads((run_dir / "reports" / "report.json").read_text(encoding="utf-8"))
+    items = report.get("items", []) if isinstance(report, dict) else []
+    assert items and isinstance(items[0], dict)
+    assert "sweep_stage" in items[0]
+    assert "replay_stage" in items[0]
+    assert "canonical_cpu_verified" in items[0]

@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from tools.factory_cycle import _apply_strategy_mode_overlay, _stable_promotion_since_s
+from tools.factory_cycle import _apply_strategy_mode_overlay, _parse_candidate, _select_deployable_candidates, _stable_promotion_since_s
 
 
 def _iso(ts: datetime.datetime) -> str:
@@ -122,3 +122,96 @@ def test_stable_promotion_since_uses_latest_contiguous_segment_after_config_swit
     assert since_b is not None
     assert since_a == pytest.approx((start + datetime.timedelta(hours=3)).timestamp())
     assert since_b == pytest.approx((start + datetime.timedelta(hours=2)).timestamp())
+
+
+def test_parse_candidate_legacy_fields_are_backward_compatible() -> None:
+    legacy = {
+        "config_id": "abc",
+        "config_path": "/tmp/candidate.yaml",
+        "total_pnl": 1.5,
+        "profit_factor": 1.2,
+        "total_trades": 2,
+    }
+    cand = _parse_candidate(legacy)
+    assert cand is not None
+    assert cand.pipeline_stage == "legacy"
+    assert cand.sweep_stage == "legacy"
+    assert cand.replay_stage == ""
+    assert cand.validation_gate == "replay_only"
+    assert cand.canonical_cpu_verified is True
+    assert cand.has_stage_metadata is False
+
+
+def test_select_deployable_candidates_prefers_stage_and_cpu_verified_candidates() -> None:
+    candidates = [
+        {
+            "config_id": "cand_1",
+            "config_path": "/tmp/a.yaml",
+            "total_pnl": 1.0,
+            "total_trades": 1,
+            "profit_factor": 1.0,
+            "max_drawdown_pct": 0.1,
+            "pipeline_stage": "candidate_generation",
+            "sweep_stage": "cpu",
+            "replay_stage": "",
+            "validation_gate": "replay_only",
+            "canonical_cpu_verified": False,
+        },
+        {
+            "config_id": "cand_2",
+            "config_path": "/tmp/b.yaml",
+            "total_pnl": 0.5,
+            "total_trades": 1,
+            "profit_factor": 1.0,
+            "max_drawdown_pct": 0.1,
+            "pipeline_stage": "candidate_validation",
+            "sweep_stage": "gpu",
+            "replay_stage": "cpu_replay",
+            "validation_gate": "replay_only",
+            "canonical_cpu_verified": True,
+        },
+        {
+            "config_id": "cand_3",
+            "config_path": "/tmp/c.yaml",
+            "total_pnl": 2.0,
+            "total_trades": 1,
+            "profit_factor": 1.0,
+            "max_drawdown_pct": 0.1,
+        },
+    ]
+    parsed = [_parse_candidate(c) for c in candidates]
+    assert all(p is not None for p in parsed)
+    selected = _select_deployable_candidates([p for p in parsed if p is not None], limit=1)
+    assert len(selected) == 1
+    assert selected[0].config_id == "cand_2"
+
+
+def test_unverified_staged_candidates_are_not_deployable() -> None:
+    candidates = [
+        {
+            "config_id": "cand_legacy",
+            "config_path": "/tmp/a.yaml",
+            "total_pnl": 1.0,
+            "total_trades": 1,
+            "profit_factor": 1.0,
+            "max_drawdown_pct": 0.1,
+        },
+        {
+            "config_id": "cand_unverified",
+            "config_path": "/tmp/b.yaml",
+            "total_pnl": 10.0,
+            "total_trades": 1,
+            "profit_factor": 3.0,
+            "max_drawdown_pct": 0.1,
+            "pipeline_stage": "candidate_validation",
+            "sweep_stage": "gpu",
+            "replay_stage": "cpu_replay",
+            "validation_gate": "replay_only",
+            "canonical_cpu_verified": False,
+        },
+    ]
+    parsed = [_parse_candidate(c) for c in candidates]
+    assert all(p is not None for p in parsed)
+    selected = _select_deployable_candidates([p for p in parsed if p is not None], limit=2)
+    assert len(selected) == 1
+    assert selected[0].config_id == "cand_legacy"
