@@ -185,6 +185,7 @@ class Candidate:
     replay_stage: str
     validation_gate: str
     canonical_cpu_verified: bool
+    candidate_mode: bool
     has_stage_metadata: bool
 
 
@@ -229,6 +230,18 @@ def _parse_candidate(it: dict[str, Any]) -> Candidate | None:
             return None
         score_v1 = it.get("score_v1", None)
         score = None if score_v1 is None else float(score_v1)
+        candidate_mode = bool(it.get("candidate_mode", False))
+        pipeline_stage = str(it.get("pipeline_stage", "")).strip()
+        sweep_stage = str(it.get("sweep_stage", "")).strip()
+        replay_stage = str(it.get("replay_stage", "")).strip()
+        validation_gate = str(it.get("validation_gate", "")).strip()
+
+        if not candidate_mode:
+            pipeline_stage = pipeline_stage or "legacy"
+            sweep_stage = sweep_stage or "legacy"
+            if not replay_stage:
+                replay_stage = ""
+
         return Candidate(
             config_id=config_id,
             config_path=config_path,
@@ -243,14 +256,27 @@ def _parse_candidate(it: dict[str, Any]) -> Candidate | None:
                 k in it
                 for k in ("pipeline_stage", "sweep_stage", "replay_stage", "validation_gate", "canonical_cpu_verified")
             ),
-            pipeline_stage=str(it.get("pipeline_stage", "")).strip() or "legacy",
-            sweep_stage=str(it.get("sweep_stage", "")).strip() or "legacy",
-            replay_stage=str(it.get("replay_stage", "")).strip() or "",
-            validation_gate=str(it.get("validation_gate", "")).strip() or "replay_only",
+            pipeline_stage=pipeline_stage,
+            sweep_stage=sweep_stage,
+            replay_stage=replay_stage,
+            validation_gate=validation_gate or "replay_only",
             canonical_cpu_verified=bool(it.get("canonical_cpu_verified", True)),
+            candidate_mode=candidate_mode,
         )
     except Exception:
         return None
+
+
+def _candidate_stage_complete(c: Candidate) -> bool:
+    if not c.candidate_mode:
+        return False
+    return bool(c.pipeline_stage) and bool(c.sweep_stage) and bool(c.replay_stage) and bool(c.validation_gate)
+
+
+def _candidate_deployable(c: Candidate) -> bool:
+    if not c.candidate_mode:
+        return True
+    return c.canonical_cpu_verified and _candidate_stage_complete(c)
 
 
 def _candidate_sort_key(c: Candidate) -> tuple[float, float]:
@@ -259,7 +285,9 @@ def _candidate_sort_key(c: Candidate) -> tuple[float, float]:
 
 
 def _stage_rank(c: Candidate) -> int:
-    if not bool(c.has_stage_metadata):
+    if not bool(c.candidate_mode):
+        return 0
+    if not _candidate_stage_complete(c):
         return 0
     if c.canonical_cpu_verified and c.replay_stage:
         return 2
@@ -621,7 +649,7 @@ def _select_best_candidate(items: list[dict[str, Any]]) -> Candidate | None:
 
     # Prefer score_v1 when present. If score_v1 is missing for all candidates, fall back to total_pnl.
     any_score = any(c.score_v1 is not None for c in parsed_ok)
-    filtered = [c for c in parsed_ok if (not c.has_stage_metadata) or c.canonical_cpu_verified]
+    filtered = [c for c in parsed_ok if _candidate_deployable(c)]
     if not filtered:
         return None
     parsed_ok = filtered
@@ -638,7 +666,7 @@ def _select_deployable_candidates(parsed: list[Candidate], *, limit: int) -> lis
     ok = [c for c in parsed if not bool(c.rejected)]
     if not ok:
         return []
-    ok = [c for c in ok if (not c.has_stage_metadata) or c.canonical_cpu_verified]
+    ok = [c for c in ok if _candidate_deployable(c)]
     if not ok:
         return []
     ok.sort(key=_candidate_sort_key_with_stage, reverse=True)

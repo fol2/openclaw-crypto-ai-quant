@@ -876,6 +876,7 @@ def _stage_defaults_for_candidate(*, args: Any) -> dict[str, Any]:
         "replay_stage": "",
         "validation_gate": _infer_validation_gate_from_args(args),
         "canonical_cpu_verified": False,
+        "candidate_mode": True,
     }
 
 
@@ -887,12 +888,14 @@ def _attach_replay_metadata(
     replay_stage: str = "cpu_replay",
 ) -> None:
     verified = str(summary.get("replay_equivalence_status", "")).strip().lower() == "pass"
+    candidate_mode = bool(entry.get("candidate_mode", False)) if isinstance(entry, dict) else False
     stage_fields = {
         "pipeline_stage": "candidate_validation",
         "sweep_stage": _infer_sweep_stage_from_args(args),
         "replay_stage": replay_stage,
         "validation_gate": _infer_validation_gate_from_args(args),
         "canonical_cpu_verified": bool(verified),
+        "candidate_mode": candidate_mode,
     }
     if entry is not None:
         for k, v in stage_fields.items():
@@ -1504,10 +1507,13 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
 
         candidate_paths.append(dst)
         candidate_config_ids[str(dst)] = dst_cfg_id
+        had_candidate_mode = "candidate_mode" in it
         entry = dict(source_stage_defaults)
         entry.update(
             {k: v for k, v in it.items() if isinstance(v, (str, int, float, bool, dict, list, tuple, type(None)))}
         )
+        if not had_candidate_mode:
+            entry["candidate_mode"] = False
         entry["path"] = str(dst)
         entry["config_id"] = dst_cfg_id
         entry["source_path"] = str(src)
@@ -2172,6 +2178,7 @@ def main(argv: list[str] | None = None) -> int:
     shortlist_per_mode = int(getattr(args, "shortlist_per_mode", 0) or 0)
     shortlist_max_rank = int(getattr(args, "shortlist_max_rank", 0) or 0)
     shortlist_modes_raw = str(getattr(args, "shortlist_modes", "") or "").strip()
+    candidate_min_trades = max(0, int(getattr(args, "candidate_min_trades", 1) or 0))
 
     candidate_paths: list[Path] = []
     candidate_config_ids: dict[str, str] = {}
@@ -2186,6 +2193,7 @@ def main(argv: list[str] | None = None) -> int:
             candidate_entries = [it for it in existing_entries if isinstance(it, dict)]
             for it in candidate_entries:
                 defaults = dict(default_entry_stage)
+                had_candidate_mode = "candidate_mode" in it
                 for k, v in it.items():
                     if isinstance(v, (str, int, float, bool, dict, list, tuple, type(None))):
                         defaults[k] = v
@@ -2194,6 +2202,8 @@ def main(argv: list[str] | None = None) -> int:
                 defaults.setdefault("sweep_stage", _infer_sweep_stage_from_args(args))
                 defaults.setdefault("replay_stage", "")
                 defaults.setdefault("validation_gate", _infer_validation_gate_from_args(args))
+                if not had_candidate_mode:
+                    defaults["candidate_mode"] = False
                 it.update(defaults)
                 p = str(it.get("path", "")).strip()
                 if p:
@@ -2243,6 +2253,8 @@ def main(argv: list[str] | None = None) -> int:
                     str(mode),
                     "--rank",
                     str(rank),
+                    "--min-trades",
+                    str(candidate_min_trades),
                     "-o",
                     str(out_yaml),
                 ]
@@ -2305,6 +2317,8 @@ def main(argv: list[str] | None = None) -> int:
                 str(args.sort_by),
                 "--rank",
                 str(rank),
+                "--min-trades",
+                str(candidate_min_trades),
                 "-o",
                 str(out_yaml),
             ]
@@ -2926,6 +2940,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default="balanced",
         choices=["pnl", "dd", "pf", "wr", "sharpe", "trades", "balanced"],
         help="Sort metric for candidate selection when shortlist is disabled (default: balanced).",
+    )
+    ap.add_argument(
+        "--candidate-min-trades",
+        type=int,
+        default=1,
+        help=(
+            "Minimum trade count required when selecting shortlist/candidate configurations. "
+            "Set to 0 to include zero-trade candidates."
+        ),
     )
     ap.add_argument(
         "--shortlist-modes",

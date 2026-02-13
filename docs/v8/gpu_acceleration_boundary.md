@@ -61,14 +61,16 @@ Candidate output compatibility is validated by reading/rejecting rows that do no
 - `selection.json` must include:
   - `selection_stage = "selected"`
   - `deploy_stage = no_deploy|skipped` (dry/smoke) or not `pending` (real)
-  - `promotion_stage = skipped|approved` (dry/smoke) or not `pending` (real)
-  - `evidence_bundle_paths` with canonical file set:
-    - `run_dir`
-    - `run_metadata_json`
-    - `selection_json`
-    - `report_json`
-    - `report_md`
-    - `selection_md`
+- `promotion_stage = skipped|approved` (dry/smoke) or not `pending` (real)
+- `evidence_bundle_paths` with canonical file set:
+  - `run_dir`
+  - `run_metadata_json`
+  - `selection_json`
+  - `report_json`
+  - `report_md`
+  - `selection_md`
+- `selection_gate_summary_json` (machine-readable output emitted by
+  `scripts/run_factory_stage_gate.sh` or `scripts/validate_factory_selection_gate.py`)
 - Selected candidate must include `canonical_cpu_verified = true` and replay proof fields:
   - `replay_stage`
   - `replay_equivalence_report_path`

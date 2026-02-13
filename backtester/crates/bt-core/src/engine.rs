@@ -145,7 +145,7 @@ struct SimState {
 
 fn make_kernel_params(cfg: &StrategyConfig) -> decision_kernel::KernelParams {
     let mut kernel_params = decision_kernel::KernelParams::default();
-    kernel_params.allow_pyramiding = cfg.trade.enable_pyramiding;
+    kernel_params.allow_pyramid = cfg.trade.enable_pyramiding;
     // Engine entry processing closes the existing position first when a reverse
     // signal arrives; keep this behaviour by disabling canonical reverses.
     kernel_params.allow_reverse = false;
@@ -349,7 +349,7 @@ pub fn run_simulation(
     };
     let mut state = SimState {
         balance: init_balance,
-        positions: init_positions,
+        positions: init_positions.clone(),
         last_entry_attempt_ms: FxHashMap::default(),
         last_exit_attempt_ms: FxHashMap::default(),
         indicators: FxHashMap::default(),
@@ -1394,7 +1394,7 @@ fn apply_exit(
     let fill_price = accounting::quantize(match pos.pos_type {
         PositionType::Long => exit_price * (1.0 - 0.5 / 10_000.0), // Conservative: half a bps
         PositionType::Short => exit_price * (1.0 + 0.5 / 10_000.0),
-    };
+    });
 
     if let Some(partial_pct) = exit.partial_pct {
         // Partial exit
@@ -1930,7 +1930,7 @@ fn execute_sub_bar_entry(
             symbol: sym.to_string(),
             signal,
             confidence,
-            adx,
+            adx: snap.adx,
             atr,
             entry_adx_threshold,
             snap: snap.clone(),

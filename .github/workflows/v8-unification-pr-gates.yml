@@ -59,7 +59,7 @@ jobs:
       - name: Run unification unit tests
         if: steps.changes.outputs.unification == 'true'
         run: |
-          uv run pytest tests/test_kernel_decision_routing.py \
+          PYTEST_ADDOPTS='--no-cov' uv run pytest tests/test_kernel_decision_routing.py \
             tests/test_replay_equivalence.py \
             tests/test_factory_replay_harness.py \
             tests/test_factory_sweep_candidate_schema.py \

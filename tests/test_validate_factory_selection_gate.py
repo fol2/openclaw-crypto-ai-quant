@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.validate_factory_selection_gate import validate_selection_path
+from scripts.validate_factory_selection_gate import _run, validate_selection_path
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
@@ -139,3 +139,52 @@ def test_validate_selection_path_allows_legacy_mode(tmp_path: Path) -> None:
     _write_json(path, payload)
 
     assert validate_selection_path(path, stage="real", allow_legacy=True) == []
+
+
+def test_run_writes_summary_json_on_success(tmp_path: Path) -> None:
+    path = tmp_path / "selection.json"
+    _write_json(path, _base_payload(tmp_path, stage="smoke"))
+    summary = tmp_path / "selection_summary.json"
+
+    rc = _run(
+        [
+            "--selection-json",
+            str(path),
+            "--stage",
+            "smoke",
+            "--summary-json",
+            str(summary),
+        ]
+    )
+
+    assert rc == 0
+    data = json.loads(summary.read_text(encoding="utf-8"))
+    assert data["status"] == "pass"
+    assert data["selection_stage"] == "selected"
+    assert data["selected"]["canonical_cpu_verified"] is True
+
+
+def test_run_writes_summary_json_on_failure(tmp_path: Path) -> None:
+    path = tmp_path / "selection.json"
+    payload = _base_payload(tmp_path, stage="real")
+    payload["selected"]["canonical_cpu_verified"] = False
+    payload["selected"]["replay_equivalence_status"] = "fail"
+    _write_json(path, payload)
+    summary = tmp_path / "selection_summary_fail.json"
+
+    rc = _run(
+        [
+            "--selection-json",
+            str(path),
+            "--stage",
+            "real",
+            "--summary-json",
+            str(summary),
+        ]
+    )
+
+    assert rc != 0
+    data = json.loads(summary.read_text(encoding="utf-8"))
+    assert data["status"] == "fail"
+    assert data["errors"]
+    assert any("canonical_cpu_verified" in item for item in data["errors"])

@@ -208,15 +208,17 @@ PY
         return 1
     fi
 
+    local summary_json="${run_stage_dir}/selection_gate_summary_${stage}.json"
     if ! python3 scripts/validate_factory_selection_gate.py \
         --selection-json "$selection_json" \
         --stage "$stage" \
+        --summary-json "$summary_json" \
         --status-message "[stage-gate] selection evidence check"; then
         echo "[stage-gate] ERROR: selection evidence validation failed for ${stage}"
         return 1
     fi
 
-python3 - "$selection_json" "$run_stage_dir" "$EVIDENCE_PATH" "$stage" "${run_id}" <<'PY'
+python3 - "$selection_json" "$run_stage_dir" "$EVIDENCE_PATH" "$stage" "${run_id}" "$summary_json" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -226,6 +228,7 @@ run_stage_dir = sys.argv[2]
 evidence_path = sys.argv[3]
 stage = sys.argv[4]
 run_id = sys.argv[5] if len(sys.argv) > 5 else Path(run_stage_dir).name
+summary_json = sys.argv[6] if len(sys.argv) > 6 else ""
 
 selection_path = Path(selection_path)
 evidence_path = Path(evidence_path)
@@ -238,6 +241,8 @@ evidence = {
     "promotion_stage": selection_obj.get("promotion_stage"),
     "evidence_bundle_paths": selection_obj.get("evidence_bundle_paths", {}),
 }
+if summary_json:
+    evidence["selection_gate_summary_json"] = summary_json
 
 existing = []
 if evidence_path.exists():

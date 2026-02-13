@@ -258,6 +258,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stage", required=False, default="smoke", help="dry/smoke/real")
     parser.add_argument("--allow-legacy", action="store_true", help="Allow legacy payloads without stage metadata")
     parser.add_argument(
+        "--summary-json",
+        default="",
+        help="Optional path to write machine-readable validation summary",
+    )
+    parser.add_argument(
         "--status-message",
         default="",
         help="Optional plain text prefix to include in output",
@@ -270,16 +275,57 @@ def _run(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     path = Path(str(args.selection_json))
     errors = validate_selection_path(path, stage=str(args.stage), allow_legacy=bool(args.allow_legacy))
+    summary = {
+        "status": "pass" if not errors else "fail",
+        "selection_json": str(path),
+        "stage": str(args.stage),
+        "allow_legacy": bool(args.allow_legacy),
+        "errors": errors,
+    }
+    try:
+        selection = _load_json(path)
+    except Exception:
+        selection = {}
+    if isinstance(selection, dict):
+        summary["selection_stage"] = str(selection.get("selection_stage", ""))
+        summary["deploy_stage"] = str(selection.get("deploy_stage", ""))
+        summary["promotion_stage"] = str(selection.get("promotion_stage", ""))
+        selected = selection.get("selected")
+        if isinstance(selected, dict):
+            summary["selected"] = {
+                "config_id": str(selected.get("config_id", "")),
+                "canonical_cpu_verified": bool(selected.get("canonical_cpu_verified", False)),
+                "replay_stage": str(selected.get("replay_stage", "")),
+                "pipeline_stage": str(selected.get("pipeline_stage", "")),
+                "sweep_stage": str(selected.get("sweep_stage", "")),
+                "validation_gate": str(selected.get("validation_gate", "")),
+            }
+        evidence = selection.get("evidence_bundle_paths")
+        if isinstance(evidence, dict):
+            summary["evidence_bundle_paths"] = {
+                k: str(v) for k, v in evidence.items() if isinstance(v, str)
+            }
     if errors:
         if args.status_message:
             print(args.status_message)
         for e in errors:
             print(f"[selection-gate] ERROR: {e}")
-        return 1
-    if args.status_message:
+        rc = 1
+    else:
+        rc = 0
+
+    if str(args.summary_json).strip():
+        Path(str(args.summary_json)).write_text(
+            json.dumps(summary, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+    if rc == 0 and args.status_message:
         print(args.status_message)
-    print(f"[selection-gate] OK for {path}")
-    return 0
+    if rc == 0:
+        print(f"[selection-gate] OK for {path}")
+    return rc
+
 
 
 if __name__ == "__main__":
