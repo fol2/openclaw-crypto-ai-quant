@@ -74,7 +74,8 @@ struct GpuParams {
     unsigned int chunk_start;
     unsigned int chunk_end;
     unsigned int initial_balance_bits;
-    unsigned int fee_rate_bits;
+    unsigned int maker_fee_rate_bits;
+    unsigned int taker_fee_rate_bits;
     unsigned int max_sub_per_bar;
     unsigned int trade_end_bar;
 };
@@ -191,8 +192,8 @@ struct EntryCandidate {
 
 // -- Helper functions ---------------------------------------------------------
 
-__device__ float get_fee_rate(const GpuParams* params) {
-    return __uint_as_float(params->fee_rate_bits);
+__device__ float get_taker_fee_rate(const GpuParams* params) {
+    return __uint_as_float(params->taker_fee_rate_bits);
 }
 
 __device__ float profit_atr(const GpuPosition& pos, float price) {
@@ -942,7 +943,7 @@ extern "C" __global__ void sweep_engine_kernel(
     // Load state into local memory
     GpuComboState state = states[combo_id];
     GpuComboConfig cfg  = configs[combo_id];
-    float fee_rate = get_fee_rate(params);
+    float fee_rate = get_taker_fee_rate(params);
     unsigned int ns = params->num_symbols;
 
     unsigned int max_sub = params->max_sub_per_bar;

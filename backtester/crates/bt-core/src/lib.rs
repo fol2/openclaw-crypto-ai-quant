@@ -3,6 +3,7 @@
 pub mod candle;
 pub mod config;
 pub mod indicators;
+pub mod accounting;
 pub mod signals;
 pub mod exits;
 pub mod position;

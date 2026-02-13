@@ -874,7 +874,8 @@ fn dispatch_trade_arena(
             chunk_start,
             chunk_end,
             initial_balance_bits: initial_balance.to_bits(),
-            fee_rate_bits: 0.00035f32.to_bits(),
+            maker_fee_rate_bits: 0.00035f32.to_bits(),
+            taker_fee_rate_bits: 0.00035f32.to_bits(),
             max_sub_per_bar,
             trade_end_bar: trade_end,
         };
