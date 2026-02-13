@@ -10,7 +10,7 @@ if [[ -d /usr/lib/wsl/lib ]]; then
 fi
 
 cd "${ROOT_DIR}/backtester"
-echo "[gpu-parity-gate] Running tiny GPU runtime parity fixture (strict=${STRICT_MODE})..."
+echo "[gpu-parity-gate] Running GPU parity fixtures (strict=${STRICT_MODE})..."
 
 if ! command -v nvcc >/dev/null 2>&1; then
     echo "::warning::[gpu-parity-gate] nvcc not found on this runner; skipping GPU parity gate."
@@ -27,6 +27,7 @@ if ! command -v nvcc >/dev/null 2>&1; then
 fi
 
 LOG_FILE="$(mktemp)"
+GPU_RUNTIME_SKIP=0
 trap 'rm -f "${LOG_FILE}"' EXIT
 
 if ! cargo test -p bt-gpu --test gpu_runtime_parity_tiny_fixture -- --nocapture 2>&1 | tee "${LOG_FILE}"; then
@@ -34,8 +35,23 @@ if ! cargo test -p bt-gpu --test gpu_runtime_parity_tiny_fixture -- --nocapture 
     exit 1
 fi
 
-if grep -Fq "[gpu-parity] SKIP: CUDA unavailable" "${LOG_FILE}"; then
-    echo "::warning::[gpu-parity-gate] CUDA unavailable on this runner; GPU parity assertions were not enforced."
+if grep -E -q "(\\[gpu-parity\\] SKIP: CUDA unavailable|Skipping: CUDA unavailable)" "${LOG_FILE}"; then
+    echo "[gpu-parity-gate] tiny fixture is skipped: CUDA unavailable."
+    GPU_RUNTIME_SKIP=1
+fi
+
+if ! cargo test -p bt-gpu --test cpu_gpu_parity_sweep_1h_3m -- --nocapture 2>&1 | tee "${LOG_FILE}"; then
+    echo "[gpu-parity-gate] FAIL: synthetic CPU↔GPU parity fixture failed."
+    exit 1
+fi
+
+if grep -E -q "(\\[gpu-parity\\] SKIP: CUDA unavailable|Skipping: CUDA unavailable)" "${LOG_FILE}"; then
+    echo "[gpu-parity-gate] synthetic parity fixture is skipped: CUDA unavailable."
+    GPU_RUNTIME_SKIP=1
+fi
+
+if [ "${GPU_RUNTIME_SKIP}" = "1" ]; then
+    echo "::warning::[gpu-parity-gate] CUDA unavailable on this runner; GPU parity assertions were not fully enforced."
     case "${STRICT_MODE}" in
         1 | true | TRUE | yes | YES | on | ON)
             echo "[gpu-parity-gate] STRICT MODE: AQC_GPU_PARITY_STRICT=${STRICT_MODE}; failing because CUDA is unavailable."
@@ -46,6 +62,11 @@ if grep -Fq "[gpu-parity] SKIP: CUDA unavailable" "${LOG_FILE}"; then
             ;;
     esac
     exit 0
+fi
+
+if ! "${ROOT_DIR}/scripts/ci_gpu_smoke_parity_gate.sh"; then
+    echo "[gpu-parity-gate] FAIL: lane smoke parity stage failed."
+    exit 1
 fi
 
 echo "[gpu-parity-gate] PASS: GPU parity assertions executed."
