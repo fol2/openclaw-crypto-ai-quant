@@ -4,6 +4,7 @@
 #[derive(Debug, Clone)]
 pub struct GpuSweepResult {
     pub config_id: String,
+    pub output_mode: String,
     pub total_pnl: f64,
     pub final_balance: f64,
     pub total_trades: u32,

@@ -162,6 +162,27 @@ enum SweepParityMode {
     IdenticalSymbolUniverse,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum SweepOutputMode {
+    /// Full row format (legacy): report style fields and all diagnostics.
+    Full,
+    /// Candidate-oriented compact format with stable fields for downstream tooling.
+    Candidate,
+}
+
+impl SweepOutputMode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Candidate => "candidate",
+        }
+    }
+
+    fn is_candidate(&self) -> bool {
+        matches!(self, Self::Candidate)
+    }
+}
+
 #[derive(Parser)]
 struct ReplayArgs {
     /// Path to the strategy YAML config
@@ -312,6 +333,13 @@ struct SweepArgs {
     /// Output file for JSONL results (one JSON object per line per combo)
     #[arg(long, default_value = "sweep_results.jsonl")]
     output: PathBuf,
+
+    /// Sweep output format.
+    ///
+    /// `full` writes compatibility rows used by existing replay/reporting pipelines.
+    /// `candidate` writes a compact candidate row for sweep-gate handoffs.
+    #[arg(long, default_value_t = SweepOutputMode::Full, value_enum)]
+    output_mode: SweepOutputMode,
 
     /// Starting account balance in USD
     #[arg(long, default_value_t = 10_000.0)]
@@ -2007,7 +2035,7 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
     let gpu_sub_candles: Option<&bt_core::candle::CandleData> =
         exit_candles.as_ref().or(entry_candles.as_ref());
 
-    #[cfg(feature = "gpu")]
+#[cfg(feature = "gpu")]
     if args.tpe {
         if !args.gpu {
             eprintln!("Error: --tpe requires --gpu");
@@ -2037,17 +2065,31 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
             let mut f = std::fs::File::create(&args.output)?;
             let top_n = args.top_n.unwrap_or(results.len());
             for r in results.iter().take(top_n) {
-                let json = serde_json::json!({
-                    "config_id": r.config_id,
-                    "total_pnl": r.total_pnl,
-                    "final_balance": r.final_balance,
-                    "total_trades": r.total_trades,
-                    "total_wins": r.total_wins,
-                    "win_rate": r.win_rate,
-                    "profit_factor": r.profit_factor,
-                    "max_drawdown_pct": r.max_drawdown_pct,
-                    "overrides": r.overrides,
-                });
+                let json = if args.output_mode.is_candidate() {
+                    serde_json::json!({
+                        "config_id": r.config_id,
+                        "output_mode": args.output_mode.as_str(),
+                        "overrides": r.overrides,
+                        "total_pnl": r.total_pnl,
+                        "total_trades": r.total_trades,
+                        "profit_factor": r.profit_factor,
+                        "max_drawdown_pct": r.max_drawdown_pct,
+                        "candidate_mode": true,
+                    })
+                } else {
+                    serde_json::json!({
+                        "config_id": r.config_id,
+                        "output_mode": args.output_mode.as_str(),
+                        "total_pnl": r.total_pnl,
+                        "final_balance": r.final_balance,
+                        "total_trades": r.total_trades,
+                        "total_wins": r.total_wins,
+                        "win_rate": r.win_rate,
+                        "profit_factor": r.profit_factor,
+                        "max_drawdown_pct": r.max_drawdown_pct,
+                        "overrides": r.overrides,
+                    })
+                };
                 writeln!(f, "{}", json)?;
             }
             eprintln!(
@@ -2100,16 +2142,30 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
         {
             let mut f = std::fs::File::create(&args.output)?;
             for r in &results {
-                let json = serde_json::json!({
-                    "config_id": r.config_id,
-                    "total_pnl": r.total_pnl,
-                    "final_balance": r.final_balance,
-                    "total_trades": r.total_trades,
-                    "win_rate": r.win_rate,
-                    "profit_factor": r.profit_factor,
-                    "max_drawdown_pct": r.max_drawdown_pct,
-                    "overrides": r.overrides,
-                });
+                let json = if args.output_mode.is_candidate() {
+                    serde_json::json!({
+                        "config_id": r.config_id,
+                        "output_mode": args.output_mode.as_str(),
+                        "overrides": r.overrides,
+                        "total_pnl": r.total_pnl,
+                        "total_trades": r.total_trades,
+                        "profit_factor": r.profit_factor,
+                        "max_drawdown_pct": r.max_drawdown_pct,
+                        "candidate_mode": true,
+                    })
+                } else {
+                    serde_json::json!({
+                        "config_id": r.config_id,
+                        "output_mode": args.output_mode.as_str(),
+                        "total_pnl": r.total_pnl,
+                        "final_balance": r.final_balance,
+                        "total_trades": r.total_trades,
+                        "win_rate": r.win_rate,
+                        "profit_factor": r.profit_factor,
+                        "max_drawdown_pct": r.max_drawdown_pct,
+                        "overrides": r.overrides,
+                    })
+                };
                 writeln!(f, "{}", json)?;
             }
             eprintln!(
@@ -2148,17 +2204,41 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // Write JSONL output (report + overrides flattened)
     {
-        let mut f = std::fs::File::create(&args.output)?;
-        for r in &results {
-            let mut obj = serde_json::to_value(&r.report)?;
-            if let serde_json::Value::Object(ref mut map) = obj {
-                let mut ov = serde_json::Map::new();
+            let mut f = std::fs::File::create(&args.output)?;
+            for r in &results {
+                let mut obj = serde_json::to_value(&r.report)?;
+                if let serde_json::Value::Object(ref mut map) = obj {
+                    let mut ov = serde_json::Map::new();
                 for (k, v) in &r.overrides {
                     ov.insert(k.clone(), serde_json::Value::from(*v));
                 }
                 map.insert("overrides".to_string(), serde_json::Value::Object(ov));
+                map.insert(
+                    "output_mode".to_string(),
+                    serde_json::Value::String(args.output_mode.as_str().to_string()),
+                );
+                if args.output_mode.is_candidate() {
+                    map.insert(
+                        "candidate_mode".to_string(),
+                        serde_json::Value::Bool(true),
+                    );
+                }
             }
-            let line = serde_json::to_string(&obj)?;
+            let line = if args.output_mode.is_candidate() {
+                serde_json::json!({
+                    "config_id": r.config_id,
+                    "output_mode": args.output_mode.as_str(),
+                    "overrides": obj.get("overrides").cloned().unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
+                    "total_pnl": r.report.total_pnl,
+                    "total_trades": r.report.total_trades,
+                    "profit_factor": r.report.profit_factor,
+                    "max_drawdown_pct": r.report.max_drawdown_pct,
+                    "candidate_mode": true,
+                })
+            } else {
+                obj
+            };
+            let line = serde_json::to_string(&line)?;
             writeln!(f, "{line}")?;
         }
         eprintln!(
