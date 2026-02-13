@@ -5,22 +5,19 @@
 //! signal generation → engine-level transforms → entry execution → PnL.
 
 use crate::candle::{CandleData, FundingRateData, OhlcvBar};
+use crate::accounting;
 use crate::config::{Confidence, Signal, StrategyConfig};
 use crate::exits::{self, ExitResult};
 use crate::indicators::{IndicatorBank, IndicatorSnapshot};
 use crate::position::{Position, PositionType, SignalRecord, TradeRecord};
 use crate::signals::{entry, gates};
+use crate::decision_kernel;
+use serde::{Deserialize, Serialize};
 use risk_core::{
     compute_entry_sizing, compute_pyramid_sizing, evaluate_exposure_guard, ConfidenceTier,
     EntrySizingInput, ExposureBlockReason, ExposureGuardInput, PyramidSizingInput,
 };
 use rustc_hash::FxHashMap;
-
-// ---------------------------------------------------------------------------
-// Fee constant
-// ---------------------------------------------------------------------------
-
-const FEE_RATE: f64 = 0.00035; // Hyperliquid taker fee
 
 // ---------------------------------------------------------------------------
 // Public result types
@@ -52,9 +49,55 @@ pub struct GateStats {
 pub struct SimResult {
     pub trades: Vec<TradeRecord>,
     pub signals: Vec<SignalRecord>,
+    pub decision_diagnostics: Vec<DecisionKernelTrace>,
     pub final_balance: f64,
     pub equity_curve: Vec<(i64, f64)>,
     pub gate_stats: GateStats,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DecisionKernelIntentSummary {
+    kind: String,
+    side: String,
+    symbol: String,
+    quantity: f64,
+    price: f64,
+    notional_usd: f64,
+    fee_rate: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DecisionKernelFillSummary {
+    side: String,
+    symbol: String,
+    quantity: f64,
+    price: f64,
+    notional_usd: f64,
+    fee_usd: f64,
+    pnl_usd: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DecisionKernelTrace {
+    event_id: u64,
+    source: String,
+    timestamp_ms: i64,
+    symbol: String,
+    signal: String,
+    requested_notional_usd: f64,
+    requested_price: f64,
+    schema_version: u32,
+    step: u64,
+    state_step: u64,
+    state_cash_usd: f64,
+    state_positions: usize,
+    intent_count: usize,
+    fill_count: usize,
+    warnings: Vec<String>,
+    errors: Vec<String>,
+    intents: Vec<DecisionKernelIntentSummary>,
+    fills: Vec<DecisionKernelFillSummary>,
+    applied_to_kernel_state: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -92,8 +135,157 @@ struct SimState {
     last_close: FxHashMap<String, (i64, PositionType, String)>,
     trades: Vec<TradeRecord>,
     signals: Vec<SignalRecord>,
+    decision_diagnostics: Vec<DecisionKernelTrace>,
+    kernel_state: decision_kernel::StrategyState,
+    kernel_params: decision_kernel::KernelParams,
+    next_kernel_event_id: u64,
     equity_curve: Vec<(i64, f64)>,
     gate_stats: GateStats,
+}
+
+fn make_kernel_params(cfg: &StrategyConfig) -> decision_kernel::KernelParams {
+    let mut kernel_params = decision_kernel::KernelParams::default();
+    kernel_params.allow_pyramiding = cfg.trade.enable_pyramiding;
+    // Engine entry processing closes the existing position first when a reverse
+    // signal arrives; keep this behaviour by disabling canonical reverses.
+    kernel_params.allow_reverse = false;
+    kernel_params
+}
+
+fn maker_taker_fee_rate(params: &decision_kernel::KernelParams, role: accounting::FeeRole) -> f64 {
+    accounting::FeeModel {
+        maker_fee_bps: params.maker_fee_bps,
+        taker_fee_bps: params.taker_fee_bps,
+    }
+    .role_rate(role)
+}
+
+fn make_kernel_state(
+    init_balance: f64,
+    timestamp_ms: i64,
+    positions: &FxHashMap<String, Position>,
+) -> decision_kernel::StrategyState {
+    let mut kernel_state = decision_kernel::StrategyState::new(init_balance, timestamp_ms);
+    for pos in positions.values() {
+        let side = match pos.pos_type {
+            PositionType::Long => decision_kernel::PositionSide::Long,
+            PositionType::Short => decision_kernel::PositionSide::Short,
+        };
+        let quantity = accounting::quantize(pos.size);
+        if quantity <= 0.0 {
+            continue;
+        }
+        let notional_usd = accounting::quantize(pos.size * pos.entry_price);
+        kernel_state.positions.insert(
+            pos.symbol.clone(),
+            decision_kernel::Position {
+                symbol: pos.symbol.clone(),
+                side,
+                quantity,
+                avg_entry_price: accounting::quantize(pos.entry_price),
+                opened_at_ms: pos.open_time_ms,
+                updated_at_ms: pos.open_time_ms,
+                notional_usd,
+            },
+        );
+    }
+    kernel_state
+}
+
+fn kernel_signal(signal: Signal) -> decision_kernel::MarketSignal {
+    match signal {
+        Signal::Buy => decision_kernel::MarketSignal::Buy,
+        Signal::Sell => decision_kernel::MarketSignal::Sell,
+        Signal::Neutral => decision_kernel::MarketSignal::Neutral,
+    }
+}
+
+fn signal_name(signal: Signal) -> &'static str {
+    match signal {
+        Signal::Buy => "BUY",
+        Signal::Sell => "SELL",
+        Signal::Neutral => "NEUTRAL",
+    }
+}
+
+fn decision_signal_name(signal: &decision_kernel::MarketSignal) -> &'static str {
+    match signal {
+        decision_kernel::MarketSignal::Buy => "BUY",
+        decision_kernel::MarketSignal::Sell => "SELL",
+        decision_kernel::MarketSignal::Neutral => "NEUTRAL",
+    }
+}
+
+fn step_decision(
+    state: &mut SimState,
+    ts: i64,
+    symbol: &str,
+    signal: Signal,
+    price: f64,
+    requested_notional_usd: Option<f64>,
+    source: &'static str,
+) -> decision_kernel::DecisionResult {
+    let event = decision_kernel::MarketEvent {
+        schema_version: 1,
+        event_id: state.next_kernel_event_id,
+        timestamp_ms: ts,
+        symbol: symbol.to_string(),
+        signal: kernel_signal(signal),
+        price: accounting::quantize(price),
+        notional_hint_usd: requested_notional_usd,
+    };
+    state.next_kernel_event_id = state.next_kernel_event_id.saturating_add(1);
+
+    let decision = decision_kernel::step(&state.kernel_state, &event, &state.kernel_params);
+    state.kernel_state = decision.state.clone();
+
+    let mut trace = DecisionKernelTrace {
+        event_id: event.event_id,
+        source: source.to_string(),
+        timestamp_ms: ts,
+        symbol: symbol.to_string(),
+        signal: signal_name(signal).to_string(),
+        requested_notional_usd: requested_notional_usd.unwrap_or(0.0),
+        requested_price: price,
+        schema_version: decision.diagnostics.schema_version,
+        step: decision.state.step,
+        state_step: decision.state.step,
+        state_cash_usd: decision.state.cash_usd,
+        state_positions: decision.state.positions.len(),
+        intent_count: decision.intents.len(),
+        fill_count: decision.fills.len(),
+        warnings: decision.diagnostics.warnings.clone(),
+        errors: decision.diagnostics.errors.clone(),
+        intents: decision
+            .intents
+            .iter()
+            .map(|intent| DecisionKernelIntentSummary {
+                kind: format!("{:?}", intent.kind).to_lowercase(),
+                side: format!("{:?}", intent.side).to_lowercase(),
+                symbol: intent.symbol.clone(),
+                quantity: intent.quantity,
+                price: intent.price,
+                notional_usd: intent.notional_usd,
+                fee_rate: intent.fee_rate,
+            })
+            .collect(),
+        fills: decision
+            .fills
+            .iter()
+            .map(|fill| DecisionKernelFillSummary {
+                side: format!("{:?}", fill.side).to_lowercase(),
+                symbol: fill.symbol.clone(),
+                quantity: fill.quantity,
+                price: fill.price,
+                notional_usd: fill.notional_usd,
+                fee_usd: fill.fee_usd,
+                pnl_usd: fill.pnl_usd,
+            })
+            .collect(),
+        applied_to_kernel_state: !decision.diagnostics.has_errors(),
+    };
+    state.decision_diagnostics.push(trace);
+    decision
 }
 
 fn make_indicator_bank(cfg: &StrategyConfig, use_stoch_rsi: bool) -> IndicatorBank {
@@ -148,6 +340,7 @@ pub fn run_simulation(
         return SimResult {
             trades: vec![],
             signals: vec![],
+            decision_diagnostics: vec![],
             final_balance: initial_balance,
             equity_curve: vec![],
             gate_stats: GateStats::default(),
@@ -173,6 +366,10 @@ pub fn run_simulation(
         last_close: FxHashMap::default(),
         trades: Vec::with_capacity(4096),
         signals: Vec::with_capacity(8192),
+        decision_diagnostics: Vec::new(),
+        kernel_state: make_kernel_state(init_balance, timestamps[0], &init_positions),
+        kernel_params: make_kernel_params(cfg),
+        next_kernel_event_id: 1,
         equity_curve: Vec::with_capacity(timestamps.len()),
         gate_stats: GateStats::default(),
     };
@@ -375,11 +572,26 @@ pub fn run_simulation(
                     Signal::Neutral => unreachable!(),
                 };
 
-                // Handle signal flip: close opposite position first
+                // Handle signal-directed close for opposite positions via canonical kernel step.
                 if let Some(pos) = state.positions.get(sym_str) {
                     if pos.pos_type != desired_type {
-                        let exit = ExitResult::exit("Signal Flip", snap.close);
-                        apply_exit(&mut state, sym_str, &exit, &snap, ts);
+                        let decision = step_decision(
+                            &mut state,
+                            ts,
+                            sym_str,
+                            signal,
+                            snap.close,
+                            None,
+                            "indicator-bar-close",
+                        );
+                        if decision
+                            .intents
+                            .iter()
+                            .any(|intent| matches!(intent.kind, decision_kernel::OrderIntentKind::Close | decision_kernel::OrderIntentKind::Reverse))
+                        {
+                            let exit = ExitResult::exit("Signal Flip", snap.close);
+                            apply_exit(&mut state, sym_str, &exit, &snap, ts);
+                        }
                     }
                 }
 
@@ -435,17 +647,17 @@ pub fn run_simulation(
                     }
                 }
 
-                // Collect as candidate for ranking
-                indicator_bar_candidates.push(EntryCandidate {
-                    symbol: sym.to_string(),
-                    signal,
-                    confidence,
-                    adx: snap.adx,
-                    atr,
-                    entry_adx_threshold,
-                    snap: snap.clone(),
-                    ts,
-                });
+            // Collect as candidate for ranking
+            indicator_bar_candidates.push(EntryCandidate {
+                symbol: sym.to_string(),
+                signal,
+                confidence,
+                adx: snap.adx,
+                atr,
+                entry_adx_threshold,
+                snap: snap.clone(),
+                ts,
+            });
             }
         }
 
@@ -529,65 +741,35 @@ pub fn run_simulation(
                         continue;
                     }
                 }
-
-                let desired_type = match cand.signal {
-                    Signal::Buy => PositionType::Long,
-                    Signal::Sell => PositionType::Short,
-                    Signal::Neutral => continue,
-                };
-
-                let fill_price = match cand.signal {
-                    Signal::Buy => cand.snap.close * (1.0 + cfg.trade.slippage_bps / 10_000.0),
-                    Signal::Sell => cand.snap.close * (1.0 - cfg.trade.slippage_bps / 10_000.0),
-                    Signal::Neutral => continue,
-                };
-
-                let fee_usd = notional * FEE_RATE;
-                state.balance -= fee_usd;
-
-                let pos = Position {
-                    symbol: cand.symbol.clone(),
-                    pos_type: desired_type,
-                    entry_price: fill_price,
-                    size,
-                    confidence: cand.confidence,
-                    entry_atr: cand.atr,
-                    entry_adx_threshold: cand.entry_adx_threshold,
-                    trailing_sl: None,
-                    leverage,
-                    margin_used,
-                    adds_count: 0,
-                    tp1_taken: false,
-                    open_time_ms: cand.ts,
-                    last_add_time_ms: cand.ts,
-                    mae_usd: 0.0,
-                    mfe_usd: 0.0,
-                };
-                state.positions.insert(cand.symbol.clone(), pos);
-                note_entry_attempt(&mut state, &cand.symbol, cand.ts);
-                entries_this_bar += 1;
-
-                let action = match desired_type {
-                    PositionType::Long => "OPEN_LONG",
-                    PositionType::Short => "OPEN_SHORT",
-                };
-                state.trades.push(TradeRecord {
-                    timestamp_ms: cand.ts,
-                    symbol: cand.symbol.clone(),
-                    action: action.to_string(),
-                    price: fill_price,
-                    size,
-                    notional,
-                    reason: format!("{:?} entry", cand.confidence),
-                    confidence: cand.confidence,
-                    pnl: 0.0,
-                    fee_usd,
-                    balance: state.balance,
-                    entry_atr: cand.atr,
-                    leverage,
-                    margin_used,
-                    ..Default::default()
+                let kernel_notional = notional;
+                let decision = step_decision(
+                    &mut state,
+                    cand.ts,
+                    &cand.symbol,
+                    cand.signal,
+                    cand.snap.close,
+                    Some(kernel_notional),
+                    "indicator-bar-open",
+                );
+                let intent_open = decision.intents.iter().any(|intent| {
+                    matches!(
+                        intent.kind,
+                        decision_kernel::OrderIntentKind::Open | decision_kernel::OrderIntentKind::Add
+                    )
                 });
+                if intent_open
+                    && apply_indicator_open_from_kernel(
+                        &mut state,
+                        &cand,
+                        size,
+                        margin_used,
+                        leverage,
+                        kernel_notional,
+                        cfg,
+                        &format!("{:?} entry", cand.confidence),
+                    ) {
+                    entries_this_bar += 1;
+                }
             }
         }
 
@@ -820,18 +1002,17 @@ pub fn run_simulation(
                             if let Some(rates) = fr.get(&sym) {
                                 // Find the funding rate at this boundary
                                 if let Some(rate) = lookup_funding_rate(rates, boundary) {
-                                    // Funding: shorts receive, longs pay (when rate > 0)
-                                    // delta = -signed_size * price * rate
                                     let price = state
                                         .indicators
                                         .get(&sym)
                                         .map(|b| b.prev_close)
                                         .unwrap_or(pos.entry_price);
-                                    let signed_size = match pos.pos_type {
-                                        PositionType::Long => pos.size,
-                                        PositionType::Short => -pos.size,
-                                    };
-                                    let delta_usd = -signed_size * price * rate;
+                                    let delta_usd = accounting::funding_delta(
+                                        matches!(pos.pos_type, PositionType::Long),
+                                        pos.size,
+                                        price,
+                                        rate,
+                                    );
                                     state.balance += delta_usd;
 
                                     state.trades.push(TradeRecord {
@@ -886,6 +1067,7 @@ pub fn run_simulation(
     SimResult {
         trades: state.trades,
         signals: state.signals,
+        decision_diagnostics: state.decision_diagnostics,
         final_balance: state.balance,
         equity_curve: state.equity_curve,
         gate_stats: state.gate_stats,
@@ -1217,23 +1399,23 @@ fn apply_exit(
     };
 
     // Apply slippage to exit
-    let fill_price = match pos.pos_type {
+    let fill_price = accounting::quantize(match pos.pos_type {
         PositionType::Long => exit_price * (1.0 - 0.5 / 10_000.0), // Conservative: half a bps
         PositionType::Short => exit_price * (1.0 + 0.5 / 10_000.0),
     };
 
     if let Some(partial_pct) = exit.partial_pct {
         // Partial exit
-        let exit_size = pos.size * partial_pct;
-        let exit_notional = exit_size * fill_price;
-        let fee_usd = exit_notional * FEE_RATE;
-
-        let pnl = match pos.pos_type {
-            PositionType::Long => (fill_price - pos.entry_price) * exit_size,
-            PositionType::Short => (pos.entry_price - fill_price) * exit_size,
-        };
-
-        state.balance += pnl - fee_usd;
+        let partial_fill = accounting::build_partial_close_plan(pos.size, pos.margin_used, partial_pct);
+        let exit_size = partial_fill.closed_size;
+        let close = accounting::apply_close_fill(
+            matches!(pos.pos_type, PositionType::Long),
+            pos.entry_price,
+            fill_price,
+            exit_size,
+            maker_taker_fee_rate(&state.kernel_params, accounting::FeeRole::Taker),
+        );
+        state.balance += close.cash_delta;
 
         // Record PESC info (partial exits also count)
         state
@@ -1251,36 +1433,44 @@ fn apply_exit(
             action: action.to_string(),
             price: fill_price,
             size: exit_size,
-            notional: exit_notional,
+            notional: close.notional,
             reason: exit.reason.clone(),
             confidence: pos.confidence,
-            pnl,
-            fee_usd,
+            pnl: close.pnl,
+            fee_usd: close.fee_usd,
             balance: state.balance,
             entry_atr: pos.entry_atr,
             leverage: pos.leverage,
-            margin_used: pos.margin_used * partial_pct,
+            margin_used: pos.margin_used * if pos.size > 0.0 {
+                partial_fill.closed_size / pos.size
+            } else {
+                0.0
+            },
             ..Default::default()
         });
 
         // Reduce position in place
         if let Some(p) = state.positions.get_mut(symbol) {
-            p.reduce_by_fraction(partial_pct);
+            let reduce_fraction = if pos.size > 0.0 {
+                partial_fill.closed_size / pos.size
+            } else {
+                0.0
+            };
+            p.reduce_by_fraction(reduce_fraction);
             // Partial exits represent TP1 in the current engine contract.
             // Do not couple this state transition to human-readable reason text.
             p.tp1_taken = true;
         }
     } else {
         // Full exit
-        let exit_notional = pos.size * fill_price;
-        let fee_usd = exit_notional * FEE_RATE;
-
-        let pnl = match pos.pos_type {
-            PositionType::Long => (fill_price - pos.entry_price) * pos.size,
-            PositionType::Short => (pos.entry_price - fill_price) * pos.size,
-        };
-
-        state.balance += pnl - fee_usd;
+        let close = accounting::apply_close_fill(
+            matches!(pos.pos_type, PositionType::Long),
+            pos.entry_price,
+            fill_price,
+            pos.size,
+            maker_taker_fee_rate(&state.kernel_params, accounting::FeeRole::Taker),
+        );
+        state.balance += close.cash_delta;
 
         // Record PESC info
         state
@@ -1298,11 +1488,11 @@ fn apply_exit(
             action: action.to_string(),
             price: fill_price,
             size: pos.size,
-            notional: exit_notional,
+            notional: close.notional,
             reason: exit.reason.clone(),
             confidence: pos.confidence,
-            pnl,
-            fee_usd,
+            pnl: close.pnl,
+            fee_usd: close.fee_usd,
             balance: state.balance,
             entry_atr: pos.entry_atr,
             leverage: pos.leverage,
@@ -1466,41 +1656,38 @@ fn try_pyramid(
         return;
     }
 
-    let fill_price = match pos.pos_type {
-        PositionType::Long => snap.close * (1.0 + tc.slippage_bps / 10_000.0),
-        PositionType::Short => snap.close * (1.0 - tc.slippage_bps / 10_000.0),
+    let add_signal = match pos.pos_type {
+        PositionType::Long => Signal::Buy,
+        PositionType::Short => Signal::Sell,
     };
-
-    let fee_usd = add_notional * FEE_RATE;
-    state.balance -= fee_usd;
-
-    let action = match pos.pos_type {
-        PositionType::Long => "ADD_LONG",
-        PositionType::Short => "ADD_SHORT",
-    };
-    state.trades.push(TradeRecord {
-        timestamp_ms: ts,
-        symbol: symbol.to_string(),
-        action: action.to_string(),
-        price: fill_price,
-        size: add_size,
-        notional: add_notional,
-        reason: format!("Pyramid #{}", pos.adds_count + 1),
-        confidence,
-        pnl: 0.0,
-        fee_usd,
-        balance: state.balance,
-        entry_atr: atr,
-        leverage,
-        margin_used: add_margin,
-        ..Default::default()
-    });
-
-    // Update position
-    if let Some(p) = state.positions.get_mut(symbol) {
-        p.add_to_position(fill_price, add_size, add_margin, ts);
+    let decision = step_decision(
+        state,
+        ts,
+        symbol,
+        add_signal,
+        snap.close,
+        Some(add_notional),
+        "pyramid",
+    );
+    let has_add = decision
+        .intents
+        .iter()
+        .any(|intent| matches!(intent.kind, decision_kernel::OrderIntentKind::Add));
+    if !has_add {
+        return;
     }
-    note_entry_attempt(state, symbol, ts);
+    let _ = apply_kernel_add_from_plan(
+        state,
+        symbol,
+        cfg,
+        snap,
+        confidence,
+        atr,
+        add_size,
+        add_notional,
+        add_margin,
+        ts,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1723,57 +1910,216 @@ fn execute_sub_bar_entry(
         }
     }
 
-    let fill_price = match signal {
-        Signal::Buy => snap.close * (1.0 + cfg.trade.slippage_bps / 10_000.0),
-        Signal::Sell => snap.close * (1.0 - cfg.trade.slippage_bps / 10_000.0),
+    let decision = step_decision(
+        state,
+        ts,
+        sym,
+        signal,
+        snap.close,
+        Some(notional),
+        "sub-bar-open",
+    );
+    let has_open = decision
+        .intents
+        .iter()
+        .any(|intent| {
+            matches!(
+                intent.kind,
+                decision_kernel::OrderIntentKind::Open | decision_kernel::OrderIntentKind::Add,
+            )
+        });
+    if !has_open {
+        return false;
+    }
+
+    apply_kernel_open_from_plan(
+        state,
+        &EntryCandidate {
+            symbol: sym.to_string(),
+            signal,
+            confidence,
+            adx,
+            atr,
+            entry_adx_threshold,
+            snap: snap.clone(),
+            ts,
+        },
+        size,
+        margin_used,
+        leverage,
+        notional,
+        cfg,
+        &format!("{:?} entry (sub-bar)", confidence),
+    )
+}
+
+fn apply_kernel_open_from_plan(
+    state: &mut SimState,
+    cand: &EntryCandidate,
+    size: f64,
+    margin_used: f64,
+    leverage: f64,
+    requested_notional_usd: f64,
+    cfg: &StrategyConfig,
+    reason: &str,
+) -> bool {
+    if state.positions.contains_key(&cand.symbol) {
+        return false;
+    }
+
+    let desired_type = match cand.signal {
+        Signal::Buy => PositionType::Long,
+        Signal::Sell => PositionType::Short,
         Signal::Neutral => return false,
     };
-    let fee_usd = notional * FEE_RATE;
-    state.balance -= fee_usd;
+
+    if size <= 0.0 || margin_used <= 0.0 || leverage <= 0.0 {
+        return false;
+    }
+
+    let fill_price = accounting::quantize(match desired_type {
+        PositionType::Long => cand.snap.close * (1.0 + cfg.trade.slippage_bps / 10_000.0),
+        PositionType::Short => cand.snap.close * (1.0 - cfg.trade.slippage_bps / 10_000.0),
+    });
+
+    let fill = accounting::apply_open_fill(
+        requested_notional_usd,
+        maker_taker_fee_rate(&state.kernel_params, accounting::FeeRole::Taker),
+    );
+    state.balance += fill.cash_delta;
 
     let pos = Position {
-        symbol: sym.to_string(),
+        symbol: cand.symbol.to_string(),
         pos_type: desired_type,
         entry_price: fill_price,
         size,
-        confidence,
-        entry_atr: atr,
-        entry_adx_threshold,
+        confidence: cand.confidence,
+        entry_atr: cand.atr,
+        entry_adx_threshold: cand.entry_adx_threshold,
         trailing_sl: None,
         leverage,
         margin_used,
         adds_count: 0,
         tp1_taken: false,
-        open_time_ms: ts,
-        last_add_time_ms: ts,
+        open_time_ms: cand.ts,
+        last_add_time_ms: cand.ts,
         mae_usd: 0.0,
         mfe_usd: 0.0,
     };
-    state.positions.insert(sym.to_string(), pos);
-    note_entry_attempt(state, sym, ts);
+    state.positions.insert(cand.symbol.to_string(), pos);
+    note_entry_attempt(state, &cand.symbol, cand.ts);
 
     let action = match desired_type {
         PositionType::Long => "OPEN_LONG",
         PositionType::Short => "OPEN_SHORT",
     };
     state.trades.push(TradeRecord {
-        timestamp_ms: ts,
-        symbol: sym.to_string(),
+        timestamp_ms: cand.ts,
+        symbol: cand.symbol.to_string(),
         action: action.to_string(),
         price: fill_price,
         size,
-        notional,
-        reason: format!("{:?} entry (sub-bar)", confidence),
-        confidence,
+        notional: fill.notional,
+        reason: reason.to_string(),
+        confidence: cand.confidence,
         pnl: 0.0,
-        fee_usd,
+        fee_usd: fill.fee_usd,
         balance: state.balance,
-        entry_atr: atr,
+        entry_atr: cand.atr,
         leverage,
         margin_used,
         ..Default::default()
     });
 
+    true
+}
+
+fn apply_indicator_open_from_kernel(
+    state: &mut SimState,
+    cand: &EntryCandidate,
+    size: f64,
+    margin_used: f64,
+    leverage: f64,
+    requested_notional_usd: f64,
+    cfg: &StrategyConfig,
+    reason: &str,
+) -> bool {
+    apply_kernel_open_from_plan(
+        state,
+        cand,
+        size,
+        margin_used,
+        leverage,
+        requested_notional_usd,
+        cfg,
+        reason,
+    )
+}
+
+fn apply_kernel_add_from_plan(
+    state: &mut SimState,
+    symbol: &str,
+    cfg: &StrategyConfig,
+    snap: &IndicatorSnapshot,
+    confidence: Confidence,
+    atr: f64,
+    add_size: f64,
+    add_notional: f64,
+    add_margin: f64,
+    ts: i64,
+) -> bool {
+    let add_signal = match state.positions.get(symbol).map(|pos| pos.pos_type) {
+        Some(PositionType::Long) => Signal::Buy,
+        Some(PositionType::Short) => Signal::Sell,
+        None => return false,
+    };
+
+    if add_size <= 0.0 || add_margin <= 0.0 {
+        return false;
+    }
+
+    let fill = accounting::apply_open_fill(
+        add_notional,
+        maker_taker_fee_rate(&state.kernel_params, accounting::FeeRole::Taker),
+    );
+    state.balance += fill.cash_delta;
+
+    let fill_price = accounting::quantize(match add_signal {
+        Signal::Buy => snap.close * (1.0 + cfg.trade.slippage_bps / 10_000.0),
+        Signal::Sell => snap.close * (1.0 - cfg.trade.slippage_bps / 10_000.0),
+        Signal::Neutral => return false,
+    });
+
+    if let Some(pos) = state.positions.get_mut(symbol) {
+        pos.add_to_position(fill_price, add_size, add_margin, ts);
+
+        let next_add = pos.adds_count;
+        state.trades.push(TradeRecord {
+            timestamp_ms: ts,
+            symbol: symbol.to_string(),
+            action: if pos.pos_type == PositionType::Long {
+                "ADD_LONG".to_string()
+            } else {
+                "ADD_SHORT".to_string()
+            },
+            price: fill_price,
+            size: add_size,
+            notional: fill.notional,
+            reason: format!("Pyramid #{}", next_add),
+            confidence,
+            pnl: 0.0,
+            fee_usd: fill.fee_usd,
+            balance: state.balance,
+            entry_atr: atr,
+            leverage: pos.leverage,
+            margin_used: pos.margin_used,
+            ..Default::default()
+        });
+    } else {
+        return false;
+    }
+
+    note_entry_attempt(state, symbol, ts);
     true
 }
 
@@ -1854,6 +2200,7 @@ fn make_minimal_snap(price: f64, ts: i64) -> IndicatorSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn test_atr_floor() {
@@ -1981,6 +2328,10 @@ mod tests {
             last_close: FxHashMap::default(),
             trades: vec![],
             signals: vec![],
+            decision_diagnostics: Vec::new(),
+            kernel_state: make_kernel_state(1000.0, 0, &FxHashMap::default()),
+            kernel_params: make_kernel_params(&StrategyConfig::default()),
+            next_kernel_event_id: 1,
             equity_curve: vec![],
             gate_stats: GateStats::default(),
         };
@@ -2004,6 +2355,10 @@ mod tests {
             last_close: FxHashMap::default(),
             trades: vec![],
             signals: vec![],
+            decision_diagnostics: Vec::new(),
+            kernel_state: make_kernel_state(1000.0, 0, &FxHashMap::default()),
+            kernel_params: make_kernel_params(&StrategyConfig::default()),
+            next_kernel_event_id: 1,
             equity_curve: vec![],
             gate_stats: GateStats::default(),
         };
@@ -2030,6 +2385,10 @@ mod tests {
             last_close: FxHashMap::default(),
             trades: vec![],
             signals: vec![],
+            decision_diagnostics: Vec::new(),
+            kernel_state: make_kernel_state(1000.0, 0, &FxHashMap::default()),
+            kernel_params: make_kernel_params(&StrategyConfig::default()),
+            next_kernel_event_id: 1,
             equity_curve: vec![],
             gate_stats: GateStats::default(),
         };
@@ -2073,6 +2432,10 @@ mod tests {
             last_close: FxHashMap::default(),
             trades: vec![],
             signals: vec![],
+            decision_diagnostics: Vec::new(),
+            kernel_state: make_kernel_state(1_000.0, 0, &positions),
+            kernel_params: make_kernel_params(&StrategyConfig::default()),
+            next_kernel_event_id: 1,
             equity_curve: vec![],
             gate_stats: GateStats::default(),
             last_entry_attempt_ms: FxHashMap::default(),
@@ -2127,5 +2490,92 @@ mod tests {
         assert!((pos.size - 0.75).abs() < 1e-12);
         assert_eq!(state.trades.len(), 1);
         assert_eq!(state.trades[0].action, "REDUCE_LONG");
+    }
+
+    #[test]
+    fn test_apply_exit_pnl_matches_shared_accounting_close_formula() {
+        let symbol = "ETH";
+        let mut state = make_state_with_open_long(symbol);
+        let close_price = 105.0;
+        let snapped = make_minimal_snap(close_price, 1_700_000_000_002);
+        let exit = ExitResult::exit("Take Profit", close_price);
+        let fill_price = accounting::quantize(close_price * (1.0 - 0.5 / 10_000.0));
+        let expected = accounting::apply_close_fill(
+            true,
+            100.0,
+            fill_price,
+            1.0,
+            maker_taker_fee_rate(&state.kernel_params, accounting::FeeRole::Taker),
+        );
+
+        apply_exit(&mut state, symbol, &exit, &snapped, snapped.t);
+
+        assert!((state.balance - (1_000.0 + expected.cash_delta)).abs() < 1e-9);
+        assert_eq!(state.trades.len(), 1);
+        assert_eq!(state.trades[0].action, "CLOSE_LONG");
+        assert!((state.trades[0].pnl - expected.pnl).abs() < 1e-9);
+        assert!((state.trades[0].fee_usd - expected.fee_usd).abs() < 1e-9);
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    struct KernelTraceFixture {
+        final_cash: f64,
+        traces: Vec<DecisionKernelTrace>,
+    }
+
+    #[test]
+    fn test_kernel_entry_exit_sequence_matches_expected_fixture() {
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/kernel_path/entry_exit_kernel_path.json");
+        let fixture_raw = std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|e| panic!("Failed to read fixture {:?}: {e}", fixture_path));
+        let fixture: KernelTraceFixture = serde_json::from_str(&fixture_raw)
+            .unwrap_or_else(|e| panic!("Invalid fixture JSON in {fixture_path:?}: {e}"));
+
+        let mut state = SimState {
+            balance: 10_000.0,
+            positions: FxHashMap::default(),
+            last_entry_attempt_ms: FxHashMap::default(),
+            last_exit_attempt_ms: FxHashMap::default(),
+            indicators: FxHashMap::default(),
+            ema_slow_history: FxHashMap::default(),
+            bar_counts: FxHashMap::default(),
+            last_close: FxHashMap::default(),
+            trades: vec![],
+            signals: vec![],
+            decision_diagnostics: Vec::new(),
+            kernel_state: make_kernel_state(10_000.0, 0, &FxHashMap::default()),
+            kernel_params: make_kernel_params(&StrategyConfig::default()),
+            next_kernel_event_id: 1,
+            equity_curve: vec![],
+            gate_stats: GateStats::default(),
+        };
+
+        let _ = step_decision(
+            &mut state,
+            1_000,
+            "BTC",
+            Signal::Buy,
+            100.0,
+            Some(1_000.0),
+            "fixture-open",
+        );
+        let _ = step_decision(
+            &mut state,
+            2_000,
+            "BTC",
+            Signal::Sell,
+            110.0,
+            Some(1_000.0),
+            "fixture-exit",
+        );
+
+        assert_eq!(state.decision_diagnostics, fixture.traces);
+        assert!(
+            (state.kernel_state.cash_usd - fixture.final_cash).abs() < 1e-12,
+            "kernel final cash {} != fixture final cash {}",
+            state.kernel_state.cash_usd,
+            fixture.final_cash
+        );
     }
 }
