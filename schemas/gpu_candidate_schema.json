@@ -5,6 +5,7 @@
   "type": "object",
   "required": [
     "config_id",
+    "schema_version",
     "output_mode",
     "overrides",
     "total_pnl",
@@ -17,6 +18,11 @@
     "config_id": {
       "type": "string",
       "minLength": 1
+    },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1
     },
     "output_mode": {
       "type": "string",

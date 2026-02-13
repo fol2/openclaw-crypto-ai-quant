@@ -979,6 +979,17 @@ def _validate_candidate_schema_row(row: Any) -> tuple[bool, list[str]]:
     if not candidate_mode:
         errors.append("candidate_mode is not true")
 
+    schema_version = row.get("schema_version")
+    if isinstance(schema_version, bool) or schema_version is None:
+        errors.append("schema_version is required and must be an integer >= 1")
+    else:
+        try:
+            schema_version = int(schema_version)
+            if schema_version != 1:
+                errors.append("schema_version must be 1")
+        except Exception:
+            errors.append("schema_version is required and must be an integer >= 1")
+
     output_mode = str(row.get("output_mode", "")).strip()
     if output_mode != "candidate":
         errors.append(f"output_mode is not candidate: {output_mode!r}")
