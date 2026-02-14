@@ -82,8 +82,8 @@ global:
     max_entry_orders_per_loop: 6
   indicators:
     adx_window: 19
-    ema_fast_window: 11
-    ema_slow_window: 15
+    ema_fast_window: 8
+    ema_slow_window: 50
     bb_window: 16
     ema_macro_window: 200
     atr_window: 12
@@ -98,13 +98,13 @@ global:
     enable_extension_filter: true
     enable_ranging_filter: false
     enable_anomaly_filter: false
-    require_btc_alignment: true
+    require_btc_alignment: false
     require_volume_confirmation: false
     require_macro_alignment: false
-    require_adx_rising: true
+    require_adx_rising: false
     adx_rising_saturation: 40.0
     vol_confirm_include_prev: true
-    use_stoch_rsi_filter: true
+    use_stoch_rsi_filter: false
   thresholds:
     entry:
       min_adx: 15.0

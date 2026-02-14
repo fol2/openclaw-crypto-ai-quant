@@ -637,9 +637,13 @@ class PythonAnalyzeDecisionProvider:
                 if sig_u not in ("BUY", "SELL"):
                     continue
 
-                if not isinstance(now_series, dict):
+                if isinstance(now_series, pd.Series):
+                    try:
+                        now_series = now_series.to_dict()
+                    except Exception:
+                        now_series = {}
+                elif not isinstance(now_series, dict):
                     now_series = {}
-
                 # ATR floor: enforce minimum ATR as % of price.
                 try:
                     _atr_raw = float(now_series.get("ATR") or 0.0)
@@ -1389,9 +1393,14 @@ class UnifiedEngine:
                 reason=reason,
             )
         except TypeError:
-            # Fall back only to explicit action handlers to avoid silently degrading to signal-only legacy routing.
+            # Fall back to legacy signal-only API when the trader doesn't accept ``action``.
             if act == "OPEN":
-                return
+                # Legacy PaperTrader path: OPEN implies full entry flow when signal says BUY/SELL.
+                try:
+                    return self.trader.execute_trade(sym, signal, price, timestamp, confidence, atr=atr, indicators=indicators)
+                except Exception:
+                    pass
+
             if act == "ADD":
                 fn = getattr(self.trader, "add_to_position", None)
                 if callable(fn):
