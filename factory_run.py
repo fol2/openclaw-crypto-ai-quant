@@ -1147,13 +1147,22 @@ def _validate_candidate_schema_row(row: Any) -> tuple[bool, list[str]]:
         errors.append("config_id is required and must be a non-empty string")
 
     overrides = row.get("overrides")
-    if not isinstance(overrides, dict):
-        errors.append("overrides must be an object")
-    else:
+    if isinstance(overrides, dict):
         for key, value in overrides.items():
             if isinstance(value, (dict, list, tuple)):
                 errors.append(f"overrides[{key!r}] has unsupported type: {type(value).__name__}")
                 break
+    elif isinstance(overrides, list):
+        # Rust backtester emits overrides as [["key", value], ...] pairs.
+        for i, pair in enumerate(overrides):
+            if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                errors.append(f"overrides[{i}] must be a [key, value] pair")
+                break
+            if not isinstance(pair[0], str):
+                errors.append(f"overrides[{i}][0] must be a string key")
+                break
+    else:
+        errors.append("overrides must be an object or list of [key, value] pairs")
 
     required_keys = [
         "total_pnl",
