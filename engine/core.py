@@ -603,16 +603,23 @@ class PythonAnalyzeDecisionProvider:
     ) -> Iterable[KernelDecision]:
         decisions: list[KernelDecision] = []
         open_set = {s.upper() for s in (open_symbols or [])}
+        
+        # DEBUG LOGging
+        # print(f"🔍 get_decisions: symbols={len(symbols)} watchlist={len(watchlist)} not_ready={len(not_ready_symbols)}")
 
         # --- BTC context (require_btc_alignment filter) ----------------
+        # NOTE: use mei_alpha_v1 directly; `strategy` is a StrategyManager and
+        # does NOT have .analyze / .ta / .pd attributes.
+        from strategy import mei_alpha_v1 as _strat_mod
+
         btc_bullish = self._btc_bullish
         try:
             btc_df = market.get_candles_df("BTC", interval=interval, min_rows=lookback_bars)
             if btc_df is not None and not btc_df.empty and len(btc_df) >= lookback_bars:
-                btc_ema_slow = strategy.ta.trend.ema_indicator(
+                btc_ema_slow = _strat_mod.ta.trend.ema_indicator(
                     btc_df["Close"], window=50,
                 ).iloc[-1]
-                if strategy.pd.notna(btc_ema_slow):
+                if _strat_mod.pd.notna(btc_ema_slow):
                     btc_bullish = bool(btc_df["Close"].iloc[-1] > btc_ema_slow)
                     self._btc_bullish = btc_bullish
         except Exception:
@@ -621,7 +628,10 @@ class PythonAnalyzeDecisionProvider:
         # --- Per-symbol signal generation ------------------------------
         for sym in watchlist:
             sym_u = sym.upper().strip()
-            if not sym_u or sym_u in not_ready_symbols:
+            if not sym_u:
+                continue
+
+            if sym_u in not_ready_symbols:
                 continue
 
             try:
@@ -632,13 +642,15 @@ class PythonAnalyzeDecisionProvider:
                     continue
 
                 df = df_raw.tail(lookback_bars).copy()
-                sig, conf, now_series = strategy.analyze(
+                sig, conf, now_series = _strat_mod.analyze(
                     df, sym_u, btc_bullish=btc_bullish,
                 )
 
                 sig_u = str(sig or "").upper()
                 if sig_u not in ("BUY", "SELL"):
                     continue
+
+                print(f"🎯 SIGNAL: {sym_u} {sig_u} {conf}")
 
                 if not isinstance(now_series, dict):
                     try:
@@ -650,7 +662,7 @@ class PythonAnalyzeDecisionProvider:
                     _atr_raw = float(now_series.get("ATR") or 0.0)
                     _close_px = float(now_series.get("Close") or 0.0)
                     _min_atr_pct = float(
-                        (strategy.get_trade_params(sym_u) or {}).get(
+                        (_strat_mod.get_trade_params(sym_u) or {}).get(
                             "min_atr_pct", 0.003,
                         ) or 0.003,
                     )
@@ -1792,6 +1804,7 @@ class UnifiedEngine:
                 # Phase 2: Execute explicit kernel decisions (OPEN/ADD/CLOSE/REDUCE) ordered by score.
                 decision_exec: list[KernelDecision] = []
                 try:
+                    print(f"DEBUG: calling decision_provider.get_decisions for {len(watchlist)} symbols")
                     for dec in self.decision_provider.get_decisions(
                         symbols=watchlist,
                         watchlist=watchlist,
