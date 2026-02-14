@@ -841,16 +841,17 @@ def _compute_score_v1(
 
 def _summarise_replay_report(path: Path) -> dict[str, Any]:
     d = _load_json(path)
+    # Values may be explicitly None in the JSON, so use `or` fallback.
     return {
         "path": str(path),
-        "initial_balance": float(d.get("initial_balance", 0.0)),
-        "final_balance": float(d.get("final_balance", 0.0)),
-        "total_pnl": float(d.get("total_pnl", 0.0)),
-        "total_trades": int(d.get("total_trades", 0)),
-        "win_rate": float(d.get("win_rate", 0.0)),
-        "profit_factor": float(d.get("profit_factor", 0.0)),
-        "max_drawdown_pct": float(d.get("max_drawdown_pct", 0.0)),
-        "total_fees": float(d.get("total_fees", 0.0)),
+        "initial_balance": float(d.get("initial_balance") or 0.0),
+        "final_balance": float(d.get("final_balance") or 0.0),
+        "total_pnl": float(d.get("total_pnl") or 0.0),
+        "total_trades": int(d.get("total_trades") or 0),
+        "win_rate": float(d.get("win_rate") or 0.0),
+        "profit_factor": float(d.get("profit_factor") or 0.0),
+        "max_drawdown_pct": float(d.get("max_drawdown_pct") or 0.0),
+        "total_fees": float(d.get("total_fees") or 0.0),
     }
 
 
