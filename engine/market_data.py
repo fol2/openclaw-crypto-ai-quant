@@ -44,6 +44,8 @@ def _interval_to_ms(interval: str) -> int:
         return int(n * 60.0 * 60.0 * 1000.0)
     if unit == "d":
         return int(n * 24.0 * 60.0 * 60.0 * 1000.0)
+    if unit == "w":
+        return int(n * 7 * 24 * 60 * 60 * 1000)
     # Fallback: assume seconds
     try:
         return int(float(s) * 1000.0)
@@ -166,6 +168,9 @@ class MarketDataHub:
         return self._ws.health(symbols=list(symbols), interval=str(interval))
 
     def candles_ready(self, *, symbols: list[str], interval: str) -> tuple[bool, list[str]]:
+        # BUG-15: If we are in sidecar-only mode, candles_ready should be more permissive
+        # because the sidecar itself handles backfilling and may report not_ready 
+        # for symbols that actually have enough data in the DB for a trade.
         fn = getattr(self._ws, "candles_ready", None)
         if not callable(fn):
             return True, []
@@ -173,6 +178,22 @@ class MarketDataHub:
             ready, not_ready = fn(symbols=list(symbols), interval=str(interval))
             if not isinstance(not_ready, list):
                 not_ready = []
+            
+            # If the sidecar says not_ready, we check the DB directly as a second opinion.
+            # This prevents the "not_ready" gate from blocking trades when data is actually present.
+            if not_ready:
+                truly_not_ready = []
+                for sym in not_ready:
+                    # If we can get a valid DF with min_rows, it's ready enough for us.
+                    try:
+                        df = self.get_candles_df(sym, interval=interval, min_rows=10)
+                        if df is None or len(df) < 10:
+                            truly_not_ready.append(sym)
+                    except Exception:
+                        truly_not_ready.append(sym)
+                not_ready = truly_not_ready
+                ready = (len(not_ready) == 0)
+
             return bool(ready), [str(s).upper() for s in not_ready]
         except Exception:
             return False, [str(s).upper() for s in (symbols or [])]
@@ -436,7 +457,7 @@ class MarketDataHub:
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT t, T
+                SELECT t, t_close
                 FROM candles
                 WHERE symbol = ? AND interval = ?
                 ORDER BY t DESC
@@ -446,13 +467,13 @@ class MarketDataHub:
             )
             rows = cur.fetchall() or []
             out: list[tuple[int | None, int | None]] = []
-            for t_ms, T_ms in rows:
+            for t_ms, tc_ms in rows:
                 try:
                     t_i = int(t_ms) if t_ms is not None else None
                 except Exception:
                     t_i = None
                 try:
-                    tc_i = int(T_ms) if T_ms is not None else None
+                    tc_i = int(tc_ms) if tc_ms is not None else None
                 except Exception:
                     tc_i = None
                 out.append((t_i, tc_i))
@@ -597,7 +618,7 @@ class MarketDataHub:
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT t, T, o, h, l, c, v, n
+                SELECT t, t_close, o, h, l, c, v, n
                 FROM candles
                 WHERE symbol = ? AND interval = ?
                 ORDER BY t DESC
@@ -749,12 +770,16 @@ class MarketDataHub:
                 # If callbacks are unavailable for some reason, we'll clean up on the next call.
                 pass
 
+    def close(self):
+        if self._rest_candle_pool is not None:
+            self._rest_candle_pool.shutdown(wait=False)
+
     def _upsert_candles(self, symbol: str, interval: str, candles: list[dict[str, Any]]) -> None:
         db_path = self._candle_db_path(interval)
         conn = sqlite3.connect(db_path, timeout=self._db_timeout_s)
         cur = conn.cursor()
         cur.execute(
-            "CREATE TABLE IF NOT EXISTS candles (symbol TEXT, interval TEXT, t INTEGER, T INTEGER, o REAL, h REAL, l REAL, c REAL, v REAL, n INTEGER, updated_at TEXT, PRIMARY KEY (symbol, interval, t))"
+            "CREATE TABLE IF NOT EXISTS candles (symbol TEXT, interval TEXT, t INTEGER, t_close INTEGER, o REAL, h REAL, l REAL, c REAL, v REAL, n INTEGER, updated_at TEXT, PRIMARY KEY (symbol, interval, t))"
         )
         updated_at = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
         try:
@@ -762,10 +787,10 @@ class MarketDataHub:
                 try:
                     cur.execute(
                         """
-                        INSERT INTO candles (symbol, interval, t, T, o, h, l, c, v, n, updated_at)
+                        INSERT INTO candles (symbol, interval, t, t_close, o, h, l, c, v, n, updated_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(symbol, interval, t) DO UPDATE SET
-                            T = excluded.T,
+                            t_close = excluded.t_close,
                             o = excluded.o,
                             h = excluded.h,
                             l = excluded.l,
@@ -778,7 +803,7 @@ class MarketDataHub:
                             symbol,
                             interval,
                             int(c.get("t")),
-                            int(c.get("T")) if c.get("T") is not None else None,
+                            int(c.get("T") if c.get("T") is not None else c.get("t_close")),
                             float(c.get("o")),
                             float(c.get("h")),
                             float(c.get("l")),
