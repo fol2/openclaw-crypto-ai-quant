@@ -82,3 +82,4 @@ local/
 # Reports (generated analysis markdown)
 reports/
 artifacts/
+sweep_results.jsonl

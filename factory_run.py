@@ -1785,7 +1785,29 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
     return 0
 
 
+def _ensure_cuda_env() -> None:
+    """Ensure LD_LIBRARY_PATH includes CUDA/WSL driver paths for Rust backtester.
+
+    On WSL2, the CUDA driver lives in /usr/lib/wsl/lib which is often not in
+    LD_LIBRARY_PATH for systemd services or cron jobs.
+    """
+    cuda_paths = [
+        "/usr/lib/wsl/lib",
+        "/usr/lib/x86_64-linux-gnu",
+    ]
+    current = os.environ.get("LD_LIBRARY_PATH", "")
+    parts = [p for p in current.split(":") if p]
+    added = False
+    for cp in cuda_paths:
+        if Path(cp).is_dir() and cp not in parts:
+            parts.append(cp)
+            added = True
+    if added:
+        os.environ["LD_LIBRARY_PATH"] = ":".join(parts)
+
+
 def main(argv: list[str] | None = None) -> int:
+    _ensure_cuda_env()
     args = _parse_cli_args(argv)
 
     artifacts_root = (AIQ_ROOT / str(args.artifacts_dir)).resolve()
@@ -2098,6 +2120,21 @@ def main(argv: list[str] | None = None) -> int:
                 "intervals": check_intervals,
             }
         )
+    _write_json(run_dir / "run_metadata.json", meta)
+
+    # ── Pre-sweep funding refresh ───────────────────────────────────────
+    # Fetch latest funding rates before the freshness check to avoid stale-data failures.
+    funding_refresh_out = run_dir / "data_checks" / "funding_refresh.stdout.txt"
+    funding_refresh_err = run_dir / "data_checks" / "funding_refresh.stderr.txt"
+    funding_refresh_res = _run_cmd(
+        ["python3", "tools/fetch_funding_rates.py", "--days", "7"],
+        cwd=AIQ_ROOT,
+        stdout_path=funding_refresh_out,
+        stderr_path=funding_refresh_err,
+    )
+    meta["steps"].append({"name": "refresh_funding_rates", **funding_refresh_res.__dict__})
+    if funding_refresh_res.exit_code != 0:
+        print(f"⚠️ Funding refresh failed (exit={funding_refresh_res.exit_code}), proceeding with existing data")
     _write_json(run_dir / "run_metadata.json", meta)
 
     funding_out = run_dir / "data_checks" / "funding_rates.json"
