@@ -1,3 +1,4 @@
+import logging
 import pandas as pd  # noqa: F401  (re-exported for other modules)
 import ta
 import time
@@ -9,6 +10,8 @@ import sqlite3
 import tomllib
 import yaml
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 import exchange.ws as hyperliquid_ws
 import exchange.meta as hyperliquid_meta
@@ -149,7 +152,7 @@ def _get_default_symbols() -> list[str]:
         if syms:
             return syms
     except Exception as e:
-        print(f"⚠️ Failed to auto-select top {top_n} symbols from Hyperliquid: {e}")
+        logger.warning(f"⚠️ Failed to auto-select top {top_n} symbols from Hyperliquid: {e}")
     return list(_FALLBACK_SYMBOLS)
 
 _env_symbols = os.getenv("AI_QUANT_SYMBOLS", "").strip()
@@ -180,7 +183,11 @@ DISCORD_CHANNEL = os.getenv("AI_QUANT_DISCORD_CHANNEL", "")
 # Multi-trade allocation (paper perps): margin allocated per position (notional ≈ margin × leverage).
 # Default (code-level): 3% margin per position. Prefer overriding via YAML:
 #   config/strategy_overrides.yaml
-ALLOCATION_PCT = 0.03  # Match Rust backtester default
+# NOTE: This is a hardcoded fallback. Prefer overriding via get_strategy_config() / YAML.
+try:
+    ALLOCATION_PCT = float(os.getenv("AI_QUANT_ALLOCATION_PCT", "0.03"))
+except Exception:
+    ALLOCATION_PCT = 0.03  # Match Rust backtester default
 
 # --- Hyperliquid (Perps) Costs ---
 # Defaults from Hyperliquid fee schedule (VIP 0, Base): Taker 0.045%, Maker 0.015%.
@@ -457,7 +464,7 @@ if _QTStrategyManager is not None:
             watchlist_refresh_s=float(os.getenv("AI_QUANT_WATCHLIST_REFRESH_S", "60")),
         )
     except Exception as e:
-        print(
+        logger.warning(
             "⚠️ StrategyManager bootstrap failed; falling back to legacy overrides. "
             f"Error: {e}"
         )
@@ -485,7 +492,7 @@ def _load_strategy_overrides() -> dict:
                 return tomllib.load(f)
         return {}
     except Exception as e:
-        print(
+        logger.warning(
             "⚠️ Failed to load strategy overrides "
             f"(yaml={STRATEGY_YAML_PATH}, toml={STRATEGY_TOML_PATH}): {e}"
         )
@@ -660,7 +667,9 @@ def compute_entry_sizing(
     try:
         allocation_pct = float(trade_cfg.get("allocation_pct", ALLOCATION_PCT))
     except Exception:
+        # Fallback: should come from get_strategy_config() / YAML, not this hardcoded constant.
         allocation_pct = float(ALLOCATION_PCT or 0.0)
+        logger.warning("Using hardcoded ALLOCATION_PCT fallback (%.4f) — check strategy config", allocation_pct)
     allocation_pct = max(0.0, allocation_pct)
 
     margin_target = equity * allocation_pct
@@ -1039,7 +1048,7 @@ def ensure_db():
         )
         cursor.execute(
             "INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)",
-            (migration_id, datetime.datetime.now().isoformat()),
+            (migration_id, datetime.datetime.now(datetime.timezone.utc).isoformat()),
         )
 
     conn.commit()
@@ -1125,6 +1134,9 @@ class PaperTrader:
         self._last_entry_attempt_at_s: dict[str, float] = {}
         self._last_exit_attempt_at_s: dict[str, float] = {}
         self._entry_budget_remaining: int | None = None
+        # Set when get_live_balance falls back to entry_price (WS + REST both failed).
+        # execute_trade checks this before opening new positions.
+        self._data_stale: bool = False
         ensure_db()
         self.load_state()
 
@@ -1294,7 +1306,7 @@ class PaperTrader:
         if cooldown_s > 0:
             last = self._last_entry_attempt_at_s.get(symbol, 0.0)
             if (time.time() - last) < cooldown_s:
-                print(
+                logger.debug(
                     f"⏳ ENTRY_SKIP_COOLDOWN: {symbol} entry blocked — "
                     f"rate-limit cooldown ({cooldown_s:.0f}s) active"
                 )
@@ -1309,7 +1321,7 @@ class PaperTrader:
                 return False
 
         if self._entry_budget_remaining is not None and self._entry_budget_remaining <= 0:
-            print(
+            logger.debug(
                 f"⏳ ENTRY_SKIP_BUDGET: {symbol} entry blocked — "
                 f"max_entry_orders_per_loop budget exhausted"
             )
@@ -1378,7 +1390,7 @@ class PaperTrader:
                 pos.get("tp1_taken"),
                 pos.get("last_add_time"),
                 pos.get("entry_adx_threshold"),
-                datetime.datetime.now().isoformat(),
+                datetime.datetime.now(datetime.timezone.utc).isoformat(),
             ),
         )
         conn.commit()
@@ -1415,7 +1427,7 @@ class PaperTrader:
         ensure_db()
         conn = sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT_S)
         cursor = conn.cursor()
-        timestamp = timestamp_override or datetime.datetime.now().isoformat()
+        timestamp = timestamp_override or datetime.datetime.now(datetime.timezone.utc).isoformat()
         notional = price * size
         meta_json = _json_dumps_safe(meta) if meta else None
 
@@ -1558,7 +1570,7 @@ class PaperTrader:
                 timeout_s=timeout_s,
             )
         except Exception as e:
-            print(f"Failed to send Discord message: {e}")
+            logger.error(f"Failed to send Discord message: {e}")
         return trade_id
 
     def apply_funding_payments(self, *, now_ms: int | None = None) -> float:
@@ -1579,7 +1591,8 @@ class PaperTrader:
             from hyperliquid.info import Info
             from hyperliquid.utils import constants
         except Exception as e:
-            print(f"⚠️ Funding sync unavailable (hyperliquid SDK import failed): {e}")
+            logger.warning("apply_funding_payments: hyperliquid SDK not available, skipping funding")
+            logger.warning(f"⚠️ Funding sync unavailable (hyperliquid SDK import failed): {e}")
             return 0.0
 
         def _funding_price_from_candles(symbol: str, t_ms: int) -> float | None:
@@ -1627,7 +1640,7 @@ class PaperTrader:
             try:
                 events = info.funding_history(symbol, last_ms, now_ms) or []
             except Exception as e:
-                print(f"⚠️ Funding history failed for {symbol}: {e}")
+                logger.warning(f"⚠️ Funding history failed for {symbol}: {e}")
                 continue
 
             applied_any = False
@@ -1647,7 +1660,11 @@ class PaperTrader:
                 px = _funding_price_from_candles(symbol, ev_time)
                 if px is None:
                     mid = hyperliquid_ws.hl_ws.get_mid(symbol, max_age_s=10.0)
-                    px = float(mid) if mid is not None else float(pos.get("entry_price", 0.0))
+                    if mid is not None:
+                        px = float(mid)
+                    else:
+                        px = float(pos.get("entry_price", 0.0))
+                        logger.warning("funding: using entry_price fallback for %s (mark price unavailable)", symbol)
 
                 try:
                     size = float(pos.get("size", 0.0))
@@ -1712,6 +1729,7 @@ class PaperTrader:
 
             unrealized_pnl = 0.0
             est_close_fees = 0.0
+            _any_stale = False
             fee_rate = _effective_fee_rate()
             try:
                 mid_max_age_s = float(
@@ -1811,6 +1829,8 @@ class PaperTrader:
                         current_price = None
                 if current_price is None:
                     # Final fallback: assume mark == entry to at least estimate close fees.
+                    logger.warning("get_live_balance: using entry_price fallback for %s — data may be stale", symbol)
+                    _any_stale = True
                     try:
                         current_price = float(pos.get("entry_price") or 0.0)
                     except Exception:
@@ -1834,9 +1854,10 @@ class PaperTrader:
                     unrealized_pnl += (entry - current_price) * size
 
                 est_close_fees += abs(size) * current_price * fee_rate
+            self._data_stale = _any_stale
             return self.balance + unrealized_pnl - est_close_fees
         except Exception as e:
-            print(f"Error calculating live balance: {e}")
+            logger.error(f"Error calculating live balance: {e}")
             return self.balance # Fallback to realized balance
 
     def _estimate_margin_used(self, symbol: str, pos: dict, *, mark_price: float | None = None) -> float:
@@ -1983,6 +2004,9 @@ class PaperTrader:
         if profit_atr < min_profit_atr:
             return False
 
+        # allocation_pct should come from get_strategy_config() / YAML, not the hardcoded constant.
+        if "allocation_pct" not in trade_cfg:
+            logger.warning("Using hardcoded ALLOCATION_PCT fallback — check strategy config")
         allocation_pct = float(trade_cfg.get("allocation_pct", ALLOCATION_PCT))
         add_frac = float(trade_cfg.get("add_fraction_of_base_margin", 0.5))
         add_frac = max(0.0, min(2.0, add_frac))
@@ -1994,7 +2018,12 @@ class PaperTrader:
         min_notional = float(trade_cfg.get("min_notional_usd", 10.0))
         max_total_margin_pct = float(trade_cfg.get("max_total_margin_pct", 0.60))
 
-        equity_base = _safe_float(self.get_live_balance(), self.balance) or self.balance
+        equity_base = _safe_float(self.get_live_balance(), None)
+        if equity_base is None or equity_base <= 0:
+            equity_base = max(0.0, float(self.balance or 0.0))
+            if equity_base <= 0:
+                logger.warning("attempt_add_to_position: equity_base is zero/negative, skipping %s", symbol)
+                return False
         base_margin = equity_base * allocation_pct
         margin_target = base_margin * add_frac
 
@@ -2156,7 +2185,7 @@ class PaperTrader:
             notify=False,
         )
         margin_est = (notional / leverage) if leverage > 0 else 0.0
-        print(
+        logger.info(
             f"➕ ADD {pos_type} {symbol} px={fill_price:.4f} size={add_size:.6f} "
             f"notional~=${notional:.2f} lev={leverage:.0f} margin~=${margin_est:.2f} "
             f"fee=${fee_usd:.4f} conf={confidence}"
@@ -2255,7 +2284,7 @@ class PaperTrader:
             margin_used=margin_delta,
             meta=meta,
         )
-        print(
+        logger.info(
             f"✅ {action} {pos_type} {symbol} px={fill_price:.4f} size={reduce_size:.6f} "
             f"notional~=${notional:.2f} lev={leverage:.0f} Δmargin~=${margin_delta:+.2f} | "
             f"Reason: {reason} | GrossPnL={gross_pnl:.2f} | Fee={fee_usd:.4f} | NetPnL={pnl:.2f}"
@@ -2285,7 +2314,7 @@ class PaperTrader:
                 INSERT INTO signals (timestamp, symbol, signal, confidence, price, rsi, ema_fast, ema_slow, meta_json)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
-                datetime.datetime.now().isoformat(),
+                datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 symbol, signal, confidence, price,
                 indicators.get('RSI', 0) if indicators is not None else 0,
                 indicators.get('EMA_fast', 0) if indicators is not None else 0,
@@ -2329,6 +2358,16 @@ class PaperTrader:
 
         # Open new position if no position for this symbol
         if symbol not in self.positions:
+            # Block new entries when market data is stale (WS + REST both failed).
+            if getattr(self, "_data_stale", False):
+                logger.warning("execute_trade: blocking new entry for %s — market data is stale", symbol)
+                log_audit_event(
+                    symbol,
+                    "ENTRY_SKIP_DATA_STALE",
+                    data={"signal": str(signal or "").upper(), "confidence": str(confidence or "")},
+                )
+                return
+
             cfg = get_strategy_config(symbol)
             trade_cfg = cfg.get("trade") or {}
             thr = cfg.get("thresholds") or {}
@@ -2336,7 +2375,7 @@ class PaperTrader:
             # v5.035: Entry confidence gate.
             min_entry_conf = str(trade_cfg.get("entry_min_confidence", "high"))
             if not _conf_ok(confidence, min_confidence=min_entry_conf):
-                print(f"🟡 Skipping {symbol} entry: confidence '{confidence}' < '{min_entry_conf}'")
+                logger.warning(f"🟡 Skipping {symbol} entry: confidence '{confidence}' < '{min_entry_conf}'")
                 log_audit_event(
                     symbol,
                     "ENTRY_SKIP_LOW_CONFIDENCE",
@@ -2354,7 +2393,7 @@ class PaperTrader:
             except Exception:
                 max_open_positions = 0
             if max_open_positions > 0 and len(self.positions or {}) >= max_open_positions:
-                print(f"🟡 Skipping {symbol} entry: max_open_positions={max_open_positions} reached")
+                logger.warning(f"🟡 Skipping {symbol} entry: max_open_positions={max_open_positions} reached")
                 log_audit_event(
                     symbol,
                     "ENTRY_SKIP_MAX_OPEN_POSITIONS",
@@ -2418,7 +2457,7 @@ class PaperTrader:
                         except Exception:
                             last_ts_s = None
                 except Exception as e:
-                    print(f"⚠️ PESC db query failed for {symbol}: {e}")
+                    logger.warning(f"⚠️ PESC db query failed for {symbol}: {e}")
                     try:
                         conn.close()
                     except Exception:
@@ -2432,7 +2471,7 @@ class PaperTrader:
                         and str(last_type).upper() == target_type
                         and "Signal Flip" not in (last_reason or "")
                     ):
-                        print(
+                        logger.debug(
                             f"⏳ PESC: Skipping {symbol} {target_type} re-entry. Cooldown active "
                             f"({diff_mins:.1f}/{reentry_cooldown:.1f}m, ADX: {float(adx_val):.1f})"
                         )
@@ -2460,7 +2499,7 @@ class PaperTrader:
                 macd_h = indicators.get("MACD_hist", 0)
                 if signal == "BUY" and macd_h < 0:
                     # 做多但 MACD 仲係負數，代表動量仲未轉正。
-                    print(f"⏳ SSF: Skipping {symbol} BUY. MACD_hist ({macd_h:.6f}) is negative.")
+                    logger.debug(f"⏳ SSF: Skipping {symbol} BUY. MACD_hist ({macd_h:.6f}) is negative.")
                     log_audit_event(
                         symbol,
                         "ENTRY_SKIP_SSF",
@@ -2473,7 +2512,7 @@ class PaperTrader:
                     return
                 if signal == "SELL" and macd_h > 0:
                     # 做空但 MACD 仲係正數。
-                    print(f"⏳ SSF: Skipping {symbol} SELL. MACD_hist ({macd_h:.6f}) is positive.")
+                    logger.debug(f"⏳ SSF: Skipping {symbol} SELL. MACD_hist ({macd_h:.6f}) is positive.")
                     log_audit_event(
                         symbol,
                         "ENTRY_SKIP_SSF",
@@ -2493,7 +2532,7 @@ class PaperTrader:
                     long_block = _safe_float(trade_cfg.get("reef_long_rsi_block_gt"), 70.0) or 70.0
                     short_block = _safe_float(trade_cfg.get("reef_short_rsi_block_lt"), 30.0) or 30.0
                     if signal == "BUY" and float(rsi_v) > float(long_block):
-                        print(f"⛔ REEF: Skipping {symbol} BUY. RSI ({float(rsi_v):.1f}) > {float(long_block):.1f}")
+                        logger.info(f"⛔ REEF: Skipping {symbol} BUY. RSI ({float(rsi_v):.1f}) > {float(long_block):.1f}")
                         log_audit_event(
                             symbol,
                             "ENTRY_SKIP_REEF",
@@ -2506,7 +2545,7 @@ class PaperTrader:
                         )
                         return
                     if signal == "SELL" and float(rsi_v) < float(short_block):
-                        print(f"⛔ REEF: Skipping {symbol} SELL. RSI ({float(rsi_v):.1f}) < {float(short_block):.1f}")
+                        logger.info(f"⛔ REEF: Skipping {symbol} SELL. RSI ({float(rsi_v):.1f}) < {float(short_block):.1f}")
                         log_audit_event(
                             symbol,
                             "ENTRY_SKIP_REEF",
@@ -2528,7 +2567,12 @@ class PaperTrader:
             min_notional = float(trade_cfg.get("min_notional_usd", 10.0))
             max_total_margin_pct = float(trade_cfg.get("max_total_margin_pct", 0.60))
 
-            equity_base = _safe_float(self.get_live_balance(), self.balance) or self.balance
+            equity_base = _safe_float(self.get_live_balance(), None)
+            if equity_base is None or equity_base <= 0:
+                equity_base = max(0.0, float(self.balance or 0.0))
+                if equity_base <= 0:
+                    logger.warning("execute_trade: equity_base is zero/negative, skipping %s", symbol)
+                    return
             sizing = compute_entry_sizing(
                 symbol=symbol,
                 equity_base=equity_base,
@@ -2547,7 +2591,7 @@ class PaperTrader:
                 current_margin += self._estimate_margin_used(sym, p)
 
             if (current_margin + margin_target) > (equity_base * max_total_margin_pct):
-                print(
+                logger.warning(
                     f"🟡 Skipping {symbol} entry: margin cap hit "
                     f"({current_margin + margin_target:.2f} > {equity_base * max_total_margin_pct:.2f})"
                 )
@@ -2616,7 +2660,7 @@ class PaperTrader:
             fee_usd = notional * fee_rate
             self.balance -= fee_usd
 
-            opened_at = datetime.datetime.now().isoformat()
+            opened_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
             self.positions[symbol] = {
                 'type': 'LONG' if signal == 'BUY' else 'SHORT',
                 'entry_price': fill_price,
@@ -2663,7 +2707,7 @@ class PaperTrader:
             self.upsert_position_state(symbol)
             self._note_entry_attempt(symbol)
             _rev_tag = " [REVERSED]" if (indicators or {}).get("_reversed_entry") is True else ""
-            print(
+            logger.info(
                 f"🚀 OPEN {('LONG' if signal=='BUY' else 'SHORT')} {symbol} "
                 f"px={fill_price:.4f} size={size:.6f} notional~=${notional:.2f} "
                 f"lev={leverage:.0f} margin~=${margin_used:.2f} fee=${fee_usd:.4f} conf={confidence}{_rev_tag}"
@@ -2748,7 +2792,7 @@ class PaperTrader:
         # If you want to freeze exits during anomaly flags, toggle this in YAML:
         #   global.filters.block_exits_on_anomaly: true
         if is_anomaly and bool(flt.get("block_exits_on_anomaly", False)):
-            print(f"🛡️ Blocking exit for {symbol} due to anomaly flag: {current_price}")
+            logger.info(f"🛡️ Blocking exit for {symbol} due to anomaly flag: {current_price}")
             return
 
         # Simulated exit cooldown (mirrors live exchange rate limits).
@@ -2767,7 +2811,7 @@ class PaperTrader:
         if bool(trade_cfg.get("block_exits_on_extreme_dev", False)):
             price_dev_pct = abs(current_price - entry) / entry
             if price_dev_pct > glitch_price_dev_pct or (atr > 0 and abs(current_price - entry) > (atr * glitch_atr_mult)):
-                print(f"⚠️ Extreme price deviation detected for {symbol} (${current_price}). Possible glitch. Blocking exit.")
+                logger.warning(f"⚠️ Extreme price deviation detected for {symbol} (${current_price}). Possible glitch. Blocking exit.")
                 return
 
         pos_type = pos['type']
@@ -2971,9 +3015,9 @@ class PaperTrader:
                             open_dt = datetime.datetime.fromisoformat(ts_str)
                             # Ensure open_dt is aware if current is aware (naive vs aware mismatch)
                             if open_dt.tzinfo is None:
-                                duration_hrs = (datetime.datetime.now() - open_dt).total_seconds() / 3600
-                            else:
-                                duration_hrs = (datetime.datetime.now(datetime.timezone.utc) - open_dt).total_seconds() / 3600
+                                open_dt = open_dt.replace(tzinfo=datetime.timezone.utc)
+                            
+                            duration_hrs = (datetime.datetime.now(datetime.timezone.utc) - open_dt).total_seconds() / 3600
 
                             if duration_hrs > 1.0: # Start decay after 1 hour
                                 # v3.7: Extend window to 12h and add 0.35 ATR floor
@@ -2992,7 +3036,7 @@ class PaperTrader:
                             if is_trend_valid and adx_val > 25:
                                 headwind_threshold = max(0.75, headwind_threshold)
                         except Exception as e:
-                            print(f"⚠️ TDH Error: {e}")
+                            logger.warning(f"⚠️ TDH Error: {e}")
 
                     # v3.4/v3.7: Momentum-Filtered Funding Exit (MFE)
                     # If momentum is still improving in our direction, increase threshold by 50%
@@ -3501,6 +3545,9 @@ def analyze(df, symbol, btc_bullish=None):
     df["vol_sma"] = df["Volume"].rolling(window=int(ind["vol_sma_window"])).mean()
     df["vol_trend"] = df["Volume"].rolling(window=int(ind["vol_trend_window"])).mean() > df["vol_sma"]
 
+    if len(df) < 5:
+        return "NEUTRAL", "low"
+
     latest = df.iloc[-1].copy()
     prev = df.iloc[-2]
 
@@ -3511,16 +3558,18 @@ def analyze(df, symbol, btc_bullish=None):
     # Prev MACD Hist for momentum filtering (v3.4)
     latest["prev_MACD_hist"] = prev["MACD_hist"]
     # v5.001: Prev2 MACD Hist for momentum exhaustion check
-    latest["prev2_MACD_hist"] = df["MACD_hist"].iloc[-3]
+    latest["prev2_MACD_hist"] = df["MACD_hist"].iloc[-3] if len(df) >= 3 else 0.0
     # v5.013: Prev3 MACD Hist for persistent divergence check
-    latest["prev3_MACD_hist"] = df["MACD_hist"].iloc[-4]
+    latest["prev3_MACD_hist"] = df["MACD_hist"].iloc[-4] if len(df) >= 4 else 0.0
 
     signal, conf = "NEUTRAL", "low"
 
     # 1) Ranging filter
     bb_width_ratio = latest["bb_width"] / latest["avg_bb_width"] if latest["avg_bb_width"] > 0 else 1.0
     is_ranging = False
-    if bool(flt.get("enable_ranging_filter", True)):
+    if latest["avg_bb_width"] == 0:
+        is_ranging = True
+    elif bool(flt.get("enable_ranging_filter", True)):
         r = thr["ranging"]
         # Less strict: require N "ranging signals" instead of any single one.
         # (Old behavior was effectively min_signals=1.)

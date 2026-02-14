@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import logging
 import os
 import json
 import time
 import traceback
 import importlib
+from importlib import util
+import sys
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Protocol
 
@@ -13,6 +17,8 @@ import pandas as pd
 from .market_data import MarketDataHub
 from .strategy_manager import StrategyManager
 from .utils import now_ms
+
+logger = logging.getLogger(__name__)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -80,7 +86,10 @@ class KernelDecision:
 
         now_series = raw.get("now_series")
         if not isinstance(now_series, dict):
-            now_series = {}
+            try:
+                now_series = dict(now_series)
+            except (TypeError, ValueError):
+                now_series = {}
 
         target_size = _normalise_kernel_target_size(raw.get("quantity"), raw.get("notional_usd"), raw.get("price"))
         if target_size is None:
@@ -195,7 +204,55 @@ class KernelDecisionFileProvider:
 
 def _load_kernel_runtime_module(module_name: str = "bt_runtime"):
     """Import and return the Rust runtime binding module."""
-    return importlib.import_module(module_name)
+    def _try_import() -> object:
+        return importlib.import_module(module_name)
+
+    try:
+        return _try_import()
+    except ModuleNotFoundError as exc:
+        if exc.name not in {module_name, None}:
+            raise
+
+        candidates = [
+            Path(os.getenv("AI_QUANT_BT_RUNTIME_PATH") or ""),
+            Path(__file__).resolve().parents[1] / "backtester" / "target" / "release" / "deps",
+            Path(__file__).resolve().parents[1] / "backtester" / "target" / "release",
+            Path(__file__).resolve().parents[1] / "backtester" / "target" / "debug" / "deps",
+            Path(__file__).resolve().parents[1] / "backtester" / "target" / "debug",
+        ]
+        for candidate in candidates:
+            candidate_str = str(candidate)
+            if not candidate.exists() or candidate_str in sys.path:
+                continue
+            sys.path.insert(0, candidate_str)
+
+        try:
+            return _try_import()
+        except ModuleNotFoundError as second_exc:
+            if second_exc.name not in {module_name, None}:
+                raise
+
+        for candidate_dir in candidates:
+            if not candidate_dir.is_dir():
+                continue
+            for pattern in [
+                f"lib{module_name}*.so",
+                f"{module_name}*.so",
+                f"{module_name}.so",
+            ]:
+                for candidate in candidate_dir.glob(pattern):
+                    if not candidate.is_file():
+                        continue
+                    if not candidate.name.startswith(("lib" + module_name, module_name)):
+                        continue
+                    spec = util.spec_from_file_location(module_name, str(candidate))
+                    if spec is None or spec.loader is None:
+                        continue
+                    module = util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    return module
+
+        raise
 
 
 def _normalise_kernel_signal(raw_signal: Any) -> str:
@@ -270,14 +327,14 @@ def _normalise_kernel_target_size(raw_size: Any, raw_notional: Any, raw_price: A
             if price <= 0.0:
                 return None
             return notional / price
-    except Exception:
+    except (TypeError, ValueError):
         pass
 
     try:
         quantity = float(raw_size)
         if quantity > 0.0:
             return quantity
-    except Exception:
+    except (TypeError, ValueError):
         pass
 
     try:
@@ -511,12 +568,161 @@ class NoopDecisionProvider:
         return []
 
 
+_CONF_RANK = {"high": 2, "medium": 1, "low": 0}
+
+
+class PythonAnalyzeDecisionProvider:
+    """Generate entry decisions via mei_alpha_v1.analyze() — Python signal path.
+
+    Restores the pre-TKT-004 signal generation that was removed when kernel
+    decision routing was introduced (415ccef).  The Rust backtester computes
+    indicators and signals internally; this provider gives the live/paper
+    engine an equivalent signal source so the SSOT decision path is not broken.
+
+    When AI_QUANT_KERNEL_DECISION_FILE is configured, use
+    KernelDecisionRustBindingProvider instead (file-based kernel decisions).
+    """
+
+    def __init__(self) -> None:
+        self._btc_bullish: bool | None = None
+        self._btc_key: int | None = None
+
+    # ------------------------------------------------------------------
+    # DecisionProvider protocol
+    # ------------------------------------------------------------------
+    def get_decisions(
+        self,
+        *,
+        symbols: list[str],
+        watchlist: list[str],
+        open_symbols: list[str],
+        market: Any,
+        interval: str,
+        lookback_bars: int,
+        mode: str,
+        not_ready_symbols: set[str],
+        strategy: Any,
+        now_ms: int,
+    ) -> Iterable[KernelDecision]:
+        decisions: list[KernelDecision] = []
+        open_set = {s.upper() for s in (open_symbols or [])}
+        
+        # DEBUG LOGging
+        # print(f"🔍 get_decisions: symbols={len(symbols)} watchlist={len(watchlist)} not_ready={len(not_ready_symbols)}")
+
+        # --- BTC context (require_btc_alignment filter) ----------------
+        # NOTE: use mei_alpha_v1 directly; `strategy` is a StrategyManager and
+        # does NOT have .analyze / .ta / .pd attributes.
+        from strategy import mei_alpha_v1 as _strat_mod
+
+        btc_bullish = self._btc_bullish
+        try:
+            btc_df = market.get_candles_df("BTC", interval=interval, min_rows=lookback_bars)
+            if btc_df is not None and not btc_df.empty and len(btc_df) >= lookback_bars:
+                btc_ema_slow = _strat_mod.ta.trend.ema_indicator(
+                    btc_df["Close"], window=50,
+                ).iloc[-1]
+                if _strat_mod.pd.notna(btc_ema_slow):
+                    btc_bullish = bool(btc_df["Close"].iloc[-1] > btc_ema_slow)
+                    self._btc_bullish = btc_bullish
+        except Exception:
+            pass
+
+        # --- Per-symbol signal generation ------------------------------
+        for sym in watchlist:
+            sym_u = sym.upper().strip()
+            if not sym_u:
+                continue
+
+            if sym_u in not_ready_symbols:
+                continue
+
+            try:
+                df_raw = market.get_candles_df(
+                    sym_u, interval=interval, min_rows=lookback_bars,
+                )
+                if df_raw is None or df_raw.empty or len(df_raw) < lookback_bars:
+                    continue
+
+                df = df_raw.tail(lookback_bars).copy()
+                sig, conf, now_series = _strat_mod.analyze(
+                    df, sym_u, btc_bullish=btc_bullish,
+                )
+
+                sig_u = str(sig or "").upper()
+                if sig_u not in ("BUY", "SELL"):
+                    continue
+
+                logger.info(f"🎯 SIGNAL: {sym_u} {sig_u} {conf}")
+
+                if not isinstance(now_series, dict):
+                    try:
+                        now_series = dict(now_series)
+                    except (TypeError, ValueError):
+                        now_series = {}
+                # ATR floor: enforce minimum ATR as % of price.
+                try:
+                    _atr_raw = float(now_series.get("ATR") or 0.0)
+                    _close_px = float(now_series.get("Close") or 0.0)
+                    _min_atr_pct = float(
+                        (_strat_mod.get_trade_params(sym_u) or {}).get(
+                            "min_atr_pct", 0.003,
+                        ) or 0.003,
+                    )
+                    if _close_px > 0 and _min_atr_pct > 0:
+                        _atr_floor = _close_px * _min_atr_pct
+                        if _atr_raw < _atr_floor:
+                            now_series["ATR"] = _atr_floor
+                            now_series["_atr_floored"] = True
+                except Exception:
+                    pass
+
+                # Candle key for dedup (engine handles actual dedup).
+                entry_key: int | None = None
+                try:
+                    if "T" in df.columns:
+                        entry_key = int(df["T"].iloc[-1])
+                    else:
+                        entry_key = int(df["timestamp"].iloc[-1])
+                except Exception:
+                    pass
+
+                price = float(now_series.get("Close") or 0)
+                if price <= 0:
+                    continue
+
+                action = "ADD" if sym_u in open_set else "OPEN"
+                adx = float(now_series.get("ADX") or 0)
+                score = _CONF_RANK.get(str(conf or "").lower(), 0) * 100 + adx
+
+                decisions.append(
+                    KernelDecision(
+                        symbol=sym_u,
+                        action=action,
+                        signal=sig_u,
+                        confidence=str(conf or "N/A"),
+                        score=score,
+                        now_series=now_series,
+                        entry_key=entry_key,
+                        reason=f"python_analyze:{sig_u.lower()}",
+                    )
+                )
+            except Exception:
+                continue
+
+        return decisions
+
+
 def _build_default_decision_provider() -> DecisionProvider:
     path = os.getenv("AI_QUANT_KERNEL_DECISION_FILE")
     provider_mode = str(os.getenv("AI_QUANT_KERNEL_DECISION_PROVIDER", "") or "").strip().lower()
 
     if provider_mode in {"none", "noop"}:
         return NoopDecisionProvider()
+
+    if provider_mode == "python":
+        logger.info("📊 Decision provider: PythonAnalyzeDecisionProvider (explicit)")
+        return PythonAnalyzeDecisionProvider()
 
     if provider_mode == "file":
         if not path:
@@ -526,14 +732,23 @@ def _build_default_decision_provider() -> DecisionProvider:
         return KernelDecisionFileProvider(path)
 
     if provider_mode == "rust":
-        try:
-            return KernelDecisionRustBindingProvider(path=path)
-        except Exception as exc:
-            raise RuntimeError(
-                "AI_QUANT_KERNEL_DECISION_PROVIDER=rust is configured, but the Rust decision kernel "
-                "extension is unavailable. Set AI_QUANT_KERNEL_DECISION_PROVIDER=none or provide "
-                "AI_QUANT_KERNEL_DECISION_FILE."
-            ) from exc
+        if path:
+            try:
+                return KernelDecisionRustBindingProvider(path=path)
+            except Exception as exc:
+                raise RuntimeError(
+                    "AI_QUANT_KERNEL_DECISION_PROVIDER=rust is configured, but the Rust decision kernel "
+                    "extension is unavailable. Set AI_QUANT_KERNEL_DECISION_PROVIDER=none or provide "
+                    "AI_QUANT_KERNEL_DECISION_FILE."
+                ) from exc
+        # No decision file: Rust binding cannot generate signals from candle data
+        # on its own.  Fall back to Python analyze path which replicates the same
+        # indicator / filter logic that the Rust backtester uses internally.
+        logger.warning(
+            "⚠️ AI_QUANT_KERNEL_DECISION_PROVIDER=rust but AI_QUANT_KERNEL_DECISION_FILE "
+            "not set. Falling back to PythonAnalyzeDecisionProvider (mei_alpha_v1.analyze)."
+        )
+        return PythonAnalyzeDecisionProvider()
 
     if path:
         try:
@@ -541,13 +756,16 @@ def _build_default_decision_provider() -> DecisionProvider:
         except Exception:
             return KernelDecisionFileProvider(path)
 
+    # Auto mode: try Rust binding with file, then Python analyze, then crash.
     try:
         return KernelDecisionRustBindingProvider(path=None)
-    except Exception as exc:
-        raise RuntimeError(
-            "Decision provider auto-mode cannot start because neither the Rust decision kernel extension "
-            "is available and AI_QUANT_KERNEL_DECISION_FILE is not configured."
-        ) from exc
+    except Exception:
+        logger.warning(
+            "⚠️ Decision provider auto-mode: Rust kernel extension unavailable and "
+            "AI_QUANT_KERNEL_DECISION_FILE not configured. "
+            "Falling back to PythonAnalyzeDecisionProvider (mei_alpha_v1.analyze)."
+        )
+        return PythonAnalyzeDecisionProvider()
 
 
 class ModePlugin(Protocol):
@@ -802,7 +1020,7 @@ class UnifiedEngine:
         self._ws_restart_count_in_window += 1
         self.stats.last_ws_restart_s = now_s
 
-        print(
+        logger.info(
             f"🔄 WS restart. stale_strikes={self._stale_strikes} reason={reason}. "
             f"restart_count_in_window={self._ws_restart_count_in_window}/{self._ws_restart_max_in_window}"
         )
@@ -818,7 +1036,7 @@ class UnifiedEngine:
                 user=user,
             )
         except Exception:
-            print(f"⚠️ WS restart failed\n{traceback.format_exc()}")
+            logger.warning(f"⚠️ WS restart failed\n{traceback.format_exc()}")
             return
 
         if self._ws_restart_count_in_window >= self._ws_restart_max_in_window:
@@ -1146,7 +1364,7 @@ class UnifiedEngine:
             except Exception:
                 pass
             try:
-                print(f"🧭 regime gate {'ON' if self._regime_gate_on else 'OFF'} reason={self._regime_gate_reason}")
+                logger.info(f"🧭 regime gate {'ON' if self._regime_gate_on else 'OFF'} reason={self._regime_gate_reason}")
             except Exception:
                 pass
 
@@ -1191,9 +1409,16 @@ class UnifiedEngine:
                 reason=reason,
             )
         except TypeError:
-            # Fall back only to explicit action handlers to avoid silently degrading to signal-only legacy routing.
-            if act == "OPEN":
-                return
+            # Fall back to legacy signal-only API when the trader doesn't accept ``action``.
+            if act in {"OPEN", "ADD"}:
+                # Legacy PaperTrader path: OPEN/ADD should be handled via execute_trade.
+                try:
+                    return self.trader.execute_trade(sym, signal, price, timestamp, confidence, atr=atr, indicators=indicators)
+                except Exception as e:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.error("Legacy execute_trade fallback failed for %s: %s", sym, e, exc_info=True)
+
             if act == "ADD":
                 fn = getattr(self.trader, "add_to_position", None)
                 if callable(fn):
@@ -1205,6 +1430,9 @@ class UnifiedEngine:
 
             if act in {"CLOSE", "REDUCE"}:
                 if sym not in ((self.trader.positions or {}) if isinstance(getattr(self.trader, "positions", None), dict) else {}):
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.debug("Skipping %s for %s: not in positions", act, sym)
                     return
                 pos = (self.trader.positions or {}).get(sym, {})
                 try:
@@ -1255,6 +1483,9 @@ class UnifiedEngine:
 
         if act in {"CLOSE", "REDUCE"}:
             if sym not in ((self.trader.positions or {}) if isinstance(getattr(self.trader, "positions", None), dict) else {}):
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.debug("Skipping %s for %s: not in positions", act, sym)
                 return
             pos = (self.trader.positions or {}).get(sym, {})
             try:
@@ -1370,15 +1601,17 @@ class UnifiedEngine:
                         candle_limit=candle_limit,
                         user=user,
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.error("market.ensure() failed: %s", e, exc_info=True)
 
                 try:
                     self._maybe_restart_ws(active_symbols=active_symbols, candle_limit=candle_limit, user=user)
                 except SystemExit:
                     raise
                 except Exception:
-                    print(f"⚠️ WS health check failed\n{traceback.format_exc()}")
+                    logger.warning(f"⚠️ WS health check failed\n{traceback.format_exc()}")
 
                 # Candle readiness gate (sidecar only):
                 # - Exits still run (using cached indicators + fresh price).
@@ -1568,12 +1801,13 @@ class UnifiedEngine:
                     except SystemExit:
                         raise
                     except Exception:
-                        print(f"⚠️ Engine exit logic error: {sym_u}\n{traceback.format_exc()}")
+                        logger.warning(f"⚠️ Engine exit logic error: {sym_u}\n{traceback.format_exc()}")
                         continue
 
                 # Phase 2: Execute explicit kernel decisions (OPEN/ADD/CLOSE/REDUCE) ordered by score.
                 decision_exec: list[KernelDecision] = []
                 try:
+                    logger.debug(f"DEBUG: calling decision_provider.get_decisions for {len(watchlist)} symbols")
                     for dec in self.decision_provider.get_decisions(
                         symbols=watchlist,
                         watchlist=watchlist,
@@ -1625,12 +1859,12 @@ class UnifiedEngine:
 
                         # Skip decision entries where candle keys are not ready.
                         if act in {"OPEN", "ADD"} and sym_u in not_ready_set:
-                            print(f"🕒 skip {sym_u} {act}: candles not ready")
+                            logger.debug(f"🕒 skip {sym_u} {act}: candles not ready")
                             continue
 
                         decision_exec.append(dec)
                 except Exception:
-                    print(f"⚠️ Engine decision provider error: {traceback.format_exc()}")
+                    logger.warning(f"⚠️ Engine decision provider error: {traceback.format_exc()}")
 
                 decision_exec.sort(
                     key=lambda item: (
@@ -1695,7 +1929,7 @@ class UnifiedEngine:
                             if entry_key is not None:
                                 now_ts = now_ms()
                                 if self._entry_is_too_late(entry_key=int(entry_key), now_ts_ms=int(now_ts)):
-                                    print(
+                                    logger.debug(
                                         f"🕒 skip {sym_u} {act}: stale candle-close signal "
                                         f"key={int(entry_key)}"
                                     )
@@ -1764,7 +1998,7 @@ class UnifiedEngine:
                     except SystemExit:
                         raise
                     except Exception:
-                        print(f"⚠️ Engine decision execution error: {dec.symbol}\n{traceback.format_exc()}")
+                        logger.warning(f"⚠️ Engine decision execution error: {dec.symbol}\n{traceback.format_exc()}")
                         continue
 
                 if self.mode_plugin is not None:
@@ -1839,7 +2073,7 @@ class UnifiedEngine:
                                 slip_median_bps_s = f"{float(med):.3f}"
                     except Exception:
                         pass
-                    print(
+                    logger.info(
                         f"🫀 engine ok. loops={self.stats.loops} errors={self.stats.loop_errors} "
                         f"symbols={len(active_symbols)} open_pos={open_pos} loop={loop_s:.2f}s "
                         f"size_mult={float(_size_mult):g} "
@@ -1862,7 +2096,7 @@ class UnifiedEngine:
                 raise
             except Exception:
                 self.stats.loop_errors += 1
-                print(f"🔥 Engine loop error\n{traceback.format_exc()}")
+                logger.error(f"🔥 Engine loop error\n{traceback.format_exc()}")
             finally:
                 # Align sleep to wall-clock boundaries (e.g., :00 for 60s target).
                 # This ensures loops fire at predictable times matching candle closes.

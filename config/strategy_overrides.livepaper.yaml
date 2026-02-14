@@ -38,6 +38,7 @@ global:
     add_min_profit_atr: 0.5
     add_min_confidence: medium
     enable_partial_tp: true
+    tp_partial_atr_mult: 1.0
     tp_partial_pct: 0.5
     tp_partial_min_notional_usd: 10.0
     trailing_start_atr: 2.213200488881059
@@ -82,8 +83,8 @@ global:
     max_entry_orders_per_loop: 6
   indicators:
     adx_window: 19
-    ema_fast_window: 11
-    ema_slow_window: 15
+    ema_fast_window: 9
+    ema_slow_window: 21
     bb_window: 16
     ema_macro_window: 200
     atr_window: 12
@@ -98,18 +99,18 @@ global:
     enable_extension_filter: true
     enable_ranging_filter: false
     enable_anomaly_filter: false
-    require_btc_alignment: true
+    require_btc_alignment: false
     require_volume_confirmation: false
     require_macro_alignment: false
-    require_adx_rising: true
-    adx_rising_saturation: 40.0
+    require_adx_rising: false
+    adx_rising_saturation: 25
     vol_confirm_include_prev: true
-    use_stoch_rsi_filter: true
+    use_stoch_rsi_filter: false
   thresholds:
     entry:
       min_adx: 15.0
       max_dist_ema_fast: 0.03
-      btc_adx_override: 40.0
+      btc_adx_override: 25.0
       high_conf_volume_mult: 2.5
       ave_enabled: true
       ave_atr_ratio_gt: 1.5
@@ -158,11 +159,6 @@ global:
     auto_reverse_breadth_low: 10.0
     auto_reverse_breadth_high: 90.0
     enable_regime_gate: false
-    regime_gate_breadth_low: 20.0
-    regime_gate_breadth_high: 80.0
-    regime_gate_btc_adx_min: 20.0
-    regime_gate_btc_atr_pct_min: 0.003
-    regime_gate_fail_open: false
   watchlist_exclude:
     - BERA
     - INJ

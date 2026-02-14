@@ -1,0 +1,19 @@
+{
+  "artefacts": [
+    {
+      "kind": "cpu",
+      "path": "/home/fol2hk/openclaw-plugins/ai_quant_wt/major-v8-runtime/backtester/dist/mei-backtester-cpu",
+      "sha256": "abf5596279ab345256a48cd54b1242185a6a6580fadf31acd701df0373c06e0c",
+      "version": "mei-backtester 0.1.0 git:abfc1780644d build:1770767770 gpu:0"
+    },
+    {
+      "kind": "gpu",
+      "path": "/home/fol2hk/openclaw-plugins/ai_quant_wt/major-v8-runtime/backtester/dist/mei-backtester-gpu",
+      "sha256": "58e74f95ef4948be8fe753e799e9f7928e6acb9d9113f237bf3e51c7f1f0aa3c",
+      "version": "mei-backtester 0.1.0 git:abfc1780644d build:1770767811 gpu:1"
+    }
+  ],
+  "generated_at_ms": 1771033545279,
+  "git_head": "7a9d8c9653259b4d8b47911ee594a0f5e67c6111",
+  "version": "mei_backtester_build_v1"
+}

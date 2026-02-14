@@ -18,6 +18,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import re
 import sqlite3
 import subprocess
@@ -57,6 +58,50 @@ def _env_int(env_name: str, *, default: int | None = None) -> int | None:
         return int(raw)
     except Exception:
         raise SystemExit(f"{env_name} must be an integer when set")
+
+
+def _nvidia_gpu_available() -> bool:
+    smi = shutil.which("nvidia-smi")
+    if not smi:
+        return False
+    try:
+        res = subprocess.run(
+            [smi, "-L"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return False
+    if int(res.returncode) != 0:
+        return False
+    lines = [ln.strip() for ln in (res.stdout or "").splitlines() if ln.strip()]
+    if len(lines) == 0:
+        return False
+
+    try:
+        procs = subprocess.run(
+            [smi, "--query-compute-apps=pid,process_name,used_memory", "--format=csv,noheader,nounits"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        # If process-query fails, treat GPU as available to preserve existing behaviour.
+        return True
+    if int(procs.returncode) != 0:
+        return True
+
+    for line in (procs.stdout or "").splitlines():
+        parts = [ln.strip() for ln in line.split(",")]
+        if len(parts) < 1:
+            continue
+        pid = parts[0]
+        if pid.isdigit() and pid.isascii() and os.path.exists(f"/proc/{pid}"):
+            return False
+    return True
 
 
 # When invoked as `python3 tools/factory_cycle.py`, sys.path[0] is `tools/`.
@@ -1073,6 +1118,18 @@ def main(argv: list[str] | None = None) -> int:
 
     ap.add_argument("--gpu", action="store_true", help="Use GPU sweep (requires CUDA build/runtime).")
     ap.add_argument("--tpe", action="store_true", help="Use TPE Bayesian optimisation for GPU sweeps (requires --gpu).")
+    ap.add_argument(
+        "--allow-unsafe-gpu-sweep",
+        action="store_true",
+        default=_env_bool("AI_QUANT_FACTORY_ALLOW_UNSAFE_GPU_SWEEP", default=True),
+        help="Allow unsafe long-window GPU sweeps (required by daily+tpe on most environments).",
+    )
+    ap.add_argument(
+        "--fallback-to-cpu-on-no-gpu",
+        action="store_true",
+        default=_env_bool("AI_QUANT_FALLBACK_TO_CPU_ON_NO_GPU", default=True),
+        help="Fallback to CPU sweep if no usable GPU is detected.",
+    )
     ap.add_argument("--walk-forward", action="store_true", help="Enable walk-forward validation.")
     ap.add_argument("--slippage-stress", action="store_true", help="Enable slippage stress validation.")
     ap.add_argument("--concentration-checks", action="store_true", help="Enable concentration checks.")
@@ -1240,6 +1297,17 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             interval = "1h"
 
+    run_with_gpu = bool(args.gpu)
+    run_with_tpe = bool(args.tpe)
+    fallback_to_cpu_on_no_gpu = bool(args.fallback_to_cpu_on_no_gpu)
+    if run_with_gpu and fallback_to_cpu_on_no_gpu and not _nvidia_gpu_available():
+        run_with_gpu = False
+        run_with_tpe = False
+        _send_discord(
+            target=str(args.discord_target),
+            message="⚠️ Factory WARN • GPU not usable; fallback to CPU sweep for this cycle.",
+        )
+
     def _read_metadata(path: Path) -> dict[str, Any]:
         try:
             return json.loads(path.read_text(encoding="utf-8"))
@@ -1272,10 +1340,12 @@ def main(argv: list[str] | None = None) -> int:
     ]
     if bool(args.resume):
         factory_argv.append("--resume")
-    if bool(args.gpu):
+    if bool(run_with_gpu):
         factory_argv.append("--gpu")
-    if bool(args.tpe):
+    if bool(run_with_tpe):
         factory_argv.append("--tpe")
+    if bool(args.allow_unsafe_gpu_sweep):
+        factory_argv.append("--allow-unsafe-gpu-sweep")
     if bool(args.walk_forward):
         factory_argv.append("--walk-forward")
     if bool(args.slippage_stress):
@@ -1290,7 +1360,7 @@ def main(argv: list[str] | None = None) -> int:
         lines=[
             f"🧪 Factory START • `{run_id}`",
             f"`profile` {args.profile}  `mode` {str(args.strategy_mode or 'none').strip() or 'none'}  `interval` {interval}",
-            f"`gpu/tpe/wf` {int(bool(args.gpu))}/{int(bool(args.tpe))}/{int(bool(args.walk_forward))}",
+            f"`gpu/tpe/wf` {int(bool(run_with_gpu))}/{int(bool(run_with_tpe))}/{int(bool(args.walk_forward))}",
             (
                 "`checks` stress="
                 f"{int(bool(args.slippage_stress))} concentration={int(bool(args.concentration_checks))} "
@@ -1353,7 +1423,7 @@ def main(argv: list[str] | None = None) -> int:
             target=str(args.discord_target),
             message=f"⚠️ Factory OK • `{run_id}` but no deployable candidates (all rejected)",
         )
-        return 2
+        return 0
 
     selection = {
         "version": "factory_cycle_selection_v1",

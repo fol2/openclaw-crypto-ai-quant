@@ -33,6 +33,7 @@ struct StepEnvelope {
 }
 
 fn validation_error(code: &str, message: &str, details: Vec<String>) -> String {
+    let details_copy = details.clone();
     serde_json::to_string(&ErrorEnvelope {
         ok: false,
         error: ErrorObject {
@@ -47,7 +48,7 @@ fn validation_error(code: &str, message: &str, details: Vec<String>) -> String {
             "error": {
                 "code": code,
                 "message": message,
-                "details": details,
+                "details": details_copy,
             }
         })
         .to_string()
