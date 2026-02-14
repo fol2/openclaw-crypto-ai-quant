@@ -394,13 +394,13 @@ def _funding_check_degraded_allowance(
 
 
 PROFILE_DEFAULTS: dict[str, dict[str, int | str]] = {
-    # Very fast profile for verifying the pipeline end-to-end.
+    # Very fast profile for verifying all 142 axes end-to-end (not for optimisation).
     "smoke": {
         "tpe_trials": 2000,
         "num_candidates": 2,
         "shortlist_per_mode": 3,
         "shortlist_max_rank": 20,
-        "sweep_spec": "backtester/sweeps/smoke.yaml",
+        "sweep_spec": "backtester/sweeps/full_144v.yaml",
     },
     # Default weekday run profile (~1hr GPU, 7K samples/axis for 142 axes).
     "daily": {
