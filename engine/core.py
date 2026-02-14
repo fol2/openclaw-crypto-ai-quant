@@ -1228,7 +1228,13 @@ class UnifiedEngine:
         rc = cfg.get("market_regime") if isinstance(cfg, dict) else None
         rc = rc if isinstance(rc, dict) else {}
 
-        enabled = bool(rc.get("enable_regime_gate", False))
+        # Sweep-compatible alias: enable_regime_filter → enable_regime_gate
+        # The sweep spec (Rust side) uses enable_regime_filter; the Python engine
+        # historically used enable_regime_gate. Accept both, sweep name takes precedence.
+        enabled = bool(
+            rc.get("enable_regime_filter",
+                    rc.get("enable_regime_gate", False))
+        )
         fail_open = bool(rc.get("regime_gate_fail_open", False))
 
         if not enabled:
@@ -1236,12 +1242,19 @@ class UnifiedEngine:
             new_reason = "disabled"
         else:
             # Breadth chop zone: inside => gate OFF; outside => potential trend regime.
+            # Sweep-compatible aliases: breadth_block_long_below → regime_gate_breadth_low
+            #                          breadth_block_short_above → regime_gate_breadth_high
+            # Sweep names take precedence when set.
             try:
-                chop_lo = float(rc.get("regime_gate_breadth_low", rc.get("auto_reverse_breadth_low", 10.0)))
+                chop_lo = float(rc.get("breadth_block_long_below",
+                                       rc.get("regime_gate_breadth_low",
+                                              rc.get("auto_reverse_breadth_low", 10.0))))
             except Exception:
                 chop_lo = 10.0
             try:
-                chop_hi = float(rc.get("regime_gate_breadth_high", rc.get("auto_reverse_breadth_high", 90.0)))
+                chop_hi = float(rc.get("breadth_block_short_above",
+                                       rc.get("regime_gate_breadth_high",
+                                              rc.get("auto_reverse_breadth_high", 90.0))))
             except Exception:
                 chop_hi = 90.0
 
@@ -1602,8 +1615,6 @@ class UnifiedEngine:
                         user=user,
                     )
                 except Exception as e:
-                    import logging
-                    logger = logging.getLogger(__name__)
                     logger.error("market.ensure() failed: %s", e, exc_info=True)
 
                 try:
@@ -1903,6 +1914,18 @@ class UnifiedEngine:
                                 now_series["funding_rate"] = 0.0
                         else:
                             now_series["funding_rate"] = 0.0
+
+                        # ── Regime gate enforcement (B1 fix) ──
+                        # When the gate is OFF, block new OPEN and ADD entries.
+                        # Exits (CLOSE / REDUCE) are never blocked.
+                        # _regime_gate_on is already True when enable_regime_gate is
+                        # False, so this single check covers the disabled case too.
+                        if act in {"OPEN", "ADD"} and not self._regime_gate_on:
+                            logger.info(
+                                f"🚫 regime gate blocked {act} for {sym_u} "
+                                f"reason={self._regime_gate_reason}"
+                            )
+                            continue
 
                         quote = None
                         if act in {"OPEN", "ADD"}:

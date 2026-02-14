@@ -403,17 +403,24 @@ PROFILE_DEFAULTS: dict[str, dict[str, int]] = {
     },
     # Default weekday run profile.
     "daily": {
-        "tpe_trials": 5000,
-        "num_candidates": 3,
-        "shortlist_per_mode": 10,
-        "shortlist_max_rank": 50,
+        "tpe_trials": 200000,
+        "num_candidates": 5,
+        "shortlist_per_mode": 20,
+        "shortlist_max_rank": 150,
     },
     # Heavier profile for deeper sweeps and larger shortlists.
     "deep": {
-        "tpe_trials": 500000,
-        "num_candidates": 5,
-        "shortlist_per_mode": 20,
-        "shortlist_max_rank": 200,
+        "tpe_trials": 2000000,
+        "num_candidates": 10,
+        "shortlist_per_mode": 30,
+        "shortlist_max_rank": 400,
+    },
+    # Weekly profile — identical to deep; weekly is the canonical name going forward.
+    "weekly": {
+        "tpe_trials": 2000000,
+        "num_candidates": 10,
+        "shortlist_per_mode": 30,
+        "shortlist_max_rank": 400,
     },
 }
 
@@ -3006,6 +3013,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     (run_dir / "reports" / "validation_report.md").write_text(validation_md, encoding="utf-8")
 
+    # ------------------------------------------------------------------
+    # 5b) Candidate promotion (20→3)
+    # ------------------------------------------------------------------
+    promote_count = int(getattr(args, "promote_count", 3) or 0)
+    promote_dir = str(getattr(args, "promote_dir", "promoted_configs") or "promoted_configs")
+    if promote_count > 0 and replay_reports:
+        promotion_meta = _promote_candidates(
+            replay_reports,
+            run_dir=run_dir,
+            promote_dir=promote_dir,
+            promote_count=promote_count,
+        )
+        meta["promotion"] = promotion_meta
+    else:
+        meta["promotion"] = {"skipped": True, "reason": "promote_count=0 or no replay reports"}
+
     # Persist metadata before registry ingestion (ingest reads run_metadata.json).
     _write_json(run_dir / "run_metadata.json", meta)
 
@@ -3037,6 +3060,125 @@ def _apply_profile_defaults(args: argparse.Namespace) -> None:
             continue
         if getattr(args, k) is None:
             setattr(args, k, int(v))
+
+
+def _promote_candidates(
+    candidates: list[dict[str, Any]],
+    *,
+    run_dir: Path,
+    promote_dir: str = "promoted_configs",
+    promote_count: int = 3,
+) -> dict[str, Any]:
+    """Select up to *promote_count* candidates for distinct roles and write promoted YAMLs.
+
+    Roles (when promote_count >= 3):
+      - **primary**: best balanced score  (PnL × (1 - max_dd) × profit_factor)
+      - **fallback**: best drawdown-adjusted score among positive-PnL candidates
+                      (lowest max_drawdown_pct with positive PnL, then highest PnL as tie-break)
+      - **conservative**: absolute lowest max_drawdown_pct with positive PnL required
+
+    Returns a dict of promotion metadata suitable for embedding in run_metadata.json.
+    """
+
+    try:
+        import yaml as _yaml  # noqa: F811
+    except ImportError:  # pragma: no cover
+        import json as _yaml  # type: ignore[no-redef]  # fallback: write JSON
+
+    if promote_count <= 0:
+        return {"skipped": True, "reason": "promote_count=0"}
+
+    # Filter to candidates with positive PnL and a config path.
+    positive = [
+        c for c in candidates
+        if float(c.get("total_pnl", 0.0)) > 0.0
+        and str(c.get("config_path", "") or c.get("path", "")).strip()
+    ]
+
+    if not positive:
+        return {"skipped": True, "reason": "no_positive_pnl_candidates"}
+
+    # ---- Scoring helpers ------------------------------------------------
+    def _balanced_score(c: dict[str, Any]) -> float:
+        pnl = float(c.get("total_pnl", 0.0))
+        dd = float(c.get("max_drawdown_pct", 0.0))
+        pf = float(c.get("profit_factor", 1.0))
+        return pnl * (1.0 - min(dd, 1.0)) * max(pf, 0.0)
+
+    def _dd_adjusted_key(c: dict[str, Any]) -> tuple[float, float]:
+        """Sort key: lowest max_drawdown_pct first, then highest PnL as tie-break."""
+        dd = float(c.get("max_drawdown_pct", 1.0))
+        pnl = float(c.get("total_pnl", 0.0))
+        return (dd, -pnl)
+
+    # ---- Role selection -------------------------------------------------
+    roles: dict[str, dict[str, Any]] = {}
+
+    # PRIMARY: highest balanced score
+    primary = max(positive, key=_balanced_score)
+    roles["primary"] = primary
+
+    # FALLBACK: best drawdown-adjusted (lowest DD, positive PnL)
+    fallback = min(positive, key=_dd_adjusted_key)
+    roles["fallback"] = fallback
+
+    # CONSERVATIVE: absolute lowest max_drawdown_pct with positive PnL
+    conservative = min(positive, key=lambda c: float(c.get("max_drawdown_pct", 1.0)))
+    roles["conservative"] = conservative
+
+    # ---- Write promoted configs -----------------------------------------
+    out_dir = run_dir / promote_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    promotion_meta: dict[str, Any] = {
+        "skipped": False,
+        "promote_dir": str(out_dir),
+        "roles": {},
+    }
+
+    written = 0
+    for role_name, cand in roles.items():
+        if written >= promote_count:
+            break
+
+        cfg_path_str = str(cand.get("config_path", "") or cand.get("path", "")).strip()
+        if not cfg_path_str:
+            continue
+
+        src = Path(cfg_path_str)
+        if not src.exists():
+            promotion_meta["roles"][role_name] = {
+                "config_id": str(cand.get("config_id", "")),
+                "error": f"source config not found: {src}",
+            }
+            continue
+
+        dst = out_dir / f"{role_name}.yaml"
+
+        # Read source and write (preserve YAML if possible).
+        try:
+            content = src.read_text(encoding="utf-8")
+            dst.write_text(content, encoding="utf-8")
+        except Exception as exc:
+            promotion_meta["roles"][role_name] = {
+                "config_id": str(cand.get("config_id", "")),
+                "error": f"copy failed: {type(exc).__name__}: {exc}",
+            }
+            continue
+
+        promotion_meta["roles"][role_name] = {
+            "config_id": str(cand.get("config_id", "")),
+            "source_config": str(src),
+            "promoted_path": str(dst),
+            "total_pnl": float(cand.get("total_pnl", 0.0)),
+            "max_drawdown_pct": float(cand.get("max_drawdown_pct", 0.0)),
+            "profit_factor": float(cand.get("profit_factor", 0.0)),
+            "balanced_score": _balanced_score(cand),
+        }
+        written += 1
+
+    promotion_meta["promoted_count"] = written
+    return promotion_meta
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -3239,6 +3381,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.05,
         help="Maximum score_v1 trades penalty when trades=0 (default: 0.05).",
+    )
+
+    ap.add_argument(
+        "--promote-count",
+        type=int,
+        default=3,
+        help="Number of candidates to promote (0 to skip promotion entirely). Default: 3.",
+    )
+    ap.add_argument(
+        "--promote-dir",
+        default="promoted_configs",
+        help="Sub-directory under the run dir for promoted config YAMLs (default: promoted_configs).",
     )
 
     return ap

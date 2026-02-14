@@ -4,11 +4,6 @@
 initial_balance: 10000.0
 lookback: 200
 axes:
-- path: indicators.ave_avg_atr_window
-  values:
-  - 35.0
-  - 50.0
-  - 65.0
 - path: market_regime.breadth_block_short_above
   values:
   - 63.0
@@ -38,6 +33,13 @@ axes:
   - 126.0
   - 180.0
   - 234.0
+- path: trade.tp_partial_atr_mult
+  values:
+  - 0.0
+  - 1.0
+  - 2.0
+  - 3.0
+  - 4.0
 - path: trade.tp_partial_min_notional_usd
   values:
   - 7.0

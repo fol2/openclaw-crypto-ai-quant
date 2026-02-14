@@ -1,4 +1,4 @@
-# sweep_full 144v profile
+# sweep_full 142v profile (was 144v — see changelog below)
 #
 # Scope:
 # - Expands sweep coverage from the legacy 34-axis profile to broad strategy coverage.
@@ -10,6 +10,23 @@
 # - trade.add_min_confidence: 0=low, 1=medium, 2=high
 # - thresholds.entry.pullback_confidence: 0=low, 1=medium, 2=high
 # - thresholds.entry.macd_hist_entry_mode: 0=accel, 1=sign, 2=none
+#
+# Intentional exclusions (engine-only keys — not sweepable in backtest):
+# - trade.use_bbo_for_fills              — requires live orderbook (BBO data)
+# - market_regime.regime_gate_enabled    — requires live breadth data
+# - market_regime.regime_gate_bear_min   — requires live breadth data
+# - market_regime.regime_gate_bear_max   — requires live breadth data
+# - market_regime.regime_gate_bull_min   — requires live breadth data
+# - market_regime.regime_gate_bull_max   — requires live breadth data
+# - market_regime.regime_gate_neutral_min — requires live breadth data
+# - market_regime.regime_gate_neutral_max — requires live breadth data
+#
+# Changelog:
+# 2026-02-14  B3  Removed duplicate indicators.ave_avg_atr_window (alias of
+#                 thresholds.entry.ave_avg_atr_window — Rust syncs them; keeping
+#                 both wastes 3× compute). Added trade.tp_partial_atr_mult
+#                 (fully implemented in Rust+Python, has sweep match arm,
+#                 materially impacts trade behavior). Net: +1 −1 = 142 axes.
 initial_balance: 10000.0
 lookback: 200
 axes:
@@ -70,11 +87,6 @@ axes:
   - 16.0
   - 18.0
   - 20.0
-- path: indicators.ave_avg_atr_window
-  values:
-  - 35.0
-  - 50.0
-  - 65.0
 - path: indicators.bb_width_avg_window
   values:
   - 15.0
@@ -728,6 +740,13 @@ axes:
   - 7.0
   - 7.5
   - 8.0
+- path: trade.tp_partial_atr_mult
+  values:
+  - 0.0
+  - 1.0
+  - 2.0
+  - 3.0
+  - 4.0
 - path: trade.tp_partial_min_notional_usd
   values:
   - 7.0

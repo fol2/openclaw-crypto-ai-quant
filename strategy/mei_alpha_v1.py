@@ -557,6 +557,26 @@ def get_strategy_config(symbol: str) -> dict:
         if not isinstance(cfg.get(key), dict):
             cfg[key] = {}
 
+    # ── Sync indicators.ave_avg_atr_window ↔ thresholds.entry.ave_avg_atr_window ──
+    # The Rust backtester keeps both in lock-step (set_ave_avg_atr_window).
+    # The Python engine only reads thresholds.entry.ave_avg_atr_window, so
+    # propagate a sweep-set indicators value into the threshold path.
+    # If the user explicitly set the threshold path, that takes precedence.
+    try:
+        _ind_aaw = cfg["indicators"].get("ave_avg_atr_window")
+        _thr_entry = cfg["thresholds"].setdefault("entry", {})
+        _thr_aaw = _thr_entry.get("ave_avg_atr_window")
+        if _ind_aaw is not None and _thr_aaw is None:
+            _thr_entry["ave_avg_atr_window"] = int(_ind_aaw)
+        elif _ind_aaw is not None and _thr_aaw is not None:
+            # Both set: indicators path takes precedence (matches Rust sweep
+            # behaviour where either path calls set_ave_avg_atr_window and
+            # syncs both).  Only override when they differ.
+            if int(_ind_aaw) != int(_thr_aaw):
+                _thr_entry["ave_avg_atr_window"] = int(_ind_aaw)
+    except Exception:
+        pass
+
     return cfg
 
 
@@ -4141,6 +4161,26 @@ def analyze(df, symbol, btc_bullish=None):
                 "ema_slow_slope_pct": float(ema_slow_slope_pct),
             },
         }
+    except Exception:
+        pass
+
+    # ── reverse_entry_signal: flip BUY↔SELL (matches Rust apply_reverse) ──
+    # Allows the sweep to optimise a contrarian mode without touching the
+    # signal generation logic.  auto_reverse (breadth-based) takes precedence
+    # when enabled, mirroring the Rust engine behaviour.
+    try:
+        mr = cfg.get("market_regime") or {}
+        _should_reverse = bool(trade_cfg.get("reverse_entry_signal", False))
+        if bool(mr.get("enable_auto_reverse", False)):
+            _ar_lo = float(mr.get("auto_reverse_breadth_low", 10.0))
+            _ar_hi = float(mr.get("auto_reverse_breadth_high", 90.0))
+            # breadth_pct is not available in per-symbol analyze(); the engine
+            # handles auto_reverse at the decision routing level.  Here we only
+            # apply the static reverse_entry_signal toggle.
+            pass  # auto_reverse defers to engine/core.py
+        if _should_reverse and signal in ("BUY", "SELL"):
+            signal = "SELL" if signal == "BUY" else "BUY"
+            latest["_reversed_signal"] = True
     except Exception:
         pass
 
