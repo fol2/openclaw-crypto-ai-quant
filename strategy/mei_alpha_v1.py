@@ -1039,7 +1039,7 @@ def ensure_db():
         )
         cursor.execute(
             "INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)",
-            (migration_id, datetime.datetime.now().isoformat()),
+            (migration_id, datetime.datetime.now(datetime.timezone.utc).isoformat()),
         )
 
     conn.commit()
@@ -1378,7 +1378,7 @@ class PaperTrader:
                 pos.get("tp1_taken"),
                 pos.get("last_add_time"),
                 pos.get("entry_adx_threshold"),
-                datetime.datetime.now().isoformat(),
+                datetime.datetime.now(datetime.timezone.utc).isoformat(),
             ),
         )
         conn.commit()
@@ -1415,7 +1415,7 @@ class PaperTrader:
         ensure_db()
         conn = sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT_S)
         cursor = conn.cursor()
-        timestamp = timestamp_override or datetime.datetime.now().isoformat()
+        timestamp = timestamp_override or datetime.datetime.now(datetime.timezone.utc).isoformat()
         notional = price * size
         meta_json = _json_dumps_safe(meta) if meta else None
 
@@ -2285,7 +2285,7 @@ class PaperTrader:
                 INSERT INTO signals (timestamp, symbol, signal, confidence, price, rsi, ema_fast, ema_slow, meta_json)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
-                datetime.datetime.now().isoformat(),
+                datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 symbol, signal, confidence, price,
                 indicators.get('RSI', 0) if indicators is not None else 0,
                 indicators.get('EMA_fast', 0) if indicators is not None else 0,
@@ -2616,7 +2616,7 @@ class PaperTrader:
             fee_usd = notional * fee_rate
             self.balance -= fee_usd
 
-            opened_at = datetime.datetime.now().isoformat()
+            opened_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
             self.positions[symbol] = {
                 'type': 'LONG' if signal == 'BUY' else 'SHORT',
                 'entry_price': fill_price,
@@ -2971,9 +2971,9 @@ class PaperTrader:
                             open_dt = datetime.datetime.fromisoformat(ts_str)
                             # Ensure open_dt is aware if current is aware (naive vs aware mismatch)
                             if open_dt.tzinfo is None:
-                                duration_hrs = (datetime.datetime.now() - open_dt).total_seconds() / 3600
-                            else:
-                                duration_hrs = (datetime.datetime.now(datetime.timezone.utc) - open_dt).total_seconds() / 3600
+                                open_dt = open_dt.replace(tzinfo=datetime.timezone.utc)
+                            
+                            duration_hrs = (datetime.datetime.now(datetime.timezone.utc) - open_dt).total_seconds() / 3600
 
                             if duration_hrs > 1.0: # Start decay after 1 hour
                                 # v3.7: Extend window to 12h and add 0.35 ATR floor
@@ -3501,6 +3501,9 @@ def analyze(df, symbol, btc_bullish=None):
     df["vol_sma"] = df["Volume"].rolling(window=int(ind["vol_sma_window"])).mean()
     df["vol_trend"] = df["Volume"].rolling(window=int(ind["vol_trend_window"])).mean() > df["vol_sma"]
 
+    if len(df) < 5:
+        return "NEUTRAL", "low"
+
     latest = df.iloc[-1].copy()
     prev = df.iloc[-2]
 
@@ -3511,16 +3514,18 @@ def analyze(df, symbol, btc_bullish=None):
     # Prev MACD Hist for momentum filtering (v3.4)
     latest["prev_MACD_hist"] = prev["MACD_hist"]
     # v5.001: Prev2 MACD Hist for momentum exhaustion check
-    latest["prev2_MACD_hist"] = df["MACD_hist"].iloc[-3]
+    latest["prev2_MACD_hist"] = df["MACD_hist"].iloc[-3] if len(df) >= 3 else 0.0
     # v5.013: Prev3 MACD Hist for persistent divergence check
-    latest["prev3_MACD_hist"] = df["MACD_hist"].iloc[-4]
+    latest["prev3_MACD_hist"] = df["MACD_hist"].iloc[-4] if len(df) >= 4 else 0.0
 
     signal, conf = "NEUTRAL", "low"
 
     # 1) Ranging filter
     bb_width_ratio = latest["bb_width"] / latest["avg_bb_width"] if latest["avg_bb_width"] > 0 else 1.0
     is_ranging = False
-    if bool(flt.get("enable_ranging_filter", True)):
+    if latest["avg_bb_width"] == 0:
+        is_ranging = True
+    elif bool(flt.get("enable_ranging_filter", True)):
         r = thr["ranging"]
         # Less strict: require N "ranging signals" instead of any single one.
         # (Old behavior was effectively min_signals=1.)

@@ -83,7 +83,10 @@ class KernelDecision:
 
         now_series = raw.get("now_series")
         if not isinstance(now_series, dict):
-            now_series = {}
+            try:
+                now_series = dict(now_series)
+            except (TypeError, ValueError):
+                now_series = {}
 
         target_size = _normalise_kernel_target_size(raw.get("quantity"), raw.get("notional_usd"), raw.get("price"))
         if target_size is None:
@@ -321,14 +324,14 @@ def _normalise_kernel_target_size(raw_size: Any, raw_notional: Any, raw_price: A
             if price <= 0.0:
                 return None
             return notional / price
-    except Exception:
+    except (TypeError, ValueError):
         pass
 
     try:
         quantity = float(raw_size)
         if quantity > 0.0:
             return quantity
-    except Exception:
+    except (TypeError, ValueError):
         pass
 
     try:
@@ -637,13 +640,11 @@ class PythonAnalyzeDecisionProvider:
                 if sig_u not in ("BUY", "SELL"):
                     continue
 
-                if isinstance(now_series, pd.Series):
+                if not isinstance(now_series, dict):
                     try:
-                        now_series = now_series.to_dict()
-                    except Exception:
+                        now_series = dict(now_series)
+                    except (TypeError, ValueError):
                         now_series = {}
-                elif not isinstance(now_series, dict):
-                    now_series = {}
                 # ATR floor: enforce minimum ATR as % of price.
                 try:
                     _atr_raw = float(now_series.get("ATR") or 0.0)
@@ -1394,12 +1395,14 @@ class UnifiedEngine:
             )
         except TypeError:
             # Fall back to legacy signal-only API when the trader doesn't accept ``action``.
-            if act == "OPEN":
-                # Legacy PaperTrader path: OPEN implies full entry flow when signal says BUY/SELL.
+            if act in {"OPEN", "ADD"}:
+                # Legacy PaperTrader path: OPEN/ADD should be handled via execute_trade.
                 try:
                     return self.trader.execute_trade(sym, signal, price, timestamp, confidence, atr=atr, indicators=indicators)
-                except Exception:
-                    pass
+                except Exception as e:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.error("Legacy execute_trade fallback failed for %s: %s", sym, e, exc_info=True)
 
             if act == "ADD":
                 fn = getattr(self.trader, "add_to_position", None)
@@ -1412,6 +1415,9 @@ class UnifiedEngine:
 
             if act in {"CLOSE", "REDUCE"}:
                 if sym not in ((self.trader.positions or {}) if isinstance(getattr(self.trader, "positions", None), dict) else {}):
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.debug("Skipping %s for %s: not in positions", act, sym)
                     return
                 pos = (self.trader.positions or {}).get(sym, {})
                 try:
@@ -1462,6 +1468,9 @@ class UnifiedEngine:
 
         if act in {"CLOSE", "REDUCE"}:
             if sym not in ((self.trader.positions or {}) if isinstance(getattr(self.trader, "positions", None), dict) else {}):
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.debug("Skipping %s for %s: not in positions", act, sym)
                 return
             pos = (self.trader.positions or {}).get(sym, {})
             try:
@@ -1577,8 +1586,10 @@ class UnifiedEngine:
                         candle_limit=candle_limit,
                         user=user,
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.error("market.ensure() failed: %s", e, exc_info=True)
 
                 try:
                     self._maybe_restart_ws(active_symbols=active_symbols, candle_limit=candle_limit, user=user)
