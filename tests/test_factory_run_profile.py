@@ -65,3 +65,33 @@ def test_profile_does_not_override_explicit_values() -> None:
 
 def test_all_profiles_present_in_defaults() -> None:
     assert set(PROFILE_DEFAULTS.keys()) == {"smoke", "daily", "deep", "weekly"}
+
+
+# ── Sweep-spec profile binding (C2) ──────────────────────────────────
+
+
+def test_smoke_profile_sweep_spec() -> None:
+    args = _parse_cli_args(["--run-id", "x", "--profile", "smoke"])
+    assert args.sweep_spec == "backtester/sweeps/smoke.yaml"
+
+
+def test_daily_profile_sweep_spec() -> None:
+    args = _parse_cli_args(["--run-id", "x", "--profile", "daily"])
+    assert args.sweep_spec == "backtester/sweeps/full_144v.yaml"
+
+
+def test_weekly_profile_sweep_spec() -> None:
+    args = _parse_cli_args(["--run-id", "x", "--profile", "weekly"])
+    assert args.sweep_spec == "backtester/sweeps/full_144v.yaml"
+
+
+def test_deep_profile_sweep_spec() -> None:
+    args = _parse_cli_args(["--run-id", "x", "--profile", "deep"])
+    assert args.sweep_spec == "backtester/sweeps/full_144v.yaml"
+
+
+def test_explicit_sweep_spec_overrides_profile() -> None:
+    args = _parse_cli_args(
+        ["--run-id", "x", "--profile", "daily", "--sweep-spec", "custom/my_spec.yaml"]
+    )
+    assert args.sweep_spec == "custom/my_spec.yaml"

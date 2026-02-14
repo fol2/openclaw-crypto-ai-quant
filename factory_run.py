@@ -393,13 +393,14 @@ def _funding_check_degraded_allowance(
     }
 
 
-PROFILE_DEFAULTS: dict[str, dict[str, int]] = {
+PROFILE_DEFAULTS: dict[str, dict[str, int | str]] = {
     # Very fast profile for verifying the pipeline end-to-end.
     "smoke": {
         "tpe_trials": 2000,
         "num_candidates": 2,
         "shortlist_per_mode": 3,
         "shortlist_max_rank": 20,
+        "sweep_spec": "backtester/sweeps/smoke.yaml",
     },
     # Default weekday run profile.
     "daily": {
@@ -407,6 +408,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, int]] = {
         "num_candidates": 5,
         "shortlist_per_mode": 20,
         "shortlist_max_rank": 150,
+        "sweep_spec": "backtester/sweeps/full_144v.yaml",
     },
     # Heavier profile for deeper sweeps and larger shortlists.
     "deep": {
@@ -414,6 +416,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, int]] = {
         "num_candidates": 10,
         "shortlist_per_mode": 30,
         "shortlist_max_rank": 400,
+        "sweep_spec": "backtester/sweeps/full_144v.yaml",
     },
     # Weekly profile — identical to deep; weekly is the canonical name going forward.
     "weekly": {
@@ -421,6 +424,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, int]] = {
         "num_candidates": 10,
         "shortlist_per_mode": 30,
         "shortlist_max_rank": 400,
+        "sweep_spec": "backtester/sweeps/full_144v.yaml",
     },
 }
 
@@ -3059,7 +3063,7 @@ def _apply_profile_defaults(args: argparse.Namespace) -> None:
         if not hasattr(args, k):
             continue
         if getattr(args, k) is None:
-            setattr(args, k, int(v))
+            setattr(args, k, int(v) if isinstance(v, int) else v)
 
 
 def _promote_candidates(
@@ -3213,7 +3217,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Allow this many stale symbols to pass as WARN before treating funding check as FAIL.",
     )
 
-    ap.add_argument("--sweep-spec", default="backtester/sweeps/smoke.yaml", help="Sweep spec YAML path.")
+    ap.add_argument("--sweep-spec", default=None, help="Sweep spec YAML path.")
     ap.add_argument("--gpu", action="store_true", help="Use GPU sweep (requires CUDA build/runtime).")
     ap.add_argument(
         "--allow-unsafe-gpu-sweep",

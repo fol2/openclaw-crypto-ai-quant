@@ -880,6 +880,18 @@ def main() -> None:
     except Exception:
         pass
 
+    # Apply promoted config from factory runs (paper daemons only).
+    # Must run BEFORE StrategyManager.get() so AI_QUANT_STRATEGY_YAML is set.
+    promoted_role: str | None = None
+    try:
+        from .promoted_config import maybe_apply_promoted_config
+
+        promoted_role = maybe_apply_promoted_config()
+    except Exception:
+        import traceback
+
+        print(f"⚠️ promoted_config: failed to apply\n{traceback.format_exc()}")
+
     import strategy.mei_alpha_v1 as mei_alpha_v1
 
     default_lock_name = "ai_quant_paper.lock" if mode == "paper" else "ai_quant_live.lock"
@@ -975,9 +987,13 @@ def main() -> None:
         mode_plugin=plugin,
         decision_provider=_build_default_decision_provider(),
     )
-    print(f"🚀 Unified engine started. mode={mode}")
+    promo_tag = f" promoted_role={promoted_role}" if promoted_role else ""
+    print(f"🚀 Unified engine started. mode={mode}{promo_tag}")
     try:
-        alerting.send_alert(f"🚀 Unified engine started. mode={mode}", extra={"kind": "restart", "mode": str(mode)})
+        alerting.send_alert(
+            f"🚀 Unified engine started. mode={mode}{promo_tag}",
+            extra={"kind": "restart", "mode": str(mode), "promoted_role": str(promoted_role or "")},
+        )
     except Exception:
         pass
     engine.run_forever()
