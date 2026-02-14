@@ -21,3 +21,4 @@ serde_yaml = "0.9"
 tpe = "0.2"
 rand = "0.8"
 clap = { version = "4", features = ["derive"] }
+crossbeam-channel = "0.5"
