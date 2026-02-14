@@ -13,25 +13,25 @@ def test_profile_smoke_sets_trials_and_candidate_counts() -> None:
 
 def test_profile_daily_sets_updated_values() -> None:
     args = _parse_cli_args(["--run-id", "x", "--profile", "daily"])
-    assert args.tpe_trials == 200000
+    assert args.tpe_trials == 1000000
     assert args.shortlist_per_mode == 20
-    assert args.shortlist_max_rank == 150
+    assert args.shortlist_max_rank == 200
     assert args.num_candidates == 5
 
 
 def test_profile_deep_backward_compat() -> None:
     args = _parse_cli_args(["--run-id", "x", "--profile", "deep"])
-    assert args.tpe_trials == 2000000
-    assert args.shortlist_per_mode == 30
-    assert args.shortlist_max_rank == 400
+    assert args.tpe_trials == 5000000
+    assert args.shortlist_per_mode == 40
+    assert args.shortlist_max_rank == 500
     assert args.num_candidates == 10
 
 
 def test_profile_weekly_values() -> None:
     args = _parse_cli_args(["--run-id", "x", "--profile", "weekly"])
-    assert args.tpe_trials == 2000000
-    assert args.shortlist_per_mode == 30
-    assert args.shortlist_max_rank == 400
+    assert args.tpe_trials == 5000000
+    assert args.shortlist_per_mode == 40
+    assert args.shortlist_max_rank == 500
     assert args.num_candidates == 10
 
 

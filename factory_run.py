@@ -402,28 +402,28 @@ PROFILE_DEFAULTS: dict[str, dict[str, int | str]] = {
         "shortlist_max_rank": 20,
         "sweep_spec": "backtester/sweeps/smoke.yaml",
     },
-    # Default weekday run profile.
+    # Default weekday run profile (~1hr GPU, 7K samples/axis for 142 axes).
     "daily": {
-        "tpe_trials": 200000,
+        "tpe_trials": 1000000,
         "num_candidates": 5,
         "shortlist_per_mode": 20,
-        "shortlist_max_rank": 150,
+        "shortlist_max_rank": 200,
         "sweep_spec": "backtester/sweeps/full_144v.yaml",
     },
-    # Heavier profile for deeper sweeps and larger shortlists.
+    # Deep/weekly profile (~4-5hr GPU, 35K samples/axis for 142 axes).
     "deep": {
-        "tpe_trials": 2000000,
+        "tpe_trials": 5000000,
         "num_candidates": 10,
-        "shortlist_per_mode": 30,
-        "shortlist_max_rank": 400,
+        "shortlist_per_mode": 40,
+        "shortlist_max_rank": 500,
         "sweep_spec": "backtester/sweeps/full_144v.yaml",
     },
     # Weekly profile — identical to deep; weekly is the canonical name going forward.
     "weekly": {
-        "tpe_trials": 2000000,
+        "tpe_trials": 5000000,
         "num_candidates": 10,
-        "shortlist_per_mode": 30,
-        "shortlist_max_rank": 400,
+        "shortlist_per_mode": 40,
+        "shortlist_max_rank": 500,
         "sweep_spec": "backtester/sweeps/full_144v.yaml",
     },
 }

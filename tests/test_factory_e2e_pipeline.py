@@ -60,9 +60,9 @@ class TestProfileResolution:
 
     def test_daily_profile_full_defaults(self) -> None:
         args = _parse_cli_args(["--run-id", "test", "--profile", "daily"])
-        assert args.tpe_trials == 200_000
+        assert args.tpe_trials == 1_000_000
         assert args.shortlist_per_mode == 20
-        assert args.shortlist_max_rank == 150
+        assert args.shortlist_max_rank == 200
         assert args.num_candidates == 5
 
         # Non-profile defaults should also be present.
@@ -84,16 +84,16 @@ class TestProfileResolution:
 
     def test_deep_profile_full_defaults(self) -> None:
         args = _parse_cli_args(["--run-id", "test", "--profile", "deep"])
-        assert args.tpe_trials == 2_000_000
-        assert args.shortlist_per_mode == 30
-        assert args.shortlist_max_rank == 400
+        assert args.tpe_trials == 5_000_000
+        assert args.shortlist_per_mode == 40
+        assert args.shortlist_max_rank == 500
         assert args.num_candidates == 10
 
     def test_weekly_profile_full_defaults(self) -> None:
         args = _parse_cli_args(["--run-id", "test", "--profile", "weekly"])
-        assert args.tpe_trials == 2_000_000
-        assert args.shortlist_per_mode == 30
-        assert args.shortlist_max_rank == 400
+        assert args.tpe_trials == 5_000_000
+        assert args.shortlist_per_mode == 40
+        assert args.shortlist_max_rank == 500
         assert args.num_candidates == 10
 
     def test_explicit_cli_overrides_profile(self) -> None:
