@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import json
 import time
@@ -16,6 +17,8 @@ import pandas as pd
 from .market_data import MarketDataHub
 from .strategy_manager import StrategyManager
 from .utils import now_ms
+
+logger = logging.getLogger(__name__)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -650,7 +653,7 @@ class PythonAnalyzeDecisionProvider:
                 if sig_u not in ("BUY", "SELL"):
                     continue
 
-                print(f"🎯 SIGNAL: {sym_u} {sig_u} {conf}")
+                logger.info(f"🎯 SIGNAL: {sym_u} {sig_u} {conf}")
 
                 if not isinstance(now_series, dict):
                     try:
@@ -718,7 +721,7 @@ def _build_default_decision_provider() -> DecisionProvider:
         return NoopDecisionProvider()
 
     if provider_mode == "python":
-        print("📊 Decision provider: PythonAnalyzeDecisionProvider (explicit)")
+        logger.info("📊 Decision provider: PythonAnalyzeDecisionProvider (explicit)")
         return PythonAnalyzeDecisionProvider()
 
     if provider_mode == "file":
@@ -741,7 +744,7 @@ def _build_default_decision_provider() -> DecisionProvider:
         # No decision file: Rust binding cannot generate signals from candle data
         # on its own.  Fall back to Python analyze path which replicates the same
         # indicator / filter logic that the Rust backtester uses internally.
-        print(
+        logger.warning(
             "⚠️ AI_QUANT_KERNEL_DECISION_PROVIDER=rust but AI_QUANT_KERNEL_DECISION_FILE "
             "not set. Falling back to PythonAnalyzeDecisionProvider (mei_alpha_v1.analyze)."
         )
@@ -757,7 +760,7 @@ def _build_default_decision_provider() -> DecisionProvider:
     try:
         return KernelDecisionRustBindingProvider(path=None)
     except Exception:
-        print(
+        logger.warning(
             "⚠️ Decision provider auto-mode: Rust kernel extension unavailable and "
             "AI_QUANT_KERNEL_DECISION_FILE not configured. "
             "Falling back to PythonAnalyzeDecisionProvider (mei_alpha_v1.analyze)."
@@ -1017,7 +1020,7 @@ class UnifiedEngine:
         self._ws_restart_count_in_window += 1
         self.stats.last_ws_restart_s = now_s
 
-        print(
+        logger.info(
             f"🔄 WS restart. stale_strikes={self._stale_strikes} reason={reason}. "
             f"restart_count_in_window={self._ws_restart_count_in_window}/{self._ws_restart_max_in_window}"
         )
@@ -1033,7 +1036,7 @@ class UnifiedEngine:
                 user=user,
             )
         except Exception:
-            print(f"⚠️ WS restart failed\n{traceback.format_exc()}")
+            logger.warning(f"⚠️ WS restart failed\n{traceback.format_exc()}")
             return
 
         if self._ws_restart_count_in_window >= self._ws_restart_max_in_window:
@@ -1361,7 +1364,7 @@ class UnifiedEngine:
             except Exception:
                 pass
             try:
-                print(f"🧭 regime gate {'ON' if self._regime_gate_on else 'OFF'} reason={self._regime_gate_reason}")
+                logger.info(f"🧭 regime gate {'ON' if self._regime_gate_on else 'OFF'} reason={self._regime_gate_reason}")
             except Exception:
                 pass
 
@@ -1608,7 +1611,7 @@ class UnifiedEngine:
                 except SystemExit:
                     raise
                 except Exception:
-                    print(f"⚠️ WS health check failed\n{traceback.format_exc()}")
+                    logger.warning(f"⚠️ WS health check failed\n{traceback.format_exc()}")
 
                 # Candle readiness gate (sidecar only):
                 # - Exits still run (using cached indicators + fresh price).
@@ -1798,13 +1801,13 @@ class UnifiedEngine:
                     except SystemExit:
                         raise
                     except Exception:
-                        print(f"⚠️ Engine exit logic error: {sym_u}\n{traceback.format_exc()}")
+                        logger.warning(f"⚠️ Engine exit logic error: {sym_u}\n{traceback.format_exc()}")
                         continue
 
                 # Phase 2: Execute explicit kernel decisions (OPEN/ADD/CLOSE/REDUCE) ordered by score.
                 decision_exec: list[KernelDecision] = []
                 try:
-                    print(f"DEBUG: calling decision_provider.get_decisions for {len(watchlist)} symbols")
+                    logger.debug(f"DEBUG: calling decision_provider.get_decisions for {len(watchlist)} symbols")
                     for dec in self.decision_provider.get_decisions(
                         symbols=watchlist,
                         watchlist=watchlist,
@@ -1856,12 +1859,12 @@ class UnifiedEngine:
 
                         # Skip decision entries where candle keys are not ready.
                         if act in {"OPEN", "ADD"} and sym_u in not_ready_set:
-                            print(f"🕒 skip {sym_u} {act}: candles not ready")
+                            logger.debug(f"🕒 skip {sym_u} {act}: candles not ready")
                             continue
 
                         decision_exec.append(dec)
                 except Exception:
-                    print(f"⚠️ Engine decision provider error: {traceback.format_exc()}")
+                    logger.warning(f"⚠️ Engine decision provider error: {traceback.format_exc()}")
 
                 decision_exec.sort(
                     key=lambda item: (
@@ -1926,7 +1929,7 @@ class UnifiedEngine:
                             if entry_key is not None:
                                 now_ts = now_ms()
                                 if self._entry_is_too_late(entry_key=int(entry_key), now_ts_ms=int(now_ts)):
-                                    print(
+                                    logger.debug(
                                         f"🕒 skip {sym_u} {act}: stale candle-close signal "
                                         f"key={int(entry_key)}"
                                     )
@@ -1995,7 +1998,7 @@ class UnifiedEngine:
                     except SystemExit:
                         raise
                     except Exception:
-                        print(f"⚠️ Engine decision execution error: {dec.symbol}\n{traceback.format_exc()}")
+                        logger.warning(f"⚠️ Engine decision execution error: {dec.symbol}\n{traceback.format_exc()}")
                         continue
 
                 if self.mode_plugin is not None:
@@ -2070,7 +2073,7 @@ class UnifiedEngine:
                                 slip_median_bps_s = f"{float(med):.3f}"
                     except Exception:
                         pass
-                    print(
+                    logger.info(
                         f"🫀 engine ok. loops={self.stats.loops} errors={self.stats.loop_errors} "
                         f"symbols={len(active_symbols)} open_pos={open_pos} loop={loop_s:.2f}s "
                         f"size_mult={float(_size_mult):g} "
@@ -2093,7 +2096,7 @@ class UnifiedEngine:
                 raise
             except Exception:
                 self.stats.loop_errors += 1
-                print(f"🔥 Engine loop error\n{traceback.format_exc()}")
+                logger.error(f"🔥 Engine loop error\n{traceback.format_exc()}")
             finally:
                 # Align sleep to wall-clock boundaries (e.g., :00 for 60s target).
                 # This ensures loops fire at predictable times matching candle closes.

@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -8,6 +9,8 @@ from dataclasses import dataclass
 
 import pandas as pd
 import websocket
+
+logger = logging.getLogger(__name__)
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 # Candle cache DB:
@@ -487,10 +490,10 @@ class HyperliquidWS:
         except sqlite3.OperationalError as e:
             # Never crash the daemon on transient SQLite contention; just start with an empty cache.
             if "locked" not in str(e).lower():
-                print(f"⚠️ Candle load DB error: {e}")
+                logger.warning(f"⚠️ Candle load DB error: {e}")
             rows = []
         except Exception as e:
-            print(f"⚠️ Candle load error: {e}")
+            logger.warning(f"⚠️ Candle load error: {e}")
             rows = []
         finally:
             try:
@@ -553,9 +556,9 @@ class HyperliquidWS:
         except sqlite3.OperationalError as e:
             # Never crash the WS thread on SQLite contention; skip this persist and continue.
             if "locked" not in str(e).lower():
-                print(f"⚠️ Candle persist DB error: {e}")
+                logger.warning(f"⚠️ Candle persist DB error: {e}")
         except Exception as e:
-            print(f"⚠️ Candle persist error: {e}")
+            logger.warning(f"⚠️ Candle persist error: {e}")
         finally:
             try:
                 if conn is not None:
@@ -744,10 +747,10 @@ class HyperliquidWS:
 
     def _on_error(self, _ws, error):
         # Keep errors non-fatal; reconnect handles recovery.
-        print(f"⚠️ HL WS error: {error}")
+        logger.warning(f"⚠️ HL WS error: {error}")
 
     def _on_close(self, _ws, status_code, msg):
-        print(f"🟡 HL WS closed: {status_code} {msg}")
+        logger.info(f"🟡 HL WS closed: {status_code} {msg}")
         with self._lock:
             self._connected = False
             self._bbo.clear()
