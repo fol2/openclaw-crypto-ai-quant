@@ -5,6 +5,9 @@ import json
 import time
 import traceback
 import importlib
+from importlib import util
+import sys
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Protocol
 
@@ -195,7 +198,55 @@ class KernelDecisionFileProvider:
 
 def _load_kernel_runtime_module(module_name: str = "bt_runtime"):
     """Import and return the Rust runtime binding module."""
-    return importlib.import_module(module_name)
+    def _try_import() -> object:
+        return importlib.import_module(module_name)
+
+    try:
+        return _try_import()
+    except ModuleNotFoundError as exc:
+        if exc.name not in {module_name, None}:
+            raise
+
+        candidates = [
+            Path(os.getenv("AI_QUANT_BT_RUNTIME_PATH") or ""),
+            Path(__file__).resolve().parents[1] / "backtester" / "target" / "release" / "deps",
+            Path(__file__).resolve().parents[1] / "backtester" / "target" / "release",
+            Path(__file__).resolve().parents[1] / "backtester" / "target" / "debug" / "deps",
+            Path(__file__).resolve().parents[1] / "backtester" / "target" / "debug",
+        ]
+        for candidate in candidates:
+            candidate_str = str(candidate)
+            if not candidate.exists() or candidate_str in sys.path:
+                continue
+            sys.path.insert(0, candidate_str)
+
+        try:
+            return _try_import()
+        except ModuleNotFoundError as second_exc:
+            if second_exc.name not in {module_name, None}:
+                raise
+
+        for candidate_dir in candidates:
+            if not candidate_dir.is_dir():
+                continue
+            for pattern in [
+                f"lib{module_name}*.so",
+                f"{module_name}*.so",
+                f"{module_name}.so",
+            ]:
+                for candidate in candidate_dir.glob(pattern):
+                    if not candidate.is_file():
+                        continue
+                    if not candidate.name.startswith(("lib" + module_name, module_name)):
+                        continue
+                    spec = util.spec_from_file_location(module_name, str(candidate))
+                    if spec is None or spec.loader is None:
+                        continue
+                    module = util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    return module
+
+        raise
 
 
 def _normalise_kernel_signal(raw_signal: Any) -> str:
@@ -511,12 +562,147 @@ class NoopDecisionProvider:
         return []
 
 
+_CONF_RANK = {"high": 2, "medium": 1, "low": 0}
+
+
+class PythonAnalyzeDecisionProvider:
+    """Generate entry decisions via mei_alpha_v1.analyze() — Python signal path.
+
+    Restores the pre-TKT-004 signal generation that was removed when kernel
+    decision routing was introduced (415ccef).  The Rust backtester computes
+    indicators and signals internally; this provider gives the live/paper
+    engine an equivalent signal source so the SSOT decision path is not broken.
+
+    When AI_QUANT_KERNEL_DECISION_FILE is configured, use
+    KernelDecisionRustBindingProvider instead (file-based kernel decisions).
+    """
+
+    def __init__(self) -> None:
+        self._btc_bullish: bool | None = None
+        self._btc_key: int | None = None
+
+    # ------------------------------------------------------------------
+    # DecisionProvider protocol
+    # ------------------------------------------------------------------
+    def get_decisions(
+        self,
+        *,
+        symbols: list[str],
+        watchlist: list[str],
+        open_symbols: list[str],
+        market: Any,
+        interval: str,
+        lookback_bars: int,
+        mode: str,
+        not_ready_symbols: set[str],
+        strategy: Any,
+        now_ms: int,
+    ) -> Iterable[KernelDecision]:
+        decisions: list[KernelDecision] = []
+        open_set = {s.upper() for s in (open_symbols or [])}
+
+        # --- BTC context (require_btc_alignment filter) ----------------
+        btc_bullish = self._btc_bullish
+        try:
+            btc_df = market.get_candles_df("BTC", interval=interval, min_rows=lookback_bars)
+            if btc_df is not None and not btc_df.empty and len(btc_df) >= lookback_bars:
+                btc_ema_slow = strategy.ta.trend.ema_indicator(
+                    btc_df["Close"], window=50,
+                ).iloc[-1]
+                if strategy.pd.notna(btc_ema_slow):
+                    btc_bullish = bool(btc_df["Close"].iloc[-1] > btc_ema_slow)
+                    self._btc_bullish = btc_bullish
+        except Exception:
+            pass
+
+        # --- Per-symbol signal generation ------------------------------
+        for sym in watchlist:
+            sym_u = sym.upper().strip()
+            if not sym_u or sym_u in not_ready_symbols:
+                continue
+
+            try:
+                df_raw = market.get_candles_df(
+                    sym_u, interval=interval, min_rows=lookback_bars,
+                )
+                if df_raw is None or df_raw.empty or len(df_raw) < lookback_bars:
+                    continue
+
+                df = df_raw.tail(lookback_bars).copy()
+                sig, conf, now_series = strategy.analyze(
+                    df, sym_u, btc_bullish=btc_bullish,
+                )
+
+                sig_u = str(sig or "").upper()
+                if sig_u not in ("BUY", "SELL"):
+                    continue
+
+                if not isinstance(now_series, dict):
+                    now_series = {}
+
+                # ATR floor: enforce minimum ATR as % of price.
+                try:
+                    _atr_raw = float(now_series.get("ATR") or 0.0)
+                    _close_px = float(now_series.get("Close") or 0.0)
+                    _min_atr_pct = float(
+                        (strategy.get_trade_params(sym_u) or {}).get(
+                            "min_atr_pct", 0.003,
+                        ) or 0.003,
+                    )
+                    if _close_px > 0 and _min_atr_pct > 0:
+                        _atr_floor = _close_px * _min_atr_pct
+                        if _atr_raw < _atr_floor:
+                            now_series["ATR"] = _atr_floor
+                            now_series["_atr_floored"] = True
+                except Exception:
+                    pass
+
+                # Candle key for dedup (engine handles actual dedup).
+                entry_key: int | None = None
+                try:
+                    if "T" in df.columns:
+                        entry_key = int(df["T"].iloc[-1])
+                    else:
+                        entry_key = int(df["timestamp"].iloc[-1])
+                except Exception:
+                    pass
+
+                price = float(now_series.get("Close") or 0)
+                if price <= 0:
+                    continue
+
+                action = "ADD" if sym_u in open_set else "OPEN"
+                adx = float(now_series.get("ADX") or 0)
+                score = _CONF_RANK.get(str(conf or "").lower(), 0) * 100 + adx
+
+                decisions.append(
+                    KernelDecision(
+                        symbol=sym_u,
+                        action=action,
+                        signal=sig_u,
+                        confidence=str(conf or "N/A"),
+                        score=score,
+                        now_series=now_series,
+                        entry_key=entry_key,
+                        reason=f"python_analyze:{sig_u.lower()}",
+                    )
+                )
+            except Exception:
+                continue
+
+        return decisions
+
+
 def _build_default_decision_provider() -> DecisionProvider:
     path = os.getenv("AI_QUANT_KERNEL_DECISION_FILE")
     provider_mode = str(os.getenv("AI_QUANT_KERNEL_DECISION_PROVIDER", "") or "").strip().lower()
 
     if provider_mode in {"none", "noop"}:
         return NoopDecisionProvider()
+
+    if provider_mode == "python":
+        print("📊 Decision provider: PythonAnalyzeDecisionProvider (explicit)")
+        return PythonAnalyzeDecisionProvider()
 
     if provider_mode == "file":
         if not path:
@@ -526,14 +712,23 @@ def _build_default_decision_provider() -> DecisionProvider:
         return KernelDecisionFileProvider(path)
 
     if provider_mode == "rust":
-        try:
-            return KernelDecisionRustBindingProvider(path=path)
-        except Exception as exc:
-            raise RuntimeError(
-                "AI_QUANT_KERNEL_DECISION_PROVIDER=rust is configured, but the Rust decision kernel "
-                "extension is unavailable. Set AI_QUANT_KERNEL_DECISION_PROVIDER=none or provide "
-                "AI_QUANT_KERNEL_DECISION_FILE."
-            ) from exc
+        if path:
+            try:
+                return KernelDecisionRustBindingProvider(path=path)
+            except Exception as exc:
+                raise RuntimeError(
+                    "AI_QUANT_KERNEL_DECISION_PROVIDER=rust is configured, but the Rust decision kernel "
+                    "extension is unavailable. Set AI_QUANT_KERNEL_DECISION_PROVIDER=none or provide "
+                    "AI_QUANT_KERNEL_DECISION_FILE."
+                ) from exc
+        # No decision file: Rust binding cannot generate signals from candle data
+        # on its own.  Fall back to Python analyze path which replicates the same
+        # indicator / filter logic that the Rust backtester uses internally.
+        print(
+            "⚠️ AI_QUANT_KERNEL_DECISION_PROVIDER=rust but AI_QUANT_KERNEL_DECISION_FILE "
+            "not set. Falling back to PythonAnalyzeDecisionProvider (mei_alpha_v1.analyze)."
+        )
+        return PythonAnalyzeDecisionProvider()
 
     if path:
         try:
@@ -541,13 +736,16 @@ def _build_default_decision_provider() -> DecisionProvider:
         except Exception:
             return KernelDecisionFileProvider(path)
 
+    # Auto mode: try Rust binding with file, then Python analyze, then crash.
     try:
         return KernelDecisionRustBindingProvider(path=None)
-    except Exception as exc:
-        raise RuntimeError(
-            "Decision provider auto-mode cannot start because neither the Rust decision kernel extension "
-            "is available and AI_QUANT_KERNEL_DECISION_FILE is not configured."
-        ) from exc
+    except Exception:
+        print(
+            "⚠️ Decision provider auto-mode: Rust kernel extension unavailable and "
+            "AI_QUANT_KERNEL_DECISION_FILE not configured. "
+            "Falling back to PythonAnalyzeDecisionProvider (mei_alpha_v1.analyze)."
+        )
+        return PythonAnalyzeDecisionProvider()
 
 
 class ModePlugin(Protocol):
