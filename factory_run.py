@@ -2127,7 +2127,7 @@ def main(argv: list[str] | None = None) -> int:
     funding_refresh_out = run_dir / "data_checks" / "funding_refresh.stdout.txt"
     funding_refresh_err = run_dir / "data_checks" / "funding_refresh.stderr.txt"
     funding_refresh_res = _run_cmd(
-        ["python3", "tools/fetch_funding_rates.py", "--days", "7"],
+        [sys.executable, "tools/fetch_funding_rates.py", "--days", "7"],
         cwd=AIQ_ROOT,
         stdout_path=funding_refresh_out,
         stderr_path=funding_refresh_err,
