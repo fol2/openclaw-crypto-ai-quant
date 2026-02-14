@@ -15,6 +15,7 @@ from engine.core import (
     KernelDecisionRustBindingProvider,
     KernelDecisionFileProvider,
     NoopDecisionProvider,
+    PythonAnalyzeDecisionProvider,
     _build_default_decision_provider,
 )
 from live.trader import LiveTrader
@@ -763,7 +764,10 @@ def test_build_default_decision_provider_falls_back_to_file_if_rust_not_availabl
     assert decisions[0].action == "OPEN"
 
 
-def test_build_default_decision_provider_needs_file_or_kernel_when_no_provider_available(monkeypatch) -> None:
+def test_build_default_decision_provider_falls_back_to_python_when_no_provider_available(monkeypatch) -> None:
+    """After the PythonAnalyzeDecisionProvider fallback (commit 9de45ce), auto-mode
+    no longer raises when both Rust kernel and decision file are unavailable — it
+    falls back to PythonAnalyzeDecisionProvider instead."""
     monkeypatch.delenv("AI_QUANT_KERNEL_DECISION_PROVIDER", raising=False)
     monkeypatch.delenv("AI_QUANT_KERNEL_DECISION_FILE", raising=False)
     monkeypatch.setattr(
@@ -771,8 +775,8 @@ def test_build_default_decision_provider_needs_file_or_kernel_when_no_provider_a
         lambda *_args, **_kwargs: (_ for _ in ()).throw(ImportError("missing bt_runtime")),
     )
 
-    with pytest.raises(RuntimeError, match="Decision provider auto-mode cannot start"):
-        _build_default_decision_provider()
+    provider = _build_default_decision_provider()
+    assert isinstance(provider, PythonAnalyzeDecisionProvider)
 
 
 def test_build_default_decision_provider_respects_noop_mode(monkeypatch) -> None:

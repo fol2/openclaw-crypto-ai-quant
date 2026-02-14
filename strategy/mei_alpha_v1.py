@@ -1,3 +1,4 @@
+import logging
 import pandas as pd  # noqa: F401  (re-exported for other modules)
 import ta
 import time
@@ -9,6 +10,8 @@ import sqlite3
 import tomllib
 import yaml
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 import exchange.ws as hyperliquid_ws
 import exchange.meta as hyperliquid_meta
@@ -180,6 +183,7 @@ DISCORD_CHANNEL = os.getenv("AI_QUANT_DISCORD_CHANNEL", "")
 # Multi-trade allocation (paper perps): margin allocated per position (notional ≈ margin × leverage).
 # Default (code-level): 3% margin per position. Prefer overriding via YAML:
 #   config/strategy_overrides.yaml
+# NOTE: This is a hardcoded fallback. Prefer overriding via get_strategy_config() / YAML.
 ALLOCATION_PCT = 0.03  # Match Rust backtester default
 
 # --- Hyperliquid (Perps) Costs ---
@@ -660,6 +664,8 @@ def compute_entry_sizing(
     try:
         allocation_pct = float(trade_cfg.get("allocation_pct", ALLOCATION_PCT))
     except Exception:
+        # Fallback: should come from get_strategy_config() / YAML, not this hardcoded constant.
+        logger.warning("Using hardcoded ALLOCATION_PCT fallback — check strategy config")
         allocation_pct = float(ALLOCATION_PCT or 0.0)
     allocation_pct = max(0.0, allocation_pct)
 
@@ -1125,6 +1131,9 @@ class PaperTrader:
         self._last_entry_attempt_at_s: dict[str, float] = {}
         self._last_exit_attempt_at_s: dict[str, float] = {}
         self._entry_budget_remaining: int | None = None
+        # Set when get_live_balance falls back to entry_price (WS + REST both failed).
+        # execute_trade checks this before opening new positions.
+        self._data_stale: bool = False
         ensure_db()
         self.load_state()
 
@@ -1579,6 +1588,7 @@ class PaperTrader:
             from hyperliquid.info import Info
             from hyperliquid.utils import constants
         except Exception as e:
+            logger.warning("apply_funding_payments: hyperliquid SDK not available, skipping funding")
             print(f"⚠️ Funding sync unavailable (hyperliquid SDK import failed): {e}")
             return 0.0
 
@@ -1712,6 +1722,7 @@ class PaperTrader:
 
             unrealized_pnl = 0.0
             est_close_fees = 0.0
+            _any_stale = False
             fee_rate = _effective_fee_rate()
             try:
                 mid_max_age_s = float(
@@ -1811,6 +1822,8 @@ class PaperTrader:
                         current_price = None
                 if current_price is None:
                     # Final fallback: assume mark == entry to at least estimate close fees.
+                    logger.warning("get_live_balance: using entry_price fallback for %s — data may be stale", symbol)
+                    _any_stale = True
                     try:
                         current_price = float(pos.get("entry_price") or 0.0)
                     except Exception:
@@ -1834,6 +1847,7 @@ class PaperTrader:
                     unrealized_pnl += (entry - current_price) * size
 
                 est_close_fees += abs(size) * current_price * fee_rate
+            self._data_stale = _any_stale
             return self.balance + unrealized_pnl - est_close_fees
         except Exception as e:
             print(f"Error calculating live balance: {e}")
@@ -1983,6 +1997,9 @@ class PaperTrader:
         if profit_atr < min_profit_atr:
             return False
 
+        # allocation_pct should come from get_strategy_config() / YAML, not the hardcoded constant.
+        if "allocation_pct" not in trade_cfg:
+            logger.warning("Using hardcoded ALLOCATION_PCT fallback — check strategy config")
         allocation_pct = float(trade_cfg.get("allocation_pct", ALLOCATION_PCT))
         add_frac = float(trade_cfg.get("add_fraction_of_base_margin", 0.5))
         add_frac = max(0.0, min(2.0, add_frac))
@@ -2329,6 +2346,16 @@ class PaperTrader:
 
         # Open new position if no position for this symbol
         if symbol not in self.positions:
+            # Block new entries when market data is stale (WS + REST both failed).
+            if getattr(self, "_data_stale", False):
+                logger.warning("execute_trade: blocking new entry for %s — market data is stale", symbol)
+                log_audit_event(
+                    symbol,
+                    "ENTRY_SKIP_DATA_STALE",
+                    data={"signal": str(signal or "").upper(), "confidence": str(confidence or "")},
+                )
+                return
+
             cfg = get_strategy_config(symbol)
             trade_cfg = cfg.get("trade") or {}
             thr = cfg.get("thresholds") or {}

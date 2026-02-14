@@ -102,7 +102,7 @@ class HyperliquidWS:
         self._candle_limit_by_key: dict[tuple[str, str], int] = {}
 
         self._mids: dict[str, float] = {}
-        self._mids_updated_at: float | None = None
+        self._mids_updated_at: dict[str, float] = {}
 
         self._bbo: dict[str, tuple[float, float]] = {}
         self._bbo_updated_at: dict[str, float] = {}
@@ -368,7 +368,13 @@ class HyperliquidWS:
 
     def health(self, *, symbols: list[str], interval: str) -> WsHealth:
         with self._lock:
-            mids_age = None if self._mids_updated_at is None else (time.time() - self._mids_updated_at)
+            mids_age: float | None = None
+            for sym in symbols:
+                ts = self._mids_updated_at.get(sym)
+                if ts is None:
+                    continue
+                age = time.time() - ts
+                mids_age = age if mids_age is None else max(mids_age, age)
 
             candle_age: float | None = None
             for sym in symbols:
@@ -412,7 +418,7 @@ class HyperliquidWS:
             if mid is None:
                 return None
             if max_age_s is not None:
-                ts = self._mids_updated_at
+                ts = self._mids_updated_at.get(symbol)
                 if ts is None or (now - ts) > float(max_age_s):
                     return None
             return mid
@@ -596,9 +602,9 @@ class HyperliquidWS:
                 for sym, mid in mids.items():
                     try:
                         self._mids[sym] = float(mid)
+                        self._mids_updated_at[sym] = now
                     except Exception:
                         continue
-                self._mids_updated_at = now
             return
 
         if channel == "meta":
@@ -747,7 +753,7 @@ class HyperliquidWS:
             self._bbo.clear()
             self._bbo_updated_at.clear()
             self._mids.clear()
-            self._mids_updated_at = None
+            self._mids_updated_at.clear()
 
     def _ping_loop(self):
         while not self._stop_event.wait(HL_WS_PING_SECS):

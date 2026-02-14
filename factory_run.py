@@ -1727,9 +1727,7 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
             _write_json(run_dir / "run_metadata.json", meta)
             return 1
         replay_entry = entry_by_path.get(str(cfg_path))
-        _attach_replay_metadata(summary=summary, entry=replay_entry, args=args)
-        entry = entry_by_path.get(str(cfg_path))
-        _attach_replay_metadata(summary=summary, entry=entry, args=source_args_obj)
+        _attach_replay_metadata(summary=summary, entry=replay_entry, args=source_args_obj)
         replay_reports.append(summary)
         _write_json(run_dir / "run_metadata.json", meta)
 
@@ -2223,6 +2221,11 @@ def main(argv: list[str] | None = None) -> int:
             sweep_argv += ["--funding-db", str(bt_funding_db)]
         if bool(args.gpu):
             sweep_argv += ["--gpu"]
+        allow_unsafe = bool(getattr(args, "allow_unsafe_gpu_sweep", False)) or os.getenv(
+            "AI_QUANT_FACTORY_ALLOW_UNSAFE_GPU_SWEEP", ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        if allow_unsafe and "--allow-unsafe-gpu-sweep" not in sweep_argv:
+            sweep_argv += ["--allow-unsafe-gpu-sweep"]
         if bool(getattr(args, "tpe", False)):
             if not bool(args.gpu):
                 (run_dir / "reports").mkdir(parents=True, exist_ok=True)
@@ -2240,8 +2243,6 @@ def main(argv: list[str] | None = None) -> int:
                 "--tpe-seed",
                 str(int(getattr(args, "tpe_seed", 42))),
             ]
-        if os.getenv("AI_QUANT_FACTORY_ALLOW_UNSAFE_GPU_SWEEP", "").strip().lower() in {"1", "true", "yes", "on"}:
-            sweep_argv += ["--allow-unsafe-gpu-sweep"]
 
         sweep_output_mode = _sweep_output_mode_from_args(args)
         fallback_to_legacy_output = False
@@ -3063,6 +3064,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
     ap.add_argument("--sweep-spec", default="backtester/sweeps/smoke.yaml", help="Sweep spec YAML path.")
     ap.add_argument("--gpu", action="store_true", help="Use GPU sweep (requires CUDA build/runtime).")
+    ap.add_argument(
+        "--allow-unsafe-gpu-sweep",
+        action="store_true",
+        help="Override GPU sweep guardrails for long windows.",
+    )
     ap.add_argument(
         "--gpu-wait-s",
         type=int,
