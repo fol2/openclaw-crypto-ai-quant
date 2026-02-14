@@ -436,7 +436,7 @@ class MarketDataHub:
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT t, t_close
+                SELECT t, T
                 FROM candles
                 WHERE symbol = ? AND interval = ?
                 ORDER BY t DESC
@@ -446,13 +446,13 @@ class MarketDataHub:
             )
             rows = cur.fetchall() or []
             out: list[tuple[int | None, int | None]] = []
-            for t_ms, tclose_ms in rows:
+            for t_ms, T_ms in rows:
                 try:
                     t_i = int(t_ms) if t_ms is not None else None
                 except Exception:
                     t_i = None
                 try:
-                    tc_i = int(tclose_ms) if tclose_ms is not None else None
+                    tc_i = int(T_ms) if T_ms is not None else None
                 except Exception:
                     tc_i = None
                 out.append((t_i, tc_i))
@@ -495,7 +495,7 @@ class MarketDataHub:
         df_best = df_db if (df_db is not None and len(df_db) >= (len(df) if df is not None else 0)) else df
         if df_best is None:
             return None
-        return df_best if len(df_best) >= want else df_best
+        return df_best if len(df_best) >= want else None
 
     def get_mid_price(self, symbol: str, *, max_age_s: float | None = None, interval: str | None = None) -> PriceQuote | None:
         sym = str(symbol).upper()
@@ -581,8 +581,8 @@ class MarketDataHub:
             age_s = max(0.0, (now - int(t_close)) / 1000.0)
             return age_s <= self._stale_candle_s
         except Exception:
-            # If we cannot compute freshness, treat it as usable.
-            return True
+            # If we cannot compute freshness, treat it as unusable.
+            return False
 
     def _read_candles_from_db(self, symbol: str, interval: str, *, limit: int) -> pd.DataFrame | None:
         """Read candles directly from SQLite into the same column names used by your strategy."""
@@ -597,7 +597,7 @@ class MarketDataHub:
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT t, t_close, o, h, l, c, v, n
+                SELECT t, T, o, h, l, c, v, n
                 FROM candles
                 WHERE symbol = ? AND interval = ?
                 ORDER BY t DESC
@@ -753,37 +753,47 @@ class MarketDataHub:
         db_path = self._candle_db_path(interval)
         conn = sqlite3.connect(db_path, timeout=self._db_timeout_s)
         cur = conn.cursor()
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS candles (symbol TEXT, interval TEXT, t INTEGER, T INTEGER, o REAL, h REAL, l REAL, c REAL, v REAL, n INTEGER, updated_at TEXT, PRIMARY KEY (symbol, interval, t))"
+        )
         updated_at = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
         try:
             for c in candles:
-                cur.execute(
-                    """
-                    INSERT INTO candles (symbol, interval, t, t_close, o, h, l, c, v, n, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(symbol, interval, t) DO UPDATE SET
-                        t_close = excluded.t_close,
-                        o = excluded.o,
-                        h = excluded.h,
-                        l = excluded.l,
-                        c = excluded.c,
-                        v = excluded.v,
-                        n = excluded.n,
-                        updated_at = excluded.updated_at
-                    """,
-                    (
-                        symbol,
-                        interval,
-                        int(c.get("t")),
-                        int(c.get("T")) if c.get("T") is not None else None,
-                        float(c.get("o")),
-                        float(c.get("h")),
-                        float(c.get("l")),
-                        float(c.get("c")),
-                        float(c.get("v")),
-                        int(c.get("n")) if c.get("n") is not None else None,
-                        updated_at,
-                    ),
-                )
+                try:
+                    cur.execute(
+                        """
+                        INSERT INTO candles (symbol, interval, t, T, o, h, l, c, v, n, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(symbol, interval, t) DO UPDATE SET
+                            T = excluded.T,
+                            o = excluded.o,
+                            h = excluded.h,
+                            l = excluded.l,
+                            c = excluded.c,
+                            v = excluded.v,
+                            n = excluded.n,
+                            updated_at = excluded.updated_at
+                        """,
+                        (
+                            symbol,
+                            interval,
+                            int(c.get("t")),
+                            int(c.get("T")) if c.get("T") is not None else None,
+                            float(c.get("o")),
+                            float(c.get("h")),
+                            float(c.get("l")),
+                            float(c.get("c")),
+                            float(c.get("v")),
+                            int(c.get("n")) if c.get("n") is not None else None,
+                            updated_at,
+                        ),
+                    )
+                except (TypeError, ValueError) as e:
+                    import logging
+
+                    logger = logging.getLogger(__name__)
+                    logger.warning("Skipping bad candle for %s: %s", symbol, e)
+                    continue
             conn.commit()
         finally:
             conn.close()

@@ -96,6 +96,7 @@ class HyperliquidWS:
         self._thread: threading.Thread | None = None
         self._ping_thread: threading.Thread | None = None
         self._connected: bool = False
+        self._restarting: bool = False
 
         self._subscriptions: list[dict] = []
         self._candle_limit_by_key: dict[tuple[str, str], int] = {}
@@ -128,6 +129,10 @@ class HyperliquidWS:
         self._stop_event = threading.Event()
 
     def ensure_started(self, *, symbols: list[str], interval: str, candle_limit: int, user: str | None = None):
+        with self._lock:
+            if self._restarting:
+                return
+
         def sub_key(sub: dict) -> tuple:
             t = sub.get("type")
             if t == "allMids":
@@ -253,9 +258,13 @@ class HyperliquidWS:
 
     def restart(self, *, join_timeout_s: float = 5.0) -> None:
         """Best-effort in-process restart without swapping the global instance."""
-        self.stop()
-
         with self._lock:
+            self._stop_event.set()
+            if self._ws_app:
+                try:
+                    self._ws_app.close()
+                except Exception:
+                    pass
             t = self._thread
             p = self._ping_thread
 
@@ -272,15 +281,13 @@ class HyperliquidWS:
                 pass
 
         with self._lock:
-            self._ws_app = None
-            self._thread = None
-            self._ping_thread = None
-            self._connected = False
+            self._restarting = True
             self._stop_event.clear()
             self._thread = threading.Thread(target=self._run, daemon=True)
-            self._thread.start()
             self._ping_thread = threading.Thread(target=self._ping_loop, daemon=True)
+            self._thread.start()
             self._ping_thread.start()
+            self._restarting = False
 
     def get_latest_candle_times(self, symbol: str, interval: str) -> tuple[int | None, int | None]:
         """Return (t_open_ms, t_close_ms) for the latest candle in cache.
@@ -737,6 +744,10 @@ class HyperliquidWS:
         print(f"🟡 HL WS closed: {status_code} {msg}")
         with self._lock:
             self._connected = False
+            self._bbo.clear()
+            self._bbo_updated_at.clear()
+            self._mids.clear()
+            self._mids_updated_at = None
 
     def _ping_loop(self):
         while not self._stop_event.wait(HL_WS_PING_SECS):
