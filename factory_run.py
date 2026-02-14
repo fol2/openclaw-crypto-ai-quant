@@ -941,6 +941,142 @@ def _replay_equivalence_env_var(env_name: str, mode: str) -> str | None:
     return raw or None
 
 
+def _find_run_dir(path: Path) -> Path | None:
+    """Find the nearest ancestor that looks like a factory run directory."""
+
+    start = path if path.is_dir() else path.parent
+    current = start
+    for _ in range(8):
+        if (current / "run_metadata.json").is_file():
+            return current
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return None
+
+
+def _coerce_replay_report_path(value: Any, *, run_dir: Path | None = None) -> Path | None:
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    p = Path(raw)
+    if not p.is_absolute():
+        if run_dir is not None:
+            p = (run_dir / p).resolve()
+        else:
+            p = p.expanduser().resolve()
+    return p
+
+
+def _candidate_baseline_from_run_metadata(
+    run_dir: Path,
+    *,
+    summary: dict[str, Any],
+) -> Path | None:
+    meta = _load_json(run_dir / "run_metadata.json")
+    candidates = meta.get("candidate_configs")
+    if not isinstance(candidates, list):
+        return None
+
+    config_id = str(summary.get("config_id", "")).strip()
+    cfg_path = str(summary.get("config_path", "")).strip()
+    cfg_path_name = Path(cfg_path).name if cfg_path else ""
+
+    # Prefer exact config_id match as it is stable across config regenerations in a run.
+    if config_id:
+        for it in candidates:
+            if not isinstance(it, dict):
+                continue
+            if str(it.get("config_id", "")).strip() != config_id:
+                continue
+            bp = _coerce_replay_report_path(it.get("replay_report_path"), run_dir=run_dir)
+            if bp and bp.is_file():
+                return bp
+
+    # Fall back to matching on source file name for compatibility with legacy metadata.
+    if cfg_path_name:
+        for it in candidates:
+            if not isinstance(it, dict):
+                continue
+            it_cfg = str(it.get("path", "")).strip()
+            if Path(it_cfg).name != cfg_path_name:
+                continue
+            bp = _coerce_replay_report_path(it.get("replay_report_path"), run_dir=run_dir)
+            if bp and bp.is_file():
+                return bp
+
+    return None
+
+
+def _candidate_baseline_in_directory(
+    baseline_dir: Path,
+    *,
+    right_report: Path,
+) -> Path | None:
+    if not right_report.is_absolute():
+        right_report = (Path.cwd() / right_report).resolve()
+    candidates = [baseline_dir / right_report.name]
+    for c in candidates:
+        if c.is_file():
+            return c
+    return None
+
+
+def _resolve_replay_equivalence_baseline_path(
+    mode: str,
+    baseline_path: Path,
+    *,
+    right_report: Path,
+    summary: dict[str, Any],
+) -> Path:
+    """
+    Resolve replay equivalence baseline path with stronger alignment guarantees.
+
+    Supported inputs:
+    - a direct baseline replay JSON file path,
+    - a replay directory/run directory containing run_metadata.json and replay candidates.
+    """
+
+    if baseline_path.is_file():
+        # 1) Use same-baseline file when the caller explicitly passes one file.
+        # 2) When this file belongs to a factory run, prefer run-level match by config.
+        # 3) Fall back to a sibling replay file with the same candidate name.
+        run_dir = _find_run_dir(baseline_path)
+        if run_dir is not None and run_dir != baseline_path:
+            resolved = _candidate_baseline_from_run_metadata(
+                run_dir,
+                summary=summary,
+            )
+            if resolved is not None:
+                return resolved
+
+        if baseline_path.name.endswith(".replay.json") and baseline_path.name != right_report.name:
+            sibling = _candidate_baseline_in_directory(baseline_path.parent, right_report=right_report)
+            if sibling is not None:
+                return sibling
+
+        return baseline_path
+
+    if not baseline_path.is_dir():
+        return baseline_path
+
+    run_dir = _find_run_dir(baseline_path) or baseline_path
+    if (run_dir / "run_metadata.json").is_file():
+        resolved = _candidate_baseline_from_run_metadata(run_dir, summary=summary)
+        if resolved is not None:
+            return resolved
+
+    replay_dir = run_dir / "replays"
+    sibling = _candidate_baseline_in_directory(replay_dir, right_report=right_report)
+    if sibling is not None:
+        return sibling
+
+    return baseline_path / "__missing_replay_equivalence_baseline__.json"
+
+
 def _replay_equivalence_baseline_path(*, mode: str) -> Path | None:
     raw = _replay_equivalence_env_var("BASELINE", mode=mode)
     if not raw:
@@ -1076,6 +1212,13 @@ def _run_replay_equivalence_check(
     summary["replay_equivalence_strict"] = strict
 
     baseline = _replay_equivalence_baseline_path(mode=mode)
+    if baseline is not None:
+        baseline = _resolve_replay_equivalence_baseline_path(
+            mode=mode,
+            baseline_path=baseline,
+            right_report=right_report,
+            summary=summary,
+        )
     if baseline is None:
         summary["replay_equivalence_status"] = "not_run"
         summary["replay_equivalence_failure_code"] = _replay_equivalence_failure_code("not_run")
