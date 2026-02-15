@@ -219,6 +219,131 @@ pub struct FillEvent {
     pub pnl_usd: f64,
 }
 
+/// Simplified indicator snapshot for diagnostics tracing (subset of IndicatorSnapshot, all f64).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IndicatorSnapshotTrace {
+    pub close: f64,
+    pub rsi: f64,
+    pub adx: f64,
+    pub adx_slope: f64,
+    pub macd_hist: f64,
+    pub ema_fast: f64,
+    pub ema_slow: f64,
+    pub ema_macro: f64,
+    pub bb_width_ratio: f64,
+    pub stoch_k: f64,
+    pub atr: f64,
+    pub atr_slope: f64,
+    pub volume: f64,
+    pub vol_sma: f64,
+}
+
+impl Default for IndicatorSnapshotTrace {
+    fn default() -> Self {
+        Self {
+            close: 0.0,
+            rsi: 0.0,
+            adx: 0.0,
+            adx_slope: 0.0,
+            macd_hist: 0.0,
+            ema_fast: 0.0,
+            ema_slow: 0.0,
+            ema_macro: 0.0,
+            bb_width_ratio: 0.0,
+            stoch_k: 0.0,
+            atr: 0.0,
+            atr_slope: 0.0,
+            volume: 0.0,
+            vol_sma: 0.0,
+        }
+    }
+}
+
+impl IndicatorSnapshotTrace {
+    /// Build from a full `IndicatorSnapshot`.
+    pub fn from_snapshot(snap: &IndicatorSnapshot) -> Self {
+        Self {
+            close: snap.close,
+            rsi: snap.rsi,
+            adx: snap.adx,
+            adx_slope: snap.adx_slope,
+            macd_hist: snap.macd_hist,
+            ema_fast: snap.ema_fast,
+            ema_slow: snap.ema_slow,
+            ema_macro: snap.ema_macro,
+            bb_width_ratio: snap.bb_width_ratio,
+            stoch_k: snap.stoch_rsi_k,
+            atr: snap.atr,
+            atr_slope: snap.atr_slope,
+            volume: snap.volume,
+            vol_sma: snap.vol_sma,
+        }
+    }
+}
+
+/// A single threshold evaluation record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThresholdRecord {
+    /// Gate/condition name (e.g. "adx_gate", "rsi_entry", "sl_distance").
+    pub name: String,
+    /// The measured value.
+    pub actual: f64,
+    /// The threshold applied.
+    pub threshold: f64,
+    /// Did this threshold check pass?
+    pub passed: bool,
+}
+
+impl Default for ThresholdRecord {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            actual: 0.0,
+            threshold: 0.0,
+            passed: false,
+        }
+    }
+}
+
+/// Context when an exit is triggered.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExitContext {
+    /// Type of exit (e.g. "stop_loss", "take_profit", "trailing", "smart_exit").
+    pub exit_type: String,
+    /// Detailed reason for the exit.
+    pub exit_reason: String,
+    /// Price at which exit occurred.
+    pub exit_price: f64,
+    /// Average entry price of the position.
+    pub entry_price: f64,
+    /// Current stop-loss price level.
+    pub sl_price: Option<f64>,
+    /// Current take-profit price level.
+    pub tp_price: Option<f64>,
+    /// Current trailing stop-loss price level.
+    pub trailing_sl: Option<f64>,
+    /// Profit measured in ATR units.
+    pub profit_atr: f64,
+    /// Number of bars the position was open.
+    pub duration_bars: u64,
+}
+
+impl Default for ExitContext {
+    fn default() -> Self {
+        Self {
+            exit_type: String::new(),
+            exit_reason: String::new(),
+            exit_price: 0.0,
+            entry_price: 0.0,
+            sl_price: None,
+            tp_price: None,
+            trailing_sl: None,
+            profit_atr: 0.0,
+            duration_bars: 0,
+        }
+    }
+}
+
 /// Per-step diagnostics.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Diagnostics {
@@ -246,6 +371,18 @@ pub struct Diagnostics {
     /// True if entry was blocked by PESC.
     #[serde(default)]
     pub pesc_blocked: bool,
+    /// Full indicator snapshot at decision time.
+    #[serde(default)]
+    pub indicator_snapshot: Option<IndicatorSnapshotTrace>,
+    /// Thresholds that were applied: (gate_name, actual_value, threshold_value, passed).
+    #[serde(default)]
+    pub applied_thresholds: Vec<ThresholdRecord>,
+    /// Exit context when an exit is triggered.
+    #[serde(default)]
+    pub exit_context: Option<ExitContext>,
+    /// Confidence determination factors: (factor_name, value).
+    #[serde(default)]
+    pub confidence_factors: Vec<(String, f64)>,
 }
 
 impl Diagnostics {
@@ -724,13 +861,16 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
         }
 
         if let (Some(exit_params), Some(snap)) = (&params.exit_params, &event.indicators) {
+            // Capture indicator snapshot for diagnostics.
+            diagnostics.indicator_snapshot = Some(IndicatorSnapshotTrace::from_snapshot(snap));
+
             // Capture position side from original state before any mutations.
             let pre_exit_side = state.positions.get(&event.symbol).map(|p| p.side);
 
-            // Evaluate exits, then act on the result (two-phase to satisfy borrow checker).
-            let exit_result = {
+            // Evaluate exits with full diagnostics (threshold records + exit context).
+            let exit_eval = {
                 if let Some(pos) = next_state.positions.get_mut(&event.symbol) {
-                    Some(crate::kernel_exits::evaluate_exits(
+                    Some(crate::kernel_exits::evaluate_exits_with_diagnostics(
                         pos,
                         snap,
                         exit_params,
@@ -741,7 +881,10 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                 }
             };
 
-            if let Some(result) = exit_result {
+            if let Some(eval) = exit_eval {
+                diagnostics.applied_thresholds = eval.threshold_records;
+                diagnostics.exit_context = eval.exit_context;
+                let result = eval.result;
                 let fee_model = accounting::FeeModel {
                     maker_fee_bps: params.maker_fee_bps,
                     taker_fee_bps: params.taker_fee_bps,
@@ -868,6 +1011,9 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
             }
         };
 
+        // Capture indicator snapshot for diagnostics.
+        diagnostics.indicator_snapshot = Some(IndicatorSnapshotTrace::from_snapshot(snap));
+
         let slope = event.ema_slow_slope_pct.unwrap_or(0.0);
         let entry_result = crate::kernel_entries::evaluate_entry(snap, gate_result, entry_params, slope);
 
@@ -878,6 +1024,49 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
             bt_signals::Signal::Neutral => "neutral".to_string(),
         });
         diagnostics.entry_confidence = Some(entry_result.confidence);
+
+        // Record confidence factors for entry decisions.
+        {
+            let mut factors: Vec<(String, f64)> = Vec::new();
+            factors.push(("adx".into(), snap.adx));
+            factors.push(("rsi".into(), snap.rsi));
+            factors.push(("bb_width_ratio".into(), snap.bb_width_ratio));
+            factors.push(("vol_sma_ratio".into(), if snap.vol_sma > 0.0 { snap.volume / snap.vol_sma } else { 0.0 }));
+            factors.push(("macd_hist".into(), snap.macd_hist));
+            factors.push(("adx_slope".into(), snap.adx_slope));
+            factors.push(("confidence".into(), entry_result.confidence as f64));
+            diagnostics.confidence_factors = factors;
+        }
+
+        // Record gate thresholds for entry decisions.
+        {
+            let mut thr = Vec::new();
+            thr.push(ThresholdRecord {
+                name: "adx_above_min".into(),
+                actual: snap.adx,
+                threshold: gate_result.effective_min_adx,
+                passed: gate_result.adx_above_min,
+            });
+            thr.push(ThresholdRecord {
+                name: "adx_trending_up".into(),
+                actual: snap.adx_slope,
+                threshold: 0.0,
+                passed: gate_result.is_trending_up,
+            });
+            thr.push(ThresholdRecord {
+                name: "vol_confirm".into(),
+                actual: snap.volume,
+                threshold: snap.vol_sma,
+                passed: gate_result.vol_confirm,
+            });
+            thr.push(ThresholdRecord {
+                name: "bb_width_ratio".into(),
+                actual: snap.bb_width_ratio,
+                threshold: 1.0,
+                passed: !gate_result.is_ranging,
+            });
+            diagnostics.applied_thresholds = thr;
+        }
 
         if entry_result.signal == bt_signals::Signal::Neutral {
             diagnostics.intent_count = 0;
@@ -1028,6 +1217,11 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
     let mut next_state = state.clone();
     next_state.step = next_state.step.saturating_add(1);
     next_state.timestamp_ms = event.timestamp_ms;
+
+    // Capture indicator snapshot for Buy/Sell diagnostics (if available).
+    if let Some(ref snap) = event.indicators {
+        diagnostics.indicator_snapshot = Some(IndicatorSnapshotTrace::from_snapshot(snap));
+    }
 
     // --- Gate pre-filter for entry decisions ---
     if let Some(ref gr) = event.gate_result {
