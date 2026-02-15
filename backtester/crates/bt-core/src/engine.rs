@@ -227,6 +227,7 @@ fn step_decision(
         signal: kernel_signal(signal),
         price: accounting::quantize(price),
         notional_hint_usd: requested_notional_usd,
+        close_fraction: None,
     };
     state.next_kernel_event_id = state.next_kernel_event_id.saturating_add(1);
 

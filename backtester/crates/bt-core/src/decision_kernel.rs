@@ -52,6 +52,11 @@ pub struct MarketEvent {
     pub price: f64,
     #[serde(default)]
     pub notional_hint_usd: Option<f64>,
+    /// Fraction of position to close: `None` or `Some(1.0)` = full close,
+    /// `Some(0.5)` = close 50%.  Only meaningful when the event triggers a
+    /// close (opposite-side signal with an existing position).
+    #[serde(default)]
+    pub close_fraction: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -348,11 +353,12 @@ fn apply_close(
     side: PositionSide,
     price: f64,
     fee_rate: f64,
+    close_fraction: Option<f64>,
     intent_id: u64,
     diagnostics: &mut Diagnostics,
 ) -> Option<(OrderIntent, FillEvent)> {
-    let position = match state.positions.remove(symbol) {
-        Some(pos) => pos,
+    let position = match state.positions.get(symbol) {
+        Some(pos) => pos.clone(),
         None => {
             diagnostics
                 .warnings
@@ -374,18 +380,42 @@ fn apply_close(
         return None;
     }
 
-    let quantity = accounting::quantize(position.quantity);
+    // Determine effective fraction: None or >= 1.0 means full close.
+    let frac = close_fraction.unwrap_or(1.0).clamp(0.0, 1.0);
+    let is_full_close = frac >= 1.0 - 1e-15;
+
+    let plan = accounting::build_partial_close_plan(position.quantity, position.margin_usd, frac);
+
+    if plan.closed_size <= 0.0 {
+        diagnostics
+            .warnings
+            .push(format!("close skipped for {symbol}: closed size is zero"));
+        return None;
+    }
+
+    let close_qty = plan.closed_size;
     let close = accounting::apply_close_fill(
         side == PositionSide::Long,
         position.avg_entry_price,
         price,
-        quantity,
+        close_qty,
         fee_rate,
     );
 
-    // Return margin (collateral) + PnL - fee to cash.
-    let margin = position.margin_usd;
-    state.cash_usd = quantise(state.cash_usd + margin + close.pnl - close.fee_usd);
+    // Return proportional margin + PnL - fee to cash.
+    let returned_margin = quantise(position.margin_usd - plan.remaining_margin);
+    state.cash_usd = quantise(state.cash_usd + returned_margin + close.pnl - close.fee_usd);
+
+    if is_full_close {
+        state.positions.remove(symbol);
+    } else {
+        // Update position in-place with reduced values.
+        let pos = state.positions.get_mut(symbol).unwrap();
+        pos.quantity = plan.remaining_size;
+        pos.margin_usd = plan.remaining_margin;
+        pos.notional_usd = quantise(pos.avg_entry_price * plan.remaining_size);
+        pos.updated_at_ms = state.timestamp_ms;
+    }
 
     let intent = OrderIntent {
         schema_version: KERNEL_SCHEMA_VERSION,
@@ -393,7 +423,7 @@ fn apply_close(
         symbol: symbol.to_string(),
         kind: OrderIntentKind::Close,
         side,
-        quantity,
+        quantity: close_qty,
         price: quantise(price),
         notional_usd: close.notional,
         fee_rate,
@@ -403,7 +433,7 @@ fn apply_close(
         intent_id,
         symbol: symbol.to_string(),
         side,
-        quantity,
+        quantity: close_qty,
         price: quantise(price),
         notional_usd: close.notional,
         fee_usd: close.fee_usd,
@@ -515,6 +545,7 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                 closed_side,
                 event.price,
                 fee_rate,
+                event.close_fraction,
                 close_id,
                 &mut diagnostics,
             ) {
@@ -586,6 +617,7 @@ mod tests {
             signal,
             price: 10_000.0,
             notional_hint_usd: notional_hint,
+            close_fraction: None,
         }
     }
 
@@ -661,6 +693,7 @@ mod tests {
             signal: MarketSignal::Sell,
             price: 10_200.0,
             notional_hint_usd: None,
+            close_fraction: None,
         };
         let close_state = open_result.state;
         let close_result = step(&close_state, &close_event, &params);
@@ -691,5 +724,205 @@ mod tests {
         assert!(result.diagnostics.has_errors());
         assert_eq!(result.state, state);
         assert_eq!(result.intents.len(), 0);
+    }
+
+    // ---- Partial close tests ----
+
+    /// Helper: open a long BTC position with given notional and return resulting state.
+    fn open_long_btc(notional: f64, price: f64) -> StrategyState {
+        let state = init_state();
+        let params = KernelParams {
+            allow_reverse: false,
+            ..KernelParams::default()
+        };
+        let mut event = event_with_signal("BTC", MarketSignal::Buy);
+        event.notional_hint_usd = Some(notional);
+        event.price = price;
+        step(&state, &event, &params).state
+    }
+
+    fn partial_close_event(fraction: f64, price: f64) -> MarketEvent {
+        MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 200,
+            timestamp_ms: 2_000,
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Sell,
+            price,
+            notional_hint_usd: None,
+            close_fraction: Some(fraction),
+        }
+    }
+
+    #[test]
+    fn partial_close_50_pct_keeps_position() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams {
+            allow_reverse: false,
+            ..KernelParams::default()
+        };
+        let pos_before = state.positions.get("BTC").unwrap().clone();
+        let event = partial_close_event(0.5, 10_200.0);
+
+        let result = step(&state, &event, &params);
+
+        // Position should still exist with halved quantity.
+        let pos = result.state.positions.get("BTC").expect("position remains");
+        assert!((pos.quantity - accounting::quantize(pos_before.quantity * 0.5)).abs() < 1e-12);
+        assert!((pos.margin_usd - accounting::quantize(pos_before.margin_usd * 0.5)).abs() < 1e-12);
+        assert_eq!(pos.side, PositionSide::Long);
+
+        // Fill should reflect partial quantity.
+        assert_eq!(result.fills.len(), 1);
+        assert!((result.fills[0].quantity - accounting::quantize(pos_before.quantity * 0.5)).abs() < 1e-12);
+        assert!(result.fills[0].pnl_usd > 0.0); // price rose
+    }
+
+    #[test]
+    fn partial_close_25_pct() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams {
+            allow_reverse: false,
+            ..KernelParams::default()
+        };
+        let pos_before = state.positions.get("BTC").unwrap().clone();
+        let event = partial_close_event(0.25, 10_000.0);
+
+        let result = step(&state, &event, &params);
+
+        let pos = result.state.positions.get("BTC").expect("position remains");
+        assert!((pos.quantity - accounting::quantize(pos_before.quantity * 0.75)).abs() < 1e-12);
+        assert!((pos.margin_usd - accounting::quantize(pos_before.margin_usd * 0.75)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn partial_close_75_pct() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams {
+            allow_reverse: false,
+            ..KernelParams::default()
+        };
+        let pos_before = state.positions.get("BTC").unwrap().clone();
+        let event = partial_close_event(0.75, 9_800.0);
+
+        let result = step(&state, &event, &params);
+
+        let pos = result.state.positions.get("BTC").expect("position remains");
+        assert!((pos.quantity - accounting::quantize(pos_before.quantity * 0.25)).abs() < 1e-12);
+        assert!((pos.margin_usd - accounting::quantize(pos_before.margin_usd * 0.25)).abs() < 1e-12);
+        // Price dropped → PnL should be negative.
+        assert!(result.fills[0].pnl_usd < 0.0);
+    }
+
+    #[test]
+    fn partial_close_100_pct_removes_position() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams {
+            allow_reverse: false,
+            ..KernelParams::default()
+        };
+        let event = partial_close_event(1.0, 10_100.0);
+
+        let result = step(&state, &event, &params);
+
+        assert!(
+            result.state.positions.get("BTC").is_none(),
+            "full close should remove position"
+        );
+        assert_eq!(result.fills.len(), 1);
+    }
+
+    #[test]
+    fn partial_close_none_fraction_is_full_close() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams {
+            allow_reverse: false,
+            ..KernelParams::default()
+        };
+        let mut event = partial_close_event(1.0, 10_100.0);
+        event.close_fraction = None;
+
+        let result = step(&state, &event, &params);
+
+        assert!(
+            result.state.positions.get("BTC").is_none(),
+            "None fraction should behave as full close"
+        );
+    }
+
+    #[test]
+    fn partial_close_cash_accounting_round_trip() {
+        let initial_cash = 100_000.0;
+        let entry_price = 10_000.0;
+        let exit_price = 10_400.0;
+        let notional = 10_000.0;
+        let frac = 0.5;
+        let fee_rate = accounting::DEFAULT_TAKER_FEE_RATE;
+
+        let state = open_long_btc(notional, entry_price);
+        let cash_after_open = state.cash_usd;
+        let pos = state.positions.get("BTC").unwrap();
+        let full_qty = pos.quantity;
+        let full_margin = pos.margin_usd;
+
+        let params = KernelParams {
+            allow_reverse: false,
+            ..KernelParams::default()
+        };
+        let event = partial_close_event(frac, exit_price);
+        let result = step(&state, &event, &params);
+
+        // Manually compute expected cash after partial close.
+        let close_qty = accounting::quantize(full_qty * frac);
+        let returned_margin = accounting::quantize(full_margin * frac);
+        let close_acc = accounting::apply_close_fill(true, entry_price, exit_price, close_qty, fee_rate);
+        let expected_cash = accounting::quantize(cash_after_open + returned_margin + close_acc.pnl - close_acc.fee_usd);
+
+        assert!(
+            (result.state.cash_usd - expected_cash).abs() < 1e-12,
+            "partial close cash: {} != expected {}",
+            result.state.cash_usd,
+            expected_cash,
+        );
+
+        // Close the remaining 50%.
+        let event2 = MarketEvent {
+            event_id: 300,
+            timestamp_ms: 3_000,
+            close_fraction: Some(1.0),
+            price: exit_price,
+            ..event
+        };
+        let result2 = step(&result.state, &event2, &params);
+        assert!(result2.state.positions.get("BTC").is_none());
+
+        // Total round-trip: initial_cash + total_pnl - total_fees.
+        let open_fee = accounting::apply_open_fill(notional, fee_rate).fee_usd;
+        let total_pnl = accounting::mark_to_market_pnl(true, entry_price, exit_price, full_qty);
+        let close1_fee = close_acc.fee_usd;
+        let close2_qty = accounting::quantize(full_qty - close_qty);
+        let close2_fee = accounting::apply_close_fill(true, entry_price, exit_price, close2_qty, fee_rate).fee_usd;
+        let expected_final = accounting::quantize(initial_cash + total_pnl - open_fee - close1_fee - close2_fee);
+
+        assert!(
+            (result2.state.cash_usd - expected_final).abs() < 1e-12,
+            "round-trip cash: {} != expected {}",
+            result2.state.cash_usd,
+            expected_final,
+        );
+    }
+
+    #[test]
+    fn partial_close_deterministic() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams {
+            allow_reverse: false,
+            ..KernelParams::default()
+        };
+        let event = partial_close_event(0.5, 10_200.0);
+
+        let r1 = step(&state, &event, &params);
+        let r2 = step(&state, &event, &params);
+        assert_eq!(r1, r2, "partial close must be deterministic");
     }
 }
