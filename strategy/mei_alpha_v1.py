@@ -1422,6 +1422,127 @@ def save_gate_evaluation(
             conn.close()
 
 
+def _log_gates_batch(decision_id: str, gates: list[dict]) -> None:
+    """Batch-insert multiple gate evaluations for a single decision event.
+
+    Each entry in *gates* is a dict with keys matching :func:`save_gate_evaluation`'s
+    parameters: ``gate_name``, ``gate_passed``, and optional ``metric_value``,
+    ``threshold_value``, ``operator``, ``explanation``.
+
+    Uses a single transaction for minimal I/O overhead on the hot path.
+    """
+    if not gates:
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT_S)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.executemany(
+            """
+            INSERT INTO gate_evaluations
+                (decision_id, gate_name, gate_passed, metric_value,
+                 threshold_value, operator, explanation)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    decision_id,
+                    g["gate_name"],
+                    1 if g.get("gate_passed") else 0,
+                    g.get("metric_value"),
+                    g.get("threshold_value"),
+                    g.get("operator"),
+                    g.get("explanation"),
+                )
+                for g in gates
+            ],
+        )
+        conn.commit()
+    except Exception as exc:
+        logger.debug("_log_gates_batch: failed for decision %s: %s", decision_id, exc)
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _log_gates_for_decision(decision_id: str, gates_dict: dict, values_dict: dict) -> None:
+    """Log all gate evaluations for a decision event.
+
+    Translates the ``audit["gates"]`` and ``audit["values"]`` dicts produced by
+    :func:`analyze` into individual :table:`gate_evaluations` rows.
+
+    Parameters
+    ----------
+    decision_id : str
+        ULID of the parent decision event.
+    gates_dict : dict
+        The ``latest["audit"]["gates"]`` dict from analyze().
+    values_dict : dict
+        The ``latest["audit"]["values"]`` dict from analyze().
+    """
+    rows: list[dict] = []
+
+    def _g(name: str, passed: bool, metric=None, threshold=None, op=None, expl=None):
+        rows.append({
+            "gate_name": name,
+            "gate_passed": passed,
+            "metric_value": None if metric is None else float(metric),
+            "threshold_value": None if threshold is None else float(threshold),
+            "operator": op,
+            "explanation": expl,
+        })
+
+    try:
+        adx_v = float(gates_dict.get("adx", 0))
+        eff_min_adx = float(gates_dict.get("effective_min_adx", 0))
+        _g("adx_gate", adx_v > eff_min_adx, adx_v, eff_min_adx, ">",
+           f"ADX {adx_v:.2f} vs min {eff_min_adx:.2f}")
+
+        _g("ranging_filter", not gates_dict.get("is_ranging", False),
+           explanation="composite: ADX+BB+RSI ranging signals")
+
+        _g("anomaly_filter", not gates_dict.get("is_anomaly", False),
+           explanation="composite: price_change_pct + ema_deviation")
+
+        is_ext = gates_dict.get("is_extended", False)
+        dist = float(values_dict.get("close", 0)) - float(values_dict.get("ema_fast", 0))
+        dist_pct = float(gates_dict.get("dist_ema_fast", 0))
+        max_dist = float(gates_dict.get("max_dist_ema_fast", 0.04))
+        _g("extension_filter", not is_ext, dist_pct, max_dist, "<=",
+           f"dist_ema_fast={dist_pct:.4f} vs max={max_dist:.4f}")
+
+        _g("volume_confirm", bool(gates_dict.get("vol_confirm", False)),
+           explanation="volume > vol_sma check")
+
+        is_trending = gates_dict.get("is_trending_up", False)
+        adx_slope = float(values_dict.get("adx_slope", 0))
+        _g("adx_rising", bool(is_trending), adx_slope, 0, ">",
+           f"adx_slope={adx_slope:.4f} or ADX>{gates_dict.get('adx', 0):.1f} saturated")
+
+        btc_ok_l = gates_dict.get("btc_ok_long", True)
+        btc_ok_s = gates_dict.get("btc_ok_short", True)
+        _g("btc_alignment", bool(btc_ok_l and btc_ok_s),
+           explanation=f"btc_ok_long={btc_ok_l}, btc_ok_short={btc_ok_s}")
+
+        ema_f = float(values_dict.get("ema_fast", 0))
+        ema_s = float(values_dict.get("ema_slow", 0))
+        _g("ema_alignment", ema_f != ema_s, ema_f, ema_s,
+           ">" if ema_f > ema_s else "<",
+           f"ema_fast={ema_f:.4f} vs ema_slow={ema_s:.4f}")
+
+        if gates_dict.get("require_macro_alignment", False):
+            ema_macro = float(values_dict.get("ema_macro", 0))
+            _g("macro_alignment", ema_s > ema_macro if ema_macro > 0 else True,
+               ema_s, ema_macro, ">",
+               f"ema_slow={ema_s:.4f} vs ema_macro={ema_macro:.4f}")
+
+    except Exception as exc:
+        logger.debug("_log_gates_for_decision: gate build failed: %s", exc)
+
+    _log_gates_batch(decision_id, rows)
+
+
 def link_decision_to_trade(decision_id: str, trade_id: int) -> None:
     """Link an existing decision event to a trade by updating its trade_id."""
     conn = None
@@ -3023,6 +3144,16 @@ class PaperTrader:
             trade_cfg = cfg.get("trade") or {}
             thr = cfg.get("thresholds") or {}
 
+            # AQC-803: Resolve parent decision_id from analyze() for gate tracing.
+            _parent_did = None
+            try:
+                if indicators is not None:
+                    _parent_did = indicators.get("_decision_id")
+            except Exception:
+                pass
+            # Accumulate execution gate results; flushed on success or first failure.
+            _exec_gates: list[dict] = []
+
             # v5.035: Entry confidence gate.
             min_entry_conf = str(trade_cfg.get("entry_min_confidence", "high"))
             if not _conf_ok(confidence, min_confidence=min_entry_conf):
@@ -3036,6 +3167,26 @@ class PaperTrader:
                         "min_entry_confidence": str(min_entry_conf).lower(),
                     },
                 )
+                # AQC-803: log blocked confidence gate
+                try:
+                    _conf_rank = {"low": 1, "medium": 2, "high": 3}
+                    _did = create_decision_event(
+                        symbol=symbol, event_type="gate_block", status="blocked",
+                        phase="gate_evaluation", parent_decision_id=_parent_did,
+                        triggered_by="schedule",
+                        action_taken="blocked",
+                        rejection_reason=f"confidence {confidence} < {min_entry_conf}",
+                    )
+                    _log_gates_batch(_did, [{
+                        "gate_name": "confidence_gate",
+                        "gate_passed": False,
+                        "metric_value": float(_conf_rank.get(str(confidence or "").lower(), 0)),
+                        "threshold_value": float(_conf_rank.get(str(min_entry_conf).lower(), 3)),
+                        "operator": ">=",
+                        "explanation": f"confidence '{confidence}' < min '{min_entry_conf}'",
+                    }])
+                except Exception:
+                    pass
                 return
 
             # Optional hard limit: max concurrent net positions across all symbols.
@@ -3055,6 +3206,25 @@ class PaperTrader:
                         "open_positions": int(len(self.positions or {})),
                     },
                 )
+                # AQC-803: log blocked max_positions gate
+                try:
+                    _n_open = len(self.positions or {})
+                    _did = create_decision_event(
+                        symbol=symbol, event_type="gate_block", status="blocked",
+                        phase="risk_check", parent_decision_id=_parent_did,
+                        triggered_by="schedule", action_taken="blocked",
+                        rejection_reason=f"max_open_positions {_n_open}>={max_open_positions}",
+                    )
+                    _log_gates_batch(_did, [{
+                        "gate_name": "max_positions",
+                        "gate_passed": False,
+                        "metric_value": float(_n_open),
+                        "threshold_value": float(max_open_positions),
+                        "operator": "<",
+                        "explanation": f"open={_n_open} >= max={max_open_positions}",
+                    }])
+                except Exception:
+                    pass
                 return
 
             # v5.014: 同向平倉後進場冷卻 (Post-Exit Same-Direction Cooldown - PESC)
@@ -3140,6 +3310,24 @@ class PaperTrader:
                                 "last_reason": str(last_reason or ""),
                             },
                         )
+                        # AQC-803: log blocked PESC gate
+                        try:
+                            _did = create_decision_event(
+                                symbol=symbol, event_type="gate_block", status="blocked",
+                                phase="gate_evaluation", parent_decision_id=_parent_did,
+                                triggered_by="schedule", action_taken="blocked",
+                                rejection_reason=f"PESC cooldown {diff_mins:.1f}/{reentry_cooldown:.1f}m",
+                            )
+                            _log_gates_batch(_did, [{
+                                "gate_name": "pesc_cooldown",
+                                "gate_passed": False,
+                                "metric_value": float(diff_mins),
+                                "threshold_value": float(reentry_cooldown),
+                                "operator": ">=",
+                                "explanation": f"elapsed {diff_mins:.1f}m < cooldown {reentry_cooldown:.1f}m (ADX {float(adx_val):.1f})",
+                            }])
+                        except Exception:
+                            pass
                         return
 
             # v5.017: 信號穩定性過濾 (Signal Stability Filter - SSF)
@@ -3160,6 +3348,24 @@ class PaperTrader:
                             "macd_hist": float(macd_h),
                         },
                     )
+                    # AQC-803: log blocked SSF gate
+                    try:
+                        _did = create_decision_event(
+                            symbol=symbol, event_type="gate_block", status="blocked",
+                            phase="gate_evaluation", parent_decision_id=_parent_did,
+                            triggered_by="schedule", action_taken="blocked",
+                            rejection_reason=f"SSF: MACD_hist {macd_h:.6f} negative for BUY",
+                        )
+                        _log_gates_batch(_did, [{
+                            "gate_name": "ssf_filter",
+                            "gate_passed": False,
+                            "metric_value": float(macd_h),
+                            "threshold_value": 0.0,
+                            "operator": ">",
+                            "explanation": f"BUY requires MACD_hist > 0, got {macd_h:.6f}",
+                        }])
+                    except Exception:
+                        pass
                     return
                 if signal == "SELL" and macd_h > 0:
                     # 做空但 MACD 仲係正數。
@@ -3173,6 +3379,24 @@ class PaperTrader:
                             "macd_hist": float(macd_h),
                         },
                     )
+                    # AQC-803: log blocked SSF gate
+                    try:
+                        _did = create_decision_event(
+                            symbol=symbol, event_type="gate_block", status="blocked",
+                            phase="gate_evaluation", parent_decision_id=_parent_did,
+                            triggered_by="schedule", action_taken="blocked",
+                            rejection_reason=f"SSF: MACD_hist {macd_h:.6f} positive for SELL",
+                        )
+                        _log_gates_batch(_did, [{
+                            "gate_name": "ssf_filter",
+                            "gate_passed": False,
+                            "metric_value": float(macd_h),
+                            "threshold_value": 0.0,
+                            "operator": "<",
+                            "explanation": f"SELL requires MACD_hist < 0, got {macd_h:.6f}",
+                        }])
+                    except Exception:
+                        pass
                     return
 
             # v5.018: RSI 進場極端過濾 (REEF)
@@ -3194,6 +3418,24 @@ class PaperTrader:
                                 "threshold_gt": float(long_block),
                             },
                         )
+                        # AQC-803: log blocked REEF gate
+                        try:
+                            _did = create_decision_event(
+                                symbol=symbol, event_type="gate_block", status="blocked",
+                                phase="gate_evaluation", parent_decision_id=_parent_did,
+                                triggered_by="schedule", action_taken="blocked",
+                                rejection_reason=f"REEF: RSI {float(rsi_v):.1f} > {float(long_block):.1f}",
+                            )
+                            _log_gates_batch(_did, [{
+                                "gate_name": "reef_filter",
+                                "gate_passed": False,
+                                "metric_value": float(rsi_v),
+                                "threshold_value": float(long_block),
+                                "operator": "<=",
+                                "explanation": f"BUY blocked: RSI {float(rsi_v):.1f} > {float(long_block):.1f}",
+                            }])
+                        except Exception:
+                            pass
                         return
                     if signal == "SELL" and float(rsi_v) < float(short_block):
                         logger.info(f"⛔ REEF: Skipping {symbol} SELL. RSI ({float(rsi_v):.1f}) < {float(short_block):.1f}")
@@ -3207,6 +3449,24 @@ class PaperTrader:
                                 "threshold_lt": float(short_block),
                             },
                         )
+                        # AQC-803: log blocked REEF gate
+                        try:
+                            _did = create_decision_event(
+                                symbol=symbol, event_type="gate_block", status="blocked",
+                                phase="gate_evaluation", parent_decision_id=_parent_did,
+                                triggered_by="schedule", action_taken="blocked",
+                                rejection_reason=f"REEF: RSI {float(rsi_v):.1f} < {float(short_block):.1f}",
+                            )
+                            _log_gates_batch(_did, [{
+                                "gate_name": "reef_filter",
+                                "gate_passed": False,
+                                "metric_value": float(rsi_v),
+                                "threshold_value": float(short_block),
+                                "operator": ">=",
+                                "explanation": f"SELL blocked: RSI {float(rsi_v):.1f} < {float(short_block):.1f}",
+                            }])
+                        except Exception:
+                            pass
                         return
 
             # Simulated rate-limit gate (cooldown + budget).
@@ -3259,6 +3519,26 @@ class PaperTrader:
                         "cap_margin": float(equity_base * max_total_margin_pct),
                     },
                 )
+                # AQC-803: log blocked margin gate
+                try:
+                    _total_margin = current_margin + margin_target
+                    _cap = equity_base * max_total_margin_pct
+                    _did = create_decision_event(
+                        symbol=symbol, event_type="gate_block", status="blocked",
+                        phase="risk_check", parent_decision_id=_parent_did,
+                        triggered_by="schedule", action_taken="blocked",
+                        rejection_reason=f"margin {_total_margin:.2f} > cap {_cap:.2f}",
+                    )
+                    _log_gates_batch(_did, [{
+                        "gate_name": "margin_limit",
+                        "gate_passed": False,
+                        "metric_value": float(_total_margin),
+                        "threshold_value": float(_cap),
+                        "operator": "<=",
+                        "explanation": f"margin_needed={_total_margin:.2f} > cap={_cap:.2f} ({max_total_margin_pct:.0%} of equity)",
+                    }])
+                except Exception:
+                    pass
                 return
 
             # Notional with leverage (perps). Fees are charged on notional.
@@ -3387,6 +3667,57 @@ class PaperTrader:
                     "reversed_entry": True if (indicators or {}).get("_reversed_entry") is True else False,
                 },
             )
+            # AQC-803: log all execution gates as passed + link decision to trade
+            try:
+                _exec_did = create_decision_event(
+                    symbol=symbol, event_type="fill", status="executed",
+                    phase="execution", parent_decision_id=_parent_did,
+                    trade_id=trade_id,
+                    triggered_by="schedule",
+                    action_taken="open_long" if signal == "BUY" else "open_short",
+                )
+                _rsi_v = float(indicators.get("RSI", 0)) if indicators else 0.0
+                _macd_h = float(indicators.get("MACD_hist", 0)) if indicators else 0.0
+                _reef_ok = True
+                if bool(trade_cfg.get("enable_reef_filter", True)) and indicators:
+                    _reef_thr = _safe_float(trade_cfg.get("reef_long_rsi_block_gt"), 70.0) or 70.0
+                    if signal == "BUY":
+                        _reef_ok = _rsi_v <= _reef_thr
+                    else:
+                        _reef_thr = _safe_float(trade_cfg.get("reef_short_rsi_block_lt"), 30.0) or 30.0
+                        _reef_ok = _rsi_v >= _reef_thr
+                _ssf_ok = True
+                if bool(trade_cfg.get("enable_ssf_filter", True)) and indicators:
+                    if signal == "BUY":
+                        _ssf_ok = _macd_h >= 0
+                    else:
+                        _ssf_ok = _macd_h <= 0
+                _cap = equity_base * max_total_margin_pct
+                _exec_rows = [
+                    {"gate_name": "reef_filter", "gate_passed": _reef_ok,
+                     "metric_value": _rsi_v, "operator": "<=" if signal == "BUY" else ">=",
+                     "explanation": f"RSI {_rsi_v:.1f} passed REEF"},
+                    {"gate_name": "ssf_filter", "gate_passed": _ssf_ok,
+                     "metric_value": _macd_h, "threshold_value": 0.0,
+                     "operator": ">=" if signal == "BUY" else "<=",
+                     "explanation": f"MACD_hist {_macd_h:.6f} sign-aligned"},
+                    {"gate_name": "confidence_gate", "gate_passed": True,
+                     "explanation": f"confidence '{confidence}' >= min '{str(trade_cfg.get('entry_min_confidence', 'high'))}'"},
+                    {"gate_name": "max_positions", "gate_passed": True,
+                     "metric_value": float(len(self.positions or {})),
+                     "explanation": "within max_open_positions"},
+                    {"gate_name": "margin_limit", "gate_passed": True,
+                     "metric_value": float(current_margin + margin_used),
+                     "threshold_value": float(_cap),
+                     "operator": "<=",
+                     "explanation": f"margin {current_margin + margin_used:.2f} <= cap {_cap:.2f}"},
+                ]
+                _log_gates_batch(_exec_did, _exec_rows)
+                # Link parent signal decision to this trade
+                if _parent_did:
+                    link_decision_to_trade(_parent_did, trade_id)
+            except Exception:
+                pass
             self._kernel_persist()
 
     def check_exit_conditions(self, symbol, current_price, timestamp, is_anomaly=False, dynamic_tp_mult=None, indicators=None):
@@ -3889,6 +4220,104 @@ class PaperTrader:
                     smart_exit_reason = f"RSI Overbought ({rsi:.1f}, Thr: {rsi_ub:g})"
                 elif pos_type == 'SHORT' and rsi < rsi_lb:
                     smart_exit_reason = f"RSI Oversold ({rsi:.1f}, Thr: {rsi_lb:g})"
+
+        # ── AQC-803: Log exit gate evaluations when an exit fires ──────────
+        _exit_fires = False
+        _exit_kind = None
+        if smart_exit_reason:
+            _exit_fires = True
+            _exit_kind = "smart_exit"
+        elif pos_type == 'LONG' and current_price <= sl_price:
+            _exit_fires = True
+            _exit_kind = "trailing_stop" if pos.get('trailing_sl') else "stop_loss"
+        elif pos_type == 'LONG' and current_price >= (tp_check_price):
+            _exit_fires = True
+            _exit_kind = "take_profit"
+        elif pos_type == 'SHORT' and current_price >= sl_price:
+            _exit_fires = True
+            _exit_kind = "trailing_stop" if pos.get('trailing_sl') else "stop_loss"
+        elif pos_type == 'SHORT' and current_price <= (tp_check_price):
+            _exit_fires = True
+            _exit_kind = "take_profit"
+
+        if _exit_fires:
+            try:
+                _exit_did = create_decision_event(
+                    symbol=symbol,
+                    event_type="exit_check",
+                    status="executed",
+                    phase="gate_evaluation",
+                    triggered_by=_exit_kind or "price_update",
+                    action_taken="close_long" if pos_type == "LONG" else "close_short",
+                    context={
+                        "exit_kind": _exit_kind,
+                        "smart_exit_reason": smart_exit_reason,
+                        "entry_price": float(entry),
+                        "current_price": float(current_price),
+                        "sl_price": float(sl_price),
+                        "tp_price": float(tp_price),
+                        "trailing_sl": None if pos.get("trailing_sl") is None else float(pos["trailing_sl"]),
+                    },
+                )
+                _exit_rows: list[dict] = []
+                # Stop loss gate
+                _sl_hit = (pos_type == 'LONG' and current_price <= sl_price) or (pos_type == 'SHORT' and current_price >= sl_price)
+                _exit_rows.append({
+                    "gate_name": "stop_loss",
+                    "gate_passed": _sl_hit,
+                    "metric_value": float(current_price),
+                    "threshold_value": float(sl_price),
+                    "operator": "<=" if pos_type == "LONG" else ">=",
+                    "explanation": f"price {current_price:.4f} vs SL {sl_price:.4f}",
+                })
+                # Take profit gate
+                _tp_hit = (pos_type == 'LONG' and current_price >= tp_price) or (pos_type == 'SHORT' and current_price <= tp_price)
+                _exit_rows.append({
+                    "gate_name": "take_profit",
+                    "gate_passed": _tp_hit,
+                    "metric_value": float(current_price),
+                    "threshold_value": float(tp_price),
+                    "operator": ">=" if pos_type == "LONG" else "<=",
+                    "explanation": f"price {current_price:.4f} vs TP {tp_price:.4f}",
+                })
+                # Trailing stop gate
+                _ts_val = pos.get("trailing_sl")
+                _ts_hit = False
+                if _ts_val is not None:
+                    _ts_hit = (pos_type == 'LONG' and current_price <= _ts_val) or (pos_type == 'SHORT' and current_price >= _ts_val)
+                _exit_rows.append({
+                    "gate_name": "trailing_stop",
+                    "gate_passed": _ts_hit,
+                    "metric_value": float(current_price),
+                    "threshold_value": None if _ts_val is None else float(_ts_val),
+                    "operator": "<=" if pos_type == "LONG" else ">=",
+                    "explanation": f"trailing_sl={'N/A' if _ts_val is None else f'{_ts_val:.4f}'}",
+                })
+                # Breakeven stop gate
+                _be_active = be_enabled and be_start_atr > 0
+                _be_engaged = False
+                if _be_active:
+                    if pos_type == 'LONG':
+                        _be_engaged = (current_price - entry) >= (atr * be_start_atr)
+                    else:
+                        _be_engaged = (entry - current_price) >= (atr * be_start_atr)
+                _exit_rows.append({
+                    "gate_name": "breakeven_stop",
+                    "gate_passed": _be_engaged,
+                    "metric_value": float(profit_atr),
+                    "threshold_value": float(be_start_atr),
+                    "operator": ">=",
+                    "explanation": f"breakeven {'engaged' if _be_engaged else 'not engaged'} (start={be_start_atr:.2f} ATR)",
+                })
+                # Smart exit gate
+                _exit_rows.append({
+                    "gate_name": "smart_exit",
+                    "gate_passed": smart_exit_reason is not None,
+                    "explanation": str(smart_exit_reason) if smart_exit_reason else "no smart exit triggered",
+                })
+                _log_gates_batch(_exit_did, _exit_rows)
+            except Exception as _ex_exc:
+                logger.debug("check_exit_conditions: exit gate logging failed: %s", _ex_exc)
 
         # Check Hits
         if smart_exit_reason:
@@ -4803,6 +5232,61 @@ def analyze(df, symbol, btc_bullish=None):
         }
     except Exception:
         pass
+
+    # ── AQC-803: Create decision event and log gate evaluations ──────────
+    try:
+        _all_gates_pass = (
+            not is_ranging
+            and not is_anomaly
+            and not is_extended
+            and vol_confirm
+            and is_trending_up
+            and (latest.get("ADX", 0) > effective_min_adx)
+        )
+        _status = "executed" if signal != "NEUTRAL" else ("blocked" if not _all_gates_pass else "hold")
+        _action = {
+            "BUY": "open_long",
+            "SELL": "open_short",
+        }.get(signal, "hold")
+        _rejection = None
+        if _status == "blocked":
+            _blocked_gates = []
+            if is_ranging:
+                _blocked_gates.append("ranging")
+            if is_anomaly:
+                _blocked_gates.append("anomaly")
+            if is_extended:
+                _blocked_gates.append("extension")
+            if not vol_confirm:
+                _blocked_gates.append("volume")
+            if not is_trending_up:
+                _blocked_gates.append("adx_rising")
+            if latest.get("ADX", 0) <= effective_min_adx:
+                _blocked_gates.append("adx_gate")
+            _rejection = "blocked by: " + ", ".join(_blocked_gates) if _blocked_gates else None
+
+        _decision_id = create_decision_event(
+            symbol=str(symbol or ""),
+            event_type="entry_signal",
+            status=_status,
+            phase="signal_generation",
+            triggered_by="schedule",
+            action_taken=_action,
+            rejection_reason=_rejection,
+            context=latest.get("audit") if hasattr(latest, "get") else None,
+        )
+        latest["_decision_id"] = _decision_id
+
+        # Log individual gate evaluations against this decision.
+        _audit = latest.get("audit") if hasattr(latest, "get") else None
+        if _audit and isinstance(_audit, dict):
+            _log_gates_for_decision(
+                _decision_id,
+                _audit.get("gates", {}),
+                _audit.get("values", {}),
+            )
+    except Exception as _de_exc:
+        logger.debug("analyze: decision event logging failed: %s", _de_exc)
 
     # ── reverse_entry_signal: flip BUY↔SELL (matches Rust apply_reverse) ──
     # Allows the sweep to optimise a contrarian mode without touching the
