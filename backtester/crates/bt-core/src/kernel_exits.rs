@@ -104,6 +104,16 @@ pub enum KernelExitResult {
     PartialClose { reason: String, exit_price: f64, fraction: f64 },
 }
 
+/// Bundled exit evaluation result with diagnostic threshold records and context.
+#[derive(Debug, Clone)]
+pub struct ExitEvaluation {
+    pub result: KernelExitResult,
+    /// Threshold records captured during exit evaluation.
+    pub threshold_records: Vec<crate::decision_kernel::ThresholdRecord>,
+    /// Exit context (populated when an exit fires).
+    pub exit_context: Option<crate::decision_kernel::ExitContext>,
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Internal helpers
 // ═══════════════════════════════════════════════════════════════════════════
@@ -768,15 +778,52 @@ pub fn evaluate_exits(
     params: &ExitParams,
     current_time_ms: i64,
 ) -> KernelExitResult {
+    evaluate_exits_with_diagnostics(pos, snap, params, current_time_ms).result
+}
+
+/// Evaluate exit conditions and return enriched diagnostics (threshold records + exit context).
+///
+/// Same logic as `evaluate_exits`, but bundles threshold records for every
+/// price-level check and an `ExitContext` when an exit fires.
+pub fn evaluate_exits_with_diagnostics(
+    pos: &mut Position,
+    snap: &IndicatorSnapshot,
+    params: &ExitParams,
+    current_time_ms: i64,
+) -> ExitEvaluation {
+    use crate::decision_kernel::{ThresholdRecord, ExitContext};
+
+    let mut thresholds: Vec<ThresholdRecord> = Vec::new();
+
     // ── 0. Glitch guard — block exits during extreme price deviations ───
-    // Mirrors exits/mod.rs check_all_exits() step 0.
     if params.block_exits_on_extreme_dev && snap.prev_close > 0.0 {
         let price_change_pct = (snap.close - snap.prev_close).abs() / snap.prev_close;
+        let atr_dev = if snap.atr > 0.0 {
+            (snap.close - snap.prev_close).abs() / snap.atr
+        } else {
+            0.0
+        };
         let is_glitch = price_change_pct > params.glitch_price_dev_pct
             || (snap.atr > 0.0
                 && (snap.close - snap.prev_close).abs() > snap.atr * params.glitch_atr_mult);
+        thresholds.push(ThresholdRecord {
+            name: "glitch_price_dev".into(),
+            actual: price_change_pct,
+            threshold: params.glitch_price_dev_pct,
+            passed: price_change_pct <= params.glitch_price_dev_pct,
+        });
+        thresholds.push(ThresholdRecord {
+            name: "glitch_atr_mult".into(),
+            actual: atr_dev,
+            threshold: params.glitch_atr_mult,
+            passed: atr_dev <= params.glitch_atr_mult,
+        });
         if is_glitch {
-            return KernelExitResult::Hold;
+            return ExitEvaluation {
+                result: KernelExitResult::Hold,
+                threshold_records: thresholds,
+                exit_context: None,
+            };
         }
     }
 
@@ -784,16 +831,53 @@ pub fn evaluate_exits(
     let atr = effective_atr(entry, pos.entry_atr);
     let pa = profit_atr(pos.side, entry, snap.close, atr);
 
+    // Compute duration_bars from timestamp difference (approximate as step count).
+    let duration_bars = if current_time_ms > pos.opened_at_ms {
+        // Each bar is assumed to be one step; use ms difference / assumed bar duration.
+        // For diagnostics, store the raw step count from time difference.
+        ((current_time_ms - pos.opened_at_ms) / 1000).max(0) as u64
+    } else {
+        0
+    };
+
     // ── 1. Stop Loss ────────────────────────────────────────────────────
     let sl_price = compute_sl_price(pos.side, entry, atr, snap, params);
     let sl_hit = match pos.side {
         PositionSide::Long => snap.close <= sl_price,
         PositionSide::Short => snap.close >= sl_price,
     };
+    let sl_distance = match pos.side {
+        PositionSide::Long => snap.close - sl_price,
+        PositionSide::Short => sl_price - snap.close,
+    };
+    thresholds.push(ThresholdRecord {
+        name: "sl_distance".into(),
+        actual: sl_distance,
+        threshold: 0.0,
+        passed: !sl_hit,
+    });
     if sl_hit {
-        return KernelExitResult::FullClose {
-            reason: "Stop Loss".to_string(),
-            exit_price: snap.close,
+        let tp_price_val = match pos.side {
+            PositionSide::Long => entry + (atr * params.tp_atr_mult),
+            PositionSide::Short => entry - (atr * params.tp_atr_mult),
+        };
+        return ExitEvaluation {
+            result: KernelExitResult::FullClose {
+                reason: "Stop Loss".to_string(),
+                exit_price: snap.close,
+            },
+            threshold_records: thresholds,
+            exit_context: Some(ExitContext {
+                exit_type: "stop_loss".into(),
+                exit_reason: format!("SL at {sl_price:.4}, close {:.4}", snap.close),
+                exit_price: snap.close,
+                entry_price: entry,
+                sl_price: Some(sl_price),
+                tp_price: Some(tp_price_val),
+                trailing_sl: pos.trailing_sl,
+                profit_atr: pa,
+                duration_bars,
+            }),
         };
     }
 
@@ -808,7 +892,6 @@ pub fn evaluate_exits(
         params,
         pa,
     );
-    // Always ratchet trailing_sl into position state
     pos.trailing_sl = new_tsl;
 
     if let Some(tsl_price) = new_tsl {
@@ -816,15 +899,57 @@ pub fn evaluate_exits(
             PositionSide::Long => snap.close <= tsl_price,
             PositionSide::Short => snap.close >= tsl_price,
         };
+        let tsl_distance = match pos.side {
+            PositionSide::Long => snap.close - tsl_price,
+            PositionSide::Short => tsl_price - snap.close,
+        };
+        thresholds.push(ThresholdRecord {
+            name: "trailing_sl_distance".into(),
+            actual: tsl_distance,
+            threshold: 0.0,
+            passed: !triggered,
+        });
         if triggered {
-            return KernelExitResult::FullClose {
-                reason: "Trailing Stop".to_string(),
-                exit_price: snap.close,
+            let tp_price_val = match pos.side {
+                PositionSide::Long => entry + (atr * params.tp_atr_mult),
+                PositionSide::Short => entry - (atr * params.tp_atr_mult),
+            };
+            return ExitEvaluation {
+                result: KernelExitResult::FullClose {
+                    reason: "Trailing Stop".to_string(),
+                    exit_price: snap.close,
+                },
+                threshold_records: thresholds,
+                exit_context: Some(ExitContext {
+                    exit_type: "trailing".into(),
+                    exit_reason: format!("Trailing SL at {tsl_price:.4}, close {:.4}", snap.close),
+                    exit_price: snap.close,
+                    entry_price: entry,
+                    sl_price: Some(sl_price),
+                    tp_price: Some(tp_price_val),
+                    trailing_sl: Some(tsl_price),
+                    profit_atr: pa,
+                    duration_bars,
+                }),
             };
         }
     }
 
     // ── 3. Take Profit ──────────────────────────────────────────────────
+    let tp_price_val = match pos.side {
+        PositionSide::Long => entry + (atr * params.tp_atr_mult),
+        PositionSide::Short => entry - (atr * params.tp_atr_mult),
+    };
+    let tp_distance = match pos.side {
+        PositionSide::Long => tp_price_val - snap.close,
+        PositionSide::Short => snap.close - tp_price_val,
+    };
+    thresholds.push(ThresholdRecord {
+        name: "tp_distance".into(),
+        actual: tp_distance,
+        threshold: 0.0,
+        passed: tp_distance > 0.0, // not yet hit
+    });
     let tp_result = check_tp(
         pos.side,
         entry,
@@ -835,7 +960,26 @@ pub fn evaluate_exits(
         params,
     );
     if tp_result != KernelExitResult::Hold {
-        return tp_result;
+        let (exit_type, exit_reason) = match &tp_result {
+            KernelExitResult::PartialClose { reason, .. } => ("take_profit_partial".to_string(), reason.clone()),
+            KernelExitResult::FullClose { reason, .. } => ("take_profit".to_string(), reason.clone()),
+            _ => unreachable!(),
+        };
+        return ExitEvaluation {
+            result: tp_result,
+            threshold_records: thresholds,
+            exit_context: Some(ExitContext {
+                exit_type,
+                exit_reason,
+                exit_price: snap.close,
+                entry_price: entry,
+                sl_price: Some(sl_price),
+                tp_price: Some(tp_price_val),
+                trailing_sl: pos.trailing_sl,
+                profit_atr: pa,
+                duration_bars,
+            }),
+        };
     }
 
     // ── 4. Smart Exits ──────────────────────────────────────────────────
@@ -844,7 +988,34 @@ pub fn evaluate_exits(
     } else {
         0.0
     };
-    evaluate_smart_exits(pos, snap, params, pa, duration_hours)
+    let smart_result = evaluate_smart_exits(pos, snap, params, pa, duration_hours);
+    if smart_result != KernelExitResult::Hold {
+        let reason_str = match &smart_result {
+            KernelExitResult::FullClose { reason, .. } => reason.clone(),
+            _ => String::new(),
+        };
+        return ExitEvaluation {
+            result: smart_result,
+            threshold_records: thresholds,
+            exit_context: Some(ExitContext {
+                exit_type: "smart_exit".into(),
+                exit_reason: reason_str,
+                exit_price: snap.close,
+                entry_price: entry,
+                sl_price: Some(sl_price),
+                tp_price: Some(tp_price_val),
+                trailing_sl: pos.trailing_sl,
+                profit_atr: pa,
+                duration_bars,
+            }),
+        };
+    }
+
+    ExitEvaluation {
+        result: KernelExitResult::Hold,
+        threshold_records: thresholds,
+        exit_context: None,
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
