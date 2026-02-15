@@ -15,7 +15,6 @@ from engine.core import (
     KernelDecisionRustBindingProvider,
     KernelDecisionFileProvider,
     NoopDecisionProvider,
-    PythonAnalyzeDecisionProvider,
     _build_default_decision_provider,
 )
 from live.trader import LiveTrader
@@ -764,10 +763,9 @@ def test_build_default_decision_provider_falls_back_to_file_if_rust_not_availabl
     assert decisions[0].action == "OPEN"
 
 
-def test_build_default_decision_provider_falls_back_to_python_when_no_provider_available(monkeypatch) -> None:
-    """After the PythonAnalyzeDecisionProvider fallback (commit 9de45ce), auto-mode
-    no longer raises when both Rust kernel and decision file are unavailable — it
-    falls back to PythonAnalyzeDecisionProvider instead."""
+def test_build_default_decision_provider_fails_fast_when_bt_runtime_unavailable(monkeypatch) -> None:
+    """After AQC-825, auto-mode raises SystemExit when bt_runtime is unavailable
+    instead of falling back to PythonAnalyzeDecisionProvider."""
     monkeypatch.delenv("AI_QUANT_KERNEL_DECISION_PROVIDER", raising=False)
     monkeypatch.delenv("AI_QUANT_KERNEL_DECISION_FILE", raising=False)
     monkeypatch.setattr(
@@ -775,8 +773,40 @@ def test_build_default_decision_provider_falls_back_to_python_when_no_provider_a
         lambda *_args, **_kwargs: (_ for _ in ()).throw(ImportError("missing bt_runtime")),
     )
 
+    with pytest.raises(SystemExit):
+        _build_default_decision_provider()
+
+
+def test_build_default_decision_provider_rejects_python_mode(monkeypatch) -> None:
+    """AI_QUANT_KERNEL_DECISION_PROVIDER=python is no longer accepted (AQC-825)."""
+    monkeypatch.setenv("AI_QUANT_KERNEL_DECISION_PROVIDER", "python")
+    monkeypatch.delenv("AI_QUANT_KERNEL_DECISION_FILE", raising=False)
+
+    with pytest.raises(SystemExit):
+        _build_default_decision_provider()
+
+
+def test_build_default_decision_provider_accepts_kernel_only_mode(monkeypatch) -> None:
+    """AI_QUANT_KERNEL_DECISION_PROVIDER=kernel_only works as alias for rust."""
+    monkeypatch.setenv("AI_QUANT_KERNEL_DECISION_PROVIDER", "kernel_only")
+    monkeypatch.delenv("AI_QUANT_KERNEL_DECISION_FILE", raising=False)
+    monkeypatch.setattr("engine.core._load_kernel_runtime_module", lambda *_args, **_kwargs: _FakeKernelRuntime())
+
     provider = _build_default_decision_provider()
-    assert isinstance(provider, PythonAnalyzeDecisionProvider)
+    assert isinstance(provider, KernelDecisionRustBindingProvider)
+
+
+def test_build_default_decision_provider_rust_mode_fails_fast_without_bt_runtime(monkeypatch) -> None:
+    """AI_QUANT_KERNEL_DECISION_PROVIDER=rust fails fast when bt_runtime is missing."""
+    monkeypatch.setenv("AI_QUANT_KERNEL_DECISION_PROVIDER", "rust")
+    monkeypatch.setenv("AI_QUANT_KERNEL_DECISION_FILE", "/tmp/fake_events.json")
+    monkeypatch.setattr(
+        "engine.core._load_kernel_runtime_module",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ImportError("missing bt_runtime")),
+    )
+
+    with pytest.raises(SystemExit):
+        _build_default_decision_provider()
 
 
 def test_build_default_decision_provider_respects_noop_mode(monkeypatch) -> None:
