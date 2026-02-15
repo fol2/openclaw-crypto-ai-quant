@@ -2633,7 +2633,73 @@ mod guardrails_tests {
 // main
 // ---------------------------------------------------------------------------
 
+// ─── WSL2 CUDA driver fix ────────────────────────────────────────────
+//
+// On WSL2, the real CUDA driver lives in /usr/lib/wsl/lib/ but a stale
+// native-Linux libcuda.so from a CUDA toolkit install may shadow it in
+// ld.so.cache.  cudarc loads "libcuda.so" via dlopen which picks the
+// cached (wrong) version → CUDA_ERROR_NO_DEVICE.
+//
+// Fix: detect WSL2, prepend /usr/lib/wsl/lib to LD_LIBRARY_PATH, and
+// re-exec so the dynamic linker sees the correct library first.
+#[cfg(all(target_os = "linux", feature = "gpu"))]
+fn ensure_wsl_cuda_path() {
+    const WSL_LIB: &str = "/usr/lib/wsl/lib";
+    const MARKER: &str = "__MEI_WSL_CUDA_REEXEC";
+
+    // Already re-executed, or not on WSL2.
+    if std::env::var_os(MARKER).is_some() {
+        return;
+    }
+    if !std::path::Path::new(&format!("{WSL_LIB}/libcuda.so.1")).exists() {
+        return;
+    }
+
+    let current = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
+    if current.contains(WSL_LIB) {
+        return;
+    }
+
+    let new_val = if current.is_empty() {
+        WSL_LIB.to_string()
+    } else {
+        format!("{WSL_LIB}:{current}")
+    };
+
+    // SAFETY: single-threaded at this point (before rayon/tokio init).
+    unsafe {
+        std::env::set_var("LD_LIBRARY_PATH", &new_val);
+        std::env::set_var(MARKER, "1");
+    }
+
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let args: Vec<std::ffi::CString> = std::env::args()
+        .map(|a| std::ffi::CString::new(a).unwrap_or_default())
+        .collect();
+    let mut ptrs: Vec<*const libc::c_char> =
+        args.iter().map(|a| a.as_ptr()).collect();
+    ptrs.push(std::ptr::null());
+
+    let exe_c = match std::ffi::CString::new(exe.to_string_lossy().into_owned()) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    eprintln!("[GPU] WSL2 detected — re-exec with LD_LIBRARY_PATH={new_val}");
+    unsafe {
+        libc::execv(exe_c.as_ptr(), ptrs.as_ptr());
+    }
+    // execv only returns on error — fall through and try without the fix.
+    eprintln!("[GPU] WSL2 re-exec failed, CUDA may not work");
+}
+
 fn main() {
+    #[cfg(all(target_os = "linux", feature = "gpu"))]
+    ensure_wsl_cuda_path();
+
     let cli = Cli::parse();
 
     eprintln!("mei-backtester v{VERSION}");

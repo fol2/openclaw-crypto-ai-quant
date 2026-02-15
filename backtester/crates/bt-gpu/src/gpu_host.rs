@@ -12,6 +12,7 @@ use std::sync::Arc;
 use cudarc::driver::{
     CudaDevice, CudaFunction, CudaSlice, DeviceRepr, LaunchAsync, LaunchConfig, ValidAsZeroBits,
 };
+
 use cudarc::nvrtc::Ptx;
 
 use crate::buffers::{
@@ -53,7 +54,12 @@ pub struct GpuDeviceState {
 
 impl GpuDeviceState {
     pub fn new() -> Self {
-        let dev = CudaDevice::new(0).expect("No CUDA device found");
+        let dev = CudaDevice::new(0).unwrap_or_else(|e| {
+            eprintln!("[GPU] CUDA init failed: {e}");
+            eprintln!("[GPU] Hint: on WSL2, ensure /usr/lib/wsl/lib/libcuda.so.1 exists");
+            eprintln!("[GPU] Hint: run `nvidia-smi` to verify the driver is loaded");
+            panic!("No CUDA device found: {e}");
+        });
 
         // Load sweep engine PTX (trade logic)
         let ptx_sweep = include_str!(concat!(env!("OUT_DIR"), "/sweep_engine.ptx"));
