@@ -808,11 +808,11 @@ __device__ void clear_position(GpuPosition* pos) {
 }
 
 __device__ void apply_close(GpuComboState* state, unsigned int sym, const GpuSnapshot& snap,
-                            bool reason_is_signal_flip, float fee_rate) {
+                            bool reason_is_signal_flip, float fee_rate, float slippage_bps) {
     const GpuPosition& pos = state->positions[sym];
     if (pos.active == POS_EMPTY) { return; }
 
-    float slip = (pos.active == POS_LONG) ? 0.5f : -0.5f;
+    float slip = (pos.active == POS_LONG) ? slippage_bps : -slippage_bps;
 
     float fill_price = snap.close * (1.0f + slip / 10000.0f);
     float notional = pos.size * fill_price;
@@ -845,12 +845,12 @@ __device__ void apply_close(GpuComboState* state, unsigned int sym, const GpuSna
 }
 
 __device__ void apply_partial_close(GpuComboState* state, unsigned int sym, const GpuSnapshot& snap,
-                                    float pct, float fee_rate) {
+                                    float pct, float fee_rate, float slippage_bps) {
     const GpuPosition& pos = state->positions[sym];
     if (pos.active == POS_EMPTY) { return; }
 
     float exit_size = pos.size * pct;
-    float slip = (pos.active == POS_LONG) ? 0.5f : -0.5f;
+    float slip = (pos.active == POS_LONG) ? slippage_bps : -slippage_bps;
     float fill_price = snap.close * (1.0f + slip / 10000.0f);
     float notional = exit_size * fill_price;
     float fee = notional * fee_rate;
@@ -993,7 +993,7 @@ extern "C" __global__ void sweep_engine_kernel(
                         } else {
                             // Stop loss
                             if (check_stop_loss(pos, ind_snap, &cfg)) {
-                                apply_close(&state, sym, ind_snap, false, fee_rate);
+                                apply_close(&state, sym, ind_snap, false, fee_rate, cfg.slippage_bps);
                             } else {
                                 // Update trailing stop
                                 float new_tsl = compute_trailing(pos, ind_snap, &cfg, p_atr);
@@ -1004,19 +1004,19 @@ extern "C" __global__ void sweep_engine_kernel(
                                 // Trailing stop exit
                                 if (state.positions[sym].active != POS_EMPTY
                                     && check_trailing_exit(state.positions[sym], ind_snap)) {
-                                    apply_close(&state, sym, ind_snap, false, fee_rate);
+                                    apply_close(&state, sym, ind_snap, false, fee_rate, cfg.slippage_bps);
                                 } else if (state.positions[sym].active != POS_EMPTY) {
                                     // Take profit
                                     float tp_mult = get_tp_mult(ind_snap, &cfg);
                                     unsigned int tp_result = check_tp(state.positions[sym], ind_snap, &cfg, tp_mult);
                                     if (tp_result == 1u) {
-                                        apply_partial_close(&state, sym, ind_snap, cfg.tp_partial_pct, fee_rate);
+                                        apply_partial_close(&state, sym, ind_snap, cfg.tp_partial_pct, fee_rate, cfg.slippage_bps);
                                     } else if (tp_result == 2u) {
-                                        apply_close(&state, sym, ind_snap, false, fee_rate);
+                                        apply_close(&state, sym, ind_snap, false, fee_rate, cfg.slippage_bps);
                                     } else {
                                         // Smart exits
                                         if (check_smart_exits(state.positions[sym], ind_snap, &cfg, p_atr)) {
-                                            apply_close(&state, sym, ind_snap, false, fee_rate);
+                                            apply_close(&state, sym, ind_snap, false, fee_rate, cfg.slippage_bps);
                                         }
                                     }
                                 }
@@ -1062,7 +1062,7 @@ extern "C" __global__ void sweep_engine_kernel(
 
                     // Stop loss
                     if (check_stop_loss(pos, hybrid, &cfg)) {
-                        apply_close(&state, sym, hybrid, false, fee_rate);
+                        apply_close(&state, sym, hybrid, false, fee_rate, cfg.slippage_bps);
                         break;
                     }
 
@@ -1074,7 +1074,7 @@ extern "C" __global__ void sweep_engine_kernel(
 
                     // Trailing stop exit
                     if (check_trailing_exit(state.positions[sym], hybrid)) {
-                        apply_close(&state, sym, hybrid, false, fee_rate);
+                        apply_close(&state, sym, hybrid, false, fee_rate, cfg.slippage_bps);
                         break;
                     }
 
@@ -1082,19 +1082,19 @@ extern "C" __global__ void sweep_engine_kernel(
                     float tp_mult = get_tp_mult(hybrid, &cfg);
                     unsigned int tp_result = check_tp(pos, hybrid, &cfg, tp_mult);
                     if (tp_result == 1u) {
-                        apply_partial_close(&state, sym, hybrid, cfg.tp_partial_pct, fee_rate);
+                        apply_partial_close(&state, sym, hybrid, cfg.tp_partial_pct, fee_rate, cfg.slippage_bps);
                         // CPU sub-bar semantics keep scanning later sub-bars after a partial TP.
                         // Remaining size can still hit SL/TS/other exits within the same bar window.
                         continue;
                     }
                     if (tp_result == 2u) {
-                        apply_close(&state, sym, hybrid, false, fee_rate);
+                        apply_close(&state, sym, hybrid, false, fee_rate, cfg.slippage_bps);
                         break;
                     }
 
                     // Smart exits
                     if (check_smart_exits(pos, hybrid, &cfg, p_atr)) {
-                        apply_close(&state, sym, hybrid, false, fee_rate);
+                        apply_close(&state, sym, hybrid, false, fee_rate, cfg.slippage_bps);
                         break;
                     }
                 }
@@ -1369,7 +1369,7 @@ extern "C" __global__ void sweep_engine_kernel(
 
                 // Stop loss
                 if (check_stop_loss(pos, snap, &cfg)) {
-                    apply_close(&state, sym, snap, false, fee_rate);
+                    apply_close(&state, sym, snap, false, fee_rate, cfg.slippage_bps);
                     continue;
                 }
 
@@ -1381,7 +1381,7 @@ extern "C" __global__ void sweep_engine_kernel(
 
                 // Trailing stop exit
                 if (check_trailing_exit(state.positions[sym], snap)) {
-                    apply_close(&state, sym, snap, false, fee_rate);
+                    apply_close(&state, sym, snap, false, fee_rate, cfg.slippage_bps);
                     continue;
                 }
 
@@ -1389,17 +1389,17 @@ extern "C" __global__ void sweep_engine_kernel(
                 float tp_mult = get_tp_mult(snap, &cfg);
                 unsigned int tp_result = check_tp(pos, snap, &cfg, tp_mult);
                 if (tp_result == 1u) {
-                    apply_partial_close(&state, sym, snap, cfg.tp_partial_pct, fee_rate);
+                    apply_partial_close(&state, sym, snap, cfg.tp_partial_pct, fee_rate, cfg.slippage_bps);
                     continue;
                 }
                 if (tp_result == 2u) {
-                    apply_close(&state, sym, snap, false, fee_rate);
+                    apply_close(&state, sym, snap, false, fee_rate, cfg.slippage_bps);
                     continue;
                 }
 
                 // Smart exits
                 if (check_smart_exits(pos, snap, &cfg, p_atr)) {
-                    apply_close(&state, sym, snap, false, fee_rate);
+                    apply_close(&state, sym, snap, false, fee_rate, cfg.slippage_bps);
                     continue;
                 }
             }
