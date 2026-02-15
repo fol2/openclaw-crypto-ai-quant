@@ -29,11 +29,61 @@ struct ExpectedGpuSweepResult {
     total_pnl: f64,
     final_balance: f64,
     total_trades: u32,
+    #[allow(dead_code)]
     total_wins: u32,
     win_rate: f64,
     profit_factor: f64,
     max_drawdown_pct: f64,
 }
+
+// ---------------------------------------------------------------------------
+// Configurable tolerances
+// ---------------------------------------------------------------------------
+
+fn tolerance(env_key: &str, default: f64) -> f64 {
+    let multiplier: f64 = std::env::var("AQC_GPU_PARITY_TOLERANCE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1.0);
+    let base: f64 = std::env::var(env_key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default);
+    base * multiplier
+}
+
+// ---------------------------------------------------------------------------
+// Diff report
+// ---------------------------------------------------------------------------
+
+struct ParityCheck {
+    metric: &'static str,
+    cpu_value: f64,
+    gpu_value: f64,
+    delta: f64,
+    tolerance: f64,
+    passed: bool,
+}
+
+fn print_parity_table(checks: &[ParityCheck]) {
+    eprintln!();
+    eprintln!("┌───────────────────┬────────────┬────────────┬────────────┬────────────┬────────┐");
+    eprintln!("│ Metric            │ CPU        │ GPU        │ Delta      │ Tolerance  │ Status │");
+    eprintln!("├───────────────────┼────────────┼────────────┼────────────┼────────────┼────────┤");
+    for c in checks {
+        let status = if c.passed { "PASS" } else { "FAIL" };
+        eprintln!(
+            "│ {:<17} │ {:>10.4} │ {:>10.4} │ {:>10.4} │ {:>10.4} │ {:<6} │",
+            c.metric, c.cpu_value, c.gpu_value, c.delta, c.tolerance, status
+        );
+    }
+    eprintln!("└───────────────────┴────────────┴────────────┴────────────┴────────────┴────────┘");
+    eprintln!();
+}
+
+// ---------------------------------------------------------------------------
+// Fixture loaders
+// ---------------------------------------------------------------------------
 
 fn load_candles_fixture(path: &Path) -> CandleData {
     let raw = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("Failed to read {path:?}: {e}"));
@@ -65,10 +115,20 @@ fn load_expected(path: &Path) -> ExpectedGpuSweepResult {
     serde_json::from_str(&raw).unwrap_or_else(|e| panic!("Invalid JSON in {path:?}: {e}"))
 }
 
+// ---------------------------------------------------------------------------
+// Test
+// ---------------------------------------------------------------------------
+
 #[test]
 fn gpu_cpu_parity_fixture_is_within_tolerance() {
     let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let fixture_dir = crate_root.join("../../testdata/gpu_cpu_parity");
+
+    // Graceful skip when fixture files are missing (CI without GPU data).
+    if !fixture_dir.exists() {
+        eprintln!("SKIP: GPU/CPU parity fixture not found at {fixture_dir:?}");
+        return;
+    }
 
     let candles_path = fixture_dir.join("candles_1h.json");
     let expected_path = fixture_dir.join("expected_gpu_sweep.json");
@@ -116,8 +176,10 @@ fn gpu_cpu_parity_fixture_is_within_tolerance() {
         expected.config_id
     );
 
-    // Compare net PnL via final_balance to avoid differences in how `total_pnl`
-    // is reported between GPU and CPU (fees/rounding).
+    // -----------------------------------------------------------------------
+    // Compute all parity metrics
+    // -----------------------------------------------------------------------
+
     let cpu_net_pnl = rpt.final_balance - initial_balance;
     let gpu_net_pnl = expected.final_balance - initial_balance;
 
@@ -128,60 +190,75 @@ fn gpu_cpu_parity_fixture_is_within_tolerance() {
         gpu_net_pnl
     );
 
-    // Tolerance envelope: keep these intentionally loose. This harness exists
-    // to catch major drift, not to enforce perfect equality.
+    // Tolerances — tightened from the original loose bounds.
+    let tol_pnl = tolerance("AQC_PARITY_TOL_PNL", 0.005);
+    let tol_dd = tolerance("AQC_PARITY_TOL_DD", 0.01);
+    let tol_wr = tolerance("AQC_PARITY_TOL_WR", 0.05);
+    let tol_tc = tolerance("AQC_PARITY_TOL_TC", 0.02);
+    let tol_pf = tolerance("AQC_PARITY_TOL_PF", 0.5);
+
     let net_pnl_rel_err = (cpu_net_pnl - gpu_net_pnl).abs() / initial_balance;
-    assert!(
-        net_pnl_rel_err <= 0.03,
-        "Net PnL drifted too far (cpu={:.2} gpu={:.2} rel_err={:.3})",
-        cpu_net_pnl,
-        gpu_net_pnl,
-        net_pnl_rel_err
-    );
-
     let dd_delta = (rpt.max_drawdown_pct - expected.max_drawdown_pct).abs();
-    assert!(
-        dd_delta <= 0.03,
-        "Max drawdown pct drifted too far (cpu={:.3} gpu={:.3} delta={:.3})",
-        rpt.max_drawdown_pct,
-        expected.max_drawdown_pct,
-        dd_delta
-    );
-
-    assert!(
-        (rpt.win_rate - expected.win_rate).abs() <= 0.20,
-        "Win rate drifted too far (cpu={:.4} gpu={:.4})",
-        rpt.win_rate,
-        expected.win_rate
-    );
-
-    // Profit factor tends to be noisy when gross_loss is small. Keep this wide.
-    let pf_delta = (rpt.profit_factor - expected.profit_factor).abs();
-    assert!(
-        pf_delta <= 3.0,
-        "Profit factor drifted too far (cpu={:.3} gpu={:.3} delta={:.3})",
-        rpt.profit_factor,
-        expected.profit_factor,
-        pf_delta
-    );
-
-    // Trade counts are expected to differ (GPU uses a simplified trade kernel).
-    // Keep a very loose bound here to catch pathological changes.
+    let wr_delta = (rpt.win_rate - expected.win_rate).abs();
     let trade_ratio = rpt.total_trades as f64 / expected.total_trades as f64;
-    assert!(
-        (0.25..=4.0).contains(&trade_ratio),
-        "Trade count ratio is out of bounds (cpu={} gpu={} ratio={:.3})",
-        rpt.total_trades,
-        expected.total_trades,
-        trade_ratio
-    );
+    let trade_ratio_delta = (trade_ratio - 1.0).abs();
+    let pf_delta = (rpt.profit_factor - expected.profit_factor).abs();
 
-    let win_ratio = rpt.total_wins as f64 / expected.total_wins.max(1) as f64;
+    // -----------------------------------------------------------------------
+    // Build diff report
+    // -----------------------------------------------------------------------
+
+    let checks = vec![
+        ParityCheck {
+            metric: "Net PnL (rel)",
+            cpu_value: cpu_net_pnl,
+            gpu_value: gpu_net_pnl,
+            delta: net_pnl_rel_err,
+            tolerance: tol_pnl,
+            passed: net_pnl_rel_err <= tol_pnl,
+        },
+        ParityCheck {
+            metric: "Max Drawdown %",
+            cpu_value: rpt.max_drawdown_pct,
+            gpu_value: expected.max_drawdown_pct,
+            delta: dd_delta,
+            tolerance: tol_dd,
+            passed: dd_delta <= tol_dd,
+        },
+        ParityCheck {
+            metric: "Win Rate",
+            cpu_value: rpt.win_rate,
+            gpu_value: expected.win_rate,
+            delta: wr_delta,
+            tolerance: tol_wr,
+            passed: wr_delta <= tol_wr,
+        },
+        ParityCheck {
+            metric: "Trade Count (±%)",
+            cpu_value: rpt.total_trades as f64,
+            gpu_value: expected.total_trades as f64,
+            delta: trade_ratio_delta,
+            tolerance: tol_tc,
+            passed: trade_ratio_delta <= tol_tc,
+        },
+        ParityCheck {
+            metric: "Profit Factor",
+            cpu_value: rpt.profit_factor,
+            gpu_value: expected.profit_factor,
+            delta: pf_delta,
+            tolerance: tol_pf,
+            passed: pf_delta <= tol_pf,
+        },
+    ];
+
+    // Always print the table so CI logs are easy to scan.
+    print_parity_table(&checks);
+
+    let failures: Vec<&ParityCheck> = checks.iter().filter(|c| !c.passed).collect();
     assert!(
-        (0.25..=4.0).contains(&win_ratio),
-        "Win count ratio is out of bounds (cpu={} gpu={} ratio={:.3})",
-        rpt.total_wins,
-        expected.total_wins,
-        win_ratio
+        failures.is_empty(),
+        "GPU↔CPU parity failed for {} metric(s): [{}]",
+        failures.len(),
+        failures.iter().map(|c| c.metric).collect::<Vec<_>>().join(", ")
     );
 }
