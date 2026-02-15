@@ -240,6 +240,7 @@ mod tests {
                 margin_usd: 10_000.0,
                 confidence: Some(2),
                 entry_atr: Some(1_500.0),
+                entry_adx_threshold: None,
                 adds_count: 1,
                 tp1_taken: false,
                 trailing_sl: Some(58_000.0),

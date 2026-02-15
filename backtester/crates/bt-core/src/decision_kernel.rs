@@ -93,6 +93,9 @@ pub struct Position {
     /// ATR value at the time of entry, used for exit sizing.
     #[serde(default)]
     pub entry_atr: Option<f64>,
+    /// ADX threshold at entry time, used for smart exit exhaustion check.
+    #[serde(default)]
+    pub entry_adx_threshold: Option<f64>,
     /// Number of ADD (pyramid) fills applied to this position.
     #[serde(default)]
     pub adds_count: u32,
@@ -365,6 +368,7 @@ fn apply_open(
                 margin_usd: margin,
                 confidence: None,
                 entry_atr: None,
+                entry_adx_threshold: None,
                 adds_count: 0,
                 tp1_taken: false,
                 trailing_sl: None,
@@ -1470,6 +1474,7 @@ mod tests {
             margin_usd: 8_000.0,
             confidence: Some(1),
             entry_atr: Some(120.5),
+            entry_adx_threshold: Some(18.0),
             adds_count: 3,
             tp1_taken: true,
             trailing_sl: Some(3_300.0),
