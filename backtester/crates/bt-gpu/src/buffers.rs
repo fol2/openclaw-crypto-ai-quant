@@ -211,21 +211,23 @@ pub struct GpuComboConfig {
     pub reef_long_rsi_extreme_gt: f32,
     pub reef_short_rsi_extreme_lt: f32,
 
-    // Dynamic leverage [10-15]
+    // Dynamic leverage [10-14]
     pub enable_dynamic_leverage: u32,
     pub leverage_low: f32,
     pub leverage_medium: f32,
     pub leverage_high: f32,
     pub leverage_max_cap: f32,
-    pub _pad0: u32,
+    // Trailing config (repurposed pad slots) [15]
+    pub trailing_rsi_floor_default: f32,
 
-    // Execution [16-21]
+    // Execution [16-19]
     pub slippage_bps: f32,
     pub min_notional_usd: f32,
     pub bump_to_min_notional: u32,
     pub max_total_margin_pct: f32,
-    pub _pad1: u32,
-    pub _pad2: u32,
+    // Trailing config (repurposed pad slots) [20-21]
+    pub trailing_rsi_floor_trending: f32,
+    pub trailing_vbts_bb_threshold: f32,
 
     // Dynamic sizing [22-29]
     pub enable_dynamic_sizing: u32,
@@ -237,11 +239,11 @@ pub struct GpuComboConfig {
     pub vol_baseline_pct: f32,
     pub vol_scalar_min: f32,
 
-    // [30-31]
+    // [30] + trailing config [31]
     pub vol_scalar_max: f32,
-    pub _pad3: u32,
+    pub trailing_vbts_mult: f32,
 
-    // Pyramiding [32-39]
+    // Pyramiding [32-38] + trailing config [39]
     pub enable_pyramiding: u32,
     pub max_adds_per_symbol: u32,
     pub add_fraction_of_base_margin: f32,
@@ -249,7 +251,7 @@ pub struct GpuComboConfig {
     pub add_min_profit_atr: f32,
     pub add_min_confidence: u32, // 0=Low, 1=Medium, 2=High
     pub entry_min_confidence: u32,
-    pub _pad4: u32,
+    pub trailing_high_profit_atr: f32,
 
     // Partial TP [40-45]
     pub enable_partial_tp: u32,
@@ -283,25 +285,25 @@ pub struct GpuComboConfig {
     pub rsi_exit_lb_lo_profit_low_conf: f32,
     pub rsi_exit_lb_hi_profit_low_conf: f32,
 
-    // Reentry cooldown [64-67]
+    // Reentry cooldown [64-66] + trailing config [67]
     pub reentry_cooldown_minutes: u32,
     pub reentry_cooldown_min_mins: u32,
     pub reentry_cooldown_max_mins: u32,
-    pub _pad6: u32,
+    pub trailing_tighten_default: f32,
 
-    // Volatility-buffered trailing + TSME [68-71]
+    // Volatility-buffered trailing + TSME [68-70] + trailing config [71]
     pub enable_vol_buffered_trailing: u32,
     pub tsme_min_profit_atr: f32,
     pub tsme_require_adx_slope_negative: u32,
-    pub _pad7: u32,
+    pub trailing_tighten_tspv: f32,
 
-    // ATR floor / signal reversal / glitch [72-77]
+    // ATR floor / signal reversal / glitch [72-76] + trailing config [77]
     pub min_atr_pct: f32,
     pub reverse_entry_signal: u32,
     pub block_exits_on_extreme_dev: u32,
     pub glitch_price_dev_pct: f32,
     pub glitch_atr_mult: f32,
-    pub _pad8: u32,
+    pub trailing_weak_trend_mult: f32,
 
     // Rate limits + entry flags [78-81]
     pub max_open_positions: u32,
@@ -523,14 +525,14 @@ impl GpuComboConfig {
             leverage_medium: tc.leverage_medium as f32,
             leverage_high: tc.leverage_high as f32,
             leverage_max_cap: tc.leverage_max_cap as f32,
-            _pad0: 0,
+            trailing_rsi_floor_default: 0.5,
 
             slippage_bps: tc.slippage_bps as f32,
             min_notional_usd: tc.min_notional_usd as f32,
             bump_to_min_notional: tc.bump_to_min_notional as u32,
             max_total_margin_pct: tc.max_total_margin_pct as f32,
-            _pad1: 0,
-            _pad2: 0,
+            trailing_rsi_floor_trending: 0.7,
+            trailing_vbts_bb_threshold: 1.2,
 
             enable_dynamic_sizing: tc.enable_dynamic_sizing as u32,
             confidence_mult_high: tc.confidence_mult_high as f32,
@@ -542,7 +544,7 @@ impl GpuComboConfig {
             vol_scalar_min: tc.vol_scalar_min as f32,
 
             vol_scalar_max: tc.vol_scalar_max as f32,
-            _pad3: 0,
+            trailing_vbts_mult: 1.25,
 
             enable_pyramiding: tc.enable_pyramiding as u32,
             max_adds_per_symbol: tc.max_adds_per_symbol as u32,
@@ -551,7 +553,7 @@ impl GpuComboConfig {
             add_min_profit_atr: tc.add_min_profit_atr as f32,
             add_min_confidence: tc.add_min_confidence as u32,
             entry_min_confidence: tc.entry_min_confidence as u32,
-            _pad4: 0,
+            trailing_high_profit_atr: 2.0,
 
             enable_partial_tp: tc.enable_partial_tp as u32,
             tp_partial_pct: tc.tp_partial_pct as f32,
@@ -584,19 +586,19 @@ impl GpuComboConfig {
             reentry_cooldown_minutes: tc.reentry_cooldown_minutes as u32,
             reentry_cooldown_min_mins: tc.reentry_cooldown_min_mins as u32,
             reentry_cooldown_max_mins: tc.reentry_cooldown_max_mins as u32,
-            _pad6: 0,
+            trailing_tighten_default: 0.5,
 
             enable_vol_buffered_trailing: tc.enable_vol_buffered_trailing as u32,
             tsme_min_profit_atr: tc.tsme_min_profit_atr as f32,
             tsme_require_adx_slope_negative: tc.tsme_require_adx_slope_negative as u32,
-            _pad7: 0,
+            trailing_tighten_tspv: 0.75,
 
             min_atr_pct: tc.min_atr_pct as f32,
             reverse_entry_signal: tc.reverse_entry_signal as u32,
             block_exits_on_extreme_dev: tc.block_exits_on_extreme_dev as u32,
             glitch_price_dev_pct: tc.glitch_price_dev_pct as f32,
             glitch_atr_mult: tc.glitch_atr_mult as f32,
-            _pad8: 0,
+            trailing_weak_trend_mult: 0.7,
 
             max_open_positions: tc.max_open_positions as u32,
             max_entry_orders_per_loop: tc.max_entry_orders_per_loop as u32,

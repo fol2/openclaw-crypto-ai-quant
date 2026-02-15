@@ -112,16 +112,16 @@ struct __align__(16) GpuComboConfig {
     unsigned int enable_reef_filter;  float reef_long_rsi_block_gt;  float reef_short_rsi_block_lt;
     float reef_adx_threshold;  float reef_long_rsi_extreme_gt;  float reef_short_rsi_extreme_lt;
     unsigned int enable_dynamic_leverage;  float leverage_low;  float leverage_medium;
-    float leverage_high;  float leverage_max_cap;  unsigned int _p0;
+    float leverage_high;  float leverage_max_cap;  float trailing_rsi_floor_default;
     float slippage_bps;  float min_notional_usd;  unsigned int bump_to_min_notional;
-    float max_total_margin_pct;  unsigned int _p1;  unsigned int _p2;
+    float max_total_margin_pct;  float trailing_rsi_floor_trending;  float trailing_vbts_bb_threshold;
     unsigned int enable_dynamic_sizing;  float confidence_mult_high;  float confidence_mult_medium;
     float confidence_mult_low;  float adx_sizing_min_mult;  float adx_sizing_full_adx;
     float vol_baseline_pct;  float vol_scalar_min;
-    float vol_scalar_max;  unsigned int _p3;
+    float vol_scalar_max;  float trailing_vbts_mult;
     unsigned int enable_pyramiding;  unsigned int max_adds_per_symbol;  float add_fraction_of_base_margin;
     unsigned int add_cooldown_minutes;  float add_min_profit_atr;  unsigned int add_min_confidence;
-    unsigned int entry_min_confidence;  unsigned int _p4;
+    unsigned int entry_min_confidence;  float trailing_high_profit_atr;
     unsigned int enable_partial_tp;  float tp_partial_pct;  float tp_partial_min_notional_usd;
     float trailing_start_atr;  float trailing_distance_atr;  float tp_partial_atr_mult;
     unsigned int enable_ssf_filter;  unsigned int enable_breakeven_stop;  float breakeven_start_atr;
@@ -134,11 +134,11 @@ struct __align__(16) GpuComboConfig {
     float rsi_exit_ub_lo_profit_low_conf;  float rsi_exit_ub_hi_profit_low_conf;
     float rsi_exit_lb_lo_profit_low_conf;  float rsi_exit_lb_hi_profit_low_conf;
     unsigned int reentry_cooldown_minutes;  unsigned int reentry_cooldown_min_mins;
-    unsigned int reentry_cooldown_max_mins;  unsigned int _p6;
+    unsigned int reentry_cooldown_max_mins;  float trailing_tighten_default;
     unsigned int enable_vol_buffered_trailing;  float tsme_min_profit_atr;
-    unsigned int tsme_require_adx_slope_negative;  unsigned int _p7;
+    unsigned int tsme_require_adx_slope_negative;  float trailing_tighten_tspv;
     float min_atr_pct;  unsigned int reverse_entry_signal;  unsigned int block_exits_on_extreme_dev;
-    float glitch_price_dev_pct;  float glitch_atr_mult;  unsigned int _p8;
+    float glitch_price_dev_pct;  float glitch_atr_mult;  float trailing_weak_trend_mult;
     unsigned int max_open_positions;  unsigned int max_entry_orders_per_loop;
     unsigned int enable_slow_drift_entries;  unsigned int slow_drift_require_macd_sign;
     unsigned int enable_ranging_filter;  unsigned int enable_anomaly_filter;  unsigned int enable_extension_filter;
@@ -544,29 +544,29 @@ __device__ float compute_trailing(const GpuPosition& pos, const GpuSnapshot& sna
         if (cfg->trailing_distance_atr_low_conf > 0.0f) { trailing_dist = cfg->trailing_distance_atr_low_conf; }
     }
 
-    // RSI Trend-Guard floor
-    float min_dist = 0.5f;
-    if (pos.active == POS_LONG && snap.rsi > 60.0f) { min_dist = 0.7f; }
-    if (pos.active == POS_SHORT && snap.rsi < 40.0f) { min_dist = 0.7f; }
+    // RSI Trend-Guard floor — read from config
+    float min_dist = cfg->trailing_rsi_floor_default;
+    if (pos.active == POS_LONG && snap.rsi > 60.0f) { min_dist = cfg->trailing_rsi_floor_trending; }
+    if (pos.active == POS_SHORT && snap.rsi < 40.0f) { min_dist = cfg->trailing_rsi_floor_trending; }
 
     float eff_dist = trailing_dist;
 
-    // VBTS
-    if (cfg->enable_vol_buffered_trailing != 0u && snap.bb_width_ratio > 1.2f) {
-        eff_dist *= 1.25f;
+    // VBTS — read from config
+    if (cfg->enable_vol_buffered_trailing != 0u && snap.bb_width_ratio > cfg->trailing_vbts_bb_threshold) {
+        eff_dist *= cfg->trailing_vbts_mult;
     }
 
-    // High-profit tightening
-    if (p_atr > 2.0f) {
+    // High-profit tightening — read from config
+    if (p_atr > cfg->trailing_high_profit_atr) {
         if (snap.adx > 35.0f && snap.adx_slope > 0.0f) {
-            eff_dist = trailing_dist * 1.0f; // TATP: don't tighten
+            eff_dist = trailing_dist * 1.0f; // TATP: don't tighten (stays hardcoded)
         } else if (snap.atr_slope > 0.0f) {
-            eff_dist = trailing_dist * 0.75f; // TSPV
+            eff_dist = trailing_dist * cfg->trailing_tighten_tspv;
         } else {
-            eff_dist = trailing_dist * 0.5f;
+            eff_dist = trailing_dist * cfg->trailing_tighten_default;
         }
     } else if (snap.adx < 25.0f) {
-        eff_dist = trailing_dist * 0.7f;
+        eff_dist = trailing_dist * cfg->trailing_weak_trend_mult;
     }
 
     eff_dist = fmaxf(eff_dist, min_dist);
