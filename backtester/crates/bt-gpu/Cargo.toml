@@ -7,6 +7,9 @@ edition = "2021"
 # Convenience flag to match workspace CLI feature naming.
 # bt-gpu is inherently GPU-backed and always compiles CUDA kernels in build.rs.
 gpu = []
+# Run CUDA codegen from Rust kernel source during build.
+# Generates kernels/generated_accounting.cu for inspection.
+codegen = []
 
 [dependencies]
 bt-core = { path = "../bt-core" }

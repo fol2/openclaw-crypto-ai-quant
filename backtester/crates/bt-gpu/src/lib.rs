@@ -7,6 +7,10 @@ mod precompute;
 pub mod raw_candles;
 pub mod tpe_sweep;
 
+#[cfg(feature = "codegen")]
+#[path = "../codegen/mod.rs"]
+pub mod codegen;
+
 /// Check if a set of overrides produces a degenerate config that the GPU f32
 /// kernel can evaluate but produces phantom signals not reproducible in f64.
 ///
