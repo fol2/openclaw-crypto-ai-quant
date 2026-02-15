@@ -977,6 +977,16 @@ def main() -> None:
         lookback_bars = int(mei_alpha_v1.LOOKBACK_HOURS)
     lookback_bars = int(max(50, min(10_000, lookback_bars)))
 
+    decision_provider = _build_default_decision_provider()
+
+    # Wire kernel provider to OMS for fill reconciliation (AQC-743).
+    if hasattr(plugin, "oms") and plugin.oms is not None:
+        try:
+            if hasattr(decision_provider, "_runtime"):
+                plugin.oms.kernel_provider = decision_provider
+        except Exception:
+            pass
+
     engine = UnifiedEngine(
         trader=trader,
         strategy=strategy,
@@ -985,7 +995,7 @@ def main() -> None:
         lookback_bars=lookback_bars,
         mode=mode,
         mode_plugin=plugin,
-        decision_provider=_build_default_decision_provider(),
+        decision_provider=decision_provider,
     )
     promo_tag = f" promoted_role={promoted_role}" if promoted_role else ""
     print(f"🚀 Unified engine started. mode={mode}{promo_tag}")

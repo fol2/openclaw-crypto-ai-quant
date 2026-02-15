@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -10,6 +11,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from .utils import json_dumps_safe, now_ms
+
+logger = logging.getLogger(__name__)
 
 
 def _coerce_ts_ms(ts: Any) -> int | None:
@@ -972,6 +975,14 @@ class LiveOms:
         self._manual_intent_prefix = (
             str(os.getenv("AI_QUANT_OMS_MANUAL_INTENT_PREFIX", "manual_") or "manual_").strip() or "manual_"
         )
+
+        # Optional kernel provider for fill reconciliation (set externally).
+        # When set to a KernelDecisionRustBindingProvider, confirmed fills are
+        # fed to the kernel via step_full() and positions are reconciled.
+        # Fill dedup: INSERT OR IGNORE on oms_fills (fill_hash + fill_tid unique
+        # index) ensures each fill is processed at most once, preventing
+        # double-counting in the kernel.
+        self.kernel_provider: Any | None = None
 
     def create_intent(
         self,
@@ -2518,6 +2529,15 @@ class LiveOms:
                     except Exception:
                         pass
 
+            # After commit: update kernel state from confirmed fills and reconcile positions.
+            # Only newly-inserted fills (notify_rows) are processed — OMS fill_hash dedup
+            # (INSERT OR IGNORE) prevents double-counting in the kernel.
+            if notify_rows:
+                try:
+                    self._update_kernel_for_fills(notify_rows, trader)
+                except Exception:
+                    pass
+
         except Exception as e:
             try:
                 if conn is not None:
@@ -2556,3 +2576,164 @@ class LiveOms:
             "unmatched_samples": unmatched_samples,
         }
         return inserted
+
+    # ------------------------------------------------------------------
+    # Kernel fill reconciliation
+    # ------------------------------------------------------------------
+
+    def _update_kernel_for_fills(self, notify_rows: list[dict], trader: Any) -> None:
+        """Update kernel state from confirmed fills and reconcile positions.
+
+        For each newly-inserted fill, a MarketEvent is constructed and fed to
+        the kernel via ``bt_runtime.step_full()``.  After all fills are
+        processed the kernel state is persisted and positions are compared
+        with the trader's live positions.
+
+        Dedup safety: this method is only called for fills that passed the
+        INSERT OR IGNORE dedup (``notify_rows``), so the kernel is updated at
+        most once per fill.
+        """
+        kp = self.kernel_provider
+        if kp is None:
+            return
+        runtime = getattr(kp, "_runtime", None)
+        state_json = getattr(kp, "_state_json", None)
+        params_json = getattr(kp, "_params_json", None)
+        if runtime is None or state_json is None or params_json is None:
+            return
+
+        step_full_fn = getattr(runtime, "step_full", None)
+        if not callable(step_full_fn):
+            return
+
+        updated = False
+        for row in notify_rows:
+            try:
+                symbol = str(row.get("symbol") or "").strip().upper()
+                if not symbol:
+                    continue
+                price = float(row.get("price") or 0)
+                if price <= 0:
+                    continue
+                side = str(row.get("side") or "").strip().upper()
+                if side not in ("BUY", "SELL"):
+                    continue
+                t_ms = int(row.get("t_ms") or 0)
+                if t_ms <= 0:
+                    t_ms = int(time.time() * 1000)
+
+                event = {
+                    "schema_version": 1,
+                    "event_id": t_ms,
+                    "timestamp_ms": t_ms,
+                    "symbol": symbol,
+                    "signal": side,
+                    "price": price,
+                }
+                result_json = step_full_fn(
+                    state_json,
+                    json.dumps(event),
+                    params_json,
+                    "{}",
+                )
+                result = json.loads(result_json)
+                if result.get("ok") and "decision" in result:
+                    new_state = result["decision"].get("state")
+                    if new_state is not None:
+                        state_json = json.dumps(new_state) if isinstance(new_state, dict) else str(new_state)
+                        updated = True
+                else:
+                    err = result.get("error", {})
+                    logger.debug(
+                        "[kernel-reconcile] step rejected for %s: %s",
+                        symbol,
+                        err.get("message", str(result_json)[:200]),
+                    )
+            except Exception as exc:
+                logger.warning("[kernel-reconcile] step_full failed for fill: %s", exc)
+
+        if updated:
+            kp._state_json = state_json
+            try:
+                persist = getattr(kp, "_persist_state", None)
+                if callable(persist):
+                    persist(state_json)
+            except Exception as exc:
+                logger.warning("[kernel-reconcile] failed to persist kernel state: %s", exc)
+
+        # Reconcile kernel positions with trader/exchange positions.
+        try:
+            self._reconcile_kernel_positions(state_json, trader)
+        except Exception as exc:
+            logger.warning("[kernel-reconcile] position reconciliation failed: %s", exc)
+
+    def _reconcile_kernel_positions(self, state_json: str, trader: Any) -> None:
+        """Compare kernel positions with trader's live positions and log discrepancies."""
+        try:
+            state = json.loads(state_json)
+        except Exception:
+            return
+        kernel_positions = state.get("positions")
+        if not isinstance(kernel_positions, dict):
+            return
+
+        trader_positions = getattr(trader, "positions", None)
+        if not isinstance(trader_positions, dict):
+            return
+
+        # Collect all symbols from both sides.
+        all_symbols = set(kernel_positions.keys()) | set(trader_positions.keys())
+
+        for sym in sorted(all_symbols):
+            kp = kernel_positions.get(sym)
+            tp = trader_positions.get(sym)
+
+            # Kernel has position, trader doesn't.
+            if kp and not tp:
+                k_qty = float(kp.get("quantity") or 0)
+                k_side = str(kp.get("side") or "").upper()
+                if k_qty > 1e-9:
+                    logger.warning(
+                        "[kernel-reconcile] MISMATCH %s: kernel has %s qty=%.6f but trader has no position",
+                        sym, k_side, k_qty,
+                    )
+                continue
+
+            # Trader has position, kernel doesn't.
+            if tp and not kp:
+                t_qty = float(tp.get("size") or 0)
+                t_side = str(tp.get("type") or "").upper()
+                if t_qty > 1e-9:
+                    logger.warning(
+                        "[kernel-reconcile] MISMATCH %s: trader has %s qty=%.6f but kernel has no position",
+                        sym, t_side, t_qty,
+                    )
+                continue
+
+            # Both have positions — compare qty, entry price, and side.
+            if kp and tp:
+                k_qty = float(kp.get("quantity") or 0)
+                k_entry = float(kp.get("avg_entry_price") or 0)
+                k_side = str(kp.get("side") or "").strip().lower()
+
+                t_qty = float(tp.get("size") or 0)
+                t_entry = float(tp.get("entry_price") or 0)
+                t_side = str(tp.get("type") or "").strip().lower()
+
+                qty_diff = abs(k_qty - t_qty)
+                entry_diff = abs(k_entry - t_entry) if (k_entry > 0 and t_entry > 0) else 0
+
+                # Tolerance: 0.1% for qty, 0.5% for entry price.
+                qty_tol = max(k_qty, t_qty) * 0.001 if max(k_qty, t_qty) > 0 else 1e-9
+                entry_tol = max(k_entry, t_entry) * 0.005 if max(k_entry, t_entry) > 0 else 0
+
+                side_mismatch = k_side != t_side
+                qty_mismatch = qty_diff > qty_tol
+                entry_mismatch = entry_diff > entry_tol
+
+                if side_mismatch or qty_mismatch or entry_mismatch:
+                    logger.warning(
+                        "[kernel-reconcile] MISMATCH %s: kernel(%s qty=%.6f entry=%.2f) vs "
+                        "trader(%s qty=%.6f entry=%.2f)",
+                        sym, k_side, k_qty, k_entry, t_side, t_qty, t_entry,
+                    )
