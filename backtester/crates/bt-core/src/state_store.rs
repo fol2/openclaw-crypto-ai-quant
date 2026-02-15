@@ -245,6 +245,7 @@ mod tests {
                 trailing_sl: Some(58_000.0),
                 mae_usd: -500.0,
                 mfe_usd: 2_000.0,
+                last_funding_ms: None,
             }
         );
 
