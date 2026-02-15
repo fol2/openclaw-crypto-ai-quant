@@ -75,9 +75,9 @@ def _json_dumps_safe(obj) -> str:
 # - You can override explicitly without editing code:
 #     AI_QUANT_SYMBOLS="BTC,ETH,SOL,..."
 #
-# Balances (paper)
-# - `self.balance` = realized cash (starts at AI_QUANT_PAPER_BALANCE, then updates from DB)
-# - `get_live_balance()` = equity estimate = cash + unrealized PnL − estimated close fees
+# Balances (paper) — AQC-755: kernel is sole accounting authority
+# - `self.balance` = property delegating to Rust kernel `cash_usd` (via bt_runtime)
+# - `get_live_balance()` = equity from kernel + fee estimate
 #
 # Perps-style positions
 # - One NET position per symbol (like real perps), but multiple fills/tranches are supported:
@@ -1157,7 +1157,7 @@ def log_audit_event(
 
 class PaperTrader:
     def __init__(self):
-        self.balance = PAPER_BALANCE
+        self._seed_balance: float = PAPER_BALANCE  # only for kernel init seeding
         self.positions = {} # symbol -> position_dict
         # Simulated rate-limit state (mirrors LiveTrader friction).
         self._last_entry_attempt_at_s: dict[str, float] = {}
@@ -1175,21 +1175,35 @@ class PaperTrader:
         ensure_db()
         self.load_state()
 
+    @property
+    def balance(self) -> float:
+        """Authoritative realized balance from Rust kernel (AQC-755).
+
+        All callers that previously read the manually-tracked ``self.balance``
+        now transparently receive the kernel's ``cash_usd`` value.
+        """
+        if self._kernel_available:
+            kb = self.get_kernel_balance()
+            if kb is not None:
+                return kb
+        return self._seed_balance
+
     def _init_kernel(self) -> None:
-        """Initialize Rust kernel state for parallel comparison (AQC-742)."""
+        """Initialize Rust kernel state — kernel is the sole accounting authority (AQC-755)."""
         if not _BT_RUNTIME_AVAILABLE:
-            logger.info("[kernel] bt_runtime not available — kernel delegation disabled")
+            logger.critical("[kernel] bt_runtime not available — CANNOT operate without kernel")
+            self._kernel_available = False
             return
         try:
             now_ms = int(time.time() * 1000)
             self._kernel_state_json = _bt_runtime.default_kernel_state_json(
-                float(self.balance), now_ms
+                float(self._seed_balance), now_ms
             )
             self._kernel_params_json = _bt_runtime.default_kernel_params_json()
             self._kernel_available = True
-            logger.info("[kernel] Rust kernel state initialized (balance=%.2f)", self.balance)
+            logger.info("[kernel] Rust kernel state initialized (balance=%.2f)", self._seed_balance)
         except Exception as e:
-            logger.warning("[kernel] Failed to initialize kernel state: %s", e)
+            logger.critical("[kernel] Failed to initialize kernel state: %s — CANNOT operate", e)
             self._kernel_available = False
 
     def _kernel_sync_event(
@@ -1202,7 +1216,7 @@ class PaperTrader:
         timestamp_ms: int,
         funding_rate: float | None = None,
     ) -> None:
-        """Feed an event to the Rust kernel and compare cash_usd with PaperTrader balance."""
+        """Feed an event to the Rust kernel — kernel is sole accounting authority (AQC-755)."""
         if not self._kernel_available or self._kernel_state_json is None:
             return
         try:
@@ -1240,15 +1254,9 @@ class PaperTrader:
                     logger.debug("[kernel] step rejected: %s", err.get("message", result_json[:200]))
                     return
 
-            # --- Parallel comparison via ShadowReport (AQC-752) ---
-            kernel_balance = self.get_kernel_balance()
-            if kernel_balance is not None:
-                self._shadow_report.add_comparison(
-                    metric="balance",
-                    old_val=float(self.balance),
-                    kernel_val=kernel_balance,
-                    tolerance=0.01,
-                )
+            # --- Shadow report: log kernel balance for audit (AQC-755) ---
+            # Old Python-vs-kernel comparison removed; kernel is now sole authority.
+            # Future: compare kernel vs exchange data when available.
         except Exception as e:
             logger.warning("[kernel] sync event failed: %s", e)
 
@@ -1294,7 +1302,7 @@ class PaperTrader:
             logger.warning("[shadow] persist failed: %s", e)
 
     def _kernel_restore(self) -> None:
-        """Attempt to restore kernel state from disk."""
+        """Attempt to restore kernel state from disk; re-init with DB balance if missing."""
         if not _BT_RUNTIME_AVAILABLE:
             return
         try:
@@ -1304,6 +1312,11 @@ class PaperTrader:
                 self._kernel_available = True
                 kb = self.get_kernel_balance()
                 logger.info("[kernel] Restored kernel state from disk (cash_usd=%.2f)", kb or 0.0)
+            else:
+                # No persisted kernel state (e.g. first run after migration).
+                # Re-init with the DB-loaded seed balance so kernel starts in sync.
+                logger.info("[kernel] No state file found — re-initializing with seed balance %.2f", self._seed_balance)
+                self._init_kernel()
             # Restore shadow report (AQC-752)
             report_path = os.path.join(os.path.dirname(DB_PATH), "kernel_shadow_report.json")
             if os.path.isfile(report_path):
@@ -1322,11 +1335,11 @@ class PaperTrader:
         conn = sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT_S)
         cursor = conn.cursor()
 
-        # Get latest balance
+        # Get latest balance from DB — used as seed for kernel init only (AQC-755).
         cursor.execute("SELECT balance FROM trades ORDER BY id DESC LIMIT 1")
         row = cursor.fetchone()
         if row:
-            self.balance = row[0]
+            self._seed_balance = float(row[0])
 
         # Load all currently open positions (even if the symbol isn't in the configured watchlist).
         cursor.execute(
@@ -1858,7 +1871,15 @@ class PaperTrader:
                 signed_size = size if pos_type == "LONG" else -size
                 delta = -(signed_size * px * rate)
 
-                self.balance += delta
+                # AQC-755: kernel handles balance — sync BEFORE log so self.balance reads post-trade.
+                self._kernel_sync_event(
+                    symbol=symbol,
+                    signal="FUNDING",
+                    price=px,
+                    size=size,
+                    timestamp_ms=int(ev_time),
+                    funding_rate=rate,
+                )
                 total_delta += delta
                 applied_any = True
 
@@ -1884,15 +1905,6 @@ class PaperTrader:
                     },
                     notify=False,
                 )
-                # Kernel delegation: sync FUNDING event (AQC-742)
-                self._kernel_sync_event(
-                    symbol=symbol,
-                    signal="FUNDING",
-                    price=px,
-                    size=size,
-                    timestamp_ms=int(ev_time),
-                    funding_rate=rate,
-                )
 
                 last_ms = ev_time
 
@@ -1904,10 +1916,10 @@ class PaperTrader:
         return total_delta
 
     def get_live_balance(self):
-        """Estimates Equity: realized cash + unrealized PnL − estimated close fees.
+        """Equity from kernel (cash + unrealized PnL) minus estimated close fees (AQC-755).
 
-        Uses WS mids when available; falls back to last-known WS mids, then REST allMids, then entry price.
-        This avoids reporting Equity == Cash when WS is temporarily stale/disconnected.
+        Gathers live mid prices via WS/REST, delegates PnL to kernel via
+        ``get_kernel_equity(prices)``, then subtracts estimated close fees.
         """
         try:
             hyperliquid_ws.hl_ws.ensure_started(
@@ -1916,7 +1928,7 @@ class PaperTrader:
                 candle_limit=LOOKBACK_HOURS + 50,
             )
 
-            unrealized_pnl = 0.0
+            prices: dict[str, float] = {}
             est_close_fees = 0.0
             _any_stale = False
             fee_rate = _effective_fee_rate()
@@ -1937,8 +1949,6 @@ class PaperTrader:
                 nonlocal rest_mids
                 if rest_mids is not None:
                     return rest_mids
-                # In "sidecar-only" market-data mode, never fetch mids from HL REST here.
-                # (Orders/execution can still use REST elsewhere.)
                 rest_enabled = str(os.getenv("AI_QUANT_REST_ENABLE", "1") or "1").strip().lower() in {
                     "1",
                     "true",
@@ -1977,7 +1987,6 @@ class PaperTrader:
 
                     res = HyperliquidRestClient(timeout_s=timeout_s).all_mids()
                     raw = res.data or {}
-                    # Some API shapes return {"mids": {...}}
                     if isinstance(raw, dict) and isinstance(raw.get("mids"), dict):
                         raw = raw.get("mids") or {}
 
@@ -2007,17 +2016,14 @@ class PaperTrader:
 
                 current_price = hyperliquid_ws.hl_ws.get_mid(sym_u, max_age_s=mid_max_age_s)
                 if current_price is None:
-                    # If WS is stale but we still have a last-known mid, use it.
                     current_price = hyperliquid_ws.hl_ws.get_mid(sym_u, max_age_s=None)
                 if current_price is None:
-                    # REST fallback (cached) if WS has no mid at all.
                     mid_map = _get_rest_mids()
                     try:
                         current_price = mid_map.get(sym_u)
                     except Exception:
                         current_price = None
                 if current_price is None:
-                    # Final fallback: assume mark == entry to at least estimate close fees.
                     logger.warning("get_live_balance: using entry_price fallback for %s — data may be stale", symbol)
                     _any_stale = True
                     try:
@@ -2032,22 +2038,25 @@ class PaperTrader:
                 if current_price <= 0:
                     continue
 
-                entry = float(pos.get("entry_price") or 0.0)
+                prices[sym_u] = current_price
+
+                # Estimate close fees (not tracked by kernel).
                 size = float(pos.get("size") or 0.0)
-                if size <= 0 or entry <= 0:
-                    continue
+                if size > 0:
+                    est_close_fees += abs(size) * current_price * fee_rate
 
-                if str(pos.get("type") or "").upper() == "LONG":
-                    unrealized_pnl += (current_price - entry) * size
-                else:
-                    unrealized_pnl += (entry - current_price) * size
-
-                est_close_fees += abs(size) * current_price * fee_rate
             self._data_stale = _any_stale
-            return self.balance + unrealized_pnl - est_close_fees
+
+            # AQC-755: delegate equity calculation to kernel.
+            kernel_equity = self.get_kernel_equity(prices) if prices else self.get_kernel_balance()
+            if kernel_equity is not None:
+                return kernel_equity - est_close_fees
+
+            # Fallback: kernel balance minus fees (no position PnL available).
+            return self.balance - est_close_fees
         except Exception as e:
             logger.error(f"Error calculating live balance: {e}")
-            return self.balance # Fallback to realized balance
+            return self.balance
 
     def _estimate_margin_used(self, symbol: str, pos: dict, *, mark_price: float | None = None) -> float:
         """Approx initial margin used (isolated): notional / leverage."""
@@ -2301,7 +2310,7 @@ class PaperTrader:
 
         fee_rate = _effective_fee_rate()
         fee_usd = notional * fee_rate
-        self.balance -= fee_usd
+        # AQC-755: self.balance no longer manually updated — kernel is authoritative.
 
         # Weighted average entry update
         new_total_size = float(pos.get("size") or 0.0) + add_size
@@ -2356,6 +2365,15 @@ class PaperTrader:
             },
         }
 
+        # AQC-755: sync kernel BEFORE log so self.balance reads post-trade value.
+        add_signal = "BUY" if pos_type == "LONG" else "SELL"
+        self._kernel_sync_event(
+            symbol=symbol,
+            signal=add_signal,
+            price=fill_price,
+            size=add_size,
+            timestamp_ms=now_ms,
+        )
         self.log_trade(
             symbol,
             "ADD",
@@ -2378,15 +2396,6 @@ class PaperTrader:
             f"➕ ADD {pos_type} {symbol} px={fill_price:.4f} size={add_size:.6f} "
             f"notional~=${notional:.2f} lev={leverage:.0f} margin~=${margin_est:.2f} "
             f"fee=${fee_usd:.4f} conf={confidence}"
-        )
-        # Kernel delegation: sync ADD event (AQC-742)
-        add_signal = "BUY" if pos_type == "LONG" else "SELL"
-        self._kernel_sync_event(
-            symbol=symbol,
-            signal=add_signal,
-            price=fill_price,
-            size=add_size,
-            timestamp_ms=now_ms,
         )
         self._kernel_persist()
         return True
@@ -2450,7 +2459,7 @@ class PaperTrader:
         fee_rate = _effective_fee_rate()
         fee_usd = notional * fee_rate
         pnl = gross_pnl - fee_usd
-        self.balance += pnl
+        # AQC-755: self.balance no longer manually updated — kernel is authoritative.
 
         remaining = size - reduce_size
         is_final = remaining <= 0
@@ -2464,6 +2473,16 @@ class PaperTrader:
             # Approx margin used at entry price (cap logic uses live marks separately).
             pos["margin_used"] = (abs(remaining) * entry) / leverage if entry > 0 else 0.0
             self.upsert_position_state(symbol)
+
+        # AQC-755: sync kernel BEFORE log so self.balance reads post-trade value.
+        close_signal = "SELL" if pos_type == "LONG" else "BUY"
+        self._kernel_sync_event(
+            symbol=symbol,
+            signal=close_signal,
+            price=fill_price,
+            size=reduce_size,
+            timestamp_ms=int(time.time() * 1000),
+        )
 
         # Log fill
         action = "CLOSE" if is_final else "REDUCE"
@@ -2487,16 +2506,6 @@ class PaperTrader:
             f"✅ {action} {pos_type} {symbol} px={fill_price:.4f} size={reduce_size:.6f} "
             f"notional~=${notional:.2f} lev={leverage:.0f} Δmargin~=${margin_delta:+.2f} | "
             f"Reason: {reason} | GrossPnL={gross_pnl:.2f} | Fee={fee_usd:.4f} | NetPnL={pnl:.2f}"
-        )
-        # Kernel delegation: sync REDUCE/CLOSE event (AQC-742)
-        # For the kernel, closing = opposite-side signal.
-        close_signal = "SELL" if pos_type == "LONG" else "BUY"
-        self._kernel_sync_event(
-            symbol=symbol,
-            signal=close_signal,
-            price=fill_price,
-            size=reduce_size,
-            timestamp_ms=int(time.time() * 1000),
         )
         self._kernel_persist()
         return True
@@ -2868,7 +2877,7 @@ class PaperTrader:
 
             fee_rate = _effective_fee_rate()
             fee_usd = notional * fee_rate
-            self.balance -= fee_usd
+            # AQC-755: self.balance no longer manually updated — kernel is authoritative.
 
             opened_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
             self.positions[symbol] = {
@@ -2891,6 +2900,14 @@ class PaperTrader:
                 "tp1_taken": 0,
                 "last_add_time": 0,
             }
+            # AQC-755: sync kernel BEFORE log so self.balance reads post-trade value.
+            self._kernel_sync_event(
+                symbol=symbol,
+                signal=signal,
+                price=fill_price,
+                size=size,
+                timestamp_ms=int(time.time() * 1000),
+            )
             audit = None
             if indicators is not None:
                 try:
@@ -2937,14 +2954,6 @@ class PaperTrader:
                     "fee_rate": float(fee_rate or 0.0),
                     "reversed_entry": True if (indicators or {}).get("_reversed_entry") is True else False,
                 },
-            )
-            # Kernel delegation: sync OPEN event (AQC-742)
-            self._kernel_sync_event(
-                symbol=symbol,
-                signal=signal,
-                price=fill_price,
-                size=size,
-                timestamp_ms=int(time.time() * 1000),
             )
             self._kernel_persist()
 
