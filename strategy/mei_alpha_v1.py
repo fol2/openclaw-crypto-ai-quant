@@ -17,6 +17,14 @@ import exchange.ws as hyperliquid_ws
 import exchange.meta as hyperliquid_meta
 from engine.alerting import send_openclaw_message
 
+try:
+    import bt_runtime as _bt_runtime
+
+    _BT_RUNTIME_AVAILABLE = True
+except ImportError:
+    _bt_runtime = None  # type: ignore[assignment]
+    _BT_RUNTIME_AVAILABLE = False
+
 
 def _json_default(o):
     try:
@@ -1157,8 +1165,144 @@ class PaperTrader:
         # Set when get_live_balance falls back to entry_price (WS + REST both failed).
         # execute_trade checks this before opening new positions.
         self._data_stale: bool = False
+        # --- Rust kernel state delegation (AQC-742) ---
+        self._kernel_state_json: str | None = None
+        self._kernel_params_json: str | None = None
+        self._kernel_available: bool = False
+        self._init_kernel()
         ensure_db()
         self.load_state()
+
+    def _init_kernel(self) -> None:
+        """Initialize Rust kernel state for parallel comparison (AQC-742)."""
+        if not _BT_RUNTIME_AVAILABLE:
+            logger.info("[kernel] bt_runtime not available — kernel delegation disabled")
+            return
+        try:
+            now_ms = int(time.time() * 1000)
+            self._kernel_state_json = _bt_runtime.default_kernel_state_json(
+                float(self.balance), now_ms
+            )
+            self._kernel_params_json = _bt_runtime.default_kernel_params_json()
+            self._kernel_available = True
+            logger.info("[kernel] Rust kernel state initialized (balance=%.2f)", self.balance)
+        except Exception as e:
+            logger.warning("[kernel] Failed to initialize kernel state: %s", e)
+            self._kernel_available = False
+
+    def _kernel_sync_event(
+        self,
+        *,
+        symbol: str,
+        signal: str,
+        price: float,
+        size: float,
+        timestamp_ms: int,
+        funding_rate: float | None = None,
+    ) -> None:
+        """Feed an event to the Rust kernel and compare cash_usd with PaperTrader balance."""
+        if not self._kernel_available or self._kernel_state_json is None:
+            return
+        try:
+            if funding_rate is not None:
+                new_state_json = _bt_runtime.apply_funding(
+                    self._kernel_state_json,
+                    symbol,
+                    float(funding_rate),
+                    float(price),
+                    self._kernel_params_json,
+                )
+                self._kernel_state_json = new_state_json
+            else:
+                event = {
+                    "schema_version": 1,
+                    "event_id": int(timestamp_ms),
+                    "timestamp_ms": int(timestamp_ms),
+                    "symbol": str(symbol).upper(),
+                    "signal": str(signal).upper(),
+                    "price": float(price),
+                }
+                result_json = _bt_runtime.step_full(
+                    self._kernel_state_json,
+                    json.dumps(event),
+                    self._kernel_params_json,
+                    "{}",
+                )
+                result = json.loads(result_json)
+                if result.get("ok") and "decision" in result:
+                    new_state = result["decision"].get("state")
+                    if new_state is not None:
+                        self._kernel_state_json = json.dumps(new_state) if isinstance(new_state, dict) else str(new_state)
+                else:
+                    err = result.get("error", {})
+                    logger.debug("[kernel] step rejected: %s", err.get("message", result_json[:200]))
+                    return
+
+            # --- Parallel comparison ---
+            kernel_balance = self.get_kernel_balance()
+            if kernel_balance is not None:
+                diff = abs(float(self.balance) - kernel_balance)
+                if diff > 0.01:
+                    logger.warning(
+                        "[kernel] DISCREPANCY: PaperTrader balance=%.4f vs kernel cash_usd=%.4f (diff=%.4f) symbol=%s signal=%s",
+                        self.balance,
+                        kernel_balance,
+                        diff,
+                        symbol,
+                        signal or "FUNDING",
+                    )
+        except Exception as e:
+            logger.warning("[kernel] sync event failed: %s", e)
+
+    def get_kernel_balance(self) -> float | None:
+        """Extract cash_usd from the kernel state JSON."""
+        if not self._kernel_available or self._kernel_state_json is None:
+            return None
+        try:
+            state = json.loads(self._kernel_state_json)
+            return float(state.get("cash_usd", 0.0))
+        except Exception:
+            return None
+
+    def get_kernel_equity(self, prices: dict[str, float] | None = None) -> float | None:
+        """Mark-to-market equity from the kernel (cash + unrealized PnL)."""
+        if not self._kernel_available or self._kernel_state_json is None:
+            return None
+        if prices is None:
+            return self.get_kernel_balance()
+        try:
+            return _bt_runtime.get_equity(
+                self._kernel_state_json,
+                json.dumps(prices),
+            )
+        except Exception as e:
+            logger.debug("[kernel] get_equity failed: %s", e)
+            return None
+
+    def _kernel_persist(self) -> None:
+        """Save kernel state to disk alongside the SQLite database."""
+        if not self._kernel_available or self._kernel_state_json is None:
+            return
+        try:
+            state_path = os.path.join(os.path.dirname(DB_PATH), "kernel_state.json")
+            _bt_runtime.save_state(self._kernel_state_json, state_path)
+        except Exception as e:
+            logger.warning("[kernel] persist failed: %s", e)
+
+    def _kernel_restore(self) -> None:
+        """Attempt to restore kernel state from disk."""
+        if not _BT_RUNTIME_AVAILABLE:
+            return
+        try:
+            state_path = os.path.join(os.path.dirname(DB_PATH), "kernel_state.json")
+            if os.path.isfile(state_path):
+                self._kernel_state_json = _bt_runtime.load_state(state_path)
+                self._kernel_available = True
+                kb = self.get_kernel_balance()
+                logger.info("[kernel] Restored kernel state from disk (cash_usd=%.2f)", kb or 0.0)
+        except Exception as e:
+            logger.warning("[kernel] restore failed, re-initializing: %s", e)
+            self._init_kernel()
 
     def load_state(self):
         ensure_db()
@@ -1314,6 +1458,8 @@ class PaperTrader:
                 "last_add_time": int(last_add_time or 0),
             }
         conn.close()
+        # Restore kernel state from disk if available (AQC-742).
+        self._kernel_restore()
 
     # -- Simulated rate-limit helpers (mirrors LiveTrader friction) --
 
@@ -1725,6 +1871,15 @@ class PaperTrader:
                     },
                     notify=False,
                 )
+                # Kernel delegation: sync FUNDING event (AQC-742)
+                self._kernel_sync_event(
+                    symbol=symbol,
+                    signal="FUNDING",
+                    price=px,
+                    size=size,
+                    timestamp_ms=int(ev_time),
+                    funding_rate=rate,
+                )
 
                 last_ms = ev_time
 
@@ -1732,6 +1887,7 @@ class PaperTrader:
                 pos["last_funding_time"] = last_ms
                 self.upsert_position_state(symbol)
 
+        self._kernel_persist()
         return total_delta
 
     def get_live_balance(self):
@@ -2210,6 +2366,16 @@ class PaperTrader:
             f"notional~=${notional:.2f} lev={leverage:.0f} margin~=${margin_est:.2f} "
             f"fee=${fee_usd:.4f} conf={confidence}"
         )
+        # Kernel delegation: sync ADD event (AQC-742)
+        add_signal = "BUY" if pos_type == "LONG" else "SELL"
+        self._kernel_sync_event(
+            symbol=symbol,
+            signal=add_signal,
+            price=fill_price,
+            size=add_size,
+            timestamp_ms=now_ms,
+        )
+        self._kernel_persist()
         return True
 
     def reduce_position(self, symbol, reduce_size, price, timestamp, reason, *, confidence="N/A", meta: dict | None = None) -> bool:
@@ -2309,6 +2475,17 @@ class PaperTrader:
             f"notional~=${notional:.2f} lev={leverage:.0f} Δmargin~=${margin_delta:+.2f} | "
             f"Reason: {reason} | GrossPnL={gross_pnl:.2f} | Fee={fee_usd:.4f} | NetPnL={pnl:.2f}"
         )
+        # Kernel delegation: sync REDUCE/CLOSE event (AQC-742)
+        # For the kernel, closing = opposite-side signal.
+        close_signal = "SELL" if pos_type == "LONG" else "BUY"
+        self._kernel_sync_event(
+            symbol=symbol,
+            signal=close_signal,
+            price=fill_price,
+            size=reduce_size,
+            timestamp_ms=int(time.time() * 1000),
+        )
+        self._kernel_persist()
         return True
 
     def execute_trade(self, symbol, signal, price, timestamp, confidence, atr=0.0, indicators=None):
@@ -2748,6 +2925,15 @@ class PaperTrader:
                     "reversed_entry": True if (indicators or {}).get("_reversed_entry") is True else False,
                 },
             )
+            # Kernel delegation: sync OPEN event (AQC-742)
+            self._kernel_sync_event(
+                symbol=symbol,
+                signal=signal,
+                price=fill_price,
+                size=size,
+                timestamp_ms=int(time.time() * 1000),
+            )
+            self._kernel_persist()
 
     def check_exit_conditions(self, symbol, current_price, timestamp, is_anomaly=False, dynamic_tp_mult=None, indicators=None):
         # Normalise indicators: pandas Series → dict
