@@ -441,6 +441,10 @@ struct SweepArgs {
     #[arg(long, default_value_t = 42)]
     tpe_seed: u64,
 
+    /// Max results kept in memory during TPE sweep (0 = unlimited). Default 50000.
+    #[arg(long, default_value_t = 50_000)]
+    sweep_top_k: usize,
+
     /// Override GPU sweep guardrails (unsafe).
     ///
     /// By default, GPU sweeps are restricted to "safe" interval combos
@@ -2057,6 +2061,7 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
             gpu_sub_candles,
             from_ts,
             to_ts,
+            args.sweep_top_k,
         );
         let gpu_elapsed = gpu_start.elapsed();
 

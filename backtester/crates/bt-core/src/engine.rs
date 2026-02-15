@@ -18,6 +18,7 @@ use risk_core::{
     EntrySizingInput, ExposureBlockReason, ExposureGuardInput, PyramidSizingInput,
 };
 use rustc_hash::FxHashMap;
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Public result types
@@ -77,6 +78,25 @@ pub struct DecisionKernelFillSummary {
     pnl_usd: f64,
 }
 
+/// Detail of a single gate evaluation during entry signal processing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GateCheck {
+    pub gate_name: String,
+    pub passed: bool,
+    pub actual_value: f64,
+    pub threshold_value: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Per-signal gate evaluation chain — captures which gates were checked,
+/// what values were compared, and which gate (if any) blocked the signal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GateEvaluation {
+    pub passed: bool,
+    pub checked_gates: Vec<GateCheck>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DecisionKernelTrace {
     event_id: u64,
@@ -98,6 +118,12 @@ pub struct DecisionKernelTrace {
     intents: Vec<DecisionKernelIntentSummary>,
     fills: Vec<DecisionKernelFillSummary>,
     applied_to_kernel_state: bool,
+    #[serde(default)]
+    active_params: HashMap<String, f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gate_result: Option<GateEvaluation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    indicator_snapshot: Option<IndicatorSnapshot>,
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +139,7 @@ struct EntryCandidate {
     entry_adx_threshold: f64,
     snap: IndicatorSnapshot,
     ts: i64,
+    gate_eval: GateEvaluation,
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +176,7 @@ fn make_kernel_params(cfg: &StrategyConfig) -> decision_kernel::KernelParams {
     // Engine entry processing closes the existing position first when a reverse
     // signal arrives; keep this behaviour by disabling canonical reverses.
     kernel_params.allow_reverse = false;
+    kernel_params.leverage = cfg.trade.leverage.max(1.0);
     kernel_params
 }
 
@@ -186,6 +214,15 @@ fn make_kernel_state(
                 opened_at_ms: pos.open_time_ms,
                 updated_at_ms: pos.open_time_ms,
                 notional_usd,
+                margin_usd: accounting::quantize(pos.margin_used),
+                confidence: None,
+                entry_atr: None,
+                adds_count: 0,
+                tp1_taken: false,
+                trailing_sl: None,
+                mae_usd: 0.0,
+                mfe_usd: 0.0,
+                last_funding_ms: None,
             },
         );
     }
@@ -208,6 +245,249 @@ fn signal_name(signal: Signal) -> &'static str {
     }
 }
 
+fn build_active_params(
+    source: &str,
+    cfg: &StrategyConfig,
+    kernel_params: &decision_kernel::KernelParams,
+) -> HashMap<String, f64> {
+    let is_entry = source.contains("open") || source.contains("pyramid");
+    let mut params = HashMap::new();
+    if is_entry {
+        params.insert("min_adx".into(), cfg.thresholds.entry.min_adx);
+        params.insert("reef_adx_threshold".into(), cfg.trade.reef_adx_threshold);
+        params.insert("reef_long_rsi_block_gt".into(), cfg.trade.reef_long_rsi_block_gt);
+        params.insert("pullback_rsi_long_min".into(), cfg.thresholds.entry.pullback_rsi_long_min);
+        params.insert("pullback_rsi_short_max".into(), cfg.thresholds.entry.pullback_rsi_short_max);
+        params.insert("leverage".into(), cfg.trade.leverage);
+        params.insert("taker_fee_bps".into(), kernel_params.taker_fee_bps);
+        params.insert("maker_fee_bps".into(), kernel_params.maker_fee_bps);
+    } else {
+        params.insert("sl_atr_mult".into(), cfg.trade.sl_atr_mult);
+        params.insert("tp_atr_mult".into(), cfg.trade.tp_atr_mult);
+        params.insert("trailing_start_atr".into(), cfg.trade.trailing_start_atr);
+        params.insert("tsme_min_profit_atr".into(), cfg.trade.tsme_min_profit_atr);
+        params.insert("smart_exit_adx_exhaustion_lt".into(), cfg.trade.smart_exit_adx_exhaustion_lt);
+    }
+    params
+}
+
+/// Build a per-signal gate evaluation chain from the primary `GateResult`
+/// and engine-level post-signal checks.
+fn build_gate_evaluation(
+    gr: &gates::GateResult,
+    snap: &IndicatorSnapshot,
+    signal: Signal,
+    confidence: Confidence,
+    cfg: &StrategyConfig,
+) -> GateEvaluation {
+    let mut checks = Vec::with_capacity(10);
+
+    // Gate 1: ADX minimum threshold
+    checks.push(GateCheck {
+        gate_name: "adx_min".into(),
+        passed: gr.adx_above_min,
+        actual_value: snap.adx,
+        threshold_value: gr.effective_min_adx,
+        reason: if !gr.adx_above_min {
+            Some(format!(
+                "ADX {:.2} below effective min {:.2}",
+                snap.adx, gr.effective_min_adx
+            ))
+        } else {
+            None
+        },
+    });
+
+    // Gate 2: Ranging filter (vote system; bb_width_ratio is the most visible metric)
+    checks.push(GateCheck {
+        gate_name: "ranging".into(),
+        passed: !gr.is_ranging,
+        actual_value: gr.bb_width_ratio,
+        threshold_value: 0.0,
+        reason: if gr.is_ranging {
+            Some("Market in ranging regime (vote system)".into())
+        } else {
+            None
+        },
+    });
+
+    // Gate 3: Anomaly filter
+    let price_change_pct = if snap.prev_close > 0.0 {
+        (snap.close - snap.prev_close).abs() / snap.prev_close
+    } else {
+        0.0
+    };
+    checks.push(GateCheck {
+        gate_name: "anomaly".into(),
+        passed: !gr.is_anomaly,
+        actual_value: price_change_pct,
+        threshold_value: 0.0,
+        reason: if gr.is_anomaly {
+            Some("Anomalous price move or EMA deviation".into())
+        } else {
+            None
+        },
+    });
+
+    // Gate 4: Extension filter (distance from EMA_fast)
+    let ext_dist = if snap.ema_fast > 0.0 {
+        (snap.close - snap.ema_fast).abs() / snap.ema_fast
+    } else {
+        0.0
+    };
+    checks.push(GateCheck {
+        gate_name: "extension".into(),
+        passed: !gr.is_extended,
+        actual_value: ext_dist,
+        threshold_value: cfg.thresholds.entry.max_dist_ema_fast,
+        reason: if gr.is_extended {
+            Some(format!(
+                "Price dist {:.4} from EMA_fast exceeds {:.4}",
+                ext_dist, cfg.thresholds.entry.max_dist_ema_fast
+            ))
+        } else {
+            None
+        },
+    });
+
+    // Gate 5: Volume confirmation
+    checks.push(GateCheck {
+        gate_name: "volume".into(),
+        passed: gr.vol_confirm,
+        actual_value: snap.volume,
+        threshold_value: snap.vol_sma,
+        reason: if !gr.vol_confirm {
+            Some("Volume below SMA or vol_trend false".into())
+        } else {
+            None
+        },
+    });
+
+    // Gate 6: ADX rising
+    checks.push(GateCheck {
+        gate_name: "adx_rising".into(),
+        passed: gr.is_trending_up,
+        actual_value: snap.adx_slope,
+        threshold_value: 0.0,
+        reason: if !gr.is_trending_up {
+            Some(format!(
+                "ADX slope {:.4} not rising and ADX below saturation",
+                snap.adx_slope
+            ))
+        } else {
+            None
+        },
+    });
+
+    // Gate 7: BTC alignment (directional)
+    let btc_passed = match signal {
+        Signal::Buy => gr.btc_ok_long,
+        Signal::Sell => gr.btc_ok_short,
+        Signal::Neutral => true,
+    };
+    checks.push(GateCheck {
+        gate_name: "btc_alignment".into(),
+        passed: btc_passed,
+        actual_value: if btc_passed { 1.0 } else { 0.0 },
+        threshold_value: 1.0,
+        reason: if !btc_passed {
+            Some(format!(
+                "BTC alignment blocked {} signal",
+                match signal {
+                    Signal::Buy => "long",
+                    Signal::Sell => "short",
+                    Signal::Neutral => "neutral",
+                }
+            ))
+        } else {
+            None
+        },
+    });
+
+    // Post-signal gate: Confidence
+    let conf_meets = confidence.meets_min(cfg.trade.entry_min_confidence);
+    checks.push(GateCheck {
+        gate_name: "confidence".into(),
+        passed: conf_meets,
+        actual_value: confidence.rank() as f64,
+        threshold_value: cfg.trade.entry_min_confidence.rank() as f64,
+        reason: if !conf_meets {
+            Some(format!(
+                "Confidence {:?} below min {:?}",
+                confidence, cfg.trade.entry_min_confidence
+            ))
+        } else {
+            None
+        },
+    });
+
+    // Post-signal gate: SSF filter (MACD histogram)
+    if cfg.trade.enable_ssf_filter {
+        let ssf_ok = match signal {
+            Signal::Buy => snap.macd_hist > 0.0,
+            Signal::Sell => snap.macd_hist < 0.0,
+            Signal::Neutral => true,
+        };
+        checks.push(GateCheck {
+            gate_name: "ssf".into(),
+            passed: ssf_ok,
+            actual_value: snap.macd_hist,
+            threshold_value: 0.0,
+            reason: if !ssf_ok {
+                Some(format!(
+                    "MACD histogram {:.4} wrong side for {:?}",
+                    snap.macd_hist, signal
+                ))
+            } else {
+                None
+            },
+        });
+    }
+
+    // Post-signal gate: REEF filter (RSI with ADX-adaptive threshold)
+    if cfg.trade.enable_reef_filter {
+        let (reef_blocked, rsi_threshold) = match signal {
+            Signal::Buy => {
+                let thresh = if snap.adx < cfg.trade.reef_adx_threshold {
+                    cfg.trade.reef_long_rsi_block_gt
+                } else {
+                    cfg.trade.reef_long_rsi_extreme_gt
+                };
+                (snap.rsi > thresh, thresh)
+            }
+            Signal::Sell => {
+                let thresh = if snap.adx < cfg.trade.reef_adx_threshold {
+                    cfg.trade.reef_short_rsi_block_lt
+                } else {
+                    cfg.trade.reef_short_rsi_extreme_lt
+                };
+                (snap.rsi < thresh, thresh)
+            }
+            Signal::Neutral => (false, 0.0),
+        };
+        checks.push(GateCheck {
+            gate_name: "reef".into(),
+            passed: !reef_blocked,
+            actual_value: snap.rsi,
+            threshold_value: rsi_threshold,
+            reason: if reef_blocked {
+                Some(format!(
+                    "RSI {:.2} blocked by reef threshold {:.2}",
+                    snap.rsi, rsi_threshold
+                ))
+            } else {
+                None
+            },
+        });
+    }
+
+    let passed = checks.iter().all(|c| c.passed);
+    GateEvaluation {
+        passed,
+        checked_gates: checks,
+    }
+}
+
 fn step_decision(
     state: &mut SimState,
     ts: i64,
@@ -216,6 +496,7 @@ fn step_decision(
     price: f64,
     requested_notional_usd: Option<f64>,
     source: &'static str,
+    cfg: &StrategyConfig,
 ) -> decision_kernel::DecisionResult {
     let event = decision_kernel::MarketEvent {
         schema_version: 1,
@@ -225,13 +506,16 @@ fn step_decision(
         signal: kernel_signal(signal),
         price: accounting::quantize(price),
         notional_hint_usd: requested_notional_usd,
+        close_fraction: None,
+        fee_role: None,
+        funding_rate: None,
     };
     state.next_kernel_event_id = state.next_kernel_event_id.saturating_add(1);
 
     let decision = decision_kernel::step(&state.kernel_state, &event, &state.kernel_params);
     state.kernel_state = decision.state.clone();
 
-    let mut trace = DecisionKernelTrace {
+    let trace = DecisionKernelTrace {
         event_id: event.event_id,
         source: source.to_string(),
         timestamp_ms: ts,
@@ -275,6 +559,9 @@ fn step_decision(
             })
             .collect(),
         applied_to_kernel_state: !decision.diagnostics.has_errors(),
+        active_params: build_active_params(source, cfg, &state.kernel_params),
+        gate_result: None,
+        indicator_snapshot: None,
     };
     state.decision_diagnostics.push(trace);
     decision
@@ -575,7 +862,11 @@ pub fn run_simulation(
                             snap.close,
                             None,
                             "indicator-bar-close",
+                            cfg,
                         );
+                        if let Some(last) = state.decision_diagnostics.last_mut() {
+                            last.indicator_snapshot = Some(snap.clone());
+                        }
                         if decision
                             .intents
                             .iter()
@@ -639,6 +930,11 @@ pub fn run_simulation(
                     }
                 }
 
+            // Build per-signal gate evaluation chain
+            let gate_eval = build_gate_evaluation(
+                &gate_result, &snap, signal, confidence, cfg,
+            );
+
             // Collect as candidate for ranking
             indicator_bar_candidates.push(EntryCandidate {
                 symbol: sym.to_string(),
@@ -649,6 +945,7 @@ pub fn run_simulation(
                 entry_adx_threshold,
                 snap: snap.clone(),
                 ts,
+                gate_eval,
             });
             }
         }
@@ -742,7 +1039,13 @@ pub fn run_simulation(
                     cand.snap.close,
                     Some(kernel_notional),
                     "indicator-bar-open",
+                    cfg,
                 );
+                // Attach per-signal gate evaluation and indicator snapshot to the trace entry
+                if let Some(last) = state.decision_diagnostics.last_mut() {
+                    last.gate_result = Some(cand.gate_eval.clone());
+                    last.indicator_snapshot = Some(cand.snap.clone());
+                }
                 let intent_open = decision.intents.iter().any(|intent| {
                     matches!(
                         intent.kind,
@@ -964,6 +1267,7 @@ pub fn run_simulation(
                             cand.signal,
                             cand.ts,
                             sub_equity,
+                            &cand.gate_eval,
                         );
                         if opened {
                             entries_this_bar += 1;
@@ -1407,7 +1711,8 @@ fn apply_exit(
             exit_size,
             maker_taker_fee_rate(&state.kernel_params, accounting::FeeRole::Taker),
         );
-        state.balance += close.cash_delta;
+        // Margin-based: balance += pnl - fee (margin tracked per-position, not in balance).
+        state.balance += close.pnl - close.fee_usd;
 
         // Record PESC info (partial exits also count)
         state
@@ -1418,6 +1723,11 @@ fn apply_exit(
         let action = match pos.pos_type {
             PositionType::Long => "REDUCE_LONG",
             PositionType::Short => "REDUCE_SHORT",
+        };
+        let closed_margin = pos.margin_used * if pos.size > 0.0 {
+            partial_fill.closed_size / pos.size
+        } else {
+            0.0
         };
         state.trades.push(TradeRecord {
             timestamp_ms: ts,
@@ -1433,11 +1743,7 @@ fn apply_exit(
             balance: state.balance,
             entry_atr: pos.entry_atr,
             leverage: pos.leverage,
-            margin_used: pos.margin_used * if pos.size > 0.0 {
-                partial_fill.closed_size / pos.size
-            } else {
-                0.0
-            },
+            margin_used: closed_margin,
             ..Default::default()
         });
 
@@ -1453,6 +1759,18 @@ fn apply_exit(
             // Do not couple this state transition to human-readable reason text.
             p.tp1_taken = true;
         }
+
+        // Sync kernel state: reduce kernel position + return margin proportionally.
+        if let Some(kpos) = state.kernel_state.positions.get_mut(symbol) {
+            let close_frac = if pos.size > 0.0 { exit_size / pos.size } else { 0.0 };
+            let returned_margin = accounting::quantize(kpos.margin_usd * close_frac);
+            kpos.margin_usd = accounting::quantize(kpos.margin_usd - returned_margin);
+            kpos.quantity = accounting::quantize(kpos.quantity - exit_size);
+            kpos.notional_usd = accounting::quantize(kpos.notional_usd - (exit_size * pos.entry_price));
+            state.kernel_state.cash_usd = accounting::quantize(
+                state.kernel_state.cash_usd + returned_margin + close.pnl - close.fee_usd,
+            );
+        }
     } else {
         // Full exit
         let close = accounting::apply_close_fill(
@@ -1462,7 +1780,8 @@ fn apply_exit(
             pos.size,
             maker_taker_fee_rate(&state.kernel_params, accounting::FeeRole::Taker),
         );
-        state.balance += close.cash_delta;
+        // Margin-based: balance += pnl - fee.
+        state.balance += close.pnl - close.fee_usd;
 
         // Record PESC info
         state
@@ -1491,6 +1810,13 @@ fn apply_exit(
             margin_used: pos.margin_used,
             ..Default::default()
         });
+
+        // Sync kernel state: remove position + return margin to cash.
+        if let Some(kpos) = state.kernel_state.positions.remove(symbol) {
+            state.kernel_state.cash_usd = accounting::quantize(
+                state.kernel_state.cash_usd + kpos.margin_usd + close.pnl - close.fee_usd,
+            );
+        }
 
         state.positions.remove(symbol);
     }
@@ -1660,7 +1986,11 @@ fn try_pyramid(
         snap.close,
         Some(add_notional),
         "pyramid",
+        cfg,
     );
+    if let Some(last) = state.decision_diagnostics.last_mut() {
+        last.indicator_snapshot = Some(snap.clone());
+    }
     let has_add = decision
         .intents
         .iter()
@@ -1827,6 +2157,8 @@ fn evaluate_sub_bar_candidate(
         }
     }
 
+    let gate_eval = build_gate_evaluation(&gate_result, snap, signal, confidence, cfg);
+
     Some(EntryCandidate {
         symbol: sym.to_string(),
         signal,
@@ -1836,6 +2168,7 @@ fn evaluate_sub_bar_candidate(
         entry_adx_threshold,
         snap: snap.clone(),
         ts,
+        gate_eval,
     })
 }
 
@@ -1852,6 +2185,7 @@ fn execute_sub_bar_entry(
     signal: Signal,
     ts: i64,
     equity: f64,
+    gate_eval: &GateEvaluation,
 ) -> bool {
     if state.positions.contains_key(sym) {
         return false;
@@ -1910,7 +2244,13 @@ fn execute_sub_bar_entry(
         snap.close,
         Some(notional),
         "sub-bar-open",
+        cfg,
     );
+    // Attach per-signal gate evaluation and indicator snapshot to the trace entry
+    if let Some(last) = state.decision_diagnostics.last_mut() {
+        last.gate_result = Some(gate_eval.clone());
+        last.indicator_snapshot = Some(snap.clone());
+    }
     let has_open = decision
         .intents
         .iter()
@@ -1935,6 +2275,7 @@ fn execute_sub_bar_entry(
             entry_adx_threshold,
             snap: snap.clone(),
             ts,
+            gate_eval: gate_eval.clone(),
         },
         size,
         margin_used,
@@ -1974,11 +2315,11 @@ fn apply_kernel_open_from_plan(
         PositionType::Short => cand.snap.close * (1.0 - cfg.trade.slippage_bps / 10_000.0),
     });
 
-    let fill = accounting::apply_open_fill(
-        requested_notional_usd,
-        maker_taker_fee_rate(&state.kernel_params, accounting::FeeRole::Taker),
-    );
-    state.balance += fill.cash_delta;
+    // Margin-based accounting: only deduct fee from balance (matching main
+    // backtester).  Margin is tracked per-position, not deducted from cash.
+    let fee_rate = maker_taker_fee_rate(&state.kernel_params, accounting::FeeRole::Taker);
+    let fee_usd = accounting::quantize(requested_notional_usd * fee_rate);
+    state.balance -= fee_usd;
 
     let pos = Position {
         symbol: cand.symbol.to_string(),
@@ -2011,11 +2352,11 @@ fn apply_kernel_open_from_plan(
         action: action.to_string(),
         price: fill_price,
         size,
-        notional: fill.notional,
+        notional: requested_notional_usd,
         reason: reason.to_string(),
         confidence: cand.confidence,
         pnl: 0.0,
-        fee_usd: fill.fee_usd,
+        fee_usd,
         balance: state.balance,
         entry_atr: cand.atr,
         leverage,
@@ -2070,11 +2411,10 @@ fn apply_kernel_add_from_plan(
         return false;
     }
 
-    let fill = accounting::apply_open_fill(
-        add_notional,
-        maker_taker_fee_rate(&state.kernel_params, accounting::FeeRole::Taker),
-    );
-    state.balance += fill.cash_delta;
+    // Margin-based accounting: only deduct fee from balance (matching main backtester).
+    let add_fee_rate = maker_taker_fee_rate(&state.kernel_params, accounting::FeeRole::Taker);
+    let add_fee_usd = accounting::quantize(add_notional * add_fee_rate);
+    state.balance -= add_fee_usd;
 
     let fill_price = accounting::quantize(match add_signal {
         Signal::Buy => snap.close * (1.0 + cfg.trade.slippage_bps / 10_000.0),
@@ -2096,11 +2436,11 @@ fn apply_kernel_add_from_plan(
             },
             price: fill_price,
             size: add_size,
-            notional: fill.notional,
+            notional: add_notional,
             reason: format!("Pyramid #{}", next_add),
             confidence,
             pnl: 0.0,
-            fee_usd: fill.fee_usd,
+            fee_usd: add_fee_usd,
             balance: state.balance,
             entry_atr: atr,
             leverage: pos.leverage,
@@ -2415,6 +2755,7 @@ mod tests {
             },
         );
 
+        let kernel_state = make_kernel_state(1_000.0, 0, &positions);
         SimState {
             balance: 1_000.0,
             positions,
@@ -2425,7 +2766,7 @@ mod tests {
             trades: vec![],
             signals: vec![],
             decision_diagnostics: Vec::new(),
-            kernel_state: make_kernel_state(1_000.0, 0, &positions),
+            kernel_state,
             kernel_params: make_kernel_params(&StrategyConfig::default()),
             next_kernel_event_id: 1,
             equity_curve: vec![],
@@ -2502,7 +2843,8 @@ mod tests {
 
         apply_exit(&mut state, symbol, &exit, &snapped, snapped.t);
 
-        assert!((state.balance - (1_000.0 + expected.cash_delta)).abs() < 1e-9);
+        // Margin-based: balance changes by pnl - fee (not cash_delta which was notional-based).
+        assert!((state.balance - (1_000.0 + expected.pnl - expected.fee_usd)).abs() < 1e-9);
         assert_eq!(state.trades.len(), 1);
         assert_eq!(state.trades[0].action, "CLOSE_LONG");
         assert!((state.trades[0].pnl - expected.pnl).abs() < 1e-9);
@@ -2543,6 +2885,7 @@ mod tests {
             gate_stats: GateStats::default(),
         };
 
+        let cfg = StrategyConfig::default();
         let _ = step_decision(
             &mut state,
             1_000,
@@ -2551,6 +2894,7 @@ mod tests {
             100.0,
             Some(1_000.0),
             "fixture-open",
+            &cfg,
         );
         let _ = step_decision(
             &mut state,
@@ -2560,6 +2904,7 @@ mod tests {
             110.0,
             Some(1_000.0),
             "fixture-exit",
+            &cfg,
         );
 
         assert_eq!(state.decision_diagnostics, fixture.traces);
@@ -2568,6 +2913,381 @@ mod tests {
             "kernel final cash {} != fixture final cash {}",
             state.kernel_state.cash_usd,
             fixture.final_cash
+        );
+    }
+
+    #[test]
+    fn test_gate_evaluation_all_pass() {
+        // Build a snapshot and config where all gates pass.
+        let snap = IndicatorSnapshot {
+            close: 100.0,
+            high: 101.0,
+            low: 99.0,
+            open: 100.0,
+            volume: 1000.0,
+            t: 0,
+            ema_slow: 98.0,
+            ema_fast: 99.5,
+            ema_macro: 95.0,
+            adx: 30.0,
+            adx_pos: 20.0,
+            adx_neg: 10.0,
+            adx_slope: 1.0,
+            bb_upper: 102.0,
+            bb_lower: 98.0,
+            bb_width: 0.04,
+            bb_width_avg: 0.03,
+            bb_width_ratio: 1.33,
+            atr: 1.5,
+            atr_slope: 0.1,
+            avg_atr: 1.4,
+            rsi: 55.0,
+            stoch_rsi_k: 0.5,
+            stoch_rsi_d: 0.5,
+            macd_hist: 0.5,
+            prev_macd_hist: 0.3,
+            prev2_macd_hist: 0.1,
+            prev3_macd_hist: 0.0,
+            vol_sma: 800.0,
+            vol_trend: true,
+            prev_close: 99.5,
+            prev_ema_fast: 98.5,
+            prev_ema_slow: 97.8,
+            bar_count: 200,
+            funding_rate: 0.0,
+        };
+        let cfg = StrategyConfig::default();
+        let gr = gates::check_gates(&snap, &cfg, "ETH", Some(true), 0.001);
+        assert!(gr.all_gates_pass, "precondition: all primary gates pass");
+
+        let eval = build_gate_evaluation(&gr, &snap, Signal::Buy, Confidence::High, &cfg);
+
+        assert!(eval.passed, "GateEvaluation should show passed");
+        assert!(
+            eval.checked_gates.iter().all(|c| c.passed),
+            "Every individual gate check should be passed"
+        );
+        // Verify primary gates are present
+        let names: Vec<&str> = eval.checked_gates.iter().map(|c| c.gate_name.as_str()).collect();
+        assert!(names.contains(&"adx_min"));
+        assert!(names.contains(&"ranging"));
+        assert!(names.contains(&"anomaly"));
+        assert!(names.contains(&"extension"));
+        assert!(names.contains(&"volume"));
+        assert!(names.contains(&"adx_rising"));
+        assert!(names.contains(&"btc_alignment"));
+        assert!(names.contains(&"confidence"));
+        // No reason strings when all pass
+        assert!(
+            eval.checked_gates.iter().all(|c| c.reason.is_none()),
+            "No reason strings expected when all gates pass"
+        );
+    }
+
+    #[test]
+    fn test_gate_evaluation_blocked_by_adx() {
+        let snap = IndicatorSnapshot {
+            close: 100.0,
+            high: 101.0,
+            low: 99.0,
+            open: 100.0,
+            volume: 1000.0,
+            t: 0,
+            ema_slow: 98.0,
+            ema_fast: 99.5,
+            ema_macro: 95.0,
+            adx: 15.0, // well below default min_adx (22.0)
+            adx_pos: 10.0,
+            adx_neg: 5.0,
+            adx_slope: 1.0,
+            bb_upper: 102.0,
+            bb_lower: 98.0,
+            bb_width: 0.04,
+            bb_width_avg: 0.03,
+            bb_width_ratio: 1.33,
+            atr: 1.5,
+            atr_slope: 0.1,
+            avg_atr: 1.4,
+            rsi: 55.0,
+            stoch_rsi_k: 0.5,
+            stoch_rsi_d: 0.5,
+            macd_hist: 0.5,
+            prev_macd_hist: 0.3,
+            prev2_macd_hist: 0.1,
+            prev3_macd_hist: 0.0,
+            vol_sma: 800.0,
+            vol_trend: true,
+            prev_close: 99.5,
+            prev_ema_fast: 98.5,
+            prev_ema_slow: 97.8,
+            bar_count: 200,
+            funding_rate: 0.0,
+        };
+        let cfg = StrategyConfig::default();
+        let gr = gates::check_gates(&snap, &cfg, "ETH", Some(true), 0.001);
+        assert!(!gr.adx_above_min, "precondition: ADX below threshold");
+
+        let eval = build_gate_evaluation(&gr, &snap, Signal::Buy, Confidence::High, &cfg);
+
+        assert!(!eval.passed, "GateEvaluation should show NOT passed");
+        let adx_check = eval
+            .checked_gates
+            .iter()
+            .find(|c| c.gate_name == "adx_min")
+            .expect("adx_min gate should be present");
+        assert!(!adx_check.passed, "adx_min should be blocked");
+        assert!(
+            (adx_check.actual_value - 15.0).abs() < 1e-9,
+            "actual should be snap.adx"
+        );
+        assert!(
+            adx_check.threshold_value >= 22.0,
+            "threshold should be effective_min_adx"
+        );
+        assert!(
+            adx_check.reason.is_some(),
+            "blocked gate should have reason"
+        );
+    }
+
+    #[test]
+    fn test_gate_evaluation_blocked_by_reef() {
+        let snap = IndicatorSnapshot {
+            close: 100.0,
+            high: 101.0,
+            low: 99.0,
+            open: 100.0,
+            volume: 1000.0,
+            t: 0,
+            ema_slow: 98.0,
+            ema_fast: 99.5,
+            ema_macro: 95.0,
+            adx: 30.0,
+            adx_pos: 20.0,
+            adx_neg: 10.0,
+            adx_slope: 1.0,
+            bb_upper: 102.0,
+            bb_lower: 98.0,
+            bb_width: 0.04,
+            bb_width_avg: 0.03,
+            bb_width_ratio: 1.33,
+            atr: 1.5,
+            atr_slope: 0.1,
+            avg_atr: 1.4,
+            rsi: 75.0, // high RSI — will be blocked by reef for Buy signal
+            stoch_rsi_k: 0.5,
+            stoch_rsi_d: 0.5,
+            macd_hist: 0.5,
+            prev_macd_hist: 0.3,
+            prev2_macd_hist: 0.1,
+            prev3_macd_hist: 0.0,
+            vol_sma: 800.0,
+            vol_trend: true,
+            prev_close: 99.5,
+            prev_ema_fast: 98.5,
+            prev_ema_slow: 97.8,
+            bar_count: 200,
+            funding_rate: 0.0,
+        };
+        let mut cfg = StrategyConfig::default();
+        cfg.trade.enable_reef_filter = true;
+        // Default reef_long_rsi_block_gt = 70.0 and adx(30) < reef_adx_threshold(45)
+        // So RSI 75 > 70 → reef blocks long
+
+        let gr = gates::check_gates(&snap, &cfg, "ETH", Some(true), 0.001);
+        let eval = build_gate_evaluation(&gr, &snap, Signal::Buy, Confidence::High, &cfg);
+
+        assert!(!eval.passed, "GateEvaluation should show NOT passed");
+        let reef_check = eval
+            .checked_gates
+            .iter()
+            .find(|c| c.gate_name == "reef")
+            .expect("reef gate should be present");
+        assert!(!reef_check.passed, "reef should be blocked");
+        assert!(
+            (reef_check.actual_value - 75.0).abs() < 1e-9,
+            "actual should be snap.rsi"
+        );
+        assert!(
+            (reef_check.threshold_value - 70.0).abs() < 1e-9,
+            "threshold should be reef_long_rsi_block_gt"
+        );
+        assert!(
+            reef_check.reason.is_some(),
+            "blocked reef should have reason"
+        );
+    }
+
+    #[test]
+    fn test_gate_evaluation_serde_roundtrip() {
+        let eval = GateEvaluation {
+            passed: true,
+            checked_gates: vec![
+                GateCheck {
+                    gate_name: "adx_min".into(),
+                    passed: true,
+                    actual_value: 30.0,
+                    threshold_value: 22.0,
+                    reason: None,
+                },
+                GateCheck {
+                    gate_name: "ranging".into(),
+                    passed: false,
+                    actual_value: 0.7,
+                    threshold_value: 0.0,
+                    reason: Some("Market in ranging regime (vote system)".into()),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&eval).unwrap();
+        let deser: GateEvaluation = serde_json::from_str(&json).unwrap();
+        assert_eq!(eval, deser);
+    }
+
+    #[test]
+    fn test_indicator_snapshot_in_trace() {
+        // Verify IndicatorSnapshot serializes/deserializes correctly in a trace context.
+        let snap = make_minimal_snap(42000.0, 1_700_000_000_000);
+        let json = serde_json::to_string(&snap).unwrap();
+        let deser: IndicatorSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(snap, deser, "IndicatorSnapshot serde roundtrip");
+
+        // Verify indicator values match what we put in.
+        assert!((deser.close - 42000.0).abs() < 1e-9);
+        assert!((deser.adx - 0.0).abs() < 1e-9);
+        assert!((deser.rsi - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_trace_with_indicator_snapshot() {
+        // Build a trace via step_decision and then attach a snapshot,
+        // verifying the snapshot values are preserved in the trace struct.
+        let mut state = SimState {
+            balance: 10_000.0,
+            positions: FxHashMap::default(),
+            last_entry_attempt_ms: FxHashMap::default(),
+            last_exit_attempt_ms: FxHashMap::default(),
+            indicators: FxHashMap::default(),
+            ema_slow_history: FxHashMap::default(),
+            bar_counts: FxHashMap::default(),
+            last_close: FxHashMap::default(),
+            trades: vec![],
+            signals: vec![],
+            decision_diagnostics: Vec::new(),
+            kernel_state: make_kernel_state(10_000.0, 0, &FxHashMap::default()),
+            kernel_params: make_kernel_params(&StrategyConfig::default()),
+            next_kernel_event_id: 1,
+            equity_curve: vec![],
+            gate_stats: GateStats::default(),
+        };
+        let cfg = StrategyConfig::default();
+
+        let _ = step_decision(
+            &mut state,
+            1_000,
+            "ETH",
+            Signal::Buy,
+            3500.0,
+            Some(500.0),
+            "fixture-open",
+            &cfg,
+        );
+
+        // Simulate attaching an indicator snapshot (as the engine does after step_decision)
+        let snap = IndicatorSnapshot {
+            close: 3500.0,
+            high: 3520.0,
+            low: 3480.0,
+            open: 3490.0,
+            volume: 5000.0,
+            t: 1_000,
+            ema_slow: 3450.0,
+            ema_fast: 3475.0,
+            ema_macro: 3400.0,
+            adx: 28.5,
+            adx_pos: 22.0,
+            adx_neg: 12.0,
+            adx_slope: 0.8,
+            bb_upper: 3550.0,
+            bb_lower: 3430.0,
+            bb_width: 0.034,
+            bb_width_avg: 0.030,
+            bb_width_ratio: 1.13,
+            atr: 45.0,
+            atr_slope: 2.0,
+            avg_atr: 42.0,
+            rsi: 58.0,
+            stoch_rsi_k: 0.65,
+            stoch_rsi_d: 0.60,
+            macd_hist: 3.2,
+            prev_macd_hist: 2.1,
+            prev2_macd_hist: 1.0,
+            prev3_macd_hist: 0.5,
+            vol_sma: 4500.0,
+            vol_trend: true,
+            prev_close: 3490.0,
+            prev_ema_fast: 3470.0,
+            prev_ema_slow: 3445.0,
+            bar_count: 150,
+            funding_rate: 0.0001,
+        };
+
+        if let Some(last) = state.decision_diagnostics.last_mut() {
+            last.indicator_snapshot = Some(snap.clone());
+        }
+
+        // Verify the trace has the snapshot with correct values
+        let trace = state.decision_diagnostics.last().unwrap();
+        assert!(trace.indicator_snapshot.is_some());
+        let trace_snap = trace.indicator_snapshot.as_ref().unwrap();
+        assert!((trace_snap.adx - 28.5).abs() < 1e-9, "ADX should match");
+        assert!((trace_snap.rsi - 58.0).abs() < 1e-9, "RSI should match");
+        assert!((trace_snap.atr - 45.0).abs() < 1e-9, "ATR should match");
+        assert!((trace_snap.close - 3500.0).abs() < 1e-9, "close should match");
+        assert!((trace_snap.ema_slow - 3450.0).abs() < 1e-9, "EMA slow should match");
+        assert!((trace_snap.ema_fast - 3475.0).abs() < 1e-9, "EMA fast should match");
+        assert!((trace_snap.bb_width_ratio - 1.13).abs() < 1e-9, "BB width ratio should match");
+
+        // Verify full serde roundtrip of trace with snapshot
+        let json = serde_json::to_string(trace).unwrap();
+        let deser: DecisionKernelTrace = serde_json::from_str(&json).unwrap();
+        assert_eq!(*trace, deser, "Trace with indicator_snapshot serde roundtrip");
+    }
+
+    #[test]
+    fn test_trace_without_snapshot_backward_compat() {
+        // Verify that traces without indicator_snapshot deserialize correctly
+        // (backward compatibility with old fixture format).
+        let json = r#"{
+            "event_id": 1,
+            "source": "test",
+            "timestamp_ms": 1000,
+            "symbol": "BTC",
+            "signal": "BUY",
+            "requested_notional_usd": 100.0,
+            "requested_price": 50000.0,
+            "schema_version": 1,
+            "step": 1,
+            "state_step": 1,
+            "state_cash_usd": 9900.0,
+            "state_positions": 1,
+            "intent_count": 0,
+            "fill_count": 0,
+            "warnings": [],
+            "errors": [],
+            "intents": [],
+            "fills": [],
+            "applied_to_kernel_state": true,
+            "active_params": {}
+        }"#;
+        let trace: DecisionKernelTrace = serde_json::from_str(json).unwrap();
+        assert!(
+            trace.indicator_snapshot.is_none(),
+            "Missing indicator_snapshot should default to None"
+        );
+        assert!(
+            trace.gate_result.is_none(),
+            "Missing gate_result should default to None"
         );
     }
 }

@@ -105,6 +105,199 @@ def _env_float_optional(env_name: str) -> float | None:
         raise SystemExit(f"{env_name} must be a float when set")
 
 
+LIVE_BALANCE_PROFILES = {"daily", "deep", "weekly"}
+
+
+def _resolve_live_db_path_candidates() -> list[Path]:
+    candidates: list[Path] = []
+
+    env_raw = os.getenv("AI_QUANT_LIVE_DB_PATH")
+    if env_raw:
+        candidates.append(Path(env_raw).expanduser())
+
+    candidates.append(AIQ_ROOT / "trading_engine_live.db")
+    candidates.append(Path("/home/fol2hk/.openclaw/workspace/dev/ai_quant/trading_engine_live.db"))
+
+    out: list[Path] = []
+    seen: set[str] = set()
+    for cand in candidates:
+        try:
+            rp = cand.expanduser().resolve()
+        except Exception:
+            continue
+        rs = str(rp)
+        if rs in seen:
+            continue
+        seen.add(rs)
+        out.append(rp)
+
+    return out
+
+
+def _first_existing_live_db_path() -> Path | None:
+    for cand in _resolve_live_db_path_candidates():
+        if cand.exists():
+            return cand
+    return None
+
+
+def _read_balance_from_live_db(*, db_path: Path) -> float | None:
+    try:
+        if not db_path.exists():
+            return None
+        conn = sqlite3.connect(str(db_path), timeout=10)
+        try:
+            row = conn.execute("SELECT balance FROM trades ORDER BY id DESC LIMIT 1").fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        return float(row[0])
+    except Exception:
+        return None
+
+
+
+
+def _resolve_live_export_python() -> str:
+    venv_py = AIQ_ROOT / ".venv" / "bin" / "python3"
+    if venv_py.exists():
+        return str(venv_py)
+    return sys.executable
+
+def _export_live_balance_via_cli(*, output: Path) -> tuple[float | None, dict[str, Any]]:
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    env = os.environ.copy()
+    secrets_raw = os.getenv("AI_QUANT_SECRETS_PATH")
+    if secrets_raw:
+        env["AI_QUANT_SECRETS_PATH"] = str(Path(secrets_raw).expanduser())
+    else:
+        for default_secret_path in [
+            AIQ_ROOT / "secrets.json",
+            Path("~/.config/openclaw/ai-quant-secrets.json").expanduser(),
+            Path("/home/fol2hk/openclaw-plugins/ai_quant/secrets.json"),
+        ]:
+            if default_secret_path.exists():
+                env["AI_QUANT_SECRETS_PATH"] = str(default_secret_path)
+                break
+
+    cmd = [
+        _resolve_live_export_python(),
+        str(AIQ_ROOT / "tools" / "export_state.py"),
+        "--source",
+        "live",
+        "--output",
+        str(output),
+    ]
+
+    try:
+        res = subprocess.run(
+            cmd,
+            cwd=str(AIQ_ROOT),
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+    except Exception as e:
+        return None, {"method": "export_state", "success": False, "error": f"{type(e).__name__}: {e}"}
+
+    if res.returncode != 0:
+        err = str(res.stderr or res.stdout or "").strip()
+        if not err:
+            err = f"export_state exited with code {int(res.returncode)}"
+        return None, {"method": "export_state", "success": False, "error": err}
+
+    try:
+        payload = _load_json(output)
+        raw_bal = payload.get("balance")
+        if raw_bal is None:
+            return None, {"method": "export_state", "success": False, "error": "balance missing from export payload"}
+        balance = float(raw_bal)
+    except Exception as e:
+        return None, {"method": "export_state", "success": False, "error": f"failed to read export payload: {type(e).__name__}: {e}"}
+
+    return balance, {"method": "export_state", "success": True, "path": str(output), "secrets_path_used": env.get("AI_QUANT_SECRETS_PATH", "")}
+
+
+def _write_initial_balance_state_json(*, path: Path, balance: float, metadata: dict[str, Any]) -> None:
+    payload: dict[str, Any] = {
+        "version": 1,
+        "updated_at_ms": int(time.time() * 1000),
+        "balance": round(float(balance), 4),
+        "metadata": dict(metadata),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _resolve_profile_requires_live_initial_balance(*, profile: str) -> bool:
+    return str(profile or "").strip().lower() in LIVE_BALANCE_PROFILES
+
+
+def _resolve_factory_initial_balance(*, run_dir: Path, args: argparse.Namespace) -> tuple[float | None, Path | None, dict[str, Any]]:
+    if not _resolve_profile_requires_live_initial_balance(profile=str(getattr(args, "profile", "daily").strip())):
+        return None, None, {"mode": "disabled", "reason": "profile_no_live_init"}
+
+    state_dir = run_dir / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_json = state_dir / "live_initial_balance.json"
+
+    if state_json.exists():
+        try:
+            existing = _load_json(state_json)
+            if isinstance(existing, dict) and "balance" in existing:
+                bal = float(existing.get("balance") or 0.0)
+                return bal, state_json, {
+                    "mode": "live",
+                    "source": "cache",
+                    "path": str(state_json),
+                    "cached_at_ms": float(existing.get("updated_at_ms", 0.0) or 0.0),
+                }
+        except Exception:
+            pass
+
+    bal, meta = _export_live_balance_via_cli(output=state_json)
+    if bal is not None:
+        meta["mode"] = "live"
+        if "path" not in meta:
+            meta["path"] = str(state_json)
+        _write_initial_balance_state_json(path=state_json, balance=bal, metadata=meta)
+        return bal, state_json, meta
+
+    db_path = _first_existing_live_db_path()
+    if db_path is None:
+        return None, None, {
+            "mode": "live",
+            "source": "sqlite",
+            "success": False,
+            "reason": "missing_live_db",
+            "export_error": meta.get("error"),
+        }
+
+    bal_from_db = _read_balance_from_live_db(db_path=db_path)
+    if bal_from_db is None:
+        return None, None, {
+            "mode": "live",
+            "source": "sqlite",
+            "success": False,
+            "reason": "live_db_has_no_balance_rows",
+            "live_db_path": str(db_path),
+            "export_error": meta.get("error"),
+        }
+
+    fallback_meta = {
+        "mode": "live",
+        "source": "sqlite",
+        "success": True,
+        "live_db_path": str(db_path),
+    }
+    _write_initial_balance_state_json(path=state_json, balance=bal_from_db, metadata=fallback_meta)
+    return bal_from_db, state_json, fallback_meta
+
+
 _REPLAY_EQUIVALENCE_MODES = ("live", "paper", "backtest")
 
 
@@ -1201,25 +1394,182 @@ def _validate_candidate_output_schema(path: Path) -> tuple[bool, list[str]]:
         return False, [f"sweep output file empty: {path}"]
 
     errors: list[str] = []
-    for line_no, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        raw_line = raw_line.strip()
-        if not raw_line:
-            continue
-        try:
-            row = json.loads(raw_line)
-        except Exception as exc:
-            errors.append(f"line {line_no}: invalid json: {exc}")
-            continue
+    with path.open("r", encoding="utf-8") as f:
+        for line_no, raw_line in enumerate(f, 1):
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+            try:
+                row = json.loads(raw_line)
+            except Exception as exc:
+                errors.append(f"line {line_no}: invalid json: {exc}")
+                continue
 
-        ok, row_errors = _validate_candidate_schema_row(row)
-        if ok:
-            continue
-        for err in row_errors:
-            errors.append(f"line {line_no}: {err}")
+            ok, row_errors = _validate_candidate_schema_row(row)
+            if ok:
+                continue
+            for err in row_errors:
+                errors.append(f"line {line_no}: {err}")
 
     if errors:
         return False, errors
     return True, []
+
+
+# ---------------------------------------------------------------------------
+# Sort-key functions for _extract_top_candidates (mirrors generate_config.py)
+# ---------------------------------------------------------------------------
+
+_EXTRACT_SORT_KEYS: dict[str, Any] = {
+    "pnl":      lambda r: float(r.get("total_pnl", 0) or 0),
+    "dd":       lambda r: -float(r.get("max_drawdown_pct", 1) or 1),
+    "pf":       lambda r: float(r.get("profit_factor", 0) or 0),
+    "wr":       lambda r: float(r.get("win_rate", 0) or 0),
+    "sharpe":   lambda r: float(r.get("sharpe_ratio", 0) or 0),
+    "trades":   lambda r: float(r.get("total_trades", 0) or 0),
+}
+
+
+def _extract_balanced_score(r: dict) -> float:
+    """Composite score matching generate_config.py balanced_score()."""
+    try:
+        pnl = float(r.get("total_pnl", 0) or 0)
+    except Exception:
+        pnl = 0.0
+    try:
+        pf = min(float(r.get("profit_factor", 0) or 0), 10.0)
+    except Exception:
+        pf = 0.0
+    try:
+        sharpe = float(r.get("sharpe_ratio", 0) or 0)
+    except Exception:
+        sharpe = 0.0
+    try:
+        dd = float(r.get("max_drawdown_pct", 1) or 1)
+    except Exception:
+        dd = 1.0
+    try:
+        trades = int(float(r.get("total_trades", 0) or 0))
+    except Exception:
+        trades = 0
+    trade_penalty = 0.5 if trades < 20 else 1.0
+    return (pnl * 0.3 + pf * 20 + sharpe * 15 - dd * 100) * trade_penalty
+
+
+def _extract_top_candidates(
+    src: Path,
+    dst: Path,
+    *,
+    max_rank: int,
+    modes: list[str],
+    min_trades: int = 0,
+    validate_schema: bool = False,
+    max_schema_errors: int = 100,
+) -> tuple[int, list[str]]:
+    """Single-pass streaming extraction of multi-criteria top-N candidates.
+
+    Streams through *src* line-by-line (constant memory) maintaining a
+    bounded min-heap per sort *mode*.  After the pass, unions all heaps,
+    deduplicates by ``config_id``, and writes the compact result to *dst*.
+
+    Returns ``(total_rows_read, schema_errors)`` where *schema_errors* is
+    non-empty only when *validate_schema* is ``True`` and issues are found.
+
+    Memory usage: O(max_rank × len(modes) × row_size) — typically < 50 MB
+    even for multi-million-trial sweeps.
+    """
+    import heapq
+
+    sort_fns: dict[str, Any] = {**_EXTRACT_SORT_KEYS, "balanced": _extract_balanced_score}
+
+    # One min-heap per mode, each capped at max_rank entries.
+    heaps: dict[str, list[tuple[float, int, str]]] = {m: [] for m in modes if m in sort_fns}
+    # Store rows by config_id so we only keep one copy of each row dict.
+    row_store: dict[str, str] = {}  # config_id -> json line
+
+    schema_errors: list[str] = []
+    total_rows = 0
+    counter = 0  # tie-breaker for heap ordering
+
+    with src.open("r", encoding="utf-8") as f:
+        for line_no, raw_line in enumerate(f, 1):
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+
+            try:
+                row = json.loads(raw_line)
+            except Exception as exc:
+                if validate_schema:
+                    schema_errors.append(f"line {line_no}: invalid json: {exc}")
+                    if len(schema_errors) >= max_schema_errors:
+                        break
+                continue
+
+            if validate_schema:
+                ok, row_errors = _validate_candidate_schema_row(row)
+                if not ok:
+                    for err in row_errors:
+                        schema_errors.append(f"line {line_no}: {err}")
+                    if len(schema_errors) >= max_schema_errors:
+                        break
+                    continue
+
+            total_rows += 1
+
+            # Skip rows below min_trades threshold.
+            try:
+                trades = int(float(row.get("total_trades", 0) or 0))
+            except Exception:
+                trades = 0
+            if min_trades > 0 and trades < min_trades:
+                continue
+
+            config_id = str(row.get("config_id", "") or "").strip()
+            if not config_id:
+                config_id = f"_anon_{counter}"
+
+            counter += 1
+
+            for mode, score_fn in sort_fns.items():
+                if mode not in heaps:
+                    continue
+                try:
+                    score = float(score_fn(row))
+                except Exception:
+                    continue
+                entry = (score, counter, config_id)
+                heap = heaps[mode]
+                if len(heap) < max_rank:
+                    heapq.heappush(heap, entry)
+                    row_store[config_id] = raw_line
+                elif score > heap[0][0]:
+                    evicted = heapq.heapreplace(heap, entry)
+                    row_store[config_id] = raw_line
+                    # Evict row from store if no longer referenced by any heap.
+                    evicted_id = evicted[2]
+                    if not any(evicted_id == e[2] for h in heaps.values() for e in h):
+                        row_store.pop(evicted_id, None)
+
+    # Union all heaps, deduplicate, and write.
+    seen: set[str] = set()
+    output_lines: list[str] = []
+    # Process heaps in deterministic order; within each heap, best-first.
+    for mode in modes:
+        if mode not in heaps:
+            continue
+        for _score, _cnt, cid in sorted(heaps[mode], reverse=True):
+            if cid in seen:
+                continue
+            seen.add(cid)
+            line = row_store.get(cid)
+            if line is not None:
+                output_lines.append(line)
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text("\n".join(output_lines) + ("\n" if output_lines else ""), encoding="utf-8")
+
+    return total_rows, schema_errors
 
 
 def _run_replay_equivalence_check(
@@ -2225,6 +2575,18 @@ def main(argv: list[str] | None = None) -> int:
 
     _write_json(run_dir / "run_metadata.json", meta)
 
+    # Resolve live-initial balance for daily/deep/weekly profiles.
+    live_initial_balance, live_initial_balance_path, live_initial_balance_meta = _resolve_factory_initial_balance(
+        run_dir=run_dir,
+        args=args,
+    )
+    meta["initial_balance"] = {
+        "value": live_initial_balance,
+        "path": str(live_initial_balance_path) if live_initial_balance_path else "",
+        "profile": str(getattr(args, "profile", "daily")).strip(),
+        **live_initial_balance_meta,
+    }
+
     # ------------------------------------------------------------------
     # 2) Sweep
     # ------------------------------------------------------------------
@@ -2263,7 +2625,17 @@ def main(argv: list[str] | None = None) -> int:
             "--output-mode",
             _sweep_output_mode_from_args(args),
         ]
+        if live_initial_balance_path is not None:
+            sweep_argv += ["--balance-from", str(live_initial_balance_path)]
         top_n = int(args.top_n or 0)
+        if top_n <= 0:
+            # Auto-derive --top-n from profile to reduce sweep output size.
+            # A 5× safety margin over shortlist_max_rank ensures multi-criteria
+            # extraction has ample headroom while cutting output from GBs to MBs.
+            _slm = int(getattr(args, "shortlist_max_rank", 0) or 0)
+            _spm = int(getattr(args, "shortlist_per_mode", 0) or 0)
+            _effective_max_rank = _slm if _slm > 0 else (max(10, _spm * 5) if _spm > 0 else 200)
+            top_n = _effective_max_rank * 5
         if top_n > 0:
             sweep_argv += ["--top-n", str(top_n)]
         if bt_candles_db:
@@ -2381,15 +2753,65 @@ def main(argv: list[str] | None = None) -> int:
     _write_json(run_dir / "run_metadata.json", meta)
 
     # ------------------------------------------------------------------
+    # 2b) Extract top candidates (single-pass streaming)
+    # ------------------------------------------------------------------
+    shortlist_per_mode = int(getattr(args, "shortlist_per_mode", 0) or 0)
+    shortlist_max_rank = int(getattr(args, "shortlist_max_rank", 0) or 0)
+    shortlist_modes_raw = str(getattr(args, "shortlist_modes", "") or "").strip()
+
+    allowed_modes = {"pnl", "dd", "pf", "wr", "sharpe", "trades", "balanced"}
+    extract_modes = [m.strip() for m in shortlist_modes_raw.split(",") if m.strip()]
+    extract_modes = [m for m in extract_modes if m in allowed_modes]
+    if not extract_modes:
+        extract_modes = ["dd", "balanced"]
+    # Always include the legacy sort-by mode so single-mode generation works.
+    legacy_sort = str(getattr(args, "sort_by", "balanced") or "balanced").strip()
+    if legacy_sort in allowed_modes and legacy_sort not in extract_modes:
+        extract_modes.append(legacy_sort)
+    # Always include "pnl" so default ranking is available.
+    if "pnl" not in extract_modes:
+        extract_modes.append("pnl")
+
+    if shortlist_max_rank <= 0:
+        shortlist_max_rank = max(10, shortlist_per_mode * 5) if shortlist_per_mode > 0 else 200
+
+    candidate_min_trades = max(0, int(getattr(args, "candidate_min_trades", 1) or 0))
+
+    sweep_candidates_out = run_dir / "sweeps" / "sweep_candidates.jsonl"
+    if bool(args.resume) and _is_nonempty_file(sweep_candidates_out):
+        meta["steps"].append({"name": "extract_top_candidates_skip", "path": str(sweep_candidates_out)})
+    else:
+        t0 = time.monotonic()
+        extract_rows, extract_schema_errors = _extract_top_candidates(
+            sweep_out,
+            sweep_candidates_out,
+            max_rank=shortlist_max_rank,
+            modes=extract_modes,
+            min_trades=candidate_min_trades,
+        )
+        elapsed = time.monotonic() - t0
+        meta["steps"].append({
+            "name": "extract_top_candidates",
+            "path": str(sweep_candidates_out),
+            "source_path": str(sweep_out),
+            "total_rows_scanned": extract_rows,
+            "modes": extract_modes,
+            "max_rank": shortlist_max_rank,
+            "min_trades": candidate_min_trades,
+            "elapsed_s": round(elapsed, 2),
+            "output_size_bytes": sweep_candidates_out.stat().st_size if sweep_candidates_out.exists() else 0,
+        })
+
+    _write_json(run_dir / "run_metadata.json", meta)
+
+    # All downstream generate_config calls use the compact candidates file.
+    sweep_gen_source = sweep_candidates_out
+
+    # ------------------------------------------------------------------
     # 3) Candidate config generation
     # ------------------------------------------------------------------
     configs_dir = run_dir / "configs"
     configs_dir.mkdir(parents=True, exist_ok=True)
-
-    shortlist_per_mode = int(getattr(args, "shortlist_per_mode", 0) or 0)
-    shortlist_max_rank = int(getattr(args, "shortlist_max_rank", 0) or 0)
-    shortlist_modes_raw = str(getattr(args, "shortlist_modes", "") or "").strip()
-    candidate_min_trades = max(0, int(getattr(args, "candidate_min_trades", 1) or 0))
 
     candidate_paths: list[Path] = []
     candidate_config_ids: dict[str, str] = {}
@@ -2457,7 +2879,7 @@ def main(argv: list[str] | None = None) -> int:
                     "python3",
                     "tools/generate_config.py",
                     "--sweep-results",
-                    str(sweep_out),
+                    str(sweep_gen_source),
                     "--base-config",
                     str(args.config),
                     "--sort-by",
@@ -2521,7 +2943,7 @@ def main(argv: list[str] | None = None) -> int:
                 "python3",
                 "tools/generate_config.py",
                 "--sweep-results",
-                str(sweep_out),
+                str(sweep_gen_source),
                 "--base-config",
                 str(args.config),
                 "--sort-by",
@@ -2602,6 +3024,8 @@ def main(argv: list[str] | None = None) -> int:
             "--output",
             str(out_json),
         ]
+        if live_initial_balance_path is not None:
+            replay_argv += ["--balance-from", str(live_initial_balance_path)]
         if bt_candles_db:
             replay_argv += [
                 "--candles-db",

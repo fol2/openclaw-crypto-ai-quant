@@ -7,6 +7,7 @@ pub mod macd;
 pub mod volume;
 
 use crate::candle::OhlcvBar;
+use serde::{Deserialize, Serialize};
 
 /// Ring buffer for rolling-window computations (BB, StochRSI, vol SMA, etc.).
 #[derive(Debug, Clone)]
@@ -135,7 +136,7 @@ pub struct IndicatorBank {
 }
 
 /// Snapshot of indicator values for the current bar (passed to signal logic).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IndicatorSnapshot {
     pub close: f64,
     pub high: f64,

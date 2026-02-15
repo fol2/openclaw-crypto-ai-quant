@@ -19,6 +19,7 @@ pub enum MarketSignal {
     Buy,
     Sell,
     Neutral,
+    Funding,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +53,18 @@ pub struct MarketEvent {
     pub price: f64,
     #[serde(default)]
     pub notional_hint_usd: Option<f64>,
+    /// Fraction of position to close: `None` or `Some(1.0)` = full close,
+    /// `Some(0.5)` = close 50%.  Only meaningful when the event triggers a
+    /// close (opposite-side signal with an existing position).
+    #[serde(default)]
+    pub close_fraction: Option<f64>,
+    /// Fee role override: `None` defaults to Taker.
+    #[serde(default)]
+    pub fee_role: Option<accounting::FeeRole>,
+    /// Funding rate for settlement events.  Only meaningful when
+    /// `signal == MarketSignal::Funding`.  Positive rate means longs pay shorts.
+    #[serde(default)]
+    pub funding_rate: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -63,6 +76,33 @@ pub struct Position {
     pub opened_at_ms: i64,
     pub updated_at_ms: i64,
     pub notional_usd: f64,
+    /// Margin (collateral) locked for this position = notional / leverage.
+    #[serde(default)]
+    pub margin_usd: f64,
+    /// Signal confidence at entry (0=Low, 1=Medium, 2=High).
+    #[serde(default)]
+    pub confidence: Option<u8>,
+    /// ATR value at the time of entry, used for exit sizing.
+    #[serde(default)]
+    pub entry_atr: Option<f64>,
+    /// Number of ADD (pyramid) fills applied to this position.
+    #[serde(default)]
+    pub adds_count: u32,
+    /// Whether partial take-profit (TP1) has been taken.
+    #[serde(default)]
+    pub tp1_taken: bool,
+    /// Trailing stop-loss price, if active.
+    #[serde(default)]
+    pub trailing_sl: Option<f64>,
+    /// Maximum adverse excursion in USD (worst unrealised drawdown).
+    #[serde(default)]
+    pub mae_usd: f64,
+    /// Maximum favorable excursion in USD (best unrealised profit).
+    #[serde(default)]
+    pub mfe_usd: f64,
+    /// Timestamp (ms) of the last funding settlement applied to this position.
+    #[serde(default)]
+    pub last_funding_ms: Option<i64>,
 }
 
 /// Canonical strategy state persisted between steps.
@@ -162,6 +202,10 @@ pub struct KernelParams {
     pub taker_fee_bps: f64,
     pub allow_pyramid: bool,
     pub allow_reverse: bool,
+    /// Leverage used for margin calculation.  Kernel tracks margin (= notional /
+    /// leverage) in its cash model rather than full notional, matching the
+    /// exchange's margined-perpetual accounting.  Default 1.0 (spot-equivalent).
+    pub leverage: f64,
 }
 
 impl Default for KernelParams {
@@ -175,6 +219,7 @@ impl Default for KernelParams {
             taker_fee_bps: accounting::DEFAULT_TAKER_FEE_BPS,
             allow_pyramid: true,
             allow_reverse: true,
+            leverage: 1.0,
         }
     }
 }
@@ -213,7 +258,7 @@ fn side_from_signal(signal: MarketSignal) -> Option<PositionSide> {
     match signal {
         MarketSignal::Buy => Some(PositionSide::Long),
         MarketSignal::Sell => Some(PositionSide::Short),
-        MarketSignal::Neutral => None,
+        MarketSignal::Neutral | MarketSignal::Funding => None,
     }
 }
 
@@ -228,6 +273,7 @@ fn apply_open(
     notional: f64,
     price: f64,
     fee_rate: f64,
+    leverage: f64,
     timestamp_ms: i64,
     intent_id: u64,
     kind: OrderIntentKind,
@@ -247,7 +293,11 @@ fn apply_open(
     }
 
     let open = accounting::apply_open_fill(notional, fee_rate);
-    if open.notional + open.fee_usd > state.cash_usd {
+    let effective_leverage = leverage.max(1.0);
+    let margin = quantise(open.notional / effective_leverage);
+
+    // Margin-based cash check: only the collateral (margin) is locked, not full notional.
+    if margin + open.fee_usd > state.cash_usd {
         diagnostics
             .warnings
             .push(format!("skip open for {symbol}: insufficient cash"));
@@ -264,7 +314,8 @@ fn apply_open(
         return None;
     }
 
-    state.cash_usd = quantise(state.cash_usd + open.cash_delta);
+    // Deduct margin + fee from cash (not full notional).
+    state.cash_usd = quantise(state.cash_usd - margin - open.fee_usd);
     if let Some(existing) = state.positions.get_mut(symbol) {
         if existing.side == side {
             // Weighted average with additional stake.
@@ -279,9 +330,11 @@ fn apply_open(
                 (existing.avg_entry_price * existing_qty + price * quantity) / total_qty
             };
             existing.notional_usd = accounting::quantize(total_notional);
+            existing.margin_usd = accounting::quantize(existing.margin_usd + margin);
             existing.quantity = accounting::quantize(total_qty);
             existing.avg_entry_price = accounting::quantize(avg_entry);
             existing.updated_at_ms = timestamp_ms;
+            existing.adds_count = existing.adds_count.saturating_add(1);
         } else {
             return None;
         }
@@ -296,6 +349,15 @@ fn apply_open(
                 opened_at_ms: timestamp_ms,
                 updated_at_ms: timestamp_ms,
                 notional_usd: notional,
+                margin_usd: margin,
+                confidence: None,
+                entry_atr: None,
+                adds_count: 0,
+                tp1_taken: false,
+                trailing_sl: None,
+                mae_usd: 0.0,
+                mfe_usd: 0.0,
+                last_funding_ms: None,
             },
         );
     }
@@ -332,11 +394,12 @@ fn apply_close(
     side: PositionSide,
     price: f64,
     fee_rate: f64,
+    close_fraction: Option<f64>,
     intent_id: u64,
     diagnostics: &mut Diagnostics,
 ) -> Option<(OrderIntent, FillEvent)> {
-    let position = match state.positions.remove(symbol) {
-        Some(pos) => pos,
+    let position = match state.positions.get(symbol) {
+        Some(pos) => pos.clone(),
         None => {
             diagnostics
                 .warnings
@@ -358,16 +421,42 @@ fn apply_close(
         return None;
     }
 
-    let quantity = accounting::quantize(position.quantity);
+    // Determine effective fraction: None or >= 1.0 means full close.
+    let frac = close_fraction.unwrap_or(1.0).clamp(0.0, 1.0);
+    let is_full_close = frac >= 1.0 - 1e-15;
+
+    let plan = accounting::build_partial_close_plan(position.quantity, position.margin_usd, frac);
+
+    if plan.closed_size <= 0.0 {
+        diagnostics
+            .warnings
+            .push(format!("close skipped for {symbol}: closed size is zero"));
+        return None;
+    }
+
+    let close_qty = plan.closed_size;
     let close = accounting::apply_close_fill(
         side == PositionSide::Long,
         position.avg_entry_price,
         price,
-        quantity,
+        close_qty,
         fee_rate,
     );
 
-    state.cash_usd = quantise(state.cash_usd + close.cash_delta);
+    // Return proportional margin + PnL - fee to cash.
+    let returned_margin = quantise(position.margin_usd - plan.remaining_margin);
+    state.cash_usd = quantise(state.cash_usd + returned_margin + close.pnl - close.fee_usd);
+
+    if is_full_close {
+        state.positions.remove(symbol);
+    } else {
+        // Update position in-place with reduced values.
+        let pos = state.positions.get_mut(symbol).unwrap();
+        pos.quantity = plan.remaining_size;
+        pos.margin_usd = plan.remaining_margin;
+        pos.notional_usd = quantise(pos.avg_entry_price * plan.remaining_size);
+        pos.updated_at_ms = state.timestamp_ms;
+    }
 
     let intent = OrderIntent {
         schema_version: KERNEL_SCHEMA_VERSION,
@@ -375,7 +464,7 @@ fn apply_close(
         symbol: symbol.to_string(),
         kind: OrderIntentKind::Close,
         side,
-        quantity,
+        quantity: close_qty,
         price: quantise(price),
         notional_usd: close.notional,
         fee_rate,
@@ -385,7 +474,7 @@ fn apply_close(
         intent_id,
         symbol: symbol.to_string(),
         side,
-        quantity,
+        quantity: close_qty,
         price: quantise(price),
         notional_usd: close.notional,
         fee_usd: close.fee_usd,
@@ -405,6 +494,36 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
         return DecisionResult {
             schema_version: KERNEL_SCHEMA_VERSION,
             state: state.clone(),
+            intents: vec![],
+            fills: vec![],
+            diagnostics,
+        };
+    }
+
+    // ---- Funding settlement: cash-only adjustment, no order intents. ----
+    if event.signal == MarketSignal::Funding {
+        let mut next_state = state.clone();
+        next_state.step = next_state.step.saturating_add(1);
+        next_state.timestamp_ms = event.timestamp_ms;
+
+        if let Some(rate) = event.funding_rate {
+            if rate != 0.0 {
+                if let Some(pos) = next_state.positions.get_mut(&event.symbol) {
+                    let is_long = pos.side == PositionSide::Long;
+                    let delta =
+                        accounting::funding_delta(is_long, pos.quantity, event.price, rate);
+                    next_state.cash_usd = quantise(next_state.cash_usd + delta);
+                    pos.last_funding_ms = Some(event.timestamp_ms);
+                    pos.updated_at_ms = event.timestamp_ms;
+                }
+            }
+        }
+
+        diagnostics.intent_count = 0;
+        diagnostics.fill_count = 0;
+        return DecisionResult {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            state: next_state,
             intents: vec![],
             fills: vec![],
             diagnostics,
@@ -432,7 +551,9 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
         maker_fee_bps: params.maker_fee_bps,
         taker_fee_bps: params.taker_fee_bps,
     };
-    let fee_rate = fee_model.role_rate(accounting::FeeRole::Taker);
+    let role = event.fee_role.unwrap_or(accounting::FeeRole::Taker);
+    let fee_rate = fee_model.role_rate(role);
+    let leverage = params.leverage;
     let notional = event
         .notional_hint_usd
         .unwrap_or(params.default_notional_usd)
@@ -453,6 +574,7 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                 notional,
                 event.price,
                 fee_rate,
+                leverage,
                 event.timestamp_ms,
                 open_id,
                 OrderIntentKind::Open,
@@ -471,6 +593,7 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                     notional,
                     event.price,
                     fee_rate,
+                    leverage,
                     event.timestamp_ms,
                     open_id,
                     OrderIntentKind::Add,
@@ -494,6 +617,7 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                 closed_side,
                 event.price,
                 fee_rate,
+                event.close_fraction,
                 close_id,
                 &mut diagnostics,
             ) {
@@ -516,6 +640,7 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                     notional,
                     event.price,
                     fee_rate,
+                    leverage,
                     event.timestamp_ms,
                     reverse_id,
                     OrderIntentKind::Open,
@@ -564,6 +689,9 @@ mod tests {
             signal,
             price: 10_000.0,
             notional_hint_usd: notional_hint,
+            close_fraction: None,
+            fee_role: None,
+            funding_rate: None,
         }
     }
 
@@ -609,16 +737,27 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_close_pnl_matches_shared_accounting() {
+    fn round_trip_close_pnl_matches_margin_accounting() {
         let initial_state = init_state();
-        let params = KernelParams::default();
+        let params = KernelParams {
+            // Disable reverse so the Sell signal only closes, not re-opens.
+            allow_reverse: false,
+            ..KernelParams::default() // leverage = 1.0
+        };
         let mut open_event = event_with_signal("BTC", MarketSignal::Buy);
         open_event.notional_hint_usd = Some(10_000.0);
 
         let open_result = step(&initial_state, &open_event, &params);
         let open_fill = accounting::apply_open_fill(10_000.0, accounting::DEFAULT_TAKER_FEE_RATE);
-        assert!((open_fill.cash_delta + open_fill.notional).abs() < 1e-12);
-        assert!((open_result.state.cash_usd - (initial_state.cash_usd + open_fill.cash_delta)).abs() < 1e-12);
+        let margin = accounting::quantize(10_000.0 / params.leverage.max(1.0));
+        // Kernel deducts margin + fee from cash.
+        let expected_cash_after_open = accounting::quantize(initial_state.cash_usd - margin - open_fill.fee_usd);
+        assert!(
+            (open_result.state.cash_usd - expected_cash_after_open).abs() < 1e-12,
+            "open cash: {} != expected {}",
+            open_result.state.cash_usd,
+            expected_cash_after_open,
+        );
 
         let close_event = MarketEvent {
             schema_version: 1,
@@ -628,13 +767,24 @@ mod tests {
             signal: MarketSignal::Sell,
             price: 10_200.0,
             notional_hint_usd: None,
+            close_fraction: None,
+            fee_role: None,
+            funding_rate: None,
         };
         let close_state = open_result.state;
         let close_result = step(&close_state, &close_event, &params);
 
         let expected_close = accounting::apply_close_fill(true, 10_000.0, 10_200.0, 1.0, accounting::DEFAULT_TAKER_FEE_RATE);
-        let expected_cash = initial_state.cash_usd + open_fill.cash_delta + expected_close.cash_delta;
-        assert!((close_result.state.cash_usd - expected_cash).abs() < 1e-12);
+        // Round-trip: initial - margin - open_fee + margin + pnl - close_fee = initial + pnl - total_fees
+        let expected_cash = accounting::quantize(
+            initial_state.cash_usd + expected_close.pnl - open_fill.fee_usd - expected_close.fee_usd,
+        );
+        assert!(
+            (close_result.state.cash_usd - expected_cash).abs() < 1e-12,
+            "close cash: {} != expected {}",
+            close_result.state.cash_usd,
+            expected_cash,
+        );
         assert!((close_result.fills[0].pnl_usd - expected_close.pnl).abs() < 1e-12);
     }
 
@@ -650,5 +800,853 @@ mod tests {
         assert!(result.diagnostics.has_errors());
         assert_eq!(result.state, state);
         assert_eq!(result.intents.len(), 0);
+    }
+
+    // ---- Partial close tests ----
+
+    /// Helper: open a long BTC position with given notional and return resulting state.
+    fn open_long_btc(notional: f64, price: f64) -> StrategyState {
+        let state = init_state();
+        let params = KernelParams {
+            allow_reverse: false,
+            ..KernelParams::default()
+        };
+        let mut event = event_with_signal("BTC", MarketSignal::Buy);
+        event.notional_hint_usd = Some(notional);
+        event.price = price;
+        step(&state, &event, &params).state
+    }
+
+    fn partial_close_event(fraction: f64, price: f64) -> MarketEvent {
+        MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 200,
+            timestamp_ms: 2_000,
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Sell,
+            price,
+            notional_hint_usd: None,
+            close_fraction: Some(fraction),
+            fee_role: None,
+            funding_rate: None,
+        }
+    }
+
+    #[test]
+    fn partial_close_50_pct_keeps_position() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams {
+            allow_reverse: false,
+            ..KernelParams::default()
+        };
+        let pos_before = state.positions.get("BTC").unwrap().clone();
+        let event = partial_close_event(0.5, 10_200.0);
+
+        let result = step(&state, &event, &params);
+
+        // Position should still exist with halved quantity.
+        let pos = result.state.positions.get("BTC").expect("position remains");
+        assert!((pos.quantity - accounting::quantize(pos_before.quantity * 0.5)).abs() < 1e-12);
+        assert!((pos.margin_usd - accounting::quantize(pos_before.margin_usd * 0.5)).abs() < 1e-12);
+        assert_eq!(pos.side, PositionSide::Long);
+
+        // Fill should reflect partial quantity.
+        assert_eq!(result.fills.len(), 1);
+        assert!((result.fills[0].quantity - accounting::quantize(pos_before.quantity * 0.5)).abs() < 1e-12);
+        assert!(result.fills[0].pnl_usd > 0.0); // price rose
+    }
+
+    #[test]
+    fn partial_close_25_pct() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams {
+            allow_reverse: false,
+            ..KernelParams::default()
+        };
+        let pos_before = state.positions.get("BTC").unwrap().clone();
+        let event = partial_close_event(0.25, 10_000.0);
+
+        let result = step(&state, &event, &params);
+
+        let pos = result.state.positions.get("BTC").expect("position remains");
+        assert!((pos.quantity - accounting::quantize(pos_before.quantity * 0.75)).abs() < 1e-12);
+        assert!((pos.margin_usd - accounting::quantize(pos_before.margin_usd * 0.75)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn partial_close_75_pct() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams {
+            allow_reverse: false,
+            ..KernelParams::default()
+        };
+        let pos_before = state.positions.get("BTC").unwrap().clone();
+        let event = partial_close_event(0.75, 9_800.0);
+
+        let result = step(&state, &event, &params);
+
+        let pos = result.state.positions.get("BTC").expect("position remains");
+        assert!((pos.quantity - accounting::quantize(pos_before.quantity * 0.25)).abs() < 1e-12);
+        assert!((pos.margin_usd - accounting::quantize(pos_before.margin_usd * 0.25)).abs() < 1e-12);
+        // Price dropped → PnL should be negative.
+        assert!(result.fills[0].pnl_usd < 0.0);
+    }
+
+    #[test]
+    fn partial_close_100_pct_removes_position() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams {
+            allow_reverse: false,
+            ..KernelParams::default()
+        };
+        let event = partial_close_event(1.0, 10_100.0);
+
+        let result = step(&state, &event, &params);
+
+        assert!(
+            result.state.positions.get("BTC").is_none(),
+            "full close should remove position"
+        );
+        assert_eq!(result.fills.len(), 1);
+    }
+
+    #[test]
+    fn partial_close_none_fraction_is_full_close() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams {
+            allow_reverse: false,
+            ..KernelParams::default()
+        };
+        let mut event = partial_close_event(1.0, 10_100.0);
+        event.close_fraction = None;
+
+        let result = step(&state, &event, &params);
+
+        assert!(
+            result.state.positions.get("BTC").is_none(),
+            "None fraction should behave as full close"
+        );
+    }
+
+    #[test]
+    fn partial_close_cash_accounting_round_trip() {
+        let initial_cash = 100_000.0;
+        let entry_price = 10_000.0;
+        let exit_price = 10_400.0;
+        let notional = 10_000.0;
+        let frac = 0.5;
+        let fee_rate = accounting::DEFAULT_TAKER_FEE_RATE;
+
+        let state = open_long_btc(notional, entry_price);
+        let cash_after_open = state.cash_usd;
+        let pos = state.positions.get("BTC").unwrap();
+        let full_qty = pos.quantity;
+        let full_margin = pos.margin_usd;
+
+        let params = KernelParams {
+            allow_reverse: false,
+            ..KernelParams::default()
+        };
+        let event = partial_close_event(frac, exit_price);
+        let result = step(&state, &event, &params);
+
+        // Manually compute expected cash after partial close.
+        let close_qty = accounting::quantize(full_qty * frac);
+        let returned_margin = accounting::quantize(full_margin * frac);
+        let close_acc = accounting::apply_close_fill(true, entry_price, exit_price, close_qty, fee_rate);
+        let expected_cash = accounting::quantize(cash_after_open + returned_margin + close_acc.pnl - close_acc.fee_usd);
+
+        assert!(
+            (result.state.cash_usd - expected_cash).abs() < 1e-12,
+            "partial close cash: {} != expected {}",
+            result.state.cash_usd,
+            expected_cash,
+        );
+
+        // Close the remaining 50%.
+        let event2 = MarketEvent {
+            event_id: 300,
+            timestamp_ms: 3_000,
+            close_fraction: Some(1.0),
+            price: exit_price,
+            ..event
+        };
+        let result2 = step(&result.state, &event2, &params);
+        assert!(result2.state.positions.get("BTC").is_none());
+
+        // Total round-trip: initial_cash + total_pnl - total_fees.
+        let open_fee = accounting::apply_open_fill(notional, fee_rate).fee_usd;
+        let total_pnl = accounting::mark_to_market_pnl(true, entry_price, exit_price, full_qty);
+        let close1_fee = close_acc.fee_usd;
+        let close2_qty = accounting::quantize(full_qty - close_qty);
+        let close2_fee = accounting::apply_close_fill(true, entry_price, exit_price, close2_qty, fee_rate).fee_usd;
+        let expected_final = accounting::quantize(initial_cash + total_pnl - open_fee - close1_fee - close2_fee);
+
+        assert!(
+            (result2.state.cash_usd - expected_final).abs() < 1e-12,
+            "round-trip cash: {} != expected {}",
+            result2.state.cash_usd,
+            expected_final,
+        );
+    }
+
+    #[test]
+    fn partial_close_deterministic() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams {
+            allow_reverse: false,
+            ..KernelParams::default()
+        };
+        let event = partial_close_event(0.5, 10_200.0);
+
+        let r1 = step(&state, &event, &params);
+        let r2 = step(&state, &event, &params);
+        assert_eq!(r1, r2, "partial close must be deterministic");
+    }
+
+    // ---- ADD weighted-average entry price tests ----
+
+    fn pyramid_params() -> KernelParams {
+        KernelParams {
+            allow_pyramid: true,
+            allow_reverse: false,
+            ..KernelParams::default()
+        }
+    }
+
+    #[test]
+    fn add_recalculates_weighted_avg_entry_price() {
+        // Open at 10_000, then ADD at 12_000. Expect weighted average.
+        let state = init_state();
+        let params = pyramid_params();
+
+        // Step 1: open long BTC @ 10_000, notional 10_000 → qty = 1.0
+        let mut open_evt = event_with_signal("BTC", MarketSignal::Buy);
+        open_evt.notional_hint_usd = Some(10_000.0);
+        open_evt.price = 10_000.0;
+        let r1 = step(&state, &open_evt, &params);
+        let pos1 = r1.state.positions.get("BTC").unwrap();
+        assert!((pos1.avg_entry_price - 10_000.0).abs() < 1e-12);
+        assert!((pos1.quantity - 1.0).abs() < 1e-12);
+
+        // Step 2: ADD long BTC @ 12_000, notional 12_000 → qty = 1.0
+        let mut add_evt = MarketEvent {
+            event_id: 101,
+            timestamp_ms: 2_000,
+            price: 12_000.0,
+            notional_hint_usd: Some(12_000.0),
+            signal: MarketSignal::Buy,
+            close_fraction: None,
+            ..open_evt
+        };
+        add_evt.symbol = "BTC".to_string();
+        let r2 = step(&r1.state, &add_evt, &params);
+
+        let pos2 = r2.state.positions.get("BTC").unwrap();
+        // Weighted avg = (10_000 * 1.0 + 12_000 * 1.0) / (1.0 + 1.0) = 11_000
+        let expected_avg = accounting::quantize(
+            (10_000.0 * pos1.quantity + 12_000.0 * 1.0) / (pos1.quantity + 1.0),
+        );
+        assert!(
+            (pos2.avg_entry_price - expected_avg).abs() < 1e-12,
+            "avg_entry: {} != expected {}",
+            pos2.avg_entry_price,
+            expected_avg,
+        );
+        // Total qty should be 2.0
+        assert!((pos2.quantity - 2.0).abs() < 1e-12);
+        assert_eq!(r2.intents[0].kind, OrderIntentKind::Add);
+    }
+
+    #[test]
+    fn add_at_lower_price_brings_avg_down() {
+        // Open at 10_000, ADD at 8_000 — avg should decrease.
+        let state = init_state();
+        let params = pyramid_params();
+
+        let mut open_evt = event_with_signal("BTC", MarketSignal::Buy);
+        open_evt.notional_hint_usd = Some(10_000.0);
+        open_evt.price = 10_000.0;
+        let r1 = step(&state, &open_evt, &params);
+        let pos1 = r1.state.positions.get("BTC").unwrap();
+        let qty1 = pos1.quantity;
+
+        // ADD at 8_000, notional 8_000 → qty = 1.0
+        let add_evt = MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 102,
+            timestamp_ms: 3_000,
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Buy,
+            price: 8_000.0,
+            notional_hint_usd: Some(8_000.0),
+            close_fraction: None,
+            fee_role: None,
+            funding_rate: None,
+        };
+        let r2 = step(&r1.state, &add_evt, &params);
+        let pos2 = r2.state.positions.get("BTC").unwrap();
+
+        let add_qty = accounting::quantize(8_000.0 / 8_000.0); // 1.0
+        let expected_avg = accounting::quantize(
+            (10_000.0 * qty1 + 8_000.0 * add_qty) / (qty1 + add_qty),
+        );
+        assert!(
+            (pos2.avg_entry_price - expected_avg).abs() < 1e-12,
+            "avg_entry after lower add: {} != expected {}",
+            pos2.avg_entry_price,
+            expected_avg,
+        );
+        assert!(pos2.avg_entry_price < 10_000.0, "avg should decrease");
+    }
+
+    #[test]
+    fn add_accumulates_notional_and_margin() {
+        let state = init_state();
+        let params = pyramid_params();
+        let fee_rate = accounting::DEFAULT_TAKER_FEE_RATE;
+
+        let mut open_evt = event_with_signal("BTC", MarketSignal::Buy);
+        open_evt.notional_hint_usd = Some(10_000.0);
+        open_evt.price = 10_000.0;
+        let r1 = step(&state, &open_evt, &params);
+        let pos1 = r1.state.positions.get("BTC").unwrap();
+        let notional1 = pos1.notional_usd;
+        let margin1 = pos1.margin_usd;
+
+        // ADD with notional 5_000
+        let add_evt = MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 103,
+            timestamp_ms: 4_000,
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Buy,
+            price: 11_000.0,
+            notional_hint_usd: Some(5_000.0),
+            close_fraction: None,
+            fee_role: None,
+            funding_rate: None,
+        };
+        let r2 = step(&r1.state, &add_evt, &params);
+        let pos2 = r2.state.positions.get("BTC").unwrap();
+
+        // Notional should be cumulative.
+        let add_notional = accounting::apply_open_fill(5_000.0, fee_rate).notional;
+        let expected_notional = accounting::quantize(notional1 + add_notional);
+        assert!(
+            (pos2.notional_usd - expected_notional).abs() < 1e-12,
+            "notional: {} != expected {}",
+            pos2.notional_usd,
+            expected_notional,
+        );
+
+        // Margin should accumulate.
+        let add_margin = accounting::quantize(add_notional / params.leverage.max(1.0));
+        let expected_margin = accounting::quantize(margin1 + add_margin);
+        assert!(
+            (pos2.margin_usd - expected_margin).abs() < 1e-12,
+            "margin: {} != expected {}",
+            pos2.margin_usd,
+            expected_margin,
+        );
+    }
+
+    #[test]
+    fn add_three_levels_weighted_avg_correct() {
+        // Open @ 10_000, ADD @ 11_000, ADD @ 9_000
+        let state = init_state();
+        let params = pyramid_params();
+
+        let mut e1 = event_with_signal("BTC", MarketSignal::Buy);
+        e1.notional_hint_usd = Some(10_000.0);
+        e1.price = 10_000.0;
+        let r1 = step(&state, &e1, &params);
+
+        let e2 = MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 201,
+            timestamp_ms: 2_000,
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Buy,
+            price: 11_000.0,
+            notional_hint_usd: Some(11_000.0),
+            close_fraction: None,
+            fee_role: None,
+            funding_rate: None,
+        };
+        let r2 = step(&r1.state, &e2, &params);
+
+        let e3 = MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 202,
+            timestamp_ms: 3_000,
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Buy,
+            price: 9_000.0,
+            notional_hint_usd: Some(9_000.0),
+            close_fraction: None,
+            fee_role: None,
+            funding_rate: None,
+        };
+        let r3 = step(&r2.state, &e3, &params);
+        let pos3 = r3.state.positions.get("BTC").unwrap();
+
+        // qty1=1.0 @ 10k, qty2=1.0 @ 11k, qty3=1.0 @ 9k
+        // weighted avg = (10k*1 + 11k*1 + 9k*1) / 3 = 10_000
+        let p1 = r1.state.positions.get("BTC").unwrap();
+        let p2 = r2.state.positions.get("BTC").unwrap();
+        // Verify step-by-step: after step 2, avg = (10k*1 + 11k*1)/2 = 10_500
+        let expected_avg2 = accounting::quantize(
+            (10_000.0 * p1.quantity + 11_000.0 * (p2.quantity - p1.quantity))
+                / p2.quantity,
+        );
+        assert!(
+            (p2.avg_entry_price - expected_avg2).abs() < 1e-12,
+            "avg after 2nd add: {} != {}",
+            p2.avg_entry_price,
+            expected_avg2,
+        );
+
+        // After step 3: avg = (prev_avg * prev_qty + 9k * new_qty) / total_qty
+        let qty3_added = accounting::quantize(9_000.0 / 9_000.0);
+        let expected_avg3 = accounting::quantize(
+            (p2.avg_entry_price * p2.quantity + 9_000.0 * qty3_added)
+                / (p2.quantity + qty3_added),
+        );
+        assert!(
+            (pos3.avg_entry_price - expected_avg3).abs() < 1e-12,
+            "avg after 3rd add: {} != {}",
+            pos3.avg_entry_price,
+            expected_avg3,
+        );
+        assert!((pos3.quantity - 3.0).abs() < 1e-12);
+    }
+
+    // ---- Position tracking metadata tests ----
+
+    #[test]
+    fn adds_count_increments_on_each_add() {
+        let state = init_state();
+        let params = pyramid_params();
+
+        let mut open_evt = event_with_signal("BTC", MarketSignal::Buy);
+        open_evt.notional_hint_usd = Some(10_000.0);
+        open_evt.price = 10_000.0;
+        let r1 = step(&state, &open_evt, &params);
+        assert_eq!(r1.state.positions.get("BTC").unwrap().adds_count, 0);
+
+        let add1 = MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 301,
+            timestamp_ms: 2_000,
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Buy,
+            price: 10_500.0,
+            notional_hint_usd: Some(5_000.0),
+            close_fraction: None,
+            fee_role: None,
+            funding_rate: None,
+        };
+        let r2 = step(&r1.state, &add1, &params);
+        assert_eq!(r2.state.positions.get("BTC").unwrap().adds_count, 1);
+
+        let add2 = MarketEvent {
+            event_id: 302,
+            timestamp_ms: 3_000,
+            price: 11_000.0,
+            ..add1.clone()
+        };
+        let r3 = step(&r2.state, &add2, &params);
+        assert_eq!(r3.state.positions.get("BTC").unwrap().adds_count, 2);
+    }
+
+    #[test]
+    fn metadata_defaults_on_new_position() {
+        let state = init_state();
+        let params = KernelParams::default();
+
+        let mut open_evt = event_with_signal("BTC", MarketSignal::Buy);
+        open_evt.notional_hint_usd = Some(10_000.0);
+        let result = step(&state, &open_evt, &params);
+        let pos = result.state.positions.get("BTC").unwrap();
+
+        assert_eq!(pos.confidence, None);
+        assert_eq!(pos.entry_atr, None);
+        assert_eq!(pos.adds_count, 0);
+        assert!(!pos.tp1_taken);
+        assert_eq!(pos.trailing_sl, None);
+        assert!((pos.mae_usd - 0.0).abs() < f64::EPSILON);
+        assert!((pos.mfe_usd - 0.0).abs() < f64::EPSILON);
+        assert_eq!(pos.last_funding_ms, None);
+    }
+
+    #[test]
+    fn caller_set_metadata_survives_add_cycle() {
+        let state = init_state();
+        let params = pyramid_params();
+
+        // Open position.
+        let mut open_evt = event_with_signal("BTC", MarketSignal::Buy);
+        open_evt.notional_hint_usd = Some(10_000.0);
+        open_evt.price = 10_000.0;
+        let mut r1 = step(&state, &open_evt, &params);
+
+        // Simulate caller setting metadata after open.
+        let pos = r1.state.positions.get_mut("BTC").unwrap();
+        pos.confidence = Some(2);
+        pos.entry_atr = Some(350.0);
+        pos.tp1_taken = true;
+        pos.trailing_sl = Some(9_500.0);
+        pos.mae_usd = -150.0;
+        pos.mfe_usd = 200.0;
+
+        // ADD to position — metadata should survive.
+        let add_evt = MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 401,
+            timestamp_ms: 2_000,
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Buy,
+            price: 10_500.0,
+            notional_hint_usd: Some(5_000.0),
+            close_fraction: None,
+            fee_role: None,
+            funding_rate: None,
+        };
+        let r2 = step(&r1.state, &add_evt, &params);
+        let pos2 = r2.state.positions.get("BTC").unwrap();
+
+        assert_eq!(pos2.confidence, Some(2));
+        assert_eq!(pos2.entry_atr, Some(350.0));
+        assert!(pos2.tp1_taken);
+        assert_eq!(pos2.trailing_sl, Some(9_500.0));
+        assert!((pos2.mae_usd - (-150.0)).abs() < f64::EPSILON);
+        assert!((pos2.mfe_usd - 200.0).abs() < f64::EPSILON);
+        assert_eq!(pos2.adds_count, 1); // incremented by kernel
+    }
+
+    #[test]
+    fn position_json_round_trip_with_metadata() {
+        let pos = Position {
+            symbol: "ETH".to_string(),
+            side: PositionSide::Short,
+            quantity: 5.0,
+            avg_entry_price: 3_200.0,
+            opened_at_ms: 1_000,
+            updated_at_ms: 2_000,
+            notional_usd: 16_000.0,
+            margin_usd: 8_000.0,
+            confidence: Some(1),
+            entry_atr: Some(120.5),
+            adds_count: 3,
+            tp1_taken: true,
+            trailing_sl: Some(3_300.0),
+            mae_usd: -400.0,
+            mfe_usd: 600.0,
+            last_funding_ms: Some(1_500),
+        };
+
+        let json = serde_json::to_string(&pos).unwrap();
+        let deser: Position = serde_json::from_str(&json).unwrap();
+        assert_eq!(pos, deser);
+    }
+
+    #[test]
+    fn position_json_round_trip_without_optional_metadata() {
+        // Deserialise JSON missing all optional/default fields.
+        let json = r#"{
+            "symbol": "BTC",
+            "side": "long",
+            "quantity": 1.0,
+            "avg_entry_price": 10000.0,
+            "opened_at_ms": 0,
+            "updated_at_ms": 0,
+            "notional_usd": 10000.0
+        }"#;
+        let pos: Position = serde_json::from_str(json).unwrap();
+        assert_eq!(pos.margin_usd, 0.0);
+        assert_eq!(pos.confidence, None);
+        assert_eq!(pos.entry_atr, None);
+        assert_eq!(pos.adds_count, 0);
+        assert!(!pos.tp1_taken);
+        assert_eq!(pos.trailing_sl, None);
+        assert!((pos.mae_usd).abs() < f64::EPSILON);
+        assert!((pos.mfe_usd).abs() < f64::EPSILON);
+    }
+
+    // ---- Fee role selection tests ----
+
+    fn fee_role_params() -> KernelParams {
+        KernelParams {
+            maker_fee_bps: 1.0,  // 0.01%
+            taker_fee_bps: 3.5,  // 0.035%
+            ..KernelParams::default()
+        }
+    }
+
+    #[test]
+    fn open_with_default_none_fee_role_uses_taker() {
+        let state = init_state();
+        let params = fee_role_params();
+        let mut event = event_with_signal("BTC", MarketSignal::Buy);
+        event.notional_hint_usd = Some(10_000.0);
+        // fee_role is None → taker
+
+        let result = step(&state, &event, &params);
+        let fill = &result.fills[0];
+
+        let expected_fee = accounting::quantize(10_000.0 * (3.5 / 10_000.0));
+        assert!(
+            (fill.fee_usd - expected_fee).abs() < 1e-12,
+            "default fee: {} != expected taker fee {}",
+            fill.fee_usd,
+            expected_fee,
+        );
+    }
+
+    #[test]
+    fn open_with_explicit_maker_fee_role() {
+        let state = init_state();
+        let params = fee_role_params();
+        let mut event = event_with_signal("BTC", MarketSignal::Buy);
+        event.notional_hint_usd = Some(10_000.0);
+        event.fee_role = Some(accounting::FeeRole::Maker);
+
+        let result = step(&state, &event, &params);
+        let fill = &result.fills[0];
+
+        let expected_fee = accounting::quantize(10_000.0 * (1.0 / 10_000.0));
+        assert!(
+            (fill.fee_usd - expected_fee).abs() < 1e-12,
+            "maker fee: {} != expected {}",
+            fill.fee_usd,
+            expected_fee,
+        );
+    }
+
+    #[test]
+    fn open_with_explicit_taker_matches_default() {
+        let state = init_state();
+        let params = fee_role_params();
+
+        let mut evt_default = event_with_signal("BTC", MarketSignal::Buy);
+        evt_default.notional_hint_usd = Some(10_000.0);
+        // fee_role = None (taker by default)
+
+        let mut evt_explicit = evt_default.clone();
+        evt_explicit.fee_role = Some(accounting::FeeRole::Taker);
+
+        let r_default = step(&state, &evt_default, &params);
+        let r_explicit = step(&state, &evt_explicit, &params);
+
+        assert_eq!(
+            r_default.fills[0].fee_usd, r_explicit.fills[0].fee_usd,
+            "explicit taker should match default"
+        );
+        assert_eq!(r_default.state.cash_usd, r_explicit.state.cash_usd);
+    }
+
+    #[test]
+    fn maker_vs_taker_cash_difference_matches_bps_delta() {
+        let state = init_state();
+        let params = fee_role_params();
+        let notional = 10_000.0;
+
+        let mut evt_maker = event_with_signal("BTC", MarketSignal::Buy);
+        evt_maker.notional_hint_usd = Some(notional);
+        evt_maker.fee_role = Some(accounting::FeeRole::Maker);
+
+        let mut evt_taker = event_with_signal("BTC", MarketSignal::Buy);
+        evt_taker.notional_hint_usd = Some(notional);
+        // fee_role = None → taker
+
+        let r_maker = step(&state, &evt_maker, &params);
+        let r_taker = step(&state, &evt_taker, &params);
+
+        // Maker saves (taker_bps - maker_bps) / 10_000 * notional in fees.
+        let bps_delta = params.taker_fee_bps - params.maker_fee_bps; // 2.5
+        let expected_savings = accounting::quantize(notional * bps_delta / 10_000.0);
+        let actual_savings = accounting::quantize(r_maker.state.cash_usd - r_taker.state.cash_usd);
+        assert!(
+            (actual_savings - expected_savings).abs() < 1e-12,
+            "cash savings: {} != expected {}",
+            actual_savings,
+            expected_savings,
+        );
+    }
+
+    // ---- Funding settlement tests ----
+
+    fn funding_event(symbol: &str, price: f64, rate: f64) -> MarketEvent {
+        MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 500,
+            timestamp_ms: 5_000,
+            symbol: symbol.to_string(),
+            signal: MarketSignal::Funding,
+            price,
+            notional_hint_usd: None,
+            close_fraction: None,
+            fee_role: None,
+            funding_rate: Some(rate),
+        }
+    }
+
+    #[test]
+    fn funding_long_positive_rate_decreases_cash() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams::default();
+        let cash_before = state.cash_usd;
+        let pos = state.positions.get("BTC").unwrap();
+        let qty = pos.quantity;
+
+        let rate = 0.0001; // positive
+        let event = funding_event("BTC", 10_000.0, rate);
+        let result = step(&state, &event, &params);
+
+        // Long pays positive funding: cash should decrease.
+        let expected_delta = accounting::funding_delta(true, qty, 10_000.0, rate);
+        assert!(expected_delta < 0.0, "long+positive rate delta should be negative");
+        let expected_cash = accounting::quantize(cash_before + expected_delta);
+        assert!(
+            (result.state.cash_usd - expected_cash).abs() < 1e-12,
+            "funding long cash: {} != expected {}",
+            result.state.cash_usd,
+            expected_cash,
+        );
+        // No intents or fills.
+        assert!(result.intents.is_empty());
+        assert!(result.fills.is_empty());
+        // Position still exists, unchanged quantity.
+        let pos_after = result.state.positions.get("BTC").unwrap();
+        assert!((pos_after.quantity - qty).abs() < 1e-12);
+        assert_eq!(pos_after.last_funding_ms, Some(5_000));
+    }
+
+    #[test]
+    fn funding_short_positive_rate_increases_cash() {
+        // Open a short position.
+        let state = init_state();
+        let params = KernelParams {
+            allow_reverse: false,
+            ..KernelParams::default()
+        };
+        let mut open_evt = event_with_signal("BTC", MarketSignal::Sell);
+        open_evt.notional_hint_usd = Some(10_000.0);
+        let open_result = step(&state, &open_evt, &params);
+        let short_state = open_result.state;
+        let cash_before = short_state.cash_usd;
+        let pos = short_state.positions.get("BTC").unwrap();
+        let qty = pos.quantity;
+        assert_eq!(pos.side, PositionSide::Short);
+
+        let rate = 0.0001;
+        let event = funding_event("BTC", 10_000.0, rate);
+        let result = step(&short_state, &event, &params);
+
+        // Short receives positive funding: cash should increase.
+        let expected_delta = accounting::funding_delta(false, qty, 10_000.0, rate);
+        assert!(expected_delta > 0.0, "short+positive rate delta should be positive");
+        let expected_cash = accounting::quantize(cash_before + expected_delta);
+        assert!(
+            (result.state.cash_usd - expected_cash).abs() < 1e-12,
+            "funding short cash: {} != expected {}",
+            result.state.cash_usd,
+            expected_cash,
+        );
+        assert!(result.intents.is_empty());
+        assert!(result.fills.is_empty());
+    }
+
+    #[test]
+    fn funding_zero_rate_no_cash_change() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams::default();
+        let cash_before = state.cash_usd;
+
+        let event = funding_event("BTC", 10_000.0, 0.0);
+        let result = step(&state, &event, &params);
+
+        assert!(
+            (result.state.cash_usd - cash_before).abs() < 1e-12,
+            "zero rate should not change cash",
+        );
+        // last_funding_ms should NOT be updated for zero rate.
+        let pos = result.state.positions.get("BTC").unwrap();
+        assert_eq!(pos.last_funding_ms, None);
+    }
+
+    #[test]
+    fn funding_no_position_no_cash_change() {
+        let state = init_state(); // no positions
+        let params = KernelParams::default();
+        let cash_before = state.cash_usd;
+
+        let event = funding_event("BTC", 10_000.0, 0.0001);
+        let result = step(&state, &event, &params);
+
+        assert!(
+            (result.state.cash_usd - cash_before).abs() < 1e-12,
+            "no position → no funding effect",
+        );
+        assert!(result.intents.is_empty());
+        assert!(result.fills.is_empty());
+    }
+
+    #[test]
+    fn funding_no_rate_field_no_cash_change() {
+        // Funding signal but funding_rate = None → no effect.
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams::default();
+        let cash_before = state.cash_usd;
+
+        let mut event = funding_event("BTC", 10_000.0, 0.0);
+        event.funding_rate = None;
+        let result = step(&state, &event, &params);
+
+        assert!(
+            (result.state.cash_usd - cash_before).abs() < 1e-12,
+            "None funding_rate should not change cash",
+        );
+    }
+
+    #[test]
+    fn funding_advances_step_counter() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams::default();
+        let step_before = state.step;
+
+        let event = funding_event("BTC", 10_000.0, 0.0001);
+        let result = step(&state, &event, &params);
+
+        assert_eq!(result.state.step, step_before + 1);
+        assert_eq!(result.state.timestamp_ms, 5_000);
+    }
+
+    #[test]
+    fn funding_deterministic() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams::default();
+
+        let event = funding_event("BTC", 10_000.0, 0.0001);
+        let r1 = step(&state, &event, &params);
+        let r2 = step(&state, &event, &params);
+        assert_eq!(r1, r2, "funding settlement must be deterministic");
+    }
+
+    #[test]
+    fn funding_wrong_symbol_no_effect() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams::default();
+        let cash_before = state.cash_usd;
+
+        // Funding for ETH, but only BTC position exists.
+        let event = funding_event("ETH", 3_000.0, 0.0001);
+        let result = step(&state, &event, &params);
+
+        assert!(
+            (result.state.cash_usd - cash_before).abs() < 1e-12,
+            "funding for wrong symbol should not change cash",
+        );
     }
 }

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from factory_run import PROFILE_DEFAULTS, _parse_cli_args
+from factory_run import PROFILE_DEFAULTS, _parse_cli_args, _resolve_profile_requires_live_initial_balance
 
 
 def test_profile_smoke_sets_trials_and_candidate_counts() -> None:
@@ -73,6 +73,13 @@ def test_all_profiles_present_in_defaults() -> None:
 def test_smoke_profile_sweep_spec() -> None:
     args = _parse_cli_args(["--run-id", "x", "--profile", "smoke"])
     assert args.sweep_spec == "backtester/sweeps/full_144v.yaml"
+
+
+def test_live_initial_balance_profiles() -> None:
+    assert _resolve_profile_requires_live_initial_balance(profile="daily")
+    assert _resolve_profile_requires_live_initial_balance(profile="deep")
+    assert _resolve_profile_requires_live_initial_balance(profile="weekly")
+    assert not _resolve_profile_requires_live_initial_balance(profile="smoke")
 
 
 def test_daily_profile_sweep_spec() -> None:
