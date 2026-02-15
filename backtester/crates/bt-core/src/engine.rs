@@ -122,6 +122,8 @@ pub struct DecisionKernelTrace {
     active_params: HashMap<String, f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     gate_result: Option<GateEvaluation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    indicator_snapshot: Option<IndicatorSnapshot>,
 }
 
 // ---------------------------------------------------------------------------
@@ -559,6 +561,7 @@ fn step_decision(
         applied_to_kernel_state: !decision.diagnostics.has_errors(),
         active_params: build_active_params(source, cfg, &state.kernel_params),
         gate_result: None,
+        indicator_snapshot: None,
     };
     state.decision_diagnostics.push(trace);
     decision
@@ -861,6 +864,9 @@ pub fn run_simulation(
                             "indicator-bar-close",
                             cfg,
                         );
+                        if let Some(last) = state.decision_diagnostics.last_mut() {
+                            last.indicator_snapshot = Some(snap.clone());
+                        }
                         if decision
                             .intents
                             .iter()
@@ -1035,9 +1041,10 @@ pub fn run_simulation(
                     "indicator-bar-open",
                     cfg,
                 );
-                // Attach per-signal gate evaluation to the trace entry
+                // Attach per-signal gate evaluation and indicator snapshot to the trace entry
                 if let Some(last) = state.decision_diagnostics.last_mut() {
                     last.gate_result = Some(cand.gate_eval.clone());
+                    last.indicator_snapshot = Some(cand.snap.clone());
                 }
                 let intent_open = decision.intents.iter().any(|intent| {
                     matches!(
@@ -1981,6 +1988,9 @@ fn try_pyramid(
         "pyramid",
         cfg,
     );
+    if let Some(last) = state.decision_diagnostics.last_mut() {
+        last.indicator_snapshot = Some(snap.clone());
+    }
     let has_add = decision
         .intents
         .iter()
@@ -2236,9 +2246,10 @@ fn execute_sub_bar_entry(
         "sub-bar-open",
         cfg,
     );
-    // Attach per-signal gate evaluation to the trace entry
+    // Attach per-signal gate evaluation and indicator snapshot to the trace entry
     if let Some(last) = state.decision_diagnostics.last_mut() {
         last.gate_result = Some(gate_eval.clone());
+        last.indicator_snapshot = Some(snap.clone());
     }
     let has_open = decision
         .intents
@@ -3131,5 +3142,152 @@ mod tests {
         let json = serde_json::to_string(&eval).unwrap();
         let deser: GateEvaluation = serde_json::from_str(&json).unwrap();
         assert_eq!(eval, deser);
+    }
+
+    #[test]
+    fn test_indicator_snapshot_in_trace() {
+        // Verify IndicatorSnapshot serializes/deserializes correctly in a trace context.
+        let snap = make_minimal_snap(42000.0, 1_700_000_000_000);
+        let json = serde_json::to_string(&snap).unwrap();
+        let deser: IndicatorSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(snap, deser, "IndicatorSnapshot serde roundtrip");
+
+        // Verify indicator values match what we put in.
+        assert!((deser.close - 42000.0).abs() < 1e-9);
+        assert!((deser.adx - 0.0).abs() < 1e-9);
+        assert!((deser.rsi - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_trace_with_indicator_snapshot() {
+        // Build a trace via step_decision and then attach a snapshot,
+        // verifying the snapshot values are preserved in the trace struct.
+        let mut state = SimState {
+            balance: 10_000.0,
+            positions: FxHashMap::default(),
+            last_entry_attempt_ms: FxHashMap::default(),
+            last_exit_attempt_ms: FxHashMap::default(),
+            indicators: FxHashMap::default(),
+            ema_slow_history: FxHashMap::default(),
+            bar_counts: FxHashMap::default(),
+            last_close: FxHashMap::default(),
+            trades: vec![],
+            signals: vec![],
+            decision_diagnostics: Vec::new(),
+            kernel_state: make_kernel_state(10_000.0, 0, &FxHashMap::default()),
+            kernel_params: make_kernel_params(&StrategyConfig::default()),
+            next_kernel_event_id: 1,
+            equity_curve: vec![],
+            gate_stats: GateStats::default(),
+        };
+        let cfg = StrategyConfig::default();
+
+        let _ = step_decision(
+            &mut state,
+            1_000,
+            "ETH",
+            Signal::Buy,
+            3500.0,
+            Some(500.0),
+            "fixture-open",
+            &cfg,
+        );
+
+        // Simulate attaching an indicator snapshot (as the engine does after step_decision)
+        let snap = IndicatorSnapshot {
+            close: 3500.0,
+            high: 3520.0,
+            low: 3480.0,
+            open: 3490.0,
+            volume: 5000.0,
+            t: 1_000,
+            ema_slow: 3450.0,
+            ema_fast: 3475.0,
+            ema_macro: 3400.0,
+            adx: 28.5,
+            adx_pos: 22.0,
+            adx_neg: 12.0,
+            adx_slope: 0.8,
+            bb_upper: 3550.0,
+            bb_lower: 3430.0,
+            bb_width: 0.034,
+            bb_width_avg: 0.030,
+            bb_width_ratio: 1.13,
+            atr: 45.0,
+            atr_slope: 2.0,
+            avg_atr: 42.0,
+            rsi: 58.0,
+            stoch_rsi_k: 0.65,
+            stoch_rsi_d: 0.60,
+            macd_hist: 3.2,
+            prev_macd_hist: 2.1,
+            prev2_macd_hist: 1.0,
+            prev3_macd_hist: 0.5,
+            vol_sma: 4500.0,
+            vol_trend: true,
+            prev_close: 3490.0,
+            prev_ema_fast: 3470.0,
+            prev_ema_slow: 3445.0,
+            bar_count: 150,
+            funding_rate: 0.0001,
+        };
+
+        if let Some(last) = state.decision_diagnostics.last_mut() {
+            last.indicator_snapshot = Some(snap.clone());
+        }
+
+        // Verify the trace has the snapshot with correct values
+        let trace = state.decision_diagnostics.last().unwrap();
+        assert!(trace.indicator_snapshot.is_some());
+        let trace_snap = trace.indicator_snapshot.as_ref().unwrap();
+        assert!((trace_snap.adx - 28.5).abs() < 1e-9, "ADX should match");
+        assert!((trace_snap.rsi - 58.0).abs() < 1e-9, "RSI should match");
+        assert!((trace_snap.atr - 45.0).abs() < 1e-9, "ATR should match");
+        assert!((trace_snap.close - 3500.0).abs() < 1e-9, "close should match");
+        assert!((trace_snap.ema_slow - 3450.0).abs() < 1e-9, "EMA slow should match");
+        assert!((trace_snap.ema_fast - 3475.0).abs() < 1e-9, "EMA fast should match");
+        assert!((trace_snap.bb_width_ratio - 1.13).abs() < 1e-9, "BB width ratio should match");
+
+        // Verify full serde roundtrip of trace with snapshot
+        let json = serde_json::to_string(trace).unwrap();
+        let deser: DecisionKernelTrace = serde_json::from_str(&json).unwrap();
+        assert_eq!(*trace, deser, "Trace with indicator_snapshot serde roundtrip");
+    }
+
+    #[test]
+    fn test_trace_without_snapshot_backward_compat() {
+        // Verify that traces without indicator_snapshot deserialize correctly
+        // (backward compatibility with old fixture format).
+        let json = r#"{
+            "event_id": 1,
+            "source": "test",
+            "timestamp_ms": 1000,
+            "symbol": "BTC",
+            "signal": "BUY",
+            "requested_notional_usd": 100.0,
+            "requested_price": 50000.0,
+            "schema_version": 1,
+            "step": 1,
+            "state_step": 1,
+            "state_cash_usd": 9900.0,
+            "state_positions": 1,
+            "intent_count": 0,
+            "fill_count": 0,
+            "warnings": [],
+            "errors": [],
+            "intents": [],
+            "fills": [],
+            "applied_to_kernel_state": true,
+            "active_params": {}
+        }"#;
+        let trace: DecisionKernelTrace = serde_json::from_str(json).unwrap();
+        assert!(
+            trace.indicator_snapshot.is_none(),
+            "Missing indicator_snapshot should default to None"
+        );
+        assert!(
+            trace.gate_result.is_none(),
+            "Missing gate_result should default to None"
+        );
     }
 }
