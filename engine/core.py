@@ -392,12 +392,61 @@ def _normalise_kernel_event_id(raw_id: Any, fallback: int) -> int:
 class KernelDecisionRustBindingProvider:
     """Call the Rust decision kernel via the `bt_runtime` extension."""
 
+    _KERNEL_STATE_PATH = str(Path("~/.mei/kernel_state.json").expanduser())
+
     def __init__(self, module_name: str = "bt_runtime", path: str | None = None) -> None:
         self._runtime = _load_kernel_runtime_module(module_name)
         self._path = str(path).strip() if path else None
-        self._state_json = self._runtime.default_kernel_state_json(10_000.0, now_ms())
+        self._state_json = self._load_or_create_state()
         self._params_json = self._runtime.default_kernel_params_json()
         self._event_id = 1
+
+    def _load_or_create_state(self) -> str:
+        """Load kernel state from disk, or create fresh if missing/corrupt."""
+        state_path = self._KERNEL_STATE_PATH
+        try:
+            state_json = self._runtime.load_state(state_path)
+            # Parse to extract log fields.
+            try:
+                state = json.loads(state_json)
+                ts_ms = int(state.get("timestamp_ms", 0))
+                n_pos = len(state.get("positions") or {})
+                cash = float(state.get("cash_usd", 0.0))
+                age_s = max(0.0, (now_ms() - ts_ms) / 1000.0) if ts_ms > 0 else 0.0
+                logger.info(
+                    "Kernel state loaded, age=%.1fs, positions=%d, cash=$%.2f",
+                    age_s, n_pos, cash,
+                )
+                if age_s > 300.0:
+                    logger.warning(
+                        "Kernel state stale by %.0fs", age_s,
+                    )
+            except Exception:
+                logger.info("Kernel state loaded from %s", state_path)
+            return state_json
+        except OSError:
+            # File missing — normal on first run.
+            pass
+        except Exception:
+            logger.error(
+                "Kernel state file corrupt, creating fresh: %s\n%s",
+                state_path, traceback.format_exc(),
+            )
+        fresh = self._runtime.default_kernel_state_json(10_000.0, now_ms())
+        logger.info("Kernel state created fresh")
+        self._persist_state(fresh)
+        return fresh
+
+    def _persist_state(self, state_json: str) -> None:
+        """Save kernel state to disk. Best-effort, never raises."""
+        try:
+            state_dir = Path(self._KERNEL_STATE_PATH).parent
+            state_dir.mkdir(parents=True, exist_ok=True)
+            self._runtime.save_state(state_json, self._KERNEL_STATE_PATH)
+        except Exception:
+            logger.warning(
+                "Failed to persist kernel state: %s", traceback.format_exc(),
+            )
 
     def _load_raw_events(self) -> list[dict[str, Any]]:
         if not self._path:
@@ -539,6 +588,7 @@ class KernelDecisionRustBindingProvider:
 
             state_json = json.dumps(decision_payload.get("state"), ensure_ascii=False)
             self._state_json = state_json
+            self._persist_state(state_json)
             for raw_intent in decision_payload.get("intents", []):
                 if not isinstance(raw_intent, Mapping):
                     continue
