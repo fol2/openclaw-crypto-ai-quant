@@ -1637,6 +1637,122 @@ def complete_lineage(
             conn.close()
 
 
+def get_decision_chain(trade_id: int) -> list[dict]:
+    """Return the full decision chain for a given trade.
+
+    Walks the ``decision_lineage`` row keyed by *entry_trade_id* (or
+    *exit_trade_id*) and collects every linked ``decision_events`` row in
+    chronological order (by ``timestamp_ms``).
+
+    The returned chain typically contains:
+      signal_decision -> entry_trade -> exit_decision -> exit_trade
+
+    Parameters
+    ----------
+    trade_id : int
+        The ``trades.id`` to look up.  Matches against both
+        ``entry_trade_id`` and ``exit_trade_id`` in ``decision_lineage``.
+
+    Returns
+    -------
+    list[dict]
+        Each dict has keys matching the ``decision_events`` columns:
+        ``id``, ``timestamp_ms``, ``symbol``, ``event_type``, ``status``,
+        ``decision_phase``, ``parent_decision_id``, ``trade_id``,
+        ``triggered_by``, ``action_taken``, ``rejection_reason``,
+        ``context_json``.  Empty list when no lineage exists.
+    """
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT_S)
+        conn.row_factory = sqlite3.Row
+
+        # Find lineage rows that reference this trade (as entry or exit).
+        lineage_rows = conn.execute(
+            """
+            SELECT signal_decision_id, exit_decision_id,
+                   entry_trade_id, exit_trade_id
+            FROM decision_lineage
+            WHERE entry_trade_id = ? OR exit_trade_id = ?
+            """,
+            (trade_id, trade_id),
+        ).fetchall()
+
+        if not lineage_rows:
+            return []
+
+        # Collect all decision IDs and trade IDs referenced by lineage.
+        decision_ids: set[str] = set()
+        trade_ids: set[int] = set()
+        for row in lineage_rows:
+            if row["signal_decision_id"]:
+                decision_ids.add(row["signal_decision_id"])
+            if row["exit_decision_id"]:
+                decision_ids.add(row["exit_decision_id"])
+            if row["entry_trade_id"] is not None:
+                trade_ids.add(row["entry_trade_id"])
+            if row["exit_trade_id"] is not None:
+                trade_ids.add(row["exit_trade_id"])
+
+        # Also include any decision_events directly linked to these trade_ids.
+        if trade_ids:
+            placeholders = ",".join("?" for _ in trade_ids)
+            trade_linked = conn.execute(
+                f"SELECT id FROM decision_events WHERE trade_id IN ({placeholders})",
+                list(trade_ids),
+            ).fetchall()
+            for r in trade_linked:
+                decision_ids.add(r["id"])
+
+        if not decision_ids:
+            return []
+
+        # Fetch all matching decision events, ordered chronologically.
+        placeholders = ",".join("?" for _ in decision_ids)
+        events = conn.execute(
+            f"""
+            SELECT id, timestamp_ms, symbol, event_type, status,
+                   decision_phase, parent_decision_id, trade_id,
+                   triggered_by, action_taken, rejection_reason, context_json
+            FROM decision_events
+            WHERE id IN ({placeholders})
+            ORDER BY timestamp_ms ASC, id ASC
+            """,
+            list(decision_ids),
+        ).fetchall()
+
+        return [dict(e) for e in events]
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _compute_duration_ms(open_timestamp: str | None) -> int | None:
+    """Compute milliseconds elapsed since *open_timestamp* until now.
+
+    Parameters
+    ----------
+    open_timestamp : str or None
+        ISO-8601 timestamp (with or without trailing ``Z``).
+
+    Returns
+    -------
+    int or None
+        Duration in milliseconds, or ``None`` if *open_timestamp* is falsy
+        or cannot be parsed.
+    """
+    if not open_timestamp:
+        return None
+    try:
+        ots = str(open_timestamp).replace("Z", "+00:00")
+        odt = datetime.datetime.fromisoformat(ots)
+        if odt.tzinfo is None:
+            odt = odt.replace(tzinfo=datetime.timezone.utc)
+        return int((datetime.datetime.now(datetime.timezone.utc) - odt).total_seconds() * 1000)
+    except Exception:
+        return None
+
+
 def log_audit_event(
     symbol: str,
     event: str,
@@ -2459,6 +2575,27 @@ class PaperTrader:
                     notify=False,
                 )
 
+                # AQC-804: funding decision event
+                try:
+                    create_decision_event(
+                        symbol=symbol,
+                        event_type="funding",
+                        status="executed",
+                        phase="execution",
+                        triggered_by="schedule",
+                        action_taken="apply_funding",
+                        timestamp_ms=int(ev_time),
+                        context={
+                            "rate": float(rate),
+                            "delta_usd": float(delta),
+                            "price": float(px),
+                            "size": float(size),
+                            "pos_type": str(pos_type),
+                        },
+                    )
+                except Exception as _fde:
+                    logger.debug("AQC-804: funding decision event failed: %s", _fde)
+
                 last_ms = ev_time
 
             if applied_any:
@@ -2954,7 +3091,12 @@ class PaperTrader:
         return True
 
     def reduce_position(self, symbol, reduce_size, price, timestamp, reason, *, confidence="N/A", meta: dict | None = None) -> bool:
-        """Partially closes a position (or fully closes if reduce_size >= remaining size)."""
+        """Partially closes a position (or fully closes if reduce_size >= remaining size).
+
+        Side-effect: on success, stores the resulting trade_id on ``self._last_close_trade_id``
+        so callers (e.g. lineage tracking) can reference the fill.
+        """
+        self._last_close_trade_id = None
         if symbol not in self.positions:
             return False
 
@@ -3040,7 +3182,7 @@ class PaperTrader:
         # Log fill
         action = "CLOSE" if is_final else "REDUCE"
         margin_delta = -(notional / leverage) if leverage > 0 else 0.0
-        self.log_trade(
+        close_trade_id = self.log_trade(
             symbol,
             action,
             pos_type,
@@ -3055,6 +3197,7 @@ class PaperTrader:
             margin_used=margin_delta,
             meta=meta,
         )
+        self._last_close_trade_id = close_trade_id
         logger.info(
             f"✅ {action} {pos_type} {symbol} px={fill_price:.4f} size={reduce_size:.6f} "
             f"notional~=${notional:.2f} lev={leverage:.0f} Δmargin~=${margin_delta:+.2f} | "
@@ -3102,22 +3245,46 @@ class PaperTrader:
                       (pos['type'] == 'SHORT' and signal == 'BUY')
 
             if is_flip:
+                # AQC-804: capture entry info before close deletes the position.
+                _flip_open_trade_id = pos.get("open_trade_id")
+                _flip_open_timestamp = pos.get("open_timestamp")
                 audit = None
                 if indicators is not None:
                     try:
                         audit = indicators.get("audit")
                     except Exception:
                         audit = None
+                _flip_reason = f"Signal Flip ({confidence})" + (" [REVERSED]" if (indicators or {}).get("_reversed_entry") is True else "")
                 self.close_position(
                     symbol,
                     price,
                     timestamp,
-                    reason=f"Signal Flip ({confidence})" + (" [REVERSED]" if (indicators or {}).get("_reversed_entry") is True else ""),
+                    reason=_flip_reason,
                     meta={
                         "audit": audit if isinstance(audit, dict) else None,
                         "exit": {"kind": "SIGNAL_FLIP", "confidence": str(confidence or "")},
                     },
                 )
+                # AQC-804: exit decision + lineage for signal flip
+                try:
+                    _flip_close_tid = getattr(self, "_last_close_trade_id", None)
+                    _flip_exit_did = create_decision_event(
+                        symbol=symbol, event_type="exit_check", status="executed",
+                        phase="execution", triggered_by="signal_flip",
+                        action_taken="close", trade_id=_flip_close_tid,
+                        context={"exit_reason": _flip_reason, "exit_price": float(price),
+                                 "entry_trade_id": _flip_open_trade_id},
+                    )
+                    if _flip_open_trade_id is not None and _flip_close_tid is not None:
+                        complete_lineage(
+                            entry_trade_id=int(_flip_open_trade_id),
+                            exit_decision_id=_flip_exit_did,
+                            exit_trade_id=int(_flip_close_tid),
+                            exit_reason=_flip_reason,
+                            duration_ms=_compute_duration_ms(_flip_open_timestamp),
+                        )
+                except Exception as _dle:
+                    logger.debug("AQC-804: signal-flip exit lineage failed: %s", _dle)
             else:
                 # Same-direction signal: optionally pyramid (scale in) rather than opening another position.
                 is_same_dir = (pos['type'] == 'LONG' and signal == 'BUY') or (pos['type'] == 'SHORT' and signal == 'SELL')
@@ -3138,6 +3305,16 @@ class PaperTrader:
                     "ENTRY_SKIP_DATA_STALE",
                     data={"signal": str(signal or "").upper(), "confidence": str(confidence or "")},
                 )
+                # AQC-804: blocked entry decision
+                try:
+                    create_decision_event(
+                        symbol=symbol, event_type="entry_signal", status="blocked",
+                        phase="gate_evaluation", triggered_by="signal",
+                        action_taken="blocked", rejection_reason="data_stale",
+                        context={"signal": str(signal or ""), "confidence": str(confidence or "")},
+                    )
+                except Exception:
+                    pass
                 return
 
             cfg = get_strategy_config(symbol)
@@ -3560,6 +3737,17 @@ class PaperTrader:
                             "margin_target": float(margin_target),
                         },
                     )
+                    # AQC-804: blocked entry decision
+                    try:
+                        create_decision_event(
+                            symbol=symbol, event_type="entry_signal", status="blocked",
+                            phase="risk_check", triggered_by="signal",
+                            action_taken="blocked",
+                            rejection_reason=f"min_notional ({target_notional:.2f} < {min_notional:.2f})",
+                            context={"signal": str(signal or ""), "confidence": str(confidence or "")},
+                        )
+                    except Exception:
+                        pass
                     return
 
             fill_price = _get_fill_price(
@@ -3718,6 +3906,42 @@ class PaperTrader:
                     link_decision_to_trade(_parent_did, trade_id)
             except Exception:
                 pass
+
+            # AQC-804: Decision lineage — entry signal → trade
+            try:
+                _ind_ctx = {}
+                if indicators is not None:
+                    for _k in ("RSI", "ADX", "ADX_slope", "MACD_hist", "EMA_fast", "EMA_slow",
+                               "EMA_macro", "ATR", "ATR_slope", "bb_width_ratio", "stoch_k",
+                               "stoch_d", "volume", "vol_sma", "funding_rate"):
+                        _v = indicators.get(_k)
+                        if _v is not None:
+                            try:
+                                _ind_ctx[_k] = float(_v)
+                            except Exception:
+                                pass
+                _entry_decision_id = create_decision_event(
+                    symbol=symbol,
+                    event_type="entry_signal",
+                    status="executed",
+                    phase="execution",
+                    triggered_by="signal",
+                    action_taken=f"open_{'long' if signal == 'BUY' else 'short'}",
+                    parent_decision_id=_parent_did,
+                    context={
+                        "signal": str(signal or ""),
+                        "confidence": str(confidence or ""),
+                        "price": float(fill_price),
+                        "size": float(size),
+                        "atr": float(atr or 0.0),
+                        "indicators": _ind_ctx,
+                    },
+                )
+                if trade_id is not None:
+                    link_decision_to_trade(_entry_decision_id, int(trade_id))
+                    create_lineage(signal_decision_id=_entry_decision_id, entry_trade_id=int(trade_id))
+            except Exception as _dle:
+                logger.debug("AQC-804: entry lineage logging failed: %s", _dle)
             self._kernel_persist()
 
     def check_exit_conditions(self, symbol, current_price, timestamp, is_anomaly=False, dynamic_tp_mult=None, indicators=None):
@@ -3730,6 +3954,45 @@ class PaperTrader:
         pos = self.positions.get(symbol)
         if not pos:
             return
+
+        # AQC-804: capture open_trade_id early (before position may be deleted by close).
+        _open_trade_id = pos.get("open_trade_id")
+        _open_timestamp = pos.get("open_timestamp")
+
+        # AQC-804: helper to log exit decision + complete lineage after a full close.
+        def _log_exit_lineage(exit_reason: str, *, is_partial: bool = False) -> None:
+            try:
+                close_trade_id = getattr(self, "_last_close_trade_id", None)
+                exit_decision_id = create_decision_event(
+                    symbol=symbol,
+                    event_type="exit_check",
+                    status="executed",
+                    phase="execution",
+                    triggered_by=exit_reason,
+                    action_taken="reduce" if is_partial else "close",
+                    trade_id=close_trade_id,
+                    context={
+                        "exit_reason": exit_reason,
+                        "exit_price": float(current_price),
+                        "entry_trade_id": _open_trade_id,
+                        "is_partial": is_partial,
+                    },
+                )
+                if not is_partial and _open_trade_id is not None and close_trade_id is not None:
+                    complete_lineage(
+                        entry_trade_id=int(_open_trade_id),
+                        exit_decision_id=exit_decision_id,
+                        exit_trade_id=int(close_trade_id),
+                        exit_reason=exit_reason,
+                        duration_ms=_compute_duration_ms(_open_timestamp),
+                    )
+            except Exception as _dle:
+                logger.debug("AQC-804: exit lineage logging failed: %s", _dle)
+
+        # AQC-804: throttle counter for hold decisions (only log every 10th check).
+        _exit_check_key = f"_exit_check_count_{symbol}"
+        _exit_check_count = getattr(self, _exit_check_key, 0)
+        setattr(self, _exit_check_key, _exit_check_count + 1)
 
         cfg = get_strategy_config(symbol)
         trade_cfg = cfg.get("trade") or {}
@@ -4347,6 +4610,7 @@ class PaperTrader:
                     },
                 },
             )
+            _log_exit_lineage(smart_exit_reason)
         elif pos_type == 'LONG':
             if current_price <= sl_price:
                 reason = "Trailing Stop" if pos['trailing_sl'] else "Stop Loss"
@@ -4376,6 +4640,7 @@ class PaperTrader:
                         },
                     },
                 )
+                _log_exit_lineage(reason)
             elif current_price >= tp_check_price:
                 # Take-profit ladder (partial TP once, then trail the remainder).
                 if bool(trade_cfg.get("enable_partial_tp", True)) and tp1_taken == 0:
@@ -4433,6 +4698,7 @@ class PaperTrader:
                                 else:
                                     pos2["trailing_sl"] = max(float(pos2["trailing_sl"]), entry)
                                 self.upsert_position_state(symbol)
+                                _log_exit_lineage("Take Profit (Partial)", is_partial=True)
                             return
 
                 # If partial TP was already taken:
@@ -4468,6 +4734,7 @@ class PaperTrader:
                         },
                     },
                 )
+                _log_exit_lineage("Take Profit")
         else:
             if current_price >= sl_price:
                 reason = "Trailing Stop" if pos['trailing_sl'] else "Stop Loss"
@@ -4497,6 +4764,7 @@ class PaperTrader:
                         },
                     },
                 )
+                _log_exit_lineage(reason)
             elif current_price <= tp_check_price:
                 if bool(trade_cfg.get("enable_partial_tp", True)) and tp1_taken == 0:
                     try:
@@ -4552,6 +4820,7 @@ class PaperTrader:
                                 else:
                                     pos2["trailing_sl"] = min(float(pos2["trailing_sl"]), entry)
                                 self.upsert_position_state(symbol)
+                                _log_exit_lineage("Take Profit (Partial)", is_partial=True)
                             return
 
                 if bool(trade_cfg.get("enable_partial_tp", True)) and tp1_taken == 1:
@@ -4584,6 +4853,30 @@ class PaperTrader:
                         },
                     },
                 )
+                _log_exit_lineage("Take Profit")
+
+        # AQC-804: Hold decision (throttled — every 10th check to reduce noise).
+        if symbol in self.positions:
+            _check_count = getattr(self, _exit_check_key, 0)
+            if _check_count % 10 == 0:
+                try:
+                    create_decision_event(
+                        symbol=symbol,
+                        event_type="exit_check",
+                        status="hold",
+                        phase="evaluation",
+                        triggered_by="price_update",
+                        action_taken="hold",
+                        context={
+                            "price": float(current_price),
+                            "sl_price": float(sl_price),
+                            "tp_price": float(tp_price),
+                            "trailing_sl": None if pos.get("trailing_sl") is None else float(pos.get("trailing_sl")),
+                            "check_count": int(_check_count),
+                        },
+                    )
+                except Exception:
+                    pass
 
     def close_position(self, symbol, price, timestamp, reason, *, meta: dict | None = None):
         if symbol not in self.positions:
