@@ -256,6 +256,488 @@ def _json_dumps_safe(obj) -> str:
         except Exception:
             return ""
 
+
+# ---------------------------------------------------------------------------
+# Entry signal delegation to kernel Evaluate mode (AQC-812)
+# ---------------------------------------------------------------------------
+
+def build_gate_result(snap: dict, symbol: str, cfg: dict | None = None,
+                      btc_bullish: bool | None = None,
+                      ema_slow_slope_pct: float = 0.0) -> dict:
+    """Build a GateResult dict matching the Rust GateResult schema.
+
+    Mirrors the gate evaluation logic from ``analyze()`` and the Rust
+    ``bt_signals::gates::check_gates()`` function, producing a JSON-safe
+    dict that can be passed to the kernel's ``Evaluate`` signal.
+
+    Parameters
+    ----------
+    snap : dict
+        IndicatorSnapshot dict (from ``build_indicator_snapshot``).
+    symbol : str
+        Trading symbol (e.g. "ETH").
+    cfg : dict, optional
+        Strategy config (from ``get_strategy_config``).  ``None`` uses defaults.
+    btc_bullish : bool or None
+        BTC trend direction.  ``None`` = unknown.
+    ema_slow_slope_pct : float
+        Pre-computed EMA-slow slope: ``(ema_slow_now - ema_slow_prev) / close_now``.
+
+    Returns
+    -------
+    dict
+        GateResult with all fields matching the Rust schema.
+    """
+    if cfg is None:
+        cfg = _DEFAULT_STRATEGY_CONFIG
+
+    flt = cfg.get("filters") or {}
+    thr = cfg.get("thresholds") or {}
+    thr_entry = thr.get("entry") or {}
+    thr_ranging = thr.get("ranging") or {}
+    tp = thr.get("tp_and_momentum") or {}
+    trade_cfg = cfg.get("trade") or {}
+
+    # Gate 1: Ranging filter
+    bb_width_ratio = float(snap.get("bb_width_ratio", 1.0))
+    is_ranging = False
+    if bool(flt.get("enable_ranging_filter", True)):
+        try:
+            min_signals = max(1, int(thr_ranging.get("min_signals", 2)))
+        except Exception:
+            min_signals = 2
+        votes = 0
+        if snap.get("adx", 0) < float(thr_ranging.get("adx_below", 21.0)):
+            votes += 1
+        if bb_width_ratio < float(thr_ranging.get("bb_width_ratio_below", 0.8)):
+            votes += 1
+        rsi = float(snap.get("rsi", 50.0))
+        if float(thr_ranging.get("rsi_low", 47.0)) < rsi < float(thr_ranging.get("rsi_high", 53.0)):
+            votes += 1
+        is_ranging = votes >= min_signals
+
+    # Gate 2: Anomaly filter
+    is_anomaly = False
+    if bool(flt.get("enable_anomaly_filter", True)):
+        thr_anomaly = thr.get("anomaly") or {}
+        prev_close = float(snap.get("prev_close", 0.0))
+        close_val = float(snap.get("close", 0.0))
+        if prev_close > 0:
+            price_change_pct = abs(close_val - prev_close) / prev_close
+        else:
+            price_change_pct = 0.0
+        ema_fast = float(snap.get("ema_fast", 0.0))
+        if ema_fast > 0:
+            ema_dev_pct = abs(close_val - ema_fast) / ema_fast
+        else:
+            ema_dev_pct = 0.0
+        is_anomaly = (
+            price_change_pct > float(thr_anomaly.get("price_change_pct_gt", 0.10))
+            or ema_dev_pct > float(thr_anomaly.get("ema_fast_dev_pct_gt", 0.50))
+        )
+
+    # Gate 3: Extension filter
+    is_extended = False
+    if bool(flt.get("enable_extension_filter", True)):
+        ema_fast = float(snap.get("ema_fast", 0.0))
+        close_val = float(snap.get("close", 0.0))
+        max_dist = float(thr_entry.get("max_dist_ema_fast", 0.04))
+        dist = abs(close_val - ema_fast) / ema_fast if ema_fast > 0 else 0.0
+        is_extended = dist > max_dist
+
+    # Gate 4: Volume confirmation
+    vol_confirm = True
+    if bool(flt.get("require_volume_confirmation", False)):
+        vol = float(snap.get("volume", 0.0))
+        vol_sma = float(snap.get("vol_sma", 0.0))
+        vol_trend = bool(snap.get("vol_trend", False))
+        if bool(flt.get("vol_confirm_include_prev", True)):
+            vol_confirm = (vol > vol_sma) or vol_trend
+        else:
+            vol_confirm = (vol > vol_sma) and vol_trend
+
+    # Gate 5: ADX rising (or saturated)
+    is_trending_up = True
+    if bool(flt.get("require_adx_rising", True)):
+        saturation = float(flt.get("adx_rising_saturation", 40.0))
+        adx_slope = float(snap.get("adx_slope", 0.0))
+        adx_val = float(snap.get("adx", 0.0))
+        is_trending_up = (adx_slope > 0.0) or (adx_val > saturation)
+
+    # Gate 6: ADX threshold (effective_min_adx with TMC + AVE)
+    try:
+        min_adx = float(thr_entry.get("min_adx", 22.0))
+    except Exception:
+        min_adx = 22.0
+    effective_min_adx = min_adx
+
+    # TMC: if ADX slope > 0.5, cap at 25.0
+    adx_slope = float(snap.get("adx_slope", 0.0))
+    if adx_slope > 0.5:
+        effective_min_adx = min(effective_min_adx, 25.0)
+
+    # AVE: if ATR/avg_ATR > threshold, multiply by ave_adx_mult
+    ave_enabled = bool(thr_entry.get("ave_enabled", True))
+    avg_atr = float(snap.get("avg_atr", 0.0))
+    if ave_enabled and avg_atr > 0:
+        atr = float(snap.get("atr", 0.0))
+        atr_ratio = atr / avg_atr
+        ave_atr_ratio_gt = float(thr_entry.get("ave_atr_ratio_gt", 1.5))
+        if atr_ratio > ave_atr_ratio_gt:
+            ave_adx_mult = float(thr_entry.get("ave_adx_mult", 1.25))
+            if ave_adx_mult > 0:
+                effective_min_adx *= ave_adx_mult
+
+    adx_val = float(snap.get("adx", 0.0))
+    adx_above_min = adx_val > effective_min_adx
+
+    # Gate 7: Alignment (EMA cross + optional macro)
+    ema_fast_val = float(snap.get("ema_fast", 0.0))
+    ema_slow_val = float(snap.get("ema_slow", 0.0))
+    ema_macro_val = float(snap.get("ema_macro", 0.0))
+
+    bullish_alignment = ema_fast_val > ema_slow_val
+    bearish_alignment = ema_fast_val < ema_slow_val
+    if bool(flt.get("require_macro_alignment", False)):
+        bullish_alignment = bullish_alignment and (ema_slow_val > ema_macro_val)
+        bearish_alignment = bearish_alignment and (ema_slow_val < ema_macro_val)
+
+    # Gate 8: BTC alignment
+    sym_u = str(symbol or "").upper()
+    require_btc = bool(flt.get("require_btc_alignment", True))
+    try:
+        btc_adx_override = float(thr_entry.get("btc_adx_override", 40.0))
+    except Exception:
+        btc_adx_override = 40.0
+
+    btc_ok_long = (
+        (not require_btc) or (sym_u == "BTC")
+        or (btc_bullish is None) or bool(btc_bullish)
+        or (adx_val > btc_adx_override)
+    )
+    btc_ok_short = (
+        (not require_btc) or (sym_u == "BTC")
+        or (btc_bullish is None) or (not bool(btc_bullish))
+        or (adx_val > btc_adx_override)
+    )
+
+    # Slow-drift ranging override
+    enable_slow_drift = bool(thr_entry.get("enable_slow_drift_entries", False))
+    slow_drift_min_slope = float(thr_entry.get("slow_drift_min_slope_pct", 0.0006))
+    if enable_slow_drift and is_ranging and abs(ema_slow_slope_pct) >= slow_drift_min_slope:
+        is_ranging = False
+
+    # Dynamic TP multiplier
+    tp_atr_mult = float(trade_cfg.get("tp_atr_mult", TP_ATR_MULT))
+    if adx_val > float(tp.get("adx_strong_gt", 40.0)):
+        dynamic_tp_mult = float(tp.get("tp_mult_strong", 7.0))
+    elif adx_val < float(tp.get("adx_weak_lt", 30.0)):
+        dynamic_tp_mult = float(tp.get("tp_mult_weak", 3.0))
+    else:
+        dynamic_tp_mult = tp_atr_mult
+
+    # DRE: Dynamic RSI Elasticity
+    adx_min_dre = float(thr_entry.get("min_adx", 22.0))
+    adx_max_dre = float(tp.get("adx_strong_gt", 40.0))
+    if adx_max_dre <= adx_min_dre:
+        adx_max_dre = adx_min_dre + 1.0
+    weight = max(0.0, min(1.0, (adx_val - adx_min_dre) / (adx_max_dre - adx_min_dre)))
+    rsi_long_limit = float(tp.get("rsi_long_weak", 56.0)) + weight * (
+        float(tp.get("rsi_long_strong", 52.0)) - float(tp.get("rsi_long_weak", 56.0))
+    )
+    rsi_short_limit = float(tp.get("rsi_short_weak", 44.0)) + weight * (
+        float(tp.get("rsi_short_strong", 48.0)) - float(tp.get("rsi_short_weak", 44.0))
+    )
+
+    # StochRSI
+    stoch_k = float(snap.get("stoch_rsi_k", 0.0))
+    stoch_d = float(snap.get("stoch_rsi_d", 0.0))
+    stoch_rsi_active = bool(flt.get("use_stoch_rsi_filter", True))
+
+    # Combined check
+    all_gates_pass = (
+        adx_above_min
+        and (not is_ranging)
+        and (not is_anomaly)
+        and (not is_extended)
+        and vol_confirm
+        and is_trending_up
+    )
+
+    return {
+        "is_ranging": bool(is_ranging),
+        "is_anomaly": bool(is_anomaly),
+        "is_extended": bool(is_extended),
+        "vol_confirm": bool(vol_confirm),
+        "is_trending_up": bool(is_trending_up),
+        "adx_above_min": bool(adx_above_min),
+        "bullish_alignment": bool(bullish_alignment),
+        "bearish_alignment": bool(bearish_alignment),
+        "btc_ok_long": bool(btc_ok_long),
+        "btc_ok_short": bool(btc_ok_short),
+        "effective_min_adx": float(effective_min_adx),
+        "bb_width_ratio": float(bb_width_ratio),
+        "dynamic_tp_mult": float(dynamic_tp_mult),
+        "rsi_long_limit": float(rsi_long_limit),
+        "rsi_short_limit": float(rsi_short_limit),
+        "stoch_k": float(stoch_k),
+        "stoch_d": float(stoch_d),
+        "stoch_rsi_active": bool(stoch_rsi_active),
+        "all_gates_pass": bool(all_gates_pass),
+    }
+
+
+def compute_ema_slow_slope(df, cfg: dict | None = None) -> float:
+    """Compute the EMA-slow slope percentage from a DataFrame.
+
+    Returns ``(ema_slow_now - ema_slow_prev_N) / close_now`` over the
+    configured ``slow_drift_slope_window``.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must have a 'Close' column and enough rows for indicator computation.
+    cfg : dict, optional
+        Strategy config.  Uses ``thresholds.entry.slow_drift_slope_window``
+        (default 20).
+
+    Returns
+    -------
+    float
+        EMA-slow slope as a fraction of current price.
+    """
+    import ta as _ta
+
+    if cfg is None:
+        cfg = _DEFAULT_STRATEGY_CONFIG
+    thr_entry = (cfg.get("thresholds") or {}).get("entry") or {}
+    ind = cfg.get("indicators") or {}
+    try:
+        slope_window = int(thr_entry.get("slow_drift_slope_window", 20))
+    except Exception:
+        slope_window = 20
+    slope_window = max(3, min(slope_window, len(df) - 1))
+
+    try:
+        ema_slow_win = int(ind.get("ema_slow_window", 50))
+    except Exception:
+        ema_slow_win = 50
+
+    ema_slow = _ta.trend.ema_indicator(df["Close"], window=ema_slow_win)
+    try:
+        ema_slow_now = float(ema_slow.iloc[-1])
+        ema_slow_prev = float(ema_slow.iloc[-slope_window])
+        close_now = float(df["Close"].iloc[-1])
+        if close_now == 0:
+            close_now = 1.0
+        result = (ema_slow_now - ema_slow_prev) / close_now
+        if result != result:  # NaN check
+            return 0.0
+        return result
+    except Exception:
+        return 0.0
+
+
+def build_entry_params(cfg: dict | None = None) -> dict:
+    """Build an EntryParams dict matching the Rust kernel's EntryParams schema.
+
+    Parameters
+    ----------
+    cfg : dict, optional
+        Strategy config.  ``None`` uses defaults.
+
+    Returns
+    -------
+    dict
+        EntryParams serializable to JSON for the kernel.
+    """
+    if cfg is None:
+        cfg = _DEFAULT_STRATEGY_CONFIG
+    thr = (cfg.get("thresholds") or {})
+    thr_entry = thr.get("entry") or {}
+    stoch_rsi = thr.get("stoch_rsi") or {}
+
+    macd_mode_str = str(thr_entry.get("macd_hist_entry_mode", "accel")).strip().lower()
+    macd_mode = {"accel": 0, "sign": 1, "none": 2}.get(macd_mode_str, 0)
+
+    pullback_conf_str = str(thr_entry.get("pullback_confidence", "low")).strip().lower()
+    pullback_conf = {"low": 0, "medium": 1, "high": 2}.get(pullback_conf_str, 0)
+
+    return {
+        "macd_mode": macd_mode,
+        "stoch_block_long_gt": float(stoch_rsi.get("block_long_if_k_gt", 0.85)),
+        "stoch_block_short_lt": float(stoch_rsi.get("block_short_if_k_lt", 0.15)),
+        "high_conf_volume_mult": float(thr_entry.get("high_conf_volume_mult", 2.5)),
+        "enable_pullback": bool(thr_entry.get("enable_pullback_entries", False)),
+        "pullback_confidence": pullback_conf,
+        "pullback_min_adx": float(thr_entry.get("pullback_min_adx", 22.0)),
+        "pullback_rsi_long_min": float(thr_entry.get("pullback_rsi_long_min", 50.0)),
+        "pullback_rsi_short_max": float(thr_entry.get("pullback_rsi_short_max", 50.0)),
+        "pullback_require_macd_sign": bool(thr_entry.get("pullback_require_macd_sign", True)),
+        "enable_slow_drift": bool(thr_entry.get("enable_slow_drift_entries", False)),
+        "slow_drift_min_slope_pct": float(thr_entry.get("slow_drift_min_slope_pct", 0.0006)),
+        "slow_drift_min_adx": float(thr_entry.get("slow_drift_min_adx", 10.0)),
+        "slow_drift_rsi_long_min": float(thr_entry.get("slow_drift_rsi_long_min", 50.0)),
+        "slow_drift_rsi_short_max": float(thr_entry.get("slow_drift_rsi_short_max", 50.0)),
+        "slow_drift_require_macd_sign": bool(thr_entry.get("slow_drift_require_macd_sign", True)),
+    }
+
+
+def evaluate_entry_kernel(df, symbol: str, state_json: str, params_json: str,
+                          btc_bullish: bool | None = None, cfg: dict | None = None):
+    """Evaluate entry signal using the Rust kernel's Evaluate mode.
+
+    Flow: candles -> build_indicator_snapshot() -> build_gate_result() ->
+    MarketEvent(Evaluate, indicators, gate_result) -> kernel step_decision()
+    -> DecisionResult with diagnostics.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Candle data with Open, High, Low, Close, Volume columns.
+    symbol : str
+        Trading symbol (e.g. "ETH").
+    state_json : str
+        Current kernel StrategyState as JSON.
+    params_json : str
+        Current kernel KernelParams as JSON (must include ``entry_params``).
+    btc_bullish : bool or None
+        BTC trend direction.
+    cfg : dict, optional
+        Strategy config override.  ``None`` uses ``get_strategy_config(symbol)``.
+
+    Returns
+    -------
+    tuple[str, str, dict]
+        ``(signal, confidence, diagnostics)`` where signal is "BUY"/"SELL"/"NEUTRAL",
+        confidence is "low"/"medium"/"high", and diagnostics is the full kernel
+        diagnostics dict.
+
+    Raises
+    ------
+    RuntimeError
+        If bt_runtime is not available or the kernel returns an error.
+    """
+    if not _BT_RUNTIME_AVAILABLE or _bt_runtime is None:
+        raise RuntimeError("bt_runtime is not available; cannot use kernel Evaluate mode")
+
+    if cfg is None:
+        cfg = get_strategy_config(symbol)
+
+    # 1. Build indicator snapshot
+    snap = build_indicator_snapshot(df, symbol=symbol,
+                                   config=cfg.get("indicators"))
+
+    # 2. Compute EMA-slow slope
+    slope = compute_ema_slow_slope(df, cfg)
+
+    # 3. Build gate result
+    gate_result = build_gate_result(snap, symbol, cfg=cfg,
+                                    btc_bullish=btc_bullish,
+                                    ema_slow_slope_pct=slope)
+
+    # 4. Build entry_params and merge into params
+    entry_params = build_entry_params(cfg)
+    params_dict = json.loads(params_json)
+    params_dict["entry_params"] = entry_params
+    merged_params_json = json.dumps(params_dict)
+
+    # 5. Build MarketEvent
+    state_dict = json.loads(state_json)
+    event = {
+        "schema_version": int(state_dict.get("schema_version", 1)),
+        "event_id": int(snap.get("t", 0)),
+        "timestamp_ms": int(snap.get("t", 0)),
+        "symbol": str(symbol).upper(),
+        "signal": "evaluate",
+        "price": float(snap.get("close", 0.0)),
+        "indicators": snap,
+        "gate_result": gate_result,
+        "ema_slow_slope_pct": float(slope),
+    }
+    event_json = json.dumps(event, default=_json_default)
+
+    # 6. Call kernel
+    result_json = _bt_runtime.step_decision(state_json, event_json, merged_params_json)
+    result = json.loads(result_json)
+
+    if not result.get("ok"):
+        err = result.get("error", {})
+        raise RuntimeError(
+            f"Kernel Evaluate failed: {err.get('message', 'unknown')} "
+            f"details={err.get('details', [])}"
+        )
+
+    decision = result.get("decision", {})
+    diag = decision.get("diagnostics", {})
+
+    # 7. Extract signal + confidence from diagnostics
+    entry_signal_raw = str(diag.get("entry_signal", "neutral")).upper()
+    signal = entry_signal_raw if entry_signal_raw in ("BUY", "SELL") else "NEUTRAL"
+
+    conf_int = diag.get("entry_confidence", 0)
+    confidence = {0: "low", 1: "medium", 2: "high"}.get(conf_int, "low")
+
+    return signal, confidence, diag
+
+
+def analyze_with_shadow(df, symbol: str, state_json: str, params_json: str,
+                        btc_bullish: bool | None = None, cfg: dict | None = None):
+    """Run both Python ``analyze()`` and kernel ``Evaluate``, log differences.
+
+    The kernel result is authoritative.  Python's ``analyze()`` is run for
+    shadow comparison only and its result is discarded (except for logging).
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Candle data.
+    symbol : str
+        Trading symbol.
+    state_json : str
+        Kernel state JSON.
+    params_json : str
+        Kernel params JSON.
+    btc_bullish : bool or None
+        BTC trend direction.
+    cfg : dict, optional
+        Strategy config override.
+
+    Returns
+    -------
+    tuple[str, str, dict]
+        ``(signal, confidence, diagnostics)`` — always from the kernel.
+    """
+    # Python signal (best-effort; never let it break the kernel path)
+    py_signal, py_conf = "NEUTRAL", "low"
+    try:
+        py_result = analyze(df, symbol, btc_bullish)
+        py_signal = str(py_result[0]).upper()
+        py_conf = str(py_result[1]).lower()
+    except Exception as exc:
+        logger.warning("[shadow] Python analyze() failed: %s", exc)
+
+    # Kernel signal
+    k_signal, k_conf, k_diag = evaluate_entry_kernel(
+        df, symbol, state_json, params_json,
+        btc_bullish=btc_bullish, cfg=cfg,
+    )
+
+    # Compare and log
+    if py_signal != k_signal or py_conf != k_conf:
+        logger.warning(
+            "[shadow] Signal mismatch for %s: Python=%s/%s, Kernel=%s/%s",
+            symbol, py_signal, py_conf, k_signal, k_conf,
+        )
+    else:
+        logger.debug(
+            "[shadow] Signal agreement for %s: %s/%s",
+            symbol, k_signal, k_conf,
+        )
+
+    return k_signal, k_conf, k_diag
+
+
 # --------------------------------------------------------------------------------------
 # Developer Notes (READ ME FIRST)
 #
