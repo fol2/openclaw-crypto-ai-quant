@@ -164,13 +164,14 @@ struct __align__(16) GpuComboConfig {
 };
 
 struct GpuComboState {
-    float balance;  unsigned int num_open;  unsigned int entries_this_bar;  unsigned int _sp;
+    double balance;  unsigned int num_open;  unsigned int entries_this_bar;
     GpuPosition positions[52];
     unsigned int pesc_close_time_sec[52];
     unsigned int pesc_close_type[52];
     unsigned int pesc_close_reason[52];
-    float total_pnl;  float total_fees;  unsigned int total_trades;  unsigned int total_wins;
-    float gross_profit;  float gross_loss;  float max_drawdown;  float peak_equity;
+    double total_pnl;  double total_fees;  unsigned int total_trades;  unsigned int total_wins;
+    double gross_profit;  double gross_loss;  double max_drawdown;  double peak_equity;
+    unsigned int _acc_pad[2];
 };
 
 struct __align__(16) GpuResult {
@@ -813,21 +814,27 @@ __device__ void apply_close(GpuComboState* state, unsigned int sym, const GpuSna
     if (pos.active == POS_EMPTY) { return; }
 
     float slip = (pos.active == POS_LONG) ? slippage_bps : -slippage_bps;
-
     float fill_price = snap.close * (1.0f + slip / 10000.0f);
-    float notional = pos.size * fill_price;
-    float fee = notional * fee_rate;
 
-    float pnl = profit_usd(pos, fill_price);
+    // Use double for PnL/fee to prevent accumulation drift over 10K+ trades
+    double pnl;
+    if (pos.active == POS_LONG) {
+        pnl = ((double)fill_price - (double)pos.entry_price) * (double)pos.size;
+    } else {
+        pnl = ((double)pos.entry_price - (double)fill_price) * (double)pos.size;
+    }
+    double notional = (double)pos.size * (double)fill_price;
+    double fee = notional * (double)fee_rate;
+
     state->balance += pnl - fee;
     state->total_pnl += pnl;
     state->total_fees += fee;
     state->total_trades += 1u;
-    if (pnl > 0.0f) {
+    if (pnl > 0.0) {
         state->total_wins += 1u;
         state->gross_profit += pnl;
     } else {
-        state->gross_loss += fabsf(pnl);
+        state->gross_loss += fabs(pnl);
     }
     state->num_open -= 1u;
 
@@ -852,25 +859,26 @@ __device__ void apply_partial_close(GpuComboState* state, unsigned int sym, cons
     float exit_size = pos.size * pct;
     float slip = (pos.active == POS_LONG) ? slippage_bps : -slippage_bps;
     float fill_price = snap.close * (1.0f + slip / 10000.0f);
-    float notional = exit_size * fill_price;
-    float fee = notional * fee_rate;
 
-    float pnl;
+    // Use double for PnL/fee to prevent accumulation drift over 10K+ trades
+    double pnl;
     if (pos.active == POS_LONG) {
-        pnl = (fill_price - pos.entry_price) * exit_size;
+        pnl = ((double)fill_price - (double)pos.entry_price) * (double)exit_size;
     } else {
-        pnl = (pos.entry_price - fill_price) * exit_size;
+        pnl = ((double)pos.entry_price - (double)fill_price) * (double)exit_size;
     }
+    double notional = (double)exit_size * (double)fill_price;
+    double fee = notional * (double)fee_rate;
 
     state->balance += pnl - fee;
     state->total_pnl += pnl;
     state->total_fees += fee;
     state->total_trades += 1u;
-    if (pnl > 0.0f) {
+    if (pnl > 0.0) {
         state->total_wins += 1u;
         state->gross_profit += pnl;
     } else {
-        state->gross_loss += fabsf(pnl);
+        state->gross_loss += fabs(pnl);
     }
 
     // Reduce position
@@ -1129,7 +1137,7 @@ extern "C" __global__ void sweep_engine_kernel(
                             if (p_atr_pyr >= cfg.add_min_profit_atr) {
                                 unsigned int elapsed_sec = hybrid.t_sec - pos.last_add_time_sec;
                                 if (elapsed_sec >= cfg.add_cooldown_minutes * 60u) {
-                                    float equity = state.balance;
+                                    float equity = (float)state.balance;
                                     float base_margin = equity * cfg.allocation_pct;
                                     float add_margin = base_margin * cfg.add_fraction_of_base_margin;
                                     float lev = pos.leverage;
@@ -1267,10 +1275,10 @@ extern "C" __global__ void sweep_engine_kernel(
                             total_margin += state.positions[s].margin_used;
                         }
                     }
-                    float headroom = state.balance * cfg.max_total_margin_pct - total_margin;
+                    float headroom = (float)state.balance * cfg.max_total_margin_pct - total_margin;
                     if (headroom <= 0.0f) { continue; }
 
-                    SizingResult sizing = compute_entry_size(state.balance, hybrid.close, cand.confidence,
+                    SizingResult sizing = compute_entry_size((float)state.balance, hybrid.close, cand.confidence,
                                                              cand.atr, hybrid, &cfg);
                     float size = sizing.size;
                     float margin = sizing.margin;
@@ -1406,7 +1414,7 @@ extern "C" __global__ void sweep_engine_kernel(
                         if (p_atr_pyr >= cfg.add_min_profit_atr) {
                             unsigned int elapsed_sec = snap.t_sec - pos.last_add_time_sec;
                             if (elapsed_sec >= cfg.add_cooldown_minutes * 60u) {
-                                float equity = state.balance;
+                                float equity = (float)state.balance;
                                 float base_margin = equity * cfg.allocation_pct;
                                 float add_margin = base_margin * cfg.add_fraction_of_base_margin;
                                 float lev = pos.leverage;
@@ -1532,10 +1540,10 @@ extern "C" __global__ void sweep_engine_kernel(
                         total_margin += state.positions[s].margin_used;
                     }
                 }
-                float headroom = state.balance * cfg.max_total_margin_pct - total_margin;
+                float headroom = (float)state.balance * cfg.max_total_margin_pct - total_margin;
                 if (headroom <= 0.0f) { continue; }
 
-                SizingResult sizing = compute_entry_size(state.balance, snap.close, cand.confidence,
+                SizingResult sizing = compute_entry_size((float)state.balance, snap.close, cand.confidence,
                                                          cand.atr, snap, &cfg);
                 float size = sizing.size;
                 float margin = sizing.margin;
@@ -1588,20 +1596,20 @@ extern "C" __global__ void sweep_engine_kernel(
             }
         } // end if/else max_sub
 
-        // == Equity tracking =================================================
-        float equity = state.balance;
+        // == Equity tracking (double precision) ==================================
+        double equity = state.balance;
         for (unsigned int s = 0u; s < ns; s++) {
             const GpuPosition& p = state.positions[s];
             if (p.active != POS_EMPTY) {
                 const GpuSnapshot& snap = snapshots[cfg.snapshot_offset + bar * ns + s];
                 if (snap.valid != 0u) {
-                    equity += profit_usd(p, snap.close);
+                    equity += (double)profit_usd(p, snap.close);
                 }
             }
         }
         if (equity > state.peak_equity) { state.peak_equity = equity; }
-        if (state.peak_equity > 0.0f) {
-            float dd = (state.peak_equity - equity) / state.peak_equity;
+        if (state.peak_equity > 0.0) {
+            double dd = (state.peak_equity - equity) / state.peak_equity;
             if (dd > state.max_drawdown) { state.max_drawdown = dd; }
         }
     }
@@ -1615,15 +1623,15 @@ extern "C" __global__ void sweep_engine_kernel(
                                     ? (state.total_trades - state.total_wins)
                                     : 0u;
         GpuResult res;
-        res.final_balance = state.balance;
-        res.total_pnl = state.total_pnl;
-        res.total_fees = state.total_fees;
+        res.final_balance = (float)state.balance;
+        res.total_pnl = (float)state.total_pnl;
+        res.total_fees = (float)state.total_fees;
         res.total_trades = state.total_trades;
         res.total_wins = state.total_wins;
         res.total_losses = total_losses;
-        res.gross_profit = state.gross_profit;
-        res.gross_loss = state.gross_loss;
-        res.max_drawdown_pct = state.max_drawdown;
+        res.gross_profit = (float)state.gross_profit;
+        res.gross_loss = (float)state.gross_loss;
+        res.max_drawdown_pct = (float)state.max_drawdown;
         res._pad[0] = 0u;
         res._pad[1] = 0u;
         res._pad[2] = 0u;

@@ -262,8 +262,8 @@ impl BatchBuffers {
 
         let mut states_host = vec![GpuComboState::zeroed(); configs.len()];
         for s in &mut states_host {
-            s.balance = initial_balance;
-            s.peak_equity = initial_balance;
+            s.balance = initial_balance as f64;
+            s.peak_equity = initial_balance as f64;
         }
         let states = ds.dev.htod_sync_copy(&states_host).unwrap();
         let results = ds.dev.alloc_zeros::<GpuResult>(configs.len()).unwrap();
@@ -323,8 +323,8 @@ impl BatchBuffers {
 
         let mut states_host = vec![GpuComboState::zeroed(); configs.len()];
         for s in &mut states_host {
-            s.balance = initial_balance;
-            s.peak_equity = initial_balance;
+            s.balance = initial_balance as f64;
+            s.peak_equity = initial_balance as f64;
         }
         let states = ds.dev.htod_sync_copy(&states_host).unwrap();
         let results = ds.dev.alloc_zeros::<GpuResult>(configs.len()).unwrap();

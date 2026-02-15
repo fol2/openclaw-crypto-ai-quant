@@ -407,15 +407,16 @@ const _: () = assert!(std::mem::size_of::<GpuPosition>() == 64);
 /// Contains up to 52 symbol positions (matching max watchlist size)
 /// plus PESC cooldown arrays and result accumulators.
 ///
-/// Size: 64 + 52*64 + 52*4 + 52*4 + 52*4 + 32 = 3,608 bytes → round to 3,616 (16-aligned)
+/// Accumulator fields use f64 (double) for precision over 10K+ trade accumulations.
+///
+/// Size: 16 (header) + 52*64 (positions) + 3*52*4 (PESC) + 56 (accumulators) + 8 (pad) = 4,032
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct GpuComboState {
-    // Account state
-    pub balance: f32,
+    // Account state (f64 balance = 8 bytes, absorbs old _state_pad)
+    pub balance: f64,
     pub num_open: u32,
     pub entries_this_bar: u32,
-    pub _state_pad: u32,
 
     // Positions (fixed-size array)
     pub positions: [GpuPosition; 52],
@@ -425,15 +426,16 @@ pub struct GpuComboState {
     pub pesc_close_type: [u32; 52],   // 0=none, 1=LONG, 2=SHORT
     pub pesc_close_reason: [u32; 52], // 0=none, 1=signal_flip, 2=other
 
-    // Result accumulators
-    pub total_pnl: f32,
-    pub total_fees: f32,
+    // Result accumulators (f64 for precision)
+    pub total_pnl: f64,
+    pub total_fees: f64,
     pub total_trades: u32,
     pub total_wins: u32,
-    pub gross_profit: f32,
-    pub gross_loss: f32,
-    pub max_drawdown: f32,
-    pub peak_equity: f32,
+    pub gross_profit: f64,
+    pub gross_loss: f64,
+    pub max_drawdown: f64,
+    pub peak_equity: f64,
+    pub _acc_pad: [u32; 2],
 }
 
 // Manual impls because bytemuck derive doesn't support [T; 52]
@@ -441,6 +443,7 @@ pub struct GpuComboState {
 unsafe impl Pod for GpuComboState {}
 unsafe impl Zeroable for GpuComboState {}
 
+const _: () = assert!(std::mem::size_of::<GpuComboState>() == 4032);
 const _: () = assert!(std::mem::size_of::<GpuComboState>() % 16 == 0);
 
 // ═══════════════════════════════════════════════════════════════════════════
