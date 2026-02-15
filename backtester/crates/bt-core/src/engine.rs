@@ -191,6 +191,13 @@ fn make_kernel_state(
                 updated_at_ms: pos.open_time_ms,
                 notional_usd,
                 margin_usd: accounting::quantize(pos.margin_used),
+                confidence: None,
+                entry_atr: None,
+                adds_count: 0,
+                tp1_taken: false,
+                trailing_sl: None,
+                mae_usd: 0.0,
+                mfe_usd: 0.0,
             },
         );
     }
