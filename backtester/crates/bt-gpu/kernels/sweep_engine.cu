@@ -877,14 +877,8 @@ __device__ void apply_partial_close(GpuComboState* state, unsigned int sym, cons
     state->positions[sym].size -= exit_size;
     state->positions[sym].margin_used *= (1.0f - pct);
     state->positions[sym].tp1_taken = 1u;
-    // Lock trailing SL to at least entry (breakeven)
-    if (state->positions[sym].trailing_sl <= 0.0f || (
-        pos.active == POS_LONG && state->positions[sym].trailing_sl < pos.entry_price
-    ) || (
-        pos.active == POS_SHORT && state->positions[sym].trailing_sl > pos.entry_price
-    )) {
-        state->positions[sym].trailing_sl = pos.entry_price;
-    }
+    // CPU semantics: trailing SL is NOT modified on partial close.
+    // compute_trailing() continues ratcheting on subsequent bars.
 }
 
 // -- PESC Check ---------------------------------------------------------------
