@@ -1,8 +1,8 @@
 //! Kernel-level exit evaluation (SL, trailing, TP with partial support).
 //!
 //! Mirrors the priority logic from `exits/mod.rs::check_all_exits()` but operates
-//! on the kernel's own `Position` type.  Smart exits (AQC-713) and glitch guard
-//! (AQC-712) will be added in later tickets.
+//! on the kernel's own `Position` type.  Glitch guard (AQC-712) blocks exits during
+//! extreme price deviations.  Smart exits (AQC-713) will be added in a later ticket.
 
 use crate::decision_kernel::{Position, PositionSide};
 use crate::indicators::IndicatorSnapshot;
@@ -26,7 +26,7 @@ pub struct ExitParams {
     pub breakeven_start_atr: f64,
     pub breakeven_buffer_atr: f64,
     pub enable_vol_buffered_trailing: bool,
-    // Glitch guard (AQC-712 — not evaluated yet)
+    // Glitch guard (AQC-712)
     pub block_exits_on_extreme_dev: bool,
     pub glitch_price_dev_pct: f64,
     pub glitch_atr_mult: f64,
@@ -352,7 +352,7 @@ fn check_tp(
 
 /// Evaluate exit conditions for an existing kernel position.
 ///
-/// Priority: Stop Loss > Trailing Stop > Take Profit.
+/// Priority: Glitch Guard > Stop Loss > Trailing Stop > Take Profit.
 /// Updates `pos.trailing_sl` in-place (ratcheted).
 pub fn evaluate_exits(
     pos: &mut Position,
@@ -360,6 +360,18 @@ pub fn evaluate_exits(
     params: &ExitParams,
     _current_time_ms: i64,
 ) -> KernelExitResult {
+    // ── 0. Glitch guard — block exits during extreme price deviations ───
+    // Mirrors exits/mod.rs check_all_exits() step 0.
+    if params.block_exits_on_extreme_dev && snap.prev_close > 0.0 {
+        let price_change_pct = (snap.close - snap.prev_close).abs() / snap.prev_close;
+        let is_glitch = price_change_pct > params.glitch_price_dev_pct
+            || (snap.atr > 0.0
+                && (snap.close - snap.prev_close).abs() > snap.atr * params.glitch_atr_mult);
+        if is_glitch {
+            return KernelExitResult::Hold;
+        }
+    }
+
     let entry = pos.avg_entry_price;
     let atr = effective_atr(entry, pos.entry_atr);
     let pa = profit_atr(pos.side, entry, snap.close, atr);
@@ -821,5 +833,96 @@ mod tests {
         let json = serde_json::to_string(&params).unwrap();
         let deser: ExitParams = serde_json::from_str(&json).unwrap();
         assert_eq!(params, deser);
+    }
+
+    // ── Glitch guard tests (AQC-712) ────────────────────────────────────
+
+    #[test]
+    fn test_glitch_guard_blocks_exit_on_price_spike() {
+        // 50% price spike: prev_close=100, close=150 → pct=0.50 > 0.40 threshold
+        // SL would trigger (close=150 is far from entry=200), but glitch guard blocks first
+        let mut pos = long_pos(200.0);
+        let mut snap = default_snap(150.0);
+        snap.prev_close = 100.0;
+        let params = ExitParams {
+            block_exits_on_extreme_dev: true,
+            enable_partial_tp: false,
+            ..default_params()
+        };
+        let result = evaluate_exits(&mut pos, &snap, &params, 0);
+        assert_eq!(result, KernelExitResult::Hold, "Glitch guard should block exit on price spike");
+    }
+
+    #[test]
+    fn test_glitch_guard_blocks_exit_on_atr_spike() {
+        // ATR-relative spike: |close - prev_close| = 15.0 > atr(1.0) * glitch_atr_mult(12.0) = 12.0
+        // But pct = 15/100 = 0.15 < 0.40, so only ATR condition triggers
+        let mut pos = long_pos(200.0);
+        let mut snap = default_snap(115.0);
+        snap.prev_close = 100.0;
+        snap.atr = 1.0;
+        let params = ExitParams {
+            block_exits_on_extreme_dev: true,
+            enable_partial_tp: false,
+            ..default_params()
+        };
+        let result = evaluate_exits(&mut pos, &snap, &params, 0);
+        assert_eq!(result, KernelExitResult::Hold, "Glitch guard should block exit on ATR spike");
+    }
+
+    #[test]
+    fn test_glitch_guard_allows_exit_normal_move() {
+        // Normal move: prev_close=100, close=97.5 → pct=0.025 < 0.40
+        // ATR check: |2.5| vs 1.0*12.0=12.0 → not triggered
+        // SL: entry=100, atr=1.0, sl_mult=2.0 → SL=98.0; close=97.5 → SL triggers
+        let mut pos = long_pos(100.0);
+        let mut snap = default_snap(97.5);
+        snap.prev_close = 100.0;
+        let params = ExitParams {
+            block_exits_on_extreme_dev: true,
+            enable_partial_tp: false,
+            ..default_params()
+        };
+        let result = evaluate_exits(&mut pos, &snap, &params, 0);
+        match result {
+            KernelExitResult::FullClose { reason, .. } => assert_eq!(reason, "Stop Loss"),
+            other => panic!("Expected SL to trigger on normal move, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_glitch_guard_disabled_allows_extreme_move() {
+        // Same extreme spike as first test, but guard disabled → SL fires
+        let mut pos = long_pos(200.0);
+        let mut snap = default_snap(150.0);
+        snap.prev_close = 100.0;
+        let params = ExitParams {
+            block_exits_on_extreme_dev: false,
+            enable_partial_tp: false,
+            ..default_params()
+        };
+        let result = evaluate_exits(&mut pos, &snap, &params, 0);
+        match result {
+            KernelExitResult::FullClose { reason, .. } => assert_eq!(reason, "Stop Loss"),
+            other => panic!("Expected SL when glitch guard disabled, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_glitch_guard_prev_close_zero_skips() {
+        // prev_close=0 → guard condition short-circuits, SL fires normally
+        let mut pos = long_pos(100.0);
+        let mut snap = default_snap(97.5);
+        snap.prev_close = 0.0;
+        let params = ExitParams {
+            block_exits_on_extreme_dev: true,
+            enable_partial_tp: false,
+            ..default_params()
+        };
+        let result = evaluate_exits(&mut pos, &snap, &params, 0);
+        match result {
+            KernelExitResult::FullClose { reason, .. } => assert_eq!(reason, "Stop Loss"),
+            other => panic!("Expected SL when prev_close=0 skips guard, got {:?}", other),
+        }
     }
 }
