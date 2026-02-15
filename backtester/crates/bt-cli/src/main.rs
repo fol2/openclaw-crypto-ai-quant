@@ -2655,6 +2655,7 @@ mod tests {
             margin_used: 0.0,
             mae_usd: 0.0,
             mfe_usd: 0.0,
+            exit_context: None,
         }
     }
 
@@ -2753,6 +2754,7 @@ mod tests {
             margin_used: 0.0,
             mae_usd: 0.0,
             mfe_usd: 0.0,
+            exit_context: None,
         }
     }
 
