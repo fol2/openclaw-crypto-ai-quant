@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 import exchange.ws as hyperliquid_ws
 import exchange.meta as hyperliquid_meta
 from engine.alerting import send_openclaw_message
+from engine.kernel_shadow_report import ShadowReport
 
 try:
     import bt_runtime as _bt_runtime
@@ -1169,6 +1170,7 @@ class PaperTrader:
         self._kernel_state_json: str | None = None
         self._kernel_params_json: str | None = None
         self._kernel_available: bool = False
+        self._shadow_report: ShadowReport = ShadowReport()
         self._init_kernel()
         ensure_db()
         self.load_state()
@@ -1238,19 +1240,15 @@ class PaperTrader:
                     logger.debug("[kernel] step rejected: %s", err.get("message", result_json[:200]))
                     return
 
-            # --- Parallel comparison ---
+            # --- Parallel comparison via ShadowReport (AQC-752) ---
             kernel_balance = self.get_kernel_balance()
             if kernel_balance is not None:
-                diff = abs(float(self.balance) - kernel_balance)
-                if diff > 0.01:
-                    logger.warning(
-                        "[kernel] DISCREPANCY: PaperTrader balance=%.4f vs kernel cash_usd=%.4f (diff=%.4f) symbol=%s signal=%s",
-                        self.balance,
-                        kernel_balance,
-                        diff,
-                        symbol,
-                        signal or "FUNDING",
-                    )
+                self._shadow_report.add_comparison(
+                    metric="balance",
+                    old_val=float(self.balance),
+                    kernel_val=kernel_balance,
+                    tolerance=0.01,
+                )
         except Exception as e:
             logger.warning("[kernel] sync event failed: %s", e)
 
@@ -1288,6 +1286,12 @@ class PaperTrader:
             _bt_runtime.save_state(self._kernel_state_json, state_path)
         except Exception as e:
             logger.warning("[kernel] persist failed: %s", e)
+        # Persist shadow report alongside kernel state (AQC-752)
+        try:
+            report_path = os.path.join(os.path.dirname(DB_PATH), "kernel_shadow_report.json")
+            self._shadow_report.to_json(report_path)
+        except Exception as e:
+            logger.warning("[shadow] persist failed: %s", e)
 
     def _kernel_restore(self) -> None:
         """Attempt to restore kernel state from disk."""
@@ -1300,6 +1304,15 @@ class PaperTrader:
                 self._kernel_available = True
                 kb = self.get_kernel_balance()
                 logger.info("[kernel] Restored kernel state from disk (cash_usd=%.2f)", kb or 0.0)
+            # Restore shadow report (AQC-752)
+            report_path = os.path.join(os.path.dirname(DB_PATH), "kernel_shadow_report.json")
+            if os.path.isfile(report_path):
+                self._shadow_report = ShadowReport.from_json(report_path)
+                s = self._shadow_report.summary()
+                logger.info(
+                    "[shadow] Restored report: %d checks, %d failures, converged=%s",
+                    s["total_checks"], s["failures"], self._shadow_report.is_converged(),
+                )
         except Exception as e:
             logger.warning("[kernel] restore failed, re-initializing: %s", e)
             self._init_kernel()
