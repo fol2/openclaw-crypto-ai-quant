@@ -969,14 +969,14 @@ extern "C" __global__ void sweep_engine_kernel(
                 // CPU semantics: always evaluate exits once on the indicator-bar snapshot at `ts`
                 // (using the main bar OHLCV), then scan sub-bars in (ts, next_ts].
                 //
-                // Note: even if glitch guard blocks exits on the indicator bar, trailing is still
-                // updated and sub-bar scanning proceeds.
+                // Note: if glitch guard blocks exits on the indicator bar, we skip ALL exit
+                // processing including trailing SL update (matching CPU Hold semantics).
                 {
                     const GpuPosition& pos = state.positions[sym];
                     if (pos.active != POS_EMPTY) {
                         float p_atr = profit_atr(pos, ind_snap.close);
 
-                        // Glitch guard (CPU semantics): block exits on extreme deviations, but still update trailing.
+                        // Glitch guard (CPU semantics): block ALL exit processing including trailing update.
                         bool block_exits = false;
                         if (cfg.block_exits_on_extreme_dev != 0u && ind_snap.prev_close > 0.0f) {
                             float price_change_pct = fabsf(ind_snap.close - ind_snap.prev_close) / ind_snap.prev_close;
@@ -986,10 +986,7 @@ extern "C" __global__ void sweep_engine_kernel(
                         }
 
                         if (block_exits) {
-                            float new_tsl = compute_trailing(pos, ind_snap, &cfg, p_atr);
-                            if (new_tsl > 0.0f) {
-                                state.positions[sym].trailing_sl = new_tsl;
-                            }
+                            // CPU returns Hold immediately — skip trailing update too.
                         } else {
                             // Stop loss
                             if (check_stop_loss(pos, ind_snap, &cfg)) {
@@ -1044,7 +1041,7 @@ extern "C" __global__ void sweep_engine_kernel(
                     if (pos.active == POS_EMPTY) { break; } // exited in earlier sub-bar
                     float p_atr = profit_atr(pos, hybrid.close);
 
-                    // Glitch guard (CPU semantics): block exits on extreme deviations, but still update trailing
+                    // Glitch guard (CPU semantics): block ALL exit processing including trailing update.
                     bool block_exits = false;
                     if (cfg.block_exits_on_extreme_dev != 0u && hybrid.prev_close > 0.0f) {
                         float price_change_pct = fabsf(hybrid.close - hybrid.prev_close) / hybrid.prev_close;
@@ -1053,11 +1050,7 @@ extern "C" __global__ void sweep_engine_kernel(
                                 && fabsf(hybrid.close - hybrid.prev_close) > hybrid.atr * cfg.glitch_atr_mult);
                     }
                     if (block_exits) {
-                        float new_tsl = compute_trailing(pos, hybrid, &cfg, p_atr);
-                        if (new_tsl > 0.0f) {
-                            state.positions[sym].trailing_sl = new_tsl;
-                        }
-                        continue;
+                        continue;  // CPU returns Hold — skip trailing update too
                     }
 
                     // Stop loss
@@ -1351,7 +1344,7 @@ extern "C" __global__ void sweep_engine_kernel(
 
                 float p_atr = profit_atr(pos, snap.close);
 
-                // Glitch guard (CPU semantics): block exits on extreme deviations, but still update trailing
+                // Glitch guard (CPU semantics): block ALL exit processing including trailing update.
                 bool block_exits = false;
                 if (cfg.block_exits_on_extreme_dev != 0u && snap.prev_close > 0.0f) {
                     float price_change_pct = fabsf(snap.close - snap.prev_close) / snap.prev_close;
@@ -1360,11 +1353,7 @@ extern "C" __global__ void sweep_engine_kernel(
                             && fabsf(snap.close - snap.prev_close) > snap.atr * cfg.glitch_atr_mult);
                 }
                 if (block_exits) {
-                    float new_tsl = compute_trailing(pos, snap, &cfg, p_atr);
-                    if (new_tsl > 0.0f) {
-                        state.positions[sym].trailing_sl = new_tsl;
-                    }
-                    continue;
+                    continue;  // CPU returns Hold — skip trailing update too
                 }
 
                 // Stop loss
