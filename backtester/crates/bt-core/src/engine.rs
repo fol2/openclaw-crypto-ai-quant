@@ -7,8 +7,9 @@
 use crate::candle::{CandleData, FundingRateData, OhlcvBar};
 use crate::accounting;
 use crate::config::{Confidence, Signal, StrategyConfig};
-use crate::exits::{self, ExitResult};
+use crate::exits::ExitResult;
 use crate::indicators::{IndicatorBank, IndicatorSnapshot};
+use crate::kernel_exits::{self, ExitParams, KernelExitResult};
 use crate::position::{ExitContext, Position, PositionType, SignalRecord, TradeRecord};
 use crate::signals::{entry, gates};
 use crate::decision_kernel;
@@ -170,6 +171,45 @@ struct SimState {
     gate_stats: GateStats,
 }
 
+/// Build kernel ExitParams from StrategyConfig trade fields.
+fn build_exit_params(cfg: &StrategyConfig) -> ExitParams {
+    let t = &cfg.trade;
+    ExitParams {
+        sl_atr_mult: t.sl_atr_mult,
+        tp_atr_mult: t.tp_atr_mult,
+        trailing_start_atr: t.trailing_start_atr,
+        trailing_distance_atr: t.trailing_distance_atr,
+        enable_partial_tp: t.enable_partial_tp,
+        tp_partial_pct: t.tp_partial_pct,
+        tp_partial_atr_mult: t.tp_partial_atr_mult,
+        tp_partial_min_notional_usd: t.tp_partial_min_notional_usd,
+        enable_breakeven_stop: t.enable_breakeven_stop,
+        breakeven_start_atr: t.breakeven_start_atr,
+        breakeven_buffer_atr: t.breakeven_buffer_atr,
+        enable_vol_buffered_trailing: t.enable_vol_buffered_trailing,
+        block_exits_on_extreme_dev: t.block_exits_on_extreme_dev,
+        glitch_price_dev_pct: t.glitch_price_dev_pct,
+        glitch_atr_mult: t.glitch_atr_mult,
+        smart_exit_adx_exhaustion_lt: t.smart_exit_adx_exhaustion_lt,
+        tsme_min_profit_atr: t.tsme_min_profit_atr,
+        tsme_require_adx_slope_negative: t.tsme_require_adx_slope_negative,
+        enable_rsi_overextension_exit: t.enable_rsi_overextension_exit,
+        rsi_exit_profit_atr_switch: t.rsi_exit_profit_atr_switch,
+        rsi_exit_ub_lo_profit: t.rsi_exit_ub_lo_profit,
+        rsi_exit_ub_hi_profit: t.rsi_exit_ub_hi_profit,
+        rsi_exit_lb_lo_profit: t.rsi_exit_lb_lo_profit,
+        rsi_exit_lb_hi_profit: t.rsi_exit_lb_hi_profit,
+        rsi_exit_ub_lo_profit_low_conf: t.rsi_exit_ub_lo_profit_low_conf,
+        rsi_exit_lb_lo_profit_low_conf: t.rsi_exit_lb_lo_profit_low_conf,
+        rsi_exit_ub_hi_profit_low_conf: t.rsi_exit_ub_hi_profit_low_conf,
+        rsi_exit_lb_hi_profit_low_conf: t.rsi_exit_lb_hi_profit_low_conf,
+        smart_exit_adx_exhaustion_lt_low_conf: t.smart_exit_adx_exhaustion_lt_low_conf,
+        require_macro_alignment: cfg.filters.require_macro_alignment,
+        trailing_start_atr_low_conf: t.trailing_start_atr_low_conf,
+        trailing_distance_atr_low_conf: t.trailing_distance_atr_low_conf,
+    }
+}
+
 fn make_kernel_params(cfg: &StrategyConfig) -> decision_kernel::KernelParams {
     let mut kernel_params = decision_kernel::KernelParams::default();
     kernel_params.allow_pyramid = cfg.trade.enable_pyramiding;
@@ -177,6 +217,7 @@ fn make_kernel_params(cfg: &StrategyConfig) -> decision_kernel::KernelParams {
     // signal arrives; keep this behaviour by disabling canonical reverses.
     kernel_params.allow_reverse = false;
     kernel_params.leverage = cfg.trade.leverage.max(1.0);
+    kernel_params.exit_params = Some(build_exit_params(cfg));
     kernel_params
 }
 
@@ -244,6 +285,93 @@ fn signal_name(signal: Signal) -> &'static str {
         Signal::Sell => "SELL",
         Signal::Neutral => "NEUTRAL",
     }
+}
+
+/// Sync engine position metadata into the corresponding kernel position so that
+/// kernel exit evaluation sees the correct entry_atr, confidence, and
+/// entry_adx_threshold values (these are set by the engine at entry time).
+fn sync_engine_to_kernel_pos(
+    engine_pos: &Position,
+    kernel_pos: &mut decision_kernel::Position,
+) {
+    kernel_pos.entry_atr = Some(engine_pos.entry_atr);
+    kernel_pos.confidence = Some(engine_pos.confidence.rank());
+    kernel_pos.entry_adx_threshold = if engine_pos.entry_adx_threshold > 0.0 {
+        Some(engine_pos.entry_adx_threshold)
+    } else {
+        None
+    };
+    kernel_pos.trailing_sl = engine_pos.trailing_sl;
+    kernel_pos.tp1_taken = engine_pos.tp1_taken;
+}
+
+/// Sync kernel position exit state (trailing_sl, tp1_taken) back to the engine
+/// position after kernel exit evaluation has updated them.
+fn sync_kernel_to_engine_pos(
+    kernel_pos: &decision_kernel::Position,
+    engine_pos: &mut Position,
+) {
+    engine_pos.trailing_sl = kernel_pos.trailing_sl;
+    engine_pos.tp1_taken = kernel_pos.tp1_taken;
+}
+
+/// Convert a `KernelExitResult` to the engine's `ExitResult` type.
+fn kernel_exit_to_engine(result: &KernelExitResult) -> Option<ExitResult> {
+    match result {
+        KernelExitResult::Hold => None,
+        KernelExitResult::FullClose { reason, exit_price } => {
+            Some(ExitResult::exit(reason, *exit_price))
+        }
+        KernelExitResult::PartialClose {
+            reason,
+            exit_price,
+            fraction,
+        } => Some(ExitResult::partial_exit(reason, *exit_price, *fraction)),
+    }
+}
+
+/// Evaluate exit conditions via the kernel's exit logic for a given symbol.
+///
+/// 1. Syncs engine → kernel position metadata.
+/// 2. Calls `kernel_exits::evaluate_exits()` on the kernel position.
+/// 3. Syncs updated trailing_sl / tp1_taken back to the engine position.
+/// 4. Returns an `ExitResult` if an exit was triggered, or `None` to hold.
+fn evaluate_kernel_exit(
+    state: &mut SimState,
+    symbol: &str,
+    snap: &IndicatorSnapshot,
+    ts: i64,
+) -> Option<ExitResult> {
+    let exit_params = match state.kernel_params.exit_params {
+        Some(ref ep) => ep.clone(),
+        None => return None,
+    };
+
+    // Phase 1: sync engine → kernel position
+    if let Some(epos) = state.positions.get(symbol) {
+        if let Some(kpos) = state.kernel_state.positions.get_mut(symbol) {
+            sync_engine_to_kernel_pos(epos, kpos);
+        }
+    }
+
+    // Phase 2: evaluate exits on kernel position (mutates trailing_sl in-place)
+    let kernel_result = {
+        if let Some(kpos) = state.kernel_state.positions.get_mut(symbol) {
+            kernel_exits::evaluate_exits(kpos, snap, &exit_params, ts)
+        } else {
+            return None;
+        }
+    };
+
+    // Phase 3: sync kernel → engine position (trailing_sl, tp1_taken)
+    if let Some(kpos) = state.kernel_state.positions.get(symbol) {
+        if let Some(epos) = state.positions.get_mut(symbol) {
+            sync_kernel_to_engine_pos(kpos, epos);
+        }
+    }
+
+    // Phase 4: convert to engine ExitResult
+    kernel_exit_to_engine(&kernel_result)
 }
 
 fn build_active_params(
@@ -748,18 +876,18 @@ pub fn run_simulation(
                 }
             }
 
-            // ── Exit check for existing position ────────────────────────
+            // ── Exit check for existing position (kernel-delegated) ──────
             // Runs BEFORE warmup guard so that init-state positions are
             // monitored from the very first bar (without init-state,
             // positions are empty during warmup so this is a no-op).
-            if let Some(pos) = state.positions.get(sym_str) {
+            // Exit evaluation is delegated to kernel_exits::evaluate_exits()
+            // which handles SL, trailing, TP, glitch guard, and smart exits.
+            // The kernel updates trailing_sl/tp1_taken in-place; we sync them
+            // back to the engine position after each evaluation.
+            if state.positions.contains_key(sym_str) {
                 if !is_exit_cooldown_active(&state, sym_str, ts, cfg) {
-                    let exit_result = exits::check_all_exits(pos, &snap, cfg, ts);
-                    if exit_result.should_exit {
+                    if let Some(exit_result) = evaluate_kernel_exit(&mut state, sym_str, &snap, ts) {
                         apply_exit(&mut state, sym_str, &exit_result, &snap, ts, cfg);
-                    } else {
-                        // Update trailing stop if applicable
-                        update_trailing_stop(&mut state, sym_str, &snap, cfg);
                     }
                 }
             }
@@ -1078,9 +1206,10 @@ pub fn run_simulation(
             i64::MAX
         };
 
-        // ── Exit sub-bar block ──────────────────────────────────────────
+        // ── Exit sub-bar block (kernel-delegated) ──────────────────────
         // Scan exit candles (e.g. 1m) within this indicator bar's time range
         // for SL/TP exit precision, matching live behavior.
+        // Uses kernel exit evaluation instead of direct exits::check_all_exits.
         if let (Some(ec), Some(ref ec_idx)) = (exit_candles, &exit_bar_index) {
             if !state.positions.is_empty() {
                 let exit_syms: Vec<String> = state.positions.keys().cloned().collect();
@@ -1112,23 +1241,18 @@ pub fn run_simulation(
                                         continue;
                                     }
                                     let sub_snap = make_exit_snap(&base_snap, sub_bar);
-                                    let pos = state.positions.get(sym.as_str()).unwrap();
-                                    let exit_result =
-                                        exits::check_all_exits(pos, &sub_snap, cfg, sub_ts);
-                                    if exit_result.should_exit {
+                                    if let Some(exit_result) = evaluate_kernel_exit(
+                                        &mut state,
+                                        sym.as_str(),
+                                        &sub_snap,
+                                        sub_ts,
+                                    ) {
                                         apply_exit(
                                             &mut state,
                                             sym.as_str(),
                                             &exit_result,
                                             &sub_snap,
                                             sub_ts,
-                                            cfg,
-                                        );
-                                    } else {
-                                        update_trailing_stop(
-                                            &mut state,
-                                            sym.as_str(),
-                                            &sub_snap,
                                             cfg,
                                         );
                                     }
@@ -1865,81 +1989,6 @@ fn apply_exit(
         }
 
         state.positions.remove(symbol);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Trailing stop update
-// ---------------------------------------------------------------------------
-
-fn update_trailing_stop(
-    state: &mut SimState,
-    symbol: &str,
-    snap: &IndicatorSnapshot,
-    cfg: &StrategyConfig,
-) {
-    let pos = match state.positions.get_mut(symbol) {
-        Some(p) => p,
-        None => return,
-    };
-
-    let profit_atr = pos.profit_atr(snap.close);
-    let trailing_start = cfg.trade.trailing_start_atr;
-    let trailing_dist = cfg.trade.trailing_distance_atr;
-
-    if profit_atr < trailing_start {
-        return;
-    }
-
-    let new_sl = match pos.pos_type {
-        PositionType::Long => snap.close - trailing_dist * pos.entry_atr,
-        PositionType::Short => snap.close + trailing_dist * pos.entry_atr,
-    };
-
-    match pos.trailing_sl {
-        Some(current_sl) => match pos.pos_type {
-            PositionType::Long => {
-                if new_sl > current_sl {
-                    pos.trailing_sl = Some(new_sl);
-                }
-            }
-            PositionType::Short => {
-                if new_sl < current_sl {
-                    pos.trailing_sl = Some(new_sl);
-                }
-            }
-        },
-        None => {
-            pos.trailing_sl = Some(new_sl);
-        }
-    }
-
-    // Breakeven stop
-    if cfg.trade.enable_breakeven_stop && profit_atr >= cfg.trade.breakeven_start_atr {
-        let be_price = match pos.pos_type {
-            PositionType::Long => pos.entry_price + cfg.trade.breakeven_buffer_atr * pos.entry_atr,
-            PositionType::Short => pos.entry_price - cfg.trade.breakeven_buffer_atr * pos.entry_atr,
-        };
-        match pos.pos_type {
-            PositionType::Long => {
-                if let Some(ref mut sl) = pos.trailing_sl {
-                    if be_price > *sl {
-                        *sl = be_price;
-                    }
-                } else {
-                    pos.trailing_sl = Some(be_price);
-                }
-            }
-            PositionType::Short => {
-                if let Some(ref mut sl) = pos.trailing_sl {
-                    if be_price < *sl {
-                        *sl = be_price;
-                    }
-                } else {
-                    pos.trailing_sl = Some(be_price);
-                }
-            }
-        }
     }
 }
 
