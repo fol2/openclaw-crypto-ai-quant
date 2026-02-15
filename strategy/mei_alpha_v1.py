@@ -738,6 +738,512 @@ def analyze_with_shadow(df, symbol: str, state_json: str, params_json: str,
     return k_signal, k_conf, k_diag
 
 
+# ---------------------------------------------------------------------------
+# Exit delegation to kernel PriceUpdate mode (AQC-813)
+# ---------------------------------------------------------------------------
+
+
+def build_exit_params(config=None):
+    """Serialize strategy exit config to kernel ExitParams JSON dict.
+
+    Maps fields from ``_DEFAULT_STRATEGY_CONFIG["trade"]`` (and ``filters``)
+    to the Rust kernel ``ExitParams`` schema defined in ``kernel_exits.rs``.
+
+    Parameters
+    ----------
+    config : dict, optional
+        Full strategy config dict.  ``None`` uses ``_DEFAULT_STRATEGY_CONFIG``.
+
+    Returns
+    -------
+    dict
+        ExitParams dict serializable to JSON for the kernel.
+    """
+    if config is None:
+        config = _DEFAULT_STRATEGY_CONFIG
+    trade = config.get("trade") or {}
+    flt = config.get("filters") or {}
+
+    def _f(key, default):
+        try:
+            return float(trade.get(key, default))
+        except Exception:
+            return float(default)
+
+    def _b(key, default):
+        return bool(trade.get(key, default))
+
+    return {
+        "sl_atr_mult": _f("sl_atr_mult", 2.0),
+        "tp_atr_mult": _f("tp_atr_mult", 4.0),
+        "trailing_start_atr": _f("trailing_start_atr", 1.0),
+        "trailing_distance_atr": _f("trailing_distance_atr", 0.8),
+        "enable_partial_tp": _b("enable_partial_tp", True),
+        "tp_partial_pct": _f("tp_partial_pct", 0.5),
+        "tp_partial_atr_mult": _f("tp_partial_atr_mult", 0.0),
+        "tp_partial_min_notional_usd": _f("tp_partial_min_notional_usd", 10.0),
+        "enable_breakeven_stop": _b("enable_breakeven_stop", True),
+        "breakeven_start_atr": _f("breakeven_start_atr", 0.7),
+        "breakeven_buffer_atr": _f("breakeven_buffer_atr", 0.05),
+        "enable_vol_buffered_trailing": _b("enable_vol_buffered_trailing", True),
+        "block_exits_on_extreme_dev": _b("block_exits_on_extreme_dev", False),
+        "glitch_price_dev_pct": _f("glitch_price_dev_pct", 0.40),
+        "glitch_atr_mult": _f("glitch_atr_mult", 12.0),
+        # Smart exits
+        "smart_exit_adx_exhaustion_lt": _f("smart_exit_adx_exhaustion_lt", 18.0),
+        "tsme_min_profit_atr": _f("tsme_min_profit_atr", 1.0),
+        "tsme_require_adx_slope_negative": _b("tsme_require_adx_slope_negative", True),
+        "enable_rsi_overextension_exit": _b("enable_rsi_overextension_exit", True),
+        "rsi_exit_profit_atr_switch": _f("rsi_exit_profit_atr_switch", 1.5),
+        "rsi_exit_ub_lo_profit": _f("rsi_exit_ub_lo_profit", 80.0),
+        "rsi_exit_ub_hi_profit": _f("rsi_exit_ub_hi_profit", 70.0),
+        "rsi_exit_lb_lo_profit": _f("rsi_exit_lb_lo_profit", 20.0),
+        "rsi_exit_lb_hi_profit": _f("rsi_exit_lb_hi_profit", 30.0),
+        # Low-confidence RSI overrides
+        "rsi_exit_ub_lo_profit_low_conf": _f("rsi_exit_ub_lo_profit_low_conf", 0.0),
+        "rsi_exit_lb_lo_profit_low_conf": _f("rsi_exit_lb_lo_profit_low_conf", 0.0),
+        "rsi_exit_ub_hi_profit_low_conf": _f("rsi_exit_ub_hi_profit_low_conf", 0.0),
+        "rsi_exit_lb_hi_profit_low_conf": _f("rsi_exit_lb_hi_profit_low_conf", 0.0),
+        # Low-confidence ADX exhaustion
+        "smart_exit_adx_exhaustion_lt_low_conf": _f("smart_exit_adx_exhaustion_lt_low_conf", 0.0),
+        # Macro alignment (from filters)
+        "require_macro_alignment": bool(flt.get("require_macro_alignment", False)),
+        # Per-confidence trailing overrides
+        "trailing_start_atr_low_conf": _f("trailing_start_atr_low_conf", 0.0),
+        "trailing_distance_atr_low_conf": _f("trailing_distance_atr_low_conf", 0.0),
+    }
+
+
+def evaluate_exit_kernel(df, symbol, state_json, params_json, current_price,
+                         timestamp_ms, config=None):
+    """Evaluate exit conditions using the Rust kernel's PriceUpdate mode.
+
+    Flow:
+        1. ``build_indicator_snapshot(df)`` -> IndicatorSnapshot
+        2. ``build_exit_params(config)`` -> ExitParams
+        3. Construct ``MarketEvent(signal=PriceUpdate, indicators=snapshot)``
+        4. ``bt_runtime.step_full(state, event, params, exit_params)``
+        5. Parse result: extract ``exit_context`` from diagnostics
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Candle data with Open, High, Low, Close, Volume columns.
+    symbol : str
+        Trading symbol (e.g. "ETH").
+    state_json : str
+        Current kernel StrategyState as JSON.  Must contain a position for
+        *symbol* if exit evaluation is to produce a non-hold result.
+    params_json : str
+        Kernel KernelParams as JSON.
+    current_price : float
+        Current market price for the exit evaluation.
+    timestamp_ms : int
+        Current timestamp in milliseconds.
+    config : dict, optional
+        Strategy config override.  ``None`` uses ``get_strategy_config(symbol)``.
+
+    Returns
+    -------
+    tuple[str, dict | None, dict]
+        ``(action, exit_context, diagnostics)`` where:
+        - *action*: ``"hold"`` | ``"full_close"`` | ``"partial_close"``
+        - *exit_context*: dict with exit_type, exit_reason, exit_price, etc.
+          or ``None`` when action is ``"hold"``
+        - *diagnostics*: full diagnostics dict from kernel
+
+    Raises
+    ------
+    RuntimeError
+        If bt_runtime is not available or the kernel returns an error.
+    """
+    if not _BT_RUNTIME_AVAILABLE or _bt_runtime is None:
+        raise RuntimeError(
+            "bt_runtime is not available; cannot use kernel PriceUpdate mode"
+        )
+
+    if config is None:
+        config = get_strategy_config(symbol)
+
+    # 1. Build indicator snapshot
+    snap = build_indicator_snapshot(df, symbol=symbol,
+                                   config=config.get("indicators"))
+
+    # 2. Build exit params
+    exit_params = build_exit_params(config)
+    exit_params_json = json.dumps(exit_params, default=_json_default)
+
+    # 3. Build MarketEvent with PriceUpdate signal
+    state_dict = json.loads(state_json)
+    event = {
+        "schema_version": int(state_dict.get("schema_version", 1)),
+        "event_id": int(timestamp_ms),
+        "timestamp_ms": int(timestamp_ms),
+        "symbol": str(symbol).upper(),
+        "signal": "price_update",
+        "price": float(current_price),
+        "indicators": snap,
+        "notional_hint_usd": None,
+        "close_fraction": None,
+        "fee_role": None,
+        "funding_rate": None,
+        "gate_result": None,
+        "ema_slow_slope_pct": None,
+    }
+    event_json = json.dumps(event, default=_json_default)
+
+    # 4. Call kernel step_full (merges exit_params into params)
+    result_json = _bt_runtime.step_full(
+        state_json, event_json, params_json, exit_params_json,
+    )
+    result = json.loads(result_json)
+
+    if not result.get("ok"):
+        err = result.get("error", {})
+        raise RuntimeError(
+            f"Kernel PriceUpdate failed: {err.get('message', 'unknown')} "
+            f"details={err.get('details', [])}"
+        )
+
+    decision = result.get("decision", {})
+    diag = decision.get("diagnostics", {})
+    exit_ctx = diag.get("exit_context")
+
+    # 5. Determine action from kernel result
+    fills = decision.get("fills", [])
+    intents = decision.get("intents", [])
+
+    if exit_ctx is not None:
+        # Kernel triggered an exit — determine full vs partial
+        # Check intents/fills for close_fraction hint
+        is_partial = False
+        for intent in intents:
+            kind = str(intent.get("kind", "")).lower()
+            if kind == "close":
+                frac = intent.get("close_fraction")
+                if frac is not None and 0.0 < float(frac) < 1.0:
+                    is_partial = True
+                    break
+        # Also check if fills indicate partial (notional < position notional)
+        if not is_partial and len(fills) > 0:
+            for fill in fills:
+                frac = fill.get("close_fraction")
+                if frac is not None and 0.0 < float(frac) < 1.0:
+                    is_partial = True
+                    break
+
+        action = "partial_close" if is_partial else "full_close"
+    else:
+        action = "hold"
+        exit_ctx = None
+
+    return action, exit_ctx, diag
+
+
+def check_exit_with_kernel(df, symbol, state_json, params_json, current_price,
+                           timestamp_ms, indicators=None, config=None,
+                           btc_bullish=None):
+    """Orchestrate kernel basic exits + Python smart exits.
+
+    1. Call ``evaluate_exit_kernel()`` for basic exits (SL/TP/trailing/
+       breakeven/glitch guard).
+    2. If kernel says ``"full_close"`` or ``"partial_close"`` -- return
+       immediately (kernel is authoritative for basic exits).
+    3. If kernel says ``"hold"`` -- check Python smart exits:
+       - ADX exhaustion
+       - RSI overextension
+       - Trend breakdown (EMA cross)
+    4. If a Python smart exit fires -- return with ``action="full_close"``
+       and an exit_context dict describing the smart exit reason.
+    5. If nothing fires -- return ``action="hold"``.
+
+    NOTE: Funding headwind, MACD divergence, stagnation exits stay in the
+    original Python ``check_exit_conditions()`` and are NOT part of this
+    delegation.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Candle data.
+    symbol : str
+        Trading symbol.
+    state_json : str
+        Kernel state JSON (must have position for *symbol*).
+    params_json : str
+        Kernel params JSON.
+    current_price : float
+        Current market price.
+    timestamp_ms : int
+        Current timestamp in milliseconds.
+    indicators : dict, optional
+        Pre-computed indicator dict (Python-style keys like ``ADX``, ``RSI``,
+        ``EMA_fast``, ``EMA_slow``).  If ``None``, will attempt to extract
+        from the DataFrame.
+    config : dict, optional
+        Strategy config override.
+    btc_bullish : bool or None
+        BTC trend direction (unused currently; reserved for future gates).
+
+    Returns
+    -------
+    tuple[str, dict | None, dict]
+        ``(action, exit_context, diagnostics)`` with same schema as
+        ``evaluate_exit_kernel``.
+    """
+    if config is None:
+        config = get_strategy_config(symbol)
+
+    # --- Step 1: Kernel basic exits ---
+    action, exit_ctx, diag = evaluate_exit_kernel(
+        df, symbol, state_json, params_json,
+        current_price, timestamp_ms, config=config,
+    )
+
+    # --- Step 2: Kernel is authoritative for basic exits ---
+    if action in ("full_close", "partial_close"):
+        return action, exit_ctx, diag
+
+    # --- Step 3: Python smart exits (only when kernel says "hold") ---
+    trade_cfg = config.get("trade") or {}
+
+    # Build indicator values from the snapshot in diagnostics or from the
+    # provided indicators dict.
+    ind = indicators or {}
+    snap_diag = diag.get("indicator_snapshot") or {}
+
+    def _ind_float(py_key, snap_key, default=0.0):
+        """Resolve indicator value: prefer provided indicators, fall back to
+        kernel snapshot diagnostics."""
+        v = ind.get(py_key)
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                pass
+        v = snap_diag.get(snap_key)
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                pass
+        return float(default)
+
+    adx = _ind_float("ADX", "adx", 0.0)
+    rsi = _ind_float("RSI", "rsi", 50.0)
+    ema_fast = _ind_float("EMA_fast", "ema_fast", 0.0)
+    ema_slow = _ind_float("EMA_slow", "ema_slow", 0.0)
+    atr = _ind_float("ATR", "atr", 0.0)
+
+    # Determine position side from kernel state
+    state_dict = json.loads(state_json)
+    pos_data = (state_dict.get("positions") or {}).get(symbol.upper())
+    if pos_data is None:
+        # No position => nothing to exit
+        return "hold", None, diag
+
+    pos_side = str(pos_data.get("side", "")).lower()
+    entry_price = float(pos_data.get("entry_price", 0.0))
+    entry_atr = float(pos_data.get("entry_atr", 0.0) or 0.0)
+    if entry_atr <= 0 and entry_price > 0:
+        entry_atr = entry_price * 0.005
+
+    # Compute profit in ATR units
+    if entry_atr > 0:
+        if pos_side == "long":
+            profit_atr = (current_price - entry_price) / entry_atr
+        else:
+            profit_atr = (entry_price - current_price) / entry_atr
+    else:
+        profit_atr = 0.0
+
+    # ADX exhaustion threshold
+    try:
+        adx_exhaustion_lt = float(trade_cfg.get("smart_exit_adx_exhaustion_lt", 18.0))
+    except Exception:
+        adx_exhaustion_lt = 18.0
+
+    # --- 3a: ADX exhaustion ---
+    tsme_min_profit = float(trade_cfg.get("tsme_min_profit_atr", 1.0))
+    if adx_exhaustion_lt > 0 and adx < adx_exhaustion_lt and profit_atr > tsme_min_profit:
+        smart_ctx = {
+            "exit_type": "smart_exit",
+            "exit_reason": f"ADX Exhaustion (ADX={adx:.1f} < {adx_exhaustion_lt:g})",
+            "exit_price": float(current_price),
+            "entry_price": float(entry_price),
+            "sl_price": None,
+            "tp_price": None,
+            "trailing_sl": None,
+            "profit_atr": float(profit_atr),
+            "duration_bars": 0,
+        }
+        return "full_close", smart_ctx, diag
+
+    # --- 3b: RSI overextension ---
+    if bool(trade_cfg.get("enable_rsi_overextension_exit", True)):
+        try:
+            rsi_switch = float(trade_cfg.get("rsi_exit_profit_atr_switch", 1.5))
+        except Exception:
+            rsi_switch = 1.5
+
+        if profit_atr < rsi_switch:
+            rsi_ub = float(trade_cfg.get("rsi_exit_ub_lo_profit", 80.0))
+            rsi_lb = float(trade_cfg.get("rsi_exit_lb_lo_profit", 20.0))
+        else:
+            rsi_ub = float(trade_cfg.get("rsi_exit_ub_hi_profit", 70.0))
+            rsi_lb = float(trade_cfg.get("rsi_exit_lb_hi_profit", 30.0))
+
+        triggered = False
+        if pos_side == "long" and rsi > rsi_ub:
+            triggered = True
+            reason = f"RSI Overbought ({rsi:.1f} > {rsi_ub:g})"
+        elif pos_side == "short" and rsi < rsi_lb:
+            triggered = True
+            reason = f"RSI Oversold ({rsi:.1f} < {rsi_lb:g})"
+
+        if triggered:
+            smart_ctx = {
+                "exit_type": "smart_exit",
+                "exit_reason": reason,
+                "exit_price": float(current_price),
+                "entry_price": float(entry_price),
+                "sl_price": None,
+                "tp_price": None,
+                "trailing_sl": None,
+                "profit_atr": float(profit_atr),
+                "duration_bars": 0,
+            }
+            return "full_close", smart_ctx, diag
+
+    # --- 3c: Trend breakdown (EMA cross) ---
+    if ema_fast > 0 and ema_slow > 0:
+        if pos_side == "long" and ema_fast < ema_slow:
+            smart_ctx = {
+                "exit_type": "smart_exit",
+                "exit_reason": "Trend Breakdown (EMA cross: fast < slow)",
+                "exit_price": float(current_price),
+                "entry_price": float(entry_price),
+                "sl_price": None,
+                "tp_price": None,
+                "trailing_sl": None,
+                "profit_atr": float(profit_atr),
+                "duration_bars": 0,
+            }
+            return "full_close", smart_ctx, diag
+        if pos_side == "short" and ema_fast > ema_slow:
+            smart_ctx = {
+                "exit_type": "smart_exit",
+                "exit_reason": "Trend Breakdown (EMA cross: fast > slow)",
+                "exit_price": float(current_price),
+                "entry_price": float(entry_price),
+                "sl_price": None,
+                "tp_price": None,
+                "trailing_sl": None,
+                "profit_atr": float(profit_atr),
+                "duration_bars": 0,
+            }
+            return "full_close", smart_ctx, diag
+
+    # --- Step 5: Nothing fires ---
+    return "hold", None, diag
+
+
+def check_exit_with_shadow(df, symbol, state_json, params_json, current_price,
+                           timestamp_ms, indicators=None, config=None,
+                           btc_bullish=None):
+    """Shadow comparison mode for exit evaluation.
+
+    Runs kernel exit evaluation via ``evaluate_exit_kernel()``, performs a
+    best-effort comparison against what simplified Python logic would decide,
+    and logs mismatches.  Always returns the kernel result as authoritative.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Candle data.
+    symbol : str
+        Trading symbol.
+    state_json : str
+        Kernel state JSON.
+    params_json : str
+        Kernel params JSON.
+    current_price : float
+        Current market price.
+    timestamp_ms : int
+        Current timestamp in milliseconds.
+    indicators : dict, optional
+        Pre-computed indicator dict.
+    config : dict, optional
+        Strategy config override.
+    btc_bullish : bool or None
+        BTC trend direction.
+
+    Returns
+    -------
+    tuple[str, dict | None, dict]
+        ``(action, exit_context, diagnostics)`` -- always from the kernel.
+    """
+    if config is None:
+        config = get_strategy_config(symbol)
+
+    # --- Kernel exit (authoritative) ---
+    k_action, k_exit_ctx, k_diag = evaluate_exit_kernel(
+        df, symbol, state_json, params_json,
+        current_price, timestamp_ms, config=config,
+    )
+
+    # --- Python simplified exit (best-effort shadow) ---
+    py_action = "hold"
+    try:
+        ind = indicators or {}
+        snap_diag = k_diag.get("indicator_snapshot") or {}
+
+        def _sv(py_key, snap_key, default=0.0):
+            v = ind.get(py_key)
+            if v is not None:
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    pass
+            v = snap_diag.get(snap_key)
+            if v is not None:
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    pass
+            return float(default)
+
+        ema_fast = _sv("EMA_fast", "ema_fast", 0.0)
+        ema_slow = _sv("EMA_slow", "ema_slow", 0.0)
+
+        # Determine position side
+        state_dict = json.loads(state_json)
+        pos_data = (state_dict.get("positions") or {}).get(symbol.upper())
+        if pos_data is not None:
+            pos_side = str(pos_data.get("side", "")).lower()
+            # Simple trend breakdown check
+            if ema_fast > 0 and ema_slow > 0:
+                if pos_side == "long" and ema_fast < ema_slow:
+                    py_action = "full_close"
+                elif pos_side == "short" and ema_fast > ema_slow:
+                    py_action = "full_close"
+    except Exception as exc:
+        logger.warning("[exit-shadow] Python exit check failed: %s", exc)
+
+    # --- Compare and log ---
+    if k_action != py_action:
+        logger.warning(
+            "[exit-shadow] Exit mismatch for %s: Kernel=%s, Python=%s",
+            symbol, k_action, py_action,
+        )
+    else:
+        logger.debug(
+            "[exit-shadow] Exit agreement for %s: %s",
+            symbol, k_action,
+        )
+
+    return k_action, k_exit_ctx, k_diag
+
+
 # --------------------------------------------------------------------------------------
 # Developer Notes (READ ME FIRST)
 #
