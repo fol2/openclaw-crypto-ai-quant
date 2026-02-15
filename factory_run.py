@@ -1954,7 +1954,7 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
     source_meta = _load_json(source_run_dir / "run_metadata.json")
     source_args = source_meta.get("args", {}) if isinstance(source_meta.get("args", {}), dict) else {}
 
-    interval = str(source_args.get("interval", "1h"))
+    interval = str(source_args.get("interval", "30m"))
     candles_db = source_args.get("candles_db")
     funding_db = source_args.get("funding_db")
     candles_db_bt = _normalise_candles_db_arg_for_backtester(str(candles_db)) if candles_db else None
@@ -3538,9 +3538,8 @@ def _promote_candidates(
     """Select up to *promote_count* candidates for distinct roles and write promoted YAMLs.
 
     Roles (when promote_count >= 3):
-      - **primary**: best balanced score  (PnL × (1 - max_dd) × profit_factor)
-      - **fallback**: best drawdown-adjusted score among positive-PnL candidates
-                      (lowest max_drawdown_pct with positive PnL, then highest PnL as tie-break)
+      - **primary**: best risk-adjusted score  ((PnL / max_dd) × profit_factor)
+      - **fallback**: best balanced score  (PnL × (1 - max_dd) × profit_factor)
       - **conservative**: absolute lowest max_drawdown_pct with positive PnL required
 
     Returns a dict of promotion metadata suitable for embedding in run_metadata.json.
@@ -3565,27 +3564,29 @@ def _promote_candidates(
         return {"skipped": True, "reason": "no_positive_pnl_candidates"}
 
     # ---- Scoring helpers ------------------------------------------------
+    def _risk_adjusted_score(c: dict[str, Any]) -> float:
+        """Risk-adjusted: (PnL / DD) × PF.  Favours high return per unit of risk."""
+        pnl = float(c.get("total_pnl", 0.0))
+        dd = max(float(c.get("max_drawdown_pct", 1.0)), 0.01)  # floor to avoid div-by-zero
+        pf = max(float(c.get("profit_factor", 1.0)), 0.0)
+        return (pnl / dd) * pf
+
     def _balanced_score(c: dict[str, Any]) -> float:
+        """Balanced: PnL × (1 - DD) × PF.  Rewards raw PnL with mild DD penalty."""
         pnl = float(c.get("total_pnl", 0.0))
         dd = float(c.get("max_drawdown_pct", 0.0))
         pf = float(c.get("profit_factor", 1.0))
         return pnl * (1.0 - min(dd, 1.0)) * max(pf, 0.0)
 
-    def _dd_adjusted_key(c: dict[str, Any]) -> tuple[float, float]:
-        """Sort key: lowest max_drawdown_pct first, then highest PnL as tie-break."""
-        dd = float(c.get("max_drawdown_pct", 1.0))
-        pnl = float(c.get("total_pnl", 0.0))
-        return (dd, -pnl)
-
     # ---- Role selection -------------------------------------------------
     roles: dict[str, dict[str, Any]] = {}
 
-    # PRIMARY: highest balanced score
-    primary = max(positive, key=_balanced_score)
+    # PRIMARY: best risk-adjusted score (PnL/DD × PF)
+    primary = max(positive, key=_risk_adjusted_score)
     roles["primary"] = primary
 
-    # FALLBACK: best drawdown-adjusted (lowest DD, positive PnL)
-    fallback = min(positive, key=_dd_adjusted_key)
+    # FALLBACK: highest balanced score (PnL × (1-DD) × PF)
+    fallback = max(positive, key=_balanced_score)
     roles["fallback"] = fallback
 
     # CONSERVATIVE: absolute lowest max_drawdown_pct with positive PnL
@@ -3663,7 +3664,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
 
     ap.add_argument("--config", default="config/strategy_overrides.yaml", help="Base strategy YAML config path.")
-    ap.add_argument("--interval", default="1h", help="Main interval for sweep/replay (default: 1h).")
+    ap.add_argument("--interval", default="30m", help="Main interval for sweep/replay (default: 30m).")
     ap.add_argument("--candles-db", default=None, help="Optional candle DB path override.")
     ap.add_argument("--funding-db", default=None, help="Optional funding DB path for replay/sweep.")
     ap.add_argument(

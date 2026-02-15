@@ -198,7 +198,7 @@ global:
   watchlist_exclude: []               # engine-only (Rust ignores)
 
   engine:                             # engine-only (Rust ignores)
-    interval: 1h                      # main indicator candle (NOT hot-reloadable)
+    interval: 30m                     # main indicator candle (NOT hot-reloadable)
     entry_interval: 3m                # entry signal granularity (hot-reloadable)
     exit_interval: 3m                 # exit price candle (hot-reloadable)
     loop_target_s: 60
@@ -215,14 +215,14 @@ modes:
     global:
       engine:
         interval: 30m
-        entry_interval: 5m
-        exit_interval: 5m
+        entry_interval: 3m
+        exit_interval: 3m
   fallback:
     global:
       engine:
         interval: 1h
-        entry_interval: 5m
-        exit_interval: 5m
+        entry_interval: 3m
+        exit_interval: 3m
   conservative:
     global:
       engine:

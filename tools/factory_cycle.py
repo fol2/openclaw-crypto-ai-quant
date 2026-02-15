@@ -1118,7 +1118,7 @@ def main(argv: list[str] | None = None) -> int:
 
     ap.add_argument("--gpu", action="store_true", help="Use GPU sweep (requires CUDA build/runtime).")
     ap.add_argument("--tpe", action="store_true", help="Use TPE Bayesian optimisation for GPU sweeps (requires --gpu).")
-    ap.add_argument("--tpe-batch", type=int, default=4096, help="TPE batch size (trials per GPU batch, default: 4096).")
+    ap.add_argument("--tpe-batch", type=int, default=256, help="TPE batch size (trials per GPU batch, default: 256).")
     ap.add_argument("--tpe-seed", type=int, default=None, help="TPE RNG seed (default: from profile).")
     ap.add_argument(
         "--allow-unsafe-gpu-sweep",
@@ -1305,9 +1305,9 @@ def main(argv: list[str] | None = None) -> int:
     if not interval:
         try:
             eff_obj2 = _read_yaml(effective_cfg_path)
-            interval = _yaml_engine_interval(eff_obj2) or "1h"
+            interval = _yaml_engine_interval(eff_obj2) or "30m"
         except Exception:
-            interval = "1h"
+            interval = "30m"
 
     run_with_gpu = bool(args.gpu)
     run_with_tpe = bool(args.tpe)
