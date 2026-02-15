@@ -925,4 +925,214 @@ mod tests {
         let r2 = step(&state, &event, &params);
         assert_eq!(r1, r2, "partial close must be deterministic");
     }
+
+    // ---- ADD weighted-average entry price tests ----
+
+    fn pyramid_params() -> KernelParams {
+        KernelParams {
+            allow_pyramid: true,
+            allow_reverse: false,
+            ..KernelParams::default()
+        }
+    }
+
+    #[test]
+    fn add_recalculates_weighted_avg_entry_price() {
+        // Open at 10_000, then ADD at 12_000. Expect weighted average.
+        let state = init_state();
+        let params = pyramid_params();
+
+        // Step 1: open long BTC @ 10_000, notional 10_000 → qty = 1.0
+        let mut open_evt = event_with_signal("BTC", MarketSignal::Buy);
+        open_evt.notional_hint_usd = Some(10_000.0);
+        open_evt.price = 10_000.0;
+        let r1 = step(&state, &open_evt, &params);
+        let pos1 = r1.state.positions.get("BTC").unwrap();
+        assert!((pos1.avg_entry_price - 10_000.0).abs() < 1e-12);
+        assert!((pos1.quantity - 1.0).abs() < 1e-12);
+
+        // Step 2: ADD long BTC @ 12_000, notional 12_000 → qty = 1.0
+        let mut add_evt = MarketEvent {
+            event_id: 101,
+            timestamp_ms: 2_000,
+            price: 12_000.0,
+            notional_hint_usd: Some(12_000.0),
+            signal: MarketSignal::Buy,
+            close_fraction: None,
+            ..open_evt
+        };
+        add_evt.symbol = "BTC".to_string();
+        let r2 = step(&r1.state, &add_evt, &params);
+
+        let pos2 = r2.state.positions.get("BTC").unwrap();
+        // Weighted avg = (10_000 * 1.0 + 12_000 * 1.0) / (1.0 + 1.0) = 11_000
+        let expected_avg = accounting::quantize(
+            (10_000.0 * pos1.quantity + 12_000.0 * 1.0) / (pos1.quantity + 1.0),
+        );
+        assert!(
+            (pos2.avg_entry_price - expected_avg).abs() < 1e-12,
+            "avg_entry: {} != expected {}",
+            pos2.avg_entry_price,
+            expected_avg,
+        );
+        // Total qty should be 2.0
+        assert!((pos2.quantity - 2.0).abs() < 1e-12);
+        assert_eq!(r2.intents[0].kind, OrderIntentKind::Add);
+    }
+
+    #[test]
+    fn add_at_lower_price_brings_avg_down() {
+        // Open at 10_000, ADD at 8_000 — avg should decrease.
+        let state = init_state();
+        let params = pyramid_params();
+
+        let mut open_evt = event_with_signal("BTC", MarketSignal::Buy);
+        open_evt.notional_hint_usd = Some(10_000.0);
+        open_evt.price = 10_000.0;
+        let r1 = step(&state, &open_evt, &params);
+        let pos1 = r1.state.positions.get("BTC").unwrap();
+        let qty1 = pos1.quantity;
+
+        // ADD at 8_000, notional 8_000 → qty = 1.0
+        let add_evt = MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 102,
+            timestamp_ms: 3_000,
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Buy,
+            price: 8_000.0,
+            notional_hint_usd: Some(8_000.0),
+            close_fraction: None,
+        };
+        let r2 = step(&r1.state, &add_evt, &params);
+        let pos2 = r2.state.positions.get("BTC").unwrap();
+
+        let add_qty = accounting::quantize(8_000.0 / 8_000.0); // 1.0
+        let expected_avg = accounting::quantize(
+            (10_000.0 * qty1 + 8_000.0 * add_qty) / (qty1 + add_qty),
+        );
+        assert!(
+            (pos2.avg_entry_price - expected_avg).abs() < 1e-12,
+            "avg_entry after lower add: {} != expected {}",
+            pos2.avg_entry_price,
+            expected_avg,
+        );
+        assert!(pos2.avg_entry_price < 10_000.0, "avg should decrease");
+    }
+
+    #[test]
+    fn add_accumulates_notional_and_margin() {
+        let state = init_state();
+        let params = pyramid_params();
+        let fee_rate = accounting::DEFAULT_TAKER_FEE_RATE;
+
+        let mut open_evt = event_with_signal("BTC", MarketSignal::Buy);
+        open_evt.notional_hint_usd = Some(10_000.0);
+        open_evt.price = 10_000.0;
+        let r1 = step(&state, &open_evt, &params);
+        let pos1 = r1.state.positions.get("BTC").unwrap();
+        let notional1 = pos1.notional_usd;
+        let margin1 = pos1.margin_usd;
+
+        // ADD with notional 5_000
+        let add_evt = MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 103,
+            timestamp_ms: 4_000,
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Buy,
+            price: 11_000.0,
+            notional_hint_usd: Some(5_000.0),
+            close_fraction: None,
+        };
+        let r2 = step(&r1.state, &add_evt, &params);
+        let pos2 = r2.state.positions.get("BTC").unwrap();
+
+        // Notional should be cumulative.
+        let add_notional = accounting::apply_open_fill(5_000.0, fee_rate).notional;
+        let expected_notional = accounting::quantize(notional1 + add_notional);
+        assert!(
+            (pos2.notional_usd - expected_notional).abs() < 1e-12,
+            "notional: {} != expected {}",
+            pos2.notional_usd,
+            expected_notional,
+        );
+
+        // Margin should accumulate.
+        let add_margin = accounting::quantize(add_notional / params.leverage.max(1.0));
+        let expected_margin = accounting::quantize(margin1 + add_margin);
+        assert!(
+            (pos2.margin_usd - expected_margin).abs() < 1e-12,
+            "margin: {} != expected {}",
+            pos2.margin_usd,
+            expected_margin,
+        );
+    }
+
+    #[test]
+    fn add_three_levels_weighted_avg_correct() {
+        // Open @ 10_000, ADD @ 11_000, ADD @ 9_000
+        let state = init_state();
+        let params = pyramid_params();
+
+        let mut e1 = event_with_signal("BTC", MarketSignal::Buy);
+        e1.notional_hint_usd = Some(10_000.0);
+        e1.price = 10_000.0;
+        let r1 = step(&state, &e1, &params);
+
+        let e2 = MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 201,
+            timestamp_ms: 2_000,
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Buy,
+            price: 11_000.0,
+            notional_hint_usd: Some(11_000.0),
+            close_fraction: None,
+        };
+        let r2 = step(&r1.state, &e2, &params);
+
+        let e3 = MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 202,
+            timestamp_ms: 3_000,
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Buy,
+            price: 9_000.0,
+            notional_hint_usd: Some(9_000.0),
+            close_fraction: None,
+        };
+        let r3 = step(&r2.state, &e3, &params);
+        let pos3 = r3.state.positions.get("BTC").unwrap();
+
+        // qty1=1.0 @ 10k, qty2=1.0 @ 11k, qty3=1.0 @ 9k
+        // weighted avg = (10k*1 + 11k*1 + 9k*1) / 3 = 10_000
+        let p1 = r1.state.positions.get("BTC").unwrap();
+        let p2 = r2.state.positions.get("BTC").unwrap();
+        // Verify step-by-step: after step 2, avg = (10k*1 + 11k*1)/2 = 10_500
+        let expected_avg2 = accounting::quantize(
+            (10_000.0 * p1.quantity + 11_000.0 * (p2.quantity - p1.quantity))
+                / p2.quantity,
+        );
+        assert!(
+            (p2.avg_entry_price - expected_avg2).abs() < 1e-12,
+            "avg after 2nd add: {} != {}",
+            p2.avg_entry_price,
+            expected_avg2,
+        );
+
+        // After step 3: avg = (prev_avg * prev_qty + 9k * new_qty) / total_qty
+        let qty3_added = accounting::quantize(9_000.0 / 9_000.0);
+        let expected_avg3 = accounting::quantize(
+            (p2.avg_entry_price * p2.quantity + 9_000.0 * qty3_added)
+                / (p2.quantity + qty3_added),
+        );
+        assert!(
+            (pos3.avg_entry_price - expected_avg3).abs() < 1e-12,
+            "avg after 3rd add: {} != {}",
+            pos3.avg_entry_price,
+            expected_avg3,
+        );
+        assert!((pos3.quantity - 3.0).abs() < 1e-12);
+    }
 }
