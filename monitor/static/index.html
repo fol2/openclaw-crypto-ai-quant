@@ -90,6 +90,14 @@
       </div>
     </header>
 
+    <!-- ========== VIEW TABS ========== -->
+    <div class="viewtabs">
+      <div class="seg" role="tablist" aria-label="View">
+        <button id="viewDash" class="segbtn is-on" role="tab" aria-selected="true" data-view-tab="dashboard">DASHBOARD</button>
+        <button id="viewDecisions" class="segbtn" role="tab" aria-selected="false" data-view-tab="decisions">DECISIONS</button>
+      </div>
+    </div>
+
     <!-- ========== MAIN LAYOUT ========== -->
     <main id="main" class="layout">
 
@@ -212,6 +220,103 @@
         </div>
       </section>
     </main>
+
+    <!-- ========== DECISIONS VIEW ========== -->
+    <section id="decisionsView" class="decisions-view is-hidden">
+      <div class="dec-toolbar">
+        <div class="dec-filters">
+          <label class="dec-filter-group">
+            <span class="dec-label">Symbol</span>
+            <select id="decFilterSymbol" class="dec-select">
+              <option value="">All</option>
+            </select>
+          </label>
+          <label class="dec-filter-group">
+            <span class="dec-label">Event</span>
+            <select id="decFilterEvent" class="dec-select">
+              <option value="">All</option>
+              <option value="entry_signal">entry_signal</option>
+              <option value="exit_check">exit_check</option>
+              <option value="gate_block">gate_block</option>
+              <option value="fill">fill</option>
+              <option value="funding">funding</option>
+            </select>
+          </label>
+          <label class="dec-filter-group">
+            <span class="dec-label">Status</span>
+            <select id="decFilterStatus" class="dec-select">
+              <option value="">All</option>
+              <option value="executed">executed</option>
+              <option value="blocked">blocked</option>
+              <option value="rejected">rejected</option>
+              <option value="hold">hold</option>
+            </select>
+          </label>
+          <label class="dec-filter-group">
+            <span class="dec-label">From</span>
+            <input id="decFilterStart" type="datetime-local" class="dec-input" />
+          </label>
+          <label class="dec-filter-group">
+            <span class="dec-label">To</span>
+            <input id="decFilterEnd" type="datetime-local" class="dec-input" />
+          </label>
+        </div>
+        <div class="dec-actions">
+          <button id="decApplyBtn" class="ghost" type="button">APPLY</button>
+          <button id="decClearBtn" class="ghost" type="button">CLEAR</button>
+          <button id="decExportBtn" class="ghost" type="button">EXPORT JSON</button>
+        </div>
+      </div>
+      <div class="dec-summary" id="decSummaryBar">&mdash;</div>
+      <div class="dec-timeline" id="decTimeline">
+        <div class="dec-empty">Apply filters to load decision events.</div>
+      </div>
+      <div class="dec-pager">
+        <button id="decLoadMore" class="ghost" type="button" style="display:none;">LOAD MORE</button>
+      </div>
+    </section>
+
+    <!-- ========== DECISION DETAIL MODAL ========== -->
+    <div id="decModal" class="modal is-hidden" aria-hidden="true">
+      <div class="modalback" data-dec-modal-close="true" aria-hidden="true"></div>
+      <div class="modalcard dec-modalcard" role="dialog" aria-modal="true" aria-labelledby="decModalTitle">
+        <div class="modalhd">
+          <div class="modaltitle" id="decModalTitle">&mdash;</div>
+          <button class="modalclose" id="decModalClose" type="button" aria-label="Close">CLOSE</button>
+        </div>
+        <div class="dec-modal-body" id="decModalBody">
+          <div class="dec-modal-section" id="decModalContext">
+            <div class="dec-modal-section-title">Indicator Snapshot</div>
+            <div class="kv" id="decModalIndicators">&mdash;</div>
+          </div>
+          <div class="dec-modal-section" id="decModalGates">
+            <div class="dec-modal-section-title">Gate Evaluations</div>
+            <div class="dec-gates-table-wrap">
+              <table class="dec-gates-table" id="decModalGateTable">
+                <thead>
+                  <tr>
+                    <th>Gate</th>
+                    <th>Pass</th>
+                    <th>Metric</th>
+                    <th>Threshold</th>
+                    <th>Op</th>
+                    <th>Explanation</th>
+                  </tr>
+                </thead>
+                <tbody id="decModalGateBody"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="dec-modal-section" id="decModalMeta">
+            <div class="dec-modal-section-title">Decision Metadata</div>
+            <div class="kv" id="decModalMetaKv">&mdash;</div>
+          </div>
+          <div class="dec-modal-actions">
+            <button id="decReplayBtn" class="ghost" type="button">REPLAY DECISION</button>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <!-- ========== MODAL ========== -->
     <div id="modal" class="modal is-hidden" aria-hidden="true">
