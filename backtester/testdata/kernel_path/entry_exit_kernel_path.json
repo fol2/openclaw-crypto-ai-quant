@@ -1,5 +1,5 @@
 {
-  "final_cash": 9099.265,
+  "final_cash": 10099.265,
   "traces": [
     {
       "event_id": 1,
@@ -12,7 +12,7 @@
       "schema_version": 1,
       "step": 1,
       "state_step": 1,
-      "state_cash_usd": 8999.65,
+      "state_cash_usd": 9666.316666666668,
       "state_positions": 1,
       "intent_count": 1,
       "fill_count": 1,
@@ -53,7 +53,7 @@
       "schema_version": 1,
       "step": 2,
       "state_step": 2,
-      "state_cash_usd": 9099.265,
+      "state_cash_usd": 10099.265,
       "state_positions": 0,
       "intent_count": 1,
       "fill_count": 1,

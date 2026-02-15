@@ -149,6 +149,7 @@ fn make_kernel_params(cfg: &StrategyConfig) -> decision_kernel::KernelParams {
     // Engine entry processing closes the existing position first when a reverse
     // signal arrives; keep this behaviour by disabling canonical reverses.
     kernel_params.allow_reverse = false;
+    kernel_params.leverage = cfg.trade.leverage.max(1.0);
     kernel_params
 }
 
@@ -186,6 +187,7 @@ fn make_kernel_state(
                 opened_at_ms: pos.open_time_ms,
                 updated_at_ms: pos.open_time_ms,
                 notional_usd,
+                margin_usd: accounting::quantize(pos.margin_used),
             },
         );
     }
@@ -1407,7 +1409,8 @@ fn apply_exit(
             exit_size,
             maker_taker_fee_rate(&state.kernel_params, accounting::FeeRole::Taker),
         );
-        state.balance += close.cash_delta;
+        // Margin-based: balance += pnl - fee (margin tracked per-position, not in balance).
+        state.balance += close.pnl - close.fee_usd;
 
         // Record PESC info (partial exits also count)
         state
@@ -1418,6 +1421,11 @@ fn apply_exit(
         let action = match pos.pos_type {
             PositionType::Long => "REDUCE_LONG",
             PositionType::Short => "REDUCE_SHORT",
+        };
+        let closed_margin = pos.margin_used * if pos.size > 0.0 {
+            partial_fill.closed_size / pos.size
+        } else {
+            0.0
         };
         state.trades.push(TradeRecord {
             timestamp_ms: ts,
@@ -1433,11 +1441,7 @@ fn apply_exit(
             balance: state.balance,
             entry_atr: pos.entry_atr,
             leverage: pos.leverage,
-            margin_used: pos.margin_used * if pos.size > 0.0 {
-                partial_fill.closed_size / pos.size
-            } else {
-                0.0
-            },
+            margin_used: closed_margin,
             ..Default::default()
         });
 
@@ -1453,6 +1457,18 @@ fn apply_exit(
             // Do not couple this state transition to human-readable reason text.
             p.tp1_taken = true;
         }
+
+        // Sync kernel state: reduce kernel position + return margin proportionally.
+        if let Some(kpos) = state.kernel_state.positions.get_mut(symbol) {
+            let close_frac = if pos.size > 0.0 { exit_size / pos.size } else { 0.0 };
+            let returned_margin = accounting::quantize(kpos.margin_usd * close_frac);
+            kpos.margin_usd = accounting::quantize(kpos.margin_usd - returned_margin);
+            kpos.quantity = accounting::quantize(kpos.quantity - exit_size);
+            kpos.notional_usd = accounting::quantize(kpos.notional_usd - (exit_size * pos.entry_price));
+            state.kernel_state.cash_usd = accounting::quantize(
+                state.kernel_state.cash_usd + returned_margin + close.pnl - close.fee_usd,
+            );
+        }
     } else {
         // Full exit
         let close = accounting::apply_close_fill(
@@ -1462,7 +1478,8 @@ fn apply_exit(
             pos.size,
             maker_taker_fee_rate(&state.kernel_params, accounting::FeeRole::Taker),
         );
-        state.balance += close.cash_delta;
+        // Margin-based: balance += pnl - fee.
+        state.balance += close.pnl - close.fee_usd;
 
         // Record PESC info
         state
@@ -1491,6 +1508,13 @@ fn apply_exit(
             margin_used: pos.margin_used,
             ..Default::default()
         });
+
+        // Sync kernel state: remove position + return margin to cash.
+        if let Some(kpos) = state.kernel_state.positions.remove(symbol) {
+            state.kernel_state.cash_usd = accounting::quantize(
+                state.kernel_state.cash_usd + kpos.margin_usd + close.pnl - close.fee_usd,
+            );
+        }
 
         state.positions.remove(symbol);
     }
@@ -1974,11 +1998,11 @@ fn apply_kernel_open_from_plan(
         PositionType::Short => cand.snap.close * (1.0 - cfg.trade.slippage_bps / 10_000.0),
     });
 
-    let fill = accounting::apply_open_fill(
-        requested_notional_usd,
-        maker_taker_fee_rate(&state.kernel_params, accounting::FeeRole::Taker),
-    );
-    state.balance += fill.cash_delta;
+    // Margin-based accounting: only deduct fee from balance (matching main
+    // backtester).  Margin is tracked per-position, not deducted from cash.
+    let fee_rate = maker_taker_fee_rate(&state.kernel_params, accounting::FeeRole::Taker);
+    let fee_usd = accounting::quantize(requested_notional_usd * fee_rate);
+    state.balance -= fee_usd;
 
     let pos = Position {
         symbol: cand.symbol.to_string(),
@@ -2011,11 +2035,11 @@ fn apply_kernel_open_from_plan(
         action: action.to_string(),
         price: fill_price,
         size,
-        notional: fill.notional,
+        notional: requested_notional_usd,
         reason: reason.to_string(),
         confidence: cand.confidence,
         pnl: 0.0,
-        fee_usd: fill.fee_usd,
+        fee_usd,
         balance: state.balance,
         entry_atr: cand.atr,
         leverage,
@@ -2070,11 +2094,10 @@ fn apply_kernel_add_from_plan(
         return false;
     }
 
-    let fill = accounting::apply_open_fill(
-        add_notional,
-        maker_taker_fee_rate(&state.kernel_params, accounting::FeeRole::Taker),
-    );
-    state.balance += fill.cash_delta;
+    // Margin-based accounting: only deduct fee from balance (matching main backtester).
+    let add_fee_rate = maker_taker_fee_rate(&state.kernel_params, accounting::FeeRole::Taker);
+    let add_fee_usd = accounting::quantize(add_notional * add_fee_rate);
+    state.balance -= add_fee_usd;
 
     let fill_price = accounting::quantize(match add_signal {
         Signal::Buy => snap.close * (1.0 + cfg.trade.slippage_bps / 10_000.0),
@@ -2096,11 +2119,11 @@ fn apply_kernel_add_from_plan(
             },
             price: fill_price,
             size: add_size,
-            notional: fill.notional,
+            notional: add_notional,
             reason: format!("Pyramid #{}", next_add),
             confidence,
             pnl: 0.0,
-            fee_usd: fill.fee_usd,
+            fee_usd: add_fee_usd,
             balance: state.balance,
             entry_atr: atr,
             leverage: pos.leverage,
@@ -2415,6 +2438,7 @@ mod tests {
             },
         );
 
+        let kernel_state = make_kernel_state(1_000.0, 0, &positions);
         SimState {
             balance: 1_000.0,
             positions,
@@ -2425,7 +2449,7 @@ mod tests {
             trades: vec![],
             signals: vec![],
             decision_diagnostics: Vec::new(),
-            kernel_state: make_kernel_state(1_000.0, 0, &positions),
+            kernel_state,
             kernel_params: make_kernel_params(&StrategyConfig::default()),
             next_kernel_event_id: 1,
             equity_curve: vec![],
@@ -2502,7 +2526,8 @@ mod tests {
 
         apply_exit(&mut state, symbol, &exit, &snapped, snapped.t);
 
-        assert!((state.balance - (1_000.0 + expected.cash_delta)).abs() < 1e-9);
+        // Margin-based: balance changes by pnl - fee (not cash_delta which was notional-based).
+        assert!((state.balance - (1_000.0 + expected.pnl - expected.fee_usd)).abs() < 1e-9);
         assert_eq!(state.trades.len(), 1);
         assert_eq!(state.trades[0].action, "CLOSE_LONG");
         assert!((state.trades[0].pnl - expected.pnl).abs() < 1e-9);

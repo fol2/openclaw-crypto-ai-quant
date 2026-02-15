@@ -63,6 +63,9 @@ pub struct Position {
     pub opened_at_ms: i64,
     pub updated_at_ms: i64,
     pub notional_usd: f64,
+    /// Margin (collateral) locked for this position = notional / leverage.
+    #[serde(default)]
+    pub margin_usd: f64,
 }
 
 /// Canonical strategy state persisted between steps.
@@ -162,6 +165,10 @@ pub struct KernelParams {
     pub taker_fee_bps: f64,
     pub allow_pyramid: bool,
     pub allow_reverse: bool,
+    /// Leverage used for margin calculation.  Kernel tracks margin (= notional /
+    /// leverage) in its cash model rather than full notional, matching the
+    /// exchange's margined-perpetual accounting.  Default 1.0 (spot-equivalent).
+    pub leverage: f64,
 }
 
 impl Default for KernelParams {
@@ -175,6 +182,7 @@ impl Default for KernelParams {
             taker_fee_bps: accounting::DEFAULT_TAKER_FEE_BPS,
             allow_pyramid: true,
             allow_reverse: true,
+            leverage: 1.0,
         }
     }
 }
@@ -228,6 +236,7 @@ fn apply_open(
     notional: f64,
     price: f64,
     fee_rate: f64,
+    leverage: f64,
     timestamp_ms: i64,
     intent_id: u64,
     kind: OrderIntentKind,
@@ -247,7 +256,11 @@ fn apply_open(
     }
 
     let open = accounting::apply_open_fill(notional, fee_rate);
-    if open.notional + open.fee_usd > state.cash_usd {
+    let effective_leverage = leverage.max(1.0);
+    let margin = quantise(open.notional / effective_leverage);
+
+    // Margin-based cash check: only the collateral (margin) is locked, not full notional.
+    if margin + open.fee_usd > state.cash_usd {
         diagnostics
             .warnings
             .push(format!("skip open for {symbol}: insufficient cash"));
@@ -264,7 +277,8 @@ fn apply_open(
         return None;
     }
 
-    state.cash_usd = quantise(state.cash_usd + open.cash_delta);
+    // Deduct margin + fee from cash (not full notional).
+    state.cash_usd = quantise(state.cash_usd - margin - open.fee_usd);
     if let Some(existing) = state.positions.get_mut(symbol) {
         if existing.side == side {
             // Weighted average with additional stake.
@@ -279,6 +293,7 @@ fn apply_open(
                 (existing.avg_entry_price * existing_qty + price * quantity) / total_qty
             };
             existing.notional_usd = accounting::quantize(total_notional);
+            existing.margin_usd = accounting::quantize(existing.margin_usd + margin);
             existing.quantity = accounting::quantize(total_qty);
             existing.avg_entry_price = accounting::quantize(avg_entry);
             existing.updated_at_ms = timestamp_ms;
@@ -296,6 +311,7 @@ fn apply_open(
                 opened_at_ms: timestamp_ms,
                 updated_at_ms: timestamp_ms,
                 notional_usd: notional,
+                margin_usd: margin,
             },
         );
     }
@@ -367,7 +383,9 @@ fn apply_close(
         fee_rate,
     );
 
-    state.cash_usd = quantise(state.cash_usd + close.cash_delta);
+    // Return margin (collateral) + PnL - fee to cash.
+    let margin = position.margin_usd;
+    state.cash_usd = quantise(state.cash_usd + margin + close.pnl - close.fee_usd);
 
     let intent = OrderIntent {
         schema_version: KERNEL_SCHEMA_VERSION,
@@ -433,6 +451,7 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
         taker_fee_bps: params.taker_fee_bps,
     };
     let fee_rate = fee_model.role_rate(accounting::FeeRole::Taker);
+    let leverage = params.leverage;
     let notional = event
         .notional_hint_usd
         .unwrap_or(params.default_notional_usd)
@@ -453,6 +472,7 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                 notional,
                 event.price,
                 fee_rate,
+                leverage,
                 event.timestamp_ms,
                 open_id,
                 OrderIntentKind::Open,
@@ -471,6 +491,7 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                     notional,
                     event.price,
                     fee_rate,
+                    leverage,
                     event.timestamp_ms,
                     open_id,
                     OrderIntentKind::Add,
@@ -516,6 +537,7 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                     notional,
                     event.price,
                     fee_rate,
+                    leverage,
                     event.timestamp_ms,
                     reverse_id,
                     OrderIntentKind::Open,
@@ -609,16 +631,27 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_close_pnl_matches_shared_accounting() {
+    fn round_trip_close_pnl_matches_margin_accounting() {
         let initial_state = init_state();
-        let params = KernelParams::default();
+        let params = KernelParams {
+            // Disable reverse so the Sell signal only closes, not re-opens.
+            allow_reverse: false,
+            ..KernelParams::default() // leverage = 1.0
+        };
         let mut open_event = event_with_signal("BTC", MarketSignal::Buy);
         open_event.notional_hint_usd = Some(10_000.0);
 
         let open_result = step(&initial_state, &open_event, &params);
         let open_fill = accounting::apply_open_fill(10_000.0, accounting::DEFAULT_TAKER_FEE_RATE);
-        assert!((open_fill.cash_delta + open_fill.notional).abs() < 1e-12);
-        assert!((open_result.state.cash_usd - (initial_state.cash_usd + open_fill.cash_delta)).abs() < 1e-12);
+        let margin = accounting::quantize(10_000.0 / params.leverage.max(1.0));
+        // Kernel deducts margin + fee from cash.
+        let expected_cash_after_open = accounting::quantize(initial_state.cash_usd - margin - open_fill.fee_usd);
+        assert!(
+            (open_result.state.cash_usd - expected_cash_after_open).abs() < 1e-12,
+            "open cash: {} != expected {}",
+            open_result.state.cash_usd,
+            expected_cash_after_open,
+        );
 
         let close_event = MarketEvent {
             schema_version: 1,
@@ -633,8 +666,16 @@ mod tests {
         let close_result = step(&close_state, &close_event, &params);
 
         let expected_close = accounting::apply_close_fill(true, 10_000.0, 10_200.0, 1.0, accounting::DEFAULT_TAKER_FEE_RATE);
-        let expected_cash = initial_state.cash_usd + open_fill.cash_delta + expected_close.cash_delta;
-        assert!((close_result.state.cash_usd - expected_cash).abs() < 1e-12);
+        // Round-trip: initial - margin - open_fee + margin + pnl - close_fee = initial + pnl - total_fees
+        let expected_cash = accounting::quantize(
+            initial_state.cash_usd + expected_close.pnl - open_fill.fee_usd - expected_close.fee_usd,
+        );
+        assert!(
+            (close_result.state.cash_usd - expected_cash).abs() < 1e-12,
+            "close cash: {} != expected {}",
+            close_result.state.cash_usd,
+            expected_cash,
+        );
         assert!((close_result.fills[0].pnl_usd - expected_close.pnl).abs() < 1e-12);
     }
 
