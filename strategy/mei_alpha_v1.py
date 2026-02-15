@@ -6,6 +6,7 @@ import datetime
 import copy
 import json
 import os
+import random
 import sqlite3
 import tomllib
 import yaml
@@ -1080,8 +1081,439 @@ def ensure_db():
             (migration_id, datetime.datetime.now(datetime.timezone.utc).isoformat()),
         )
 
+    # ── Decision traceability tables (AQC-801) ───────────────────────────
+
+    # Every decision point (entry signal, exit check, gate block, fill)
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS decision_events (
+            id TEXT PRIMARY KEY,                    -- ULID for time-sortability
+            timestamp_ms INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            event_type TEXT NOT NULL,               -- 'entry_signal', 'exit_check', 'gate_block', 'fill', 'funding'
+            status TEXT NOT NULL,                   -- 'executed', 'blocked', 'rejected', 'hold'
+            decision_phase TEXT NOT NULL,           -- 'signal_generation', 'gate_evaluation', 'risk_check', 'execution'
+            parent_decision_id TEXT,                -- chain to previous decision
+            trade_id INTEGER,                       -- FK to trades.id if resulted in trade
+            triggered_by TEXT,                      -- 'schedule', 'price_update', 'signal_flip', 'stop_loss'
+            action_taken TEXT,                      -- 'open_long', 'close_short', 'hold', 'blocked'
+            rejection_reason TEXT,                  -- if blocked/rejected
+            context_json TEXT                       -- full indicator + threshold snapshot
+        )
+        """
+    )
+
+    # Normalized indicator values at decision time (queryable without JSON parsing)
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS decision_context (
+            decision_id TEXT PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            price REAL, rsi REAL, adx REAL, adx_slope REAL,
+            macd_hist REAL, ema_fast REAL, ema_slow REAL, ema_macro REAL,
+            bb_width_ratio REAL, stoch_k REAL, stoch_d REAL,
+            atr REAL, atr_slope REAL, volume REAL, vol_sma REAL,
+            -- Dynamic thresholds that were applied
+            rsi_entry_threshold REAL,
+            min_adx_threshold REAL,
+            sl_price REAL, tp_price REAL, trailing_sl REAL,
+            -- Gate status
+            gate_ranging INTEGER, gate_anomaly INTEGER, gate_extension INTEGER,
+            gate_adx INTEGER, gate_volume INTEGER, gate_adx_rising INTEGER,
+            gate_btc_alignment INTEGER,
+            -- Alignment
+            bullish_alignment INTEGER, bearish_alignment INTEGER,
+            FOREIGN KEY (decision_id) REFERENCES decision_events(id)
+        )
+        """
+    )
+
+    # Per-gate evaluation detail
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS gate_evaluations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            decision_id TEXT NOT NULL,
+            gate_name TEXT NOT NULL,
+            gate_passed INTEGER NOT NULL,           -- 0 or 1
+            metric_value REAL,
+            threshold_value REAL,
+            operator TEXT,                           -- '<', '>', 'between', '=='
+            explanation TEXT,
+            FOREIGN KEY (decision_id) REFERENCES decision_events(id)
+        )
+        """
+    )
+
+    # Links signals to trades to exits (full lifecycle)
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS decision_lineage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            signal_decision_id TEXT,                -- decision_events.id for entry signal
+            entry_trade_id INTEGER,                 -- trades.id for OPEN fill
+            exit_decision_id TEXT,                  -- decision_events.id for exit
+            exit_trade_id INTEGER,                  -- trades.id for CLOSE fill
+            exit_reason TEXT,
+            duration_ms INTEGER,                    -- time from entry to exit
+            FOREIGN KEY (signal_decision_id) REFERENCES decision_events(id),
+            FOREIGN KEY (exit_decision_id) REFERENCES decision_events(id)
+        )
+        """
+    )
+
+    # Decision traceability indexes
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_de_symbol_ts ON decision_events(symbol, timestamp_ms)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_de_event_type ON decision_events(event_type)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_de_trade_id ON decision_events(trade_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ge_decision ON gate_evaluations(decision_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_dl_entry ON decision_lineage(entry_trade_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_dl_exit ON decision_lineage(exit_trade_id)")
+
     conn.commit()
     conn.close()
+
+
+# ── ULID generator (AQC-801) ────────────────────────────────────────────
+
+_ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+
+def generate_ulid() -> str:
+    """Generate a ULID (Universally Unique Lexicographically Sortable Identifier).
+
+    Returns a 26-character, time-sortable unique ID using Crockford's Base32.
+    No external dependency required.
+    """
+    t = int(time.time() * 1000)
+    time_part = ""
+    for _ in range(10):
+        time_part = _ULID_ALPHABET[t & 0x1F] + time_part
+        t >>= 5
+    rand_part = "".join(random.choices(_ULID_ALPHABET, k=16))
+    return time_part + rand_part
+
+
+# ── Decision traceability helpers (AQC-801) ──────────────────────────────
+
+
+def create_decision_event(
+    symbol: str,
+    event_type: str,
+    status: str,
+    phase: str,
+    *,
+    parent_decision_id: str | None = None,
+    trade_id: int | None = None,
+    triggered_by: str | None = None,
+    action_taken: str | None = None,
+    rejection_reason: str | None = None,
+    context: dict | None = None,
+    timestamp_ms: int | None = None,
+) -> str:
+    """Create a decision event row and return its ULID.
+
+    Parameters
+    ----------
+    symbol : str
+        Trading symbol (e.g. "ETH").
+    event_type : str
+        One of 'entry_signal', 'exit_check', 'gate_block', 'fill', 'funding'.
+    status : str
+        One of 'executed', 'blocked', 'rejected', 'hold'.
+    phase : str
+        One of 'signal_generation', 'gate_evaluation', 'risk_check', 'execution'.
+    parent_decision_id : str, optional
+        ULID of a preceding decision in the chain.
+    trade_id : int, optional
+        FK to trades.id if this decision resulted in a trade.
+    triggered_by : str, optional
+        What triggered this decision ('schedule', 'price_update', 'signal_flip', 'stop_loss').
+    action_taken : str, optional
+        What the engine did ('open_long', 'close_short', 'hold', 'blocked').
+    rejection_reason : str, optional
+        Human-readable reason if status is 'blocked' or 'rejected'.
+    context : dict, optional
+        Full indicator + threshold snapshot (stored as JSON).
+    timestamp_ms : int, optional
+        Epoch ms; defaults to now.
+
+    Returns
+    -------
+    str
+        The ULID of the created decision event.
+    """
+    decision_id = generate_ulid()
+    ts = timestamp_ms if timestamp_ms is not None else int(time.time() * 1000)
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT_S)
+        conn.execute(
+            """
+            INSERT INTO decision_events
+                (id, timestamp_ms, symbol, event_type, status, decision_phase,
+                 parent_decision_id, trade_id, triggered_by, action_taken,
+                 rejection_reason, context_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                decision_id,
+                ts,
+                symbol.strip().upper(),
+                event_type,
+                status,
+                phase,
+                parent_decision_id,
+                trade_id,
+                triggered_by,
+                action_taken,
+                rejection_reason,
+                _json_dumps_safe(context) if context else None,
+            ),
+        )
+        conn.commit()
+    finally:
+        if conn is not None:
+            conn.close()
+    return decision_id
+
+
+def save_decision_context(
+    decision_id: str,
+    symbol: str,
+    indicators: dict,
+    thresholds: dict | None = None,
+    gates: dict | None = None,
+) -> None:
+    """Save normalized indicator, threshold, and gate snapshots for a decision.
+
+    Parameters
+    ----------
+    decision_id : str
+        The ULID of the decision event.
+    symbol : str
+        Trading symbol.
+    indicators : dict
+        Keys may include: price, rsi, adx, adx_slope, macd_hist, ema_fast,
+        ema_slow, ema_macro, bb_width_ratio, stoch_k, stoch_d, atr,
+        atr_slope, volume, vol_sma.
+    thresholds : dict, optional
+        Keys may include: rsi_entry_threshold, min_adx_threshold, sl_price,
+        tp_price, trailing_sl.
+    gates : dict, optional
+        Keys may include: gate_ranging, gate_anomaly, gate_extension,
+        gate_adx, gate_volume, gate_adx_rising, gate_btc_alignment,
+        bullish_alignment, bearish_alignment.  Values should be 0/1.
+    """
+    thresholds = thresholds or {}
+    gates = gates or {}
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT_S)
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO decision_context
+                (decision_id, symbol,
+                 price, rsi, adx, adx_slope, macd_hist,
+                 ema_fast, ema_slow, ema_macro,
+                 bb_width_ratio, stoch_k, stoch_d,
+                 atr, atr_slope, volume, vol_sma,
+                 rsi_entry_threshold, min_adx_threshold,
+                 sl_price, tp_price, trailing_sl,
+                 gate_ranging, gate_anomaly, gate_extension,
+                 gate_adx, gate_volume, gate_adx_rising,
+                 gate_btc_alignment,
+                 bullish_alignment, bearish_alignment)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                decision_id,
+                symbol.strip().upper(),
+                indicators.get("price"),
+                indicators.get("rsi"),
+                indicators.get("adx"),
+                indicators.get("adx_slope"),
+                indicators.get("macd_hist"),
+                indicators.get("ema_fast"),
+                indicators.get("ema_slow"),
+                indicators.get("ema_macro"),
+                indicators.get("bb_width_ratio"),
+                indicators.get("stoch_k"),
+                indicators.get("stoch_d"),
+                indicators.get("atr"),
+                indicators.get("atr_slope"),
+                indicators.get("volume"),
+                indicators.get("vol_sma"),
+                thresholds.get("rsi_entry_threshold"),
+                thresholds.get("min_adx_threshold"),
+                thresholds.get("sl_price"),
+                thresholds.get("tp_price"),
+                thresholds.get("trailing_sl"),
+                gates.get("gate_ranging"),
+                gates.get("gate_anomaly"),
+                gates.get("gate_extension"),
+                gates.get("gate_adx"),
+                gates.get("gate_volume"),
+                gates.get("gate_adx_rising"),
+                gates.get("gate_btc_alignment"),
+                gates.get("bullish_alignment"),
+                gates.get("bearish_alignment"),
+            ),
+        )
+        conn.commit()
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def save_gate_evaluation(
+    decision_id: str,
+    gate_name: str,
+    gate_passed: bool,
+    *,
+    metric_value: float | None = None,
+    threshold_value: float | None = None,
+    operator: str | None = None,
+    explanation: str | None = None,
+) -> None:
+    """Record a single gate evaluation for a decision.
+
+    Parameters
+    ----------
+    decision_id : str
+        The ULID of the decision event.
+    gate_name : str
+        Name of the gate (e.g. 'ranging', 'anomaly', 'adx_rising').
+    gate_passed : bool
+        Whether this gate passed.
+    metric_value : float, optional
+        The actual metric value evaluated.
+    threshold_value : float, optional
+        The threshold the metric was compared against.
+    operator : str, optional
+        Comparison operator ('<', '>', 'between', '==').
+    explanation : str, optional
+        Human-readable explanation of the gate result.
+    """
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT_S)
+        conn.execute(
+            """
+            INSERT INTO gate_evaluations
+                (decision_id, gate_name, gate_passed, metric_value,
+                 threshold_value, operator, explanation)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                decision_id,
+                gate_name,
+                1 if gate_passed else 0,
+                metric_value,
+                threshold_value,
+                operator,
+                explanation,
+            ),
+        )
+        conn.commit()
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def link_decision_to_trade(decision_id: str, trade_id: int) -> None:
+    """Link an existing decision event to a trade by updating its trade_id."""
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT_S)
+        conn.execute(
+            "UPDATE decision_events SET trade_id = ? WHERE id = ?",
+            (trade_id, decision_id),
+        )
+        conn.commit()
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def create_lineage(
+    signal_decision_id: str,
+    entry_trade_id: int,
+) -> int:
+    """Start a lineage record when a new trade is opened.
+
+    Parameters
+    ----------
+    signal_decision_id : str
+        The ULID of the entry signal decision event.
+    entry_trade_id : int
+        The trades.id for the OPEN fill.
+
+    Returns
+    -------
+    int
+        The rowid of the created lineage record.
+    """
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT_S)
+        cur = conn.execute(
+            """
+            INSERT INTO decision_lineage
+                (signal_decision_id, entry_trade_id)
+            VALUES (?, ?)
+            """,
+            (signal_decision_id, entry_trade_id),
+        )
+        conn.commit()
+        return cur.lastrowid  # type: ignore[return-value]
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def complete_lineage(
+    entry_trade_id: int,
+    exit_decision_id: str,
+    exit_trade_id: int,
+    exit_reason: str,
+    duration_ms: int | None = None,
+) -> None:
+    """Complete a lineage record when a trade is closed.
+
+    Parameters
+    ----------
+    entry_trade_id : int
+        The trades.id for the OPEN fill (used to find the lineage row).
+    exit_decision_id : str
+        The ULID of the exit decision event.
+    exit_trade_id : int
+        The trades.id for the CLOSE fill.
+    exit_reason : str
+        Why the trade was closed (e.g. 'signal_flip', 'stop_loss', 'take_profit').
+    duration_ms : int, optional
+        Time from entry to exit in milliseconds.
+    """
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT_S)
+        conn.execute(
+            """
+            UPDATE decision_lineage
+            SET exit_decision_id = ?,
+                exit_trade_id = ?,
+                exit_reason = ?,
+                duration_ms = ?
+            WHERE entry_trade_id = ?
+              AND exit_decision_id IS NULL
+            """,
+            (exit_decision_id, exit_trade_id, exit_reason, duration_ms, entry_trade_id),
+        )
+        conn.commit()
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def log_audit_event(
