@@ -451,6 +451,16 @@ struct SweepArgs {
     /// (30m/5m, 1h/5m, 30m/3m, 1h/3m) and a <=19-day scoped window.
     #[arg(long, default_value_t = false)]
     allow_unsafe_gpu_sweep: bool,
+
+    /// Verify that each sweep override path actually takes effect on the config.
+    /// Logs warnings for any failed overrides.
+    #[arg(long, default_value_t = false)]
+    verify_overrides: bool,
+
+    /// Abort the sweep if any override path is not found or fails to apply.
+    /// Implies --verify-overrides.
+    #[arg(long, default_value_t = false)]
+    strict_overrides: bool,
 }
 
 #[derive(Parser)]
@@ -1785,6 +1795,58 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    // Override verification (before any heavy I/O)
+    let do_verify = args.verify_overrides || args.strict_overrides;
+    let override_verifications = if do_verify {
+        // Collect unique (path, sample_value) pairs from the sweep spec
+        let test_overrides: Vec<(String, f64)> = spec
+            .axes
+            .iter()
+            .map(|axis| {
+                let sample_value = axis.values.first().copied().unwrap_or(0.0);
+                (axis.path.clone(), sample_value)
+            })
+            .collect();
+
+        let verifications = bt_core::sweep::verify_overrides(&base_cfg, &test_overrides);
+
+        let mut has_failures = false;
+        for v in &verifications {
+            match v.status {
+                bt_core::sweep::OverrideStatus::Applied => {
+                    eprintln!(
+                        "[verify] OK: {} (before={:.6}, after={:.6}, requested={:.6})",
+                        v.path,
+                        v.before.unwrap_or(f64::NAN),
+                        v.after.unwrap_or(f64::NAN),
+                        v.requested,
+                    );
+                }
+                bt_core::sweep::OverrideStatus::FailedNotFound => {
+                    eprintln!("[verify] FAIL: {} — path not found in config", v.path);
+                    has_failures = true;
+                }
+                bt_core::sweep::OverrideStatus::FailedUnchanged => {
+                    eprintln!(
+                        "[verify] FAIL: {} — override did not change value (before={:.6}, requested={:.6})",
+                        v.path,
+                        v.before.unwrap_or(f64::NAN),
+                        v.requested,
+                    );
+                    has_failures = true;
+                }
+            }
+        }
+
+        if has_failures && args.strict_overrides {
+            return Err("Aborting: --strict-overrides is set and one or more override paths failed verification.".into());
+        }
+
+        Some(verifications)
+    } else {
+        None
+    };
+
     // Compute time range: explicit --start-ts / --end-ts, with optional auto-scope.
     let mut scope_dbs: Vec<(&[String], &str)> =
         vec![(candles_db_paths.as_slice(), interval.as_str())];
@@ -2228,6 +2290,12 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
                     map.insert(
                         "candidate_mode".to_string(),
                         serde_json::Value::Bool(true),
+                    );
+                }
+                if let Some(ref verifications) = override_verifications {
+                    map.insert(
+                        "override_verification".to_string(),
+                        serde_json::to_value(verifications).unwrap_or(serde_json::Value::Null),
                     );
                 }
             }

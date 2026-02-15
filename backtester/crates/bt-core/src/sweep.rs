@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use rayon::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::candle::{CandleData, FundingRateData};
 use crate::config::{Confidence, MacdMode, StrategyConfig};
@@ -307,6 +307,272 @@ fn apply_one(cfg: &mut StrategyConfig, path: &str, value: f64) {
 }
 
 // ---------------------------------------------------------------------------
+// Override verification
+// ---------------------------------------------------------------------------
+
+/// Status of a single override verification check.
+#[derive(Debug, Clone, Serialize)]
+pub enum OverrideStatus {
+    Applied,
+    FailedNotFound,
+    FailedUnchanged,
+}
+
+/// Verification result for a single override path.
+#[derive(Debug, Clone, Serialize)]
+pub struct OverrideVerification {
+    pub path: String,
+    pub requested: f64,
+    pub before: Option<f64>,
+    pub after: Option<f64>,
+    pub status: OverrideStatus,
+}
+
+/// Read a single f64 config value by dot-separated path (inverse of `apply_one`).
+///
+/// Returns `None` for unknown paths. Boolean fields return 1.0/0.0.
+/// Enum fields (Confidence, MacdMode) return their integer encoding.
+fn read_one(cfg: &StrategyConfig, path: &str) -> Option<f64> {
+    Some(match path {
+        // === Trade config ===
+        "trade.sl_atr_mult" => cfg.trade.sl_atr_mult,
+        "trade.tp_atr_mult" => cfg.trade.tp_atr_mult,
+        "trade.trailing_start_atr" => cfg.trade.trailing_start_atr,
+        "trade.trailing_distance_atr" => cfg.trade.trailing_distance_atr,
+        "trade.allocation_pct" => cfg.trade.allocation_pct,
+        "trade.leverage" => cfg.trade.leverage,
+        "trade.max_open_positions" => cfg.trade.max_open_positions as f64,
+        "trade.min_atr_pct" => cfg.trade.min_atr_pct,
+        "trade.slippage_bps" => cfg.trade.slippage_bps,
+        "trade.min_notional_usd" => cfg.trade.min_notional_usd,
+        "trade.use_bbo_for_fills" => if cfg.trade.use_bbo_for_fills { 1.0 } else { 0.0 },
+        "trade.bump_to_min_notional" => if cfg.trade.bump_to_min_notional { 1.0 } else { 0.0 },
+        "trade.max_total_margin_pct" => cfg.trade.max_total_margin_pct,
+        "trade.reentry_cooldown_minutes" => cfg.trade.reentry_cooldown_minutes as f64,
+        "trade.reentry_cooldown_min_mins" => cfg.trade.reentry_cooldown_min_mins as f64,
+        "trade.reentry_cooldown_max_mins" => cfg.trade.reentry_cooldown_max_mins as f64,
+        "trade.breakeven_start_atr" => cfg.trade.breakeven_start_atr,
+        "trade.breakeven_buffer_atr" => cfg.trade.breakeven_buffer_atr,
+        "trade.confidence_mult_low" => cfg.trade.confidence_mult_low,
+        "trade.confidence_mult_medium" => cfg.trade.confidence_mult_medium,
+        "trade.confidence_mult_high" => cfg.trade.confidence_mult_high,
+        "trade.tsme_min_profit_atr" => cfg.trade.tsme_min_profit_atr,
+        "trade.rsi_exit_profit_atr_switch" => cfg.trade.rsi_exit_profit_atr_switch,
+        "trade.rsi_exit_ub_lo_profit" => cfg.trade.rsi_exit_ub_lo_profit,
+        "trade.rsi_exit_ub_hi_profit" => cfg.trade.rsi_exit_ub_hi_profit,
+        "trade.rsi_exit_lb_lo_profit" => cfg.trade.rsi_exit_lb_lo_profit,
+        "trade.rsi_exit_lb_hi_profit" => cfg.trade.rsi_exit_lb_hi_profit,
+        "trade.rsi_exit_ub_lo_profit_low_conf" => cfg.trade.rsi_exit_ub_lo_profit_low_conf,
+        "trade.rsi_exit_ub_hi_profit_low_conf" => cfg.trade.rsi_exit_ub_hi_profit_low_conf,
+        "trade.rsi_exit_lb_lo_profit_low_conf" => cfg.trade.rsi_exit_lb_lo_profit_low_conf,
+        "trade.rsi_exit_lb_hi_profit_low_conf" => cfg.trade.rsi_exit_lb_hi_profit_low_conf,
+        "trade.tp_partial_pct" => cfg.trade.tp_partial_pct,
+        "trade.tp_partial_atr_mult" => cfg.trade.tp_partial_atr_mult,
+        "trade.tp_partial_min_notional_usd" => cfg.trade.tp_partial_min_notional_usd,
+        "trade.add_min_profit_atr" => cfg.trade.add_min_profit_atr,
+        "trade.add_fraction_of_base_margin" => cfg.trade.add_fraction_of_base_margin,
+        "trade.max_adds_per_symbol" => cfg.trade.max_adds_per_symbol as f64,
+        "trade.add_cooldown_minutes" => cfg.trade.add_cooldown_minutes as f64,
+        "trade.leverage_low" => cfg.trade.leverage_low,
+        "trade.leverage_medium" => cfg.trade.leverage_medium,
+        "trade.leverage_high" => cfg.trade.leverage_high,
+        "trade.leverage_max_cap" => cfg.trade.leverage_max_cap,
+        "trade.adx_sizing_min_mult" => cfg.trade.adx_sizing_min_mult,
+        "trade.adx_sizing_full_adx" => cfg.trade.adx_sizing_full_adx,
+        "trade.vol_baseline_pct" => cfg.trade.vol_baseline_pct,
+        "trade.vol_scalar_min" => cfg.trade.vol_scalar_min,
+        "trade.vol_scalar_max" => cfg.trade.vol_scalar_max,
+        "trade.entry_cooldown_s" => cfg.trade.entry_cooldown_s as f64,
+        "trade.exit_cooldown_s" => cfg.trade.exit_cooldown_s as f64,
+        "trade.max_entry_orders_per_loop" => cfg.trade.max_entry_orders_per_loop as f64,
+        "trade.glitch_price_dev_pct" => cfg.trade.glitch_price_dev_pct,
+        "trade.glitch_atr_mult" => cfg.trade.glitch_atr_mult,
+        "trade.reef_long_rsi_block_gt" => cfg.trade.reef_long_rsi_block_gt,
+        "trade.reef_short_rsi_block_lt" => cfg.trade.reef_short_rsi_block_lt,
+        "trade.reef_adx_threshold" => cfg.trade.reef_adx_threshold,
+        "trade.reef_long_rsi_extreme_gt" => cfg.trade.reef_long_rsi_extreme_gt,
+        "trade.reef_short_rsi_extreme_lt" => cfg.trade.reef_short_rsi_extreme_lt,
+        "trade.trailing_start_atr_low_conf" => cfg.trade.trailing_start_atr_low_conf,
+        "trade.trailing_distance_atr_low_conf" => cfg.trade.trailing_distance_atr_low_conf,
+        "trade.smart_exit_adx_exhaustion_lt" => cfg.trade.smart_exit_adx_exhaustion_lt,
+        "trade.smart_exit_adx_exhaustion_lt_low_conf" => cfg.trade.smart_exit_adx_exhaustion_lt_low_conf,
+
+        // === Confidence enums (0=low, 1=medium, 2=high) ===
+        "trade.entry_min_confidence" => match cfg.trade.entry_min_confidence {
+            Confidence::Low => 0.0,
+            Confidence::Medium => 1.0,
+            Confidence::High => 2.0,
+        },
+        "trade.add_min_confidence" => match cfg.trade.add_min_confidence {
+            Confidence::Low => 0.0,
+            Confidence::Medium => 1.0,
+            Confidence::High => 2.0,
+        },
+        "thresholds.entry.pullback_confidence" => match cfg.thresholds.entry.pullback_confidence {
+            Confidence::Low => 0.0,
+            Confidence::Medium => 1.0,
+            Confidence::High => 2.0,
+        },
+
+        // === Thresholds — entry ===
+        "thresholds.entry.min_adx" => cfg.thresholds.entry.min_adx,
+        "thresholds.entry.high_conf_volume_mult" => cfg.thresholds.entry.high_conf_volume_mult,
+        "thresholds.entry.btc_adx_override" => cfg.thresholds.entry.btc_adx_override,
+        "thresholds.entry.max_dist_ema_fast" => cfg.thresholds.entry.max_dist_ema_fast,
+        "thresholds.entry.ave_atr_ratio_gt" => cfg.thresholds.entry.ave_atr_ratio_gt,
+        "thresholds.entry.ave_adx_mult" => cfg.thresholds.entry.ave_adx_mult,
+        "thresholds.entry.ave_avg_atr_window" => cfg.thresholds.entry.ave_avg_atr_window as f64,
+        "thresholds.entry.pullback_min_adx" => cfg.thresholds.entry.pullback_min_adx,
+        "thresholds.entry.pullback_rsi_long_min" => cfg.thresholds.entry.pullback_rsi_long_min,
+        "thresholds.entry.pullback_rsi_short_max" => cfg.thresholds.entry.pullback_rsi_short_max,
+        "thresholds.entry.slow_drift_slope_window" => cfg.thresholds.entry.slow_drift_slope_window as f64,
+        "thresholds.entry.slow_drift_min_slope_pct" => cfg.thresholds.entry.slow_drift_min_slope_pct,
+        "thresholds.entry.slow_drift_min_adx" => cfg.thresholds.entry.slow_drift_min_adx,
+        "thresholds.entry.slow_drift_rsi_long_min" => cfg.thresholds.entry.slow_drift_rsi_long_min,
+        "thresholds.entry.slow_drift_rsi_short_max" => cfg.thresholds.entry.slow_drift_rsi_short_max,
+        "thresholds.entry.macd_hist_entry_mode" => match cfg.thresholds.entry.macd_hist_entry_mode {
+            MacdMode::Accel => 0.0,
+            MacdMode::Sign => 1.0,
+            MacdMode::None => 2.0,
+        },
+
+        // === Thresholds — ranging ===
+        "thresholds.ranging.min_signals" => cfg.thresholds.ranging.min_signals as f64,
+        "thresholds.ranging.adx_below" => cfg.thresholds.ranging.adx_below,
+        "thresholds.ranging.bb_width_ratio_below" => cfg.thresholds.ranging.bb_width_ratio_below,
+        "thresholds.ranging.rsi_low" => cfg.thresholds.ranging.rsi_low,
+        "thresholds.ranging.rsi_high" => cfg.thresholds.ranging.rsi_high,
+
+        // === Thresholds — anomaly ===
+        "thresholds.anomaly.price_change_pct_gt" => cfg.thresholds.anomaly.price_change_pct_gt,
+        "thresholds.anomaly.ema_fast_dev_pct_gt" => cfg.thresholds.anomaly.ema_fast_dev_pct_gt,
+
+        // === Thresholds — tp_and_momentum ===
+        "thresholds.tp_and_momentum.adx_strong_gt" => cfg.thresholds.tp_and_momentum.adx_strong_gt,
+        "thresholds.tp_and_momentum.adx_weak_lt" => cfg.thresholds.tp_and_momentum.adx_weak_lt,
+        "thresholds.tp_and_momentum.tp_mult_strong" => cfg.thresholds.tp_and_momentum.tp_mult_strong,
+        "thresholds.tp_and_momentum.tp_mult_weak" => cfg.thresholds.tp_and_momentum.tp_mult_weak,
+        "thresholds.tp_and_momentum.rsi_long_strong" => cfg.thresholds.tp_and_momentum.rsi_long_strong,
+        "thresholds.tp_and_momentum.rsi_long_weak" => cfg.thresholds.tp_and_momentum.rsi_long_weak,
+        "thresholds.tp_and_momentum.rsi_short_strong" => cfg.thresholds.tp_and_momentum.rsi_short_strong,
+        "thresholds.tp_and_momentum.rsi_short_weak" => cfg.thresholds.tp_and_momentum.rsi_short_weak,
+
+        // === Thresholds — stoch_rsi ===
+        "thresholds.stoch_rsi.block_long_if_k_gt" => cfg.thresholds.stoch_rsi.block_long_if_k_gt,
+        "thresholds.stoch_rsi.block_short_if_k_lt" => cfg.thresholds.stoch_rsi.block_short_if_k_lt,
+
+        // === Boolean toggles ===
+        "trade.enable_dynamic_sizing" => if cfg.trade.enable_dynamic_sizing { 1.0 } else { 0.0 },
+        "trade.enable_dynamic_leverage" => if cfg.trade.enable_dynamic_leverage { 1.0 } else { 0.0 },
+        "trade.enable_pyramiding" => if cfg.trade.enable_pyramiding { 1.0 } else { 0.0 },
+        "trade.enable_partial_tp" => if cfg.trade.enable_partial_tp { 1.0 } else { 0.0 },
+        "trade.enable_ssf_filter" => if cfg.trade.enable_ssf_filter { 1.0 } else { 0.0 },
+        "trade.enable_reef_filter" => if cfg.trade.enable_reef_filter { 1.0 } else { 0.0 },
+        "trade.enable_breakeven_stop" => if cfg.trade.enable_breakeven_stop { 1.0 } else { 0.0 },
+        "trade.enable_rsi_overextension_exit" => if cfg.trade.enable_rsi_overextension_exit { 1.0 } else { 0.0 },
+        "trade.enable_vol_buffered_trailing" => if cfg.trade.enable_vol_buffered_trailing { 1.0 } else { 0.0 },
+        "trade.tsme_require_adx_slope_negative" => if cfg.trade.tsme_require_adx_slope_negative { 1.0 } else { 0.0 },
+        "trade.reverse_entry_signal" => if cfg.trade.reverse_entry_signal { 1.0 } else { 0.0 },
+        "trade.block_exits_on_extreme_dev" => if cfg.trade.block_exits_on_extreme_dev { 1.0 } else { 0.0 },
+        "filters.vol_confirm_include_prev" => if cfg.filters.vol_confirm_include_prev { 1.0 } else { 0.0 },
+
+        // === Filters ===
+        "filters.enable_ranging_filter" => if cfg.filters.enable_ranging_filter { 1.0 } else { 0.0 },
+        "filters.enable_anomaly_filter" => if cfg.filters.enable_anomaly_filter { 1.0 } else { 0.0 },
+        "filters.enable_extension_filter" => if cfg.filters.enable_extension_filter { 1.0 } else { 0.0 },
+        "filters.require_adx_rising" => if cfg.filters.require_adx_rising { 1.0 } else { 0.0 },
+        "filters.adx_rising_saturation" => cfg.filters.adx_rising_saturation,
+        "filters.require_volume_confirmation" => if cfg.filters.require_volume_confirmation { 1.0 } else { 0.0 },
+        "filters.use_stoch_rsi_filter" => if cfg.filters.use_stoch_rsi_filter { 1.0 } else { 0.0 },
+        "filters.require_btc_alignment" => if cfg.filters.require_btc_alignment { 1.0 } else { 0.0 },
+        "filters.require_macro_alignment" => if cfg.filters.require_macro_alignment { 1.0 } else { 0.0 },
+
+        // === Entry toggles ===
+        "thresholds.entry.enable_pullback_entries" => if cfg.thresholds.entry.enable_pullback_entries { 1.0 } else { 0.0 },
+        "thresholds.entry.enable_slow_drift_entries" => if cfg.thresholds.entry.enable_slow_drift_entries { 1.0 } else { 0.0 },
+        "thresholds.entry.ave_enabled" => if cfg.thresholds.entry.ave_enabled { 1.0 } else { 0.0 },
+        "thresholds.entry.pullback_require_macd_sign" => if cfg.thresholds.entry.pullback_require_macd_sign { 1.0 } else { 0.0 },
+        "thresholds.entry.slow_drift_require_macd_sign" => if cfg.thresholds.entry.slow_drift_require_macd_sign { 1.0 } else { 0.0 },
+
+        // === Market regime toggles ===
+        "market_regime.enable_regime_filter" => if cfg.market_regime.enable_regime_filter { 1.0 } else { 0.0 },
+        "market_regime.enable_auto_reverse" => if cfg.market_regime.enable_auto_reverse { 1.0 } else { 0.0 },
+
+        // === Indicators ===
+        "indicators.ema_slow_window" => cfg.indicators.ema_slow_window as f64,
+        "indicators.ema_fast_window" => cfg.indicators.ema_fast_window as f64,
+        "indicators.ema_macro_window" => cfg.indicators.ema_macro_window as f64,
+        "indicators.adx_window" => cfg.indicators.adx_window as f64,
+        "indicators.bb_window" => cfg.indicators.bb_window as f64,
+        "indicators.bb_width_avg_window" => cfg.indicators.bb_width_avg_window as f64,
+        "indicators.atr_window" => cfg.indicators.atr_window as f64,
+        "indicators.rsi_window" => cfg.indicators.rsi_window as f64,
+        "indicators.vol_sma_window" => cfg.indicators.vol_sma_window as f64,
+        "indicators.vol_trend_window" => cfg.indicators.vol_trend_window as f64,
+        "indicators.stoch_rsi_window" => cfg.indicators.stoch_rsi_window as f64,
+        "indicators.stoch_rsi_smooth1" => cfg.indicators.stoch_rsi_smooth1 as f64,
+        "indicators.stoch_rsi_smooth2" => cfg.indicators.stoch_rsi_smooth2 as f64,
+        "indicators.ave_avg_atr_window" => cfg.indicators.ave_avg_atr_window as f64,
+
+        // === Market regime ===
+        "market_regime.breadth_block_short_above" => cfg.market_regime.breadth_block_short_above,
+        "market_regime.breadth_block_long_below" => cfg.market_regime.breadth_block_long_below,
+        "market_regime.auto_reverse_breadth_low" => cfg.market_regime.auto_reverse_breadth_low,
+        "market_regime.auto_reverse_breadth_high" => cfg.market_regime.auto_reverse_breadth_high,
+
+        _ => return None,
+    })
+}
+
+/// Verify that each override path in the sweep spec actually takes effect on the config.
+///
+/// For each unique (path, value) pair:
+/// 1. Reads the field BEFORE applying
+/// 2. Applies the override
+/// 3. Reads the field AFTER applying
+/// 4. Reports whether the override was applied, not found, or unchanged
+pub fn verify_overrides(
+    base_cfg: &StrategyConfig,
+    overrides: &[(String, f64)],
+) -> Vec<OverrideVerification> {
+    overrides
+        .iter()
+        .map(|(path, value)| {
+            let before = read_one(base_cfg, path);
+
+            if before.is_none() {
+                return OverrideVerification {
+                    path: path.clone(),
+                    requested: *value,
+                    before: None,
+                    after: None,
+                    status: OverrideStatus::FailedNotFound,
+                };
+            }
+
+            let mut test_cfg = base_cfg.clone();
+            apply_one(&mut test_cfg, path, *value);
+            let after = read_one(&test_cfg, path);
+
+            let status = match (&before, &after) {
+                (Some(b), Some(a)) if (a - b).abs() < 1e-12 && (a - value).abs() > 1e-12 => {
+                    OverrideStatus::FailedUnchanged
+                }
+                _ => OverrideStatus::Applied,
+            };
+
+            OverrideVerification {
+                path: path.clone(),
+                requested: *value,
+                before,
+                after,
+                status,
+            }
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -565,5 +831,73 @@ axes:
         let spec: SweepSpec = serde_yaml::from_str(yaml).unwrap();
         assert!((spec.initial_balance - 10000.0).abs() < 1e-9);
         assert_eq!(spec.lookback, 200);
+    }
+
+    #[test]
+    fn test_verify_overrides_valid_paths() {
+        let base = StrategyConfig::default();
+        let overrides = vec![
+            ("trade.sl_atr_mult".to_string(), 99.0),
+            ("trade.leverage".to_string(), 3.0),
+            ("indicators.ema_slow_window".to_string(), 50.0),
+        ];
+        let results = verify_overrides(&base, &overrides);
+        assert_eq!(results.len(), 3);
+        for v in &results {
+            assert!(
+                matches!(v.status, OverrideStatus::Applied),
+                "Expected Applied for {}, got {:?}",
+                v.path,
+                v.status,
+            );
+            assert!(v.before.is_some());
+            assert!(v.after.is_some());
+        }
+        // Verify the after values match what we requested
+        assert!((results[0].after.unwrap() - 99.0).abs() < 1e-9);
+        assert!((results[1].after.unwrap() - 3.0).abs() < 1e-9);
+        assert!((results[2].after.unwrap() - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_verify_overrides_unknown_path() {
+        let base = StrategyConfig::default();
+        let overrides = vec![("trade.nonexistent_field".to_string(), 42.0)];
+        let results = verify_overrides(&base, &overrides);
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0].status, OverrideStatus::FailedNotFound));
+        assert!(results[0].before.is_none());
+        assert!(results[0].after.is_none());
+    }
+
+    #[test]
+    fn test_verify_overrides_mixed_valid_and_invalid() {
+        let base = StrategyConfig::default();
+        let overrides = vec![
+            ("trade.sl_atr_mult".to_string(), 2.5),
+            ("bogus.path".to_string(), 1.0),
+            ("filters.adx_rising_saturation".to_string(), 40.0),
+        ];
+        let results = verify_overrides(&base, &overrides);
+        assert_eq!(results.len(), 3);
+        assert!(matches!(results[0].status, OverrideStatus::Applied));
+        assert!(matches!(results[1].status, OverrideStatus::FailedNotFound));
+        assert!(matches!(results[2].status, OverrideStatus::Applied));
+    }
+
+    #[test]
+    fn test_read_one_round_trips_with_apply_one() {
+        let mut cfg = StrategyConfig::default();
+        apply_one(&mut cfg, "trade.leverage", 7.0);
+        assert!((read_one(&cfg, "trade.leverage").unwrap() - 7.0).abs() < 1e-9);
+
+        apply_one(&mut cfg, "trade.enable_pyramiding", 1.0);
+        assert!((read_one(&cfg, "trade.enable_pyramiding").unwrap() - 1.0).abs() < 1e-9);
+
+        apply_one(&mut cfg, "indicators.atr_window", 21.0);
+        assert!((read_one(&cfg, "indicators.atr_window").unwrap() - 21.0).abs() < 1e-9);
+
+        // Unknown path returns None
+        assert!(read_one(&cfg, "does.not.exist").is_none());
     }
 }
