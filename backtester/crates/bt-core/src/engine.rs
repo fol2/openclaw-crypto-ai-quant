@@ -18,6 +18,7 @@ use risk_core::{
     EntrySizingInput, ExposureBlockReason, ExposureGuardInput, PyramidSizingInput,
 };
 use rustc_hash::FxHashMap;
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Public result types
@@ -98,6 +99,8 @@ pub struct DecisionKernelTrace {
     intents: Vec<DecisionKernelIntentSummary>,
     fills: Vec<DecisionKernelFillSummary>,
     applied_to_kernel_state: bool,
+    #[serde(default)]
+    active_params: HashMap<String, f64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -210,6 +213,32 @@ fn signal_name(signal: Signal) -> &'static str {
     }
 }
 
+fn build_active_params(
+    source: &str,
+    cfg: &StrategyConfig,
+    kernel_params: &decision_kernel::KernelParams,
+) -> HashMap<String, f64> {
+    let is_entry = source.contains("open") || source.contains("pyramid");
+    let mut params = HashMap::new();
+    if is_entry {
+        params.insert("min_adx".into(), cfg.thresholds.entry.min_adx);
+        params.insert("reef_adx_threshold".into(), cfg.trade.reef_adx_threshold);
+        params.insert("reef_long_rsi_block_gt".into(), cfg.trade.reef_long_rsi_block_gt);
+        params.insert("pullback_rsi_long_min".into(), cfg.thresholds.entry.pullback_rsi_long_min);
+        params.insert("pullback_rsi_short_max".into(), cfg.thresholds.entry.pullback_rsi_short_max);
+        params.insert("leverage".into(), cfg.trade.leverage);
+        params.insert("taker_fee_bps".into(), kernel_params.taker_fee_bps);
+        params.insert("maker_fee_bps".into(), kernel_params.maker_fee_bps);
+    } else {
+        params.insert("sl_atr_mult".into(), cfg.trade.sl_atr_mult);
+        params.insert("tp_atr_mult".into(), cfg.trade.tp_atr_mult);
+        params.insert("trailing_start_atr".into(), cfg.trade.trailing_start_atr);
+        params.insert("tsme_min_profit_atr".into(), cfg.trade.tsme_min_profit_atr);
+        params.insert("smart_exit_adx_exhaustion_lt".into(), cfg.trade.smart_exit_adx_exhaustion_lt);
+    }
+    params
+}
+
 fn step_decision(
     state: &mut SimState,
     ts: i64,
@@ -218,6 +247,7 @@ fn step_decision(
     price: f64,
     requested_notional_usd: Option<f64>,
     source: &'static str,
+    cfg: &StrategyConfig,
 ) -> decision_kernel::DecisionResult {
     let event = decision_kernel::MarketEvent {
         schema_version: 1,
@@ -277,6 +307,7 @@ fn step_decision(
             })
             .collect(),
         applied_to_kernel_state: !decision.diagnostics.has_errors(),
+        active_params: build_active_params(source, cfg, &state.kernel_params),
     };
     state.decision_diagnostics.push(trace);
     decision
@@ -577,6 +608,7 @@ pub fn run_simulation(
                             snap.close,
                             None,
                             "indicator-bar-close",
+                            cfg,
                         );
                         if decision
                             .intents
@@ -744,6 +776,7 @@ pub fn run_simulation(
                     cand.snap.close,
                     Some(kernel_notional),
                     "indicator-bar-open",
+                    cfg,
                 );
                 let intent_open = decision.intents.iter().any(|intent| {
                     matches!(
@@ -1684,6 +1717,7 @@ fn try_pyramid(
         snap.close,
         Some(add_notional),
         "pyramid",
+        cfg,
     );
     let has_add = decision
         .intents
@@ -1934,6 +1968,7 @@ fn execute_sub_bar_entry(
         snap.close,
         Some(notional),
         "sub-bar-open",
+        cfg,
     );
     let has_open = decision
         .intents
@@ -2568,6 +2603,7 @@ mod tests {
             gate_stats: GateStats::default(),
         };
 
+        let cfg = StrategyConfig::default();
         let _ = step_decision(
             &mut state,
             1_000,
@@ -2576,6 +2612,7 @@ mod tests {
             100.0,
             Some(1_000.0),
             "fixture-open",
+            &cfg,
         );
         let _ = step_decision(
             &mut state,
@@ -2585,6 +2622,7 @@ mod tests {
             110.0,
             Some(1_000.0),
             "fixture-exit",
+            &cfg,
         );
 
         assert_eq!(state.decision_diagnostics, fixture.traces);
