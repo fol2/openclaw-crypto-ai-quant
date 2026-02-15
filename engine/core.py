@@ -618,152 +618,27 @@ class NoopDecisionProvider:
         return []
 
 
-_CONF_RANK = {"high": 2, "medium": 1, "low": 0}
-
-
-class PythonAnalyzeDecisionProvider:
-    """Generate entry decisions via mei_alpha_v1.analyze() — Python signal path.
-
-    Restores the pre-TKT-004 signal generation that was removed when kernel
-    decision routing was introduced (415ccef).  The Rust backtester computes
-    indicators and signals internally; this provider gives the live/paper
-    engine an equivalent signal source so the SSOT decision path is not broken.
-
-    When AI_QUANT_KERNEL_DECISION_FILE is configured, use
-    KernelDecisionRustBindingProvider instead (file-based kernel decisions).
-    """
-
-    def __init__(self) -> None:
-        self._btc_bullish: bool | None = None
-        self._btc_key: int | None = None
-
-    # ------------------------------------------------------------------
-    # DecisionProvider protocol
-    # ------------------------------------------------------------------
-    def get_decisions(
-        self,
-        *,
-        symbols: list[str],
-        watchlist: list[str],
-        open_symbols: list[str],
-        market: Any,
-        interval: str,
-        lookback_bars: int,
-        mode: str,
-        not_ready_symbols: set[str],
-        strategy: Any,
-        now_ms: int,
-    ) -> Iterable[KernelDecision]:
-        decisions: list[KernelDecision] = []
-        open_set = {s.upper() for s in (open_symbols or [])}
-        
-        # DEBUG LOGging
-        # print(f"🔍 get_decisions: symbols={len(symbols)} watchlist={len(watchlist)} not_ready={len(not_ready_symbols)}")
-
-        # --- BTC context (require_btc_alignment filter) ----------------
-        # NOTE: use mei_alpha_v1 directly; `strategy` is a StrategyManager and
-        # does NOT have .analyze / .ta / .pd attributes.
-        from strategy import mei_alpha_v1 as _strat_mod
-
-        btc_bullish = self._btc_bullish
-        try:
-            btc_df = market.get_candles_df("BTC", interval=interval, min_rows=lookback_bars)
-            if btc_df is not None and not btc_df.empty and len(btc_df) >= lookback_bars:
-                btc_ema_slow = _strat_mod.ta.trend.ema_indicator(
-                    btc_df["Close"], window=50,
-                ).iloc[-1]
-                if _strat_mod.pd.notna(btc_ema_slow):
-                    btc_bullish = bool(btc_df["Close"].iloc[-1] > btc_ema_slow)
-                    self._btc_bullish = btc_bullish
-        except Exception:
-            pass
-
-        # --- Per-symbol signal generation ------------------------------
-        for sym in watchlist:
-            sym_u = sym.upper().strip()
-            if not sym_u:
-                continue
-
-            if sym_u in not_ready_symbols:
-                continue
-
-            try:
-                df_raw = market.get_candles_df(
-                    sym_u, interval=interval, min_rows=lookback_bars,
-                )
-                if df_raw is None or df_raw.empty or len(df_raw) < lookback_bars:
-                    continue
-
-                df = df_raw.tail(lookback_bars).copy()
-                sig, conf, now_series = _strat_mod.analyze(
-                    df, sym_u, btc_bullish=btc_bullish,
-                )
-
-                sig_u = str(sig or "").upper()
-                if sig_u not in ("BUY", "SELL"):
-                    continue
-
-                logger.info(f"🎯 SIGNAL: {sym_u} {sig_u} {conf}")
-
-                if not isinstance(now_series, dict):
-                    try:
-                        now_series = dict(now_series)
-                    except (TypeError, ValueError):
-                        now_series = {}
-                # ATR floor: enforce minimum ATR as % of price.
-                try:
-                    _atr_raw = float(now_series.get("ATR") or 0.0)
-                    _close_px = float(now_series.get("Close") or 0.0)
-                    _min_atr_pct = float(
-                        (_strat_mod.get_trade_params(sym_u) or {}).get(
-                            "min_atr_pct", 0.003,
-                        ) or 0.003,
-                    )
-                    if _close_px > 0 and _min_atr_pct > 0:
-                        _atr_floor = _close_px * _min_atr_pct
-                        if _atr_raw < _atr_floor:
-                            now_series["ATR"] = _atr_floor
-                            now_series["_atr_floored"] = True
-                except Exception:
-                    pass
-
-                # Candle key for dedup (engine handles actual dedup).
-                entry_key: int | None = None
-                try:
-                    if "T" in df.columns:
-                        entry_key = int(df["T"].iloc[-1])
-                    else:
-                        entry_key = int(df["timestamp"].iloc[-1])
-                except Exception:
-                    pass
-
-                price = float(now_series.get("Close") or 0)
-                if price <= 0:
-                    continue
-
-                action = "ADD" if sym_u in open_set else "OPEN"
-                adx = float(now_series.get("ADX") or 0)
-                score = _CONF_RANK.get(str(conf or "").lower(), 0) * 100 + adx
-
-                decisions.append(
-                    KernelDecision(
-                        symbol=sym_u,
-                        action=action,
-                        signal=sig_u,
-                        confidence=str(conf or "N/A"),
-                        score=score,
-                        now_series=now_series,
-                        entry_key=entry_key,
-                        reason=f"python_analyze:{sig_u.lower()}",
-                    )
-                )
-            except Exception:
-                continue
-
-        return decisions
-
-
 def _build_default_decision_provider() -> DecisionProvider:
+    """Build the decision provider based on environment configuration.
+
+    After AQC-825, the Python ``mei_alpha_v1.analyze()`` decision path has been
+    removed.  The Rust kernel (``bt_runtime``) is the **only** decision source
+    for live/paper trading.  If it cannot be loaded the engine will fail-fast
+    with a clear error rather than silently falling back to Python.
+
+    Accepted values for ``AI_QUANT_KERNEL_DECISION_PROVIDER``:
+
+    * ``rust`` / ``kernel_only`` (default) -- Rust kernel via ``bt_runtime``
+    * ``file``  -- read decisions from a JSON file
+    * ``none`` / ``noop`` -- no-op (dry-run / testing)
+
+    Raises
+    ------
+    SystemExit
+        If ``bt_runtime`` cannot be imported and no fallback is appropriate.
+    RuntimeError
+        If configuration is invalid.
+    """
     path = os.getenv("AI_QUANT_KERNEL_DECISION_FILE")
     provider_mode = str(os.getenv("AI_QUANT_KERNEL_DECISION_PROVIDER", "") or "").strip().lower()
 
@@ -771,8 +646,12 @@ def _build_default_decision_provider() -> DecisionProvider:
         return NoopDecisionProvider()
 
     if provider_mode == "python":
-        logger.info("📊 Decision provider: PythonAnalyzeDecisionProvider (explicit)")
-        return PythonAnalyzeDecisionProvider()
+        logger.fatal(
+            "FATAL: AI_QUANT_KERNEL_DECISION_PROVIDER=python is no longer supported. "
+            "The PythonAnalyzeDecisionProvider has been removed (AQC-825). "
+            "Use 'rust', 'kernel_only', 'file', or 'none'."
+        )
+        raise SystemExit(1)
 
     if provider_mode == "file":
         if not path:
@@ -781,41 +660,64 @@ def _build_default_decision_provider() -> DecisionProvider:
             )
         return KernelDecisionFileProvider(path)
 
-    if provider_mode == "rust":
+    if provider_mode in {"rust", "kernel_only"}:
+        # Explicit rust/kernel_only mode: fail-fast if bt_runtime unavailable.
         if path:
             try:
                 return KernelDecisionRustBindingProvider(path=path)
             except Exception as exc:
-                raise RuntimeError(
-                    "AI_QUANT_KERNEL_DECISION_PROVIDER=rust is configured, but the Rust decision kernel "
-                    "extension is unavailable. Set AI_QUANT_KERNEL_DECISION_PROVIDER=none or provide "
-                    "AI_QUANT_KERNEL_DECISION_FILE."
-                ) from exc
-        # No decision file: Rust binding cannot generate signals from candle data
-        # on its own.  Fall back to Python analyze path which replicates the same
-        # indicator / filter logic that the Rust backtester uses internally.
-        logger.warning(
-            "⚠️ AI_QUANT_KERNEL_DECISION_PROVIDER=rust but AI_QUANT_KERNEL_DECISION_FILE "
-            "not set. Falling back to PythonAnalyzeDecisionProvider (mei_alpha_v1.analyze)."
-        )
-        return PythonAnalyzeDecisionProvider()
+                logger.fatal(
+                    "FATAL: bt_runtime extension unavailable — cannot initialise "
+                    "Rust kernel decision provider.  Ensure the bt_runtime shared "
+                    "library is built and accessible.  Error: %s", exc,
+                )
+                raise SystemExit(1) from exc
 
-    if path:
         try:
-            return KernelDecisionRustBindingProvider(path=path)
-        except Exception:
-            return KernelDecisionFileProvider(path)
+            return KernelDecisionRustBindingProvider(path=None)
+        except Exception as exc:
+            logger.fatal(
+                "FATAL: bt_runtime extension unavailable and "
+                "AI_QUANT_KERNEL_DECISION_FILE not configured. "
+                "The Rust kernel is REQUIRED for live/paper trading (AQC-825). "
+                "Build bt_runtime or set AI_QUANT_KERNEL_DECISION_PROVIDER=none "
+                "for dry-run mode.  Error: %s", exc,
+            )
+            raise SystemExit(1) from exc
 
-    # Auto mode: try Rust binding with file, then Python analyze, then crash.
-    try:
-        return KernelDecisionRustBindingProvider(path=None)
-    except Exception:
-        logger.warning(
-            "⚠️ Decision provider auto-mode: Rust kernel extension unavailable and "
-            "AI_QUANT_KERNEL_DECISION_FILE not configured. "
-            "Falling back to PythonAnalyzeDecisionProvider (mei_alpha_v1.analyze)."
-        )
-        return PythonAnalyzeDecisionProvider()
+    if provider_mode == "":
+        # Auto mode: try Rust binding first; fall back to file provider if
+        # a decision file is configured, otherwise fail-fast.
+        if path:
+            try:
+                return KernelDecisionRustBindingProvider(path=path)
+            except Exception:
+                logger.warning(
+                    "bt_runtime extension unavailable; falling back to "
+                    "KernelDecisionFileProvider (AI_QUANT_KERNEL_DECISION_FILE=%s).",
+                    path,
+                )
+                return KernelDecisionFileProvider(path)
+
+        try:
+            return KernelDecisionRustBindingProvider(path=None)
+        except Exception as exc:
+            logger.fatal(
+                "FATAL: bt_runtime extension unavailable and "
+                "AI_QUANT_KERNEL_DECISION_FILE not configured. "
+                "The Rust kernel is REQUIRED for live/paper trading (AQC-825). "
+                "Build bt_runtime or set AI_QUANT_KERNEL_DECISION_PROVIDER=none "
+                "for dry-run mode.  Error: %s", exc,
+            )
+            raise SystemExit(1) from exc
+
+    # Unrecognised provider mode — hard error.
+    logger.fatal(
+        "FATAL: Unrecognised AI_QUANT_KERNEL_DECISION_PROVIDER=%r. "
+        "Accepted values: rust, kernel_only, file, none, noop.",
+        provider_mode,
+    )
+    raise SystemExit(1)
 
 
 class ModePlugin(Protocol):
@@ -844,7 +746,7 @@ class UnifiedEngine:
       Exits always run for open positions. Entries only run for real entry candidates.
 
     The engine delegates:
-    - Strategy math to mei_alpha_v1.analyze
+    - Decision generation to the Rust kernel via DecisionProvider
     - Execution and position accounting to PaperTrader / LiveTrader
     """
 
@@ -878,7 +780,7 @@ class UnifiedEngine:
         # Cached strategy outputs to avoid re-running ta.*.
         # Stored per symbol:
         # - key: candle key we last analyzed (close ms if signal_on_close else open ms)
-        # - sig/conf/now: outputs of mei_alpha_v1.analyze
+        # - sig/conf/now: outputs of the decision provider
         self._analysis_cache: dict[str, dict[str, Any]] = {}
 
         # BTC anchor context cache.

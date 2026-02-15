@@ -301,14 +301,14 @@ class TestLegacyMode:
     """Tests for LegacyMode enum and get_legacy_mode()."""
 
     def test_enum_values(self):
-        """LegacyMode has KERNEL_ONLY, SHADOW, LEGACY values."""
+        """LegacyMode has KERNEL_ONLY and SHADOW values (LEGACY removed in AQC-825)."""
         assert LegacyMode.KERNEL_ONLY.value == "kernel_only"
         assert LegacyMode.SHADOW.value == "shadow"
-        assert LegacyMode.LEGACY.value == "legacy"
+        assert not hasattr(LegacyMode, "LEGACY")
 
     def test_enum_count(self):
-        """LegacyMode has exactly 3 members."""
-        assert len(LegacyMode) == 3
+        """LegacyMode has exactly 2 members (LEGACY removed in AQC-825)."""
+        assert len(LegacyMode) == 2
 
     def test_get_legacy_mode_default(self):
         """get_legacy_mode returns KERNEL_ONLY by default."""
@@ -324,9 +324,11 @@ class TestLegacyMode:
             mode = get_legacy_mode()
         assert mode is LegacyMode.SHADOW
 
+    def test_get_legacy_mode_rejects_legacy_value(self):
+        """KERNEL_LEGACY_MODE=legacy is no longer valid (AQC-825); falls back to default."""
         with mock.patch.dict(os.environ, {"KERNEL_LEGACY_MODE": "legacy"}):
             mode = get_legacy_mode()
-        assert mode is LegacyMode.LEGACY
+        assert mode is LegacyMode.KERNEL_ONLY
 
     def test_get_legacy_mode_from_config(self):
         """get_legacy_mode reads from config dict when env not set."""
@@ -338,7 +340,7 @@ class TestLegacyMode:
     def test_get_legacy_mode_env_overrides_config(self):
         """Environment variable takes precedence over config."""
         with mock.patch.dict(os.environ, {"KERNEL_LEGACY_MODE": "kernel_only"}):
-            mode = get_legacy_mode({"legacy_mode": "legacy"})
+            mode = get_legacy_mode({"legacy_mode": "shadow"})
         assert mode is LegacyMode.KERNEL_ONLY
 
     def test_get_legacy_mode_invalid_env_falls_back(self):
@@ -544,18 +546,17 @@ class TestProcessCandle:
         assert "error" in decision.diagnostics
 
     def test_process_candle_runtime_unavailable(self):
-        """process_candle returns ok=False when bt_runtime is not available."""
+        """process_candle raises RuntimeError when bt_runtime is not available (AQC-825 fail-fast)."""
         with mock.patch.multiple(
             "strategy.kernel_orchestrator",
             _bt_runtime=None,
             _BT_RUNTIME_AVAILABLE=False,
         ):
             orch = KernelOrchestrator()
-            decision = orch.process_candle(
-                "ETH", mock.MagicMock(), _make_state(), _make_params(),
-            )
-        assert decision.ok is False
-        assert "bt_runtime not available" in decision.diagnostics.get("error", "")
+            with pytest.raises(RuntimeError, match="bt_runtime.*not available"):
+                orch.process_candle(
+                    "ETH", mock.MagicMock(), _make_state(), _make_params(),
+                )
 
     def test_process_candle_runtime_exception(self):
         """process_candle handles bt_runtime exceptions gracefully."""
@@ -643,17 +644,17 @@ class TestProcessPriceUpdate:
         assert decision.action == "CLOSE"
 
     def test_price_update_runtime_unavailable(self):
-        """process_price_update returns ok=False when bt_runtime is missing."""
+        """process_price_update raises RuntimeError when bt_runtime is missing (AQC-825 fail-fast)."""
         with mock.patch.multiple(
             "strategy.kernel_orchestrator",
             _bt_runtime=None,
             _BT_RUNTIME_AVAILABLE=False,
         ):
             orch = KernelOrchestrator()
-            decision = orch.process_price_update(
-                "ETH", 2100.0, _make_state(), _make_params(), _make_exit_params(),
-            )
-        assert decision.ok is False
+            with pytest.raises(RuntimeError, match="bt_runtime.*not available"):
+                orch.process_price_update(
+                    "ETH", 2100.0, _make_state(), _make_params(), _make_exit_params(),
+                )
 
     def test_price_update_kernel_exception(self):
         """process_price_update handles bt_runtime exceptions."""

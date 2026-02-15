@@ -18,7 +18,7 @@ KernelDecision
 Enum
 ----
 LegacyMode
-    Gradual cutover mode (KERNEL_ONLY, SHADOW, LEGACY).
+    Kernel operation mode (KERNEL_ONLY, SHADOW).
 
 Module helpers
 --------------
@@ -91,16 +91,16 @@ KERNEL_SCHEMA_VERSION = 1
 
 
 class LegacyMode(str, enum.Enum):
-    """Cutover mode for gradual Python -> kernel migration.
+    """Cutover mode for kernel operation.
 
-    * ``KERNEL_ONLY`` -- pure kernel decisions (default for new deployments).
-    * ``SHADOW``      -- kernel decides but Python runs in parallel for comparison.
-    * ``LEGACY``      -- Python decides (fallback).
+    * ``KERNEL_ONLY`` -- pure kernel decisions (default).
+    * ``SHADOW``      -- kernel decides but a secondary path runs in parallel for comparison.
+
+    The former ``LEGACY`` mode (Python decides) was removed in AQC-825.
     """
 
     KERNEL_ONLY = "kernel_only"
     SHADOW = "shadow"
-    LEGACY = "legacy"
 
 
 def get_legacy_mode(config: dict[str, Any] | None = None) -> LegacyMode:
@@ -351,14 +351,10 @@ class KernelOrchestrator:
         KernelDecision
         """
         if not _BT_RUNTIME_AVAILABLE or _bt_runtime is None:
-            return KernelDecision(
-                ok=False,
-                state_json=kernel_state_json,
-                intents=[],
-                fills=[],
-                diagnostics={"error": "bt_runtime not available"},
-                action="HOLD",
-                raw_json="{}",
+            raise RuntimeError(
+                "FATAL: bt_runtime extension is not available.  The Rust kernel is "
+                "REQUIRED for live/paper trading (AQC-825).  Build bt_runtime or check "
+                "your AI_QUANT_BT_RUNTIME_PATH configuration."
             )
 
         effective_cfg = cfg or self._config
@@ -456,14 +452,10 @@ class KernelOrchestrator:
         KernelDecision
         """
         if not _BT_RUNTIME_AVAILABLE or _bt_runtime is None:
-            return KernelDecision(
-                ok=False,
-                state_json=kernel_state_json,
-                intents=[],
-                fills=[],
-                diagnostics={"error": "bt_runtime not available"},
-                action="HOLD",
-                raw_json="{}",
+            raise RuntimeError(
+                "FATAL: bt_runtime extension is not available.  The Rust kernel is "
+                "REQUIRED for live/paper trading (AQC-825).  Build bt_runtime or check "
+                "your AI_QUANT_BT_RUNTIME_PATH configuration."
             )
 
         event = build_price_update_event(symbol, price, timestamp_ms=timestamp_ms)
