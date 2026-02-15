@@ -90,12 +90,24 @@ fn btc_symbol_bypasses_alignment_when_btc_is_bearish() {
     let snap = bullish_snap();
 
     let btc_gate = check_gates(&snap, &cfg, "BTC", Some(false), 0.001);
-    assert!(btc_gate.btc_ok_long, "BTC symbol must bypass long alignment blocking");
-    assert!(btc_gate.btc_ok_short, "BTC symbol must bypass short alignment blocking");
+    assert!(
+        btc_gate.btc_ok_long,
+        "BTC symbol must bypass long alignment blocking"
+    );
+    assert!(
+        btc_gate.btc_ok_short,
+        "BTC symbol must bypass short alignment blocking"
+    );
 
     let eth_gate = check_gates(&snap, &cfg, "ETH", Some(false), 0.001);
-    assert!(!eth_gate.btc_ok_long, "Non-BTC long should be blocked when BTC is bearish");
-    assert!(eth_gate.btc_ok_short, "Non-BTC short should remain allowed when BTC is bearish");
+    assert!(
+        !eth_gate.btc_ok_long,
+        "Non-BTC long should be blocked when BTC is bearish"
+    );
+    assert!(
+        eth_gate.btc_ok_short,
+        "Non-BTC short should remain allowed when BTC is bearish"
+    );
 }
 
 #[test]
@@ -106,11 +118,20 @@ fn btc_symbol_bypasses_alignment_when_btc_is_bullish() {
     let snap = bearish_snap();
 
     let btc_gate = check_gates(&snap, &cfg, "BTC", Some(true), -0.001);
-    assert!(btc_gate.btc_ok_long, "BTC symbol must bypass long alignment blocking");
-    assert!(btc_gate.btc_ok_short, "BTC symbol must bypass short alignment blocking");
+    assert!(
+        btc_gate.btc_ok_long,
+        "BTC symbol must bypass long alignment blocking"
+    );
+    assert!(
+        btc_gate.btc_ok_short,
+        "BTC symbol must bypass short alignment blocking"
+    );
 
     let eth_gate = check_gates(&snap, &cfg, "ETH", Some(true), -0.001);
-    assert!(eth_gate.btc_ok_long, "Non-BTC long should remain allowed when BTC is bullish");
+    assert!(
+        eth_gate.btc_ok_long,
+        "Non-BTC long should remain allowed when BTC is bullish"
+    );
     assert!(
         !eth_gate.btc_ok_short,
         "Non-BTC short should be blocked when BTC is bullish"

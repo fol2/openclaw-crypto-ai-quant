@@ -14,11 +14,11 @@ use cudarc::driver::{
 };
 use cudarc::nvrtc::Ptx;
 
-use bytemuck::Zeroable;
 use crate::buffers::{
-    GpuComboConfig, GpuComboState, GpuParams, GpuRawCandle, GpuResult, GpuSnapshot,
-    GpuIndicatorConfig, IndicatorParams,
+    GpuComboConfig, GpuComboState, GpuIndicatorConfig, GpuParams, GpuRawCandle, GpuResult,
+    GpuSnapshot, IndicatorParams,
 };
+use bytemuck::Zeroable;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // DeviceRepr + ValidAsZeroBits impls for GPU buffer structs
@@ -62,8 +62,12 @@ impl GpuDeviceState {
 
         // Load indicator kernel PTX (indicator computation + breadth)
         let ptx_ind = include_str!(concat!(env!("OUT_DIR"), "/indicator_kernel.ptx"));
-        dev.load_ptx(Ptx::from_src(ptx_ind), "indicators", &["indicator_kernel", "breadth_kernel"])
-            .expect("Failed to load indicator_kernel PTX");
+        dev.load_ptx(
+            Ptx::from_src(ptx_ind),
+            "indicators",
+            &["indicator_kernel", "breadth_kernel"],
+        )
+        .expect("Failed to load indicator_kernel PTX");
 
         let name = dev.name().unwrap_or_else(|_| "unknown".to_string());
         eprintln!("[GPU] CUDA Device: {}", name);
@@ -82,8 +86,12 @@ impl GpuDeviceState {
         }
     }
 
-    pub fn total_vram_bytes(&self) -> usize { self.vram_info().1 }
-    pub fn free_vram_bytes(&self) -> usize { self.vram_info().0 }
+    pub fn total_vram_bytes(&self) -> usize {
+        self.vram_info().1
+    }
+    pub fn free_vram_bytes(&self) -> usize {
+        self.vram_info().0
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -154,17 +162,15 @@ impl IndicatorBuffers {
 
 /// Dispatch indicator_kernel + breadth_kernel on GPU.
 /// After this returns, snapshots/breadth/btc_bullish are ready in VRAM.
-pub fn dispatch_indicator_kernels(
-    ds: &GpuDeviceState,
-    buffers: &mut IndicatorBuffers,
-) {
+pub fn dispatch_indicator_kernels(ds: &GpuDeviceState, buffers: &mut IndicatorBuffers) {
     let block_size = 64u32;
 
     // ── Indicator kernel: K × S threads ─────────────────────────────────
     let ind_threads = buffers.num_ind_combos * buffers.num_symbols;
     let ind_grid = (ind_threads + block_size - 1) / block_size;
 
-    let ind_func: CudaFunction = ds.dev
+    let ind_func: CudaFunction = ds
+        .dev
         .get_func("indicators", "indicator_kernel")
         .expect("indicator_kernel not found in PTX");
 
@@ -191,7 +197,8 @@ pub fn dispatch_indicator_kernels(
     let br_threads = buffers.num_ind_combos * buffers.num_bars;
     let br_grid = (br_threads + block_size - 1) / block_size;
 
-    let br_func: CudaFunction = ds.dev
+    let br_func: CudaFunction = ds
+        .dev
         .get_func("indicators", "breadth_kernel")
         .expect("breadth_kernel not found in PTX");
 
@@ -383,7 +390,11 @@ pub fn dispatch_and_readback(
     );
 
     // Dynamic chunk size: smaller when sub-bars active (TDR mitigation)
-    let effective_chunk = if buffers.max_sub_per_bar > 0 { chunk_size.min(50) } else { chunk_size };
+    let effective_chunk = if buffers.max_sub_per_bar > 0 {
+        chunk_size.min(50)
+    } else {
+        chunk_size
+    };
     let num_chunks = (trade_range + effective_chunk - 1) / effective_chunk;
 
     // Create sentinel buffers if no sub-bar data (cudarc needs valid pointers)
@@ -425,7 +436,8 @@ pub fn dispatch_and_readback(
             shared_mem_bytes: 0,
         };
 
-        let func: CudaFunction = ds.dev
+        let func: CudaFunction = ds
+            .dev
             .get_func("sweep", "sweep_engine_kernel")
             .expect("sweep_engine_kernel not found in PTX");
 

@@ -62,7 +62,10 @@ fn panic_payload_to_string(payload: Box<dyn Any + Send>) -> String {
 }
 
 fn is_cuda_unavailable_error(err: &DriverError) -> bool {
-    matches!(err.0, CUresult::CUDA_ERROR_NO_DEVICE | CUresult::CUDA_ERROR_INVALID_DEVICE)
+    matches!(
+        err.0,
+        CUresult::CUDA_ERROR_NO_DEVICE | CUresult::CUDA_ERROR_INVALID_DEVICE
+    )
 }
 
 fn probe_cuda_runtime() -> CudaProbe {

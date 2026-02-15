@@ -109,12 +109,18 @@ fn cpu_gpu_parity_sweep_1h_3m_tiny_fixture() {
     );
     assert_eq!(cpu.len(), 1);
     let cpu_rpt = &cpu[0].report;
-    assert_eq!(cpu_rpt.total_trades, 1, "Fixture should produce exactly one trade on CPU");
+    assert_eq!(
+        cpu_rpt.total_trades, 1,
+        "Fixture should produce exactly one trade on CPU"
+    );
 
     let gpu = run_gpu_sweep(&candles, &cfg, &spec, None, Some(&exit_candles), None, None);
     assert_eq!(gpu.len(), 1);
     let gpu_rpt = &gpu[0];
-    assert_eq!(gpu_rpt.total_trades, 1, "Fixture should produce exactly one trade on GPU");
+    assert_eq!(
+        gpu_rpt.total_trades, 1,
+        "Fixture should produce exactly one trade on GPU"
+    );
 
     // Parity: allow minor differences due to f32 vs f64 math.
     let eps = 0.10;

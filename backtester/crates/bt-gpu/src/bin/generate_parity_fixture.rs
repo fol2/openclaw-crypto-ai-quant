@@ -14,15 +14,24 @@ use bt_core::sweep::SweepSpec;
 #[derive(Parser, Debug)]
 struct Args {
     /// Strategy YAML to load.
-    #[arg(long, default_value = "backtester/testdata/gpu_cpu_parity/strategy.yaml")]
+    #[arg(
+        long,
+        default_value = "backtester/testdata/gpu_cpu_parity/strategy.yaml"
+    )]
     config: String,
 
     /// Path to the candle fixture JSON.
-    #[arg(long, default_value = "backtester/testdata/gpu_cpu_parity/candles_1h.json")]
+    #[arg(
+        long,
+        default_value = "backtester/testdata/gpu_cpu_parity/candles_1h.json"
+    )]
     candles_json: PathBuf,
 
     /// Output path for the expected GPU result JSON.
-    #[arg(long, default_value = "backtester/testdata/gpu_cpu_parity/expected_gpu_sweep.json")]
+    #[arg(
+        long,
+        default_value = "backtester/testdata/gpu_cpu_parity/expected_gpu_sweep.json"
+    )]
     out: PathBuf,
 
     /// Initial balance used for the sweep.
@@ -147,4 +156,3 @@ fn main() {
 
     eprintln!("[ok] Wrote {}", out_path.display());
 }
-

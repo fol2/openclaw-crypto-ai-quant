@@ -8,8 +8,8 @@ use bt_core::candle::CandleData;
 use bt_core::config::StrategyConfig;
 use bt_core::indicators::IndicatorBank;
 
-use bytemuck::Zeroable;
 use crate::buffers::GpuSnapshot;
+use bytemuck::Zeroable;
 
 /// Result of CPU precomputation for one indicator config.
 pub struct PrecomputeResult {
@@ -75,10 +75,7 @@ pub fn precompute_snapshots(
         .collect();
 
     // Initialize indicator banks per symbol
-    let mut banks: Vec<IndicatorBank> = symbols
-        .iter()
-        .map(|_| make_indicator_bank(cfg))
-        .collect();
+    let mut banks: Vec<IndicatorBank> = symbols.iter().map(|_| make_indicator_bank(cfg)).collect();
 
     // EMA slow history per symbol (for slope computation)
     let slope_window = cfg.thresholds.entry.slow_drift_slope_window;
@@ -115,8 +112,7 @@ pub fn precompute_snapshots(
                 ema_slow_histories[sym_idx].push(snap.ema_slow);
 
                 // Compute EMA slow slope
-                let slope = if ema_slow_histories[sym_idx].len() >= slope_window
-                    && snap.close > 0.0
+                let slope = if ema_slow_histories[sym_idx].len() >= slope_window && snap.close > 0.0
                 {
                     let h = &ema_slow_histories[sym_idx];
                     let current = h[h.len() - 1];
@@ -192,7 +188,11 @@ pub fn precompute_snapshots(
         if let Some(&bi) = btc_idx {
             let bank = &banks[bi];
             if bank.bar_count >= 2 {
-                btc_bullish[bar_idx] = if bank.prev_close > bank.prev_ema_slow { 1 } else { 0 };
+                btc_bullish[bar_idx] = if bank.prev_close > bank.prev_ema_slow {
+                    1
+                } else {
+                    0
+                };
             }
         }
     }

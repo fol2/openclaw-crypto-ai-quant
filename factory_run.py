@@ -404,7 +404,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, int | str]] = {
     },
     # Default weekday run profile (~1hr GPU, 7K samples/axis for 142 axes).
     "daily": {
-        "tpe_trials": 1000000,
+        "tpe_trials": 2000000,
         "num_candidates": 5,
         "shortlist_per_mode": 20,
         "shortlist_max_rank": 200,
@@ -412,7 +412,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, int | str]] = {
     },
     # Deep/weekly profile (~4-5hr GPU, 35K samples/axis for 142 axes).
     "deep": {
-        "tpe_trials": 5000000,
+        "tpe_trials": 10000000,
         "num_candidates": 10,
         "shortlist_per_mode": 40,
         "shortlist_max_rank": 500,
@@ -420,7 +420,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, int | str]] = {
     },
     # Weekly profile — identical to deep; weekly is the canonical name going forward.
     "weekly": {
-        "tpe_trials": 5000000,
+        "tpe_trials": 10000000,
         "num_candidates": 10,
         "shortlist_per_mode": 40,
         "shortlist_max_rank": 500,
