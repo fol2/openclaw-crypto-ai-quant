@@ -514,3 +514,97 @@ def test_full_decision_lifecycle(strategy):
     assert lineage[2] == 7200000
 
     conn.close()
+
+
+# ── get_decision_chain tests (AQC-804) ──────────────────────────────────
+
+
+def test_get_decision_chain_returns_chain_for_lineage(strategy):
+    """Create a signal + lineage and verify get_decision_chain returns the event."""
+    signal_id = strategy.create_decision_event(
+        symbol="ETH",
+        event_type="entry_signal",
+        status="executed",
+        phase="signal_generation",
+        triggered_by="schedule",
+        action_taken="open_long",
+    )
+    strategy.link_decision_to_trade(signal_id, trade_id=300)
+    strategy.create_lineage(signal_decision_id=signal_id, entry_trade_id=300)
+
+    chain = strategy.get_decision_chain(300)
+    assert len(chain) >= 1
+    ids_in_chain = {e["id"] for e in chain}
+    assert signal_id in ids_in_chain
+    # Verify chronological ordering
+    timestamps = [e["timestamp_ms"] for e in chain]
+    assert timestamps == sorted(timestamps)
+
+
+def test_get_decision_chain_full_lifecycle(strategy):
+    """Entry signal -> fill -> exit decision -> exit fill: full chain."""
+    # 1. Entry signal
+    signal_id = strategy.create_decision_event(
+        symbol="ETH",
+        event_type="entry_signal",
+        status="executed",
+        phase="signal_generation",
+        triggered_by="schedule",
+        action_taken="open_long",
+    )
+    strategy.link_decision_to_trade(signal_id, trade_id=400)
+    strategy.create_lineage(signal_decision_id=signal_id, entry_trade_id=400)
+
+    # 2. Fill event (entry)
+    fill_id = strategy.create_decision_event(
+        symbol="ETH",
+        event_type="fill",
+        status="executed",
+        phase="execution",
+        parent_decision_id=signal_id,
+        trade_id=400,
+        action_taken="open_long",
+    )
+
+    # 3. Exit decision
+    exit_id = strategy.create_decision_event(
+        symbol="ETH",
+        event_type="exit_check",
+        status="executed",
+        phase="execution",
+        triggered_by="stop_loss",
+        action_taken="close",
+        trade_id=401,
+    )
+
+    # 4. Complete lineage
+    strategy.complete_lineage(
+        entry_trade_id=400,
+        exit_decision_id=exit_id,
+        exit_trade_id=401,
+        exit_reason="stop_loss",
+        duration_ms=5000,
+    )
+
+    chain = strategy.get_decision_chain(400)
+    ids_in_chain = {e["id"] for e in chain}
+
+    # All three decision events should be in the chain.
+    assert signal_id in ids_in_chain
+    assert fill_id in ids_in_chain
+    assert exit_id in ids_in_chain
+
+    # Verify chronological ordering
+    timestamps = [e["timestamp_ms"] for e in chain]
+    assert timestamps == sorted(timestamps)
+
+    # Also queryable via exit_trade_id
+    chain_via_exit = strategy.get_decision_chain(401)
+    exit_ids = {e["id"] for e in chain_via_exit}
+    assert exit_id in exit_ids
+
+
+def test_get_decision_chain_nonexistent_trade(strategy):
+    """get_decision_chain returns empty list for a trade_id that doesn't exist."""
+    chain = strategy.get_decision_chain(999999)
+    assert chain == []
