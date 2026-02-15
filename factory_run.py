@@ -105,6 +105,199 @@ def _env_float_optional(env_name: str) -> float | None:
         raise SystemExit(f"{env_name} must be a float when set")
 
 
+LIVE_BALANCE_PROFILES = {"daily", "deep", "weekly"}
+
+
+def _resolve_live_db_path_candidates() -> list[Path]:
+    candidates: list[Path] = []
+
+    env_raw = os.getenv("AI_QUANT_LIVE_DB_PATH")
+    if env_raw:
+        candidates.append(Path(env_raw).expanduser())
+
+    candidates.append(AIQ_ROOT / "trading_engine_live.db")
+    candidates.append(Path("/home/fol2hk/.openclaw/workspace/dev/ai_quant/trading_engine_live.db"))
+
+    out: list[Path] = []
+    seen: set[str] = set()
+    for cand in candidates:
+        try:
+            rp = cand.expanduser().resolve()
+        except Exception:
+            continue
+        rs = str(rp)
+        if rs in seen:
+            continue
+        seen.add(rs)
+        out.append(rp)
+
+    return out
+
+
+def _first_existing_live_db_path() -> Path | None:
+    for cand in _resolve_live_db_path_candidates():
+        if cand.exists():
+            return cand
+    return None
+
+
+def _read_balance_from_live_db(*, db_path: Path) -> float | None:
+    try:
+        if not db_path.exists():
+            return None
+        conn = sqlite3.connect(str(db_path), timeout=10)
+        try:
+            row = conn.execute("SELECT balance FROM trades ORDER BY id DESC LIMIT 1").fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        return float(row[0])
+    except Exception:
+        return None
+
+
+
+
+def _resolve_live_export_python() -> str:
+    venv_py = AIQ_ROOT / ".venv" / "bin" / "python3"
+    if venv_py.exists():
+        return str(venv_py)
+    return sys.executable
+
+def _export_live_balance_via_cli(*, output: Path) -> tuple[float | None, dict[str, Any]]:
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    env = os.environ.copy()
+    secrets_raw = os.getenv("AI_QUANT_SECRETS_PATH")
+    if secrets_raw:
+        env["AI_QUANT_SECRETS_PATH"] = str(Path(secrets_raw).expanduser())
+    else:
+        for default_secret_path in [
+            AIQ_ROOT / "secrets.json",
+            Path("~/.config/openclaw/ai-quant-secrets.json").expanduser(),
+            Path("/home/fol2hk/openclaw-plugins/ai_quant/secrets.json"),
+        ]:
+            if default_secret_path.exists():
+                env["AI_QUANT_SECRETS_PATH"] = str(default_secret_path)
+                break
+
+    cmd = [
+        _resolve_live_export_python(),
+        str(AIQ_ROOT / "tools" / "export_state.py"),
+        "--source",
+        "live",
+        "--output",
+        str(output),
+    ]
+
+    try:
+        res = subprocess.run(
+            cmd,
+            cwd=str(AIQ_ROOT),
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+    except Exception as e:
+        return None, {"method": "export_state", "success": False, "error": f"{type(e).__name__}: {e}"}
+
+    if res.returncode != 0:
+        err = str(res.stderr or res.stdout or "").strip()
+        if not err:
+            err = f"export_state exited with code {int(res.returncode)}"
+        return None, {"method": "export_state", "success": False, "error": err}
+
+    try:
+        payload = _load_json(output)
+        raw_bal = payload.get("balance")
+        if raw_bal is None:
+            return None, {"method": "export_state", "success": False, "error": "balance missing from export payload"}
+        balance = float(raw_bal)
+    except Exception as e:
+        return None, {"method": "export_state", "success": False, "error": f"failed to read export payload: {type(e).__name__}: {e}"}
+
+    return balance, {"method": "export_state", "success": True, "path": str(output), "secrets_path_used": env.get("AI_QUANT_SECRETS_PATH", "")}
+
+
+def _write_initial_balance_state_json(*, path: Path, balance: float, metadata: dict[str, Any]) -> None:
+    payload: dict[str, Any] = {
+        "version": 1,
+        "updated_at_ms": int(time.time() * 1000),
+        "balance": round(float(balance), 4),
+        "metadata": dict(metadata),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _resolve_profile_requires_live_initial_balance(*, profile: str) -> bool:
+    return str(profile or "").strip().lower() in LIVE_BALANCE_PROFILES
+
+
+def _resolve_factory_initial_balance(*, run_dir: Path, args: argparse.Namespace) -> tuple[float | None, Path | None, dict[str, Any]]:
+    if not _resolve_profile_requires_live_initial_balance(profile=str(getattr(args, "profile", "daily").strip())):
+        return None, None, {"mode": "disabled", "reason": "profile_no_live_init"}
+
+    state_dir = run_dir / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_json = state_dir / "live_initial_balance.json"
+
+    if state_json.exists():
+        try:
+            existing = _load_json(state_json)
+            if isinstance(existing, dict) and "balance" in existing:
+                bal = float(existing.get("balance") or 0.0)
+                return bal, state_json, {
+                    "mode": "live",
+                    "source": "cache",
+                    "path": str(state_json),
+                    "cached_at_ms": float(existing.get("updated_at_ms", 0.0) or 0.0),
+                }
+        except Exception:
+            pass
+
+    bal, meta = _export_live_balance_via_cli(output=state_json)
+    if bal is not None:
+        meta["mode"] = "live"
+        if "path" not in meta:
+            meta["path"] = str(state_json)
+        _write_initial_balance_state_json(path=state_json, balance=bal, metadata=meta)
+        return bal, state_json, meta
+
+    db_path = _first_existing_live_db_path()
+    if db_path is None:
+        return None, None, {
+            "mode": "live",
+            "source": "sqlite",
+            "success": False,
+            "reason": "missing_live_db",
+            "export_error": meta.get("error"),
+        }
+
+    bal_from_db = _read_balance_from_live_db(db_path=db_path)
+    if bal_from_db is None:
+        return None, None, {
+            "mode": "live",
+            "source": "sqlite",
+            "success": False,
+            "reason": "live_db_has_no_balance_rows",
+            "live_db_path": str(db_path),
+            "export_error": meta.get("error"),
+        }
+
+    fallback_meta = {
+        "mode": "live",
+        "source": "sqlite",
+        "success": True,
+        "live_db_path": str(db_path),
+    }
+    _write_initial_balance_state_json(path=state_json, balance=bal_from_db, metadata=fallback_meta)
+    return bal_from_db, state_json, fallback_meta
+
+
 _REPLAY_EQUIVALENCE_MODES = ("live", "paper", "backtest")
 
 
@@ -2225,6 +2418,18 @@ def main(argv: list[str] | None = None) -> int:
 
     _write_json(run_dir / "run_metadata.json", meta)
 
+    # Resolve live-initial balance for daily/deep/weekly profiles.
+    live_initial_balance, live_initial_balance_path, live_initial_balance_meta = _resolve_factory_initial_balance(
+        run_dir=run_dir,
+        args=args,
+    )
+    meta["initial_balance"] = {
+        "value": live_initial_balance,
+        "path": str(live_initial_balance_path) if live_initial_balance_path else "",
+        "profile": str(getattr(args, "profile", "daily")).strip(),
+        **live_initial_balance_meta,
+    }
+
     # ------------------------------------------------------------------
     # 2) Sweep
     # ------------------------------------------------------------------
@@ -2263,6 +2468,8 @@ def main(argv: list[str] | None = None) -> int:
             "--output-mode",
             _sweep_output_mode_from_args(args),
         ]
+        if live_initial_balance_path is not None:
+            sweep_argv += ["--balance-from", str(live_initial_balance_path)]
         top_n = int(args.top_n or 0)
         if top_n > 0:
             sweep_argv += ["--top-n", str(top_n)]
@@ -2602,6 +2809,8 @@ def main(argv: list[str] | None = None) -> int:
             "--output",
             str(out_json),
         ]
+        if live_initial_balance_path is not None:
+            replay_argv += ["--balance-from", str(live_initial_balance_path)]
         if bt_candles_db:
             replay_argv += [
                 "--candles-db",
