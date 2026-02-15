@@ -105,7 +105,7 @@ def _env_float_optional(env_name: str) -> float | None:
         raise SystemExit(f"{env_name} must be a float when set")
 
 
-LIVE_BALANCE_PROFILES = {"daily", "deep", "weekly"}
+LIVE_BALANCE_PROFILES = {"smoke", "daily", "deep", "weekly"}
 
 
 def _resolve_live_db_path_candidates() -> list[Path]:

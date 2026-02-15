@@ -3,17 +3,17 @@
     {
       "kind": "cpu",
       "path": "/home/fol2hk/openclaw-plugins/ai_quant_wt/major-v8-runtime/backtester/dist/mei-backtester-cpu",
-      "sha256": "3363c50378a411a74c60f5685a03187a82cadcfb356197e432d1081a0592109b",
-      "version": "mei-backtester 0.1.0 git:abfc1780644d build:1770767770 gpu:0"
+      "sha256": "5f9871c3da928915f68b8632eb4f2c1d7d6cfba2a478d219622172284acc8c11",
+      "version": "mei-backtester 0.1.0 git:8a34ff45634c build:1771190125 gpu:0"
     },
     {
       "kind": "gpu",
       "path": "/home/fol2hk/openclaw-plugins/ai_quant_wt/major-v8-runtime/backtester/dist/mei-backtester-gpu",
-      "sha256": "19d20d2afb1176e79389d5937990ea7f50f68e21aab294800e7990d33c938e1f",
-      "version": "mei-backtester 0.1.0 git:abfc1780644d build:1770767811 gpu:1"
+      "sha256": "b3ddbec594b1dcdd11bc58d44d5924e1f06bf888d69487de40ee3bbf6876d0c4",
+      "version": "mei-backtester 0.1.0 git:87ba2cd5be3b build:1771187345 gpu:1"
     }
   ],
-  "generated_at_ms": 1771187203751,
-  "git_head": "87ba2cd5be3b60414e8c511c6fc7c3ba400e904c",
+  "generated_at_ms": 1771190125293,
+  "git_head": "8a34ff45634c930cc0adb793069fce034fa9ab6b",
   "version": "mei_backtester_build_v1"
 }
