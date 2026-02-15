@@ -71,6 +71,27 @@ pub struct Position {
     /// Margin (collateral) locked for this position = notional / leverage.
     #[serde(default)]
     pub margin_usd: f64,
+    /// Signal confidence at entry (0=Low, 1=Medium, 2=High).
+    #[serde(default)]
+    pub confidence: Option<u8>,
+    /// ATR value at the time of entry, used for exit sizing.
+    #[serde(default)]
+    pub entry_atr: Option<f64>,
+    /// Number of ADD (pyramid) fills applied to this position.
+    #[serde(default)]
+    pub adds_count: u32,
+    /// Whether partial take-profit (TP1) has been taken.
+    #[serde(default)]
+    pub tp1_taken: bool,
+    /// Trailing stop-loss price, if active.
+    #[serde(default)]
+    pub trailing_sl: Option<f64>,
+    /// Maximum adverse excursion in USD (worst unrealised drawdown).
+    #[serde(default)]
+    pub mae_usd: f64,
+    /// Maximum favorable excursion in USD (best unrealised profit).
+    #[serde(default)]
+    pub mfe_usd: f64,
 }
 
 /// Canonical strategy state persisted between steps.
@@ -302,6 +323,7 @@ fn apply_open(
             existing.quantity = accounting::quantize(total_qty);
             existing.avg_entry_price = accounting::quantize(avg_entry);
             existing.updated_at_ms = timestamp_ms;
+            existing.adds_count = existing.adds_count.saturating_add(1);
         } else {
             return None;
         }
@@ -317,6 +339,13 @@ fn apply_open(
                 updated_at_ms: timestamp_ms,
                 notional_usd: notional,
                 margin_usd: margin,
+                confidence: None,
+                entry_atr: None,
+                adds_count: 0,
+                tp1_taken: false,
+                trailing_sl: None,
+                mae_usd: 0.0,
+                mfe_usd: 0.0,
             },
         );
     }
@@ -1134,5 +1163,151 @@ mod tests {
             expected_avg3,
         );
         assert!((pos3.quantity - 3.0).abs() < 1e-12);
+    }
+
+    // ---- Position tracking metadata tests ----
+
+    #[test]
+    fn adds_count_increments_on_each_add() {
+        let state = init_state();
+        let params = pyramid_params();
+
+        let mut open_evt = event_with_signal("BTC", MarketSignal::Buy);
+        open_evt.notional_hint_usd = Some(10_000.0);
+        open_evt.price = 10_000.0;
+        let r1 = step(&state, &open_evt, &params);
+        assert_eq!(r1.state.positions.get("BTC").unwrap().adds_count, 0);
+
+        let add1 = MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 301,
+            timestamp_ms: 2_000,
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Buy,
+            price: 10_500.0,
+            notional_hint_usd: Some(5_000.0),
+            close_fraction: None,
+        };
+        let r2 = step(&r1.state, &add1, &params);
+        assert_eq!(r2.state.positions.get("BTC").unwrap().adds_count, 1);
+
+        let add2 = MarketEvent {
+            event_id: 302,
+            timestamp_ms: 3_000,
+            price: 11_000.0,
+            ..add1.clone()
+        };
+        let r3 = step(&r2.state, &add2, &params);
+        assert_eq!(r3.state.positions.get("BTC").unwrap().adds_count, 2);
+    }
+
+    #[test]
+    fn metadata_defaults_on_new_position() {
+        let state = init_state();
+        let params = KernelParams::default();
+
+        let mut open_evt = event_with_signal("BTC", MarketSignal::Buy);
+        open_evt.notional_hint_usd = Some(10_000.0);
+        let result = step(&state, &open_evt, &params);
+        let pos = result.state.positions.get("BTC").unwrap();
+
+        assert_eq!(pos.confidence, None);
+        assert_eq!(pos.entry_atr, None);
+        assert_eq!(pos.adds_count, 0);
+        assert!(!pos.tp1_taken);
+        assert_eq!(pos.trailing_sl, None);
+        assert!((pos.mae_usd - 0.0).abs() < f64::EPSILON);
+        assert!((pos.mfe_usd - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn caller_set_metadata_survives_add_cycle() {
+        let state = init_state();
+        let params = pyramid_params();
+
+        // Open position.
+        let mut open_evt = event_with_signal("BTC", MarketSignal::Buy);
+        open_evt.notional_hint_usd = Some(10_000.0);
+        open_evt.price = 10_000.0;
+        let mut r1 = step(&state, &open_evt, &params);
+
+        // Simulate caller setting metadata after open.
+        let pos = r1.state.positions.get_mut("BTC").unwrap();
+        pos.confidence = Some(2);
+        pos.entry_atr = Some(350.0);
+        pos.tp1_taken = true;
+        pos.trailing_sl = Some(9_500.0);
+        pos.mae_usd = -150.0;
+        pos.mfe_usd = 200.0;
+
+        // ADD to position — metadata should survive.
+        let add_evt = MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 401,
+            timestamp_ms: 2_000,
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Buy,
+            price: 10_500.0,
+            notional_hint_usd: Some(5_000.0),
+            close_fraction: None,
+        };
+        let r2 = step(&r1.state, &add_evt, &params);
+        let pos2 = r2.state.positions.get("BTC").unwrap();
+
+        assert_eq!(pos2.confidence, Some(2));
+        assert_eq!(pos2.entry_atr, Some(350.0));
+        assert!(pos2.tp1_taken);
+        assert_eq!(pos2.trailing_sl, Some(9_500.0));
+        assert!((pos2.mae_usd - (-150.0)).abs() < f64::EPSILON);
+        assert!((pos2.mfe_usd - 200.0).abs() < f64::EPSILON);
+        assert_eq!(pos2.adds_count, 1); // incremented by kernel
+    }
+
+    #[test]
+    fn position_json_round_trip_with_metadata() {
+        let pos = Position {
+            symbol: "ETH".to_string(),
+            side: PositionSide::Short,
+            quantity: 5.0,
+            avg_entry_price: 3_200.0,
+            opened_at_ms: 1_000,
+            updated_at_ms: 2_000,
+            notional_usd: 16_000.0,
+            margin_usd: 8_000.0,
+            confidence: Some(1),
+            entry_atr: Some(120.5),
+            adds_count: 3,
+            tp1_taken: true,
+            trailing_sl: Some(3_300.0),
+            mae_usd: -400.0,
+            mfe_usd: 600.0,
+        };
+
+        let json = serde_json::to_string(&pos).unwrap();
+        let deser: Position = serde_json::from_str(&json).unwrap();
+        assert_eq!(pos, deser);
+    }
+
+    #[test]
+    fn position_json_round_trip_without_optional_metadata() {
+        // Deserialise JSON missing all optional/default fields.
+        let json = r#"{
+            "symbol": "BTC",
+            "side": "long",
+            "quantity": 1.0,
+            "avg_entry_price": 10000.0,
+            "opened_at_ms": 0,
+            "updated_at_ms": 0,
+            "notional_usd": 10000.0
+        }"#;
+        let pos: Position = serde_json::from_str(json).unwrap();
+        assert_eq!(pos.margin_usd, 0.0);
+        assert_eq!(pos.confidence, None);
+        assert_eq!(pos.entry_atr, None);
+        assert_eq!(pos.adds_count, 0);
+        assert!(!pos.tp1_taken);
+        assert_eq!(pos.trailing_sl, None);
+        assert!((pos.mae_usd).abs() < f64::EPSILON);
+        assert!((pos.mfe_usd).abs() < f64::EPSILON);
     }
 }
