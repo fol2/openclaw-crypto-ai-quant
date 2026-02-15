@@ -101,12 +101,18 @@ struct AxisOptimizer {
 
 /// TPE worker: runs on a dedicated thread. Owns all TpeOptimizer state.
 ///
-/// Protocol:
-/// 1. Sample batch 0 (priming) → send to GPU
-/// 2. Wait for GPU results of batch N
-/// 3. tell() results of batch N
-/// 4. ask() batch N+1 → send to GPU
-/// 5. Repeat until all trials sampled
+/// **Pre-fetch pipeline** — always stays one batch ahead of GPU:
+///   1. Sample batch 0 (priming) → send to GPU
+///   2. Immediately sample batch 1 (speculative, pre-fetch) → send to GPU
+///   3. Wait for GPU results of batch 0
+///   4. tell() batch 0 results
+///   5. Sample batch 2 (now informed by batch 0) → send to GPU
+///   6. Wait for GPU results of batch 1 → tell() → sample batch 3 → send ...
+///   7. Repeat until all trials exhausted
+///
+/// GPU never starves because there's always a pre-fetched batch in the channel.
+/// Quality loss: batch 1 is sampled before batch 0 results (same as random for
+/// the first batch; subsequent pre-fetches lag by one tell cycle, not two).
 fn tpe_worker(
     mut axis_opts: Vec<AxisOptimizer>,
     mut rng: StdRng,
@@ -119,24 +125,67 @@ fn tpe_worker(
     let mut obs_count: usize = 0;
     let mut trials_sampled: usize = 0;
     let mut batch_idx: usize = 0;
+    let mut pending_results: usize = 0;
 
-    // --- Priming: sample batch 0 without any tell (no results yet) ---
-    let batch_n = tpe_cfg_batch_size.min(tpe_cfg_trials);
-    let (overrides, raw_values) = sample_batch(&mut axis_opts, &mut rng, batch_n);
-    trials_sampled += batch_n;
+    // --- Helper: sample and send one batch if trials remain ---
+    let send_batch =
+        |axis_opts: &mut Vec<AxisOptimizer>,
+         rng: &mut StdRng,
+         trials_sampled: &mut usize,
+         batch_idx: &mut usize,
+         pending: &mut usize,
+         tx: &crossbeam_channel::Sender<Option<TpeBatchRequest>>|
+         -> bool {
+            if *trials_sampled >= tpe_cfg_trials {
+                return false;
+            }
+            let batch_n = tpe_cfg_batch_size.min(tpe_cfg_trials - *trials_sampled);
+            let (overrides, raw_values) = sample_batch(axis_opts, rng, batch_n);
+            *trials_sampled += batch_n;
 
-    request_tx
-        .send(Some(TpeBatchRequest {
-            batch_idx,
-            batch_n,
-            trial_overrides: overrides,
-            trial_raw_values: raw_values,
-        }))
-        .expect("GPU thread dropped channel");
-    batch_idx += 1;
+            let ok = tx
+                .send(Some(TpeBatchRequest {
+                    batch_idx: *batch_idx,
+                    batch_n,
+                    trial_overrides: overrides,
+                    trial_raw_values: raw_values,
+                }))
+                .is_ok();
+            if ok {
+                *batch_idx += 1;
+                *pending += 1;
+            }
+            ok
+        };
 
-    // --- Main loop: receive results, tell, ask next ---
-    while let Ok(gpu_result) = result_rx.recv() {
+    // --- Priming: send batch 0 ---
+    send_batch(
+        &mut axis_opts,
+        &mut rng,
+        &mut trials_sampled,
+        &mut batch_idx,
+        &mut pending_results,
+        &request_tx,
+    );
+
+    // --- Pre-fetch: send batch 1 immediately (speculative, before any results) ---
+    send_batch(
+        &mut axis_opts,
+        &mut rng,
+        &mut trials_sampled,
+        &mut batch_idx,
+        &mut pending_results,
+        &request_tx,
+    );
+
+    // --- Main loop: receive results, tell, pre-fetch next ---
+    while pending_results > 0 {
+        let gpu_result = match result_rx.recv() {
+            Ok(r) => r,
+            Err(_) => break,
+        };
+        pending_results -= 1;
+
         // tell() the results from the completed batch
         tell_results(
             &mut axis_opts,
@@ -145,31 +194,22 @@ fn tpe_worker(
             &mut obs_count,
         );
 
-        // Check if we need more batches
-        if trials_sampled >= tpe_cfg_trials {
-            // Signal GPU thread: no more batches
-            let _ = request_tx.send(None);
-            break;
+        // Pre-fetch: sample and send next batch (overlaps with GPU processing
+        // the batch that's already in the channel)
+        if trials_sampled < tpe_cfg_trials {
+            send_batch(
+                &mut axis_opts,
+                &mut rng,
+                &mut trials_sampled,
+                &mut batch_idx,
+                &mut pending_results,
+                &request_tx,
+            );
         }
-
-        // ask() next batch
-        let batch_n = tpe_cfg_batch_size.min(tpe_cfg_trials - trials_sampled);
-        let (overrides, raw_values) = sample_batch(&mut axis_opts, &mut rng, batch_n);
-        trials_sampled += batch_n;
-
-        if request_tx
-            .send(Some(TpeBatchRequest {
-                batch_idx,
-                batch_n,
-                trial_overrides: overrides,
-                trial_raw_values: raw_values,
-            }))
-            .is_err()
-        {
-            break; // GPU thread shut down
-        }
-        batch_idx += 1;
     }
+
+    // Signal GPU thread: no more batches
+    let _ = request_tx.send(None);
 }
 
 /// Sample one batch of trial parameters from TPE.
@@ -545,8 +585,10 @@ pub fn run_tpe_sweep(
         .unwrap();
 
     // -- 3. Double-buffer pipeline ------------------------------------------------
-    // Channels: bounded(1) so TPE blocks after sending until GPU consumes
-    let (request_tx, request_rx) = crossbeam_channel::bounded::<Option<TpeBatchRequest>>(1);
+    // Request channel: bounded(2) so TPE can always have one pre-fetched batch
+    // queued while GPU processes the current one. This is the core of the
+    // double-buffer: GPU finishes → immediately grabs pre-fetched batch → zero stall.
+    let (request_tx, request_rx) = crossbeam_channel::bounded::<Option<TpeBatchRequest>>(2);
     let (result_tx, result_rx) = crossbeam_channel::bounded::<GpuBatchResult>(1);
 
     let tpe_trials = tpe_cfg.trials;
