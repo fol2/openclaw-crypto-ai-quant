@@ -640,6 +640,7 @@ fn step_decision(
         funding_rate: None,
         indicators: None,
         gate_result: None,
+        ema_slow_slope_pct: None,
     };
     state.next_kernel_event_id = state.next_kernel_event_id.saturating_add(1);
 

@@ -9,6 +9,7 @@
 
 use crate::accounting;
 use crate::indicators::IndicatorSnapshot;
+use crate::kernel_entries::EntryParams;
 use crate::kernel_exits::{ExitParams, KernelExitResult};
 use crate::signals::gates::GateResult;
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,9 @@ pub enum MarketSignal {
     Funding,
     /// Per-bar price tick: kernel evaluates exit conditions for existing positions.
     PriceUpdate,
+    /// Kernel evaluates entry signal from indicators + gate result.
+    /// Requires: indicators, gate_result, and entry_params in KernelParams.
+    Evaluate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +82,9 @@ pub struct MarketEvent {
     /// the kernel uses this to filter entry intents (block if gates fail).
     #[serde(default)]
     pub gate_result: Option<GateResult>,
+    /// EMA slow slope for entry evaluation (only used with Evaluate signal).
+    #[serde(default)]
+    pub ema_slow_slope_pct: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -186,6 +193,12 @@ pub struct Diagnostics {
     /// Which gates blocked entry (if any).
     #[serde(default)]
     pub gate_block_reasons: Vec<String>,
+    /// Entry signal computed by kernel (only for Evaluate mode).
+    #[serde(default)]
+    pub entry_signal: Option<String>,
+    /// Entry confidence computed by kernel.
+    #[serde(default)]
+    pub entry_confidence: Option<u8>,
 }
 
 impl Diagnostics {
@@ -232,6 +245,10 @@ pub struct KernelParams {
     /// exit conditions (SL, trailing, TP) for existing positions.
     #[serde(default)]
     pub exit_params: Option<ExitParams>,
+    /// Entry evaluation parameters. When present, Evaluate signals will
+    /// generate entry signals internally using indicator data.
+    #[serde(default)]
+    pub entry_params: Option<EntryParams>,
 }
 
 impl Default for KernelParams {
@@ -247,6 +264,7 @@ impl Default for KernelParams {
             allow_reverse: true,
             leverage: 1.0,
             exit_params: None,
+            entry_params: None,
         }
     }
 }
@@ -285,7 +303,8 @@ fn side_from_signal(signal: MarketSignal) -> Option<PositionSide> {
     match signal {
         MarketSignal::Buy => Some(PositionSide::Long),
         MarketSignal::Sell => Some(PositionSide::Short),
-        MarketSignal::Neutral | MarketSignal::Funding | MarketSignal::PriceUpdate => None,
+        MarketSignal::Neutral | MarketSignal::Funding | MarketSignal::PriceUpdate
+        | MarketSignal::Evaluate => None,
     }
 }
 
@@ -668,6 +687,125 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
         };
     }
 
+    // ---- Evaluate: kernel computes entry signal from indicators. ----
+    if event.signal == MarketSignal::Evaluate {
+        let mut next_state = state.clone();
+        next_state.step = next_state.step.saturating_add(1);
+        next_state.timestamp_ms = event.timestamp_ms;
+
+        let (entry_params, snap, gate_result) = match (
+            &params.entry_params,
+            &event.indicators,
+            &event.gate_result,
+        ) {
+            (Some(ep), Some(s), Some(gr)) => (ep, s, gr),
+            _ => {
+                diagnostics.warnings.push(
+                    "Evaluate signal requires entry_params, indicators, and gate_result".to_string()
+                );
+                return DecisionResult {
+                    schema_version: KERNEL_SCHEMA_VERSION,
+                    state: next_state,
+                    intents: vec![],
+                    fills: vec![],
+                    diagnostics,
+                };
+            }
+        };
+
+        let slope = event.ema_slow_slope_pct.unwrap_or(0.0);
+        let entry_result = crate::kernel_entries::evaluate_entry(snap, gate_result, entry_params, slope);
+
+        // Record in diagnostics
+        diagnostics.entry_signal = Some(match entry_result.signal {
+            bt_signals::Signal::Buy => "buy".to_string(),
+            bt_signals::Signal::Sell => "sell".to_string(),
+            bt_signals::Signal::Neutral => "neutral".to_string(),
+        });
+        diagnostics.entry_confidence = Some(entry_result.confidence);
+
+        if entry_result.signal == bt_signals::Signal::Neutral {
+            diagnostics.intent_count = 0;
+            diagnostics.fill_count = 0;
+            return DecisionResult {
+                schema_version: KERNEL_SCHEMA_VERSION,
+                state: next_state,
+                intents: vec![],
+                fills: vec![],
+                diagnostics,
+            };
+        }
+
+        let requested_side = match entry_result.signal {
+            bt_signals::Signal::Buy => PositionSide::Long,
+            bt_signals::Signal::Sell => PositionSide::Short,
+            bt_signals::Signal::Neutral => unreachable!(),
+        };
+
+        // Re-check gate alignment for directional filtering.
+        {
+            let mut blocked_reasons = Vec::new();
+            match requested_side {
+                PositionSide::Long => {
+                    if !gate_result.bullish_alignment {
+                        blocked_reasons.push("bearish_alignment".to_string());
+                    }
+                    if !gate_result.btc_ok_long {
+                        blocked_reasons.push("btc_alignment".to_string());
+                    }
+                }
+                PositionSide::Short => {
+                    if !gate_result.bearish_alignment {
+                        blocked_reasons.push("bullish_alignment".to_string());
+                    }
+                    if !gate_result.btc_ok_short {
+                        blocked_reasons.push("btc_alignment".to_string());
+                    }
+                }
+            }
+
+            if !blocked_reasons.is_empty() {
+                let has_position = next_state.positions.contains_key(&event.symbol);
+                let is_same_side = next_state
+                    .positions
+                    .get(&event.symbol)
+                    .map_or(false, |p| p.side == requested_side);
+
+                if !has_position || is_same_side {
+                    diagnostics.gate_blocked = true;
+                    diagnostics.gate_block_reasons = blocked_reasons;
+                    diagnostics.intent_count = 0;
+                    diagnostics.fill_count = 0;
+                    return DecisionResult {
+                        schema_version: KERNEL_SCHEMA_VERSION,
+                        state: next_state,
+                        intents: vec![],
+                        fills: vec![],
+                        diagnostics,
+                    };
+                }
+
+                diagnostics.gate_block_reasons = blocked_reasons;
+            }
+        }
+
+        let (intents, fills) = execute_entry(
+            &mut next_state, event, params, requested_side, &mut diagnostics,
+        );
+
+        next_state.cash_usd = quantise(next_state.cash_usd);
+        diagnostics.intent_count = intents.len();
+        diagnostics.fill_count = fills.len();
+
+        return DecisionResult {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            state: next_state,
+            intents,
+            fills,
+            diagnostics,
+        };
+    }
+
     let requested_side = match side_from_signal(event.signal) {
         Some(side) => side,
         None => {
@@ -758,6 +896,32 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
         }
     }
 
+    let (intents, fills) = execute_entry(
+        &mut next_state, event, params, requested_side, &mut diagnostics,
+    );
+
+    next_state.cash_usd = quantise(next_state.cash_usd);
+    next_state.timestamp_ms = event.timestamp_ms;
+    diagnostics.intent_count = intents.len();
+    diagnostics.fill_count = fills.len();
+
+    DecisionResult {
+        schema_version: KERNEL_SCHEMA_VERSION,
+        state: next_state,
+        intents,
+        fills,
+        diagnostics,
+    }
+}
+
+/// Shared entry execution logic for Buy/Sell and Evaluate paths.
+fn execute_entry(
+    next_state: &mut StrategyState,
+    event: &MarketEvent,
+    params: &KernelParams,
+    requested_side: PositionSide,
+    diagnostics: &mut Diagnostics,
+) -> (Vec<OrderIntent>, Vec<FillEvent>) {
     let fee_model = accounting::FeeModel {
         maker_fee_bps: params.maker_fee_bps,
         taker_fee_bps: params.taker_fee_bps,
@@ -779,7 +943,7 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
     match existing {
         None => {
             if let Some((intent, fill)) = apply_open(
-                &mut next_state,
+                next_state,
                 &event.symbol,
                 requested_side,
                 notional,
@@ -789,7 +953,7 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                 event.timestamp_ms,
                 open_id,
                 OrderIntentKind::Open,
-                &mut diagnostics,
+                diagnostics,
             ) {
                 intents.push(intent);
                 fills.push(fill);
@@ -798,7 +962,7 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
         Some(position) if position.side == requested_side => {
             if params.allow_pyramid {
                 if let Some((intent, fill)) = apply_open(
-                    &mut next_state,
+                    next_state,
                     &event.symbol,
                     requested_side,
                     notional,
@@ -808,7 +972,7 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                     event.timestamp_ms,
                     open_id,
                     OrderIntentKind::Add,
-                    &mut diagnostics,
+                    diagnostics,
                 ) {
                     intents.push(intent);
                     fills.push(fill);
@@ -823,14 +987,14 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
         Some(position) => {
             let closed_side = position.side;
             if let Some((intent, fill)) = apply_close(
-                &mut next_state,
+                next_state,
                 &event.symbol,
                 closed_side,
                 event.price,
                 fee_rate,
                 event.close_fraction,
                 close_id,
-                &mut diagnostics,
+                diagnostics,
             ) {
                 intents.push(OrderIntent {
                     kind: if params.allow_reverse {
@@ -845,7 +1009,7 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
 
             if params.allow_reverse {
                 if let Some((intent, fill)) = apply_open(
-                    &mut next_state,
+                    next_state,
                     &event.symbol,
                     requested_side,
                     notional,
@@ -855,7 +1019,7 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                     event.timestamp_ms,
                     reverse_id,
                     OrderIntentKind::Open,
-                    &mut diagnostics,
+                    diagnostics,
                 ) {
                     intents.push(intent);
                     fills.push(fill);
@@ -864,18 +1028,7 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
         }
     }
 
-    next_state.cash_usd = quantise(next_state.cash_usd);
-    next_state.timestamp_ms = event.timestamp_ms;
-    diagnostics.intent_count = intents.len();
-    diagnostics.fill_count = fills.len();
-
-    DecisionResult {
-        schema_version: KERNEL_SCHEMA_VERSION,
-        state: next_state,
-        intents,
-        fills,
-        diagnostics,
-    }
+    (intents, fills)
 }
 
 #[cfg(test)]
@@ -905,6 +1058,7 @@ mod tests {
             funding_rate: None,
             indicators: None,
             gate_result: None,
+            ema_slow_slope_pct: None,
         }
     }
 
@@ -985,6 +1139,7 @@ mod tests {
             funding_rate: None,
             indicators: None,
             gate_result: None,
+            ema_slow_slope_pct: None,
         };
         let close_state = open_result.state;
         let close_result = step(&close_state, &close_event, &params);
@@ -1046,6 +1201,7 @@ mod tests {
             funding_rate: None,
             indicators: None,
             gate_result: None,
+            ema_slow_slope_pct: None,
         }
     }
 
@@ -1302,6 +1458,7 @@ mod tests {
             funding_rate: None,
             indicators: None,
             gate_result: None,
+            ema_slow_slope_pct: None,
         };
         let r2 = step(&r1.state, &add_evt, &params);
         let pos2 = r2.state.positions.get("BTC").unwrap();
@@ -1347,6 +1504,7 @@ mod tests {
             funding_rate: None,
             indicators: None,
             gate_result: None,
+            ema_slow_slope_pct: None,
         };
         let r2 = step(&r1.state, &add_evt, &params);
         let pos2 = r2.state.positions.get("BTC").unwrap();
@@ -1396,6 +1554,7 @@ mod tests {
             funding_rate: None,
             indicators: None,
             gate_result: None,
+            ema_slow_slope_pct: None,
         };
         let r2 = step(&r1.state, &e2, &params);
 
@@ -1412,6 +1571,7 @@ mod tests {
             funding_rate: None,
             indicators: None,
             gate_result: None,
+            ema_slow_slope_pct: None,
         };
         let r3 = step(&r2.state, &e3, &params);
         let pos3 = r3.state.positions.get("BTC").unwrap();
@@ -1473,6 +1633,7 @@ mod tests {
             funding_rate: None,
             indicators: None,
             gate_result: None,
+            ema_slow_slope_pct: None,
         };
         let r2 = step(&r1.state, &add1, &params);
         assert_eq!(r2.state.positions.get("BTC").unwrap().adds_count, 1);
@@ -1541,6 +1702,7 @@ mod tests {
             funding_rate: None,
             indicators: None,
             gate_result: None,
+            ema_slow_slope_pct: None,
         };
         let r2 = step(&r1.state, &add_evt, &params);
         let pos2 = r2.state.positions.get("BTC").unwrap();
@@ -1721,6 +1883,7 @@ mod tests {
             funding_rate: Some(rate),
             indicators: None,
             gate_result: None,
+            ema_slow_slope_pct: None,
         }
     }
 
@@ -1946,6 +2109,7 @@ mod tests {
             funding_rate: None,
             indicators: Some(snap),
             gate_result: None,
+            ema_slow_slope_pct: None,
         }
     }
 
@@ -2068,6 +2232,7 @@ mod tests {
             funding_rate: None,
             indicators: None,
             gate_result: None,
+            ema_slow_slope_pct: None,
         };
 
         let result = step(&state, &event, &params);
@@ -2195,6 +2360,7 @@ mod tests {
             funding_rate: None,
             indicators: None,
             gate_result: Some(failing_gate_result()),
+            ema_slow_slope_pct: None,
         };
 
         let result = step(&state, &event, &params);
@@ -2244,6 +2410,7 @@ mod tests {
             funding_rate: None,
             indicators: None,
             gate_result: Some(failing_gate_result()),
+            ema_slow_slope_pct: None,
         };
 
         let pos_before = state.positions.get("BTC").unwrap().clone();
@@ -2280,5 +2447,231 @@ mod tests {
         assert!(result.diagnostics.gate_block_reasons.contains(&"btc_alignment".to_string()));
         assert_eq!(result.diagnostics.intent_count, 0);
         assert_eq!(result.diagnostics.fill_count, 0);
+    }
+
+    // ---- Evaluate signal tests ----
+
+    use crate::kernel_entries::EntryParams;
+
+    fn bullish_eval_snap() -> IndicatorSnapshot {
+        IndicatorSnapshot {
+            close: 100.0,
+            high: 101.0,
+            low: 99.0,
+            open: 99.5,
+            volume: 1200.0,
+            t: 0,
+            ema_slow: 97.0,
+            ema_fast: 99.0,
+            ema_macro: 94.0,
+            adx: 32.0,
+            adx_pos: 22.0,
+            adx_neg: 10.0,
+            adx_slope: 1.5,
+            bb_upper: 103.0,
+            bb_lower: 97.0,
+            bb_width: 0.06,
+            bb_width_avg: 0.05,
+            bb_width_ratio: 1.2,
+            atr: 1.5,
+            atr_slope: 0.1,
+            avg_atr: 1.4,
+            rsi: 57.0,
+            stoch_rsi_k: 0.5,
+            stoch_rsi_d: 0.5,
+            macd_hist: 0.5,
+            prev_macd_hist: 0.3,
+            prev2_macd_hist: 0.1,
+            prev3_macd_hist: 0.0,
+            vol_sma: 800.0,
+            vol_trend: true,
+            prev_close: 98.0,
+            prev_ema_fast: 98.5,
+            prev_ema_slow: 96.8,
+            bar_count: 200,
+            funding_rate: 0.0,
+        }
+    }
+
+    fn ranging_snap() -> IndicatorSnapshot {
+        IndicatorSnapshot {
+            close: 100.0,
+            high: 100.5,
+            low: 99.5,
+            open: 100.0,
+            volume: 500.0,
+            t: 0,
+            ema_slow: 100.0,
+            ema_fast: 100.0,
+            ema_macro: 100.0,
+            adx: 15.0,
+            adx_pos: 12.0,
+            adx_neg: 12.0,
+            adx_slope: 0.0,
+            bb_upper: 101.0,
+            bb_lower: 99.0,
+            bb_width: 0.02,
+            bb_width_avg: 0.03,
+            bb_width_ratio: 0.67,
+            atr: 0.5,
+            atr_slope: 0.0,
+            avg_atr: 0.5,
+            rsi: 50.0,
+            stoch_rsi_k: 0.5,
+            stoch_rsi_d: 0.5,
+            macd_hist: 0.01,
+            prev_macd_hist: 0.01,
+            prev2_macd_hist: 0.0,
+            prev3_macd_hist: 0.0,
+            vol_sma: 800.0,
+            vol_trend: false,
+            prev_close: 100.0,
+            prev_ema_fast: 100.0,
+            prev_ema_slow: 100.0,
+            bar_count: 200,
+            funding_rate: 0.0,
+        }
+    }
+
+    fn evaluate_event(snap: IndicatorSnapshot, gates: GateResult) -> MarketEvent {
+        MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 700,
+            timestamp_ms: 1_000,
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Evaluate,
+            price: snap.close,
+            notional_hint_usd: Some(10_000.0),
+            close_fraction: None,
+            fee_role: None,
+            funding_rate: None,
+            indicators: Some(snap),
+            gate_result: Some(gates),
+            ema_slow_slope_pct: Some(0.0),
+        }
+    }
+
+    fn eval_params() -> KernelParams {
+        KernelParams {
+            entry_params: Some(EntryParams::default()),
+            ..KernelParams::default()
+        }
+    }
+
+    #[test]
+    fn evaluate_opens_position() {
+        let state = init_state();
+        let params = eval_params();
+        let event = evaluate_event(bullish_eval_snap(), passing_gate_result());
+
+        let result = step(&state, &event, &params);
+
+        assert!(
+            result.state.positions.get("BTC").is_some(),
+            "Evaluate with bullish snap + passing gates should open position"
+        );
+        assert!(!result.intents.is_empty());
+        assert_eq!(result.diagnostics.entry_signal, Some("buy".to_string()));
+        assert!(result.diagnostics.entry_confidence.is_some());
+    }
+
+    #[test]
+    fn evaluate_neutral_no_action() {
+        let state = init_state();
+        let params = eval_params();
+        // Ranging snap with failing gates → should produce Neutral
+        let event = evaluate_event(ranging_snap(), failing_gate_result());
+
+        let result = step(&state, &event, &params);
+
+        assert!(
+            result.state.positions.get("BTC").is_none(),
+            "Evaluate with ranging snap should not open position"
+        );
+        assert!(result.intents.is_empty());
+        assert_eq!(result.diagnostics.entry_signal, Some("neutral".to_string()));
+    }
+
+    #[test]
+    fn evaluate_backwards_compat() {
+        // Buy signal with entry_params present → still works via Buy path
+        let state = init_state();
+        let params = eval_params();
+        let mut event = event_with_signal("BTC", MarketSignal::Buy);
+        event.notional_hint_usd = Some(10_000.0);
+
+        let result = step(&state, &event, &params);
+
+        assert!(
+            result.state.positions.get("BTC").is_some(),
+            "Buy signal should still work even with entry_params set"
+        );
+        assert_eq!(result.diagnostics.entry_signal, None);
+    }
+
+    #[test]
+    fn evaluate_missing_params() {
+        // Evaluate without entry_params → warning in diagnostics
+        let state = init_state();
+        let params = KernelParams::default(); // no entry_params
+        let event = evaluate_event(bullish_eval_snap(), passing_gate_result());
+
+        let result = step(&state, &event, &params);
+
+        assert!(
+            result.state.positions.get("BTC").is_none(),
+            "Evaluate without entry_params should not open position"
+        );
+        assert!(result.intents.is_empty());
+        assert!(result.diagnostics.warnings.iter().any(|w| w.contains("entry_params")));
+    }
+
+    #[test]
+    fn evaluate_diagnostics_populated() {
+        let state = init_state();
+        let params = eval_params();
+        let event = evaluate_event(bullish_eval_snap(), passing_gate_result());
+
+        let result = step(&state, &event, &params);
+
+        assert!(result.diagnostics.entry_signal.is_some());
+        assert!(result.diagnostics.entry_confidence.is_some());
+        let sig = result.diagnostics.entry_signal.unwrap();
+        assert!(sig == "buy" || sig == "sell" || sig == "neutral");
+    }
+
+    #[test]
+    fn evaluate_closes_opposite() {
+        // Open a short position, then Evaluate produces Buy → should close and open Long
+        let state = init_state();
+        let params_no_reverse = KernelParams {
+            allow_reverse: false,
+            entry_params: Some(EntryParams::default()),
+            ..KernelParams::default()
+        };
+        // Open short
+        let mut open_evt = event_with_signal("BTC", MarketSignal::Sell);
+        open_evt.notional_hint_usd = Some(10_000.0);
+        let open_result = step(&state, &open_evt, &params_no_reverse);
+        let short_state = open_result.state;
+        assert_eq!(
+            short_state.positions.get("BTC").unwrap().side,
+            PositionSide::Short
+        );
+
+        // Evaluate with bullish snap → should close short (allow_reverse=false)
+        let params_reverse = KernelParams {
+            allow_reverse: true,
+            entry_params: Some(EntryParams::default()),
+            ..KernelParams::default()
+        };
+        let event = evaluate_event(bullish_eval_snap(), passing_gate_result());
+        let result = step(&short_state, &event, &params_reverse);
+
+        assert_eq!(result.diagnostics.entry_signal, Some("buy".to_string()));
+        // With allow_reverse, should have closed short and opened long
+        if let Some(pos) = result.state.positions.get("BTC") {
+            assert_eq!(pos.side, PositionSide::Long, "should have reversed to long");
+        }
     }
 }
