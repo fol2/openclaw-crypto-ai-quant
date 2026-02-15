@@ -10,6 +10,7 @@
 use crate::accounting;
 use crate::indicators::IndicatorSnapshot;
 use crate::kernel_exits::{ExitParams, KernelExitResult};
+use crate::signals::gates::GateResult;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -73,6 +74,10 @@ pub struct MarketEvent {
     /// `signal == MarketSignal::PriceUpdate`.
     #[serde(default)]
     pub indicators: Option<IndicatorSnapshot>,
+    /// Pre-computed gate evaluation result. When present on Buy/Sell events,
+    /// the kernel uses this to filter entry intents (block if gates fail).
+    #[serde(default)]
+    pub gate_result: Option<GateResult>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -175,6 +180,12 @@ pub struct Diagnostics {
     pub intent_count: usize,
     pub fill_count: usize,
     pub step: u64,
+    /// Gate evaluation summary for audit trail.
+    #[serde(default)]
+    pub gate_blocked: bool,
+    /// Which gates blocked entry (if any).
+    #[serde(default)]
+    pub gate_block_reasons: Vec<String>,
 }
 
 impl Diagnostics {
@@ -674,6 +685,79 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
     next_state.step = next_state.step.saturating_add(1);
     next_state.timestamp_ms = event.timestamp_ms;
 
+    // --- Gate pre-filter for entry decisions ---
+    if let Some(ref gr) = event.gate_result {
+        let mut blocked_reasons = Vec::new();
+
+        // Core gates
+        if !gr.all_gates_pass {
+            if gr.is_ranging {
+                blocked_reasons.push("ranging".to_string());
+            }
+            if gr.is_anomaly {
+                blocked_reasons.push("anomaly".to_string());
+            }
+            if gr.is_extended {
+                blocked_reasons.push("extension".to_string());
+            }
+            if !gr.adx_above_min {
+                blocked_reasons.push("adx_low".to_string());
+            }
+            if !gr.is_trending_up {
+                blocked_reasons.push("adx_not_rising".to_string());
+            }
+            if !gr.vol_confirm {
+                blocked_reasons.push("volume".to_string());
+            }
+        }
+
+        // Directional alignment checks
+        match requested_side {
+            PositionSide::Long => {
+                if !gr.bullish_alignment {
+                    blocked_reasons.push("bearish_alignment".to_string());
+                }
+                if !gr.btc_ok_long {
+                    blocked_reasons.push("btc_alignment".to_string());
+                }
+            }
+            PositionSide::Short => {
+                if !gr.bearish_alignment {
+                    blocked_reasons.push("bullish_alignment".to_string());
+                }
+                if !gr.btc_ok_short {
+                    blocked_reasons.push("btc_alignment".to_string());
+                }
+            }
+        }
+
+        if !blocked_reasons.is_empty() {
+            let has_position = next_state.positions.contains_key(&event.symbol);
+            let is_same_side = next_state
+                .positions
+                .get(&event.symbol)
+                .map_or(false, |p| p.side == requested_side);
+
+            // Block new entries (no existing position) and same-side pyramids
+            if !has_position || is_same_side {
+                diagnostics.gate_blocked = true;
+                diagnostics.gate_block_reasons = blocked_reasons;
+                diagnostics.intent_count = 0;
+                diagnostics.fill_count = 0;
+                return DecisionResult {
+                    schema_version: KERNEL_SCHEMA_VERSION,
+                    state: next_state,
+                    intents: vec![],
+                    fills: vec![],
+                    diagnostics,
+                };
+            }
+
+            // Opposite-side: allow close/reverse but record reasons for audit
+            diagnostics.gate_block_reasons = blocked_reasons;
+        }
+    }
+
     let fee_model = accounting::FeeModel {
         maker_fee_bps: params.maker_fee_bps,
         taker_fee_bps: params.taker_fee_bps,
@@ -820,6 +904,7 @@ mod tests {
             fee_role: None,
             funding_rate: None,
             indicators: None,
+            gate_result: None,
         }
     }
 
@@ -899,6 +984,7 @@ mod tests {
             fee_role: None,
             funding_rate: None,
             indicators: None,
+            gate_result: None,
         };
         let close_state = open_result.state;
         let close_result = step(&close_state, &close_event, &params);
@@ -959,6 +1045,7 @@ mod tests {
             fee_role: None,
             funding_rate: None,
             indicators: None,
+            gate_result: None,
         }
     }
 
@@ -1214,6 +1301,7 @@ mod tests {
             fee_role: None,
             funding_rate: None,
             indicators: None,
+            gate_result: None,
         };
         let r2 = step(&r1.state, &add_evt, &params);
         let pos2 = r2.state.positions.get("BTC").unwrap();
@@ -1258,6 +1346,7 @@ mod tests {
             fee_role: None,
             funding_rate: None,
             indicators: None,
+            gate_result: None,
         };
         let r2 = step(&r1.state, &add_evt, &params);
         let pos2 = r2.state.positions.get("BTC").unwrap();
@@ -1306,6 +1395,7 @@ mod tests {
             fee_role: None,
             funding_rate: None,
             indicators: None,
+            gate_result: None,
         };
         let r2 = step(&r1.state, &e2, &params);
 
@@ -1321,6 +1411,7 @@ mod tests {
             fee_role: None,
             funding_rate: None,
             indicators: None,
+            gate_result: None,
         };
         let r3 = step(&r2.state, &e3, &params);
         let pos3 = r3.state.positions.get("BTC").unwrap();
@@ -1381,6 +1472,7 @@ mod tests {
             fee_role: None,
             funding_rate: None,
             indicators: None,
+            gate_result: None,
         };
         let r2 = step(&r1.state, &add1, &params);
         assert_eq!(r2.state.positions.get("BTC").unwrap().adds_count, 1);
@@ -1448,6 +1540,7 @@ mod tests {
             fee_role: None,
             funding_rate: None,
             indicators: None,
+            gate_result: None,
         };
         let r2 = step(&r1.state, &add_evt, &params);
         let pos2 = r2.state.positions.get("BTC").unwrap();
@@ -1627,6 +1720,7 @@ mod tests {
             fee_role: None,
             funding_rate: Some(rate),
             indicators: None,
+            gate_result: None,
         }
     }
 
@@ -1851,6 +1945,7 @@ mod tests {
             fee_role: None,
             funding_rate: None,
             indicators: Some(snap),
+            gate_result: None,
         }
     }
 
@@ -1972,6 +2067,7 @@ mod tests {
             fee_role: None,
             funding_rate: None,
             indicators: None,
+            gate_result: None,
         };
 
         let result = step(&state, &event, &params);
@@ -1990,5 +2086,199 @@ mod tests {
         let result = step(&state, &event, &params);
 
         assert_eq!(result.state.step, step_before + 1);
+    }
+
+    // ---- Gate pre-filter tests ----
+
+    fn failing_gate_result() -> GateResult {
+        GateResult {
+            is_ranging: true,
+            is_anomaly: false,
+            is_extended: false,
+            vol_confirm: true,
+            is_trending_up: true,
+            adx_above_min: true,
+            bullish_alignment: false,
+            bearish_alignment: false,
+            btc_ok_long: true,
+            btc_ok_short: true,
+            effective_min_adx: 22.0,
+            bb_width_ratio: 1.0,
+            dynamic_tp_mult: 5.0,
+            rsi_long_limit: 55.0,
+            rsi_short_limit: 45.0,
+            stoch_k: 0.5,
+            stoch_d: 0.5,
+            stoch_rsi_active: false,
+            all_gates_pass: false,
+        }
+    }
+
+    fn passing_gate_result() -> GateResult {
+        GateResult {
+            is_ranging: false,
+            is_anomaly: false,
+            is_extended: false,
+            vol_confirm: true,
+            is_trending_up: true,
+            adx_above_min: true,
+            bullish_alignment: true,
+            bearish_alignment: true,
+            btc_ok_long: true,
+            btc_ok_short: true,
+            effective_min_adx: 22.0,
+            bb_width_ratio: 1.0,
+            dynamic_tp_mult: 5.0,
+            rsi_long_limit: 55.0,
+            rsi_short_limit: 45.0,
+            stoch_k: 0.5,
+            stoch_d: 0.5,
+            stoch_rsi_active: false,
+            all_gates_pass: true,
+        }
+    }
+
+    #[test]
+    fn gate_blocks_new_entry() {
+        let state = init_state();
+        let params = KernelParams::default();
+        let mut event = event_with_signal("BTC", MarketSignal::Buy);
+        event.gate_result = Some(failing_gate_result());
+
+        let result = step(&state, &event, &params);
+
+        assert!(
+            result.state.positions.get("BTC").is_none(),
+            "failing gates should block new entry"
+        );
+        assert!(result.intents.is_empty());
+        assert!(result.fills.is_empty());
+        assert!(result.diagnostics.gate_blocked);
+    }
+
+    #[test]
+    fn gate_allows_entry_when_passing() {
+        let state = init_state();
+        let params = KernelParams::default();
+        let mut event = event_with_signal("BTC", MarketSignal::Buy);
+        event.gate_result = Some(passing_gate_result());
+
+        let result = step(&state, &event, &params);
+
+        assert!(
+            result.state.positions.get("BTC").is_some(),
+            "passing gates should allow entry"
+        );
+        assert_eq!(result.intents.len(), 1);
+        assert!(!result.diagnostics.gate_blocked);
+    }
+
+    #[test]
+    fn gate_allows_close_despite_failing() {
+        // Open a long position, then send a Sell signal with failing gates.
+        // The close should still happen (we want to be able to exit).
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams {
+            allow_reverse: false,
+            ..KernelParams::default()
+        };
+        let event = MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 600,
+            timestamp_ms: 2_000,
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Sell,
+            price: 10_200.0,
+            notional_hint_usd: None,
+            close_fraction: None,
+            fee_role: None,
+            funding_rate: None,
+            indicators: None,
+            gate_result: Some(failing_gate_result()),
+        };
+
+        let result = step(&state, &event, &params);
+
+        assert!(
+            result.state.positions.get("BTC").is_none(),
+            "opposite-side signal should still close despite failing gates"
+        );
+        assert!(!result.intents.is_empty());
+        assert!(!result.diagnostics.gate_blocked);
+        // But gate_block_reasons should still be populated for audit
+        assert!(!result.diagnostics.gate_block_reasons.is_empty());
+    }
+
+    #[test]
+    fn gate_none_allows_entry() {
+        // Backwards compatibility: gate_result = None should not block anything.
+        let state = init_state();
+        let params = KernelParams::default();
+        let mut event = event_with_signal("BTC", MarketSignal::Buy);
+        event.gate_result = None;
+
+        let result = step(&state, &event, &params);
+
+        assert!(
+            result.state.positions.get("BTC").is_some(),
+            "None gate_result should allow entry (backwards compatible)"
+        );
+        assert!(!result.diagnostics.gate_blocked);
+    }
+
+    #[test]
+    fn gate_blocks_pyramid() {
+        // Open a long position, then try to pyramid with failing gates.
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = pyramid_params();
+        let event = MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 601,
+            timestamp_ms: 2_000,
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Buy,
+            price: 10_500.0,
+            notional_hint_usd: Some(5_000.0),
+            close_fraction: None,
+            fee_role: None,
+            funding_rate: None,
+            indicators: None,
+            gate_result: Some(failing_gate_result()),
+        };
+
+        let pos_before = state.positions.get("BTC").unwrap().clone();
+        let result = step(&state, &event, &params);
+
+        // Position should remain unchanged (no pyramid added).
+        let pos_after = result.state.positions.get("BTC").unwrap();
+        assert!(
+            (pos_after.quantity - pos_before.quantity).abs() < 1e-12,
+            "failing gates should block pyramid"
+        );
+        assert_eq!(pos_after.adds_count, 0);
+        assert!(result.diagnostics.gate_blocked);
+        assert!(result.intents.is_empty());
+    }
+
+    #[test]
+    fn gate_blocked_diagnostics() {
+        let state = init_state();
+        let params = KernelParams::default();
+        let mut event = event_with_signal("BTC", MarketSignal::Buy);
+        // Create a gate result that fails on multiple fronts
+        let mut gr = failing_gate_result();
+        gr.is_anomaly = true;
+        gr.btc_ok_long = false;
+        event.gate_result = Some(gr);
+
+        let result = step(&state, &event, &params);
+
+        assert!(result.diagnostics.gate_blocked);
+        assert!(result.diagnostics.gate_block_reasons.contains(&"ranging".to_string()));
+        assert!(result.diagnostics.gate_block_reasons.contains(&"anomaly".to_string()));
+        assert!(result.diagnostics.gate_block_reasons.contains(&"bearish_alignment".to_string()));
+        assert!(result.diagnostics.gate_block_reasons.contains(&"btc_alignment".to_string()));
+        assert_eq!(result.diagnostics.intent_count, 0);
+        assert_eq!(result.diagnostics.fill_count, 0);
     }
 }

@@ -3,13 +3,14 @@
 //! Faithfully mirrors `mei_alpha_v1.analyze()` lines 3344-3537.
 
 use crate::{IndicatorSnapshotLike, SignalConfigLike};
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
 /// Outcome of running every entry gate on the current bar.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GateResult {
     // --- Individual gate flags ---
     pub is_ranging: bool,
