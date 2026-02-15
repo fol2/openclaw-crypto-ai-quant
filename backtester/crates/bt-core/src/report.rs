@@ -637,6 +637,7 @@ mod tests {
             margin_used: 3.33,
             mae_usd: 0.0,
             mfe_usd: 0.0,
+            exit_context: None,
         }
     }
 

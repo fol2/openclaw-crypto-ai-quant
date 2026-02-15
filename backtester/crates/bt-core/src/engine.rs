@@ -9,7 +9,7 @@ use crate::accounting;
 use crate::config::{Confidence, Signal, StrategyConfig};
 use crate::exits::{self, ExitResult};
 use crate::indicators::{IndicatorBank, IndicatorSnapshot};
-use crate::position::{Position, PositionType, SignalRecord, TradeRecord};
+use crate::position::{ExitContext, Position, PositionType, SignalRecord, TradeRecord};
 use crate::signals::{entry, gates};
 use crate::decision_kernel;
 use serde::{Deserialize, Serialize};
@@ -754,7 +754,7 @@ pub fn run_simulation(
                 if !is_exit_cooldown_active(&state, sym_str, ts, cfg) {
                     let exit_result = exits::check_all_exits(pos, &snap, cfg, ts);
                     if exit_result.should_exit {
-                        apply_exit(&mut state, sym_str, &exit_result, &snap, ts);
+                        apply_exit(&mut state, sym_str, &exit_result, &snap, ts, cfg);
                     } else {
                         // Update trailing stop if applicable
                         update_trailing_stop(&mut state, sym_str, &snap, cfg);
@@ -873,7 +873,7 @@ pub fn run_simulation(
                             .any(|intent| matches!(intent.kind, decision_kernel::OrderIntentKind::Close | decision_kernel::OrderIntentKind::Reverse))
                         {
                             let exit = ExitResult::exit("Signal Flip", snap.close);
-                            apply_exit(&mut state, sym_str, &exit, &snap, ts);
+                            apply_exit(&mut state, sym_str, &exit, &snap, ts, cfg);
                         }
                     }
                 }
@@ -1120,6 +1120,7 @@ pub fn run_simulation(
                                             &exit_result,
                                             &sub_snap,
                                             sub_ts,
+                                            cfg,
                                         );
                                     } else {
                                         update_trailing_stop(
@@ -1356,6 +1357,7 @@ pub fn run_simulation(
                 &exit,
                 &snap,
                 *timestamps.last().unwrap_or(&0),
+                cfg,
             );
         }
     }
@@ -1676,16 +1678,56 @@ fn compute_entry_size(
 // Exit application
 // ---------------------------------------------------------------------------
 
+/// Convert an interval string (e.g. "15m", "1h", "4h", "1d") to milliseconds.
+fn interval_to_ms(interval: &str) -> i64 {
+    let s = interval.trim();
+    if s.is_empty() {
+        return 0;
+    }
+    let (num_part, unit) = s.split_at(s.len() - 1);
+    let n: i64 = num_part.parse().unwrap_or(1);
+    match unit {
+        "m" => n * 60_000,
+        "h" => n * 3_600_000,
+        "d" => n * 86_400_000,
+        _ => 0,
+    }
+}
+
 fn apply_exit(
     state: &mut SimState,
     symbol: &str,
     exit: &ExitResult,
     snap: &IndicatorSnapshot,
     ts: i64,
+    cfg: &StrategyConfig,
 ) {
     let pos = match state.positions.get(symbol) {
         Some(p) => p.clone(),
         None => return,
+    };
+
+    // Build exit context snapshot
+    let bar_ms = interval_to_ms(&cfg.engine.interval);
+    let bars_held = if bar_ms > 0 {
+        ((ts - pos.open_time_ms).max(0) / bar_ms) as u32
+    } else {
+        0
+    };
+    let exit_ctx = ExitContext {
+        trailing_active: pos.trailing_sl.is_some(),
+        trailing_high_water_mark: pos.trailing_sl.unwrap_or(0.0),
+        sl_atr_mult_applied: cfg.trade.sl_atr_mult,
+        tp_atr_mult_applied: cfg.trade.tp_atr_mult,
+        smart_exit_threshold: if cfg.trade.smart_exit_adx_exhaustion_lt > 0.0 {
+            Some(cfg.trade.smart_exit_adx_exhaustion_lt)
+        } else {
+            None
+        },
+        indicator_at_exit: Some(snap.clone()),
+        bars_held,
+        max_unrealized_pnl: pos.mfe_usd,
+        min_unrealized_pnl: pos.mae_usd,
     };
 
     let exit_price = if exit.exit_price > 0.0 {
@@ -1744,6 +1786,7 @@ fn apply_exit(
             entry_atr: pos.entry_atr,
             leverage: pos.leverage,
             margin_used: closed_margin,
+            exit_context: Some(exit_ctx.clone()),
             ..Default::default()
         });
 
@@ -1808,6 +1851,7 @@ fn apply_exit(
             entry_atr: pos.entry_atr,
             leverage: pos.leverage,
             margin_used: pos.margin_used,
+            exit_context: Some(exit_ctx),
             ..Default::default()
         });
 
@@ -2781,7 +2825,8 @@ mod tests {
         let mut state = make_state_with_open_long("ETH");
         let snap = make_minimal_snap(101.0, 10_000);
         let exit = ExitResult::exit("Take Profit", 101.0);
-        apply_exit(&mut state, "ETH", &exit, &snap, 10_000);
+        let cfg = StrategyConfig::default();
+        apply_exit(&mut state, "ETH", &exit, &snap, 10_000, &cfg);
 
         assert_eq!(state.last_exit_attempt_ms.get("ETH"), Some(&10_000));
         assert!(!state.positions.contains_key("ETH"));
@@ -2793,8 +2838,9 @@ mod tests {
         let mut state = make_state_with_open_long(symbol);
         let snap = make_minimal_snap(105.0, 1_700_000_000_000);
         let exit = ExitResult::partial_exit("Take Profit (Partial)", 105.0, 0.5);
+        let cfg = StrategyConfig::default();
 
-        apply_exit(&mut state, symbol, &exit, &snap, snap.t);
+        apply_exit(&mut state, symbol, &exit, &snap, snap.t, &cfg);
 
         let pos = state
             .positions
@@ -2812,8 +2858,9 @@ mod tests {
         let mut state = make_state_with_open_long(symbol);
         let snap = make_minimal_snap(103.0, 1_700_000_000_001);
         let exit = ExitResult::partial_exit("Risk Trim", 103.0, 0.25);
+        let cfg = StrategyConfig::default();
 
-        apply_exit(&mut state, symbol, &exit, &snap, snap.t);
+        apply_exit(&mut state, symbol, &exit, &snap, snap.t, &cfg);
 
         let pos = state
             .positions
@@ -2841,7 +2888,8 @@ mod tests {
             maker_taker_fee_rate(&state.kernel_params, accounting::FeeRole::Taker),
         );
 
-        apply_exit(&mut state, symbol, &exit, &snapped, snapped.t);
+        let cfg = StrategyConfig::default();
+        apply_exit(&mut state, symbol, &exit, &snapped, snapped.t, &cfg);
 
         // Margin-based: balance changes by pnl - fee (not cash_delta which was notional-based).
         assert!((state.balance - (1_000.0 + expected.pnl - expected.fee_usd)).abs() < 1e-9);
@@ -3289,5 +3337,116 @@ mod tests {
             trace.gate_result.is_none(),
             "Missing gate_result should default to None"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // AQC-710: ExitContext tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_exit_context_populated_on_full_close() {
+        let symbol = "BTC";
+        let mut state = make_state_with_open_long(symbol);
+        // Give the position a trailing stop to verify it shows up in ExitContext
+        state.positions.get_mut(symbol).unwrap().trailing_sl = Some(99.0);
+        state.positions.get_mut(symbol).unwrap().mfe_usd = 5.0;
+        state.positions.get_mut(symbol).unwrap().mae_usd = -2.0;
+        let snap = make_minimal_snap(105.0, 1_700_000_000_000);
+        let exit = ExitResult::exit("Take Profit", 105.0);
+        let mut cfg = StrategyConfig::default();
+        cfg.trade.sl_atr_mult = 1.5;
+        cfg.trade.tp_atr_mult = 2.0;
+        cfg.engine.interval = "15m".to_string();
+
+        apply_exit(&mut state, symbol, &exit, &snap, snap.t, &cfg);
+
+        assert_eq!(state.trades.len(), 1);
+        let ctx = state.trades[0]
+            .exit_context
+            .as_ref()
+            .expect("exit_context should be populated for close");
+        assert!(ctx.trailing_active);
+        assert!((ctx.trailing_high_water_mark - 99.0).abs() < 1e-9);
+        assert!((ctx.sl_atr_mult_applied - 1.5).abs() < 1e-9);
+        assert!((ctx.tp_atr_mult_applied - 2.0).abs() < 1e-9);
+        assert!(ctx.indicator_at_exit.is_some());
+        assert!((ctx.max_unrealized_pnl - 5.0).abs() < 1e-9);
+        assert!((ctx.min_unrealized_pnl - (-2.0)).abs() < 1e-9);
+        // Default config has smart_exit_adx_exhaustion_lt = 18.0
+        assert_eq!(ctx.smart_exit_threshold, Some(18.0));
+    }
+
+    #[test]
+    fn test_exit_context_with_smart_exit_threshold() {
+        let symbol = "ETH";
+        let mut state = make_state_with_open_long(symbol);
+        let snap = make_minimal_snap(103.0, 1_700_000_000_000);
+        let exit = ExitResult::exit("ADX Exhaustion", 103.0);
+        let mut cfg = StrategyConfig::default();
+        cfg.trade.smart_exit_adx_exhaustion_lt = 18.0;
+        cfg.engine.interval = "1h".to_string();
+
+        apply_exit(&mut state, symbol, &exit, &snap, snap.t, &cfg);
+
+        let ctx = state.trades[0]
+            .exit_context
+            .as_ref()
+            .expect("exit_context should be populated");
+        assert_eq!(ctx.smart_exit_threshold, Some(18.0));
+        assert!(!ctx.trailing_active);
+        assert!((ctx.trailing_high_water_mark).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_exit_context_bars_held_calculation() {
+        let symbol = "BTC";
+        let mut state = make_state_with_open_long(symbol);
+        // Set position open_time to 10 bars ago (15m each = 9_000_000 ms)
+        state.positions.get_mut(symbol).unwrap().open_time_ms = 1_700_000_000_000 - 9_000_000;
+        let snap = make_minimal_snap(101.0, 1_700_000_000_000);
+        let exit = ExitResult::exit("Stop Loss", 101.0);
+        let mut cfg = StrategyConfig::default();
+        cfg.engine.interval = "15m".to_string();
+
+        apply_exit(&mut state, symbol, &exit, &snap, snap.t, &cfg);
+
+        let ctx = state.trades[0]
+            .exit_context
+            .as_ref()
+            .expect("exit_context should be populated");
+        assert_eq!(ctx.bars_held, 10);
+    }
+
+    #[test]
+    fn test_exit_context_serde_roundtrip() {
+        use crate::position::ExitContext;
+        let ctx = ExitContext {
+            trailing_active: true,
+            trailing_high_water_mark: 58_500.0,
+            sl_atr_mult_applied: 1.5,
+            tp_atr_mult_applied: 2.5,
+            smart_exit_threshold: Some(18.0),
+            indicator_at_exit: None,
+            bars_held: 42,
+            max_unrealized_pnl: 3_200.0,
+            min_unrealized_pnl: -800.0,
+        };
+        let json = serde_json::to_string(&ctx).unwrap();
+        let parsed: ExitContext = serde_json::from_str(&json).unwrap();
+        assert_eq!(ctx, parsed);
+
+        // Verify backward compat: missing optional fields deserialize to defaults
+        let minimal = r#"{
+            "trailing_active": false,
+            "trailing_high_water_mark": 0.0,
+            "sl_atr_mult_applied": 1.0,
+            "tp_atr_mult_applied": 2.0,
+            "bars_held": 5,
+            "max_unrealized_pnl": 100.0,
+            "min_unrealized_pnl": -50.0
+        }"#;
+        let parsed: ExitContext = serde_json::from_str(minimal).unwrap();
+        assert!(parsed.smart_exit_threshold.is_none());
+        assert!(parsed.indicator_at_exit.is_none());
     }
 }
