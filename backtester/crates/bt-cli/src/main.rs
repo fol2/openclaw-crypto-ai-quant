@@ -512,6 +512,13 @@ fn expand_db_path(raw: &str) -> Vec<String> {
         {
             continue;
         }
+        // Only include files named candles_*.db — skip funding_rates.db,
+        // bbo_snapshots.db, and other non-candle DBs that happen to live
+        // in the same directory.
+        let fname = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if !fname.starts_with("candles_") {
+            continue;
+        }
         out.push(path.to_string_lossy().to_string());
     }
     out.sort();
