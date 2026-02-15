@@ -1244,6 +1244,306 @@ def check_exit_with_shadow(df, symbol, state_json, params_json, current_price,
     return k_action, k_exit_ctx, k_diag
 
 
+# ---------------------------------------------------------------------------
+# Position lifecycle delegation to kernel SSOT (AQC-814)
+# ---------------------------------------------------------------------------
+
+
+def get_kernel_positions(state_json: str) -> dict:
+    """Extract positions from kernel state JSON.
+
+    Uses ``bt_runtime.get_positions()`` when available (parses and validates
+    through Rust serde), falling back to direct JSON parsing.
+
+    Parameters
+    ----------
+    state_json : str
+        Kernel StrategyState as JSON string.
+
+    Returns
+    -------
+    dict
+        Mapping of symbol (str) -> kernel Position dict.
+    """
+    if _BT_RUNTIME_AVAILABLE and _bt_runtime is not None:
+        try:
+            positions_json = _bt_runtime.get_positions(state_json)
+            return json.loads(positions_json)
+        except Exception:
+            pass  # fall through to Python fallback
+
+    # Python fallback: parse state JSON directly
+    try:
+        state = json.loads(state_json)
+        return dict(state.get("positions") or {})
+    except Exception:
+        return {}
+
+
+def kernel_position_to_python(symbol: str, kernel_pos: dict) -> dict:
+    """Convert a kernel Position dict to the Python position dict format.
+
+    The Rust kernel ``Position`` struct has fields like ``quantity``,
+    ``avg_entry_price``, ``side`` (``"long"``/``"short"``), while the Python
+    ``PaperTrader.positions`` dict uses ``size``, ``entry_price``,
+    ``type`` (``"LONG"``/``"SHORT"``).
+
+    Parameters
+    ----------
+    symbol : str
+        Trading symbol (e.g. "ETH").
+    kernel_pos : dict
+        Position dict as returned by ``get_kernel_positions()``.
+
+    Returns
+    -------
+    dict
+        Python-format position dict compatible with PaperTrader.
+    """
+    side_raw = str(kernel_pos.get("side", "long")).lower()
+    py_type = "LONG" if side_raw == "long" else "SHORT"
+
+    trailing_sl = kernel_pos.get("trailing_sl")
+    if trailing_sl is not None:
+        try:
+            trailing_sl = float(trailing_sl)
+        except (TypeError, ValueError):
+            trailing_sl = None
+
+    entry_atr = kernel_pos.get("entry_atr")
+    if entry_atr is not None:
+        try:
+            entry_atr = float(entry_atr)
+        except (TypeError, ValueError):
+            entry_atr = 0.0
+    else:
+        entry_atr = 0.0
+
+    entry_adx_threshold = kernel_pos.get("entry_adx_threshold")
+    if entry_adx_threshold is not None:
+        try:
+            entry_adx_threshold = float(entry_adx_threshold)
+        except (TypeError, ValueError):
+            entry_adx_threshold = 0.0
+    else:
+        entry_adx_threshold = 0.0
+
+    avg_entry = float(kernel_pos.get("avg_entry_price", 0.0))
+    quantity = float(kernel_pos.get("quantity", 0.0))
+    notional = abs(quantity) * avg_entry
+    margin_usd = float(kernel_pos.get("margin_usd", 0.0))
+    # Estimate leverage from margin if available
+    if margin_usd > 0 and notional > 0:
+        leverage = notional / margin_usd
+    else:
+        leverage = 1.0
+
+    confidence_raw = kernel_pos.get("confidence")
+    if confidence_raw is not None:
+        # Kernel stores 0=Low, 1=Medium, 2=High
+        conf_map = {0: "low", 1: "medium", 2: "high"}
+        confidence = conf_map.get(int(confidence_raw), "medium")
+    else:
+        confidence = ""
+
+    opened_at_ms = int(kernel_pos.get("opened_at_ms", 0))
+    try:
+        import datetime as _dt
+        opened_at = _dt.datetime.fromtimestamp(
+            opened_at_ms / 1000.0, tz=_dt.timezone.utc
+        ).isoformat() if opened_at_ms > 0 else ""
+    except Exception:
+        opened_at = ""
+
+    last_funding_ms = kernel_pos.get("last_funding_ms")
+    last_funding_time = int(last_funding_ms) if last_funding_ms is not None else 0
+
+    return {
+        "type": py_type,
+        "entry_price": avg_entry,
+        "size": quantity,
+        "confidence": confidence,
+        "entry_atr": entry_atr,
+        "entry_adx_threshold": entry_adx_threshold,
+        "open_trade_id": None,  # not tracked by kernel
+        "open_timestamp": opened_at,
+        "trailing_sl": trailing_sl,
+        "last_funding_time": last_funding_time,
+        "leverage": leverage,
+        "margin_used": margin_usd,
+        "adds_count": int(kernel_pos.get("adds_count", 0)),
+        "tp1_taken": int(kernel_pos.get("tp1_taken", False)),
+        "last_add_time": 0,  # not tracked by kernel
+    }
+
+
+def python_position_to_kernel(symbol: str, py_pos: dict) -> dict:
+    """Convert a Python position dict back to kernel Position format.
+
+    Inverse of ``kernel_position_to_python``.
+
+    Parameters
+    ----------
+    symbol : str
+        Trading symbol (e.g. "ETH").
+    py_pos : dict
+        Python-format position dict from PaperTrader.
+
+    Returns
+    -------
+    dict
+        Kernel Position dict matching the Rust ``Position`` struct schema.
+    """
+    pos_type = str(py_pos.get("type", "LONG")).upper()
+    side = "long" if pos_type == "LONG" else "short"
+
+    entry_price = float(py_pos.get("entry_price", 0.0))
+    size = float(py_pos.get("size", 0.0))
+    leverage = float(py_pos.get("leverage", 1.0))
+    leverage = max(1.0, leverage)
+    notional = abs(size) * entry_price
+    margin_usd = float(py_pos.get("margin_used", 0.0))
+    if margin_usd <= 0 and entry_price > 0:
+        margin_usd = notional / leverage
+
+    trailing_sl = py_pos.get("trailing_sl")
+    if trailing_sl is not None:
+        try:
+            trailing_sl = float(trailing_sl)
+        except (TypeError, ValueError):
+            trailing_sl = None
+
+    entry_atr = py_pos.get("entry_atr")
+    if entry_atr is not None:
+        try:
+            entry_atr = float(entry_atr)
+        except (TypeError, ValueError):
+            entry_atr = None
+
+    entry_adx_threshold = py_pos.get("entry_adx_threshold")
+    if entry_adx_threshold is not None:
+        try:
+            entry_adx_threshold = float(entry_adx_threshold)
+        except (TypeError, ValueError):
+            entry_adx_threshold = None
+
+    confidence_str = str(py_pos.get("confidence", "")).strip().lower()
+    conf_map = {"low": 0, "medium": 1, "high": 2}
+    confidence = conf_map.get(confidence_str)
+
+    opened_at = py_pos.get("open_timestamp", "")
+    opened_at_ms = 0
+    if opened_at:
+        try:
+            import datetime as _dt
+            dt = _dt.datetime.fromisoformat(str(opened_at))
+            opened_at_ms = int(dt.timestamp() * 1000)
+        except Exception:
+            opened_at_ms = 0
+
+    last_funding_time = int(py_pos.get("last_funding_time", 0))
+
+    return {
+        "symbol": symbol,
+        "side": side,
+        "quantity": size,
+        "avg_entry_price": entry_price,
+        "opened_at_ms": opened_at_ms,
+        "updated_at_ms": opened_at_ms,  # best approximation
+        "notional_usd": notional,
+        "margin_usd": margin_usd,
+        "confidence": confidence,
+        "entry_atr": entry_atr,
+        "entry_adx_threshold": entry_adx_threshold,
+        "adds_count": int(py_pos.get("adds_count", 0)),
+        "tp1_taken": bool(int(py_pos.get("tp1_taken", 0))),
+        "trailing_sl": trailing_sl,
+        "mae_usd": 0.0,
+        "mfe_usd": 0.0,
+        "last_funding_ms": last_funding_time if last_funding_time > 0 else None,
+    }
+
+
+def sync_positions_from_kernel(state_json: str) -> dict:
+    """Read kernel state and convert all positions to Python format.
+
+    This is the main bridge function that allows Python code to read the
+    kernel's SSOT position state in the familiar PaperTrader dict format.
+
+    Parameters
+    ----------
+    state_json : str
+        Kernel StrategyState as JSON string.
+
+    Returns
+    -------
+    dict
+        Mapping of symbol (str) -> Python position dict.
+    """
+    kernel_positions = get_kernel_positions(state_json)
+    result = {}
+    for symbol, kernel_pos in kernel_positions.items():
+        result[symbol] = kernel_position_to_python(symbol, kernel_pos)
+    return result
+
+
+def build_position_state_for_db(state_json: str) -> list[dict]:
+    """Extract position data from kernel state and format for SQLite persistence.
+
+    Returns a list of dicts suitable for inserting into the ``position_state``
+    table.  Each dict contains the columns expected by
+    ``PaperTrader.upsert_position_state()``.
+
+    Parameters
+    ----------
+    state_json : str
+        Kernel StrategyState as JSON string.
+
+    Returns
+    -------
+    list[dict]
+        List of position dicts with keys matching the DB schema:
+        ``symbol``, ``open_trade_id``, ``trailing_sl``, ``last_funding_time``,
+        ``adds_count``, ``tp1_taken``, ``last_add_time``, ``entry_adx_threshold``.
+    """
+    import datetime as _dt
+
+    kernel_positions = get_kernel_positions(state_json)
+    rows = []
+    for symbol, kernel_pos in kernel_positions.items():
+        trailing_sl = kernel_pos.get("trailing_sl")
+        if trailing_sl is not None:
+            try:
+                trailing_sl = float(trailing_sl)
+            except (TypeError, ValueError):
+                trailing_sl = None
+
+        entry_adx_threshold = kernel_pos.get("entry_adx_threshold")
+        if entry_adx_threshold is not None:
+            try:
+                entry_adx_threshold = float(entry_adx_threshold)
+            except (TypeError, ValueError):
+                entry_adx_threshold = 0.0
+        else:
+            entry_adx_threshold = 0.0
+
+        last_funding_ms = kernel_pos.get("last_funding_ms")
+        last_funding_time = int(last_funding_ms) if last_funding_ms is not None else 0
+
+        rows.append({
+            "symbol": symbol,
+            "open_trade_id": None,  # not tracked by kernel
+            "trailing_sl": trailing_sl,
+            "last_funding_time": last_funding_time,
+            "adds_count": int(kernel_pos.get("adds_count", 0)),
+            "tp1_taken": int(kernel_pos.get("tp1_taken", False)),
+            "last_add_time": 0,  # not tracked by kernel
+            "entry_adx_threshold": entry_adx_threshold,
+            "updated_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        })
+    return rows
+
+
 # --------------------------------------------------------------------------------------
 # Developer Notes (READ ME FIRST)
 #
