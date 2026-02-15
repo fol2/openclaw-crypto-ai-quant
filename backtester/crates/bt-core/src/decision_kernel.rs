@@ -8,6 +8,8 @@
 //!    being written into state so that repeated replays remain stable.
 
 use crate::accounting;
+use crate::indicators::IndicatorSnapshot;
+use crate::kernel_exits::{ExitParams, KernelExitResult};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -20,6 +22,8 @@ pub enum MarketSignal {
     Sell,
     Neutral,
     Funding,
+    /// Per-bar price tick: kernel evaluates exit conditions for existing positions.
+    PriceUpdate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +69,10 @@ pub struct MarketEvent {
     /// `signal == MarketSignal::Funding`.  Positive rate means longs pay shorts.
     #[serde(default)]
     pub funding_rate: Option<f64>,
+    /// Indicator snapshot for exit evaluation.  Only meaningful when
+    /// `signal == MarketSignal::PriceUpdate`.
+    #[serde(default)]
+    pub indicators: Option<IndicatorSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -206,6 +214,10 @@ pub struct KernelParams {
     /// leverage) in its cash model rather than full notional, matching the
     /// exchange's margined-perpetual accounting.  Default 1.0 (spot-equivalent).
     pub leverage: f64,
+    /// Exit evaluation parameters.  When `Some`, PriceUpdate events will evaluate
+    /// exit conditions (SL, trailing, TP) for existing positions.
+    #[serde(default)]
+    pub exit_params: Option<ExitParams>,
 }
 
 impl Default for KernelParams {
@@ -220,6 +232,7 @@ impl Default for KernelParams {
             allow_pyramid: true,
             allow_reverse: true,
             leverage: 1.0,
+            exit_params: None,
         }
     }
 }
@@ -258,7 +271,7 @@ fn side_from_signal(signal: MarketSignal) -> Option<PositionSide> {
     match signal {
         MarketSignal::Buy => Some(PositionSide::Long),
         MarketSignal::Sell => Some(PositionSide::Short),
-        MarketSignal::Neutral | MarketSignal::Funding => None,
+        MarketSignal::Neutral | MarketSignal::Funding | MarketSignal::PriceUpdate => None,
     }
 }
 
@@ -530,6 +543,116 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
         };
     }
 
+    // ---- PriceUpdate: evaluate exit conditions for existing positions. ----
+    if event.signal == MarketSignal::PriceUpdate {
+        let mut next_state = state.clone();
+        next_state.step = next_state.step.saturating_add(1);
+        next_state.timestamp_ms = event.timestamp_ms;
+
+        let mut intents = Vec::new();
+        let mut fills = Vec::new();
+
+        if let (Some(exit_params), Some(snap)) = (&params.exit_params, &event.indicators) {
+            // Evaluate exits, then act on the result (two-phase to satisfy borrow checker).
+            let exit_result = {
+                if let Some(pos) = next_state.positions.get_mut(&event.symbol) {
+                    Some(crate::kernel_exits::evaluate_exits(
+                        pos,
+                        snap,
+                        exit_params,
+                        event.timestamp_ms,
+                    ))
+                } else {
+                    None
+                }
+            };
+
+            if let Some(result) = exit_result {
+                let fee_model = accounting::FeeModel {
+                    maker_fee_bps: params.maker_fee_bps,
+                    taker_fee_bps: params.taker_fee_bps,
+                };
+                let role = event.fee_role.unwrap_or(accounting::FeeRole::Taker);
+                let fee_rate = fee_model.role_rate(role);
+                let close_id = with_intent_id(next_state.step, 1);
+
+                match result {
+                    KernelExitResult::Hold => {}
+                    KernelExitResult::FullClose { exit_price, .. } => {
+                        if let Some(pos) = next_state.positions.get(&event.symbol) {
+                            let closed_side = pos.side;
+                            if let Some((intent, fill)) = apply_close(
+                                &mut next_state,
+                                &event.symbol,
+                                closed_side,
+                                exit_price,
+                                fee_rate,
+                                Some(1.0),
+                                close_id,
+                                &mut diagnostics,
+                            ) {
+                                intents.push(intent);
+                                fills.push(fill);
+                            }
+                        }
+                    }
+                    KernelExitResult::PartialClose {
+                        exit_price,
+                        fraction,
+                        ..
+                    } => {
+                        if let Some(pos) = next_state.positions.get(&event.symbol) {
+                            let closed_side = pos.side;
+                            if let Some((intent, fill)) = apply_close(
+                                &mut next_state,
+                                &event.symbol,
+                                closed_side,
+                                exit_price,
+                                fee_rate,
+                                Some(fraction),
+                                close_id,
+                                &mut diagnostics,
+                            ) {
+                                intents.push(intent);
+                                fills.push(fill);
+                                // Mark tp1_taken after successful partial close.
+                                if let Some(pos) = next_state.positions.get_mut(&event.symbol) {
+                                    pos.tp1_taken = true;
+                                    // Lock trailing_sl to at least entry (breakeven).
+                                    let entry = pos.avg_entry_price;
+                                    match pos.side {
+                                        PositionSide::Long => {
+                                            pos.trailing_sl = Some(match pos.trailing_sl {
+                                                Some(prev) => prev.max(entry),
+                                                None => entry,
+                                            });
+                                        }
+                                        PositionSide::Short => {
+                                            pos.trailing_sl = Some(match pos.trailing_sl {
+                                                Some(prev) => prev.min(entry),
+                                                None => entry,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        diagnostics.intent_count = intents.len();
+        diagnostics.fill_count = fills.len();
+        return DecisionResult {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            state: next_state,
+            intents,
+            fills,
+            diagnostics,
+        };
+    }
+
     let requested_side = match side_from_signal(event.signal) {
         Some(side) => side,
         None => {
@@ -692,6 +815,7 @@ mod tests {
             close_fraction: None,
             fee_role: None,
             funding_rate: None,
+            indicators: None,
         }
     }
 
@@ -770,6 +894,7 @@ mod tests {
             close_fraction: None,
             fee_role: None,
             funding_rate: None,
+            indicators: None,
         };
         let close_state = open_result.state;
         let close_result = step(&close_state, &close_event, &params);
@@ -829,6 +954,7 @@ mod tests {
             close_fraction: Some(fraction),
             fee_role: None,
             funding_rate: None,
+            indicators: None,
         }
     }
 
@@ -1083,6 +1209,7 @@ mod tests {
             close_fraction: None,
             fee_role: None,
             funding_rate: None,
+            indicators: None,
         };
         let r2 = step(&r1.state, &add_evt, &params);
         let pos2 = r2.state.positions.get("BTC").unwrap();
@@ -1126,6 +1253,7 @@ mod tests {
             close_fraction: None,
             fee_role: None,
             funding_rate: None,
+            indicators: None,
         };
         let r2 = step(&r1.state, &add_evt, &params);
         let pos2 = r2.state.positions.get("BTC").unwrap();
@@ -1173,6 +1301,7 @@ mod tests {
             close_fraction: None,
             fee_role: None,
             funding_rate: None,
+            indicators: None,
         };
         let r2 = step(&r1.state, &e2, &params);
 
@@ -1187,6 +1316,7 @@ mod tests {
             close_fraction: None,
             fee_role: None,
             funding_rate: None,
+            indicators: None,
         };
         let r3 = step(&r2.state, &e3, &params);
         let pos3 = r3.state.positions.get("BTC").unwrap();
@@ -1246,6 +1376,7 @@ mod tests {
             close_fraction: None,
             fee_role: None,
             funding_rate: None,
+            indicators: None,
         };
         let r2 = step(&r1.state, &add1, &params);
         assert_eq!(r2.state.positions.get("BTC").unwrap().adds_count, 1);
@@ -1312,6 +1443,7 @@ mod tests {
             close_fraction: None,
             fee_role: None,
             funding_rate: None,
+            indicators: None,
         };
         let r2 = step(&r1.state, &add_evt, &params);
         let pos2 = r2.state.positions.get("BTC").unwrap();
@@ -1489,6 +1621,7 @@ mod tests {
             close_fraction: None,
             fee_role: None,
             funding_rate: Some(rate),
+            indicators: None,
         }
     }
 
@@ -1648,5 +1781,209 @@ mod tests {
             (result.state.cash_usd - cash_before).abs() < 1e-12,
             "funding for wrong symbol should not change cash",
         );
+    }
+
+    // ---- PriceUpdate / exit evaluation integration tests ----
+
+    fn test_snap(close: f64) -> IndicatorSnapshot {
+        IndicatorSnapshot {
+            close,
+            high: close,
+            low: close,
+            open: close,
+            volume: 0.0,
+            t: 0,
+            ema_slow: close,
+            ema_fast: close,
+            ema_macro: close,
+            adx: 30.0,
+            adx_pos: 15.0,
+            adx_neg: 15.0,
+            adx_slope: 0.0,
+            bb_upper: close * 1.02,
+            bb_lower: close * 0.98,
+            bb_width: 0.04,
+            bb_width_avg: 0.04,
+            bb_width_ratio: 1.0,
+            atr: close * 0.01,
+            atr_slope: 0.0,
+            avg_atr: close * 0.01,
+            rsi: 50.0,
+            stoch_rsi_k: 50.0,
+            stoch_rsi_d: 50.0,
+            macd_hist: 0.0,
+            prev_macd_hist: 0.0,
+            prev2_macd_hist: 0.0,
+            prev3_macd_hist: 0.0,
+            vol_sma: 100.0,
+            vol_trend: false,
+            prev_close: close,
+            prev_ema_fast: close,
+            prev_ema_slow: close,
+            bar_count: 200,
+            funding_rate: 0.0,
+        }
+    }
+
+    fn exit_params_for_test() -> KernelParams {
+        KernelParams {
+            allow_reverse: false,
+            exit_params: Some(ExitParams::default()),
+            ..KernelParams::default()
+        }
+    }
+
+    fn price_update_event(symbol: &str, price: f64, snap: IndicatorSnapshot) -> MarketEvent {
+        MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 900,
+            timestamp_ms: 5_000,
+            symbol: symbol.to_string(),
+            signal: MarketSignal::PriceUpdate,
+            price,
+            notional_hint_usd: None,
+            close_fraction: None,
+            fee_role: None,
+            funding_rate: None,
+            indicators: Some(snap),
+        }
+    }
+
+    #[test]
+    fn price_update_sl_triggers_close() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let mut state_with_atr = state.clone();
+        let pos = state_with_atr.positions.get_mut("BTC").unwrap();
+        pos.entry_atr = Some(100.0);
+
+        let params = exit_params_for_test();
+        let snap = test_snap(9_750.0);
+        let event = price_update_event("BTC", 9_750.0, snap);
+
+        let result = step(&state_with_atr, &event, &params);
+
+        assert!(!result.intents.is_empty(), "should emit close intent");
+        assert_eq!(result.intents[0].kind, OrderIntentKind::Close);
+        assert!(
+            result.state.positions.get("BTC").is_none(),
+            "position should be closed"
+        );
+    }
+
+    #[test]
+    fn price_update_no_exit_on_normal_price() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let mut state_with_atr = state.clone();
+        let pos = state_with_atr.positions.get_mut("BTC").unwrap();
+        pos.entry_atr = Some(100.0);
+
+        let params = exit_params_for_test();
+        let snap = test_snap(10_050.0);
+        let event = price_update_event("BTC", 10_050.0, snap);
+
+        let result = step(&state_with_atr, &event, &params);
+
+        assert!(result.intents.is_empty(), "no exit should trigger");
+        assert!(
+            result.state.positions.get("BTC").is_some(),
+            "position should remain"
+        );
+    }
+
+    #[test]
+    fn price_update_partial_tp_emits_partial_close() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let mut state_with_atr = state.clone();
+        let pos = state_with_atr.positions.get_mut("BTC").unwrap();
+        pos.entry_atr = Some(100.0);
+
+        let params = exit_params_for_test();
+        let snap = test_snap(10_400.0);
+        let event = price_update_event("BTC", 10_400.0, snap);
+
+        let result = step(&state_with_atr, &event, &params);
+
+        assert!(!result.intents.is_empty(), "should emit close intent");
+        assert_eq!(result.intents[0].kind, OrderIntentKind::Close);
+        let pos = result.state.positions.get("BTC");
+        assert!(pos.is_some(), "position should remain after partial TP");
+        let pos = pos.unwrap();
+        assert!(pos.tp1_taken, "tp1_taken should be set after partial TP");
+    }
+
+    #[test]
+    fn price_update_trailing_updates_position() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let mut state_with_atr = state.clone();
+        let pos = state_with_atr.positions.get_mut("BTC").unwrap();
+        pos.entry_atr = Some(100.0);
+
+        let params = exit_params_for_test();
+        let snap = test_snap(10_200.0);
+        let event = price_update_event("BTC", 10_200.0, snap);
+
+        let result = step(&state_with_atr, &event, &params);
+
+        let pos = result.state.positions.get("BTC").unwrap();
+        assert!(
+            pos.trailing_sl.is_some(),
+            "trailing_sl should be set after sufficient profit"
+        );
+    }
+
+    #[test]
+    fn price_update_without_exit_params_is_noop() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams {
+            allow_reverse: false,
+            exit_params: None,
+            ..KernelParams::default()
+        };
+        let snap = test_snap(9_500.0);
+        let event = price_update_event("BTC", 9_500.0, snap);
+
+        let result = step(&state, &event, &params);
+
+        assert!(result.intents.is_empty(), "no intents without exit_params");
+        assert!(
+            result.state.positions.get("BTC").is_some(),
+            "position should remain"
+        );
+    }
+
+    #[test]
+    fn price_update_without_indicators_is_noop() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = exit_params_for_test();
+        let event = MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 901,
+            timestamp_ms: 5_000,
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::PriceUpdate,
+            price: 9_500.0,
+            notional_hint_usd: None,
+            close_fraction: None,
+            fee_role: None,
+            funding_rate: None,
+            indicators: None,
+        };
+
+        let result = step(&state, &event, &params);
+
+        assert!(result.intents.is_empty());
+    }
+
+    #[test]
+    fn price_update_advances_step_counter() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = exit_params_for_test();
+        let snap = test_snap(10_050.0);
+        let event = price_update_event("BTC", 10_050.0, snap);
+        let step_before = state.step;
+
+        let result = step(&state, &event, &params);
+
+        assert_eq!(result.state.step, step_before + 1);
     }
 }

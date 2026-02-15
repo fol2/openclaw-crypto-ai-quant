@@ -509,6 +509,7 @@ fn step_decision(
         close_fraction: None,
         fee_role: None,
         funding_rate: None,
+        indicators: None,
     };
     state.next_kernel_event_id = state.next_kernel_event_id.saturating_add(1);
 
