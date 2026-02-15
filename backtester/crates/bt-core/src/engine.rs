@@ -198,6 +198,7 @@ fn make_kernel_state(
                 trailing_sl: None,
                 mae_usd: 0.0,
                 mfe_usd: 0.0,
+                last_funding_ms: None,
             },
         );
     }
@@ -266,6 +267,7 @@ fn step_decision(
         notional_hint_usd: requested_notional_usd,
         close_fraction: None,
         fee_role: None,
+        funding_rate: None,
     };
     state.next_kernel_event_id = state.next_kernel_event_id.saturating_add(1);
 

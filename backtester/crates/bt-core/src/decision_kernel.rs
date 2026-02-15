@@ -19,6 +19,7 @@ pub enum MarketSignal {
     Buy,
     Sell,
     Neutral,
+    Funding,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +61,10 @@ pub struct MarketEvent {
     /// Fee role override: `None` defaults to Taker.
     #[serde(default)]
     pub fee_role: Option<accounting::FeeRole>,
+    /// Funding rate for settlement events.  Only meaningful when
+    /// `signal == MarketSignal::Funding`.  Positive rate means longs pay shorts.
+    #[serde(default)]
+    pub funding_rate: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -95,6 +100,9 @@ pub struct Position {
     /// Maximum favorable excursion in USD (best unrealised profit).
     #[serde(default)]
     pub mfe_usd: f64,
+    /// Timestamp (ms) of the last funding settlement applied to this position.
+    #[serde(default)]
+    pub last_funding_ms: Option<i64>,
 }
 
 /// Canonical strategy state persisted between steps.
@@ -250,7 +258,7 @@ fn side_from_signal(signal: MarketSignal) -> Option<PositionSide> {
     match signal {
         MarketSignal::Buy => Some(PositionSide::Long),
         MarketSignal::Sell => Some(PositionSide::Short),
-        MarketSignal::Neutral => None,
+        MarketSignal::Neutral | MarketSignal::Funding => None,
     }
 }
 
@@ -349,6 +357,7 @@ fn apply_open(
                 trailing_sl: None,
                 mae_usd: 0.0,
                 mfe_usd: 0.0,
+                last_funding_ms: None,
             },
         );
     }
@@ -485,6 +494,36 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
         return DecisionResult {
             schema_version: KERNEL_SCHEMA_VERSION,
             state: state.clone(),
+            intents: vec![],
+            fills: vec![],
+            diagnostics,
+        };
+    }
+
+    // ---- Funding settlement: cash-only adjustment, no order intents. ----
+    if event.signal == MarketSignal::Funding {
+        let mut next_state = state.clone();
+        next_state.step = next_state.step.saturating_add(1);
+        next_state.timestamp_ms = event.timestamp_ms;
+
+        if let Some(rate) = event.funding_rate {
+            if rate != 0.0 {
+                if let Some(pos) = next_state.positions.get_mut(&event.symbol) {
+                    let is_long = pos.side == PositionSide::Long;
+                    let delta =
+                        accounting::funding_delta(is_long, pos.quantity, event.price, rate);
+                    next_state.cash_usd = quantise(next_state.cash_usd + delta);
+                    pos.last_funding_ms = Some(event.timestamp_ms);
+                    pos.updated_at_ms = event.timestamp_ms;
+                }
+            }
+        }
+
+        diagnostics.intent_count = 0;
+        diagnostics.fill_count = 0;
+        return DecisionResult {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            state: next_state,
             intents: vec![],
             fills: vec![],
             diagnostics,
@@ -652,6 +691,7 @@ mod tests {
             notional_hint_usd: notional_hint,
             close_fraction: None,
             fee_role: None,
+            funding_rate: None,
         }
     }
 
@@ -729,6 +769,7 @@ mod tests {
             notional_hint_usd: None,
             close_fraction: None,
             fee_role: None,
+            funding_rate: None,
         };
         let close_state = open_result.state;
         let close_result = step(&close_state, &close_event, &params);
@@ -787,6 +828,7 @@ mod tests {
             notional_hint_usd: None,
             close_fraction: Some(fraction),
             fee_role: None,
+            funding_rate: None,
         }
     }
 
@@ -1040,6 +1082,7 @@ mod tests {
             notional_hint_usd: Some(8_000.0),
             close_fraction: None,
             fee_role: None,
+            funding_rate: None,
         };
         let r2 = step(&r1.state, &add_evt, &params);
         let pos2 = r2.state.positions.get("BTC").unwrap();
@@ -1082,6 +1125,7 @@ mod tests {
             notional_hint_usd: Some(5_000.0),
             close_fraction: None,
             fee_role: None,
+            funding_rate: None,
         };
         let r2 = step(&r1.state, &add_evt, &params);
         let pos2 = r2.state.positions.get("BTC").unwrap();
@@ -1128,6 +1172,7 @@ mod tests {
             notional_hint_usd: Some(11_000.0),
             close_fraction: None,
             fee_role: None,
+            funding_rate: None,
         };
         let r2 = step(&r1.state, &e2, &params);
 
@@ -1141,6 +1186,7 @@ mod tests {
             notional_hint_usd: Some(9_000.0),
             close_fraction: None,
             fee_role: None,
+            funding_rate: None,
         };
         let r3 = step(&r2.state, &e3, &params);
         let pos3 = r3.state.positions.get("BTC").unwrap();
@@ -1199,6 +1245,7 @@ mod tests {
             notional_hint_usd: Some(5_000.0),
             close_fraction: None,
             fee_role: None,
+            funding_rate: None,
         };
         let r2 = step(&r1.state, &add1, &params);
         assert_eq!(r2.state.positions.get("BTC").unwrap().adds_count, 1);
@@ -1230,6 +1277,7 @@ mod tests {
         assert_eq!(pos.trailing_sl, None);
         assert!((pos.mae_usd - 0.0).abs() < f64::EPSILON);
         assert!((pos.mfe_usd - 0.0).abs() < f64::EPSILON);
+        assert_eq!(pos.last_funding_ms, None);
     }
 
     #[test]
@@ -1263,6 +1311,7 @@ mod tests {
             notional_hint_usd: Some(5_000.0),
             close_fraction: None,
             fee_role: None,
+            funding_rate: None,
         };
         let r2 = step(&r1.state, &add_evt, &params);
         let pos2 = r2.state.positions.get("BTC").unwrap();
@@ -1294,6 +1343,7 @@ mod tests {
             trailing_sl: Some(3_300.0),
             mae_usd: -400.0,
             mfe_usd: 600.0,
+            last_funding_ms: Some(1_500),
         };
 
         let json = serde_json::to_string(&pos).unwrap();
@@ -1422,6 +1472,181 @@ mod tests {
             "cash savings: {} != expected {}",
             actual_savings,
             expected_savings,
+        );
+    }
+
+    // ---- Funding settlement tests ----
+
+    fn funding_event(symbol: &str, price: f64, rate: f64) -> MarketEvent {
+        MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 500,
+            timestamp_ms: 5_000,
+            symbol: symbol.to_string(),
+            signal: MarketSignal::Funding,
+            price,
+            notional_hint_usd: None,
+            close_fraction: None,
+            fee_role: None,
+            funding_rate: Some(rate),
+        }
+    }
+
+    #[test]
+    fn funding_long_positive_rate_decreases_cash() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams::default();
+        let cash_before = state.cash_usd;
+        let pos = state.positions.get("BTC").unwrap();
+        let qty = pos.quantity;
+
+        let rate = 0.0001; // positive
+        let event = funding_event("BTC", 10_000.0, rate);
+        let result = step(&state, &event, &params);
+
+        // Long pays positive funding: cash should decrease.
+        let expected_delta = accounting::funding_delta(true, qty, 10_000.0, rate);
+        assert!(expected_delta < 0.0, "long+positive rate delta should be negative");
+        let expected_cash = accounting::quantize(cash_before + expected_delta);
+        assert!(
+            (result.state.cash_usd - expected_cash).abs() < 1e-12,
+            "funding long cash: {} != expected {}",
+            result.state.cash_usd,
+            expected_cash,
+        );
+        // No intents or fills.
+        assert!(result.intents.is_empty());
+        assert!(result.fills.is_empty());
+        // Position still exists, unchanged quantity.
+        let pos_after = result.state.positions.get("BTC").unwrap();
+        assert!((pos_after.quantity - qty).abs() < 1e-12);
+        assert_eq!(pos_after.last_funding_ms, Some(5_000));
+    }
+
+    #[test]
+    fn funding_short_positive_rate_increases_cash() {
+        // Open a short position.
+        let state = init_state();
+        let params = KernelParams {
+            allow_reverse: false,
+            ..KernelParams::default()
+        };
+        let mut open_evt = event_with_signal("BTC", MarketSignal::Sell);
+        open_evt.notional_hint_usd = Some(10_000.0);
+        let open_result = step(&state, &open_evt, &params);
+        let short_state = open_result.state;
+        let cash_before = short_state.cash_usd;
+        let pos = short_state.positions.get("BTC").unwrap();
+        let qty = pos.quantity;
+        assert_eq!(pos.side, PositionSide::Short);
+
+        let rate = 0.0001;
+        let event = funding_event("BTC", 10_000.0, rate);
+        let result = step(&short_state, &event, &params);
+
+        // Short receives positive funding: cash should increase.
+        let expected_delta = accounting::funding_delta(false, qty, 10_000.0, rate);
+        assert!(expected_delta > 0.0, "short+positive rate delta should be positive");
+        let expected_cash = accounting::quantize(cash_before + expected_delta);
+        assert!(
+            (result.state.cash_usd - expected_cash).abs() < 1e-12,
+            "funding short cash: {} != expected {}",
+            result.state.cash_usd,
+            expected_cash,
+        );
+        assert!(result.intents.is_empty());
+        assert!(result.fills.is_empty());
+    }
+
+    #[test]
+    fn funding_zero_rate_no_cash_change() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams::default();
+        let cash_before = state.cash_usd;
+
+        let event = funding_event("BTC", 10_000.0, 0.0);
+        let result = step(&state, &event, &params);
+
+        assert!(
+            (result.state.cash_usd - cash_before).abs() < 1e-12,
+            "zero rate should not change cash",
+        );
+        // last_funding_ms should NOT be updated for zero rate.
+        let pos = result.state.positions.get("BTC").unwrap();
+        assert_eq!(pos.last_funding_ms, None);
+    }
+
+    #[test]
+    fn funding_no_position_no_cash_change() {
+        let state = init_state(); // no positions
+        let params = KernelParams::default();
+        let cash_before = state.cash_usd;
+
+        let event = funding_event("BTC", 10_000.0, 0.0001);
+        let result = step(&state, &event, &params);
+
+        assert!(
+            (result.state.cash_usd - cash_before).abs() < 1e-12,
+            "no position → no funding effect",
+        );
+        assert!(result.intents.is_empty());
+        assert!(result.fills.is_empty());
+    }
+
+    #[test]
+    fn funding_no_rate_field_no_cash_change() {
+        // Funding signal but funding_rate = None → no effect.
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams::default();
+        let cash_before = state.cash_usd;
+
+        let mut event = funding_event("BTC", 10_000.0, 0.0);
+        event.funding_rate = None;
+        let result = step(&state, &event, &params);
+
+        assert!(
+            (result.state.cash_usd - cash_before).abs() < 1e-12,
+            "None funding_rate should not change cash",
+        );
+    }
+
+    #[test]
+    fn funding_advances_step_counter() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams::default();
+        let step_before = state.step;
+
+        let event = funding_event("BTC", 10_000.0, 0.0001);
+        let result = step(&state, &event, &params);
+
+        assert_eq!(result.state.step, step_before + 1);
+        assert_eq!(result.state.timestamp_ms, 5_000);
+    }
+
+    #[test]
+    fn funding_deterministic() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams::default();
+
+        let event = funding_event("BTC", 10_000.0, 0.0001);
+        let r1 = step(&state, &event, &params);
+        let r2 = step(&state, &event, &params);
+        assert_eq!(r1, r2, "funding settlement must be deterministic");
+    }
+
+    #[test]
+    fn funding_wrong_symbol_no_effect() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let params = KernelParams::default();
+        let cash_before = state.cash_usd;
+
+        // Funding for ETH, but only BTC position exists.
+        let event = funding_event("ETH", 3_000.0, 0.0001);
+        let result = step(&state, &event, &params);
+
+        assert!(
+            (result.state.cash_usd - cash_before).abs() < 1e-12,
+            "funding for wrong symbol should not change cash",
         );
     }
 }
