@@ -8,10 +8,13 @@
 use std::collections::HashMap;
 
 use pyo3::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{self, Value, json};
 
+use bt_core::candle::OhlcvBar;
+use bt_core::config::IndicatorsConfig;
 use bt_core::decision_kernel;
+use bt_core::indicators::IndicatorBank;
 
 const ERROR_OK_PREFIX: &str = "bt-runtime:";
 
@@ -361,6 +364,79 @@ fn load_state(path: &str) -> PyResult<String> {
     Ok(json)
 }
 
+// ---------------------------------------------------------------------------
+// IndicatorSnapshot bridge — compute_indicators
+// ---------------------------------------------------------------------------
+
+/// Input candle for JSON deserialization. Field names match the Python
+/// convention (`open`, `high`, …) rather than the compact `OhlcvBar` names.
+#[derive(Deserialize)]
+struct CandleInput {
+    t: i64,
+    open: f64,
+    high: f64,
+    low: f64,
+    close: f64,
+    volume: f64,
+}
+
+impl CandleInput {
+    fn to_bar(&self) -> OhlcvBar {
+        OhlcvBar {
+            t: self.t,
+            t_close: self.t, // not meaningful for indicator computation
+            o: self.open,
+            h: self.high,
+            l: self.low,
+            c: self.close,
+            v: self.volume,
+            n: 0,
+        }
+    }
+}
+
+/// Compute indicators from a JSON array of candles and an optional config,
+/// returning the final `IndicatorSnapshot` as a JSON string.
+///
+/// `candles_json`: `[{"t": <ms>, "open": f64, "high": f64, "low": f64, "close": f64, "volume": f64}, ...]`
+/// `config_json`:  JSON matching `IndicatorsConfig` fields, or `"null"`/`"{}"` for defaults.
+#[pyfunction]
+fn compute_indicators(candles_json: &str, config_json: &str) -> PyResult<String> {
+    let candles: Vec<CandleInput> = serde_json::from_str(candles_json).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("Invalid candles JSON: {e}"))
+    })?;
+
+    if candles.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "candles array must not be empty",
+        ));
+    }
+
+    let cfg: IndicatorsConfig = if config_json.trim().is_empty()
+        || config_json.trim() == "null"
+        || config_json.trim() == "{}"
+    {
+        IndicatorsConfig::default()
+    } else {
+        serde_json::from_str(config_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid config JSON: {e}"))
+        })?
+    };
+
+    let mut bank = IndicatorBank::new(&cfg, true);
+
+    for candle in &candles {
+        bank.update(&candle.to_bar());
+    }
+
+    let snap = bank.latest_snap();
+    serde_json::to_string(&snap).map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "Failed to serialise IndicatorSnapshot: {e}"
+        ))
+    })
+}
+
 #[pymodule]
 fn bt_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(step_decision, m)?)?;
@@ -372,5 +448,6 @@ fn bt_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(save_state, m)?)?;
     m.add_function(wrap_pyfunction!(load_state, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_indicators, m)?)?;
     Ok(())
 }
