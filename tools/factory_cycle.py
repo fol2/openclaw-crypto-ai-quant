@@ -1099,7 +1099,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional modes.<mode> overlay to materialise into global for this run (e.g. primary, fallback).",
     )
 
-    ap.add_argument("--sweep-spec", default="backtester/sweeps/allgpu_60k.yaml", help="Sweep spec YAML path.")
+    ap.add_argument("--sweep-spec", default="backtester/sweeps/full_144v.yaml", help="Sweep spec YAML path.")
     ap.add_argument("--interval", default="", help="Main interval for sweep/replay (default: from effective YAML).")
     ap.add_argument("--candles-db", default="candles_dbs", help="Candle DB path (dir or glob).")
     ap.add_argument("--funding-db", default="candles_dbs/funding_rates.db", help="Funding DB path.")
@@ -1118,6 +1118,8 @@ def main(argv: list[str] | None = None) -> int:
 
     ap.add_argument("--gpu", action="store_true", help="Use GPU sweep (requires CUDA build/runtime).")
     ap.add_argument("--tpe", action="store_true", help="Use TPE Bayesian optimisation for GPU sweeps (requires --gpu).")
+    ap.add_argument("--tpe-batch", type=int, default=4096, help="TPE batch size (trials per GPU batch, default: 4096).")
+    ap.add_argument("--tpe-seed", type=int, default=None, help="TPE RNG seed (default: from profile).")
     ap.add_argument(
         "--allow-unsafe-gpu-sweep",
         action="store_true",
@@ -1354,6 +1356,10 @@ def main(argv: list[str] | None = None) -> int:
         factory_argv.append("--gpu")
     if bool(run_with_tpe):
         factory_argv.append("--tpe")
+        if args.tpe_batch:
+            factory_argv += ["--tpe-batch", str(int(args.tpe_batch))]
+        if args.tpe_seed is not None:
+            factory_argv += ["--tpe-seed", str(int(args.tpe_seed))]
     if bool(args.allow_unsafe_gpu_sweep):
         factory_argv.append("--allow-unsafe-gpu-sweep")
     if bool(args.walk_forward):
