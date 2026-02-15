@@ -340,6 +340,24 @@ fn get_equity(state_json: &str, prices_json: &str) -> PyResult<f64> {
     Ok(equity)
 }
 
+/// Extract positions map from kernel state as JSON.
+///
+/// Returns the `positions` field of `StrategyState` as a JSON string
+/// (a map of symbol -> Position).  This is the SSOT for position state
+/// (AQC-814).
+#[pyfunction]
+fn get_positions(state_json: &str) -> PyResult<String> {
+    let state: decision_kernel::StrategyState =
+        serde_json::from_str(state_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid state JSON: {e}"))
+        })?;
+    serde_json::to_string(&state.positions).map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "Failed to serialise positions: {e}"
+        ))
+    })
+}
+
 /// Validate and persist state JSON to a file.
 #[pyfunction]
 fn save_state(state_json: &str, path: &str) -> PyResult<()> {
@@ -443,6 +461,7 @@ fn bt_runtime(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(step_full, m)?)?;
     m.add_function(wrap_pyfunction!(apply_funding, m)?)?;
     m.add_function(wrap_pyfunction!(get_equity, m)?)?;
+    m.add_function(wrap_pyfunction!(get_positions, m)?)?;
     m.add_function(wrap_pyfunction!(default_kernel_state_json, m)?)?;
     m.add_function(wrap_pyfunction!(default_kernel_params_json, m)?)?;
     m.add_function(wrap_pyfunction!(schema_version, m)?)?;
