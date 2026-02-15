@@ -28,6 +28,211 @@ except ImportError:
     _BT_RUNTIME_AVAILABLE = False
 
 
+# ---------------------------------------------------------------------------
+# IndicatorSnapshot bridge (AQC-811)
+# ---------------------------------------------------------------------------
+
+# Canonical field list matching Rust IndicatorSnapshot (bt-core indicators/mod.rs).
+_INDICATOR_SNAPSHOT_FIELDS: list[tuple[str, type]] = [
+    ("close", float), ("high", float), ("low", float), ("open", float),
+    ("volume", float), ("t", int),
+    ("ema_slow", float), ("ema_fast", float), ("ema_macro", float),
+    ("adx", float), ("adx_pos", float), ("adx_neg", float), ("adx_slope", float),
+    ("bb_upper", float), ("bb_lower", float), ("bb_width", float),
+    ("bb_width_avg", float), ("bb_width_ratio", float),
+    ("atr", float), ("atr_slope", float), ("avg_atr", float),
+    ("rsi", float), ("stoch_rsi_k", float), ("stoch_rsi_d", float),
+    ("macd_hist", float), ("prev_macd_hist", float),
+    ("prev2_macd_hist", float), ("prev3_macd_hist", float),
+    ("vol_sma", float), ("vol_trend", bool),
+    ("prev_close", float), ("prev_ema_fast", float), ("prev_ema_slow", float),
+    ("bar_count", int),
+    ("funding_rate", float),
+]
+
+
+def build_indicator_snapshot(df, symbol=None, config=None):
+    """Build an IndicatorSnapshot dict matching the Rust schema from a pandas DataFrame.
+
+    If bt_runtime is available, uses the Rust IndicatorBank for exact numerical
+    match.  Otherwise, falls back to Python ta-based computation.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must have columns: Open, High, Low, Close, Volume.
+        The index should be a DatetimeIndex (or have a 'Timestamp' column) with
+        millisecond-epoch semantics.
+    symbol : str, optional
+        Trading symbol (unused currently; reserved for per-symbol config lookup).
+    config : dict, optional
+        Indicator config override matching Rust ``IndicatorsConfig`` fields
+        (e.g. ``ema_slow_window``, ``atr_window``).  ``None`` or ``{}`` uses
+        defaults.
+
+    Returns
+    -------
+    dict
+        IndicatorSnapshot with all 35 fields matching the Rust schema.
+    """
+    if len(df) == 0:
+        raise ValueError("DataFrame must not be empty")
+
+    # --- resolve timestamp column ---
+    if "Timestamp" in df.columns:
+        timestamps = df["Timestamp"].values
+    elif hasattr(df.index, "astype"):
+        try:
+            timestamps = df.index.astype("int64") // 10**6  # ns -> ms
+        except Exception:
+            timestamps = list(range(len(df)))
+    else:
+        timestamps = list(range(len(df)))
+
+    # --- Rust path (preferred) ---
+    if _BT_RUNTIME_AVAILABLE:
+        candles = []
+        for i in range(len(df)):
+            row = df.iloc[i]
+            candles.append({
+                "t": int(timestamps[i]) if hasattr(timestamps, "__getitem__") else int(timestamps),
+                "open": float(row["Open"]),
+                "high": float(row["High"]),
+                "low": float(row["Low"]),
+                "close": float(row["Close"]),
+                "volume": float(row["Volume"]),
+            })
+        candles_json = json.dumps(candles)
+        config_json = json.dumps(config) if config else "{}"
+        result_json = _bt_runtime.compute_indicators(candles_json, config_json)
+        return json.loads(result_json)
+
+    # --- Python fallback ---
+    return _build_indicator_snapshot_python(df, timestamps, config)
+
+
+def _build_indicator_snapshot_python(df, timestamps, config):
+    """Pure-Python fallback using the ``ta`` library.
+
+    Mirrors the Rust IndicatorBank computation as closely as possible given
+    that ``ta`` uses pandas rolling windows (not incremental EMA seeding), so
+    there will be small numerical differences vs Rust on early bars.
+    """
+    cfg = config or {}
+    ema_slow_win = int(cfg.get("ema_slow_window", 50))
+    ema_fast_win = int(cfg.get("ema_fast_window", 20))
+    ema_macro_win = int(cfg.get("ema_macro_window", 200))
+    adx_win = int(cfg.get("adx_window", 14))
+    bb_win = int(cfg.get("bb_window", 20))
+    bb_width_avg_win = int(cfg.get("bb_width_avg_window", 30))
+    atr_win = int(cfg.get("atr_window", 14))
+    rsi_win = int(cfg.get("rsi_window", 14))
+    vol_sma_win = int(cfg.get("vol_sma_window", 20))
+    vol_trend_win = int(cfg.get("vol_trend_window", 5))
+    stoch_rsi_win = int(cfg.get("stoch_rsi_window", 14))
+    stoch_rsi_s1 = int(cfg.get("stoch_rsi_smooth1", 3))
+    stoch_rsi_s2 = int(cfg.get("stoch_rsi_smooth2", 3))
+    ave_avg_atr_win = int(cfg.get("ave_avg_atr_window", 50))
+
+    close = df["Close"]
+    high = df["High"]
+    low = df["Low"]
+    volume = df["Volume"]
+
+    ema_slow = ta.trend.ema_indicator(close, window=ema_slow_win)
+    ema_fast = ta.trend.ema_indicator(close, window=ema_fast_win)
+    ema_macro = ta.trend.ema_indicator(close, window=ema_macro_win)
+
+    adx_obj = ta.trend.ADXIndicator(high, low, close, window=adx_win)
+    adx_series = adx_obj.adx()
+    adx_pos_series = adx_obj.adx_pos()
+    adx_neg_series = adx_obj.adx_neg()
+
+    bb_obj = ta.volatility.BollingerBands(close, window=bb_win)
+    bb_upper = bb_obj.bollinger_hband()
+    bb_lower = bb_obj.bollinger_lband()
+    bb_width = (bb_upper - bb_lower) / close
+    bb_width_avg = bb_width.rolling(window=bb_width_avg_win).mean()
+
+    atr_series = ta.volatility.average_true_range(high, low, close, window=atr_win)
+    avg_atr_series = atr_series.rolling(window=ave_avg_atr_win).mean()
+
+    rsi_series = ta.momentum.rsi(close, window=rsi_win)
+
+    stoch_rsi_obj = ta.momentum.StochRSIIndicator(
+        close, window=stoch_rsi_win, smooth1=stoch_rsi_s1, smooth2=stoch_rsi_s2,
+    )
+    stoch_k_series = stoch_rsi_obj.stochrsi_k()
+    stoch_d_series = stoch_rsi_obj.stochrsi_d()
+
+    macd_obj = ta.trend.MACD(close, window_slow=26, window_fast=12, window_sign=9)
+    macd_hist = macd_obj.macd_diff()
+
+    vol_sma_series = volume.rolling(window=vol_sma_win).mean()
+    vol_trend_sma = volume.rolling(window=vol_trend_win).mean()
+
+    n = len(df)
+    last = n - 1
+
+    def _safe_float(series, idx, default=0.0):
+        try:
+            v = float(series.iloc[idx])
+            return v if v == v else default  # NaN check
+        except Exception:
+            return default
+
+    adx_val = _safe_float(adx_series, last)
+    prev_adx = _safe_float(adx_series, last - 1) if n > 1 else 0.0
+    atr_val = _safe_float(atr_series, last)
+    prev_atr = _safe_float(atr_series, last - 1) if n > 1 else 0.0
+
+    bb_w = _safe_float(bb_width, last)
+    bb_w_avg = _safe_float(bb_width_avg, last)
+    bb_w_ratio = bb_w / bb_w_avg if bb_w_avg > 0 else 1.0
+
+    vol_sma_val = _safe_float(vol_sma_series, last)
+    vol_trend_short = _safe_float(vol_trend_sma, last)
+    vol_trend_val = vol_trend_short > vol_sma_val
+
+    return {
+        "close": float(df["Close"].iloc[last]),
+        "high": float(df["High"].iloc[last]),
+        "low": float(df["Low"].iloc[last]),
+        "open": float(df["Open"].iloc[last]),
+        "volume": float(df["Volume"].iloc[last]),
+        "t": int(timestamps[last]),
+        "ema_slow": _safe_float(ema_slow, last),
+        "ema_fast": _safe_float(ema_fast, last),
+        "ema_macro": _safe_float(ema_macro, last),
+        "adx": adx_val,
+        "adx_pos": _safe_float(adx_pos_series, last),
+        "adx_neg": _safe_float(adx_neg_series, last),
+        "adx_slope": adx_val - prev_adx,
+        "bb_upper": _safe_float(bb_upper, last),
+        "bb_lower": _safe_float(bb_lower, last),
+        "bb_width": bb_w,
+        "bb_width_avg": bb_w_avg,
+        "bb_width_ratio": bb_w_ratio,
+        "atr": atr_val,
+        "atr_slope": atr_val - prev_atr,
+        "avg_atr": _safe_float(avg_atr_series, last),
+        "rsi": _safe_float(rsi_series, last),
+        "stoch_rsi_k": _safe_float(stoch_k_series, last),
+        "stoch_rsi_d": _safe_float(stoch_d_series, last),
+        "macd_hist": _safe_float(macd_hist, last),
+        "prev_macd_hist": _safe_float(macd_hist, last - 1) if n > 1 else 0.0,
+        "prev2_macd_hist": _safe_float(macd_hist, last - 2) if n > 2 else 0.0,
+        "prev3_macd_hist": _safe_float(macd_hist, last - 3) if n > 3 else 0.0,
+        "vol_sma": vol_sma_val,
+        "vol_trend": bool(vol_trend_val),
+        "prev_close": float(df["Close"].iloc[last - 1]) if n > 1 else 0.0,
+        "prev_ema_fast": _safe_float(ema_fast, last - 1) if n > 1 else 0.0,
+        "prev_ema_slow": _safe_float(ema_slow, last - 1) if n > 1 else 0.0,
+        "bar_count": n - 1,  # Rust counts 0-based (bars fed before latest)
+        "funding_rate": 0.0,
+    }
+
+
 def _json_default(o):
     try:
         if hasattr(o, "item"):
