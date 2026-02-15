@@ -2163,6 +2163,378 @@ def build_decision_gates(mode: str, decision_id: str) -> dict[str, Any] | None:
             pass
 
 
+# ── Decision Replay API (AQC-806) ───────────────────────────────────────
+
+
+# Column → IndicatorSnapshot field mapping for the kernel's MarketEvent.
+_CTX_TO_INDICATOR: dict[str, str] = {
+    "price": "close",
+    "rsi": "rsi",
+    "adx": "adx",
+    "adx_slope": "adx_slope",
+    "macd_hist": "macd_hist",
+    "ema_fast": "ema_fast",
+    "ema_slow": "ema_slow",
+    "ema_macro": "ema_macro",
+    "bb_width_ratio": "bb_width_ratio",
+    "stoch_k": "stoch_rsi_k",
+    "stoch_d": "stoch_rsi_d",
+    "atr": "atr",
+    "atr_slope": "atr_slope",
+    "volume": "volume",
+    "vol_sma": "vol_sma",
+}
+
+# Gate name → GateResult field mapping.
+_GATE_NAME_TO_FIELD: dict[str, str] = {
+    "ranging": "is_ranging",
+    "gate_ranging": "is_ranging",
+    "anomaly": "is_anomaly",
+    "gate_anomaly": "is_anomaly",
+    "extension": "is_extended",
+    "gate_extension": "is_extended",
+    "volume": "vol_confirm",
+    "gate_volume": "vol_confirm",
+    "adx_rising": "is_trending_up",
+    "gate_adx_rising": "is_trending_up",
+    "adx_threshold": "adx_above_min",
+    "adx": "adx_above_min",
+    "gate_adx": "adx_above_min",
+    "btc_alignment": "btc_ok_long",
+    "gate_btc_alignment": "btc_ok_long",
+}
+
+# Inverted gates: gate_passed=1 means the condition is NOT active.
+_INVERTED_GATES: set[str] = {
+    "is_ranging",
+    "is_anomaly",
+    "is_extended",
+}
+
+
+def _build_indicators_from_context(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Build a partial IndicatorSnapshot dict from a decision_context row."""
+    indicators: dict[str, Any] = {
+        "close": 0.0, "high": 0.0, "low": 0.0, "open": 0.0,
+        "volume": 0.0, "t": 0,
+        "ema_slow": 0.0, "ema_fast": 0.0, "ema_macro": 0.0,
+        "adx": 0.0, "adx_pos": 0.0, "adx_neg": 0.0, "adx_slope": 0.0,
+        "bb_upper": 0.0, "bb_lower": 0.0, "bb_width": 0.0,
+        "bb_width_avg": 0.0, "bb_width_ratio": 0.0,
+        "atr": 0.0, "atr_slope": 0.0, "avg_atr": 0.0,
+        "rsi": 50.0,
+        "stoch_rsi_k": 50.0, "stoch_rsi_d": 50.0,
+        "macd_hist": 0.0, "prev_macd_hist": 0.0,
+        "prev2_macd_hist": 0.0, "prev3_macd_hist": 0.0,
+        "vol_sma": 0.0, "vol_trend": False,
+        "prev_close": 0.0, "prev_ema_fast": 0.0, "prev_ema_slow": 0.0,
+        "bar_count": 100, "funding_rate": 0.0,
+    }
+    for ctx_col, ind_field in _CTX_TO_INDICATOR.items():
+        val = ctx.get(ctx_col)
+        if val is not None:
+            indicators[ind_field] = float(val)
+    # Also copy price → high/low/open for a minimal snapshot.
+    price = ctx.get("price")
+    if price is not None:
+        p = float(price)
+        indicators["close"] = p
+        indicators["high"] = p
+        indicators["low"] = p
+        indicators["open"] = p
+        indicators["prev_close"] = p
+    return indicators
+
+
+def _build_gate_result_from_evaluations(gates: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build a GateResult dict from gate_evaluations rows."""
+    result: dict[str, Any] = {
+        "is_ranging": False, "is_anomaly": False, "is_extended": False,
+        "vol_confirm": True, "is_trending_up": True, "adx_above_min": True,
+        "bullish_alignment": False, "bearish_alignment": False,
+        "btc_ok_long": True, "btc_ok_short": True,
+        "effective_min_adx": 20.0, "bb_width_ratio": 0.0, "dynamic_tp_mult": 1.0,
+        "rsi_long_limit": 70.0, "rsi_short_limit": 30.0,
+        "stoch_k": 50.0, "stoch_d": 50.0, "stoch_rsi_active": False,
+        "all_gates_pass": True,
+    }
+    for g in gates:
+        gate_name = str(g.get("gate_name", "")).strip().lower()
+        passed = bool(g.get("gate_passed", 0))
+        field = _GATE_NAME_TO_FIELD.get(gate_name)
+        if field:
+            if field in _INVERTED_GATES:
+                # For inverted gates: passed=True means NOT ranging/anomaly/extended.
+                result[field] = not passed
+            else:
+                result[field] = passed
+    # Recompute all_gates_pass from constituent gates.
+    result["all_gates_pass"] = (
+        result["adx_above_min"]
+        and not result["is_ranging"]
+        and not result["is_anomaly"]
+        and not result["is_extended"]
+        and result["vol_confirm"]
+        and result["is_trending_up"]
+    )
+    return result
+
+
+def _infer_signal(event_type: str, action_taken: str | None) -> str:
+    """Map decision event_type + action_taken to a MarketSignal string."""
+    et = (event_type or "").strip().lower()
+    act = (action_taken or "").strip().lower()
+    if et in ("entry_signal", "gate_block"):
+        if "short" in act or "sell" in act:
+            return "Sell"
+        return "Buy"
+    if et in ("exit_check", "exit_signal"):
+        return "PriceUpdate"
+    if et == "fill":
+        if "short" in act or "sell" in act:
+            return "Sell"
+        return "Buy"
+    # Default to Buy for unknown entry-like events.
+    return "Buy"
+
+
+def _compute_replay_diff(
+    original_event: dict[str, Any],
+    original_gates: list[dict[str, Any]],
+    replayed: dict[str, Any],
+) -> dict[str, Any]:
+    """Compare original decision outcome vs replayed kernel result."""
+    details: list[str] = []
+
+    # --- Gate comparison ---
+    replayed_diag = replayed.get("diagnostics") or {}
+    replayed_thresholds = replayed_diag.get("applied_thresholds") or []
+    replayed_gate_blocked = replayed_diag.get("gate_blocked", False)
+
+    # Build original gate pass/fail map.
+    orig_gate_map: dict[str, bool] = {}
+    for g in original_gates:
+        gn = str(g.get("gate_name", "")).strip().lower()
+        orig_gate_map[gn] = bool(g.get("gate_passed", 0))
+
+    # Build replayed gate map from applied_thresholds.
+    replay_gate_map: dict[str, bool] = {}
+    for t in replayed_thresholds:
+        tn = str(t.get("name", "")).strip().lower()
+        replay_gate_map[tn] = bool(t.get("passed", False))
+
+    gates_match = True
+    for gn, orig_passed in orig_gate_map.items():
+        # Try exact match, then normalized forms.
+        replay_passed = replay_gate_map.get(gn)
+        if replay_passed is None:
+            # Try with _gate suffix / prefix variations.
+            for rn, rp in replay_gate_map.items():
+                if gn in rn or rn in gn:
+                    replay_passed = rp
+                    break
+        if replay_passed is not None and replay_passed != orig_passed:
+            gates_match = False
+            details.append(f"gate '{gn}': original={orig_passed}, replayed={replay_passed}")
+
+    # --- Outcome comparison ---
+    orig_status = str(original_event.get("status", "")).strip().lower()
+    orig_approved = orig_status in ("executed", "approved", "filled")
+
+    replayed_intents = replayed.get("intents") or []
+    replay_approved = len(replayed_intents) > 0 and not replayed_gate_blocked
+
+    outcome_match = orig_approved == replay_approved
+    if not outcome_match:
+        details.append(
+            f"outcome: original={'approved' if orig_approved else 'rejected'}, "
+            f"replayed={'approved' if replay_approved else 'rejected'}"
+        )
+
+    return {
+        "gates_match": gates_match,
+        "outcome_match": outcome_match,
+        "details": details,
+    }
+
+
+def build_decision_replay(
+    mode: str,
+    decision_id: str,
+    *,
+    state_override_json: str | None = None,
+) -> dict[str, Any]:
+    """Replay a decision through the kernel and diff against the original.
+
+    Returns a dict with ``ok``, ``decision_id``, ``original``, ``replayed``,
+    and ``diff`` keys.
+    """
+    if not _BT_RUNTIME_OK:
+        return {"ok": False, "error": "bt_runtime_not_available", "decision_id": decision_id}
+
+    mode2 = (mode or "paper").strip().lower()
+    db_path, _log_path = mode_paths(mode2)
+
+    if not db_path.exists():
+        return {"ok": False, "error": "db_missing", "decision_id": decision_id}
+
+    try:
+        con = connect_db_ro(db_path)
+    except Exception as e:
+        return {"ok": False, "error": f"db_open_failed:{e}", "decision_id": decision_id}
+
+    try:
+        if not _has_table(con, "decision_events"):
+            return {"ok": False, "error": "table_missing", "decision_id": decision_id}
+
+        # 1. Fetch the original decision event.
+        decision = _fetchone(
+            con,
+            """
+            SELECT id, timestamp_ms, symbol, event_type, status, decision_phase,
+                   parent_decision_id, trade_id, triggered_by, action_taken,
+                   rejection_reason, context_json
+            FROM decision_events WHERE id = ?
+            """,
+            (decision_id,),
+        )
+        if not decision:
+            return {"ok": False, "error": "not_found", "decision_id": decision_id}
+
+        # 2. Fetch indicator context.
+        ctx: dict[str, Any] = {}
+        if _has_table(con, "decision_context"):
+            ctx_row = _fetchone(
+                con,
+                "SELECT * FROM decision_context WHERE decision_id = ?",
+                (decision_id,),
+            )
+            if ctx_row:
+                ctx = ctx_row
+
+        # 3. Fetch gate evaluations.
+        gates: list[dict[str, Any]] = []
+        if _has_table(con, "gate_evaluations"):
+            gates = _fetchall(
+                con,
+                """
+                SELECT id, decision_id, gate_name, gate_passed, metric_value,
+                       threshold_value, operator, explanation
+                FROM gate_evaluations WHERE decision_id = ?
+                ORDER BY id ASC
+                """,
+                (decision_id,),
+            )
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+    # 4. Build indicator snapshot from context.
+    indicators = _build_indicators_from_context(ctx)
+
+    # Build original response summary.
+    original_indicators = {k: v for k, v in ctx.items() if k not in ("decision_id", "symbol")}
+    original = {
+        "event_type": decision.get("event_type"),
+        "status": decision.get("status"),
+        "action_taken": decision.get("action_taken"),
+        "indicators": original_indicators,
+        "gates": gates,
+    }
+
+    # 5. Build gate result from evaluations.
+    gate_result = _build_gate_result_from_evaluations(gates)
+
+    # Carry over alignment from context if available.
+    if ctx.get("bullish_alignment") is not None:
+        gate_result["bullish_alignment"] = bool(ctx["bullish_alignment"])
+    if ctx.get("bearish_alignment") is not None:
+        gate_result["bearish_alignment"] = bool(ctx["bearish_alignment"])
+
+    # 6. Build the MarketEvent JSON.
+    signal = _infer_signal(
+        decision.get("event_type", ""),
+        decision.get("action_taken"),
+    )
+    event_json_obj: dict[str, Any] = {
+        "schema_version": 8,
+        "event_id": abs(hash(decision_id)) % (2**63),
+        "timestamp_ms": decision.get("timestamp_ms", 0),
+        "symbol": decision.get("symbol", "BTCUSDT"),
+        "signal": signal,
+        "price": float(ctx.get("price", 0) or 0),
+        "indicators": indicators if signal == "PriceUpdate" else None,
+        "gate_result": gate_result if signal in ("Buy", "Sell") else None,
+    }
+
+    # 7. Load strategy state.
+    if state_override_json:
+        state_json = state_override_json
+    else:
+        state_path = _find_kernel_state_path(db_path)
+        if state_path is None:
+            return {
+                "ok": False, "error": "kernel_state_not_found",
+                "decision_id": decision_id, "original": original,
+            }
+        try:
+            state_json = _bt_runtime.load_state(str(state_path))
+        except Exception as e:
+            return {
+                "ok": False, "error": f"load_state_failed:{e}",
+                "decision_id": decision_id, "original": original,
+            }
+
+    # 8. Load or default kernel params.
+    params_json: str | None = None
+    params_path = db_path.parent / "kernel_params.json"
+    if params_path.exists():
+        try:
+            params_json = params_path.read_text(encoding="utf-8")
+        except Exception:
+            params_json = None
+    if not params_json:
+        try:
+            params_json = _bt_runtime.default_kernel_params_json()
+        except Exception:
+            params_json = '{"schema_version":8}'
+
+    # 9. Call the kernel.
+    event_json_str = json.dumps(event_json_obj)
+    try:
+        result_json = _bt_runtime.step_decision(state_json, event_json_str, params_json)
+    except Exception as e:
+        return {
+            "ok": False, "error": f"step_decision_failed:{e}",
+            "decision_id": decision_id, "original": original,
+        }
+
+    try:
+        replayed = json.loads(result_json)
+    except Exception as e:
+        return {
+            "ok": False, "error": f"result_parse_failed:{e}",
+            "decision_id": decision_id, "original": original,
+        }
+
+    # 10. Compute diff.
+    diff = _compute_replay_diff(decision, gates, replayed)
+
+    return {
+        "ok": True,
+        "decision_id": decision_id,
+        "original": original,
+        "replayed": {
+            "intents": replayed.get("intents", []),
+            "fills": replayed.get("fills", []),
+            "diagnostics": replayed.get("diagnostics", {}),
+        },
+        "diff": diff,
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "aiq-monitor/0.1"
 
@@ -2348,6 +2720,52 @@ class Handler(BaseHTTPRequestHandler):
             qs = parse_qs(parsed.query or "")
             mode = (qs.get("mode") or ["paper"])[0]
             self._send_text(build_prometheus_metrics(mode))
+            return
+
+        self._send_text("not found", status=404)
+
+    # ── POST endpoints ───────────────────────────────────────────────
+    def do_POST(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        path = parsed.path or "/"
+
+        # Read request body.
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except (TypeError, ValueError):
+            content_length = 0
+        raw_body = self.rfile.read(content_length) if content_length > 0 else b""
+
+        if path == "/api/v2/decisions/replay":
+            try:
+                body = json.loads(raw_body) if raw_body else {}
+            except (json.JSONDecodeError, ValueError):
+                self._send_json({"ok": False, "error": "invalid_json"}, status=400)
+                return
+
+            decision_id = body.get("decision_id")
+            if not decision_id:
+                self._send_json({"ok": False, "error": "missing_decision_id"}, status=400)
+                return
+
+            qs = parse_qs(parsed.query or "")
+            mode = (qs.get("mode") or ["paper"])[0]
+            state_override_json = body.get("state_override_json")
+
+            result = build_decision_replay(
+                mode,
+                str(decision_id),
+                state_override_json=state_override_json,
+            )
+
+            if result.get("error") == "not_found":
+                self._send_json(result, status=404)
+            elif result.get("error") == "bt_runtime_not_available":
+                self._send_json(result, status=503)
+            elif not result.get("ok"):
+                self._send_json(result, status=500)
+            else:
+                self._send_json(result)
             return
 
         self._send_text("not found", status=404)

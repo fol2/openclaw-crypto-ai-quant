@@ -501,3 +501,378 @@ class TestDecisionGates:
         result = mod.build_decision_gates("paper", "G002")
         assert result is not None
         assert result["gates"] == []
+
+
+# ── POST /api/v2/decisions/replay (AQC-806) ─────────────────────────────
+
+
+def _make_step_decision_stub(
+    intents: list | None = None,
+    fills: list | None = None,
+    gate_blocked: bool = False,
+    applied_thresholds: list | None = None,
+):
+    """Return a callable that mimics bt_runtime.step_decision."""
+    result = {
+        "schema_version": 8,
+        "state": {
+            "schema_version": 8,
+            "timestamp_ms": 0,
+            "step": 1,
+            "cash_usd": 10000.0,
+            "positions": {},
+            "last_entry_ms": {},
+            "last_exit_ms": {},
+            "last_close_info": {},
+        },
+        "intents": intents or [],
+        "fills": fills or [],
+        "diagnostics": {
+            "schema_version": 8,
+            "errors": [],
+            "warnings": [],
+            "intent_count": len(intents or []),
+            "fill_count": len(fills or []),
+            "step": 1,
+            "gate_blocked": gate_blocked,
+            "gate_block_reasons": [],
+            "applied_thresholds": applied_thresholds or [],
+        },
+    }
+
+    def _stub(_state_json: str, _event_json: str, _params_json: str) -> str:
+        return json.dumps(result)
+
+    return _stub
+
+
+@pytest.fixture()
+def replay_db(tmp_path, monkeypatch):
+    """Create a temp DB with decision data and stub bt_runtime for replay tests.
+
+    Returns (db_path, module, bt_runtime_stub_module).
+    """
+    db_path = tmp_path / "trading_engine.db"
+    monkeypatch.setenv("AIQ_MONITOR_PAPER_DB", str(db_path))
+
+    # Create a kernel state file next to the DB.
+    state_path = tmp_path / "kernel_state.json"
+    state_path.write_text(json.dumps({
+        "schema_version": 8,
+        "timestamp_ms": 0,
+        "step": 0,
+        "cash_usd": 10000.0,
+        "positions": {},
+        "last_entry_ms": {},
+        "last_exit_ms": {},
+        "last_close_info": {},
+    }))
+
+    stubbed = _stub_missing_modules()
+
+    # Create the DB and schema.
+    con = sqlite3.connect(str(db_path))
+    con.executescript("""
+        CREATE TABLE IF NOT EXISTS decision_events (
+            id TEXT PRIMARY KEY,
+            timestamp_ms INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            decision_phase TEXT NOT NULL,
+            parent_decision_id TEXT,
+            trade_id INTEGER,
+            triggered_by TEXT,
+            action_taken TEXT,
+            rejection_reason TEXT,
+            context_json TEXT
+        );
+        CREATE TABLE IF NOT EXISTS decision_context (
+            decision_id TEXT PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            price REAL, rsi REAL, adx REAL, adx_slope REAL,
+            macd_hist REAL, ema_fast REAL, ema_slow REAL, ema_macro REAL,
+            bb_width_ratio REAL, stoch_k REAL, stoch_d REAL,
+            atr REAL, atr_slope REAL, volume REAL, vol_sma REAL,
+            rsi_entry_threshold REAL,
+            min_adx_threshold REAL,
+            sl_price REAL, tp_price REAL, trailing_sl REAL,
+            gate_ranging INTEGER, gate_anomaly INTEGER, gate_extension INTEGER,
+            gate_adx INTEGER, gate_volume INTEGER, gate_adx_rising INTEGER,
+            gate_btc_alignment INTEGER,
+            bullish_alignment INTEGER, bearish_alignment INTEGER,
+            FOREIGN KEY (decision_id) REFERENCES decision_events(id)
+        );
+        CREATE TABLE IF NOT EXISTS gate_evaluations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            decision_id TEXT NOT NULL,
+            gate_name TEXT NOT NULL,
+            gate_passed INTEGER NOT NULL,
+            metric_value REAL,
+            threshold_value REAL,
+            operator TEXT,
+            explanation TEXT,
+            FOREIGN KEY (decision_id) REFERENCES decision_events(id)
+        );
+    """)
+    con.commit()
+    con.close()
+
+    # Import (or reload) the monitor server module.
+    mod_name = "monitor.server"
+    if mod_name in sys.modules:
+        mod = sys.modules[mod_name]
+    else:
+        import monitor.server as mod  # type: ignore[import-untyped]
+
+    # Install the bt_runtime stub into the module.
+    bt_stub = sys.modules.get("bt_runtime")
+    if bt_stub is None:
+        bt_stub = types.ModuleType("bt_runtime")
+        sys.modules["bt_runtime"] = bt_stub
+
+    yield str(db_path), mod, bt_stub
+
+    for name in stubbed:
+        sys.modules.pop(name, None)
+
+
+def _seed_replay_decision(db_path: str, *, decision_id: str = "R001") -> None:
+    """Insert a complete decision event with context and gates for replay."""
+    now_ms = int(time.time() * 1000)
+    _seed_decision_events(db_path, [
+        {
+            "id": decision_id, "timestamp_ms": now_ms, "symbol": "BTCUSDT",
+            "event_type": "entry_signal", "status": "executed",
+            "decision_phase": "signal_generation", "action_taken": "open_long",
+        },
+    ])
+    _seed_decision_context(db_path, [
+        {
+            "decision_id": decision_id, "symbol": "BTCUSDT",
+            "price": 95000.0, "rsi": 45.2, "adx": 28.0, "atr": 1200.0,
+            "gate_adx": 1, "gate_volume": 1,
+            "bullish_alignment": 1, "bearish_alignment": 0,
+        },
+    ])
+    _seed_gate_evaluations(db_path, [
+        {"decision_id": decision_id, "gate_name": "adx", "gate_passed": 1,
+         "metric_value": 28.0, "threshold_value": 25.0, "operator": ">", "explanation": "ADX OK"},
+        {"decision_id": decision_id, "gate_name": "volume", "gate_passed": 1,
+         "metric_value": 5000000.0, "threshold_value": 3000000.0, "operator": ">", "explanation": "Volume OK"},
+        {"decision_id": decision_id, "gate_name": "ranging", "gate_passed": 1,
+         "metric_value": 0.5, "threshold_value": 0.8, "operator": "<", "explanation": "Not ranging"},
+    ])
+
+
+class TestDecisionReplay:
+
+    def test_replay_valid_decision(self, replay_db):
+        db_path, mod, bt_stub = replay_db
+        _seed_replay_decision(db_path)
+
+        # Stub step_decision to return an approved result.
+        intent = {
+            "schema_version": 8, "intent_id": 1, "symbol": "BTCUSDT",
+            "kind": "Open", "side": "Long", "quantity": 0.1,
+            "price": 95000.0, "notional_usd": 9500.0, "fee_rate": 0.00045,
+        }
+        stub_fn = _make_step_decision_stub(
+            intents=[intent],
+            applied_thresholds=[
+                {"name": "adx", "actual": 28.0, "threshold": 25.0, "passed": True},
+                {"name": "volume", "actual": 5000000.0, "threshold": 3000000.0, "passed": True},
+            ],
+        )
+        bt_stub.step_decision = stub_fn
+        bt_stub.load_state = lambda path: json.dumps({
+            "schema_version": 8, "timestamp_ms": 0, "step": 0,
+            "cash_usd": 10000.0, "positions": {},
+            "last_entry_ms": {}, "last_exit_ms": {}, "last_close_info": {},
+        })
+        bt_stub.default_kernel_params_json = lambda: json.dumps({"schema_version": 8})
+
+        # Ensure module sees bt_runtime.
+        orig_ok = mod._BT_RUNTIME_OK
+        orig_rt = mod._bt_runtime
+        mod._BT_RUNTIME_OK = True
+        mod._bt_runtime = bt_stub
+        try:
+            result = mod.build_decision_replay("paper", "R001")
+        finally:
+            mod._BT_RUNTIME_OK = orig_ok
+            mod._bt_runtime = orig_rt
+
+        assert result["ok"] is True
+        assert result["decision_id"] == "R001"
+        assert result["original"]["event_type"] == "entry_signal"
+        assert result["original"]["status"] == "executed"
+        assert result["original"]["action_taken"] == "open_long"
+        assert "indicators" in result["original"]
+        assert len(result["original"]["gates"]) == 3
+
+        assert len(result["replayed"]["intents"]) == 1
+        assert result["replayed"]["intents"][0]["symbol"] == "BTCUSDT"
+        assert "diagnostics" in result["replayed"]
+
+        assert result["diff"]["outcome_match"] is True
+        assert result["diff"]["gates_match"] is True
+        assert result["diff"]["details"] == []
+
+    def test_replay_missing_decision(self, replay_db):
+        _db_path, mod, bt_stub = replay_db
+
+        bt_stub.step_decision = _make_step_decision_stub()
+        bt_stub.load_state = lambda path: "{}"
+        bt_stub.default_kernel_params_json = lambda: '{"schema_version":8}'
+
+        orig_ok = mod._BT_RUNTIME_OK
+        orig_rt = mod._bt_runtime
+        mod._BT_RUNTIME_OK = True
+        mod._bt_runtime = bt_stub
+        try:
+            result = mod.build_decision_replay("paper", "NONEXISTENT")
+        finally:
+            mod._BT_RUNTIME_OK = orig_ok
+            mod._bt_runtime = orig_rt
+
+        assert result["ok"] is False
+        assert result["error"] == "not_found"
+        assert result["decision_id"] == "NONEXISTENT"
+
+    def test_replay_without_bt_runtime(self, replay_db):
+        _db_path, mod, _bt_stub = replay_db
+
+        orig_ok = mod._BT_RUNTIME_OK
+        mod._BT_RUNTIME_OK = False
+        try:
+            result = mod.build_decision_replay("paper", "R001")
+        finally:
+            mod._BT_RUNTIME_OK = orig_ok
+
+        assert result["ok"] is False
+        assert result["error"] == "bt_runtime_not_available"
+
+    def test_replay_with_state_override(self, replay_db):
+        db_path, mod, bt_stub = replay_db
+        _seed_replay_decision(db_path)
+
+        # Track the state JSON passed to step_decision.
+        captured_args: list[tuple] = []
+
+        def _capturing_step(state_json, event_json, params_json):
+            captured_args.append((state_json, event_json, params_json))
+            return _make_step_decision_stub()(state_json, event_json, params_json)
+
+        bt_stub.step_decision = _capturing_step
+        bt_stub.load_state = lambda path: json.dumps({"schema_version": 8})
+        bt_stub.default_kernel_params_json = lambda: '{"schema_version":8}'
+
+        custom_state = json.dumps({
+            "schema_version": 8, "timestamp_ms": 999, "step": 42,
+            "cash_usd": 50000.0, "positions": {},
+            "last_entry_ms": {}, "last_exit_ms": {}, "last_close_info": {},
+        })
+
+        orig_ok = mod._BT_RUNTIME_OK
+        orig_rt = mod._bt_runtime
+        mod._BT_RUNTIME_OK = True
+        mod._bt_runtime = bt_stub
+        try:
+            result = mod.build_decision_replay(
+                "paper", "R001", state_override_json=custom_state,
+            )
+        finally:
+            mod._BT_RUNTIME_OK = orig_ok
+            mod._bt_runtime = orig_rt
+
+        assert result["ok"] is True
+        # Verify the custom state was passed through.
+        assert len(captured_args) == 1
+        passed_state = json.loads(captured_args[0][0])
+        assert passed_state["cash_usd"] == 50000.0
+        assert passed_state["step"] == 42
+
+    def test_replay_diff_detects_gate_mismatch(self, replay_db):
+        db_path, mod, bt_stub = replay_db
+        _seed_replay_decision(db_path)
+
+        # Stub returns a result where adx gate did NOT pass (mismatch with original).
+        stub_fn = _make_step_decision_stub(
+            intents=[],
+            gate_blocked=True,
+            applied_thresholds=[
+                {"name": "adx", "actual": 22.0, "threshold": 25.0, "passed": False},
+                {"name": "volume", "actual": 5000000.0, "threshold": 3000000.0, "passed": True},
+            ],
+        )
+        bt_stub.step_decision = stub_fn
+        bt_stub.load_state = lambda path: json.dumps({
+            "schema_version": 8, "timestamp_ms": 0, "step": 0,
+            "cash_usd": 10000.0, "positions": {},
+            "last_entry_ms": {}, "last_exit_ms": {}, "last_close_info": {},
+        })
+        bt_stub.default_kernel_params_json = lambda: '{"schema_version":8}'
+
+        orig_ok = mod._BT_RUNTIME_OK
+        orig_rt = mod._bt_runtime
+        mod._BT_RUNTIME_OK = True
+        mod._bt_runtime = bt_stub
+        try:
+            result = mod.build_decision_replay("paper", "R001")
+        finally:
+            mod._BT_RUNTIME_OK = orig_ok
+            mod._bt_runtime = orig_rt
+
+        assert result["ok"] is True
+        assert result["diff"]["gates_match"] is False
+        assert result["diff"]["outcome_match"] is False
+        assert len(result["diff"]["details"]) >= 1
+        # Should mention gate mismatch.
+        gate_detail = [d for d in result["diff"]["details"] if "adx" in d]
+        assert len(gate_detail) >= 1
+        # Should mention outcome mismatch.
+        outcome_detail = [d for d in result["diff"]["details"] if "outcome" in d]
+        assert len(outcome_detail) == 1
+
+    def test_replay_event_json_structure(self, replay_db):
+        """Verify the MarketEvent JSON sent to the kernel has correct structure."""
+        db_path, mod, bt_stub = replay_db
+        _seed_replay_decision(db_path)
+
+        captured_events: list[dict] = []
+
+        def _capturing_step(state_json, event_json, params_json):
+            captured_events.append(json.loads(event_json))
+            return _make_step_decision_stub()(state_json, event_json, params_json)
+
+        bt_stub.step_decision = _capturing_step
+        bt_stub.load_state = lambda path: json.dumps({
+            "schema_version": 8, "timestamp_ms": 0, "step": 0,
+            "cash_usd": 10000.0, "positions": {},
+            "last_entry_ms": {}, "last_exit_ms": {}, "last_close_info": {},
+        })
+        bt_stub.default_kernel_params_json = lambda: '{"schema_version":8}'
+
+        orig_ok = mod._BT_RUNTIME_OK
+        orig_rt = mod._bt_runtime
+        mod._BT_RUNTIME_OK = True
+        mod._bt_runtime = bt_stub
+        try:
+            mod.build_decision_replay("paper", "R001")
+        finally:
+            mod._BT_RUNTIME_OK = orig_ok
+            mod._bt_runtime = orig_rt
+
+        assert len(captured_events) == 1
+        ev = captured_events[0]
+        assert ev["schema_version"] == 8
+        assert ev["symbol"] == "BTCUSDT"
+        assert ev["signal"] == "Buy"
+        assert ev["price"] == 95000.0
+        # entry_signal with action open_long → Buy → gate_result present, indicators absent.
+        assert ev["gate_result"] is not None
+        assert ev["indicators"] is None
+        assert ev["gate_result"]["adx_above_min"] is True
+        assert ev["gate_result"]["vol_confirm"] is True
+        assert ev["gate_result"]["is_ranging"] is False
