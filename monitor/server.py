@@ -1883,6 +1883,286 @@ def build_prometheus_metrics(mode: str) -> str:
     return "\n".join(lines) + ("\n" if lines else "")
 
 
+def _has_table(con: sqlite3.Connection, table: str) -> bool:
+    """Check if a SQLite table exists."""
+    row = _fetchone(con, "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+    return bool(row)
+
+
+def _parse_int(val: str | None, default: int) -> int:
+    """Parse an integer query-string value, returning *default* on failure."""
+    raw = str(val or "").strip()
+    if not raw:
+        return int(default)
+    try:
+        return int(raw)
+    except Exception:
+        return int(default)
+
+
+# ── Decision Trace API (AQC-805) ────────────────────────────────────────
+
+
+def build_decisions_list(
+    mode: str,
+    *,
+    symbol: str | None = None,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+    event_type: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """List decision events with optional filters and pagination."""
+    mode2 = (mode or "paper").strip().lower()
+    db_path, _log_path = mode_paths(mode2)
+
+    limit = max(1, min(1000, int(limit)))
+    offset = max(0, int(offset))
+
+    if not db_path.exists():
+        return {"data": [], "total": 0, "limit": limit, "offset": offset, "error": "db_missing"}
+
+    try:
+        con = connect_db_ro(db_path)
+    except Exception as e:
+        return {"data": [], "total": 0, "limit": limit, "offset": offset, "error": f"db_open_failed:{e}"}
+
+    try:
+        if not _has_table(con, "decision_events"):
+            return {"data": [], "total": 0, "limit": limit, "offset": offset}
+
+        where_clauses: list[str] = []
+        params: list[Any] = []
+
+        if symbol:
+            where_clauses.append("symbol = ?")
+            params.append(symbol.strip().upper())
+        if start_ms is not None:
+            where_clauses.append("timestamp_ms >= ?")
+            params.append(int(start_ms))
+        if end_ms is not None:
+            where_clauses.append("timestamp_ms <= ?")
+            params.append(int(end_ms))
+        if event_type:
+            where_clauses.append("event_type = ?")
+            params.append(event_type.strip())
+        if status:
+            where_clauses.append("status = ?")
+            params.append(status.strip())
+
+        where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+        count_row = _fetchone(con, f"SELECT COUNT(*) AS total FROM decision_events{where_sql}", tuple(params))
+        total = int(count_row["total"]) if count_row and count_row.get("total") is not None else 0
+
+        rows = _fetchall(
+            con,
+            f"""
+            SELECT id, timestamp_ms, symbol, event_type, status, decision_phase,
+                   parent_decision_id, trade_id, triggered_by, action_taken,
+                   rejection_reason, context_json
+            FROM decision_events
+            {where_sql}
+            ORDER BY timestamp_ms DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            tuple(params) + (limit, offset),
+        )
+
+        return {"data": rows, "total": total, "limit": limit, "offset": offset}
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
+def build_decision_detail(mode: str, decision_id: str) -> dict[str, Any] | None:
+    """Fetch a single decision event with its context and gate evaluations."""
+    mode2 = (mode or "paper").strip().lower()
+    db_path, _log_path = mode_paths(mode2)
+
+    if not db_path.exists():
+        return None
+
+    try:
+        con = connect_db_ro(db_path)
+    except Exception:
+        return None
+
+    try:
+        if not _has_table(con, "decision_events"):
+            return None
+
+        decision = _fetchone(
+            con,
+            """
+            SELECT id, timestamp_ms, symbol, event_type, status, decision_phase,
+                   parent_decision_id, trade_id, triggered_by, action_taken,
+                   rejection_reason, context_json
+            FROM decision_events WHERE id = ?
+            """,
+            (decision_id,),
+        )
+        if not decision:
+            return None
+
+        context: list[dict[str, Any]] = []
+        if _has_table(con, "decision_context"):
+            context = _fetchall(
+                con,
+                "SELECT * FROM decision_context WHERE decision_id = ?",
+                (decision_id,),
+            )
+
+        gates: list[dict[str, Any]] = []
+        if _has_table(con, "gate_evaluations"):
+            gates = _fetchall(
+                con,
+                """
+                SELECT id, decision_id, gate_name, gate_passed, metric_value,
+                       threshold_value, operator, explanation
+                FROM gate_evaluations WHERE decision_id = ?
+                ORDER BY id ASC
+                """,
+                (decision_id,),
+            )
+
+        return {"decision": decision, "context": context, "gates": gates}
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
+def build_trade_decision_trace(mode: str, trade_id: int) -> dict[str, Any]:
+    """Build the entry-to-exit decision chain for a trade."""
+    mode2 = (mode or "paper").strip().lower()
+    db_path, _log_path = mode_paths(mode2)
+
+    if not db_path.exists():
+        return {"chain": [], "lineage": None, "error": "db_missing"}
+
+    try:
+        con = connect_db_ro(db_path)
+    except Exception as e:
+        return {"chain": [], "lineage": None, "error": f"db_open_failed:{e}"}
+
+    try:
+        if not _has_table(con, "decision_lineage") or not _has_table(con, "decision_events"):
+            return {"chain": [], "lineage": None}
+
+        # Find lineage rows that reference this trade (as entry or exit).
+        lineage_rows = _fetchall(
+            con,
+            """
+            SELECT id, signal_decision_id, entry_trade_id, exit_decision_id,
+                   exit_trade_id, exit_reason, duration_ms
+            FROM decision_lineage
+            WHERE entry_trade_id = ? OR exit_trade_id = ?
+            """,
+            (trade_id, trade_id),
+        )
+
+        # Use first lineage row as the primary lineage record.
+        lineage = lineage_rows[0] if lineage_rows else None
+
+        # Collect all decision IDs and trade IDs referenced by lineage.
+        decision_ids: set[str] = set()
+        trade_ids: set[int] = set()
+        for row in lineage_rows:
+            if row.get("signal_decision_id"):
+                decision_ids.add(row["signal_decision_id"])
+            if row.get("exit_decision_id"):
+                decision_ids.add(row["exit_decision_id"])
+            if row.get("entry_trade_id") is not None:
+                trade_ids.add(int(row["entry_trade_id"]))
+            if row.get("exit_trade_id") is not None:
+                trade_ids.add(int(row["exit_trade_id"]))
+
+        # Also include decision_events directly linked to these trade_ids.
+        if trade_ids:
+            ph = _placeholders(len(trade_ids))
+            trade_linked = _fetchall(
+                con,
+                f"SELECT id FROM decision_events WHERE trade_id IN ({ph})",
+                tuple(trade_ids),
+            )
+            for r in trade_linked:
+                decision_ids.add(r["id"])
+
+        if not decision_ids:
+            return {"chain": [], "lineage": lineage}
+
+        # Fetch all matching decision events, ordered chronologically.
+        ph = _placeholders(len(decision_ids))
+        chain = _fetchall(
+            con,
+            f"""
+            SELECT id, timestamp_ms, symbol, event_type, status,
+                   decision_phase, parent_decision_id, trade_id,
+                   triggered_by, action_taken, rejection_reason, context_json
+            FROM decision_events
+            WHERE id IN ({ph})
+            ORDER BY timestamp_ms ASC, id ASC
+            """,
+            tuple(decision_ids),
+        )
+
+        return {"chain": chain, "lineage": lineage}
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
+def build_decision_gates(mode: str, decision_id: str) -> dict[str, Any] | None:
+    """Fetch gate evaluations for a single decision."""
+    mode2 = (mode or "paper").strip().lower()
+    db_path, _log_path = mode_paths(mode2)
+
+    if not db_path.exists():
+        return None
+
+    try:
+        con = connect_db_ro(db_path)
+    except Exception:
+        return None
+
+    try:
+        if not _has_table(con, "decision_events"):
+            return None
+
+        # Verify the decision exists.
+        decision = _fetchone(con, "SELECT id FROM decision_events WHERE id = ?", (decision_id,))
+        if not decision:
+            return None
+
+        gates: list[dict[str, Any]] = []
+        if _has_table(con, "gate_evaluations"):
+            gates = _fetchall(
+                con,
+                """
+                SELECT id, decision_id, gate_name, gate_passed, metric_value,
+                       threshold_value, operator, explanation
+                FROM gate_evaluations WHERE decision_id = ?
+                ORDER BY id ASC
+                """,
+                (decision_id,),
+            )
+
+        return {"gates": gates}
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "aiq-monitor/0.1"
 
@@ -1999,6 +2279,63 @@ class Handler(BaseHTTPRequestHandler):
             mode = (qs.get("mode") or ["paper"])[0]
             snap = STATE.get_snapshot_cached(mode, lambda: build_snapshot(mode))
             self._send_json(snap)
+            return
+
+        # ── Decision Trace API v2 (AQC-805) ────────────────────────────
+        if path == "/api/v2/decisions":
+            qs = parse_qs(parsed.query or "")
+            mode = (qs.get("mode") or ["paper"])[0]
+            symbol = (qs.get("symbol") or [None])[0]
+            start_ms = _parse_int((qs.get("start") or [None])[0], 0) or None
+            end_ms = _parse_int((qs.get("end") or [None])[0], 0) or None
+            event_type = (qs.get("event_type") or [None])[0]
+            status = (qs.get("status") or [None])[0]
+            limit = _parse_int((qs.get("limit") or ["100"])[0], 100)
+            offset = _parse_int((qs.get("offset") or ["0"])[0], 0)
+            result = build_decisions_list(
+                mode,
+                symbol=symbol,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                event_type=event_type,
+                status=status,
+                limit=limit,
+                offset=offset,
+            )
+            self._send_json(result)
+            return
+
+        _m_decision_gates = re.match(r"^/api/v2/decisions/([^/]+)/gates$", path)
+        if _m_decision_gates:
+            qs = parse_qs(parsed.query or "")
+            mode = (qs.get("mode") or ["paper"])[0]
+            decision_id = _m_decision_gates.group(1)
+            result = build_decision_gates(mode, decision_id)
+            if result is None:
+                self._send_json({"error": "not_found"}, status=404)
+            else:
+                self._send_json(result)
+            return
+
+        _m_decision_detail = re.match(r"^/api/v2/decisions/([^/]+)$", path)
+        if _m_decision_detail:
+            qs = parse_qs(parsed.query or "")
+            mode = (qs.get("mode") or ["paper"])[0]
+            decision_id = _m_decision_detail.group(1)
+            result = build_decision_detail(mode, decision_id)
+            if result is None:
+                self._send_json({"error": "not_found"}, status=404)
+            else:
+                self._send_json(result)
+            return
+
+        _m_trade_trace = re.match(r"^/api/v2/trades/(\d+)/decision-trace$", path)
+        if _m_trade_trace:
+            qs = parse_qs(parsed.query or "")
+            mode = (qs.get("mode") or ["paper"])[0]
+            trade_id = int(_m_trade_trace.group(1))
+            result = build_trade_decision_trace(mode, trade_id)
+            self._send_json(result)
             return
 
         if path == "/api/metrics":
