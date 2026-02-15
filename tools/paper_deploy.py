@@ -20,6 +20,7 @@ import os
 import socket
 import sqlite3
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -126,6 +127,57 @@ def _restart_systemd_user_service(service: str) -> RestartResult:
     )
 
 
+def _service_environment(service: str) -> dict[str, str]:
+    try:
+        proc = subprocess.run(
+            ["systemctl", "--user", "show", "-p", "Environment", "--value", str(service)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=8.0,
+        )
+        if int(proc.returncode) != 0:
+            return {}
+        raw = str(proc.stdout or "").strip()
+        out: dict[str, str] = {}
+        for part in raw.split():
+            if "=" not in part:
+                continue
+            k, v = part.split("=", 1)
+            key = str(k or "").strip()
+            if key:
+                out[key] = str(v or "")
+        return out
+    except Exception:
+        return {}
+
+
+def _update_service_env_file(service: str, key: str, value: str) -> None:
+    # Standard v8 service naming: openclaw-ai-quant-trader-v8-<name>
+    name = str(service).split("-")[-1]
+    env_file = Path(f"/home/fol2hk/.config/openclaw/ai-quant-trader-v8-{name}.env")
+    if not env_file.exists():
+        # Fallback to older naming if it exists
+        alt_file = Path(f"/home/fol2hk/.config/openclaw/ai-quant-trader-{name}.env")
+        if alt_file.exists():
+            env_file = alt_file
+    if not env_file.exists():
+        return
+
+    lines = env_file.read_text(encoding="utf-8").splitlines()
+    out = []
+    found = False
+    for line in lines:
+        if line.startswith(f"{key}="):
+            out.append(f"{key}={value}")
+            found = True
+        else:
+            out.append(line)
+    if not found:
+        out.append(f"{key}={value}")
+    env_file.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
 def deploy_paper_config(
     *,
     config_id: str,
@@ -142,6 +194,8 @@ def deploy_paper_config(
     pause_mode: str = "close_only",
     resume_on_success: bool = True,
     verify_sleep_s: float = 2.0,
+    mirror_source: str | None = None,
+    skip_mirror: bool = False,
 ) -> Path:
     """Deploy config_id to yaml_path and return the deploy directory path."""
     config_id = str(config_id).strip()
@@ -239,6 +293,48 @@ def deploy_paper_config(
                 raise RuntimeError(f"service restart failed: {service}")
             raise RuntimeError(f"service restart failed: {failed.service} (exit_code={failed.exit_code})")
 
+        # Optional state mirroring + PnL baseline reset (AQC-800)
+        mirror_enabled = os.getenv("AI_QUANT_MIRROR_LIVE_ON_PROMOTE", "false").lower() in ("true", "1", "yes")
+        if mirror_enabled and not bool(skip_mirror):
+            env = _service_environment(service)
+            target_db = env.get("AI_QUANT_DB_PATH")
+            source_db = mirror_source or "/home/fol2hk/.openclaw/workspace/dev/ai_quant/trading_engine_live.db"
+
+            if target_db and os.path.exists(source_db):
+                print(f"Mirroring state from {source_db} to {target_db}...")
+                mirror_script = AIQ_ROOT / "tools" / "mirror_live_state.py"
+                try:
+                    subprocess.run(
+                        [sys.executable, str(mirror_script), "--source", source_db, "--target", target_db],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+
+                    # Read balance from target DB
+                    con = sqlite3.connect(target_db)
+                    try:
+                        row = con.execute("SELECT balance FROM trades ORDER BY id DESC LIMIT 1").fetchone()
+                        if row:
+                            balance = row[0]
+                            print(f"Mirrored balance: {balance}. Resetting baseline PnL.")
+                            _update_service_env_file(service, "AI_QUANT_NOTIFY_BASELINE_USD", str(balance))
+
+                            # Restart again to pick up new env
+                            print(f"Restarting {service} to pick up new baseline...")
+                            orchestrate_interval_restart(
+                                ws_service=str(ws_service),
+                                trader_service=str(service),
+                                pause_file=pause_file,
+                                pause_mode=str(pause_mode or "close_only"),
+                                resume_on_success=bool(resume_on_success),
+                                verify_sleep_s=float(verify_sleep_s),
+                            )
+                    finally:
+                        con.close()
+                except Exception as e:
+                    print(f"Mirroring/Baseline reset failed for {service}: {e}")
+
     (deploy_dir / "deploy_event.json").write_text(json.dumps(event, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return deploy_dir
 
@@ -298,6 +394,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Skip deployment-time YAML validation (not recommended).",
     )
+    ap.add_argument(
+        "--mirror-source",
+        default="/home/fol2hk/.openclaw/workspace/dev/ai_quant/trading_engine_live.db",
+        help="Source DB for state mirroring (default: .../trading_engine_live.db).",
+    )
+    ap.add_argument(
+        "--skip-mirror",
+        action="store_true",
+        help="Force skip state mirroring even if AI_QUANT_MIRROR_LIVE_ON_PROMOTE is true.",
+    )
     args = ap.parse_args(argv)
 
     out_dir = Path(args.out_dir).expanduser().resolve() if str(args.out_dir).strip() else None
@@ -318,6 +424,8 @@ def main(argv: list[str] | None = None) -> int:
             pause_mode=str(args.pause_mode),
             resume_on_success=not bool(args.leave_paused),
             verify_sleep_s=float(args.verify_sleep_s),
+            mirror_source=str(args.mirror_source),
+            skip_mirror=bool(args.skip_mirror),
         )
         return 0
     except KeyError as e:

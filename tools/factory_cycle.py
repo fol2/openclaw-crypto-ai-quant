@@ -1259,6 +1259,16 @@ def main(argv: list[str] | None = None) -> int:
         default=0.0,
         help="Incumbent guard: candidate drawdown may exceed incumbent by at most this percentage-point tolerance.",
     )
+    ap.add_argument(
+        "--mirror-source",
+        default="/home/fol2hk/.openclaw/workspace/dev/ai_quant/trading_engine_live.db",
+        help="Source DB for state mirroring during promotion (default: .../trading_engine_live.db).",
+    )
+    ap.add_argument(
+        "--skip-mirror",
+        action="store_true",
+        help="Force skip state mirroring even if AI_QUANT_MIRROR_LIVE_ON_PROMOTE is true.",
+    )
 
     ap.add_argument(
         "--discord-target",
@@ -1540,6 +1550,8 @@ def main(argv: list[str] | None = None) -> int:
                 pause_mode=str(args.pause_mode),
                 resume_on_success=not bool(args.leave_paused),
                 verify_sleep_s=float(args.verify_sleep_s),
+                mirror_source=str(args.mirror_source),
+                skip_mirror=bool(args.skip_mirror),
             )
         except Exception as e:
             _send_discord(
@@ -1957,6 +1969,8 @@ def main(argv: list[str] | None = None) -> int:
                         pause_mode=str(args.pause_mode),
                         resume_on_success=not bool(args.leave_paused),
                         verify_sleep_s=float(args.verify_sleep_s),
+                        mirror_source=str(args.mirror_source),
+                        skip_mirror=bool(args.skip_mirror),
                     )
                     promotion["ok"] = True
                     promotion["selected"] = chosen
