@@ -28,6 +28,14 @@ if str(MONITOR_DIR) not in sys.path:
 
 from heartbeat import parse_last_heartbeat  # noqa: E402
 
+try:
+    import bt_runtime as _bt_runtime  # noqa: E402
+
+    _BT_RUNTIME_OK = True
+except ImportError:
+    _bt_runtime = None  # type: ignore[assignment]
+    _BT_RUNTIME_OK = False
+
 
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
@@ -242,6 +250,63 @@ def _parse_iso_ts_ms(ts: str | None) -> int | None:
         return int(dt.timestamp() * 1000)
     except Exception:
         return None
+
+
+_KERNEL_STATE_HOME = Path("~/.mei/kernel_state.json").expanduser()
+
+
+def _find_kernel_state_path(db_path: Path) -> Path | None:
+    """Locate the kernel state JSON — next to the trading DB, or ~/.mei fallback."""
+    beside_db = db_path.parent / "kernel_state.json"
+    if beside_db.exists():
+        return beside_db
+    if _KERNEL_STATE_HOME.exists():
+        return _KERNEL_STATE_HOME
+    return None
+
+
+def get_kernel_equity(
+    db_path: Path,
+    mids: dict[str, float],
+) -> dict[str, Any]:
+    """Compute mark-to-market equity via the Rust kernel.
+
+    Returns a dict with ``ok``, ``equity_usd``, ``cash_usd``, ``state_path``, and
+    optionally ``error``.
+    """
+    if not _BT_RUNTIME_OK:
+        return {"ok": False, "error": "bt_runtime_not_available"}
+
+    state_path = _find_kernel_state_path(db_path)
+    if state_path is None:
+        return {"ok": False, "error": "kernel_state_not_found"}
+
+    try:
+        state_json = _bt_runtime.load_state(str(state_path))
+    except Exception as e:
+        return {"ok": False, "error": f"load_state_failed:{e}", "state_path": str(state_path)}
+
+    # Extract cash_usd from the state for reference.
+    cash_usd: float | None = None
+    try:
+        state = json.loads(state_json)
+        cash_usd = float(state.get("cash_usd", 0.0))
+    except Exception:
+        pass
+
+    # Build prices dict from mids (kernel expects symbol -> price).
+    prices_json = json.dumps(mids) if mids else "{}"
+
+    try:
+        equity = _bt_runtime.get_equity(state_json, prices_json)
+        return {
+            "ok": True,
+            "equity_usd": float(equity),
+            "cash_usd": cash_usd,
+            "state_path": str(state_path),
+        }
+    except Exception as e:
+        return {"ok": False, "error": f"get_equity_failed:{e}", "state_path": str(state_path)}
 
 
 _HL_ADDR_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
@@ -1414,6 +1479,27 @@ def build_snapshot(mode: str) -> dict[str, Any]:
             if realised_usd is not None:
                 equity_est_usd = float(realised_usd) + float(unreal_total) - float(close_fee_total)
 
+        # --- Kernel equity (AQC-745) ---
+        kernel_equity_result: dict[str, Any] | None = None
+        if _BT_RUNTIME_OK:
+            mid_snap = STATE.mids.snapshot()
+            kernel_mids = mid_snap.get("mids") or {}
+            kernel_equity_result = get_kernel_equity(db_path, kernel_mids)
+
+            # Log discrepancy between kernel and monitor equity estimates.
+            if (
+                kernel_equity_result.get("ok")
+                and equity_est_usd is not None
+                and kernel_equity_result.get("equity_usd") is not None
+            ):
+                diff = abs(float(kernel_equity_result["equity_usd"]) - float(equity_est_usd))
+                if diff > 0.01:
+                    snapshot["warnings"].append(
+                        f"kernel_equity_drift:{diff:.2f} "
+                        f"(kernel={kernel_equity_result['equity_usd']:.2f} "
+                        f"monitor={equity_est_usd:.2f})"
+                    )
+
         snapshot["balances"] = {
             "balance_source": balance_source,
             "realised_usd": realised_usd,
@@ -1428,6 +1514,7 @@ def build_snapshot(mode: str) -> dict[str, Any]:
             "fee_rate": fee_rate,
             "account_value_asof_usd": account_value_asof_usd,
             "hl_balance": hl_bal_public if mode2 == "live" else None,
+            "kernel_equity": kernel_equity_result,
         }
 
         # Daily metrics (UTC day) for the dashboard summary.
