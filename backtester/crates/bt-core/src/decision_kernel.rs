@@ -17,6 +17,34 @@ use std::collections::BTreeMap;
 
 const KERNEL_SCHEMA_VERSION: u32 = 1;
 
+/// Cooldown configuration. When present, kernel enforces entry/exit cooldowns
+/// and PESC (post-exit same-direction cooldown).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CooldownParams {
+    /// Entry cooldown in seconds. 0 = disabled.
+    pub entry_cooldown_s: u32,
+    /// Exit cooldown in seconds. 0 = disabled.
+    pub exit_cooldown_s: u32,
+    /// PESC master toggle: reentry cooldown in minutes. 0 = disabled.
+    pub reentry_cooldown_minutes: u32,
+    /// Min PESC cooldown (high ADX ≥ 40).
+    pub reentry_cooldown_min_mins: u32,
+    /// Max PESC cooldown (low ADX ≤ 25).
+    pub reentry_cooldown_max_mins: u32,
+}
+
+impl Default for CooldownParams {
+    fn default() -> Self {
+        Self {
+            entry_cooldown_s: 20,
+            exit_cooldown_s: 15,
+            reentry_cooldown_minutes: 60,
+            reentry_cooldown_min_mins: 45,
+            reentry_cooldown_max_mins: 180,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MarketSignal {
@@ -136,6 +164,16 @@ pub struct StrategyState {
     pub step: u64,
     pub cash_usd: f64,
     pub positions: BTreeMap<String, Position>,
+    /// Per-symbol last entry timestamp (ms).
+    #[serde(default)]
+    pub last_entry_ms: BTreeMap<String, i64>,
+    /// Per-symbol last exit timestamp (ms).
+    #[serde(default)]
+    pub last_exit_ms: BTreeMap<String, i64>,
+    /// Per-symbol last close info for PESC: (timestamp_ms, side, exit_reason).
+    /// Side stored as string "long"/"short" for serde compatibility.
+    #[serde(default)]
+    pub last_close_info: BTreeMap<String, (i64, String, String)>,
 }
 
 impl StrategyState {
@@ -146,6 +184,9 @@ impl StrategyState {
             step: 0,
             cash_usd,
             positions: BTreeMap::new(),
+            last_entry_ms: BTreeMap::new(),
+            last_exit_ms: BTreeMap::new(),
+            last_close_info: BTreeMap::new(),
         }
     }
 }
@@ -199,6 +240,12 @@ pub struct Diagnostics {
     /// Entry confidence computed by kernel.
     #[serde(default)]
     pub entry_confidence: Option<u8>,
+    /// True if entry was blocked by cooldown.
+    #[serde(default)]
+    pub cooldown_blocked: bool,
+    /// True if entry was blocked by PESC.
+    #[serde(default)]
+    pub pesc_blocked: bool,
 }
 
 impl Diagnostics {
@@ -249,6 +296,10 @@ pub struct KernelParams {
     /// generate entry signals internally using indicator data.
     #[serde(default)]
     pub entry_params: Option<EntryParams>,
+    /// Cooldown configuration. When present, kernel enforces entry/exit cooldowns
+    /// and PESC (post-exit same-direction cooldown).
+    #[serde(default)]
+    pub cooldown_params: Option<CooldownParams>,
 }
 
 impl Default for KernelParams {
@@ -265,6 +316,7 @@ impl Default for KernelParams {
             leverage: 1.0,
             exit_params: None,
             entry_params: None,
+            cooldown_params: None,
         }
     }
 }
@@ -306,6 +358,74 @@ fn side_from_signal(signal: MarketSignal) -> Option<PositionSide> {
         MarketSignal::Neutral | MarketSignal::Funding | MarketSignal::PriceUpdate
         | MarketSignal::Evaluate => None,
     }
+}
+
+fn is_entry_cooldown_active(state: &StrategyState, symbol: &str, ts: i64, cooldown_s: u32) -> bool {
+    if cooldown_s == 0 {
+        return false;
+    }
+    match state.last_entry_ms.get(symbol) {
+        Some(&last_ts) => ts.saturating_sub(last_ts) < (cooldown_s as i64) * 1000,
+        None => false,
+    }
+}
+
+fn is_exit_cooldown_active(state: &StrategyState, symbol: &str, ts: i64, cooldown_s: u32) -> bool {
+    if cooldown_s == 0 {
+        return false;
+    }
+    match state.last_exit_ms.get(symbol) {
+        Some(&last_ts) => ts.saturating_sub(last_ts) < (cooldown_s as i64) * 1000,
+        None => false,
+    }
+}
+
+/// PESC: Post-Exit Same-Direction Cooldown with ADX-adaptive interpolation.
+fn is_pesc_blocked(
+    state: &StrategyState,
+    symbol: &str,
+    requested_side: PositionSide,
+    current_ts: i64,
+    adx: f64,
+    cd: &CooldownParams,
+) -> bool {
+    if cd.reentry_cooldown_minutes == 0 {
+        return false;
+    }
+
+    let (close_ts, close_side, close_reason) = match state.last_close_info.get(symbol) {
+        Some(v) => v.clone(),
+        None => return false,
+    };
+
+    // No cooldown after signal flips
+    if close_reason == "Signal Flip" {
+        return false;
+    }
+
+    // Only applies to same direction
+    let same_dir = match requested_side {
+        PositionSide::Long => close_side == "long",
+        PositionSide::Short => close_side == "short",
+    };
+    if !same_dir {
+        return false;
+    }
+
+    // ADX-adaptive cooldown interpolation
+    let min_cd = cd.reentry_cooldown_min_mins as f64;
+    let max_cd = cd.reentry_cooldown_max_mins as f64;
+    let cooldown_mins = if adx >= 40.0 {
+        min_cd
+    } else if adx <= 25.0 {
+        max_cd
+    } else {
+        let t = (adx - 25.0) / 15.0;
+        max_cd + t * (min_cd - max_cd)
+    };
+
+    let cooldown_ms = (cooldown_mins * 60_000.0) as i64;
+    current_ts.saturating_sub(close_ts) < cooldown_ms
 }
 
 fn with_intent_id(step: u64, offset: u64) -> u64 {
@@ -586,7 +706,27 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
         let mut intents = Vec::new();
         let mut fills = Vec::new();
 
+        // Exit cooldown check
+        if let Some(ref cd) = params.cooldown_params {
+            if is_exit_cooldown_active(&next_state, &event.symbol, event.timestamp_ms, cd.exit_cooldown_s) {
+                diagnostics.warnings.push(format!("exit cooldown active for {}", event.symbol));
+                diagnostics.cooldown_blocked = true;
+                diagnostics.intent_count = 0;
+                diagnostics.fill_count = 0;
+                return DecisionResult {
+                    schema_version: KERNEL_SCHEMA_VERSION,
+                    state: next_state,
+                    intents: vec![],
+                    fills: vec![],
+                    diagnostics,
+                };
+            }
+        }
+
         if let (Some(exit_params), Some(snap)) = (&params.exit_params, &event.indicators) {
+            // Capture position side from original state before any mutations.
+            let pre_exit_side = state.positions.get(&event.symbol).map(|p| p.side);
+
             // Evaluate exits, then act on the result (two-phase to satisfy borrow checker).
             let exit_result = {
                 if let Some(pos) = next_state.positions.get_mut(&event.symbol) {
@@ -612,7 +752,7 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
 
                 match result {
                     KernelExitResult::Hold => {}
-                    KernelExitResult::FullClose { exit_price, .. } => {
+                    KernelExitResult::FullClose { exit_price, ref reason } => {
                         if let Some(pos) = next_state.positions.get(&event.symbol) {
                             let closed_side = pos.side;
                             if let Some((intent, fill)) = apply_close(
@@ -627,6 +767,19 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                             ) {
                                 intents.push(intent);
                                 fills.push(fill);
+                                // Record cooldown timestamps
+                                next_state.last_exit_ms.insert(event.symbol.clone(), event.timestamp_ms);
+                                // Record PESC info from original state's position side
+                                if let Some(side) = pre_exit_side {
+                                    let side_str = match side {
+                                        PositionSide::Long => "long",
+                                        PositionSide::Short => "short",
+                                    };
+                                    next_state.last_close_info.insert(
+                                        event.symbol.clone(),
+                                        (event.timestamp_ms, side_str.to_string(), reason.clone()),
+                                    );
+                                }
                             }
                         }
                     }
@@ -649,6 +802,8 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                             ) {
                                 intents.push(intent);
                                 fills.push(fill);
+                                // Record exit timestamp (partial exits also trigger exit cooldown)
+                                next_state.last_exit_ms.insert(event.symbol.clone(), event.timestamp_ms);
                                 // Mark tp1_taken after successful partial close.
                                 if let Some(pos) = next_state.positions.get_mut(&event.symbol) {
                                     pos.tp1_taken = true;
@@ -789,9 +944,60 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
             }
         }
 
+        // Cooldown checks for Evaluate path — only block entries, not opposite-side closes.
+        {
+            let is_opposite_close = next_state
+                .positions
+                .get(&event.symbol)
+                .map_or(false, |p| p.side != requested_side);
+
+            if !is_opposite_close {
+                if let Some(ref cd) = params.cooldown_params {
+                    if is_entry_cooldown_active(&next_state, &event.symbol, event.timestamp_ms, cd.entry_cooldown_s) {
+                        diagnostics.warnings.push(format!("entry cooldown active for {}", event.symbol));
+                        diagnostics.cooldown_blocked = true;
+                        diagnostics.intent_count = 0;
+                        diagnostics.fill_count = 0;
+                        return DecisionResult {
+                            schema_version: KERNEL_SCHEMA_VERSION,
+                            state: next_state,
+                            intents: vec![],
+                            fills: vec![],
+                            diagnostics,
+                        };
+                    }
+
+                    let adx = event.indicators.as_ref().map(|s| s.adx)
+                        .or_else(|| event.gate_result.as_ref().map(|g| g.effective_min_adx))
+                        .unwrap_or(30.0);
+                    if is_pesc_blocked(&next_state, &event.symbol, requested_side, event.timestamp_ms, adx, cd) {
+                        diagnostics.warnings.push(format!("PESC blocked for {}", event.symbol));
+                        diagnostics.pesc_blocked = true;
+                        diagnostics.intent_count = 0;
+                        diagnostics.fill_count = 0;
+                        return DecisionResult {
+                            schema_version: KERNEL_SCHEMA_VERSION,
+                            state: next_state,
+                            intents: vec![],
+                            fills: vec![],
+                            diagnostics,
+                        };
+                    }
+                }
+            }
+        }
+
         let (intents, fills) = execute_entry(
             &mut next_state, event, params, requested_side, &mut diagnostics,
         );
+
+        // Record entry timestamp only for actual entry fills (Open/Add), not closes
+        let has_entry_fill = intents.iter().any(|i| {
+            matches!(i.kind, OrderIntentKind::Open | OrderIntentKind::Add)
+        });
+        if has_entry_fill {
+            next_state.last_entry_ms.insert(event.symbol.clone(), event.timestamp_ms);
+        }
 
         next_state.cash_usd = quantise(next_state.cash_usd);
         diagnostics.intent_count = intents.len();
@@ -896,9 +1102,62 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
         }
     }
 
+    // Cooldown checks for Buy/Sell path — only block entries, not opposite-side closes.
+    {
+        let is_opposite_close = next_state
+            .positions
+            .get(&event.symbol)
+            .map_or(false, |p| p.side != requested_side);
+
+        if !is_opposite_close {
+            if let Some(ref cd) = params.cooldown_params {
+                // Entry cooldown
+                if is_entry_cooldown_active(&next_state, &event.symbol, event.timestamp_ms, cd.entry_cooldown_s) {
+                    diagnostics.warnings.push(format!("entry cooldown active for {}", event.symbol));
+                    diagnostics.cooldown_blocked = true;
+                    diagnostics.intent_count = 0;
+                    diagnostics.fill_count = 0;
+                    return DecisionResult {
+                        schema_version: KERNEL_SCHEMA_VERSION,
+                        state: next_state,
+                        intents: vec![],
+                        fills: vec![],
+                        diagnostics,
+                    };
+                }
+
+                // PESC: need ADX from indicators or gate_result
+                let adx = event.indicators.as_ref().map(|s| s.adx)
+                    .or_else(|| event.gate_result.as_ref().map(|g| g.effective_min_adx))
+                    .unwrap_or(30.0);
+                if is_pesc_blocked(&next_state, &event.symbol, requested_side, event.timestamp_ms, adx, cd) {
+                    diagnostics.warnings.push(format!("PESC blocked for {}", event.symbol));
+                    diagnostics.pesc_blocked = true;
+                    diagnostics.intent_count = 0;
+                    diagnostics.fill_count = 0;
+                    return DecisionResult {
+                        schema_version: KERNEL_SCHEMA_VERSION,
+                        state: next_state,
+                        intents: vec![],
+                        fills: vec![],
+                        diagnostics,
+                    };
+                }
+            }
+        }
+    }
+
     let (intents, fills) = execute_entry(
         &mut next_state, event, params, requested_side, &mut diagnostics,
     );
+
+    // Record entry timestamp only for actual entry fills (Open/Add), not closes
+    let has_entry_fill = intents.iter().any(|i| {
+        matches!(i.kind, OrderIntentKind::Open | OrderIntentKind::Add)
+    });
+    if has_entry_fill {
+        next_state.last_entry_ms.insert(event.symbol.clone(), event.timestamp_ms);
+    }
 
     next_state.cash_usd = quantise(next_state.cash_usd);
     next_state.timestamp_ms = event.timestamp_ms;
@@ -1005,6 +1264,17 @@ fn execute_entry(
                     ..intent
                 });
                 fills.push(fill);
+
+                // Record close/exit timestamps for cooldown tracking
+                next_state.last_exit_ms.insert(event.symbol.clone(), event.timestamp_ms);
+                let side_str = match closed_side {
+                    PositionSide::Long => "long",
+                    PositionSide::Short => "short",
+                };
+                next_state.last_close_info.insert(
+                    event.symbol.clone(),
+                    (event.timestamp_ms, side_str.to_string(), "Signal Flip".to_string()),
+                );
             }
 
             if params.allow_reverse {
@@ -2673,5 +2943,458 @@ mod tests {
         if let Some(pos) = result.state.positions.get("BTC") {
             assert_eq!(pos.side, PositionSide::Long, "should have reversed to long");
         }
+    }
+
+    // ---- Cooldown and PESC tests ----
+
+    fn cooldown_params_for_test() -> KernelParams {
+        KernelParams {
+            allow_reverse: false,
+            cooldown_params: Some(CooldownParams {
+                entry_cooldown_s: 20,
+                exit_cooldown_s: 15,
+                reentry_cooldown_minutes: 60,
+                reentry_cooldown_min_mins: 45,
+                reentry_cooldown_max_mins: 180,
+            }),
+            exit_params: Some(ExitParams::default()),
+            ..KernelParams::default()
+        }
+    }
+
+    /// Open a long BTC position with cooldown-aware params and return state.
+    fn open_long_btc_with_cooldown(notional: f64, price: f64) -> (StrategyState, KernelParams) {
+        let state = init_state();
+        let params = cooldown_params_for_test();
+        let mut event = event_with_signal("BTC", MarketSignal::Buy);
+        event.notional_hint_usd = Some(notional);
+        event.price = price;
+        event.timestamp_ms = 1_000;
+        let result = step(&state, &event, &params);
+        assert!(result.state.positions.get("BTC").is_some(), "setup: position should open");
+        (result.state, params)
+    }
+
+    #[test]
+    fn entry_cooldown_blocks_rapid_entry() {
+        let (state_after_open, params) = open_long_btc_with_cooldown(10_000.0, 10_000.0);
+
+        // Close the position via opposite signal
+        let close_evt = MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 200,
+            timestamp_ms: 5_000,
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Sell,
+            price: 10_100.0,
+            notional_hint_usd: None,
+            close_fraction: None,
+            fee_role: None,
+            funding_rate: None,
+            indicators: None,
+            gate_result: None,
+            ema_slow_slope_pct: None,
+        };
+        let closed = step(&state_after_open, &close_evt, &params);
+        assert!(closed.state.positions.get("BTC").is_none(), "position should be closed");
+
+        // Try to reopen immediately (within 20s entry cooldown).
+        // last_entry_ms was set at 1_000, now at 6_000 → 5s elapsed < 20s cooldown.
+        let reopen_evt = MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 300,
+            timestamp_ms: 6_000, // 5s after entry
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Buy,
+            price: 10_050.0,
+            notional_hint_usd: Some(10_000.0),
+            close_fraction: None,
+            fee_role: None,
+            funding_rate: None,
+            indicators: None,
+            gate_result: None,
+            ema_slow_slope_pct: None,
+        };
+        let result = step(&closed.state, &reopen_evt, &params);
+        assert!(
+            result.state.positions.get("BTC").is_none(),
+            "entry cooldown should block rapid re-entry"
+        );
+        assert!(result.diagnostics.cooldown_blocked);
+    }
+
+    #[test]
+    fn entry_cooldown_allows_after_expiry() {
+        let (state_after_open, params) = open_long_btc_with_cooldown(10_000.0, 10_000.0);
+
+        // Close position
+        let close_evt = MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 200,
+            timestamp_ms: 5_000,
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Sell,
+            price: 10_100.0,
+            notional_hint_usd: None,
+            close_fraction: None,
+            fee_role: None,
+            funding_rate: None,
+            indicators: None,
+            gate_result: None,
+            ema_slow_slope_pct: None,
+        };
+        let closed = step(&state_after_open, &close_evt, &params);
+
+        // Reopen after cooldown expires (entry was at 1_000, 21_001 = 20.001s later)
+        let reopen_evt = MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 300,
+            timestamp_ms: 21_001,
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Buy,
+            price: 10_050.0,
+            notional_hint_usd: Some(10_000.0),
+            close_fraction: None,
+            fee_role: None,
+            funding_rate: None,
+            indicators: None,
+            gate_result: None,
+            ema_slow_slope_pct: None,
+        };
+        let result = step(&closed.state, &reopen_evt, &params);
+        assert!(
+            result.state.positions.get("BTC").is_some(),
+            "entry should be allowed after cooldown expires"
+        );
+        assert!(!result.diagnostics.cooldown_blocked);
+    }
+
+    #[test]
+    fn exit_cooldown_blocks_rapid_exit() {
+        let (mut state_after_open, params) = open_long_btc_with_cooldown(10_000.0, 10_000.0);
+        // Set entry_atr for SL trigger
+        state_after_open.positions.get_mut("BTC").unwrap().entry_atr = Some(100.0);
+        // Simulate a previous exit that set last_exit_ms
+        state_after_open.last_exit_ms.insert("BTC".to_string(), 4_000);
+
+        // PriceUpdate at 4_005 (5ms after last exit, within 15s cooldown)
+        let snap = test_snap(9_750.0); // SL price
+        let mut event = price_update_event("BTC", 9_750.0, snap);
+        event.timestamp_ms = 4_005;
+
+        let result = step(&state_after_open, &event, &params);
+        assert!(
+            result.state.positions.get("BTC").is_some(),
+            "exit cooldown should block exit evaluation"
+        );
+        assert!(result.diagnostics.cooldown_blocked);
+    }
+
+    #[test]
+    fn exit_cooldown_allows_after_expiry() {
+        let (mut state_after_open, params) = open_long_btc_with_cooldown(10_000.0, 10_000.0);
+        state_after_open.positions.get_mut("BTC").unwrap().entry_atr = Some(100.0);
+        state_after_open.last_exit_ms.insert("BTC".to_string(), 4_000);
+
+        // PriceUpdate at 19_001 (15.001s after last exit, cooldown expired)
+        let snap = test_snap(9_750.0);
+        let mut event = price_update_event("BTC", 9_750.0, snap);
+        event.timestamp_ms = 19_001;
+
+        let result = step(&state_after_open, &event, &params);
+        assert!(
+            result.state.positions.get("BTC").is_none(),
+            "exit should be allowed after cooldown expires"
+        );
+        assert!(!result.diagnostics.cooldown_blocked);
+    }
+
+    #[test]
+    fn pesc_blocks_same_direction() {
+        let state = init_state();
+        let params = cooldown_params_for_test();
+
+        // Open long
+        let mut open_evt = event_with_signal("BTC", MarketSignal::Buy);
+        open_evt.notional_hint_usd = Some(10_000.0);
+        open_evt.price = 10_000.0;
+        open_evt.timestamp_ms = 1_000;
+        let opened = step(&state, &open_evt, &params);
+
+        // Close via SL (PriceUpdate triggers full close)
+        let mut state_with_atr = opened.state.clone();
+        state_with_atr.positions.get_mut("BTC").unwrap().entry_atr = Some(100.0);
+        let snap = test_snap(9_750.0);
+        let mut sl_event = price_update_event("BTC", 9_750.0, snap);
+        sl_event.timestamp_ms = 100_000;
+        let closed = step(&state_with_atr, &sl_event, &params);
+        assert!(closed.state.positions.get("BTC").is_none(), "should be closed by SL");
+        // Verify last_close_info was recorded
+        assert!(closed.state.last_close_info.contains_key("BTC"));
+        let (_, ref side, ref reason) = closed.state.last_close_info["BTC"];
+        assert_eq!(side, "long");
+        assert_ne!(reason, "Signal Flip"); // SL exit
+
+        // Try to reopen long within PESC window (high ADX=40 → min=45min)
+        // 100_000 + 30min*60000 = 100_000 + 1_800_000 = 1_900_000 — within 45min
+        let reopen_evt = MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 400,
+            timestamp_ms: 1_900_000,
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Buy,
+            price: 10_000.0,
+            notional_hint_usd: Some(10_000.0),
+            close_fraction: None,
+            fee_role: None,
+            funding_rate: None,
+            indicators: Some(test_snap(10_000.0)), // adx=30.0 (between 25-40)
+            gate_result: None,
+            ema_slow_slope_pct: None,
+        };
+        let result = step(&closed.state, &reopen_evt, &params);
+        assert!(
+            result.state.positions.get("BTC").is_none(),
+            "PESC should block same-direction reentry"
+        );
+        assert!(result.diagnostics.pesc_blocked);
+    }
+
+    #[test]
+    fn pesc_allows_opposite_direction() {
+        let state = init_state();
+        let params = cooldown_params_for_test();
+
+        // Open long
+        let mut open_evt = event_with_signal("BTC", MarketSignal::Buy);
+        open_evt.notional_hint_usd = Some(10_000.0);
+        open_evt.price = 10_000.0;
+        open_evt.timestamp_ms = 1_000;
+        let opened = step(&state, &open_evt, &params);
+
+        // Close via SL
+        let mut state_with_atr = opened.state.clone();
+        state_with_atr.positions.get_mut("BTC").unwrap().entry_atr = Some(100.0);
+        let snap = test_snap(9_750.0);
+        let mut sl_event = price_update_event("BTC", 9_750.0, snap);
+        sl_event.timestamp_ms = 100_000;
+        let closed = step(&state_with_atr, &sl_event, &params);
+        assert!(closed.state.positions.get("BTC").is_none());
+
+        // Open short (opposite direction) — should be allowed despite PESC
+        // Use timestamp well past entry cooldown but within PESC window
+        let short_evt = MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 400,
+            timestamp_ms: 200_000, // past entry cooldown (20s) from the SL close
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Sell,
+            price: 9_900.0,
+            notional_hint_usd: Some(10_000.0),
+            close_fraction: None,
+            fee_role: None,
+            funding_rate: None,
+            indicators: None,
+            gate_result: None,
+            ema_slow_slope_pct: None,
+        };
+        let result = step(&closed.state, &short_evt, &params);
+        assert!(
+            result.state.positions.get("BTC").is_some(),
+            "opposite direction should be allowed"
+        );
+        assert!(!result.diagnostics.pesc_blocked);
+        assert_eq!(
+            result.state.positions.get("BTC").unwrap().side,
+            PositionSide::Short
+        );
+    }
+
+    #[test]
+    fn pesc_allows_after_signal_flip() {
+        let state = init_state();
+        let params = cooldown_params_for_test();
+
+        // Open long
+        let mut open_evt = event_with_signal("BTC", MarketSignal::Buy);
+        open_evt.notional_hint_usd = Some(10_000.0);
+        open_evt.price = 10_000.0;
+        open_evt.timestamp_ms = 1_000;
+        let opened = step(&state, &open_evt, &params);
+
+        // Close via signal flip (Sell signal closes Long)
+        let close_evt = MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 200,
+            timestamp_ms: 100_000,
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Sell,
+            price: 10_100.0,
+            notional_hint_usd: None,
+            close_fraction: None,
+            fee_role: None,
+            funding_rate: None,
+            indicators: None,
+            gate_result: None,
+            ema_slow_slope_pct: None,
+        };
+        let closed = step(&opened.state, &close_evt, &params);
+        assert!(closed.state.positions.get("BTC").is_none());
+        // Verify it was recorded as Signal Flip
+        let (_, _, ref reason) = closed.state.last_close_info["BTC"];
+        assert_eq!(reason, "Signal Flip");
+
+        // Reopen long immediately (past entry cooldown only)
+        let reopen_evt = MarketEvent {
+            schema_version: KERNEL_SCHEMA_VERSION,
+            event_id: 300,
+            timestamp_ms: 121_000, // 21s after last entry (100_000), past entry cooldown
+            symbol: "BTC".to_string(),
+            signal: MarketSignal::Buy,
+            price: 10_050.0,
+            notional_hint_usd: Some(10_000.0),
+            close_fraction: None,
+            fee_role: None,
+            funding_rate: None,
+            indicators: None,
+            gate_result: None,
+            ema_slow_slope_pct: None,
+        };
+        let result = step(&closed.state, &reopen_evt, &params);
+        assert!(
+            result.state.positions.get("BTC").is_some(),
+            "Signal Flip should exempt PESC"
+        );
+        assert!(!result.diagnostics.pesc_blocked);
+    }
+
+    #[test]
+    fn pesc_adx_adaptive() {
+        // Verify ADX-adaptive cooldown: high ADX uses min cooldown, low ADX uses max.
+        let cd = CooldownParams {
+            entry_cooldown_s: 0,
+            exit_cooldown_s: 0,
+            reentry_cooldown_minutes: 60,
+            reentry_cooldown_min_mins: 45,
+            reentry_cooldown_max_mins: 180,
+        };
+
+        let mut state = init_state();
+        // Record a close 46 minutes ago (side=long, reason=SL)
+        let close_ts = 0_i64;
+        let current_ts = 46 * 60 * 1000; // 46 minutes
+        state.last_close_info.insert(
+            "BTC".to_string(),
+            (close_ts, "long".to_string(), "SL".to_string()),
+        );
+
+        // High ADX (>=40) → min cooldown = 45 min → 46 min > 45 min → NOT blocked
+        assert!(
+            !is_pesc_blocked(&state, "BTC", PositionSide::Long, current_ts, 40.0, &cd),
+            "high ADX should use min cooldown (45min), 46min elapsed → allowed"
+        );
+
+        // Low ADX (<=25) → max cooldown = 180 min → 46 min < 180 min → BLOCKED
+        assert!(
+            is_pesc_blocked(&state, "BTC", PositionSide::Long, current_ts, 25.0, &cd),
+            "low ADX should use max cooldown (180min), 46min elapsed → blocked"
+        );
+
+        // Mid ADX (32.5) → interpolated: max + (32.5-25)/15 * (min-max) = 180 + 0.5*(45-180) = 180-67.5 = 112.5 min
+        // 46 min < 112.5 min → BLOCKED
+        assert!(
+            is_pesc_blocked(&state, "BTC", PositionSide::Long, current_ts, 32.5, &cd),
+            "mid ADX should interpolate cooldown, 46min < 112.5min → blocked"
+        );
+
+        // Check that after 181 minutes even low ADX allows
+        let late_ts = 181 * 60 * 1000;
+        assert!(
+            !is_pesc_blocked(&state, "BTC", PositionSide::Long, late_ts, 25.0, &cd),
+            "181min > 180min max cooldown → allowed"
+        );
+    }
+
+    #[test]
+    fn cooldown_none_no_effect() {
+        // cooldown_params = None should not block anything (backwards compat).
+        let state = init_state();
+        let params = KernelParams {
+            cooldown_params: None,
+            ..KernelParams::default()
+        };
+
+        // Open position
+        let mut event = event_with_signal("BTC", MarketSignal::Buy);
+        event.notional_hint_usd = Some(10_000.0);
+        let result = step(&state, &event, &params);
+        assert!(result.state.positions.get("BTC").is_some());
+        assert!(!result.diagnostics.cooldown_blocked);
+        assert!(!result.diagnostics.pesc_blocked);
+
+        // Immediately try to open another (same symbol, same side = pyramid)
+        let params_pyramid = KernelParams {
+            allow_pyramid: true,
+            cooldown_params: None,
+            ..KernelParams::default()
+        };
+        let mut event2 = event_with_signal("BTC", MarketSignal::Buy);
+        event2.event_id = 200;
+        event2.timestamp_ms = 1_001; // 1ms later
+        event2.notional_hint_usd = Some(5_000.0);
+        let result2 = step(&result.state, &event2, &params_pyramid);
+        // Should succeed (pyramid allowed, no cooldown)
+        assert!(!result2.diagnostics.cooldown_blocked);
+        assert!(!result2.diagnostics.pesc_blocked);
+        assert!(result2.fills.len() > 0);
+    }
+
+    #[test]
+    fn cooldown_zero_disabled() {
+        // CooldownParams with all zeros should not block anything.
+        let state = init_state();
+        let params = KernelParams {
+            cooldown_params: Some(CooldownParams {
+                entry_cooldown_s: 0,
+                exit_cooldown_s: 0,
+                reentry_cooldown_minutes: 0,
+                reentry_cooldown_min_mins: 0,
+                reentry_cooldown_max_mins: 0,
+            }),
+            ..KernelParams::default()
+        };
+
+        // Open position
+        let mut event = event_with_signal("BTC", MarketSignal::Buy);
+        event.notional_hint_usd = Some(10_000.0);
+        let result = step(&state, &event, &params);
+        assert!(result.state.positions.get("BTC").is_some());
+        assert!(!result.diagnostics.cooldown_blocked);
+        assert!(!result.diagnostics.pesc_blocked);
+
+        // Set up state as if we recently closed
+        let mut state_with_close = result.state.clone();
+        state_with_close.last_entry_ms.insert("BTC".to_string(), 999);
+        state_with_close.last_exit_ms.insert("BTC".to_string(), 999);
+        state_with_close.last_close_info.insert(
+            "BTC".to_string(),
+            (999, "long".to_string(), "SL".to_string()),
+        );
+        state_with_close.positions.remove("BTC");
+        // Return cash for simplicity
+        state_with_close.cash_usd = 100_000.0;
+
+        // Try to reopen at ts=1000 (1ms later) — should succeed with zero cooldowns
+        let mut reopen = event_with_signal("BTC", MarketSignal::Buy);
+        reopen.event_id = 300;
+        reopen.timestamp_ms = 1_000;
+        reopen.notional_hint_usd = Some(10_000.0);
+        let result2 = step(&state_with_close, &reopen, &params);
+        assert!(
+            result2.state.positions.get("BTC").is_some(),
+            "zero cooldowns should not block"
+        );
+        assert!(!result2.diagnostics.cooldown_blocked);
+        assert!(!result2.diagnostics.pesc_blocked);
     }
 }

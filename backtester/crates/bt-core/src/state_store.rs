@@ -127,6 +127,9 @@ mod tests {
             step: 42,
             cash_usd: 98_765.4321,
             positions: BTreeMap::new(),
+            last_entry_ms: BTreeMap::new(),
+            last_exit_ms: BTreeMap::new(),
+            last_close_info: BTreeMap::new(),
         }
     }
 
