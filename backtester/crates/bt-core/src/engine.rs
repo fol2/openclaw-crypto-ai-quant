@@ -217,6 +217,7 @@ fn make_kernel_state(
                 margin_usd: accounting::quantize(pos.margin_used),
                 confidence: None,
                 entry_atr: None,
+                entry_adx_threshold: None,
                 adds_count: 0,
                 tp1_taken: false,
                 trailing_sl: None,

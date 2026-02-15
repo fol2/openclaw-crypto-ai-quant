@@ -40,6 +40,15 @@ pub struct ExitParams {
     pub rsi_exit_ub_hi_profit: f64,
     pub rsi_exit_lb_lo_profit: f64,
     pub rsi_exit_lb_hi_profit: f64,
+    // Low-confidence RSI overrides
+    pub rsi_exit_ub_lo_profit_low_conf: f64,
+    pub rsi_exit_lb_lo_profit_low_conf: f64,
+    pub rsi_exit_ub_hi_profit_low_conf: f64,
+    pub rsi_exit_lb_hi_profit_low_conf: f64,
+    // Low-confidence ADX exhaustion override
+    pub smart_exit_adx_exhaustion_lt_low_conf: f64,
+    // Macro alignment (from filters config)
+    pub require_macro_alignment: bool,
     // Per-confidence trailing overrides
     pub trailing_start_atr_low_conf: f64,
     pub trailing_distance_atr_low_conf: f64,
@@ -72,6 +81,12 @@ impl Default for ExitParams {
             rsi_exit_ub_hi_profit: 70.0,
             rsi_exit_lb_lo_profit: 20.0,
             rsi_exit_lb_hi_profit: 30.0,
+            rsi_exit_ub_lo_profit_low_conf: 0.0,
+            rsi_exit_lb_lo_profit_low_conf: 0.0,
+            rsi_exit_ub_hi_profit_low_conf: 0.0,
+            rsi_exit_lb_hi_profit_low_conf: 0.0,
+            smart_exit_adx_exhaustion_lt_low_conf: 0.0,
+            require_macro_alignment: false,
             trailing_start_atr_low_conf: 0.0,
             trailing_distance_atr_low_conf: 0.0,
         }
@@ -347,6 +362,399 @@ fn check_tp(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Smart exit evaluation (mirrors exits/smart_exits.rs)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Evaluate all smart exit conditions on a kernel position.
+///
+/// Check order matches the CPU-side `exits/smart_exits.rs::check()`:
+///   1. Trend Breakdown (EMA Cross) + TBB buffer
+///   2. Trend Exhaustion (ADX < threshold)
+///   3. EMA Macro Breakdown
+///   4. Stagnation Exit (low-vol + underwater, skip PAXG)
+///   5. Funding Headwind Exit
+///   6. TSME (Trend Saturation Momentum Exit)
+///   7. MMDE (MACD Persistent Divergence Exit)
+///   8. RSI Overextension Exit
+fn evaluate_smart_exits(
+    pos: &Position,
+    snap: &IndicatorSnapshot,
+    params: &ExitParams,
+    profit_atr_val: f64,
+    duration_hours: f64,
+) -> KernelExitResult {
+    let entry = pos.avg_entry_price;
+    let atr = effective_atr(entry, pos.entry_atr);
+
+    let is_long = pos.side == PositionSide::Long;
+    let is_low_conf = pos.confidence == Some(0);
+
+    // ADX exhaustion threshold: prefer entry's threshold, then low-conf override, then config.
+    let entry_adx_thr = pos.entry_adx_threshold.unwrap_or(0.0);
+    let adx_exhaustion_lt = if entry_adx_thr > 0.0 {
+        entry_adx_thr
+    } else if is_low_conf && params.smart_exit_adx_exhaustion_lt_low_conf > 0.0 {
+        params.smart_exit_adx_exhaustion_lt_low_conf
+    } else {
+        params.smart_exit_adx_exhaustion_lt
+    }
+    .max(0.0);
+
+    // ── 1. Trend Breakdown (EMA Cross) with TBB buffer ──────────────────
+    let ema_dev = if snap.ema_slow > 0.0 {
+        (snap.ema_fast - snap.ema_slow).abs() / snap.ema_slow
+    } else {
+        0.0
+    };
+    let is_weak_cross = ema_dev < 0.001 && snap.adx > 25.0;
+
+    let ema_cross_exit = if is_long {
+        snap.ema_fast < snap.ema_slow && !is_weak_cross
+    } else {
+        snap.ema_fast > snap.ema_slow && !is_weak_cross
+    };
+
+    // ── 2. Trend Exhaustion (ADX below threshold) ───────────────────────
+    let exhausted = adx_exhaustion_lt > 0.0 && snap.adx < adx_exhaustion_lt;
+
+    if ema_cross_exit || exhausted {
+        let reason = if ema_cross_exit {
+            "Trend Breakdown (EMA Cross)".to_string()
+        } else {
+            format!("Trend Exhaustion (ADX < {adx_exhaustion_lt})")
+        };
+        return KernelExitResult::FullClose {
+            reason,
+            exit_price: snap.close,
+        };
+    }
+
+    // ── 3. EMA Macro Breakdown ──────────────────────────────────────────
+    if params.require_macro_alignment && snap.ema_macro > 0.0 {
+        if is_long && snap.close < snap.ema_macro {
+            return KernelExitResult::FullClose {
+                reason: "EMA Macro Breakdown".to_string(),
+                exit_price: snap.close,
+            };
+        }
+        if !is_long && snap.close > snap.ema_macro {
+            return KernelExitResult::FullClose {
+                reason: "EMA Macro Breakout".to_string(),
+                exit_price: snap.close,
+            };
+        }
+    }
+
+    // ── 4. Stagnation Exit (low-vol + underwater, skip PAXG) ────────────
+    if snap.atr < (atr * 0.70) {
+        let is_underwater = if is_long {
+            snap.close < entry
+        } else {
+            snap.close > entry
+        };
+        if is_underwater && pos.symbol.to_uppercase() != "PAXG" {
+            return KernelExitResult::FullClose {
+                reason: format!(
+                    "Stagnation Exit (Low Vol: {:.2} < {:.2})",
+                    snap.atr,
+                    atr * 0.70
+                ),
+                exit_price: snap.close,
+            };
+        }
+    }
+
+    // ── 5. Funding Headwind Exit ────────────────────────────────────────
+    if let Some(result) =
+        check_funding_headwind_kernel(pos, snap, profit_atr_val, duration_hours)
+    {
+        return result;
+    }
+
+    // ── 6. TSME (Trend Saturation Momentum Exit) ────────────────────────
+    if snap.adx > 50.0 {
+        let tsme_min_profit = params.tsme_min_profit_atr;
+        let gate_profit_ok = profit_atr_val >= tsme_min_profit;
+        let gate_slope_ok = if params.tsme_require_adx_slope_negative {
+            snap.adx_slope < 0.0
+        } else {
+            true
+        };
+
+        if gate_profit_ok && gate_slope_ok {
+            let is_exhausted = if is_long {
+                snap.macd_hist < snap.prev_macd_hist
+                    && snap.prev_macd_hist < snap.prev2_macd_hist
+            } else {
+                snap.macd_hist > snap.prev_macd_hist
+                    && snap.prev_macd_hist > snap.prev2_macd_hist
+            };
+
+            if is_exhausted {
+                return KernelExitResult::FullClose {
+                    reason: format!(
+                        "Trend Saturation Momentum Exhaustion (ADX: {:.1}, ADX_slope: {:.2})",
+                        snap.adx, snap.adx_slope
+                    ),
+                    exit_price: snap.close,
+                };
+            }
+        }
+    }
+
+    // ── 7. MMDE (MACD Persistent Divergence Exit) ───────────────────────
+    if profit_atr_val > 1.5 && snap.adx > 35.0 {
+        let is_diverging = if is_long {
+            snap.macd_hist < snap.prev_macd_hist
+                && snap.prev_macd_hist < snap.prev2_macd_hist
+                && snap.prev2_macd_hist < snap.prev3_macd_hist
+        } else {
+            snap.macd_hist > snap.prev_macd_hist
+                && snap.prev_macd_hist > snap.prev2_macd_hist
+                && snap.prev2_macd_hist > snap.prev3_macd_hist
+        };
+
+        if is_diverging {
+            return KernelExitResult::FullClose {
+                reason: format!(
+                    "MACD Persistent Divergence (Profit: {profit_atr_val:.2} ATR)"
+                ),
+                exit_price: snap.close,
+            };
+        }
+    }
+
+    // ── 8. RSI Overextension Exit ───────────────────────────────────────
+    if params.enable_rsi_overextension_exit {
+        if let Some(result) = check_rsi_overextension_kernel(pos, snap, params, profit_atr_val) {
+            return result;
+        }
+    }
+
+    KernelExitResult::Hold
+}
+
+/// Funding headwind sub-check for kernel positions.
+/// Faithfully replicates the full AFL/TDH/TLFB/MFE/ABF/HCFB/MTF/TCFB/VSFT/CTEB/ETFS/TAES/DFG/PVS/PBFB/TWFS chain.
+fn check_funding_headwind_kernel(
+    pos: &Position,
+    snap: &IndicatorSnapshot,
+    profit_atr_val: f64,
+    duration_hours: f64,
+) -> Option<KernelExitResult> {
+    let funding_rate = snap.funding_rate;
+    if funding_rate == 0.0 {
+        return None;
+    }
+
+    let is_long = pos.side == PositionSide::Long;
+    let entry = pos.avg_entry_price;
+    let atr = effective_atr(entry, pos.entry_atr);
+
+    let is_headwind = if is_long {
+        funding_rate > 0.0
+    } else {
+        funding_rate < 0.0
+    };
+    if !is_headwind {
+        return None;
+    }
+
+    let price_diff_atr = (snap.close - entry).abs() / atr;
+
+    // ── AFL (Adaptive Funding Ladder) ────────────────────────────────────
+    let mut headwind_threshold = if funding_rate.abs() > 0.0001 {
+        0.15
+    } else if funding_rate.abs() > 0.00006 {
+        0.25
+    } else if funding_rate.abs() > 0.00004 {
+        0.40
+    } else if funding_rate.abs() > 0.00002 {
+        0.60
+    } else if funding_rate.abs() < 0.00001 {
+        0.95 // NZF: near-zero funding buffer
+    } else {
+        0.80
+    };
+
+    // ── Volatility-Adjusted Sensitivity ──────────────────────────────────
+    if snap.atr > (atr * 1.2) {
+        headwind_threshold *= 0.6;
+    }
+
+    // ── TDH (Time-Decay Headwind) with floor ─────────────────────────────
+    if duration_hours > 1.0 {
+        let decay_factor = (1.0 - (duration_hours - 1.0) / 11.0).max(0.0);
+        headwind_threshold = (headwind_threshold * decay_factor).max(0.35);
+    }
+
+    // ── TLFB (Trend Loyalty Funding Buffer) ──────────────────────────────
+    let is_trend_valid = if is_long {
+        snap.ema_fast > snap.ema_slow
+    } else {
+        snap.ema_fast < snap.ema_slow
+    };
+    if is_trend_valid && snap.adx > 25.0 {
+        headwind_threshold = headwind_threshold.max(0.75);
+    }
+
+    // ── MFE (Momentum-Filtered Funding Exit) ─────────────────────────────
+    let is_momentum_improving = if is_long {
+        snap.macd_hist > snap.prev_macd_hist
+    } else {
+        snap.macd_hist < snap.prev_macd_hist
+    };
+    if is_momentum_improving {
+        headwind_threshold *= 1.5;
+        headwind_threshold = headwind_threshold.max(0.50);
+    }
+
+    // ── ABF (ADX-Boosted Funding Threshold) ──────────────────────────────
+    if snap.adx > 35.0 {
+        headwind_threshold *= 1.4;
+    }
+
+    // ── HCFB (High-Confidence Funding Buffer) ────────────────────────────
+    if pos.confidence == Some(2) {
+        headwind_threshold *= 1.25;
+    }
+
+    // ── MTF (Macro-Trend Filtered Funding Exit) ──────────────────────────
+    let is_macro_aligned = if snap.ema_macro > 0.0 {
+        if is_long {
+            snap.close > snap.ema_macro
+        } else {
+            snap.close < snap.ema_macro
+        }
+    } else {
+        false
+    };
+    if is_macro_aligned {
+        headwind_threshold *= 1.3;
+    }
+
+    // ── TCFB (Triple Confirmation Funding Buffer) ────────────────────────
+    if is_momentum_improving && is_macro_aligned && pos.confidence == Some(2) {
+        headwind_threshold *= 1.5;
+    }
+
+    // ── VSFT (Volatility-Scaled Funding Tolerance) ───────────────────────
+    if snap.close > 0.0 && (snap.atr / snap.close) < 0.002 {
+        headwind_threshold *= 1.25;
+    }
+
+    // ── CTEB (Counter-Trend Exhaustion Buffer) ───────────────────────────
+    if (!is_long && snap.rsi > 65.0) || (is_long && snap.rsi < 35.0) {
+        headwind_threshold *= 1.3;
+    }
+
+    // ── ETFS (Extreme Trend Funding Shield) ──────────────────────────────
+    if snap.adx > 45.0 {
+        headwind_threshold *= 1.6;
+    }
+
+    // ── TAES (Trend Acceleration Exit Shield) ────────────────────────────
+    if snap.adx_slope > 1.0 {
+        headwind_threshold *= 1.4;
+    }
+
+    // ── DFG (Dynamic Funding Guard) ──────────────────────────────────────
+    if snap.adx > 40.0 {
+        headwind_threshold *= 1.25;
+    }
+
+    // ── PVS (Profit-Vol Shield) ──────────────────────────────────────────
+    if profit_atr_val > 1.5 && snap.atr_slope > 0.0 {
+        headwind_threshold *= 1.5;
+    }
+
+    // ── PBFB (Profit-Based Funding Buffer) ───────────────────────────────
+    if profit_atr_val > 3.0 {
+        headwind_threshold *= 2.0;
+    } else if profit_atr_val > 2.0 {
+        headwind_threshold *= 1.5;
+    }
+
+    // ── TWFS (Trend Weakening Funding Sensitivity) ───────────────────────
+    if snap.adx_slope < 0.0 {
+        headwind_threshold *= 0.75;
+    }
+
+    // ── Final check: underwater with headwind ────────────────────────────
+    let is_underwater = if is_long {
+        snap.close < entry
+    } else {
+        snap.close > entry
+    };
+    if is_underwater && price_diff_atr > headwind_threshold {
+        return Some(KernelExitResult::FullClose {
+            reason: format!(
+                "Funding Headwind Exit (FR: {funding_rate:.6}, Thr: {headwind_threshold:.2}, Dur: {duration_hours:.1}h)"
+            ),
+            exit_price: snap.close,
+        });
+    }
+
+    None
+}
+
+/// RSI overextension sub-check for kernel positions.
+fn check_rsi_overextension_kernel(
+    pos: &Position,
+    snap: &IndicatorSnapshot,
+    params: &ExitParams,
+    profit_atr_val: f64,
+) -> Option<KernelExitResult> {
+    let is_long = pos.side == PositionSide::Long;
+    let is_low_conf = pos.confidence == Some(0);
+
+    let sw = params.rsi_exit_profit_atr_switch.max(0.0);
+
+    let (rsi_ub, rsi_lb) = if profit_atr_val < sw {
+        // Low-profit regime: wider thresholds (less aggressive exit).
+        let mut ub = params.rsi_exit_ub_lo_profit;
+        let mut lb = params.rsi_exit_lb_lo_profit;
+        if is_low_conf {
+            if params.rsi_exit_ub_lo_profit_low_conf > 0.0 {
+                ub = params.rsi_exit_ub_lo_profit_low_conf;
+            }
+            if params.rsi_exit_lb_lo_profit_low_conf > 0.0 {
+                lb = params.rsi_exit_lb_lo_profit_low_conf;
+            }
+        }
+        (ub, lb)
+    } else {
+        // High-profit regime: tighter thresholds (protect profits).
+        let mut ub = params.rsi_exit_ub_hi_profit;
+        let mut lb = params.rsi_exit_lb_hi_profit;
+        if is_low_conf {
+            if params.rsi_exit_ub_hi_profit_low_conf > 0.0 {
+                ub = params.rsi_exit_ub_hi_profit_low_conf;
+            }
+            if params.rsi_exit_lb_hi_profit_low_conf > 0.0 {
+                lb = params.rsi_exit_lb_hi_profit_low_conf;
+            }
+        }
+        (ub, lb)
+    };
+
+    if is_long && snap.rsi > rsi_ub {
+        return Some(KernelExitResult::FullClose {
+            reason: format!("RSI Overbought ({:.1}, Thr: {rsi_ub})", snap.rsi),
+            exit_price: snap.close,
+        });
+    }
+    if !is_long && snap.rsi < rsi_lb {
+        return Some(KernelExitResult::FullClose {
+            reason: format!("RSI Oversold ({:.1}, Thr: {rsi_lb})", snap.rsi),
+            exit_price: snap.close,
+        });
+    }
+
+    None
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Public API
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -358,7 +766,7 @@ pub fn evaluate_exits(
     pos: &mut Position,
     snap: &IndicatorSnapshot,
     params: &ExitParams,
-    _current_time_ms: i64,
+    current_time_ms: i64,
 ) -> KernelExitResult {
     let entry = pos.avg_entry_price;
     let atr = effective_atr(entry, pos.entry_atr);
@@ -405,7 +813,7 @@ pub fn evaluate_exits(
     }
 
     // ── 3. Take Profit ──────────────────────────────────────────────────
-    check_tp(
+    let tp_result = check_tp(
         pos.side,
         entry,
         atr,
@@ -413,7 +821,18 @@ pub fn evaluate_exits(
         pos.tp1_taken,
         snap,
         params,
-    )
+    );
+    if tp_result != KernelExitResult::Hold {
+        return tp_result;
+    }
+
+    // ── 4. Smart Exits ──────────────────────────────────────────────────
+    let duration_hours = if current_time_ms > pos.opened_at_ms {
+        (current_time_ms - pos.opened_at_ms) as f64 / 3_600_000.0
+    } else {
+        0.0
+    };
+    evaluate_smart_exits(pos, snap, params, pa, duration_hours)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -476,6 +895,7 @@ mod tests {
             margin_usd: entry / 3.0,
             confidence: Some(2), // High
             entry_atr: Some(entry * 0.01),
+            entry_adx_threshold: None,
             adds_count: 0,
             tp1_taken: false,
             trailing_sl: None,
@@ -497,6 +917,7 @@ mod tests {
             margin_usd: entry / 3.0,
             confidence: Some(2),
             entry_atr: Some(entry * 0.01),
+            entry_adx_threshold: None,
             adds_count: 0,
             tp1_taken: false,
             trailing_sl: None,
@@ -821,5 +1242,196 @@ mod tests {
         let json = serde_json::to_string(&params).unwrap();
         let deser: ExitParams = serde_json::from_str(&json).unwrap();
         assert_eq!(params, deser);
+    }
+
+    // ── Smart exit tests ────────────────────────────────────────────────
+
+    /// Helper: params that disable partial TP and set ADX exhaustion to 0
+    /// so only the smart exit under test fires.
+    fn smart_exit_params() -> ExitParams {
+        ExitParams {
+            enable_partial_tp: false,
+            smart_exit_adx_exhaustion_lt: 0.0,
+            require_macro_alignment: false,
+            ..default_params()
+        }
+    }
+
+    #[test]
+    fn test_smart_exit_trend_breakdown_ema_cross() {
+        let mut pos = long_pos(100.0);
+        let mut snap = default_snap(100.0);
+        snap.ema_fast = 99.0;
+        snap.ema_slow = 100.0;
+        snap.adx = 20.0; // low ADX → not a weak cross
+        let params = smart_exit_params();
+        let result = evaluate_exits(&mut pos, &snap, &params, 0);
+        match result {
+            KernelExitResult::FullClose { reason, .. } => {
+                assert!(reason.contains("Trend Breakdown"), "got: {reason}");
+            }
+            other => panic!("Expected FullClose(Trend Breakdown), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_smart_exit_weak_cross_suppression() {
+        let mut pos = long_pos(100.0);
+        let mut snap = default_snap(100.0);
+        snap.ema_fast = 99.95; // ema_dev = 0.05% < 0.1%
+        snap.ema_slow = 100.0;
+        snap.adx = 30.0; // ADX > 25 → TBB buffer active
+        let params = smart_exit_params();
+        let result = evaluate_exits(&mut pos, &snap, &params, 0);
+        assert_eq!(result, KernelExitResult::Hold);
+    }
+
+    #[test]
+    fn test_smart_exit_trend_exhaustion_adx_below_threshold() {
+        let mut pos = long_pos(100.0);
+        let mut snap = default_snap(100.0);
+        snap.adx = 15.0; // below threshold
+        let params = ExitParams {
+            enable_partial_tp: false,
+            smart_exit_adx_exhaustion_lt: 20.0,
+            require_macro_alignment: false,
+            ..default_params()
+        };
+        let result = evaluate_exits(&mut pos, &snap, &params, 0);
+        match result {
+            KernelExitResult::FullClose { reason, .. } => {
+                assert!(reason.contains("Trend Exhaustion"), "got: {reason}");
+            }
+            other => panic!("Expected FullClose(Trend Exhaustion), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_smart_exit_stagnation_low_vol_underwater() {
+        let mut pos = long_pos(100.0);
+        let mut snap = default_snap(99.0); // underwater
+        snap.atr = 0.5; // 50% of entry_atr (1.0), below 70% threshold
+        snap.adx = 30.0; // above exhaustion
+        let params = smart_exit_params();
+        let result = evaluate_exits(&mut pos, &snap, &params, 0);
+        match result {
+            KernelExitResult::FullClose { reason, .. } => {
+                assert!(reason.contains("Stagnation Exit"), "got: {reason}");
+            }
+            other => panic!("Expected FullClose(Stagnation Exit), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_smart_exit_stagnation_skips_paxg() {
+        let mut pos = long_pos(100.0);
+        pos.symbol = "PAXG".to_string();
+        let mut snap = default_snap(99.0);
+        snap.atr = 0.5;
+        snap.adx = 30.0;
+        let params = smart_exit_params();
+        let result = evaluate_exits(&mut pos, &snap, &params, 0);
+        // Should NOT trigger stagnation for PAXG
+        assert!(
+            !matches!(result, KernelExitResult::FullClose { ref reason, .. } if reason.contains("Stagnation")),
+            "PAXG should be exempt from stagnation exit, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_smart_exit_tsme_momentum_contraction() {
+        let mut pos = long_pos(100.0);
+        let mut snap = default_snap(102.0);
+        snap.adx = 55.0;
+        snap.adx_slope = -1.0;
+        snap.macd_hist = 0.5;
+        snap.prev_macd_hist = 0.8;
+        snap.prev2_macd_hist = 1.1;
+        let params = smart_exit_params();
+        // profit_atr = (102-100)/1.0 = 2.0 >= tsme_min_profit_atr (1.0)
+        let result = evaluate_exits(&mut pos, &snap, &params, 0);
+        match result {
+            KernelExitResult::FullClose { reason, .. } => {
+                assert!(reason.contains("Trend Saturation"), "got: {reason}");
+            }
+            other => panic!("Expected FullClose(TSME), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_smart_exit_mmde_persistent_divergence() {
+        let mut pos = long_pos(100.0);
+        let mut snap = default_snap(102.0);
+        snap.adx = 40.0;
+        snap.macd_hist = 0.3;
+        snap.prev_macd_hist = 0.5;
+        snap.prev2_macd_hist = 0.7;
+        snap.prev3_macd_hist = 0.9;
+        let params = smart_exit_params();
+        // profit_atr = (102-100)/1.0 = 2.0 > 1.5, ADX 40 > 35
+        let result = evaluate_exits(&mut pos, &snap, &params, 0);
+        match result {
+            KernelExitResult::FullClose { reason, .. } => {
+                assert!(reason.contains("MACD Persistent Divergence"), "got: {reason}");
+            }
+            other => panic!("Expected FullClose(MMDE), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_smart_exit_rsi_overextension_long() {
+        let mut pos = long_pos(100.0);
+        let mut snap = default_snap(100.0);
+        snap.rsi = 85.0; // above 80 (lo-profit threshold)
+        snap.adx = 30.0;
+        let params = smart_exit_params();
+        // profit_atr = 0.0 < rsi_exit_profit_atr_switch (1.5) → lo-profit regime → rsi_ub = 80
+        let result = evaluate_exits(&mut pos, &snap, &params, 0);
+        match result {
+            KernelExitResult::FullClose { reason, .. } => {
+                assert!(reason.contains("RSI Overbought"), "got: {reason}");
+            }
+            other => panic!("Expected FullClose(RSI Overbought), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_smart_exit_rsi_profit_switch_tighter_threshold() {
+        let mut pos = long_pos(100.0);
+        let mut snap = default_snap(100.0);
+        snap.rsi = 72.0; // between 70 (hi-profit) and 80 (lo-profit)
+        snap.adx = 30.0;
+        let params = smart_exit_params();
+
+        // Low profit: rsi_ub = 80 → 72 < 80 → no trigger
+        // profit_atr = 0.0 (close=100, entry=100, atr=1.0)
+        let result = evaluate_exits(&mut pos, &snap, &params, 0);
+        assert_eq!(result, KernelExitResult::Hold);
+
+        // High profit: simulate by setting close above entry so profit_atr > switch (1.5)
+        let mut snap2 = snap;
+        snap2.close = 101.6; // profit_atr = 1.6/1.0 = 1.6 > 1.5 → hi-profit → rsi_ub = 70
+        snap2.rsi = 72.0; // 72 > 70 → trigger
+        let result2 = evaluate_exits(&mut pos, &snap2, &params, 0);
+        match result2 {
+            KernelExitResult::FullClose { reason, .. } => {
+                assert!(reason.contains("RSI Overbought"), "got: {reason}");
+            }
+            other => panic!("Expected FullClose(RSI Overbought) with hi-profit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_smart_exit_no_trigger_normal_conditions() {
+        let mut pos = long_pos(100.0);
+        let mut snap = default_snap(101.0);
+        snap.ema_fast = 101.0;
+        snap.ema_slow = 100.0; // EMA aligned for Long
+        snap.adx = 30.0; // above any exhaustion threshold
+        snap.rsi = 55.0; // normal
+        let params = smart_exit_params();
+        let result = evaluate_exits(&mut pos, &snap, &params, 0);
+        assert_eq!(result, KernelExitResult::Hold);
     }
 }
