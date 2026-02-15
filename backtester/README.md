@@ -1,6 +1,12 @@
-# Mei Backtester
+# Mei Backtester (V8 — Single Source of Truth)
 
 High-performance Rust backtesting simulator for the Mei Alpha strategy.
+
+> **V8 is the sole backtester.** The legacy main-branch backtester has been
+> archived as `archive/main-backtester-v6`. All execution paths (CPU replay,
+> GPU sweep, live/paper trading via PyO3 bridge) share a single decision
+> kernel (`decision_kernel.rs`). See the V8 SSOT migration issues AQC-711
+> through AQC-762 for details.
 
 ## Build
 
