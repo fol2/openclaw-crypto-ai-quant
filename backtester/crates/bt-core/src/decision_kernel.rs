@@ -57,6 +57,9 @@ pub struct MarketEvent {
     /// close (opposite-side signal with an existing position).
     #[serde(default)]
     pub close_fraction: Option<f64>,
+    /// Fee role override: `None` defaults to Taker.
+    #[serde(default)]
+    pub fee_role: Option<accounting::FeeRole>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -509,7 +512,8 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
         maker_fee_bps: params.maker_fee_bps,
         taker_fee_bps: params.taker_fee_bps,
     };
-    let fee_rate = fee_model.role_rate(accounting::FeeRole::Taker);
+    let role = event.fee_role.unwrap_or(accounting::FeeRole::Taker);
+    let fee_rate = fee_model.role_rate(role);
     let leverage = params.leverage;
     let notional = event
         .notional_hint_usd
@@ -647,6 +651,7 @@ mod tests {
             price: 10_000.0,
             notional_hint_usd: notional_hint,
             close_fraction: None,
+            fee_role: None,
         }
     }
 
@@ -723,6 +728,7 @@ mod tests {
             price: 10_200.0,
             notional_hint_usd: None,
             close_fraction: None,
+            fee_role: None,
         };
         let close_state = open_result.state;
         let close_result = step(&close_state, &close_event, &params);
@@ -780,6 +786,7 @@ mod tests {
             price,
             notional_hint_usd: None,
             close_fraction: Some(fraction),
+            fee_role: None,
         }
     }
 
@@ -1032,6 +1039,7 @@ mod tests {
             price: 8_000.0,
             notional_hint_usd: Some(8_000.0),
             close_fraction: None,
+            fee_role: None,
         };
         let r2 = step(&r1.state, &add_evt, &params);
         let pos2 = r2.state.positions.get("BTC").unwrap();
@@ -1073,6 +1081,7 @@ mod tests {
             price: 11_000.0,
             notional_hint_usd: Some(5_000.0),
             close_fraction: None,
+            fee_role: None,
         };
         let r2 = step(&r1.state, &add_evt, &params);
         let pos2 = r2.state.positions.get("BTC").unwrap();
@@ -1118,6 +1127,7 @@ mod tests {
             price: 11_000.0,
             notional_hint_usd: Some(11_000.0),
             close_fraction: None,
+            fee_role: None,
         };
         let r2 = step(&r1.state, &e2, &params);
 
@@ -1130,6 +1140,7 @@ mod tests {
             price: 9_000.0,
             notional_hint_usd: Some(9_000.0),
             close_fraction: None,
+            fee_role: None,
         };
         let r3 = step(&r2.state, &e3, &params);
         let pos3 = r3.state.positions.get("BTC").unwrap();
@@ -1187,6 +1198,7 @@ mod tests {
             price: 10_500.0,
             notional_hint_usd: Some(5_000.0),
             close_fraction: None,
+            fee_role: None,
         };
         let r2 = step(&r1.state, &add1, &params);
         assert_eq!(r2.state.positions.get("BTC").unwrap().adds_count, 1);
@@ -1250,6 +1262,7 @@ mod tests {
             price: 10_500.0,
             notional_hint_usd: Some(5_000.0),
             close_fraction: None,
+            fee_role: None,
         };
         let r2 = step(&r1.state, &add_evt, &params);
         let pos2 = r2.state.positions.get("BTC").unwrap();
@@ -1309,5 +1322,106 @@ mod tests {
         assert_eq!(pos.trailing_sl, None);
         assert!((pos.mae_usd).abs() < f64::EPSILON);
         assert!((pos.mfe_usd).abs() < f64::EPSILON);
+    }
+
+    // ---- Fee role selection tests ----
+
+    fn fee_role_params() -> KernelParams {
+        KernelParams {
+            maker_fee_bps: 1.0,  // 0.01%
+            taker_fee_bps: 3.5,  // 0.035%
+            ..KernelParams::default()
+        }
+    }
+
+    #[test]
+    fn open_with_default_none_fee_role_uses_taker() {
+        let state = init_state();
+        let params = fee_role_params();
+        let mut event = event_with_signal("BTC", MarketSignal::Buy);
+        event.notional_hint_usd = Some(10_000.0);
+        // fee_role is None → taker
+
+        let result = step(&state, &event, &params);
+        let fill = &result.fills[0];
+
+        let expected_fee = accounting::quantize(10_000.0 * (3.5 / 10_000.0));
+        assert!(
+            (fill.fee_usd - expected_fee).abs() < 1e-12,
+            "default fee: {} != expected taker fee {}",
+            fill.fee_usd,
+            expected_fee,
+        );
+    }
+
+    #[test]
+    fn open_with_explicit_maker_fee_role() {
+        let state = init_state();
+        let params = fee_role_params();
+        let mut event = event_with_signal("BTC", MarketSignal::Buy);
+        event.notional_hint_usd = Some(10_000.0);
+        event.fee_role = Some(accounting::FeeRole::Maker);
+
+        let result = step(&state, &event, &params);
+        let fill = &result.fills[0];
+
+        let expected_fee = accounting::quantize(10_000.0 * (1.0 / 10_000.0));
+        assert!(
+            (fill.fee_usd - expected_fee).abs() < 1e-12,
+            "maker fee: {} != expected {}",
+            fill.fee_usd,
+            expected_fee,
+        );
+    }
+
+    #[test]
+    fn open_with_explicit_taker_matches_default() {
+        let state = init_state();
+        let params = fee_role_params();
+
+        let mut evt_default = event_with_signal("BTC", MarketSignal::Buy);
+        evt_default.notional_hint_usd = Some(10_000.0);
+        // fee_role = None (taker by default)
+
+        let mut evt_explicit = evt_default.clone();
+        evt_explicit.fee_role = Some(accounting::FeeRole::Taker);
+
+        let r_default = step(&state, &evt_default, &params);
+        let r_explicit = step(&state, &evt_explicit, &params);
+
+        assert_eq!(
+            r_default.fills[0].fee_usd, r_explicit.fills[0].fee_usd,
+            "explicit taker should match default"
+        );
+        assert_eq!(r_default.state.cash_usd, r_explicit.state.cash_usd);
+    }
+
+    #[test]
+    fn maker_vs_taker_cash_difference_matches_bps_delta() {
+        let state = init_state();
+        let params = fee_role_params();
+        let notional = 10_000.0;
+
+        let mut evt_maker = event_with_signal("BTC", MarketSignal::Buy);
+        evt_maker.notional_hint_usd = Some(notional);
+        evt_maker.fee_role = Some(accounting::FeeRole::Maker);
+
+        let mut evt_taker = event_with_signal("BTC", MarketSignal::Buy);
+        evt_taker.notional_hint_usd = Some(notional);
+        // fee_role = None → taker
+
+        let r_maker = step(&state, &evt_maker, &params);
+        let r_taker = step(&state, &evt_taker, &params);
+
+        // Maker saves (taker_bps - maker_bps) / 10_000 * notional in fees.
+        let bps_delta = params.taker_fee_bps - params.maker_fee_bps; // 2.5
+        let expected_savings = accounting::quantize(notional * bps_delta / 10_000.0);
+        let actual_savings = accounting::quantize(r_maker.state.cash_usd - r_taker.state.cash_usd);
+        assert!(
+            (actual_savings - expected_savings).abs() < 1e-12,
+            "cash savings: {} != expected {}",
+            actual_savings,
+            expected_savings,
+        );
     }
 }
