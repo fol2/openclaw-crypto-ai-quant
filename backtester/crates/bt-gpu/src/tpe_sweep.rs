@@ -12,7 +12,7 @@
 //! - Layer 3: TPE observation pruning (caps ask/tell complexity at O(4000))
 //! - Layer 4: Double-buffer pipeline — TPE ask() overlaps with GPU evaluation
 
-use std::collections::HashMap;
+use std::collections::{BinaryHeap, HashMap};
 use std::time::Instant;
 
 use bt_core::candle::{CandleData, FundingRateData};
@@ -29,7 +29,7 @@ use bytemuck::Zeroable;
 use crate::axis_split::INDICATOR_PATHS;
 use crate::buffers;
 use crate::gpu_host;
-use crate::layout::GpuSweepResult;
+use crate::layout::{GpuSweepResult, MinPnlHeapEntry};
 use crate::raw_candles;
 use crate::BAR_CHUNK_SIZE;
 
@@ -413,6 +413,7 @@ pub fn run_tpe_sweep(
     sub_candles: Option<&CandleData>,
     from_ts: Option<i64>,
     to_ts: Option<i64>,
+    top_k: usize,
 ) -> Vec<GpuSweepResult> {
     let rng = StdRng::seed_from_u64(tpe_cfg.seed);
 
@@ -610,7 +611,11 @@ pub fn run_tpe_sweep(
         .expect("Failed to spawn TPE thread");
 
     // GPU thread: receive batches, evaluate, send results
-    let mut all_results: Vec<GpuSweepResult> = Vec::new();
+    // Bounded top-K heap: keeps only the best results by PnL to prevent OOM
+    let effective_top_k = if top_k == 0 { usize::MAX } else { top_k };
+    let mut top_heap: BinaryHeap<MinPnlHeapEntry> = BinaryHeap::with_capacity(
+        effective_top_k.min(tpe_cfg.trials).min(100_000) + 1,
+    );
     let mut best_pnl = f64::NEG_INFINITY;
     let mut best_trial = 0usize;
     let mut trials_done = 0usize;
@@ -681,7 +686,16 @@ pub fn run_tpe_sweep(
             trials_done, tpe_trials, best_pnl, best_trial, gpu_ms, request.batch_idx,
         );
 
-        all_results.extend(batch_results);
+        for r in batch_results {
+            if top_heap.len() < effective_top_k {
+                top_heap.push(MinPnlHeapEntry(r));
+            } else if let Some(worst) = top_heap.peek() {
+                if r.total_pnl > worst.0.total_pnl || worst.0.total_pnl.is_nan() {
+                    top_heap.pop();
+                    top_heap.push(MinPnlHeapEntry(r));
+                }
+            }
+        }
 
         // Send results to TPE thread (tell + ask next batch)
         // This returns immediately — TPE thread will process while we wait for next request
@@ -701,14 +715,15 @@ pub fn run_tpe_sweep(
     // Wait for TPE thread to finish
     tpe_handle.join().expect("TPE thread panicked");
 
-    // Sort by PnL descending
-    all_results.sort_by(|a, b| {
+    // Drain heap and sort by PnL descending
+    let mut results: Vec<GpuSweepResult> = top_heap.into_iter().map(|e| e.0).collect();
+    results.sort_by(|a, b| {
         b.total_pnl
             .partial_cmp(&a.total_pnl)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    all_results
+    results
 }
 
 // =============================================================================
