@@ -1037,8 +1037,8 @@ fn dispatch_trade_arena(
 
     let mut states_host = vec![buffers::GpuComboState::zeroed(); gpu_configs.len()];
     for s in &mut states_host {
-        s.balance = initial_balance;
-        s.peak_equity = initial_balance;
+        s.balance = initial_balance as f64;
+        s.peak_equity = initial_balance as f64;
     }
     let mut states_gpu = ds.dev.htod_sync_copy(&states_host).unwrap();
     let mut results_gpu = ds
