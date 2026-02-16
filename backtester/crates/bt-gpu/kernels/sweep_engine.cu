@@ -1137,8 +1137,18 @@ extern "C" __global__ void sweep_engine_kernel(
                             if (p_atr_pyr >= cfg.add_min_profit_atr) {
                                 unsigned int elapsed_sec = hybrid.t_sec - pos.last_add_time_sec;
                                 if (elapsed_sec >= cfg.add_cooldown_minutes * 60u) {
-                                    float equity = (float)state.balance;
-                                    float base_margin = equity * cfg.allocation_pct;
+                                    // Equity = balance + unrealized PnL (mirrors CPU)
+                                    float pyr_equity = (float)state.balance;
+                                    for (unsigned int eq_s2 = 0u; eq_s2 < ns; eq_s2++) {
+                                        if (state.positions[eq_s2].active != POS_EMPTY) {
+                                            const GpuSnapshot& eq_snap2 = snapshots[cfg.snapshot_offset + bar * ns + eq_s2];
+                                            if (eq_snap2.valid != 0u) {
+                                                pyr_equity += profit_usd(state.positions[eq_s2], eq_snap2.close);
+                                            }
+                                        }
+                                    }
+                                    if (pyr_equity < 0.0f) { pyr_equity = 0.0f; }
+                                    float base_margin = pyr_equity * cfg.allocation_pct;
                                     float add_margin = base_margin * cfg.add_fraction_of_base_margin;
                                     float lev = pos.leverage;
                                     float add_notional = add_margin * lev;
@@ -1250,6 +1260,18 @@ extern "C" __global__ void sweep_engine_kernel(
                     candidates[j] = key;
                 }
 
+                // Compute equity = balance + unrealized PnL (mirrors CPU engine.rs:1094-1095)
+                float hybrid_entry_equity = (float)state.balance;
+                for (unsigned int eq_s = 0u; eq_s < ns; eq_s++) {
+                    if (state.positions[eq_s].active != POS_EMPTY) {
+                        const GpuSnapshot& eq_snap = snapshots[cfg.snapshot_offset + bar * ns + eq_s];
+                        if (eq_snap.valid != 0u) {
+                            hybrid_entry_equity += profit_usd(state.positions[eq_s], eq_snap.close);
+                        }
+                    }
+                }
+                if (hybrid_entry_equity < 0.0f) { hybrid_entry_equity = 0.0f; }
+
                 // Execute ranked entries for this sub-bar tick
                 for (unsigned int i = 0u; i < num_cands; i++) {
                     if (state.entries_this_bar >= cfg.max_entry_orders_per_loop) { break; }
@@ -1275,10 +1297,10 @@ extern "C" __global__ void sweep_engine_kernel(
                             total_margin += state.positions[s].margin_used;
                         }
                     }
-                    float headroom = (float)state.balance * cfg.max_total_margin_pct - total_margin;
+                    float headroom = hybrid_entry_equity * cfg.max_total_margin_pct - total_margin;
                     if (headroom <= 0.0f) { continue; }
 
-                    SizingResult sizing = compute_entry_size((float)state.balance, hybrid.close, cand.confidence,
+                    SizingResult sizing = compute_entry_size(hybrid_entry_equity, hybrid.close, cand.confidence,
                                                              cand.atr, hybrid, &cfg);
                     float size = sizing.size;
                     float margin = sizing.margin;
@@ -1527,6 +1549,18 @@ extern "C" __global__ void sweep_engine_kernel(
             }
 
             // == Phase 4: Execute ranked entries =============================
+            // Compute equity = balance + unrealized PnL (mirrors CPU engine.rs:1094-1095)
+            float main_entry_equity = (float)state.balance;
+            for (unsigned int eq_s3 = 0u; eq_s3 < ns; eq_s3++) {
+                if (state.positions[eq_s3].active != POS_EMPTY) {
+                    const GpuSnapshot& eq_snap3 = snapshots[cfg.snapshot_offset + bar * ns + eq_s3];
+                    if (eq_snap3.valid != 0u) {
+                        main_entry_equity += profit_usd(state.positions[eq_s3], eq_snap3.close);
+                    }
+                }
+            }
+            if (main_entry_equity < 0.0f) { main_entry_equity = 0.0f; }
+
             for (unsigned int i = 0u; i < num_cands; i++) {
                 if (state.entries_this_bar >= cfg.max_entry_orders_per_loop) { break; }
                 if (state.num_open >= cfg.max_open_positions) { break; }
@@ -1540,10 +1574,10 @@ extern "C" __global__ void sweep_engine_kernel(
                         total_margin += state.positions[s].margin_used;
                     }
                 }
-                float headroom = (float)state.balance * cfg.max_total_margin_pct - total_margin;
+                float headroom = main_entry_equity * cfg.max_total_margin_pct - total_margin;
                 if (headroom <= 0.0f) { continue; }
 
-                SizingResult sizing = compute_entry_size((float)state.balance, snap.close, cand.confidence,
+                SizingResult sizing = compute_entry_size(main_entry_equity, snap.close, cand.confidence,
                                                          cand.atr, snap, &cfg);
                 float size = sizing.size;
                 float margin = sizing.margin;
