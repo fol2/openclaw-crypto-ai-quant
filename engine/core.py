@@ -18,6 +18,23 @@ from .market_data import MarketDataHub
 from .strategy_manager import StrategyManager
 from .utils import now_ms
 
+# AQC-801 traceability: module-level helpers from the strategy module.
+# These are lazy-imported on first use to avoid circular-import issues
+# (strategy imports engine in some factory paths).
+_decision_event_fn = None
+_link_trade_fn = None
+
+
+def _get_decision_event_fn():
+    global _decision_event_fn
+    if _decision_event_fn is None:
+        try:
+            from strategy.mei_alpha_v1 import create_decision_event
+            _decision_event_fn = create_decision_event
+        except Exception:
+            _decision_event_fn = False  # sentinel: import failed, don't retry
+    return _decision_event_fn if _decision_event_fn else None
+
 logger = logging.getLogger(__name__)
 
 
@@ -1918,12 +1935,15 @@ class UnifiedEngine:
                                 f"🚫 regime gate blocked {act} for {sym_u} "
                                 f"reason={self._regime_gate_reason}"
                             )
-                            if hasattr(self.trader, 'create_decision_event'):
-                                self.trader.create_decision_event(
-                                    symbol=sym_u, event_type="gate_block",
-                                    decision_phase="regime_gate", action_taken="blocked",
-                                    context_json={"reason": "regime_gate_off", "gate_on": self._regime_gate_on,
+                            _cde = _get_decision_event_fn()
+                            if _cde:
+                                try:
+                                    _cde(sym_u, "gate_block", "blocked", "gate_evaluation",
+                                         action_taken="blocked",
+                                         context={"reason": "regime_gate_off", "gate_on": self._regime_gate_on,
                                                   "breadth_pct": self._market_breadth_pct})
+                                except Exception:
+                                    pass
                             continue
 
                         quote = None
@@ -1950,11 +1970,14 @@ class UnifiedEngine:
                         # WARN-E3: Guard against zero price when all sources fail.
                         if current_price <= 0:
                             logger.warning(f"[{sym_u}] all price sources failed, skipping {act}")
-                            if hasattr(self.trader, 'create_decision_event'):
-                                self.trader.create_decision_event(
-                                    symbol=sym_u, event_type="gate_block",
-                                    decision_phase="price_check", action_taken="blocked",
-                                    context_json={"reason": "zero_price", "action": act})
+                            _cde = _get_decision_event_fn()
+                            if _cde:
+                                try:
+                                    _cde(sym_u, "gate_block", "blocked", "gate_evaluation",
+                                         action_taken="blocked",
+                                         context={"reason": "zero_price", "action": act})
+                                except Exception:
+                                    pass
                             continue
 
                         if act in {"OPEN", "ADD"}:
@@ -1965,11 +1988,14 @@ class UnifiedEngine:
                                         f"🕒 skip {sym_u} {act}: stale candle-close signal "
                                         f"key={int(entry_key)}"
                                     )
-                                    if hasattr(self.trader, 'create_decision_event'):
-                                        self.trader.create_decision_event(
-                                            symbol=sym_u, event_type="gate_block",
-                                            decision_phase="stale_candle", action_taken="blocked",
-                                            context_json={"reason": "stale_candle", "entry_key": int(entry_key)})
+                                    _cde = _get_decision_event_fn()
+                                    if _cde:
+                                        try:
+                                            _cde(sym_u, "gate_block", "blocked", "gate_evaluation",
+                                                 action_taken="blocked",
+                                                 context={"reason": "stale_candle", "entry_key": int(entry_key)})
+                                        except Exception:
+                                            pass
                                     continue
 
                                 last_key = self._last_entry_key.get(sym_u)
@@ -1979,18 +2005,24 @@ class UnifiedEngine:
                                         if last_open_count is not None and int(len(self.trader.positions or {})) < int(last_open_count):
                                             self._last_entry_key_open_pos_count[sym_u] = int(open_pos_count)
                                         else:
-                                            if hasattr(self.trader, 'create_decision_event'):
-                                                self.trader.create_decision_event(
-                                                    symbol=sym_u, event_type="gate_block",
-                                                    decision_phase="dedup_key", action_taken="blocked",
-                                                    context_json={"reason": "dedup_key", "entry_key": int(entry_key)})
+                                            _cde = _get_decision_event_fn()
+                                            if _cde:
+                                                try:
+                                                    _cde(sym_u, "gate_block", "blocked", "gate_evaluation",
+                                                         action_taken="blocked",
+                                                         context={"reason": "dedup_key", "entry_key": int(entry_key)})
+                                                except Exception:
+                                                    pass
                                             continue
                                     else:
-                                        if hasattr(self.trader, 'create_decision_event'):
-                                            self.trader.create_decision_event(
-                                                symbol=sym_u, event_type="gate_block",
-                                                decision_phase="dedup_key", action_taken="blocked",
-                                                context_json={"reason": "dedup_key", "entry_key": int(entry_key)})
+                                        _cde = _get_decision_event_fn()
+                                        if _cde:
+                                            try:
+                                                _cde(sym_u, "gate_block", "blocked", "gate_evaluation",
+                                                     action_taken="blocked",
+                                                     context={"reason": "dedup_key", "entry_key": int(entry_key)})
+                                            except Exception:
+                                                pass
                                         continue
 
                             if self._rest_enabled and hyperliquid_meta is not None:
@@ -2014,12 +2046,15 @@ class UnifiedEngine:
                                     pass
 
                             _did = None
-                            if hasattr(self.trader, 'create_decision_event'):
-                                _did = self.trader.create_decision_event(
-                                    symbol=sym_u, event_type="kernel_decision",
-                                    decision_phase="kernel_evaluation", action_taken=act.lower(),
-                                    context_json={"confidence": dec.confidence, "action": act,
-                                                  "source": "kernel_candle"})
+                            _cde = _get_decision_event_fn()
+                            if _cde:
+                                try:
+                                    _did = _cde(sym_u, "entry_signal", "executed", "execution",
+                                                action_taken=act.lower(),
+                                                context={"confidence": dec.confidence, "action": act,
+                                                         "source": "kernel_candle"})
+                                except Exception:
+                                    pass
 
                             self._decision_execute_trade(
                                 sym_u,
@@ -2034,13 +2069,8 @@ class UnifiedEngine:
                                 reason=dec.reason,
                             )
 
-                            if _did and hasattr(self.trader, 'link_decision_to_trade'):
-                                try:
-                                    latest_trade = self.trader._last_trade_id.get(sym_u)
-                                    if latest_trade:
-                                        self.trader.link_decision_to_trade(_did, latest_trade)
-                                except Exception:
-                                    pass
+                            # TODO(AQC-801): link_decision_to_trade requires trade_id
+                            # from _record_trade(); needs _record_trade to return id first.
 
                             # BUG-E1: Set dedup key AFTER trade execution so a
                             # gate-blocked entry can retry on the next tick.
@@ -2050,12 +2080,15 @@ class UnifiedEngine:
 
                         elif act in {"CLOSE", "REDUCE"}:
                             _did = None
-                            if hasattr(self.trader, 'create_decision_event'):
-                                _did = self.trader.create_decision_event(
-                                    symbol=sym_u, event_type="kernel_decision",
-                                    decision_phase="kernel_evaluation", action_taken=act.lower(),
-                                    context_json={"confidence": dec.confidence, "action": act,
-                                                  "source": "kernel_candle"})
+                            _cde = _get_decision_event_fn()
+                            if _cde:
+                                try:
+                                    _did = _cde(sym_u, "exit_check", "executed", "execution",
+                                                action_taken=act.lower(),
+                                                context={"confidence": dec.confidence, "action": act,
+                                                         "source": "kernel_candle"})
+                                except Exception:
+                                    pass
 
                             self._decision_execute_trade(
                                 sym_u,
@@ -2070,13 +2103,8 @@ class UnifiedEngine:
                                 reason=dec.reason,
                             )
 
-                            if _did and hasattr(self.trader, 'link_decision_to_trade'):
-                                try:
-                                    latest_trade = self.trader._last_trade_id.get(sym_u)
-                                    if latest_trade:
-                                        self.trader.link_decision_to_trade(_did, latest_trade)
-                                except Exception:
-                                    pass
+                            # TODO(AQC-801): link_decision_to_trade requires trade_id
+                            # from _record_trade(); needs _record_trade to return id first.
                     except SystemExit:
                         raise
                     except Exception:
