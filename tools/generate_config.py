@@ -77,9 +77,14 @@ CONFIDENCE_FIELDS = {
 }
 CONFIDENCE_MAP = {0: "low", 1: "medium", 2: "high"}
 
+# Fields that are categorical enums encoded as continuous floats by the sweep optimizer
+CATEGORICAL_FIELDS = {
+    "macd_hist_entry_mode": {0: "accel", 1: "sign", 2: "none"},
+}
+
 # Fields that are string enums (keep as-is)
 STRING_FIELDS = {
-    "macd_hist_entry_mode", "interval", "entry_interval", "exit_interval",
+    "interval", "entry_interval", "exit_interval",
 }
 
 
@@ -103,6 +108,13 @@ def _clamp_int(v: int, lo: int, hi: int) -> int:
 
 def coerce_value(param_name: str, raw_value):
     """Convert a raw sweep value to the correct Python type for YAML output."""
+    if param_name in CATEGORICAL_FIELDS:
+        mapping = CATEGORICAL_FIELDS[param_name]
+        if isinstance(raw_value, str) and raw_value in mapping.values():
+            return raw_value  # already a valid string
+        idx = max(0, min(len(mapping) - 1, round(float(raw_value))))
+        return mapping.get(idx, list(mapping.values())[0])
+
     if param_name in STRING_FIELDS:
         return str(raw_value)
 
@@ -139,9 +151,15 @@ def coerce_value(param_name: str, raw_value):
         except Exception:
             return int(raw_value)
 
-    # Default: float (preserve precision)
+    # Default: float (round to 6 significant digits for readability)
     if isinstance(raw_value, (int, float)):
-        return float(raw_value)
+        val = float(raw_value)
+        if val == 0:
+            return 0.0
+        if abs(val) >= 1:
+            return round(val, 6)
+        digits = 6 - int(math.floor(math.log10(abs(val)))) - 1
+        return round(val, max(0, digits))
     return raw_value
 
 
@@ -381,6 +399,13 @@ def main():
         coerced = coerce_value(param_name, raw_val)
         _set_nested(base_data, path, coerced)
         applied += 1
+
+    # Warn about potentially problematic config values
+    leverage_max_cap = _get_nested(base_data, "global.trade.leverage_max_cap", 0)
+    if isinstance(leverage_max_cap, (int, float)) and 0 < leverage_max_cap < 1.5:
+        print(f"⚠️  leverage_max_cap={leverage_max_cap:.4f} effectively disables "
+              f"dynamic leverage (caps all leverage to ~{leverage_max_cap:.1f}x)",
+              file=sys.stderr)
 
     # Update header comment
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

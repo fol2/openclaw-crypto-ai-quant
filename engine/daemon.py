@@ -631,11 +631,11 @@ class LivePlugin:
                 self._log_exc("risk_reduce_drawdown", "reduce-risk on drawdown kill failed")
 
             # Periodic OMS maintenance (expire stale intents).
-                try:
-                    if self._oms is not None:
-                        self._oms.reconcile(trader=self.trader)
-                except Exception:
-                    self._log_exc("oms_reconcile", "OMS reconcile() failed")
+            try:
+                if self._oms is not None:
+                    self._oms.reconcile(trader=self.trader)
+            except Exception:
+                self._log_exc("oms_reconcile", "OMS reconcile() failed")
 
         # Mode switching policy (runs after risk.refresh so new kill events are visible).
         try:

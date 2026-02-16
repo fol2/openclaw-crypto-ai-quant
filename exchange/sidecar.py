@@ -8,7 +8,11 @@ import threading
 from dataclasses import dataclass
 from typing import Any
 
+import logging
+
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -99,6 +103,8 @@ class SidecarWSClient:
 
         # Best-effort connectivity indicator.
         self._connected = False
+        self._was_connected = False  # Track previous state for reconnection detection
+        self._disconnect_ts: float | None = None  # Monotonic time of last disconnect
 
     def _connect(self, *, timeout_s: float) -> None:
         if self._sock is not None:
@@ -110,7 +116,21 @@ class SidecarWSClient:
         f = s.makefile("rwb")
         self._sock = s
         self._f = f
+
+        # Detect reconnection after a previous disconnect.
+        reconnected = self._was_connected and not self._connected
         self._connected = True
+        self._was_connected = True
+
+        if reconnected and self._disconnect_ts is not None:
+            import time as _time
+            gap_s = _time.monotonic() - self._disconnect_ts
+            if gap_s > 5.0:
+                logger.warning(
+                    "sidecar reconnected after %.0fs disconnect — candle gaps possible, signals may use stale data until backfill completes",
+                    gap_s,
+                )
+            self._disconnect_ts = None
 
     def _close(self) -> None:
         try:
@@ -130,6 +150,9 @@ class SidecarWSClient:
                     pass
         finally:
             self._sock = None
+            if self._connected:
+                import time as _time
+                self._disconnect_ts = _time.monotonic()
             self._connected = False
 
     def _rpc(self, method: str, params: dict[str, Any] | None = None, *, timeout_s: float = 2.0) -> Any:
