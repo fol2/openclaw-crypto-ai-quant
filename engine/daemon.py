@@ -376,6 +376,8 @@ class LivePlugin:
         self._unmatched_kill = _env_bool("AI_QUANT_HEALTH_UNMATCHED_KILL", False)
         self._unmatched_kill_mode = str(os.getenv("AI_QUANT_HEALTH_UNMATCHED_KILL_MODE", "close_only") or "close_only").strip().lower()
         self._unmatched_ts: deque[float] = deque()
+        # Grace period: suppress unmatched-fill alerts during startup REST backfill.
+        self._unmatched_grace_until = time.time() + float(os.getenv("AI_QUANT_HEALTH_UNMATCHED_GRACE_S", "120"))
 
         self._pending_fills_to_kill = int(float(os.getenv("AI_QUANT_HEALTH_PENDING_FILLS_TO_KILL", "20000")))
         self._pending_fills_kill = _env_bool("AI_QUANT_HEALTH_PENDING_FILLS_KILL", True)
@@ -704,19 +706,26 @@ class LivePlugin:
                             self._unmatched_ts.popleft()
 
                         if self._unmatched_alert_n > 0 and len(self._unmatched_ts) >= self._unmatched_alert_n:
-                            samples = st.get("unmatched_samples")
-                            extra = ""
-                            try:
-                                if isinstance(samples, list) and samples:
-                                    extra = f" samples={samples[:3]}"
-                            except Exception:
+                            # Suppress during startup grace period (REST backfill
+                            # produces unmatched fills before OMS has intents).
+                            if now < self._unmatched_grace_until:
+                                logger.debug(
+                                    "unmatched_fills suppressed during startup grace "
+                                    "(%.0fs remaining)", self._unmatched_grace_until - now)
+                            else:
+                                samples = st.get("unmatched_samples")
                                 extra = ""
-                            self._health_alert(
-                                "unmatched_fills",
-                                f"unmatched_new={unmatched_new} window_s={self._unmatched_window_s} count_in_window={len(self._unmatched_ts)}{extra}",
-                                kill=bool(self._unmatched_kill),
-                                kill_mode=str(self._unmatched_kill_mode or "close_only"),
-                            )
+                                try:
+                                    if isinstance(samples, list) and samples:
+                                        extra = f" samples={samples[:3]}"
+                                except Exception:
+                                    extra = ""
+                                self._health_alert(
+                                    "unmatched_fills",
+                                    f"unmatched_new={unmatched_new} window_s={self._unmatched_window_s} count_in_window={len(self._unmatched_ts)}{extra}",
+                                    kill=bool(self._unmatched_kill),
+                                    kill_mode=str(self._unmatched_kill_mode or "close_only"),
+                                )
                     except Exception:
                         pass
 
