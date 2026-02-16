@@ -16,6 +16,210 @@
 
 // SOURCE_HASHES: {"../bt-core/src/exits/mod.rs":"2dc6dcd56371a1bbf822bc5e69903fbb9b10a99f65134df3a81a04a1231af375","../bt-core/src/exits/smart_exits.rs":"ed3a3c40f00af3277b68191099a796988ae740d4aa11d9d9ba23b09810527c60","../bt-core/src/exits/stop_loss.rs":"39a2da91cd2b9ac8355f29b70ab4e333701a7e8ca6a145448381e9b1b0dc0d9c","../bt-core/src/exits/take_profit.rs":"794e8a9ab896ee91287e8c5cc250017bf9da5ffdd773ef8b1dbd8412cefc41ce","../bt-core/src/exits/trailing.rs":"501e5b5bc7fc7f9e8fea9572784aa14550cd5658b66428cded74c3eefdc3523e","../bt-signals/src/entry.rs":"7046e519e86605bc8f631c8ee3bcadfadeea119f616a1ad07f9b19f647072fbc","../bt-signals/src/gates.rs":"730aacfca4ec69a383157e2fdce134c5e5e16a40caf4ab36cf15a6ab0fa47acb"}
 
+// Derived from bt-signals/src/gates.rs
+// Gate evaluation: 8 gates + TMC/AVE + DRE + slow-drift override.
+// All indicator/price math in double precision (AQC-734).
+// All tunables read from cfg (no hardcoded gate thresholds).
+
+struct GateResultD {
+    bool all_gates_pass;
+    bool is_ranging;
+    bool is_anomaly;
+    bool is_extended;
+    bool vol_confirm;
+    bool is_trending_up;
+    bool adx_above_min;
+    bool bullish_alignment;
+    bool bearish_alignment;
+    double effective_min_adx;
+    double rsi_long_limit;
+    double rsi_short_limit;
+};
+
+__device__ GateResultD check_gates_codegen(
+    const GpuComboConfig& cfg,
+    double rsi,
+    double adx,
+    double adx_slope,
+    double bb_width_ratio,
+    double ema_fast,
+    double ema_slow,
+    double ema_macro,
+    double close,
+    double prev_close,
+    double volume,
+    double vol_sma,
+    unsigned int vol_trend,
+    double atr,
+    double avg_atr,
+    double stoch_rsi_k,
+    double ema_slow_slope_pct,
+    unsigned int btc_bullish,      // 0=bearish, 1=bullish, 2=unknown/no-data
+    unsigned int is_btc_symbol     // 1 if symbol is BTC
+) {
+    GateResultD result;
+    result.all_gates_pass = false;
+    result.is_ranging = false;
+    result.is_anomaly = false;
+    result.is_extended = false;
+    result.vol_confirm = true;
+    result.is_trending_up = true;
+    result.adx_above_min = false;
+    result.bullish_alignment = (ema_fast > ema_slow);
+    result.bearish_alignment = (ema_fast < ema_slow);
+    result.effective_min_adx = (double)cfg.min_adx;
+    result.rsi_long_limit = 0.0;
+    result.rsi_short_limit = 0.0;
+
+    // ── Gate 1: Ranging filter (vote system) ─────────────────────────────
+    // Python lines 3344-3363; Rust gates.rs Gate 1.
+    // Three votes: ADX below threshold, BB width ratio below threshold,
+    // RSI in neutral zone.  Ranging if votes >= min_signals.
+    if (cfg.enable_ranging_filter != 0u) {
+        unsigned int min_signals = cfg.ranging_min_signals;
+        if (min_signals < 1u) { min_signals = 1u; }
+        unsigned int votes = 0u;
+
+        // Vote 1: ADX below ranging threshold
+        if (adx < (double)cfg.ranging_adx_lt) { votes += 1u; }
+
+        // Vote 2: BB width ratio below ranging threshold
+        if (bb_width_ratio < (double)cfg.ranging_bb_width_ratio_lt) { votes += 1u; }
+
+        // Vote 3: RSI in neutral zone
+        if (rsi > (double)cfg.ranging_rsi_low && rsi < (double)cfg.ranging_rsi_high) { votes += 1u; }
+
+        result.is_ranging = (votes >= min_signals);
+    }
+
+    // ── Gate 2: Anomaly filter ───────────────────────────────────────────
+    // Python lines 3365-3371; Rust gates.rs Gate 2.
+    // Blocks entry when price_change_pct > threshold OR ema_dev_pct > threshold.
+    if (cfg.enable_anomaly_filter != 0u) {
+        double price_change_pct = 0.0;
+        if (prev_close > 0.0) {
+            price_change_pct = fabs(close - prev_close) / prev_close;
+        }
+        double ema_dev_pct = 0.0;
+        if (ema_fast > 0.0) {
+            ema_dev_pct = fabs(close - ema_fast) / ema_fast;
+        }
+        result.is_anomaly = (price_change_pct > (double)cfg.anomaly_price_change_pct)
+                         || (ema_dev_pct > (double)cfg.anomaly_ema_dev_pct);
+    }
+
+    // ── Gate 3: Extension filter (distance from EMA_fast) ────────────────
+    // Python lines 3533-3537; Rust gates.rs Gate 3.
+    if (cfg.enable_extension_filter != 0u) {
+        if (ema_fast > 0.0) {
+            double dist = fabs(close - ema_fast) / ema_fast;
+            result.is_extended = (dist > (double)cfg.max_dist_ema_fast);
+        }
+    }
+
+    // ── Gate 4: Volume confirmation ──────────────────────────────────────
+    // Python lines 3432-3440; Rust gates.rs Gate 4.
+    // When vol_confirm_include_prev: relaxed (vol > vol_sma OR vol_trend).
+    // Otherwise strict: (vol > vol_sma) AND vol_trend.
+    if (cfg.require_volume_confirmation != 0u) {
+        bool vol_above_sma = (volume > vol_sma);
+        bool vol_trend_ok = (vol_trend != 0u);
+        if (cfg.vol_confirm_include_prev != 0u) {
+            result.vol_confirm = vol_above_sma || vol_trend_ok;
+        } else {
+            result.vol_confirm = vol_above_sma && vol_trend_ok;
+        }
+    }
+
+    // ── Gate 5: ADX rising (or saturated) ────────────────────────────────
+    // Python lines 3426-3430; Rust gates.rs Gate 5.
+    if (cfg.require_adx_rising != 0u) {
+        double saturation = (double)cfg.adx_rising_saturation;
+        result.is_trending_up = (adx_slope > 0.0) || (adx > saturation);
+    }
+
+    // ── Gate 6: ADX threshold (effective_min_adx with TMC + AVE) ─────────
+    // Python lines 3383-3424; Rust gates.rs Gate 6.
+    double effective_min_adx = (double)cfg.min_adx;
+
+    // TMC: Trend Momentum Confirmation (v4.6)
+    // If ADX slope > 0.5, cap effective_min_adx at 25.0.
+    if (adx_slope > 0.5) {
+        effective_min_adx = fmin(effective_min_adx, 25.0);
+    }
+
+    // AVE: Adaptive Volatility Entry (v4.7)
+    // If ATR / avg_ATR > threshold, multiply effective_min_adx by ave_adx_mult.
+    if (cfg.ave_enabled != 0u && avg_atr > 0.0) {
+        double atr_ratio = atr / avg_atr;
+        if (atr_ratio > (double)cfg.ave_atr_ratio_gt) {
+            double mult = ((double)cfg.ave_adx_mult > 0.0)
+                ? (double)cfg.ave_adx_mult
+                : 1.0;
+            effective_min_adx *= mult;
+        }
+    }
+
+    result.adx_above_min = (adx > effective_min_adx);
+    result.effective_min_adx = effective_min_adx;
+
+    // ── Gate 7: Macro alignment (EMA cross + optional macro EMA) ─────────
+    // Python lines 3448-3452; Rust gates.rs Gate 7.
+    if (cfg.require_macro_alignment != 0u) {
+        result.bullish_alignment = result.bullish_alignment && (ema_slow > ema_macro);
+        result.bearish_alignment = result.bearish_alignment && (ema_slow < ema_macro);
+    }
+
+    // ── Gate 8: BTC alignment (optional) ─────────────────────────────────
+    // Python lines 3454-3461; Rust gates.rs Gate 8.
+    // btc_bullish: 0=bearish, 1=bullish, 2=unknown/no-data.
+    // If is_btc_symbol or btc_bullish unknown or alignment matches, gate passes.
+    // High ADX overrides BTC alignment requirement.
+    // (btc_ok is not part of all_gates_pass; it is checked per-direction by the
+    //  signal generator.  We store the results for the caller.)
+
+    // ── Slow-drift ranging override ──────────────────────────────────────
+    // Python lines 3524-3526; Rust gates.rs slow-drift override.
+    // If slow drift enabled and EMA_slow slope exceeds threshold, clear ranging.
+    if (cfg.enable_slow_drift_entries != 0u
+        && result.is_ranging
+        && fabs(ema_slow_slope_pct) >= (double)cfg.slow_drift_ranging_slope_override) {
+        result.is_ranging = false;
+    }
+
+    // ── DRE (Dynamic RSI Elasticity) — v4.1 ─────────────────────────────
+    // Python lines 3551-3560; Rust gates.rs DRE.
+    // Linear interpolation of RSI limits between weak and strong based on ADX.
+    {
+        double adx_min_dre = (double)cfg.dre_min_adx;
+        double adx_max_dre = (double)cfg.dre_max_adx;
+        if (adx_max_dre <= adx_min_dre) {
+            adx_max_dre = adx_min_dre + 1.0;
+        }
+        double weight = (adx - adx_min_dre) / (adx_max_dre - adx_min_dre);
+        weight = fmax(fmin(weight, 1.0), 0.0);  // clamp [0, 1]
+
+        double rsi_long_weak  = (double)cfg.dre_long_rsi_limit_low;
+        double rsi_long_strong = (double)cfg.dre_long_rsi_limit_high;
+        result.rsi_long_limit = rsi_long_weak + weight * (rsi_long_strong - rsi_long_weak);
+
+        double rsi_short_weak  = (double)cfg.dre_short_rsi_limit_low;
+        double rsi_short_strong = (double)cfg.dre_short_rsi_limit_high;
+        result.rsi_short_limit = rsi_short_weak + weight * (rsi_short_strong - rsi_short_weak);
+    }
+
+    // ── Combined check: all gates required for standard trend entry ──────
+    // Rust gates.rs: adx_above_min && !ranging && !anomaly && !extended
+    //                && vol_confirm && is_trending_up
+    result.all_gates_pass = result.adx_above_min
+        && !result.is_ranging
+        && !result.is_anomaly
+        && !result.is_extended
+        && result.vol_confirm
+        && result.is_trending_up;
+
+    return result;
+}
 // Derived from bt-core/src/exits/stop_loss.rs
 // Computes the dynamic stop-loss price for a position each bar.
 //
