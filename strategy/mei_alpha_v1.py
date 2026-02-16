@@ -1063,8 +1063,7 @@ def check_exit_with_kernel(df, symbol, state_json, params_json, current_price,
         adx_exhaustion_lt = 18.0
 
     # --- 3a: ADX exhaustion ---
-    tsme_min_profit = float(trade_cfg.get("tsme_min_profit_atr", 1.0))
-    if adx_exhaustion_lt > 0 and adx < adx_exhaustion_lt and profit_atr > tsme_min_profit:
+    if adx_exhaustion_lt > 0 and adx < adx_exhaustion_lt:
         smart_ctx = {
             "exit_type": "smart_exit",
             "exit_reason": f"ADX Exhaustion (ADX={adx:.1f} < {adx_exhaustion_lt:g})",
@@ -1092,6 +1091,24 @@ def check_exit_with_kernel(df, symbol, state_json, params_json, current_price,
             rsi_ub = float(trade_cfg.get("rsi_exit_ub_hi_profit", 70.0))
             rsi_lb = float(trade_cfg.get("rsi_exit_lb_hi_profit", 30.0))
 
+        # Per-confidence RSI overrides (aligned with Python path, BUG-X1 v>0 guard)
+        pos_conf = str(pos_data.get("confidence", "")).strip().lower()
+        if pos_conf.startswith("l"):
+            if profit_atr < rsi_switch:
+                v = float(trade_cfg.get("rsi_exit_ub_lo_profit_low_conf", 0.0))
+                if v > 0:
+                    rsi_ub = v
+                v = float(trade_cfg.get("rsi_exit_lb_lo_profit_low_conf", 0.0))
+                if v > 0:
+                    rsi_lb = v
+            else:
+                v = float(trade_cfg.get("rsi_exit_ub_hi_profit_low_conf", 0.0))
+                if v > 0:
+                    rsi_ub = v
+                v = float(trade_cfg.get("rsi_exit_lb_hi_profit_low_conf", 0.0))
+                if v > 0:
+                    rsi_lb = v
+
         triggered = False
         if pos_side == "long" and rsi > rsi_ub:
             triggered = True
@@ -1115,8 +1132,12 @@ def check_exit_with_kernel(df, symbol, state_json, params_json, current_price,
             return "full_close", smart_ctx, diag
 
     # --- 3c: Trend breakdown (EMA cross) ---
+    # TBB: Shallow EMA crosses with strong ADX shouldn't trigger exit.
     if ema_fast > 0 and ema_slow > 0:
-        if pos_side == "long" and ema_fast < ema_slow:
+        ema_dev = (ema_fast - ema_slow) / ema_slow if ema_slow != 0 else 0.0
+        if abs(ema_dev) < 0.001 and adx > 25:
+            pass  # skip trend breakdown — shallow cross in strong trend
+        elif pos_side == "long" and ema_fast < ema_slow:
             smart_ctx = {
                 "exit_type": "smart_exit",
                 "exit_reason": "Trend Breakdown (EMA cross: fast < slow)",
@@ -1129,7 +1150,7 @@ def check_exit_with_kernel(df, symbol, state_json, params_json, current_price,
                 "duration_bars": 0,
             }
             return "full_close", smart_ctx, diag
-        if pos_side == "short" and ema_fast > ema_slow:
+        elif pos_side == "short" and ema_fast > ema_slow:
             smart_ctx = {
                 "exit_type": "smart_exit",
                 "exit_reason": "Trend Breakdown (EMA cross: fast > slow)",
@@ -4699,7 +4720,23 @@ class PaperTrader:
         self._kernel_persist()
         return True
 
-    def execute_trade(self, symbol, signal, price, timestamp, confidence, atr=0.0, indicators=None):
+    def execute_trade(self, symbol, signal, price, timestamp, confidence, atr=0.0, indicators=None,
+                       *, action=None, target_size=None, reason=None):
+        # action kwarg: "OPEN", "CLOSE", "ADD" — match LiveTrader dispatch semantics.
+        if action is not None:
+            action_upper = str(action).upper()
+            if action_upper == "CLOSE":
+                if symbol in self.positions:
+                    self.close_position(symbol, price, timestamp, reason=reason or "Action CLOSE")
+                return
+            if action_upper == "ADD":
+                if symbol in self.positions:
+                    self.add_to_position(symbol, price, timestamp, confidence, atr=atr, indicators=indicators)
+                return
+            if action_upper == "OPEN":
+                if symbol in self.positions:
+                    return  # already open — skip (match LiveTrader)
+
         # Normalise indicators: pandas Series → dict (avoids truth-value crash)
         if indicators is not None and not isinstance(indicators, dict):
             try:
@@ -5543,8 +5580,16 @@ class PaperTrader:
             return
 
         # Simulated exit cooldown (mirrors live exchange rate limits).
+        # WARN-X1: Hard SL must bypass cooldown to prevent uncapped losses.
         if not self._can_attempt_exit(symbol):
-            return
+            _cd_entry = pos['entry_price']
+            _cd_atr = pos.get('entry_atr', 0.0)
+            if _cd_atr <= 0:
+                _cd_atr = _cd_entry * 0.005
+            _cd_sl = _cd_entry - (_cd_atr * sl_atr_mult) if pos['type'] == 'LONG' else _cd_entry + (_cd_atr * sl_atr_mult)
+            _cd_sl_hit = (pos['type'] == 'LONG' and current_price <= _cd_sl) or (pos['type'] == 'SHORT' and current_price >= _cd_sl)
+            if not _cd_sl_hit:
+                return
 
         entry = pos['entry_price']
         atr = pos.get('entry_atr', 0.0)
@@ -5959,18 +6004,22 @@ class PaperTrader:
                     rsi_lb = _cfg_float("rsi_exit_lb_lo_profit", 20.0)
                     # Optional per-confidence overrides.
                     if pos_conf.startswith("l"):
-                        if "rsi_exit_ub_lo_profit_low_conf" in trade_cfg:
-                            rsi_ub = _cfg_float("rsi_exit_ub_lo_profit_low_conf", rsi_ub)
-                        if "rsi_exit_lb_lo_profit_low_conf" in trade_cfg:
-                            rsi_lb = _cfg_float("rsi_exit_lb_lo_profit_low_conf", rsi_lb)
+                        v = _cfg_float("rsi_exit_ub_lo_profit_low_conf", 0.0)
+                        if v > 0:
+                            rsi_ub = v
+                        v = _cfg_float("rsi_exit_lb_lo_profit_low_conf", 0.0)
+                        if v > 0:
+                            rsi_lb = v
                 else:
                     rsi_ub = _cfg_float("rsi_exit_ub_hi_profit", 70.0)
                     rsi_lb = _cfg_float("rsi_exit_lb_hi_profit", 30.0)
                     if pos_conf.startswith("l"):
-                        if "rsi_exit_ub_hi_profit_low_conf" in trade_cfg:
-                            rsi_ub = _cfg_float("rsi_exit_ub_hi_profit_low_conf", rsi_ub)
-                        if "rsi_exit_lb_hi_profit_low_conf" in trade_cfg:
-                            rsi_lb = _cfg_float("rsi_exit_lb_hi_profit_low_conf", rsi_lb)
+                        v = _cfg_float("rsi_exit_ub_hi_profit_low_conf", 0.0)
+                        if v > 0:
+                            rsi_ub = v
+                        v = _cfg_float("rsi_exit_lb_hi_profit_low_conf", 0.0)
+                        if v > 0:
+                            rsi_lb = v
 
                 if pos_type == 'LONG' and rsi > rsi_ub:
                     smart_exit_reason = f"RSI Overbought ({rsi:.1f}, Thr: {rsi_ub:g})"
@@ -6151,6 +6200,14 @@ class PaperTrader:
                         partial_sz = hyperliquid_meta.round_size(symbol, total_sz * pct)
                         partial_min_ntl = float(trade_cfg.get("tp_partial_min_notional_usd", 10.0))
 
+                        # WARN-X4: If remaining notional after partial TP < min_notional,
+                        # convert to full close to prevent zombie positions.
+                        _remaining_after = total_sz - partial_sz
+                        _min_ntl_usd = float(trade_cfg.get("min_notional_usd", 10.0))
+                        if partial_sz > 0 and partial_sz < total_sz and _remaining_after > 0:
+                            if (_remaining_after * current_price) < _min_ntl_usd:
+                                partial_sz = total_sz  # promote to full close
+
                         if partial_sz > 0 and (partial_sz * current_price) >= partial_min_ntl and partial_sz < total_sz:
                             audit = None
                             if indicators is not None:
@@ -6273,6 +6330,14 @@ class PaperTrader:
                             total_sz = 0.0
                         partial_sz = hyperliquid_meta.round_size(symbol, total_sz * pct)
                         partial_min_ntl = float(trade_cfg.get("tp_partial_min_notional_usd", 10.0))
+
+                        # WARN-X4: If remaining notional after partial TP < min_notional,
+                        # convert to full close to prevent zombie positions.
+                        _remaining_after = total_sz - partial_sz
+                        _min_ntl_usd = float(trade_cfg.get("min_notional_usd", 10.0))
+                        if partial_sz > 0 and partial_sz < total_sz and _remaining_after > 0:
+                            if (_remaining_after * current_price) < _min_ntl_usd:
+                                partial_sz = total_sz  # promote to full close
 
                         if partial_sz > 0 and (partial_sz * current_price) >= partial_min_ntl and partial_sz < total_sz:
                             audit = None
