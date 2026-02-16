@@ -259,7 +259,263 @@ __device__ GateResultD check_gates_codegen(
 }
 
 /// Signals: Mode 1/2/3 + MACD helpers (AQC-1211)
-pub fn generate_signal_codegen() -> String { String::new() /* stub */ }
+///
+/// Generates a CUDA `__device__` function that mirrors
+/// `bt-signals/src/entry.rs::generate_signal`.
+///
+/// Three entry modes in priority order:
+///   1. Standard trend entry (all gates pass, DRE RSI, MACD, StochRSI, BTC, volume confidence)
+///   2. Pullback continuation (EMA cross, subset gates, MACD sign, RSI range)
+///   3. Slow drift (EMA slope grind, subset gates, MACD sign, RSI range)
+///
+/// Returns a `SignalResult` struct: `{ int signal; int confidence; double effective_min_adx; }`
+///   - signal: 0=neutral, 1=buy, 2=sell
+///   - confidence: 0=low, 1=medium, 2=high
+///   - effective_min_adx: the ADX threshold used by the mode that fired (for entry tracking)
+///
+/// Uses `double` precision for all indicator/price arithmetic to match the f64 Rust
+/// source and satisfy T2 precision requirements (AQC-734).
+pub fn generate_signal_codegen() -> String {
+    r#"// Derived from bt-signals/src/entry.rs
+// Signal generation: Mode 1 (standard trend), Mode 2 (pullback continuation),
+// Mode 3 (slow drift).  All indicator math in double precision (AQC-734).
+// All config values accessed via cfg. prefix with (double) cast.
+
+struct SignalResult {
+    int signal;             // 0=neutral, 1=buy, 2=sell
+    int confidence;         // 0=low, 1=medium, 2=high
+    double effective_min_adx;  // ADX threshold used by the firing mode
+};
+
+// MACD histogram helpers (mirrors bt-signals/src/entry.rs check_macd_long/short)
+__device__ bool check_macd_long_codegen(unsigned int mode, double macd_hist, double prev_macd_hist) {
+    if (mode == 0u) {  // MACD_ACCEL
+        return macd_hist > prev_macd_hist;
+    } else if (mode == 1u) {  // MACD_SIGN
+        return macd_hist > 0.0;
+    }
+    // MACD_NONE (mode == 2)
+    return true;
+}
+
+__device__ bool check_macd_short_codegen(unsigned int mode, double macd_hist, double prev_macd_hist) {
+    if (mode == 0u) {  // MACD_ACCEL
+        return macd_hist < prev_macd_hist;
+    } else if (mode == 1u) {  // MACD_SIGN
+        return macd_hist < 0.0;
+    }
+    // MACD_NONE (mode == 2)
+    return true;
+}
+
+__device__ SignalResult generate_signal_codegen(
+    const GpuComboConfig& cfg,
+    double close,
+    double ema_fast,
+    double ema_slow,
+    double adx,
+    double rsi,
+    double macd_hist,
+    double prev_macd_hist,
+    double volume,
+    double vol_sma,
+    double atr,
+    double avg_atr,
+    double stoch_k,
+    double prev_close,
+    double prev_ema_fast,
+    double ema_slow_slope_pct,
+    bool all_gates_pass,
+    bool bullish_alignment,
+    bool bearish_alignment,
+    bool is_anomaly,
+    bool is_extended,
+    bool is_ranging,
+    bool vol_confirm,
+    unsigned int btc_bull,
+    bool is_btc_symbol
+) {
+    SignalResult neutral;
+    neutral.signal = 0;       // SIG_NEUTRAL
+    neutral.confidence = 0;   // CONF_LOW
+    neutral.effective_min_adx = 0.0;
+
+    // ── BTC alignment (mirrors bt-signals/src/gates.rs btc_ok_long/short) ──
+    bool btc_ok_long = true;
+    bool btc_ok_short = true;
+    if (cfg.require_btc_alignment != 0u
+        && !is_btc_symbol
+        && !(adx > (double)cfg.btc_adx_override)) {
+        if (btc_bull == 1u) {         // BTC_BULL_BULLISH
+            btc_ok_long = true;
+            btc_ok_short = false;
+        } else if (btc_bull == 0u) {  // BTC_BULL_BEARISH
+            btc_ok_long = false;
+            btc_ok_short = true;
+        } else {
+            // Unknown BTC state does not block entries (CPU parity).
+            btc_ok_long = true;
+            btc_ok_short = true;
+        }
+    }
+
+    // =================================================================
+    // Mode 1: Standard trend entry  (entry.rs lines 43-49)
+    // =================================================================
+    if (all_gates_pass) {
+        int signal = 0;    // SIG_NEUTRAL
+        int confidence = 1; // CONF_MEDIUM
+
+        // ── Direction from alignment + close vs EMA_fast ──
+        if (bullish_alignment && close > ema_fast && btc_ok_long) {
+            signal = 1;  // SIG_BUY
+        } else if (bearish_alignment && close < ema_fast && btc_ok_short) {
+            signal = 2;  // SIG_SELL
+        }
+        if (signal == 0) { return neutral; }
+
+        // ── DRE (Dynamic RSI Elasticity) ──
+        double adx_min = (double)cfg.dre_min_adx;
+        double adx_max = (double)cfg.dre_max_adx;
+        if (adx_max <= adx_min) { adx_max = adx_min + 1.0; }
+        double weight = fmax(fmin((adx - adx_min) / (adx_max - adx_min), 1.0), 0.0);
+        double rsi_long_limit = (double)cfg.dre_long_rsi_limit_low
+            + weight * ((double)cfg.dre_long_rsi_limit_high - (double)cfg.dre_long_rsi_limit_low);
+        double rsi_short_limit = (double)cfg.dre_short_rsi_limit_low
+            + weight * ((double)cfg.dre_short_rsi_limit_high - (double)cfg.dre_short_rsi_limit_low);
+
+        // ── RSI gate ──
+        if (signal == 1 && rsi <= rsi_long_limit) { return neutral; }
+        if (signal == 2 && rsi >= rsi_short_limit) { return neutral; }
+
+        // ── MACD histogram gate ──
+        bool macd_ok;
+        if (signal == 1) {
+            macd_ok = check_macd_long_codegen(cfg.macd_mode, macd_hist, prev_macd_hist);
+        } else {
+            macd_ok = check_macd_short_codegen(cfg.macd_mode, macd_hist, prev_macd_hist);
+        }
+        if (!macd_ok) { return neutral; }
+
+        // ── StochRSI filter ──
+        if (cfg.use_stoch_rsi_filter != 0u) {
+            if (signal == 1 && stoch_k > (double)cfg.stoch_rsi_block_long_gt) { return neutral; }
+            if (signal == 2 && stoch_k < (double)cfg.stoch_rsi_block_short_lt) { return neutral; }
+        }
+
+        // ── AVE (Adaptive Volatility Entry): upgrade confidence ──
+        if (cfg.ave_enabled != 0u && avg_atr > 0.0) {
+            double atr_ratio = atr / avg_atr;
+            if (atr_ratio > (double)cfg.ave_atr_ratio_gt) {
+                confidence = 2;  // CONF_HIGH
+            }
+        }
+
+        // ── Volume-based confidence upgrade to High ──
+        if (vol_sma > 0.0 && volume > vol_sma * (double)cfg.high_conf_volume_mult) {
+            confidence = 2;  // CONF_HIGH
+        }
+
+        SignalResult result;
+        result.signal = signal;
+        result.confidence = confidence;
+        result.effective_min_adx = adx;
+        return result;
+    }
+
+    // =================================================================
+    // Mode 2: Pullback continuation  (entry.rs lines 54-66)
+    // =================================================================
+    if (cfg.enable_pullback_entries != 0u) {
+        bool pullback_gates_ok =
+            !is_anomaly
+            && !is_extended
+            && !is_ranging
+            && vol_confirm
+            && adx >= (double)cfg.pullback_min_adx;
+
+        if (pullback_gates_ok) {
+            // Cross detection: EMA_fast cross-up / cross-down
+            bool cross_up = (prev_close <= prev_ema_fast) && (close > ema_fast);
+            bool cross_dn = (prev_close >= prev_ema_fast) && (close < ema_fast);
+
+            int pullback_conf = (int)cfg.pullback_confidence;
+
+            // ── Long pullback continuation ──
+            if (cross_up && bullish_alignment && btc_ok_long) {
+                bool macd_ok = (cfg.pullback_require_macd_sign == 0u) || (macd_hist > 0.0);
+                if (macd_ok && rsi >= (double)cfg.pullback_rsi_long_min) {
+                    SignalResult result;
+                    result.signal = 1;  // SIG_BUY
+                    result.confidence = pullback_conf;
+                    result.effective_min_adx = (double)cfg.pullback_min_adx;
+                    return result;
+                }
+            }
+            // ── Short pullback continuation (elif in Python) ──
+            else if (cross_dn && bearish_alignment && btc_ok_short) {
+                bool macd_ok = (cfg.pullback_require_macd_sign == 0u) || (macd_hist < 0.0);
+                if (macd_ok && rsi <= (double)cfg.pullback_rsi_short_max) {
+                    SignalResult result;
+                    result.signal = 2;  // SIG_SELL
+                    result.confidence = pullback_conf;
+                    result.effective_min_adx = (double)cfg.pullback_min_adx;
+                    return result;
+                }
+            }
+        }
+    }
+
+    // =================================================================
+    // Mode 3: Slow drift  (entry.rs lines 71-85)
+    // =================================================================
+    if (cfg.enable_slow_drift_entries != 0u) {
+        bool slow_gates_ok =
+            !is_anomaly
+            && !is_extended
+            && !is_ranging
+            && vol_confirm
+            && adx >= (double)cfg.slow_drift_min_adx;
+
+        if (slow_gates_ok) {
+            double min_slope = (double)cfg.slow_drift_min_slope_pct;
+
+            // ── Long drift: slope >= +threshold, price above EMA_slow ──
+            if (bullish_alignment
+                && close > ema_slow
+                && btc_ok_long
+                && ema_slow_slope_pct >= min_slope) {
+                bool macd_ok = (cfg.slow_drift_require_macd_sign == 0u) || (macd_hist > 0.0);
+                if (macd_ok && rsi >= (double)cfg.slow_drift_rsi_long_min) {
+                    SignalResult result;
+                    result.signal = 1;  // SIG_BUY
+                    result.confidence = 0;  // CONF_LOW (always Low for slow drift)
+                    result.effective_min_adx = (double)cfg.slow_drift_min_adx;
+                    return result;
+                }
+            }
+            // ── Short drift: slope <= -threshold, price below EMA_slow (elif) ──
+            else if (bearish_alignment
+                     && close < ema_slow
+                     && btc_ok_short
+                     && ema_slow_slope_pct <= -min_slope) {
+                bool macd_ok = (cfg.slow_drift_require_macd_sign == 0u) || (macd_hist < 0.0);
+                if (macd_ok && rsi <= (double)cfg.slow_drift_rsi_short_max) {
+                    SignalResult result;
+                    result.signal = 2;  // SIG_SELL
+                    result.confidence = 0;  // CONF_LOW (always Low for slow drift)
+                    result.effective_min_adx = (double)cfg.slow_drift_min_adx;
+                    return result;
+                }
+            }
+        }
+    }
+
+    return neutral;
+}
+"#
+    .to_string()
+}
 
 /// Stop loss: ASE/DASE/SLB/breakeven (AQC-1220)
 ///
@@ -1535,6 +1791,322 @@ mod tests {
             "generated code must be substantial, got {} bytes",
             src.len()
         );
+    }
+
+    // -- generate_signal_codegen tests (AQC-1211) --------------------------------
+
+    #[test]
+    fn signal_codegen_has_correct_function_signature() {
+        let src = generate_signal_codegen();
+        assert!(
+            src.contains("__device__ SignalResult generate_signal_codegen("),
+            "must declare a __device__ SignalResult function"
+        );
+        assert!(
+            src.contains("const GpuComboConfig& cfg"),
+            "must take GpuComboConfig by const ref"
+        );
+        assert!(
+            src.contains("double close"),
+            "must take close as double"
+        );
+        assert!(
+            src.contains("double ema_fast"),
+            "must take ema_fast as double"
+        );
+        assert!(
+            src.contains("double ema_slow"),
+            "must take ema_slow as double"
+        );
+        assert!(
+            src.contains("double adx"),
+            "must take adx as double"
+        );
+        assert!(
+            src.contains("double rsi"),
+            "must take rsi as double"
+        );
+        assert!(
+            src.contains("double macd_hist"),
+            "must take macd_hist as double"
+        );
+        assert!(
+            src.contains("double prev_macd_hist"),
+            "must take prev_macd_hist as double"
+        );
+        assert!(
+            src.contains("double volume"),
+            "must take volume as double"
+        );
+        assert!(
+            src.contains("double vol_sma"),
+            "must take vol_sma as double"
+        );
+        assert!(
+            src.contains("double stoch_k"),
+            "must take stoch_k as double"
+        );
+        assert!(
+            src.contains("double prev_close"),
+            "must take prev_close as double"
+        );
+        assert!(
+            src.contains("double prev_ema_fast"),
+            "must take prev_ema_fast as double"
+        );
+        assert!(
+            src.contains("double ema_slow_slope_pct"),
+            "must take ema_slow_slope_pct as double"
+        );
+        assert!(
+            src.contains("bool all_gates_pass"),
+            "must take all_gates_pass as bool"
+        );
+        assert!(
+            src.contains("bool bullish_alignment"),
+            "must take bullish_alignment as bool"
+        );
+        assert!(
+            src.contains("bool bearish_alignment"),
+            "must take bearish_alignment as bool"
+        );
+        assert!(
+            src.contains("unsigned int btc_bull"),
+            "must take btc_bull as unsigned int"
+        );
+    }
+
+    #[test]
+    fn signal_codegen_has_source_comment() {
+        let src = generate_signal_codegen();
+        assert!(
+            src.contains("Derived from bt-signals/src/entry.rs"),
+            "must reference the Rust SSOT source file"
+        );
+    }
+
+    #[test]
+    fn signal_codegen_has_signal_result_struct() {
+        let src = generate_signal_codegen();
+        assert!(
+            src.contains("struct SignalResult"),
+            "must define SignalResult struct"
+        );
+        assert!(
+            src.contains("int signal;"),
+            "SignalResult must have signal field"
+        );
+        assert!(
+            src.contains("int confidence;"),
+            "SignalResult must have confidence field"
+        );
+        assert!(
+            src.contains("double effective_min_adx;"),
+            "SignalResult must have effective_min_adx field"
+        );
+    }
+
+    #[test]
+    fn signal_codegen_contains_mode1_standard_entry() {
+        let src = generate_signal_codegen();
+        assert!(
+            src.contains("Mode 1") || src.contains("Standard trend"),
+            "must have Mode 1 standard trend comment"
+        );
+        assert!(
+            src.contains("all_gates_pass"),
+            "Mode 1 checks all_gates_pass"
+        );
+        assert!(
+            src.contains("bullish_alignment && close > ema_fast"),
+            "Mode 1 long: bullish alignment + close > ema_fast"
+        );
+        assert!(
+            src.contains("bearish_alignment && close < ema_fast"),
+            "Mode 1 short: bearish alignment + close < ema_fast"
+        );
+    }
+
+    #[test]
+    fn signal_codegen_contains_dre_logic() {
+        let src = generate_signal_codegen();
+        assert!(
+            src.contains("DRE") || src.contains("Dynamic RSI Elasticity"),
+            "must reference DRE logic"
+        );
+        assert!(src.contains("cfg.dre_min_adx"), "DRE uses dre_min_adx from config");
+        assert!(src.contains("cfg.dre_max_adx"), "DRE uses dre_max_adx from config");
+        assert!(src.contains("cfg.dre_long_rsi_limit_low"), "DRE uses dre_long_rsi_limit_low");
+        assert!(src.contains("cfg.dre_long_rsi_limit_high"), "DRE uses dre_long_rsi_limit_high");
+        assert!(src.contains("cfg.dre_short_rsi_limit_low"), "DRE uses dre_short_rsi_limit_low");
+        assert!(src.contains("cfg.dre_short_rsi_limit_high"), "DRE uses dre_short_rsi_limit_high");
+        assert!(src.contains("rsi_long_limit"), "DRE computes rsi_long_limit");
+        assert!(src.contains("rsi_short_limit"), "DRE computes rsi_short_limit");
+    }
+
+    #[test]
+    fn signal_codegen_contains_macd_helpers() {
+        let src = generate_signal_codegen();
+        assert!(src.contains("check_macd_long_codegen"), "must have check_macd_long_codegen helper");
+        assert!(src.contains("check_macd_short_codegen"), "must have check_macd_short_codegen helper");
+        assert!(src.contains("cfg.macd_mode"), "MACD gate reads macd_mode from config");
+    }
+
+    #[test]
+    fn signal_codegen_contains_stoch_rsi_filter() {
+        let src = generate_signal_codegen();
+        assert!(src.contains("cfg.use_stoch_rsi_filter"), "must check use_stoch_rsi_filter config flag");
+        assert!(src.contains("cfg.stoch_rsi_block_long_gt"), "StochRSI uses block_long_gt from config");
+        assert!(src.contains("cfg.stoch_rsi_block_short_lt"), "StochRSI uses block_short_lt from config");
+    }
+
+    #[test]
+    fn signal_codegen_contains_volume_confidence_upgrade() {
+        let src = generate_signal_codegen();
+        assert!(src.contains("cfg.high_conf_volume_mult"), "must use high_conf_volume_mult from config");
+        assert!(src.contains("volume > vol_sma"), "volume confidence check compares volume to vol_sma");
+    }
+
+    #[test]
+    fn signal_codegen_contains_mode2_pullback() {
+        let src = generate_signal_codegen();
+        assert!(src.contains("Mode 2") || src.contains("Pullback"), "must have Mode 2 pullback comment");
+        assert!(src.contains("cfg.enable_pullback_entries"), "Mode 2 checks enable_pullback_entries");
+        assert!(src.contains("cfg.pullback_min_adx"), "Mode 2 uses pullback_min_adx");
+        assert!(src.contains("cross_up"), "Mode 2 detects EMA cross-up");
+        assert!(src.contains("cross_dn"), "Mode 2 detects EMA cross-down");
+        assert!(src.contains("cfg.pullback_rsi_long_min"), "Mode 2 uses pullback_rsi_long_min");
+        assert!(src.contains("cfg.pullback_rsi_short_max"), "Mode 2 uses pullback_rsi_short_max");
+        assert!(src.contains("cfg.pullback_require_macd_sign"), "Mode 2 checks pullback_require_macd_sign");
+        assert!(src.contains("cfg.pullback_confidence"), "Mode 2 uses pullback_confidence");
+    }
+
+    #[test]
+    fn signal_codegen_contains_mode3_slow_drift() {
+        let src = generate_signal_codegen();
+        assert!(src.contains("Mode 3") || src.contains("Slow drift"), "must have Mode 3 slow drift comment");
+        assert!(src.contains("cfg.enable_slow_drift_entries"), "Mode 3 checks enable_slow_drift_entries");
+        assert!(src.contains("cfg.slow_drift_min_adx"), "Mode 3 uses slow_drift_min_adx");
+        assert!(src.contains("cfg.slow_drift_min_slope_pct"), "Mode 3 uses slow_drift_min_slope_pct");
+        assert!(src.contains("cfg.slow_drift_rsi_long_min"), "Mode 3 uses slow_drift_rsi_long_min");
+        assert!(src.contains("cfg.slow_drift_rsi_short_max"), "Mode 3 uses slow_drift_rsi_short_max");
+        assert!(src.contains("cfg.slow_drift_require_macd_sign"), "Mode 3 checks slow_drift_require_macd_sign");
+        assert!(src.contains("ema_slow_slope_pct"), "Mode 3 uses ema_slow_slope_pct");
+    }
+
+    #[test]
+    fn signal_codegen_contains_btc_alignment() {
+        let src = generate_signal_codegen();
+        assert!(src.contains("cfg.require_btc_alignment"), "must check require_btc_alignment");
+        assert!(src.contains("btc_ok_long"), "must compute btc_ok_long");
+        assert!(src.contains("btc_ok_short"), "must compute btc_ok_short");
+        assert!(src.contains("cfg.btc_adx_override"), "BTC alignment uses btc_adx_override");
+    }
+
+    #[test]
+    fn signal_codegen_uses_double_precision() {
+        let src = generate_signal_codegen();
+        assert!(src.contains("double adx_min"), "adx_min must be double");
+        assert!(src.contains("double adx_max"), "adx_max must be double");
+        assert!(src.contains("double weight"), "weight must be double");
+        assert!(src.contains("double rsi_long_limit"), "rsi_long_limit must be double");
+        assert!(src.contains("double rsi_short_limit"), "rsi_short_limit must be double");
+        assert!(src.contains("double min_slope"), "min_slope must be double");
+        assert!(!src.contains("float rsi_long_limit"), "rsi_long_limit must be double, not float");
+        assert!(!src.contains("float rsi_short_limit"), "rsi_short_limit must be double, not float");
+    }
+
+    #[test]
+    fn signal_codegen_uses_correct_config_fields() {
+        let src = generate_signal_codegen();
+        assert!(src.contains("cfg.dre_min_adx"), "must use cfg.dre_min_adx");
+        assert!(src.contains("cfg.macd_mode"), "must use cfg.macd_mode");
+        assert!(src.contains("cfg.use_stoch_rsi_filter"), "must use cfg.use_stoch_rsi_filter");
+        assert!(src.contains("cfg.high_conf_volume_mult"), "must use cfg.high_conf_volume_mult");
+        assert!(src.contains("cfg.require_btc_alignment"), "must use cfg.require_btc_alignment");
+        assert!(src.contains("cfg.enable_pullback_entries"), "must use cfg.enable_pullback_entries");
+        assert!(src.contains("cfg.pullback_min_adx"), "must use cfg.pullback_min_adx");
+        assert!(src.contains("cfg.pullback_confidence"), "must use cfg.pullback_confidence");
+        assert!(src.contains("cfg.enable_slow_drift_entries"), "must use cfg.enable_slow_drift_entries");
+        assert!(src.contains("cfg.slow_drift_min_adx"), "must use cfg.slow_drift_min_adx");
+    }
+
+    #[test]
+    fn signal_codegen_mode_priority_order() {
+        let src = generate_signal_codegen();
+        let mode1_pos = src.rfind("// Mode 1: Standard").expect("Mode 1 section header must exist");
+        let mode2_pos = src.rfind("// Mode 2: Pullback").expect("Mode 2 section header must exist");
+        let mode3_pos = src.rfind("// Mode 3: Slow drift").expect("Mode 3 section header must exist");
+        assert!(mode1_pos < mode2_pos, "Mode 1 must appear before Mode 2");
+        assert!(mode2_pos < mode3_pos, "Mode 2 must appear before Mode 3");
+    }
+
+    #[test]
+    fn signal_codegen_slow_drift_always_low_confidence() {
+        let src = generate_signal_codegen();
+        let marker = "// Mode 3: Slow drift";
+        let slow_drift_start = src.rfind(marker).expect("Mode 3 section header must exist");
+        let slow_drift_section = &src[slow_drift_start..];
+        assert!(slow_drift_section.contains("confidence = 0"), "slow drift must always return CONF_LOW (0)");
+        assert!(
+            !slow_drift_section.contains("confidence = 1") && !slow_drift_section.contains("confidence = 2"),
+            "slow drift must not set medium or high confidence"
+        );
+    }
+
+    #[test]
+    fn signal_codegen_is_nonempty() {
+        let src = generate_signal_codegen();
+        assert!(src.len() > 200, "generated code must be substantial, got {} bytes", src.len());
+    }
+
+    #[test]
+    fn signal_codegen_contains_ave_logic() {
+        let src = generate_signal_codegen();
+        assert!(src.contains("AVE") || src.contains("Adaptive Volatility"), "must reference AVE logic");
+        assert!(src.contains("cfg.ave_atr_ratio_gt"), "AVE uses ave_atr_ratio_gt");
+        assert!(src.contains("cfg.ave_enabled"), "AVE uses ave_enabled");
+    }
+
+    #[test]
+    fn signal_codegen_pullback_cross_detection() {
+        let src = generate_signal_codegen();
+        assert!(
+            src.contains("prev_close <= prev_ema_fast") && src.contains("close > ema_fast"),
+            "cross_up must check prev_close <= prev_ema_fast AND close > ema_fast"
+        );
+        assert!(
+            src.contains("prev_close >= prev_ema_fast") && src.contains("close < ema_fast"),
+            "cross_dn must check prev_close >= prev_ema_fast AND close < ema_fast"
+        );
+    }
+
+    #[test]
+    fn signal_codegen_pullback_gate_subset() {
+        let src = generate_signal_codegen();
+        let marker2 = "// Mode 2: Pullback";
+        let marker3 = "// Mode 3: Slow drift";
+        let mode2_start = src.rfind(marker2).expect("Mode 2 section header must exist");
+        let mode3_start = src.rfind(marker3).expect("Mode 3 section header must exist");
+        let mode2_section = &src[mode2_start..mode3_start];
+        assert!(mode2_section.contains("!is_anomaly"), "pullback gate checks !is_anomaly");
+        assert!(mode2_section.contains("!is_extended"), "pullback gate checks !is_extended");
+        assert!(mode2_section.contains("!is_ranging"), "pullback gate checks !is_ranging");
+        assert!(mode2_section.contains("vol_confirm"), "pullback gate checks vol_confirm");
+        assert!(mode2_section.contains("cfg.pullback_min_adx"), "pullback gate checks pullback_min_adx");
+    }
+
+    #[test]
+    fn signal_codegen_slow_drift_gate_subset() {
+        let src = generate_signal_codegen();
+        let marker = "// Mode 3: Slow drift";
+        let mode3_start = src.rfind(marker).expect("Mode 3 section header must exist");
+        let mode3_section = &src[mode3_start..];
+        assert!(mode3_section.contains("!is_anomaly"), "slow drift gate checks !is_anomaly");
+        assert!(mode3_section.contains("!is_extended"), "slow drift gate checks !is_extended");
+        assert!(mode3_section.contains("!is_ranging"), "slow drift gate checks !is_ranging");
+        assert!(mode3_section.contains("vol_confirm"), "slow drift gate checks vol_confirm");
+        assert!(mode3_section.contains("cfg.slow_drift_min_adx"), "slow drift gate checks slow_drift_min_adx");
     }
 
     // -- compute_trailing_codegen tests (AQC-1221) ----------------------------
