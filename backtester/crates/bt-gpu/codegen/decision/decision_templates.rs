@@ -42,7 +42,106 @@ pub fn check_gates_codegen() -> String { String::new() /* stub */ }
 pub fn generate_signal_codegen() -> String { String::new() /* stub */ }
 
 /// Stop loss: ASE/DASE/SLB/breakeven (AQC-1220)
-pub fn compute_sl_price_codegen() -> String { String::new() /* stub */ }
+///
+/// Generates a CUDA `__device__` function that mirrors
+/// `bt-core/src/exits/stop_loss.rs::compute_sl_price`.
+///
+/// Uses `double` precision for all price arithmetic to match the f64 Rust
+/// source and satisfy T2 precision requirements (single arithmetic:
+/// price +/- atr * mult).
+pub fn compute_sl_price_codegen() -> String {
+    r#"// Derived from bt-core/src/exits/stop_loss.rs
+// Computes the dynamic stop-loss price for a position each bar.
+//
+// Modifiers applied to sl_atr_mult:
+//   1. ASE  — ADX slope < 0 AND underwater -> tighten 20% (x0.80)
+//   2. FTB  — Disabled in backtester (no funding data)
+//   3. DASE — ADX > 40 AND profitable > 0.5 ATR -> widen 15% (x1.15)
+//   4. SLB  — ADX > 45 -> widen 10% (x1.10)
+//   5. Breakeven — profit >= be_start -> move SL to entry +/- be_buffer
+__device__ double compute_sl_price_codegen(
+    const GpuComboConfig& cfg,
+    int pos_type,
+    double entry_price,
+    double atr,
+    double current_price,
+    double adx,
+    double adx_slope
+) {
+    // ATR fallback: legacy positions with no ATR recorded
+    double eff_atr = (atr > 0.0) ? atr : (entry_price * 0.005);
+
+    double sl_mult = (double)cfg.sl_atr_mult;
+
+    // ── 1. ASE (ADX Slope-Adjusted Stop) ─────────────────────────────────
+    // If trend is weakening (ADX slope < 0) and position is underwater,
+    // tighten the stop by 20%.
+    bool is_underwater;
+    if (pos_type == 1) {  // POS_LONG
+        is_underwater = (current_price < entry_price);
+    } else {              // POS_SHORT
+        is_underwater = (current_price > entry_price);
+    }
+    if (adx_slope < 0.0 && is_underwater) {
+        sl_mult *= 0.8;
+    }
+
+    // ── 2. FTB (Funding Tailwind Buffer) ─────────────────────────────────
+    // Disabled in backtester — no funding rate data available.
+
+    // ── 3. DASE (Dynamic ADX Stop Expansion) ─────────────────────────────
+    // If ADX > 40 and position is profitable by > 0.5 ATR, widen by 15%.
+    if (adx > 40.0) {
+        double profit_in_atr;
+        if (pos_type == 1) {  // POS_LONG
+            profit_in_atr = (current_price - entry_price) / eff_atr;
+        } else {              // POS_SHORT
+            profit_in_atr = (entry_price - current_price) / eff_atr;
+        }
+        if (profit_in_atr > 0.5) {
+            sl_mult *= 1.15;
+        }
+    }
+
+    // ── 4. SLB (Saturation Loyalty Buffer) ───────────────────────────────
+    // If ADX > 45 (saturated/strong trend), widen overall SL by 10%.
+    if (adx > 45.0) {
+        sl_mult *= 1.10;
+    }
+
+    // ── Compute raw SL price ─────────────────────────────────────────────
+    double sl_price;
+    if (pos_type == 1) {  // POS_LONG
+        sl_price = entry_price - (eff_atr * sl_mult);
+    } else {              // POS_SHORT
+        sl_price = entry_price + (eff_atr * sl_mult);
+    }
+
+    // ── 5. Breakeven Stop ────────────────────────────────────────────────
+    // If profit exceeds breakeven_start_atr ATRs, move SL to
+    // entry +/- breakeven_buffer_atr ATRs (protecting at least entry).
+    if (cfg.enable_breakeven_stop != 0u && cfg.breakeven_start_atr > 0.0f) {
+        double be_start = eff_atr * (double)cfg.breakeven_start_atr;
+        double be_buffer = eff_atr * (double)cfg.breakeven_buffer_atr;
+
+        if (pos_type == 1) {  // POS_LONG
+            if ((current_price - entry_price) >= be_start) {
+                // Only raise SL, never lower it from the breakeven level.
+                sl_price = fmax(sl_price, entry_price + be_buffer);
+            }
+        } else {              // POS_SHORT
+            if ((entry_price - current_price) >= be_start) {
+                // Only lower SL, never raise it from the breakeven level.
+                sl_price = fmin(sl_price, entry_price - be_buffer);
+            }
+        }
+    }
+
+    return sl_price;
+}
+"#
+    .to_string()
+}
 
 /// Trailing stop: VBTS/TATP/TSPV/ratchet (AQC-1221)
 pub fn compute_trailing_codegen() -> String { String::new() /* stub */ }
@@ -61,3 +160,223 @@ pub fn compute_entry_size_codegen() -> String { String::new() /* stub */ }
 
 /// PESC cooldown: reentry cooldown + ADX interpolation (AQC-1231)
 pub fn is_pesc_blocked_codegen() -> String { String::new() /* stub */ }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sl_codegen_has_correct_function_signature() {
+        let src = compute_sl_price_codegen();
+        assert!(
+            src.contains("__device__ double compute_sl_price_codegen("),
+            "must declare a __device__ double function"
+        );
+        assert!(
+            src.contains("const GpuComboConfig& cfg"),
+            "must take GpuComboConfig by const ref"
+        );
+        assert!(
+            src.contains("int pos_type"),
+            "must take pos_type as int"
+        );
+        assert!(
+            src.contains("double entry_price"),
+            "must take entry_price as double"
+        );
+        assert!(
+            src.contains("double atr"),
+            "must take atr as double"
+        );
+        assert!(
+            src.contains("double current_price"),
+            "must take current_price as double"
+        );
+        assert!(
+            src.contains("double adx"),
+            "must take adx as double"
+        );
+        assert!(
+            src.contains("double adx_slope"),
+            "must take adx_slope as double"
+        );
+    }
+
+    #[test]
+    fn sl_codegen_uses_double_precision() {
+        let src = compute_sl_price_codegen();
+        // Return type is double
+        assert!(src.contains("__device__ double"));
+        // Internal arithmetic uses double variables
+        assert!(src.contains("double sl_mult"));
+        assert!(src.contains("double sl_price"));
+        assert!(src.contains("double eff_atr"));
+        assert!(src.contains("double be_start"));
+        assert!(src.contains("double be_buffer"));
+        // Must NOT use float for price-critical variables
+        assert!(
+            !src.contains("float sl_price"),
+            "sl_price must be double, not float"
+        );
+        assert!(
+            !src.contains("float sl_mult"),
+            "sl_mult must be double, not float"
+        );
+    }
+
+    #[test]
+    fn sl_codegen_contains_ase_logic() {
+        let src = compute_sl_price_codegen();
+        assert!(src.contains("ASE"), "must have ASE comment marker");
+        assert!(
+            src.contains("adx_slope < 0.0"),
+            "ASE checks for negative ADX slope"
+        );
+        assert!(
+            src.contains("is_underwater"),
+            "ASE checks underwater condition"
+        );
+        assert!(src.contains("*= 0.8"), "ASE tightens by 20% (x0.80)");
+    }
+
+    #[test]
+    fn sl_codegen_contains_dase_logic() {
+        let src = compute_sl_price_codegen();
+        assert!(src.contains("DASE"), "must have DASE comment marker");
+        assert!(
+            src.contains("adx > 40.0"),
+            "DASE triggers when ADX > 40"
+        );
+        assert!(
+            src.contains("profit_in_atr"),
+            "DASE computes profit in ATR units"
+        );
+        assert!(
+            src.contains("profit_in_atr > 0.5"),
+            "DASE requires > 0.5 ATR profit"
+        );
+        assert!(src.contains("*= 1.15"), "DASE widens by 15% (x1.15)");
+    }
+
+    #[test]
+    fn sl_codegen_contains_slb_logic() {
+        let src = compute_sl_price_codegen();
+        assert!(src.contains("SLB"), "must have SLB comment marker");
+        assert!(
+            src.contains("adx > 45.0"),
+            "SLB triggers when ADX > 45"
+        );
+        assert!(src.contains("*= 1.10"), "SLB widens by 10% (x1.10)");
+    }
+
+    #[test]
+    fn sl_codegen_contains_breakeven_logic() {
+        let src = compute_sl_price_codegen();
+        assert!(
+            src.contains("Breakeven"),
+            "must have Breakeven comment marker"
+        );
+        assert!(
+            src.contains("cfg.enable_breakeven_stop"),
+            "breakeven checks enable flag from config"
+        );
+        assert!(
+            src.contains("cfg.breakeven_start_atr"),
+            "breakeven uses start ATR threshold from config"
+        );
+        assert!(
+            src.contains("cfg.breakeven_buffer_atr"),
+            "breakeven uses buffer ATR from config"
+        );
+        assert!(
+            src.contains("fmax(sl_price, entry_price + be_buffer)"),
+            "long breakeven raises SL via fmax"
+        );
+        assert!(
+            src.contains("fmin(sl_price, entry_price - be_buffer)"),
+            "short breakeven lowers SL via fmin"
+        );
+    }
+
+    #[test]
+    fn sl_codegen_uses_correct_config_fields() {
+        let src = compute_sl_price_codegen();
+        // All config field accesses must use GpuComboConfig field names
+        assert!(src.contains("cfg.sl_atr_mult"), "must use cfg.sl_atr_mult");
+        assert!(
+            src.contains("cfg.enable_breakeven_stop"),
+            "must use cfg.enable_breakeven_stop"
+        );
+        assert!(
+            src.contains("cfg.breakeven_start_atr"),
+            "must use cfg.breakeven_start_atr"
+        );
+        assert!(
+            src.contains("cfg.breakeven_buffer_atr"),
+            "must use cfg.breakeven_buffer_atr"
+        );
+    }
+
+    #[test]
+    fn sl_codegen_uses_fmax_fmin_not_std_max() {
+        let src = compute_sl_price_codegen();
+        // Must use CUDA fmax/fmin, not std::max/std::min
+        assert!(src.contains("fmax("), "must use fmax for CUDA");
+        assert!(src.contains("fmin("), "must use fmin for CUDA");
+        assert!(
+            !src.contains("std::max"),
+            "must not use std::max (use fmax for CUDA)"
+        );
+        assert!(
+            !src.contains("std::min"),
+            "must not use std::min (use fmin for CUDA)"
+        );
+    }
+
+    #[test]
+    fn sl_codegen_has_long_short_direction() {
+        let src = compute_sl_price_codegen();
+        // Long: SL below entry (entry - atr * mult)
+        assert!(
+            src.contains("entry_price - (eff_atr * sl_mult)"),
+            "long SL = entry - atr * mult"
+        );
+        // Short: SL above entry (entry + atr * mult)
+        assert!(
+            src.contains("entry_price + (eff_atr * sl_mult)"),
+            "short SL = entry + atr * mult"
+        );
+    }
+
+    #[test]
+    fn sl_codegen_has_atr_fallback() {
+        let src = compute_sl_price_codegen();
+        assert!(
+            src.contains("entry_price * 0.005"),
+            "must have ATR fallback for legacy positions"
+        );
+    }
+
+    #[test]
+    fn sl_codegen_has_source_comment() {
+        let src = compute_sl_price_codegen();
+        assert!(
+            src.contains("Derived from bt-core/src/exits/stop_loss.rs"),
+            "must reference the Rust SSOT source file"
+        );
+    }
+
+    #[test]
+    fn sl_codegen_pos_type_uses_integer_constants() {
+        let src = compute_sl_price_codegen();
+        // Must use integer comparison, not enum
+        assert!(
+            src.contains("pos_type == 1"),
+            "long check must use pos_type == 1 (POS_LONG)"
+        );
+    }
+}

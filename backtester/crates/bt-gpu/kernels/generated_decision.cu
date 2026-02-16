@@ -16,3 +16,92 @@
 
 // SOURCE_HASHES: {"../bt-core/src/exits/mod.rs":"2dc6dcd56371a1bbf822bc5e69903fbb9b10a99f65134df3a81a04a1231af375","../bt-core/src/exits/smart_exits.rs":"ed3a3c40f00af3277b68191099a796988ae740d4aa11d9d9ba23b09810527c60","../bt-core/src/exits/stop_loss.rs":"39a2da91cd2b9ac8355f29b70ab4e333701a7e8ca6a145448381e9b1b0dc0d9c","../bt-core/src/exits/take_profit.rs":"794e8a9ab896ee91287e8c5cc250017bf9da5ffdd773ef8b1dbd8412cefc41ce","../bt-core/src/exits/trailing.rs":"501e5b5bc7fc7f9e8fea9572784aa14550cd5658b66428cded74c3eefdc3523e","../bt-signals/src/entry.rs":"7046e519e86605bc8f631c8ee3bcadfadeea119f616a1ad07f9b19f647072fbc","../bt-signals/src/gates.rs":"730aacfca4ec69a383157e2fdce134c5e5e16a40caf4ab36cf15a6ab0fa47acb"}
 
+// Derived from bt-core/src/exits/stop_loss.rs
+// Computes the dynamic stop-loss price for a position each bar.
+//
+// Modifiers applied to sl_atr_mult:
+//   1. ASE  — ADX slope < 0 AND underwater -> tighten 20% (x0.80)
+//   2. FTB  — Disabled in backtester (no funding data)
+//   3. DASE — ADX > 40 AND profitable > 0.5 ATR -> widen 15% (x1.15)
+//   4. SLB  — ADX > 45 -> widen 10% (x1.10)
+//   5. Breakeven — profit >= be_start -> move SL to entry +/- be_buffer
+__device__ double compute_sl_price_codegen(
+    const GpuComboConfig& cfg,
+    int pos_type,
+    double entry_price,
+    double atr,
+    double current_price,
+    double adx,
+    double adx_slope
+) {
+    // ATR fallback: legacy positions with no ATR recorded
+    double eff_atr = (atr > 0.0) ? atr : (entry_price * 0.005);
+
+    double sl_mult = (double)cfg.sl_atr_mult;
+
+    // ── 1. ASE (ADX Slope-Adjusted Stop) ─────────────────────────────────
+    // If trend is weakening (ADX slope < 0) and position is underwater,
+    // tighten the stop by 20%.
+    bool is_underwater;
+    if (pos_type == 1) {  // POS_LONG
+        is_underwater = (current_price < entry_price);
+    } else {              // POS_SHORT
+        is_underwater = (current_price > entry_price);
+    }
+    if (adx_slope < 0.0 && is_underwater) {
+        sl_mult *= 0.8;
+    }
+
+    // ── 2. FTB (Funding Tailwind Buffer) ─────────────────────────────────
+    // Disabled in backtester — no funding rate data available.
+
+    // ── 3. DASE (Dynamic ADX Stop Expansion) ─────────────────────────────
+    // If ADX > 40 and position is profitable by > 0.5 ATR, widen by 15%.
+    if (adx > 40.0) {
+        double profit_in_atr;
+        if (pos_type == 1) {  // POS_LONG
+            profit_in_atr = (current_price - entry_price) / eff_atr;
+        } else {              // POS_SHORT
+            profit_in_atr = (entry_price - current_price) / eff_atr;
+        }
+        if (profit_in_atr > 0.5) {
+            sl_mult *= 1.15;
+        }
+    }
+
+    // ── 4. SLB (Saturation Loyalty Buffer) ───────────────────────────────
+    // If ADX > 45 (saturated/strong trend), widen overall SL by 10%.
+    if (adx > 45.0) {
+        sl_mult *= 1.10;
+    }
+
+    // ── Compute raw SL price ─────────────────────────────────────────────
+    double sl_price;
+    if (pos_type == 1) {  // POS_LONG
+        sl_price = entry_price - (eff_atr * sl_mult);
+    } else {              // POS_SHORT
+        sl_price = entry_price + (eff_atr * sl_mult);
+    }
+
+    // ── 5. Breakeven Stop ────────────────────────────────────────────────
+    // If profit exceeds breakeven_start_atr ATRs, move SL to
+    // entry +/- breakeven_buffer_atr ATRs (protecting at least entry).
+    if (cfg.enable_breakeven_stop != 0u && cfg.breakeven_start_atr > 0.0f) {
+        double be_start = eff_atr * (double)cfg.breakeven_start_atr;
+        double be_buffer = eff_atr * (double)cfg.breakeven_buffer_atr;
+
+        if (pos_type == 1) {  // POS_LONG
+            if ((current_price - entry_price) >= be_start) {
+                // Only raise SL, never lower it from the breakeven level.
+                sl_price = fmax(sl_price, entry_price + be_buffer);
+            }
+        } else {              // POS_SHORT
+            if ((entry_price - current_price) >= be_start) {
+                // Only lower SL, never raise it from the breakeven level.
+                sl_price = fmin(sl_price, entry_price - be_buffer);
+            }
+        }
+    }
+
+    return sl_price;
+}
