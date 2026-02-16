@@ -3610,33 +3610,40 @@ class PaperTrader:
                 kb = self.get_kernel_balance()
                 logger.info("[kernel] Restored kernel state from disk (cash_usd=%.2f)", kb or 0.0)
             else:
-                # No persisted kernel state (e.g. first run after migration).
-                # Re-init with the DB-loaded seed balance so kernel starts in sync.
+                # No persisted kernel state (e.g. first run after migration
+                # or after switching to per-instance state paths).
+                # Re-init with the authoritative balance (live-synced).
+                self._seed_balance = PAPER_BALANCE
                 logger.info("[kernel] No state file found — re-initializing with seed balance %.2f", self._seed_balance)
                 self._init_kernel()
 
-            # AQC-FIX: Reconcile kernel cash_usd with the DB/live-synced seed
-            # balance.  The persisted state may carry stale cash_usd (e.g. from
-            # a previous session or, before this fix, from a different instance
-            # sharing the same state file).  The seed balance — which is synced
-            # from the live Hyperliquid account when PAPER_BALANCE_FROM_LIVE=1
-            # — is the authoritative starting balance for position sizing.
+            # AQC-FIX: Reconcile kernel cash_usd with the authoritative
+            # paper balance.  Use the module-level PAPER_BALANCE which
+            # reflects the live-synced value (daemon sets AI_QUANT_PAPER_BALANCE
+            # from the Hyperliquid account before strategy import when
+            # PAPER_BALANCE_FROM_LIVE=1).  This takes precedence over
+            # _seed_balance which load_state() may have overwritten with a
+            # stale DB value from a previous buggy session.
+            _auth_balance = PAPER_BALANCE
             if self._kernel_available and self._kernel_state_json:
                 try:
                     _st = json.loads(self._kernel_state_json)
                     disk_cash = float(_st.get("cash_usd", 0.0))
-                    if abs(disk_cash - self._seed_balance) > 0.01:
+                    if abs(disk_cash - _auth_balance) > 0.01:
                         logger.info(
-                            "[kernel] Reconciling cash_usd: %.2f → %.2f (seed balance)",
+                            "[kernel] Reconciling cash_usd: %.2f → %.2f (live balance)",
                             disk_cash,
-                            self._seed_balance,
+                            _auth_balance,
                         )
-                        _st["cash_usd"] = self._seed_balance
+                        _st["cash_usd"] = _auth_balance
                         self._kernel_state_json = json.dumps(
                             _st,
                             separators=(",", ":"),
                             sort_keys=True,
                         )
+                        # Keep _seed_balance in sync so self.balance reads
+                        # the correct value even before any kernel step.
+                        self._seed_balance = _auth_balance
                 except Exception as e:
                     logger.warning("[kernel] cash_usd reconciliation failed: %s", e)
 
