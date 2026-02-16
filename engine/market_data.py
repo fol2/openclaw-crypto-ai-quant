@@ -505,12 +505,20 @@ class MarketDataHub:
         # TTL cache: avoid repeated DB reads for the same symbol+interval within one loop.
         cache_key = f"{sym}:{interval_s}"
         now_mono = time.monotonic()
+
+        # Periodic cache cleanup: evict entries older than 10× TTL every 60s.
+        if now_mono - getattr(self, '_last_cache_cleanup', 0.0) > 60.0:
+            self._last_cache_cleanup = now_mono
+            expired = [k for k, (t, _) in self._candle_cache.items() if now_mono - t > self._candle_cache_ttl_s * 10]
+            for k in expired:
+                del self._candle_cache[k]
+
         cached = self._candle_cache.get(cache_key)
         if cached is not None:
             ts, df_cached = cached
             if now_mono - ts < self._candle_cache_ttl_s:
                 if df_cached is not None and len(df_cached) >= want:
-                    return df_cached
+                    return df_cached.copy()
 
         # 1) WS cache first
         df = None

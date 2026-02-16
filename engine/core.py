@@ -18,6 +18,23 @@ from .market_data import MarketDataHub
 from .strategy_manager import StrategyManager
 from .utils import now_ms
 
+# AQC-801 traceability: module-level helpers from the strategy module.
+# These are lazy-imported on first use to avoid circular-import issues
+# (strategy imports engine in some factory paths).
+_decision_event_fn = None
+_link_trade_fn = None
+
+
+def _get_decision_event_fn():
+    global _decision_event_fn
+    if _decision_event_fn is None:
+        try:
+            from strategy.mei_alpha_v1 import create_decision_event
+            _decision_event_fn = create_decision_event
+        except Exception:
+            _decision_event_fn = False  # sentinel: import failed, don't retry
+    return _decision_event_fn if _decision_event_fn else None
+
 logger = logging.getLogger(__name__)
 
 
@@ -79,10 +96,10 @@ class KernelDecision:
         )
         confidence = str(raw.get("confidence", "N/A"))
         # Kernel decisions have confidence="N/A" (Rust kernel events lack a
-        # confidence field).  Normalise to "high" so the downstream confidence
-        # gate does not block them — the kernel already validated the signal.
+        # confidence field).  Normalise to "medium" — a safer default that
+        # still passes the confidence gate without granting max leverage/sizing.
         if confidence.strip().upper() == "N/A":
-            confidence = "high"
+            confidence = "medium"
 
         try:
             score = float(raw.get("score", 0.0) or 0.0)
@@ -635,6 +652,7 @@ def _build_default_decision_provider() -> DecisionProvider:
     Accepted values for ``AI_QUANT_KERNEL_DECISION_PROVIDER``:
 
     * ``rust`` / ``kernel_only`` (default) -- Rust kernel via ``bt_runtime``
+    * ``candle`` -- KernelCandleDecisionProvider (candle-driven orchestrator)
     * ``file``  -- read decisions from a JSON file
     * ``none`` / ``noop`` -- no-op (dry-run / testing)
 
@@ -655,7 +673,7 @@ def _build_default_decision_provider() -> DecisionProvider:
         logger.fatal(
             "FATAL: AI_QUANT_KERNEL_DECISION_PROVIDER=python is no longer supported. "
             "The PythonAnalyzeDecisionProvider has been removed (AQC-825). "
-            "Use 'rust', 'kernel_only', 'file', or 'none'."
+            "Use 'rust', 'kernel_only', 'candle', 'file', or 'none'."
         )
         raise SystemExit(1)
 
@@ -691,6 +709,16 @@ def _build_default_decision_provider() -> DecisionProvider:
             )
             raise SystemExit(1) from exc
 
+    if provider_mode == "candle":
+        try:
+            from strategy.kernel_orchestrator import KernelCandleDecisionProvider
+            return KernelCandleDecisionProvider(
+                decision_factory=KernelDecision.from_raw,
+            )
+        except Exception as exc:
+            logger.fatal("FATAL: Cannot init KernelCandleDecisionProvider: %s", exc)
+            raise SystemExit(1) from exc
+
     if provider_mode == "":
         # Auto mode: try Rust binding first; fall back to file provider if
         # a decision file is configured, otherwise fail-fast.
@@ -704,6 +732,19 @@ def _build_default_decision_provider() -> DecisionProvider:
                     path,
                 )
                 return KernelDecisionFileProvider(path)
+
+        # Auto mode with no event file: prefer KernelCandleDecisionProvider
+        # when bt_runtime is available.
+        try:
+            _load_kernel_runtime_module()
+            # bt_runtime is available — try candle provider first
+            try:
+                from strategy.kernel_orchestrator import KernelCandleDecisionProvider
+                return KernelCandleDecisionProvider(decision_factory=KernelDecision.from_raw)
+            except Exception:
+                pass  # fall through to old provider
+        except Exception:
+            pass
 
         try:
             return KernelDecisionRustBindingProvider(path=None)
@@ -720,7 +761,7 @@ def _build_default_decision_provider() -> DecisionProvider:
     # Unrecognised provider mode — hard error.
     logger.fatal(
         "FATAL: Unrecognised AI_QUANT_KERNEL_DECISION_PROVIDER=%r. "
-        "Accepted values: rust, kernel_only, file, none, noop.",
+        "Accepted values: rust, kernel_only, candle, file, none, noop.",
         provider_mode,
     )
     raise SystemExit(1)
@@ -1894,6 +1935,15 @@ class UnifiedEngine:
                                 f"🚫 regime gate blocked {act} for {sym_u} "
                                 f"reason={self._regime_gate_reason}"
                             )
+                            _cde = _get_decision_event_fn()
+                            if _cde:
+                                try:
+                                    _cde(sym_u, "gate_block", "blocked", "gate_evaluation",
+                                         action_taken="blocked",
+                                         context={"reason": "regime_gate_off", "gate_on": self._regime_gate_on,
+                                                  "breadth_pct": self._market_breadth_pct})
+                                except Exception:
+                                    pass
                             continue
 
                         quote = None
@@ -1920,6 +1970,14 @@ class UnifiedEngine:
                         # WARN-E3: Guard against zero price when all sources fail.
                         if current_price <= 0:
                             logger.warning(f"[{sym_u}] all price sources failed, skipping {act}")
+                            _cde = _get_decision_event_fn()
+                            if _cde:
+                                try:
+                                    _cde(sym_u, "gate_block", "blocked", "gate_evaluation",
+                                         action_taken="blocked",
+                                         context={"reason": "zero_price", "action": act})
+                                except Exception:
+                                    pass
                             continue
 
                         if act in {"OPEN", "ADD"}:
@@ -1930,6 +1988,14 @@ class UnifiedEngine:
                                         f"🕒 skip {sym_u} {act}: stale candle-close signal "
                                         f"key={int(entry_key)}"
                                     )
+                                    _cde = _get_decision_event_fn()
+                                    if _cde:
+                                        try:
+                                            _cde(sym_u, "gate_block", "blocked", "gate_evaluation",
+                                                 action_taken="blocked",
+                                                 context={"reason": "stale_candle", "entry_key": int(entry_key)})
+                                        except Exception:
+                                            pass
                                     continue
 
                                 last_key = self._last_entry_key.get(sym_u)
@@ -1939,8 +2005,24 @@ class UnifiedEngine:
                                         if last_open_count is not None and int(len(self.trader.positions or {})) < int(last_open_count):
                                             self._last_entry_key_open_pos_count[sym_u] = int(open_pos_count)
                                         else:
+                                            _cde = _get_decision_event_fn()
+                                            if _cde:
+                                                try:
+                                                    _cde(sym_u, "gate_block", "blocked", "gate_evaluation",
+                                                         action_taken="blocked",
+                                                         context={"reason": "dedup_key", "entry_key": int(entry_key)})
+                                                except Exception:
+                                                    pass
                                             continue
                                     else:
+                                        _cde = _get_decision_event_fn()
+                                        if _cde:
+                                            try:
+                                                _cde(sym_u, "gate_block", "blocked", "gate_evaluation",
+                                                     action_taken="blocked",
+                                                     context={"reason": "dedup_key", "entry_key": int(entry_key)})
+                                            except Exception:
+                                                pass
                                         continue
 
                             if self._rest_enabled and hyperliquid_meta is not None:
@@ -1963,6 +2045,17 @@ class UnifiedEngine:
                                 except Exception:
                                     pass
 
+                            _did = None
+                            _cde = _get_decision_event_fn()
+                            if _cde:
+                                try:
+                                    _did = _cde(sym_u, "entry_signal", "executed", "execution",
+                                                action_taken=act.lower(),
+                                                context={"confidence": dec.confidence, "action": act,
+                                                         "source": "kernel_candle"})
+                                except Exception:
+                                    pass
+
                             self._decision_execute_trade(
                                 sym_u,
                                 signal,
@@ -1976,6 +2069,9 @@ class UnifiedEngine:
                                 reason=dec.reason,
                             )
 
+                            # TODO(AQC-801): link_decision_to_trade requires trade_id
+                            # from _record_trade(); needs _record_trade to return id first.
+
                             # BUG-E1: Set dedup key AFTER trade execution so a
                             # gate-blocked entry can retry on the next tick.
                             if entry_key is not None and sym_u in (self.trader.positions or {}):
@@ -1983,6 +2079,17 @@ class UnifiedEngine:
                                 self._last_entry_key_open_pos_count[sym_u] = open_pos_count
 
                         elif act in {"CLOSE", "REDUCE"}:
+                            _did = None
+                            _cde = _get_decision_event_fn()
+                            if _cde:
+                                try:
+                                    _did = _cde(sym_u, "exit_check", "executed", "execution",
+                                                action_taken=act.lower(),
+                                                context={"confidence": dec.confidence, "action": act,
+                                                         "source": "kernel_candle"})
+                                except Exception:
+                                    pass
+
                             self._decision_execute_trade(
                                 sym_u,
                                 signal,
@@ -1995,6 +2102,9 @@ class UnifiedEngine:
                                 target_size=dec.target_size,
                                 reason=dec.reason,
                             )
+
+                            # TODO(AQC-801): link_decision_to_trade requires trade_id
+                            # from _record_trade(); needs _record_trade to return id first.
                     except SystemExit:
                         raise
                     except Exception:

@@ -42,6 +42,16 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+__all__ = [
+    "KernelCandleDecisionProvider",
+    "KernelDecision",
+    "KernelOrchestrator",
+    "LegacyMode",
+    "build_evaluate_event",
+    "build_price_update_event",
+    "get_legacy_mode",
+]
+
 # ---------------------------------------------------------------------------
 # Lazy bt_runtime import
 # ---------------------------------------------------------------------------
@@ -741,7 +751,7 @@ class KernelCandleDecisionProvider:
         Strategy config passed to orchestrator and indicator helpers.
     state_path : str, optional
         Path to the kernel state JSON file.
-        Defaults to ``~/.mei/kernel_state.json``.
+        Defaults to ``~/.mei/kernel_candle_state.json``.
     decision_factory : callable, optional
         Factory ``(raw_dict) -> decision | None`` used to convert raw intent
         dicts into engine ``KernelDecision`` objects.  When wired from
@@ -764,7 +774,7 @@ class KernelCandleDecisionProvider:
 
         self._config = config or {}
         self._orch = orchestrator or KernelOrchestrator(config=self._config)
-        self._state_path = state_path or os.path.expanduser("~/.mei/kernel_state.json")
+        self._state_path = state_path or os.path.expanduser("~/.mei/kernel_candle_state.json")
         self._decision_factory = decision_factory
 
         self._state_json = self._load_or_create_state()
