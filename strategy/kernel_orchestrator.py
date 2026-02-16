@@ -718,6 +718,216 @@ class KernelOrchestrator:
 
 
 # ---------------------------------------------------------------------------
+# KernelCandleDecisionProvider
+# ---------------------------------------------------------------------------
+
+
+class KernelCandleDecisionProvider:
+    """Decision provider that generates kernel decisions from live candle data.
+
+    Bridges :class:`KernelOrchestrator` (which feeds candle DataFrames to the
+    Rust decision kernel) with the engine's ``DecisionProvider`` protocol.
+
+    Unlike ``KernelDecisionRustBindingProvider`` (which reads pre-built market
+    events from a JSON file that may not exist), this provider computes
+    indicators from *live candle data*, feeds them to the Rust kernel via
+    ``process_candle()``, and returns actionable intents.
+
+    Parameters
+    ----------
+    orchestrator : KernelOrchestrator, optional
+        Pre-configured orchestrator.  Built from *config* if not supplied.
+    config : dict, optional
+        Strategy config passed to orchestrator and indicator helpers.
+    state_path : str, optional
+        Path to the kernel state JSON file.
+        Defaults to ``~/.mei/kernel_state.json``.
+    decision_factory : callable, optional
+        Factory ``(raw_dict) -> decision | None`` used to convert raw intent
+        dicts into engine ``KernelDecision`` objects.  When wired from
+        ``engine.core``, pass ``KernelDecision.from_raw``.  If ``None``, raw
+        dicts are returned directly.
+    """
+
+    def __init__(
+        self,
+        orchestrator: KernelOrchestrator | None = None,
+        config: dict[str, Any] | None = None,
+        state_path: str | None = None,
+        decision_factory: Any | None = None,
+    ):
+        if not _BT_RUNTIME_AVAILABLE or _bt_runtime is None:
+            raise RuntimeError(
+                "bt_runtime extension is required for KernelCandleDecisionProvider. "
+                "Build bt_runtime or check your AI_QUANT_BT_RUNTIME_PATH configuration."
+            )
+
+        self._config = config or {}
+        self._orch = orchestrator or KernelOrchestrator(config=self._config)
+        self._state_path = state_path or os.path.expanduser("~/.mei/kernel_state.json")
+        self._decision_factory = decision_factory
+
+        self._state_json = self._load_or_create_state()
+        self._params_json = _bt_runtime.default_kernel_params_json()
+
+    # ---- state management ------------------------------------------------
+
+    def _load_or_create_state(self) -> str:
+        """Load kernel state from disk, or create fresh if missing/corrupt."""
+        try:
+            state_json = _bt_runtime.load_state(self._state_path)
+            logger.info(
+                "[candle-provider] kernel state loaded from %s", self._state_path,
+            )
+            return state_json
+        except OSError:
+            pass  # file missing — normal on first run
+        except Exception:
+            logger.error(
+                "[candle-provider] kernel state corrupt, creating fresh: %s",
+                self._state_path,
+            )
+
+        seed = float(os.getenv("AI_QUANT_PAPER_BALANCE", "10000.0"))
+        fresh = _bt_runtime.default_kernel_state_json(seed, int(time.time() * 1000))
+        self._persist_state(fresh)
+        logger.info("[candle-provider] kernel state created fresh (seed=$%.2f)", seed)
+        return fresh
+
+    def _persist_state(self, state_json: str) -> None:
+        """Save kernel state to disk.  Best-effort, never raises."""
+        try:
+            state_dir = os.path.dirname(self._state_path)
+            if state_dir:
+                os.makedirs(state_dir, exist_ok=True)
+            _bt_runtime.save_state(state_json, self._state_path)
+        except Exception:
+            logger.warning(
+                "[candle-provider] failed to persist kernel state", exc_info=True,
+            )
+
+    # ---- DecisionProvider protocol ---------------------------------------
+
+    def get_decisions(
+        self,
+        *,
+        symbols: list[str],
+        watchlist: list[str],
+        open_symbols: list[str],
+        market: Any,
+        interval: str,
+        lookback_bars: int,
+        mode: str,
+        not_ready_symbols: set[str],
+        strategy: Any,
+        now_ms: int,
+    ) -> list[Any]:
+        """Generate kernel decisions from live candle data.
+
+        For each symbol in *symbols* (skipping *not_ready_symbols*), fetches
+        candle data via ``market.get_candles_df()``, feeds it to the
+        orchestrator's ``process_candle()``, extracts intents from the kernel
+        response, and converts them via *decision_factory* (if provided).
+
+        Returns
+        -------
+        list
+            If *decision_factory* was provided at init, returns a list of
+            engine ``KernelDecision`` objects.  Otherwise, returns raw intent
+            dicts compatible with ``KernelDecision.from_raw()``.
+        """
+        ready_symbols = [s for s in symbols if s not in not_ready_symbols]
+        if not ready_symbols:
+            return []
+
+        # Get strategy config for indicator computation
+        effective_cfg = self._config
+        if strategy is not None:
+            try:
+                global_cfg = strategy.get_config("__GLOBAL__")
+                if global_cfg:
+                    effective_cfg = global_cfg
+            except Exception:
+                pass
+
+        decisions: list[Any] = []
+        state_json = self._state_json
+
+        for sym in ready_symbols:
+            try:
+                df = market.get_candles_df(
+                    sym, interval=interval, min_rows=lookback_bars,
+                )
+                if df is None or len(df) < 20:
+                    continue
+
+                kd = self._orch.process_candle(
+                    symbol=sym,
+                    candle_df=df,
+                    kernel_state_json=state_json,
+                    params_json=self._params_json,
+                    cfg=effective_cfg,
+                )
+
+                # Update running state for next symbol (kernel state is sequential)
+                if kd.ok and kd.state_json:
+                    state_json = kd.state_json
+
+                if not kd.ok or not kd.intents:
+                    continue
+
+                # Convert intents to decision dicts
+                for intent in kd.intents:
+                    if not isinstance(intent, dict):
+                        continue
+
+                    raw = {
+                        "symbol": str(intent.get("symbol", sym)).upper(),
+                        "kind": intent.get("kind"),
+                        "side": intent.get("side"),
+                        "action": intent.get("action", kd.action),
+                        "quantity": intent.get("quantity"),
+                        "price": intent.get("price"),
+                        "notional_usd": intent.get("notional_usd"),
+                        "notional_hint_usd": intent.get("notional_hint_usd"),
+                        "intent_id": intent.get("intent_id"),
+                        "signal": intent.get("signal", kd.action),
+                        "confidence": intent.get("confidence", "N/A"),
+                        "now_series": intent.get("now_series"),
+                        "entry_key": intent.get(
+                            "entry_key", intent.get("candle_key"),
+                        ),
+                        "reason": f"kernel_candle:{kd.action.lower()}",
+                    }
+
+                    if self._decision_factory is not None:
+                        dec = self._decision_factory(raw)
+                        if dec is not None:
+                            decisions.append(dec)
+                    else:
+                        decisions.append(raw)
+
+            except Exception:
+                logger.warning(
+                    "[candle-provider] [%s] kernel candle decision failed",
+                    sym,
+                    exc_info=True,
+                )
+
+        # Persist final state
+        if state_json != self._state_json:
+            self._state_json = state_json
+            self._persist_state(state_json)
+
+        return decisions
+
+    @property
+    def state_json(self) -> str:
+        """Current kernel state JSON (for inspection / debugging)."""
+        return self._state_json
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
