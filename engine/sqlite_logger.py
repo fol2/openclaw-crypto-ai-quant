@@ -123,12 +123,16 @@ class _SqliteLogSink:
             self._t.join(timeout=1.5)
 
     def _open_con(self) -> sqlite3.Connection:
-        Path(self._db_path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
-        con = sqlite3.connect(self._db_path, timeout=0.25)
+        db_p = Path(self._db_path).expanduser().resolve()
+        db_p.parent.mkdir(parents=True, exist_ok=True)
+        con = sqlite3.connect(str(db_p), timeout=0.25)
         with suppress(Exception):
             con.execute("PRAGMA journal_mode=WAL")
             con.execute("PRAGMA synchronous=NORMAL")
         _ensure_runtime_logs_schema(con)
+        with suppress(Exception):
+            import os as _os
+            _os.chmod(str(db_p), 0o600)
         return con
 
     def _run(self) -> None:

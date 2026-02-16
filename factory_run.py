@@ -176,7 +176,6 @@ def _export_live_balance_via_cli(*, output: Path) -> tuple[float | None, dict[st
         for default_secret_path in [
             AIQ_ROOT / "secrets.json",
             Path("~/.config/openclaw/ai-quant-secrets.json").expanduser(),
-            Path("/home/fol2hk/openclaw-plugins/ai_quant/secrets.json"),
         ]:
             if default_secret_path.exists():
                 env["AI_QUANT_SECRETS_PATH"] = str(default_secret_path)

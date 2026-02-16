@@ -23,5 +23,8 @@ Environment=AI_QUANT_REST_CANDLE_BACKFILL=0
 Environment=AI_QUANT_REST_ENABLE=0
 Environment=PYTHONUNBUFFERED=1
 
+NoNewPrivileges=yes
+PrivateTmp=yes
+
 [Install]
 WantedBy=default.target

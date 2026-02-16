@@ -99,7 +99,8 @@ def _load_yaml(path: str | Path) -> dict[str, Any]:
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
         return data if isinstance(data, dict) else {}
-    except Exception:
+    except (OSError, yaml.YAMLError) as exc:
+        print(f"⚠️ promoted_config: failed to load YAML {path}: {exc}")
         return {}
 
 

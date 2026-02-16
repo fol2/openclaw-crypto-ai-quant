@@ -98,19 +98,19 @@ class RiskManager:
         self._kill_mode_env = _env_str("AI_QUANT_KILL_SWITCH_MODE", "close_only").strip().lower()
 
         # Rate limits (entry orders)
-        entry_per_min = float(max(1.0, _env_float("AI_QUANT_RISK_MAX_ENTRY_ORDERS_PER_MIN", 30.0)))
+        entry_per_min = float(min(1000.0, max(1.0, _env_float("AI_QUANT_RISK_MAX_ENTRY_ORDERS_PER_MIN", 30.0))))
         self._entry_bucket = TokenBucket(capacity=entry_per_min, refill_per_s=entry_per_min / 60.0)
 
-        entry_sym_per_min = float(max(1.0, _env_float("AI_QUANT_RISK_MAX_ENTRY_ORDERS_PER_MIN_PER_SYMBOL", 6.0)))
+        entry_sym_per_min = float(min(1000.0, max(1.0, _env_float("AI_QUANT_RISK_MAX_ENTRY_ORDERS_PER_MIN_PER_SYMBOL", 6.0))))
         self._entry_symbol_per_min = float(entry_sym_per_min)
         self._entry_symbol_events: dict[str, deque[float]] = defaultdict(deque)
 
         # Rate limits (exit orders)
-        exit_per_min = float(max(1.0, _env_float("AI_QUANT_RISK_MAX_EXIT_ORDERS_PER_MIN", 120.0)))
+        exit_per_min = float(min(1000.0, max(1.0, _env_float("AI_QUANT_RISK_MAX_EXIT_ORDERS_PER_MIN", 120.0))))
         self._exit_bucket = TokenBucket(capacity=exit_per_min, refill_per_s=exit_per_min / 60.0)
 
         # Cancels
-        cancel_per_min = float(max(1.0, _env_float("AI_QUANT_RISK_MAX_CANCELS_PER_MIN", 120.0)))
+        cancel_per_min = float(min(1000.0, max(1.0, _env_float("AI_QUANT_RISK_MAX_CANCELS_PER_MIN", 120.0))))
         self._cancel_bucket = TokenBucket(capacity=cancel_per_min, refill_per_s=cancel_per_min / 60.0)
 
         # Notional throttle (entry only by default)

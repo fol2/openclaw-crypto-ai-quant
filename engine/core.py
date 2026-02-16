@@ -443,8 +443,8 @@ class KernelDecisionRustBindingProvider:
                     logger.warning(
                         "Kernel state stale by %.0fs", age_s,
                     )
-            except Exception:
-                logger.info("Kernel state loaded from %s", state_path)
+            except (ValueError, TypeError, KeyError) as exc:
+                logger.warning("Kernel state metadata parsing failed: %s; loaded from %s", exc, state_path)
             return state_json
         except OSError:
             # File missing — normal on first run.

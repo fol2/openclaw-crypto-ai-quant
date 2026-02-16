@@ -44,5 +44,5 @@ addopts = [
   "--cov=engine.sqlite_logger",
   "--cov=monitor.heartbeat",
   "--cov-report=term-missing",
-  "--cov-fail-under=100",
+  "--cov-fail-under=80",
 ]

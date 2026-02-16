@@ -952,11 +952,14 @@ def main() -> None:
                     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "secrets.json"),
                 )
             )
-            _exec = HyperliquidLiveExecutor(
-                secret_key=_secrets.secret_key,
-                main_address=_secrets.main_address,
-                timeout_s=4,
-            )
+            try:
+                _exec = HyperliquidLiveExecutor(
+                    secret_key=_secrets.secret_key,
+                    main_address=_secrets.main_address,
+                    timeout_s=4,
+                )
+            except Exception:
+                raise RuntimeError("Executor init failed — check secrets and network") from None
             _snap = _exec.account_snapshot(force=True)
             if _snap.withdrawable_usd and _snap.withdrawable_usd > 0:
                 os.environ["AI_QUANT_PAPER_BALANCE"] = str(_snap.withdrawable_usd)

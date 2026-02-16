@@ -298,6 +298,17 @@ class PositionReconciler:
             resolutions=[],
         )
         report.severity = calculate_severity(report)
+
+        # H12: When reconciliation severity is critical, emit an alert and log at CRITICAL level.
+        if report.severity == "critical":
+            crit_details = "; ".join(d.details for d in discrepancies if d.severity == "critical")
+            logger.critical("RECONCILIATION CRITICAL: %s", crit_details)
+            try:
+                from engine.alerting import send_alert
+                send_alert(f"RECONCILIATION CRITICAL: {crit_details}")
+            except Exception:
+                logger.warning("failed to send critical reconciliation alert", exc_info=True)
+
         return report
 
     def classify_discrepancy(

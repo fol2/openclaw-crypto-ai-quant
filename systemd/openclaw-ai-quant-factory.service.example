@@ -11,6 +11,9 @@ EnvironmentFile=-%h/.config/openclaw/ai-quant-universe.env
 EnvironmentFile=-%h/.config/openclaw/ai-quant-live.env
 ExecStart=/usr/bin/env bash -lc "cd \"$PROJECT_DIR\" && \"$PROJECT_DIR/.venv/bin/python3\" -u factory_run.py --run-id nightly_$(date -u +%Y%m%dT%H%M%SZ) --profile daily"
 
+NoNewPrivileges=yes
+PrivateTmp=yes
+
 [Install]
 WantedBy=default.target
 

@@ -128,7 +128,7 @@ def close_paper_positions(db_path: Path, *, reason: str) -> int:
             # Only insert columns that exist in the local DB schema.
             keep_cols = [k for k in base.keys() if k in cols]
             if keep_cols:
-                col_sql = ", ".join(keep_cols)
+                col_sql = ", ".join(f'"{c}"' for c in keep_cols)
                 qs_sql = ", ".join(["?"] * len(keep_cols))
                 for sym in symbols:
                     row_data = dict(base)

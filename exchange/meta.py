@@ -49,8 +49,10 @@ def _refresh_cache() -> None:
         data = info.meta_and_asset_ctxs()
         if not data or len(data) < 2:
             return
-    except Exception:
+    except Exception as e:
         # Avoid blocking/hammering in hot paths when HL is slow/unreachable.
+        import logging as _logging
+        _logging.getLogger(__name__).warning("metadata refresh failed: %s", e)
         try:
             cooldown_s = float(os.getenv("AI_QUANT_HL_META_FAIL_COOLDOWN_S", "60"))
         except Exception:

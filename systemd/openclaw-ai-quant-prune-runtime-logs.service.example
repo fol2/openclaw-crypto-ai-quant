@@ -7,6 +7,9 @@ WorkingDirectory=$PROJECT_DIR
 EnvironmentFile=-%h/.config/openclaw/ai-quant-live.env
 ExecStart=$PROJECT_DIR/.venv/bin/python3 -u tools/prune_runtime_logs.py
 
+NoNewPrivileges=yes
+PrivateTmp=yes
+
 [Install]
 WantedBy=default.target
 
