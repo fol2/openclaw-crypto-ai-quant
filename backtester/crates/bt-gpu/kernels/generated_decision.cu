@@ -413,3 +413,57 @@ __device__ SizingResultD compute_entry_size_codegen(
     result.leverage = lev;
     return result;
 }
+// Derived from bt-core/src/engine.rs PESC cooldown logic
+// Post-Exit Same-Direction Cooldown: prevents re-entry in the same direction
+// too soon after an exit, with ADX-adaptive interpolation of cooldown duration.
+//
+// Gate chain:
+//   1. reentry_cooldown_minutes == 0 -> disabled
+//   2. No prior close recorded      -> not blocked
+//   3. Signal flip exit reason       -> not blocked (direction changed)
+//   4. Different direction           -> not blocked
+//   5. ADX-interpolated cooldown     -> blocked if elapsed < cooldown
+
+__device__ bool is_pesc_blocked_codegen(
+    const GpuComboConfig& cfg,
+    int bars_since_exit,
+    double adx,
+    unsigned int close_ts,
+    unsigned int close_reason,
+    unsigned int close_type,
+    unsigned int desired_type,
+    unsigned int current_sec
+) {
+    // Gate 1: PESC disabled when reentry_cooldown_minutes == 0
+    if (cfg.reentry_cooldown_minutes == 0u) { return false; }
+
+    // Gate 2: no prior close recorded for this symbol
+    if (close_ts == 0u) { return false; }
+
+    // Gate 3: no cooldown after signal flips (PESC_SIGNAL_FLIP == 2)
+    if (close_reason == 2u) { return false; }
+
+    // Gate 4: only block same-direction re-entry
+    if (close_type != desired_type) { return false; }
+
+    // ADX-adaptive cooldown interpolation
+    double min_cd = (double)(cfg.reentry_cooldown_min_mins);
+    double max_cd = (double)(cfg.reentry_cooldown_max_mins);
+
+    double cooldown_mins;
+    if (adx >= 40.0) {
+        // Strong trend: use minimum cooldown
+        cooldown_mins = min_cd;
+    } else if (adx <= 25.0) {
+        // Weak trend: use maximum cooldown
+        cooldown_mins = max_cd;
+    } else {
+        // Linear interpolation: ADX 25->40 maps max_cd->min_cd
+        double t = (adx - 25.0) / 15.0;
+        cooldown_mins = max_cd + t * (min_cd - max_cd);
+    }
+
+    unsigned int cooldown_sec = (unsigned int)(cooldown_mins * 60.0);
+    unsigned int elapsed = current_sec - close_ts;
+    return elapsed < cooldown_sec;
+}
