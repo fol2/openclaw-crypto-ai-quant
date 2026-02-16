@@ -3102,8 +3102,8 @@ fn test_pesc_signal_flip_bypass() {
     let pesc_section = &src[pesc_start..];
 
     assert!(
-        pesc_section.contains("close_reason == 2u"),
-        "PESC must check for signal flip (reason == 2)"
+        pesc_section.contains("close_reason == PESC_SIGNAL_FLIP"),
+        "PESC must check for signal flip (uses PESC_SIGNAL_FLIP define)"
     );
 }
 

@@ -492,7 +492,9 @@ __device__ bool check_smart_exits(const GpuPosition& pos, const GpuSnapshot& sna
     return se.should_exit;
 }
 
-// -- Entry Sizing -------------------------------------------------------------
+// -- Entry Sizing (AQC-1233: delegated to compute_entry_size_codegen) ---------
+// The codegen SizingResultD operates in double precision (AQC-734).
+// This wrapper bridges to the float-based SizingResult used by the kernel.
 
 struct SizingResult {
     float size;
@@ -503,43 +505,16 @@ struct SizingResult {
 __device__ SizingResult compute_entry_size(float equity, float price, unsigned int confidence,
                                            float atr, const GpuSnapshot& snap,
                                            const GpuComboConfig* cfg) {
-    // Returns (size, margin, leverage)
-    float margin = equity * cfg->allocation_pct;
-
-    if (cfg->enable_dynamic_sizing != 0u) {
-        float conf_mult = cfg->confidence_mult_medium;
-        if (confidence == CONF_HIGH) { conf_mult = cfg->confidence_mult_high; }
-        if (confidence == CONF_LOW) { conf_mult = cfg->confidence_mult_low; }
-
-        float adx_mult = fmaxf(fminf(snap.adx / cfg->adx_sizing_full_adx, 1.0f), cfg->adx_sizing_min_mult);
-
-        float vol_scalar = 1.0f;
-        if (cfg->vol_baseline_pct > 0.0f && price > 0.0f) {
-            float vol_ratio = (atr / price) / cfg->vol_baseline_pct;
-            if (vol_ratio > 0.0f) {
-                vol_scalar = fmaxf(fminf(1.0f / vol_ratio, cfg->vol_scalar_max), cfg->vol_scalar_min);
-            }
-        }
-
-        margin *= conf_mult * adx_mult * vol_scalar;
-    }
-
-    float lev = cfg->leverage;
-    if (cfg->enable_dynamic_leverage != 0u) {
-        if (confidence == CONF_HIGH) { lev = cfg->leverage_high; }
-        else if (confidence == CONF_MEDIUM) { lev = cfg->leverage_medium; }
-        else { lev = cfg->leverage_low; }
-        if (cfg->leverage_max_cap > 0.0f) { lev = fminf(lev, cfg->leverage_max_cap); }
-    }
-
-    float notional = margin * lev;
-    float size = 0.0f;
-    if (price > 0.0f) { size = notional / price; }
+    // AQC-1233: delegate to double-precision codegen
+    SizingResultD sd = compute_entry_size_codegen(
+        (double)equity, (double)price, confidence,
+        (double)atr, (double)snap.adx, *cfg
+    );
 
     SizingResult result;
-    result.size = size;
-    result.margin = margin;
-    result.leverage = lev;
+    result.size = (float)sd.size;
+    result.margin = (float)sd.margin;
+    result.leverage = (float)sd.leverage;
     return result;
 }
 
@@ -645,30 +620,24 @@ __device__ void apply_partial_close(GpuComboState* state, unsigned int sym, cons
     // compute_trailing() continues ratcheting on subsequent bars.
 }
 
-// -- PESC Check ---------------------------------------------------------------
+// -- PESC Check (AQC-1233: delegated to is_pesc_blocked_codegen) ---------------
+// Wrapper preserves the existing call-site signature while delegating to the
+// double-precision codegen implementation from generated_decision.cu.
 
 __device__ bool is_pesc_blocked(const GpuComboState* state, unsigned int sym,
                                 unsigned int desired_type, unsigned int current_sec,
                                 float adx, const GpuComboConfig* cfg) {
-    if (cfg->reentry_cooldown_minutes == 0u) { return false; }
-    unsigned int close_ts = state->pesc_close_time_sec[sym];
-    if (close_ts == 0u) { return false; }
-    if (state->pesc_close_reason[sym] == PESC_SIGNAL_FLIP) { return false; }
-    if (state->pesc_close_type[sym] != desired_type) { return false; }
-
-    float min_cd = (float)(cfg->reentry_cooldown_min_mins);
-    float max_cd = (float)(cfg->reentry_cooldown_max_mins);
-    float cooldown_mins;
-    if (adx >= 40.0f) { cooldown_mins = min_cd; }
-    else if (adx <= 25.0f) { cooldown_mins = max_cd; }
-    else {
-        float t = (adx - 25.0f) / 15.0f;
-        cooldown_mins = max_cd + t * (min_cd - max_cd);
-    }
-
-    unsigned int cooldown_sec = (unsigned int)(cooldown_mins * 60.0f);
-    unsigned int elapsed = current_sec - close_ts;
-    return elapsed < cooldown_sec;
+    // AQC-1233: delegate to double-precision codegen
+    return is_pesc_blocked_codegen(
+        *cfg,
+        0,  // bars_since_exit — unused by timestamp-based cooldown
+        (double)adx,
+        state->pesc_close_time_sec[sym],
+        state->pesc_close_reason[sym],
+        state->pesc_close_type[sym],
+        desired_type,
+        current_sec
+    );
 }
 
 // -- TP Multiplier (must mirror bt-core fixed tp_atr_mult semantics) ---------
