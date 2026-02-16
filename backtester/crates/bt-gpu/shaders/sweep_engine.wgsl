@@ -139,6 +139,14 @@ struct GpuComboConfig {
     anomaly_bb_width_ratio_gt: f32, slow_drift_ranging_slope_override: f32,
     _p11: u32, _p12: u32,
     tp_strong_adx_gt: f32, tp_weak_adx_lt: f32,
+    // === Decision codegen fields (AQC-1250) ===
+    enable_pullback_entries: u32,
+    anomaly_price_change_pct: f32, anomaly_ema_dev_pct: f32,
+    ranging_rsi_low: f32, ranging_rsi_high: f32, ranging_min_signals: u32,
+    stoch_rsi_block_long_gt: f32, stoch_rsi_block_short_lt: f32,
+    ave_enabled: u32,
+    tp_mult_strong: f32, tp_mult_weak: f32,
+    _codegen_pad: u32,
 }
 
 struct GpuComboState {

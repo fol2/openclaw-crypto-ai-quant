@@ -193,7 +193,7 @@ const _: () = assert!(std::mem::size_of::<IndicatorParams>() == 32);
 /// Flattened trade parameters for one sweep combo.
 /// Only trade-affecting fields (not indicator windows).
 ///
-/// 512 bytes (128 × f32), aligned to 16.
+/// 560 bytes (140 × f32), aligned to 16.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuComboConfig {
@@ -366,9 +366,31 @@ pub struct GpuComboConfig {
     // TP momentum [126-127]
     pub tp_strong_adx_gt: f32,
     pub tp_weak_adx_lt: f32,
+
+    // === Decision codegen fields (AQC-1250) === [128-138]
+    // Pullback entry (mode 2)
+    pub enable_pullback_entries: u32,
+    // Anomaly filter (CPU uses price_change + ema_dev; GPU previously used only bb_width)
+    pub anomaly_price_change_pct: f32,
+    pub anomaly_ema_dev_pct: f32,
+    // Ranging filter (previously hardcoded in CUDA)
+    pub ranging_rsi_low: f32,
+    pub ranging_rsi_high: f32,
+    pub ranging_min_signals: u32,
+    // StochRSI thresholds (previously hardcoded 0.85 / 0.15)
+    pub stoch_rsi_block_long_gt: f32,
+    pub stoch_rsi_block_short_lt: f32,
+    // AVE (Adaptive Volatility Entry) gate
+    pub ave_enabled: u32,
+    // TP multipliers (confidence-dependent TP)
+    pub tp_mult_strong: f32,
+    pub tp_mult_weak: f32,
+
+    // Padding to 560 bytes (140 x 4 bytes) [139]
+    pub _codegen_pad: u32,
 }
 
-const _: () = assert!(std::mem::size_of::<GpuComboConfig>() == 512);
+const _: () = assert!(std::mem::size_of::<GpuComboConfig>() == 560);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GpuPosition — per-symbol position state
@@ -507,7 +529,7 @@ impl GpuComboConfig {
         let mc = &cfg.market_regime;
         let et = &cfg.thresholds.entry;
         let rt = &cfg.thresholds.ranging;
-        let _at = &cfg.thresholds.anomaly;
+        let at = &cfg.thresholds.anomaly;
         let tp = &cfg.thresholds.tp_and_momentum;
 
         Self {
@@ -662,13 +684,27 @@ impl GpuComboConfig {
 
             tp_strong_adx_gt: tp.adx_strong_gt as f32,
             tp_weak_adx_lt: tp.adx_weak_lt as f32,
+
+            // Decision codegen fields (AQC-1250)
+            enable_pullback_entries: et.enable_pullback_entries as u32,
+            anomaly_price_change_pct: at.price_change_pct_gt as f32,
+            anomaly_ema_dev_pct: at.ema_fast_dev_pct_gt as f32,
+            ranging_rsi_low: rt.rsi_low as f32,
+            ranging_rsi_high: rt.rsi_high as f32,
+            ranging_min_signals: rt.min_signals as u32,
+            stoch_rsi_block_long_gt: cfg.thresholds.stoch_rsi.block_long_if_k_gt as f32,
+            stoch_rsi_block_short_lt: cfg.thresholds.stoch_rsi.block_short_if_k_lt as f32,
+            ave_enabled: et.ave_enabled as u32,
+            tp_mult_strong: tp.tp_mult_strong as f32,
+            tp_mult_weak: tp.tp_mult_weak as f32,
+            _codegen_pad: 0,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::GpuIndicatorConfig;
+    use super::{GpuComboConfig, GpuIndicatorConfig};
     use bt_core::config::StrategyConfig;
 
     #[test]
@@ -679,5 +715,66 @@ mod tests {
 
         let out = GpuIndicatorConfig::from_strategy_config(&cfg, 200);
         assert_eq!(out.avg_atr_window, 17);
+    }
+
+    /// AQC-1250: round-trip test — StrategyConfig → GpuComboConfig for the 11 new
+    /// decision codegen fields.
+    #[test]
+    fn test_codegen_fields_roundtrip() {
+        let mut cfg = StrategyConfig::default();
+
+        // Set non-default values for all 11 new fields
+        cfg.thresholds.entry.enable_pullback_entries = true;
+        cfg.thresholds.anomaly.price_change_pct_gt = 0.25;
+        cfg.thresholds.anomaly.ema_fast_dev_pct_gt = 0.75;
+        cfg.thresholds.ranging.rsi_low = 42.0;
+        cfg.thresholds.ranging.rsi_high = 58.0;
+        cfg.thresholds.ranging.min_signals = 3;
+        cfg.thresholds.stoch_rsi.block_long_if_k_gt = 0.90;
+        cfg.thresholds.stoch_rsi.block_short_if_k_lt = 0.10;
+        cfg.thresholds.entry.ave_enabled = false;
+        cfg.thresholds.tp_and_momentum.tp_mult_strong = 8.5;
+        cfg.thresholds.tp_and_momentum.tp_mult_weak = 2.5;
+
+        let gpu = GpuComboConfig::from_strategy_config(&cfg);
+
+        assert_eq!(gpu.enable_pullback_entries, 1);
+        assert!((gpu.anomaly_price_change_pct - 0.25).abs() < f32::EPSILON);
+        assert!((gpu.anomaly_ema_dev_pct - 0.75).abs() < f32::EPSILON);
+        assert!((gpu.ranging_rsi_low - 42.0).abs() < f32::EPSILON);
+        assert!((gpu.ranging_rsi_high - 58.0).abs() < f32::EPSILON);
+        assert_eq!(gpu.ranging_min_signals, 3);
+        assert!((gpu.stoch_rsi_block_long_gt - 0.90).abs() < f32::EPSILON);
+        assert!((gpu.stoch_rsi_block_short_lt - 0.10).abs() < f32::EPSILON);
+        assert_eq!(gpu.ave_enabled, 0);
+        assert!((gpu.tp_mult_strong - 8.5).abs() < f32::EPSILON);
+        assert!((gpu.tp_mult_weak - 2.5).abs() < f32::EPSILON);
+    }
+
+    /// AQC-1250: default StrategyConfig maps disabled features to 0 in GPU struct.
+    #[test]
+    fn test_codegen_fields_defaults() {
+        let cfg = StrategyConfig::default();
+        let gpu = GpuComboConfig::from_strategy_config(&cfg);
+
+        // enable_pullback_entries defaults to false → 0
+        assert_eq!(gpu.enable_pullback_entries, 0);
+        // ave_enabled defaults to true → 1
+        assert_eq!(gpu.ave_enabled, 1);
+        // Default anomaly thresholds
+        assert!((gpu.anomaly_price_change_pct - 0.10).abs() < f32::EPSILON);
+        assert!((gpu.anomaly_ema_dev_pct - 0.50).abs() < f32::EPSILON);
+        // Default ranging RSI zone
+        assert!((gpu.ranging_rsi_low - 47.0).abs() < f32::EPSILON);
+        assert!((gpu.ranging_rsi_high - 53.0).abs() < f32::EPSILON);
+        assert_eq!(gpu.ranging_min_signals, 2);
+        // Default stochRSI thresholds
+        assert!((gpu.stoch_rsi_block_long_gt - 0.85).abs() < f32::EPSILON);
+        assert!((gpu.stoch_rsi_block_short_lt - 0.15).abs() < f32::EPSILON);
+        // Default TP multipliers
+        assert!((gpu.tp_mult_strong - 7.0).abs() < f32::EPSILON);
+        assert!((gpu.tp_mult_weak - 3.0).abs() < f32::EPSILON);
+        // Padding is zero
+        assert_eq!(gpu._codegen_pad, 0);
     }
 }
