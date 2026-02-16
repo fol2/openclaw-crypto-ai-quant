@@ -275,6 +275,7 @@ __device__ unsigned int apply_regime_filter(unsigned int signal, const GpuComboC
 // The GateResult struct is a lightweight facade used by the sweep kernel.
 // The actual gate evaluation is performed by check_gates_codegen() from
 // generated_decision.cu which operates in double precision (AQC-734).
+// Thin wrapper over codegen: float->double on inputs, GateResultD->GateResult on output.
 
 struct GateResult {
     bool all_gates_pass;
@@ -324,14 +325,9 @@ __device__ GateResult check_gates(const GpuSnapshot& snap, const GpuComboConfig*
     return result;
 }
 
-// Backwards-compatible overload (legacy call sites that don't pass btc_bull).
-__device__ GateResult check_gates(const GpuSnapshot& snap, const GpuComboConfig* cfg,
-                                   float ema_slope) {
-    return check_gates(snap, cfg, ema_slope, /*btc_bull=*/BTC_BULL_UNKNOWN, /*is_btc_symbol=*/false);
-}
-
 // -- Signal Generation (AQC-1213: delegated to generate_signal_codegen) -------
 //
+// Thin wrapper over codegen: float->double on inputs, int->unsigned int + double->float on output.
 // The codegen SignalResult (from generated_decision.cu) uses:
 //   int signal, int confidence, double effective_min_adx
 // The sweep kernel expects unsigned int signal/confidence and float entry_adx_threshold.
@@ -384,7 +380,7 @@ __device__ SignalResultLegacy generate_signal(const GpuSnapshot& snap, const Gpu
 }
 
 // -- Stop Loss ----------------------------------------------------------------
-// AQC-1226: replaced by codegen — delegates to compute_sl_price_codegen()
+// AQC-1226: Thin wrapper over codegen — float->double on inputs, double->float on output.
 
 __device__ float compute_sl_price(const GpuPosition& pos, const GpuSnapshot& snap, const GpuComboConfig* cfg) {
     // AQC-1226: delegate to double-precision codegen
@@ -413,7 +409,7 @@ __device__ bool check_stop_loss(const GpuPosition& pos, const GpuSnapshot& snap,
 }
 
 // -- Trailing Stop ------------------------------------------------------------
-// AQC-1226: replaced by codegen — delegates to compute_trailing_codegen()
+// AQC-1226: Thin wrapper over codegen — float->double on inputs, double->float on output.
 
 __device__ float compute_trailing(const GpuPosition& pos, const GpuSnapshot& snap,
                                   const GpuComboConfig* cfg, float p_atr) {
@@ -443,8 +439,7 @@ __device__ bool check_trailing_exit(const GpuPosition& pos, const GpuSnapshot& s
 }
 
 // -- Take Profit --------------------------------------------------------------
-// AQC-1226: replaced by codegen — delegates to check_tp_codegen()
-
+// AQC-1226: Thin wrapper over codegen — float->double on inputs, TpResult.action->unsigned int.
 // Returns: 0 = hold, 1 = partial, 2 = full close
 __device__ unsigned int check_tp(const GpuPosition& pos, const GpuSnapshot& snap,
                                  const GpuComboConfig* cfg, float tp_mult) {
@@ -463,7 +458,7 @@ __device__ unsigned int check_tp(const GpuPosition& pos, const GpuSnapshot& snap
 }
 
 // -- Smart Exits --------------------------------------------------------------
-// AQC-1226: replaced by codegen — delegates to check_smart_exits_codegen()
+// AQC-1226: Thin wrapper over codegen — float->double on inputs, SmartExitResult.should_exit->bool.
 
 __device__ bool check_smart_exits(const GpuPosition& pos, const GpuSnapshot& snap,
                                   const GpuComboConfig* cfg, float p_atr) {
@@ -494,6 +489,7 @@ __device__ bool check_smart_exits(const GpuPosition& pos, const GpuSnapshot& sna
 }
 
 // -- Entry Sizing (AQC-1233: delegated to compute_entry_size_codegen) ---------
+// Thin wrapper over codegen: float->double on inputs, SizingResultD->SizingResult (double->float).
 // The codegen SizingResultD operates in double precision (AQC-734).
 // This wrapper bridges to the float-based SizingResult used by the kernel.
 
@@ -622,8 +618,7 @@ __device__ void apply_partial_close(GpuComboState* state, unsigned int sym, cons
 }
 
 // -- PESC Check (AQC-1233: delegated to is_pesc_blocked_codegen) ---------------
-// Wrapper preserves the existing call-site signature while delegating to the
-// double-precision codegen implementation from generated_decision.cu.
+// Thin wrapper over codegen: maps state arrays to codegen params, float->double on adx.
 
 __device__ bool is_pesc_blocked(const GpuComboState* state, unsigned int sym,
                                 unsigned int desired_type, unsigned int current_sec,
