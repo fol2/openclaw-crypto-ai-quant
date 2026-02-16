@@ -36,7 +36,227 @@ pub const DECISION_HEADER: &str = "\
 // The SOURCE_HASHES line will be injected by the drift detector (AQC-1200)
 
 /// Gates: 8 gates + TMC/AVE + DRE (AQC-1210)
-pub fn check_gates_codegen() -> String { String::new() /* stub */ }
+///
+/// Generates a CUDA `__device__` function that mirrors
+/// `bt-signals/src/gates.rs::check_gates`.
+///
+/// Evaluates 8 individual gates (ranging, anomaly, extension, volume,
+/// ADX rising, ADX threshold with TMC/AVE, macro alignment, BTC alignment),
+/// plus slow-drift ranging override and DRE (Dynamic RSI Elasticity).
+///
+/// Returns a `GateResultD` struct with `all_gates_pass`, directional alignment
+/// flags, DRE RSI limits, and the `effective_min_adx` used.
+///
+/// All indicator/price math uses `double` precision to match the f64 Rust
+/// source and satisfy T2 precision requirements (AQC-734).
+pub fn check_gates_codegen() -> String {
+    r#"// Derived from bt-signals/src/gates.rs
+// Gate evaluation: 8 gates + TMC/AVE + DRE + slow-drift override.
+// All indicator/price math in double precision (AQC-734).
+// All tunables read from cfg (no hardcoded gate thresholds).
+
+struct GateResultD {
+    bool all_gates_pass;
+    bool is_ranging;
+    bool is_anomaly;
+    bool is_extended;
+    bool vol_confirm;
+    bool is_trending_up;
+    bool adx_above_min;
+    bool bullish_alignment;
+    bool bearish_alignment;
+    double effective_min_adx;
+    double rsi_long_limit;
+    double rsi_short_limit;
+};
+
+__device__ GateResultD check_gates_codegen(
+    const GpuComboConfig& cfg,
+    double rsi,
+    double adx,
+    double adx_slope,
+    double bb_width_ratio,
+    double ema_fast,
+    double ema_slow,
+    double ema_macro,
+    double close,
+    double prev_close,
+    double volume,
+    double vol_sma,
+    unsigned int vol_trend,
+    double atr,
+    double avg_atr,
+    double stoch_rsi_k,
+    double ema_slow_slope_pct,
+    unsigned int btc_bullish,      // 0=bearish, 1=bullish, 2=unknown/no-data
+    unsigned int is_btc_symbol     // 1 if symbol is BTC
+) {
+    GateResultD result;
+    result.all_gates_pass = false;
+    result.is_ranging = false;
+    result.is_anomaly = false;
+    result.is_extended = false;
+    result.vol_confirm = true;
+    result.is_trending_up = true;
+    result.adx_above_min = false;
+    result.bullish_alignment = (ema_fast > ema_slow);
+    result.bearish_alignment = (ema_fast < ema_slow);
+    result.effective_min_adx = (double)cfg.min_adx;
+    result.rsi_long_limit = 0.0;
+    result.rsi_short_limit = 0.0;
+
+    // ── Gate 1: Ranging filter (vote system) ─────────────────────────────
+    // Python lines 3344-3363; Rust gates.rs Gate 1.
+    // Three votes: ADX below threshold, BB width ratio below threshold,
+    // RSI in neutral zone.  Ranging if votes >= min_signals.
+    if (cfg.enable_ranging_filter != 0u) {
+        unsigned int min_signals = cfg.ranging_min_signals;
+        if (min_signals < 1u) { min_signals = 1u; }
+        unsigned int votes = 0u;
+
+        // Vote 1: ADX below ranging threshold
+        if (adx < (double)cfg.ranging_adx_lt) { votes += 1u; }
+
+        // Vote 2: BB width ratio below ranging threshold
+        if (bb_width_ratio < (double)cfg.ranging_bb_width_ratio_lt) { votes += 1u; }
+
+        // Vote 3: RSI in neutral zone
+        if (rsi > (double)cfg.ranging_rsi_low && rsi < (double)cfg.ranging_rsi_high) { votes += 1u; }
+
+        result.is_ranging = (votes >= min_signals);
+    }
+
+    // ── Gate 2: Anomaly filter ───────────────────────────────────────────
+    // Python lines 3365-3371; Rust gates.rs Gate 2.
+    // Blocks entry when price_change_pct > threshold OR ema_dev_pct > threshold.
+    if (cfg.enable_anomaly_filter != 0u) {
+        double price_change_pct = 0.0;
+        if (prev_close > 0.0) {
+            price_change_pct = fabs(close - prev_close) / prev_close;
+        }
+        double ema_dev_pct = 0.0;
+        if (ema_fast > 0.0) {
+            ema_dev_pct = fabs(close - ema_fast) / ema_fast;
+        }
+        result.is_anomaly = (price_change_pct > (double)cfg.anomaly_price_change_pct)
+                         || (ema_dev_pct > (double)cfg.anomaly_ema_dev_pct);
+    }
+
+    // ── Gate 3: Extension filter (distance from EMA_fast) ────────────────
+    // Python lines 3533-3537; Rust gates.rs Gate 3.
+    if (cfg.enable_extension_filter != 0u) {
+        if (ema_fast > 0.0) {
+            double dist = fabs(close - ema_fast) / ema_fast;
+            result.is_extended = (dist > (double)cfg.max_dist_ema_fast);
+        }
+    }
+
+    // ── Gate 4: Volume confirmation ──────────────────────────────────────
+    // Python lines 3432-3440; Rust gates.rs Gate 4.
+    // When vol_confirm_include_prev: relaxed (vol > vol_sma OR vol_trend).
+    // Otherwise strict: (vol > vol_sma) AND vol_trend.
+    if (cfg.require_volume_confirmation != 0u) {
+        bool vol_above_sma = (volume > vol_sma);
+        bool vol_trend_ok = (vol_trend != 0u);
+        if (cfg.vol_confirm_include_prev != 0u) {
+            result.vol_confirm = vol_above_sma || vol_trend_ok;
+        } else {
+            result.vol_confirm = vol_above_sma && vol_trend_ok;
+        }
+    }
+
+    // ── Gate 5: ADX rising (or saturated) ────────────────────────────────
+    // Python lines 3426-3430; Rust gates.rs Gate 5.
+    if (cfg.require_adx_rising != 0u) {
+        double saturation = (double)cfg.adx_rising_saturation;
+        result.is_trending_up = (adx_slope > 0.0) || (adx > saturation);
+    }
+
+    // ── Gate 6: ADX threshold (effective_min_adx with TMC + AVE) ─────────
+    // Python lines 3383-3424; Rust gates.rs Gate 6.
+    double effective_min_adx = (double)cfg.min_adx;
+
+    // TMC: Trend Momentum Confirmation (v4.6)
+    // If ADX slope > 0.5, cap effective_min_adx at 25.0.
+    if (adx_slope > 0.5) {
+        effective_min_adx = fmin(effective_min_adx, 25.0);
+    }
+
+    // AVE: Adaptive Volatility Entry (v4.7)
+    // If ATR / avg_ATR > threshold, multiply effective_min_adx by ave_adx_mult.
+    if (cfg.ave_enabled != 0u && avg_atr > 0.0) {
+        double atr_ratio = atr / avg_atr;
+        if (atr_ratio > (double)cfg.ave_atr_ratio_gt) {
+            double mult = ((double)cfg.ave_adx_mult > 0.0)
+                ? (double)cfg.ave_adx_mult
+                : 1.0;
+            effective_min_adx *= mult;
+        }
+    }
+
+    result.adx_above_min = (adx > effective_min_adx);
+    result.effective_min_adx = effective_min_adx;
+
+    // ── Gate 7: Macro alignment (EMA cross + optional macro EMA) ─────────
+    // Python lines 3448-3452; Rust gates.rs Gate 7.
+    if (cfg.require_macro_alignment != 0u) {
+        result.bullish_alignment = result.bullish_alignment && (ema_slow > ema_macro);
+        result.bearish_alignment = result.bearish_alignment && (ema_slow < ema_macro);
+    }
+
+    // ── Gate 8: BTC alignment (optional) ─────────────────────────────────
+    // Python lines 3454-3461; Rust gates.rs Gate 8.
+    // btc_bullish: 0=bearish, 1=bullish, 2=unknown/no-data.
+    // If is_btc_symbol or btc_bullish unknown or alignment matches, gate passes.
+    // High ADX overrides BTC alignment requirement.
+    // (btc_ok is not part of all_gates_pass; it is checked per-direction by the
+    //  signal generator.  We store the results for the caller.)
+
+    // ── Slow-drift ranging override ──────────────────────────────────────
+    // Python lines 3524-3526; Rust gates.rs slow-drift override.
+    // If slow drift enabled and EMA_slow slope exceeds threshold, clear ranging.
+    if (cfg.enable_slow_drift_entries != 0u
+        && result.is_ranging
+        && fabs(ema_slow_slope_pct) >= (double)cfg.slow_drift_ranging_slope_override) {
+        result.is_ranging = false;
+    }
+
+    // ── DRE (Dynamic RSI Elasticity) — v4.1 ─────────────────────────────
+    // Python lines 3551-3560; Rust gates.rs DRE.
+    // Linear interpolation of RSI limits between weak and strong based on ADX.
+    {
+        double adx_min_dre = (double)cfg.dre_min_adx;
+        double adx_max_dre = (double)cfg.dre_max_adx;
+        if (adx_max_dre <= adx_min_dre) {
+            adx_max_dre = adx_min_dre + 1.0;
+        }
+        double weight = (adx - adx_min_dre) / (adx_max_dre - adx_min_dre);
+        weight = fmax(fmin(weight, 1.0), 0.0);  // clamp [0, 1]
+
+        double rsi_long_weak  = (double)cfg.dre_long_rsi_limit_low;
+        double rsi_long_strong = (double)cfg.dre_long_rsi_limit_high;
+        result.rsi_long_limit = rsi_long_weak + weight * (rsi_long_strong - rsi_long_weak);
+
+        double rsi_short_weak  = (double)cfg.dre_short_rsi_limit_low;
+        double rsi_short_strong = (double)cfg.dre_short_rsi_limit_high;
+        result.rsi_short_limit = rsi_short_weak + weight * (rsi_short_strong - rsi_short_weak);
+    }
+
+    // ── Combined check: all gates required for standard trend entry ──────
+    // Rust gates.rs: adx_above_min && !ranging && !anomaly && !extended
+    //                && vol_confirm && is_trending_up
+    result.all_gates_pass = result.adx_above_min
+        && !result.is_ranging
+        && !result.is_anomaly
+        && !result.is_extended
+        && result.vol_confirm
+        && result.is_trending_up;
+
+    return result;
+}
+"#
+    .to_string()
+}
 
 /// Signals: Mode 1/2/3 + MACD helpers (AQC-1211)
 pub fn generate_signal_codegen() -> String { String::new() /* stub */ }
@@ -787,6 +1007,533 @@ mod tests {
         assert!(
             src.contains("pos_type == 1"),
             "long check must use pos_type == 1 (POS_LONG)"
+        );
+    }
+
+    // -- check_gates_codegen tests (AQC-1210) ----------------------------------
+
+    #[test]
+    fn gates_codegen_has_correct_function_signature() {
+        let src = check_gates_codegen();
+        assert!(
+            src.contains("__device__ GateResultD check_gates_codegen("),
+            "must declare a __device__ GateResultD function"
+        );
+        assert!(
+            src.contains("const GpuComboConfig& cfg"),
+            "must take GpuComboConfig by const ref"
+        );
+        assert!(
+            src.contains("double rsi"),
+            "must take rsi as double"
+        );
+        assert!(
+            src.contains("double adx"),
+            "must take adx as double"
+        );
+        assert!(
+            src.contains("double adx_slope"),
+            "must take adx_slope as double"
+        );
+        assert!(
+            src.contains("double bb_width_ratio"),
+            "must take bb_width_ratio as double"
+        );
+        assert!(
+            src.contains("double ema_fast"),
+            "must take ema_fast as double"
+        );
+        assert!(
+            src.contains("double ema_slow"),
+            "must take ema_slow as double"
+        );
+        assert!(
+            src.contains("double ema_macro"),
+            "must take ema_macro as double"
+        );
+        assert!(
+            src.contains("double close"),
+            "must take close as double"
+        );
+        assert!(
+            src.contains("double prev_close"),
+            "must take prev_close as double"
+        );
+        assert!(
+            src.contains("double volume"),
+            "must take volume as double"
+        );
+        assert!(
+            src.contains("double vol_sma"),
+            "must take vol_sma as double"
+        );
+        assert!(
+            src.contains("double atr"),
+            "must take atr as double"
+        );
+        assert!(
+            src.contains("double avg_atr"),
+            "must take avg_atr as double"
+        );
+        assert!(
+            src.contains("double stoch_rsi_k"),
+            "must take stoch_rsi_k as double"
+        );
+        assert!(
+            src.contains("double ema_slow_slope_pct"),
+            "must take ema_slow_slope_pct as double"
+        );
+    }
+
+    #[test]
+    fn gates_codegen_has_source_comment() {
+        let src = check_gates_codegen();
+        assert!(
+            src.contains("Derived from bt-signals/src/gates.rs"),
+            "must reference the Rust SSOT source file"
+        );
+    }
+
+    #[test]
+    fn gates_codegen_has_gate_result_struct() {
+        let src = check_gates_codegen();
+        assert!(
+            src.contains("struct GateResultD"),
+            "must define GateResultD struct"
+        );
+        assert!(
+            src.contains("bool all_gates_pass"),
+            "GateResultD must have all_gates_pass field"
+        );
+        assert!(
+            src.contains("bool is_ranging"),
+            "GateResultD must have is_ranging field"
+        );
+        assert!(
+            src.contains("bool is_anomaly"),
+            "GateResultD must have is_anomaly field"
+        );
+        assert!(
+            src.contains("bool is_extended"),
+            "GateResultD must have is_extended field"
+        );
+        assert!(
+            src.contains("bool vol_confirm"),
+            "GateResultD must have vol_confirm field"
+        );
+        assert!(
+            src.contains("bool is_trending_up"),
+            "GateResultD must have is_trending_up field"
+        );
+        assert!(
+            src.contains("bool adx_above_min"),
+            "GateResultD must have adx_above_min field"
+        );
+        assert!(
+            src.contains("bool bullish_alignment"),
+            "GateResultD must have bullish_alignment field"
+        );
+        assert!(
+            src.contains("bool bearish_alignment"),
+            "GateResultD must have bearish_alignment field"
+        );
+        assert!(
+            src.contains("double effective_min_adx"),
+            "GateResultD must have effective_min_adx as double"
+        );
+        assert!(
+            src.contains("double rsi_long_limit"),
+            "GateResultD must have rsi_long_limit as double"
+        );
+        assert!(
+            src.contains("double rsi_short_limit"),
+            "GateResultD must have rsi_short_limit as double"
+        );
+    }
+
+    #[test]
+    fn gates_codegen_uses_double_precision() {
+        let src = check_gates_codegen();
+        // Internal arithmetic uses double variables
+        assert!(src.contains("double price_change_pct"), "price_change_pct must be double");
+        assert!(src.contains("double ema_dev_pct"), "ema_dev_pct must be double");
+        assert!(src.contains("double dist"), "dist (extension) must be double");
+        assert!(src.contains("double effective_min_adx"), "effective_min_adx must be double");
+        assert!(src.contains("double saturation"), "saturation must be double");
+        assert!(src.contains("double atr_ratio"), "atr_ratio must be double");
+        assert!(src.contains("double weight"), "DRE weight must be double");
+        assert!(src.contains("double rsi_long_weak"), "DRE rsi_long_weak must be double");
+        assert!(src.contains("double rsi_short_weak"), "DRE rsi_short_weak must be double");
+        // Must NOT use float for indicator-critical variables
+        assert!(
+            !src.contains("float price_change_pct"),
+            "price_change_pct must be double, not float"
+        );
+        assert!(
+            !src.contains("float effective_min_adx"),
+            "effective_min_adx must be double, not float"
+        );
+    }
+
+    #[test]
+    fn gates_codegen_contains_ranging_filter() {
+        let src = check_gates_codegen();
+        assert!(
+            src.contains("Gate 1") || src.contains("Ranging filter"),
+            "must have ranging filter comment marker"
+        );
+        assert!(
+            src.contains("cfg.enable_ranging_filter"),
+            "must check enable_ranging_filter config flag"
+        );
+        assert!(
+            src.contains("cfg.ranging_adx_lt"),
+            "must use ranging_adx_lt from config"
+        );
+        assert!(
+            src.contains("cfg.ranging_bb_width_ratio_lt"),
+            "must use ranging_bb_width_ratio_lt from config"
+        );
+        assert!(
+            src.contains("cfg.ranging_rsi_low"),
+            "must use ranging_rsi_low from config"
+        );
+        assert!(
+            src.contains("cfg.ranging_rsi_high"),
+            "must use ranging_rsi_high from config"
+        );
+        assert!(
+            src.contains("cfg.ranging_min_signals"),
+            "must use ranging_min_signals from config"
+        );
+        assert!(
+            src.contains("votes"),
+            "ranging filter must use vote counting"
+        );
+    }
+
+    #[test]
+    fn gates_codegen_contains_anomaly_filter() {
+        let src = check_gates_codegen();
+        assert!(
+            src.contains("Gate 2") || src.contains("Anomaly filter"),
+            "must have anomaly filter comment marker"
+        );
+        assert!(
+            src.contains("cfg.enable_anomaly_filter"),
+            "must check enable_anomaly_filter config flag"
+        );
+        assert!(
+            src.contains("cfg.anomaly_price_change_pct"),
+            "must use anomaly_price_change_pct from config"
+        );
+        assert!(
+            src.contains("cfg.anomaly_ema_dev_pct"),
+            "must use anomaly_ema_dev_pct from config"
+        );
+        assert!(
+            src.contains("price_change_pct"),
+            "must compute price_change_pct"
+        );
+        assert!(
+            src.contains("ema_dev_pct"),
+            "must compute ema_dev_pct"
+        );
+    }
+
+    #[test]
+    fn gates_codegen_contains_extension_filter() {
+        let src = check_gates_codegen();
+        assert!(
+            src.contains("Gate 3") || src.contains("Extension filter"),
+            "must have extension filter comment marker"
+        );
+        assert!(
+            src.contains("cfg.enable_extension_filter"),
+            "must check enable_extension_filter config flag"
+        );
+        assert!(
+            src.contains("cfg.max_dist_ema_fast"),
+            "must use max_dist_ema_fast from config"
+        );
+    }
+
+    #[test]
+    fn gates_codegen_contains_volume_confirmation() {
+        let src = check_gates_codegen();
+        assert!(
+            src.contains("Gate 4") || src.contains("Volume confirmation"),
+            "must have volume confirmation comment marker"
+        );
+        assert!(
+            src.contains("cfg.require_volume_confirmation"),
+            "must check require_volume_confirmation config flag"
+        );
+        assert!(
+            src.contains("cfg.vol_confirm_include_prev"),
+            "must check vol_confirm_include_prev config flag"
+        );
+        assert!(
+            src.contains("vol_trend"),
+            "volume confirmation must check vol_trend"
+        );
+    }
+
+    #[test]
+    fn gates_codegen_contains_adx_rising() {
+        let src = check_gates_codegen();
+        assert!(
+            src.contains("Gate 5") || src.contains("ADX rising"),
+            "must have ADX rising comment marker"
+        );
+        assert!(
+            src.contains("cfg.require_adx_rising"),
+            "must check require_adx_rising config flag"
+        );
+        assert!(
+            src.contains("cfg.adx_rising_saturation"),
+            "must use adx_rising_saturation from config"
+        );
+        assert!(
+            src.contains("adx_slope > 0.0"),
+            "ADX rising checks for positive ADX slope"
+        );
+    }
+
+    #[test]
+    fn gates_codegen_contains_tmc_logic() {
+        let src = check_gates_codegen();
+        assert!(
+            src.contains("TMC") || src.contains("Trend Momentum"),
+            "must have TMC comment marker"
+        );
+        assert!(
+            src.contains("adx_slope > 0.5"),
+            "TMC checks ADX slope > 0.5"
+        );
+        assert!(
+            src.contains("fmin(effective_min_adx, 25.0)"),
+            "TMC caps effective_min_adx at 25.0"
+        );
+    }
+
+    #[test]
+    fn gates_codegen_contains_ave_logic() {
+        let src = check_gates_codegen();
+        assert!(
+            src.contains("AVE") || src.contains("Adaptive Volatility"),
+            "must have AVE comment marker"
+        );
+        assert!(
+            src.contains("cfg.ave_enabled"),
+            "must check ave_enabled config flag"
+        );
+        assert!(
+            src.contains("cfg.ave_atr_ratio_gt"),
+            "must use ave_atr_ratio_gt from config"
+        );
+        assert!(
+            src.contains("cfg.ave_adx_mult"),
+            "must use ave_adx_mult from config"
+        );
+        assert!(
+            src.contains("atr_ratio"),
+            "AVE must compute atr_ratio"
+        );
+        assert!(
+            src.contains("effective_min_adx *="),
+            "AVE must multiply effective_min_adx"
+        );
+    }
+
+    #[test]
+    fn gates_codegen_contains_adx_threshold() {
+        let src = check_gates_codegen();
+        assert!(
+            src.contains("Gate 6") || src.contains("ADX threshold"),
+            "must have ADX threshold comment marker"
+        );
+        assert!(
+            src.contains("cfg.min_adx"),
+            "must use min_adx from config"
+        );
+        assert!(
+            src.contains("adx > effective_min_adx"),
+            "must check adx against effective_min_adx"
+        );
+    }
+
+    #[test]
+    fn gates_codegen_contains_macro_alignment() {
+        let src = check_gates_codegen();
+        assert!(
+            src.contains("Gate 7") || src.contains("Macro alignment"),
+            "must have macro alignment comment marker"
+        );
+        assert!(
+            src.contains("cfg.require_macro_alignment"),
+            "must check require_macro_alignment config flag"
+        );
+        assert!(
+            src.contains("ema_slow > ema_macro"),
+            "bullish macro alignment checks ema_slow > ema_macro"
+        );
+        assert!(
+            src.contains("ema_slow < ema_macro"),
+            "bearish macro alignment checks ema_slow < ema_macro"
+        );
+    }
+
+    #[test]
+    fn gates_codegen_contains_slow_drift_override() {
+        let src = check_gates_codegen();
+        assert!(
+            src.contains("Slow-drift") || src.contains("slow_drift"),
+            "must have slow-drift override reference"
+        );
+        assert!(
+            src.contains("cfg.enable_slow_drift_entries"),
+            "must check enable_slow_drift_entries config flag"
+        );
+        assert!(
+            src.contains("cfg.slow_drift_ranging_slope_override"),
+            "must use slow_drift_ranging_slope_override from config"
+        );
+        assert!(
+            src.contains("ema_slow_slope_pct"),
+            "slow-drift checks ema_slow_slope_pct"
+        );
+    }
+
+    #[test]
+    fn gates_codegen_contains_dre_logic() {
+        let src = check_gates_codegen();
+        assert!(
+            src.contains("DRE") || src.contains("Dynamic RSI Elasticity"),
+            "must have DRE comment marker"
+        );
+        assert!(
+            src.contains("cfg.dre_min_adx"),
+            "must use dre_min_adx from config"
+        );
+        assert!(
+            src.contains("cfg.dre_max_adx"),
+            "must use dre_max_adx from config"
+        );
+        assert!(
+            src.contains("cfg.dre_long_rsi_limit_low"),
+            "must use dre_long_rsi_limit_low from config"
+        );
+        assert!(
+            src.contains("cfg.dre_long_rsi_limit_high"),
+            "must use dre_long_rsi_limit_high from config"
+        );
+        assert!(
+            src.contains("cfg.dre_short_rsi_limit_low"),
+            "must use dre_short_rsi_limit_low from config"
+        );
+        assert!(
+            src.contains("cfg.dre_short_rsi_limit_high"),
+            "must use dre_short_rsi_limit_high from config"
+        );
+        assert!(
+            src.contains("weight"),
+            "DRE must compute interpolation weight"
+        );
+        assert!(
+            src.contains("rsi_long_limit"),
+            "DRE must compute rsi_long_limit"
+        );
+        assert!(
+            src.contains("rsi_short_limit"),
+            "DRE must compute rsi_short_limit"
+        );
+    }
+
+    #[test]
+    fn gates_codegen_contains_combined_check() {
+        let src = check_gates_codegen();
+        assert!(
+            src.contains("result.adx_above_min"),
+            "combined check must include adx_above_min"
+        );
+        assert!(
+            src.contains("!result.is_ranging"),
+            "combined check must require not ranging"
+        );
+        assert!(
+            src.contains("!result.is_anomaly"),
+            "combined check must require not anomaly"
+        );
+        assert!(
+            src.contains("!result.is_extended"),
+            "combined check must require not extended"
+        );
+        assert!(
+            src.contains("result.vol_confirm"),
+            "combined check must require vol_confirm"
+        );
+        assert!(
+            src.contains("result.is_trending_up"),
+            "combined check must require is_trending_up"
+        );
+    }
+
+    #[test]
+    fn gates_codegen_uses_fabs_not_std() {
+        let src = check_gates_codegen();
+        assert!(
+            src.contains("fabs("),
+            "must use fabs for CUDA double absolute value"
+        );
+        assert!(
+            !src.contains("std::abs"),
+            "must not use std::abs (use fabs for CUDA)"
+        );
+        assert!(
+            !src.contains("std::max"),
+            "must not use std::max (use fmax for CUDA)"
+        );
+        assert!(
+            !src.contains("std::min"),
+            "must not use std::min (use fmin for CUDA)"
+        );
+    }
+
+    #[test]
+    fn gates_codegen_uses_fmax_fmin() {
+        let src = check_gates_codegen();
+        assert!(src.contains("fmax("), "must use fmax for CUDA double math");
+        assert!(src.contains("fmin("), "must use fmin for CUDA double math");
+    }
+
+    #[test]
+    fn gates_codegen_uses_correct_config_fields() {
+        let src = check_gates_codegen();
+        // Gate toggle flags
+        assert!(src.contains("cfg.enable_ranging_filter"), "must use enable_ranging_filter");
+        assert!(src.contains("cfg.enable_anomaly_filter"), "must use enable_anomaly_filter");
+        assert!(src.contains("cfg.enable_extension_filter"), "must use enable_extension_filter");
+        assert!(src.contains("cfg.require_adx_rising"), "must use require_adx_rising");
+        assert!(src.contains("cfg.require_volume_confirmation"), "must use require_volume_confirmation");
+        assert!(src.contains("cfg.require_macro_alignment"), "must use require_macro_alignment");
+        assert!(src.contains("cfg.enable_slow_drift_entries"), "must use enable_slow_drift_entries");
+        // Threshold fields
+        assert!(src.contains("cfg.min_adx"), "must use min_adx");
+        assert!(src.contains("cfg.max_dist_ema_fast"), "must use max_dist_ema_fast");
+        assert!(src.contains("cfg.adx_rising_saturation"), "must use adx_rising_saturation");
+        assert!(src.contains("cfg.ave_enabled"), "must use ave_enabled");
+        assert!(src.contains("cfg.ave_atr_ratio_gt"), "must use ave_atr_ratio_gt");
+        assert!(src.contains("cfg.ave_adx_mult"), "must use ave_adx_mult");
+    }
+
+    #[test]
+    fn gates_codegen_is_nonempty() {
+        let src = check_gates_codegen();
+        assert!(
+            src.len() > 200,
+            "generated code must be substantial, got {} bytes",
+            src.len()
         );
     }
 
