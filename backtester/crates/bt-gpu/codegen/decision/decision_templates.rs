@@ -1462,6 +1462,72 @@ __device__ bool is_pesc_blocked_codegen(
     .to_string()
 }
 
+// -- Cooldown functions --
+
+/// Entry cooldown: blocks new entries for a configurable period after closing
+/// a position on the same symbol. Prevents whipsaw re-entries.
+///
+/// Generates a CUDA `__device__` function that mirrors
+/// `bt-core/src/engine.rs` entry cooldown logic.
+/// All time arithmetic uses `unsigned int` seconds (GPU convention).
+pub fn check_entry_cooldown_codegen() -> String {
+    r#"// Derived from bt-core/src/engine.rs cooldown logic
+// Entry cooldown: after closing a position, block new entries for
+// `cooldown_minutes` to prevent whipsaw re-entries.
+//
+// Returns true (blocked) when elapsed time since last close < cooldown.
+// If last_close_time_sec == 0, no previous close exists — not blocked.
+
+__device__ bool check_entry_cooldown_codegen(
+    unsigned int last_close_time_sec,
+    unsigned int current_time_sec,
+    unsigned int cooldown_minutes,
+    const GpuComboConfig& cfg
+) {
+    // No previous close recorded — no cooldown to enforce
+    if (last_close_time_sec == 0u) { return false; }
+
+    unsigned int elapsed_sec = current_time_sec - last_close_time_sec;
+    unsigned int cooldown_sec = cooldown_minutes * 60u;
+
+    return elapsed_sec < cooldown_sec;  // true = blocked
+}
+"#
+    .to_string()
+}
+
+/// Exit cooldown (minimum hold time): blocks exits (except stop-loss) until
+/// the position has been held for at least `min_hold_minutes`.
+///
+/// Generates a CUDA `__device__` function that mirrors
+/// `bt-core/src/engine.rs` exit cooldown / minimum hold logic.
+/// All time arithmetic uses `unsigned int` seconds (GPU convention).
+pub fn check_exit_cooldown_codegen() -> String {
+    r#"// Derived from bt-core/src/engine.rs cooldown logic
+// Exit cooldown (minimum hold time): after opening a position, enforce a
+// minimum hold period before allowing any exit except stop-loss.
+//
+// Returns true (blocked) when held time < min_hold.
+// If min_hold_minutes == 0, the feature is disabled — never blocked.
+
+__device__ bool check_exit_cooldown_codegen(
+    unsigned int entry_time_sec,
+    unsigned int current_time_sec,
+    unsigned int min_hold_minutes,
+    const GpuComboConfig& cfg
+) {
+    // Feature disabled when min_hold_minutes == 0
+    if (min_hold_minutes == 0u) { return false; }
+
+    unsigned int held_sec = current_time_sec - entry_time_sec;
+    unsigned int min_hold_sec = min_hold_minutes * 60u;
+
+    return held_sec < min_hold_sec;  // true = blocked (except SL)
+}
+"#
+    .to_string()
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════════
@@ -3955,6 +4021,140 @@ mod tests {
         assert!(
             src.contains("return elapsed < cooldown_sec"),
             "final return must compare elapsed vs cooldown"
+        );
+    }
+
+    // -- Entry cooldown tests --
+
+    #[test]
+    fn entry_cooldown_has_correct_signature() {
+        let src = check_entry_cooldown_codegen();
+        assert!(
+            src.contains("__device__ bool check_entry_cooldown_codegen("),
+            "must declare a __device__ bool function with correct name"
+        );
+        assert!(
+            src.contains("unsigned int last_close_time_sec"),
+            "must accept last_close_time_sec param"
+        );
+        assert!(
+            src.contains("unsigned int current_time_sec"),
+            "must accept current_time_sec param"
+        );
+        assert!(
+            src.contains("unsigned int cooldown_minutes"),
+            "must accept cooldown_minutes param"
+        );
+        assert!(
+            src.contains("const GpuComboConfig& cfg"),
+            "must accept GpuComboConfig reference"
+        );
+    }
+
+    #[test]
+    fn entry_cooldown_contains_time_comparison() {
+        let src = check_entry_cooldown_codegen();
+        assert!(
+            src.contains("elapsed_sec < cooldown_sec"),
+            "must compare elapsed time against cooldown threshold"
+        );
+        assert!(
+            src.contains("cooldown_minutes * 60u"),
+            "must convert cooldown from minutes to seconds"
+        );
+    }
+
+    #[test]
+    fn entry_cooldown_handles_zero_last_close_time() {
+        let src = check_entry_cooldown_codegen();
+        assert!(
+            src.contains("last_close_time_sec == 0u"),
+            "must check for zero last_close_time_sec (no previous close)"
+        );
+        assert!(
+            src.contains("if (last_close_time_sec == 0u) { return false; }"),
+            "must return false (not blocked) when no previous close"
+        );
+    }
+
+    #[test]
+    fn entry_cooldown_is_nonempty() {
+        let src = check_entry_cooldown_codegen();
+        assert!(
+            !src.is_empty(),
+            "entry cooldown codegen must not return empty string"
+        );
+        assert!(
+            src.len() > 100,
+            "entry cooldown codegen must contain substantive CUDA code, got {} bytes",
+            src.len()
+        );
+    }
+
+    // -- Exit cooldown tests --
+
+    #[test]
+    fn exit_cooldown_has_correct_signature() {
+        let src = check_exit_cooldown_codegen();
+        assert!(
+            src.contains("__device__ bool check_exit_cooldown_codegen("),
+            "must declare a __device__ bool function with correct name"
+        );
+        assert!(
+            src.contains("unsigned int entry_time_sec"),
+            "must accept entry_time_sec param"
+        );
+        assert!(
+            src.contains("unsigned int current_time_sec"),
+            "must accept current_time_sec param"
+        );
+        assert!(
+            src.contains("unsigned int min_hold_minutes"),
+            "must accept min_hold_minutes param"
+        );
+        assert!(
+            src.contains("const GpuComboConfig& cfg"),
+            "must accept GpuComboConfig reference"
+        );
+    }
+
+    #[test]
+    fn exit_cooldown_contains_time_comparison() {
+        let src = check_exit_cooldown_codegen();
+        assert!(
+            src.contains("held_sec < min_hold_sec"),
+            "must compare held time against minimum hold threshold"
+        );
+        assert!(
+            src.contains("min_hold_minutes * 60u"),
+            "must convert min_hold from minutes to seconds"
+        );
+    }
+
+    #[test]
+    fn exit_cooldown_handles_zero_min_hold() {
+        let src = check_exit_cooldown_codegen();
+        assert!(
+            src.contains("min_hold_minutes == 0u"),
+            "must check for zero min_hold_minutes (feature disabled)"
+        );
+        assert!(
+            src.contains("if (min_hold_minutes == 0u) { return false; }"),
+            "must return false (not blocked) when feature disabled"
+        );
+    }
+
+    #[test]
+    fn exit_cooldown_is_nonempty() {
+        let src = check_exit_cooldown_codegen();
+        assert!(
+            !src.is_empty(),
+            "exit cooldown codegen must not return empty string"
+        );
+        assert!(
+            src.len() > 100,
+            "exit cooldown codegen must contain substantive CUDA code, got {} bytes",
+            src.len()
         );
     }
 }
