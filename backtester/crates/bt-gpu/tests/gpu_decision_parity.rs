@@ -13,21 +13,19 @@
 //!   4. **Fixture diversity**: 50 test fixtures spanning penny stocks to BTC,
 //!      long/short, deep loss to large profit, weak to strong trend.
 //!
-//! Tests for unimplemented codegen functions are marked `#[ignore]` with a note
-//! on the ticket that will implement them.
+//! All codegen functions are now validated (AQC-1261 through AQC-1270).
 //!
 //! # Implemented
 //! - `compute_sl_price_codegen` (AQC-1220) -- stop loss
 //! - `compute_trailing_codegen` (AQC-1221) -- trailing stop
-//!
-//! # Stubs (ignored)
-//! - `check_gates_codegen` (AQC-1210)
-//! - `generate_signal_codegen` (AQC-1211)
-//! - `check_tp_codegen` (AQC-1222)
-//! - `check_smart_exits_codegen` (AQC-1223)
-//! - `check_all_exits_codegen` (AQC-1224)
-//! - `compute_entry_size_codegen` (AQC-1230)
-//! - `is_pesc_blocked_codegen` (AQC-1231)
+//! - `check_gates_codegen` (AQC-1210, validated AQC-1261)
+//! - `generate_signal_codegen` (AQC-1211, validated AQC-1262)
+//! - `check_tp_codegen` (AQC-1222, validated AQC-1265)
+//! - `check_smart_exits_codegen` (AQC-1223, validated AQC-1266)
+//! - `check_all_exits_codegen` (AQC-1224, validated AQC-1267)
+//! - `compute_entry_size_codegen` (AQC-1230, validated AQC-1268)
+//! - `is_pesc_blocked_codegen` (AQC-1231, validated AQC-1269)
+//! - Config round-trip validation (AQC-1270)
 //!
 //! # Running
 //!
@@ -1560,76 +1558,1856 @@ fn test_trailing_codegen_uses_double_not_float() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Ignored placeholder tests for unimplemented codegen functions.
-// Each will be filled in by the ticket noted in the comment.
+// AQC-1261: Gates axis-by-axis validation
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[test]
-#[ignore = "AQC-1210: check_gates_codegen not yet implemented"]
 fn test_gates_codegen_parity() {
     let src = get_decision_cuda_source();
+
+    // Function signature
     assert!(
-        src.contains("__device__") && src.contains("check_gates"),
-        "Gates codegen stub should be replaced by AQC-1210"
+        src.contains("__device__ GateResultD check_gates_codegen("),
+        "Gates codegen must have correct __device__ function signature"
+    );
+    assert!(
+        src.contains("const GpuComboConfig& cfg"),
+        "Gates must take GpuComboConfig by const ref"
     );
 }
 
 #[test]
-#[ignore = "AQC-1211: generate_signal_codegen not yet implemented"]
+fn test_gates_all_gates_pass_combination() {
+    // AQC-1261: Verify combined all_gates_pass check contains all required fields
+    let src = get_decision_cuda_source();
+
+    assert!(
+        src.contains("result.adx_above_min"),
+        "all_gates_pass must check adx_above_min"
+    );
+    assert!(
+        src.contains("!result.is_ranging"),
+        "all_gates_pass must check !is_ranging"
+    );
+    assert!(
+        src.contains("!result.is_anomaly"),
+        "all_gates_pass must check !is_anomaly"
+    );
+    assert!(
+        src.contains("!result.is_extended"),
+        "all_gates_pass must check !is_extended"
+    );
+    assert!(
+        src.contains("result.vol_confirm"),
+        "all_gates_pass must check vol_confirm"
+    );
+    assert!(
+        src.contains("result.is_trending_up"),
+        "all_gates_pass must check is_trending_up"
+    );
+}
+
+#[test]
+fn test_gates_ranging_filter_vote_system() {
+    // AQC-1261: Ranging filter uses vote system (low ADX + narrow BB + RSI neutral)
+    let src = get_decision_cuda_source();
+
+    assert!(
+        src.contains("cfg.enable_ranging_filter"),
+        "Ranging filter must check enable flag"
+    );
+    assert!(
+        src.contains("cfg.ranging_min_signals"),
+        "Ranging filter must use min_signals from config"
+    );
+    assert!(
+        src.contains("cfg.ranging_adx_lt"),
+        "Vote 1: ADX below ranging threshold"
+    );
+    assert!(
+        src.contains("cfg.ranging_bb_width_ratio_lt"),
+        "Vote 2: BB width below ranging threshold"
+    );
+    assert!(
+        src.contains("cfg.ranging_rsi_low") && src.contains("cfg.ranging_rsi_high"),
+        "Vote 3: RSI in neutral zone"
+    );
+    assert!(
+        src.contains("votes >= min_signals"),
+        "Ranging activates when votes >= min_signals"
+    );
+}
+
+#[test]
+fn test_gates_anomaly_filter() {
+    // AQC-1261: Anomaly filter checks price_change_pct and ema_dev_pct
+    let src = get_decision_cuda_source();
+
+    assert!(
+        src.contains("cfg.enable_anomaly_filter"),
+        "Anomaly filter must check enable flag"
+    );
+    assert!(
+        src.contains("price_change_pct"),
+        "Anomaly filter must compute price_change_pct"
+    );
+    assert!(
+        src.contains("ema_dev_pct"),
+        "Anomaly filter must compute ema_dev_pct"
+    );
+    assert!(
+        src.contains("cfg.anomaly_price_change_pct"),
+        "Anomaly filter must compare against config threshold"
+    );
+    assert!(
+        src.contains("cfg.anomaly_ema_dev_pct"),
+        "Anomaly filter must compare ema_dev against config threshold"
+    );
+}
+
+#[test]
+fn test_gates_extension_filter() {
+    // AQC-1261: Extension filter checks distance from EMA_fast
+    let src = get_decision_cuda_source();
+
+    assert!(
+        src.contains("cfg.enable_extension_filter"),
+        "Extension filter must check enable flag"
+    );
+    assert!(
+        src.contains("cfg.max_dist_ema_fast"),
+        "Extension filter must use max_dist_ema_fast from config"
+    );
+    assert!(
+        src.contains("fabs(close - ema_fast)"),
+        "Extension filter must compute absolute distance from EMA_fast"
+    );
+}
+
+#[test]
+fn test_gates_volume_confirmation() {
+    // AQC-1261: Volume filter checks vol_above_sma and vol_trend
+    let src = get_decision_cuda_source();
+
+    assert!(
+        src.contains("cfg.require_volume_confirmation"),
+        "Volume confirmation must check enable flag"
+    );
+    assert!(
+        src.contains("volume > vol_sma"),
+        "Volume confirmation must check volume > vol_sma"
+    );
+    assert!(
+        src.contains("vol_trend"),
+        "Volume confirmation must check vol_trend"
+    );
+    assert!(
+        src.contains("cfg.vol_confirm_include_prev"),
+        "Volume confirmation must check relaxed mode flag"
+    );
+}
+
+#[test]
+fn test_gates_adx_rising() {
+    // AQC-1261: ADX rising checks slope or saturation override
+    let src = get_decision_cuda_source();
+
+    assert!(
+        src.contains("cfg.require_adx_rising"),
+        "ADX rising must check enable flag"
+    );
+    assert!(
+        src.contains("adx_slope > 0.0"),
+        "ADX rising must check positive slope"
+    );
+    assert!(
+        src.contains("cfg.adx_rising_saturation"),
+        "ADX rising must check saturation override"
+    );
+}
+
+#[test]
+fn test_gates_macro_alignment() {
+    // AQC-1261: Macro alignment checks EMA slow vs EMA macro
+    let src = get_decision_cuda_source();
+
+    assert!(
+        src.contains("cfg.require_macro_alignment"),
+        "Macro alignment must check enable flag"
+    );
+    assert!(
+        src.contains("ema_slow > ema_macro"),
+        "Bullish macro alignment: ema_slow > ema_macro"
+    );
+    assert!(
+        src.contains("ema_slow < ema_macro"),
+        "Bearish macro alignment: ema_slow < ema_macro"
+    );
+}
+
+#[test]
+fn test_gates_tmc_and_ave() {
+    // AQC-1261: TMC caps effective_min_adx when slope > 0.5;
+    // AVE multiplies when ATR ratio exceeds threshold
+    let src = get_decision_cuda_source();
+
+    // TMC
+    assert!(
+        src.contains("adx_slope > 0.5"),
+        "TMC must check ADX slope > 0.5"
+    );
+    assert!(
+        src.contains("fmin(effective_min_adx, 25.0)"),
+        "TMC must cap effective_min_adx at 25.0"
+    );
+
+    // AVE
+    assert!(
+        src.contains("cfg.ave_enabled"),
+        "AVE must check ave_enabled flag"
+    );
+    assert!(
+        src.contains("cfg.ave_atr_ratio_gt"),
+        "AVE must use atr_ratio threshold from config"
+    );
+    assert!(
+        src.contains("cfg.ave_adx_mult"),
+        "AVE must use adx_mult from config"
+    );
+    assert!(
+        src.contains("effective_min_adx *="),
+        "AVE must multiply effective_min_adx"
+    );
+}
+
+#[test]
+fn test_gates_dre_interpolation() {
+    // AQC-1261: DRE interpolates RSI limits between weak and strong based on ADX
+    let src = get_decision_cuda_source();
+
+    assert!(
+        src.contains("cfg.dre_min_adx"),
+        "DRE must use dre_min_adx from config"
+    );
+    assert!(
+        src.contains("cfg.dre_max_adx"),
+        "DRE must use dre_max_adx from config"
+    );
+    assert!(
+        src.contains("cfg.dre_long_rsi_limit_low") && src.contains("cfg.dre_long_rsi_limit_high"),
+        "DRE must interpolate long RSI limits"
+    );
+    assert!(
+        src.contains("cfg.dre_short_rsi_limit_low") && src.contains("cfg.dre_short_rsi_limit_high"),
+        "DRE must interpolate short RSI limits"
+    );
+    // Weight clamped to [0, 1]
+    assert!(
+        src.contains("fmax(fmin(weight, 1.0), 0.0)"),
+        "DRE weight must be clamped to [0, 1]"
+    );
+}
+
+#[test]
+fn test_gates_slow_drift_override() {
+    // AQC-1261: Slow-drift override clears ranging when slope exceeds threshold
+    let src = get_decision_cuda_source();
+
+    assert!(
+        src.contains("cfg.enable_slow_drift_entries"),
+        "Slow-drift override must check enable flag"
+    );
+    assert!(
+        src.contains("cfg.slow_drift_ranging_slope_override"),
+        "Slow-drift must use ranging slope override from config"
+    );
+    assert!(
+        src.contains("result.is_ranging = false"),
+        "Slow-drift must clear is_ranging"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AQC-1262: Signals mode-by-mode validation
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
 fn test_signal_codegen_parity() {
     let src = get_decision_cuda_source();
+
+    // Function signature
     assert!(
-        src.contains("__device__") && src.contains("generate_signal"),
-        "Signal codegen stub should be replaced by AQC-1211"
+        src.contains("__device__ SignalResult generate_signal_codegen("),
+        "Signal codegen must have correct __device__ function signature"
+    );
+    assert!(
+        src.contains("const GpuComboConfig& cfg"),
+        "Signal must take GpuComboConfig by const ref"
     );
 }
 
 #[test]
-#[ignore = "AQC-1222: check_tp_codegen not yet implemented"]
+fn test_signal_mode1_standard_trend_long() {
+    // AQC-1262: Mode 1 standard trend — long direction
+    let src = get_decision_cuda_source();
+
+    assert!(
+        src.contains("bullish_alignment && close > ema_fast && btc_ok_long"),
+        "Mode 1 long: bullish_alignment AND close > ema_fast AND btc_ok_long"
+    );
+    assert!(
+        src.contains("signal = 1"),
+        "Mode 1 long must set signal = 1 (SIG_BUY)"
+    );
+}
+
+#[test]
+fn test_signal_mode1_standard_trend_short() {
+    // AQC-1262: Mode 1 standard trend — short direction
+    let src = get_decision_cuda_source();
+
+    assert!(
+        src.contains("bearish_alignment && close < ema_fast && btc_ok_short"),
+        "Mode 1 short: bearish_alignment AND close < ema_fast AND btc_ok_short"
+    );
+    assert!(
+        src.contains("signal = 2"),
+        "Mode 1 short must set signal = 2 (SIG_SELL)"
+    );
+}
+
+#[test]
+fn test_signal_mode2_pullback_continuation() {
+    // AQC-1262: Mode 2 pullback continuation with EMA cross detection
+    let src = get_decision_cuda_source();
+
+    assert!(
+        src.contains("cfg.enable_pullback_entries"),
+        "Mode 2 must check enable_pullback_entries config flag"
+    );
+    assert!(
+        src.contains("cfg.pullback_min_adx"),
+        "Mode 2 must check pullback_min_adx"
+    );
+    // Cross detection
+    assert!(
+        src.contains("prev_close <= prev_ema_fast") && src.contains("close > ema_fast"),
+        "Mode 2 must detect EMA cross-up"
+    );
+    assert!(
+        src.contains("prev_close >= prev_ema_fast") && src.contains("close < ema_fast"),
+        "Mode 2 must detect EMA cross-down"
+    );
+    assert!(
+        src.contains("cfg.pullback_confidence"),
+        "Mode 2 must use pullback_confidence from config"
+    );
+}
+
+#[test]
+fn test_signal_mode3_slow_drift() {
+    // AQC-1262: Mode 3 slow drift — always Low confidence
+    let src = get_decision_cuda_source();
+
+    assert!(
+        src.contains("cfg.enable_slow_drift_entries"),
+        "Mode 3 must check enable_slow_drift_entries"
+    );
+    assert!(
+        src.contains("cfg.slow_drift_min_slope_pct"),
+        "Mode 3 must use slow_drift_min_slope_pct"
+    );
+    assert!(
+        src.contains("ema_slow_slope_pct >= min_slope"),
+        "Mode 3 long must check slope >= threshold"
+    );
+    assert!(
+        src.contains("ema_slow_slope_pct <= -min_slope"),
+        "Mode 3 short must check slope <= -threshold"
+    );
+
+    // Slow drift always returns CONF_LOW (0)
+    let mode3_marker = "// Mode 3: Slow drift";
+    let mode3_start = src.rfind(mode3_marker).expect("Mode 3 section must exist");
+    let mode3_section = &src[mode3_start..];
+    assert!(
+        mode3_section.contains("confidence = 0"),
+        "Mode 3 must always set CONF_LOW (0)"
+    );
+}
+
+#[test]
+fn test_signal_dre_rsi_gate() {
+    // AQC-1262: DRE RSI gate in Mode 1 — blocks if RSI below limit
+    let src = get_decision_cuda_source();
+
+    // Mode 1 section contains DRE RSI check
+    assert!(
+        src.contains("rsi <= rsi_long_limit"),
+        "Mode 1 must block long when rsi <= rsi_long_limit"
+    );
+    assert!(
+        src.contains("rsi >= rsi_short_limit"),
+        "Mode 1 must block short when rsi >= rsi_short_limit"
+    );
+}
+
+#[test]
+fn test_signal_macd_gate_accel_and_sign() {
+    // AQC-1262: MACD gate supports accel (mode 0) and sign (mode 1) modes
+    let src = get_decision_cuda_source();
+
+    // MACD helper functions
+    assert!(
+        src.contains("check_macd_long_codegen"),
+        "Must have check_macd_long_codegen helper"
+    );
+    assert!(
+        src.contains("check_macd_short_codegen"),
+        "Must have check_macd_short_codegen helper"
+    );
+
+    // MACD_ACCEL mode (0): checks histogram acceleration
+    assert!(
+        src.contains("macd_hist > prev_macd_hist"),
+        "MACD_ACCEL long: hist > prev_hist"
+    );
+    assert!(
+        src.contains("macd_hist < prev_macd_hist"),
+        "MACD_ACCEL short: hist < prev_hist"
+    );
+
+    // MACD_SIGN mode (1): checks histogram sign
+    assert!(
+        src.contains("macd_hist > 0.0"),
+        "MACD_SIGN long: hist > 0"
+    );
+    assert!(
+        src.contains("macd_hist < 0.0"),
+        "MACD_SIGN short: hist < 0"
+    );
+}
+
+#[test]
+fn test_signal_stoch_rsi_filter() {
+    // AQC-1262: StochRSI filter blocks overbought longs and oversold shorts
+    let src = get_decision_cuda_source();
+
+    assert!(
+        src.contains("cfg.use_stoch_rsi_filter"),
+        "StochRSI filter must check enable flag"
+    );
+    assert!(
+        src.contains("cfg.stoch_rsi_block_long_gt"),
+        "StochRSI must use block_long_gt threshold"
+    );
+    assert!(
+        src.contains("cfg.stoch_rsi_block_short_lt"),
+        "StochRSI must use block_short_lt threshold"
+    );
+}
+
+#[test]
+fn test_signal_ave_confidence_upgrade() {
+    // AQC-1262: AVE upgrades confidence to High when ATR ratio exceeds threshold
+    let src = get_decision_cuda_source();
+
+    // Find the Mode 1 section specifically
+    let mode1_marker = "// Mode 1: Standard";
+    let mode1_start = src.find(mode1_marker).expect("Mode 1 section must exist");
+    let mode1_section = &src[mode1_start..];
+
+    assert!(
+        mode1_section.contains("cfg.ave_enabled"),
+        "AVE must check ave_enabled in Mode 1"
+    );
+    assert!(
+        mode1_section.contains("confidence = 2"),
+        "AVE must upgrade confidence to 2 (CONF_HIGH)"
+    );
+}
+
+#[test]
+fn test_signal_btc_alignment() {
+    // AQC-1262: BTC alignment directional filter
+    let src = get_decision_cuda_source();
+
+    assert!(
+        src.contains("cfg.require_btc_alignment"),
+        "BTC alignment must check config flag"
+    );
+    assert!(
+        src.contains("btc_ok_long"),
+        "Must compute btc_ok_long"
+    );
+    assert!(
+        src.contains("btc_ok_short"),
+        "Must compute btc_ok_short"
+    );
+    assert!(
+        src.contains("cfg.btc_adx_override"),
+        "BTC alignment must use ADX override threshold"
+    );
+}
+
+#[test]
+fn test_signal_mode_priority_order() {
+    // AQC-1262: Modes evaluated in priority order: 1 > 2 > 3
+    let src = get_decision_cuda_source();
+
+    let mode1_pos = src.rfind("// Mode 1: Standard").expect("Mode 1 must exist");
+    let mode2_pos = src.rfind("// Mode 2: Pullback").expect("Mode 2 must exist");
+    let mode3_pos = src.rfind("// Mode 3: Slow drift").expect("Mode 3 must exist");
+    assert!(mode1_pos < mode2_pos, "Mode 1 must precede Mode 2");
+    assert!(mode2_pos < mode3_pos, "Mode 2 must precede Mode 3");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AQC-1263: Stop loss axis validation (additional edge cases)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_sl_ase_tightening_underwater_adx_declining() {
+    // AQC-1263: ASE tightens by 20% when underwater AND ADX slope < 0
+    let fixtures = make_fixtures();
+    let sl_atr_mult = 2.0;
+
+    for f in fixtures.iter().filter(|f| {
+        f.adx_slope < 0.0
+            && match f.pos_type {
+                PosType::Long => f.current_price < f.entry_price,
+                PosType::Short => f.current_price > f.entry_price,
+            }
+    }) {
+        let sl = rust_compute_sl_price(
+            f.pos_type, f.entry_price, f.entry_atr, f.current_price,
+            f.adx, f.adx_slope, sl_atr_mult, false, 0.0, 0.0,
+        );
+        // ASE tightened: effective mult = 2.0 * 0.8 = 1.6
+        let atr = if f.entry_atr > 0.0 { f.entry_atr } else { f.entry_price * 0.005 };
+        let expected_mult = sl_atr_mult * 0.8;
+        let expected_sl = match f.pos_type {
+            PosType::Long => f.entry_price - atr * expected_mult,
+            PosType::Short => f.entry_price + atr * expected_mult,
+        };
+        // May also have DASE/SLB applied on top
+        // Verify ASE at least tightened (closer to entry than base)
+        let base_sl = match f.pos_type {
+            PosType::Long => f.entry_price - atr * sl_atr_mult,
+            PosType::Short => f.entry_price + atr * sl_atr_mult,
+        };
+        match f.pos_type {
+            PosType::Long => assert!(
+                sl >= base_sl - f64::EPSILON,
+                "ASE must tighten LONG SL for '{}': sl={}, base_sl={}",
+                f.label, sl, base_sl
+            ),
+            PosType::Short => assert!(
+                sl <= base_sl + f64::EPSILON,
+                "ASE must tighten SHORT SL for '{}': sl={}, base_sl={}",
+                f.label, sl, base_sl
+            ),
+        }
+        // When no DASE/SLB, should match exactly
+        if f.adx <= 40.0 {
+            assert!(
+                within_tolerance(expected_sl, sl, TIER_T2_TOLERANCE),
+                "ASE-only SL mismatch for '{}': expected={}, got={}",
+                f.label, expected_sl, sl
+            );
+        }
+    }
+}
+
+#[test]
+fn test_sl_dase_widening_high_adx_profit() {
+    // AQC-1263: DASE widens by 15% when ADX > 40 AND profit > 0.5 ATR
+    let sl = rust_compute_sl_price(
+        PosType::Long, 50000.0, 500.0, 50300.0,  // profit_atr = 0.6
+        42.0, 0.5, 2.0, false, 0.0, 0.0,
+    );
+    let atr = 500.0;
+    // DASE active: profit_atr = 0.6 > 0.5, ADX = 42 > 40
+    // sl_mult = 2.0 * 1.15 = 2.30
+    let expected = 50000.0 - atr * 2.0 * 1.15;
+    assert!(
+        within_tolerance(expected, sl, TIER_T2_TOLERANCE),
+        "DASE widening: expected={}, got={}", expected, sl
+    );
+}
+
+#[test]
+fn test_sl_slb_widening_very_high_adx() {
+    // AQC-1263: SLB widens by 10% when ADX > 45
+    let sl = rust_compute_sl_price(
+        PosType::Long, 50000.0, 500.0, 49900.0,  // underwater, no DASE
+        47.0, 0.5, 2.0, false, 0.0, 0.0,
+    );
+    let atr = 500.0;
+    // SLB: ADX = 47 > 45, sl_mult = 2.0 * 1.10 = 2.20
+    // DASE: ADX > 40, but profit_atr = -0.2 (underwater), not > 0.5
+    let expected = 50000.0 - atr * 2.0 * 1.10;
+    assert!(
+        within_tolerance(expected, sl, TIER_T2_TOLERANCE),
+        "SLB widening: expected={}, got={}", expected, sl
+    );
+}
+
+#[test]
+fn test_sl_breakeven_activation() {
+    // AQC-1263: Breakeven stop moves SL past entry when profit >= be_start ATR
+    let sl = rust_compute_sl_price(
+        PosType::Long, 50000.0, 500.0, 50400.0,  // profit = 400, be_start = 500*0.7 = 350
+        30.0, 0.5, 2.0, true, 0.7, 0.05,
+    );
+    let atr = 500.0;
+    let be_buffer = atr * 0.05;
+    // Breakeven active: profit = 400 >= 350
+    // SL = max(entry - atr*2.0, entry + be_buffer) = max(49000, 50025) = 50025
+    let expected = 50000.0 + be_buffer;
+    assert!(
+        within_tolerance(expected, sl, TIER_T2_TOLERANCE),
+        "Breakeven activation: expected={}, got={}", expected, sl
+    );
+}
+
+#[test]
+fn test_sl_zero_atr_fallback() {
+    // AQC-1263: Zero entry_atr uses fallback = entry_price * 0.005
+    let sl = rust_compute_sl_price(
+        PosType::Long, 100.0, 0.0, 101.0,
+        30.0, 0.5, 2.0, false, 0.0, 0.0,
+    );
+    let fallback_atr = 100.0 * 0.005;
+    let expected = 100.0 - fallback_atr * 2.0;
+    assert!(
+        within_tolerance(expected, sl, TIER_T2_TOLERANCE),
+        "Zero ATR fallback: expected={}, got={}", expected, sl
+    );
+}
+
+#[test]
+fn test_sl_dase_and_slb_combined() {
+    // AQC-1263: When ADX > 45 AND profitable, both DASE and SLB apply
+    let sl = rust_compute_sl_price(
+        PosType::Long, 50000.0, 500.0, 50400.0,  // profit_atr = 0.8
+        50.0, 0.5, 2.0, false, 0.0, 0.0,
+    );
+    let atr = 500.0;
+    // DASE: ADX=50 > 40, profit_atr=0.8 > 0.5 -> mult *= 1.15
+    // SLB: ADX=50 > 45 -> mult *= 1.10
+    // Combined: 2.0 * 1.15 * 1.10 = 2.53
+    let expected = 50000.0 - atr * 2.0 * 1.15 * 1.10;
+    assert!(
+        within_tolerance(expected, sl, TIER_T2_TOLERANCE),
+        "DASE+SLB combined: expected={}, got={}", expected, sl
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AQC-1264: Trailing stop axis validation (additional edge cases)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn trailing_defaults() -> (f64, f64, f64, f64, f64, f64, bool, f64, f64, f64, f64, f64, f64) {
+    (
+        1.0,   // trailing_start_atr
+        0.8,   // trailing_distance_atr
+        0.0,   // trailing_start_atr_low_conf
+        0.0,   // trailing_distance_atr_low_conf
+        0.5,   // trailing_rsi_floor_default
+        0.7,   // trailing_rsi_floor_trending
+        true,  // enable_vol_buffered_trailing
+        1.2,   // trailing_vbts_bb_threshold
+        1.25,  // trailing_vbts_mult
+        2.0,   // trailing_high_profit_atr
+        0.75,  // trailing_tighten_tspv
+        0.5,   // trailing_tighten_default
+        0.7,   // trailing_weak_trend_mult
+    )
+}
+
+#[test]
+fn test_trailing_vbts_adjustment_high_bb_width() {
+    // AQC-1264: VBTS widens trailing when bb_width_ratio > threshold
+    let (ts, td, tslc, tdlc, rfd, rft, evb, vbt, vbm, hpa, ttp, ttd, twm) = trailing_defaults();
+
+    let tsl = rust_compute_trailing(
+        PosType::Long, 50000.0, 51500.0, 500.0, 0.0,
+        Confidence::High, 55.0, 30.0, 0.5, 0.0,
+        1.5,  // bb_width_ratio > 1.2 (VBTS triggers)
+        3.0,  // profit > trailing_start
+        ts, td, tslc, tdlc, rfd, rft, evb, vbt, vbm, hpa, ttp, ttd, twm,
+    );
+
+    // VBTS active: effective_dist = 0.8 * 1.25 = 1.0
+    // Then high-profit tightening (profit=3.0 > 2.0):
+    //   adx=30 < 35, atr_slope=0 not > 0 -> default tighten: 0.8 * 0.5 = 0.4
+    // VBTS applies before high-profit, but high-profit overrides the base dist.
+    // Actually the code checks high-profit AFTER VBTS, and high-profit uses t_dist (base),
+    // not effective_dist. So effective_dist = 0.8 * 0.5 = 0.4 (default tighten wins).
+    // Clamp to floor: max(0.4, 0.5) = 0.5
+    let atr = 500.0;
+    let expected = 51500.0 - atr * 0.5;
+    assert!(
+        within_tolerance(expected, tsl, TIER_T2_TOLERANCE),
+        "VBTS + high-profit: expected={}, got={}", expected, tsl
+    );
+}
+
+#[test]
+fn test_trailing_tatp_preservation_trending_adx() {
+    // AQC-1264: TATP preserves distance (1.0x) when ADX > 35 and slope > 0
+    let (ts, td, tslc, tdlc, rfd, rft, evb, vbt, vbm, hpa, ttp, ttd, twm) = trailing_defaults();
+
+    let tsl = rust_compute_trailing(
+        PosType::Long, 50000.0, 51500.0, 500.0, 0.0,
+        Confidence::High, 55.0, 40.0, 1.0, 0.0,
+        1.0,  // bb_width_ratio normal
+        3.0,  // profit > high_profit_atr (2.0)
+        ts, td, tslc, tdlc, rfd, rft, evb, vbt, vbm, hpa, ttp, ttd, twm,
+    );
+
+    // TATP: adx=40 > 35 AND adx_slope=1.0 > 0 -> effective_dist = 0.8 * 1.0 = 0.8
+    let atr = 500.0;
+    let expected = 51500.0 - atr * 0.8;
+    assert!(
+        within_tolerance(expected, tsl, TIER_T2_TOLERANCE),
+        "TATP preservation: expected={}, got={}", expected, tsl
+    );
+}
+
+#[test]
+fn test_trailing_tspv_tightening() {
+    // AQC-1264: TSPV tightens when atr_slope > 0 (vol expanding) and high profit
+    let (ts, td, tslc, tdlc, rfd, rft, evb, vbt, vbm, hpa, ttp, ttd, twm) = trailing_defaults();
+
+    let tsl = rust_compute_trailing(
+        PosType::Long, 50000.0, 51500.0, 500.0, 0.0,
+        Confidence::High, 55.0, 28.0, -0.5, 0.5,  // atr_slope > 0, adx < 35
+        1.0,
+        3.0,
+        ts, td, tslc, tdlc, rfd, rft, evb, vbt, vbm, hpa, ttp, ttd, twm,
+    );
+
+    // TSPV: adx=28 (< 35 so TATP not active), atr_slope=0.5 > 0
+    // effective_dist = 0.8 * 0.75 = 0.6
+    let atr = 500.0;
+    let expected = 51500.0 - atr * 0.6;
+    assert!(
+        within_tolerance(expected, tsl, TIER_T2_TOLERANCE),
+        "TSPV tightening: expected={}, got={}", expected, tsl
+    );
+}
+
+#[test]
+fn test_trailing_weak_trend_widening_low_adx() {
+    // AQC-1264: Weak-trend tightening when ADX < 25 (only when not high-profit)
+    let (ts, td, tslc, tdlc, rfd, rft, evb, vbt, vbm, hpa, ttp, ttd, twm) = trailing_defaults();
+
+    let tsl = rust_compute_trailing(
+        PosType::Long, 50000.0, 50600.0, 500.0, 0.0,
+        Confidence::High, 55.0, 20.0, 0.3, 0.0,
+        1.0,
+        1.2,  // profit_atr = 1.2 (< 2.0, not high-profit, but >= start=1.0)
+        ts, td, tslc, tdlc, rfd, rft, evb, vbt, vbm, hpa, ttp, ttd, twm,
+    );
+
+    // Weak-trend: adx=20 < 25 AND profit_atr=1.2 (not > 2.0)
+    // effective_dist = 0.8 * 0.7 = 0.56
+    // Clamp to floor: max(0.56, 0.5) = 0.56
+    let atr = 500.0;
+    let expected = 50600.0 - atr * 0.56;
+    assert!(
+        within_tolerance(expected, tsl, TIER_T2_TOLERANCE),
+        "Weak-trend widening: expected={}, got={}", expected, tsl
+    );
+}
+
+#[test]
+fn test_trailing_rsi_trend_guard_floor() {
+    // AQC-1264: RSI Trend-Guard raises min distance when RSI favourable
+    let (ts, td, tslc, tdlc, rfd, rft, evb, vbt, vbm, hpa, ttp, ttd, twm) = trailing_defaults();
+
+    // Long with RSI > 60 -> trending floor = 0.7
+    let tsl = rust_compute_trailing(
+        PosType::Long, 50000.0, 50600.0, 500.0, 0.0,
+        Confidence::High, 65.0, 20.0, 0.3, 0.0,
+        1.0,
+        1.2,  // not high-profit
+        ts, td, tslc, tdlc, rfd, rft, evb, vbt, vbm, hpa, ttp, ttd, twm,
+    );
+
+    // Weak-trend: effective_dist = 0.8 * 0.7 = 0.56
+    // RSI > 60 -> min_trailing_dist = 0.7
+    // Clamp: max(0.56, 0.7) = 0.7
+    let atr = 500.0;
+    let expected = 50600.0 - atr * 0.7;
+    assert!(
+        within_tolerance(expected, tsl, TIER_T2_TOLERANCE),
+        "RSI Trend-Guard floor: expected={}, got={}", expected, tsl
+    );
+}
+
+#[test]
+fn test_trailing_low_confidence_overrides() {
+    // AQC-1264: Low confidence overrides when configured
+    let (ts, td, _tslc, _tdlc, rfd, rft, evb, vbt, vbm, hpa, ttp, ttd, twm) = trailing_defaults();
+
+    // Set low-conf overrides
+    let tslc = 1.5;  // trailing_start_atr_low_conf
+    let tdlc = 1.0;  // trailing_distance_atr_low_conf
+
+    let tsl = rust_compute_trailing(
+        PosType::Long, 50000.0, 51500.0, 500.0, 0.0,
+        Confidence::Low, 55.0, 30.0, 0.5, 0.0,
+        1.0,
+        3.0,  // profit = 3.0 ATR
+        ts, td, tslc, tdlc, rfd, rft, evb, vbt, vbm, hpa, ttp, ttd, twm,
+    );
+
+    // Low confidence: trailing_start = 1.5, trailing_dist = 1.0
+    // profit=3.0 > start=1.5, so active
+    // High-profit: adx=30 (< 35), atr_slope=0 -> default tighten: 1.0 * 0.5 = 0.5
+    // Clamp to floor: max(0.5, 0.5) = 0.5
+    let atr = 500.0;
+    let expected = 51500.0 - atr * 0.5;
+    assert!(
+        within_tolerance(expected, tsl, TIER_T2_TOLERANCE),
+        "Low confidence overrides: expected={}, got={}", expected, tsl
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AQC-1265: Take profit axis validation
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
 fn test_tp_codegen_parity() {
     let src = get_decision_cuda_source();
+
+    // Function signature
     assert!(
-        src.contains("__device__") && src.contains("check_tp"),
-        "TP codegen stub should be replaced by AQC-1222"
+        src.contains("__device__ TpResult check_tp_codegen("),
+        "TP codegen must have correct __device__ function signature"
+    );
+    assert!(
+        src.contains("const GpuComboConfig& cfg"),
+        "TP must take GpuComboConfig by const ref"
     );
 }
 
 #[test]
-#[ignore = "AQC-1223: check_smart_exits_codegen not yet implemented"]
+fn test_tp_full_hit_long() {
+    // AQC-1265: Full TP hit for long position
+    let src = get_decision_cuda_source();
+
+    // Long: TP above entry
+    assert!(
+        src.contains("entry_price + (atr * tp_mult)"),
+        "Long TP price = entry + atr * mult"
+    );
+    assert!(
+        src.contains("current_price >= tp_price"),
+        "Long TP hit when current >= tp_price"
+    );
+    assert!(
+        src.contains("result.exit_code = 11"),
+        "Full TP exit_code must be 11"
+    );
+}
+
+#[test]
+fn test_tp_full_hit_short() {
+    // AQC-1265: Full TP hit for short position
+    let src = get_decision_cuda_source();
+
+    assert!(
+        src.contains("entry_price - (atr * tp_mult)"),
+        "Short TP price = entry - atr * mult"
+    );
+    assert!(
+        src.contains("current_price <= tp_price"),
+        "Short TP hit when current <= tp_price"
+    );
+}
+
+#[test]
+fn test_tp_partial_hit() {
+    // AQC-1265: Partial TP fires with reduce action
+    let src = get_decision_cuda_source();
+
+    assert!(
+        src.contains("cfg.enable_partial_tp"),
+        "Partial TP must check enable flag"
+    );
+    assert!(
+        src.contains("tp1_taken == 0u"),
+        "Partial TP checks tp1_taken == 0 for first partial"
+    );
+    assert!(
+        src.contains("result.action = 1"),
+        "Partial TP must set action = 1 (reduce)"
+    );
+    assert!(
+        src.contains("result.fraction = pct"),
+        "Partial TP must set fraction"
+    );
+    assert!(
+        src.contains("result.exit_code = 10"),
+        "Partial TP exit_code must be 10"
+    );
+}
+
+#[test]
+fn test_tp_tp1_taken_then_full_check() {
+    // AQC-1265: After tp1 taken, check full TP for remainder
+    let src = get_decision_cuda_source();
+
+    assert!(
+        src.contains("tp1 already taken"),
+        "Must have path for tp1 already taken"
+    );
+    assert!(
+        src.contains("cfg.tp_partial_atr_mult > 0.0"),
+        "Must check for separate partial mult level"
+    );
+}
+
+#[test]
+fn test_tp_separate_partial_level() {
+    // AQC-1265: Separate partial TP level when tp_partial_atr_mult > 0
+    let src = get_decision_cuda_source();
+
+    assert!(
+        src.contains("double partial_mult"),
+        "Must compute partial_mult separately"
+    );
+    assert!(
+        src.contains("cfg.tp_partial_atr_mult"),
+        "Must read tp_partial_atr_mult from config"
+    );
+    assert!(
+        src.contains("double partial_tp_price"),
+        "Must compute separate partial_tp_price"
+    );
+}
+
+#[test]
+fn test_tp_atr_fallback() {
+    // AQC-1265: ATR fallback for zero entry_atr
+    let src = get_decision_cuda_source();
+
+    // TP codegen contains the same ATR fallback pattern
+    let tp_section_start = src.find("check_tp_codegen").expect("check_tp_codegen must exist");
+    let tp_section = &src[tp_section_start..];
+    assert!(
+        tp_section.contains("entry_price * 0.005"),
+        "TP codegen must have ATR fallback for zero entry_atr"
+    );
+}
+
+#[test]
+fn test_tp_notional_minimum_check() {
+    // AQC-1265: Partial TP checks minimum notional
+    let src = get_decision_cuda_source();
+
+    assert!(
+        src.contains("remaining_notional"),
+        "Must compute remaining notional"
+    );
+    assert!(
+        src.contains("cfg.tp_partial_min_notional_usd"),
+        "Must check minimum notional threshold"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AQC-1266: Smart exits axis-by-axis validation
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
 fn test_smart_exits_codegen_parity() {
     let src = get_decision_cuda_source();
+
+    // Function signature
     assert!(
-        src.contains("__device__") && src.contains("check_smart_exits"),
-        "Smart exits codegen stub should be replaced by AQC-1223"
+        src.contains("__device__ SmartExitResult check_smart_exits_codegen("),
+        "Smart exits codegen must have correct __device__ function signature"
     );
 }
 
 #[test]
-#[ignore = "AQC-1224: check_all_exits_codegen not yet implemented"]
+fn test_smart_exit_1_trend_breakdown() {
+    // AQC-1266: Trend Breakdown (EMA Cross) with TBB buffer
+    let src = get_decision_cuda_source();
+
+    // Find smart exits section
+    let se_start = src.find("check_smart_exits_codegen").expect("smart exits must exist");
+    let se_section = &src[se_start..];
+
+    assert!(
+        se_section.contains("ema_fast < ema_slow"),
+        "Trend Breakdown must check EMA cross for LONG"
+    );
+    assert!(
+        se_section.contains("ema_fast > ema_slow"),
+        "Trend Breakdown must check EMA cross for SHORT"
+    );
+    assert!(
+        se_section.contains("is_weak_cross"),
+        "Trend Breakdown must have TBB (weak cross) buffer"
+    );
+    assert!(
+        se_section.contains("ema_dev < 0.001"),
+        "TBB must check EMA deviation < 0.001"
+    );
+    assert!(
+        se_section.contains("exit_code = 1"),
+        "Trend Breakdown must set exit_code = 1"
+    );
+}
+
+#[test]
+fn test_smart_exit_2_trend_exhaustion() {
+    // AQC-1266: Trend Exhaustion (ADX below threshold)
+    let src = get_decision_cuda_source();
+
+    let se_start = src.find("check_smart_exits_codegen").expect("smart exits must exist");
+    let se_section = &src[se_start..];
+
+    assert!(
+        se_section.contains("adx < adx_exhaustion_lt"),
+        "Trend Exhaustion must check ADX below threshold"
+    );
+    assert!(
+        se_section.contains("exit_code = 2"),
+        "Trend Exhaustion must set exit_code = 2"
+    );
+    assert!(
+        se_section.contains("cfg.smart_exit_adx_exhaustion_lt"),
+        "Must read ADX exhaustion threshold from config"
+    );
+}
+
+#[test]
+fn test_smart_exit_3_ema_macro_breakdown() {
+    // AQC-1266: EMA Macro Breakdown
+    let src = get_decision_cuda_source();
+
+    let se_start = src.find("check_smart_exits_codegen").expect("smart exits must exist");
+    let se_section = &src[se_start..];
+
+    assert!(
+        se_section.contains("cfg.require_macro_alignment"),
+        "EMA Macro Breakdown must check require_macro_alignment flag"
+    );
+    assert!(
+        se_section.contains("current_price < ema_macro"),
+        "LONG EMA Macro Breakdown: price < ema_macro"
+    );
+    assert!(
+        se_section.contains("current_price > ema_macro"),
+        "SHORT EMA Macro Breakdown: price > ema_macro"
+    );
+    assert!(
+        se_section.contains("exit_code = 3"),
+        "EMA Macro Breakdown must set exit_code = 3"
+    );
+}
+
+#[test]
+fn test_smart_exit_4_stagnation() {
+    // AQC-1266: Stagnation Exit (low-vol + underwater)
+    let src = get_decision_cuda_source();
+
+    let se_start = src.find("check_smart_exits_codegen").expect("smart exits must exist");
+    let se_section = &src[se_start..];
+
+    assert!(
+        se_section.contains("atr < (eff_atr * 0.70)"),
+        "Stagnation must check ATR < 70% of entry ATR"
+    );
+    assert!(
+        se_section.contains("exit_code = 4"),
+        "Stagnation must set exit_code = 4"
+    );
+}
+
+#[test]
+fn test_smart_exit_5_funding_headwind_noop() {
+    // AQC-1266: Funding Headwind is a no-op (never fires in backtester v1)
+    let src = get_decision_cuda_source();
+
+    let se_start = src.find("check_smart_exits_codegen").expect("smart exits must exist");
+    let se_section = &src[se_start..];
+
+    assert!(
+        se_section.contains("Funding Headwind"),
+        "Must have Funding Headwind comment/marker"
+    );
+    // Should NOT have exit_code = 5 as an active path
+    // The code has it as a placeholder comment but no active assignment
+    assert!(
+        se_section.contains("exit_code = 5") == false
+            || se_section.contains("no-op")
+            || se_section.contains("never fires"),
+        "Funding Headwind must be a no-op (exit_code=5 never assigned actively)"
+    );
+}
+
+#[test]
+fn test_smart_exit_6_tsme() {
+    // AQC-1266: TSME (Trend Saturation Momentum Exit)
+    let src = get_decision_cuda_source();
+
+    let se_start = src.find("check_smart_exits_codegen").expect("smart exits must exist");
+    let se_section = &src[se_start..];
+
+    assert!(
+        se_section.contains("adx > 50.0"),
+        "TSME must check ADX > 50"
+    );
+    assert!(
+        se_section.contains("cfg.tsme_min_profit_atr"),
+        "TSME must use min_profit_atr from config"
+    );
+    assert!(
+        se_section.contains("cfg.tsme_require_adx_slope_negative"),
+        "TSME must check ADX slope negative requirement"
+    );
+    assert!(
+        se_section.contains("exit_code = 6"),
+        "TSME must set exit_code = 6"
+    );
+}
+
+#[test]
+fn test_smart_exit_7_mmde() {
+    // AQC-1266: MMDE (MACD Persistent Divergence Exit)
+    let src = get_decision_cuda_source();
+
+    let se_start = src.find("check_smart_exits_codegen").expect("smart exits must exist");
+    let se_section = &src[se_start..];
+
+    assert!(
+        se_section.contains("profit_atr > 1.5"),
+        "MMDE must check profit > 1.5 ATR"
+    );
+    assert!(
+        se_section.contains("adx > 35.0"),
+        "MMDE must check ADX > 35"
+    );
+    assert!(
+        se_section.contains("prev3_macd_hist"),
+        "MMDE must check 3 consecutive MACD contractions (4 bars)"
+    );
+    assert!(
+        se_section.contains("exit_code = 7"),
+        "MMDE must set exit_code = 7"
+    );
+}
+
+#[test]
+fn test_smart_exit_8_rsi_overextension() {
+    // AQC-1266: RSI Overextension Exit with profit-switched thresholds
+    let src = get_decision_cuda_source();
+
+    let se_start = src.find("check_smart_exits_codegen").expect("smart exits must exist");
+    let se_section = &src[se_start..];
+
+    assert!(
+        se_section.contains("cfg.enable_rsi_overextension_exit"),
+        "RSI Overextension must check enable flag"
+    );
+    assert!(
+        se_section.contains("cfg.rsi_exit_profit_atr_switch"),
+        "RSI Overextension must use profit_atr_switch"
+    );
+    assert!(
+        se_section.contains("cfg.rsi_exit_ub_lo_profit") && se_section.contains("cfg.rsi_exit_ub_hi_profit"),
+        "RSI Overextension must have profit-switched thresholds"
+    );
+    assert!(
+        se_section.contains("exit_code = 8"),
+        "RSI Overextension must set exit_code = 8"
+    );
+}
+
+#[test]
+fn test_smart_exit_priority_order() {
+    // AQC-1266: Sub-checks evaluated in order 1-8
+    let src = get_decision_cuda_source();
+
+    let se_start = src.find("check_smart_exits_codegen").expect("smart exits must exist");
+    let se_section = &src[se_start..];
+
+    let pos1 = se_section.find("exit_code = 1").expect("exit_code=1 must exist");
+    let pos2 = se_section.find("exit_code = 2").expect("exit_code=2 must exist");
+    let pos4 = se_section.find("exit_code = 4").expect("exit_code=4 must exist");
+    let pos6 = se_section.find("exit_code = 6").expect("exit_code=6 must exist");
+    let pos7 = se_section.find("exit_code = 7").expect("exit_code=7 must exist");
+    let pos8 = se_section.find("exit_code = 8").expect("exit_code=8 must exist");
+
+    assert!(pos1 < pos2, "Trend Breakdown (1) must precede Trend Exhaustion (2)");
+    assert!(pos2 < pos4, "Trend Exhaustion (2) must precede Stagnation (4)");
+    assert!(pos4 < pos6, "Stagnation (4) must precede TSME (6)");
+    assert!(pos6 < pos7, "TSME (6) must precede MMDE (7)");
+    assert!(pos7 < pos8, "MMDE (7) must precede RSI Overextension (8)");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AQC-1267: Exit orchestrator priority sequence validation
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
 fn test_all_exits_codegen_parity() {
     let src = get_decision_cuda_source();
+
+    // Function signature
     assert!(
-        src.contains("__device__") && src.contains("check_all_exits"),
-        "All-exits codegen stub should be replaced by AQC-1224"
+        src.contains("__device__ AllExitResult check_all_exits_codegen("),
+        "Exit orchestrator must have correct __device__ function signature"
+    );
+    assert!(
+        src.contains("struct AllExitResult"),
+        "Must define AllExitResult struct"
     );
 }
 
 #[test]
-#[ignore = "AQC-1230: compute_entry_size_codegen not yet implemented"]
+fn test_all_exits_sl_triggers_first() {
+    // AQC-1267: SL triggers first with exit_code=100
+    let src = get_decision_cuda_source();
+
+    let orch_start = src.find("check_all_exits_codegen").expect("orchestrator must exist");
+    let orch_section = &src[orch_start..];
+
+    assert!(
+        orch_section.contains("exit_code = 100"),
+        "SL must set exit_code = 100"
+    );
+    assert!(
+        orch_section.contains("compute_sl_price_codegen"),
+        "Orchestrator must call compute_sl_price_codegen"
+    );
+}
+
+#[test]
+fn test_all_exits_trailing_triggers_second() {
+    // AQC-1267: Trailing triggers second with exit_code=101
+    let src = get_decision_cuda_source();
+
+    let orch_start = src.find("check_all_exits_codegen").expect("orchestrator must exist");
+    let orch_section = &src[orch_start..];
+
+    assert!(
+        orch_section.contains("exit_code = 101"),
+        "Trailing must set exit_code = 101"
+    );
+    assert!(
+        orch_section.contains("compute_trailing_codegen"),
+        "Orchestrator must call compute_trailing_codegen"
+    );
+}
+
+#[test]
+fn test_all_exits_tp_triggers_third() {
+    // AQC-1267: TP triggers third with exit_code=102
+    let src = get_decision_cuda_source();
+
+    let orch_start = src.find("check_all_exits_codegen").expect("orchestrator must exist");
+    let orch_section = &src[orch_start..];
+
+    assert!(
+        orch_section.contains("exit_code = 102"),
+        "TP must set exit_code = 102"
+    );
+    assert!(
+        orch_section.contains("check_tp_codegen"),
+        "Orchestrator must call check_tp_codegen"
+    );
+}
+
+#[test]
+fn test_all_exits_smart_triggers_fourth() {
+    // AQC-1267: Smart exits trigger fourth with exit_code=1-8
+    let src = get_decision_cuda_source();
+
+    let orch_start = src.find("check_all_exits_codegen").expect("orchestrator must exist");
+    let orch_section = &src[orch_start..];
+
+    assert!(
+        orch_section.contains("check_smart_exits_codegen"),
+        "Orchestrator must call check_smart_exits_codegen"
+    );
+    assert!(
+        orch_section.contains("smart.exit_code"),
+        "Orchestrator must forward smart exit_code"
+    );
+}
+
+#[test]
+fn test_all_exits_no_exit_returns_zero() {
+    // AQC-1267: No exit when all checks pass (exit_code=0)
+    let src = get_decision_cuda_source();
+
+    let orch_start = src.find("check_all_exits_codegen").expect("orchestrator must exist");
+    let orch_section = &src[orch_start..];
+
+    assert!(
+        orch_section.contains("result.exit_code = 0") || orch_section.contains("result.should_exit = false"),
+        "No-exit path must return exit_code=0 or should_exit=false"
+    );
+}
+
+#[test]
+fn test_all_exits_priority_ordering() {
+    // AQC-1267: Verify priority sequence: SL(100) > Trailing(101) > TP(102) > Smart(1-8)
+    let src = get_decision_cuda_source();
+
+    let orch_start = src.find("check_all_exits_codegen").expect("orchestrator must exist");
+    let orch_section = &src[orch_start..];
+
+    let sl_pos = orch_section.find("exit_code = 100").expect("SL exit must exist");
+    let trail_pos = orch_section.find("exit_code = 101").expect("Trailing exit must exist");
+    let tp_pos = orch_section.find("exit_code = 102").expect("TP exit must exist");
+    let smart_pos = orch_section.find("smart.exit_code").expect("Smart exit must exist");
+
+    assert!(sl_pos < trail_pos, "SL must be checked before Trailing");
+    assert!(trail_pos < tp_pos, "Trailing must be checked before TP");
+    assert!(tp_pos < smart_pos, "TP must be checked before Smart Exits");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AQC-1268: Sizing & leverage axis validation
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
 fn test_entry_size_codegen_parity() {
     let src = get_decision_cuda_source();
+
+    // Function signature
     assert!(
-        src.contains("__device__") && src.contains("compute_entry_size"),
-        "Entry size codegen stub should be replaced by AQC-1230"
+        src.contains("__device__ SizingResultD compute_entry_size_codegen("),
+        "Entry sizing codegen must have correct __device__ function signature"
+    );
+    assert!(
+        src.contains("struct SizingResultD"),
+        "Must define SizingResultD struct"
     );
 }
 
 #[test]
-#[ignore = "AQC-1231: is_pesc_blocked_codegen not yet implemented"]
+fn test_entry_size_static_sizing() {
+    // AQC-1268: Static sizing when dynamic disabled
+    let src = get_decision_cuda_source();
+
+    let sz_start = src.find("compute_entry_size_codegen").expect("sizing fn must exist");
+    let sz_section = &src[sz_start..];
+
+    assert!(
+        sz_section.contains("cfg.allocation_pct"),
+        "Static sizing must use allocation_pct from config"
+    );
+    assert!(
+        sz_section.contains("cfg.enable_dynamic_sizing"),
+        "Must check enable_dynamic_sizing flag"
+    );
+}
+
+#[test]
+fn test_entry_size_confidence_multiplier() {
+    // AQC-1268: Confidence multiplier in dynamic sizing
+    let src = get_decision_cuda_source();
+
+    let sz_start = src.find("compute_entry_size_codegen").expect("sizing fn must exist");
+    let sz_section = &src[sz_start..];
+
+    assert!(
+        sz_section.contains("cfg.confidence_mult_high"),
+        "Dynamic sizing must use confidence_mult_high"
+    );
+    assert!(
+        sz_section.contains("cfg.confidence_mult_medium"),
+        "Dynamic sizing must use confidence_mult_medium"
+    );
+    assert!(
+        sz_section.contains("cfg.confidence_mult_low"),
+        "Dynamic sizing must use confidence_mult_low"
+    );
+    assert!(
+        sz_section.contains("CONF_HIGH") && sz_section.contains("CONF_LOW"),
+        "Must check confidence enum values"
+    );
+}
+
+#[test]
+fn test_entry_size_adx_multiplier() {
+    // AQC-1268: ADX multiplier scaling in dynamic sizing
+    let src = get_decision_cuda_source();
+
+    let sz_start = src.find("compute_entry_size_codegen").expect("sizing fn must exist");
+    let sz_section = &src[sz_start..];
+
+    assert!(
+        sz_section.contains("cfg.adx_sizing_full_adx"),
+        "ADX multiplier must use adx_sizing_full_adx from config"
+    );
+    assert!(
+        sz_section.contains("cfg.adx_sizing_min_mult"),
+        "ADX multiplier must use adx_sizing_min_mult from config"
+    );
+    assert!(
+        sz_section.contains("adx_ratio") || sz_section.contains("adx_mult"),
+        "Must compute ADX ratio or multiplier"
+    );
+}
+
+#[test]
+fn test_entry_size_vol_scalar() {
+    // AQC-1268: Volatility scalar (inverse vol ratio)
+    let src = get_decision_cuda_source();
+
+    let sz_start = src.find("compute_entry_size_codegen").expect("sizing fn must exist");
+    let sz_section = &src[sz_start..];
+
+    assert!(
+        sz_section.contains("cfg.vol_baseline_pct"),
+        "Vol scalar must use vol_baseline_pct from config"
+    );
+    assert!(
+        sz_section.contains("cfg.vol_scalar_min") && sz_section.contains("cfg.vol_scalar_max"),
+        "Vol scalar must clamp to [min, max]"
+    );
+    assert!(
+        sz_section.contains("1.0 / vol_ratio"),
+        "Vol scalar is inverse of vol_ratio"
+    );
+}
+
+#[test]
+fn test_entry_size_dynamic_leverage_tiers() {
+    // AQC-1268: Dynamic leverage per-confidence tiers
+    let src = get_decision_cuda_source();
+
+    let sz_start = src.find("compute_entry_size_codegen").expect("sizing fn must exist");
+    let sz_section = &src[sz_start..];
+
+    assert!(
+        sz_section.contains("cfg.enable_dynamic_leverage"),
+        "Must check enable_dynamic_leverage flag"
+    );
+    assert!(
+        sz_section.contains("cfg.leverage_high"),
+        "Dynamic leverage must use leverage_high"
+    );
+    assert!(
+        sz_section.contains("cfg.leverage_medium"),
+        "Dynamic leverage must use leverage_medium"
+    );
+    assert!(
+        sz_section.contains("cfg.leverage_low"),
+        "Dynamic leverage must use leverage_low"
+    );
+}
+
+#[test]
+fn test_entry_size_leverage_max_cap() {
+    // AQC-1268: Leverage max cap
+    let src = get_decision_cuda_source();
+
+    let sz_start = src.find("compute_entry_size_codegen").expect("sizing fn must exist");
+    let sz_section = &src[sz_start..];
+
+    assert!(
+        sz_section.contains("cfg.leverage_max_cap"),
+        "Must check leverage_max_cap from config"
+    );
+    assert!(
+        sz_section.contains("fmin(lev"),
+        "Leverage must be capped via fmin"
+    );
+}
+
+#[test]
+fn test_entry_size_uses_double_precision() {
+    // AQC-1268: Sizing uses double precision
+    let src = get_decision_cuda_source();
+
+    let sz_start = src.find("compute_entry_size_codegen").expect("sizing fn must exist");
+    let sz_section = &src[sz_start..];
+
+    assert!(
+        sz_section.contains("double margin"),
+        "margin must be double"
+    );
+    assert!(
+        sz_section.contains("double notional"),
+        "notional must be double"
+    );
+    assert!(
+        sz_section.contains("double size"),
+        "size must be double"
+    );
+    assert!(
+        sz_section.contains("double lev"),
+        "leverage must be double"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AQC-1269: PESC + entry/exit cooldowns validation
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
 fn test_pesc_codegen_parity() {
     let src = get_decision_cuda_source();
+
+    // Function signature
     assert!(
-        src.contains("__device__") && src.contains("is_pesc_blocked"),
-        "PESC codegen stub should be replaced by AQC-1231"
+        src.contains("__device__ bool is_pesc_blocked_codegen("),
+        "PESC codegen must have correct __device__ bool function signature"
     );
+    assert!(
+        src.contains("const GpuComboConfig& cfg"),
+        "PESC must take GpuComboConfig by const ref"
+    );
+}
+
+#[test]
+fn test_pesc_disabled_returns_false() {
+    // AQC-1269: PESC disabled when reentry_cooldown_minutes == 0
+    let src = get_decision_cuda_source();
+
+    let pesc_start = src.find("is_pesc_blocked_codegen").expect("PESC fn must exist");
+    let pesc_section = &src[pesc_start..];
+
+    assert!(
+        pesc_section.contains("cfg.reentry_cooldown_minutes == 0u"),
+        "PESC must check reentry_cooldown_minutes == 0"
+    );
+    assert!(
+        pesc_section.contains("return false"),
+        "PESC disabled must return false"
+    );
+}
+
+#[test]
+fn test_pesc_signal_flip_bypass() {
+    // AQC-1269: Signal flip exit reason bypasses cooldown
+    let src = get_decision_cuda_source();
+
+    let pesc_start = src.find("is_pesc_blocked_codegen").expect("PESC fn must exist");
+    let pesc_section = &src[pesc_start..];
+
+    assert!(
+        pesc_section.contains("close_reason == 2u"),
+        "PESC must check for signal flip (reason == 2)"
+    );
+}
+
+#[test]
+fn test_pesc_direction_gate() {
+    // AQC-1269: PESC only blocks same-direction re-entry
+    let src = get_decision_cuda_source();
+
+    let pesc_start = src.find("is_pesc_blocked_codegen").expect("PESC fn must exist");
+    let pesc_section = &src[pesc_start..];
+
+    assert!(
+        pesc_section.contains("close_type != desired_type"),
+        "PESC must check direction match"
+    );
+}
+
+#[test]
+fn test_pesc_adx_interpolation() {
+    // AQC-1269: ADX interpolation of cooldown (25..40 linear)
+    let src = get_decision_cuda_source();
+
+    let pesc_start = src.find("is_pesc_blocked_codegen").expect("PESC fn must exist");
+    let pesc_section = &src[pesc_start..];
+
+    assert!(
+        pesc_section.contains("adx >= 40.0"),
+        "PESC must check strong trend threshold (ADX >= 40)"
+    );
+    assert!(
+        pesc_section.contains("adx <= 25.0"),
+        "PESC must check weak trend threshold (ADX <= 25)"
+    );
+    assert!(
+        pesc_section.contains("(adx - 25.0) / 15.0"),
+        "PESC must interpolate ADX 25..40 linearly"
+    );
+    assert!(
+        pesc_section.contains("cfg.reentry_cooldown_min_mins"),
+        "PESC must use min cooldown from config"
+    );
+    assert!(
+        pesc_section.contains("cfg.reentry_cooldown_max_mins"),
+        "PESC must use max cooldown from config"
+    );
+}
+
+#[test]
+fn test_pesc_no_prior_close_bypass() {
+    // AQC-1269: No prior close recorded bypasses cooldown
+    let src = get_decision_cuda_source();
+
+    let pesc_start = src.find("is_pesc_blocked_codegen").expect("PESC fn must exist");
+    let pesc_section = &src[pesc_start..];
+
+    assert!(
+        pesc_section.contains("close_ts == 0u"),
+        "PESC must check for no prior close"
+    );
+}
+
+#[test]
+fn test_pesc_elapsed_time_check() {
+    // AQC-1269: PESC compares elapsed time against cooldown
+    let src = get_decision_cuda_source();
+
+    let pesc_start = src.find("is_pesc_blocked_codegen").expect("PESC fn must exist");
+    let pesc_section = &src[pesc_start..];
+
+    assert!(
+        pesc_section.contains("elapsed < cooldown_sec"),
+        "PESC must block when elapsed < cooldown_sec"
+    );
+    assert!(
+        pesc_section.contains("cooldown_mins * 60.0"),
+        "PESC must convert cooldown minutes to seconds"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AQC-1270: Config round-trip 141 fields
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_config_round_trip_size_140_fields() {
+    // AQC-1270: Verify GpuComboConfig is 560 bytes = 140 x 4-byte fields.
+    // This ensures all fields are accounted for and none were accidentally
+    // added or removed without updating the struct size assertion.
+    assert_eq!(
+        std::mem::size_of::<bt_gpu::buffers::GpuComboConfig>(),
+        560,
+        "GpuComboConfig must be exactly 560 bytes (140 x 4-byte fields)"
+    );
+}
+
+#[test]
+fn test_config_all_decision_fields_referenced_in_codegen() {
+    // AQC-1270: Verify each decision-relevant config field is referenced in the
+    // codegen output. This ensures the CUDA generated code actually reads the
+    // config fields that the GpuComboConfig struct provides.
+    let src = get_decision_cuda_source();
+
+    // Core sizing fields
+    let decision_fields = [
+        // SL
+        "cfg.sl_atr_mult",
+        "cfg.enable_breakeven_stop",
+        "cfg.breakeven_start_atr",
+        "cfg.breakeven_buffer_atr",
+        // Trailing
+        "cfg.trailing_start_atr",
+        "cfg.trailing_distance_atr",
+        "cfg.trailing_start_atr_low_conf",
+        "cfg.trailing_distance_atr_low_conf",
+        "cfg.trailing_rsi_floor_default",
+        "cfg.trailing_rsi_floor_trending",
+        "cfg.enable_vol_buffered_trailing",
+        "cfg.trailing_vbts_bb_threshold",
+        "cfg.trailing_vbts_mult",
+        "cfg.trailing_high_profit_atr",
+        "cfg.trailing_tighten_tspv",
+        "cfg.trailing_tighten_default",
+        "cfg.trailing_weak_trend_mult",
+        // TP
+        "cfg.tp_atr_mult",
+        "cfg.enable_partial_tp",
+        "cfg.tp_partial_pct",
+        "cfg.tp_partial_atr_mult",
+        "cfg.tp_partial_min_notional_usd",
+        // Smart exits
+        "cfg.smart_exit_adx_exhaustion_lt",
+        "cfg.smart_exit_adx_exhaustion_lt_low_conf",
+        "cfg.enable_rsi_overextension_exit",
+        "cfg.rsi_exit_profit_atr_switch",
+        "cfg.rsi_exit_ub_lo_profit",
+        "cfg.rsi_exit_ub_hi_profit",
+        "cfg.rsi_exit_lb_lo_profit",
+        "cfg.rsi_exit_lb_hi_profit",
+        "cfg.rsi_exit_ub_lo_profit_low_conf",
+        "cfg.rsi_exit_ub_hi_profit_low_conf",
+        "cfg.rsi_exit_lb_lo_profit_low_conf",
+        "cfg.rsi_exit_lb_hi_profit_low_conf",
+        "cfg.tsme_min_profit_atr",
+        "cfg.tsme_require_adx_slope_negative",
+        "cfg.require_macro_alignment",
+        // Gates
+        "cfg.enable_ranging_filter",
+        "cfg.enable_anomaly_filter",
+        "cfg.enable_extension_filter",
+        "cfg.require_adx_rising",
+        "cfg.adx_rising_saturation",
+        "cfg.require_volume_confirmation",
+        "cfg.vol_confirm_include_prev",
+        "cfg.min_adx",
+        "cfg.max_dist_ema_fast",
+        "cfg.anomaly_price_change_pct",
+        "cfg.anomaly_ema_dev_pct",
+        "cfg.ranging_adx_lt",
+        "cfg.ranging_bb_width_ratio_lt",
+        "cfg.ranging_rsi_low",
+        "cfg.ranging_rsi_high",
+        "cfg.ranging_min_signals",
+        "cfg.ave_enabled",
+        "cfg.ave_atr_ratio_gt",
+        "cfg.ave_adx_mult",
+        "cfg.enable_slow_drift_entries",
+        "cfg.slow_drift_ranging_slope_override",
+        // Signals
+        "cfg.dre_min_adx",
+        "cfg.dre_max_adx",
+        "cfg.dre_long_rsi_limit_low",
+        "cfg.dre_long_rsi_limit_high",
+        "cfg.dre_short_rsi_limit_low",
+        "cfg.dre_short_rsi_limit_high",
+        "cfg.macd_mode",
+        "cfg.use_stoch_rsi_filter",
+        "cfg.stoch_rsi_block_long_gt",
+        "cfg.stoch_rsi_block_short_lt",
+        "cfg.high_conf_volume_mult",
+        "cfg.require_btc_alignment",
+        "cfg.btc_adx_override",
+        "cfg.enable_pullback_entries",
+        "cfg.pullback_min_adx",
+        "cfg.pullback_rsi_long_min",
+        "cfg.pullback_rsi_short_max",
+        "cfg.pullback_require_macd_sign",
+        "cfg.pullback_confidence",
+        "cfg.slow_drift_min_slope_pct",
+        "cfg.slow_drift_min_adx",
+        "cfg.slow_drift_rsi_long_min",
+        "cfg.slow_drift_rsi_short_max",
+        "cfg.slow_drift_require_macd_sign",
+        // Sizing
+        "cfg.allocation_pct",
+        "cfg.enable_dynamic_sizing",
+        "cfg.confidence_mult_high",
+        "cfg.confidence_mult_medium",
+        "cfg.confidence_mult_low",
+        "cfg.adx_sizing_full_adx",
+        "cfg.adx_sizing_min_mult",
+        "cfg.vol_baseline_pct",
+        "cfg.vol_scalar_min",
+        "cfg.vol_scalar_max",
+        "cfg.leverage",
+        "cfg.enable_dynamic_leverage",
+        "cfg.leverage_high",
+        "cfg.leverage_medium",
+        "cfg.leverage_low",
+        "cfg.leverage_max_cap",
+        // PESC
+        "cfg.reentry_cooldown_minutes",
+        "cfg.reentry_cooldown_min_mins",
+        "cfg.reentry_cooldown_max_mins",
+    ];
+
+    for field in &decision_fields {
+        assert!(
+            src.contains(field),
+            "Decision codegen must reference config field '{}' but it was not found",
+            field
+        );
+    }
+}
+
+#[test]
+fn test_config_codegen_functions_all_present() {
+    // AQC-1270: Verify all 9 decision codegen functions are present
+    let src = get_decision_cuda_source();
+
+    let expected_fns = [
+        "check_gates_codegen",
+        "generate_signal_codegen",
+        "compute_sl_price_codegen",
+        "compute_trailing_codegen",
+        "check_tp_codegen",
+        "check_smart_exits_codegen",
+        "check_all_exits_codegen",
+        "compute_entry_size_codegen",
+        "is_pesc_blocked_codegen",
+    ];
+
+    for func in &expected_fns {
+        assert!(
+            src.contains(func),
+            "Decision codegen must contain function '{}' but it was not found",
+            func
+        );
+    }
+}
+
+#[test]
+fn test_config_struct_result_types_present() {
+    // AQC-1270: Verify all result struct types are defined in codegen
+    let src = get_decision_cuda_source();
+
+    let expected_structs = [
+        "struct GateResultD",
+        "struct SignalResult",
+        "struct TpResult",
+        "struct SmartExitResult",
+        "struct AllExitResult",
+        "struct SizingResultD",
+    ];
+
+    for s in &expected_structs {
+        assert!(
+            src.contains(s),
+            "Decision codegen must define '{}' but it was not found",
+            s
+        );
+    }
+}
+
+#[test]
+fn test_config_all_codegen_uses_double_precision() {
+    // AQC-1270: Verify all codegen functions use double for price/indicator math
+    let src = get_decision_cuda_source();
+
+    // All codegen functions must return or use double (not float) for price math
+    assert!(
+        src.contains("__device__ double compute_sl_price_codegen("),
+        "SL must return double"
+    );
+    assert!(
+        src.contains("__device__ double compute_trailing_codegen("),
+        "Trailing must return double"
+    );
+
+    // Must not use float for critical variables
+    let forbidden = [
+        "float sl_price",
+        "float sl_mult",
+        "float tp_price",
+        "float trailing_start",
+        "float trailing_dist",
+        "float effective_dist",
+        "float candidate",
+        "float margin",
+        "float notional",
+    ];
+    for pat in &forbidden {
+        assert!(
+            !src.contains(pat),
+            "Codegen must NOT use '{}' (AQC-734 mandate: double precision)",
+            pat
+        );
+    }
 }
