@@ -164,8 +164,8 @@ mod tests {
     fn open_and_close_apply_shared_rules() {
         let open = apply_open_fill(10_000.0, DEFAULT_TAKER_FEE_RATE);
         assert_eq!(open.notional, 10_000.0);
-        assert_eq!(open.fee_usd, 35.0);
-        assert_eq!(open.cash_delta, -10_035.0);
+        assert_eq!(open.fee_usd, 3.5);
+        assert_eq!(open.cash_delta, -10_003.5);
 
         let close = apply_close_fill(
             true,
@@ -175,9 +175,9 @@ mod tests {
             DEFAULT_TAKER_FEE_RATE,
         );
         assert_eq!(close.notional, 10.2);
-        assert_eq!(close.fee_usd, 0.0357);
+        assert_eq!(close.fee_usd, 0.00357);
         assert_eq!(close.pnl, 0.2);
-        assert_eq!(close.cash_delta, 0.1643);
+        assert_eq!(close.cash_delta, 0.19643);
     }
 
     #[test]
@@ -196,8 +196,8 @@ mod tests {
         let long = apply_close_fill(true, 10_000.0, 10_200.0, 1.0, DEFAULT_TAKER_FEE_RATE);
         let short = apply_close_fill(false, 10_000.0, 10_200.0, 1.0, DEFAULT_TAKER_FEE_RATE);
 
-        assert_eq!(long.pnl, 0.2);
-        assert_eq!(short.pnl, -0.2);
+        assert_eq!(long.pnl, 200.0);
+        assert_eq!(short.pnl, -200.0);
     }
 
     #[test]
