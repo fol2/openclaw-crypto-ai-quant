@@ -1028,6 +1028,138 @@ __device__ SmartExitResult check_smart_exits_codegen(
 
     return result;
 }
+// Derived from bt-core/src/engine.rs exit orchestration
+// Exit orchestrator: calls individual exit checks in priority order.
+// First triggered exit wins. Priority:
+//   1. Stop Loss       (exit_code = 100)
+//   2. Trailing Stop   (exit_code = 101)
+//   3. Take Profit     (exit_code = 102)
+//   4. Smart Exits     (exit_code = 1-8)
+//
+// All price math in double precision (AQC-734).
+
+struct AllExitResult {
+    bool should_exit;
+    int exit_code;
+    double exit_price;
+};
+
+__device__ AllExitResult check_all_exits_codegen(
+    int pos_type,
+    double entry_price,
+    double entry_atr,
+    double current_price,
+    double high_price,
+    double low_price,
+    double best_price,
+    double atr,
+    double ema_fast,
+    double ema_slow,
+    double ema_macro,
+    double adx,
+    double adx_slope,
+    double rsi,
+    double macd_hist,
+    double prev_macd_hist,
+    double prev2_macd_hist,
+    double prev3_macd_hist,
+    double profit_atr,
+    int confidence,
+    double entry_adx_threshold,
+    double equity,
+    int bars_held,
+    const GpuComboConfig& cfg
+) {
+    AllExitResult result;
+    result.should_exit = false;
+    result.exit_code = 0;
+    result.exit_price = 0.0;
+
+    // ── 1. Stop Loss ────────────────────────────────────────────────────
+    double sl_price = compute_sl_price_codegen(
+        cfg, pos_type, entry_price, atr, current_price, adx, adx_slope
+    );
+    if (pos_type == 1) {  // POS_LONG
+        if (current_price <= sl_price) {
+            result.should_exit = true;
+            result.exit_code = 100;
+            result.exit_price = sl_price;
+            return result;
+        }
+    } else {              // POS_SHORT
+        if (current_price >= sl_price) {
+            result.should_exit = true;
+            result.exit_code = 100;
+            result.exit_price = sl_price;
+            return result;
+        }
+    }
+
+    // ── 2. Trailing Stop ────────────────────────────────────────────────
+    // compute_trailing_codegen returns the trailing stop price (double).
+    // We pass current_trailing_sl = 0.0 (first-bar semantics; the sweep
+    // kernel maintains the running trailing SL across bars, but the
+    // orchestrator evaluates each bar independently with best_price).
+    double trail_price = compute_trailing_codegen(
+        cfg, pos_type, entry_price, current_price, atr,
+        0.0,  // current_trailing_sl — recomputed from best_price each bar
+        confidence, rsi, adx, adx_slope,
+        0.0,  // atr_slope — not tracked per-bar in sweep kernel
+        0.0,  // bb_width_ratio — not tracked per-bar in sweep kernel
+        profit_atr
+    );
+    if (trail_price > 0.0) {
+        bool trail_triggered = false;
+        if (pos_type == 1) {  // POS_LONG
+            trail_triggered = (current_price <= trail_price);
+        } else {              // POS_SHORT
+            trail_triggered = (current_price >= trail_price);
+        }
+        if (trail_triggered) {
+            result.should_exit = true;
+            result.exit_code = 101;
+            result.exit_price = trail_price;
+            return result;
+        }
+    }
+
+    // ── 3. Take Profit ──────────────────────────────────────────────────
+    // check_tp_codegen returns TpResult { action, fraction, exit_code }.
+    // action 2 = close (full TP), action 1 = reduce (partial TP).
+    // For the sweep orchestrator, both partial and full TP trigger exit.
+    TpResult tp = check_tp_codegen(
+        cfg, pos_type, entry_price, entry_atr, current_price,
+        equity,       // size (position equity for partial sizing)
+        0u,           // tp1_taken (sweep kernel tracks this externally)
+        (double)cfg.tp_atr_mult  // tp_mult
+    );
+    if (tp.action > 0) {
+        result.should_exit = true;
+        result.exit_code = 102;
+        result.exit_price = current_price;
+        return result;
+    }
+
+    // ── 4. Smart Exits ──────────────────────────────────────────────────
+    SmartExitResult smart = check_smart_exits_codegen(
+        cfg, pos_type, entry_price, entry_atr, current_price,
+        ema_fast, ema_slow, ema_macro,
+        adx, adx_slope, atr,
+        atr,          // avg_atr — approximated by current ATR in sweep
+        rsi, macd_hist, prev_macd_hist,
+        prev2_macd_hist, prev3_macd_hist,
+        profit_atr, confidence, entry_adx_threshold
+    );
+    if (smart.should_exit) {
+        result.should_exit = true;
+        result.exit_code = smart.exit_code;
+        result.exit_price = current_price;
+        return result;
+    }
+
+    // ── No exit triggered ───────────────────────────────────────────────
+    return result;
+}
 // Derived from bt-core/src/engine.rs sizing logic
 // (SSOT: risk-core/src/lib.rs::compute_entry_sizing)
 //
