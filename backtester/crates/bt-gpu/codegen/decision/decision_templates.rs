@@ -504,7 +504,72 @@ __device__ SizingResultD compute_entry_size_codegen(
 }
 
 /// PESC cooldown: reentry cooldown + ADX interpolation (AQC-1231)
-pub fn is_pesc_blocked_codegen() -> String { String::new() /* stub */ }
+///
+/// Generates a CUDA `__device__` function that mirrors
+/// `bt-core/src/engine.rs::is_pesc_blocked`.
+///
+/// ADX-adaptive cooldown: ADX 25..40 linearly interpolates between
+/// max_cd (weak trend = longer cooldown) and min_cd (strong trend = shorter).
+/// All ADX arithmetic uses `double` to match the f64 Rust source.
+/// Time arithmetic uses `unsigned int` seconds (GPU convention).
+pub fn is_pesc_blocked_codegen() -> String {
+    r#"// Derived from bt-core/src/engine.rs PESC cooldown logic
+// Post-Exit Same-Direction Cooldown: prevents re-entry in the same direction
+// too soon after an exit, with ADX-adaptive interpolation of cooldown duration.
+//
+// Gate chain:
+//   1. reentry_cooldown_minutes == 0 -> disabled
+//   2. No prior close recorded      -> not blocked
+//   3. Signal flip exit reason       -> not blocked (direction changed)
+//   4. Different direction           -> not blocked
+//   5. ADX-interpolated cooldown     -> blocked if elapsed < cooldown
+
+__device__ bool is_pesc_blocked_codegen(
+    const GpuComboConfig& cfg,
+    int bars_since_exit,
+    double adx,
+    unsigned int close_ts,
+    unsigned int close_reason,
+    unsigned int close_type,
+    unsigned int desired_type,
+    unsigned int current_sec
+) {
+    // Gate 1: PESC disabled when reentry_cooldown_minutes == 0
+    if (cfg.reentry_cooldown_minutes == 0u) { return false; }
+
+    // Gate 2: no prior close recorded for this symbol
+    if (close_ts == 0u) { return false; }
+
+    // Gate 3: no cooldown after signal flips (PESC_SIGNAL_FLIP == 2)
+    if (close_reason == 2u) { return false; }
+
+    // Gate 4: only block same-direction re-entry
+    if (close_type != desired_type) { return false; }
+
+    // ADX-adaptive cooldown interpolation
+    double min_cd = (double)(cfg.reentry_cooldown_min_mins);
+    double max_cd = (double)(cfg.reentry_cooldown_max_mins);
+
+    double cooldown_mins;
+    if (adx >= 40.0) {
+        // Strong trend: use minimum cooldown
+        cooldown_mins = min_cd;
+    } else if (adx <= 25.0) {
+        // Weak trend: use maximum cooldown
+        cooldown_mins = max_cd;
+    } else {
+        // Linear interpolation: ADX 25->40 maps max_cd->min_cd
+        double t = (adx - 25.0) / 15.0;
+        cooldown_mins = max_cd + t * (min_cd - max_cd);
+    }
+
+    unsigned int cooldown_sec = (unsigned int)(cooldown_mins * 60.0);
+    unsigned int elapsed = current_sec - close_ts;
+    return elapsed < cooldown_sec;
+}
+"#
+    .to_string()
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Tests
@@ -1374,6 +1439,177 @@ mod tests {
             src.len() > 200,
             "generated code must be substantial, got {} bytes",
             src.len()
+        );
+    }
+
+    // -- is_pesc_blocked_codegen tests (AQC-1231) --------------------------------
+
+    #[test]
+    fn pesc_codegen_has_correct_function_signature() {
+        let src = is_pesc_blocked_codegen();
+        assert!(
+            src.contains("__device__ bool is_pesc_blocked_codegen("),
+            "must declare a __device__ bool function"
+        );
+        assert!(
+            src.contains("const GpuComboConfig& cfg"),
+            "must take GpuComboConfig by const ref"
+        );
+        assert!(
+            src.contains("double adx"),
+            "must take adx as double"
+        );
+        assert!(
+            src.contains("unsigned int current_sec"),
+            "must take current_sec as unsigned int"
+        );
+        assert!(
+            src.contains("unsigned int desired_type"),
+            "must take desired_type as unsigned int"
+        );
+    }
+
+    #[test]
+    fn pesc_codegen_has_source_comment() {
+        let src = is_pesc_blocked_codegen();
+        assert!(
+            src.contains("Derived from bt-core/src/engine.rs PESC cooldown logic"),
+            "must reference the Rust SSOT source file"
+        );
+    }
+
+    #[test]
+    fn pesc_codegen_has_disable_gate() {
+        let src = is_pesc_blocked_codegen();
+        assert!(
+            src.contains("cfg.reentry_cooldown_minutes == 0u"),
+            "must check reentry_cooldown_minutes == 0 to disable PESC"
+        );
+    }
+
+    #[test]
+    fn pesc_codegen_has_no_prior_close_gate() {
+        let src = is_pesc_blocked_codegen();
+        assert!(
+            src.contains("close_ts == 0u"),
+            "must check for no prior close recorded"
+        );
+    }
+
+    #[test]
+    fn pesc_codegen_has_signal_flip_gate() {
+        let src = is_pesc_blocked_codegen();
+        assert!(
+            src.contains("close_reason == 2u"),
+            "must bypass cooldown for signal flip exits (PESC_SIGNAL_FLIP == 2)"
+        );
+    }
+
+    #[test]
+    fn pesc_codegen_has_direction_gate() {
+        let src = is_pesc_blocked_codegen();
+        assert!(
+            src.contains("close_type != desired_type"),
+            "must only block same-direction re-entry"
+        );
+    }
+
+    #[test]
+    fn pesc_codegen_has_adx_interpolation() {
+        let src = is_pesc_blocked_codegen();
+        assert!(
+            src.contains("adx >= 40.0"),
+            "strong trend threshold must be ADX >= 40"
+        );
+        assert!(
+            src.contains("cooldown_mins = min_cd"),
+            "strong trend uses min cooldown"
+        );
+        assert!(
+            src.contains("adx <= 25.0"),
+            "weak trend threshold must be ADX <= 25"
+        );
+        assert!(
+            src.contains("cooldown_mins = max_cd"),
+            "weak trend uses max cooldown"
+        );
+        assert!(
+            src.contains("(adx - 25.0) / 15.0"),
+            "must interpolate ADX in [25, 40] range with 15.0 denominator"
+        );
+        assert!(
+            src.contains("max_cd + t * (min_cd - max_cd)"),
+            "interpolation formula: max_cd + t * (min_cd - max_cd)"
+        );
+    }
+
+    #[test]
+    fn pesc_codegen_uses_double_for_adx_arithmetic() {
+        let src = is_pesc_blocked_codegen();
+        assert!(src.contains("double min_cd"), "min_cd must be double");
+        assert!(src.contains("double max_cd"), "max_cd must be double");
+        assert!(src.contains("double cooldown_mins"), "cooldown_mins must be double");
+        assert!(src.contains("double t"), "interpolation factor t must be double");
+    }
+
+    #[test]
+    fn pesc_codegen_uses_correct_config_fields() {
+        let src = is_pesc_blocked_codegen();
+        assert!(
+            src.contains("cfg.reentry_cooldown_minutes"),
+            "must use cfg.reentry_cooldown_minutes"
+        );
+        assert!(
+            src.contains("cfg.reentry_cooldown_min_mins"),
+            "must use cfg.reentry_cooldown_min_mins"
+        );
+        assert!(
+            src.contains("cfg.reentry_cooldown_max_mins"),
+            "must use cfg.reentry_cooldown_max_mins"
+        );
+    }
+
+    #[test]
+    fn pesc_codegen_computes_elapsed_and_compares() {
+        let src = is_pesc_blocked_codegen();
+        assert!(
+            src.contains("cooldown_mins * 60.0"),
+            "must convert cooldown from minutes to seconds"
+        );
+        assert!(
+            src.contains("current_sec - close_ts"),
+            "must compute elapsed seconds"
+        );
+        assert!(
+            src.contains("elapsed < cooldown_sec"),
+            "must return true (blocked) when elapsed < cooldown"
+        );
+    }
+
+    #[test]
+    fn pesc_codegen_is_nonempty() {
+        let src = is_pesc_blocked_codegen();
+        assert!(
+            src.len() > 200,
+            "generated code must be substantial, got {} bytes",
+            src.len()
+        );
+    }
+
+    #[test]
+    fn pesc_codegen_returns_bool() {
+        let src = is_pesc_blocked_codegen();
+        assert!(
+            src.contains("__device__ bool"),
+            "return type must be bool"
+        );
+        assert!(
+            src.contains("return false"),
+            "must have early-return false paths for gate bypasses"
+        );
+        assert!(
+            src.contains("return elapsed < cooldown_sec"),
+            "final return must compare elapsed vs cooldown"
         );
     }
 }
