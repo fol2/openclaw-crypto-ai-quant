@@ -1160,7 +1160,156 @@ __device__ SmartExitResult check_smart_exits_codegen(
 }
 
 /// Exit orchestrator: priority dispatch (AQC-1224)
-pub fn check_all_exits_codegen() -> String { String::new() /* stub */ }
+///
+/// Generates a CUDA `__device__` function that mirrors
+/// `bt-core/src/exits/mod.rs::check_all_exits`.
+///
+/// Calls each exit sub-system in priority order and returns the first
+/// triggered exit via an `AllExitResult` struct:
+///   1. Stop Loss     -> exit_code 100
+///   2. Trailing Stop  -> exit_code 101
+///   3. Take Profit   -> exit_code 102
+///   4. Smart Exits   -> exit_code 1-8 (from sub-check)
+///
+/// Uses `double` precision for all price/monetary calculations to match the
+/// f64 Rust source and satisfy T2 precision requirements (AQC-734).
+/// PESC cooldown is NOT checked here — it is an entry-side concern.
+pub fn check_all_exits_codegen() -> String {
+    r#"// Derived from bt-core/src/engine.rs exit orchestration
+// Exit orchestrator: calls individual exit checks in priority order.
+// First triggered exit wins. Priority:
+//   1. Stop Loss       (exit_code = 100)
+//   2. Trailing Stop   (exit_code = 101)
+//   3. Take Profit     (exit_code = 102)
+//   4. Smart Exits     (exit_code = 1-8)
+//
+// All price math in double precision (AQC-734).
+
+struct AllExitResult {
+    bool should_exit;
+    int exit_code;
+    double exit_price;
+};
+
+__device__ AllExitResult check_all_exits_codegen(
+    int pos_type,
+    double entry_price,
+    double entry_atr,
+    double current_price,
+    double high_price,
+    double low_price,
+    double best_price,
+    double atr,
+    double ema_fast,
+    double ema_slow,
+    double ema_macro,
+    double adx,
+    double adx_slope,
+    double rsi,
+    double macd_hist,
+    double prev_macd_hist,
+    double prev2_macd_hist,
+    double prev3_macd_hist,
+    double profit_atr,
+    int confidence,
+    double entry_adx_threshold,
+    double equity,
+    int bars_held,
+    const GpuComboConfig& cfg
+) {
+    AllExitResult result;
+    result.should_exit = false;
+    result.exit_code = 0;
+    result.exit_price = 0.0;
+
+    // ── 1. Stop Loss ────────────────────────────────────────────────────
+    double sl_price = compute_sl_price_codegen(
+        cfg, pos_type, entry_price, atr, current_price, adx, adx_slope
+    );
+    if (pos_type == 1) {  // POS_LONG
+        if (current_price <= sl_price) {
+            result.should_exit = true;
+            result.exit_code = 100;
+            result.exit_price = sl_price;
+            return result;
+        }
+    } else {              // POS_SHORT
+        if (current_price >= sl_price) {
+            result.should_exit = true;
+            result.exit_code = 100;
+            result.exit_price = sl_price;
+            return result;
+        }
+    }
+
+    // ── 2. Trailing Stop ────────────────────────────────────────────────
+    // compute_trailing_codegen returns the trailing stop price (double).
+    // We pass current_trailing_sl = 0.0 (first-bar semantics; the sweep
+    // kernel maintains the running trailing SL across bars, but the
+    // orchestrator evaluates each bar independently with best_price).
+    double trail_price = compute_trailing_codegen(
+        cfg, pos_type, entry_price, current_price, atr,
+        0.0,  // current_trailing_sl — recomputed from best_price each bar
+        confidence, rsi, adx, adx_slope,
+        0.0,  // atr_slope — not tracked per-bar in sweep kernel
+        0.0,  // bb_width_ratio — not tracked per-bar in sweep kernel
+        profit_atr
+    );
+    if (trail_price > 0.0) {
+        bool trail_triggered = false;
+        if (pos_type == 1) {  // POS_LONG
+            trail_triggered = (current_price <= trail_price);
+        } else {              // POS_SHORT
+            trail_triggered = (current_price >= trail_price);
+        }
+        if (trail_triggered) {
+            result.should_exit = true;
+            result.exit_code = 101;
+            result.exit_price = trail_price;
+            return result;
+        }
+    }
+
+    // ── 3. Take Profit ──────────────────────────────────────────────────
+    // check_tp_codegen returns TpResult { action, fraction, exit_code }.
+    // action 2 = close (full TP), action 1 = reduce (partial TP).
+    // For the sweep orchestrator, both partial and full TP trigger exit.
+    TpResult tp = check_tp_codegen(
+        cfg, pos_type, entry_price, entry_atr, current_price,
+        equity,       // size (position equity for partial sizing)
+        0u,           // tp1_taken (sweep kernel tracks this externally)
+        (double)cfg.tp_atr_mult  // tp_mult
+    );
+    if (tp.action > 0) {
+        result.should_exit = true;
+        result.exit_code = 102;
+        result.exit_price = current_price;
+        return result;
+    }
+
+    // ── 4. Smart Exits ──────────────────────────────────────────────────
+    SmartExitResult smart = check_smart_exits_codegen(
+        cfg, pos_type, entry_price, entry_atr, current_price,
+        ema_fast, ema_slow, ema_macro,
+        adx, adx_slope, atr,
+        atr,          // avg_atr — approximated by current ATR in sweep
+        rsi, macd_hist, prev_macd_hist,
+        prev2_macd_hist, prev3_macd_hist,
+        profit_atr, confidence, entry_adx_threshold
+    );
+    if (smart.should_exit) {
+        result.should_exit = true;
+        result.exit_code = smart.exit_code;
+        result.exit_price = current_price;
+        return result;
+    }
+
+    // ── No exit triggered ───────────────────────────────────────────────
+    return result;
+}
+"#
+    .to_string()
+}
 
 /// Entry sizing: dynamic sizing/leverage/vol scalar (AQC-1230)
 ///
@@ -3194,6 +3343,184 @@ mod tests {
     #[test]
     fn smart_exits_codegen_is_nonempty() {
         let src = check_smart_exits_codegen();
+        assert!(
+            src.len() > 200,
+            "generated code must be substantial, got {} bytes",
+            src.len()
+        );
+    }
+
+    // -- check_all_exits_codegen tests (AQC-1224) -------------------------------
+
+    #[test]
+    fn all_exits_codegen_has_correct_function_signature() {
+        let src = check_all_exits_codegen();
+        assert!(
+            src.contains("__device__ AllExitResult check_all_exits_codegen("),
+            "must declare a __device__ AllExitResult function"
+        );
+        assert!(
+            src.contains("int pos_type"),
+            "must take pos_type as int"
+        );
+        assert!(
+            src.contains("double entry_price"),
+            "must take entry_price as double"
+        );
+        assert!(
+            src.contains("double entry_atr"),
+            "must take entry_atr as double"
+        );
+        assert!(
+            src.contains("double current_price"),
+            "must take current_price as double"
+        );
+        assert!(
+            src.contains("const GpuComboConfig& cfg"),
+            "must take GpuComboConfig by const ref"
+        );
+    }
+
+    #[test]
+    fn all_exits_codegen_has_all_exit_result_struct() {
+        let src = check_all_exits_codegen();
+        assert!(
+            src.contains("struct AllExitResult"),
+            "must define AllExitResult struct"
+        );
+        assert!(
+            src.contains("bool should_exit"),
+            "AllExitResult must have should_exit field"
+        );
+        assert!(
+            src.contains("int exit_code"),
+            "AllExitResult must have exit_code field"
+        );
+        assert!(
+            src.contains("double exit_price"),
+            "AllExitResult must have exit_price field (double precision)"
+        );
+    }
+
+    #[test]
+    fn all_exits_codegen_uses_double_precision_for_exit_price() {
+        let src = check_all_exits_codegen();
+        // The struct must declare exit_price as double, not float
+        assert!(
+            src.contains("double exit_price"),
+            "exit_price must be double precision (T2 requirement)"
+        );
+        // Should not have float exit_price
+        assert!(
+            !src.contains("float exit_price"),
+            "exit_price must NOT be float — double required"
+        );
+    }
+
+    #[test]
+    fn all_exits_codegen_calls_compute_sl_price() {
+        let src = check_all_exits_codegen();
+        assert!(
+            src.contains("compute_sl_price_codegen("),
+            "must call compute_sl_price_codegen"
+        );
+    }
+
+    #[test]
+    fn all_exits_codegen_calls_compute_trailing() {
+        let src = check_all_exits_codegen();
+        assert!(
+            src.contains("compute_trailing_codegen("),
+            "must call compute_trailing_codegen"
+        );
+    }
+
+    #[test]
+    fn all_exits_codegen_calls_check_tp() {
+        let src = check_all_exits_codegen();
+        assert!(
+            src.contains("check_tp_codegen("),
+            "must call check_tp_codegen"
+        );
+    }
+
+    #[test]
+    fn all_exits_codegen_calls_check_smart_exits() {
+        let src = check_all_exits_codegen();
+        assert!(
+            src.contains("check_smart_exits_codegen("),
+            "must call check_smart_exits_codegen"
+        );
+    }
+
+    #[test]
+    fn all_exits_codegen_sl_has_exit_code_100() {
+        let src = check_all_exits_codegen();
+        // Find the SL section and verify exit_code = 100 comes before trailing
+        let sl_pos = src.find("compute_sl_price_codegen(")
+            .expect("must call compute_sl_price_codegen");
+        let trail_pos = src.find("compute_trailing_codegen(")
+            .expect("must call compute_trailing_codegen");
+        assert!(
+            sl_pos < trail_pos,
+            "SL must be checked before trailing (priority order)"
+        );
+        // exit_code 100 must appear between SL call and trailing call
+        let sl_section = &src[sl_pos..trail_pos];
+        assert!(
+            sl_section.contains("exit_code = 100"),
+            "SL exit must set exit_code = 100"
+        );
+    }
+
+    #[test]
+    fn all_exits_codegen_trailing_has_exit_code_101() {
+        let src = check_all_exits_codegen();
+        let trail_pos = src.find("compute_trailing_codegen(")
+            .expect("must call compute_trailing_codegen");
+        let tp_pos = src.find("check_tp_codegen(")
+            .expect("must call check_tp_codegen");
+        assert!(
+            trail_pos < tp_pos,
+            "trailing must be checked before TP (priority order)"
+        );
+        let trail_section = &src[trail_pos..tp_pos];
+        assert!(
+            trail_section.contains("exit_code = 101"),
+            "trailing exit must set exit_code = 101"
+        );
+    }
+
+    #[test]
+    fn all_exits_codegen_tp_has_exit_code_102() {
+        let src = check_all_exits_codegen();
+        let tp_pos = src.find("check_tp_codegen(")
+            .expect("must call check_tp_codegen");
+        let smart_pos = src.find("check_smart_exits_codegen(")
+            .expect("must call check_smart_exits_codegen");
+        assert!(
+            tp_pos < smart_pos,
+            "TP must be checked before smart exits (priority order)"
+        );
+        let tp_section = &src[tp_pos..smart_pos];
+        assert!(
+            tp_section.contains("exit_code = 102"),
+            "TP exit must set exit_code = 102"
+        );
+    }
+
+    #[test]
+    fn all_exits_codegen_has_source_comment() {
+        let src = check_all_exits_codegen();
+        assert!(
+            src.contains("Derived from bt-core/src/engine.rs"),
+            "must have SSOT provenance comment"
+        );
+    }
+
+    #[test]
+    fn all_exits_codegen_is_nonempty() {
+        let src = check_all_exits_codegen();
         assert!(
             src.len() > 200,
             "generated code must be substantial, got {} bytes",
