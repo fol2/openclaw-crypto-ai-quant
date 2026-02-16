@@ -54,18 +54,23 @@ pub struct GpuDeviceState {
 }
 
 impl GpuDeviceState {
-    pub fn new() -> Self {
-        let dev = CudaDevice::new(0).unwrap_or_else(|e| {
-            eprintln!("[GPU] CUDA init failed: {e}");
-            eprintln!("[GPU] Hint: on WSL2, ensure /usr/lib/wsl/lib/libcuda.so.1 exists");
-            eprintln!("[GPU] Hint: run `nvidia-smi` to verify the driver is loaded");
-            panic!("No CUDA device found: {e}");
-        });
+    /// Initialize CUDA device and load PTX kernels.
+    ///
+    /// Returns `Err` on CUDA init failure or PTX load failure, allowing the
+    /// caller to fall back to CPU mode instead of panicking (C6).
+    pub fn new() -> Result<Self, String> {
+        let dev = CudaDevice::new(0).map_err(|e| {
+            format!(
+                "CUDA init failed: {e}. \
+                 Hint (WSL2): ensure /usr/lib/wsl/lib/libcuda.so.1 exists. \
+                 Run `nvidia-smi` to verify the driver is loaded."
+            )
+        })?;
 
         // Load sweep engine PTX (trade logic)
         let ptx_sweep = include_str!(concat!(env!("OUT_DIR"), "/sweep_engine.ptx"));
         dev.load_ptx(Ptx::from_src(ptx_sweep), "sweep", &["sweep_engine_kernel"])
-            .expect("Failed to load sweep_engine PTX");
+            .map_err(|e| format!("Failed to load sweep_engine PTX: {e}"))?;
 
         // Load indicator kernel PTX (indicator computation + breadth)
         let ptx_ind = include_str!(concat!(env!("OUT_DIR"), "/indicator_kernel.ptx"));
@@ -74,12 +79,12 @@ impl GpuDeviceState {
             "indicators",
             &["indicator_kernel", "breadth_kernel"],
         )
-        .expect("Failed to load indicator_kernel PTX");
+        .map_err(|e| format!("Failed to load indicator_kernel PTX: {e}"))?;
 
         let name = dev.name().unwrap_or_else(|_| "unknown".to_string());
         eprintln!("[GPU] CUDA Device: {}", name);
 
-        Self { dev }
+        Ok(Self { dev })
     }
 
     /// Query (free, total) VRAM in bytes via cuMemGetInfo.
@@ -123,6 +128,8 @@ pub struct IndicatorBuffers {
 impl IndicatorBuffers {
     /// Create indicator buffers: upload raw candles + indicator configs,
     /// allocate snapshot/breadth/btc_bullish output in VRAM.
+    ///
+    /// Returns `Err` on GPU memory allocation failure (H11).
     pub fn new(
         ds: &GpuDeviceState,
         candles_gpu: &CudaSlice<GpuRawCandle>,
@@ -130,10 +137,11 @@ impl IndicatorBuffers {
         num_bars: u32,
         num_symbols: u32,
         btc_sym_idx: u32,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let k = ind_configs.len() as u32;
 
-        let ind_configs_gpu = ds.dev.htod_sync_copy(ind_configs).unwrap();
+        let ind_configs_gpu = ds.dev.htod_sync_copy(ind_configs)
+            .map_err(|e| format!("GPU: htod ind_configs failed: {e}"))?;
 
         let params = IndicatorParams {
             num_ind_combos: k,
@@ -142,17 +150,21 @@ impl IndicatorBuffers {
             btc_sym_idx,
             _pad: [0; 4],
         };
-        let ind_params_gpu = ds.dev.htod_sync_copy(&[params]).unwrap();
+        let ind_params_gpu = ds.dev.htod_sync_copy(&[params])
+            .map_err(|e| format!("GPU: htod ind_params failed: {e}"))?;
 
         // Allocate output buffers in VRAM (zeroed)
         let snap_count = (k as usize) * (num_bars as usize) * (num_symbols as usize);
         let breadth_count = (k as usize) * (num_bars as usize);
 
-        let snapshots_gpu = ds.dev.alloc_zeros::<GpuSnapshot>(snap_count).unwrap();
-        let breadth_gpu = ds.dev.alloc_zeros::<f32>(breadth_count).unwrap();
-        let btc_bullish_gpu = ds.dev.alloc_zeros::<u32>(breadth_count).unwrap();
+        let snapshots_gpu = ds.dev.alloc_zeros::<GpuSnapshot>(snap_count)
+            .map_err(|e| format!("GPU: alloc snapshots ({snap_count} elems) failed: {e}"))?;
+        let breadth_gpu = ds.dev.alloc_zeros::<f32>(breadth_count)
+            .map_err(|e| format!("GPU: alloc breadth ({breadth_count} elems) failed: {e}"))?;
+        let btc_bullish_gpu = ds.dev.alloc_zeros::<u32>(breadth_count)
+            .map_err(|e| format!("GPU: alloc btc_bullish ({breadth_count} elems) failed: {e}"))?;
 
-        Self {
+        Ok(Self {
             candles_gpu: candles_gpu.clone(),
             ind_configs_gpu,
             ind_params_gpu,
@@ -163,7 +175,7 @@ impl IndicatorBuffers {
             num_symbols,
             num_bars,
             btc_sym_idx,
-        }
+        })
     }
 }
 

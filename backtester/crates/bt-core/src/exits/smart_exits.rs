@@ -204,11 +204,13 @@ fn check_funding_headwind(
 
     let is_long = matches!(pos.pos_type, PositionType::Long);
     let entry = pos.entry_price;
+    // C5: ATR zero-guard — prevent NaN/Inf from division by zero
     let atr = if pos.entry_atr > 0.0 {
         pos.entry_atr
     } else {
         entry * 0.005
-    };
+    }
+    .max(1e-12);
 
     let is_headwind = if is_long {
         funding_rate > 0.0

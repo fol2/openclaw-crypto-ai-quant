@@ -1627,6 +1627,12 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
         args.initial_balance
     };
 
+    // L9: validate initial_balance > 0
+    if base_balance <= 0.0 {
+        eprintln!("[error] initial_balance must be > 0.0, got {base_balance}");
+        std::process::exit(1);
+    }
+
     // Load init-state if provided (overrides both --initial-balance and --balance-from)
     let (effective_balance, init_state) = if let Some(ref path) = args.init_state {
         eprintln!("[replay] Loading init-state from {:?}", path);
@@ -1773,6 +1779,12 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         args.initial_balance
     };
+
+    // L9: validate initial_balance > 0
+    if initial_balance <= 0.0 {
+        eprintln!("[error] initial_balance must be > 0.0, got {initial_balance}");
+        std::process::exit(1);
+    }
 
     // Load sweep spec
     let mut spec = bt_core::sweep::load_sweep_spec(&args.sweep_spec)?;

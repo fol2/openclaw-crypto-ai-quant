@@ -114,7 +114,10 @@ impl Position {
     /// Compute the weighted-average entry after adding `add_size` units at `add_price`.
     pub fn add_to_position(&mut self, add_price: f64, add_size: f64, add_margin: f64, time_ms: i64) {
         let total_size = self.size + add_size;
-        if total_size > 0.0 {
+        // H10: near-zero guard — prevent extreme entry_price from tiny denominator
+        if total_size < 1e-12 {
+            self.entry_price = add_price;
+        } else {
             self.entry_price =
                 (self.entry_price * self.size + add_price * add_size) / total_size;
         }

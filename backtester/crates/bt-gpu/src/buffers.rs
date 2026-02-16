@@ -2,6 +2,10 @@
 //!
 //! All structs are `#[repr(C)]` and 16-byte aligned for CUDA compatibility.
 //! f64 values from the CPU side are cast to f32 for GPU computation.
+//!
+//! **M12 — Known f32 precision gap:** GPU kernels use f32 for indicators and
+//! trade logic while the CPU reference engine uses f64. See [`crate::precision`]
+//! for formal tolerance tiers (T0–T4) used by the parity test suite.
 
 use bytemuck::{Pod, Zeroable};
 
