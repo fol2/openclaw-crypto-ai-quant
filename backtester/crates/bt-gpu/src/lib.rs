@@ -419,8 +419,11 @@ mod tests {
             "CUDA get_tp_mult must not hardcode ADX TP multipliers"
         );
 
+        // DEPRECATED (AQC-1241): WGSL shader is no longer maintained.
+        // This assertion is kept to prevent silent regressions in the
+        // archived shader, but no new parity checks should be added here.
         let wgsl_src = std::fs::read_to_string(root.join("shaders/sweep_engine.wgsl"))
-            .expect("Failed to read WGSL sweep engine source");
+            .expect("Failed to read WGSL sweep engine source (deprecated, retained for reference)");
         let wgsl_fn = extract_fn_block(&wgsl_src, "fn get_tp_mult(");
         assert!(
             wgsl_fn.contains("return (*cfg).tp_atr_mult;"),

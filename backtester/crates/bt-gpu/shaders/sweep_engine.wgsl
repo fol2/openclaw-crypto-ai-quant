@@ -1,5 +1,12 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// GPU Sweep Engine — WGSL Compute Shader
+// DEPRECATED (AQC-1241): This WGSL shader is no longer maintained.
+// The production GPU sweep uses CUDA (sweep_engine.cu) with codegen'd
+// decision functions. This file is retained for reference only.
+// Known divergences from CUDA: hardcoded params, inverted RSI logic,
+// missing BTC alignment, struct field name bugs, no codegen integration.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// GPU Sweep Engine — WGSL Compute Shader (DEPRECATED)
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // Mirrors the Rust backtester trade logic for parameter sweep.
