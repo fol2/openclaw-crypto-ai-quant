@@ -1431,8 +1431,8 @@ __device__ bool is_pesc_blocked_codegen(
     // Gate 2: no prior close recorded for this symbol
     if (close_ts == 0u) { return false; }
 
-    // Gate 3: no cooldown after signal flips (PESC_SIGNAL_FLIP == 2)
-    if (close_reason == 2u) { return false; }
+    // Gate 3: no cooldown after signal flips
+    if (close_reason == PESC_SIGNAL_FLIP) { return false; }
 
     // Gate 4: only block same-direction re-entry
     if (close_type != desired_type) { return false; }
@@ -3911,8 +3911,8 @@ mod tests {
     fn pesc_codegen_has_signal_flip_gate() {
         let src = is_pesc_blocked_codegen();
         assert!(
-            src.contains("close_reason == 2u"),
-            "must bypass cooldown for signal flip exits (PESC_SIGNAL_FLIP == 2)"
+            src.contains("close_reason == PESC_SIGNAL_FLIP"),
+            "must bypass cooldown for signal flip exits (uses PESC_SIGNAL_FLIP define)"
         );
     }
 
