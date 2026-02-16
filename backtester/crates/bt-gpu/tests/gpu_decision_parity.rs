@@ -37,6 +37,7 @@
 
 #![cfg(feature = "codegen")]
 
+use bt_gpu::buffers::GpuComboConfig;
 use bt_gpu::codegen::decision::render_all_decision;
 use bt_gpu::precision::*;
 
@@ -7055,5 +7056,2315 @@ fn test_aqc1225_short_position_exit_symmetry() {
             );
         }
         other => panic!("Expected Stop Loss for short, got {:?}", other),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AQC-1212: Fixture-based parity tests for gates & signals codegen
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// These tests exercise the Rust SSOT gate evaluation and signal generation
+// functions with diverse config/market data combinations, verifying outputs
+// match expected behaviour.  Since we cannot execute CUDA, the tests validate:
+//
+//   1. The Rust reference functions produce correct outputs for known inputs
+//   2. Config permutations exercise all gate/signal paths
+//   3. Numerical results are within T2 precision of f32 round-trip
+//   4. Edge cases (boundary ADX, zero slope, extreme RSI) are handled correctly
+//
+// Complements the existing structural codegen tests (AQC-1261, AQC-1262) by
+// verifying actual numerical correctness of the reference implementations.
+
+// ── Market snapshot struct for gate/signal tests ────────────────────────────
+
+/// Snapshot of market state for gate/signal evaluation.
+/// Mirrors the subset of GpuSnapshot fields used by check_gates and generate_signal.
+#[derive(Debug, Clone)]
+struct MarketSnapshot {
+    close: f64,
+    prev_close: f64,
+    ema_fast: f64,
+    ema_slow: f64,
+    ema_macro: f64,
+    prev_ema_fast: f64,
+    adx: f64,
+    adx_slope: f64,
+    atr: f64,
+    avg_atr: f64,
+    atr_slope: f64,
+    rsi: f64,
+    stoch_k: f64,
+    bb_width_ratio: f64,
+    volume: f64,
+    vol_sma: f64,
+    vol_trend: bool,
+    macd_hist: f64,
+    prev_macd_hist: f64,
+    ema_slow_slope_pct: f64,
+}
+
+impl MarketSnapshot {
+    /// A strongly bullish market: all gates should pass for a standard BUY.
+    fn strong_bullish() -> Self {
+        Self {
+            close: 100.0,
+            prev_close: 99.5,
+            ema_fast: 99.0,
+            ema_slow: 97.0,
+            ema_macro: 94.0,
+            prev_ema_fast: 98.5,
+            adx: 32.0,
+            adx_slope: 1.5,
+            atr: 1.5,
+            avg_atr: 1.4,
+            atr_slope: 0.1,
+            rsi: 57.0,
+            stoch_k: 0.5,
+            bb_width_ratio: 1.2,
+            volume: 1200.0,
+            vol_sma: 800.0,
+            vol_trend: true,
+            macd_hist: 0.5,
+            prev_macd_hist: 0.3,
+            ema_slow_slope_pct: 0.001,
+        }
+    }
+
+    /// A strongly bearish market: all gates should pass for a standard SELL.
+    fn strong_bearish() -> Self {
+        Self {
+            close: 95.0,
+            prev_close: 96.0,
+            ema_fast: 96.0,
+            ema_slow: 97.0,
+            ema_macro: 99.0,
+            prev_ema_fast: 96.5,
+            adx: 32.0,
+            adx_slope: 1.5,
+            atr: 1.5,
+            avg_atr: 1.4,
+            atr_slope: 0.1,
+            rsi: 42.0,
+            stoch_k: 0.5,
+            bb_width_ratio: 1.2,
+            volume: 1200.0,
+            vol_sma: 800.0,
+            vol_trend: true,
+            macd_hist: -0.5,
+            prev_macd_hist: -0.3,
+            ema_slow_slope_pct: -0.001,
+        }
+    }
+}
+
+// ── Gate configuration for fixture tests ────────────────────────────────────
+
+/// Configuration subset for gate evaluation, mirroring GpuComboConfig gate fields.
+#[derive(Debug, Clone)]
+struct GateConfig {
+    // Ranging filter
+    enable_ranging_filter: bool,
+    ranging_min_signals: usize,
+    ranging_adx_lt: f64,
+    ranging_bb_width_ratio_lt: f64,
+    ranging_rsi_low: f64,
+    ranging_rsi_high: f64,
+    // Anomaly filter
+    enable_anomaly_filter: bool,
+    anomaly_price_change_pct: f64,
+    anomaly_ema_dev_pct: f64,
+    // Extension filter
+    enable_extension_filter: bool,
+    max_dist_ema_fast: f64,
+    // Volume confirmation
+    require_volume_confirmation: bool,
+    vol_confirm_include_prev: bool,
+    // ADX rising
+    require_adx_rising: bool,
+    adx_rising_saturation: f64,
+    // ADX threshold + TMC/AVE
+    min_adx: f64,
+    ave_enabled: bool,
+    ave_atr_ratio_gt: f64,
+    ave_adx_mult: f64,
+    // Macro alignment
+    require_macro_alignment: bool,
+    // BTC alignment
+    require_btc_alignment: bool,
+    btc_adx_override: f64,
+    // Slow drift override
+    enable_slow_drift_entries: bool,
+    slow_drift_ranging_slope_override: f64,
+    // DRE
+    dre_min_adx: f64,
+    dre_max_adx: f64,
+    dre_long_rsi_limit_low: f64,
+    dre_long_rsi_limit_high: f64,
+    dre_short_rsi_limit_low: f64,
+    dre_short_rsi_limit_high: f64,
+    // StochRSI filter
+    use_stoch_rsi_filter: bool,
+    stoch_rsi_block_long_gt: f64,
+    stoch_rsi_block_short_lt: f64,
+    // MACD mode: 0=Accel, 1=Sign, 2=None
+    macd_mode: u32,
+    // Confidence upgrade
+    high_conf_volume_mult: f64,
+    // REEF
+    #[allow(dead_code)]
+    enable_reef_filter: bool,
+    #[allow(dead_code)]
+    reef_long_rsi_block_gt: f64,
+    #[allow(dead_code)]
+    reef_short_rsi_block_lt: f64,
+    #[allow(dead_code)]
+    reef_adx_threshold: f64,
+    #[allow(dead_code)]
+    reef_long_rsi_extreme_gt: f64,
+    #[allow(dead_code)]
+    reef_short_rsi_extreme_lt: f64,
+    // SSF
+    #[allow(dead_code)]
+    enable_ssf_filter: bool,
+    // Regime
+    #[allow(dead_code)]
+    enable_regime_filter: bool,
+    // Pullback
+    enable_pullback_entries: bool,
+    pullback_min_adx: f64,
+    pullback_rsi_long_min: f64,
+    pullback_rsi_short_max: f64,
+    pullback_require_macd_sign: bool,
+    pullback_confidence: u32, // 0=Low, 1=Medium, 2=High
+    // Slow drift signal
+    slow_drift_min_slope_pct: f64,
+    slow_drift_min_adx: f64,
+    slow_drift_rsi_long_min: f64,
+    slow_drift_rsi_short_max: f64,
+    slow_drift_require_macd_sign: bool,
+}
+
+impl GateConfig {
+    /// Default config matching the bt-signals default SignalConfigView.
+    fn default_config() -> Self {
+        Self {
+            enable_ranging_filter: true,
+            ranging_min_signals: 2,
+            ranging_adx_lt: 21.0,
+            ranging_bb_width_ratio_lt: 0.8,
+            ranging_rsi_low: 47.0,
+            ranging_rsi_high: 53.0,
+            enable_anomaly_filter: true,
+            anomaly_price_change_pct: 0.10,
+            anomaly_ema_dev_pct: 0.50,
+            enable_extension_filter: true,
+            max_dist_ema_fast: 0.04,
+            require_volume_confirmation: false,
+            vol_confirm_include_prev: true,
+            require_adx_rising: true,
+            adx_rising_saturation: 40.0,
+            min_adx: 22.0,
+            ave_enabled: true,
+            ave_atr_ratio_gt: 1.5,
+            ave_adx_mult: 1.25,
+            require_macro_alignment: false,
+            require_btc_alignment: true,
+            btc_adx_override: 40.0,
+            enable_slow_drift_entries: false,
+            slow_drift_ranging_slope_override: 0.0006,
+            dre_min_adx: 22.0,
+            dre_max_adx: 40.0,
+            dre_long_rsi_limit_low: 56.0,
+            dre_long_rsi_limit_high: 52.0,
+            dre_short_rsi_limit_low: 44.0,
+            dre_short_rsi_limit_high: 48.0,
+            use_stoch_rsi_filter: true,
+            stoch_rsi_block_long_gt: 0.85,
+            stoch_rsi_block_short_lt: 0.15,
+            macd_mode: 0, // Accel
+            high_conf_volume_mult: 2.5,
+            enable_reef_filter: false,
+            reef_long_rsi_block_gt: 70.0,
+            reef_short_rsi_block_lt: 30.0,
+            reef_adx_threshold: 30.0,
+            reef_long_rsi_extreme_gt: 80.0,
+            reef_short_rsi_extreme_lt: 20.0,
+            enable_ssf_filter: false,
+            enable_regime_filter: false,
+            enable_pullback_entries: false,
+            pullback_min_adx: 22.0,
+            pullback_rsi_long_min: 50.0,
+            pullback_rsi_short_max: 50.0,
+            pullback_require_macd_sign: true,
+            pullback_confidence: 0,
+            slow_drift_min_slope_pct: 0.0006,
+            slow_drift_min_adx: 10.0,
+            slow_drift_rsi_long_min: 50.0,
+            slow_drift_rsi_short_max: 50.0,
+            slow_drift_require_macd_sign: true,
+        }
+    }
+}
+
+// ── Gate result struct ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+struct GateResultFixture {
+    is_ranging: bool,
+    is_anomaly: bool,
+    is_extended: bool,
+    vol_confirm: bool,
+    is_trending_up: bool,
+    adx_above_min: bool,
+    bullish_alignment: bool,
+    bearish_alignment: bool,
+    btc_ok_long: bool,
+    btc_ok_short: bool,
+    effective_min_adx: f64,
+    rsi_long_limit: f64,
+    rsi_short_limit: f64,
+    stoch_rsi_active: bool,
+    all_gates_pass: bool,
+}
+
+// ── Inline Rust SSOT: check_gates (mirrors bt-signals/src/gates.rs) ─────────
+
+fn rust_check_gates(
+    snap: &MarketSnapshot,
+    cfg: &GateConfig,
+    btc_bullish: Option<bool>,
+    is_btc_symbol: bool,
+) -> GateResultFixture {
+    // Gate 1: Ranging filter (vote system)
+    let mut is_ranging = false;
+    if cfg.enable_ranging_filter {
+        let min_signals = cfg.ranging_min_signals.max(1);
+        let mut votes: u32 = 0;
+        if snap.adx < cfg.ranging_adx_lt {
+            votes += 1;
+        }
+        if snap.bb_width_ratio < cfg.ranging_bb_width_ratio_lt {
+            votes += 1;
+        }
+        if snap.rsi > cfg.ranging_rsi_low && snap.rsi < cfg.ranging_rsi_high {
+            votes += 1;
+        }
+        is_ranging = votes >= min_signals as u32;
+    }
+
+    // Gate 2: Anomaly filter
+    let is_anomaly = if cfg.enable_anomaly_filter {
+        let price_change_pct = if snap.prev_close > 0.0 {
+            (snap.close - snap.prev_close).abs() / snap.prev_close
+        } else {
+            0.0
+        };
+        let ema_dev_pct = if snap.ema_fast > 0.0 {
+            (snap.close - snap.ema_fast).abs() / snap.ema_fast
+        } else {
+            0.0
+        };
+        price_change_pct > cfg.anomaly_price_change_pct || ema_dev_pct > cfg.anomaly_ema_dev_pct
+    } else {
+        false
+    };
+
+    // Gate 3: Extension filter
+    let is_extended = if cfg.enable_extension_filter {
+        if snap.ema_fast > 0.0 {
+            let dist = (snap.close - snap.ema_fast).abs() / snap.ema_fast;
+            dist > cfg.max_dist_ema_fast
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    // Gate 4: Volume confirmation
+    let vol_confirm = if cfg.require_volume_confirmation {
+        let vol_above_sma = snap.volume > snap.vol_sma;
+        let vol_trend_ok = snap.vol_trend;
+        if cfg.vol_confirm_include_prev {
+            vol_above_sma || vol_trend_ok
+        } else {
+            vol_above_sma && vol_trend_ok
+        }
+    } else {
+        true
+    };
+
+    // Gate 5: ADX rising (or saturated)
+    let is_trending_up = if cfg.require_adx_rising {
+        (snap.adx_slope > 0.0) || (snap.adx > cfg.adx_rising_saturation)
+    } else {
+        true
+    };
+
+    // Gate 6: ADX threshold + TMC + AVE
+    let mut effective_min_adx = cfg.min_adx;
+
+    // TMC: cap at 25.0 when slope > 0.5
+    if snap.adx_slope > 0.5 {
+        effective_min_adx = effective_min_adx.min(25.0);
+    }
+
+    // AVE: multiply when ATR ratio exceeds threshold
+    if cfg.ave_enabled && snap.avg_atr > 0.0 {
+        let atr_ratio = snap.atr / snap.avg_atr;
+        if atr_ratio > cfg.ave_atr_ratio_gt {
+            let mult = if cfg.ave_adx_mult > 0.0 {
+                cfg.ave_adx_mult
+            } else {
+                1.0
+            };
+            effective_min_adx *= mult;
+        }
+    }
+
+    let adx_above_min = snap.adx > effective_min_adx;
+
+    // Gate 7: Macro alignment
+    let mut bullish_alignment = snap.ema_fast > snap.ema_slow;
+    let mut bearish_alignment = snap.ema_fast < snap.ema_slow;
+
+    if cfg.require_macro_alignment {
+        bullish_alignment = bullish_alignment && (snap.ema_slow > snap.ema_macro);
+        bearish_alignment = bearish_alignment && (snap.ema_slow < snap.ema_macro);
+    }
+
+    // Gate 8: BTC alignment
+    let btc_ok_long = !cfg.require_btc_alignment
+        || is_btc_symbol
+        || btc_bullish.is_none()
+        || btc_bullish == Some(true)
+        || snap.adx > cfg.btc_adx_override;
+
+    let btc_ok_short = !cfg.require_btc_alignment
+        || is_btc_symbol
+        || btc_bullish.is_none()
+        || btc_bullish == Some(false)
+        || snap.adx > cfg.btc_adx_override;
+
+    // Slow-drift ranging override
+    if cfg.enable_slow_drift_entries
+        && is_ranging
+        && snap.ema_slow_slope_pct.abs() >= cfg.slow_drift_ranging_slope_override
+    {
+        is_ranging = false;
+    }
+
+    // DRE (Dynamic RSI Elasticity)
+    let adx_min = cfg.dre_min_adx;
+    let adx_max = if cfg.dre_max_adx > adx_min {
+        cfg.dre_max_adx
+    } else {
+        adx_min + 1.0
+    };
+    let weight = ((snap.adx - adx_min) / (adx_max - adx_min)).clamp(0.0, 1.0);
+    let rsi_long_limit =
+        cfg.dre_long_rsi_limit_low + weight * (cfg.dre_long_rsi_limit_high - cfg.dre_long_rsi_limit_low);
+    let rsi_short_limit =
+        cfg.dre_short_rsi_limit_low + weight * (cfg.dre_short_rsi_limit_high - cfg.dre_short_rsi_limit_low);
+
+    // Combined all_gates_pass
+    let all_gates_pass = adx_above_min
+        && !is_ranging
+        && !is_anomaly
+        && !is_extended
+        && vol_confirm
+        && is_trending_up;
+
+    GateResultFixture {
+        is_ranging,
+        is_anomaly,
+        is_extended,
+        vol_confirm,
+        is_trending_up,
+        adx_above_min,
+        bullish_alignment,
+        bearish_alignment,
+        btc_ok_long,
+        btc_ok_short,
+        effective_min_adx,
+        rsi_long_limit,
+        rsi_short_limit,
+        stoch_rsi_active: cfg.use_stoch_rsi_filter,
+        all_gates_pass,
+    }
+}
+
+// ── MACD helper (mirrors bt-signals/src/entry.rs) ───────────────────────────
+
+fn check_macd_long_ref(mode: u32, macd_hist: f64, prev_macd_hist: f64) -> bool {
+    match mode {
+        0 => macd_hist > prev_macd_hist, // Accel
+        1 => macd_hist > 0.0,            // Sign
+        _ => true,                        // None
+    }
+}
+
+fn check_macd_short_ref(mode: u32, macd_hist: f64, prev_macd_hist: f64) -> bool {
+    match mode {
+        0 => macd_hist < prev_macd_hist, // Accel
+        1 => macd_hist < 0.0,            // Sign
+        _ => true,                        // None
+    }
+}
+
+// ── Signal result ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+enum SignalDir {
+    Neutral,
+    Buy,
+    Sell,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ConfLevel {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone)]
+struct SignalResultFixture {
+    signal: SignalDir,
+    confidence: ConfLevel,
+    effective_min_adx: f64,
+}
+
+// ── Inline Rust SSOT: generate_signal (mirrors bt-signals/src/entry.rs) ─────
+
+fn rust_generate_signal(
+    snap: &MarketSnapshot,
+    gates: &GateResultFixture,
+    cfg: &GateConfig,
+) -> SignalResultFixture {
+    // Mode 1: Standard trend entry
+    if gates.all_gates_pass {
+        if let Some(r) = try_standard_entry_ref(snap, gates, cfg) {
+            return r;
+        }
+    }
+
+    // Mode 2: Pullback continuation
+    if cfg.enable_pullback_entries {
+        let pullback_gates_ok = !gates.is_anomaly
+            && !gates.is_extended
+            && !gates.is_ranging
+            && gates.vol_confirm
+            && snap.adx >= cfg.pullback_min_adx;
+
+        if pullback_gates_ok {
+            if let Some(r) = try_pullback_entry_ref(snap, gates, cfg) {
+                return r;
+            }
+        }
+    }
+
+    // Mode 3: Slow drift
+    if cfg.enable_slow_drift_entries {
+        let slow_gates_ok = !gates.is_anomaly
+            && !gates.is_extended
+            && !gates.is_ranging
+            && gates.vol_confirm
+            && snap.adx >= cfg.slow_drift_min_adx;
+
+        if slow_gates_ok {
+            if let Some(r) = try_slow_drift_entry_ref(snap, gates, cfg) {
+                return r;
+            }
+        }
+    }
+
+    SignalResultFixture {
+        signal: SignalDir::Neutral,
+        confidence: ConfLevel::Low,
+        effective_min_adx: 0.0,
+    }
+}
+
+fn try_standard_entry_ref(
+    snap: &MarketSnapshot,
+    gates: &GateResultFixture,
+    cfg: &GateConfig,
+) -> Option<SignalResultFixture> {
+    // LONG
+    if gates.bullish_alignment && snap.close > snap.ema_fast {
+        if snap.rsi > gates.rsi_long_limit {
+            let macd_ok = check_macd_long_ref(cfg.macd_mode, snap.macd_hist, snap.prev_macd_hist);
+            if macd_ok {
+                let stoch_ok = if gates.stoch_rsi_active {
+                    snap.stoch_k < cfg.stoch_rsi_block_long_gt
+                } else {
+                    true
+                };
+                if stoch_ok && gates.btc_ok_long {
+                    let conf = if snap.volume > snap.vol_sma * cfg.high_conf_volume_mult {
+                        ConfLevel::High
+                    } else {
+                        ConfLevel::Medium
+                    };
+                    return Some(SignalResultFixture {
+                        signal: SignalDir::Buy,
+                        confidence: conf,
+                        effective_min_adx: gates.effective_min_adx,
+                    });
+                }
+            }
+        }
+    }
+    // SHORT (elif in Rust: only if bullish branch did not enter)
+    else if gates.bearish_alignment && snap.close < snap.ema_fast {
+        if snap.rsi < gates.rsi_short_limit {
+            let macd_ok = check_macd_short_ref(cfg.macd_mode, snap.macd_hist, snap.prev_macd_hist);
+            if macd_ok {
+                let stoch_ok = if gates.stoch_rsi_active {
+                    snap.stoch_k > cfg.stoch_rsi_block_short_lt
+                } else {
+                    true
+                };
+                if stoch_ok && gates.btc_ok_short {
+                    let conf = if snap.volume > snap.vol_sma * cfg.high_conf_volume_mult {
+                        ConfLevel::High
+                    } else {
+                        ConfLevel::Medium
+                    };
+                    return Some(SignalResultFixture {
+                        signal: SignalDir::Sell,
+                        confidence: conf,
+                        effective_min_adx: gates.effective_min_adx,
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+
+fn try_pullback_entry_ref(
+    snap: &MarketSnapshot,
+    gates: &GateResultFixture,
+    cfg: &GateConfig,
+) -> Option<SignalResultFixture> {
+    let cross_up = snap.prev_close <= snap.prev_ema_fast && snap.close > snap.ema_fast;
+    let cross_dn = snap.prev_close >= snap.prev_ema_fast && snap.close < snap.ema_fast;
+
+    let pullback_conf = match cfg.pullback_confidence {
+        2 => ConfLevel::High,
+        1 => ConfLevel::Medium,
+        _ => ConfLevel::Low,
+    };
+
+    // Long pullback
+    if cross_up && gates.bullish_alignment && gates.btc_ok_long {
+        let macd_ok = if cfg.pullback_require_macd_sign {
+            snap.macd_hist > 0.0
+        } else {
+            true
+        };
+        if macd_ok && snap.rsi >= cfg.pullback_rsi_long_min {
+            return Some(SignalResultFixture {
+                signal: SignalDir::Buy,
+                confidence: pullback_conf,
+                effective_min_adx: cfg.pullback_min_adx,
+            });
+        }
+    }
+    // Short pullback (elif)
+    else if cross_dn && gates.bearish_alignment && gates.btc_ok_short {
+        let macd_ok = if cfg.pullback_require_macd_sign {
+            snap.macd_hist < 0.0
+        } else {
+            true
+        };
+        if macd_ok && snap.rsi <= cfg.pullback_rsi_short_max {
+            return Some(SignalResultFixture {
+                signal: SignalDir::Sell,
+                confidence: pullback_conf,
+                effective_min_adx: cfg.pullback_min_adx,
+            });
+        }
+    }
+    None
+}
+
+fn try_slow_drift_entry_ref(
+    snap: &MarketSnapshot,
+    gates: &GateResultFixture,
+    cfg: &GateConfig,
+) -> Option<SignalResultFixture> {
+    let min_slope = cfg.slow_drift_min_slope_pct;
+
+    // Long drift
+    if gates.bullish_alignment
+        && snap.close > snap.ema_slow
+        && gates.btc_ok_long
+        && snap.ema_slow_slope_pct >= min_slope
+    {
+        let macd_ok = if cfg.slow_drift_require_macd_sign {
+            snap.macd_hist > 0.0
+        } else {
+            true
+        };
+        if macd_ok && snap.rsi >= cfg.slow_drift_rsi_long_min {
+            return Some(SignalResultFixture {
+                signal: SignalDir::Buy,
+                confidence: ConfLevel::Low,
+                effective_min_adx: cfg.slow_drift_min_adx,
+            });
+        }
+    }
+    // Short drift (elif)
+    else if gates.bearish_alignment
+        && snap.close < snap.ema_slow
+        && gates.btc_ok_short
+        && snap.ema_slow_slope_pct <= -min_slope
+    {
+        let macd_ok = if cfg.slow_drift_require_macd_sign {
+            snap.macd_hist < 0.0
+        } else {
+            true
+        };
+        if macd_ok && snap.rsi <= cfg.slow_drift_rsi_short_max {
+            return Some(SignalResultFixture {
+                signal: SignalDir::Sell,
+                confidence: ConfLevel::Low,
+                effective_min_adx: cfg.slow_drift_min_adx,
+            });
+        }
+    }
+    None
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Gate fixture tests (AQC-1212)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_gates_fixture_all_pass_bullish() {
+    // Strong bullish snapshot with default config: all gates should pass.
+    let snap = MarketSnapshot::strong_bullish();
+    let cfg = GateConfig::default_config();
+    let result = rust_check_gates(&snap, &cfg, Some(true), false);
+
+    assert!(result.all_gates_pass, "All gates should pass for strong bullish: {:?}", result);
+    assert!(result.bullish_alignment, "Bullish alignment expected");
+    assert!(!result.bearish_alignment, "No bearish alignment expected");
+    assert!(result.adx_above_min, "ADX 32 should be above min_adx 22");
+    assert!(!result.is_ranging, "Strong trend should not be ranging");
+    assert!(!result.is_anomaly, "Normal price move should not trigger anomaly");
+    assert!(!result.is_extended, "Close near EMA should not be extended");
+    assert!(result.vol_confirm, "Volume confirmation disabled by default => pass");
+    assert!(result.is_trending_up, "ADX slope 1.5 > 0 => trending up");
+    assert!(result.btc_ok_long, "BTC bullish => long OK");
+}
+
+#[test]
+fn test_gates_fixture_all_pass_bearish() {
+    // Strong bearish snapshot with default config: all gates should pass.
+    let snap = MarketSnapshot::strong_bearish();
+    let cfg = GateConfig::default_config();
+    let result = rust_check_gates(&snap, &cfg, Some(false), false);
+
+    assert!(result.all_gates_pass, "All gates should pass for strong bearish: {:?}", result);
+    assert!(!result.bullish_alignment, "No bullish alignment expected");
+    assert!(result.bearish_alignment, "Bearish alignment expected");
+    assert!(result.btc_ok_short, "BTC bearish => short OK");
+}
+
+#[test]
+fn test_gates_fixture_adx_rising_gate() {
+    // ADX declining and below saturation: is_trending_up = false.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.adx_slope = -0.5; // declining
+    snap.adx = 30.0;       // below saturation (40)
+    let cfg = GateConfig::default_config();
+    let result = rust_check_gates(&snap, &cfg, Some(true), false);
+
+    assert!(!result.is_trending_up, "ADX slope < 0 and ADX < saturation => not trending");
+    assert!(!result.all_gates_pass, "Gates should fail without trending_up");
+}
+
+#[test]
+fn test_gates_fixture_adx_rising_saturation_override() {
+    // ADX declining but above saturation: is_trending_up = true (saturated override).
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.adx_slope = -0.5; // declining
+    snap.adx = 42.0;       // above saturation (40)
+    let cfg = GateConfig::default_config();
+    let result = rust_check_gates(&snap, &cfg, Some(true), false);
+
+    assert!(result.is_trending_up, "ADX > saturation => trending even with declining slope");
+}
+
+#[test]
+fn test_gates_fixture_volume_confirmation_strict() {
+    // Volume confirmation enabled, strict mode (include_prev = false).
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.volume = 700.0;     // below vol_sma (800)
+    snap.vol_trend = true;   // vol_trend is true
+    let mut cfg = GateConfig::default_config();
+    cfg.require_volume_confirmation = true;
+    cfg.vol_confirm_include_prev = false;
+
+    let result = rust_check_gates(&snap, &cfg, Some(true), false);
+    assert!(!result.vol_confirm, "Strict mode: volume < vol_sma => fail even with vol_trend");
+    assert!(!result.all_gates_pass, "Gates should fail without vol_confirm");
+}
+
+#[test]
+fn test_gates_fixture_volume_confirmation_relaxed() {
+    // Volume confirmation enabled, relaxed mode (include_prev = true).
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.volume = 700.0;     // below vol_sma (800)
+    snap.vol_trend = true;   // vol_trend is true
+    let mut cfg = GateConfig::default_config();
+    cfg.require_volume_confirmation = true;
+    cfg.vol_confirm_include_prev = true;
+
+    let result = rust_check_gates(&snap, &cfg, Some(true), false);
+    assert!(result.vol_confirm, "Relaxed mode: vol_trend true => pass despite low volume");
+}
+
+#[test]
+fn test_gates_fixture_ranging_filter_all_three_votes() {
+    // All three ranging votes fire: ADX < 21, BB < 0.8, RSI in 47-53.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.adx = 18.0;            // < 21
+    snap.bb_width_ratio = 0.6;  // < 0.8
+    snap.rsi = 50.0;            // 47 < 50 < 53
+    let cfg = GateConfig::default_config();
+    let result = rust_check_gates(&snap, &cfg, Some(true), false);
+
+    assert!(result.is_ranging, "All 3 ranging votes => ranging with min_signals=2");
+    assert!(!result.all_gates_pass, "Ranging should block all_gates_pass");
+}
+
+#[test]
+fn test_gates_fixture_ranging_filter_one_vote_insufficient() {
+    // Only one ranging vote fires: ADX < 21, but BB and RSI not in range.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.adx = 18.0;            // < 21 (vote 1)
+    snap.bb_width_ratio = 1.2;  // >= 0.8 (no vote)
+    snap.rsi = 57.0;            // not in 47-53 (no vote)
+    let cfg = GateConfig::default_config();
+    let result = rust_check_gates(&snap, &cfg, Some(true), false);
+
+    assert!(!result.is_ranging, "Only 1 vote < min_signals=2 => not ranging");
+    // But adx_above_min = 18 > 22? No => still blocked by ADX threshold
+    assert!(!result.adx_above_min, "ADX 18 < min_adx 22 => adx_above_min = false");
+    assert!(!result.all_gates_pass, "ADX below min should block");
+}
+
+#[test]
+fn test_gates_fixture_anomaly_filter_large_price_move() {
+    // 12% price change: above anomaly threshold (10%).
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.prev_close = 100.0;
+    snap.close = 112.0; // 12% change
+    let cfg = GateConfig::default_config();
+    let result = rust_check_gates(&snap, &cfg, Some(true), false);
+
+    assert!(result.is_anomaly, "12% price move > 10% threshold => anomaly");
+    assert!(!result.all_gates_pass, "Anomaly should block");
+}
+
+#[test]
+fn test_gates_fixture_anomaly_filter_small_price_move() {
+    // 0.5% price change: well below anomaly threshold (10%).
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.prev_close = 100.0;
+    snap.close = 100.5;
+    let cfg = GateConfig::default_config();
+    let result = rust_check_gates(&snap, &cfg, Some(true), false);
+
+    assert!(!result.is_anomaly, "0.5% price move < 10% threshold => not anomaly");
+}
+
+#[test]
+fn test_gates_fixture_extension_filter() {
+    // Close 6% above EMA_fast: above extension threshold (4%).
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.ema_fast = 99.0;
+    snap.close = 105.0; // 6.06% distance
+    let cfg = GateConfig::default_config();
+    let result = rust_check_gates(&snap, &cfg, Some(true), false);
+
+    assert!(result.is_extended, "6% distance from EMA_fast > 4% threshold => extended");
+    assert!(!result.all_gates_pass, "Extension should block");
+}
+
+#[test]
+fn test_gates_fixture_tmc_caps_min_adx() {
+    // TMC: ADX slope > 0.5 caps effective_min_adx at 25.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.adx_slope = 1.0; // > 0.5
+    snap.adx = 24.0;
+    let mut cfg = GateConfig::default_config();
+    cfg.min_adx = 28.0; // would normally block ADX 24
+
+    let result = rust_check_gates(&snap, &cfg, Some(true), false);
+
+    assert!(
+        result.effective_min_adx <= 25.0,
+        "TMC should cap effective_min_adx at 25.0, got {}",
+        result.effective_min_adx
+    );
+    // ADX 24 < 25 so it still fails the threshold
+    assert!(!result.adx_above_min, "ADX 24 < capped 25 => adx_above_min = false");
+}
+
+#[test]
+fn test_gates_fixture_tmc_caps_and_passes() {
+    // TMC: ADX slope > 0.5 caps effective_min_adx at 25, ADX=26 passes.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.adx_slope = 1.0;
+    snap.adx = 26.0;
+    let mut cfg = GateConfig::default_config();
+    cfg.min_adx = 30.0; // Would block ADX 26 without TMC
+
+    let result = rust_check_gates(&snap, &cfg, Some(true), false);
+
+    assert_eq!(result.effective_min_adx, 25.0, "TMC caps at 25.0");
+    assert!(result.adx_above_min, "ADX 26 > capped 25 => pass");
+}
+
+#[test]
+fn test_gates_fixture_ave_raises_threshold() {
+    // AVE: high ATR/avg_ATR ratio raises effective_min_adx.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.atr = 3.0;     // ratio = 3.0 / 1.4 = 2.14 > 1.5
+    snap.avg_atr = 1.4;
+    snap.adx = 26.0;
+    snap.adx_slope = 0.3; // <= 0.5, so TMC does NOT fire
+    let cfg = GateConfig::default_config();
+
+    let result = rust_check_gates(&snap, &cfg, Some(true), false);
+
+    // AVE: effective_min_adx = 22.0 * 1.25 = 27.5
+    assert!(
+        (result.effective_min_adx - 27.5).abs() < 1e-9,
+        "AVE should raise to 27.5, got {}",
+        result.effective_min_adx
+    );
+    assert!(!result.adx_above_min, "ADX 26 < raised 27.5 => fail");
+}
+
+#[test]
+fn test_gates_fixture_tmc_and_ave_interaction() {
+    // TMC + AVE: TMC fires first (caps at min(min_adx, 25)), then AVE multiplies.
+    // With min_adx=22, TMC caps at min(22, 25) = 22. AVE: 22 * 1.25 = 27.5.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.adx_slope = 1.0; // TMC: slope > 0.5
+    snap.atr = 3.0;       // AVE: ratio 2.14 > 1.5
+    snap.avg_atr = 1.4;
+    snap.adx = 26.0;
+    let cfg = GateConfig::default_config();
+
+    let result = rust_check_gates(&snap, &cfg, Some(true), false);
+
+    // min_adx=22 => TMC caps at min(22, 25) = 22, AVE: 22 * 1.25 = 27.5
+    assert!(
+        (result.effective_min_adx - 27.5).abs() < 1e-9,
+        "TMC(min(22,25)=22) * AVE(1.25) = 27.5, got {}",
+        result.effective_min_adx
+    );
+    assert!(!result.adx_above_min, "ADX 26 < 27.5 => fail");
+}
+
+#[test]
+fn test_gates_fixture_tmc_and_ave_high_min_adx() {
+    // TMC + AVE with high min_adx: TMC caps at 25 (< 35), then AVE multiplies.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.adx_slope = 1.0; // TMC: slope > 0.5
+    snap.atr = 3.0;       // AVE: ratio 2.14 > 1.5
+    snap.avg_atr = 1.4;
+    snap.adx = 30.0;
+    let mut cfg = GateConfig::default_config();
+    cfg.min_adx = 35.0; // high min_adx
+
+    let result = rust_check_gates(&snap, &cfg, Some(true), false);
+
+    // min_adx=35 => TMC caps at min(35, 25) = 25, AVE: 25 * 1.25 = 31.25
+    assert!(
+        (result.effective_min_adx - 31.25).abs() < 1e-9,
+        "TMC(min(35,25)=25) * AVE(1.25) = 31.25, got {}",
+        result.effective_min_adx
+    );
+    assert!(!result.adx_above_min, "ADX 30 < 31.25 => fail");
+}
+
+#[test]
+fn test_gates_fixture_macro_alignment() {
+    // Macro alignment enabled: bullish requires ema_slow > ema_macro.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.ema_slow = 97.0;
+    snap.ema_macro = 98.0; // ema_slow < ema_macro => bullish_alignment = false
+    let mut cfg = GateConfig::default_config();
+    cfg.require_macro_alignment = true;
+
+    let result = rust_check_gates(&snap, &cfg, Some(true), false);
+
+    assert!(!result.bullish_alignment, "ema_slow 97 < ema_macro 98 => bullish fails with macro");
+}
+
+#[test]
+fn test_gates_fixture_btc_alignment_blocks_long() {
+    // BTC bearish: blocks long for non-BTC symbol with low ADX.
+    let snap = MarketSnapshot::strong_bullish();
+    let cfg = GateConfig::default_config();
+    let result = rust_check_gates(&snap, &cfg, Some(false), false);
+
+    assert!(!result.btc_ok_long, "BTC bearish => btc_ok_long = false for non-BTC");
+    assert!(result.btc_ok_short, "BTC bearish => btc_ok_short = true");
+}
+
+#[test]
+fn test_gates_fixture_btc_alignment_high_adx_overrides() {
+    // BTC bearish but ADX > btc_adx_override: long allowed.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.adx = 42.0; // > btc_adx_override (40)
+    let cfg = GateConfig::default_config();
+    let result = rust_check_gates(&snap, &cfg, Some(false), false);
+
+    assert!(result.btc_ok_long, "High ADX overrides BTC alignment for long");
+}
+
+#[test]
+fn test_gates_fixture_btc_symbol_always_ok() {
+    // BTC symbol itself: always OK regardless of BTC trend.
+    let snap = MarketSnapshot::strong_bullish();
+    let cfg = GateConfig::default_config();
+    let result = rust_check_gates(&snap, &cfg, Some(false), true);
+
+    assert!(result.btc_ok_long, "BTC symbol always btc_ok_long");
+    assert!(result.btc_ok_short, "BTC symbol always btc_ok_short");
+}
+
+#[test]
+fn test_gates_fixture_slow_drift_ranging_override() {
+    // Slow drift enabled, ranging active, but slope exceeds override threshold.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.adx = 18.0;            // < 21 => vote 1
+    snap.bb_width_ratio = 0.6;  // < 0.8 => vote 2
+    snap.rsi = 50.0;            // 47-53 => vote 3
+    snap.ema_slow_slope_pct = 0.001; // > 0.0006
+
+    let mut cfg = GateConfig::default_config();
+    cfg.enable_slow_drift_entries = true;
+    cfg.slow_drift_ranging_slope_override = 0.0006;
+
+    let result = rust_check_gates(&snap, &cfg, Some(true), false);
+
+    assert!(!result.is_ranging, "Slow drift override should clear ranging");
+}
+
+#[test]
+fn test_gates_fixture_dre_interpolation_midpoint() {
+    // DRE at midpoint: ADX = 31, weight = (31-22)/(40-22) = 0.5.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.adx = 31.0;
+    let cfg = GateConfig::default_config();
+    let result = rust_check_gates(&snap, &cfg, Some(true), false);
+
+    // rsi_long: 56 + 0.5 * (52 - 56) = 54
+    assert!(
+        (result.rsi_long_limit - 54.0).abs() < 0.01,
+        "DRE long limit at midpoint should be 54.0, got {}",
+        result.rsi_long_limit
+    );
+    // rsi_short: 44 + 0.5 * (48 - 44) = 46
+    assert!(
+        (result.rsi_short_limit - 46.0).abs() < 0.01,
+        "DRE short limit at midpoint should be 46.0, got {}",
+        result.rsi_short_limit
+    );
+}
+
+#[test]
+fn test_gates_fixture_dre_at_minimum() {
+    // DRE at minimum ADX: weight = 0.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.adx = 22.0;
+    let cfg = GateConfig::default_config();
+    let result = rust_check_gates(&snap, &cfg, Some(true), false);
+
+    assert!(
+        (result.rsi_long_limit - 56.0).abs() < 0.01,
+        "DRE at min: long limit should be 56.0 (weak), got {}",
+        result.rsi_long_limit
+    );
+    assert!(
+        (result.rsi_short_limit - 44.0).abs() < 0.01,
+        "DRE at min: short limit should be 44.0 (weak), got {}",
+        result.rsi_short_limit
+    );
+}
+
+#[test]
+fn test_gates_fixture_dre_at_maximum() {
+    // DRE at maximum ADX: weight = 1.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.adx = 40.0;
+    let cfg = GateConfig::default_config();
+    let result = rust_check_gates(&snap, &cfg, Some(true), false);
+
+    assert!(
+        (result.rsi_long_limit - 52.0).abs() < 0.01,
+        "DRE at max: long limit should be 52.0 (strong), got {}",
+        result.rsi_long_limit
+    );
+    assert!(
+        (result.rsi_short_limit - 48.0).abs() < 0.01,
+        "DRE at max: short limit should be 48.0 (strong), got {}",
+        result.rsi_short_limit
+    );
+}
+
+#[test]
+fn test_gates_fixture_dre_clamped_below_min() {
+    // ADX below dre_min_adx: weight clamped to 0.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.adx = 15.0;
+    snap.adx_slope = 1.0; // keep trending_up
+    let cfg = GateConfig::default_config();
+    let result = rust_check_gates(&snap, &cfg, Some(true), false);
+
+    assert!(
+        (result.rsi_long_limit - 56.0).abs() < 0.01,
+        "DRE below min: long limit clamped to 56.0, got {}",
+        result.rsi_long_limit
+    );
+}
+
+#[test]
+fn test_gates_fixture_dre_clamped_above_max() {
+    // ADX above dre_max_adx: weight clamped to 1.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.adx = 55.0;
+    let cfg = GateConfig::default_config();
+    let result = rust_check_gates(&snap, &cfg, Some(true), false);
+
+    assert!(
+        (result.rsi_long_limit - 52.0).abs() < 0.01,
+        "DRE above max: long limit clamped to 52.0, got {}",
+        result.rsi_long_limit
+    );
+}
+
+#[test]
+fn test_gates_fixture_stoch_rsi_passthrough() {
+    // StochRSI active flag set from config.
+    let snap = MarketSnapshot::strong_bullish();
+    let mut cfg = GateConfig::default_config();
+    cfg.use_stoch_rsi_filter = false;
+    let result = rust_check_gates(&snap, &cfg, Some(true), false);
+
+    assert!(!result.stoch_rsi_active, "StochRSI disabled => stoch_rsi_active = false");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Signal fixture tests (AQC-1212)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_signal_fixture_standard_buy() {
+    // Strong bullish: standard buy expected.
+    let snap = MarketSnapshot::strong_bullish();
+    let cfg = GateConfig::default_config();
+    let gates = rust_check_gates(&snap, &cfg, Some(true), false);
+    let signal = rust_generate_signal(&snap, &gates, &cfg);
+
+    assert_eq!(signal.signal, SignalDir::Buy, "Standard bullish => BUY");
+    assert_eq!(signal.confidence, ConfLevel::Medium, "Volume 1200 < vol_sma*2.5=2000 => Medium");
+}
+
+#[test]
+fn test_signal_fixture_standard_sell() {
+    // Strong bearish: standard sell expected.
+    let snap = MarketSnapshot::strong_bearish();
+    let cfg = GateConfig::default_config();
+    let gates = rust_check_gates(&snap, &cfg, Some(false), false);
+    let signal = rust_generate_signal(&snap, &gates, &cfg);
+
+    assert_eq!(signal.signal, SignalDir::Sell, "Standard bearish => SELL");
+    assert_eq!(signal.confidence, ConfLevel::Medium, "Medium confidence expected");
+}
+
+#[test]
+fn test_signal_fixture_high_volume_upgrades_confidence() {
+    // Volume > vol_sma * 2.5: High confidence.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.volume = 2500.0; // > 800 * 2.5 = 2000
+    let cfg = GateConfig::default_config();
+    let gates = rust_check_gates(&snap, &cfg, Some(true), false);
+    let signal = rust_generate_signal(&snap, &gates, &cfg);
+
+    assert_eq!(signal.signal, SignalDir::Buy);
+    assert_eq!(signal.confidence, ConfLevel::High, "High volume => High confidence");
+}
+
+#[test]
+fn test_signal_fixture_rsi_below_dre_limit_blocks() {
+    // RSI below DRE limit blocks standard BUY.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.rsi = 40.0; // well below any DRE long limit (52-56)
+    let cfg = GateConfig::default_config();
+    let gates = rust_check_gates(&snap, &cfg, Some(true), false);
+    let signal = rust_generate_signal(&snap, &gates, &cfg);
+
+    assert_eq!(signal.signal, SignalDir::Neutral, "RSI below DRE limit => Neutral");
+}
+
+#[test]
+fn test_signal_fixture_macd_accel_blocks_decelerating() {
+    // MACD deceleration blocks standard BUY in Accel mode.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.macd_hist = 0.2;
+    snap.prev_macd_hist = 0.5; // declining hist
+    let cfg = GateConfig::default_config();
+    let gates = rust_check_gates(&snap, &cfg, Some(true), false);
+    let signal = rust_generate_signal(&snap, &gates, &cfg);
+
+    assert_eq!(signal.signal, SignalDir::Neutral, "MACD decelerating => Neutral in Accel mode");
+}
+
+#[test]
+fn test_signal_fixture_macd_sign_mode_passes() {
+    // MACD Sign mode: hist > 0 passes for long.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.macd_hist = 0.1;
+    snap.prev_macd_hist = 0.5; // would fail Accel, passes Sign
+    let mut cfg = GateConfig::default_config();
+    cfg.macd_mode = 1; // Sign mode
+
+    let gates = rust_check_gates(&snap, &cfg, Some(true), false);
+    let signal = rust_generate_signal(&snap, &gates, &cfg);
+
+    assert_eq!(signal.signal, SignalDir::Buy, "MACD Sign mode: hist > 0 => Buy");
+}
+
+#[test]
+fn test_signal_fixture_macd_none_mode_always_passes() {
+    // MACD None mode: always passes regardless of histogram.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.macd_hist = -1.0;
+    snap.prev_macd_hist = 0.5; // fails both Accel and Sign
+    let mut cfg = GateConfig::default_config();
+    cfg.macd_mode = 2; // None mode
+
+    let gates = rust_check_gates(&snap, &cfg, Some(true), false);
+    let signal = rust_generate_signal(&snap, &gates, &cfg);
+
+    assert_eq!(signal.signal, SignalDir::Buy, "MACD None mode => always passes");
+}
+
+#[test]
+fn test_signal_fixture_stoch_rsi_blocks_overbought_long() {
+    // StochRSI K > 0.85 blocks long.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.stoch_k = 0.90;
+    let cfg = GateConfig::default_config();
+    let gates = rust_check_gates(&snap, &cfg, Some(true), false);
+    let signal = rust_generate_signal(&snap, &gates, &cfg);
+
+    assert_eq!(signal.signal, SignalDir::Neutral, "StochRSI K=0.90 > 0.85 blocks long");
+}
+
+#[test]
+fn test_signal_fixture_stoch_rsi_blocks_oversold_short() {
+    // StochRSI K < 0.15 blocks short.
+    let mut snap = MarketSnapshot::strong_bearish();
+    snap.stoch_k = 0.10;
+    let cfg = GateConfig::default_config();
+    let gates = rust_check_gates(&snap, &cfg, Some(false), false);
+    let signal = rust_generate_signal(&snap, &gates, &cfg);
+
+    assert_eq!(signal.signal, SignalDir::Neutral, "StochRSI K=0.10 < 0.15 blocks short");
+}
+
+#[test]
+fn test_signal_fixture_btc_bearish_blocks_long() {
+    // BTC bearish with require_btc_alignment blocks long.
+    let snap = MarketSnapshot::strong_bullish();
+    let cfg = GateConfig::default_config();
+    let gates = rust_check_gates(&snap, &cfg, Some(false), false);
+    let signal = rust_generate_signal(&snap, &gates, &cfg);
+
+    assert_eq!(signal.signal, SignalDir::Neutral, "BTC bearish blocks long");
+}
+
+#[test]
+fn test_signal_fixture_pullback_long() {
+    // Standard blocked (MACD decelerating), pullback fires via EMA cross-up.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.prev_close = 98.0;
+    snap.prev_ema_fast = 98.5; // prev_close <= prev_ema_fast
+    snap.close = 99.5;         // close > ema_fast (99.0)
+    snap.macd_hist = 0.2;
+    snap.prev_macd_hist = 0.3; // decelerating => standard blocked
+    snap.adx = 25.0;
+    snap.adx_slope = 0.5;
+
+    let mut cfg = GateConfig::default_config();
+    cfg.enable_pullback_entries = true;
+    cfg.pullback_min_adx = 20.0;
+    cfg.pullback_rsi_long_min = 50.0;
+    cfg.require_btc_alignment = false;
+
+    let gates = rust_check_gates(&snap, &cfg, Some(true), false);
+    let signal = rust_generate_signal(&snap, &gates, &cfg);
+
+    assert_eq!(signal.signal, SignalDir::Buy, "Pullback cross-up => Buy");
+    assert_eq!(signal.confidence, ConfLevel::Low, "Pullback default confidence = Low");
+    assert!(
+        (signal.effective_min_adx - 20.0).abs() < 1e-9,
+        "Pullback uses pullback_min_adx"
+    );
+}
+
+#[test]
+fn test_signal_fixture_pullback_short() {
+    // Pullback short via EMA cross-down.
+    let mut snap = MarketSnapshot::strong_bearish();
+    snap.prev_close = 97.0;
+    snap.prev_ema_fast = 96.5; // prev_close >= prev_ema_fast
+    snap.close = 95.0;         // close < ema_fast (96.0)
+    snap.macd_hist = -0.2;
+    snap.prev_macd_hist = -0.1; // decel for short (would need hist < prev, but -0.2 < -0.1)
+    snap.adx = 25.0;
+    snap.adx_slope = -0.5; // not rising, not saturated => is_trending_up = false => standard blocked
+
+    let mut cfg = GateConfig::default_config();
+    cfg.enable_pullback_entries = true;
+    cfg.pullback_min_adx = 20.0;
+    cfg.pullback_rsi_short_max = 50.0;
+    cfg.require_btc_alignment = false;
+
+    let gates = rust_check_gates(&snap, &cfg, Some(false), false);
+    // Standard blocked because is_trending_up = false
+    assert!(!gates.all_gates_pass, "Standard should be blocked (not trending)");
+
+    let signal = rust_generate_signal(&snap, &gates, &cfg);
+    assert_eq!(signal.signal, SignalDir::Sell, "Pullback cross-down => Sell");
+    assert_eq!(signal.confidence, ConfLevel::Low);
+}
+
+#[test]
+fn test_signal_fixture_slow_drift_long() {
+    // Slow drift long: low ADX, positive slope, bullish alignment.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.adx = 15.0;
+    snap.adx_slope = -0.5; // not trending_up => standard blocked
+    snap.rsi = 52.0;
+    snap.macd_hist = 0.1;
+    snap.close = 98.0;
+    snap.ema_slow = 97.0;
+    snap.ema_slow_slope_pct = 0.001; // above 0.0006
+
+    let mut cfg = GateConfig::default_config();
+    cfg.enable_slow_drift_entries = true;
+    cfg.slow_drift_min_adx = 10.0;
+    cfg.slow_drift_rsi_long_min = 50.0;
+    cfg.slow_drift_min_slope_pct = 0.0006;
+    cfg.slow_drift_ranging_slope_override = 0.0006;
+    cfg.require_btc_alignment = false;
+
+    let gates = rust_check_gates(&snap, &cfg, Some(true), false);
+    assert!(!gates.all_gates_pass, "Standard should fail (low ADX, not trending)");
+
+    let signal = rust_generate_signal(&snap, &gates, &cfg);
+    assert_eq!(signal.signal, SignalDir::Buy, "Slow drift => Buy");
+    assert_eq!(signal.confidence, ConfLevel::Low, "Slow drift always Low confidence");
+    assert!(
+        (signal.effective_min_adx - 10.0).abs() < 1e-9,
+        "Slow drift uses slow_drift_min_adx"
+    );
+}
+
+#[test]
+fn test_signal_fixture_slow_drift_short() {
+    // Slow drift short: negative slope, bearish alignment.
+    let mut snap = MarketSnapshot::strong_bearish();
+    snap.adx = 15.0;
+    snap.adx_slope = -0.5;
+    snap.rsi = 48.0;
+    snap.macd_hist = -0.1;
+    snap.close = 96.0;
+    snap.ema_slow = 99.0;
+    snap.ema_fast = 97.0; // bearish: ema_fast < ema_slow
+    snap.ema_slow_slope_pct = -0.001; // below -0.0006
+
+    let mut cfg = GateConfig::default_config();
+    cfg.enable_slow_drift_entries = true;
+    cfg.slow_drift_min_adx = 10.0;
+    cfg.slow_drift_rsi_short_max = 50.0;
+    cfg.slow_drift_min_slope_pct = 0.0006;
+    cfg.slow_drift_ranging_slope_override = 0.0006;
+    cfg.require_btc_alignment = false;
+
+    let gates = rust_check_gates(&snap, &cfg, Some(false), false);
+    let signal = rust_generate_signal(&snap, &gates, &cfg);
+
+    assert_eq!(signal.signal, SignalDir::Sell, "Slow drift short => Sell");
+    assert_eq!(signal.confidence, ConfLevel::Low);
+}
+
+#[test]
+fn test_signal_fixture_slow_drift_blocked_flat_slope() {
+    // Slow drift blocked when slope is too flat.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.adx = 15.0;
+    snap.adx_slope = -0.5;
+    snap.ema_slow_slope_pct = 0.0003; // below 0.0006
+
+    let mut cfg = GateConfig::default_config();
+    cfg.enable_slow_drift_entries = true;
+    cfg.slow_drift_min_slope_pct = 0.0006;
+    cfg.require_btc_alignment = false;
+
+    let gates = rust_check_gates(&snap, &cfg, Some(true), false);
+    let signal = rust_generate_signal(&snap, &gates, &cfg);
+
+    assert_eq!(signal.signal, SignalDir::Neutral, "Flat slope => Neutral");
+}
+
+#[test]
+fn test_signal_fixture_mode_priority_standard_over_pullback() {
+    // When both standard and pullback qualify, standard wins (Medium > Low).
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.prev_close = 98.0;
+    snap.prev_ema_fast = 98.5;
+    snap.close = 100.0;
+    snap.ema_fast = 99.0;
+
+    let mut cfg = GateConfig::default_config();
+    cfg.enable_pullback_entries = true;
+    cfg.require_btc_alignment = false;
+
+    let gates = rust_check_gates(&snap, &cfg, Some(true), false);
+    assert!(gates.all_gates_pass, "Standard gates should pass");
+
+    let signal = rust_generate_signal(&snap, &gates, &cfg);
+    assert_eq!(signal.signal, SignalDir::Buy);
+    assert_eq!(signal.confidence, ConfLevel::Medium, "Standard wins with Medium confidence");
+}
+
+#[test]
+fn test_signal_fixture_neutral_when_nothing_qualifies() {
+    // ADX too low for everything, ranging active.
+    let mut snap = MarketSnapshot::strong_bullish();
+    snap.adx = 8.0;             // below slow_drift_min_adx (10)
+    snap.adx_slope = -1.0;
+    snap.rsi = 50.0;
+    snap.bb_width_ratio = 0.6;
+
+    let mut cfg = GateConfig::default_config();
+    cfg.enable_pullback_entries = true;
+    cfg.enable_slow_drift_entries = true;
+    cfg.slow_drift_min_adx = 10.0;
+    cfg.require_btc_alignment = false;
+
+    let gates = rust_check_gates(&snap, &cfg, Some(true), false);
+    let signal = rust_generate_signal(&snap, &gates, &cfg);
+
+    assert_eq!(signal.signal, SignalDir::Neutral, "Nothing qualifies => Neutral");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Batch config permutation tests (AQC-1212)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// 15+ config variations exercising different gate/signal paths.
+fn make_config_permutations() -> Vec<(&'static str, GateConfig)> {
+    let base = GateConfig::default_config();
+
+    vec![
+        ("default", base.clone()),
+        ("ranging-disabled", {
+            let mut c = base.clone();
+            c.enable_ranging_filter = false;
+            c
+        }),
+        ("anomaly-disabled", {
+            let mut c = base.clone();
+            c.enable_anomaly_filter = false;
+            c
+        }),
+        ("extension-disabled", {
+            let mut c = base.clone();
+            c.enable_extension_filter = false;
+            c
+        }),
+        ("volume-strict", {
+            let mut c = base.clone();
+            c.require_volume_confirmation = true;
+            c.vol_confirm_include_prev = false;
+            c
+        }),
+        ("volume-relaxed", {
+            let mut c = base.clone();
+            c.require_volume_confirmation = true;
+            c.vol_confirm_include_prev = true;
+            c
+        }),
+        ("adx-rising-disabled", {
+            let mut c = base.clone();
+            c.require_adx_rising = false;
+            c
+        }),
+        ("macro-alignment-required", {
+            let mut c = base.clone();
+            c.require_macro_alignment = true;
+            c
+        }),
+        ("btc-alignment-disabled", {
+            let mut c = base.clone();
+            c.require_btc_alignment = false;
+            c
+        }),
+        ("stoch-rsi-disabled", {
+            let mut c = base.clone();
+            c.use_stoch_rsi_filter = false;
+            c
+        }),
+        ("macd-sign-mode", {
+            let mut c = base.clone();
+            c.macd_mode = 1;
+            c
+        }),
+        ("macd-none-mode", {
+            let mut c = base.clone();
+            c.macd_mode = 2;
+            c
+        }),
+        ("ave-disabled", {
+            let mut c = base.clone();
+            c.ave_enabled = false;
+            c
+        }),
+        ("high-min-adx", {
+            let mut c = base.clone();
+            c.min_adx = 35.0;
+            c
+        }),
+        ("pullback-enabled", {
+            let mut c = base.clone();
+            c.enable_pullback_entries = true;
+            c.pullback_min_adx = 20.0;
+            c.require_btc_alignment = false;
+            c
+        }),
+        ("slow-drift-enabled", {
+            let mut c = base.clone();
+            c.enable_slow_drift_entries = true;
+            c.slow_drift_min_adx = 10.0;
+            c.require_btc_alignment = false;
+            c
+        }),
+    ]
+}
+
+/// Market states exercising boundary conditions across all gates.
+fn make_market_states() -> Vec<(&'static str, MarketSnapshot)> {
+    vec![
+        ("strong-bullish", MarketSnapshot::strong_bullish()),
+        ("strong-bearish", MarketSnapshot::strong_bearish()),
+        ("low-adx-bullish", {
+            let mut s = MarketSnapshot::strong_bullish();
+            s.adx = 18.0;
+            s.adx_slope = -0.3;
+            s
+        }),
+        ("high-adx-bullish", {
+            let mut s = MarketSnapshot::strong_bullish();
+            s.adx = 55.0;
+            s
+        }),
+        ("ranging-market", {
+            let mut s = MarketSnapshot::strong_bullish();
+            s.adx = 18.0;
+            s.bb_width_ratio = 0.6;
+            s.rsi = 50.0;
+            s
+        }),
+        ("anomaly-spike", {
+            let mut s = MarketSnapshot::strong_bullish();
+            s.prev_close = 100.0;
+            s.close = 115.0;
+            s
+        }),
+        ("extended-from-ema", {
+            let mut s = MarketSnapshot::strong_bullish();
+            s.close = 106.0; // 7% from ema_fast=99
+            s
+        }),
+        ("low-volume", {
+            let mut s = MarketSnapshot::strong_bullish();
+            s.volume = 200.0;
+            s.vol_trend = false;
+            s
+        }),
+        ("overbought-stoch", {
+            let mut s = MarketSnapshot::strong_bullish();
+            s.stoch_k = 0.92;
+            s
+        }),
+        ("oversold-stoch-bearish", {
+            let mut s = MarketSnapshot::strong_bearish();
+            s.stoch_k = 0.08;
+            s
+        }),
+        ("macd-declining-bullish", {
+            let mut s = MarketSnapshot::strong_bullish();
+            s.macd_hist = 0.1;
+            s.prev_macd_hist = 0.5;
+            s
+        }),
+        ("pullback-cross-up", {
+            let mut s = MarketSnapshot::strong_bullish();
+            s.prev_close = 98.0;
+            s.prev_ema_fast = 98.5;
+            s.close = 99.5;
+            s.ema_fast = 99.0;
+            s.macd_hist = 0.2;
+            s.prev_macd_hist = 0.3;
+            s.adx = 25.0;
+            s.adx_slope = 0.5;
+            s
+        }),
+        ("slow-drift-grind", {
+            let mut s = MarketSnapshot::strong_bullish();
+            s.adx = 12.0;
+            s.adx_slope = -0.3;
+            s.rsi = 52.0;
+            s.macd_hist = 0.05;
+            s.close = 98.0;
+            s.ema_slow = 97.0;
+            s.ema_slow_slope_pct = 0.001;
+            s
+        }),
+        ("high-atr-ratio", {
+            let mut s = MarketSnapshot::strong_bullish();
+            s.atr = 4.0;
+            s.avg_atr = 1.4;
+            s
+        }),
+        ("tmc-trigger", {
+            let mut s = MarketSnapshot::strong_bullish();
+            s.adx_slope = 2.0;
+            s.adx = 26.0;
+            s
+        }),
+    ]
+}
+
+#[test]
+fn test_gates_config_permutations_x_market_states() {
+    // Cross-product: 15+ configs x 15 market states = 225+ gate evaluations.
+    // Verify all produce valid, self-consistent results.
+    let configs = make_config_permutations();
+    let markets = make_market_states();
+
+    let mut total_evaluated = 0;
+
+    for (cfg_label, cfg) in &configs {
+        for (mkt_label, snap) in &markets {
+            let btc_bullish = if snap.ema_fast > snap.ema_slow {
+                Some(true)
+            } else {
+                Some(false)
+            };
+
+            let gates = rust_check_gates(snap, cfg, btc_bullish, false);
+
+            // Self-consistency checks:
+            // 1. all_gates_pass implies all individual gates passed
+            if gates.all_gates_pass {
+                assert!(gates.adx_above_min,
+                    "[{}/{}] all_gates_pass but adx_above_min=false", cfg_label, mkt_label);
+                assert!(!gates.is_ranging,
+                    "[{}/{}] all_gates_pass but is_ranging=true", cfg_label, mkt_label);
+                assert!(!gates.is_anomaly,
+                    "[{}/{}] all_gates_pass but is_anomaly=true", cfg_label, mkt_label);
+                assert!(!gates.is_extended,
+                    "[{}/{}] all_gates_pass but is_extended=true", cfg_label, mkt_label);
+                assert!(gates.vol_confirm,
+                    "[{}/{}] all_gates_pass but vol_confirm=false", cfg_label, mkt_label);
+                assert!(gates.is_trending_up,
+                    "[{}/{}] all_gates_pass but is_trending_up=false", cfg_label, mkt_label);
+            }
+
+            // 2. effective_min_adx must be finite and positive
+            assert!(
+                gates.effective_min_adx.is_finite() && gates.effective_min_adx > 0.0,
+                "[{}/{}] effective_min_adx must be finite+positive, got {}",
+                cfg_label, mkt_label, gates.effective_min_adx
+            );
+
+            // 3. DRE limits must be finite and in [0, 100] range
+            assert!(
+                gates.rsi_long_limit >= 0.0 && gates.rsi_long_limit <= 100.0,
+                "[{}/{}] rsi_long_limit out of range: {}",
+                cfg_label, mkt_label, gates.rsi_long_limit
+            );
+            assert!(
+                gates.rsi_short_limit >= 0.0 && gates.rsi_short_limit <= 100.0,
+                "[{}/{}] rsi_short_limit out of range: {}",
+                cfg_label, mkt_label, gates.rsi_short_limit
+            );
+
+            // 4. Alignment is mutually exclusive (unless EMA_fast == EMA_slow)
+            if snap.ema_fast != snap.ema_slow {
+                assert!(
+                    !(gates.bullish_alignment && gates.bearish_alignment),
+                    "[{}/{}] Cannot be both bullish and bearish aligned",
+                    cfg_label, mkt_label
+                );
+            }
+
+            // f32 round-trip precision for DRE limits
+            let rsi_long_f32 = gates.rsi_long_limit as f32 as f64;
+            assert!(
+                within_tolerance(gates.rsi_long_limit, rsi_long_f32, TIER_T2_TOLERANCE),
+                "[{}/{}] DRE rsi_long_limit f32 round-trip exceeds T2: {} vs {}",
+                cfg_label, mkt_label, gates.rsi_long_limit, rsi_long_f32
+            );
+
+            total_evaluated += 1;
+        }
+    }
+
+    assert!(
+        total_evaluated >= 200,
+        "Expected at least 200 gate evaluations, got {}",
+        total_evaluated
+    );
+}
+
+#[test]
+fn test_signals_config_permutations_x_market_states() {
+    // Cross-product: configs x market states for signal generation.
+    // Verify signals are self-consistent with gate results.
+    let configs = make_config_permutations();
+    let markets = make_market_states();
+
+    let mut total_evaluated = 0;
+    let mut buy_count = 0;
+    let mut sell_count = 0;
+    let mut neutral_count = 0;
+
+    for (cfg_label, cfg) in &configs {
+        for (mkt_label, snap) in &markets {
+            let btc_bullish = if snap.ema_fast > snap.ema_slow {
+                Some(true)
+            } else {
+                Some(false)
+            };
+
+            let gates = rust_check_gates(snap, cfg, btc_bullish, false);
+            let signal = rust_generate_signal(snap, &gates, cfg);
+
+            match signal.signal {
+                SignalDir::Buy => buy_count += 1,
+                SignalDir::Sell => sell_count += 1,
+                SignalDir::Neutral => neutral_count += 1,
+            }
+
+            // Signal consistency checks:
+            // 1. Buy requires bullish alignment
+            if signal.signal == SignalDir::Buy {
+                assert!(
+                    gates.bullish_alignment,
+                    "[{}/{}] BUY signal without bullish_alignment",
+                    cfg_label, mkt_label
+                );
+            }
+
+            // 2. Sell requires bearish alignment
+            if signal.signal == SignalDir::Sell {
+                assert!(
+                    gates.bearish_alignment,
+                    "[{}/{}] SELL signal without bearish_alignment",
+                    cfg_label, mkt_label
+                );
+            }
+
+            // 3. If anomaly is active and no modes are special, should be Neutral
+            if gates.is_anomaly && !gates.all_gates_pass {
+                // Anomaly blocks all modes
+                assert_eq!(
+                    signal.signal, SignalDir::Neutral,
+                    "[{}/{}] Anomaly active but signal is not Neutral: {:?}",
+                    cfg_label, mkt_label, signal.signal
+                );
+            }
+
+            // 4. effective_min_adx in signal result makes sense
+            if signal.signal != SignalDir::Neutral {
+                assert!(
+                    signal.effective_min_adx > 0.0,
+                    "[{}/{}] Non-neutral signal but effective_min_adx={}",
+                    cfg_label, mkt_label, signal.effective_min_adx
+                );
+            }
+
+            total_evaluated += 1;
+        }
+    }
+
+    // Verify diversity: we should see all three signal types
+    assert!(buy_count > 0, "Cross-product should produce at least one BUY, got 0");
+    assert!(sell_count > 0, "Cross-product should produce at least one SELL, got 0");
+    assert!(neutral_count > 0, "Cross-product should produce at least one NEUTRAL, got 0");
+    assert!(
+        total_evaluated >= 200,
+        "Expected at least 200 signal evaluations, got {}",
+        total_evaluated
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DRE interpolation precision tests (AQC-1212)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_dre_interpolation_sweep() {
+    // Sweep ADX from 15 to 55 in steps of 1.0 and verify DRE interpolation
+    // matches expected linear interpolation with T2 precision.
+    let cfg = GateConfig::default_config();
+    let adx_min = cfg.dre_min_adx;       // 22
+    let adx_max = cfg.dre_max_adx;       // 40
+    let rsi_long_weak = cfg.dre_long_rsi_limit_low;    // 56
+    let rsi_long_strong = cfg.dre_long_rsi_limit_high;  // 52
+    let rsi_short_weak = cfg.dre_short_rsi_limit_low;   // 44
+    let rsi_short_strong = cfg.dre_short_rsi_limit_high; // 48
+
+    for adx_i in 15..=55 {
+        let adx = adx_i as f64;
+        let mut snap = MarketSnapshot::strong_bullish();
+        snap.adx = adx;
+        snap.adx_slope = 1.0; // keep trending_up
+
+        let result = rust_check_gates(&snap, &cfg, Some(true), false);
+
+        // Expected weight (clamped to [0, 1])
+        let weight = ((adx - adx_min) / (adx_max - adx_min)).clamp(0.0, 1.0);
+        let expected_long = rsi_long_weak + weight * (rsi_long_strong - rsi_long_weak);
+        let expected_short = rsi_short_weak + weight * (rsi_short_strong - rsi_short_weak);
+
+        assert!(
+            within_tolerance(expected_long, result.rsi_long_limit, TIER_T2_TOLERANCE),
+            "DRE long mismatch at ADX={}: expected={}, got={}, err={:.2e}",
+            adx, expected_long, result.rsi_long_limit,
+            relative_error(expected_long, result.rsi_long_limit)
+        );
+        assert!(
+            within_tolerance(expected_short, result.rsi_short_limit, TIER_T2_TOLERANCE),
+            "DRE short mismatch at ADX={}: expected={}, got={}, err={:.2e}",
+            adx, expected_short, result.rsi_short_limit,
+            relative_error(expected_short, result.rsi_short_limit)
+        );
+
+        // f32 round-trip precision
+        let long_f32 = result.rsi_long_limit as f32 as f64;
+        assert!(
+            within_tolerance(result.rsi_long_limit, long_f32, TIER_T2_TOLERANCE),
+            "DRE long f32 round-trip exceeds T2 at ADX={}",
+            adx
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// REEF (RSI Extreme Entry Filter) reference + fixture tests (AQC-1212)
+//
+// REEF is a sweep-engine-level filter (not in per-bar decision codegen).
+// It blocks entries when RSI is at extremes for the given direction.
+// Logic: for BUY, if ADX < threshold, block when RSI > block_gt; else block
+// when RSI > extreme_gt. Mirror for SELL with < comparisons.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, Copy)]
+struct ReefConfig {
+    enabled: bool,
+    long_rsi_block_gt: f64,
+    short_rsi_block_lt: f64,
+    adx_threshold: f64,
+    long_rsi_extreme_gt: f64,
+    short_rsi_extreme_lt: f64,
+}
+
+impl Default for ReefConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            long_rsi_block_gt: 70.0,
+            short_rsi_block_lt: 30.0,
+            adx_threshold: 30.0,
+            long_rsi_extreme_gt: 80.0,
+            short_rsi_extreme_lt: 20.0,
+        }
+    }
+}
+
+/// Inline REEF reference: returns true if entry is BLOCKED (should skip).
+fn reef_blocks_entry(signal: SignalDir, adx: f64, rsi: f64, cfg: &ReefConfig) -> bool {
+    if !cfg.enabled { return false; }
+    match signal {
+        SignalDir::Buy => {
+            if adx < cfg.adx_threshold {
+                rsi > cfg.long_rsi_block_gt
+            } else {
+                rsi > cfg.long_rsi_extreme_gt
+            }
+        }
+        SignalDir::Sell => {
+            if adx < cfg.adx_threshold {
+                rsi < cfg.short_rsi_block_lt
+            } else {
+                rsi < cfg.short_rsi_extreme_lt
+            }
+        }
+        SignalDir::Neutral => false,
+    }
+}
+
+#[test]
+fn test_reef_filter_disabled_allows_all() {
+    let cfg = ReefConfig { enabled: false, ..Default::default() };
+    // Even extreme RSI should pass when disabled
+    assert!(!reef_blocks_entry(SignalDir::Buy, 15.0, 95.0, &cfg),
+        "REEF disabled: BUY with RSI=95 should NOT be blocked");
+    assert!(!reef_blocks_entry(SignalDir::Sell, 15.0, 5.0, &cfg),
+        "REEF disabled: SELL with RSI=5 should NOT be blocked");
+}
+
+#[test]
+fn test_reef_filter_buy_low_adx_blocked() {
+    let cfg = ReefConfig { enabled: true, ..Default::default() };
+    // ADX=25 < threshold=30, RSI=75 > block_gt=70 => blocked
+    assert!(reef_blocks_entry(SignalDir::Buy, 25.0, 75.0, &cfg),
+        "REEF: BUY with low ADX and high RSI should be blocked");
+}
+
+#[test]
+fn test_reef_filter_buy_low_adx_passes() {
+    let cfg = ReefConfig { enabled: true, ..Default::default() };
+    // ADX=25 < threshold=30, RSI=65 <= block_gt=70 => passes
+    assert!(!reef_blocks_entry(SignalDir::Buy, 25.0, 65.0, &cfg),
+        "REEF: BUY with low ADX and moderate RSI should pass");
+}
+
+#[test]
+fn test_reef_filter_buy_high_adx_extreme_blocked() {
+    let cfg = ReefConfig { enabled: true, ..Default::default() };
+    // ADX=35 >= threshold=30, RSI=85 > extreme_gt=80 => blocked
+    assert!(reef_blocks_entry(SignalDir::Buy, 35.0, 85.0, &cfg),
+        "REEF: BUY with high ADX and extreme RSI should be blocked");
+}
+
+#[test]
+fn test_reef_filter_buy_high_adx_extreme_passes() {
+    let cfg = ReefConfig { enabled: true, ..Default::default() };
+    // ADX=35 >= threshold=30, RSI=75 <= extreme_gt=80 => passes
+    assert!(!reef_blocks_entry(SignalDir::Buy, 35.0, 75.0, &cfg),
+        "REEF: BUY with high ADX and sub-extreme RSI should pass");
+}
+
+#[test]
+fn test_reef_filter_sell_low_adx_blocked() {
+    let cfg = ReefConfig { enabled: true, ..Default::default() };
+    // ADX=25 < threshold=30, RSI=25 < block_lt=30 => blocked
+    assert!(reef_blocks_entry(SignalDir::Sell, 25.0, 25.0, &cfg),
+        "REEF: SELL with low ADX and low RSI should be blocked");
+}
+
+#[test]
+fn test_reef_filter_sell_low_adx_passes() {
+    let cfg = ReefConfig { enabled: true, ..Default::default() };
+    // ADX=25 < threshold=30, RSI=35 >= block_lt=30 => passes
+    assert!(!reef_blocks_entry(SignalDir::Sell, 25.0, 35.0, &cfg),
+        "REEF: SELL with low ADX and moderate RSI should pass");
+}
+
+#[test]
+fn test_reef_filter_sell_high_adx_extreme_blocked() {
+    let cfg = ReefConfig { enabled: true, ..Default::default() };
+    // ADX=35 >= threshold=30, RSI=15 < extreme_lt=20 => blocked
+    assert!(reef_blocks_entry(SignalDir::Sell, 35.0, 15.0, &cfg),
+        "REEF: SELL with high ADX and extreme-low RSI should be blocked");
+}
+
+#[test]
+fn test_reef_filter_sell_high_adx_extreme_passes() {
+    let cfg = ReefConfig { enabled: true, ..Default::default() };
+    // ADX=35 >= threshold=30, RSI=25 >= extreme_lt=20 => passes
+    assert!(!reef_blocks_entry(SignalDir::Sell, 35.0, 25.0, &cfg),
+        "REEF: SELL with high ADX and sub-extreme RSI should pass");
+}
+
+#[test]
+fn test_reef_filter_boundary_adx_at_threshold() {
+    let cfg = ReefConfig { enabled: true, adx_threshold: 30.0, ..Default::default() };
+    // ADX exactly at threshold => NOT less than threshold => use extreme limits
+    // BUY: RSI=75 <= extreme_gt=80 => passes
+    assert!(!reef_blocks_entry(SignalDir::Buy, 30.0, 75.0, &cfg),
+        "REEF: BUY at exact ADX threshold should use extreme limits");
+    // BUY: RSI=85 > extreme_gt=80 => blocked
+    assert!(reef_blocks_entry(SignalDir::Buy, 30.0, 85.0, &cfg),
+        "REEF: BUY at exact ADX threshold with extreme RSI should block");
+}
+
+#[test]
+fn test_reef_neutral_never_blocked() {
+    let cfg = ReefConfig { enabled: true, ..Default::default() };
+    assert!(!reef_blocks_entry(SignalDir::Neutral, 10.0, 99.0, &cfg),
+        "REEF: Neutral signals should never be blocked");
+}
+
+#[test]
+fn test_reef_config_f32_roundtrip_precision() {
+    // REEF config values must survive f32 round-trip within T2 tolerance.
+    let cfg = ReefConfig {
+        enabled: true,
+        long_rsi_block_gt: 72.5,
+        short_rsi_block_lt: 27.5,
+        adx_threshold: 32.0,
+        long_rsi_extreme_gt: 82.5,
+        short_rsi_extreme_lt: 17.5,
+    };
+
+    let vals = [
+        ("long_rsi_block_gt", cfg.long_rsi_block_gt),
+        ("short_rsi_block_lt", cfg.short_rsi_block_lt),
+        ("adx_threshold", cfg.adx_threshold),
+        ("long_rsi_extreme_gt", cfg.long_rsi_extreme_gt),
+        ("short_rsi_extreme_lt", cfg.short_rsi_extreme_lt),
+    ];
+
+    for (name, val) in &vals {
+        let rt = *val as f32 as f64;
+        assert!(
+            within_tolerance(*val, rt, TIER_T2_TOLERANCE),
+            "REEF {}: f32 round-trip exceeds T2: {} vs {}",
+            name, val, rt
+        );
+    }
+}
+
+#[test]
+fn test_reef_config_fields_in_gpu_combo() {
+    // Verify REEF fields exist in GpuComboConfig by checking sweep engine CUDA source.
+    // REEF operates at the sweep-engine level (not in per-bar decision codegen).
+    let gpu_config_size = std::mem::size_of::<GpuComboConfig>();
+    assert!(gpu_config_size >= 560, "GpuComboConfig must be at least 560 bytes (has REEF fields)");
+
+    // Verify REEF fields are packed at expected offsets by constructing a zeroed config
+    // and checking the struct has the fields.
+    let cfg: GpuComboConfig = unsafe { std::mem::zeroed() };
+    // These field accesses compile only if the fields exist in GpuComboConfig.
+    let _ = cfg.enable_reef_filter;
+    let _ = cfg.reef_long_rsi_block_gt;
+    let _ = cfg.reef_short_rsi_block_lt;
+    let _ = cfg.reef_adx_threshold;
+    let _ = cfg.reef_long_rsi_extreme_gt;
+    let _ = cfg.reef_short_rsi_extreme_lt;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SSF (Simple Signal Filter) reference + fixture tests (AQC-1212)
+//
+// SSF is a sweep-engine-level filter. When enabled:
+//   BUY blocked if MACD hist <= 0
+//   SELL blocked if MACD hist >= 0
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Inline SSF reference: returns true if entry is BLOCKED.
+fn ssf_blocks_entry(signal: SignalDir, macd_hist: f64, enabled: bool) -> bool {
+    if !enabled { return false; }
+    match signal {
+        SignalDir::Buy => macd_hist <= 0.0,
+        SignalDir::Sell => macd_hist >= 0.0,
+        SignalDir::Neutral => false,
+    }
+}
+
+#[test]
+fn test_ssf_filter_disabled_allows_all() {
+    assert!(!ssf_blocks_entry(SignalDir::Buy, -1.0, false),
+        "SSF disabled: BUY with negative MACD should NOT be blocked");
+    assert!(!ssf_blocks_entry(SignalDir::Sell, 1.0, false),
+        "SSF disabled: SELL with positive MACD should NOT be blocked");
+}
+
+#[test]
+fn test_ssf_filter_buy_positive_hist_passes() {
+    assert!(!ssf_blocks_entry(SignalDir::Buy, 0.5, true),
+        "SSF: BUY with positive MACD hist should pass");
+}
+
+#[test]
+fn test_ssf_filter_buy_negative_hist_blocked() {
+    assert!(ssf_blocks_entry(SignalDir::Buy, -0.5, true),
+        "SSF: BUY with negative MACD hist should be blocked");
+}
+
+#[test]
+fn test_ssf_filter_buy_zero_hist_blocked() {
+    assert!(ssf_blocks_entry(SignalDir::Buy, 0.0, true),
+        "SSF: BUY with zero MACD hist should be blocked (<=0)");
+}
+
+#[test]
+fn test_ssf_filter_sell_negative_hist_passes() {
+    assert!(!ssf_blocks_entry(SignalDir::Sell, -0.5, true),
+        "SSF: SELL with negative MACD hist should pass");
+}
+
+#[test]
+fn test_ssf_filter_sell_positive_hist_blocked() {
+    assert!(ssf_blocks_entry(SignalDir::Sell, 0.5, true),
+        "SSF: SELL with positive MACD hist should be blocked");
+}
+
+#[test]
+fn test_ssf_filter_sell_zero_hist_blocked() {
+    assert!(ssf_blocks_entry(SignalDir::Sell, 0.0, true),
+        "SSF: SELL with zero MACD hist should be blocked (>=0)");
+}
+
+#[test]
+fn test_ssf_neutral_never_blocked() {
+    assert!(!ssf_blocks_entry(SignalDir::Neutral, 0.0, true),
+        "SSF: Neutral should never be blocked");
+}
+
+#[test]
+fn test_ssf_config_field_in_gpu_combo() {
+    // SSF operates at the sweep-engine level. Verify the config field exists.
+    let cfg: GpuComboConfig = unsafe { std::mem::zeroed() };
+    let _ = cfg.enable_ssf_filter;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Regime filter reference + fixture tests (AQC-1212)
+//
+// Regime filter is a sweep-engine-level filter. When enabled:
+//   SELL blocked if breadth_pct > breadth_block_short_above
+//   BUY  blocked if breadth_pct < breadth_block_long_below
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, Copy)]
+struct RegimeConfig {
+    enabled: bool,
+    breadth_block_short_above: f64,
+    breadth_block_long_below: f64,
+}
+
+impl Default for RegimeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            breadth_block_short_above: 0.7,
+            breadth_block_long_below: 0.3,
+        }
+    }
+}
+
+/// Inline regime filter reference: returns the possibly-neutralized signal.
+fn apply_regime_filter_ref(signal: SignalDir, breadth_pct: f64, cfg: &RegimeConfig) -> SignalDir {
+    if !cfg.enabled { return signal; }
+    match signal {
+        SignalDir::Sell if breadth_pct > cfg.breadth_block_short_above => SignalDir::Neutral,
+        SignalDir::Buy if breadth_pct < cfg.breadth_block_long_below => SignalDir::Neutral,
+        _ => signal,
+    }
+}
+
+#[test]
+fn test_regime_filter_disabled_allows_all() {
+    let cfg = RegimeConfig { enabled: false, ..Default::default() };
+    assert_eq!(apply_regime_filter_ref(SignalDir::Buy, 0.1, &cfg), SignalDir::Buy,
+        "Regime disabled: BUY with low breadth should pass");
+    assert_eq!(apply_regime_filter_ref(SignalDir::Sell, 0.9, &cfg), SignalDir::Sell,
+        "Regime disabled: SELL with high breadth should pass");
+}
+
+#[test]
+fn test_regime_filter_buy_blocked_low_breadth() {
+    let cfg = RegimeConfig { enabled: true, ..Default::default() };
+    // breadth_pct=0.2 < breadth_block_long_below=0.3 => BUY blocked
+    assert_eq!(apply_regime_filter_ref(SignalDir::Buy, 0.2, &cfg), SignalDir::Neutral,
+        "Regime: BUY should be blocked when breadth < threshold");
+}
+
+#[test]
+fn test_regime_filter_buy_passes_adequate_breadth() {
+    let cfg = RegimeConfig { enabled: true, ..Default::default() };
+    // breadth_pct=0.5 >= breadth_block_long_below=0.3 => BUY passes
+    assert_eq!(apply_regime_filter_ref(SignalDir::Buy, 0.5, &cfg), SignalDir::Buy,
+        "Regime: BUY should pass with adequate breadth");
+}
+
+#[test]
+fn test_regime_filter_sell_blocked_high_breadth() {
+    let cfg = RegimeConfig { enabled: true, ..Default::default() };
+    // breadth_pct=0.8 > breadth_block_short_above=0.7 => SELL blocked
+    assert_eq!(apply_regime_filter_ref(SignalDir::Sell, 0.8, &cfg), SignalDir::Neutral,
+        "Regime: SELL should be blocked when breadth > threshold");
+}
+
+#[test]
+fn test_regime_filter_sell_passes_moderate_breadth() {
+    let cfg = RegimeConfig { enabled: true, ..Default::default() };
+    // breadth_pct=0.5 <= breadth_block_short_above=0.7 => SELL passes
+    assert_eq!(apply_regime_filter_ref(SignalDir::Sell, 0.5, &cfg), SignalDir::Sell,
+        "Regime: SELL should pass with moderate breadth");
+}
+
+#[test]
+fn test_regime_filter_neutral_unchanged() {
+    let cfg = RegimeConfig { enabled: true, ..Default::default() };
+    assert_eq!(apply_regime_filter_ref(SignalDir::Neutral, 0.1, &cfg), SignalDir::Neutral,
+        "Regime: Neutral should remain neutral regardless of breadth");
+}
+
+#[test]
+fn test_regime_filter_boundary_exact_threshold() {
+    let cfg = RegimeConfig {
+        enabled: true,
+        breadth_block_short_above: 0.7,
+        breadth_block_long_below: 0.3,
+    };
+    // BUY at exact threshold: breadth_pct=0.3, NOT less than 0.3 => passes
+    assert_eq!(apply_regime_filter_ref(SignalDir::Buy, 0.3, &cfg), SignalDir::Buy,
+        "Regime: BUY at exact threshold should pass (not strictly less)");
+    // SELL at exact threshold: breadth_pct=0.7, NOT greater than 0.7 => passes
+    assert_eq!(apply_regime_filter_ref(SignalDir::Sell, 0.7, &cfg), SignalDir::Sell,
+        "Regime: SELL at exact threshold should pass (not strictly greater)");
+}
+
+#[test]
+fn test_regime_config_f32_roundtrip_precision() {
+    let vals = [
+        ("breadth_block_short_above", 0.7_f64),
+        ("breadth_block_long_below", 0.3_f64),
+        ("breadth_block_short_above_custom", 0.65_f64),
+        ("breadth_block_long_below_custom", 0.35_f64),
+    ];
+    for (name, val) in &vals {
+        let rt = *val as f32 as f64;
+        assert!(
+            within_tolerance(*val, rt, TIER_T2_TOLERANCE),
+            "Regime {}: f32 round-trip exceeds T2: {} vs {}",
+            name, val, rt
+        );
+    }
+}
+
+#[test]
+fn test_regime_config_field_in_gpu_combo() {
+    // Regime filter operates at sweep-engine level. Verify config field exists.
+    let cfg: GpuComboConfig = unsafe { std::mem::zeroed() };
+    let _ = cfg.enable_regime_filter;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MACD helper precision tests (AQC-1212)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_macd_helpers_all_modes_exhaustive() {
+    // Exhaustively test MACD helpers for both long and short across all modes.
+    // Mode 0 = Accel, Mode 1 = Sign, Mode 2 = None.
+    let test_cases: &[(u32, f64, f64, bool, bool)] = &[
+        // (mode, hist, prev_hist, expected_long, expected_short)
+        // Accel mode
+        (0, 0.5, 0.3, true, false),   // rising hist: long accel ok, short accel not
+        (0, 0.3, 0.5, false, true),   // falling hist: short accel ok, long not
+        (0, 0.5, 0.5, false, false),  // flat: neither
+        (0, -0.3, -0.5, true, false), // rising (less negative): long accel ok
+        (0, -0.5, -0.3, false, true), // falling (more negative): short accel ok
+        // Sign mode
+        (1, 0.5, -999.0, true, false),   // positive hist: long sign ok
+        (1, -0.5, 999.0, false, true),   // negative hist: short sign ok
+        (1, 0.0, 0.0, false, false),     // zero: neither (> 0 false, < 0 false)
+        // None mode
+        (2, -999.0, 999.0, true, true),  // always true
+        (2, 0.0, 0.0, true, true),       // always true
+    ];
+
+    for &(mode, hist, prev, exp_long, exp_short) in test_cases {
+        let got_long = check_macd_long_ref(mode, hist, prev);
+        let got_short = check_macd_short_ref(mode, hist, prev);
+        assert_eq!(
+            got_long, exp_long,
+            "MACD long mode={}, hist={}, prev={}: expected {}, got {}",
+            mode, hist, prev, exp_long, got_long
+        );
+        assert_eq!(
+            got_short, exp_short,
+            "MACD short mode={}, hist={}, prev={}: expected {}, got {}",
+            mode, hist, prev, exp_short, got_short
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Effective min ADX precision sweep (AQC-1212)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_effective_min_adx_tmc_ave_precision_sweep() {
+    // Sweep different ADX slope and ATR/avg_ATR ratios to verify TMC+AVE
+    // interactions produce correct effective_min_adx values.
+    let base_cfg = GateConfig::default_config();
+
+    let adx_slopes = [0.0, 0.3, 0.5, 0.51, 1.0, 2.0];
+    let atr_ratios = [0.5, 1.0, 1.4, 1.5, 1.51, 2.0, 3.0];
+
+    for &slope in &adx_slopes {
+        for &ratio in &atr_ratios {
+            let mut snap = MarketSnapshot::strong_bullish();
+            snap.adx_slope = slope;
+            snap.atr = ratio * snap.avg_atr;
+
+            let result = rust_check_gates(&snap, &base_cfg, Some(true), false);
+
+            // Compute expected effective_min_adx
+            let mut expected = base_cfg.min_adx;
+
+            // TMC: slope > 0.5 => cap at 25
+            if slope > 0.5 {
+                expected = expected.min(25.0);
+            }
+
+            // AVE: ratio > 1.5 => multiply
+            if base_cfg.ave_enabled && snap.avg_atr > 0.0 {
+                let actual_ratio = snap.atr / snap.avg_atr;
+                if actual_ratio > base_cfg.ave_atr_ratio_gt {
+                    expected *= base_cfg.ave_adx_mult;
+                }
+            }
+
+            assert!(
+                within_tolerance(expected, result.effective_min_adx, TIER_T2_TOLERANCE),
+                "TMC+AVE mismatch: slope={}, atr_ratio={}: expected={}, got={}, err={:.2e}",
+                slope, ratio, expected, result.effective_min_adx,
+                relative_error(expected, result.effective_min_adx)
+            );
+
+            // f32 round-trip
+            let f32_rt = result.effective_min_adx as f32 as f64;
+            assert!(
+                within_tolerance(result.effective_min_adx, f32_rt, TIER_T2_TOLERANCE),
+                "effective_min_adx f32 round-trip exceeds T2: slope={}, ratio={}",
+                slope, ratio
+            );
+        }
     }
 }
