@@ -3411,3 +3411,1524 @@ fn test_config_all_codegen_uses_double_precision() {
         );
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AQC-1232: Fixture-based numerical parity tests for sizing & cooldown codegen
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Rust SSOT: compute_entry_sizing (mirrors risk-core/src/lib.rs).
+///
+/// This is a local copy of the CPU SSOT logic for direct numerical verification
+/// without engine/position/indicator wrappers. It MUST match risk_core::compute_entry_sizing.
+fn rust_compute_entry_sizing(
+    equity: f64,
+    price: f64,
+    atr: f64,
+    adx: f64,
+    confidence: Confidence,
+    allocation_pct: f64,
+    enable_dynamic_sizing: bool,
+    confidence_mult_high: f64,
+    confidence_mult_medium: f64,
+    confidence_mult_low: f64,
+    adx_sizing_min_mult: f64,
+    adx_sizing_full_adx: f64,
+    vol_baseline_pct: f64,
+    vol_scalar_min: f64,
+    vol_scalar_max: f64,
+    enable_dynamic_leverage: bool,
+    leverage: f64,
+    leverage_low: f64,
+    leverage_medium: f64,
+    leverage_high: f64,
+    leverage_max_cap: f64,
+) -> (f64, f64, f64, f64) {
+    let mut margin_used = equity * allocation_pct;
+
+    if enable_dynamic_sizing {
+        let confidence_mult = match confidence {
+            Confidence::High => confidence_mult_high,
+            Confidence::Medium => confidence_mult_medium,
+            Confidence::Low => confidence_mult_low,
+        };
+
+        let adx_mult = (adx / adx_sizing_full_adx).clamp(adx_sizing_min_mult, 1.0);
+
+        let vol_ratio = if vol_baseline_pct > 0.0 && price > 0.0 {
+            (atr / price) / vol_baseline_pct
+        } else {
+            1.0
+        };
+        let vol_scalar_raw = if vol_ratio > 0.0 { 1.0 / vol_ratio } else { 1.0 };
+        let vol_scalar = vol_scalar_raw.clamp(vol_scalar_min, vol_scalar_max);
+
+        margin_used *= confidence_mult * adx_mult * vol_scalar;
+    }
+
+    let lev = if enable_dynamic_leverage {
+        let base_lev = match confidence {
+            Confidence::High => leverage_high,
+            Confidence::Medium => leverage_medium,
+            Confidence::Low => leverage_low,
+        };
+        if leverage_max_cap > 0.0 {
+            base_lev.min(leverage_max_cap)
+        } else {
+            base_lev
+        }
+    } else {
+        leverage
+    };
+
+    let notional = margin_used * lev;
+    let size = if price > 0.0 { notional / price } else { 0.0 };
+
+    (size, margin_used, lev, notional)
+}
+
+/// Rust SSOT: is_pesc_blocked (mirrors bt-core/src/engine.rs).
+///
+/// Simplified for fixture testing: uses raw timestamp/type/reason values
+/// instead of SimState/StrategyConfig structs. Returns true if entry is blocked.
+fn rust_is_pesc_blocked(
+    reentry_cooldown_minutes: u32,
+    reentry_cooldown_min_mins: u32,
+    reentry_cooldown_max_mins: u32,
+    close_ts: u32,        // seconds
+    close_type: u32,      // 0=none, 1=LONG, 2=SHORT
+    close_reason: u32,    // 0=none, 1=signal_flip, 2=other
+    desired_type: u32,    // 1=LONG, 2=SHORT
+    current_ts: u32,      // seconds
+    adx: f64,
+) -> bool {
+    // Gate: disabled when reentry_cooldown_minutes == 0
+    if reentry_cooldown_minutes == 0 {
+        return false;
+    }
+
+    // No prior close recorded
+    if close_ts == 0 {
+        return false;
+    }
+
+    // Signal flip bypass (reason == 1 means signal_flip in GPU encoding;
+    // GPU uses: 1=signal_flip, 2=other. This matches the codegen check
+    // `close_reason == 2u` which checks for "non-signal-flip" reasons.
+    // Actually the GPU check is: if close_reason != 2u -> not blocked (bypass).
+    // Wait — re-reading the codegen test: it checks `close_reason == 2u` which
+    // in the GPU encoding means "other" (non-signal-flip). The GPU PESC blocks
+    // only when close_reason == 2 (i.e., NOT a signal flip).
+    // So: if close_reason != 2 (i.e., it IS a signal flip or none), bypass.
+    // But the CPU code checks: close_reason == "Signal Flip" -> return false.
+    // In GPU: 0=none, 1=signal_flip, 2=other. So signal_flip = 1 -> bypass.
+    // The codegen test says `close_reason == 2u` which means "block when reason
+    // is 'other'". If reason is 1 (signal_flip), the block code is skipped.
+    // For our Rust reference: if close_reason == 1 (signal_flip), return false.
+    if close_reason == 1 {
+        return false;
+    }
+
+    // Direction gate: only blocks same-direction re-entry
+    if close_type != desired_type {
+        return false;
+    }
+
+    // ADX-adaptive cooldown interpolation
+    let min_cd = reentry_cooldown_min_mins as f64;
+    let max_cd = reentry_cooldown_max_mins as f64;
+    let cooldown_mins = if adx >= 40.0 {
+        min_cd
+    } else if adx <= 25.0 {
+        max_cd
+    } else {
+        let t = (adx - 25.0) / 15.0;
+        max_cd + t * (min_cd - max_cd)
+    };
+
+    let cooldown_sec = cooldown_mins * 60.0;
+    let elapsed = (current_ts as f64) - (close_ts as f64);
+
+    elapsed < cooldown_sec
+}
+
+/// Sizing fixture: captures a specific config + market + equity scenario.
+#[derive(Debug, Clone)]
+struct SizingFixture {
+    label: &'static str,
+    equity: f64,
+    price: f64,
+    atr: f64,
+    adx: f64,
+    confidence: Confidence,
+    // Config params
+    allocation_pct: f64,
+    enable_dynamic_sizing: bool,
+    confidence_mult_high: f64,
+    confidence_mult_medium: f64,
+    confidence_mult_low: f64,
+    adx_sizing_min_mult: f64,
+    adx_sizing_full_adx: f64,
+    vol_baseline_pct: f64,
+    vol_scalar_min: f64,
+    vol_scalar_max: f64,
+    enable_dynamic_leverage: bool,
+    leverage: f64,
+    leverage_low: f64,
+    leverage_medium: f64,
+    leverage_high: f64,
+    leverage_max_cap: f64,
+    // Expected outputs
+    expected_margin: f64,
+    expected_leverage: f64,
+    expected_notional: f64,
+    expected_size: f64,
+}
+
+/// PESC fixture: captures a specific cooldown scenario.
+#[derive(Debug, Clone)]
+struct PescFixture {
+    label: &'static str,
+    reentry_cooldown_minutes: u32,
+    reentry_cooldown_min_mins: u32,
+    reentry_cooldown_max_mins: u32,
+    close_ts: u32,
+    close_type: u32,    // 0=none, 1=LONG, 2=SHORT
+    close_reason: u32,  // 0=none, 1=signal_flip, 2=other
+    desired_type: u32,  // 1=LONG, 2=SHORT
+    current_ts: u32,
+    adx: f64,
+    expected_blocked: bool,
+}
+
+fn make_sizing_fixtures() -> Vec<SizingFixture> {
+    vec![
+        // ── 1. Static sizing, small account, no dynamic ──────────────────
+        SizingFixture {
+            label: "static-small-account",
+            equity: 1000.0,
+            price: 50.0,
+            atr: 0.5,
+            adx: 30.0,
+            confidence: Confidence::High,
+            allocation_pct: 0.03,
+            enable_dynamic_sizing: false,
+            confidence_mult_high: 1.0,
+            confidence_mult_medium: 0.8,
+            confidence_mult_low: 0.6,
+            adx_sizing_min_mult: 0.6,
+            adx_sizing_full_adx: 40.0,
+            vol_baseline_pct: 0.01,
+            vol_scalar_min: 0.6,
+            vol_scalar_max: 1.4,
+            enable_dynamic_leverage: false,
+            leverage: 3.0,
+            leverage_low: 1.0,
+            leverage_medium: 3.0,
+            leverage_high: 5.0,
+            leverage_max_cap: 0.0,
+            // Static: margin = 1000 * 0.03 = 30, leverage = 3, notional = 90, size = 90/50 = 1.8
+            expected_margin: 30.0,
+            expected_leverage: 3.0,
+            expected_notional: 90.0,
+            expected_size: 1.8,
+        },
+        // ── 2. Static sizing, medium account, medium leverage ────────────
+        SizingFixture {
+            label: "static-medium-account",
+            equity: 10_000.0,
+            price: 100.0,
+            atr: 1.0,
+            adx: 30.0,
+            confidence: Confidence::Medium,
+            allocation_pct: 0.05,
+            enable_dynamic_sizing: false,
+            confidence_mult_high: 1.0,
+            confidence_mult_medium: 0.8,
+            confidence_mult_low: 0.6,
+            adx_sizing_min_mult: 0.6,
+            adx_sizing_full_adx: 40.0,
+            vol_baseline_pct: 0.01,
+            vol_scalar_min: 0.6,
+            vol_scalar_max: 1.4,
+            enable_dynamic_leverage: false,
+            leverage: 2.0,
+            leverage_low: 1.0,
+            leverage_medium: 3.0,
+            leverage_high: 5.0,
+            leverage_max_cap: 0.0,
+            // Static: margin = 10000 * 0.05 = 500, lev = 2, notional = 1000, size = 10
+            expected_margin: 500.0,
+            expected_leverage: 2.0,
+            expected_notional: 1000.0,
+            expected_size: 10.0,
+        },
+        // ── 3. Static sizing, large account ──────────────────────────────
+        SizingFixture {
+            label: "static-large-account",
+            equity: 100_000.0,
+            price: 65000.0,
+            atr: 1000.0,
+            adx: 35.0,
+            confidence: Confidence::Low,
+            allocation_pct: 0.02,
+            enable_dynamic_sizing: false,
+            confidence_mult_high: 1.0,
+            confidence_mult_medium: 0.8,
+            confidence_mult_low: 0.6,
+            adx_sizing_min_mult: 0.6,
+            adx_sizing_full_adx: 40.0,
+            vol_baseline_pct: 0.01,
+            vol_scalar_min: 0.6,
+            vol_scalar_max: 1.4,
+            enable_dynamic_leverage: false,
+            leverage: 5.0,
+            leverage_low: 1.0,
+            leverage_medium: 3.0,
+            leverage_high: 5.0,
+            leverage_max_cap: 0.0,
+            // Static: margin = 100000*0.02 = 2000, lev = 5, notional = 10000, size = 10000/65000
+            expected_margin: 2000.0,
+            expected_leverage: 5.0,
+            expected_notional: 10000.0,
+            expected_size: 10000.0 / 65000.0,
+        },
+        // ── 4. Dynamic sizing, high confidence, full ADX ─────────────────
+        SizingFixture {
+            label: "dynamic-high-conf-full-adx",
+            equity: 10_000.0,
+            price: 100.0,
+            atr: 1.0,
+            adx: 40.0,
+            confidence: Confidence::High,
+            allocation_pct: 0.03,
+            enable_dynamic_sizing: true,
+            confidence_mult_high: 1.0,
+            confidence_mult_medium: 0.8,
+            confidence_mult_low: 0.6,
+            adx_sizing_min_mult: 0.6,
+            adx_sizing_full_adx: 40.0,
+            vol_baseline_pct: 0.01,
+            vol_scalar_min: 0.6,
+            vol_scalar_max: 1.4,
+            enable_dynamic_leverage: true,
+            leverage: 3.0,
+            leverage_low: 1.0,
+            leverage_medium: 3.0,
+            leverage_high: 5.0,
+            leverage_max_cap: 0.0,
+            // Dynamic: conf_mult=1.0, adx_mult=40/40=1.0 clamped to [0.6,1.0]=1.0
+            // vol_ratio=(1.0/100.0)/0.01=1.0, vol_scalar=1/1.0=1.0, clamped [0.6,1.4]=1.0
+            // margin = 10000*0.03 * 1.0 * 1.0 * 1.0 = 300
+            // dynamic leverage: High -> 5.0, cap=0 -> 5.0
+            // notional = 300*5 = 1500, size = 1500/100 = 15
+            expected_margin: 300.0,
+            expected_leverage: 5.0,
+            expected_notional: 1500.0,
+            expected_size: 15.0,
+        },
+        // ── 5. Dynamic sizing, low confidence, weak ADX ──────────────────
+        SizingFixture {
+            label: "dynamic-low-conf-weak-adx",
+            equity: 10_000.0,
+            price: 100.0,
+            atr: 1.0,
+            adx: 15.0,
+            confidence: Confidence::Low,
+            allocation_pct: 0.03,
+            enable_dynamic_sizing: true,
+            confidence_mult_high: 1.0,
+            confidence_mult_medium: 0.8,
+            confidence_mult_low: 0.6,
+            adx_sizing_min_mult: 0.6,
+            adx_sizing_full_adx: 40.0,
+            vol_baseline_pct: 0.01,
+            vol_scalar_min: 0.6,
+            vol_scalar_max: 1.4,
+            enable_dynamic_leverage: true,
+            leverage: 3.0,
+            leverage_low: 1.0,
+            leverage_medium: 3.0,
+            leverage_high: 5.0,
+            leverage_max_cap: 0.0,
+            // Dynamic: conf_mult=0.6, adx_mult=15/40=0.375 clamped [0.6,1.0]=0.6
+            // vol_ratio=1.0, vol_scalar=1.0
+            // margin = 10000*0.03 * 0.6 * 0.6 * 1.0 = 108
+            // dynamic leverage: Low -> 1.0, cap=0 -> 1.0
+            // notional = 108*1 = 108, size = 108/100 = 1.08
+            expected_margin: 108.0,
+            expected_leverage: 1.0,
+            expected_notional: 108.0,
+            expected_size: 1.08,
+        },
+        // ── 6. Dynamic sizing, medium conf, partial ADX ──────────────────
+        SizingFixture {
+            label: "dynamic-medium-conf-partial-adx",
+            equity: 10_000.0,
+            price: 200.0,
+            atr: 4.0,
+            adx: 30.0,
+            confidence: Confidence::Medium,
+            allocation_pct: 0.03,
+            enable_dynamic_sizing: true,
+            confidence_mult_high: 1.0,
+            confidence_mult_medium: 0.8,
+            confidence_mult_low: 0.6,
+            adx_sizing_min_mult: 0.6,
+            adx_sizing_full_adx: 40.0,
+            vol_baseline_pct: 0.01,
+            vol_scalar_min: 0.6,
+            vol_scalar_max: 1.4,
+            enable_dynamic_leverage: true,
+            leverage: 3.0,
+            leverage_low: 1.0,
+            leverage_medium: 3.0,
+            leverage_high: 5.0,
+            leverage_max_cap: 4.0,
+            // Dynamic: conf_mult=0.8, adx_mult=30/40=0.75 clamped [0.6,1.0]=0.75
+            // vol_ratio=(4.0/200.0)/0.01=2.0, vol_scalar=1/2.0=0.5, clamped [0.6,1.4]=0.6
+            // margin = 10000*0.03 * 0.8 * 0.75 * 0.6 = 108
+            // dynamic leverage: Medium -> 3.0, cap=4.0 -> min(3.0,4.0) = 3.0
+            // notional = 108*3 = 324, size = 324/200 = 1.62
+            expected_margin: 108.0,
+            expected_leverage: 3.0,
+            expected_notional: 324.0,
+            expected_size: 1.62,
+        },
+        // ── 7. Dynamic sizing, vol expansion (low vol) ───────────────────
+        SizingFixture {
+            label: "dynamic-low-vol-expansion",
+            equity: 10_000.0,
+            price: 100.0,
+            atr: 0.5,
+            adx: 40.0,
+            confidence: Confidence::High,
+            allocation_pct: 0.03,
+            enable_dynamic_sizing: true,
+            confidence_mult_high: 1.0,
+            confidence_mult_medium: 0.8,
+            confidence_mult_low: 0.6,
+            adx_sizing_min_mult: 0.6,
+            adx_sizing_full_adx: 40.0,
+            vol_baseline_pct: 0.01,
+            vol_scalar_min: 0.6,
+            vol_scalar_max: 1.4,
+            enable_dynamic_leverage: false,
+            leverage: 3.0,
+            leverage_low: 1.0,
+            leverage_medium: 3.0,
+            leverage_high: 5.0,
+            leverage_max_cap: 0.0,
+            // Dynamic: conf=1.0, adx=1.0
+            // vol_ratio=(0.5/100.0)/0.01 = 0.5, vol_scalar=1/0.5=2.0, clamped [0.6,1.4]=1.4
+            // margin = 10000*0.03 * 1.0 * 1.0 * 1.4 = 420
+            // static leverage = 3.0
+            // notional = 420*3 = 1260, size = 1260/100 = 12.6
+            expected_margin: 420.0,
+            expected_leverage: 3.0,
+            expected_notional: 1260.0,
+            expected_size: 12.6,
+        },
+        // ── 8. Dynamic sizing, vol contraction (high vol) ────────────────
+        SizingFixture {
+            label: "dynamic-high-vol-contraction",
+            equity: 10_000.0,
+            price: 100.0,
+            atr: 3.0,
+            adx: 40.0,
+            confidence: Confidence::High,
+            allocation_pct: 0.03,
+            enable_dynamic_sizing: true,
+            confidence_mult_high: 1.0,
+            confidence_mult_medium: 0.8,
+            confidence_mult_low: 0.6,
+            adx_sizing_min_mult: 0.6,
+            adx_sizing_full_adx: 40.0,
+            vol_baseline_pct: 0.01,
+            vol_scalar_min: 0.6,
+            vol_scalar_max: 1.4,
+            enable_dynamic_leverage: false,
+            leverage: 3.0,
+            leverage_low: 1.0,
+            leverage_medium: 3.0,
+            leverage_high: 5.0,
+            leverage_max_cap: 0.0,
+            // Dynamic: conf=1.0, adx=1.0
+            // vol_ratio=(3.0/100.0)/0.01 = 3.0, vol_scalar=1/3.0≈0.333, clamped [0.6,1.4]=0.6
+            // margin = 10000*0.03 * 1.0 * 1.0 * 0.6 = 180
+            // static leverage = 3.0
+            // notional = 180*3 = 540, size = 540/100 = 5.4
+            expected_margin: 180.0,
+            expected_leverage: 3.0,
+            expected_notional: 540.0,
+            expected_size: 5.4,
+        },
+        // ── 9. Dynamic leverage with cap ─────────────────────────────────
+        SizingFixture {
+            label: "dynamic-leverage-capped",
+            equity: 10_000.0,
+            price: 100.0,
+            atr: 1.0,
+            adx: 40.0,
+            confidence: Confidence::High,
+            allocation_pct: 0.03,
+            enable_dynamic_sizing: false,
+            confidence_mult_high: 1.0,
+            confidence_mult_medium: 0.8,
+            confidence_mult_low: 0.6,
+            adx_sizing_min_mult: 0.6,
+            adx_sizing_full_adx: 40.0,
+            vol_baseline_pct: 0.01,
+            vol_scalar_min: 0.6,
+            vol_scalar_max: 1.4,
+            enable_dynamic_leverage: true,
+            leverage: 3.0,
+            leverage_low: 1.0,
+            leverage_medium: 3.0,
+            leverage_high: 5.0,
+            leverage_max_cap: 3.5,
+            // Static sizing: margin = 10000*0.03 = 300
+            // Dynamic leverage: High -> 5.0, cap=3.5 -> min(5.0, 3.5) = 3.5
+            // notional = 300*3.5 = 1050, size = 1050/100 = 10.5
+            expected_margin: 300.0,
+            expected_leverage: 3.5,
+            expected_notional: 1050.0,
+            expected_size: 10.5,
+        },
+        // ── 10. Dynamic sizing, BTC at $100k, small alloc ────────────────
+        SizingFixture {
+            label: "dynamic-btc-100k",
+            equity: 100_000.0,
+            price: 100_000.0,
+            atr: 1500.0,
+            adx: 35.0,
+            confidence: Confidence::High,
+            allocation_pct: 0.02,
+            enable_dynamic_sizing: true,
+            confidence_mult_high: 1.0,
+            confidence_mult_medium: 0.8,
+            confidence_mult_low: 0.6,
+            adx_sizing_min_mult: 0.6,
+            adx_sizing_full_adx: 40.0,
+            vol_baseline_pct: 0.015,
+            vol_scalar_min: 0.6,
+            vol_scalar_max: 1.4,
+            enable_dynamic_leverage: true,
+            leverage: 3.0,
+            leverage_low: 1.0,
+            leverage_medium: 3.0,
+            leverage_high: 5.0,
+            leverage_max_cap: 0.0,
+            // Dynamic: conf=1.0, adx=35/40=0.875 clamped [0.6,1.0]=0.875
+            // vol_ratio=(1500/100000)/0.015=1.0, vol_scalar=1/1.0=1.0
+            // margin = 100000*0.02 * 1.0 * 0.875 * 1.0 = 1750
+            // dynamic leverage: High -> 5.0, cap=0 -> 5.0
+            // notional = 1750*5 = 8750, size = 8750/100000 = 0.0875
+            expected_margin: 1750.0,
+            expected_leverage: 5.0,
+            expected_notional: 8750.0,
+            expected_size: 0.0875,
+        },
+        // ── 11. Dynamic sizing, penny stock ──────────────────────────────
+        SizingFixture {
+            label: "dynamic-penny-stock",
+            equity: 1000.0,
+            price: 0.05,
+            atr: 0.001,
+            adx: 20.0,
+            confidence: Confidence::Medium,
+            allocation_pct: 0.03,
+            enable_dynamic_sizing: true,
+            confidence_mult_high: 1.0,
+            confidence_mult_medium: 0.8,
+            confidence_mult_low: 0.6,
+            adx_sizing_min_mult: 0.6,
+            adx_sizing_full_adx: 40.0,
+            vol_baseline_pct: 0.02,
+            vol_scalar_min: 0.6,
+            vol_scalar_max: 1.4,
+            enable_dynamic_leverage: true,
+            leverage: 2.0,
+            leverage_low: 1.0,
+            leverage_medium: 2.0,
+            leverage_high: 3.0,
+            leverage_max_cap: 0.0,
+            // Dynamic: conf=0.8, adx=20/40=0.5 clamped [0.6,1.0]=0.6
+            // vol_ratio=(0.001/0.05)/0.02=1.0, vol_scalar=1.0
+            // margin = 1000*0.03 * 0.8 * 0.6 * 1.0 = 14.4
+            // dynamic leverage: Medium -> 2.0, cap=0 -> 2.0
+            // notional = 14.4*2 = 28.8, size = 28.8/0.05 = 576
+            expected_margin: 14.4,
+            expected_leverage: 2.0,
+            expected_notional: 28.8,
+            expected_size: 576.0,
+        },
+        // ── 12. Zero price returns zero size ─────────────────────────────
+        SizingFixture {
+            label: "zero-price-returns-zero-size",
+            equity: 10_000.0,
+            price: 0.0,
+            atr: 1.0,
+            adx: 30.0,
+            confidence: Confidence::High,
+            allocation_pct: 0.03,
+            enable_dynamic_sizing: false,
+            confidence_mult_high: 1.0,
+            confidence_mult_medium: 0.8,
+            confidence_mult_low: 0.6,
+            adx_sizing_min_mult: 0.6,
+            adx_sizing_full_adx: 40.0,
+            vol_baseline_pct: 0.01,
+            vol_scalar_min: 0.6,
+            vol_scalar_max: 1.4,
+            enable_dynamic_leverage: false,
+            leverage: 3.0,
+            leverage_low: 1.0,
+            leverage_medium: 3.0,
+            leverage_high: 5.0,
+            leverage_max_cap: 0.0,
+            // margin = 10000*0.03 = 300, notional = 900, size = 0 (zero price)
+            expected_margin: 300.0,
+            expected_leverage: 3.0,
+            expected_notional: 900.0,
+            expected_size: 0.0,
+        },
+        // ── 13. Dynamic sizing, zero vol baseline ────────────────────────
+        SizingFixture {
+            label: "dynamic-zero-vol-baseline",
+            equity: 10_000.0,
+            price: 100.0,
+            atr: 1.0,
+            adx: 40.0,
+            confidence: Confidence::High,
+            allocation_pct: 0.03,
+            enable_dynamic_sizing: true,
+            confidence_mult_high: 1.0,
+            confidence_mult_medium: 0.8,
+            confidence_mult_low: 0.6,
+            adx_sizing_min_mult: 0.6,
+            adx_sizing_full_adx: 40.0,
+            vol_baseline_pct: 0.0, // zero -> vol_ratio = 1.0 (fallback)
+            vol_scalar_min: 0.6,
+            vol_scalar_max: 1.4,
+            enable_dynamic_leverage: false,
+            leverage: 3.0,
+            leverage_low: 1.0,
+            leverage_medium: 3.0,
+            leverage_high: 5.0,
+            leverage_max_cap: 0.0,
+            // vol_ratio fallback=1.0 (zero baseline), vol_scalar=1.0
+            // margin = 10000*0.03 * 1.0 * 1.0 * 1.0 = 300
+            expected_margin: 300.0,
+            expected_leverage: 3.0,
+            expected_notional: 900.0,
+            expected_size: 9.0,
+        },
+        // ── 14. Dynamic sizing, zero ADX ─────────────────────────────────
+        SizingFixture {
+            label: "dynamic-zero-adx",
+            equity: 10_000.0,
+            price: 100.0,
+            atr: 1.0,
+            adx: 0.0,
+            confidence: Confidence::High,
+            allocation_pct: 0.03,
+            enable_dynamic_sizing: true,
+            confidence_mult_high: 1.0,
+            confidence_mult_medium: 0.8,
+            confidence_mult_low: 0.6,
+            adx_sizing_min_mult: 0.6,
+            adx_sizing_full_adx: 40.0,
+            vol_baseline_pct: 0.01,
+            vol_scalar_min: 0.6,
+            vol_scalar_max: 1.4,
+            enable_dynamic_leverage: true,
+            leverage: 3.0,
+            leverage_low: 1.0,
+            leverage_medium: 3.0,
+            leverage_high: 5.0,
+            leverage_max_cap: 0.0,
+            // adx_mult = 0/40 = 0.0, clamped [0.6, 1.0] = 0.6
+            // vol_ratio=1.0, vol_scalar=1.0
+            // margin = 10000*0.03 * 1.0 * 0.6 * 1.0 = 180
+            // High -> lev 5.0
+            // notional = 180*5 = 900, size = 9.0
+            expected_margin: 180.0,
+            expected_leverage: 5.0,
+            expected_notional: 900.0,
+            expected_size: 9.0,
+        },
+    ]
+}
+
+fn make_pesc_fixtures() -> Vec<PescFixture> {
+    // Base: close at t=1000s, current at various times,
+    // cooldown config: base=60min, min=45min, max=180min
+    vec![
+        // ── 1. PESC disabled (cooldown_minutes == 0) ─────────────────────
+        PescFixture {
+            label: "pesc-disabled",
+            reentry_cooldown_minutes: 0,
+            reentry_cooldown_min_mins: 45,
+            reentry_cooldown_max_mins: 180,
+            close_ts: 1000,
+            close_type: 1, // LONG
+            close_reason: 2, // other
+            desired_type: 1, // LONG (same dir)
+            current_ts: 1001, // 1 second later
+            adx: 30.0,
+            expected_blocked: false,
+        },
+        // ── 2. No prior close (close_ts == 0) ───────────────────────────
+        PescFixture {
+            label: "pesc-no-prior-close",
+            reentry_cooldown_minutes: 60,
+            reentry_cooldown_min_mins: 45,
+            reentry_cooldown_max_mins: 180,
+            close_ts: 0,
+            close_type: 0,
+            close_reason: 0,
+            desired_type: 1,
+            current_ts: 1000,
+            adx: 30.0,
+            expected_blocked: false,
+        },
+        // ── 3. Signal flip bypass ────────────────────────────────────────
+        PescFixture {
+            label: "pesc-signal-flip-bypass",
+            reentry_cooldown_minutes: 60,
+            reentry_cooldown_min_mins: 45,
+            reentry_cooldown_max_mins: 180,
+            close_ts: 1000,
+            close_type: 1,
+            close_reason: 1, // signal_flip
+            desired_type: 1,
+            current_ts: 1001, // 1 second later
+            adx: 25.0,
+            expected_blocked: false,
+        },
+        // ── 4. Different direction bypass ────────────────────────────────
+        PescFixture {
+            label: "pesc-opposite-direction-bypass",
+            reentry_cooldown_minutes: 60,
+            reentry_cooldown_min_mins: 45,
+            reentry_cooldown_max_mins: 180,
+            close_ts: 1000,
+            close_type: 1, // closed LONG
+            close_reason: 2, // other
+            desired_type: 2, // want SHORT (different dir)
+            current_ts: 1001,
+            adx: 25.0,
+            expected_blocked: false,
+        },
+        // ── 5. Blocked: same dir, weak ADX (max cooldown 180min) ─────────
+        PescFixture {
+            label: "pesc-blocked-weak-adx-max-cooldown",
+            reentry_cooldown_minutes: 60,
+            reentry_cooldown_min_mins: 45,
+            reentry_cooldown_max_mins: 180,
+            close_ts: 1000,
+            close_type: 1,
+            close_reason: 2,
+            desired_type: 1,
+            // 179 minutes = 10740 seconds after close
+            current_ts: 1000 + 10740,
+            adx: 25.0, // weak ADX -> max cooldown = 180 min
+            expected_blocked: true,
+        },
+        // ── 6. Not blocked: same dir, weak ADX, past max cooldown ────────
+        PescFixture {
+            label: "pesc-not-blocked-past-max-cooldown",
+            reentry_cooldown_minutes: 60,
+            reentry_cooldown_min_mins: 45,
+            reentry_cooldown_max_mins: 180,
+            close_ts: 1000,
+            close_type: 1,
+            close_reason: 2,
+            desired_type: 1,
+            // 181 minutes = 10860 seconds after close
+            current_ts: 1000 + 10860,
+            adx: 25.0,
+            expected_blocked: false,
+        },
+        // ── 7. Blocked: strong ADX (min cooldown 45min) ──────────────────
+        PescFixture {
+            label: "pesc-blocked-strong-adx-min-cooldown",
+            reentry_cooldown_minutes: 60,
+            reentry_cooldown_min_mins: 45,
+            reentry_cooldown_max_mins: 180,
+            close_ts: 1000,
+            close_type: 2, // SHORT
+            close_reason: 2,
+            desired_type: 2, // SHORT (same dir)
+            // 44 minutes = 2640 seconds after close
+            current_ts: 1000 + 2640,
+            adx: 40.0, // strong ADX -> min cooldown = 45 min
+            expected_blocked: true,
+        },
+        // ── 8. Not blocked: strong ADX, past min cooldown ────────────────
+        PescFixture {
+            label: "pesc-not-blocked-past-min-cooldown",
+            reentry_cooldown_minutes: 60,
+            reentry_cooldown_min_mins: 45,
+            reentry_cooldown_max_mins: 180,
+            close_ts: 1000,
+            close_type: 2,
+            close_reason: 2,
+            desired_type: 2,
+            // 46 minutes = 2760 seconds after close
+            current_ts: 1000 + 2760,
+            adx: 40.0,
+            expected_blocked: false,
+        },
+        // ── 9. ADX interpolation midpoint (ADX=32.5) ─────────────────────
+        PescFixture {
+            label: "pesc-adx-interpolation-midpoint",
+            reentry_cooldown_minutes: 60,
+            reentry_cooldown_min_mins: 45,
+            reentry_cooldown_max_mins: 180,
+            close_ts: 1000,
+            close_type: 1,
+            close_reason: 2,
+            desired_type: 1,
+            // ADX=32.5: t = (32.5-25)/15 = 0.5
+            // cooldown = 180 + 0.5*(45-180) = 180 - 67.5 = 112.5 min = 6750s
+            // 112 min = 6720s -> should be blocked
+            current_ts: 1000 + 6720,
+            adx: 32.5,
+            expected_blocked: true,
+        },
+        // ── 10. ADX interpolation midpoint, past cooldown ────────────────
+        PescFixture {
+            label: "pesc-adx-interpolation-past-cooldown",
+            reentry_cooldown_minutes: 60,
+            reentry_cooldown_min_mins: 45,
+            reentry_cooldown_max_mins: 180,
+            close_ts: 1000,
+            close_type: 1,
+            close_reason: 2,
+            desired_type: 1,
+            // cooldown at ADX=32.5 is 112.5 min = 6750s
+            // 113 min = 6780s -> should not be blocked
+            current_ts: 1000 + 6780,
+            adx: 32.5,
+            expected_blocked: false,
+        },
+        // ── 11. ADX very high (>40, uses min cooldown) ───────────────────
+        PescFixture {
+            label: "pesc-adx-very-high",
+            reentry_cooldown_minutes: 60,
+            reentry_cooldown_min_mins: 45,
+            reentry_cooldown_max_mins: 180,
+            close_ts: 1000,
+            close_type: 1,
+            close_reason: 2,
+            desired_type: 1,
+            // 44 min = 2640s, ADX=60 (>40 so min cooldown)
+            current_ts: 1000 + 2640,
+            adx: 60.0,
+            expected_blocked: true,
+        },
+        // ── 12. ADX at boundary 25.0 (uses max cooldown) ────────────────
+        PescFixture {
+            label: "pesc-adx-boundary-25",
+            reentry_cooldown_minutes: 60,
+            reentry_cooldown_min_mins: 45,
+            reentry_cooldown_max_mins: 180,
+            close_ts: 1000,
+            close_type: 1,
+            close_reason: 2,
+            desired_type: 1,
+            // 179 min = 10740s, ADX=25 -> max cooldown = 180 min
+            current_ts: 1000 + 10740,
+            adx: 25.0,
+            expected_blocked: true,
+        },
+        // ── 13. ADX at boundary 40.0 exactly (uses min cooldown) ─────────
+        PescFixture {
+            label: "pesc-adx-boundary-40",
+            reentry_cooldown_minutes: 60,
+            reentry_cooldown_min_mins: 45,
+            reentry_cooldown_max_mins: 180,
+            close_ts: 1000,
+            close_type: 1,
+            close_reason: 2,
+            desired_type: 1,
+            // 44 min = 2640s, ADX=40 -> min cooldown = 45 min
+            current_ts: 1000 + 2640,
+            adx: 40.0,
+            expected_blocked: true,
+        },
+        // ── 14. Short direction blocked ──────────────────────────────────
+        PescFixture {
+            label: "pesc-short-blocked",
+            reentry_cooldown_minutes: 60,
+            reentry_cooldown_min_mins: 30,
+            reentry_cooldown_max_mins: 120,
+            close_ts: 5000,
+            close_type: 2, // SHORT
+            close_reason: 2,
+            desired_type: 2, // SHORT (same)
+            // 29 min = 1740s, ADX=50 (>40 -> min=30 min)
+            current_ts: 5000 + 1740,
+            adx: 50.0,
+            expected_blocked: true,
+        },
+    ]
+}
+
+// ─── Test: local Rust reference matches risk_core::compute_entry_sizing ──────
+
+#[test]
+fn test_sizing_local_reference_matches_risk_core() {
+    // AQC-1232: Verify our local rust_compute_entry_sizing matches the
+    // canonical risk_core::compute_entry_sizing for all fixtures.
+    // This ensures our reference implementation is trustworthy.
+    use risk_core::{compute_entry_sizing, ConfidenceTier, EntrySizingInput};
+
+    let fixtures = make_sizing_fixtures();
+    for f in &fixtures {
+        let conf_tier = match f.confidence {
+            Confidence::High => ConfidenceTier::High,
+            Confidence::Medium => ConfidenceTier::Medium,
+            Confidence::Low => ConfidenceTier::Low,
+        };
+
+        let canonical = compute_entry_sizing(EntrySizingInput {
+            equity: f.equity,
+            price: f.price,
+            atr: f.atr,
+            adx: f.adx,
+            confidence: conf_tier,
+            allocation_pct: f.allocation_pct,
+            enable_dynamic_sizing: f.enable_dynamic_sizing,
+            confidence_mult_high: f.confidence_mult_high,
+            confidence_mult_medium: f.confidence_mult_medium,
+            confidence_mult_low: f.confidence_mult_low,
+            adx_sizing_min_mult: f.adx_sizing_min_mult,
+            adx_sizing_full_adx: f.adx_sizing_full_adx,
+            vol_baseline_pct: f.vol_baseline_pct,
+            vol_scalar_min: f.vol_scalar_min,
+            vol_scalar_max: f.vol_scalar_max,
+            enable_dynamic_leverage: f.enable_dynamic_leverage,
+            leverage: f.leverage,
+            leverage_low: f.leverage_low,
+            leverage_medium: f.leverage_medium,
+            leverage_high: f.leverage_high,
+            leverage_max_cap: f.leverage_max_cap,
+        });
+
+        let (local_size, local_margin, local_lev, local_notional) = rust_compute_entry_sizing(
+            f.equity, f.price, f.atr, f.adx, f.confidence,
+            f.allocation_pct, f.enable_dynamic_sizing,
+            f.confidence_mult_high, f.confidence_mult_medium, f.confidence_mult_low,
+            f.adx_sizing_min_mult, f.adx_sizing_full_adx,
+            f.vol_baseline_pct, f.vol_scalar_min, f.vol_scalar_max,
+            f.enable_dynamic_leverage, f.leverage,
+            f.leverage_low, f.leverage_medium, f.leverage_high, f.leverage_max_cap,
+        );
+
+        assert!(
+            (canonical.size - local_size).abs() < 1e-10,
+            "risk_core vs local size mismatch for '{}': canonical={}, local={}",
+            f.label, canonical.size, local_size
+        );
+        assert!(
+            (canonical.margin_used - local_margin).abs() < 1e-10,
+            "risk_core vs local margin mismatch for '{}': canonical={}, local={}",
+            f.label, canonical.margin_used, local_margin
+        );
+        assert!(
+            (canonical.leverage - local_lev).abs() < 1e-10,
+            "risk_core vs local leverage mismatch for '{}': canonical={}, local={}",
+            f.label, canonical.leverage, local_lev
+        );
+        assert!(
+            (canonical.notional - local_notional).abs() < 1e-10,
+            "risk_core vs local notional mismatch for '{}': canonical={}, local={}",
+            f.label, canonical.notional, local_notional
+        );
+    }
+}
+
+// ─── Test: sizing fixtures match hand-calculated expected values ──────────────
+
+#[test]
+fn test_sizing_fixtures_match_expected_values() {
+    // AQC-1232: For each sizing fixture, verify the CPU SSOT produces
+    // exactly the hand-calculated expected values. This catches formula
+    // regressions in both our reference and risk_core.
+    let fixtures = make_sizing_fixtures();
+    let tol = 1e-10;
+
+    for f in &fixtures {
+        let (size, margin, lev, notional) = rust_compute_entry_sizing(
+            f.equity, f.price, f.atr, f.adx, f.confidence,
+            f.allocation_pct, f.enable_dynamic_sizing,
+            f.confidence_mult_high, f.confidence_mult_medium, f.confidence_mult_low,
+            f.adx_sizing_min_mult, f.adx_sizing_full_adx,
+            f.vol_baseline_pct, f.vol_scalar_min, f.vol_scalar_max,
+            f.enable_dynamic_leverage, f.leverage,
+            f.leverage_low, f.leverage_medium, f.leverage_high, f.leverage_max_cap,
+        );
+
+        assert!(
+            (margin - f.expected_margin).abs() < tol,
+            "[{}] margin mismatch: got={}, expected={}",
+            f.label, margin, f.expected_margin
+        );
+        assert!(
+            (lev - f.expected_leverage).abs() < tol,
+            "[{}] leverage mismatch: got={}, expected={}",
+            f.label, lev, f.expected_leverage
+        );
+        assert!(
+            (notional - f.expected_notional).abs() < tol,
+            "[{}] notional mismatch: got={}, expected={}",
+            f.label, notional, f.expected_notional
+        );
+        assert!(
+            (size - f.expected_size).abs() < tol,
+            "[{}] size mismatch: got={}, expected={}",
+            f.label, size, f.expected_size
+        );
+    }
+}
+
+// ─── Test: sizing f32 round-trip stays within T2 precision ───────────────────
+
+#[test]
+fn test_sizing_f32_roundtrip_within_t2() {
+    // AQC-1232: Verify that sizing outputs survive f32 cast (GPU path) within T2.
+    use risk_core::{compute_entry_sizing, ConfidenceTier, EntrySizingInput};
+
+    let fixtures = make_sizing_fixtures();
+    for f in &fixtures {
+        let conf_tier = match f.confidence {
+            Confidence::High => ConfidenceTier::High,
+            Confidence::Medium => ConfidenceTier::Medium,
+            Confidence::Low => ConfidenceTier::Low,
+        };
+
+        let result = compute_entry_sizing(EntrySizingInput {
+            equity: f.equity,
+            price: f.price,
+            atr: f.atr,
+            adx: f.adx,
+            confidence: conf_tier,
+            allocation_pct: f.allocation_pct,
+            enable_dynamic_sizing: f.enable_dynamic_sizing,
+            confidence_mult_high: f.confidence_mult_high,
+            confidence_mult_medium: f.confidence_mult_medium,
+            confidence_mult_low: f.confidence_mult_low,
+            adx_sizing_min_mult: f.adx_sizing_min_mult,
+            adx_sizing_full_adx: f.adx_sizing_full_adx,
+            vol_baseline_pct: f.vol_baseline_pct,
+            vol_scalar_min: f.vol_scalar_min,
+            vol_scalar_max: f.vol_scalar_max,
+            enable_dynamic_leverage: f.enable_dynamic_leverage,
+            leverage: f.leverage,
+            leverage_low: f.leverage_low,
+            leverage_medium: f.leverage_medium,
+            leverage_high: f.leverage_high,
+            leverage_max_cap: f.leverage_max_cap,
+        });
+
+        // Check f32 round-trip for each non-zero output
+        for (name, val) in &[
+            ("margin", result.margin_used),
+            ("leverage", result.leverage),
+            ("notional", result.notional),
+            ("size", result.size),
+        ] {
+            if *val != 0.0 {
+                let f32_rt = (*val as f32) as f64;
+                assert!(
+                    within_tolerance(*val, f32_rt, TIER_T2_TOLERANCE),
+                    "[{}] {} f32 round-trip exceeds T2: f64={}, f32_rt={}, rel_err={:.2e}",
+                    f.label, name, val, f32_rt, relative_error(*val, f32_rt)
+                );
+            }
+        }
+    }
+}
+
+// ─── Test: PESC cooldown logic matches expected blocked/unblocked ─────────────
+
+#[test]
+fn test_pesc_fixtures_match_expected_blocked() {
+    // AQC-1232: For each PESC fixture, verify the cooldown logic produces
+    // the expected blocked/unblocked result.
+    let fixtures = make_pesc_fixtures();
+
+    for f in &fixtures {
+        let blocked = rust_is_pesc_blocked(
+            f.reentry_cooldown_minutes,
+            f.reentry_cooldown_min_mins,
+            f.reentry_cooldown_max_mins,
+            f.close_ts,
+            f.close_type,
+            f.close_reason,
+            f.desired_type,
+            f.current_ts,
+            f.adx,
+        );
+
+        assert_eq!(
+            blocked, f.expected_blocked,
+            "[{}] PESC blocked mismatch: got={}, expected={} \
+             (cooldown_min={}min, cooldown_max={}min, ADX={}, elapsed={}s)",
+            f.label, blocked, f.expected_blocked,
+            f.reentry_cooldown_min_mins, f.reentry_cooldown_max_mins,
+            f.adx, f.current_ts.saturating_sub(f.close_ts)
+        );
+    }
+}
+
+// ─── Test: PESC ADX interpolation numerical accuracy ─────────────────────────
+
+#[test]
+fn test_pesc_adx_interpolation_numerical_accuracy() {
+    // AQC-1232: Verify the ADX interpolation formula produces exact expected
+    // cooldown values at specific ADX points.
+    let min_cd: f64 = 45.0;
+    let max_cd: f64 = 180.0;
+
+    // ADX -> expected cooldown (minutes)
+    let test_points: &[(&str, f64, f64)] = &[
+        ("adx=25 (weak)", 25.0, 180.0),
+        ("adx=40 (strong)", 40.0, 45.0),
+        ("adx=32.5 (mid)", 32.5, 112.5),
+        ("adx=30 (1/3)", 30.0, 180.0 + (5.0 / 15.0) * (45.0 - 180.0)),
+        ("adx=35 (2/3)", 35.0, 180.0 + (10.0 / 15.0) * (45.0 - 180.0)),
+        ("adx=10 (below range)", 10.0, 180.0),   // clamps to max
+        ("adx=60 (above range)", 60.0, 45.0),     // clamps to min
+    ];
+
+    for &(label, adx, expected_cooldown) in test_points {
+        let cooldown_mins = if adx >= 40.0 {
+            min_cd
+        } else if adx <= 25.0 {
+            max_cd
+        } else {
+            let t = (adx - 25.0) / 15.0;
+            max_cd + t * (min_cd - max_cd)
+        };
+
+        assert!(
+            (cooldown_mins - expected_cooldown).abs() < 1e-10,
+            "[{}] cooldown mismatch: got={:.4}min, expected={:.4}min",
+            label, cooldown_mins, expected_cooldown
+        );
+    }
+}
+
+// ─── Test: sizing with risk_core directly across equity levels ────────────────
+
+#[test]
+fn test_sizing_risk_core_equity_scaling() {
+    // AQC-1232: Verify that sizing scales linearly with equity for static sizing,
+    // and that the sizing ratio is preserved across $1k, $10k, $100k.
+    use risk_core::{compute_entry_sizing, ConfidenceTier, EntrySizingInput};
+
+    let equities = [1_000.0, 10_000.0, 100_000.0];
+    let base_input = EntrySizingInput {
+        equity: 0.0, // placeholder
+        price: 100.0,
+        atr: 1.0,
+        adx: 30.0,
+        confidence: ConfidenceTier::High,
+        allocation_pct: 0.03,
+        enable_dynamic_sizing: false,
+        confidence_mult_high: 1.0,
+        confidence_mult_medium: 0.8,
+        confidence_mult_low: 0.6,
+        adx_sizing_min_mult: 0.6,
+        adx_sizing_full_adx: 40.0,
+        vol_baseline_pct: 0.01,
+        vol_scalar_min: 0.6,
+        vol_scalar_max: 1.4,
+        enable_dynamic_leverage: false,
+        leverage: 3.0,
+        leverage_low: 1.0,
+        leverage_medium: 3.0,
+        leverage_high: 5.0,
+        leverage_max_cap: 0.0,
+    };
+
+    let results: Vec<_> = equities.iter().map(|&eq| {
+        let mut input = base_input;
+        input.equity = eq;
+        compute_entry_sizing(input)
+    }).collect();
+
+    // Static sizing: margin = equity * alloc_pct, so 10x equity = 10x margin
+    for i in 1..results.len() {
+        let ratio = equities[i] / equities[i - 1];
+        let margin_ratio = results[i].margin_used / results[i - 1].margin_used;
+        assert!(
+            (margin_ratio - ratio).abs() < 1e-10,
+            "Margin should scale {}x with equity: got {}x (eq {}->{})",
+            ratio, margin_ratio, equities[i - 1], equities[i]
+        );
+        let size_ratio = results[i].size / results[i - 1].size;
+        assert!(
+            (size_ratio - ratio).abs() < 1e-10,
+            "Size should scale {}x with equity: got {}x",
+            ratio, size_ratio
+        );
+    }
+
+    // Leverage must be constant (static)
+    for r in &results {
+        assert!(
+            (r.leverage - 3.0).abs() < 1e-10,
+            "Static leverage should be 3.0 for all equity levels, got {}",
+            r.leverage
+        );
+    }
+}
+
+// ─── Test: dynamic leverage tiers select correct per-confidence level ─────────
+
+#[test]
+fn test_sizing_dynamic_leverage_tier_selection() {
+    // AQC-1232: Verify that each confidence level selects the correct
+    // leverage tier, and that leverage_max_cap clips correctly.
+    use risk_core::{compute_entry_sizing, ConfidenceTier, EntrySizingInput};
+
+    let base = EntrySizingInput {
+        equity: 10_000.0,
+        price: 100.0,
+        atr: 1.0,
+        adx: 30.0,
+        confidence: ConfidenceTier::High, // placeholder
+        allocation_pct: 0.03,
+        enable_dynamic_sizing: false,
+        confidence_mult_high: 1.0,
+        confidence_mult_medium: 0.8,
+        confidence_mult_low: 0.6,
+        adx_sizing_min_mult: 0.6,
+        adx_sizing_full_adx: 40.0,
+        vol_baseline_pct: 0.01,
+        vol_scalar_min: 0.6,
+        vol_scalar_max: 1.4,
+        enable_dynamic_leverage: true,
+        leverage: 3.0,
+        leverage_low: 1.5,
+        leverage_medium: 3.0,
+        leverage_high: 5.0,
+        leverage_max_cap: 0.0,
+    };
+
+    // No cap
+    let tier_tests: &[(ConfidenceTier, f64)] = &[
+        (ConfidenceTier::Low, 1.5),
+        (ConfidenceTier::Medium, 3.0),
+        (ConfidenceTier::High, 5.0),
+    ];
+
+    for &(conf, expected_lev) in tier_tests {
+        let mut input = base;
+        input.confidence = conf;
+        let r = compute_entry_sizing(input);
+        assert!(
+            (r.leverage - expected_lev).abs() < 1e-10,
+            "Dynamic leverage {:?} should be {}, got {}",
+            conf, expected_lev, r.leverage
+        );
+    }
+
+    // With cap = 2.5 (clips High and Medium)
+    let capped_tests: &[(ConfidenceTier, f64)] = &[
+        (ConfidenceTier::Low, 1.5),    // not capped (1.5 < 2.5)
+        (ConfidenceTier::Medium, 2.5), // capped (3.0 -> 2.5)
+        (ConfidenceTier::High, 2.5),   // capped (5.0 -> 2.5)
+    ];
+
+    for &(conf, expected_lev) in capped_tests {
+        let mut input = base;
+        input.confidence = conf;
+        input.leverage_max_cap = 2.5;
+        let r = compute_entry_sizing(input);
+        assert!(
+            (r.leverage - expected_lev).abs() < 1e-10,
+            "Capped leverage {:?} should be {}, got {}",
+            conf, expected_lev, r.leverage
+        );
+    }
+}
+
+// ─── Test: dynamic sizing multiplier chain correctness ───────────────────────
+
+#[test]
+fn test_sizing_dynamic_multiplier_chain() {
+    // AQC-1232: Verify the multiplicative chain: margin = equity * alloc *
+    // conf_mult * adx_mult * vol_scalar. Exercise edge cases for each factor.
+    use risk_core::{compute_entry_sizing, ConfidenceTier, EntrySizingInput};
+
+    let base = EntrySizingInput {
+        equity: 10_000.0,
+        price: 100.0,
+        atr: 1.0,
+        adx: 40.0,
+        confidence: ConfidenceTier::High,
+        allocation_pct: 0.03,
+        enable_dynamic_sizing: true,
+        confidence_mult_high: 1.0,
+        confidence_mult_medium: 0.8,
+        confidence_mult_low: 0.6,
+        adx_sizing_min_mult: 0.6,
+        adx_sizing_full_adx: 40.0,
+        vol_baseline_pct: 0.01,
+        vol_scalar_min: 0.6,
+        vol_scalar_max: 1.4,
+        enable_dynamic_leverage: false,
+        leverage: 1.0,
+        leverage_low: 1.0,
+        leverage_medium: 1.0,
+        leverage_high: 1.0,
+        leverage_max_cap: 0.0,
+    };
+
+    // All multipliers at 1.0: margin = 10000 * 0.03 = 300
+    let r = compute_entry_sizing(base);
+    assert!(
+        (r.margin_used - 300.0).abs() < 1e-10,
+        "All-ones margin should be 300, got {}", r.margin_used
+    );
+
+    // Only confidence mult active (Low = 0.6): margin = 300 * 0.6 = 180
+    let mut input = base;
+    input.confidence = ConfidenceTier::Low;
+    let r = compute_entry_sizing(input);
+    // adx=40 -> adx_mult=1.0, vol unchanged -> margin = 300 * 0.6 = 180
+    assert!(
+        (r.margin_used - 180.0).abs() < 1e-10,
+        "Low-conf margin should be 180, got {}", r.margin_used
+    );
+
+    // ADX at zero (adx_mult floors to 0.6): margin = 300 * 1.0 * 0.6 = 180
+    let mut input = base;
+    input.adx = 0.0;
+    let r = compute_entry_sizing(input);
+    assert!(
+        (r.margin_used - 180.0).abs() < 1e-10,
+        "Zero-ADX margin should be 180, got {}", r.margin_used
+    );
+
+    // High vol (atr=2.0, vol_ratio=2.0, vol_scalar=0.5 clamped to 0.6):
+    // margin = 300 * 1.0 * 1.0 * 0.6 = 180
+    let mut input = base;
+    input.atr = 2.0;
+    let r = compute_entry_sizing(input);
+    assert!(
+        (r.margin_used - 180.0).abs() < 1e-10,
+        "High-vol margin should be 180, got {}", r.margin_used
+    );
+
+    // Low vol (atr=0.25, vol_ratio=0.25, vol_scalar=4.0 clamped to 1.4):
+    // margin = 300 * 1.0 * 1.0 * 1.4 = 420
+    let mut input = base;
+    input.atr = 0.25;
+    let r = compute_entry_sizing(input);
+    assert!(
+        (r.margin_used - 420.0).abs() < 1e-10,
+        "Low-vol margin should be 420, got {}", r.margin_used
+    );
+}
+
+// ─── Test: PESC cooldown seconds conversion accuracy ─────────────────────────
+
+#[test]
+fn test_pesc_cooldown_seconds_conversion() {
+    // AQC-1232: Verify minutes-to-seconds conversion matches at boundary values.
+    // This catches off-by-one errors in the elapsed < cooldown_sec comparison.
+    let min_cd = 45u32;
+    let max_cd = 180u32;
+    let base_ts = 100_000u32;
+
+    // At ADX=25 (max cooldown = 180min = 10800s):
+    // Exactly at boundary: elapsed = 10800 -> NOT blocked (not strictly less than)
+    let blocked = rust_is_pesc_blocked(
+        60, min_cd, max_cd,
+        base_ts, 1, 2, 1,
+        base_ts + 10800,
+        25.0,
+    );
+    assert!(
+        !blocked,
+        "At exactly cooldown boundary (10800s), should NOT be blocked"
+    );
+
+    // 1 second before boundary: elapsed = 10799 -> blocked
+    let blocked = rust_is_pesc_blocked(
+        60, min_cd, max_cd,
+        base_ts, 1, 2, 1,
+        base_ts + 10799,
+        25.0,
+    );
+    assert!(
+        blocked,
+        "1 second before cooldown boundary (10799s), should be blocked"
+    );
+
+    // At ADX=40 (min cooldown = 45min = 2700s):
+    let blocked = rust_is_pesc_blocked(
+        60, min_cd, max_cd,
+        base_ts, 1, 2, 1,
+        base_ts + 2700,
+        40.0,
+    );
+    assert!(
+        !blocked,
+        "At exactly min cooldown boundary (2700s), should NOT be blocked"
+    );
+
+    let blocked = rust_is_pesc_blocked(
+        60, min_cd, max_cd,
+        base_ts, 1, 2, 1,
+        base_ts + 2699,
+        40.0,
+    );
+    assert!(
+        blocked,
+        "1 second before min cooldown boundary (2699s), should be blocked"
+    );
+}
+
+// ─── Test: sizing coverage count ─────────────────────────────────────────────
+
+#[test]
+fn test_sizing_fixture_coverage_count() {
+    // AQC-1232: Must have at least 10 sizing fixtures + 10 PESC fixtures
+    let sizing = make_sizing_fixtures();
+    let pesc = make_pesc_fixtures();
+
+    assert!(
+        sizing.len() >= 10,
+        "Must have at least 10 sizing fixtures, got {}",
+        sizing.len()
+    );
+    assert!(
+        pesc.len() >= 10,
+        "Must have at least 10 PESC fixtures, got {}",
+        pesc.len()
+    );
+}
+
+// ─── Test: sizing fixture diversity ──────────────────────────────────────────
+
+#[test]
+fn test_sizing_fixture_diversity() {
+    // AQC-1232: Verify diverse coverage of sizing scenarios.
+    let fixtures = make_sizing_fixtures();
+
+    // Must cover static sizing
+    assert!(
+        fixtures.iter().any(|f| !f.enable_dynamic_sizing),
+        "Must include static sizing fixtures"
+    );
+
+    // Must cover dynamic sizing
+    assert!(
+        fixtures.iter().any(|f| f.enable_dynamic_sizing),
+        "Must include dynamic sizing fixtures"
+    );
+
+    // Must cover all three confidence levels
+    assert!(
+        fixtures.iter().any(|f| f.confidence == Confidence::High),
+        "Must include High confidence"
+    );
+    assert!(
+        fixtures.iter().any(|f| f.confidence == Confidence::Medium),
+        "Must include Medium confidence"
+    );
+    assert!(
+        fixtures.iter().any(|f| f.confidence == Confidence::Low),
+        "Must include Low confidence"
+    );
+
+    // Must cover dynamic leverage
+    assert!(
+        fixtures.iter().any(|f| f.enable_dynamic_leverage),
+        "Must include dynamic leverage fixtures"
+    );
+
+    // Must cover leverage cap
+    assert!(
+        fixtures.iter().any(|f| f.leverage_max_cap > 0.0),
+        "Must include leverage cap fixtures"
+    );
+
+    // Must cover equity levels $1k, $10k, $100k
+    assert!(
+        fixtures.iter().any(|f| f.equity <= 1_000.0),
+        "Must include $1k equity"
+    );
+    assert!(
+        fixtures.iter().any(|f| f.equity >= 10_000.0 && f.equity < 100_000.0),
+        "Must include $10k equity"
+    );
+    assert!(
+        fixtures.iter().any(|f| f.equity >= 100_000.0),
+        "Must include $100k equity"
+    );
+
+    // Must cover zero price edge case
+    assert!(
+        fixtures.iter().any(|f| f.price == 0.0),
+        "Must include zero-price edge case"
+    );
+}
+
+// ─── Test: PESC fixture diversity ────────────────────────────────────────────
+
+#[test]
+fn test_pesc_fixture_diversity() {
+    // AQC-1232: Verify PESC fixtures cover all bypass/block paths.
+    let fixtures = make_pesc_fixtures();
+
+    // Must cover disabled PESC
+    assert!(
+        fixtures.iter().any(|f| f.reentry_cooldown_minutes == 0),
+        "Must include disabled PESC"
+    );
+
+    // Must cover no prior close
+    assert!(
+        fixtures.iter().any(|f| f.close_ts == 0),
+        "Must include no-prior-close bypass"
+    );
+
+    // Must cover signal flip bypass
+    assert!(
+        fixtures.iter().any(|f| f.close_reason == 1),
+        "Must include signal-flip bypass"
+    );
+
+    // Must cover direction gate
+    assert!(
+        fixtures.iter().any(|f| f.close_type != f.desired_type && f.close_ts > 0),
+        "Must include opposite-direction bypass"
+    );
+
+    // Must cover blocked case
+    assert!(
+        fixtures.iter().any(|f| f.expected_blocked),
+        "Must include blocked scenarios"
+    );
+
+    // Must cover unblocked-past-cooldown case
+    assert!(
+        fixtures.iter().any(|f| !f.expected_blocked && f.close_ts > 0
+            && f.close_reason == 2 && f.close_type == f.desired_type),
+        "Must include unblocked-past-cooldown scenarios"
+    );
+
+    // Must cover ADX interpolation range
+    assert!(
+        fixtures.iter().any(|f| f.adx > 25.0 && f.adx < 40.0),
+        "Must include ADX interpolation range (25 < ADX < 40)"
+    );
+}

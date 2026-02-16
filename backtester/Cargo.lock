@@ -140,6 +140,7 @@ dependencies = [
  "cudarc",
  "rand",
  "rayon",
+ "risk-core",
  "rustc-hash",
  "serde",
  "serde_json",
