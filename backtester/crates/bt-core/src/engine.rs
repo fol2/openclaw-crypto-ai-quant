@@ -1146,7 +1146,8 @@ pub fn run_simulation(
                     cfg,
                 );
                 let (mut size, mut margin_used) = if margin_used > margin_headroom {
-                    let ratio = margin_headroom / margin_used;
+                    // M13: zero-guard on margin_used division
+                    let ratio = if margin_used > 1e-12 { margin_headroom / margin_used } else { 0.0 };
                     (size * ratio, margin_headroom)
                 } else {
                     (size, margin_used)
@@ -2316,7 +2317,8 @@ fn execute_sub_bar_entry(
     let (size, margin_used, leverage) =
         compute_entry_size(sym, equity, snap.close, confidence, atr, snap, cfg);
     let (mut size, mut margin_used) = if margin_used > margin_headroom {
-        let ratio = margin_headroom / margin_used;
+        // M13: zero-guard on margin_used division
+        let ratio = if margin_used > 1e-12 { margin_headroom / margin_used } else { 0.0 };
         (size * ratio, margin_headroom)
     } else {
         (size, margin_used)

@@ -145,6 +145,8 @@ fn compute_sl_price(
     snap: &IndicatorSnapshot,
     params: &ExitParams,
 ) -> f64 {
+    // C5: ATR zero-guard — prevent NaN/Inf from division by zero
+    let atr = atr.max(1e-12);
     let mut sl_mult = params.sl_atr_mult;
 
     // 1. ASE: ADX slope < 0 AND underwater → tighten 20%
@@ -559,7 +561,8 @@ fn check_funding_headwind_kernel(
 
     let is_long = pos.side == PositionSide::Long;
     let entry = pos.avg_entry_price;
-    let atr = effective_atr(entry, pos.entry_atr);
+    // C5: ATR zero-guard — prevent NaN/Inf from division by zero
+    let atr = effective_atr(entry, pos.entry_atr).max(1e-12);
 
     let is_headwind = if is_long {
         funding_rate > 0.0

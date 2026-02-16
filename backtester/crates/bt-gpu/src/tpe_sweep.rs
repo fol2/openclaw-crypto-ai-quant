@@ -501,7 +501,14 @@ pub fn run_tpe_sweep(
         num_bars,
     );
 
-    let device_state = gpu_host::GpuDeviceState::new();
+    // C6: graceful fallback — return empty results if GPU init fails
+    let device_state = match gpu_host::GpuDeviceState::new() {
+        Ok(ds) => ds,
+        Err(e) => {
+            eprintln!("[TPE] {e} — GPU sweep unavailable, returning empty results");
+            return Vec::new();
+        }
+    };
     let candles_gpu = device_state.dev.htod_sync_copy(&raw.candles).unwrap();
 
     let sub_bar_result =
@@ -750,14 +757,21 @@ fn evaluate_trade_only_batch(
 ) -> Vec<buffers::GpuResult> {
     let ind_config = buffers::GpuIndicatorConfig::from_strategy_config(base_cfg, lookback);
 
-    let mut ind_bufs = gpu_host::IndicatorBuffers::new(
+    // H11: handle GPU memory allocation failure gracefully
+    let mut ind_bufs = match gpu_host::IndicatorBuffers::new(
         ds,
         candles_gpu,
         &[ind_config],
         num_bars,
         num_symbols,
         btc_sym_idx,
-    );
+    ) {
+        Ok(bufs) => bufs,
+        Err(e) => {
+            eprintln!("[TPE] Indicator buffer allocation failed: {e}");
+            return Vec::new();
+        }
+    };
     gpu_host::dispatch_indicator_kernels(ds, &mut ind_bufs);
 
     let gpu_configs: Vec<buffers::GpuComboConfig> = trial_overrides

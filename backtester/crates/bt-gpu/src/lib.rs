@@ -3,6 +3,8 @@ pub mod buffers;
 pub mod gpu_host;
 pub mod layout;
 pub mod precision;
+/// Legacy CPU-side indicator precompute path, superseded by the all-GPU
+/// indicator kernel pipeline. Retained for reference and potential fallback.
 #[allow(dead_code)]
 mod precompute;
 pub mod raw_candles;
@@ -124,7 +126,14 @@ pub fn run_gpu_sweep(
     );
 
     // ── 2. Init CUDA device, upload raw candles ONCE ─────────────────────
-    let device_state = gpu_host::GpuDeviceState::new();
+    // C6: graceful fallback — return empty results if GPU init fails
+    let device_state = match gpu_host::GpuDeviceState::new() {
+        Ok(ds) => ds,
+        Err(e) => {
+            eprintln!("[GPU] {e} — GPU sweep unavailable, returning empty results");
+            return Vec::new();
+        }
+    };
     let candles_gpu = device_state.dev.htod_sync_copy(&raw.candles).unwrap();
 
     let candle_upload_mb =
@@ -239,14 +248,22 @@ pub fn run_gpu_sweep(
             .collect();
 
         // b. Create indicator buffers + dispatch indicator & breadth kernels
-        let mut ind_bufs = gpu_host::IndicatorBuffers::new(
+        // H11: handle GPU memory allocation failure gracefully
+        let mut ind_bufs = match gpu_host::IndicatorBuffers::new(
             &device_state,
             &candles_gpu,
             &ind_configs,
             num_bars,
             num_symbols as u32,
             btc_sym_idx,
-        );
+        ) {
+            Ok(bufs) => bufs,
+            Err(e) => {
+                eprintln!("[GPU] Indicator buffer allocation failed: {e} — skipping batch");
+                done += chunk.len();
+                continue;
+            }
+        };
         gpu_host::dispatch_indicator_kernels(&device_state, &mut ind_bufs);
 
         // c. Build K×T GpuComboConfigs with per-combo offsets
