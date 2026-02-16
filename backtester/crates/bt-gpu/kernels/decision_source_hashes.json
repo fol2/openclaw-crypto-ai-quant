@@ -1,0 +1,9 @@
+{
+  "../bt-core/src/exits/mod.rs": "2dc6dcd56371a1bbf822bc5e69903fbb9b10a99f65134df3a81a04a1231af375",
+  "../bt-core/src/exits/smart_exits.rs": "ed3a3c40f00af3277b68191099a796988ae740d4aa11d9d9ba23b09810527c60",
+  "../bt-core/src/exits/stop_loss.rs": "39a2da91cd2b9ac8355f29b70ab4e333701a7e8ca6a145448381e9b1b0dc0d9c",
+  "../bt-core/src/exits/take_profit.rs": "794e8a9ab896ee91287e8c5cc250017bf9da5ffdd773ef8b1dbd8412cefc41ce",
+  "../bt-core/src/exits/trailing.rs": "501e5b5bc7fc7f9e8fea9572784aa14550cd5658b66428cded74c3eefdc3523e",
+  "../bt-signals/src/entry.rs": "7046e519e86605bc8f631c8ee3bcadfadeea119f616a1ad07f9b19f647072fbc",
+  "../bt-signals/src/gates.rs": "730aacfca4ec69a383157e2fdce134c5e5e16a40caf4ab36cf15a6ab0fa47acb"
+}
