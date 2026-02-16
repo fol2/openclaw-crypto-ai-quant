@@ -13,7 +13,7 @@ mod templates;
 use std::path::Path;
 
 /// Run the full codegen pipeline: accounting + decision.
-pub fn run(out_dir: &Path, inspect_dir: &Path) {
+pub fn run(out_dir: &Path, inspect_dir: &Path, source_hashes_json: &str) {
     // Accounting codegen (existing)
     let accounting_source = render_all();
     emit::write_generated(out_dir, "generated_accounting.cu", &accounting_source);
@@ -23,9 +23,8 @@ pub fn run(out_dir: &Path, inspect_dir: &Path) {
         accounting_source.len()
     );
 
-    // Decision codegen (new — AQC-1201)
-    // Source hashes will be passed from build.rs once AQC-1200 drift detector is integrated
-    decision::run(out_dir, inspect_dir, None);
+    // Decision codegen (new — AQC-1201) with embedded source hashes (AQC-1200)
+    decision::run(out_dir, inspect_dir, Some(source_hashes_json));
 }
 
 /// Render all accounting templates into a single CUDA source string.
