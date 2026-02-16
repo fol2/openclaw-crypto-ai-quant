@@ -1,0 +1,14 @@
+[Unit]
+Description=OpenClaw AI Quant Funding Rates Fetch (v8 parallel instance)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=$PROJECT_DIR
+EnvironmentFile=-%h/.config/openclaw/ai-quant-universe-v8.env
+ExecStart=$PROJECT_DIR/.venv/bin/python3 -u tools/fetch_funding_rates.py --days 30 --db $PROJECT_DIR/candles_dbs/funding_rates.db
+
+[Install]
+WantedBy=default.target
+

@@ -49,11 +49,14 @@ struct GpuParams {
     num_combos: u32,
     num_symbols: u32,
     num_bars: u32,
+    btc_sym_idx: u32,
     chunk_start: u32,
     chunk_end: u32,
     initial_balance_bits: u32,
-    fee_rate_bits: u32,
-    _pad: u32,
+    maker_fee_rate_bits: u32,
+    taker_fee_rate_bits: u32,
+    max_sub_per_bar: u32,
+    trade_end_bar: u32,
 }
 
 struct GpuSnapshot {
@@ -99,7 +102,7 @@ struct GpuComboConfig {
     add_cooldown_minutes: u32, add_min_profit_atr: f32, add_min_confidence: u32,
     entry_min_confidence: u32, enable_slow_drift_entries: u32,
     enable_partial_tp: u32, tp_partial_pct: f32, tp_partial_min_notional_usd: f32,
-    trailing_start_atr: f32, trailing_distance_atr: f32, _p5: u32,
+    trailing_start_atr: f32, trailing_distance_atr: f32, tp_partial_atr_mult: f32,
     enable_ssf_filter: u32, enable_breakeven_stop: u32, breakeven_start_atr: f32,
     breakeven_buffer_atr: f32,
     trailing_start_atr_low_conf: f32, trailing_distance_atr_low_conf: f32,
@@ -177,8 +180,8 @@ struct EntryCandidate {
 
 // ── Helper functions ────────────────────────────────────────────────────────
 
-fn get_fee_rate() -> f32 {
-    return bitcast<f32>(params.fee_rate_bits);
+fn get_taker_fee_rate() -> f32 {
+    return bitcast<f32>(params.taker_fee_rate_bits);
 }
 
 fn profit_atr(pos: GpuPosition, price: f32) -> f32 {
@@ -316,7 +319,8 @@ fn generate_signal(snap: GpuSnapshot, cfg: ptr<function, GpuComboConfig>,
     if gates_pass {
         var signal = SIG_NEUTRAL;
         var confidence = CONF_MEDIUM;
-        let adx_threshold = snap.adx;
+        // Mirror bt-core: use the ADX threshold that gated the entry, not the current ADX value.
+        let adx_threshold = (*cfg).min_adx;
 
         // EMA crossover direction
         let ema_bullish = snap.ema_fast > snap.ema_slow;
@@ -379,7 +383,7 @@ fn generate_signal(snap: GpuSnapshot, cfg: ptr<function, GpuComboConfig>,
             if snap.rsi <= (*cfg).slow_drift_rsi_short_max { signal = SIG_SELL; }
         }
         if signal != SIG_NEUTRAL {
-            return vec3<u32>(signal, CONF_LOW, bitcast<u32>(snap.adx));
+            return vec3<u32>(signal, CONF_LOW, bitcast<u32>((*cfg).slow_drift_min_adx));
         }
     }
 
@@ -431,10 +435,16 @@ fn compute_sl_price(pos: GpuPosition, snap: GpuSnapshot, cfg: ptr<function, GpuC
     return sl_price;
 }
 
+fn stop_loss_hit(pos_type: u32, price: f32, sl_price: f32) -> bool {
+    // Mirrors bt-core::exits::stop_loss::check_stop_loss:
+    // LONG exits when price <= SL, SHORT exits when price >= SL.
+    if pos_type == POS_LONG { return price <= sl_price; }
+    return price >= sl_price;
+}
+
 fn check_stop_loss(pos: GpuPosition, snap: GpuSnapshot, cfg: ptr<function, GpuComboConfig>) -> bool {
     let sl = compute_sl_price(pos, snap, cfg);
-    if pos.pos_type == POS_LONG { return snap.close <= sl; }
-    return snap.close >= sl;
+    return stop_loss_hit(pos.pos_type, snap.close, sl);
 }
 
 // ── Trailing Stop ───────────────────────────────────────────────────────────
@@ -548,48 +558,81 @@ fn check_tp(pos: GpuPosition, snap: GpuSnapshot, cfg: ptr<function, GpuComboConf
 
 fn check_smart_exits(pos: GpuPosition, snap: GpuSnapshot, cfg: ptr<function, GpuComboConfig>,
                      p_atr: f32) -> bool {
-    // 1. Trend breakdown (EMA cross)
-    if pos.pos_type == POS_LONG && snap.ema_fast < snap.ema_slow { return true; }
-    if pos.pos_type == POS_SHORT && snap.ema_fast > snap.ema_slow { return true; }
+    // Smart exit conditions mirror bt-core's `exits::smart_exits::check`.
+    let entry = pos.entry_price;
+    let entry_atr = select(entry * 0.005, pos.entry_atr, pos.entry_atr > 0.0);
 
-    // 2. Trend exhaustion (ADX < threshold)
-    var adx_thresh = (*cfg).smart_exit_adx_exhaustion_lt;
-    if pos.confidence == CONF_LOW && (*cfg).smart_exit_adx_exhaustion_lt_low_conf > 0.0 {
-        adx_thresh = (*cfg).smart_exit_adx_exhaustion_lt_low_conf;
+    let is_long = pos.pos_type == POS_LONG;
+    let is_low_conf = pos.confidence == CONF_LOW;
+
+    // 1. Trend Breakdown (EMA Cross) with TBB buffer
+    var ema_dev = 0.0;
+    if snap.ema_slow > 0.0 {
+        ema_dev = abs(snap.ema_fast - snap.ema_slow) / snap.ema_slow;
     }
-    if pos.entry_adx_threshold > 0.0 && snap.adx < (pos.entry_adx_threshold * 0.5) {
-        if snap.adx < adx_thresh { return true; }
+    let is_weak_cross = (ema_dev < 0.001) && (snap.adx > 25.0);
+    let ema_cross_exit = select(
+        snap.ema_fast > snap.ema_slow && !is_weak_cross,  // SHORT
+        snap.ema_fast < snap.ema_slow && !is_weak_cross,  // LONG
+        is_long
+    );
+
+    // 2. Trend Exhaustion (ADX below threshold)
+    var adx_exhaustion_lt = (*cfg).smart_exit_adx_exhaustion_lt;
+    if pos.entry_adx_threshold > 0.0 {
+        adx_exhaustion_lt = pos.entry_adx_threshold;
+    } else if is_low_conf && (*cfg).smart_exit_adx_exhaustion_lt_low_conf > 0.0 {
+        adx_exhaustion_lt = (*cfg).smart_exit_adx_exhaustion_lt_low_conf;
+    }
+    adx_exhaustion_lt = max(adx_exhaustion_lt, 0.0);
+    let exhausted = (adx_exhaustion_lt > 0.0) && (snap.adx < adx_exhaustion_lt);
+
+    if ema_cross_exit || exhausted { return true; }
+
+    // 3. EMA Macro Breakdown (only if require_macro_alignment is enabled)
+    if (*cfg).require_macro_alignment != 0u && snap.ema_macro > 0.0 {
+        if is_long && snap.close < snap.ema_macro { return true; }
+        if !is_long && snap.close > snap.ema_macro { return true; }
     }
 
-    // 3. EMA macro breakdown
-    if pos.pos_type == POS_LONG && snap.close < snap.ema_macro { return true; }
-    if pos.pos_type == POS_SHORT && snap.close > snap.ema_macro { return true; }
+    // 4. Stagnation Exit (low-vol + underwater)
+    if snap.atr < (entry_atr * 0.70) {
+        let is_underwater = select(snap.close > entry, snap.close < entry, is_long);
+        if is_underwater { return true; }
+    }
 
-    // 5. TSME (Trend Saturation Momentum Exit)
-    if snap.adx > 50.0 && p_atr >= (*cfg).tsme_min_profit_atr {
-        let macd_contracting = abs(snap.macd_hist) < abs(snap.prev_macd_hist);
-        var adx_declining = true;
+    // 6. TSME (Trend Saturation Momentum Exit)
+    if snap.adx > 50.0 {
+        let gate_profit_ok = p_atr >= (*cfg).tsme_min_profit_atr;
+        var gate_slope_ok = true;
         if (*cfg).tsme_require_adx_slope_negative != 0u {
-            adx_declining = snap.adx_slope < 0.0;
+            gate_slope_ok = snap.adx_slope < 0.0;
         }
-        if macd_contracting && adx_declining { return true; }
+        if gate_profit_ok && gate_slope_ok {
+            let is_exhausted = select(
+                snap.macd_hist > snap.prev_macd_hist && snap.prev_macd_hist > snap.prev2_macd_hist,  // SHORT
+                snap.macd_hist < snap.prev_macd_hist && snap.prev_macd_hist < snap.prev2_macd_hist,  // LONG
+                is_long
+            );
+            if is_exhausted { return true; }
+        }
     }
 
-    // 6. MMDE (4-bar MACD divergence)
-    if pos.pos_type == POS_LONG {
-        if snap.macd_hist < snap.prev_macd_hist
-           && snap.prev_macd_hist < snap.prev2_macd_hist
-           && snap.prev2_macd_hist < snap.prev3_macd_hist
-           && p_atr > 0.5 { return true; }
-    }
-    if pos.pos_type == POS_SHORT {
-        if snap.macd_hist > snap.prev_macd_hist
-           && snap.prev_macd_hist > snap.prev2_macd_hist
-           && snap.prev2_macd_hist > snap.prev3_macd_hist
-           && p_atr > 0.5 { return true; }
+    // 7. MMDE (MACD Persistent Divergence Exit)
+    if p_atr > 1.5 && snap.adx > 35.0 {
+        let is_diverging = select(
+            snap.macd_hist > snap.prev_macd_hist
+                && snap.prev_macd_hist > snap.prev2_macd_hist
+                && snap.prev2_macd_hist > snap.prev3_macd_hist, // SHORT
+            snap.macd_hist < snap.prev_macd_hist
+                && snap.prev_macd_hist < snap.prev2_macd_hist
+                && snap.prev2_macd_hist < snap.prev3_macd_hist, // LONG
+            is_long
+        );
+        if is_diverging { return true; }
     }
 
-    // 7. RSI overextension
+    // 8. RSI overextension
     if (*cfg).enable_rsi_overextension_exit != 0u {
         var ub: f32; var lb: f32;
         if pos.confidence == CONF_LOW && (*cfg).rsi_exit_ub_lo_profit_low_conf > 0.0 {
@@ -610,8 +653,8 @@ fn check_smart_exits(pos: GpuPosition, snap: GpuSnapshot, cfg: ptr<function, Gpu
             }
         }
         if ub > 0.0 && lb > 0.0 {
-            if pos.pos_type == POS_LONG && snap.rsi > ub { return true; }
-            if pos.pos_type == POS_SHORT && snap.rsi < lb { return true; }
+            if is_long && snap.rsi > ub { return true; }
+            if !is_long && snap.rsi < lb { return true; }
         }
     }
 
@@ -665,7 +708,7 @@ fn apply_close(state: ptr<function, GpuComboState>, sym: u32, snap: GpuSnapshot,
     let pos = (*state).positions[sym];
     if pos.pos_type == POS_EMPTY { return; }
 
-    let fee_rate = get_fee_rate();
+    let fee_rate = get_taker_fee_rate();
     let slip = select(-0.5, 0.5, pos.pos_type == POS_LONG);
     let fill_price = snap.close * (1.0 + slip / 10000.0);
     let notional = pos.size * fill_price;
@@ -704,7 +747,7 @@ fn apply_partial_close(state: ptr<function, GpuComboState>, sym: u32, snap: GpuS
     let pos = (*state).positions[sym];
     if pos.pos_type == POS_EMPTY { return; }
 
-    let fee_rate = get_fee_rate();
+    let fee_rate = get_taker_fee_rate();
     let exit_size = pos.size * pct;
     let slip = select(-0.5, 0.5, pos.pos_type == POS_LONG);
     let fill_price = snap.close * (1.0 + slip / 10000.0);
@@ -767,11 +810,12 @@ fn is_pesc_blocked(state: ptr<function, GpuComboState>, sym: u32, desired_type: 
     return elapsed < cooldown_sec;
 }
 
-// ── Dynamic TP Multiplier ───────────────────────────────────────────────────
+// ── TP Multiplier (must mirror bt-core fixed tp_atr_mult semantics) ────────
 
 fn get_tp_mult(snap: GpuSnapshot, cfg: ptr<function, GpuComboConfig>) -> f32 {
-    if snap.adx > (*cfg).tp_strong_adx_gt { return 7.0; }
-    if snap.adx < (*cfg).tp_weak_adx_lt { return 3.0; }
+    // Parity with CPU: always use the configured TP ATR multiplier.
+    // Dynamic TP scaling based on ADX is intentionally disabled on GPU.
+    let _ = snap;
     return (*cfg).tp_atr_mult;
 }
 
@@ -784,7 +828,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
 
     var state = states[combo_id];
     var cfg = configs[combo_id];
-    let fee_rate = get_fee_rate();
+    let fee_rate = get_taker_fee_rate();
     let ns = params.num_symbols;
 
     for (var bar = params.chunk_start; bar < params.chunk_end; bar++) {
@@ -802,9 +846,14 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
 
             let p_atr = profit_atr(pos, snap.close);
 
-            // Glitch guard
-            if snap.atr > 0.0 && abs(snap.close - snap.prev_close) > snap.atr * cfg.glitch_atr_mult {
-                continue; // Skip this bar for this symbol
+            // Glitch guard (matches bt-core: only active when enabled)
+            if cfg.block_exits_on_extreme_dev != 0u && snap.prev_close > 0.0 {
+                let price_change_pct = abs(snap.close - snap.prev_close) / snap.prev_close;
+                let is_glitch = price_change_pct > cfg.glitch_price_dev_pct
+                    || (snap.atr > 0.0 && abs(snap.close - snap.prev_close) > snap.atr * cfg.glitch_atr_mult);
+                if is_glitch {
+                    continue; // Skip this bar for this symbol
+                }
             }
 
             // Stop loss

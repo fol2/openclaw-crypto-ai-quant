@@ -20,7 +20,9 @@
 // -- Constants ----------------------------------------------------------------
 
 #define MAX_SYMBOLS      52u
-#define MAX_CANDIDATES   8u
+// Candidate buffer must cover the full project symbol universe to keep
+// ranking parity with CPU (no early truncation while scanning symbols).
+#define MAX_CANDIDATES   64u
 
 // Position type constants
 #define POS_EMPTY   0u
@@ -41,6 +43,11 @@
 #define MACD_ACCEL  0u
 #define MACD_SIGN   1u
 #define MACD_NONE   2u
+
+// BTC alignment state (from breadth kernel)
+#define BTC_BULL_BEARISH 0u
+#define BTC_BULL_BULLISH 1u
+#define BTC_BULL_UNKNOWN 2u
 
 // PESC close reasons
 #define PESC_NONE        0u
@@ -63,10 +70,12 @@ struct GpuParams {
     unsigned int num_combos;
     unsigned int num_symbols;
     unsigned int num_bars;
+    unsigned int btc_sym_idx;
     unsigned int chunk_start;
     unsigned int chunk_end;
     unsigned int initial_balance_bits;
-    unsigned int fee_rate_bits;
+    unsigned int maker_fee_rate_bits;
+    unsigned int taker_fee_rate_bits;
     unsigned int max_sub_per_bar;
     unsigned int trade_end_bar;
 };
@@ -103,18 +112,18 @@ struct __align__(16) GpuComboConfig {
     unsigned int enable_reef_filter;  float reef_long_rsi_block_gt;  float reef_short_rsi_block_lt;
     float reef_adx_threshold;  float reef_long_rsi_extreme_gt;  float reef_short_rsi_extreme_lt;
     unsigned int enable_dynamic_leverage;  float leverage_low;  float leverage_medium;
-    float leverage_high;  float leverage_max_cap;  unsigned int _p0;
+    float leverage_high;  float leverage_max_cap;  float trailing_rsi_floor_default;
     float slippage_bps;  float min_notional_usd;  unsigned int bump_to_min_notional;
-    float max_total_margin_pct;  unsigned int _p1;  unsigned int _p2;
+    float max_total_margin_pct;  float trailing_rsi_floor_trending;  float trailing_vbts_bb_threshold;
     unsigned int enable_dynamic_sizing;  float confidence_mult_high;  float confidence_mult_medium;
     float confidence_mult_low;  float adx_sizing_min_mult;  float adx_sizing_full_adx;
     float vol_baseline_pct;  float vol_scalar_min;
-    float vol_scalar_max;  unsigned int _p3;
+    float vol_scalar_max;  float trailing_vbts_mult;
     unsigned int enable_pyramiding;  unsigned int max_adds_per_symbol;  float add_fraction_of_base_margin;
     unsigned int add_cooldown_minutes;  float add_min_profit_atr;  unsigned int add_min_confidence;
-    unsigned int entry_min_confidence;  unsigned int enable_slow_drift_entries;
+    unsigned int entry_min_confidence;  float trailing_high_profit_atr;
     unsigned int enable_partial_tp;  float tp_partial_pct;  float tp_partial_min_notional_usd;
-    float trailing_start_atr;  float trailing_distance_atr;  unsigned int _p5;
+    float trailing_start_atr;  float trailing_distance_atr;  float tp_partial_atr_mult;
     unsigned int enable_ssf_filter;  unsigned int enable_breakeven_stop;  float breakeven_start_atr;
     float breakeven_buffer_atr;
     float trailing_start_atr_low_conf;  float trailing_distance_atr_low_conf;
@@ -125,12 +134,13 @@ struct __align__(16) GpuComboConfig {
     float rsi_exit_ub_lo_profit_low_conf;  float rsi_exit_ub_hi_profit_low_conf;
     float rsi_exit_lb_lo_profit_low_conf;  float rsi_exit_lb_hi_profit_low_conf;
     unsigned int reentry_cooldown_minutes;  unsigned int reentry_cooldown_min_mins;
-    unsigned int reentry_cooldown_max_mins;  unsigned int _p6;
+    unsigned int reentry_cooldown_max_mins;  float trailing_tighten_default;
     unsigned int enable_vol_buffered_trailing;  float tsme_min_profit_atr;
-    unsigned int tsme_require_adx_slope_negative;  unsigned int _p7;
+    unsigned int tsme_require_adx_slope_negative;  float trailing_tighten_tspv;
     float min_atr_pct;  unsigned int reverse_entry_signal;  unsigned int block_exits_on_extreme_dev;
-    float glitch_price_dev_pct;  float glitch_atr_mult;  unsigned int _p8;
-    unsigned int max_open_positions;  unsigned int max_entry_orders_per_loop;  unsigned int _p9;  unsigned int _p10;
+    float glitch_price_dev_pct;  float glitch_atr_mult;  float trailing_weak_trend_mult;
+    unsigned int max_open_positions;  unsigned int max_entry_orders_per_loop;
+    unsigned int enable_slow_drift_entries;  unsigned int slow_drift_require_macd_sign;
     unsigned int enable_ranging_filter;  unsigned int enable_anomaly_filter;  unsigned int enable_extension_filter;
     unsigned int require_adx_rising;  float adx_rising_saturation;  unsigned int require_volume_confirmation;
     unsigned int vol_confirm_include_prev;  unsigned int use_stoch_rsi_filter;
@@ -154,13 +164,14 @@ struct __align__(16) GpuComboConfig {
 };
 
 struct GpuComboState {
-    float balance;  unsigned int num_open;  unsigned int entries_this_bar;  unsigned int _sp;
+    double balance;  unsigned int num_open;  unsigned int entries_this_bar;
     GpuPosition positions[52];
     unsigned int pesc_close_time_sec[52];
     unsigned int pesc_close_type[52];
     unsigned int pesc_close_reason[52];
-    float total_pnl;  float total_fees;  unsigned int total_trades;  unsigned int total_wins;
-    float gross_profit;  float gross_loss;  float max_drawdown;  float peak_equity;
+    double total_pnl;  double total_fees;  unsigned int total_trades;  unsigned int total_wins;
+    double gross_profit;  double gross_loss;  double max_drawdown;  double peak_equity;
+    unsigned int _acc_pad[2];
 };
 
 struct __align__(16) GpuResult {
@@ -182,8 +193,8 @@ struct EntryCandidate {
 
 // -- Helper functions ---------------------------------------------------------
 
-__device__ float get_fee_rate(const GpuParams* params) {
-    return __uint_as_float(params->fee_rate_bits);
+__device__ float get_taker_fee_rate(const GpuParams* params) {
+    return __uint_as_float(params->taker_fee_rate_bits);
 }
 
 __device__ float profit_atr(const GpuPosition& pos, float price) {
@@ -247,10 +258,25 @@ __device__ unsigned int apply_regime_filter(unsigned int signal, const GpuComboC
 
 // -- Gate Checks --------------------------------------------------------------
 
-__device__ bool check_gates(const GpuSnapshot& snap, const GpuComboConfig* cfg,
-                            unsigned int btc_bull, float ema_slope) {
-    // ADX minimum
-    if (snap.adx < cfg->min_adx) { return false; }
+struct GateResult {
+    bool all_gates_pass;
+    bool is_ranging;
+    bool is_anomaly;
+    bool is_extended;
+    bool vol_confirm;
+    bool bullish_alignment;
+    bool bearish_alignment;
+};
+
+__device__ GateResult check_gates(const GpuSnapshot& snap, const GpuComboConfig* cfg, float ema_slope) {
+    GateResult result;
+    result.all_gates_pass = false;
+    result.is_ranging = false;
+    result.is_anomaly = false;
+    result.is_extended = false;
+    result.vol_confirm = true;
+    result.bullish_alignment = snap.ema_fast > snap.ema_slow;
+    result.bearish_alignment = snap.ema_fast < snap.ema_slow;
 
     // Ranging filter (vote system simplified: ADX + BB width)
     if (cfg->enable_ranging_filter != 0u) {
@@ -258,26 +284,26 @@ __device__ bool check_gates(const GpuSnapshot& snap, const GpuComboConfig* cfg,
         if (snap.adx < cfg->ranging_adx_lt) { votes += 1u; }
         if (snap.bb_width_ratio < cfg->ranging_bb_width_ratio_lt) { votes += 1u; }
         if (snap.rsi > 47.0f && snap.rsi < 53.0f) { votes += 1u; }
-        if (votes >= 2u) {
-            // Parity with CPU: only allow slow-drift "un-range" when slow drift entries are enabled.
-            if (cfg->enable_slow_drift_entries != 0u) {
-                if (fabsf(ema_slope) < cfg->slow_drift_ranging_slope_override) { return false; }
-            } else {
-                return false;
-            }
+        result.is_ranging = votes >= 2u;
+
+        // Slow-drift override for ranging gate (CPU parity).
+        if (cfg->enable_slow_drift_entries != 0u
+            && result.is_ranging
+            && fabsf(ema_slope) >= cfg->slow_drift_ranging_slope_override) {
+            result.is_ranging = false;
         }
     }
 
     // Anomaly filter
     if (cfg->enable_anomaly_filter != 0u) {
-        if (snap.bb_width_ratio > cfg->anomaly_bb_width_ratio_gt) { return false; }
+        result.is_anomaly = snap.bb_width_ratio > cfg->anomaly_bb_width_ratio_gt;
     }
 
     // Extension filter
     if (cfg->enable_extension_filter != 0u) {
         if (snap.close > 0.0f && snap.ema_fast > 0.0f) {
             float dist = fabsf(snap.close - snap.ema_fast) / snap.ema_fast;
-            if (dist > cfg->max_dist_ema_fast) { return false; }
+            result.is_extended = dist > cfg->max_dist_ema_fast;
         }
     }
 
@@ -288,28 +314,33 @@ __device__ bool check_gates(const GpuSnapshot& snap, const GpuComboConfig* cfg,
             if (cfg->vol_confirm_include_prev != 0u) {
                 vol_ok = vol_ok || (snap.volume > snap.vol_sma * 0.8f);
             }
-            if (!vol_ok) { return false; }
+            result.vol_confirm = vol_ok;
         }
     }
 
     // ADX rising (trend direction)
+    bool is_trending_up = true;
     if (cfg->require_adx_rising != 0u) {
-        if (snap.adx < cfg->adx_rising_saturation) {
-            if (snap.adx_slope <= 0.0f) { return false; }
+        if (snap.adx < cfg->adx_rising_saturation && snap.adx_slope <= 0.0f) {
+            is_trending_up = false;
         }
     }
 
-    // BTC alignment
-    if (cfg->require_btc_alignment != 0u) {
-        // Skip if symbol is BTC itself (handled at engine level)
-    }
-
-    // Macro EMA alignment
+    // Macro alignment is directional.
     if (cfg->require_macro_alignment != 0u) {
-        if (snap.close < snap.ema_macro) { return false; }
+        result.bullish_alignment = result.bullish_alignment && (snap.ema_slow > snap.ema_macro);
+        result.bearish_alignment = result.bearish_alignment && (snap.ema_slow < snap.ema_macro);
     }
 
-    return true;
+    result.all_gates_pass =
+        snap.adx >= cfg->min_adx
+        && !result.is_ranging
+        && !result.is_anomaly
+        && !result.is_extended
+        && result.vol_confirm
+        && is_trending_up;
+
+    return result;
 }
 
 // -- Signal Generation --------------------------------------------------------
@@ -321,24 +352,40 @@ struct SignalResult {
 };
 
 __device__ SignalResult generate_signal(const GpuSnapshot& snap, const GpuComboConfig* cfg,
-                                        bool gates_pass, unsigned int btc_bull, float ema_slope) {
+                                        const GateResult& gates, unsigned int btc_bull,
+                                        bool is_btc_symbol, float ema_slope) {
     // Returns (signal, confidence, entry_adx_threshold_as_bits)
     SignalResult neutral = {SIG_NEUTRAL, 0u, 0u};
 
+    bool btc_ok_long = true;
+    bool btc_ok_short = true;
+    if (cfg->require_btc_alignment != 0u
+        && !is_btc_symbol
+        && !(snap.adx > cfg->btc_adx_override)) {
+        if (btc_bull == BTC_BULL_BULLISH) {
+            btc_ok_long = true;
+            btc_ok_short = false;
+        } else if (btc_bull == BTC_BULL_BEARISH) {
+            btc_ok_long = false;
+            btc_ok_short = true;
+        } else {
+            // CPU parity: unknown BTC state does not block entries.
+            btc_ok_long = true;
+            btc_ok_short = true;
+        }
+    }
+
     // Mode 1: Standard trend
-    if (gates_pass) {
+    if (gates.all_gates_pass) {
         unsigned int signal = SIG_NEUTRAL;
         unsigned int confidence = CONF_MEDIUM;
         float adx_threshold = snap.adx;
 
-        // Standard entry direction (parity with CPU):
-        // - LONG requires bullish alignment AND close > ema_fast
-        // - SHORT requires bearish alignment AND close < ema_fast
-        bool ema_bullish = snap.ema_fast > snap.ema_slow;
-        bool ema_bearish = snap.ema_fast < snap.ema_slow;
-
-        if (ema_bullish && snap.close > snap.ema_fast) { signal = SIG_BUY; }
-        else if (ema_bearish && snap.close < snap.ema_fast) { signal = SIG_SELL; }
+        if (gates.bullish_alignment && snap.close > snap.ema_fast && btc_ok_long) {
+            signal = SIG_BUY;
+        } else if (gates.bearish_alignment && snap.close < snap.ema_fast && btc_ok_short) {
+            signal = SIG_SELL;
+        }
         if (signal == SIG_NEUTRAL) { return neutral; }
 
         // DRE (Dynamic RSI Elasticity)
@@ -368,15 +415,6 @@ __device__ SignalResult generate_signal(const GpuSnapshot& snap, const GpuComboC
             if (signal == SIG_SELL && snap.stoch_k < 0.15f) { return neutral; }
         }
 
-        // BTC alignment (parity with CPU minimal semantics).
-        if (cfg->require_btc_alignment != 0u) {
-            bool adx_override = snap.adx > cfg->btc_adx_override;
-            if (!adx_override) {
-                if (signal == SIG_BUY && btc_bull != 1u) { return neutral; }
-                if (signal == SIG_SELL && btc_bull != 0u) { return neutral; }
-            }
-        }
-
         // AVE (Adaptive Volatility Entry): upgrade confidence
         if (snap.avg_atr > 0.0f) {
             float atr_ratio = snap.atr / snap.avg_atr;
@@ -397,23 +435,39 @@ __device__ SignalResult generate_signal(const GpuSnapshot& snap, const GpuComboC
         return result;
     }
 
-    // Mode 2: Pullback (simplified -- disabled in most sweeps)
     // Mode 3: Slow drift
-    if (cfg->enable_slow_drift_entries != 0u
-        && fabsf(ema_slope) >= cfg->slow_drift_min_slope_pct
-        && snap.adx >= cfg->slow_drift_min_adx) {
-        unsigned int signal = SIG_NEUTRAL;
-        if (ema_slope > 0.0f) {
-            if (snap.rsi >= cfg->slow_drift_rsi_long_min) { signal = SIG_BUY; }
-        } else {
-            if (snap.rsi <= cfg->slow_drift_rsi_short_max) { signal = SIG_SELL; }
-        }
-        if (signal != SIG_NEUTRAL) {
-            SignalResult result;
-            result.signal = signal;
-            result.confidence = CONF_LOW;
-            result.entry_adx_thresh_bits = __float_as_uint(snap.adx);
-            return result;
+    bool slow_gates_ok =
+        !gates.is_anomaly
+        && !gates.is_extended
+        && !gates.is_ranging
+        && gates.vol_confirm
+        && snap.adx >= cfg->slow_drift_min_adx;
+
+    if (cfg->enable_slow_drift_entries != 0u && slow_gates_ok) {
+        if (gates.bullish_alignment
+            && snap.close > snap.ema_slow
+            && btc_ok_long
+            && ema_slope >= cfg->slow_drift_min_slope_pct) {
+            bool macd_ok = (cfg->slow_drift_require_macd_sign == 0u) || (snap.macd_hist > 0.0f);
+            if (macd_ok && snap.rsi >= cfg->slow_drift_rsi_long_min) {
+                SignalResult result;
+                result.signal = SIG_BUY;
+                result.confidence = CONF_LOW;
+                result.entry_adx_thresh_bits = __float_as_uint(cfg->slow_drift_min_adx);
+                return result;
+            }
+        } else if (gates.bearish_alignment
+                   && snap.close < snap.ema_slow
+                   && btc_ok_short
+                   && ema_slope <= -cfg->slow_drift_min_slope_pct) {
+            bool macd_ok = (cfg->slow_drift_require_macd_sign == 0u) || (snap.macd_hist < 0.0f);
+            if (macd_ok && snap.rsi <= cfg->slow_drift_rsi_short_max) {
+                SignalResult result;
+                result.signal = SIG_SELL;
+                result.confidence = CONF_LOW;
+                result.entry_adx_thresh_bits = __float_as_uint(cfg->slow_drift_min_adx);
+                return result;
+            }
         }
     }
 
@@ -465,10 +519,16 @@ __device__ float compute_sl_price(const GpuPosition& pos, const GpuSnapshot& sna
     return sl_price;
 }
 
+__device__ bool stop_loss_hit(unsigned int pos_type, float price, float sl_price) {
+    // Mirrors bt-core::exits::stop_loss::check_stop_loss:
+    // LONG exits when price <= SL, SHORT exits when price >= SL.
+    if (pos_type == POS_LONG) { return price <= sl_price; }
+    return price >= sl_price;
+}
+
 __device__ bool check_stop_loss(const GpuPosition& pos, const GpuSnapshot& snap, const GpuComboConfig* cfg) {
     float sl = compute_sl_price(pos, snap, cfg);
-    if (pos.active == POS_LONG) { return snap.close <= sl; }
-    return snap.close >= sl;
+    return stop_loss_hit(pos.active, snap.close, sl);
 }
 
 // -- Trailing Stop ------------------------------------------------------------
@@ -485,29 +545,29 @@ __device__ float compute_trailing(const GpuPosition& pos, const GpuSnapshot& sna
         if (cfg->trailing_distance_atr_low_conf > 0.0f) { trailing_dist = cfg->trailing_distance_atr_low_conf; }
     }
 
-    // RSI Trend-Guard floor
-    float min_dist = 0.5f;
-    if (pos.active == POS_LONG && snap.rsi > 60.0f) { min_dist = 0.7f; }
-    if (pos.active == POS_SHORT && snap.rsi < 40.0f) { min_dist = 0.7f; }
+    // RSI Trend-Guard floor — read from config
+    float min_dist = cfg->trailing_rsi_floor_default;
+    if (pos.active == POS_LONG && snap.rsi > 60.0f) { min_dist = cfg->trailing_rsi_floor_trending; }
+    if (pos.active == POS_SHORT && snap.rsi < 40.0f) { min_dist = cfg->trailing_rsi_floor_trending; }
 
     float eff_dist = trailing_dist;
 
-    // VBTS
-    if (cfg->enable_vol_buffered_trailing != 0u && snap.bb_width_ratio > 1.2f) {
-        eff_dist *= 1.25f;
+    // VBTS — read from config
+    if (cfg->enable_vol_buffered_trailing != 0u && snap.bb_width_ratio > cfg->trailing_vbts_bb_threshold) {
+        eff_dist *= cfg->trailing_vbts_mult;
     }
 
-    // High-profit tightening
-    if (p_atr > 2.0f) {
+    // High-profit tightening — read from config
+    if (p_atr > cfg->trailing_high_profit_atr) {
         if (snap.adx > 35.0f && snap.adx_slope > 0.0f) {
-            eff_dist = trailing_dist * 1.0f; // TATP: don't tighten
+            eff_dist = trailing_dist * 1.0f; // TATP: don't tighten (stays hardcoded)
         } else if (snap.atr_slope > 0.0f) {
-            eff_dist = trailing_dist * 0.75f; // TSPV
+            eff_dist = trailing_dist * cfg->trailing_tighten_tspv;
         } else {
-            eff_dist = trailing_dist * 0.5f;
+            eff_dist = trailing_dist * cfg->trailing_tighten_default;
         }
     } else if (snap.adx < 25.0f) {
-        eff_dist = trailing_dist * 0.7f;
+        eff_dist = trailing_dist * cfg->trailing_weak_trend_mult;
     }
 
     eff_dist = fmaxf(eff_dist, min_dist);
@@ -549,32 +609,56 @@ __device__ unsigned int check_tp(const GpuPosition& pos, const GpuSnapshot& snap
     float entry = pos.entry_price;
     float atr = (pos.entry_atr > 0.0f) ? pos.entry_atr : (entry * 0.005f);
 
-    float tp_price;
-    if (pos.active == POS_LONG) {
-        tp_price = entry + (atr * tp_mult);
-    } else {
-        tp_price = entry - (atr * tp_mult);
-    }
+    // ── Full TP price (always based on tp_mult) ──────────────────────────────
+    float tp_price = (pos.active == POS_LONG)
+        ? (entry + (atr * tp_mult))
+        : (entry - (atr * tp_mult));
 
-    bool tp_hit = false;
-    if (pos.active == POS_LONG) { tp_hit = snap.close >= tp_price; }
-    else { tp_hit = snap.close <= tp_price; }
-
-    if (!tp_hit) { return 0u; }
-
+    // ── Partial TP path ──────────────────────────────────────────────────────
     if (cfg->enable_partial_tp != 0u) {
         if (pos.tp1_taken == 0u) {
-            float pct = fmaxf(fminf(cfg->tp_partial_pct, 1.0f), 0.0f);
-            if (pct > 0.0f && pct < 1.0f) {
-                float remaining = pos.size * (1.0f - pct) * snap.close;
-                if (remaining < cfg->tp_partial_min_notional_usd) { return 0u; }
-                return 1u; // Partial
+            // Determine partial TP level: use dedicated mult if set, otherwise same as full TP.
+            float partial_mult = (cfg->tp_partial_atr_mult > 0.0f) ? cfg->tp_partial_atr_mult : tp_mult;
+            float partial_tp_price = (pos.active == POS_LONG)
+                ? (entry + (atr * partial_mult))
+                : (entry - (atr * partial_mult));
+            bool partial_hit = (pos.active == POS_LONG)
+                ? (snap.close >= partial_tp_price)
+                : (snap.close <= partial_tp_price);
+
+            if (partial_hit) {
+                float pct = fmaxf(fminf(cfg->tp_partial_pct, 1.0f), 0.0f);
+                if (pct > 0.0f && pct < 1.0f) {
+                    float remaining = pos.size * (1.0f - pct) * snap.close;
+                    if (remaining < cfg->tp_partial_min_notional_usd) { return 0u; }
+                    return 1u; // Partial
+                }
+                // pct == 0 or pct >= 1.0 falls through to full close check.
+            } else {
+                // Partial TP not hit yet.
+                // When tp_partial_atr_mult == 0, partial == full, so full can't be hit either.
+                if (cfg->tp_partial_atr_mult <= 0.0f) { return 0u; }
+                // When tp_partial_atr_mult > 0, fall through to check full TP
+                // (handles edge case where partial_mult > tp_mult).
             }
         } else {
-            return 0u; // tp1 already taken, let trailing manage
+            // tp1 already taken.
+            if (cfg->tp_partial_atr_mult > 0.0f) {
+                bool tp_hit = (pos.active == POS_LONG)
+                    ? (snap.close >= tp_price)
+                    : (snap.close <= tp_price);
+                if (tp_hit) { return 2u; }
+            }
+            // Same level (tp_partial_atr_mult == 0) or full TP not hit: trailing manages.
+            return 0u;
         }
     }
 
+    // ── Full TP check (partial TP disabled, or pct edge case) ────────────────
+    bool tp_hit = (pos.active == POS_LONG)
+        ? (snap.close >= tp_price)
+        : (snap.close <= tp_price);
+    if (!tp_hit) { return 0u; }
     return 2u; // Full close
 }
 
@@ -725,37 +809,32 @@ __device__ void clear_position(GpuPosition* pos) {
 }
 
 __device__ void apply_close(GpuComboState* state, unsigned int sym, const GpuSnapshot& snap,
-                            bool reason_is_signal_flip, float fee_rate) {
+                            bool reason_is_signal_flip, float fee_rate, float slippage_bps) {
     const GpuPosition& pos = state->positions[sym];
     if (pos.active == POS_EMPTY) { return; }
 
-    float slip = (pos.active == POS_LONG) ? 0.5f : -0.5f;
-    // WGSL: select(-0.5, 0.5, pos.pos_type == POS_LONG) means: if LONG then 0.5 else -0.5
-    // For exit: LONG sells (slip down = negative for the seller, but this is exit slippage)
-    // Following exact WGSL: slip = select(-0.5, 0.5, POS_LONG) => LONG gets -0.5 adverse
-    // Wait, re-read: select(false_val, true_val, cond) => cond ? true_val : false_val
-    // select(-0.5, 0.5, pos.pos_type == POS_LONG) => LONG ? 0.5 : -0.5
-    // So for exit close: LONG exit has +0.5 bps slip, SHORT exit has -0.5 bps slip
-    // This matches: LONG sells at slightly lower (worse), SHORT buys at slightly higher (worse)
-    // Actually wait: fill_price = close * (1 + slip/10000). LONG exit (selling):
-    //   slip=0.5 => fill higher? That's favorable for LONG exit. Hmm.
-    // The WGSL is the source of truth; we replicate it exactly.
-    slip = (pos.active == POS_LONG) ? 0.5f : -0.5f;
-
+    float slip = (pos.active == POS_LONG) ? slippage_bps : -slippage_bps;
     float fill_price = snap.close * (1.0f + slip / 10000.0f);
-    float notional = pos.size * fill_price;
-    float fee = notional * fee_rate;
 
-    float pnl = profit_usd(pos, fill_price);
+    // Use double for PnL/fee to prevent accumulation drift over 10K+ trades
+    double pnl;
+    if (pos.active == POS_LONG) {
+        pnl = ((double)fill_price - (double)pos.entry_price) * (double)pos.size;
+    } else {
+        pnl = ((double)pos.entry_price - (double)fill_price) * (double)pos.size;
+    }
+    double notional = (double)pos.size * (double)fill_price;
+    double fee = notional * (double)fee_rate;
+
     state->balance += pnl - fee;
     state->total_pnl += pnl;
     state->total_fees += fee;
     state->total_trades += 1u;
-    if (pnl > 0.0f) {
+    if (pnl > 0.0) {
         state->total_wins += 1u;
         state->gross_profit += pnl;
     } else {
-        state->gross_loss += fabsf(pnl);
+        state->gross_loss += fabs(pnl);
     }
     state->num_open -= 1u;
 
@@ -773,46 +852,41 @@ __device__ void apply_close(GpuComboState* state, unsigned int sym, const GpuSna
 }
 
 __device__ void apply_partial_close(GpuComboState* state, unsigned int sym, const GpuSnapshot& snap,
-                                    float pct, float fee_rate) {
+                                    float pct, float fee_rate, float slippage_bps) {
     const GpuPosition& pos = state->positions[sym];
     if (pos.active == POS_EMPTY) { return; }
 
     float exit_size = pos.size * pct;
-    float slip = (pos.active == POS_LONG) ? 0.5f : -0.5f;
+    float slip = (pos.active == POS_LONG) ? slippage_bps : -slippage_bps;
     float fill_price = snap.close * (1.0f + slip / 10000.0f);
-    float notional = exit_size * fill_price;
-    float fee = notional * fee_rate;
 
-    float pnl;
+    // Use double for PnL/fee to prevent accumulation drift over 10K+ trades
+    double pnl;
     if (pos.active == POS_LONG) {
-        pnl = (fill_price - pos.entry_price) * exit_size;
+        pnl = ((double)fill_price - (double)pos.entry_price) * (double)exit_size;
     } else {
-        pnl = (pos.entry_price - fill_price) * exit_size;
+        pnl = ((double)pos.entry_price - (double)fill_price) * (double)exit_size;
     }
+    double notional = (double)exit_size * (double)fill_price;
+    double fee = notional * (double)fee_rate;
 
     state->balance += pnl - fee;
     state->total_pnl += pnl;
     state->total_fees += fee;
     state->total_trades += 1u;
-    if (pnl > 0.0f) {
+    if (pnl > 0.0) {
         state->total_wins += 1u;
         state->gross_profit += pnl;
     } else {
-        state->gross_loss += fabsf(pnl);
+        state->gross_loss += fabs(pnl);
     }
 
     // Reduce position
     state->positions[sym].size -= exit_size;
     state->positions[sym].margin_used *= (1.0f - pct);
     state->positions[sym].tp1_taken = 1u;
-    // Lock trailing SL to at least entry (breakeven)
-    if (state->positions[sym].trailing_sl <= 0.0f || (
-        pos.active == POS_LONG && state->positions[sym].trailing_sl < pos.entry_price
-    ) || (
-        pos.active == POS_SHORT && state->positions[sym].trailing_sl > pos.entry_price
-    )) {
-        state->positions[sym].trailing_sl = pos.entry_price;
-    }
+    // CPU semantics: trailing SL is NOT modified on partial close.
+    // compute_trailing() continues ratcheting on subsequent bars.
 }
 
 // -- PESC Check ---------------------------------------------------------------
@@ -841,11 +915,12 @@ __device__ bool is_pesc_blocked(const GpuComboState* state, unsigned int sym,
     return elapsed < cooldown_sec;
 }
 
-// -- Dynamic TP Multiplier ----------------------------------------------------
+// -- TP Multiplier (must mirror bt-core fixed tp_atr_mult semantics) ---------
 
 __device__ float get_tp_mult(const GpuSnapshot& snap, const GpuComboConfig* cfg) {
-    if (snap.adx > cfg->tp_strong_adx_gt) { return 7.0f; }
-    if (snap.adx < cfg->tp_weak_adx_lt) { return 3.0f; }
+    // Parity with CPU: the CPU backtester always uses the configured TP ATR multiplier.
+    // Dynamic TP scaling based on ADX is intentionally disabled on GPU.
+    (void)snap;
     return cfg->tp_atr_mult;
 }
 
@@ -870,7 +945,7 @@ extern "C" __global__ void sweep_engine_kernel(
     // Load state into local memory
     GpuComboState state = states[combo_id];
     GpuComboConfig cfg  = configs[combo_id];
-    float fee_rate = get_fee_rate(params);
+    float fee_rate = get_taker_fee_rate(params);
     unsigned int ns = params->num_symbols;
 
     unsigned int max_sub = params->max_sub_per_bar;
@@ -886,12 +961,70 @@ extern "C" __global__ void sweep_engine_kernel(
             // Indicators come from the main bar snapshot (1h resolution)
             // ================================================================
 
-            // ── Sub-bar exits (per symbol, chronological, break on exit) ─────
+            // ── Sub-bar exits (per symbol, chronological) ───────────────────
             for (unsigned int sym = 0u; sym < ns; sym++) {
                 if (state.positions[sym].active == POS_EMPTY) { continue; }
 
                 const GpuSnapshot& ind_snap = snapshots[cfg.snapshot_offset + bar * ns + sym];
                 if (ind_snap.valid == 0u) { continue; }
+
+                // CPU semantics: always evaluate exits once on the indicator-bar snapshot at `ts`
+                // (using the main bar OHLCV), then scan sub-bars in (ts, next_ts].
+                //
+                // Note: if glitch guard blocks exits on the indicator bar, we skip ALL exit
+                // processing including trailing SL update (matching CPU Hold semantics).
+                {
+                    const GpuPosition& pos = state.positions[sym];
+                    if (pos.active != POS_EMPTY) {
+                        float p_atr = profit_atr(pos, ind_snap.close);
+
+                        // Glitch guard (CPU semantics): block ALL exit processing including trailing update.
+                        bool block_exits = false;
+                        if (cfg.block_exits_on_extreme_dev != 0u && ind_snap.prev_close > 0.0f) {
+                            float price_change_pct = fabsf(ind_snap.close - ind_snap.prev_close) / ind_snap.prev_close;
+                            block_exits = (price_change_pct > cfg.glitch_price_dev_pct)
+                                || (ind_snap.atr > 0.0f
+                                    && fabsf(ind_snap.close - ind_snap.prev_close) > ind_snap.atr * cfg.glitch_atr_mult);
+                        }
+
+                        if (block_exits) {
+                            // CPU returns Hold immediately — skip trailing update too.
+                        } else {
+                            // Stop loss
+                            if (check_stop_loss(pos, ind_snap, &cfg)) {
+                                apply_close(&state, sym, ind_snap, false, fee_rate, cfg.slippage_bps);
+                            } else {
+                                // Update trailing stop
+                                float new_tsl = compute_trailing(pos, ind_snap, &cfg, p_atr);
+                                if (new_tsl > 0.0f) {
+                                    state.positions[sym].trailing_sl = new_tsl;
+                                }
+
+                                // Trailing stop exit
+                                if (state.positions[sym].active != POS_EMPTY
+                                    && check_trailing_exit(state.positions[sym], ind_snap)) {
+                                    apply_close(&state, sym, ind_snap, false, fee_rate, cfg.slippage_bps);
+                                } else if (state.positions[sym].active != POS_EMPTY) {
+                                    // Take profit
+                                    float tp_mult = get_tp_mult(ind_snap, &cfg);
+                                    unsigned int tp_result = check_tp(state.positions[sym], ind_snap, &cfg, tp_mult);
+                                    if (tp_result == 1u) {
+                                        apply_partial_close(&state, sym, ind_snap, cfg.tp_partial_pct, fee_rate, cfg.slippage_bps);
+                                    } else if (tp_result == 2u) {
+                                        apply_close(&state, sym, ind_snap, false, fee_rate, cfg.slippage_bps);
+                                    } else {
+                                        // Smart exits
+                                        if (check_smart_exits(state.positions[sym], ind_snap, &cfg, p_atr)) {
+                                            apply_close(&state, sym, ind_snap, false, fee_rate, cfg.slippage_bps);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (state.positions[sym].active == POS_EMPTY) { continue; }
 
                 unsigned int n_sub = sub_counts[bar * ns + sym];
                 for (unsigned int sub_i = 0u; sub_i < n_sub; sub_i++) {
@@ -904,21 +1037,27 @@ extern "C" __global__ void sweep_engine_kernel(
                     hybrid.high = sc.high;
                     hybrid.low = sc.low;
                     hybrid.open = sc.open;
-                    hybrid.volume = sc.volume;
                     hybrid.t_sec = sc.t_sec;
 
                     const GpuPosition& pos = state.positions[sym];
                     if (pos.active == POS_EMPTY) { break; } // exited in earlier sub-bar
                     float p_atr = profit_atr(pos, hybrid.close);
 
-                    // Glitch guard
-                    if (hybrid.atr > 0.0f && fabsf(hybrid.close - hybrid.prev_close) > hybrid.atr * cfg.glitch_atr_mult) {
-                        continue;
+                    // Glitch guard (CPU semantics): block ALL exit processing including trailing update.
+                    bool block_exits = false;
+                    if (cfg.block_exits_on_extreme_dev != 0u && hybrid.prev_close > 0.0f) {
+                        float price_change_pct = fabsf(hybrid.close - hybrid.prev_close) / hybrid.prev_close;
+                        block_exits = (price_change_pct > cfg.glitch_price_dev_pct)
+                            || (hybrid.atr > 0.0f
+                                && fabsf(hybrid.close - hybrid.prev_close) > hybrid.atr * cfg.glitch_atr_mult);
+                    }
+                    if (block_exits) {
+                        continue;  // CPU returns Hold — skip trailing update too
                     }
 
                     // Stop loss
                     if (check_stop_loss(pos, hybrid, &cfg)) {
-                        apply_close(&state, sym, hybrid, false, fee_rate);
+                        apply_close(&state, sym, hybrid, false, fee_rate, cfg.slippage_bps);
                         break;
                     }
 
@@ -930,7 +1069,7 @@ extern "C" __global__ void sweep_engine_kernel(
 
                     // Trailing stop exit
                     if (check_trailing_exit(state.positions[sym], hybrid)) {
-                        apply_close(&state, sym, hybrid, false, fee_rate);
+                        apply_close(&state, sym, hybrid, false, fee_rate, cfg.slippage_bps);
                         break;
                     }
 
@@ -938,17 +1077,19 @@ extern "C" __global__ void sweep_engine_kernel(
                     float tp_mult = get_tp_mult(hybrid, &cfg);
                     unsigned int tp_result = check_tp(pos, hybrid, &cfg, tp_mult);
                     if (tp_result == 1u) {
-                        apply_partial_close(&state, sym, hybrid, cfg.tp_partial_pct, fee_rate);
-                        break;
+                        apply_partial_close(&state, sym, hybrid, cfg.tp_partial_pct, fee_rate, cfg.slippage_bps);
+                        // CPU sub-bar semantics keep scanning later sub-bars after a partial TP.
+                        // Remaining size can still hit SL/TS/other exits within the same bar window.
+                        continue;
                     }
                     if (tp_result == 2u) {
-                        apply_close(&state, sym, hybrid, false, fee_rate);
+                        apply_close(&state, sym, hybrid, false, fee_rate, cfg.slippage_bps);
                         break;
                     }
 
                     // Smart exits
                     if (check_smart_exits(pos, hybrid, &cfg, p_atr)) {
-                        apply_close(&state, sym, hybrid, false, fee_rate);
+                        apply_close(&state, sym, hybrid, false, fee_rate, cfg.slippage_bps);
                         break;
                     }
                 }
@@ -985,7 +1126,6 @@ extern "C" __global__ void sweep_engine_kernel(
                     hybrid.high = sc.high;
                     hybrid.low = sc.low;
                     hybrid.open = sc.open;
-                    hybrid.volume = sc.volume;
                     hybrid.t_sec = sc.t_sec;
 
                     const GpuPosition& pos = state.positions[sym];
@@ -997,7 +1137,7 @@ extern "C" __global__ void sweep_engine_kernel(
                             if (p_atr_pyr >= cfg.add_min_profit_atr) {
                                 unsigned int elapsed_sec = hybrid.t_sec - pos.last_add_time_sec;
                                 if (elapsed_sec >= cfg.add_cooldown_minutes * 60u) {
-                                    float equity = state.balance;
+                                    float equity = (float)state.balance;
                                     float base_margin = equity * cfg.allocation_pct;
                                     float add_margin = base_margin * cfg.add_fraction_of_base_margin;
                                     float lev = pos.leverage;
@@ -1034,8 +1174,16 @@ extern "C" __global__ void sweep_engine_kernel(
                     if (pos.active != POS_EMPTY) { continue; }
 
                     // Gates, signal generation, filters (using hybrid snapshot with indicator values)
-                    bool gates_ok = check_gates(hybrid, &cfg, btc_bull, hybrid.ema_slow_slope_pct);
-                    SignalResult sig_result = generate_signal(hybrid, &cfg, gates_ok, btc_bull, hybrid.ema_slow_slope_pct);
+                    GateResult gates = check_gates(hybrid, &cfg, hybrid.ema_slow_slope_pct);
+                    bool is_btc_symbol = (sym == params->btc_sym_idx);
+                    SignalResult sig_result = generate_signal(
+                        hybrid,
+                        &cfg,
+                        gates,
+                        btc_bull,
+                        is_btc_symbol,
+                        hybrid.ema_slow_slope_pct
+                    );
                     unsigned int signal = sig_result.signal;
                     unsigned int confidence = sig_result.confidence;
                     float entry_adx_thresh = __uint_as_float(sig_result.entry_adx_thresh_bits);
@@ -1118,7 +1266,6 @@ extern "C" __global__ void sweep_engine_kernel(
                     hybrid.high = sc.high;
                     hybrid.low = sc.low;
                     hybrid.open = sc.open;
-                    hybrid.volume = sc.volume;
                     hybrid.t_sec = sc.t_sec;
 
                     // Margin cap
@@ -1128,10 +1275,10 @@ extern "C" __global__ void sweep_engine_kernel(
                             total_margin += state.positions[s].margin_used;
                         }
                     }
-                    float headroom = state.balance * cfg.max_total_margin_pct - total_margin;
+                    float headroom = (float)state.balance * cfg.max_total_margin_pct - total_margin;
                     if (headroom <= 0.0f) { continue; }
 
-                    SizingResult sizing = compute_entry_size(state.balance, hybrid.close, cand.confidence,
+                    SizingResult sizing = compute_entry_size((float)state.balance, hybrid.close, cand.confidence,
                                                              cand.atr, hybrid, &cfg);
                     float size = sizing.size;
                     float margin = sizing.margin;
@@ -1199,14 +1346,21 @@ extern "C" __global__ void sweep_engine_kernel(
 
                 float p_atr = profit_atr(pos, snap.close);
 
-                // Glitch guard
-                if (snap.atr > 0.0f && fabsf(snap.close - snap.prev_close) > snap.atr * cfg.glitch_atr_mult) {
-                    continue;
+                // Glitch guard (CPU semantics): block ALL exit processing including trailing update.
+                bool block_exits = false;
+                if (cfg.block_exits_on_extreme_dev != 0u && snap.prev_close > 0.0f) {
+                    float price_change_pct = fabsf(snap.close - snap.prev_close) / snap.prev_close;
+                    block_exits = (price_change_pct > cfg.glitch_price_dev_pct)
+                        || (snap.atr > 0.0f
+                            && fabsf(snap.close - snap.prev_close) > snap.atr * cfg.glitch_atr_mult);
+                }
+                if (block_exits) {
+                    continue;  // CPU returns Hold — skip trailing update too
                 }
 
                 // Stop loss
                 if (check_stop_loss(pos, snap, &cfg)) {
-                    apply_close(&state, sym, snap, false, fee_rate);
+                    apply_close(&state, sym, snap, false, fee_rate, cfg.slippage_bps);
                     continue;
                 }
 
@@ -1218,7 +1372,7 @@ extern "C" __global__ void sweep_engine_kernel(
 
                 // Trailing stop exit
                 if (check_trailing_exit(state.positions[sym], snap)) {
-                    apply_close(&state, sym, snap, false, fee_rate);
+                    apply_close(&state, sym, snap, false, fee_rate, cfg.slippage_bps);
                     continue;
                 }
 
@@ -1226,17 +1380,17 @@ extern "C" __global__ void sweep_engine_kernel(
                 float tp_mult = get_tp_mult(snap, &cfg);
                 unsigned int tp_result = check_tp(pos, snap, &cfg, tp_mult);
                 if (tp_result == 1u) {
-                    apply_partial_close(&state, sym, snap, cfg.tp_partial_pct, fee_rate);
+                    apply_partial_close(&state, sym, snap, cfg.tp_partial_pct, fee_rate, cfg.slippage_bps);
                     continue;
                 }
                 if (tp_result == 2u) {
-                    apply_close(&state, sym, snap, false, fee_rate);
+                    apply_close(&state, sym, snap, false, fee_rate, cfg.slippage_bps);
                     continue;
                 }
 
                 // Smart exits
                 if (check_smart_exits(pos, snap, &cfg, p_atr)) {
-                    apply_close(&state, sym, snap, false, fee_rate);
+                    apply_close(&state, sym, snap, false, fee_rate, cfg.slippage_bps);
                     continue;
                 }
             }
@@ -1260,7 +1414,7 @@ extern "C" __global__ void sweep_engine_kernel(
                         if (p_atr_pyr >= cfg.add_min_profit_atr) {
                             unsigned int elapsed_sec = snap.t_sec - pos.last_add_time_sec;
                             if (elapsed_sec >= cfg.add_cooldown_minutes * 60u) {
-                                float equity = state.balance;
+                                float equity = (float)state.balance;
                                 float base_margin = equity * cfg.allocation_pct;
                                 float add_margin = base_margin * cfg.add_fraction_of_base_margin;
                                 float lev = pos.leverage;
@@ -1296,8 +1450,16 @@ extern "C" __global__ void sweep_engine_kernel(
 
                 if (pos.active != POS_EMPTY) { continue; }
 
-                bool gates_ok = check_gates(snap, &cfg, btc_bull, snap.ema_slow_slope_pct);
-                SignalResult sig_result = generate_signal(snap, &cfg, gates_ok, btc_bull, snap.ema_slow_slope_pct);
+                GateResult gates = check_gates(snap, &cfg, snap.ema_slow_slope_pct);
+                bool is_btc_symbol = (sym == params->btc_sym_idx);
+                SignalResult sig_result = generate_signal(
+                    snap,
+                    &cfg,
+                    gates,
+                    btc_bull,
+                    is_btc_symbol,
+                    snap.ema_slow_slope_pct
+                );
                 unsigned int signal = sig_result.signal;
                 unsigned int confidence = sig_result.confidence;
                 float entry_adx_thresh = __uint_as_float(sig_result.entry_adx_thresh_bits);
@@ -1378,10 +1540,10 @@ extern "C" __global__ void sweep_engine_kernel(
                         total_margin += state.positions[s].margin_used;
                     }
                 }
-                float headroom = state.balance * cfg.max_total_margin_pct - total_margin;
+                float headroom = (float)state.balance * cfg.max_total_margin_pct - total_margin;
                 if (headroom <= 0.0f) { continue; }
 
-                SizingResult sizing = compute_entry_size(state.balance, snap.close, cand.confidence,
+                SizingResult sizing = compute_entry_size((float)state.balance, snap.close, cand.confidence,
                                                          cand.atr, snap, &cfg);
                 float size = sizing.size;
                 float margin = sizing.margin;
@@ -1434,20 +1596,20 @@ extern "C" __global__ void sweep_engine_kernel(
             }
         } // end if/else max_sub
 
-        // == Equity tracking =================================================
-        float equity = state.balance;
+        // == Equity tracking (double precision) ==================================
+        double equity = state.balance;
         for (unsigned int s = 0u; s < ns; s++) {
             const GpuPosition& p = state.positions[s];
             if (p.active != POS_EMPTY) {
                 const GpuSnapshot& snap = snapshots[cfg.snapshot_offset + bar * ns + s];
                 if (snap.valid != 0u) {
-                    equity += profit_usd(p, snap.close);
+                    equity += (double)profit_usd(p, snap.close);
                 }
             }
         }
         if (equity > state.peak_equity) { state.peak_equity = equity; }
-        if (state.peak_equity > 0.0f) {
-            float dd = (state.peak_equity - equity) / state.peak_equity;
+        if (state.peak_equity > 0.0) {
+            double dd = (state.peak_equity - equity) / state.peak_equity;
             if (dd > state.max_drawdown) { state.max_drawdown = dd; }
         }
     }
@@ -1461,15 +1623,15 @@ extern "C" __global__ void sweep_engine_kernel(
                                     ? (state.total_trades - state.total_wins)
                                     : 0u;
         GpuResult res;
-        res.final_balance = state.balance;
-        res.total_pnl = state.total_pnl;
-        res.total_fees = state.total_fees;
+        res.final_balance = (float)state.balance;
+        res.total_pnl = (float)state.total_pnl;
+        res.total_fees = (float)state.total_fees;
         res.total_trades = state.total_trades;
         res.total_wins = state.total_wins;
         res.total_losses = total_losses;
-        res.gross_profit = state.gross_profit;
-        res.gross_loss = state.gross_loss;
-        res.max_drawdown_pct = state.max_drawdown;
+        res.gross_profit = (float)state.gross_profit;
+        res.gross_loss = (float)state.gross_loss;
+        res.max_drawdown_pct = (float)state.max_drawdown;
         res._pad[0] = 0u;
         res._pad[1] = 0u;
         res._pad[2] = 0u;

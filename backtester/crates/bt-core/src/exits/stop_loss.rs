@@ -45,11 +45,7 @@ pub fn check_stop_loss(
 ///
 /// This is the *base* SL (before trailing is overlaid). It incorporates all
 /// dynamic adjustments (ASE, DASE, SLB, breakeven) each bar.
-pub fn compute_sl_price(
-    pos: &Position,
-    snap: &IndicatorSnapshot,
-    cfg: &StrategyConfig,
-) -> f64 {
+pub fn compute_sl_price(pos: &Position, snap: &IndicatorSnapshot, cfg: &StrategyConfig) -> f64 {
     let trade = &cfg.trade;
 
     let entry = pos.entry_price;
@@ -294,5 +290,48 @@ mod tests {
         let cfg = default_cfg();
         let result = check_stop_loss(&pos, &snap, &cfg);
         assert!(!result.should_exit);
+    }
+
+    #[test]
+    fn sl_atr_mult_direction_is_consistent_for_long_and_short() {
+        let mut tight = default_cfg();
+        tight.trade.enable_breakeven_stop = false;
+        tight.trade.sl_atr_mult = 1.0;
+
+        let mut wide = tight.clone();
+        wide.trade.sl_atr_mult = 3.0;
+
+        // Keep dynamic SL modifiers inactive to isolate sl_atr_mult direction.
+        let mut long_snap = default_snap(98.5);
+        long_snap.adx = 30.0;
+        long_snap.adx_slope = 0.0;
+
+        let mut short_snap = default_snap(101.5);
+        short_snap.adx = 30.0;
+        short_snap.adx_slope = 0.0;
+
+        let long_pos = default_pos(100.0, PositionType::Long);
+        let short_pos = default_pos(100.0, PositionType::Short);
+
+        let long_sl_tight = compute_sl_price(&long_pos, &long_snap, &tight);
+        let long_sl_wide = compute_sl_price(&long_pos, &long_snap, &wide);
+        assert!(
+            long_sl_wide < long_sl_tight,
+            "LONG SL should move lower when sl_atr_mult widens"
+        );
+
+        let short_sl_tight = compute_sl_price(&short_pos, &short_snap, &tight);
+        let short_sl_wide = compute_sl_price(&short_pos, &short_snap, &wide);
+        assert!(
+            short_sl_wide > short_sl_tight,
+            "SHORT SL should move higher when sl_atr_mult widens"
+        );
+
+        // Same market prices: wider stops should not trigger when tighter stops do.
+        assert!(check_stop_loss(&long_pos, &long_snap, &tight).should_exit);
+        assert!(!check_stop_loss(&long_pos, &long_snap, &wide).should_exit);
+
+        assert!(check_stop_loss(&short_pos, &short_snap, &tight).should_exit);
+        assert!(!check_stop_loss(&short_pos, &short_snap, &wide).should_exit);
     }
 }

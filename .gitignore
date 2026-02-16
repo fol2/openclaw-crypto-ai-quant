@@ -50,6 +50,9 @@ analyst_state.json
 backtester/target/
 ws_sidecar/target/
 
+# PyO3 shared objects (built from Rust, copied to project root)
+bt_runtime.so
+
 # Candle databases (large, fetched at runtime)
 candles_dbs/
 
@@ -81,3 +84,8 @@ local/
 
 # Reports (generated analysis markdown)
 reports/
+artifacts/
+sweep_results.jsonl
+
+# Backtester binaries (built locally)
+backtester/dist/

@@ -188,6 +188,12 @@ global:
     breadth_block_long_below: 10.0    # default
     auto_reverse_breadth_low: 10.0    # default
     auto_reverse_breadth_high: 90.0   # default
+    enable_regime_gate: false         # default (global entry block when regime is not trend OK)
+    regime_gate_breadth_low: 20.0     # default (inside [low, high] => gate OFF)
+    regime_gate_breadth_high: 80.0    # default
+    regime_gate_btc_adx_min: 20.0     # default
+    regime_gate_btc_atr_pct_min: 0.003 # default
+    regime_gate_fail_open: false      # default (if metrics missing)
 
   watchlist_exclude:
     - BERA
@@ -197,11 +203,43 @@ global:
     - ZRO
 
   engine:                             # engine-only (Rust ignores)
-    interval: 1h                      # main indicator candle (NOT hot-reloadable)
+    interval: 30m                     # main indicator candle (NOT hot-reloadable)
     entry_interval: 3m                # entry signal granularity (hot-reloadable)
     exit_interval: 3m                 # exit price candle (hot-reloadable)
     loop_target_s: 60
     signal_on_candle_close: true
+
+# Optional strategy-mode overlays (AQC-1002).
+# Enable by setting AI_QUANT_STRATEGY_MODE=primary|fallback|conservative|flat.
+#
+# Notes:
+# - Changing global.engine.interval requires a restart (engine.interval is not hot-reloadable).
+# - entry_interval / exit_interval are hot-reloadable.
+modes:
+  primary:
+    global:
+      engine:
+        interval: 30m
+        entry_interval: 3m
+        exit_interval: 3m
+  fallback:
+    global:
+      engine:
+        interval: 1h
+        entry_interval: 3m
+        exit_interval: 3m
+  conservative:
+    global:
+      engine:
+        interval: 1h
+        entry_interval: 15m
+        exit_interval: 15m
+  flat:
+    global:
+      engine:
+        interval: 1h
+        entry_interval: 15m
+        exit_interval: 15m
 
 # No `live:` section — live engine uses identical global config as backtester.
 # What you replay = what you trade.

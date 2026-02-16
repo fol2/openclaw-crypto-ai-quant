@@ -72,9 +72,18 @@ mod tests {
     #[test]
     fn test_split_axes() {
         let axes = vec![
-            SweepAxis { path: "trade.sl_atr_mult".to_string(), values: vec![1.5, 2.0] },
-            SweepAxis { path: "indicators.ema_slow_window".to_string(), values: vec![30.0, 50.0] },
-            SweepAxis { path: "trade.tp_atr_mult".to_string(), values: vec![3.0, 5.0] },
+            SweepAxis {
+                path: "trade.sl_atr_mult".to_string(),
+                values: vec![1.5, 2.0],
+            },
+            SweepAxis {
+                path: "indicators.ema_slow_window".to_string(),
+                values: vec![30.0, 50.0],
+            },
+            SweepAxis {
+                path: "trade.tp_atr_mult".to_string(),
+                values: vec![3.0, 5.0],
+            },
         ];
         let (ind, trade) = split_axes(&axes);
         assert_eq!(ind.len(), 1);
@@ -85,8 +94,14 @@ mod tests {
     #[test]
     fn test_generate_combinations() {
         let axes = vec![
-            SweepAxis { path: "a".to_string(), values: vec![1.0, 2.0] },
-            SweepAxis { path: "b".to_string(), values: vec![10.0, 20.0] },
+            SweepAxis {
+                path: "a".to_string(),
+                values: vec![1.0, 2.0],
+            },
+            SweepAxis {
+                path: "b".to_string(),
+                values: vec![10.0, 20.0],
+            },
         ];
         let combos = generate_combinations(&axes);
         assert_eq!(combos.len(), 4);

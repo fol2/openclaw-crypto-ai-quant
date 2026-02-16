@@ -1,0 +1,7 @@
+[
+  {"timestamp": 1707955200.0, "metric": "total_pnl", "old_value": 185.30, "kernel_value": 185.35, "delta": 0.05, "tolerance": 1.0, "passed": true},
+  {"timestamp": 1707955200.0, "metric": "total_trades", "old_value": 42.0, "kernel_value": 42.0, "delta": 0.0, "tolerance": 1.0, "passed": true},
+  {"timestamp": 1707955200.0, "metric": "win_rate", "old_value": 0.4280, "kernel_value": 0.4286, "delta": 0.0006, "tolerance": 0.05, "passed": true},
+  {"timestamp": 1707955200.0, "metric": "max_drawdown_pct", "old_value": 0.0105, "kernel_value": 0.0101, "delta": 0.0004, "tolerance": 0.03, "passed": true},
+  {"timestamp": 1707955200.0, "metric": "profit_factor", "old_value": 1.98, "kernel_value": 2.00, "delta": 0.02, "tolerance": 0.50, "passed": true}
+]

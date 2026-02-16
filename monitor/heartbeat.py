@@ -29,6 +29,18 @@ _HB_OPEN_POS_RE = re.compile(r"open_pos=([0-9]+)", re.IGNORECASE)
 _HB_WS_CONNECTED_RE = re.compile(r"ws_connected=(True|False)", re.IGNORECASE)
 _HB_WS_THREAD_RE = re.compile(r"ws_thread_alive=(True|False)", re.IGNORECASE)
 _HB_WS_RESTARTS_RE = re.compile(r"ws_restarts=([0-9]+)", re.IGNORECASE)
+_HB_KILL_MODE_RE = re.compile(r"kill=(off|close_only|halt_all)", re.IGNORECASE)
+_HB_KILL_REASON_RE = re.compile(r"kill_reason=([^\s]+)", re.IGNORECASE)
+_HB_STRATEGY_MODE_RE = re.compile(r"strategy_mode=([^\s]+)", re.IGNORECASE)
+_HB_REGIME_GATE_RE = re.compile(r"regime_gate=(on|off)", re.IGNORECASE)
+_HB_REGIME_REASON_RE = re.compile(r"regime_reason=([^\s]+)", re.IGNORECASE)
+_HB_CONFIG_ID_RE = re.compile(r"config_id=([0-9a-f]{8,64}|none)", re.IGNORECASE)
+_HB_SLIP_ENABLED_RE = re.compile(r"slip_enabled=([01])", re.IGNORECASE)
+_HB_SLIP_N_RE = re.compile(r"slip_n=([0-9]+)", re.IGNORECASE)
+_HB_SLIP_WIN_RE = re.compile(r"slip_win=([0-9]+)", re.IGNORECASE)
+_HB_SLIP_THR_RE = re.compile(r"slip_thr_bps=([0-9.]+)", re.IGNORECASE)
+_HB_SLIP_LAST_RE = re.compile(r"slip_last_bps=([0-9.]+|none)", re.IGNORECASE)
+_HB_SLIP_MED_RE = re.compile(r"slip_median_bps=([0-9.]+|none)", re.IGNORECASE)
 
 
 def connect_db_ro(db_path: Path) -> sqlite3.Connection:
@@ -148,4 +160,47 @@ def parse_last_heartbeat(db_path: Path, log_path: Path) -> dict[str, Any]:
     wsr_m = _HB_WS_RESTARTS_RE.search(last_line)
     if wsr_m:
         out["ws_restarts"] = int(wsr_m.group(1))
+    km_m = _HB_KILL_MODE_RE.search(last_line)
+    if km_m:
+        out["kill_mode"] = km_m.group(1).lower()
+    kr_m = _HB_KILL_REASON_RE.search(last_line)
+    if kr_m:
+        out["kill_reason"] = kr_m.group(1)
+    smod_m = _HB_STRATEGY_MODE_RE.search(last_line)
+    if smod_m:
+        out["strategy_mode"] = smod_m.group(1).lower()
+    rg_m = _HB_REGIME_GATE_RE.search(last_line)
+    if rg_m:
+        out["regime_gate"] = rg_m.group(1).lower() == "on"
+    rr_m = _HB_REGIME_REASON_RE.search(last_line)
+    if rr_m:
+        out["regime_reason"] = rr_m.group(1)
+    cid_m = _HB_CONFIG_ID_RE.search(last_line)
+    if cid_m:
+        cid = cid_m.group(1).lower()
+        if cid != "none":
+            out["config_id"] = cid
+
+    se_m = _HB_SLIP_ENABLED_RE.search(last_line)
+    if se_m:
+        out["slip_enabled"] = se_m.group(1) == "1"
+    sn_m = _HB_SLIP_N_RE.search(last_line)
+    if sn_m:
+        out["slip_n"] = int(sn_m.group(1))
+    sw_m = _HB_SLIP_WIN_RE.search(last_line)
+    if sw_m:
+        out["slip_win"] = int(sw_m.group(1))
+    st_m = _HB_SLIP_THR_RE.search(last_line)
+    if st_m:
+        out["slip_thr_bps"] = float(st_m.group(1))
+    sl_m = _HB_SLIP_LAST_RE.search(last_line)
+    if sl_m:
+        v = sl_m.group(1).lower()
+        if v != "none":
+            out["slip_last_bps"] = float(v)
+    sm_m = _HB_SLIP_MED_RE.search(last_line)
+    if sm_m:
+        v = sm_m.group(1).lower()
+        if v != "none":
+            out["slip_median_bps"] = float(v)
     return out

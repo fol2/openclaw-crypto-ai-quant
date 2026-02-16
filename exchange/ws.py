@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -8,6 +9,8 @@ from dataclasses import dataclass
 
 import pandas as pd
 import websocket
+
+logger = logging.getLogger(__name__)
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 # Candle cache DB:
@@ -96,12 +99,13 @@ class HyperliquidWS:
         self._thread: threading.Thread | None = None
         self._ping_thread: threading.Thread | None = None
         self._connected: bool = False
+        self._restarting: bool = False
 
         self._subscriptions: list[dict] = []
         self._candle_limit_by_key: dict[tuple[str, str], int] = {}
 
         self._mids: dict[str, float] = {}
-        self._mids_updated_at: float | None = None
+        self._mids_updated_at: dict[str, float] = {}
 
         self._bbo: dict[str, tuple[float, float]] = {}
         self._bbo_updated_at: dict[str, float] = {}
@@ -128,6 +132,10 @@ class HyperliquidWS:
         self._stop_event = threading.Event()
 
     def ensure_started(self, *, symbols: list[str], interval: str, candle_limit: int, user: str | None = None):
+        with self._lock:
+            if self._restarting:
+                return
+
         def sub_key(sub: dict) -> tuple:
             t = sub.get("type")
             if t == "allMids":
@@ -253,9 +261,13 @@ class HyperliquidWS:
 
     def restart(self, *, join_timeout_s: float = 5.0) -> None:
         """Best-effort in-process restart without swapping the global instance."""
-        self.stop()
-
         with self._lock:
+            self._stop_event.set()
+            if self._ws_app:
+                try:
+                    self._ws_app.close()
+                except Exception:
+                    pass
             t = self._thread
             p = self._ping_thread
 
@@ -272,15 +284,13 @@ class HyperliquidWS:
                 pass
 
         with self._lock:
-            self._ws_app = None
-            self._thread = None
-            self._ping_thread = None
-            self._connected = False
+            self._restarting = True
             self._stop_event.clear()
             self._thread = threading.Thread(target=self._run, daemon=True)
-            self._thread.start()
             self._ping_thread = threading.Thread(target=self._ping_loop, daemon=True)
+            self._thread.start()
             self._ping_thread.start()
+            self._restarting = False
 
     def get_latest_candle_times(self, symbol: str, interval: str) -> tuple[int | None, int | None]:
         """Return (t_open_ms, t_close_ms) for the latest candle in cache.
@@ -361,7 +371,13 @@ class HyperliquidWS:
 
     def health(self, *, symbols: list[str], interval: str) -> WsHealth:
         with self._lock:
-            mids_age = None if self._mids_updated_at is None else (time.time() - self._mids_updated_at)
+            mids_age: float | None = None
+            for sym in symbols:
+                ts = self._mids_updated_at.get(sym)
+                if ts is None:
+                    continue
+                age = time.time() - ts
+                mids_age = age if mids_age is None else max(mids_age, age)
 
             candle_age: float | None = None
             for sym in symbols:
@@ -405,7 +421,7 @@ class HyperliquidWS:
             if mid is None:
                 return None
             if max_age_s is not None:
-                ts = self._mids_updated_at
+                ts = self._mids_updated_at.get(symbol)
                 if ts is None or (now - ts) > float(max_age_s):
                     return None
             return mid
@@ -474,10 +490,10 @@ class HyperliquidWS:
         except sqlite3.OperationalError as e:
             # Never crash the daemon on transient SQLite contention; just start with an empty cache.
             if "locked" not in str(e).lower():
-                print(f"⚠️ Candle load DB error: {e}")
+                logger.warning(f"⚠️ Candle load DB error: {e}")
             rows = []
         except Exception as e:
-            print(f"⚠️ Candle load error: {e}")
+            logger.warning(f"⚠️ Candle load error: {e}")
             rows = []
         finally:
             try:
@@ -540,9 +556,9 @@ class HyperliquidWS:
         except sqlite3.OperationalError as e:
             # Never crash the WS thread on SQLite contention; skip this persist and continue.
             if "locked" not in str(e).lower():
-                print(f"⚠️ Candle persist DB error: {e}")
+                logger.warning(f"⚠️ Candle persist DB error: {e}")
         except Exception as e:
-            print(f"⚠️ Candle persist error: {e}")
+            logger.warning(f"⚠️ Candle persist error: {e}")
         finally:
             try:
                 if conn is not None:
@@ -589,9 +605,9 @@ class HyperliquidWS:
                 for sym, mid in mids.items():
                     try:
                         self._mids[sym] = float(mid)
+                        self._mids_updated_at[sym] = now
                     except Exception:
                         continue
-                self._mids_updated_at = now
             return
 
         if channel == "meta":
@@ -731,12 +747,16 @@ class HyperliquidWS:
 
     def _on_error(self, _ws, error):
         # Keep errors non-fatal; reconnect handles recovery.
-        print(f"⚠️ HL WS error: {error}")
+        logger.warning(f"⚠️ HL WS error: {error}")
 
     def _on_close(self, _ws, status_code, msg):
-        print(f"🟡 HL WS closed: {status_code} {msg}")
+        logger.info(f"🟡 HL WS closed: {status_code} {msg}")
         with self._lock:
             self._connected = False
+            self._bbo.clear()
+            self._bbo_updated_at.clear()
+            self._mids.clear()
+            self._mids_updated_at.clear()
 
     def _ping_loop(self):
         while not self._stop_event.wait(HL_WS_PING_SECS):

@@ -185,7 +185,13 @@ class SidecarWSClient:
         self._close()
 
     def status(self) -> dict[str, bool]:
-        return {"running": True, "connected": bool(self._connected)}
+        running = False
+        try:
+            self._rpc("health", {}, timeout_s=1.0)
+            running = True
+        except Exception:
+            pass
+        return {"running": running, "connected": bool(self._connected)}
 
     def health(self, *, symbols: list[str], interval: str) -> WsHealth:
         res = self._rpc(
@@ -316,7 +322,7 @@ class SidecarWSClient:
         want = int(min_rows)
 
         conn = None
-        rows: list[tuple] = []
+        best_rows: list[tuple] = []
         for db_path in (_candles_db_path(interval_s), self._market_db_path):
             conn = None
             try:
@@ -333,17 +339,20 @@ class SidecarWSClient:
                     """,
                     (sym, interval_s, want),
                 )
-                rows = cur.fetchall() or []
-                if len(rows) >= want:
+                rows_iter = cur.fetchall() or []
+                if len(rows_iter) > len(best_rows):
+                    best_rows = rows_iter
+                if len(best_rows) >= want:
                     break
             except Exception:
-                rows = []
+                pass
             finally:
                 try:
                     if conn is not None:
                         conn.close()
                 except Exception:
                     pass
+        rows = best_rows
 
         if len(rows) < want:
             return None

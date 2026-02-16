@@ -21,13 +21,15 @@ from __future__ import annotations
 import os
 import time
 from collections import deque
+from pathlib import Path
 
-from .core import UnifiedEngine
+from .core import UnifiedEngine, _build_default_decision_provider
 from .market_data import MarketDataHub
 from .strategy_manager import StrategyManager
 from .oms import LiveOms
 from .oms_reconciler import LiveOmsReconciler
 from .risk import RiskManager
+from . import alerting
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -39,6 +41,153 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 def _mode() -> str:
     return str(os.getenv("AI_QUANT_MODE", "paper") or "paper").strip().lower()
+
+
+def _norm_strategy_mode(raw: str) -> str:
+    s = str(raw or "").strip().lower()
+    if not s:
+        return ""
+    if s in {"mode1", "m1"}:
+        return "primary"
+    if s in {"mode2", "m2"}:
+        return "fallback"
+    if s in {"mode3", "m3", "safety", "safe"}:
+        return "conservative"
+    if s in {"halt", "pause", "paused"}:
+        return "flat"
+    return s
+
+
+def _strategy_mode_file() -> Path:
+    p = str(os.getenv("AI_QUANT_STRATEGY_MODE_FILE", "") or "").strip()
+    if p:
+        return Path(p).expanduser().resolve()
+    root = Path(__file__).resolve().parents[1]
+    return (root / "artifacts" / "state" / "strategy_mode.txt").resolve()
+
+
+def _read_strategy_mode_file(path: Path) -> str:
+    try:
+        if not path.exists():
+            return ""
+        return _norm_strategy_mode(path.read_text(encoding="utf-8").strip())
+    except Exception:
+        return ""
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    tmp.write_text(str(text), encoding="utf-8")
+    os.replace(str(tmp), str(path))
+
+
+class StrategyModePolicy:
+    """Automatic strategy-mode switching (Primary/Fallback/Conservative/Flat).
+
+    This policy is intentionally conservative:
+    - It only steps down (no automatic step-up).
+    - It triggers on new kill events (kill_since_s changes).
+    - It persists the selected mode to a local file so restarts can pick it up.
+    """
+
+    _ORDER = ["primary", "fallback", "conservative", "flat"]
+
+    def __init__(self, *, risk: RiskManager | None):
+        self._risk = risk
+        self._enabled = _env_bool("AI_QUANT_MODE_SWITCH_ENABLE", False)
+        self._exit_on_restart_required = _env_bool("AI_QUANT_MODE_SWITCH_EXIT_ON_RESTART_REQUIRED", False)
+        self._mode_file = _strategy_mode_file()
+        self._last_handled_kill_since_s: float | None = None
+        self._last_switch_s: float = 0.0
+        try:
+            self._cooldown_s = float(os.getenv("AI_QUANT_MODE_SWITCH_COOLDOWN_S", "0") or 0)
+        except Exception:
+            self._cooldown_s = 0.0
+
+    def _current_mode(self) -> str:
+        cur = _norm_strategy_mode(str(os.getenv("AI_QUANT_STRATEGY_MODE", "") or ""))
+        if cur:
+            return cur
+        # If env is not set, fall back to the persisted file (if present).
+        return _read_strategy_mode_file(self._mode_file) or "primary"
+
+    def _step_down(self, cur: str) -> str:
+        cur = _norm_strategy_mode(cur) or "primary"
+        if cur not in self._ORDER:
+            cur = "primary"
+        i = self._ORDER.index(cur)
+        return self._ORDER[min(i + 1, len(self._ORDER) - 1)]
+
+    def maybe_switch(self) -> None:
+        if not self._enabled:
+            return
+        r = self._risk
+        if r is None:
+            return
+
+        km = str(getattr(r, "kill_mode", "off") or "off").strip().lower()
+        if km == "off":
+            return
+        kr = str(getattr(r, "kill_reason", "") or "").strip() or "none"
+        ks = getattr(r, "kill_since_s", None)
+        try:
+            ks = None if ks is None else float(ks)
+        except Exception:
+            ks = None
+        if ks is None:
+            return
+
+        if self._last_handled_kill_since_s is not None and float(ks) == float(self._last_handled_kill_since_s):
+            return
+
+        now_s = time.time()
+        if self._cooldown_s > 0 and (now_s - float(self._last_switch_s or 0.0)) < float(self._cooldown_s):
+            # Suppress rapid-fire switches, but mark the kill as handled to avoid log spam.
+            self._last_handled_kill_since_s = float(ks)
+            return
+
+        cur = self._current_mode()
+        # v1 policy: always step down on a new kill event.
+        target = self._step_down(cur)
+        self._last_handled_kill_since_s = float(ks)
+
+        if target == cur:
+            return
+
+        os.environ["AI_QUANT_STRATEGY_MODE"] = str(target)
+        try:
+            _atomic_write_text(self._mode_file, str(target) + "\n")
+        except Exception:
+            pass
+
+        self._last_switch_s = now_s
+
+        # Log as a structured event (best-effort).
+        try:
+            from .event_logger import emit_event
+
+            emit_event(
+                kind="MODE_SWITCH",
+                data={
+                    "from": str(cur),
+                    "to": str(target),
+                    "trigger": "risk_kill",
+                    "kill_mode": str(km),
+                    "kill_reason": str(kr),
+                    "kill_since_s": float(ks),
+                    "restart_required": bool(cur == "primary" or target == "primary"),
+                },
+            )
+        except Exception:
+            pass
+
+        print(f"🧭 mode switch: {cur} -> {target} (kill={km} reason={kr})")
+
+        if bool(self._exit_on_restart_required) and bool(cur == "primary" or target == "primary"):
+            raise SystemExit(f"Mode switch requires restart (interval change likely): {cur} -> {target}")
+
 
 def _default_db_path() -> str:
     try:
@@ -205,6 +354,17 @@ class LivePlugin:
         self._health_enabled = _env_bool("AI_QUANT_HEALTH_GUARD", True)
         self._health_alert_cooldown_s = float(os.getenv("AI_QUANT_HEALTH_ALERT_COOLDOWN_S", "300"))
         self._health_last_alert_s: dict[str, float] = {}
+        self._health_active: dict[str, bool] = {}
+        self._health_last_seen_s: dict[str, float] = {}
+        try:
+            self._health_resolve_after_s = float(os.getenv("AI_QUANT_HEALTH_RESOLVE_AFTER_S", "600"))
+        except Exception:
+            self._health_resolve_after_s = 600.0
+        self._health_resolve_after_s = float(max(0.0, self._health_resolve_after_s))
+
+        # Alert-on-change tracking (avoid spam).
+        self._last_kill_mode: str | None = None
+        self._last_kill_reason: str | None = None
 
         self._fill_ingest_fail_streak = 0
         self._fill_ingest_fail_to_kill = int(float(os.getenv("AI_QUANT_HEALTH_FILL_INGEST_FAILS_TO_KILL", "5")))
@@ -220,6 +380,9 @@ class LivePlugin:
         self._pending_fills_to_kill = int(float(os.getenv("AI_QUANT_HEALTH_PENDING_FILLS_TO_KILL", "20000")))
         self._pending_fills_kill = _env_bool("AI_QUANT_HEALTH_PENDING_FILLS_KILL", True)
         self._pending_fills_kill_mode = str(os.getenv("AI_QUANT_HEALTH_PENDING_FILLS_KILL_MODE", "close_only") or "close_only").strip().lower()
+
+        # One-shot risk reduction per kill event (avoid repeated close-all loops).
+        self._last_drawdown_reduce_kill_since_s: float | None = None
 
         # Signal backfill: repair missing `signals` rows from recent `trades` (live DB).
         # This keeps the monitor "SIGNAL" column populated even if signal logging was missed
@@ -251,6 +414,9 @@ class LivePlugin:
             self._max_entry_orders_per_loop = 6
         self._max_entry_orders_per_loop = max(0, int(self._max_entry_orders_per_loop))
 
+        # Automatic strategy-mode switching (best-effort).
+        self._mode_policy = StrategyModePolicy(risk=self._risk)
+
     def _log_exc(self, key: str, msg: str) -> None:
         now = time.time()
         last = float(self._err_last_s.get(key, 0.0) or 0.0)
@@ -271,6 +437,17 @@ class LivePlugin:
         if not self._health_enabled:
             return
         now = time.time()
+        try:
+            self._health_last_seen_s[str(key)] = float(now)
+        except Exception:
+            pass
+
+        k = str(key)
+        was_active = bool(self._health_active.get(k, False))
+        self._health_active[k] = True
+        if was_active:
+            return
+
         last = float(self._health_last_alert_s.get(key, 0.0) or 0.0)
         if (now - last) < float(self._health_alert_cooldown_s or 0.0):
             return
@@ -290,6 +467,14 @@ class LivePlugin:
                 event="HEALTH_ALERT",
                 level="warn",
                 data={"key": str(key), "message": str(message), "kill": bool(kill), "kill_mode": str(kill_mode)},
+            )
+        except Exception:
+            pass
+
+        try:
+            alerting.send_alert(
+                msg,
+                extra={"kind": "health", "key": str(key), "kill": bool(kill), "kill_mode": str(kill_mode)},
             )
         except Exception:
             pass
@@ -314,8 +499,104 @@ class LivePlugin:
             except Exception:
                 pass
 
+    def _maybe_resolve_health_alerts(self, *, now_s: float) -> None:
+        if not self._health_enabled:
+            return
+        if float(self._health_resolve_after_s or 0.0) <= 0:
+            return
+
+        for key, active in list((self._health_active or {}).items()):
+            if not active:
+                continue
+            last_seen = float(self._health_last_seen_s.get(key, 0.0) or 0.0)
+            if last_seen <= 0:
+                continue
+            if (float(now_s) - float(last_seen)) < float(self._health_resolve_after_s):
+                continue
+
+            self._health_active[key] = False
+            msg = f"✅ HEALTH[{key}] resolved"
+            try:
+                print(msg)
+            except Exception:
+                pass
+
+            try:
+                import strategy.mei_alpha_v1 as mei_alpha_v1
+
+                mei_alpha_v1.log_audit_event(symbol="SYSTEM", event="HEALTH_RESOLVED", level="info", data={"key": str(key)})
+            except Exception:
+                pass
+
+            try:
+                alerting.send_alert(msg, extra={"kind": "health_resolved", "key": str(key)})
+            except Exception:
+                pass
+
+            # Best-effort Discord notification (same channel as live fills).
+            try:
+                if hasattr(self._lt, "_live_notify_enabled") and callable(getattr(self._lt, "_live_notify_enabled")):
+                    if self._lt._live_notify_enabled():
+                        target = self._lt._live_discord_target()
+                        if target:
+                            self._lt._send_discord_message(target=target, message=msg)
+            except Exception:
+                pass
+
+    def _maybe_alert_kill_state_change(self) -> None:
+        risk = self._risk
+        if risk is None:
+            return
+        try:
+            km = str(getattr(risk, "kill_mode", "off") or "off").strip().lower()
+        except Exception:
+            km = "off"
+        try:
+            kr = str(getattr(risk, "kill_reason", "") or "").strip() or "none"
+        except Exception:
+            kr = "none"
+
+        if self._last_kill_mode is None and self._last_kill_reason is None:
+            self._last_kill_mode = km
+            self._last_kill_reason = kr
+            if km != "off":
+                try:
+                    alerting.send_alert(
+                        f"🛑 RISK state: kill={km} reason={kr}",
+                        extra={"kind": "risk", "kill_mode": km, "kill_reason": kr},
+                    )
+                except Exception:
+                    pass
+            return
+
+        old_km = str(self._last_kill_mode or "off")
+        old_kr = str(self._last_kill_reason or "none")
+        if km == old_km and kr == old_kr:
+            return
+
+        self._last_kill_mode = km
+        self._last_kill_reason = kr
+
+        msg = f"🛑 RISK state change: kill={old_km}->{km} reason={old_kr}->{kr}"
+        if km == "off":
+            msg = f"✅ RISK resumed: reason={old_kr}"
+
+        try:
+            alerting.send_alert(msg, extra={"kind": "risk", "kill_mode": km, "kill_reason": kr})
+        except Exception:
+            pass
+
     def before_iteration(self) -> None:
         now = time.time()
+
+        try:
+            self._maybe_resolve_health_alerts(now_s=float(now))
+        except Exception:
+            pass
+        try:
+            self._maybe_alert_kill_state_change()
+        except Exception:
+            pass
 
         # Reset per-loop entry budget on the trader (best-effort).
         try:
@@ -342,12 +623,27 @@ class LivePlugin:
             except Exception:
                 self._log_exc("sync_from_exchange", "trader.sync_from_exchange failed")
 
-            # Periodic OMS maintenance (expire stale intents).
+            # Optional risk reduction action: close all positions when a drawdown kill triggers,
+            # but only once per distinct kill event.
             try:
-                if self._oms is not None:
-                    self._oms.reconcile(trader=self.trader)
+                self._maybe_reduce_risk_on_drawdown_kill()
             except Exception:
-                self._log_exc("oms_reconcile", "OMS reconcile() failed")
+                self._log_exc("risk_reduce_drawdown", "reduce-risk on drawdown kill failed")
+
+            # Periodic OMS maintenance (expire stale intents).
+                try:
+                    if self._oms is not None:
+                        self._oms.reconcile(trader=self.trader)
+                except Exception:
+                    self._log_exc("oms_reconcile", "OMS reconcile() failed")
+
+        # Mode switching policy (runs after risk.refresh so new kill events are visible).
+        try:
+            self._mode_policy.maybe_switch()
+        except SystemExit:
+            raise
+        except Exception:
+            pass
 
         # True OMS reconcile loop (open orders, stale cancels, partial-fill tidy).
         try:
@@ -441,6 +737,11 @@ class LivePlugin:
                     )
 
         try:
+            self._maybe_alert_kill_state_change()
+        except Exception:
+            pass
+
+        try:
             fundings = self._ws.drain_user_fundings(max_items=2000)
             if fundings:
                 self._lt.process_user_fundings(self.trader, fundings)
@@ -518,6 +819,57 @@ class LivePlugin:
     def after_iteration(self) -> None:
         return
 
+    def _maybe_reduce_risk_on_drawdown_kill(self) -> None:
+        risk = self._risk
+        if risk is None:
+            return
+        if str(getattr(risk, "kill_mode", "off") or "off") != "close_only":
+            return
+
+        reason = str(getattr(risk, "kill_reason", "") or "")
+        if not reason.startswith("drawdown"):
+            return
+
+        policy = str(getattr(risk, "drawdown_reduce_policy", "none") or "none").strip().lower()
+        if policy != "close_all":
+            return
+
+        kill_since = getattr(risk, "kill_since_s", None)
+        if kill_since is None:
+            return
+        if self._last_drawdown_reduce_kill_since_s is not None and float(kill_since) == float(
+            self._last_drawdown_reduce_kill_since_s
+        ):
+            return
+        self._last_drawdown_reduce_kill_since_s = float(kill_since)
+
+        # Best-effort close-all using WS mids as the reference price.
+        try:
+            positions = dict(getattr(self.trader, "positions", None) or {})
+        except Exception:
+            positions = {}
+        if not positions:
+            return
+
+        for sym in sorted(positions.keys()):
+            mid = None
+            try:
+                mid = self._ws.get_mid(sym)
+            except Exception:
+                mid = None
+            if mid is None or float(mid) <= 0:
+                continue
+            try:
+                self.trader.close_position(
+                    sym,
+                    float(mid),
+                    time.time(),
+                    reason="Risk: drawdown kill (close_all)",
+                    meta={"risk": {"kind": "drawdown", "policy": "close_all", "kill_reason": reason}},
+                )
+            except Exception:
+                continue
+
 
 def main() -> None:
     mode = _mode()
@@ -528,6 +880,18 @@ def main() -> None:
     except Exception:
         pass
 
+    # Apply promoted config from factory runs (paper daemons only).
+    # Must run BEFORE StrategyManager.get() so AI_QUANT_STRATEGY_YAML is set.
+    promoted_role: str | None = None
+    try:
+        from .promoted_config import maybe_apply_promoted_config
+
+        promoted_role = maybe_apply_promoted_config()
+    except Exception:
+        import traceback
+
+        print(f"⚠️ promoted_config: failed to apply\n{traceback.format_exc()}")
+
     import strategy.mei_alpha_v1 as mei_alpha_v1
 
     default_lock_name = "ai_quant_paper.lock" if mode == "paper" else "ai_quant_live.lock"
@@ -536,6 +900,15 @@ def main() -> None:
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", default_lock_name),
     )
     _lock = acquire_lock_or_exit(lock_path)
+
+    # If a strategy mode is persisted locally, load it on startup (only when env is unset).
+    try:
+        if not str(os.getenv("AI_QUANT_STRATEGY_MODE", "") or "").strip():
+            m = _read_strategy_mode_file(_strategy_mode_file())
+            if m:
+                os.environ["AI_QUANT_STRATEGY_MODE"] = str(m)
+    except Exception:
+        pass
 
     strategy = StrategyManager.get()
     market_db_path = os.getenv("AI_QUANT_MARKET_DB_PATH", mei_alpha_v1.DB_PATH)
@@ -604,6 +977,16 @@ def main() -> None:
         lookback_bars = int(mei_alpha_v1.LOOKBACK_HOURS)
     lookback_bars = int(max(50, min(10_000, lookback_bars)))
 
+    decision_provider = _build_default_decision_provider()
+
+    # Wire kernel provider to OMS for fill reconciliation (AQC-743).
+    if hasattr(plugin, "oms") and plugin.oms is not None:
+        try:
+            if hasattr(decision_provider, "_runtime"):
+                plugin.oms.kernel_provider = decision_provider
+        except Exception:
+            pass
+
     engine = UnifiedEngine(
         trader=trader,
         strategy=strategy,
@@ -612,8 +995,17 @@ def main() -> None:
         lookback_bars=lookback_bars,
         mode=mode,
         mode_plugin=plugin,
+        decision_provider=decision_provider,
     )
-    print(f"🚀 Unified engine started. mode={mode}")
+    promo_tag = f" promoted_role={promoted_role}" if promoted_role else ""
+    print(f"🚀 Unified engine started. mode={mode}{promo_tag}")
+    try:
+        alerting.send_alert(
+            f"🚀 Unified engine started. mode={mode}{promo_tag}",
+            extra={"kind": "restart", "mode": str(mode), "promoted_role": str(promoted_role or "")},
+        )
+    except Exception:
+        pass
     engine.run_forever()
 
 

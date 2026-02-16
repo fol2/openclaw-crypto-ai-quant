@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════
-# Full TPE Sweep Runner — 34 axes × 6 main intervals
+# Full TPE Sweep Runner — 144v profile (broad strategy coverage)
 # ═══════════════════════════════════════════════════════════════════════════
 #
-# Runs TPE Bayesian optimization across all 34 parameter axes for each
+# Runs TPE Bayesian optimisation across the default 144v profile for each
 # main candle interval. Auto-scope ensures apple-to-apple within each run.
 #
 # GPU sweep does NOT support sub-bar entry/exit intervals (main only).
@@ -15,9 +15,7 @@
 #   ./run_full_sweep.sh --trials 100000    # quick test
 #   ./run_full_sweep.sh --intervals "15m 1h"  # specific intervals only
 #
-# Expected time (batch=4096, ~114K trials/sec):
-#   500K trials × 6 intervals ≈ 26 seconds total
-#   100K trials × 6 intervals ≈ 6 seconds total
+# Runtime varies by axis count, batch size, and host GPU throughput.
 #
 # Kill if over 10 minutes: built-in timeout per run.
 # ═══════════════════════════════════════════════════════════════════════════
@@ -31,7 +29,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 TRIALS=500000
 BATCH=4096
 SEED=42
-SWEEP_SPEC="sweeps/full_34axis.yaml"
+SWEEP_SPEC="sweeps/full_144v.yaml"
 CONFIG="../config/strategy_overrides.yaml"
 BACKTESTER="./target/release/mei-backtester"
 OUTPUT_DIR="sweep_results"
@@ -47,6 +45,7 @@ while [[ $# -gt 0 ]]; do
         --seed)       SEED="$2"; shift 2 ;;
         --intervals)  INTERVALS="$2"; shift 2 ;;
         --timeout)    TIMEOUT_PER_RUN="$2"; shift 2 ;;
+        --spec)       SWEEP_SPEC="$2"; shift 2 ;;
         --balance)    INITIAL_BALANCE="$2"; shift 2 ;;
         --include-1m) INTERVALS="1m $INTERVALS"; shift ;;
         *)            echo "Unknown arg: $1"; exit 1 ;;
@@ -75,6 +74,16 @@ export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:/usr/lib/wsl/lib"
 
 mkdir -p "$OUTPUT_DIR"
 
+AXIS_COUNT="$(python3 - "$SWEEP_SPEC" <<'PY'
+import sys, yaml
+try:
+    spec = yaml.safe_load(open(sys.argv[1], "r", encoding="utf-8").read()) or {}
+    print(len(spec.get("axes", [])))
+except Exception:
+    print("?")
+PY
+)"
+
 # ── Data coverage info ──────────────────────────────────────────────────
 declare -A INTERVAL_DAYS=(
     [1m]="3.5"
@@ -87,7 +96,7 @@ declare -A INTERVAL_DAYS=(
 
 # ── Run ─────────────────────────────────────────────────────────────────
 echo "═══════════════════════════════════════════════════════════════"
-echo "Full TPE Sweep: 34 axes × ${TRIALS} trials × batch=${BATCH}"
+echo "Full TPE Sweep: ${AXIS_COUNT} axes (${SWEEP_SPEC}) × ${TRIALS} trials × batch=${BATCH}"
 echo "Intervals: ${INTERVALS}"
 echo "Timeout per run: ${TIMEOUT_PER_RUN}s"
 echo "═══════════════════════════════════════════════════════════════"
@@ -117,6 +126,7 @@ for IV in $INTERVALS; do
     if timeout "${TIMEOUT_PER_RUN}" \
         "$BACKTESTER" sweep \
             --gpu \
+            --allow-unsafe-gpu-sweep \
             --tpe \
             --tpe-trials "$TRIALS" \
             --tpe-batch "$BATCH" \

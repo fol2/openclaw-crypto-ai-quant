@@ -12,13 +12,14 @@ use std::sync::Arc;
 use cudarc::driver::{
     CudaDevice, CudaFunction, CudaSlice, DeviceRepr, LaunchAsync, LaunchConfig, ValidAsZeroBits,
 };
+
 use cudarc::nvrtc::Ptx;
 
-use bytemuck::Zeroable;
 use crate::buffers::{
-    GpuComboConfig, GpuComboState, GpuParams, GpuRawCandle, GpuResult, GpuSnapshot,
-    GpuIndicatorConfig, IndicatorParams,
+    GpuComboConfig, GpuComboState, GpuIndicatorConfig, GpuParams, GpuRawCandle, GpuResult,
+    GpuSnapshot, IndicatorParams,
 };
+use bytemuck::Zeroable;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // DeviceRepr + ValidAsZeroBits impls for GPU buffer structs
@@ -53,7 +54,12 @@ pub struct GpuDeviceState {
 
 impl GpuDeviceState {
     pub fn new() -> Self {
-        let dev = CudaDevice::new(0).expect("No CUDA device found");
+        let dev = CudaDevice::new(0).unwrap_or_else(|e| {
+            eprintln!("[GPU] CUDA init failed: {e}");
+            eprintln!("[GPU] Hint: on WSL2, ensure /usr/lib/wsl/lib/libcuda.so.1 exists");
+            eprintln!("[GPU] Hint: run `nvidia-smi` to verify the driver is loaded");
+            panic!("No CUDA device found: {e}");
+        });
 
         // Load sweep engine PTX (trade logic)
         let ptx_sweep = include_str!(concat!(env!("OUT_DIR"), "/sweep_engine.ptx"));
@@ -62,8 +68,12 @@ impl GpuDeviceState {
 
         // Load indicator kernel PTX (indicator computation + breadth)
         let ptx_ind = include_str!(concat!(env!("OUT_DIR"), "/indicator_kernel.ptx"));
-        dev.load_ptx(Ptx::from_src(ptx_ind), "indicators", &["indicator_kernel", "breadth_kernel"])
-            .expect("Failed to load indicator_kernel PTX");
+        dev.load_ptx(
+            Ptx::from_src(ptx_ind),
+            "indicators",
+            &["indicator_kernel", "breadth_kernel"],
+        )
+        .expect("Failed to load indicator_kernel PTX");
 
         let name = dev.name().unwrap_or_else(|_| "unknown".to_string());
         eprintln!("[GPU] CUDA Device: {}", name);
@@ -82,8 +92,12 @@ impl GpuDeviceState {
         }
     }
 
-    pub fn total_vram_bytes(&self) -> usize { self.vram_info().1 }
-    pub fn free_vram_bytes(&self) -> usize { self.vram_info().0 }
+    pub fn total_vram_bytes(&self) -> usize {
+        self.vram_info().1
+    }
+    pub fn free_vram_bytes(&self) -> usize {
+        self.vram_info().0
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -102,6 +116,7 @@ pub struct IndicatorBuffers {
     pub num_ind_combos: u32,
     pub num_symbols: u32,
     pub num_bars: u32,
+    pub btc_sym_idx: u32,
 }
 
 impl IndicatorBuffers {
@@ -146,23 +161,22 @@ impl IndicatorBuffers {
             num_ind_combos: k,
             num_symbols,
             num_bars,
+            btc_sym_idx,
         }
     }
 }
 
 /// Dispatch indicator_kernel + breadth_kernel on GPU.
 /// After this returns, snapshots/breadth/btc_bullish are ready in VRAM.
-pub fn dispatch_indicator_kernels(
-    ds: &GpuDeviceState,
-    buffers: &mut IndicatorBuffers,
-) {
+pub fn dispatch_indicator_kernels(ds: &GpuDeviceState, buffers: &mut IndicatorBuffers) {
     let block_size = 64u32;
 
     // ── Indicator kernel: K × S threads ─────────────────────────────────
     let ind_threads = buffers.num_ind_combos * buffers.num_symbols;
     let ind_grid = (ind_threads + block_size - 1) / block_size;
 
-    let ind_func: CudaFunction = ds.dev
+    let ind_func: CudaFunction = ds
+        .dev
         .get_func("indicators", "indicator_kernel")
         .expect("indicator_kernel not found in PTX");
 
@@ -189,7 +203,8 @@ pub fn dispatch_indicator_kernels(
     let br_threads = buffers.num_ind_combos * buffers.num_bars;
     let br_grid = (br_threads + block_size - 1) / block_size;
 
-    let br_func: CudaFunction = ds.dev
+    let br_func: CudaFunction = ds
+        .dev
         .get_func("indicators", "breadth_kernel")
         .expect("breadth_kernel not found in PTX");
 
@@ -229,6 +244,7 @@ pub struct BatchBuffers {
     pub params: CudaSlice<GpuParams>,
     pub num_combos: u32,
     pub num_symbols: u32,
+    pub btc_sym_idx: u32,
     pub initial_balance: f32,
     pub max_sub_per_bar: u32,
     pub sub_candles: Option<CudaSlice<GpuRawCandle>>,
@@ -252,8 +268,8 @@ impl BatchBuffers {
 
         let mut states_host = vec![GpuComboState::zeroed(); configs.len()];
         for s in &mut states_host {
-            s.balance = initial_balance;
-            s.peak_equity = initial_balance;
+            s.balance = initial_balance as f64;
+            s.peak_equity = initial_balance as f64;
         }
         let states = ds.dev.htod_sync_copy(&states_host).unwrap();
         let results = ds.dev.alloc_zeros::<GpuResult>(configs.len()).unwrap();
@@ -262,10 +278,12 @@ impl BatchBuffers {
             num_combos,
             num_symbols,
             num_bars,
+            btc_sym_idx: ind_bufs.btc_sym_idx,
             chunk_start: 0,
             chunk_end: num_bars,
             initial_balance_bits: initial_balance.to_bits(),
-            fee_rate_bits: 0.00035f32.to_bits(),
+            maker_fee_rate_bits: 0.00035f32.to_bits(),
+            taker_fee_rate_bits: 0.00035f32.to_bits(),
             max_sub_per_bar: 0,
             trade_end_bar: num_bars,
         };
@@ -281,6 +299,7 @@ impl BatchBuffers {
             params,
             num_combos,
             num_symbols,
+            btc_sym_idx: ind_bufs.btc_sym_idx,
             initial_balance,
             max_sub_per_bar: 0,
             sub_candles: None,
@@ -298,6 +317,7 @@ impl BatchBuffers {
         configs: &[GpuComboConfig],
         initial_balance: f32,
         num_symbols: u32,
+        btc_sym_idx: u32,
         num_bars: u32,
     ) -> Self {
         let num_combos = configs.len() as u32;
@@ -309,8 +329,8 @@ impl BatchBuffers {
 
         let mut states_host = vec![GpuComboState::zeroed(); configs.len()];
         for s in &mut states_host {
-            s.balance = initial_balance;
-            s.peak_equity = initial_balance;
+            s.balance = initial_balance as f64;
+            s.peak_equity = initial_balance as f64;
         }
         let states = ds.dev.htod_sync_copy(&states_host).unwrap();
         let results = ds.dev.alloc_zeros::<GpuResult>(configs.len()).unwrap();
@@ -319,10 +339,12 @@ impl BatchBuffers {
             num_combos,
             num_symbols,
             num_bars,
+            btc_sym_idx,
             chunk_start: 0,
             chunk_end: num_bars,
             initial_balance_bits: initial_balance.to_bits(),
-            fee_rate_bits: 0.00035f32.to_bits(),
+            maker_fee_rate_bits: 0.00035f32.to_bits(),
+            taker_fee_rate_bits: 0.00035f32.to_bits(),
             max_sub_per_bar: 0,
             trade_end_bar: num_bars,
         };
@@ -338,6 +360,7 @@ impl BatchBuffers {
             params,
             num_combos,
             num_symbols,
+            btc_sym_idx,
             initial_balance,
             max_sub_per_bar: 0,
             sub_candles: None,
@@ -373,7 +396,11 @@ pub fn dispatch_and_readback(
     );
 
     // Dynamic chunk size: smaller when sub-bars active (TDR mitigation)
-    let effective_chunk = if buffers.max_sub_per_bar > 0 { chunk_size.min(50) } else { chunk_size };
+    let effective_chunk = if buffers.max_sub_per_bar > 0 {
+        chunk_size.min(50)
+    } else {
+        chunk_size
+    };
     let num_chunks = (trade_range + effective_chunk - 1) / effective_chunk;
 
     // Create sentinel buffers if no sub-bar data (cudarc needs valid pointers)
@@ -396,10 +423,12 @@ pub fn dispatch_and_readback(
             num_combos: buffers.num_combos,
             num_symbols: buffers.num_symbols,
             num_bars,
+            btc_sym_idx: buffers.btc_sym_idx,
             chunk_start,
             chunk_end,
             initial_balance_bits: buffers.initial_balance.to_bits(),
-            fee_rate_bits: 0.00035f32.to_bits(),
+            maker_fee_rate_bits: 0.00035f32.to_bits(),
+            taker_fee_rate_bits: 0.00035f32.to_bits(),
             max_sub_per_bar: buffers.max_sub_per_bar,
             trade_end_bar: trade_end,
         };
@@ -413,7 +442,8 @@ pub fn dispatch_and_readback(
             shared_mem_bytes: 0,
         };
 
-        let func: CudaFunction = ds.dev
+        let func: CudaFunction = ds
+            .dev
             .get_func("sweep", "sweep_engine_kernel")
             .expect("sweep_engine_kernel not found in PTX");
 

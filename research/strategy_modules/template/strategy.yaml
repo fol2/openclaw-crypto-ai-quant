@@ -1,0 +1,33 @@
+# Strategy module template config.
+#
+# This file is intentionally minimal, but it includes the fields required by
+# `tools/deploy_validate.py`. Missing keys fall back to engine/backtester defaults.
+global:
+  trade:
+    allocation_pct: 0.03
+    leverage: 3.0
+    sl_atr_mult: 2.0
+    tp_atr_mult: 4.0
+    slippage_bps: 10.0
+    max_open_positions: 20
+    max_total_margin_pct: 0.60
+    min_notional_usd: 10.0
+    min_atr_pct: 0.003
+    bump_to_min_notional: false
+
+  indicators:
+    adx_window: 14
+    ema_fast_window: 20
+    ema_slow_window: 50
+    bb_window: 20
+    atr_window: 14
+
+  thresholds:
+    entry:
+      min_adx: 22.0
+
+  engine:
+    interval: 1h
+    entry_interval: 5m
+    exit_interval: 5m
+

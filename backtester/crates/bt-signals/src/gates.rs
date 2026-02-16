@@ -1,18 +1,16 @@
 //! Entry gate evaluation — 8 boolean gates plus derived scalars.
 //!
 //! Faithfully mirrors `mei_alpha_v1.analyze()` lines 3344-3537.
-//! Each gate receives an [`IndicatorSnapshot`] and the relevant config
-//! sections (via [`StrategyConfig`]), returning an aggregate [`GateResult`].
 
-use crate::config::StrategyConfig;
-use crate::indicators::IndicatorSnapshot;
+use crate::{IndicatorSnapshotLike, SignalConfigLike};
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
 /// Outcome of running every entry gate on the current bar.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GateResult {
     // --- Individual gate flags ---
     pub is_ranging: bool,
@@ -59,24 +57,30 @@ pub struct GateResult {
 ///
 /// # Arguments
 /// * `snap`               - Current bar indicator snapshot.
-/// * `cfg`                - Full strategy configuration.
-/// * `symbol`             - The symbol being analyzed (e.g. "ETH").
+/// * `cfg`                - Signal-relevant strategy config view.
+/// * `symbol`             - The symbol being analysed (e.g. "ETH").
 /// * `btc_bullish`        - BTC trend direction (`None` = unknown / no data).
 /// * `ema_slow_slope_pct` - Pre-computed EMA-slow slope:
 ///                          `(ema_slow_now - ema_slow_prev_N) / close_now`
 ///                          over the configured `slow_drift_slope_window`.
-pub fn check_gates(
-    snap: &IndicatorSnapshot,
-    cfg: &StrategyConfig,
+pub fn check_gates<S, C>(
+    snap: &S,
+    cfg: &C,
     symbol: &str,
     btc_bullish: Option<bool>,
     ema_slow_slope_pct: f64,
-) -> GateResult {
-    let flt = &cfg.filters;
-    let thr = &cfg.thresholds;
-    let thr_entry = &thr.entry;
-    let thr_ranging = &thr.ranging;
-    let tp = &thr.tp_and_momentum;
+) -> GateResult
+where
+    S: IndicatorSnapshotLike,
+    C: SignalConfigLike,
+{
+    let snap = snap.snapshot_view();
+    let flt = cfg.filters_view();
+    let thr = cfg.thresholds_view();
+    let thr_entry = thr.entry;
+    let thr_ranging = thr.ranging;
+    let tp = thr.tp_and_momentum;
+    let trade = cfg.trade_view();
 
     // -------------------------------------------------------------------
     // Gate 1: Ranging filter (vote system)
@@ -109,7 +113,7 @@ pub fn check_gates(
     //   Python lines 3365-3371
     // -------------------------------------------------------------------
     let is_anomaly = if flt.enable_anomaly_filter {
-        let a = &thr.anomaly;
+        let a = thr.anomaly;
         let price_change_pct = if snap.prev_close > 0.0 {
             (snap.close - snap.prev_close).abs() / snap.prev_close
         } else {
@@ -145,7 +149,7 @@ pub fn check_gates(
     //   Python lines 3432-3440
     //
     //   NOTE: The Python checks prev["Volume"] > prev["vol_sma"] for the
-    //   include_prev path. The IndicatorSnapshot does not carry previous-bar
+    //   include_prev path. The indicator snapshot does not carry previous-bar
     //   volume/vol_sma separately. We approximate: when `vol_confirm_include_prev`
     //   is true we relax the gate to require *either* current vol > vol_sma
     //   (matching "current bar passes") OR vol_trend (the multi-bar rolling
@@ -259,7 +263,7 @@ pub fn check_gates(
     } else if snap.adx < tp.adx_weak_lt {
         tp.tp_mult_weak
     } else {
-        cfg.trade.tp_atr_mult
+        trade.tp_atr_mult
     };
 
     // -------------------------------------------------------------------
@@ -324,12 +328,11 @@ pub fn check_gates(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::StrategyConfig;
-    use crate::indicators::IndicatorSnapshot;
+    use crate::{SignalConfigView, SnapshotView};
 
     /// Helper: default snapshot with sensible trending values.
-    fn trending_snap() -> IndicatorSnapshot {
-        IndicatorSnapshot {
+    fn trending_snap() -> SnapshotView {
+        SnapshotView {
             close: 100.0,
             high: 101.0,
             low: 99.0,
@@ -371,9 +374,12 @@ mod tests {
     #[test]
     fn test_all_gates_pass_trending() {
         let snap = trending_snap();
-        let cfg = StrategyConfig::default();
+        let cfg = SignalConfigView::default();
         let res = check_gates(&snap, &cfg, "ETH", Some(true), 0.001);
-        assert!(res.all_gates_pass, "All gates should pass for a strong trend");
+        assert!(
+            res.all_gates_pass,
+            "All gates should pass for a strong trend"
+        );
         assert!(res.bullish_alignment);
         assert!(res.btc_ok_long);
     }
@@ -384,7 +390,7 @@ mod tests {
         snap.adx = 18.0; // below 21 -> vote
         snap.bb_width_ratio = 0.7; // below 0.8 -> vote
         snap.rsi = 50.0; // in 47-53 -> vote
-        let cfg = StrategyConfig::default();
+        let cfg = SignalConfigView::default();
         let res = check_gates(&snap, &cfg, "ETH", Some(true), 0.0);
         assert!(res.is_ranging);
         assert!(!res.all_gates_pass);
@@ -396,7 +402,7 @@ mod tests {
         snap.adx = 18.0;
         snap.bb_width_ratio = 0.7;
         snap.rsi = 50.0;
-        let mut cfg = StrategyConfig::default();
+        let mut cfg = SignalConfigView::default();
         cfg.thresholds.entry.enable_slow_drift_entries = true;
         cfg.thresholds.entry.slow_drift_min_slope_pct = 0.0006;
         let res = check_gates(&snap, &cfg, "ETH", Some(true), 0.001);
@@ -406,7 +412,7 @@ mod tests {
     #[test]
     fn test_btc_alignment_blocks_long() {
         let snap = trending_snap();
-        let mut cfg = StrategyConfig::default();
+        let mut cfg = SignalConfigView::default();
         cfg.filters.require_btc_alignment = true;
         let res = check_gates(&snap, &cfg, "ETH", Some(false), 0.0);
         assert!(!res.btc_ok_long, "BTC bearish should block ETH long");
@@ -417,7 +423,7 @@ mod tests {
     fn test_btc_override_by_high_adx() {
         let mut snap = trending_snap();
         snap.adx = 45.0; // above btc_adx_override (40.0)
-        let mut cfg = StrategyConfig::default();
+        let mut cfg = SignalConfigView::default();
         cfg.filters.require_btc_alignment = true;
         let res = check_gates(&snap, &cfg, "ETH", Some(false), 0.0);
         assert!(res.btc_ok_long, "High ADX should override BTC alignment");
@@ -428,14 +434,17 @@ mod tests {
         let mut snap = trending_snap();
         snap.atr = 3.0; // 3.0 / 1.4 ~ 2.14 > 1.5
         snap.adx = 24.0; // just above default 22 but below 22 * 1.25 = 27.5
-        let cfg = StrategyConfig::default();
+        let cfg = SignalConfigView::default();
         let res = check_gates(&snap, &cfg, "ETH", Some(true), 0.0);
         assert!(
             res.effective_min_adx > 22.0,
             "AVE should raise effective_min_adx: got {}",
             res.effective_min_adx
         );
-        assert!(!res.adx_above_min, "ADX 24 should be below raised threshold");
+        assert!(
+            !res.adx_above_min,
+            "ADX 24 should be below raised threshold"
+        );
     }
 
     #[test]
@@ -443,7 +452,7 @@ mod tests {
         let mut snap = trending_snap();
         snap.adx = 24.0;
         snap.adx_slope = 1.0; // > 0.5
-        let mut cfg = StrategyConfig::default();
+        let mut cfg = SignalConfigView::default();
         cfg.thresholds.entry.min_adx = 28.0;
         let res = check_gates(&snap, &cfg, "ETH", Some(true), 0.0);
         assert!(
@@ -458,7 +467,7 @@ mod tests {
         let mut snap = trending_snap();
         snap.prev_close = 100.0;
         snap.close = 115.0; // 15% move
-        let cfg = StrategyConfig::default();
+        let cfg = SignalConfigView::default();
         let res = check_gates(&snap, &cfg, "ETH", Some(true), 0.0);
         assert!(res.is_anomaly, "15% price move should trigger anomaly");
         assert!(!res.all_gates_pass);
@@ -469,9 +478,12 @@ mod tests {
         let mut snap = trending_snap();
         // EMA_fast = 99.0, close far above -> extended
         snap.close = 105.0; // 6.06% distance > 4% default threshold
-        let cfg = StrategyConfig::default();
+        let cfg = SignalConfigView::default();
         let res = check_gates(&snap, &cfg, "ETH", Some(true), 0.0);
-        assert!(res.is_extended, "6% distance from EMA should trigger extension");
+        assert!(
+            res.is_extended,
+            "6% distance from EMA should trigger extension"
+        );
         assert!(!res.all_gates_pass);
     }
 
@@ -479,7 +491,7 @@ mod tests {
     fn test_dynamic_tp_mult_strong() {
         let mut snap = trending_snap();
         snap.adx = 45.0; // > 40.0 (adx_strong_gt)
-        let cfg = StrategyConfig::default();
+        let cfg = SignalConfigView::default();
         let res = check_gates(&snap, &cfg, "ETH", Some(true), 0.0);
         assert!(
             (res.dynamic_tp_mult - 7.0).abs() < f64::EPSILON,
@@ -491,7 +503,7 @@ mod tests {
     fn test_dynamic_tp_mult_weak() {
         let mut snap = trending_snap();
         snap.adx = 25.0; // < 30.0 (adx_weak_lt)
-        let cfg = StrategyConfig::default();
+        let cfg = SignalConfigView::default();
         let res = check_gates(&snap, &cfg, "ETH", Some(true), 0.0);
         assert!(
             (res.dynamic_tp_mult - 3.0).abs() < f64::EPSILON,
@@ -504,7 +516,7 @@ mod tests {
         // ADX at midpoint between min_adx(22) and adx_strong_gt(40) => weight 0.5
         let mut snap = trending_snap();
         snap.adx = 31.0; // (31 - 22) / (40 - 22) = 9/18 = 0.5
-        let cfg = StrategyConfig::default();
+        let cfg = SignalConfigView::default();
         let res = check_gates(&snap, &cfg, "ETH", Some(true), 0.0);
         // rsi_long_weak=56, rsi_long_strong=52 => 56 + 0.5 * (52-56) = 54
         assert!(
@@ -523,7 +535,7 @@ mod tests {
     #[test]
     fn test_btc_symbol_always_ok() {
         let snap = trending_snap();
-        let mut cfg = StrategyConfig::default();
+        let mut cfg = SignalConfigView::default();
         cfg.filters.require_btc_alignment = true;
         let res = check_gates(&snap, &cfg, "BTC", Some(false), 0.0);
         assert!(res.btc_ok_long);
@@ -535,7 +547,7 @@ mod tests {
         let mut snap = trending_snap();
         snap.stoch_rsi_k = 0.92;
         snap.stoch_rsi_d = 0.88;
-        let cfg = StrategyConfig::default();
+        let cfg = SignalConfigView::default();
         let res = check_gates(&snap, &cfg, "ETH", Some(true), 0.0);
         assert!((res.stoch_k - 0.92).abs() < f64::EPSILON);
         assert!((res.stoch_d - 0.88).abs() < f64::EPSILON);

@@ -1007,11 +1007,93 @@
   function renderHealth(snap) {
     const h = snap?.health || {};
     $("#openCount").textContent = `open ${fmt.int(h.open_pos ?? snap?.open_positions?.length ?? 0)}`;
-    $("#hbAge").textContent = h.ok ? `hb ok` : `hb missing`;
+    const hbAgeS = (h && h.ts_ms && snap?.now_ts_ms) ? Math.max(0, (Number(snap.now_ts_ms) - Number(h.ts_ms)) / 1000) : null;
+    const ws = snap?.ws || {};
+    const wsAgeS = (ws && ws.updated_ts_ms && snap?.now_ts_ms) ? Math.max(0, (Number(snap.now_ts_ms) - Number(ws.updated_ts_ms)) / 1000) : null;
+    const hbTxt = h.ok ? (hbAgeS === null ? "hb ok" : `hb ${fmt.age(hbAgeS)}`) : "hb missing";
+    const wsTxt = wsAgeS === null ? "data \u2014" : `data ${fmt.age(wsAgeS)}`;
+    $("#hbAge").textContent = `${hbTxt} \u00b7 ${wsTxt}`;
     const loopS = h.loop_s ?? h.wall_s;
     $("#loopWall").textContent = h.ok ? `loop ${fmt.num(loopS, 2)}s` : "loop \u2014";
     $("#wsRestarts").textContent = h.ok ? `wsR ${fmt.int(h.ws_restarts)}` : "wsR \u2014";
     $("#errs").textContent = h.ok ? `err ${fmt.int(h.errors)}` : "err \u2014";
+
+    // Risk state (PAUSED when kill_mode is active).
+    const km = String(h.kill_mode || "off").toLowerCase();
+    const kr = String(h.kill_reason || "").trim();
+    const statePill = $("#statePill");
+    const stateDot = $("#stateDot");
+    const stateTxt = $("#stateTxt");
+    if (statePill && stateDot && stateTxt) {
+      stateDot.classList.remove("ok", "bad", "warn");
+      statePill.classList.remove("paused", "running");
+      if (!h.ok) {
+        stateDot.classList.add("warn");
+        stateTxt.textContent = "no hb";
+        statePill.title = "Heartbeat missing; state unknown";
+      } else {
+        const paused = (km === "close_only" || km === "halt_all");
+        statePill.classList.toggle("paused", paused);
+        statePill.classList.toggle("running", !paused);
+        stateDot.classList.toggle("bad", paused);
+        stateDot.classList.toggle("ok", !paused);
+        const label = paused ? (km === "halt_all" ? "HALT" : "PAUSED") : "RUNNING";
+        stateTxt.textContent = label.toLowerCase();
+        statePill.title = paused ? `PAUSED: ${km}${kr ? ` (${kr})` : ""}` : "Running";
+      }
+    }
+
+    // Regime gate (trend OK vs chop).
+    const rgOn = (typeof h.regime_gate === "boolean") ? h.regime_gate : null;
+    const rgReason = String(h.regime_reason || "").trim();
+    const rgPill = $("#regimePill");
+    const rgDot = $("#regimeDot");
+    const rgTxt = $("#regimeTxt");
+    if (rgPill && rgDot && rgTxt) {
+      rgDot.classList.remove("ok", "bad", "warn");
+      rgPill.classList.remove("paused", "running");
+      if (!h.ok) {
+        rgDot.classList.add("warn");
+        rgTxt.textContent = "gate";
+        rgPill.title = "Heartbeat missing; regime gate unknown";
+      } else if (rgOn === null) {
+        rgDot.classList.add("warn");
+        rgTxt.textContent = "gate —";
+        rgPill.title = "Regime gate not reported by engine";
+      } else {
+        rgPill.classList.toggle("running", rgOn);
+        rgPill.classList.toggle("paused", !rgOn);
+        rgDot.classList.toggle("ok", rgOn);
+        rgDot.classList.toggle("bad", !rgOn);
+        rgTxt.textContent = rgOn ? "gate on" : "gate off";
+        rgPill.title = rgOn ? `Regime gate ON (${rgReason || "trend_ok"})` : `Regime gate OFF (${rgReason || "n/a"})`;
+      }
+    }
+
+    // Config ID (from engine heartbeat).
+    const cfg = String(h.config_id || "").trim();
+    const cfgShort = cfg ? cfg.slice(0, 12) : "\u2014";
+    const cfgEl = $("#cfgId");
+    const cfgPill = $("#cfgPill");
+    if (cfgEl) cfgEl.textContent = cfgShort;
+    if (cfgPill) cfgPill.title = cfg ? `config_id: ${cfg}` : "config_id unavailable";
+
+    // Today's PnL + drawdown (UTC day).
+    const d = snap?.daily || {};
+    const pnl = d.pnl_usd;
+    const dd = d.drawdown_pct;
+    const pnlEl = $("#pnlToday");
+    const ddEl = $("#ddNow");
+    if (pnlEl) pnlEl.textContent = (pnl === null || pnl === undefined || Number.isNaN(Number(pnl))) ? "\u2014" : `$${fmt.num(pnl, 2)}`;
+    if (ddEl) ddEl.textContent = (dd === null || dd === undefined || Number.isNaN(Number(dd))) ? "\u2014" : `${fmt.num(dd, 1)}%`;
+
+    // Last data timestamp (WS mids).
+    const dataTs = ws?.updated_ts_ms ? Number(ws.updated_ts_ms) : null;
+    const dataEl = $("#dataTs");
+    const dataPill = $("#dataPill");
+    if (dataEl) dataEl.textContent = dataTs ? fmt.hmsFromMs(dataTs) : "\u2014";
+    if (dataPill) dataPill.title = dataTs ? `Last WS mids update: ${fmt.iso(dataTs)} (${fmt.ago(wsAgeS)})` : "WS mids timestamp unavailable";
+
     const mode = snap?.mode || state.mode;
     const b = snap?.balances || {};
     const src = b.balance_source || (mode === "live" ? "unknown" : "paper");
@@ -1743,7 +1825,7 @@
     if (modalClose) modalClose.addEventListener("click", () => closeModal());
     document.addEventListener("keydown", (e) => {
       if (e.key === "/") { e.preventDefault(); $("#search").focus(); }
-      if (e.key === "Escape") { if (closeModal()) return; $("#search").blur(); }
+      if (e.key === "Escape") { if (typeof decCloseModal === "function" && decCloseModal()) return; if (closeModal()) return; $("#search").blur(); }
     });
     const canvas = $("#spark");
     const onMove = (clientX, clientY) => {
@@ -1850,10 +1932,397 @@
     document.addEventListener("touchend", onUp);
   }
 
+  /* ============================================================
+     DECISIONS DASHBOARD (AQC-824)
+     ============================================================ */
+
+  const decState = {
+    decisions: [],
+    offset: 0,
+    limit: 50,
+    hasMore: false,
+    loading: false,
+    currentDecisionId: null,
+    lastFilters: {},
+  };
+
+  /* ── View tab switching ── */
+
+  function setViewTab(tab) {
+    const dash = tab === "dashboard";
+    const bDash = $("#viewDash");
+    const bDec = $("#viewDecisions");
+    if (bDash) { bDash.classList.toggle("is-on", dash); bDash.setAttribute("aria-selected", dash ? "true" : "false"); }
+    if (bDec) { bDec.classList.toggle("is-on", !dash); bDec.setAttribute("aria-selected", !dash ? "true" : "false"); }
+    const main = $("#main");
+    const decView = $("#decisionsView");
+    if (main) main.classList.toggle("is-hidden", !dash);
+    if (decView) decView.classList.toggle("is-hidden", dash);
+    // On first switch to decisions, populate symbol dropdown
+    if (!dash) decPopulateSymbols();
+  }
+
+  /* ── Symbol dropdown population ── */
+
+  function decPopulateSymbols() {
+    const sel = $("#decFilterSymbol");
+    if (!sel) return;
+    const snap = state.lastSnapshot;
+    const symbols = (snap?.symbols || []).map((s) => s.symbol).sort();
+    const current = sel.value;
+    const existing = new Set(Array.from(sel.options).map((o) => o.value));
+    for (const sym of symbols) {
+      if (!existing.has(sym)) {
+        const opt = document.createElement("option");
+        opt.value = sym;
+        opt.textContent = sym;
+        sel.appendChild(opt);
+      }
+    }
+    if (current) sel.value = current;
+  }
+
+  /* ── Build query params ── */
+
+  function decBuildParams() {
+    const p = new URLSearchParams();
+    p.set("mode", state.mode);
+    const sym = ($("#decFilterSymbol") || {}).value;
+    const evt = ($("#decFilterEvent") || {}).value;
+    const status = ($("#decFilterStatus") || {}).value;
+    const start = ($("#decFilterStart") || {}).value;
+    const end = ($("#decFilterEnd") || {}).value;
+    if (sym) p.set("symbol", sym);
+    if (evt) p.set("event_type", evt);
+    if (status) p.set("status", status);
+    if (start) {
+      const ms = new Date(start).getTime();
+      if (Number.isFinite(ms)) p.set("start", String(ms));
+    }
+    if (end) {
+      const ms = new Date(end).getTime();
+      if (Number.isFinite(ms)) p.set("end", String(ms));
+    }
+    p.set("limit", String(decState.limit));
+    p.set("offset", String(decState.offset));
+    return p;
+  }
+
+  /* ── Fetch decisions list ── */
+
+  async function decFetchDecisions(append) {
+    if (decState.loading) return;
+    decState.loading = true;
+    const tl = $("#decTimeline");
+    const loadBtn = $("#decLoadMore");
+    const summary = $("#decSummaryBar");
+    if (!append) {
+      decState.decisions = [];
+      decState.offset = 0;
+      if (tl) tl.innerHTML = '<div class="dec-empty">Loading...</div>';
+    }
+    try {
+      const params = decBuildParams();
+      decState.lastFilters = Object.fromEntries(params.entries());
+      const data = await fetchJson(`/api/v2/decisions?${params.toString()}`, 5000);
+      const items = data.decisions || data.items || data.results || [];
+      const total = data.total ?? null;
+      if (append) {
+        decState.decisions = decState.decisions.concat(items);
+      } else {
+        decState.decisions = items;
+      }
+      decState.hasMore = items.length >= decState.limit;
+      decState.offset += items.length;
+      decRenderTimeline();
+      if (summary) {
+        const totalTxt = total !== null ? ` of ${total}` : "";
+        summary.textContent = `${decState.decisions.length}${totalTxt} decisions \u00b7 mode: ${state.mode}`;
+      }
+      if (loadBtn) loadBtn.style.display = decState.hasMore ? "" : "none";
+    } catch (err) {
+      if (tl && !append) tl.innerHTML = `<div class="dec-empty">Error loading decisions: ${esc(String(err.message || err))}</div>`;
+      if (summary) summary.textContent = "Error loading decisions";
+    } finally {
+      decState.loading = false;
+    }
+  }
+
+  /* ── Render timeline ── */
+
+  function decRenderTimeline() {
+    const tl = $("#decTimeline");
+    if (!tl) return;
+    if (!decState.decisions.length) {
+      tl.innerHTML = '<div class="dec-empty">No decisions found for the current filters.</div>';
+      return;
+    }
+    tl.innerHTML = "";
+    for (const d of decState.decisions) {
+      const item = document.createElement("div");
+      item.className = "dec-item";
+      item.dataset.decId = d.id || "";
+      const evType = String(d.event_type || "unknown").toLowerCase();
+      const statusVal = String(d.status || "unknown").toLowerCase();
+      const tsMs = Number(d.timestamp_ms || 0);
+      const w = tsMs ? whenFromMs(tsMs) : null;
+      const agoTxt = w ? w.ago : "\u2014";
+      const atTxt = w ? w.at : "\u2014";
+      const action = d.action_taken || "\u2014";
+      const reason = d.rejection_reason || "";
+      item.innerHTML = `
+        <div class="dec-item-left">
+          <span class="dec-badge dec-badge-${esc(evType)}">${esc(evType)}</span>
+          <span class="dec-item-sym">${esc(d.symbol || "\u2014")}</span>
+        </div>
+        <div class="dec-item-center">
+          <div class="dec-item-action">${esc(action)}</div>
+          ${reason ? `<div class="dec-item-reason" title="${esc(reason)}">${esc(reason)}</div>` : ""}
+        </div>
+        <div class="dec-item-right">
+          <span class="dec-status dec-status-${esc(statusVal)}">${esc(statusVal)}</span>
+          <span class="dec-item-ago" title="${esc(atTxt)}">${esc(agoTxt)}</span>
+          <span class="dec-item-time">${esc(atTxt)}</span>
+        </div>
+      `;
+      item.addEventListener("click", () => decOpenDetail(d.id));
+      tl.appendChild(item);
+    }
+  }
+
+  /* ── Decision detail modal ── */
+
+  async function decOpenDetail(decisionId) {
+    if (!decisionId) return;
+    decState.currentDecisionId = decisionId;
+    const modal = $("#decModal");
+    const titleEl = $("#decModalTitle");
+    const indEl = $("#decModalIndicators");
+    const gateBody = $("#decModalGateBody");
+    const metaKv = $("#decModalMetaKv");
+    if (!modal) return;
+    // Show modal immediately with loading state
+    if (titleEl) titleEl.textContent = `Decision ${String(decisionId).slice(0, 12)}\u2026`;
+    if (indEl) indEl.innerHTML = "Loading\u2026";
+    if (gateBody) gateBody.innerHTML = "";
+    if (metaKv) metaKv.innerHTML = "Loading\u2026";
+    modal.classList.remove("is-hidden");
+    modal.setAttribute("aria-hidden", "false");
+    document.body.classList.add("modal-open");
+    const closeBtn = $("#decModalClose");
+    if (closeBtn) closeBtn.focus();
+    try {
+      const data = await fetchJson(`/api/v2/decisions/${encodeURIComponent(decisionId)}?mode=${encodeURIComponent(state.mode)}`, 5000);
+      const dec = data.decision || data;
+      const ctx = data.context || dec.context || {};
+      const gates = data.gates || dec.gates || [];
+      // Title
+      if (titleEl) {
+        const sym = dec.symbol || "\u2014";
+        const evType = dec.event_type || "\u2014";
+        titleEl.textContent = `${sym} \u00b7 ${evType} \u00b7 ${String(decisionId).slice(0, 12)}`;
+      }
+      // Indicators
+      if (indEl) {
+        const indFields = [
+          ["price", 6], ["rsi", 2], ["adx", 2], ["adx_slope", 4],
+          ["macd_hist", 6], ["ema_fast", 6], ["ema_slow", 6], ["ema_macro", 6],
+          ["bb_width_ratio", 4], ["stoch_k", 2], ["stoch_d", 2],
+          ["atr", 6], ["atr_slope", 4], ["volume", 2], ["vol_sma", 2],
+          ["rsi_entry_threshold", 2], ["min_adx_threshold", 2],
+          ["sl_price", 6], ["tp_price", 6], ["trailing_sl", 6],
+        ];
+        const rows = [];
+        for (const [key, dec2] of indFields) {
+          const val = ctx[key];
+          if (val !== null && val !== undefined) {
+            rows.push(kvRow(key, fmt.num(val, dec2)));
+          }
+        }
+        // Gate flags from context
+        const gateFlags = ["gate_ranging", "gate_anomaly", "gate_extension", "gate_adx",
+                          "gate_volume", "gate_adx_rising", "gate_btc_alignment",
+                          "bullish_alignment", "bearish_alignment"];
+        const gateRows = [];
+        for (const gf of gateFlags) {
+          const val = ctx[gf];
+          if (val !== null && val !== undefined) {
+            const passed = Number(val) === 1;
+            gateRows.push(kvRow(gf, passed ? "PASS" : "FAIL", passed ? "hi" : "bad"));
+          }
+        }
+        if (gateRows.length) {
+          rows.push(kvSec("Context Gates"));
+          rows.push(...gateRows);
+        }
+        indEl.innerHTML = rows.length ? rows.join("") : "No indicator data available.";
+      }
+      // Gate evaluations table
+      if (gateBody) {
+        if (gates.length) {
+          gateBody.innerHTML = gates.map((g) => {
+            const passed = Number(g.gate_passed) === 1;
+            return `<tr>
+              <td>${esc(g.gate_name || "\u2014")}</td>
+              <td class="${passed ? "dec-gate-pass" : "dec-gate-fail"}">${passed ? "PASS" : "FAIL"}</td>
+              <td>${g.metric_value !== null && g.metric_value !== undefined ? esc(fmt.num(g.metric_value, 4)) : "\u2014"}</td>
+              <td>${g.threshold_value !== null && g.threshold_value !== undefined ? esc(fmt.num(g.threshold_value, 4)) : "\u2014"}</td>
+              <td>${esc(g.operator || "\u2014")}</td>
+              <td>${esc(g.explanation || "\u2014")}</td>
+            </tr>`;
+          }).join("");
+        } else {
+          gateBody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--faint);">No gate evaluations recorded.</td></tr>';
+        }
+      }
+      // Metadata
+      if (metaKv) {
+        const mRows = [];
+        mRows.push(kvRow("id", dec.id || "\u2014"));
+        mRows.push(kvRow("event_type", dec.event_type || "\u2014"));
+        mRows.push(kvRow("status", dec.status || "\u2014"));
+        mRows.push(kvRow("decision_phase", dec.decision_phase || "\u2014"));
+        mRows.push(kvRow("action_taken", dec.action_taken || "\u2014"));
+        if (dec.rejection_reason) mRows.push(kvRow("rejection_reason", dec.rejection_reason, "bad wrap"));
+        if (dec.triggered_by) mRows.push(kvRow("triggered_by", dec.triggered_by));
+        const tsMs = Number(dec.timestamp_ms || 0);
+        if (tsMs) {
+          const w = whenFromMs(tsMs);
+          mRows.push(kvRow("timestamp", w ? `${w.ago} \u00b7 ${w.at}` : "\u2014"));
+        }
+        // Parent decision link
+        if (dec.parent_decision_id) {
+          mRows.push(`<div class="kvrow"><div class="k">PARENT</div><div class="v"><span class="dec-link" data-dec-nav="${esc(dec.parent_decision_id)}">${esc(String(dec.parent_decision_id).slice(0, 16))}\u2026</span></div></div>`);
+        }
+        // Trade ID
+        if (dec.trade_id !== null && dec.trade_id !== undefined) {
+          mRows.push(kvRow("trade_id", String(dec.trade_id)));
+        }
+        metaKv.innerHTML = mRows.join("");
+        // Bind parent link clicks
+        const links = metaKv.querySelectorAll("[data-dec-nav]");
+        for (const link of links) {
+          link.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const targetId = link.dataset.decNav;
+            if (targetId) decOpenDetail(targetId);
+          });
+        }
+      }
+    } catch (err) {
+      if (indEl) indEl.innerHTML = `Error: ${esc(String(err.message || err))}`;
+      if (metaKv) metaKv.innerHTML = `Error loading decision detail.`;
+    }
+  }
+
+  function decCloseModal() {
+    const modal = $("#decModal");
+    if (!modal) return false;
+    if (modal.classList.contains("is-hidden")) return false;
+    modal.classList.add("is-hidden");
+    modal.setAttribute("aria-hidden", "true");
+    document.body.classList.remove("modal-open");
+    decState.currentDecisionId = null;
+    return true;
+  }
+
+  /* ── Replay ── */
+
+  async function decReplay() {
+    const decId = decState.currentDecisionId;
+    if (!decId) return;
+    const btn = $("#decReplayBtn");
+    if (btn) { btn.textContent = "REPLAYING\u2026"; btn.disabled = true; }
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 10000);
+      const r = await fetch("/api/v2/decisions/replay", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decision_id: decId, mode: state.mode }),
+        signal: ctrl.signal,
+      });
+      clearTimeout(t);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      decCloseModal();
+      openModal({ title: `Replay: ${decId}`, meta: `mode: ${state.mode}`, body: pretty(data) });
+    } catch (err) {
+      decCloseModal();
+      openModal({ title: "Replay Error", meta: decId, body: String(err.message || err) });
+    } finally {
+      if (btn) { btn.textContent = "REPLAY DECISION"; btn.disabled = false; }
+    }
+  }
+
+  /* ── JSON export ── */
+
+  function decExportJson() {
+    const data = decState.decisions;
+    if (!data.length) return;
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    const now = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    a.download = `decision-trace-${state.mode}-${now}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  /* ── Clear filters ── */
+
+  function decClearFilters() {
+    const sel = (id) => { const el = $(id); if (el) el.value = ""; };
+    sel("#decFilterSymbol");
+    sel("#decFilterEvent");
+    sel("#decFilterStatus");
+    sel("#decFilterStart");
+    sel("#decFilterEnd");
+    decState.decisions = [];
+    decState.offset = 0;
+    decState.hasMore = false;
+    const tl = $("#decTimeline");
+    if (tl) tl.innerHTML = '<div class="dec-empty">Apply filters to load decision events.</div>';
+    const summary = $("#decSummaryBar");
+    if (summary) summary.textContent = "\u2014";
+    const loadBtn = $("#decLoadMore");
+    if (loadBtn) loadBtn.style.display = "none";
+  }
+
+  /* ── Bind decisions UI ── */
+
+  function bindDecisionsUi() {
+    const vd = $("#viewDash");
+    const vDec = $("#viewDecisions");
+    if (vd) vd.addEventListener("click", () => setViewTab("dashboard"));
+    if (vDec) vDec.addEventListener("click", () => setViewTab("decisions"));
+    const applyBtn = $("#decApplyBtn");
+    if (applyBtn) applyBtn.addEventListener("click", () => decFetchDecisions(false));
+    const clearBtn = $("#decClearBtn");
+    if (clearBtn) clearBtn.addEventListener("click", () => decClearFilters());
+    const exportBtn = $("#decExportBtn");
+    if (exportBtn) exportBtn.addEventListener("click", () => decExportJson());
+    const loadMore = $("#decLoadMore");
+    if (loadMore) loadMore.addEventListener("click", () => decFetchDecisions(true));
+    // Decision modal close
+    const decModal = $("#decModal");
+    const decModalClose = $("#decModalClose");
+    if (decModal) decModal.addEventListener("click", (e) => { if (e.target && e.target.closest("[data-dec-modal-close]")) decCloseModal(); });
+    if (decModalClose) decModalClose.addEventListener("click", () => decCloseModal());
+    // Replay
+    const replayBtn = $("#decReplayBtn");
+    if (replayBtn) replayBtn.addEventListener("click", () => decReplay());
+    // Escape key handled by consolidated handler in bindUi()
+  }
+
   // boot
   setSeg("live");
   setFeed("trades");
   bindUi();
+  bindDecisionsUi();
   initResizer();
   tick();
 })();

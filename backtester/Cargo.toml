@@ -1,10 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/bt-signals",
     "crates/bt-core",
     "crates/bt-data",
     "crates/bt-cli",
     "crates/bt-gpu",
+    "crates/risk-core",
+    "crates/bt-runtime",
 ]
 
 [workspace.dependencies]

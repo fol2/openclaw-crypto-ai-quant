@@ -13,6 +13,38 @@ Procedures for common operational scenarios. When the bot misbehaves, follow the
 
 All services are systemd user units. Manage with `systemctl --user <action> <unit>`.
 
+### Optional timers (nightly factory + log pruning)
+
+Example service/timer templates live under `systemd/`:
+
+- `openclaw-ai-quant-factory.{service,timer}.example` runs `factory_run.py` nightly.
+- `openclaw-ai-quant-prune-runtime-logs.{service,timer}.example` prunes SQLite `runtime_logs` daily.
+
+Install (example):
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp systemd/openclaw-ai-quant-factory.* ~/.config/systemd/user/
+cp systemd/openclaw-ai-quant-prune-runtime-logs.* ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now openclaw-ai-quant-factory.timer
+systemctl --user enable --now openclaw-ai-quant-prune-runtime-logs.timer
+```
+
+Configure runtime log retention via:
+
+```
+AI_QUANT_RUNTIME_LOG_KEEP_DAYS=14
+```
+
+### Secrets management
+
+Do not store secrets in the repo. Recommended locations:
+
+- Hyperliquid key material: `~/.config/openclaw/ai-quant-secrets.json` (chmod 600)
+- Service environment: `~/.config/openclaw/ai-quant-live.env`
+  - Put alerting targets (e.g. `AI_QUANT_ALERT_TARGETS`) here, especially if using webhook URLs.
+
 ---
 
 ## 1. Pause Trading (Emergency Stop)
@@ -82,6 +114,123 @@ journalctl --user -u openclaw-ai-quant-live --since "10 min ago" | grep -i kill
 ```
 
 ---
+
+## 1a. Emergency Flatten ("Flat Now") (AQC-808)
+
+Use when: you need to *both* pause entries and flatten positions under a known unwind policy.
+
+Policy (default):
+
+- Write a kill-switch file in `close_only` mode (pause new entries, allow exits).
+- Flatten positions:
+  - Paper: clear `position_state` and insert `SYSTEM CLOSE` trades.
+  - Live (optional): submit market-close (reduce-only IOC) per open position with retries.
+- Leave the kill-switch in place until post-incident review is complete.
+
+### Paper flatten + pause (safe default)
+
+```bash
+python tools/flat_now.py \
+  --kill-file /tmp/ai-quant-kill \
+  --pause-mode close_only \
+  --paper \
+  --yes
+```
+
+### Live flatten + pause (explicit, destructive)
+
+Live flatten requires `--yes`. Secrets are loaded from `AI_QUANT_SECRETS_PATH` (or `./secrets.json`).
+
+```bash
+python tools/flat_now.py \
+  --kill-file /tmp/ai-quant-kill \
+  --pause-mode close_only \
+  --live \
+  --yes
+```
+
+To flatten both paper and live in one command:
+
+```bash
+python tools/flat_now.py \
+  --kill-file /tmp/ai-quant-kill \
+  --pause-mode close_only \
+  --paper \
+  --live \
+  --yes
+```
+
+Notes:
+
+- Avoid `halt_all` when you want exits to run in-engine; it blocks *all* orders including exits.
+- This tool does not clear the kill-switch automatically. Clear it manually once you are confident it is safe.
+
+## 1b. Strategy Mode Switching (AQC-1002)
+
+The engine supports an optional strategy-mode overlay selected via `AI_QUANT_STRATEGY_MODE`:
+
+- `primary`: 30m/5m
+- `fallback`: 1h/5m
+- `conservative`: 1h/15m
+- `flat`: safety profile (use with a kill-switch when needed)
+
+Mode overlays are defined under `modes:` in `config/strategy_overrides.yaml`.
+
+### Manual mode change
+
+```bash
+export AI_QUANT_STRATEGY_MODE=fallback
+
+# Restart is required if the mode changes global.engine.interval.
+systemctl --user restart openclaw-ai-quant-live
+```
+
+### Automatic step-down on kill events
+
+When enabled (`AI_QUANT_MODE_SWITCH_ENABLE=1`), the live daemon steps down one mode on each new kill event
+and persists the selected mode to `AI_QUANT_STRATEGY_MODE_FILE` (default: `artifacts/state/strategy_mode.txt`).
+
+If your systemd unit is configured to auto-restart on exit, you can also enable:
+
+- `AI_QUANT_MODE_SWITCH_EXIT_ON_RESTART_REQUIRED=1`
+
+This makes the daemon exit when switching to/from `primary` (where an interval change is likely), allowing
+systemd to restart it with the new persisted mode.
+
+---
+
+## 1c. Ensemble Runner (AQC-1003)
+
+The engine supports running a small ensemble (2-3 strategies) by launching multiple daemons with different configs.
+
+This is implemented as a process runner (`tools/ensemble_runner.py`), not an in-process multi-strategy engine.
+
+### Key points
+
+- Each strategy has its own sizing budget via config overrides (e.g. `global.trade.size_multiplier`).
+- Global risk caps (portfolio heat/exposure/kill-switch) are enforced by the existing RiskManager logic.
+- Start with `dry_live` until you are confident the ensemble behaves as expected.
+
+### Example
+
+Edit the example spec:
+
+- `config/ensemble.example.yaml`
+
+Dry-run the plan:
+
+```bash
+python tools/ensemble_runner.py --spec config/ensemble.example.yaml
+```
+
+Launch the ensemble in dry-live:
+
+```bash
+python tools/ensemble_runner.py \
+  --spec config/ensemble.example.yaml \
+  --mode dry_live \
+  --yes
+```
 
 ## 2. Roll Back Config
 
@@ -179,6 +328,66 @@ sqlite3 candles_dbs/candles_5m.db "SELECT COUNT(*) AS dupes FROM (SELECT symbol,
 
 3m adds ~480 rows/day/symbol, 5m adds ~288 rows/day/symbol. With pruning disabled for both, plan disk accordingly and monitor `candles_dbs/candles_{3m,5m}.db` file sizes.
 
+### Candle DB partitioning / archival (AQC-204)
+
+If you retain multi-month histories (especially 3m/5m), a single `candles_{interval}.db` file can grow large. Partitioning keeps the "hot" DB small while preserving long history in monthly archive DBs.
+
+This repo uses monthly SQLite partitions created by `tools/partition_candles_db.py`:
+
+- Hot DB (written by the WS sidecar): `candles_dbs/candles_{interval}.db`
+- Archive partitions: `candles_dbs/partitions/{interval}/candles_{interval}_YYYY-MM.db`
+
+#### Partitioning procedure
+
+Prefer to stop the sidecar before applying changes:
+
+```bash
+systemctl --user stop openclaw-ai-quant-ws-sidecar
+```
+
+Dry-run (no writes):
+
+```bash
+uv run python tools/partition_candles_db.py --interval 5m
+```
+
+Apply copy-only:
+
+```bash
+uv run python tools/partition_candles_db.py --interval 5m --keep-days 120 --apply
+```
+
+Apply copy + delete (shrinks the hot DB over time):
+
+```bash
+uv run python tools/partition_candles_db.py --interval 5m --keep-days 120 --apply --delete
+```
+
+Optional: run `VACUUM` after deletion (slow, but compacts the file):
+
+```bash
+uv run python tools/partition_candles_db.py --interval 5m --keep-days 120 --apply --delete --vacuum
+```
+
+Restart the sidecar afterwards:
+
+```bash
+systemctl --user start openclaw-ai-quant-ws-sidecar
+```
+
+#### Backtester usage across partitions
+
+The backtester can load candles from a comma-separated list of DB paths and/or a directory containing partition DBs.
+
+Example (hot DB + partitions dir):
+
+```bash
+./target/release/mei-backtester replay \
+  --interval 5m \
+  --candles-db candles_dbs/candles_5m.db,candles_dbs/partitions/5m \
+  --config config/strategy_overrides.yaml
+```
+
 ### BBO snapshot database (AQC-206)
 
 Optional, sampled best-bid/best-ask (BBO) snapshots are stored in SQLite for slippage modelling and post-trade analysis.
@@ -239,6 +448,39 @@ uv run python tools/check_funding_rates_db.py --lookback-hours 72 --max-gap-hour
 # Backfill if stale
 uv run python tools/fetch_funding_rates.py --days 7
 ```
+
+### Universe history database (AQC-205)
+
+Tracks when symbols appear/disappear in the Hyperliquid perp universe to support survivorship-bias-aware backtests.
+
+```bash
+# Sync current universe snapshot (recommended: run hourly via cron)
+uv run python tools/sync_universe_history.py
+
+# Inspect derived listing/delisting bounds
+sqlite3 candles_dbs/universe_history.db \
+    "SELECT symbol, first_seen_ms, last_seen_ms FROM universe_listings ORDER BY last_seen_ms DESC LIMIT 20;"
+```
+
+Backtester integration:
+
+```bash
+# Replay with universe filtering enabled (keeps symbols whose listing interval overlaps the backtest window)
+./target/release/mei-backtester replay \
+    --candles-db candles_dbs/candles_5m.db \
+    --config config/strategy_overrides.yaml \
+    --universe-filter
+
+# Sweep with the same filter
+./target/release/mei-backtester sweep \
+    --candles-db candles_dbs/candles_5m.db \
+    --sweep-spec backtester/sweeps/smoke.yaml \
+    --universe-filter
+```
+
+Notes:
+- The universe filter uses `universe_listings.first_seen_ms` / `last_seen_ms` derived from local snapshots. If you have not been running the sync script for the period you are testing, the filter may exclude symbols unexpectedly.
+- The universe DB defaults to `<candles_db_dir>/universe_history.db`, so it follows your `--candles-db` location (useful when running the backtester from within `backtester/`).
 
 ### WebSocket sidecar health
 
@@ -367,6 +609,116 @@ uv run python tools/export_state.py --source live --output /tmp/live_state.json
 # Export trade history to CSV
 uv run python tools/export_csv.py
 ```
+
+---
+
+## 7. Factory Stage Gate (dry -> smoke -> real)
+
+Use when: promoting configuration candidates from nightly factory output.
+
+Use this section for all automated rollouts. Do not deploy to live without a successful gate sequence.
+
+### Precondition
+
+- Keep the strategy config under version control.
+- Ensure `factory_cycle` can write selection/evidence files to `artifacts/`.
+- Confirm the following keys are present in `reports/selection.json` after each stage:
+  - `selection_stage`
+  - `deploy_stage`
+  - `promotion_stage`
+- Confirm candidate evidence is attached in:
+  - `candidate_configs` inside `run_metadata.json`
+  - `items` inside `reports/report.json`
+  - `evidence_bundle_paths` in `selection.json`
+- Confirm replay equivalence proof exists for promotion candidates:
+  - `selected.canonical_cpu_verified == true`
+  - `selected.replay_equivalence_status == "pass"`
+  - `selected.candidate_mode == true`
+  - `selected.schema_version == 1`
+  - `selected.replay_equivalence_report_path` file exists
+  - `selected.replay_equivalence_count` is recorded
+
+### Stage command
+
+```bash
+./scripts/run_factory_stage_gate.sh \
+  --run-prefix v8_factory_gate \
+  --dry-profile smoke \
+  --smoke-profile smoke \
+  --real-profile daily \
+  --config config/strategy_overrides.yaml \
+  --artifacts-dir artifacts
+```
+
+### Stage definitions
+
+1. Dry stage (`dry`)
+   - Runs `factory_cycle` with `--no-deploy`.
+   - Expected:
+     - `selection_stage == "selected"`
+     - `deploy_stage == "no_deploy"` (or `"skipped"`)
+     - `promotion_stage == "skipped"`
+2. Smoke stage (`smoke`)
+   - Runs `factory_cycle` with `--no-deploy`.
+   - Expected:
+     - `selection_stage == "selected"`
+     - `deploy_stage == "no_deploy"` (or `"skipped"`)
+     - `promotion_stage == "skipped"`
+3. Real stage (`real`)
+   - Runs `factory_cycle` without `--no-deploy` unless deployment is intentionally blocked.
+   - If deployment is intentionally blocked, behaviour must match dry/smoke.
+   - Expected:
+     - `selection_stage == "selected"`
+     - `deploy_stage != "pending"`
+     - `promotion_stage != "pending"`
+
+### Evidence bundle
+
+`run_factory_stage_gate.sh` writes a consolidated manifest:
+
+```text
+artifacts/<run-prefix>_<timestamp>.evidence.json
+```
+
+Each stage entry includes:
+
+- `run_id`
+- `stage`
+- `selection_stage`
+- `deploy_stage`
+- `promotion_stage`
+- `evidence_bundle_paths`
+- `selected.canonical_cpu_verified`
+- `selected.replay_equivalence_status`
+
+### Hard gate acceptance (recommended before promotion)
+
+Use this checklist before moving from `smoke` to `real` and before approving any real deployment:
+
+- `selection.json` must pass:
+
+  ```bash
+  python3 scripts/validate_factory_selection_gate.py \
+    --selection-json artifacts/<run_id>/reports/selection.json \
+    --stage smoke
+  ```
+
+- `selection.json` must contain:
+  - `evidence_bundle_paths.run_metadata_json` (existing and readable)
+  - `evidence_bundle_paths.report_json`
+  - `evidence_bundle_paths.selection_json`
+  - `evidence_bundle_paths.selection_md`
+  - `selected.canonical_cpu_verified == true`
+  - `selected.pipeline_stage`, `selected.sweep_stage`, `selected.replay_stage`, `selected.validation_gate`
+  - `selected.candidate_mode == true`
+  - `selected.schema_version == 1`
+  - `selected.replay_equivalence_report_path` exists and path exists
+  - `selected.replay_report_path` exists and path exists
+  - `selected.replay_equivalence_count` is an integer >= 0
+
+- `run_metadata.json` must contain the same `selected.config_id` row, and replay proof paths must match when present.
+
+Retain this manifest with the promotion ticket.
 
 ---
 
