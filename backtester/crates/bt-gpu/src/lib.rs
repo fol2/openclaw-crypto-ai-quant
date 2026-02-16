@@ -2,6 +2,7 @@ pub mod axis_split;
 pub mod buffers;
 pub mod gpu_host;
 pub mod layout;
+pub mod precision;
 #[allow(dead_code)]
 mod precompute;
 pub mod raw_candles;
