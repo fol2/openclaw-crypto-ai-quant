@@ -200,6 +200,7 @@ def _default_db_path() -> str:
 def _db_path() -> str:
     return str(os.getenv("AI_QUANT_DB_PATH", _default_db_path()) or _default_db_path())
 
+
 def _hl_timeout_s() -> float:
     # Never allow infinite REST hangs in the main loop.
     raw = os.getenv("AI_QUANT_HL_TIMEOUT_S", "10")
@@ -264,6 +265,7 @@ class PaperPlugin:
         # Reset per-loop entry budget (mirrors LivePlugin).
         try:
             import strategy.mei_alpha_v1 as mei_alpha_v1
+
             cfg = mei_alpha_v1.get_strategy_config("BTC") or {}
             budget = int((cfg.get("trade") or {}).get("max_entry_orders_per_loop", 0))
             self.trader._entry_budget_remaining = budget if budget > 0 else None
@@ -339,7 +341,9 @@ class LivePlugin:
         self._last_rest_fills_err_s = 0.0
 
         # On start, backfill a small window (dedup happens in DB).
-        self._last_rest_fills_ms = int(time.time() * 1000) - int(float(os.getenv("AI_QUANT_LIVE_BACKFILL_MS", str(2 * 60 * 60 * 1000))))
+        self._last_rest_fills_ms = int(time.time() * 1000) - int(
+            float(os.getenv("AI_QUANT_LIVE_BACKFILL_MS", str(2 * 60 * 60 * 1000)))
+        )
 
         # Buffer WS fills so transient DB errors don't drop fills (WS queues are drained).
         self._pending_ws_fills: list[dict] = []
@@ -369,19 +373,25 @@ class LivePlugin:
         self._fill_ingest_fail_streak = 0
         self._fill_ingest_fail_to_kill = int(float(os.getenv("AI_QUANT_HEALTH_FILL_INGEST_FAILS_TO_KILL", "5")))
         self._fill_ingest_kill = _env_bool("AI_QUANT_HEALTH_FILL_INGEST_KILL", True)
-        self._fill_ingest_kill_mode = str(os.getenv("AI_QUANT_HEALTH_FILL_INGEST_KILL_MODE", "close_only") or "close_only").strip().lower()
+        self._fill_ingest_kill_mode = (
+            str(os.getenv("AI_QUANT_HEALTH_FILL_INGEST_KILL_MODE", "close_only") or "close_only").strip().lower()
+        )
 
         self._unmatched_window_s = float(os.getenv("AI_QUANT_HEALTH_UNMATCHED_WINDOW_S", "900"))
         self._unmatched_alert_n = int(float(os.getenv("AI_QUANT_HEALTH_UNMATCHED_ALERT_N", "1")))
         self._unmatched_kill = _env_bool("AI_QUANT_HEALTH_UNMATCHED_KILL", False)
-        self._unmatched_kill_mode = str(os.getenv("AI_QUANT_HEALTH_UNMATCHED_KILL_MODE", "close_only") or "close_only").strip().lower()
+        self._unmatched_kill_mode = (
+            str(os.getenv("AI_QUANT_HEALTH_UNMATCHED_KILL_MODE", "close_only") or "close_only").strip().lower()
+        )
         self._unmatched_ts: deque[float] = deque()
         # Grace period: suppress unmatched-fill alerts during startup REST backfill.
         self._unmatched_grace_until = time.time() + float(os.getenv("AI_QUANT_HEALTH_UNMATCHED_GRACE_S", "120"))
 
         self._pending_fills_to_kill = int(float(os.getenv("AI_QUANT_HEALTH_PENDING_FILLS_TO_KILL", "20000")))
         self._pending_fills_kill = _env_bool("AI_QUANT_HEALTH_PENDING_FILLS_KILL", True)
-        self._pending_fills_kill_mode = str(os.getenv("AI_QUANT_HEALTH_PENDING_FILLS_KILL_MODE", "close_only") or "close_only").strip().lower()
+        self._pending_fills_kill_mode = (
+            str(os.getenv("AI_QUANT_HEALTH_PENDING_FILLS_KILL_MODE", "close_only") or "close_only").strip().lower()
+        )
 
         # One-shot risk reduction per kill event (avoid repeated close-all loops).
         self._last_drawdown_reduce_kill_since_s: float | None = None
@@ -526,7 +536,9 @@ class LivePlugin:
             try:
                 import strategy.mei_alpha_v1 as mei_alpha_v1
 
-                mei_alpha_v1.log_audit_event(symbol="SYSTEM", event="HEALTH_RESOLVED", level="info", data={"key": str(key)})
+                mei_alpha_v1.log_audit_event(
+                    symbol="SYSTEM", event="HEALTH_RESOLVED", level="info", data={"key": str(key)}
+                )
             except Exception:
                 pass
 
@@ -710,8 +722,9 @@ class LivePlugin:
                             # produces unmatched fills before OMS has intents).
                             if now < self._unmatched_grace_until:
                                 logger.debug(
-                                    "unmatched_fills suppressed during startup grace "
-                                    "(%.0fs remaining)", self._unmatched_grace_until - now)
+                                    "unmatched_fills suppressed during startup grace (%.0fs remaining)",
+                                    self._unmatched_grace_until - now,
+                                )
                             else:
                                 samples = st.get("unmatched_samples")
                                 extra = ""
@@ -737,7 +750,10 @@ class LivePlugin:
                     "process_user_fills",
                     f"process_user_fills failed; keeping {len(self._pending_ws_fills)} fills for retry",
                 )
-                if self._fill_ingest_fail_to_kill > 0 and self._fill_ingest_fail_streak >= self._fill_ingest_fail_to_kill:
+                if (
+                    self._fill_ingest_fail_to_kill > 0
+                    and self._fill_ingest_fail_streak >= self._fill_ingest_fail_to_kill
+                ):
                     self._health_alert(
                         "fill_ingest_failed",
                         f"fail_streak={self._fill_ingest_fail_streak} pending_ws_fills={len(self._pending_ws_fills)}",
@@ -777,12 +793,15 @@ class LivePlugin:
             now_ms = int(time.time() * 1000)
             start_ms = max(0, int(self._last_rest_fills_ms) - (5 * 60 * 1000))  # overlap
             try:
-                rest_fills = self._rest_info.user_fills_by_time(
-                    self.main_address,
-                    start_ms,
-                    now_ms,
-                    aggregate_by_time=False,
-                ) or []
+                rest_fills = (
+                    self._rest_info.user_fills_by_time(
+                        self.main_address,
+                        start_ms,
+                        now_ms,
+                        aggregate_by_time=False,
+                    )
+                    or []
+                )
                 if rest_fills:
                     if self._oms is not None:
                         inserted = self._oms.process_user_fills(trader=self.trader, fills=rest_fills)
@@ -792,7 +811,9 @@ class LivePlugin:
                         try:
                             self.trader.sync_from_exchange(force=True)
                         except Exception:
-                            self._log_exc("sync_after_rest_fills", "sync_from_exchange(force=True) failed after REST fills")
+                            self._log_exc(
+                                "sync_after_rest_fills", "sync_from_exchange(force=True) failed after REST fills"
+                            )
                 # Advance the cursor only after a successful REST call.
                 self._last_rest_fills_ms = now_ms
             except Exception:
@@ -912,8 +933,16 @@ def main() -> None:
 
         print(f"⚠️ promoted_config: failed to apply\n{traceback.format_exc()}")
 
-    # Sync paper balance from live account on startup
-    if mode == "paper" and os.getenv("AI_QUANT_PAPER_BALANCE_FROM_LIVE", "0") == "1":
+    # Sync balance from live Hyperliquid account on startup.
+    # Paper mode: opt-in via AI_QUANT_PAPER_BALANCE_FROM_LIVE=1.
+    # Live mode: always sync so the inherited PaperTrader kernel and
+    # any code that reads PAPER_BALANCE uses the real account balance
+    # instead of the $10,000 default.
+    _should_sync_balance = (mode == "paper" and os.getenv("AI_QUANT_PAPER_BALANCE_FROM_LIVE", "0") == "1") or mode in {
+        "live",
+        "dry_live",
+    }
+    if _should_sync_balance:
         try:
             from exchange.executor import load_live_secrets, HyperliquidLiveExecutor
 
@@ -931,25 +960,26 @@ def main() -> None:
             _snap = _exec.account_snapshot(force=True)
             if _snap.withdrawable_usd and _snap.withdrawable_usd > 0:
                 os.environ["AI_QUANT_PAPER_BALANCE"] = str(_snap.withdrawable_usd)
-                print(f"paper balance synced from live: ${_snap.withdrawable_usd:,.2f}")
-                # Seed balance into DB so the monitor shows the correct value before any trades.
-                try:
-                    import sqlite3 as _sql
+                print(f"balance synced from live: ${_snap.withdrawable_usd:,.2f}")
+                # Seed balance into DB so the monitor shows the correct value before any trades (paper only).
+                if mode == "paper":
+                    try:
+                        import sqlite3 as _sql
 
-                    _con = _sql.connect(_db_path(), timeout=5)
-                    _cur = _con.execute("SELECT COUNT(*) FROM trades")
-                    if _cur.fetchone()[0] == 0:
-                        _con.execute(
-                            "INSERT INTO trades (timestamp, symbol, type, action, price, size, notional, balance)"
-                            " VALUES (datetime('now'), '__SEED__', 'SYSTEM', 'SYSTEM', 0, 0, 0, ?)",
-                            (_snap.withdrawable_usd,),
-                        )
-                        _con.commit()
-                    _con.close()
-                except Exception:
-                    pass
+                        _con = _sql.connect(_db_path(), timeout=5)
+                        _cur = _con.execute("SELECT COUNT(*) FROM trades")
+                        if _cur.fetchone()[0] == 0:
+                            _con.execute(
+                                "INSERT INTO trades (timestamp, symbol, type, action, price, size, notional, balance)"
+                                " VALUES (datetime('now'), '__SEED__', 'SYSTEM', 'SYSTEM', 0, 0, 0, ?)",
+                                (_snap.withdrawable_usd,),
+                            )
+                            _con.commit()
+                        _con.close()
+                    except Exception:
+                        pass
         except Exception as exc:
-            print(f"paper balance sync failed (using default): {exc}")
+            print(f"balance sync failed (using default): {exc}")
 
     import strategy.mei_alpha_v1 as mei_alpha_v1
 
