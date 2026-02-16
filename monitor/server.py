@@ -1020,8 +1020,22 @@ def mode_paths(mode: str) -> tuple[Path, Path]:
         db = Path(os.getenv("AIQ_MONITOR_LIVE_DB", str(AIQ_ROOT / "trading_engine_live.db")))
         log = Path(os.getenv("AIQ_MONITOR_LIVE_LOG", str(AIQ_ROOT / "live_daemon_log.txt")))
         return db, log
-    db = Path(os.getenv("AIQ_MONITOR_PAPER_DB", str(AIQ_ROOT / "trading_engine.db")))
-    log = Path(os.getenv("AIQ_MONITOR_PAPER_LOG", str(AIQ_ROOT / "daemon_log.txt")))
+    # paper1/2/3 support: "paper" is alias for "paper1"
+    if mode2 in ("paper", "paper1"):
+        db = Path(os.getenv("AIQ_MONITOR_PAPER1_DB", os.getenv("AIQ_MONITOR_PAPER_DB", str(AIQ_ROOT / "trading_engine.db"))))
+        log = Path(os.getenv("AIQ_MONITOR_PAPER1_LOG", os.getenv("AIQ_MONITOR_PAPER_LOG", str(AIQ_ROOT / "daemon_log.txt"))))
+        return db, log
+    if mode2 == "paper2":
+        db = Path(os.getenv("AIQ_MONITOR_PAPER2_DB", str(AIQ_ROOT / "trading_engine_paper2.db")))
+        log = Path(os.getenv("AIQ_MONITOR_PAPER2_LOG", str(AIQ_ROOT / "paper2_daemon_log.txt")))
+        return db, log
+    if mode2 == "paper3":
+        db = Path(os.getenv("AIQ_MONITOR_PAPER3_DB", str(AIQ_ROOT / "trading_engine_paper3.db")))
+        log = Path(os.getenv("AIQ_MONITOR_PAPER3_LOG", str(AIQ_ROOT / "paper3_daemon_log.txt")))
+        return db, log
+    # fallback: treat unknown as paper1
+    db = Path(os.getenv("AIQ_MONITOR_PAPER1_DB", os.getenv("AIQ_MONITOR_PAPER_DB", str(AIQ_ROOT / "trading_engine.db"))))
+    log = Path(os.getenv("AIQ_MONITOR_PAPER1_LOG", os.getenv("AIQ_MONITOR_PAPER_LOG", str(AIQ_ROOT / "daemon_log.txt"))))
     return db, log
 
 

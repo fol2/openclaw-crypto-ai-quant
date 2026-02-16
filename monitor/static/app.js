@@ -174,17 +174,24 @@
 
   /* ── Mode / prefs ── */
 
+  const MODE_BUTTONS = [
+    { id: "modeLive", mode: "live" },
+    { id: "modePaper1", mode: "paper1" },
+    { id: "modePaper2", mode: "paper2" },
+    { id: "modePaper3", mode: "paper3" },
+  ];
+
   function setSeg(mode) {
     state.mode = mode;
     state.midDecsBySym = {};
     state.lastMidBySym = {};
     state.midFlashTimers = {};
-    const live = $("#modeLive");
-    const paper = $("#modePaper");
-    live.classList.toggle("is-on", mode === "live");
-    paper.classList.toggle("is-on", mode === "paper");
-    live.setAttribute("aria-selected", mode === "live" ? "true" : "false");
-    paper.setAttribute("aria-selected", mode === "paper" ? "true" : "false");
+    for (const mb of MODE_BUTTONS) {
+      const el = $("#" + mb.id);
+      if (!el) continue;
+      el.classList.toggle("is-on", mode === mb.mode);
+      el.setAttribute("aria-selected", mode === mb.mode ? "true" : "false");
+    }
     if (isMobile()) {
       const mv = storageGet(prefKey("mobileView"));
       setMobileView(mv || "list", { persist: false });
@@ -1799,8 +1806,10 @@
   /* ── UI bindings ── */
 
   function bindUi() {
-    $("#modeLive").addEventListener("click", () => { state.focus = null; setSeg("live"); pollSnapshot(); });
-    $("#modePaper").addEventListener("click", () => { state.focus = null; setSeg("paper"); pollSnapshot(); });
+    for (const mb of MODE_BUTTONS) {
+      const el = $("#" + mb.id);
+      if (el) el.addEventListener("click", () => { state.focus = null; setSeg(mb.mode); pollSnapshot(); });
+    }
     const ml = $("#mnavList");
     const mf = $("#mnavFocus");
     if (ml) ml.addEventListener("click", () => setMobileView("list", { focusSearch: true }));
