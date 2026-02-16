@@ -161,6 +161,14 @@ struct __align__(16) GpuComboConfig {
     float anomaly_bb_width_ratio_gt;  float slow_drift_ranging_slope_override;
     unsigned int snapshot_offset;  unsigned int breadth_offset;
     float tp_strong_adx_gt;  float tp_weak_adx_lt;
+    // === Decision codegen fields (AQC-1250) ===
+    unsigned int enable_pullback_entries;
+    float anomaly_price_change_pct;  float anomaly_ema_dev_pct;
+    float ranging_rsi_low;  float ranging_rsi_high;  unsigned int ranging_min_signals;
+    float stoch_rsi_block_long_gt;  float stoch_rsi_block_short_lt;
+    unsigned int ave_enabled;
+    float tp_mult_strong;  float tp_mult_weak;
+    unsigned int _codegen_pad;
 };
 
 struct GpuComboState {
