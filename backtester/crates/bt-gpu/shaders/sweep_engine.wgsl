@@ -913,9 +913,19 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
                     if p_atr >= cfg.add_min_profit_atr {
                         let elapsed_sec = snap.t_sec - pos.last_add_time_sec;
                         if elapsed_sec >= cfg.add_cooldown_minutes * 60u {
-                            // Execute pyramid add
-                            let equity = state.balance;
-                            let base_margin = equity * cfg.allocation_pct;
+                            // Execute pyramid add (use equity = balance + unrealized PnL)
+                            var pyr_equity = state.balance;
+                            for (var eq_s2 = 0u; eq_s2 < ns; eq_s2++) {
+                                let eq_p2 = state.positions[eq_s2];
+                                if eq_p2.pos_type != POS_EMPTY {
+                                    let eq_snap2 = snapshots[bar * ns + eq_s2];
+                                    if eq_snap2.valid != 0u {
+                                        pyr_equity += profit_usd(eq_p2, eq_snap2.close);
+                                    }
+                                }
+                            }
+                            if pyr_equity < 0.0 { pyr_equity = 0.0; }
+                            let base_margin = pyr_equity * cfg.allocation_pct;
                             let add_margin = base_margin * cfg.add_fraction_of_base_margin;
                             let lev = pos.leverage;
                             var add_notional = add_margin * lev;
@@ -1023,6 +1033,19 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         }
 
         // ── Phase 4: Execute ranked entries ─────────────────────────────
+        // Compute equity = balance + unrealized PnL (mirrors CPU engine.rs:1094-1095)
+        var entry_equity = state.balance;
+        for (var eq_s = 0u; eq_s < ns; eq_s++) {
+            let eq_p = state.positions[eq_s];
+            if eq_p.pos_type != POS_EMPTY {
+                let eq_snap = snapshots[bar * ns + eq_s];
+                if eq_snap.valid != 0u {
+                    entry_equity += profit_usd(eq_p, eq_snap.close);
+                }
+            }
+        }
+        if entry_equity < 0.0 { entry_equity = 0.0; }
+
         for (var i = 0u; i < num_cands; i++) {
             if state.entries_this_bar >= cfg.max_entry_orders_per_loop { break; }
             if state.num_open >= cfg.max_open_positions { break; }
@@ -1037,11 +1060,11 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
                     total_margin += state.positions[s].margin_used;
                 }
             }
-            let headroom = state.balance * cfg.max_total_margin_pct - total_margin;
+            let headroom = entry_equity * cfg.max_total_margin_pct - total_margin;
             if headroom <= 0.0 { continue; }
 
             // Sizing
-            let sizing = compute_entry_size(state.balance, snap.close, cand.confidence,
+            let sizing = compute_entry_size(entry_equity, snap.close, cand.confidence,
                                             cand.atr, snap, &cfg);
             var size = sizing.x;
             var margin = sizing.y;
