@@ -2,7 +2,8 @@
 // GPU Sweep Engine -- CUDA Compute Kernel
 // =============================================================================
 //
-// 1:1 port of sweep_engine.wgsl to CUDA C.
+// Originally ported from sweep_engine.wgsl; now the sole production kernel.
+// The WGSL shader is deprecated (AQC-1241) and no longer maintained.
 // Mirrors the Rust backtester trade logic for parameter sweep.
 // Indicators are precomputed on CPU; this kernel only runs trade decisions.
 //

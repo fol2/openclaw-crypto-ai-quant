@@ -1,6 +1,7 @@
 //! CUDA device initialization, buffer management, and kernel dispatch.
 //!
-//! Uses cudarc (CUDA driver API) instead of wgpu/Vulkan.
+//! Uses cudarc (CUDA driver API). The earlier wgpu/WGSL path is deprecated
+//! (AQC-1241); see `shaders/sweep_engine.wgsl` for the archived shader.
 //! PTX is pre-compiled by build.rs via nvcc and embedded at compile time.
 //!
 //! Two kernel modules:
