@@ -438,6 +438,17 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             prev = old_positions.get(sym) or {}
             st = load_pos_state(sym)
 
+            # Crash recovery warning: if no in-memory state exists (cold start) and
+            # DB position_state has trailing_sl / adds_count, log it for visibility.
+            if not prev and st:
+                _db_tsl = st.get("trailing_sl")
+                _db_adds = st.get("adds_count")
+                if _db_tsl is not None or (_db_adds is not None and int(_db_adds or 0) > 0):
+                    print(
+                        f"⚠️ [{sym}] crash recovery: restoring trailing_sl={_db_tsl}, "
+                        f"adds_count={_db_adds} from position_state DB"
+                    )
+
             entry_atr = _safe_float(prev.get("entry_atr"), 0.0)
             if entry_atr <= 0:
                 entry_atr2 = load_last_entry_atr(sym)
@@ -623,6 +634,48 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     conn.close()
             except Exception:
                 pass
+
+    def _estimate_margin_used(self, symbol: str, pos: dict, *, mark_price: float | None = None) -> float:
+        """Live override: warns when WS price is stale and entry price fallback is used."""
+        try:
+            lev = float(pos.get("leverage") or 1.0)
+        except Exception:
+            lev = 1.0
+        if lev <= 0:
+            lev = 1.0
+
+        try:
+            sz = float(pos.get("size") or 0.0)
+        except Exception:
+            sz = 0.0
+        if sz <= 0:
+            return 0.0
+
+        px = None
+        if mark_price is not None:
+            px = mark_price
+        else:
+            mid = hyperliquid_ws.hl_ws.get_mid(symbol, max_age_s=10.0)
+            if mid is not None:
+                px = float(mid)
+            else:
+                bbo = hyperliquid_ws.hl_ws.get_bbo(symbol, max_age_s=15.0)
+                if bbo is not None:
+                    bid, ask = bbo
+                    if bid > 0 and ask > 0:
+                        px = (bid + ask) / 2.0
+        if px is None:
+            entry_price = 0.0
+            try:
+                entry_price = float(pos.get("entry_price") or 0.0)
+            except Exception:
+                entry_price = 0.0
+            print(f"⚠️ [{symbol}] margin estimate using entry price (WS mid stale)")
+            px = entry_price
+
+        if px <= 0:
+            return 0.0
+        return abs(sz) * float(px) / lev
 
     def _push_pending(self, symbol: str, ctx: dict) -> None:
         sym = str(symbol or "").strip().upper()
@@ -1027,9 +1080,14 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             return False
 
         max_total_margin_pct = float(trade_cfg.get("max_total_margin_pct", 0.60))
-        current_margin = 0.0
-        for s, p in (self.positions or {}).items():
-            current_margin += self._estimate_margin_used(s, p)
+        # Prefer exchange-reported total margin when available (more accurate than estimate).
+        exchange_margin = _safe_float(getattr(self, "_total_margin_used_usd", None), 0.0)
+        if exchange_margin > 0:
+            current_margin = exchange_margin
+        else:
+            current_margin = 0.0
+            for s, p in (self.positions or {}).items():
+                current_margin += self._estimate_margin_used(s, p)
         if (current_margin + margin_add) > (equity_base * max_total_margin_pct):
             return False
 
@@ -2203,9 +2261,14 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
 
         # Margin availability / global cap.
         max_total_margin_pct = float(trade_cfg.get("max_total_margin_pct", 0.60))
-        current_margin = 0.0
-        for s, p in (self.positions or {}).items():
-            current_margin += self._estimate_margin_used(s, p)
+        # Prefer exchange-reported total margin when available (more accurate than estimate).
+        exchange_margin = _safe_float(getattr(self, "_total_margin_used_usd", None), 0.0)
+        if exchange_margin > 0:
+            current_margin = exchange_margin
+        else:
+            current_margin = 0.0
+            for s, p in (self.positions or {}).items():
+                current_margin += self._estimate_margin_used(s, p)
         try:
             available_margin = max(0.0, float(self._account_value_usd) - float(self._total_margin_used_usd))
         except Exception:
@@ -2865,6 +2928,28 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
             cols = set()
 
         has_meta = "meta_json" in cols
+
+        # Secondary dedup guard: REST backfill fills may have a different fill_hash than
+        # the WS fill for the same logical execution.  Check if a trade with the same
+        # (symbol, action, size, price) within a 1-second window already exists.
+        try:
+            ts_lo = datetime.datetime.fromtimestamp((t_ms - 1000) / 1000.0, tz=datetime.timezone.utc).isoformat()
+            ts_hi = datetime.datetime.fromtimestamp((t_ms + 1000) / 1000.0, tz=datetime.timezone.utc).isoformat()
+            cur.execute(
+                """
+                SELECT 1 FROM trades
+                WHERE symbol = ? AND action = ? AND ABS(size - ?) < 1e-12
+                  AND ABS(price - ?) < 1e-8
+                  AND timestamp >= ? AND timestamp <= ?
+                LIMIT 1
+                """,
+                (sym, action, sz, px, ts_lo, ts_hi),
+            )
+            if cur.fetchone() is not None:
+                continue
+        except Exception:
+            pass  # secondary dedup failed; fall through to primary INSERT OR IGNORE
+
         if {"fill_hash", "fill_tid"}.issubset(cols):
             # Dedup at DB level via a unique index (added by mei_alpha_v1.ensure_db() migration).
             if has_meta:
