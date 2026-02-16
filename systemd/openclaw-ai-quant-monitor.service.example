@@ -12,5 +12,10 @@ Restart=always
 RestartSec=5
 KillMode=process
 
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+
 [Install]
 WantedBy=default.target

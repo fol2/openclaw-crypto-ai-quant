@@ -370,31 +370,37 @@ class HyperliquidWS:
                 return None, None
 
     def health(self, *, symbols: list[str], interval: str) -> WsHealth:
+        # Copy dicts under lock to avoid race with reconnect thread mutating them.
         with self._lock:
-            mids_age: float | None = None
-            for sym in symbols:
-                ts = self._mids_updated_at.get(sym)
-                if ts is None:
-                    continue
-                age = time.time() - ts
-                mids_age = age if mids_age is None else max(mids_age, age)
+            mids_snap = dict(self._mids_updated_at)
+            candle_snap = dict(self._candle_updated_at)
+            bbo_snap = dict(self._bbo_updated_at)
 
-            candle_age: float | None = None
-            for sym in symbols:
-                key = (sym, interval)
-                ts = self._candle_updated_at.get(key)
-                if ts is None:
-                    continue
-                age = time.time() - ts
-                candle_age = age if candle_age is None else max(candle_age, age)
+        now = time.time()
+        mids_age: float | None = None
+        for sym in symbols:
+            ts = mids_snap.get(sym)
+            if ts is None:
+                continue
+            age = now - ts
+            mids_age = age if mids_age is None else max(mids_age, age)
 
-            bbo_age: float | None = None
-            for sym in symbols:
-                ts = self._bbo_updated_at.get(sym)
-                if ts is None:
-                    continue
-                age = time.time() - ts
-                bbo_age = age if bbo_age is None else max(bbo_age, age)
+        candle_age: float | None = None
+        for sym in symbols:
+            key = (sym, interval)
+            ts = candle_snap.get(key)
+            if ts is None:
+                continue
+            age = now - ts
+            candle_age = age if candle_age is None else max(candle_age, age)
+
+        bbo_age: float | None = None
+        for sym in symbols:
+            ts = bbo_snap.get(sym)
+            if ts is None:
+                continue
+            age = now - ts
+            bbo_age = age if bbo_age is None else max(bbo_age, age)
 
         return WsHealth(mids_age_s=mids_age, candle_age_s=candle_age, bbo_age_s=bbo_age)
 
@@ -581,7 +587,8 @@ class HyperliquidWS:
     def _on_message(self, _ws, message: str):
         try:
             msg = json.loads(message)
-        except Exception:
+        except json.JSONDecodeError as e:
+            logger.warning("WS JSON parse error: %s (message truncated: %s)", e, str(message)[:200])
             return
 
         channel = msg.get("channel")
@@ -699,6 +706,7 @@ class HyperliquidWS:
                                 self._user_fills.popleft()
                             except Exception:
                                 pass
+                            logger.warning("user_fills queue limit hit (%d); oldest item evicted", HL_WS_MAX_EVENT_QUEUE)
                         self._user_fills.append(item)
                     self._user_fills_updated_at = now
             return
@@ -713,6 +721,7 @@ class HyperliquidWS:
                         self._order_updates.popleft()
                     except Exception:
                         pass
+                    logger.warning("order_updates queue limit hit (%d); oldest item evicted", HL_WS_MAX_EVENT_QUEUE)
                 self._order_updates.append({"t": now, "data": data})
                 self._order_updates_updated_at = now
             return
@@ -727,6 +736,7 @@ class HyperliquidWS:
                         self._user_fundings.popleft()
                     except Exception:
                         pass
+                    logger.warning("user_fundings queue limit hit (%d); oldest item evicted", HL_WS_MAX_EVENT_QUEUE)
                 self._user_fundings.append({"t": now, "data": data})
                 self._user_fundings_updated_at = now
             return
@@ -741,6 +751,7 @@ class HyperliquidWS:
                         self._user_ledger_updates.popleft()
                     except Exception:
                         pass
+                    logger.warning("user_ledger_updates queue limit hit (%d); oldest item evicted", HL_WS_MAX_EVENT_QUEUE)
                 self._user_ledger_updates.append({"t": now, "data": data})
                 self._user_ledger_updated_at = now
             return

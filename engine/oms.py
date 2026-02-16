@@ -1173,7 +1173,7 @@ class LiveOms:
                 resp = result.get("response") or {}
                 data = resp.get("data") or {}
                 statuses = data.get("statuses") or []
-            except Exception:
+            except (AttributeError, TypeError):
                 statuses = []
             if isinstance(statuses, list):
                 for st in statuses:

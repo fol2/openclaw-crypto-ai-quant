@@ -74,6 +74,9 @@ def openclaw_exec_env() -> dict[str, str]:
     return env
 
 
+VALID_CHANNELS = frozenset({"discord", "telegram", "slack", "webhook", "email"})
+
+
 def send_openclaw_message(
     *,
     channel: str,
@@ -82,12 +85,15 @@ def send_openclaw_message(
     timeout_s: float = 6.0,
 ) -> subprocess.CompletedProcess[str]:
     """Send a message via OpenClaw CLI with small retry/backoff for transient failures."""
+    ch = str(channel or "").strip().lower()
+    if ch not in VALID_CHANNELS:
+        raise ValueError(f"Invalid channel {ch!r}; allowed: {sorted(VALID_CHANNELS)}")
     cmd = [
         resolve_openclaw_bin(),
         "message",
         "send",
         "--channel",
-        str(channel),
+        ch,
         "--target",
         str(target),
         "--message",

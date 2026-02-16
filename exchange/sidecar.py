@@ -164,7 +164,8 @@ class SidecarWSClient:
                 self._next_id += 1
                 req = {"id": rid, "method": str(method), "params": params or {}}
                 line = (json.dumps(req, separators=(",", ":")) + "\n").encode("utf-8")
-                assert self._f is not None
+                if self._f is None:
+                    raise RuntimeError("sidecar connection broken")
                 self._f.write(line)
                 self._f.flush()
 
@@ -177,8 +178,9 @@ class SidecarWSClient:
                 if not bool(resp.get("ok", False)):
                     raise RuntimeError(str(resp.get("error") or "sidecar error"))
                 return resp.get("result")
-            except Exception:
+            except Exception as e:
                 # Broken connection: close and let callers retry via higher-level logic.
+                logger.error("sidecar RPC failed: method=%s error=%s", method, e)
                 self._close()
                 raise
 

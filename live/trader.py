@@ -125,6 +125,8 @@ except Exception:
     _DISCORD_QUEUE_MAX = 200
 _DISCORD_QUEUE_MAX = max(10, min(5000, int(_DISCORD_QUEUE_MAX)))
 
+# NOTE(L4): This global queue is shared across all instances in the same process.
+# Multi-instance deployments should use separate processes to avoid queue contention.
 _DISCORD_QUEUE: queue.Queue[tuple[str, str]] = queue.Queue(maxsize=_DISCORD_QUEUE_MAX)
 _DISCORD_WORKER_STARTED = False
 
@@ -289,6 +291,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         # Track OPEN intents we sent but haven't seen in exchange state yet.
         # This prevents exceeding max_open_positions within a single decision loop without forcing REST syncs.
         self._pending_open_sent_at_s: dict[str, float] = {}
+        self._pending_open_lock = threading.Lock()
         # PESC (post-exit cooldown) needs a real-time close marker because fills are only
         # persisted after we drain WS/REST events (which can lag the decision loop).
         self._last_full_close_sent_at_s: dict[str, float] = {}
@@ -319,12 +322,13 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         if ttl <= 0:
             return
         now_s = time.time()
-        for sym, ts in list((self._pending_open_sent_at_s or {}).items()):
-            try:
-                if (now_s - float(ts)) >= ttl:
+        with self._pending_open_lock:
+            for sym, ts in list((self._pending_open_sent_at_s or {}).items()):
+                try:
+                    if (now_s - float(ts)) >= ttl:
+                        self._pending_open_sent_at_s.pop(sym, None)
+                except Exception:
                     self._pending_open_sent_at_s.pop(sym, None)
-            except Exception:
-                self._pending_open_sent_at_s.pop(sym, None)
 
     def _exit_cooldown_s(self) -> float:
         try:
@@ -485,9 +489,10 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         # Clear pending OPEN intents once we see the position in exchange state.
         try:
             self._prune_pending_opens()
-            for sym in list((self._pending_open_sent_at_s or {}).keys()):
-                if sym in self.positions:
-                    self._pending_open_sent_at_s.pop(sym, None)
+            with self._pending_open_lock:
+                for sym in list((self._pending_open_sent_at_s or {}).keys()):
+                    if sym in self.positions:
+                        self._pending_open_sent_at_s.pop(sym, None)
         except Exception:
             pass
         # Refresh leverage cache from exchange state (open positions only).
@@ -825,8 +830,9 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     trade_cfg["max_open_positions"] = 1
             if "max_notional_usd_per_order" not in trade_cfg:
                 try:
-                    trade_cfg["max_notional_usd_per_order"] = float(
-                        os.getenv("AI_QUANT_LIVE_MAX_NOTIONAL_USD_PER_ORDER", "15.0")
+                    trade_cfg["max_notional_usd_per_order"] = min(
+                        float(os.getenv("AI_QUANT_LIVE_MAX_NOTIONAL_USD_PER_ORDER", "15.0")),
+                        1_000_000.0,
                     )
                 except Exception:
                     trade_cfg["max_notional_usd_per_order"] = 15.0
@@ -1198,7 +1204,9 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     )
                     return False
             except Exception:
-                pass
+                import logging as _logging
+                _logging.getLogger(__name__).error("risk.allow_order() raised for ADD %s, BLOCKING order as fail-closed", sym, exc_info=True)
+                return False
 
         # Per-loop entry budget (OPEN/ADD): prevent burst order submits from stalling the loop.
         try:
@@ -1286,6 +1294,9 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
 
             if err_kind in {"timeout", "exception"}:
                 # Transport errors are ambiguous: the order may have been accepted even if the response timed out.
+                # TODO(H1): Trigger reconciliation check after timeout to detect state divergence.
+                import logging as _logging
+                _logging.getLogger(__name__).warning("order timeout/exception for ADD %s — exchange state may diverge", sym)
                 self._note_entry_fail(sym, f"market_open {err_kind}")
                 if risk is not None:
                     try:
@@ -2016,9 +2027,10 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         open_syms = sorted(
             [str(s or "").strip().upper() for s in (self.positions or {}).keys() if str(s or "").strip()]
         )
-        pending_syms = sorted(
-            [str(s or "").strip().upper() for s in (self._pending_open_sent_at_s or {}).keys() if str(s or "").strip()]
-        )
+        with self._pending_open_lock:
+            pending_syms = sorted(
+                [str(s or "").strip().upper() for s in (self._pending_open_sent_at_s or {}).keys() if str(s or "").strip()]
+            )
         open_n = int(len(open_syms))
         pending_n = int(len(pending_syms))
         total_n = open_n + pending_n
@@ -2088,19 +2100,18 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             last_type = None
             last_reason = None
             try:
-                conn = sqlite3.connect(mei_alpha_v1.DB_PATH, timeout=_DB_TIMEOUT_S)
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    SELECT timestamp, type, reason 
-                    FROM trades 
-                    WHERE symbol = ? AND action = 'CLOSE'
-                    ORDER BY id DESC LIMIT 1
-                    """,
-                    (sym,),
-                )
-                row = cursor.fetchone()
-                conn.close()
+                with sqlite3.connect(mei_alpha_v1.DB_PATH, timeout=_DB_TIMEOUT_S) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        """
+                        SELECT timestamp, type, reason
+                        FROM trades
+                        WHERE symbol = ? AND action = 'CLOSE'
+                        ORDER BY id DESC LIMIT 1
+                        """,
+                        (sym,),
+                    )
+                    row = cursor.fetchone()
 
                 if row:
                     last_ts, last_type, last_reason = row
@@ -2118,10 +2129,6 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                         last_ts_s = None
             except Exception as e:
                 print(f"⚠️ LIVE PESC db query failed for {sym}: {e}")
-                try:
-                    conn.close()
-                except Exception:
-                    pass
 
             mem_ts_s = _safe_float(self._last_full_close_sent_at_s.get(sym), None)
             mem_type = str(self._last_full_close_sent_type.get(sym) or "").upper() or None
@@ -2452,7 +2459,9 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     )
                     return
             except Exception:
-                pass
+                import logging as _logging
+                _logging.getLogger(__name__).error("risk.allow_order() raised for OPEN %s, BLOCKING order as fail-closed", sym, exc_info=True)
+                return
 
         if not self._can_send_entries():
             why = "DRY LIVE" if live_mode() == "dry_live" else ("CLOSE-ONLY" if self._can_send_orders() else "DISABLED")
@@ -2566,6 +2575,9 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
 
             if err_kind in {"timeout", "exception"}:
                 # Transport errors are ambiguous: the order may have been accepted even if the response timed out.
+                # TODO(H1): Trigger reconciliation check after timeout to detect state divergence.
+                import logging as _logging
+                _logging.getLogger(__name__).warning("order timeout/exception for OPEN %s — exchange state may diverge", sym)
                 self._note_entry_fail(sym, f"market_open {err_kind}")
                 if risk is not None:
                     try:
@@ -2598,7 +2610,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                         pass
                 # Conservatively count this as a pending open so we don't exceed capacity in-loop.
                 try:
-                    self._pending_open_sent_at_s[sym] = time.time()
+                    with self._pending_open_lock:
+                        self._pending_open_sent_at_s[sym] = time.time()
                 except Exception:
                     pass
             else:
@@ -2742,7 +2755,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         # - periodic sync (AI_QUANT_LIVE_STATE_SYNC_SECS)
         # to pick up the position. Meanwhile, count this as a pending open so we don't exceed capacity.
         try:
-            self._pending_open_sent_at_s[sym] = time.time()
+            with self._pending_open_lock:
+                self._pending_open_sent_at_s[sym] = time.time()
         except Exception:
             pass
 
@@ -2850,6 +2864,8 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
         except Exception:
             continue
         if px <= 0 or sz <= 0:
+            import logging as _logging
+            _logging.getLogger(__name__).warning("fill skipped: invalid px=%s sz=%s for %s", f.get("px"), f.get("sz"), sym)
             continue
 
         dir_s = str(f.get("dir") or "")
@@ -2861,6 +2877,8 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
         pos_type, action = _dir_to_action(dir_s, start_pos, sz)
         if pos_type is None:
             # Unknown direction: still keep raw ws_events; skip trades row.
+            import logging as _logging
+            _logging.getLogger(__name__).warning("fill skipped: unknown direction dir=%r for %s (px=%s sz=%s)", dir_s, sym, px, sz)
             continue
 
         fee = _safe_float(f.get("fee"), 0.0)
@@ -3255,8 +3273,10 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
             except Exception:
                 pass
 
-    conn.commit()
-    conn.close()
+    try:
+        conn.commit()
+    finally:
+        conn.close()
     return inserted
 
 
@@ -3280,8 +3300,10 @@ def process_ws_events(channel: str, events: list[dict]) -> int:
             n += 1
         except Exception:
             continue
-    conn.commit()
-    conn.close()
+    try:
+        conn.commit()
+    finally:
+        conn.close()
     return n
 
 
@@ -3532,8 +3554,10 @@ def process_user_fundings(trader: LiveTrader, events: list[dict]) -> int:
             except Exception:
                 pass
 
-    conn.commit()
-    conn.close()
+    try:
+        conn.commit()
+    finally:
+        conn.close()
     return inserted
 
 

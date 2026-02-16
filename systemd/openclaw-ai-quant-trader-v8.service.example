@@ -44,6 +44,11 @@ Environment=AI_QUANT_NEUTRAL_AUDIT_SAMPLE_SYMBOLS=5
 
 Environment=PYTHONUNBUFFERED=1
 
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+
 [Install]
 WantedBy=default.target
 

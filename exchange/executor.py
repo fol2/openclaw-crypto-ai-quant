@@ -103,6 +103,8 @@ class HyperliquidLiveExecutor:
 
     - Market data and user fills/funding are handled separately via `hyperliquid_ws.py`.
     - This class rate-limits `user_state()` to avoid hammering the API.
+    - NOTE(L10): SSL/TLS verification is handled by the Hyperliquid Python SDK (requests library).
+      The SDK uses the system CA bundle by default. No custom SSL configuration is needed here.
     """
 
     def __init__(

@@ -457,25 +457,25 @@ class MarketDataHub:
         lim = max(1, int(limit))
 
         db_path = self._candle_db_path(interval_s)
-        conn = None
         try:
             # Read-only when candle REST backfill is disabled (sidecar owns candles).
             if not self._rest_candle_backfill_enabled:
-                conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=self._db_timeout_s)
+                uri = f"file:{db_path}?mode=ro"
+                with sqlite3.connect(uri, uri=True, timeout=self._db_timeout_s) as conn:
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT t, t_close FROM candles WHERE symbol = ? AND interval = ? ORDER BY t DESC LIMIT ?",
+                        (sym, interval_s, lim),
+                    )
+                    rows = cur.fetchall() or []
             else:
-                conn = sqlite3.connect(db_path, timeout=self._db_timeout_s)
-            cur = conn.cursor()
-            cur.execute(
-                """
-                SELECT t, t_close
-                FROM candles
-                WHERE symbol = ? AND interval = ?
-                ORDER BY t DESC
-                LIMIT ?
-                """,
-                (sym, interval_s, lim),
-            )
-            rows = cur.fetchall() or []
+                with sqlite3.connect(db_path, timeout=self._db_timeout_s) as conn:
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT t, t_close FROM candles WHERE symbol = ? AND interval = ? ORDER BY t DESC LIMIT ?",
+                        (sym, interval_s, lim),
+                    )
+                    rows = cur.fetchall() or []
             out: list[tuple[int | None, int | None]] = []
             for t_ms, tc_ms in rows:
                 try:
@@ -490,12 +490,6 @@ class MarketDataHub:
             return out
         except Exception:
             return []
-        finally:
-            try:
-                if conn is not None:
-                    conn.close()
-            except Exception:
-                pass
 
     def get_candles_df(self, symbol: str, *, interval: str, min_rows: int) -> pd.DataFrame | None:
         sym = str(symbol).upper()
@@ -644,38 +638,40 @@ class MarketDataHub:
     def _read_candles_from_db(self, symbol: str, interval: str, *, limit: int) -> pd.DataFrame | None:
         """Read candles directly from SQLite into the same column names used by your strategy."""
         rows: list[tuple] = []
-        conn = None
         try:
             db_path = self._candle_db_path(interval)
             if not self._rest_candle_backfill_enabled:
-                conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=self._db_timeout_s)
+                uri = f"file:{db_path}?mode=ro"
+                with sqlite3.connect(uri, uri=True, timeout=self._db_timeout_s) as conn:
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT t, t_close, o, h, l, c, v, n FROM candles WHERE symbol = ? AND interval = ? ORDER BY t DESC LIMIT ?",
+                        (symbol, interval, int(limit)),
+                    )
+                    rows = cur.fetchall()
             else:
-                conn = sqlite3.connect(db_path, timeout=self._db_timeout_s)
-            cur = conn.cursor()
-            cur.execute(
-                """
-                SELECT t, t_close, o, h, l, c, v, n
-                FROM candles
-                WHERE symbol = ? AND interval = ?
-                ORDER BY t DESC
-                LIMIT ?
-                """,
-                (symbol, interval, int(limit)),
-            )
-            rows = cur.fetchall()
+                with sqlite3.connect(db_path, timeout=self._db_timeout_s) as conn:
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT t, t_close, o, h, l, c, v, n FROM candles WHERE symbol = ? AND interval = ? ORDER BY t DESC LIMIT ?",
+                        (symbol, interval, int(limit)),
+                    )
+                    rows = cur.fetchall()
         except Exception:
             rows = []
-        finally:
-            try:
-                if conn is not None:
-                    conn.close()
-            except Exception:
-                pass
 
         if not rows:
             return None
         # We fetched newest-first (DESC). Reverse to chronological (ASC) for indicators.
         rows = list(reversed(rows))
+
+        import math
+
+        def _finite_or_none(val: Any) -> float | None:
+            if val is None:
+                return None
+            f = float(val)
+            return f if math.isfinite(f) else None
 
         out_rows: list[dict[str, Any]] = []
         for t_ms, T_ms, o, h, low_val, c, v, n in rows:
@@ -685,11 +681,11 @@ class MarketDataHub:
                     "T": int(T_ms) if T_ms is not None else None,
                     "s": symbol,
                     "i": interval,
-                    "Open": float(o) if o is not None else None,
-                    "High": float(h) if h is not None else None,
-                    "Low": float(low_val) if low_val is not None else None,
-                    "Close": float(c) if c is not None else None,
-                    "Volume": float(v) if v is not None else None,
+                    "Open": _finite_or_none(o),
+                    "High": _finite_or_none(h),
+                    "Low": _finite_or_none(low_val),
+                    "Close": _finite_or_none(c),
+                    "Volume": _finite_or_none(v),
                     "n": int(n) if n is not None else None,
                 }
             )

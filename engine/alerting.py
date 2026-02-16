@@ -168,10 +168,15 @@ def send_openclaw_message(*, channel: str, target: str, message: str, timeout_s:
     )
 
 
+import logging as _logging
+
+_alert_logger = _logging.getLogger(__name__)
+
 _ALERT_QUEUE_LOCK = threading.RLock()
 _ALERT_QUEUE_MAX = max(10, min(5000, _env_int("AI_QUANT_ALERT_QUEUE_MAX", 200)))
 _ALERT_QUEUE: queue.Queue[tuple[str, str, str]] = queue.Queue(maxsize=_ALERT_QUEUE_MAX)
 _ALERT_WORKER_STARTED = False
+_ALERT_DROPPED_COUNT = 0
 
 
 def _alert_worker() -> None:
@@ -242,7 +247,6 @@ def send_alert(message: str, *, extra: dict[str, Any] | None = None) -> None:
             _ALERT_QUEUE.put_nowait((str(ch), str(tgt), msg))
         except Exception:
             # Drop when overloaded; correctness > notifications.
-            try:
-                print("⚠️ Alert queue full; dropping message")
-            except Exception:
-                pass
+            global _ALERT_DROPPED_COUNT
+            _ALERT_DROPPED_COUNT += 1
+            _alert_logger.warning("Alert queue full; dropping message (total dropped: %d)", _ALERT_DROPPED_COUNT)

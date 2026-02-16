@@ -129,7 +129,9 @@ class _JsonlEventSink:
     def emit(self, payload: dict[str, Any]) -> None:
         try:
             line = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-        except Exception:
+        except Exception as exc:
+            import logging as _logging
+            _logging.getLogger(__name__).warning("event_logger: JSON encoding failed: %s", exc)
             return
         try:
             self._q.put_nowait(_EventItem(line=line))
