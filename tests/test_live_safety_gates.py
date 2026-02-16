@@ -86,6 +86,14 @@ class TestLiveEntriesEnabled:
         fn = _import_live_entries_enabled()
         assert fn() is False
 
+    def test_hard_kill_switch_blocks_entries(self, monkeypatch):
+        """HARD_KILL_SWITCH=1 blocks entries (orders disabled entirely)."""
+        monkeypatch.setenv("AI_QUANT_LIVE_ENABLE", "1")
+        monkeypatch.setenv("AI_QUANT_LIVE_CONFIRM", "I_UNDERSTAND_THIS_CAN_LOSE_MONEY")
+        monkeypatch.setenv("AI_QUANT_HARD_KILL_SWITCH", "1")
+        fn = _import_live_entries_enabled()
+        assert fn() is False
+
     def test_entries_enabled_when_all_gates_pass(self, monkeypatch):
         """All gates pass → entries enabled."""
         monkeypatch.setenv("AI_QUANT_LIVE_ENABLE", "1")

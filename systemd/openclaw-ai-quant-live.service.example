@@ -24,8 +24,6 @@ Environment=AI_QUANT_REST_ENABLE=0
 Environment=PYTHONUNBUFFERED=1
 
 NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=read-only
 PrivateTmp=yes
 
 [Install]

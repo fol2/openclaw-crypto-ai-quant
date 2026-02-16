@@ -307,7 +307,7 @@ class PositionReconciler:
                 from engine.alerting import send_alert
                 send_alert(f"RECONCILIATION CRITICAL: {crit_details}")
             except Exception:
-                pass
+                logger.warning("failed to send critical reconciliation alert", exc_info=True)
 
         return report
 

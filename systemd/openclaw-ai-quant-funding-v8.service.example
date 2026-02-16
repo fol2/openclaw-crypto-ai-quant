@@ -10,8 +10,6 @@ EnvironmentFile=-%h/.config/openclaw/ai-quant-universe-v8.env
 ExecStart=$PROJECT_DIR/.venv/bin/python3 -u tools/fetch_funding_rates.py --days 30 --db $PROJECT_DIR/candles_dbs/funding_rates.db
 
 NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=read-only
 PrivateTmp=yes
 
 [Install]

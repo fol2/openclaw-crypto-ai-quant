@@ -366,6 +366,10 @@ class OmsStore:
             )
             cur.execute("CREATE INDEX IF NOT EXISTS idx_oms_reconcile_events_ts ON oms_reconcile_events(ts_ms)")
             conn.commit()
+            try:
+                os.chmod(str(self._db_path), 0o600)
+            except OSError:
+                pass
         finally:
             conn.close()
 

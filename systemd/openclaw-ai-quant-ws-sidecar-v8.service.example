@@ -48,8 +48,6 @@ Environment=AI_QUANT_DB_TIMEOUT_S=30
 Environment=RUST_BACKTRACE=1
 
 NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=read-only
 PrivateTmp=yes
 
 [Install]

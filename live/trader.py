@@ -8,6 +8,7 @@ This module is intentionally NOT a standalone daemon entrypoint.
 
 import datetime
 import json
+import logging
 import os
 import queue
 import sqlite3
@@ -24,6 +25,9 @@ try:
     _DB_TIMEOUT_S = float(os.getenv("AI_QUANT_DB_TIMEOUT_S", "30"))
 except Exception:
     _DB_TIMEOUT_S = 30.0
+
+logger = logging.getLogger(__name__)
+
 from exchange.executor import (
     HyperliquidLiveExecutor,
     live_entries_enabled,
@@ -1204,8 +1208,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     )
                     return False
             except Exception:
-                import logging as _logging
-                _logging.getLogger(__name__).error("risk.allow_order() raised for ADD %s, BLOCKING order as fail-closed", sym, exc_info=True)
+                logger.error("risk.allow_order() raised for ADD %s, BLOCKING order as fail-closed", sym, exc_info=True)
                 return False
 
         # Per-loop entry budget (OPEN/ADD): prevent burst order submits from stalling the loop.
@@ -1295,8 +1298,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             if err_kind in {"timeout", "exception"}:
                 # Transport errors are ambiguous: the order may have been accepted even if the response timed out.
                 # TODO(H1): Trigger reconciliation check after timeout to detect state divergence.
-                import logging as _logging
-                _logging.getLogger(__name__).warning("order timeout/exception for ADD %s — exchange state may diverge", sym)
+                logger.warning("order timeout/exception for ADD %s — exchange state may diverge", sym)
                 self._note_entry_fail(sym, f"market_open {err_kind}")
                 if risk is not None:
                     try:
@@ -2459,8 +2461,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     )
                     return
             except Exception:
-                import logging as _logging
-                _logging.getLogger(__name__).error("risk.allow_order() raised for OPEN %s, BLOCKING order as fail-closed", sym, exc_info=True)
+                logger.error("risk.allow_order() raised for OPEN %s, BLOCKING order as fail-closed", sym, exc_info=True)
                 return
 
         if not self._can_send_entries():
@@ -2576,8 +2577,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             if err_kind in {"timeout", "exception"}:
                 # Transport errors are ambiguous: the order may have been accepted even if the response timed out.
                 # TODO(H1): Trigger reconciliation check after timeout to detect state divergence.
-                import logging as _logging
-                _logging.getLogger(__name__).warning("order timeout/exception for OPEN %s — exchange state may diverge", sym)
+                logger.warning("order timeout/exception for OPEN %s — exchange state may diverge", sym)
                 self._note_entry_fail(sym, f"market_open {err_kind}")
                 if risk is not None:
                     try:
@@ -2864,8 +2864,7 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
         except Exception:
             continue
         if px <= 0 or sz <= 0:
-            import logging as _logging
-            _logging.getLogger(__name__).warning("fill skipped: invalid px=%s sz=%s for %s", f.get("px"), f.get("sz"), sym)
+            logger.warning("fill skipped: invalid px=%s sz=%s for %s", f.get("px"), f.get("sz"), sym)
             continue
 
         dir_s = str(f.get("dir") or "")
@@ -2877,8 +2876,7 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
         pos_type, action = _dir_to_action(dir_s, start_pos, sz)
         if pos_type is None:
             # Unknown direction: still keep raw ws_events; skip trades row.
-            import logging as _logging
-            _logging.getLogger(__name__).warning("fill skipped: unknown direction dir=%r for %s (px=%s sz=%s)", dir_s, sym, px, sz)
+            logger.warning("fill skipped: unknown direction dir=%r for %s (px=%s sz=%s)", dir_s, sym, px, sz)
             continue
 
         fee = _safe_float(f.get("fee"), 0.0)
