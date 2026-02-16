@@ -142,6 +142,7 @@ fn run_gpu_pnl_by_axis(
         axes: vec![SweepAxis {
             path: "trade.tp_atr_mult".to_string(),
             values: TP_AXIS_VALUES.to_vec(),
+            gate: None,
         }],
         initial_balance: INITIAL_BALANCE,
         lookback: 0,

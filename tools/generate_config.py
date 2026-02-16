@@ -400,12 +400,31 @@ def main():
         _set_nested(base_data, path, coerced)
         applied += 1
 
-    # Warn about potentially problematic config values
-    leverage_max_cap = _get_nested(base_data, "global.trade.leverage_max_cap", 0)
-    if isinstance(leverage_max_cap, (int, float)) and 0 < leverage_max_cap < 1.5:
-        print(f"⚠️  leverage_max_cap={leverage_max_cap:.4f} effectively disables "
-              f"dynamic leverage (caps all leverage to ~{leverage_max_cap:.1f}x)",
-              file=sys.stderr)
+    # --- Post-override validation & clamping ---
+
+    # Force leverage_max_cap to 0 (disabled) — individual leverage tiers should
+    # be respected without an artificial hard cap overriding them.
+    _set_nested(base_data, "global.trade.leverage_max_cap", 0.0)
+
+    # Clamp min_notional_usd to Hyperliquid's $10 hard minimum.
+    _HL_MIN_NOTIONAL = 10.0
+    for npath in ("global.trade.min_notional_usd", "global.trade.tp_partial_min_notional_usd"):
+        val = _get_nested(base_data, npath, _HL_MIN_NOTIONAL)
+        if isinstance(val, (int, float)) and val < _HL_MIN_NOTIONAL:
+            print(f"⚠️  {npath}={val} below exchange minimum — clamped to ${_HL_MIN_NOTIONAL:.0f}",
+                  file=sys.stderr)
+            _set_nested(base_data, npath, _HL_MIN_NOTIONAL)
+
+    # Clamp leverage values to integers in [1, 10].
+    for lpath in ("global.trade.leverage", "global.trade.leverage_low",
+                   "global.trade.leverage_medium", "global.trade.leverage_high"):
+        val = _get_nested(base_data, lpath, None)
+        if isinstance(val, (int, float)):
+            clamped = _clamp_int(_round_half_away_from_zero(val), 1, 10)
+            if clamped != val:
+                print(f"⚠️  {lpath}={val} clamped to integer {clamped}",
+                      file=sys.stderr)
+            _set_nested(base_data, lpath, clamped)
 
     # Update header comment
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
