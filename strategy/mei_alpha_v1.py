@@ -4733,6 +4733,13 @@ class PaperTrader:
                 if symbol in self.positions:
                     self.add_to_position(symbol, price, timestamp, confidence, atr=atr, indicators=indicators)
                 return
+            if action_upper == "REDUCE":
+                if symbol in self.positions:
+                    pos = self.positions[symbol]
+                    reduce_sz = float(target_size) if target_size is not None else float(pos.get("size", 0))
+                    self.reduce_position(symbol, reduce_sz, price, timestamp,
+                                         reason=reason or "Action REDUCE", confidence=confidence)
+                return
             if action_upper == "OPEN":
                 if symbol in self.positions:
                     return  # already open — skip (match LiveTrader)
