@@ -34,18 +34,39 @@ except ImportError:
 
 # Canonical field list matching Rust IndicatorSnapshot (bt-core indicators/mod.rs).
 _INDICATOR_SNAPSHOT_FIELDS: list[tuple[str, type]] = [
-    ("close", float), ("high", float), ("low", float), ("open", float),
-    ("volume", float), ("t", int),
-    ("ema_slow", float), ("ema_fast", float), ("ema_macro", float),
-    ("adx", float), ("adx_pos", float), ("adx_neg", float), ("adx_slope", float),
-    ("bb_upper", float), ("bb_lower", float), ("bb_width", float),
-    ("bb_width_avg", float), ("bb_width_ratio", float),
-    ("atr", float), ("atr_slope", float), ("avg_atr", float),
-    ("rsi", float), ("stoch_rsi_k", float), ("stoch_rsi_d", float),
-    ("macd_hist", float), ("prev_macd_hist", float),
-    ("prev2_macd_hist", float), ("prev3_macd_hist", float),
-    ("vol_sma", float), ("vol_trend", bool),
-    ("prev_close", float), ("prev_ema_fast", float), ("prev_ema_slow", float),
+    ("close", float),
+    ("high", float),
+    ("low", float),
+    ("open", float),
+    ("volume", float),
+    ("t", int),
+    ("ema_slow", float),
+    ("ema_fast", float),
+    ("ema_macro", float),
+    ("adx", float),
+    ("adx_pos", float),
+    ("adx_neg", float),
+    ("adx_slope", float),
+    ("bb_upper", float),
+    ("bb_lower", float),
+    ("bb_width", float),
+    ("bb_width_avg", float),
+    ("bb_width_ratio", float),
+    ("atr", float),
+    ("atr_slope", float),
+    ("avg_atr", float),
+    ("rsi", float),
+    ("stoch_rsi_k", float),
+    ("stoch_rsi_d", float),
+    ("macd_hist", float),
+    ("prev_macd_hist", float),
+    ("prev2_macd_hist", float),
+    ("prev3_macd_hist", float),
+    ("vol_sma", float),
+    ("vol_trend", bool),
+    ("prev_close", float),
+    ("prev_ema_fast", float),
+    ("prev_ema_slow", float),
     ("bar_count", int),
     ("funding_rate", float),
 ]
@@ -94,14 +115,16 @@ def build_indicator_snapshot(df, symbol=None, config=None):
         candles = []
         for i in range(len(df)):
             row = df.iloc[i]
-            candles.append({
-                "t": int(timestamps[i]) if hasattr(timestamps, "__getitem__") else int(timestamps),
-                "open": float(row["Open"]),
-                "high": float(row["High"]),
-                "low": float(row["Low"]),
-                "close": float(row["Close"]),
-                "volume": float(row["Volume"]),
-            })
+            candles.append(
+                {
+                    "t": int(timestamps[i]) if hasattr(timestamps, "__getitem__") else int(timestamps),
+                    "open": float(row["Open"]),
+                    "high": float(row["High"]),
+                    "low": float(row["Low"]),
+                    "close": float(row["Close"]),
+                    "volume": float(row["Volume"]),
+                }
+            )
         candles_json = json.dumps(candles)
         config_json = json.dumps(config) if config else "{}"
         result_json = _bt_runtime.compute_indicators(candles_json, config_json)
@@ -160,7 +183,10 @@ def _build_indicator_snapshot_python(df, timestamps, config):
     rsi_series = ta.momentum.rsi(close, window=rsi_win)
 
     stoch_rsi_obj = ta.momentum.StochRSIIndicator(
-        close, window=stoch_rsi_win, smooth1=stoch_rsi_s1, smooth2=stoch_rsi_s2,
+        close,
+        window=stoch_rsi_win,
+        smooth1=stoch_rsi_s1,
+        smooth2=stoch_rsi_s2,
     )
     stoch_k_series = stoch_rsi_obj.stochrsi_k()
     stoch_d_series = stoch_rsi_obj.stochrsi_d()
@@ -261,9 +287,10 @@ def _json_dumps_safe(obj) -> str:
 # Entry signal delegation to kernel Evaluate mode (AQC-812)
 # ---------------------------------------------------------------------------
 
-def build_gate_result(snap: dict, symbol: str, cfg: dict | None = None,
-                      btc_bullish: bool | None = None,
-                      ema_slow_slope_pct: float = 0.0) -> dict:
+
+def build_gate_result(
+    snap: dict, symbol: str, cfg: dict | None = None, btc_bullish: bool | None = None, ema_slow_slope_pct: float = 0.0
+) -> dict:
     """Build a GateResult dict matching the Rust GateResult schema.
 
     Mirrors the gate evaluation logic from ``analyze()`` and the Rust
@@ -331,9 +358,8 @@ def build_gate_result(snap: dict, symbol: str, cfg: dict | None = None,
             ema_dev_pct = abs(close_val - ema_fast) / ema_fast
         else:
             ema_dev_pct = 0.0
-        is_anomaly = (
-            price_change_pct > float(thr_anomaly.get("price_change_pct_gt", 0.10))
-            or ema_dev_pct > float(thr_anomaly.get("ema_fast_dev_pct_gt", 0.50))
+        is_anomaly = price_change_pct > float(thr_anomaly.get("price_change_pct_gt", 0.10)) or ema_dev_pct > float(
+            thr_anomaly.get("ema_fast_dev_pct_gt", 0.50)
         )
 
     # Gate 3: Extension filter
@@ -411,13 +437,17 @@ def build_gate_result(snap: dict, symbol: str, cfg: dict | None = None,
         btc_adx_override = 40.0
 
     btc_ok_long = (
-        (not require_btc) or (sym_u == "BTC")
-        or (btc_bullish is None) or bool(btc_bullish)
+        (not require_btc)
+        or (sym_u == "BTC")
+        or (btc_bullish is None)
+        or bool(btc_bullish)
         or (adx_val > btc_adx_override)
     )
     btc_ok_short = (
-        (not require_btc) or (sym_u == "BTC")
-        or (btc_bullish is None) or (not bool(btc_bullish))
+        (not require_btc)
+        or (sym_u == "BTC")
+        or (btc_bullish is None)
+        or (not bool(btc_bullish))
         or (adx_val > btc_adx_override)
     )
 
@@ -456,12 +486,7 @@ def build_gate_result(snap: dict, symbol: str, cfg: dict | None = None,
 
     # Combined check
     all_gates_pass = (
-        adx_above_min
-        and (not is_ranging)
-        and (not is_anomaly)
-        and (not is_extended)
-        and vol_confirm
-        and is_trending_up
+        adx_above_min and (not is_ranging) and (not is_anomaly) and (not is_extended) and vol_confirm and is_trending_up
     )
 
     return {
@@ -553,7 +578,7 @@ def build_entry_params(cfg: dict | None = None) -> dict:
     """
     if cfg is None:
         cfg = _DEFAULT_STRATEGY_CONFIG
-    thr = (cfg.get("thresholds") or {})
+    thr = cfg.get("thresholds") or {}
     thr_entry = thr.get("entry") or {}
     stoch_rsi = thr.get("stoch_rsi") or {}
 
@@ -583,8 +608,9 @@ def build_entry_params(cfg: dict | None = None) -> dict:
     }
 
 
-def evaluate_entry_kernel(df, symbol: str, state_json: str, params_json: str,
-                          btc_bullish: bool | None = None, cfg: dict | None = None):
+def evaluate_entry_kernel(
+    df, symbol: str, state_json: str, params_json: str, btc_bullish: bool | None = None, cfg: dict | None = None
+):
     """Evaluate entry signal using the Rust kernel's Evaluate mode.
 
     Flow: candles -> build_indicator_snapshot() -> build_gate_result() ->
@@ -625,16 +651,13 @@ def evaluate_entry_kernel(df, symbol: str, state_json: str, params_json: str,
         cfg = get_strategy_config(symbol)
 
     # 1. Build indicator snapshot
-    snap = build_indicator_snapshot(df, symbol=symbol,
-                                   config=cfg.get("indicators"))
+    snap = build_indicator_snapshot(df, symbol=symbol, config=cfg.get("indicators"))
 
     # 2. Compute EMA-slow slope
     slope = compute_ema_slow_slope(df, cfg)
 
     # 3. Build gate result
-    gate_result = build_gate_result(snap, symbol, cfg=cfg,
-                                    btc_bullish=btc_bullish,
-                                    ema_slow_slope_pct=slope)
+    gate_result = build_gate_result(snap, symbol, cfg=cfg, btc_bullish=btc_bullish, ema_slow_slope_pct=slope)
 
     # 4. Build entry_params and merge into params
     entry_params = build_entry_params(cfg)
@@ -663,10 +686,7 @@ def evaluate_entry_kernel(df, symbol: str, state_json: str, params_json: str,
 
     if not result.get("ok"):
         err = result.get("error", {})
-        raise RuntimeError(
-            f"Kernel Evaluate failed: {err.get('message', 'unknown')} "
-            f"details={err.get('details', [])}"
-        )
+        raise RuntimeError(f"Kernel Evaluate failed: {err.get('message', 'unknown')} details={err.get('details', [])}")
 
     decision = result.get("decision", {})
     diag = decision.get("diagnostics", {})
@@ -681,8 +701,9 @@ def evaluate_entry_kernel(df, symbol: str, state_json: str, params_json: str,
     return signal, confidence, diag
 
 
-def analyze_with_shadow(df, symbol: str, state_json: str, params_json: str,
-                        btc_bullish: bool | None = None, cfg: dict | None = None):
+def analyze_with_shadow(
+    df, symbol: str, state_json: str, params_json: str, btc_bullish: bool | None = None, cfg: dict | None = None
+):
     """Run both Python ``analyze()`` and kernel ``Evaluate``, log differences.
 
     The kernel result is authoritative.  Python's ``analyze()`` is run for
@@ -719,20 +740,30 @@ def analyze_with_shadow(df, symbol: str, state_json: str, params_json: str,
 
     # Kernel signal
     k_signal, k_conf, k_diag = evaluate_entry_kernel(
-        df, symbol, state_json, params_json,
-        btc_bullish=btc_bullish, cfg=cfg,
+        df,
+        symbol,
+        state_json,
+        params_json,
+        btc_bullish=btc_bullish,
+        cfg=cfg,
     )
 
     # Compare and log
     if py_signal != k_signal or py_conf != k_conf:
         logger.warning(
             "[shadow] Signal mismatch for %s: Python=%s/%s, Kernel=%s/%s",
-            symbol, py_signal, py_conf, k_signal, k_conf,
+            symbol,
+            py_signal,
+            py_conf,
+            k_signal,
+            k_conf,
         )
     else:
         logger.debug(
             "[shadow] Signal agreement for %s: %s/%s",
-            symbol, k_signal, k_conf,
+            symbol,
+            k_signal,
+            k_conf,
         )
 
     return k_signal, k_conf, k_diag
@@ -814,8 +845,7 @@ def build_exit_params(config=None):
     }
 
 
-def evaluate_exit_kernel(df, symbol, state_json, params_json, current_price,
-                         timestamp_ms, config=None):
+def evaluate_exit_kernel(df, symbol, state_json, params_json, current_price, timestamp_ms, config=None):
     """Evaluate exit conditions using the Rust kernel's PriceUpdate mode.
 
     Flow:
@@ -858,16 +888,13 @@ def evaluate_exit_kernel(df, symbol, state_json, params_json, current_price,
         If bt_runtime is not available or the kernel returns an error.
     """
     if not _BT_RUNTIME_AVAILABLE or _bt_runtime is None:
-        raise RuntimeError(
-            "bt_runtime is not available; cannot use kernel PriceUpdate mode"
-        )
+        raise RuntimeError("bt_runtime is not available; cannot use kernel PriceUpdate mode")
 
     if config is None:
         config = get_strategy_config(symbol)
 
     # 1. Build indicator snapshot
-    snap = build_indicator_snapshot(df, symbol=symbol,
-                                   config=config.get("indicators"))
+    snap = build_indicator_snapshot(df, symbol=symbol, config=config.get("indicators"))
 
     # 2. Build exit params
     exit_params = build_exit_params(config)
@@ -894,15 +921,17 @@ def evaluate_exit_kernel(df, symbol, state_json, params_json, current_price,
 
     # 4. Call kernel step_full (merges exit_params into params)
     result_json = _bt_runtime.step_full(
-        state_json, event_json, params_json, exit_params_json,
+        state_json,
+        event_json,
+        params_json,
+        exit_params_json,
     )
     result = json.loads(result_json)
 
     if not result.get("ok"):
         err = result.get("error", {})
         raise RuntimeError(
-            f"Kernel PriceUpdate failed: {err.get('message', 'unknown')} "
-            f"details={err.get('details', [])}"
+            f"Kernel PriceUpdate failed: {err.get('message', 'unknown')} details={err.get('details', [])}"
         )
 
     decision = result.get("decision", {})
@@ -940,9 +969,9 @@ def evaluate_exit_kernel(df, symbol, state_json, params_json, current_price,
     return action, exit_ctx, diag
 
 
-def check_exit_with_kernel(df, symbol, state_json, params_json, current_price,
-                           timestamp_ms, indicators=None, config=None,
-                           btc_bullish=None):
+def check_exit_with_kernel(
+    df, symbol, state_json, params_json, current_price, timestamp_ms, indicators=None, config=None, btc_bullish=None
+):
     """Orchestrate kernel basic exits + Python smart exits.
 
     1. Call ``evaluate_exit_kernel()`` for basic exits (SL/TP/trailing/
@@ -995,8 +1024,13 @@ def check_exit_with_kernel(df, symbol, state_json, params_json, current_price,
 
     # --- Step 1: Kernel basic exits ---
     action, exit_ctx, diag = evaluate_exit_kernel(
-        df, symbol, state_json, params_json,
-        current_price, timestamp_ms, config=config,
+        df,
+        symbol,
+        state_json,
+        params_json,
+        current_price,
+        timestamp_ms,
+        config=config,
     )
 
     # --- Step 2: Kernel is authoritative for basic exits ---
@@ -1170,9 +1204,9 @@ def check_exit_with_kernel(df, symbol, state_json, params_json, current_price,
     return "hold", None, diag
 
 
-def check_exit_with_shadow(df, symbol, state_json, params_json, current_price,
-                           timestamp_ms, indicators=None, config=None,
-                           btc_bullish=None):
+def check_exit_with_shadow(
+    df, symbol, state_json, params_json, current_price, timestamp_ms, indicators=None, config=None, btc_bullish=None
+):
     """Shadow comparison mode for exit evaluation.
 
     Runs kernel exit evaluation via ``evaluate_exit_kernel()``, performs a
@@ -1210,8 +1244,13 @@ def check_exit_with_shadow(df, symbol, state_json, params_json, current_price,
 
     # --- Kernel exit (authoritative) ---
     k_action, k_exit_ctx, k_diag = evaluate_exit_kernel(
-        df, symbol, state_json, params_json,
-        current_price, timestamp_ms, config=config,
+        df,
+        symbol,
+        state_json,
+        params_json,
+        current_price,
+        timestamp_ms,
+        config=config,
     )
 
     # --- Python simplified exit (best-effort shadow) ---
@@ -1256,12 +1295,15 @@ def check_exit_with_shadow(df, symbol, state_json, params_json, current_price,
     if k_action != py_action:
         logger.warning(
             "[exit-shadow] Exit mismatch for %s: Kernel=%s, Python=%s",
-            symbol, k_action, py_action,
+            symbol,
+            k_action,
+            py_action,
         )
     else:
         logger.debug(
             "[exit-shadow] Exit agreement for %s: %s",
-            symbol, k_action,
+            symbol,
+            k_action,
         )
 
     return k_action, k_exit_ctx, k_diag
@@ -1372,9 +1414,12 @@ def kernel_position_to_python(symbol: str, kernel_pos: dict) -> dict:
     opened_at_ms = int(kernel_pos.get("opened_at_ms", 0))
     try:
         import datetime as _dt
-        opened_at = _dt.datetime.fromtimestamp(
-            opened_at_ms / 1000.0, tz=_dt.timezone.utc
-        ).isoformat() if opened_at_ms > 0 else ""
+
+        opened_at = (
+            _dt.datetime.fromtimestamp(opened_at_ms / 1000.0, tz=_dt.timezone.utc).isoformat()
+            if opened_at_ms > 0
+            else ""
+        )
     except Exception:
         opened_at = ""
 
@@ -1459,6 +1504,7 @@ def python_position_to_kernel(symbol: str, py_pos: dict) -> dict:
     if opened_at:
         try:
             import datetime as _dt
+
             dt = _dt.datetime.fromisoformat(str(opened_at))
             opened_at_ms = int(dt.timestamp() * 1000)
         except Exception:
@@ -1553,17 +1599,19 @@ def build_position_state_for_db(state_json: str) -> list[dict]:
         last_funding_ms = kernel_pos.get("last_funding_ms")
         last_funding_time = int(last_funding_ms) if last_funding_ms is not None else 0
 
-        rows.append({
-            "symbol": symbol,
-            "open_trade_id": None,  # not tracked by kernel
-            "trailing_sl": trailing_sl,
-            "last_funding_time": last_funding_time,
-            "adds_count": int(kernel_pos.get("adds_count", 0)),
-            "tp1_taken": int(kernel_pos.get("tp1_taken", False)),
-            "last_add_time": 0,  # not tracked by kernel
-            "entry_adx_threshold": entry_adx_threshold,
-            "updated_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-        })
+        rows.append(
+            {
+                "symbol": symbol,
+                "open_trade_id": None,  # not tracked by kernel
+                "trailing_sl": trailing_sl,
+                "last_funding_time": last_funding_time,
+                "adds_count": int(kernel_pos.get("adds_count", 0)),
+                "tp1_taken": int(kernel_pos.get("tp1_taken", False)),
+                "last_add_time": 0,  # not tracked by kernel
+                "entry_adx_threshold": entry_adx_threshold,
+                "updated_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            }
+        )
     return rows
 
 
@@ -1651,6 +1699,7 @@ _FALLBACK_SYMBOLS = [
     "TIA",
 ]
 
+
 def _parse_symbol_list(raw: str) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -1661,6 +1710,7 @@ def _parse_symbol_list(raw: str) -> list[str]:
         seen.add(sym)
         out.append(sym)
     return out
+
 
 def _get_default_symbols() -> list[str]:
     # In "sidecar-only" market-data mode, avoid direct HL REST calls from python.
@@ -1680,6 +1730,7 @@ def _get_default_symbols() -> list[str]:
     except Exception as e:
         logger.warning(f"⚠️ Failed to auto-select top {top_n} symbols from Hyperliquid: {e}")
     return list(_FALLBACK_SYMBOLS)
+
 
 _env_symbols = os.getenv("AI_QUANT_SYMBOLS", "").strip()
 SYMBOLS = _parse_symbol_list(_env_symbols) if _env_symbols else _get_default_symbols()
@@ -1729,22 +1780,26 @@ HL_BUILDER_FEE_RATE = float(os.getenv("HL_BUILDER_FEE_RATE", "0.0"))
 # Paper trader assumes marketable execution by default (taker).
 HL_FEE_MODE = os.getenv("HL_FEE_MODE", "taker").strip().lower()
 
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
+
 # Funding is exchanged hourly between longs and shorts for perps.
 HL_FUNDING_ENABLED = _env_bool("HL_FUNDING_ENABLED", True)
 HL_DEFAULT_LEVERAGE = float(os.getenv("HL_DEFAULT_LEVERAGE", "3.0"))  # Match Rust default
 HL_SLIPPAGE_BPS = float(os.getenv("HL_SLIPPAGE_BPS", "10.0"))  # Match Rust default
+
 
 def _effective_fee_rate() -> float:
     """Returns the configured all-in fee rate for a single fill (protocol fee +/- discounts + optional builder fee)."""
     protocol_rate = HL_PERP_TAKER_FEE_RATE if HL_FEE_MODE != "maker" else HL_PERP_MAKER_FEE_RATE
     discount_mult = 1.0 - max(0.0, min(100.0, HL_REFERRAL_DISCOUNT_PCT)) / 100.0
     return (protocol_rate * discount_mult) + HL_BUILDER_FEE_RATE
+
 
 # --- Strategy Overrides (Global + Per-Symbol) ---
 # Strategy overrides live in YAML (preferred):
@@ -1755,8 +1810,12 @@ def _effective_fee_rate() -> float:
 #
 # DEPRECATED: TOML overrides are still supported for backward compatibility.
 #   config/strategy_overrides.toml
-STRATEGY_YAML_PATH = os.getenv("AI_QUANT_STRATEGY_YAML", os.path.join(_THIS_DIR, "..", "config", "strategy_overrides.yaml"))
-STRATEGY_TOML_PATH = os.getenv("AI_QUANT_STRATEGY_TOML", os.path.join(_THIS_DIR, "..", "config", "strategy_overrides.toml"))
+STRATEGY_YAML_PATH = os.getenv(
+    "AI_QUANT_STRATEGY_YAML", os.path.join(_THIS_DIR, "..", "config", "strategy_overrides.yaml")
+)
+STRATEGY_TOML_PATH = os.getenv(
+    "AI_QUANT_STRATEGY_TOML", os.path.join(_THIS_DIR, "..", "config", "strategy_overrides.toml")
+)
 
 _DEFAULT_STRATEGY_CONFIG = {
     "trade": {
@@ -1767,11 +1826,11 @@ _DEFAULT_STRATEGY_CONFIG = {
         # v5.018: RSI Entry Extreme Filter (REEF) - block overextended entries.
         # v5.020: REEF v2 - Dynamic RSI limits based on ADX.
         "enable_reef_filter": True,
-        "reef_long_rsi_block_gt": 70.0,   # baseline (ADX < 45)
+        "reef_long_rsi_block_gt": 70.0,  # baseline (ADX < 45)
         "reef_short_rsi_block_lt": 30.0,  # baseline (ADX < 45)
         "reef_adx_threshold": 45.0,
         "reef_long_rsi_extreme_gt": 75.0,  # extreme (ADX >= 45)
-        "reef_short_rsi_extreme_lt": 25.0, # extreme (ADX >= 45)
+        "reef_short_rsi_extreme_lt": 25.0,  # extreme (ADX >= 45)
         # Dynamic leverage (optional): scales leverage by signal confidence for NEW positions.
         # Adds (pyramiding) reuse existing position leverage to avoid thrash.
         "enable_dynamic_leverage": True,
@@ -1990,10 +2049,7 @@ if _QTStrategyManager is not None:
             watchlist_refresh_s=float(os.getenv("AI_QUANT_WATCHLIST_REFRESH_S", "60")),
         )
     except Exception as e:
-        logger.warning(
-            "⚠️ StrategyManager bootstrap failed; falling back to legacy overrides. "
-            f"Error: {e}"
-        )
+        logger.warning(f"⚠️ StrategyManager bootstrap failed; falling back to legacy overrides. Error: {e}")
         _strategy_mgr = None
 
 
@@ -2019,8 +2075,7 @@ def _load_strategy_overrides() -> dict:
         return {}
     except Exception as e:
         logger.warning(
-            "⚠️ Failed to load strategy overrides "
-            f"(yaml={STRATEGY_YAML_PATH}, toml={STRATEGY_TOML_PATH}): {e}"
+            f"⚠️ Failed to load strategy overrides (yaml={STRATEGY_YAML_PATH}, toml={STRATEGY_TOML_PATH}): {e}"
         )
         return {}
 
@@ -2107,7 +2162,8 @@ def get_strategy_config(symbol: str) -> dict:
 
 
 def get_trade_params(symbol: str) -> dict:
-    return (get_strategy_config(symbol).get("trade") or {})
+    return get_strategy_config(symbol).get("trade") or {}
+
 
 def _safe_float(val, default: float | None = None) -> float | None:
     try:
@@ -2120,12 +2176,15 @@ def _safe_float(val, default: float | None = None) -> float | None:
     except Exception:
         return default
 
+
 _CONF_RANK = {"low": 0, "medium": 1, "high": 2}
+
 
 def _conf_ok(confidence: str | None, *, min_confidence: str) -> bool:
     c = str(confidence or "low").strip().lower()
     m = str(min_confidence or "low").strip().lower()
     return _CONF_RANK.get(c, 0) >= _CONF_RANK.get(m, 0)
+
 
 def _conf_bucket(confidence: str | None) -> str:
     c = str(confidence or "low").strip().lower()
@@ -2134,6 +2193,7 @@ def _conf_bucket(confidence: str | None) -> str:
     if c.startswith("m"):
         return "medium"
     return "low"
+
 
 def _select_leverage(trade_cfg: dict, confidence: str | None) -> float:
     """
@@ -2170,11 +2230,13 @@ def _select_leverage(trade_cfg: dict, confidence: str | None) -> float:
         lev = 1.0
     return max(1.0, lev)
 
+
 @dataclass(frozen=True)
 class EntrySizing:
     margin_usd: float
     leverage: float
     desired_notional_usd: float
+
 
 def compute_entry_sizing(
     *,
@@ -2227,7 +2289,11 @@ def compute_entry_sizing(
     if bool(trade_cfg.get("enable_dynamic_sizing", True)):
         # 1) Confidence scaling.
         b = _conf_bucket(confidence)
-        key = "confidence_mult_high" if b == "high" else ("confidence_mult_medium" if b == "medium" else "confidence_mult_low")
+        key = (
+            "confidence_mult_high"
+            if b == "high"
+            else ("confidence_mult_medium" if b == "medium" else "confidence_mult_low")
+        )
         try:
             conf_mult = float(trade_cfg.get(key, 1.0))
         except Exception:
@@ -2299,7 +2365,10 @@ def compute_entry_sizing(
         lev = max(1.0, float(max_lev))
         desired_notional = float(margin_target) * float(lev)
 
-    return EntrySizing(margin_usd=float(margin_target), leverage=float(lev), desired_notional_usd=float(desired_notional))
+    return EntrySizing(
+        margin_usd=float(margin_target), leverage=float(lev), desired_notional_usd=float(desired_notional)
+    )
+
 
 def size_for_notional_bounds(
     symbol: str,
@@ -2352,6 +2421,7 @@ def size_for_notional_bounds(
     target_sz = hyperliquid_meta.round_size(sym, desired / px)
     return float(max(min_sz, target_sz))
 
+
 def _get_fill_price(
     symbol: str,
     side: str,
@@ -2393,6 +2463,7 @@ def _get_fill_price(
 
     return float(px)
 
+
 def get_data(symbol):
     """
     Primary data fetcher: Hyperliquid websocket candle stream (backed by local DB cache).
@@ -2404,6 +2475,7 @@ def get_data(symbol):
         candle_limit=LOOKBACK_HOURS + 50,
     )
     return hyperliquid_ws.hl_ws.get_candles_df(sym, INTERVAL, min_rows=LOOKBACK_HOURS)
+
 
 def ensure_db():
     conn = sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT_S)
@@ -2478,9 +2550,7 @@ def ensure_db():
         cursor.execute("ALTER TABLE position_state ADD COLUMN entry_adx_threshold REAL")
 
     # Helpful indexes for restart-safe position reconstruction.
-    cursor.execute(
-        "CREATE INDEX IF NOT EXISTS idx_trades_symbol_action_id ON trades(symbol, action, id)"
-    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_action_id ON trades(symbol, action, id)")
 
     cursor.execute(
         """
@@ -2522,9 +2592,7 @@ def ensure_db():
         cursor.execute("ALTER TABLE trades ADD COLUMN meta_json TEXT")
 
     # Dedup live fills (userFills snapshots / reconnects) when available.
-    cursor.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_fill_hash_tid ON trades(fill_hash, fill_tid)"
-    )
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_fill_hash_tid ON trades(fill_hash, fill_tid)")
 
     # Live WS event capture (no-op for paper if unused).
     cursor.execute(
@@ -3003,58 +3071,85 @@ def _log_gates_for_decision(decision_id: str, gates_dict: dict, values_dict: dic
     rows: list[dict] = []
 
     def _g(name: str, passed: bool, metric=None, threshold=None, op=None, expl=None):
-        rows.append({
-            "gate_name": name,
-            "gate_passed": passed,
-            "metric_value": None if metric is None else float(metric),
-            "threshold_value": None if threshold is None else float(threshold),
-            "operator": op,
-            "explanation": expl,
-        })
+        rows.append(
+            {
+                "gate_name": name,
+                "gate_passed": passed,
+                "metric_value": None if metric is None else float(metric),
+                "threshold_value": None if threshold is None else float(threshold),
+                "operator": op,
+                "explanation": expl,
+            }
+        )
 
     try:
         adx_v = float(gates_dict.get("adx", 0))
         eff_min_adx = float(gates_dict.get("effective_min_adx", 0))
-        _g("adx_gate", adx_v > eff_min_adx, adx_v, eff_min_adx, ">",
-           f"ADX {adx_v:.2f} vs min {eff_min_adx:.2f}")
+        _g("adx_gate", adx_v > eff_min_adx, adx_v, eff_min_adx, ">", f"ADX {adx_v:.2f} vs min {eff_min_adx:.2f}")
 
-        _g("ranging_filter", not gates_dict.get("is_ranging", False),
-           explanation="composite: ADX+BB+RSI ranging signals")
+        _g(
+            "ranging_filter",
+            not gates_dict.get("is_ranging", False),
+            explanation="composite: ADX+BB+RSI ranging signals",
+        )
 
-        _g("anomaly_filter", not gates_dict.get("is_anomaly", False),
-           explanation="composite: price_change_pct + ema_deviation")
+        _g(
+            "anomaly_filter",
+            not gates_dict.get("is_anomaly", False),
+            explanation="composite: price_change_pct + ema_deviation",
+        )
 
         is_ext = gates_dict.get("is_extended", False)
         dist = float(values_dict.get("close", 0)) - float(values_dict.get("ema_fast", 0))
         dist_pct = float(gates_dict.get("dist_ema_fast", 0))
         max_dist = float(gates_dict.get("max_dist_ema_fast", 0.04))
-        _g("extension_filter", not is_ext, dist_pct, max_dist, "<=",
-           f"dist_ema_fast={dist_pct:.4f} vs max={max_dist:.4f}")
+        _g(
+            "extension_filter",
+            not is_ext,
+            dist_pct,
+            max_dist,
+            "<=",
+            f"dist_ema_fast={dist_pct:.4f} vs max={max_dist:.4f}",
+        )
 
-        _g("volume_confirm", bool(gates_dict.get("vol_confirm", False)),
-           explanation="volume > vol_sma check")
+        _g("volume_confirm", bool(gates_dict.get("vol_confirm", False)), explanation="volume > vol_sma check")
 
         is_trending = gates_dict.get("is_trending_up", False)
         adx_slope = float(values_dict.get("adx_slope", 0))
-        _g("adx_rising", bool(is_trending), adx_slope, 0, ">",
-           f"adx_slope={adx_slope:.4f} or ADX>{gates_dict.get('adx', 0):.1f} saturated")
+        _g(
+            "adx_rising",
+            bool(is_trending),
+            adx_slope,
+            0,
+            ">",
+            f"adx_slope={adx_slope:.4f} or ADX>{gates_dict.get('adx', 0):.1f} saturated",
+        )
 
         btc_ok_l = gates_dict.get("btc_ok_long", True)
         btc_ok_s = gates_dict.get("btc_ok_short", True)
-        _g("btc_alignment", bool(btc_ok_l and btc_ok_s),
-           explanation=f"btc_ok_long={btc_ok_l}, btc_ok_short={btc_ok_s}")
+        _g("btc_alignment", bool(btc_ok_l and btc_ok_s), explanation=f"btc_ok_long={btc_ok_l}, btc_ok_short={btc_ok_s}")
 
         ema_f = float(values_dict.get("ema_fast", 0))
         ema_s = float(values_dict.get("ema_slow", 0))
-        _g("ema_alignment", ema_f != ema_s, ema_f, ema_s,
-           ">" if ema_f > ema_s else "<",
-           f"ema_fast={ema_f:.4f} vs ema_slow={ema_s:.4f}")
+        _g(
+            "ema_alignment",
+            ema_f != ema_s,
+            ema_f,
+            ema_s,
+            ">" if ema_f > ema_s else "<",
+            f"ema_fast={ema_f:.4f} vs ema_slow={ema_s:.4f}",
+        )
 
         if gates_dict.get("require_macro_alignment", False):
             ema_macro = float(values_dict.get("ema_macro", 0))
-            _g("macro_alignment", ema_s > ema_macro if ema_macro > 0 else True,
-               ema_s, ema_macro, ">",
-               f"ema_slow={ema_s:.4f} vs ema_macro={ema_macro:.4f}")
+            _g(
+                "macro_alignment",
+                ema_s > ema_macro if ema_macro > 0 else True,
+                ema_s,
+                ema_macro,
+                ">",
+                f"ema_slow={ema_s:.4f} vs ema_macro={ema_macro:.4f}",
+            )
 
     except Exception as exc:
         logger.debug("_log_gates_for_decision: gate build failed: %s", exc)
@@ -3343,10 +3438,11 @@ def log_audit_event(
         except Exception:
             pass
 
+
 class PaperTrader:
     def __init__(self):
         self._seed_balance: float = PAPER_BALANCE  # only for kernel init seeding
-        self.positions = {} # symbol -> position_dict
+        self.positions = {}  # symbol -> position_dict
         # Simulated rate-limit state (mirrors LiveTrader friction).
         self._last_entry_attempt_at_s: dict[str, float] = {}
         self._last_exit_attempt_at_s: dict[str, float] = {}
@@ -3384,9 +3480,7 @@ class PaperTrader:
             return
         try:
             now_ms = int(time.time() * 1000)
-            self._kernel_state_json = _bt_runtime.default_kernel_state_json(
-                float(self._seed_balance), now_ms
-            )
+            self._kernel_state_json = _bt_runtime.default_kernel_state_json(float(self._seed_balance), now_ms)
             self._kernel_params_json = _bt_runtime.default_kernel_params_json()
             self._kernel_available = True
             logger.info("[kernel] Rust kernel state initialized (balance=%.2f)", self._seed_balance)
@@ -3436,7 +3530,9 @@ class PaperTrader:
                 if result.get("ok") and "decision" in result:
                     new_state = result["decision"].get("state")
                     if new_state is not None:
-                        self._kernel_state_json = json.dumps(new_state) if isinstance(new_state, dict) else str(new_state)
+                        self._kernel_state_json = (
+                            json.dumps(new_state) if isinstance(new_state, dict) else str(new_state)
+                        )
                 else:
                     err = result.get("error", {})
                     logger.debug("[kernel] step rejected: %s", err.get("message", result_json[:200]))
@@ -3473,18 +3569,31 @@ class PaperTrader:
             logger.debug("[kernel] get_equity failed: %s", e)
             return None
 
+    @staticmethod
+    def _instance_state_path(basename: str) -> str:
+        """Derive per-instance state file path using AI_QUANT_INSTANCE_TAG.
+
+        Without a tag the path falls back to the original shared name
+        (backward-compatible for single-instance deployments).
+        """
+        tag = os.getenv("AI_QUANT_INSTANCE_TAG", "").strip()
+        if tag:
+            stem, ext = os.path.splitext(basename)
+            basename = f"{stem}_{tag}{ext}"
+        return os.path.join(os.path.dirname(DB_PATH), basename)
+
     def _kernel_persist(self) -> None:
         """Save kernel state to disk alongside the SQLite database."""
         if not self._kernel_available or self._kernel_state_json is None:
             return
         try:
-            state_path = os.path.join(os.path.dirname(DB_PATH), "kernel_state.json")
+            state_path = self._instance_state_path("kernel_state.json")
             _bt_runtime.save_state(self._kernel_state_json, state_path)
         except Exception as e:
             logger.warning("[kernel] persist failed: %s", e)
         # Persist shadow report alongside kernel state (AQC-752)
         try:
-            report_path = os.path.join(os.path.dirname(DB_PATH), "kernel_shadow_report.json")
+            report_path = self._instance_state_path("kernel_shadow_report.json")
             self._shadow_report.to_json(report_path)
         except Exception as e:
             logger.warning("[shadow] persist failed: %s", e)
@@ -3494,7 +3603,7 @@ class PaperTrader:
         if not _BT_RUNTIME_AVAILABLE:
             return
         try:
-            state_path = os.path.join(os.path.dirname(DB_PATH), "kernel_state.json")
+            state_path = self._instance_state_path("kernel_state.json")
             if os.path.isfile(state_path):
                 self._kernel_state_json = _bt_runtime.load_state(state_path)
                 self._kernel_available = True
@@ -3505,14 +3614,42 @@ class PaperTrader:
                 # Re-init with the DB-loaded seed balance so kernel starts in sync.
                 logger.info("[kernel] No state file found — re-initializing with seed balance %.2f", self._seed_balance)
                 self._init_kernel()
+
+            # AQC-FIX: Reconcile kernel cash_usd with the DB/live-synced seed
+            # balance.  The persisted state may carry stale cash_usd (e.g. from
+            # a previous session or, before this fix, from a different instance
+            # sharing the same state file).  The seed balance — which is synced
+            # from the live Hyperliquid account when PAPER_BALANCE_FROM_LIVE=1
+            # — is the authoritative starting balance for position sizing.
+            if self._kernel_available and self._kernel_state_json:
+                try:
+                    _st = json.loads(self._kernel_state_json)
+                    disk_cash = float(_st.get("cash_usd", 0.0))
+                    if abs(disk_cash - self._seed_balance) > 0.01:
+                        logger.info(
+                            "[kernel] Reconciling cash_usd: %.2f → %.2f (seed balance)",
+                            disk_cash,
+                            self._seed_balance,
+                        )
+                        _st["cash_usd"] = self._seed_balance
+                        self._kernel_state_json = json.dumps(
+                            _st,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        )
+                except Exception as e:
+                    logger.warning("[kernel] cash_usd reconciliation failed: %s", e)
+
             # Restore shadow report (AQC-752)
-            report_path = os.path.join(os.path.dirname(DB_PATH), "kernel_shadow_report.json")
+            report_path = self._instance_state_path("kernel_shadow_report.json")
             if os.path.isfile(report_path):
                 self._shadow_report = ShadowReport.from_json(report_path)
                 s = self._shadow_report.summary()
                 logger.info(
                     "[shadow] Restored report: %d checks, %d failures, converged=%s",
-                    s["total_checks"], s["failures"], self._shadow_report.is_converged(),
+                    s["total_checks"],
+                    s["failures"],
+                    self._shadow_report.is_converged(),
                 )
         except Exception as e:
             logger.warning("[kernel] restore failed, re-initializing: %s", e)
@@ -3550,7 +3687,18 @@ class PaperTrader:
             """
         )
 
-        for open_trade_id, open_ts, sym_raw, pos_type_raw, open_px, open_sz, conf, open_atr, lev, m_used in cursor.fetchall():
+        for (
+            open_trade_id,
+            open_ts,
+            sym_raw,
+            pos_type_raw,
+            open_px,
+            open_sz,
+            conf,
+            open_atr,
+            lev,
+            m_used,
+        ) in cursor.fetchall():
             symbol = (sym_raw or "").upper()
             if not symbol:
                 continue
@@ -3630,7 +3778,9 @@ class PaperTrader:
             adds_count = state[3] if state and state[0] == open_trade_id else None
             tp1_taken = state[4] if state and state[0] == open_trade_id else None
             last_add_time = state[5] if state and state[0] == open_trade_id else None
-            entry_adx_threshold = float(state[6] or 0) if state and len(state) > 6 and state[0] == open_trade_id else 0.0
+            entry_adx_threshold = (
+                float(state[6] or 0) if state and len(state) > 6 and state[0] == open_trade_id else 0.0
+            )
             if last_funding_time is None:
                 try:
                     last_funding_time = int(datetime.datetime.fromisoformat(open_ts).timestamp() * 1000)
@@ -3687,8 +3837,7 @@ class PaperTrader:
             last = self._last_entry_attempt_at_s.get(symbol, 0.0)
             if (time.time() - last) < cooldown_s:
                 logger.debug(
-                    f"⏳ ENTRY_SKIP_COOLDOWN: {symbol} entry blocked — "
-                    f"rate-limit cooldown ({cooldown_s:.0f}s) active"
+                    f"⏳ ENTRY_SKIP_COOLDOWN: {symbol} entry blocked — rate-limit cooldown ({cooldown_s:.0f}s) active"
                 )
                 log_audit_event(
                     symbol,
@@ -3701,10 +3850,7 @@ class PaperTrader:
                 return False
 
         if self._entry_budget_remaining is not None and self._entry_budget_remaining <= 0:
-            logger.debug(
-                f"⏳ ENTRY_SKIP_BUDGET: {symbol} entry blocked — "
-                f"max_entry_orders_per_loop budget exhausted"
-            )
+            logger.debug(f"⏳ ENTRY_SKIP_BUDGET: {symbol} entry blocked — max_entry_orders_per_loop budget exhausted")
             log_audit_event(
                 symbol,
                 "ENTRY_SKIP_BUDGET",
@@ -3811,10 +3957,31 @@ class PaperTrader:
         notional = price * size
         meta_json = _json_dumps_safe(meta) if meta else None
 
-        cursor.execute('''
+        cursor.execute(
+            """
             INSERT INTO trades (timestamp, symbol, type, action, price, size, notional, reason, confidence, pnl, fee_usd, fee_rate, balance, entry_atr, leverage, margin_used, meta_json)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (timestamp, symbol, type, action, price, size, notional, reason, confidence, pnl, fee_usd, fee_rate, self.balance, entry_atr, leverage, margin_used, meta_json))
+        """,
+            (
+                timestamp,
+                symbol,
+                type,
+                action,
+                price,
+                size,
+                notional,
+                reason,
+                confidence,
+                pnl,
+                fee_usd,
+                fee_rate,
+                self.balance,
+                entry_atr,
+                leverage,
+                margin_used,
+                meta_json,
+            ),
+        )
         trade_id = cursor.lastrowid
         conn.commit()
         conn.close()
@@ -3867,7 +4034,7 @@ class PaperTrader:
             else:
                 p = (float(v) / baseline_usd) * 100.0
             return f"{p:+.2f}%"
-        
+
         # --- DIRECT NOTIFICATION (CANTONESE) ---
         action_map = {
             "OPEN": "開倉",
@@ -3894,15 +4061,13 @@ class PaperTrader:
             "Take Profit": "止盈 (Take Profit)",
             "Take Profit (Partial)": "止盈 (部分平倉)",
             "Trailing Stop": "移動止損 (Trailing Stop)",
-            "Signal Flip": "信號反轉"
+            "Signal Flip": "信號反轉",
         }
         reason_hk = reason_map.get(reason, reason)
         if "Signal Flip" in reason:
             reason_hk = reason.replace("Signal Flip", "信號反轉")
 
-        discord_label = str(
-            os.getenv("AI_QUANT_DISCORD_LABEL", "") or os.getenv("AI_QUANT_INSTANCE_TAG", "")
-        ).strip()
+        discord_label = str(os.getenv("AI_QUANT_DISCORD_LABEL", "") or os.getenv("AI_QUANT_INSTANCE_TAG", "")).strip()
         header = f"{emoji} **紙上交易：{action_hk}** | {symbol}"
         if discord_label:
             header = f"[{discord_label}] {header}"
@@ -3926,7 +4091,7 @@ class PaperTrader:
             elif action in {"REDUCE", "CLOSE"}:
                 msg += f"• 保證金變化 (ΔMargin est.): `${margin_f:+,.2f}`\n"
         if fee_usd:
-            rate_str = "" if fee_rate is None else f" ({fee_rate*100:.4f}%)"
+            rate_str = "" if fee_rate is None else f" ({fee_rate * 100:.4f}%)"
             msg += f"• 手續費 (Fee): `${fee_usd:,.4f}`{rate_str}\n"
         msg += f"• 原因: *{reason_hk}*\n"
         if action in {"CLOSE", "REDUCE"}:
@@ -3935,7 +4100,6 @@ class PaperTrader:
         msg += f"• **淨值 (Equity, est.):** `${equity:,.2f}` ({_pct(float(equity or 0.0), is_return=True)})\n"
         msg += f"• **未實現 (Unrealised):** `${unrealised:,.2f}` ({_pct(float(unrealised), is_return=False)})\n"
         msg += f"• **現金 (Cash, realised):** `${cash_realised:,.2f}` ({_pct(float(cash_realised), is_return=True)})"
-        
 
         try:
             try:
@@ -4383,28 +4547,29 @@ class PaperTrader:
         # 只有當 MACD Histogram 喺持倉方向仲係「擴張」緊嘅時候先准加倉。
         # 防止喺趨勢動力轉弱時加碼，減少加倉後即刻被回撤掃損嘅風險。
         if indicators is not None:
-            macd_h = indicators.get('MACD_hist', 0)
-            prev_macd_h = indicators.get('prev_MACD_hist', 0)
-            is_momentum_expanding = (pos_type == 'LONG' and macd_h > prev_macd_h) or \
-                                    (pos_type == 'SHORT' and macd_h < prev_macd_h)
+            macd_h = indicators.get("MACD_hist", 0)
+            prev_macd_h = indicators.get("prev_MACD_hist", 0)
+            is_momentum_expanding = (pos_type == "LONG" and macd_h > prev_macd_h) or (
+                pos_type == "SHORT" and macd_h < prev_macd_h
+            )
             if not is_momentum_expanding:
                 return False
 
         # v5.021: 加倉 RSI 守護 (Pyramiding RSI Guard - PRG)
         # 防止喺極端 RSI 區間（力竭區）繼續加碼，減少追漲殺跌嘅回撤。
-        rsi_val = indicators.get('RSI', 50) if indicators is not None else 50
-        if (pos_type == 'LONG' and rsi_val > 75.0) or (pos_type == 'SHORT' and rsi_val < 25.0):
+        rsi_val = indicators.get("RSI", 50) if indicators is not None else 50
+        if (pos_type == "LONG" and rsi_val > 75.0) or (pos_type == "SHORT" and rsi_val < 25.0):
             return False
 
         # Simulated rate-limit gate (cooldown + budget).
         if not self._can_attempt_entry(symbol):
             return False
 
-        if indicators is not None and indicators.get('ADX_slope', 0) > 0.75:
-            atr_slope = indicators.get('ATR_slope', 0)
+        if indicators is not None and indicators.get("ADX_slope", 0) > 0.75:
+            atr_slope = indicators.get("ATR_slope", 0)
             if atr_slope <= 0:
                 # v5.021: 如果 RSI 已經進入極端區 (Long > 65, Short < 35)，禁用 DPS 增敏，維持門檻。
-                is_rsi_extreme = (pos_type == 'LONG' and rsi_val > 65.0) or (pos_type == 'SHORT' and rsi_val < 35.0)
+                is_rsi_extreme = (pos_type == "LONG" and rsi_val > 65.0) or (pos_type == "SHORT" and rsi_val < 35.0)
                 if not is_rsi_extreme:
                     min_profit_atr *= 0.5
         profit_atr = (mark - entry) / current_atr if pos_type == "LONG" else (entry - mark) / current_atr
@@ -4533,7 +4698,9 @@ class PaperTrader:
         # Update entry ATR (size-weighted), so stops reflect the blended position.
         old_entry_atr = float(pos.get("entry_atr") or 0.0)
         if old_entry_atr > 0 and current_atr > 0:
-            pos["entry_atr"] = ((old_entry_atr * (new_total_size - add_size)) + (current_atr * add_size)) / new_total_size
+            pos["entry_atr"] = (
+                (old_entry_atr * (new_total_size - add_size)) + (current_atr * add_size)
+            ) / new_total_size
         elif current_atr > 0:
             pos["entry_atr"] = current_atr
 
@@ -4566,8 +4733,14 @@ class PaperTrader:
                 "momentum_expanding": bool(
                     (indicators is not None)
                     and (
-                        ((pos_type == "LONG") and (indicators.get("MACD_hist", 0) > indicators.get("prev_MACD_hist", 0)))
-                        or ((pos_type == "SHORT") and (indicators.get("MACD_hist", 0) < indicators.get("prev_MACD_hist", 0)))
+                        (
+                            (pos_type == "LONG")
+                            and (indicators.get("MACD_hist", 0) > indicators.get("prev_MACD_hist", 0))
+                        )
+                        or (
+                            (pos_type == "SHORT")
+                            and (indicators.get("MACD_hist", 0) < indicators.get("prev_MACD_hist", 0))
+                        )
                     )
                 ),
                 "ppeb_tp1_taken": int(pos.get("tp1_taken") or 0),
@@ -4609,17 +4782,25 @@ class PaperTrader:
         # FLOW-2: create decision event for ADD fills (traceability)
         try:
             create_decision_event(
-                symbol=symbol, event_type="fill",
-                status="executed", phase="execution",
+                symbol=symbol,
+                event_type="fill",
+                status="executed",
+                phase="execution",
                 action_taken="add",
-                context={"add_price": fill_price, "confidence": confidence,
-                         "adds_count": int(pos.get("adds_count", 0))})
+                context={
+                    "add_price": fill_price,
+                    "confidence": confidence,
+                    "adds_count": int(pos.get("adds_count", 0)),
+                },
+            )
         except Exception:
             pass
         self._kernel_persist()
         return True
 
-    def reduce_position(self, symbol, reduce_size, price, timestamp, reason, *, confidence="N/A", meta: dict | None = None) -> bool:
+    def reduce_position(
+        self, symbol, reduce_size, price, timestamp, reason, *, confidence="N/A", meta: dict | None = None
+    ) -> bool:
         """Partially closes a position (or fully closes if reduce_size >= remaining size).
 
         Side-effect: on success, stores the resulting trade_id on ``self._last_close_trade_id``
@@ -4735,8 +4916,20 @@ class PaperTrader:
         self._kernel_persist()
         return True
 
-    def execute_trade(self, symbol, signal, price, timestamp, confidence, atr=0.0, indicators=None,
-                       *, action=None, target_size=None, reason=None):
+    def execute_trade(
+        self,
+        symbol,
+        signal,
+        price,
+        timestamp,
+        confidence,
+        atr=0.0,
+        indicators=None,
+        *,
+        action=None,
+        target_size=None,
+        reason=None,
+    ):
         # action kwarg: "OPEN", "CLOSE", "ADD" — match LiveTrader dispatch semantics.
         if action is not None:
             action_upper = str(action).upper()
@@ -4752,8 +4945,9 @@ class PaperTrader:
                 if symbol in self.positions:
                     pos = self.positions[symbol]
                     reduce_sz = float(target_size) if target_size is not None else float(pos.get("size", 0))
-                    self.reduce_position(symbol, reduce_sz, price, timestamp,
-                                         reason=reason or "Action REDUCE", confidence=confidence)
+                    self.reduce_position(
+                        symbol, reduce_sz, price, timestamp, reason=reason or "Action REDUCE", confidence=confidence
+                    )
                 return
             if action_upper == "OPEN":
                 if symbol in self.positions:
@@ -4777,24 +4971,29 @@ class PaperTrader:
                 except Exception:
                     audit = None
             meta_json = _json_dumps_safe(audit) if audit else None
-            cursor.execute('''
+            cursor.execute(
+                """
                 INSERT INTO signals (timestamp, symbol, signal, confidence, price, rsi, ema_fast, ema_slow, meta_json)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                symbol, signal, confidence, price,
-                indicators.get('RSI', 0) if indicators is not None else 0,
-                indicators.get('EMA_fast', 0) if indicators is not None else 0,
-                indicators.get('EMA_slow', 0) if indicators is not None else 0,
-                meta_json,
-            ))
+            """,
+                (
+                    datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    symbol,
+                    signal,
+                    confidence,
+                    price,
+                    indicators.get("RSI", 0) if indicators is not None else 0,
+                    indicators.get("EMA_fast", 0) if indicators is not None else 0,
+                    indicators.get("EMA_slow", 0) if indicators is not None else 0,
+                    meta_json,
+                ),
+            )
             conn.commit()
             conn.close()
 
         pos = self.positions.get(symbol)
         if pos:
-            is_flip = (pos['type'] == 'LONG' and signal == 'SELL') or \
-                      (pos['type'] == 'SHORT' and signal == 'BUY')
+            is_flip = (pos["type"] == "LONG" and signal == "SELL") or (pos["type"] == "SHORT" and signal == "BUY")
 
             if is_flip:
                 # AQC-804: capture entry info before close deletes the position.
@@ -4806,7 +5005,9 @@ class PaperTrader:
                         audit = indicators.get("audit")
                     except Exception:
                         audit = None
-                _flip_reason = f"Signal Flip ({confidence})" + (" [REVERSED]" if (indicators or {}).get("_reversed_entry") is True else "")
+                _flip_reason = f"Signal Flip ({confidence})" + (
+                    " [REVERSED]" if (indicators or {}).get("_reversed_entry") is True else ""
+                )
                 self.close_position(
                     symbol,
                     price,
@@ -4821,11 +5022,18 @@ class PaperTrader:
                 try:
                     _flip_close_tid = getattr(self, "_last_close_trade_id", None)
                     _flip_exit_did = create_decision_event(
-                        symbol=symbol, event_type="exit_check", status="executed",
-                        phase="execution", triggered_by="signal_flip",
-                        action_taken="close", trade_id=_flip_close_tid,
-                        context={"exit_reason": _flip_reason, "exit_price": float(price),
-                                 "entry_trade_id": _flip_open_trade_id},
+                        symbol=symbol,
+                        event_type="exit_check",
+                        status="executed",
+                        phase="execution",
+                        triggered_by="signal_flip",
+                        action_taken="close",
+                        trade_id=_flip_close_tid,
+                        context={
+                            "exit_reason": _flip_reason,
+                            "exit_price": float(price),
+                            "entry_trade_id": _flip_open_trade_id,
+                        },
                     )
                     if _flip_open_trade_id is not None and _flip_close_tid is not None:
                         complete_lineage(
@@ -4839,7 +5047,9 @@ class PaperTrader:
                     logger.debug("AQC-804: signal-flip exit lineage failed: %s", _dle)
             else:
                 # Same-direction signal: optionally pyramid (scale in) rather than opening another position.
-                is_same_dir = (pos['type'] == 'LONG' and signal == 'BUY') or (pos['type'] == 'SHORT' and signal == 'SELL')
+                is_same_dir = (pos["type"] == "LONG" and signal == "BUY") or (
+                    pos["type"] == "SHORT" and signal == "SELL"
+                )
                 if is_same_dir:
                     self.add_to_position(symbol, price, timestamp, confidence, atr=atr, indicators=indicators)
                     return
@@ -4860,9 +5070,13 @@ class PaperTrader:
                 # AQC-804: blocked entry decision
                 try:
                     create_decision_event(
-                        symbol=symbol, event_type="entry_signal", status="blocked",
-                        phase="gate_evaluation", triggered_by="signal",
-                        action_taken="blocked", rejection_reason="data_stale",
+                        symbol=symbol,
+                        event_type="entry_signal",
+                        status="blocked",
+                        phase="gate_evaluation",
+                        triggered_by="signal",
+                        action_taken="blocked",
+                        rejection_reason="data_stale",
                         context={"signal": str(signal or ""), "confidence": str(confidence or "")},
                     )
                 except Exception:
@@ -4900,20 +5114,28 @@ class PaperTrader:
                 try:
                     _conf_rank = {"low": 1, "medium": 2, "high": 3}
                     _did = create_decision_event(
-                        symbol=symbol, event_type="gate_block", status="blocked",
-                        phase="gate_evaluation", parent_decision_id=_parent_did,
+                        symbol=symbol,
+                        event_type="gate_block",
+                        status="blocked",
+                        phase="gate_evaluation",
+                        parent_decision_id=_parent_did,
                         triggered_by="schedule",
                         action_taken="blocked",
                         rejection_reason=f"confidence {confidence} < {min_entry_conf}",
                     )
-                    _log_gates_batch(_did, [{
-                        "gate_name": "confidence_gate",
-                        "gate_passed": False,
-                        "metric_value": float(_conf_rank.get(str(confidence or "").lower(), 0)),
-                        "threshold_value": float(_conf_rank.get(str(min_entry_conf).lower(), 3)),
-                        "operator": ">=",
-                        "explanation": f"confidence '{confidence}' < min '{min_entry_conf}'",
-                    }])
+                    _log_gates_batch(
+                        _did,
+                        [
+                            {
+                                "gate_name": "confidence_gate",
+                                "gate_passed": False,
+                                "metric_value": float(_conf_rank.get(str(confidence or "").lower(), 0)),
+                                "threshold_value": float(_conf_rank.get(str(min_entry_conf).lower(), 3)),
+                                "operator": ">=",
+                                "explanation": f"confidence '{confidence}' < min '{min_entry_conf}'",
+                            }
+                        ],
+                    )
                 except Exception:
                     pass
                 return
@@ -4939,19 +5161,28 @@ class PaperTrader:
                 try:
                     _n_open = len(self.positions or {})
                     _did = create_decision_event(
-                        symbol=symbol, event_type="gate_block", status="blocked",
-                        phase="risk_check", parent_decision_id=_parent_did,
-                        triggered_by="schedule", action_taken="blocked",
+                        symbol=symbol,
+                        event_type="gate_block",
+                        status="blocked",
+                        phase="risk_check",
+                        parent_decision_id=_parent_did,
+                        triggered_by="schedule",
+                        action_taken="blocked",
                         rejection_reason=f"max_open_positions {_n_open}>={max_open_positions}",
                     )
-                    _log_gates_batch(_did, [{
-                        "gate_name": "max_positions",
-                        "gate_passed": False,
-                        "metric_value": float(_n_open),
-                        "threshold_value": float(max_open_positions),
-                        "operator": "<",
-                        "explanation": f"open={_n_open} >= max={max_open_positions}",
-                    }])
+                    _log_gates_batch(
+                        _did,
+                        [
+                            {
+                                "gate_name": "max_positions",
+                                "gate_passed": False,
+                                "metric_value": float(_n_open),
+                                "threshold_value": float(max_open_positions),
+                                "operator": "<",
+                                "explanation": f"open={_n_open} >= max={max_open_positions}",
+                            }
+                        ],
+                    )
                 except Exception:
                     pass
                 return
@@ -5042,19 +5273,28 @@ class PaperTrader:
                         # AQC-803: log blocked PESC gate
                         try:
                             _did = create_decision_event(
-                                symbol=symbol, event_type="gate_block", status="blocked",
-                                phase="gate_evaluation", parent_decision_id=_parent_did,
-                                triggered_by="schedule", action_taken="blocked",
+                                symbol=symbol,
+                                event_type="gate_block",
+                                status="blocked",
+                                phase="gate_evaluation",
+                                parent_decision_id=_parent_did,
+                                triggered_by="schedule",
+                                action_taken="blocked",
                                 rejection_reason=f"PESC cooldown {diff_mins:.1f}/{reentry_cooldown:.1f}m",
                             )
-                            _log_gates_batch(_did, [{
-                                "gate_name": "pesc_cooldown",
-                                "gate_passed": False,
-                                "metric_value": float(diff_mins),
-                                "threshold_value": float(reentry_cooldown),
-                                "operator": ">=",
-                                "explanation": f"elapsed {diff_mins:.1f}m < cooldown {reentry_cooldown:.1f}m (ADX {float(adx_val):.1f})",
-                            }])
+                            _log_gates_batch(
+                                _did,
+                                [
+                                    {
+                                        "gate_name": "pesc_cooldown",
+                                        "gate_passed": False,
+                                        "metric_value": float(diff_mins),
+                                        "threshold_value": float(reentry_cooldown),
+                                        "operator": ">=",
+                                        "explanation": f"elapsed {diff_mins:.1f}m < cooldown {reentry_cooldown:.1f}m (ADX {float(adx_val):.1f})",
+                                    }
+                                ],
+                            )
                         except Exception:
                             pass
                         return
@@ -5080,19 +5320,28 @@ class PaperTrader:
                     # AQC-803: log blocked SSF gate
                     try:
                         _did = create_decision_event(
-                            symbol=symbol, event_type="gate_block", status="blocked",
-                            phase="gate_evaluation", parent_decision_id=_parent_did,
-                            triggered_by="schedule", action_taken="blocked",
+                            symbol=symbol,
+                            event_type="gate_block",
+                            status="blocked",
+                            phase="gate_evaluation",
+                            parent_decision_id=_parent_did,
+                            triggered_by="schedule",
+                            action_taken="blocked",
                             rejection_reason=f"SSF: MACD_hist {macd_h:.6f} negative for BUY",
                         )
-                        _log_gates_batch(_did, [{
-                            "gate_name": "ssf_filter",
-                            "gate_passed": False,
-                            "metric_value": float(macd_h),
-                            "threshold_value": 0.0,
-                            "operator": ">",
-                            "explanation": f"BUY requires MACD_hist > 0, got {macd_h:.6f}",
-                        }])
+                        _log_gates_batch(
+                            _did,
+                            [
+                                {
+                                    "gate_name": "ssf_filter",
+                                    "gate_passed": False,
+                                    "metric_value": float(macd_h),
+                                    "threshold_value": 0.0,
+                                    "operator": ">",
+                                    "explanation": f"BUY requires MACD_hist > 0, got {macd_h:.6f}",
+                                }
+                            ],
+                        )
                     except Exception:
                         pass
                     return
@@ -5111,19 +5360,28 @@ class PaperTrader:
                     # AQC-803: log blocked SSF gate
                     try:
                         _did = create_decision_event(
-                            symbol=symbol, event_type="gate_block", status="blocked",
-                            phase="gate_evaluation", parent_decision_id=_parent_did,
-                            triggered_by="schedule", action_taken="blocked",
+                            symbol=symbol,
+                            event_type="gate_block",
+                            status="blocked",
+                            phase="gate_evaluation",
+                            parent_decision_id=_parent_did,
+                            triggered_by="schedule",
+                            action_taken="blocked",
                             rejection_reason=f"SSF: MACD_hist {macd_h:.6f} positive for SELL",
                         )
-                        _log_gates_batch(_did, [{
-                            "gate_name": "ssf_filter",
-                            "gate_passed": False,
-                            "metric_value": float(macd_h),
-                            "threshold_value": 0.0,
-                            "operator": "<",
-                            "explanation": f"SELL requires MACD_hist < 0, got {macd_h:.6f}",
-                        }])
+                        _log_gates_batch(
+                            _did,
+                            [
+                                {
+                                    "gate_name": "ssf_filter",
+                                    "gate_passed": False,
+                                    "metric_value": float(macd_h),
+                                    "threshold_value": 0.0,
+                                    "operator": "<",
+                                    "explanation": f"SELL requires MACD_hist < 0, got {macd_h:.6f}",
+                                }
+                            ],
+                        )
                     except Exception:
                         pass
                     return
@@ -5136,7 +5394,9 @@ class PaperTrader:
                     long_block = _safe_float(trade_cfg.get("reef_long_rsi_block_gt"), 70.0) or 70.0
                     short_block = _safe_float(trade_cfg.get("reef_short_rsi_block_lt"), 30.0) or 30.0
                     if signal == "BUY" and float(rsi_v) > float(long_block):
-                        logger.info(f"⛔ REEF: Skipping {symbol} BUY. RSI ({float(rsi_v):.1f}) > {float(long_block):.1f}")
+                        logger.info(
+                            f"⛔ REEF: Skipping {symbol} BUY. RSI ({float(rsi_v):.1f}) > {float(long_block):.1f}"
+                        )
                         log_audit_event(
                             symbol,
                             "ENTRY_SKIP_REEF",
@@ -5150,24 +5410,35 @@ class PaperTrader:
                         # AQC-803: log blocked REEF gate
                         try:
                             _did = create_decision_event(
-                                symbol=symbol, event_type="gate_block", status="blocked",
-                                phase="gate_evaluation", parent_decision_id=_parent_did,
-                                triggered_by="schedule", action_taken="blocked",
+                                symbol=symbol,
+                                event_type="gate_block",
+                                status="blocked",
+                                phase="gate_evaluation",
+                                parent_decision_id=_parent_did,
+                                triggered_by="schedule",
+                                action_taken="blocked",
                                 rejection_reason=f"REEF: RSI {float(rsi_v):.1f} > {float(long_block):.1f}",
                             )
-                            _log_gates_batch(_did, [{
-                                "gate_name": "reef_filter",
-                                "gate_passed": False,
-                                "metric_value": float(rsi_v),
-                                "threshold_value": float(long_block),
-                                "operator": "<=",
-                                "explanation": f"BUY blocked: RSI {float(rsi_v):.1f} > {float(long_block):.1f}",
-                            }])
+                            _log_gates_batch(
+                                _did,
+                                [
+                                    {
+                                        "gate_name": "reef_filter",
+                                        "gate_passed": False,
+                                        "metric_value": float(rsi_v),
+                                        "threshold_value": float(long_block),
+                                        "operator": "<=",
+                                        "explanation": f"BUY blocked: RSI {float(rsi_v):.1f} > {float(long_block):.1f}",
+                                    }
+                                ],
+                            )
                         except Exception:
                             pass
                         return
                     if signal == "SELL" and float(rsi_v) < float(short_block):
-                        logger.info(f"⛔ REEF: Skipping {symbol} SELL. RSI ({float(rsi_v):.1f}) < {float(short_block):.1f}")
+                        logger.info(
+                            f"⛔ REEF: Skipping {symbol} SELL. RSI ({float(rsi_v):.1f}) < {float(short_block):.1f}"
+                        )
                         log_audit_event(
                             symbol,
                             "ENTRY_SKIP_REEF",
@@ -5181,19 +5452,28 @@ class PaperTrader:
                         # AQC-803: log blocked REEF gate
                         try:
                             _did = create_decision_event(
-                                symbol=symbol, event_type="gate_block", status="blocked",
-                                phase="gate_evaluation", parent_decision_id=_parent_did,
-                                triggered_by="schedule", action_taken="blocked",
+                                symbol=symbol,
+                                event_type="gate_block",
+                                status="blocked",
+                                phase="gate_evaluation",
+                                parent_decision_id=_parent_did,
+                                triggered_by="schedule",
+                                action_taken="blocked",
                                 rejection_reason=f"REEF: RSI {float(rsi_v):.1f} < {float(short_block):.1f}",
                             )
-                            _log_gates_batch(_did, [{
-                                "gate_name": "reef_filter",
-                                "gate_passed": False,
-                                "metric_value": float(rsi_v),
-                                "threshold_value": float(short_block),
-                                "operator": ">=",
-                                "explanation": f"SELL blocked: RSI {float(rsi_v):.1f} < {float(short_block):.1f}",
-                            }])
+                            _log_gates_batch(
+                                _did,
+                                [
+                                    {
+                                        "gate_name": "reef_filter",
+                                        "gate_passed": False,
+                                        "metric_value": float(rsi_v),
+                                        "threshold_value": float(short_block),
+                                        "operator": ">=",
+                                        "explanation": f"SELL blocked: RSI {float(rsi_v):.1f} < {float(short_block):.1f}",
+                                    }
+                                ],
+                            )
                         except Exception:
                             pass
                         return
@@ -5253,19 +5533,28 @@ class PaperTrader:
                     _total_margin = current_margin + margin_target
                     _cap = equity_base * max_total_margin_pct
                     _did = create_decision_event(
-                        symbol=symbol, event_type="gate_block", status="blocked",
-                        phase="risk_check", parent_decision_id=_parent_did,
-                        triggered_by="schedule", action_taken="blocked",
+                        symbol=symbol,
+                        event_type="gate_block",
+                        status="blocked",
+                        phase="risk_check",
+                        parent_decision_id=_parent_did,
+                        triggered_by="schedule",
+                        action_taken="blocked",
                         rejection_reason=f"margin {_total_margin:.2f} > cap {_cap:.2f}",
                     )
-                    _log_gates_batch(_did, [{
-                        "gate_name": "margin_limit",
-                        "gate_passed": False,
-                        "metric_value": float(_total_margin),
-                        "threshold_value": float(_cap),
-                        "operator": "<=",
-                        "explanation": f"margin_needed={_total_margin:.2f} > cap={_cap:.2f} ({max_total_margin_pct:.0%} of equity)",
-                    }])
+                    _log_gates_batch(
+                        _did,
+                        [
+                            {
+                                "gate_name": "margin_limit",
+                                "gate_passed": False,
+                                "metric_value": float(_total_margin),
+                                "threshold_value": float(_cap),
+                                "operator": "<=",
+                                "explanation": f"margin_needed={_total_margin:.2f} > cap={_cap:.2f} ({max_total_margin_pct:.0%} of equity)",
+                            }
+                        ],
+                    )
                 except Exception:
                     pass
                 return
@@ -5292,8 +5581,11 @@ class PaperTrader:
                     # AQC-804: blocked entry decision
                     try:
                         create_decision_event(
-                            symbol=symbol, event_type="entry_signal", status="blocked",
-                            phase="risk_check", triggered_by="signal",
+                            symbol=symbol,
+                            event_type="entry_signal",
+                            status="blocked",
+                            phase="risk_check",
+                            triggered_by="signal",
                             action_taken="blocked",
                             rejection_reason=f"min_notional ({target_notional:.2f} < {min_notional:.2f})",
                             context={"signal": str(signal or ""), "confidence": str(confidence or "")},
@@ -5333,18 +5625,18 @@ class PaperTrader:
 
             opened_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
             self.positions[symbol] = {
-                'type': 'LONG' if signal == 'BUY' else 'SHORT',
-                'entry_price': fill_price,
-                'size': size,
+                "type": "LONG" if signal == "BUY" else "SHORT",
+                "entry_price": fill_price,
+                "size": size,
                 # Store entry confidence so exits can optionally behave differently (e.g. slow-drift low-conf).
                 "confidence": str(confidence or "").strip().lower(),
-                'entry_atr': atr,
+                "entry_atr": atr,
                 # ADX threshold used at entry — exit ADX exhaustion uses this value
                 # so entry and exit can never contradict each other.
                 "entry_adx_threshold": float(indicators.get("entry_adx_threshold", 0) or 0) if indicators else 0.0,
                 "open_trade_id": None,
                 "open_timestamp": opened_at,
-                'trailing_sl': None, # Initialize trailing SL
+                "trailing_sl": None,  # Initialize trailing SL
                 "last_funding_time": int(time.time() * 1000),
                 "leverage": leverage,
                 "margin_used": margin_used,
@@ -5387,7 +5679,7 @@ class PaperTrader:
             self._note_entry_attempt(symbol)
             _rev_tag = " [REVERSED]" if (indicators or {}).get("_reversed_entry") is True else ""
             logger.info(
-                f"🚀 OPEN {('LONG' if signal=='BUY' else 'SHORT')} {symbol} "
+                f"🚀 OPEN {('LONG' if signal == 'BUY' else 'SHORT')} {symbol} "
                 f"px={fill_price:.4f} size={size:.6f} notional~=${notional:.2f} "
                 f"lev={leverage:.0f} margin~=${margin_used:.2f} fee=${fee_usd:.4f} conf={confidence}{_rev_tag}"
             )
@@ -5410,8 +5702,11 @@ class PaperTrader:
             # AQC-803: log all execution gates as passed + link decision to trade
             try:
                 _exec_did = create_decision_event(
-                    symbol=symbol, event_type="fill", status="executed",
-                    phase="execution", parent_decision_id=_parent_did,
+                    symbol=symbol,
+                    event_type="fill",
+                    status="executed",
+                    phase="execution",
+                    parent_decision_id=_parent_did,
                     trade_id=trade_id,
                     triggered_by="schedule",
                     action_taken="open_long" if signal == "BUY" else "open_short",
@@ -5434,23 +5729,40 @@ class PaperTrader:
                         _ssf_ok = _macd_h <= 0
                 _cap = equity_base * max_total_margin_pct
                 _exec_rows = [
-                    {"gate_name": "reef_filter", "gate_passed": _reef_ok,
-                     "metric_value": _rsi_v, "operator": "<=" if signal == "BUY" else ">=",
-                     "explanation": f"RSI {_rsi_v:.1f} passed REEF"},
-                    {"gate_name": "ssf_filter", "gate_passed": _ssf_ok,
-                     "metric_value": _macd_h, "threshold_value": 0.0,
-                     "operator": ">=" if signal == "BUY" else "<=",
-                     "explanation": f"MACD_hist {_macd_h:.6f} sign-aligned"},
-                    {"gate_name": "confidence_gate", "gate_passed": True,
-                     "explanation": f"confidence '{confidence}' >= min '{str(trade_cfg.get('entry_min_confidence', 'high'))}'"},
-                    {"gate_name": "max_positions", "gate_passed": True,
-                     "metric_value": float(len(self.positions or {})),
-                     "explanation": "within max_open_positions"},
-                    {"gate_name": "margin_limit", "gate_passed": True,
-                     "metric_value": float(current_margin + margin_used),
-                     "threshold_value": float(_cap),
-                     "operator": "<=",
-                     "explanation": f"margin {current_margin + margin_used:.2f} <= cap {_cap:.2f}"},
+                    {
+                        "gate_name": "reef_filter",
+                        "gate_passed": _reef_ok,
+                        "metric_value": _rsi_v,
+                        "operator": "<=" if signal == "BUY" else ">=",
+                        "explanation": f"RSI {_rsi_v:.1f} passed REEF",
+                    },
+                    {
+                        "gate_name": "ssf_filter",
+                        "gate_passed": _ssf_ok,
+                        "metric_value": _macd_h,
+                        "threshold_value": 0.0,
+                        "operator": ">=" if signal == "BUY" else "<=",
+                        "explanation": f"MACD_hist {_macd_h:.6f} sign-aligned",
+                    },
+                    {
+                        "gate_name": "confidence_gate",
+                        "gate_passed": True,
+                        "explanation": f"confidence '{confidence}' >= min '{str(trade_cfg.get('entry_min_confidence', 'high'))}'",
+                    },
+                    {
+                        "gate_name": "max_positions",
+                        "gate_passed": True,
+                        "metric_value": float(len(self.positions or {})),
+                        "explanation": "within max_open_positions",
+                    },
+                    {
+                        "gate_name": "margin_limit",
+                        "gate_passed": True,
+                        "metric_value": float(current_margin + margin_used),
+                        "threshold_value": float(_cap),
+                        "operator": "<=",
+                        "explanation": f"margin {current_margin + margin_used:.2f} <= cap {_cap:.2f}",
+                    },
                 ]
                 _log_gates_batch(_exec_did, _exec_rows)
                 # Link parent signal decision to this trade
@@ -5463,9 +5775,23 @@ class PaperTrader:
             try:
                 _ind_ctx = {}
                 if indicators is not None:
-                    for _k in ("RSI", "ADX", "ADX_slope", "MACD_hist", "EMA_fast", "EMA_slow",
-                               "EMA_macro", "ATR", "ATR_slope", "bb_width_ratio", "stoch_k",
-                               "stoch_d", "volume", "vol_sma", "funding_rate"):
+                    for _k in (
+                        "RSI",
+                        "ADX",
+                        "ADX_slope",
+                        "MACD_hist",
+                        "EMA_fast",
+                        "EMA_slow",
+                        "EMA_macro",
+                        "ATR",
+                        "ATR_slope",
+                        "bb_width_ratio",
+                        "stoch_k",
+                        "stoch_d",
+                        "volume",
+                        "vol_sma",
+                        "funding_rate",
+                    ):
                         _v = indicators.get(_k)
                         if _v is not None:
                             try:
@@ -5496,7 +5822,9 @@ class PaperTrader:
                 logger.debug("AQC-804: entry lineage logging failed: %s", _dle)
             self._kernel_persist()
 
-    def check_exit_conditions(self, symbol, current_price, timestamp, is_anomaly=False, dynamic_tp_mult=None, indicators=None):
+    def check_exit_conditions(
+        self, symbol, current_price, timestamp, is_anomaly=False, dynamic_tp_mult=None, indicators=None
+    ):
         # Normalise indicators: pandas Series → dict
         if indicators is not None and not isinstance(indicators, dict):
             try:
@@ -5604,54 +5932,64 @@ class PaperTrader:
         # Simulated exit cooldown (mirrors live exchange rate limits).
         # WARN-X1: Hard SL must bypass cooldown to prevent uncapped losses.
         if not self._can_attempt_exit(symbol):
-            _cd_entry = pos['entry_price']
-            _cd_atr = pos.get('entry_atr', 0.0)
+            _cd_entry = pos["entry_price"]
+            _cd_atr = pos.get("entry_atr", 0.0)
             if _cd_atr != _cd_atr:  # NaN guard
                 _cd_atr = 0.0
             if _cd_atr <= 0:
                 _cd_atr = _cd_entry * 0.005
-            _cd_sl = _cd_entry - (_cd_atr * sl_atr_mult) if pos['type'] == 'LONG' else _cd_entry + (_cd_atr * sl_atr_mult)
-            _cd_sl_hit = (pos['type'] == 'LONG' and current_price <= _cd_sl) or (pos['type'] == 'SHORT' and current_price >= _cd_sl)
+            _cd_sl = (
+                _cd_entry - (_cd_atr * sl_atr_mult) if pos["type"] == "LONG" else _cd_entry + (_cd_atr * sl_atr_mult)
+            )
+            _cd_sl_hit = (pos["type"] == "LONG" and current_price <= _cd_sl) or (
+                pos["type"] == "SHORT" and current_price >= _cd_sl
+            )
             if not _cd_sl_hit:
                 return
 
-        entry = pos['entry_price']
-        atr = pos.get('entry_atr', 0.0)
+        entry = pos["entry_price"]
+        atr = pos.get("entry_atr", 0.0)
         if atr != atr:  # NaN guard
             atr = 0.0
 
         # Fallback for legacy trades with no ATR
         if atr <= 0:
-            atr = entry * 0.005 # Default to 0.5% volatility if unknown
+            atr = entry * 0.005  # Default to 0.5% volatility if unknown
 
         # Optional glitch guardrail (defaults off): blocks exits if price is *extremely* far from entry.
         # Prefer using WS mids/BBO for robustness instead of freezing exits by default.
         if bool(trade_cfg.get("block_exits_on_extreme_dev", False)):
             price_dev_pct = abs(current_price - entry) / entry
-            if price_dev_pct > glitch_price_dev_pct or (atr > 0 and abs(current_price - entry) > (atr * glitch_atr_mult)):
-                logger.warning(f"⚠️ Extreme price deviation detected for {symbol} (${current_price}). Possible glitch. Blocking exit.")
+            if price_dev_pct > glitch_price_dev_pct or (
+                atr > 0 and abs(current_price - entry) > (atr * glitch_atr_mult)
+            ):
+                logger.warning(
+                    f"⚠️ Extreme price deviation detected for {symbol} (${current_price}). Possible glitch. Blocking exit."
+                )
                 return
 
-        pos_type = pos['type']
+        pos_type = pos["type"]
 
         # 1. Standard ATR-based Stop Loss
         current_sl_atr_mult = sl_atr_mult
 
         # v3.3: ADX Slope-Adjusted Stop (ASE)
         # If trend is weakening (ADX slope < 0) and position is underwater, tighten stop by 20%
-        is_underwater = (pos_type == 'LONG' and current_price < entry) or (pos_type == 'SHORT' and current_price > entry)
-        if indicators is not None and indicators.get('ADX_slope', 0) < 0 and is_underwater:
+        is_underwater = (pos_type == "LONG" and current_price < entry) or (
+            pos_type == "SHORT" and current_price > entry
+        )
+        if indicators is not None and indicators.get("ADX_slope", 0) < 0 and is_underwater:
             current_sl_atr_mult *= 0.8
 
         # v5.005: 資金費率利好緩衝 (Funding Tailwind Buffer - FTB)
         # 如果正喺度收緊高額資金費率 (> 0.005%/hr)，將止損 ATR 倍數放寬 20%，避免被短暫嘅插針洗出局。
-        funding_rate = indicators.get('funding_rate', 0.0) if indicators is not None else 0.0
-        is_tailwind = (pos_type == 'LONG' and funding_rate < 0) or (pos_type == 'SHORT' and funding_rate > 0)
+        funding_rate = indicators.get("funding_rate", 0.0) if indicators is not None else 0.0
+        is_tailwind = (pos_type == "LONG" and funding_rate < 0) or (pos_type == "SHORT" and funding_rate > 0)
         if is_tailwind and abs(funding_rate) > 0.00005:
             current_sl_atr_mult *= 1.2
 
         # v5.016: ADX-Adaptive Stop Expansion (DASE)
-        adx_val = indicators.get('ADX', 0) if indicators is not None else 0
+        adx_val = indicators.get("ADX", 0) if indicators is not None else 0
         if adx_val > 40.0:
             px_delta_atr = abs(current_price - entry) / atr if atr > 0 else 0
             if px_delta_atr > 0.5:
@@ -5664,12 +6002,12 @@ class PaperTrader:
             current_sl_atr_mult *= 1.10
 
         # v5.016: RSI Trend-Guard
-        rsi_val = indicators.get('RSI', 50) if indicators is not None else 50
+        rsi_val = indicators.get("RSI", 50) if indicators is not None else 50
         min_trailing_dist = 0.5
-        if (pos_type == 'LONG' and rsi_val > 60.0) or (pos_type == 'SHORT' and rsi_val < 40.0):
+        if (pos_type == "LONG" and rsi_val > 60.0) or (pos_type == "SHORT" and rsi_val < 40.0):
             min_trailing_dist = 0.7
 
-        sl_price = entry - (atr * current_sl_atr_mult) if pos_type == 'LONG' else entry + (atr * current_sl_atr_mult)
+        sl_price = entry - (atr * current_sl_atr_mult) if pos_type == "LONG" else entry + (atr * current_sl_atr_mult)
 
         # 1.1 Breakeven Stop (configurable)
         be_enabled = bool(trade_cfg.get("enable_breakeven_stop", True))
@@ -5683,7 +6021,7 @@ class PaperTrader:
             be_buffer_atr = 0.05
 
         if be_enabled and be_start_atr > 0:
-            if pos_type == 'LONG':
+            if pos_type == "LONG":
                 if (current_price - entry) >= (atr * be_start_atr):
                     sl_price = max(sl_price, entry + (atr * be_buffer_atr))
             else:
@@ -5693,7 +6031,7 @@ class PaperTrader:
         # 2. Trailing Stop Logic (v3.1 Optimization)
         # Use tighter trailing distance when in high profit or when trend weakens
         effective_trailing_dist = trailing_distance_atr
-        profit_atr = (current_price - entry) / atr if pos_type == 'LONG' else (entry - current_price) / atr
+        profit_atr = (current_price - entry) / atr if pos_type == "LONG" else (entry - current_price) / atr
 
         # v5.015: 波動率緩衝移動止損 (Volatility-Buffered Trailing Stop)
         # 如果 bb_width_ratio > 1.2 (代表波動率正在顯著擴張)，放寬移動止損距離 25%，減少被插針掃出的機會。
@@ -5710,55 +6048,59 @@ class PaperTrader:
             # v5.013: 趨勢加速保護 (Trend-Acceleration Trailing Protection - TATP)
             # 如果趨勢正處於強勁加速期 (ADX > 35 且 ADX_slope > 0)，則暫停收緊移動止損，給予更多呼吸空間。
             tighten_mult = 0.5
-            adx_val = indicators.get('ADX', 0) if indicators is not None else 0
-            adx_slope = indicators.get('ADX_slope', 0) if indicators is not None else 0
-            atr_slope = indicators.get('ATR_slope', 0) if indicators is not None else 0
+            adx_val = indicators.get("ADX", 0) if indicators is not None else 0
+            adx_slope = indicators.get("ADX_slope", 0) if indicators is not None else 0
+            atr_slope = indicators.get("ATR_slope", 0) if indicators is not None else 0
 
             if adx_val > 35 and adx_slope > 0:
-                tighten_mult = 1.0 # 不收緊
+                tighten_mult = 1.0  # 不收緊
             elif atr_slope > 0.0:
                 tighten_mult = 0.75
 
             effective_trailing_dist = trailing_distance_atr * tighten_mult
-        elif indicators is not None and indicators.get('ADX', 50) < 25:
-             effective_trailing_dist = trailing_distance_atr * 0.7 # Tighten by 30% if trend fades
+        elif indicators is not None and indicators.get("ADX", 50) < 25:
+            effective_trailing_dist = trailing_distance_atr * 0.7  # Tighten by 30% if trend fades
 
-        if pos_type == 'LONG':
+        if pos_type == "LONG":
             if profit_atr >= trailing_start_atr:
                 potential_ts = current_price - (atr * max(min_trailing_dist, effective_trailing_dist))
-                if pos['trailing_sl'] is None or potential_ts > pos['trailing_sl']:
-                    pos['trailing_sl'] = potential_ts
+                if pos["trailing_sl"] is None or potential_ts > pos["trailing_sl"]:
+                    pos["trailing_sl"] = potential_ts
                     self.upsert_position_state(symbol)
         else:
             if profit_atr >= trailing_start_atr:
                 potential_ts = current_price + (atr * max(min_trailing_dist, effective_trailing_dist))
-                if pos['trailing_sl'] is None or potential_ts < pos['trailing_sl']:
-                    pos['trailing_sl'] = potential_ts
+                if pos["trailing_sl"] is None or potential_ts < pos["trailing_sl"]:
+                    pos["trailing_sl"] = potential_ts
                     self.upsert_position_state(symbol)
 
-        if pos['trailing_sl']:
-            sl_price = pos['trailing_sl']
+        if pos["trailing_sl"]:
+            sl_price = pos["trailing_sl"]
 
         # 3. Take Profit
         tp_mult = dynamic_tp_mult or tp_atr_mult
-        tp_price = entry + (atr * tp_mult) if pos_type == 'LONG' else entry - (atr * tp_mult)
+        tp_price = entry + (atr * tp_mult) if pos_type == "LONG" else entry - (atr * tp_mult)
 
         # Separate partial TP level (when configured). 0 = use tp_price (legacy).
         tp_partial_atr_mult_val = float(trade_cfg.get("tp_partial_atr_mult", 0))
         tp1_taken = int(pos.get("tp1_taken") or 0)
         if tp_partial_atr_mult_val > 0 and tp1_taken == 0:
-            tp_check_price = entry + (atr * tp_partial_atr_mult_val) if pos_type == 'LONG' else entry - (atr * tp_partial_atr_mult_val)
+            tp_check_price = (
+                entry + (atr * tp_partial_atr_mult_val)
+                if pos_type == "LONG"
+                else entry - (atr * tp_partial_atr_mult_val)
+            )
         else:
             tp_check_price = tp_price
 
         # 4. Smart Exits (v2.8 Refactor)
         smart_exit_reason = None
         if indicators is not None:
-            ema_f = indicators.get('EMA_fast', 0)
-            ema_s = indicators.get('EMA_slow', 0)
-            ema_m = indicators.get('EMA_macro', 0)
-            adx = indicators.get('ADX', 0)
-            rsi = indicators.get('RSI', 50)
+            ema_f = indicators.get("EMA_fast", 0)
+            ema_s = indicators.get("EMA_slow", 0)
+            ema_m = indicators.get("EMA_macro", 0)
+            adx = indicators.get("ADX", 0)
+            rsi = indicators.get("RSI", 50)
 
             # Trend Breakdown (v2.5) / v4.0: Trend Breakdown Buffer (TBB)
             # Relax the EMA cross exit if the cross is very shallow (< 0.1%) and ADX is still strong (> 25).
@@ -5766,12 +6108,12 @@ class PaperTrader:
             is_weak_cross = (ema_dev < 0.001) and (adx > 25)
 
             exhausted = bool(adx_exhaustion_lt > 0 and adx < adx_exhaustion_lt)
-            if pos_type == 'LONG' and ((ema_f < ema_s and not is_weak_cross) or exhausted):
+            if pos_type == "LONG" and ((ema_f < ema_s and not is_weak_cross) or exhausted):
                 if ema_f < ema_s and not is_weak_cross:
                     smart_exit_reason = "Trend Breakdown (EMA Cross)"
                 else:
                     smart_exit_reason = f"Trend Exhaustion (ADX < {adx_exhaustion_lt:g})"
-            elif pos_type == 'SHORT' and ((ema_f > ema_s and not is_weak_cross) or exhausted):
+            elif pos_type == "SHORT" and ((ema_f > ema_s and not is_weak_cross) or exhausted):
                 if ema_f > ema_s and not is_weak_cross:
                     smart_exit_reason = "Trend Breakdown (EMA Cross)"
                 else:
@@ -5781,30 +6123,32 @@ class PaperTrader:
             # Only enforce if macro alignment is required by config.
             # If counter-trend entries are allowed, we shouldn't exit just because it's counter-trend.
             if not smart_exit_reason and ema_m > 0 and bool(flt.get("require_macro_alignment", False)):
-                if pos_type == 'LONG' and current_price < ema_m:
+                if pos_type == "LONG" and current_price < ema_m:
                     smart_exit_reason = "EMA Macro Breakdown"
-                elif pos_type == 'SHORT' and current_price > ema_m:
+                elif pos_type == "SHORT" and current_price > ema_m:
                     smart_exit_reason = "EMA Macro Breakout"
 
             # v3.1: Low-Volatility Stagnation Exit
             if not smart_exit_reason:
-                current_atr = indicators.get('ATR', atr)
-                if current_atr < (atr * 0.70): # Volatility dropped by 30%
-                    is_underwater = (pos_type == 'LONG' and current_price < entry) or (pos_type == 'SHORT' and current_price > entry)
+                current_atr = indicators.get("ATR", atr)
+                if current_atr < (atr * 0.70):  # Volatility dropped by 30%
+                    is_underwater = (pos_type == "LONG" and current_price < entry) or (
+                        pos_type == "SHORT" and current_price > entry
+                    )
                     if is_underwater:
                         # v5.084: Exception for PaxG (Gold-pegged) to avoid volatility-drop exits in stable assets.
                         if str(symbol or "").upper() != "PAXG":
-                            smart_exit_reason = f"Stagnation Exit (Low Vol: {current_atr:.2f} < {atr*0.70:.2f})"
+                            smart_exit_reason = f"Stagnation Exit (Low Vol: {current_atr:.2f} < {atr * 0.70:.2f})"
 
             # Funding Headwind Exit (v2.7/2.8/2.9/3.0)
-            funding_rate = indicators.get('funding_rate', 0.0)
+            funding_rate = indicators.get("funding_rate", 0.0)
             if not smart_exit_reason and funding_rate != 0:
-                is_headwind = (pos_type == 'LONG' and funding_rate > 0) or (pos_type == 'SHORT' and funding_rate < 0)
+                is_headwind = (pos_type == "LONG" and funding_rate > 0) or (pos_type == "SHORT" and funding_rate < 0)
                 if is_headwind:
                     price_diff_atr = abs(current_price - entry) / (atr or 1.0)
 
                     # v4.1: Adaptive Funding Ladder (AFL) - More granular sensitivity
-                    if abs(funding_rate) > 0.0001: # Extreme funding (> 0.01%/hr)
+                    if abs(funding_rate) > 0.0001:  # Extreme funding (> 0.01%/hr)
                         headwind_threshold = 0.15
                     elif abs(funding_rate) > 0.00006:
                         headwind_threshold = 0.25
@@ -5820,9 +6164,9 @@ class PaperTrader:
 
                     # v3.0: Volatility-Adjusted Sensitivity
                     # If current volatility (ATR) is higher than entry volatility, tighten leash
-                    current_atr = indicators.get('ATR', atr)
+                    current_atr = indicators.get("ATR", atr)
                     if current_atr > (atr * 1.2):
-                        headwind_threshold *= 0.6 # Reduce threshold by 40% if vol expands against us
+                        headwind_threshold *= 0.6  # Reduce threshold by 40% if vol expands against us
 
                     # v3.2/v3.7: Time-Decay Headwind (TDH) with Floor
                     open_ts = pos.get("open_timestamp")
@@ -5834,10 +6178,12 @@ class PaperTrader:
                             # Ensure open_dt is aware if current is aware (naive vs aware mismatch)
                             if open_dt.tzinfo is None:
                                 open_dt = open_dt.replace(tzinfo=datetime.timezone.utc)
-                            
-                            duration_hrs = (datetime.datetime.now(datetime.timezone.utc) - open_dt).total_seconds() / 3600
 
-                            if duration_hrs > 1.0: # Start decay after 1 hour
+                            duration_hrs = (
+                                datetime.datetime.now(datetime.timezone.utc) - open_dt
+                            ).total_seconds() / 3600
+
+                            if duration_hrs > 1.0:  # Start decay after 1 hour
                                 # v3.7: Extend window to 12h and add 0.35 ATR floor
                                 decay_factor = max(0.0, 1.0 - (duration_hrs - 1.0) / 11.0)
                                 headwind_threshold = max(0.35, headwind_threshold * decay_factor)
@@ -5846,11 +6192,12 @@ class PaperTrader:
                             # 如果趨勢排列 (EMA Fast/Slow) 仍然正確且 ADX > 25，
                             # 則將 Funding Headwind 門檻保底設為 0.75 ATR，無視時間衰減。
                             # 避免在趨勢未變的情況下因為「時間到」而被洗出局。
-                            ema_f = indicators.get('EMA_fast', 0)
-                            ema_s = indicators.get('EMA_slow', 0)
-                            adx_val = indicators.get('ADX', 0)
-                            is_trend_valid = (pos_type == 'LONG' and ema_f > ema_s) or \
-                                             (pos_type == 'SHORT' and ema_f < ema_s)
+                            ema_f = indicators.get("EMA_fast", 0)
+                            ema_s = indicators.get("EMA_slow", 0)
+                            adx_val = indicators.get("ADX", 0)
+                            is_trend_valid = (pos_type == "LONG" and ema_f > ema_s) or (
+                                pos_type == "SHORT" and ema_f < ema_s
+                            )
                             if is_trend_valid and adx_val > 25:
                                 headwind_threshold = max(0.75, headwind_threshold)
                         except Exception as e:
@@ -5858,10 +6205,11 @@ class PaperTrader:
 
                     # v3.4/v3.7: Momentum-Filtered Funding Exit (MFE)
                     # If momentum is still improving in our direction, increase threshold by 50%
-                    macd_h = indicators.get('MACD_hist', 0)
-                    prev_macd_h = indicators.get('prev_MACD_hist', 0)
-                    is_momentum_improving = (pos_type == 'LONG' and macd_h > prev_macd_h) or \
-                                            (pos_type == 'SHORT' and macd_h < prev_macd_h)
+                    macd_h = indicators.get("MACD_hist", 0)
+                    prev_macd_h = indicators.get("prev_MACD_hist", 0)
+                    is_momentum_improving = (pos_type == "LONG" and macd_h > prev_macd_h) or (
+                        pos_type == "SHORT" and macd_h < prev_macd_h
+                    )
                     if is_momentum_improving:
                         headwind_threshold *= 1.5
                         # v3.7: MFE Floor - 只要動量仲改善緊，起碼留 0.5 ATR 空間
@@ -5869,42 +6217,45 @@ class PaperTrader:
 
                     # v3.7: ADX-Boosted Funding Threshold (ABF)
                     # 如果趨勢極強 (ADX > 35)，放寬 Funding 離場閾值 40%
-                    adx = indicators.get('ADX', 0)
+                    adx = indicators.get("ADX", 0)
                     if adx > 35:
                         headwind_threshold *= 1.4
 
                     # v3.8: High-Confidence Funding Buffer (HCFB)
                     # 如果係高信心信號，額外放寬 25% 空間
-                    if pos.get('confidence') == 'high':
+                    if pos.get("confidence") == "high":
                         headwind_threshold *= 1.25
 
                     # v3.6: Macro-Trend Filtered Funding Exit (MTF)
                     # 如果大趨勢 (EMA 200) 仍然支持持倉方向，放寬 Funding 離場閾值 30%
                     is_macro_aligned = False
-                    ema_m = indicators.get('EMA_macro', 0)
+                    ema_m = indicators.get("EMA_macro", 0)
                     if ema_m > 0:
-                        is_macro_aligned = (pos_type == 'LONG' and current_price > ema_m) or \
-                                           (pos_type == 'SHORT' and current_price < ema_m)
+                        is_macro_aligned = (pos_type == "LONG" and current_price > ema_m) or (
+                            pos_type == "SHORT" and current_price < ema_m
+                        )
                         if is_macro_aligned:
                             headwind_threshold *= 1.3
 
                     # v4.2: Triple Confirmation Funding Buffer (TCFB)
                     # 如果同時具備 MACD 改良 (MFE)、強勢大趨勢 (MTF) 及 高信心 (HCFB)，額外增加 50% 緩衝空間
                     # 避免在最強勢的趨勢中因為微小的資金費率波動被洗出局
-                    is_triple_confirmed = is_momentum_improving and is_macro_aligned and (pos.get('confidence') == 'high')
+                    is_triple_confirmed = (
+                        is_momentum_improving and is_macro_aligned and (pos.get("confidence") == "high")
+                    )
                     if is_triple_confirmed:
                         headwind_threshold *= 1.5
 
                     # v4.3: Volatility-Scaled Funding Tolerance (VSFT)
                     # 如果波動率極低 (ATR/Price < 0.2%)，顯示市場處於極度壓縮狀態，放寬 25% 空間以等待突破
-                    current_atr = indicators.get('ATR', atr)
+                    current_atr = indicators.get("ATR", atr)
                     if (current_atr / current_price) < 0.002:
                         headwind_threshold *= 1.25
 
                     # v4.4: Counter-Trend Exhaustion Buffer (CTEB)
                     # 如果 RSI 顯示反向運動可能接近枯竭（例如做空時 RSI > 65），額外放寬 30% 空間，等待均值回歸
-                    rsi = indicators.get('RSI', 50)
-                    if (pos_type == 'SHORT' and rsi > 65) or (pos_type == 'LONG' and rsi < 35):
+                    rsi = indicators.get("RSI", 50)
+                    if (pos_type == "SHORT" and rsi > 65) or (pos_type == "LONG" and rsi < 35):
                         headwind_threshold *= 1.3
 
                     # v4.5: 極端趨勢資金費率屏蔽 (Extreme Trend Funding Shield - ETFS)
@@ -5916,7 +6267,7 @@ class PaperTrader:
                     # v4.8: 趨勢加速離場屏蔽 (Trend Acceleration Exit Shield - TAES)
                     # 如果 ADX 斜率 > 1.0 (代表趨勢正在強勁加速)，額外放寬 40% 空間。
                     # 確保在行情進入加速段時，系統不會因為資金費率的小額成本而過早離場。
-                    adx_slope = indicators.get('ADX_slope', 0)
+                    adx_slope = indicators.get("ADX_slope", 0)
                     if adx_slope > 1.0:
                         headwind_threshold *= 1.4
 
@@ -5929,7 +6280,7 @@ class PaperTrader:
                     # v5.002: 收益波動屏蔽 (Profit-Vol Shield - PVS)
                     # 如果持倉已有超過 +1.5 ATR 的利潤，且當前 ATR 正在上升 (ATR_slope > 0)，
                     # 代表行情進入加速期且對我有利。在這種情況下，將 Funding Headwind 離場閾值額外放寬 50%。
-                    atr_slope = indicators.get('ATR_slope', 0)
+                    atr_slope = indicators.get("ATR_slope", 0)
                     if profit_atr > 1.5 and atr_slope > 0:
                         headwind_threshold *= 1.5
 
@@ -5949,7 +6300,9 @@ class PaperTrader:
                         headwind_threshold *= 0.75
 
                     # If underwater with headwind
-                    if (pos_type == 'LONG' and current_price < entry) or (pos_type == 'SHORT' and current_price > entry):
+                    if (pos_type == "LONG" and current_price < entry) or (
+                        pos_type == "SHORT" and current_price > entry
+                    ):
                         if price_diff_atr > headwind_threshold:
                             smart_exit_reason = f"Funding Headwind Exit (FR: {funding_rate:.6f}, Thr: {headwind_threshold:.2f}, Dur: {duration_hrs:.1f}h)"
 
@@ -5964,20 +6317,20 @@ class PaperTrader:
                     tsme_min_profit_atr = 1.0
                 tsme_req_adx_slope_neg = bool(trade_cfg.get("tsme_require_adx_slope_negative", True))
 
-                profit_atr_now = (current_price - entry) / atr if pos_type == 'LONG' else (entry - current_price) / atr
-                adx_slope_now = indicators.get('ADX_slope', 0)
+                profit_atr_now = (current_price - entry) / atr if pos_type == "LONG" else (entry - current_price) / atr
+                adx_slope_now = indicators.get("ADX_slope", 0)
 
                 gate_profit_ok = profit_atr_now >= tsme_min_profit_atr
                 gate_slope_ok = (adx_slope_now < 0) if tsme_req_adx_slope_neg else True
 
                 if gate_profit_ok and gate_slope_ok:
-                    macd_h = indicators.get('MACD_hist', 0)
-                    p_macd_h = indicators.get('prev_MACD_hist', 0)
-                    pp_macd_h = indicators.get('prev2_MACD_hist', 0)
+                    macd_h = indicators.get("MACD_hist", 0)
+                    p_macd_h = indicators.get("prev_MACD_hist", 0)
+                    pp_macd_h = indicators.get("prev2_MACD_hist", 0)
 
                     # Check for two consecutive periods of momentum contraction in the saturated zone
                     is_exhausted = False
-                    if pos_type == 'LONG':
+                    if pos_type == "LONG":
                         if macd_h < p_macd_h < pp_macd_h:
                             is_exhausted = True
                     else:
@@ -5994,13 +6347,13 @@ class PaperTrader:
             # 如果已經有 +1.5 ATR 浮盈，且 ADX > 35 (強趨勢)，
             # 若 MACD Histogram 連續 3 次向反方向運動，視為頂部/底部背離。
             if not smart_exit_reason and profit_atr > 1.5 and adx > 35:
-                macd_h = indicators.get('MACD_hist', 0)
-                p_macd_h = indicators.get('prev_MACD_hist', 0)
-                pp_macd_h = indicators.get('prev2_MACD_hist', 0)
-                ppp_macd_h = indicators.get('prev3_MACD_hist', 0)
+                macd_h = indicators.get("MACD_hist", 0)
+                p_macd_h = indicators.get("prev_MACD_hist", 0)
+                pp_macd_h = indicators.get("prev2_MACD_hist", 0)
+                ppp_macd_h = indicators.get("prev3_MACD_hist", 0)
 
                 is_diverging = False
-                if pos_type == 'LONG':
+                if pos_type == "LONG":
                     if macd_h < p_macd_h < pp_macd_h < ppp_macd_h:
                         is_diverging = True
                 else:
@@ -6012,7 +6365,7 @@ class PaperTrader:
 
             # RSI Overextension Exit (v2.7/2.8/2.9/3.0) — now configurable.
             if not smart_exit_reason and bool(trade_cfg.get("enable_rsi_overextension_exit", True)):
-                profit_atr = (current_price - entry) / atr if pos_type == 'LONG' else (entry - current_price) / atr
+                profit_atr = (current_price - entry) / atr if pos_type == "LONG" else (entry - current_price) / atr
                 try:
                     sw = float(trade_cfg.get("rsi_exit_profit_atr_switch", 1.5))
                 except Exception:
@@ -6047,9 +6400,9 @@ class PaperTrader:
                         if v > 0:
                             rsi_lb = v
 
-                if pos_type == 'LONG' and rsi > rsi_ub:
+                if pos_type == "LONG" and rsi > rsi_ub:
                     smart_exit_reason = f"RSI Overbought ({rsi:.1f}, Thr: {rsi_ub:g})"
-                elif pos_type == 'SHORT' and rsi < rsi_lb:
+                elif pos_type == "SHORT" and rsi < rsi_lb:
                     smart_exit_reason = f"RSI Oversold ({rsi:.1f}, Thr: {rsi_lb:g})"
 
         # ── AQC-803: Log exit gate evaluations when an exit fires ──────────
@@ -6058,16 +6411,16 @@ class PaperTrader:
         if smart_exit_reason:
             _exit_fires = True
             _exit_kind = "smart_exit"
-        elif pos_type == 'LONG' and current_price <= sl_price:
+        elif pos_type == "LONG" and current_price <= sl_price:
             _exit_fires = True
-            _exit_kind = "trailing_stop" if pos.get('trailing_sl') else "stop_loss"
-        elif pos_type == 'LONG' and current_price >= (tp_check_price):
+            _exit_kind = "trailing_stop" if pos.get("trailing_sl") else "stop_loss"
+        elif pos_type == "LONG" and current_price >= (tp_check_price):
             _exit_fires = True
             _exit_kind = "take_profit"
-        elif pos_type == 'SHORT' and current_price >= sl_price:
+        elif pos_type == "SHORT" and current_price >= sl_price:
             _exit_fires = True
-            _exit_kind = "trailing_stop" if pos.get('trailing_sl') else "stop_loss"
-        elif pos_type == 'SHORT' and current_price <= (tp_check_price):
+            _exit_kind = "trailing_stop" if pos.get("trailing_sl") else "stop_loss"
+        elif pos_type == "SHORT" and current_price <= (tp_check_price):
             _exit_fires = True
             _exit_kind = "take_profit"
 
@@ -6092,60 +6445,76 @@ class PaperTrader:
                 )
                 _exit_rows: list[dict] = []
                 # Stop loss gate
-                _sl_hit = (pos_type == 'LONG' and current_price <= sl_price) or (pos_type == 'SHORT' and current_price >= sl_price)
-                _exit_rows.append({
-                    "gate_name": "stop_loss",
-                    "gate_passed": _sl_hit,
-                    "metric_value": float(current_price),
-                    "threshold_value": float(sl_price),
-                    "operator": "<=" if pos_type == "LONG" else ">=",
-                    "explanation": f"price {current_price:.4f} vs SL {sl_price:.4f}",
-                })
+                _sl_hit = (pos_type == "LONG" and current_price <= sl_price) or (
+                    pos_type == "SHORT" and current_price >= sl_price
+                )
+                _exit_rows.append(
+                    {
+                        "gate_name": "stop_loss",
+                        "gate_passed": _sl_hit,
+                        "metric_value": float(current_price),
+                        "threshold_value": float(sl_price),
+                        "operator": "<=" if pos_type == "LONG" else ">=",
+                        "explanation": f"price {current_price:.4f} vs SL {sl_price:.4f}",
+                    }
+                )
                 # Take profit gate
-                _tp_hit = (pos_type == 'LONG' and current_price >= tp_price) or (pos_type == 'SHORT' and current_price <= tp_price)
-                _exit_rows.append({
-                    "gate_name": "take_profit",
-                    "gate_passed": _tp_hit,
-                    "metric_value": float(current_price),
-                    "threshold_value": float(tp_price),
-                    "operator": ">=" if pos_type == "LONG" else "<=",
-                    "explanation": f"price {current_price:.4f} vs TP {tp_price:.4f}",
-                })
+                _tp_hit = (pos_type == "LONG" and current_price >= tp_price) or (
+                    pos_type == "SHORT" and current_price <= tp_price
+                )
+                _exit_rows.append(
+                    {
+                        "gate_name": "take_profit",
+                        "gate_passed": _tp_hit,
+                        "metric_value": float(current_price),
+                        "threshold_value": float(tp_price),
+                        "operator": ">=" if pos_type == "LONG" else "<=",
+                        "explanation": f"price {current_price:.4f} vs TP {tp_price:.4f}",
+                    }
+                )
                 # Trailing stop gate
                 _ts_val = pos.get("trailing_sl")
                 _ts_hit = False
                 if _ts_val is not None:
-                    _ts_hit = (pos_type == 'LONG' and current_price <= _ts_val) or (pos_type == 'SHORT' and current_price >= _ts_val)
-                _exit_rows.append({
-                    "gate_name": "trailing_stop",
-                    "gate_passed": _ts_hit,
-                    "metric_value": float(current_price),
-                    "threshold_value": None if _ts_val is None else float(_ts_val),
-                    "operator": "<=" if pos_type == "LONG" else ">=",
-                    "explanation": f"trailing_sl={'N/A' if _ts_val is None else f'{_ts_val:.4f}'}",
-                })
+                    _ts_hit = (pos_type == "LONG" and current_price <= _ts_val) or (
+                        pos_type == "SHORT" and current_price >= _ts_val
+                    )
+                _exit_rows.append(
+                    {
+                        "gate_name": "trailing_stop",
+                        "gate_passed": _ts_hit,
+                        "metric_value": float(current_price),
+                        "threshold_value": None if _ts_val is None else float(_ts_val),
+                        "operator": "<=" if pos_type == "LONG" else ">=",
+                        "explanation": f"trailing_sl={'N/A' if _ts_val is None else f'{_ts_val:.4f}'}",
+                    }
+                )
                 # Breakeven stop gate
                 _be_active = be_enabled and be_start_atr > 0
                 _be_engaged = False
                 if _be_active:
-                    if pos_type == 'LONG':
+                    if pos_type == "LONG":
                         _be_engaged = (current_price - entry) >= (atr * be_start_atr)
                     else:
                         _be_engaged = (entry - current_price) >= (atr * be_start_atr)
-                _exit_rows.append({
-                    "gate_name": "breakeven_stop",
-                    "gate_passed": _be_engaged,
-                    "metric_value": float(profit_atr),
-                    "threshold_value": float(be_start_atr),
-                    "operator": ">=",
-                    "explanation": f"breakeven {'engaged' if _be_engaged else 'not engaged'} (start={be_start_atr:.2f} ATR)",
-                })
+                _exit_rows.append(
+                    {
+                        "gate_name": "breakeven_stop",
+                        "gate_passed": _be_engaged,
+                        "metric_value": float(profit_atr),
+                        "threshold_value": float(be_start_atr),
+                        "operator": ">=",
+                        "explanation": f"breakeven {'engaged' if _be_engaged else 'not engaged'} (start={be_start_atr:.2f} ATR)",
+                    }
+                )
                 # Smart exit gate
-                _exit_rows.append({
-                    "gate_name": "smart_exit",
-                    "gate_passed": smart_exit_reason is not None,
-                    "explanation": str(smart_exit_reason) if smart_exit_reason else "no smart exit triggered",
-                })
+                _exit_rows.append(
+                    {
+                        "gate_name": "smart_exit",
+                        "gate_passed": smart_exit_reason is not None,
+                        "explanation": str(smart_exit_reason) if smart_exit_reason else "no smart exit triggered",
+                    }
+                )
                 _log_gates_batch(_exit_did, _exit_rows)
             except Exception as _ex_exc:
                 logger.debug("check_exit_conditions: exit gate logging failed: %s", _ex_exc)
@@ -6179,9 +6548,9 @@ class PaperTrader:
                 },
             )
             _log_exit_lineage(smart_exit_reason)
-        elif pos_type == 'LONG':
+        elif pos_type == "LONG":
             if current_price <= sl_price:
-                reason = "Trailing Stop" if pos['trailing_sl'] else "Stop Loss"
+                reason = "Trailing Stop" if pos["trailing_sl"] else "Stop Loss"
                 audit = None
                 if indicators is not None:
                     try:
@@ -6313,7 +6682,7 @@ class PaperTrader:
                 _log_exit_lineage("Take Profit")
         else:
             if current_price >= sl_price:
-                reason = "Trailing Stop" if pos['trailing_sl'] else "Stop Loss"
+                reason = "Trailing Stop" if pos["trailing_sl"] else "Stop Loss"
                 audit = None
                 if indicators is not None:
                     try:
@@ -6474,6 +6843,7 @@ class PaperTrader:
         self.reduce_position(symbol, sz, price, timestamp, reason, confidence="N/A", meta=meta)
         self._note_exit_attempt(symbol)
 
+
 def analyze(df, symbol, btc_bullish=None):
     cfg = get_strategy_config(symbol)
     trade_cfg = cfg["trade"]
@@ -6559,7 +6929,9 @@ def analyze(df, symbol, btc_bullish=None):
         a = thr["anomaly"]
         price_change_pct = abs(latest["Close"] - prev["Close"]) / prev["Close"]
         ema_dev_pct = abs(latest["Close"] - latest["EMA_fast"]) / latest["EMA_fast"] if latest["EMA_fast"] > 0 else 0
-        is_anomaly = (price_change_pct > float(a["price_change_pct_gt"])) or (ema_dev_pct > float(a["ema_fast_dev_pct_gt"]))
+        is_anomaly = (price_change_pct > float(a["price_change_pct_gt"])) or (
+            ema_dev_pct > float(a["ema_fast_dev_pct_gt"])
+        )
 
     # 3) Dynamic TP multipliers (returned to the trader)
     tp = thr["tp_and_momentum"]
@@ -6648,8 +7020,20 @@ def analyze(df, symbol, btc_bullish=None):
         btc_adx_override = float(thr_entry.get("btc_adx_override", 40.0))
     except Exception:
         btc_adx_override = 40.0
-    btc_ok_long = (not require_btc) or (sym_u == "BTC") or (btc_bullish is None) or bool(btc_bullish) or (latest["ADX"] > btc_adx_override)
-    btc_ok_short = (not require_btc) or (sym_u == "BTC") or (btc_bullish is None) or (not bool(btc_bullish)) or (latest["ADX"] > btc_adx_override)
+    btc_ok_long = (
+        (not require_btc)
+        or (sym_u == "BTC")
+        or (btc_bullish is None)
+        or bool(btc_bullish)
+        or (latest["ADX"] > btc_adx_override)
+    )
+    btc_ok_short = (
+        (not require_btc)
+        or (sym_u == "BTC")
+        or (btc_bullish is None)
+        or (not bool(btc_bullish))
+        or (latest["ADX"] > btc_adx_override)
+    )
 
     # v5.042: Pullback continuation entry config (optional).
     pullback_enabled = bool(thr_entry.get("enable_pullback_entries", False))
@@ -6727,7 +7111,14 @@ def analyze(df, symbol, btc_bullish=None):
     dist_ema_fast = abs(latest["Close"] - latest["EMA_fast"]) / latest["EMA_fast"] if latest["EMA_fast"] > 0 else 0
     is_extended = enable_ext_filter and (dist_ema_fast > max_dist)
 
-    if latest["ADX"] > effective_min_adx and (not is_ranging) and (not is_anomaly) and (not is_extended) and vol_confirm and is_trending_up:
+    if (
+        latest["ADX"] > effective_min_adx
+        and (not is_ranging)
+        and (not is_anomaly)
+        and (not is_extended)
+        and vol_confirm
+        and is_trending_up
+    ):
         # Stochastic RSI filter (optional)
         if bool(flt.get("use_stoch_rsi_filter", True)):
             stoch_rsi = ta.momentum.StochRSIIndicator(
@@ -6747,8 +7138,12 @@ def analyze(df, symbol, btc_bullish=None):
             adx_max = adx_min + 1.0
         weight = max(0.0, min(1.0, (adx_val - adx_min) / (adx_max - adx_min)))
 
-        rsi_long_limit = float(tp["rsi_long_weak"]) + weight * (float(tp["rsi_long_strong"]) - float(tp["rsi_long_weak"]))
-        rsi_short_limit = float(tp["rsi_short_weak"]) + weight * (float(tp["rsi_short_strong"]) - float(tp["rsi_short_weak"]))
+        rsi_long_limit = float(tp["rsi_long_weak"]) + weight * (
+            float(tp["rsi_long_strong"]) - float(tp["rsi_long_weak"])
+        )
+        rsi_short_limit = float(tp["rsi_short_weak"]) + weight * (
+            float(tp["rsi_short_strong"]) - float(tp["rsi_short_weak"])
+        )
 
         high_conf_mult = float(thr_entry.get("high_conf_volume_mult", 2.5))
 
@@ -6867,14 +7262,24 @@ def analyze(df, symbol, btc_bullish=None):
             rsi_v = 0.0
 
         # Long drift: requires slope >= +threshold
-        if bullish_alignment and float(latest["Close"]) > float(latest["EMA_slow"]) and btc_ok_long and ema_slow_slope_pct >= float(slow_min_slope_pct):
+        if (
+            bullish_alignment
+            and float(latest["Close"]) > float(latest["EMA_slow"])
+            and btc_ok_long
+            and ema_slow_slope_pct >= float(slow_min_slope_pct)
+        ):
             macd_ok = (macd_h > 0.0) if slow_require_macd_sign else True
             if macd_ok and rsi_v >= float(slow_rsi_long_min):
                 signal, conf = "BUY", "low"
                 slow_used = True
 
         # Short drift: requires slope <= -threshold
-        elif bearish_alignment and float(latest["Close"]) < float(latest["EMA_slow"]) and btc_ok_short and ema_slow_slope_pct <= -float(slow_min_slope_pct):
+        elif (
+            bearish_alignment
+            and float(latest["Close"]) < float(latest["EMA_slow"])
+            and btc_ok_short
+            and ema_slow_slope_pct <= -float(slow_min_slope_pct)
+        ):
             macd_ok = (macd_h < 0.0) if slow_require_macd_sign else True
             if macd_ok and rsi_v <= float(slow_rsi_short_max):
                 signal, conf = "SELL", "low"
