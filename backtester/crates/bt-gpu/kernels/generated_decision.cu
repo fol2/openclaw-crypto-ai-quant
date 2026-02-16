@@ -345,3 +345,71 @@ __device__ TpResult check_tp_codegen(
     result.exit_code = 11;  // full TP
     return result;
 }
+// Derived from bt-core/src/engine.rs sizing logic
+// (SSOT: risk-core/src/lib.rs::compute_entry_sizing)
+//
+// Dynamic entry sizing: allocation % * confidence mult * ADX mult * vol scalar.
+// Dynamic leverage selects per-confidence leverage with optional max cap.
+// All monetary/size arithmetic in double precision (AQC-734).
+
+struct SizingResultD {
+    double size;
+    double margin;
+    double leverage;
+};
+
+__device__ SizingResultD compute_entry_size_codegen(
+    double equity,
+    double price,
+    unsigned int confidence,
+    double atr,
+    double adx,
+    const GpuComboConfig& cfg
+) {
+    // ── Base margin allocation ───────────────────────────────────────────
+    double margin = equity * (double)cfg.allocation_pct;
+
+    // ── Dynamic sizing (confidence * ADX * volatility) ──────────────────
+    if (cfg.enable_dynamic_sizing != 0u) {
+        // Confidence multiplier
+        double conf_mult = (double)cfg.confidence_mult_medium;
+        if (confidence == CONF_HIGH) { conf_mult = (double)cfg.confidence_mult_high; }
+        if (confidence == CONF_LOW)  { conf_mult = (double)cfg.confidence_mult_low; }
+
+        // ADX multiplier — linearly scales [min_mult, 1.0] over [0, full_adx]
+        double adx_ratio = adx / (double)cfg.adx_sizing_full_adx;
+        double adx_mult = fmax(fmin(adx_ratio, 1.0), (double)cfg.adx_sizing_min_mult);
+
+        // Volatility scalar — inverse of vol_ratio, clamped to [min, max]
+        double vol_scalar = 1.0;
+        if ((double)cfg.vol_baseline_pct > 0.0 && price > 0.0) {
+            double vol_ratio = (atr / price) / (double)cfg.vol_baseline_pct;
+            if (vol_ratio > 0.0) {
+                vol_scalar = fmax(fmin(1.0 / vol_ratio, (double)cfg.vol_scalar_max),
+                                  (double)cfg.vol_scalar_min);
+            }
+        }
+
+        margin *= conf_mult * adx_mult * vol_scalar;
+    }
+
+    // ── Leverage ─────────────────────────────────────────────────────────
+    double lev = (double)cfg.leverage;
+    if (cfg.enable_dynamic_leverage != 0u) {
+        if (confidence == CONF_HIGH)        { lev = (double)cfg.leverage_high; }
+        else if (confidence == CONF_MEDIUM) { lev = (double)cfg.leverage_medium; }
+        else                                { lev = (double)cfg.leverage_low; }
+        if ((double)cfg.leverage_max_cap > 0.0) { lev = fmin(lev, (double)cfg.leverage_max_cap); }
+    }
+
+    // ── Notional & position size ─────────────────────────────────────────
+    double notional = margin * lev;
+    double size = 0.0;
+    if (price > 0.0) { size = notional / price; }
+
+    SizingResultD result;
+    result.size = size;
+    result.margin = margin;
+    result.leverage = lev;
+    return result;
+}
