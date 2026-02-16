@@ -891,7 +891,273 @@ __device__ TpResult check_tp_codegen(
 }
 
 /// Smart exits: all 8 sub-checks (AQC-1223)
-pub fn check_smart_exits_codegen() -> String { String::new() /* stub */ }
+///
+/// Generates a CUDA `__device__` function that mirrors
+/// `bt-core/src/exits/smart_exits.rs::check`.
+///
+/// The 8 sub-checks (evaluated in priority order, first wins):
+///   1. Trend Breakdown (EMA Cross) with TBB (Tight-Band Buffer)
+///   2. Trend Exhaustion (ADX below threshold)
+///   3. EMA Macro Breakdown (require_macro_alignment gate)
+///   4. Stagnation Exit (low-vol + underwater, skip PAXG — PAXG excluded by caller)
+///   5. Funding Headwind Exit (no-op in backtester v1: funding_rate always 0)
+///   6. TSME (Trend Saturation Momentum Exit)
+///   7. MMDE (MACD Persistent Divergence Exit)
+///   8. RSI Overextension Exit (profit-switched thresholds)
+///
+/// Returns a `SmartExitResult` struct: `{ bool should_exit; int exit_code; }`
+///   - exit_code: 0=none, 1=Trend Breakdown, 2=Trend Exhaustion,
+///     3=EMA Macro Breakdown, 4=Stagnation, 5=Funding Headwind (never fires),
+///     6=TSME, 7=MMDE, 8=RSI Overextension
+///
+/// Uses `double` precision for all indicator/price arithmetic to match
+/// the f64 Rust source and satisfy T2 precision requirements (AQC-734).
+pub fn check_smart_exits_codegen() -> String {
+    r#"// Derived from bt-core/src/exits/smart_exits.rs
+// Smart exits: 8 independent sub-checks evaluated in priority order.
+// First triggered sub-check wins and sets exit_code.
+//
+// Sub-checks:
+//   1. Trend Breakdown (EMA Cross) + TBB buffer
+//   2. Trend Exhaustion (ADX < threshold)
+//   3. EMA Macro Breakdown (require_macro_alignment gate)
+//   4. Stagnation Exit (low-vol + underwater)
+//   5. Funding Headwind Exit (no-op: funding_rate = 0 in backtester v1)
+//   6. TSME (Trend Saturation Momentum Exit)
+//   7. MMDE (MACD Persistent Divergence Exit)
+//   8. RSI Overextension Exit (profit-switched thresholds)
+//
+// All indicator/price math in double precision (AQC-734).
+
+struct SmartExitResult {
+    bool should_exit;
+    int exit_code;     // 0=none, 1-8 for each sub-check
+};
+
+__device__ SmartExitResult check_smart_exits_codegen(
+    const GpuComboConfig& cfg,
+    int pos_type,
+    double entry_price,
+    double entry_atr,
+    double current_price,
+    double ema_fast,
+    double ema_slow,
+    double ema_macro,
+    double adx,
+    double adx_slope,
+    double atr,
+    double avg_atr,
+    double rsi,
+    double macd_hist,
+    double prev_macd_hist,
+    double prev2_macd_hist,
+    double prev3_macd_hist,
+    double profit_atr,
+    int confidence,
+    double entry_adx_threshold
+) {
+    SmartExitResult result;
+    result.should_exit = false;
+    result.exit_code = 0;
+
+    // ── ATR fallback (mirrors Rust: if entry_atr <= 0 use 0.5% of entry) ──
+    double eff_atr = (entry_atr > 0.0) ? entry_atr : (entry_price * 0.005);
+
+    // ── ADX exhaustion threshold: use entry's ADX threshold so entry and
+    // exit can never contradict; fall back to config value. ────────────────
+    double adx_exhaustion_lt = (double)cfg.smart_exit_adx_exhaustion_lt;
+    if (confidence == CONF_LOW
+        && (double)cfg.smart_exit_adx_exhaustion_lt_low_conf > 0.0) {
+        adx_exhaustion_lt = (double)cfg.smart_exit_adx_exhaustion_lt_low_conf;
+    }
+    if (entry_adx_threshold > 0.0) {
+        adx_exhaustion_lt = entry_adx_threshold;
+    }
+    adx_exhaustion_lt = fmax(adx_exhaustion_lt, 0.0);
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 1. Trend Breakdown (EMA Cross) with TBB buffer
+    // ══════════════════════════════════════════════════════════════════════
+    double ema_dev = 0.0;
+    if (ema_slow > 0.0) {
+        double diff = ema_fast - ema_slow;
+        if (diff < 0.0) { diff = -diff; }
+        ema_dev = diff / ema_slow;
+    }
+    bool is_weak_cross = (ema_dev < 0.001 && adx > 25.0);
+
+    bool ema_cross_exit;
+    if (pos_type == POS_LONG) {
+        ema_cross_exit = (ema_fast < ema_slow && !is_weak_cross);
+    } else {
+        ema_cross_exit = (ema_fast > ema_slow && !is_weak_cross);
+    }
+
+    if (ema_cross_exit) {
+        result.should_exit = true;
+        result.exit_code = 1;
+        return result;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 2. Trend Exhaustion (ADX below threshold)
+    // ══════════════════════════════════════════════════════════════════════
+    if (adx_exhaustion_lt > 0.0 && adx < adx_exhaustion_lt) {
+        result.should_exit = true;
+        result.exit_code = 2;
+        return result;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 3. EMA Macro Breakdown (only if require_macro_alignment enabled)
+    // ══════════════════════════════════════════════════════════════════════
+    if (cfg.require_macro_alignment != 0u && ema_macro > 0.0) {
+        if (pos_type == POS_LONG && current_price < ema_macro) {
+            result.should_exit = true;
+            result.exit_code = 3;
+            return result;
+        }
+        if (pos_type == POS_SHORT && current_price > ema_macro) {
+            result.should_exit = true;
+            result.exit_code = 3;
+            return result;
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 4. Stagnation Exit (low-volatility + underwater)
+    //    Note: PAXG exclusion is handled by the caller (symbol check).
+    // ══════════════════════════════════════════════════════════════════════
+    if (atr < (eff_atr * 0.70)) {
+        bool is_underwater;
+        if (pos_type == POS_LONG) {
+            is_underwater = (current_price < entry_price);
+        } else {
+            is_underwater = (current_price > entry_price);
+        }
+        if (is_underwater) {
+            result.should_exit = true;
+            result.exit_code = 4;
+            return result;
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 5. Funding Headwind Exit
+    //    No-op in backtester v1: funding_rate is always 0.0.
+    //    Implemented as a placeholder for structural parity with Rust SSOT.
+    //    exit_code = 5 (never fires)
+    // ══════════════════════════════════════════════════════════════════════
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 6. TSME (Trend Saturation Momentum Exit)
+    //    ADX > 50, profit >= tsme_min_profit_atr, optional ADX_slope < 0,
+    //    MACD momentum contracting (2 consecutive contractions).
+    // ══════════════════════════════════════════════════════════════════════
+    if (adx > 50.0) {
+        double tsme_min_profit = (double)cfg.tsme_min_profit_atr;
+        bool gate_profit_ok = (profit_atr >= tsme_min_profit);
+        bool gate_slope_ok = true;
+        if (cfg.tsme_require_adx_slope_negative != 0u) {
+            gate_slope_ok = (adx_slope < 0.0);
+        }
+
+        if (gate_profit_ok && gate_slope_ok) {
+            bool is_exhausted;
+            if (pos_type == POS_LONG) {
+                is_exhausted = (macd_hist < prev_macd_hist
+                                && prev_macd_hist < prev2_macd_hist);
+            } else {
+                is_exhausted = (macd_hist > prev_macd_hist
+                                && prev_macd_hist > prev2_macd_hist);
+            }
+
+            if (is_exhausted) {
+                result.should_exit = true;
+                result.exit_code = 6;
+                return result;
+            }
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 7. MMDE (MACD Persistent Divergence Exit)
+    //    profit > 1.5 ATR AND ADX > 35 AND 3 consecutive MACD histogram
+    //    moves against position (4 bars total).
+    // ══════════════════════════════════════════════════════════════════════
+    if (profit_atr > 1.5 && adx > 35.0) {
+        bool is_diverging;
+        if (pos_type == POS_LONG) {
+            is_diverging = (macd_hist < prev_macd_hist
+                            && prev_macd_hist < prev2_macd_hist
+                            && prev2_macd_hist < prev3_macd_hist);
+        } else {
+            is_diverging = (macd_hist > prev_macd_hist
+                            && prev_macd_hist > prev2_macd_hist
+                            && prev2_macd_hist > prev3_macd_hist);
+        }
+
+        if (is_diverging) {
+            result.should_exit = true;
+            result.exit_code = 7;
+            return result;
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 8. RSI Overextension Exit (profit-switched thresholds)
+    //    Configurable RSI thresholds with profit-regime switch and
+    //    low-confidence overrides.
+    // ══════════════════════════════════════════════════════════════════════
+    if (cfg.enable_rsi_overextension_exit != 0u) {
+        double sw = fmax((double)cfg.rsi_exit_profit_atr_switch, 0.0);
+
+        double rsi_ub;
+        double rsi_lb;
+
+        if (profit_atr < sw) {
+            // Low-profit regime: wider thresholds (less aggressive exit).
+            rsi_ub = (double)cfg.rsi_exit_ub_lo_profit;
+            rsi_lb = (double)cfg.rsi_exit_lb_lo_profit;
+            if (confidence == CONF_LOW) {
+                if ((double)cfg.rsi_exit_ub_lo_profit_low_conf > 0.0) {
+                    rsi_ub = (double)cfg.rsi_exit_ub_lo_profit_low_conf;
+                }
+                if ((double)cfg.rsi_exit_lb_lo_profit_low_conf > 0.0) {
+                    rsi_lb = (double)cfg.rsi_exit_lb_lo_profit_low_conf;
+                }
+            }
+        } else {
+            // High-profit regime: tighter thresholds (protect profits).
+            rsi_ub = (double)cfg.rsi_exit_ub_hi_profit;
+            rsi_lb = (double)cfg.rsi_exit_lb_hi_profit;
+            if (confidence == CONF_LOW) {
+                if ((double)cfg.rsi_exit_ub_hi_profit_low_conf > 0.0) {
+                    rsi_ub = (double)cfg.rsi_exit_ub_hi_profit_low_conf;
+                }
+                if ((double)cfg.rsi_exit_lb_hi_profit_low_conf > 0.0) {
+                    rsi_lb = (double)cfg.rsi_exit_lb_hi_profit_low_conf;
+                }
+            }
+        }
+
+        if (pos_type == POS_LONG && rsi > rsi_ub) {
+            result.should_exit = true;
+            result.exit_code = 8;
+            return result;
+        }
+        if (pos_type == POS_SHORT && rsi < rsi_lb) {
+            result.should_exit = true;
+            result.exit_code = 8;
+            return result;
+        }
+    }
+
+    return result;
+}
+"#
+    .to_string()
+}
 
 /// Exit orchestrator: priority dispatch (AQC-1224)
 pub fn check_all_exits_codegen() -> String { String::new() /* stub */ }
@@ -2495,6 +2761,439 @@ mod tests {
     #[test]
     fn tp_codegen_is_nonempty() {
         let src = check_tp_codegen();
+        assert!(
+            src.len() > 200,
+            "generated code must be substantial, got {} bytes",
+            src.len()
+        );
+    }
+
+    // -- check_smart_exits_codegen tests (AQC-1223) --------------------------------
+
+    #[test]
+    fn smart_exits_codegen_has_correct_function_signature() {
+        let src = check_smart_exits_codegen();
+        assert!(
+            src.contains("__device__ SmartExitResult check_smart_exits_codegen("),
+            "must declare a __device__ SmartExitResult function"
+        );
+        assert!(
+            src.contains("const GpuComboConfig& cfg"),
+            "must take GpuComboConfig by const ref"
+        );
+        assert!(
+            src.contains("int pos_type"),
+            "must take pos_type as int"
+        );
+        assert!(
+            src.contains("double entry_price"),
+            "must take entry_price as double"
+        );
+        assert!(
+            src.contains("double entry_atr"),
+            "must take entry_atr as double"
+        );
+        assert!(
+            src.contains("double current_price"),
+            "must take current_price as double"
+        );
+        assert!(
+            src.contains("double ema_fast"),
+            "must take ema_fast as double"
+        );
+        assert!(
+            src.contains("double ema_slow"),
+            "must take ema_slow as double"
+        );
+        assert!(
+            src.contains("double ema_macro"),
+            "must take ema_macro as double"
+        );
+        assert!(
+            src.contains("double adx"),
+            "must take adx as double"
+        );
+        assert!(
+            src.contains("double adx_slope"),
+            "must take adx_slope as double"
+        );
+        assert!(
+            src.contains("double rsi"),
+            "must take rsi as double"
+        );
+        assert!(
+            src.contains("double macd_hist"),
+            "must take macd_hist as double"
+        );
+        assert!(
+            src.contains("double profit_atr"),
+            "must take profit_atr as double"
+        );
+        assert!(
+            src.contains("int confidence"),
+            "must take confidence as int"
+        );
+        assert!(
+            src.contains("double entry_adx_threshold"),
+            "must take entry_adx_threshold as double"
+        );
+    }
+
+    #[test]
+    fn smart_exits_codegen_has_source_comment() {
+        let src = check_smart_exits_codegen();
+        assert!(
+            src.contains("Derived from bt-core/src/exits/smart_exits.rs"),
+            "must reference the Rust SSOT source file"
+        );
+    }
+
+    #[test]
+    fn smart_exits_codegen_has_smart_exit_result_struct() {
+        let src = check_smart_exits_codegen();
+        assert!(
+            src.contains("struct SmartExitResult"),
+            "must define SmartExitResult struct"
+        );
+        assert!(
+            src.contains("bool should_exit"),
+            "SmartExitResult must have should_exit field"
+        );
+        assert!(
+            src.contains("int exit_code"),
+            "SmartExitResult must have exit_code field"
+        );
+    }
+
+    #[test]
+    fn smart_exits_codegen_uses_double_precision() {
+        let src = check_smart_exits_codegen();
+        assert!(src.contains("double eff_atr"), "eff_atr must be double");
+        assert!(src.contains("double adx_exhaustion_lt"), "adx_exhaustion_lt must be double");
+        assert!(src.contains("double ema_dev"), "ema_dev must be double");
+        assert!(src.contains("double tsme_min_profit"), "tsme_min_profit must be double");
+        assert!(src.contains("double rsi_ub"), "rsi_ub must be double");
+        assert!(src.contains("double rsi_lb"), "rsi_lb must be double");
+        assert!(src.contains("double sw"), "profit switch sw must be double");
+        // Must NOT use float for indicator-critical variables
+        assert!(
+            !src.contains("float eff_atr"),
+            "eff_atr must be double, not float"
+        );
+        assert!(
+            !src.contains("float adx_exhaustion_lt"),
+            "adx_exhaustion_lt must be double, not float"
+        );
+        assert!(
+            !src.contains("float rsi_ub"),
+            "rsi_ub must be double, not float"
+        );
+        assert!(
+            !src.contains("float rsi_lb"),
+            "rsi_lb must be double, not float"
+        );
+    }
+
+    #[test]
+    fn smart_exits_codegen_check1_trend_breakdown() {
+        let src = check_smart_exits_codegen();
+        assert!(
+            src.contains("Trend Breakdown") || src.contains("EMA Cross"),
+            "must have Trend Breakdown / EMA Cross comment"
+        );
+        assert!(
+            src.contains("ema_fast < ema_slow"),
+            "long trend breakdown: ema_fast < ema_slow"
+        );
+        assert!(
+            src.contains("ema_fast > ema_slow"),
+            "short trend breakdown: ema_fast > ema_slow"
+        );
+        assert!(
+            src.contains("is_weak_cross"),
+            "must check TBB (Tight-Band Buffer) weak cross"
+        );
+        assert!(
+            src.contains("ema_dev < 0.001"),
+            "TBB: weak cross threshold is 0.1% deviation"
+        );
+        assert!(
+            src.contains("adx > 25.0"),
+            "TBB: weak cross requires ADX > 25"
+        );
+        assert!(
+            src.contains("exit_code = 1"),
+            "Trend Breakdown must set exit_code = 1"
+        );
+    }
+
+    #[test]
+    fn smart_exits_codegen_check2_trend_exhaustion() {
+        let src = check_smart_exits_codegen();
+        assert!(
+            src.contains("Trend Exhaustion") || src.contains("ADX below threshold"),
+            "must have Trend Exhaustion comment"
+        );
+        assert!(
+            src.contains("adx < adx_exhaustion_lt"),
+            "exhaustion check: ADX < threshold"
+        );
+        assert!(
+            src.contains("adx_exhaustion_lt > 0.0"),
+            "exhaustion gated on threshold > 0"
+        );
+        assert!(
+            src.contains("exit_code = 2"),
+            "Trend Exhaustion must set exit_code = 2"
+        );
+    }
+
+    #[test]
+    fn smart_exits_codegen_check3_ema_macro_breakdown() {
+        let src = check_smart_exits_codegen();
+        assert!(
+            src.contains("EMA Macro Breakdown"),
+            "must have EMA Macro Breakdown comment"
+        );
+        assert!(
+            src.contains("cfg.require_macro_alignment"),
+            "macro breakdown gated on require_macro_alignment config flag"
+        );
+        assert!(
+            src.contains("ema_macro > 0.0"),
+            "macro breakdown requires valid ema_macro"
+        );
+        assert!(
+            src.contains("current_price < ema_macro"),
+            "long macro breakdown: price < ema_macro"
+        );
+        assert!(
+            src.contains("current_price > ema_macro"),
+            "short macro breakout: price > ema_macro"
+        );
+        assert!(
+            src.contains("exit_code = 3"),
+            "EMA Macro Breakdown must set exit_code = 3"
+        );
+    }
+
+    #[test]
+    fn smart_exits_codegen_check4_stagnation_exit() {
+        let src = check_smart_exits_codegen();
+        assert!(
+            src.contains("Stagnation Exit") || src.contains("low-volatility"),
+            "must have Stagnation Exit comment"
+        );
+        assert!(
+            src.contains("atr < (eff_atr * 0.70)"),
+            "stagnation triggers when current ATR < 70% of entry ATR"
+        );
+        assert!(
+            src.contains("is_underwater"),
+            "stagnation requires underwater position"
+        );
+        assert!(
+            src.contains("exit_code = 4"),
+            "Stagnation Exit must set exit_code = 4"
+        );
+    }
+
+    #[test]
+    fn smart_exits_codegen_check5_funding_headwind_noop() {
+        let src = check_smart_exits_codegen();
+        assert!(
+            src.contains("Funding Headwind"),
+            "must have Funding Headwind comment"
+        );
+        assert!(
+            src.contains("no-op") || src.contains("No-op"),
+            "funding headwind must be documented as no-op in backtester v1"
+        );
+        // No actual logic should fire exit_code = 5
+    }
+
+    #[test]
+    fn smart_exits_codegen_check6_tsme() {
+        let src = check_smart_exits_codegen();
+        assert!(
+            src.contains("TSME") || src.contains("Trend Saturation"),
+            "must have TSME comment"
+        );
+        assert!(
+            src.contains("adx > 50.0"),
+            "TSME triggers when ADX > 50"
+        );
+        assert!(
+            src.contains("cfg.tsme_min_profit_atr"),
+            "TSME uses tsme_min_profit_atr from config"
+        );
+        assert!(
+            src.contains("cfg.tsme_require_adx_slope_negative"),
+            "TSME checks tsme_require_adx_slope_negative config flag"
+        );
+        assert!(
+            src.contains("macd_hist < prev_macd_hist"),
+            "TSME checks MACD momentum contraction (long)"
+        );
+        assert!(
+            src.contains("prev_macd_hist < prev2_macd_hist"),
+            "TSME checks 2 consecutive contractions"
+        );
+        assert!(
+            src.contains("exit_code = 6"),
+            "TSME must set exit_code = 6"
+        );
+    }
+
+    #[test]
+    fn smart_exits_codegen_check7_mmde() {
+        let src = check_smart_exits_codegen();
+        assert!(
+            src.contains("MMDE") || src.contains("MACD Persistent Divergence"),
+            "must have MMDE comment"
+        );
+        assert!(
+            src.contains("profit_atr > 1.5"),
+            "MMDE requires profit > 1.5 ATR"
+        );
+        assert!(
+            src.contains("adx > 35.0"),
+            "MMDE requires ADX > 35"
+        );
+        assert!(
+            src.contains("prev2_macd_hist < prev3_macd_hist"),
+            "MMDE checks 3 consecutive MACD divergences (4 bars total, long)"
+        );
+        assert!(
+            src.contains("prev2_macd_hist > prev3_macd_hist"),
+            "MMDE checks 3 consecutive MACD divergences (4 bars total, short)"
+        );
+        assert!(
+            src.contains("exit_code = 7"),
+            "MMDE must set exit_code = 7"
+        );
+    }
+
+    #[test]
+    fn smart_exits_codegen_check8_rsi_overextension() {
+        let src = check_smart_exits_codegen();
+        assert!(
+            src.contains("RSI Overextension"),
+            "must have RSI Overextension comment"
+        );
+        assert!(
+            src.contains("cfg.enable_rsi_overextension_exit"),
+            "RSI overextension gated on enable flag"
+        );
+        assert!(
+            src.contains("cfg.rsi_exit_profit_atr_switch"),
+            "RSI uses profit_atr_switch from config"
+        );
+        assert!(
+            src.contains("cfg.rsi_exit_ub_lo_profit"),
+            "RSI uses lo-profit upper bound from config"
+        );
+        assert!(
+            src.contains("cfg.rsi_exit_lb_lo_profit"),
+            "RSI uses lo-profit lower bound from config"
+        );
+        assert!(
+            src.contains("cfg.rsi_exit_ub_hi_profit"),
+            "RSI uses hi-profit upper bound from config"
+        );
+        assert!(
+            src.contains("cfg.rsi_exit_lb_hi_profit"),
+            "RSI uses hi-profit lower bound from config"
+        );
+        assert!(
+            src.contains("cfg.rsi_exit_ub_lo_profit_low_conf"),
+            "RSI uses lo-profit low-conf UB from config"
+        );
+        assert!(
+            src.contains("cfg.rsi_exit_lb_lo_profit_low_conf"),
+            "RSI uses lo-profit low-conf LB from config"
+        );
+        assert!(
+            src.contains("cfg.rsi_exit_ub_hi_profit_low_conf"),
+            "RSI uses hi-profit low-conf UB from config"
+        );
+        assert!(
+            src.contains("cfg.rsi_exit_lb_hi_profit_low_conf"),
+            "RSI uses hi-profit low-conf LB from config"
+        );
+        assert!(
+            src.contains("rsi > rsi_ub"),
+            "long RSI overextension: rsi > upper bound"
+        );
+        assert!(
+            src.contains("rsi < rsi_lb"),
+            "short RSI overextension: rsi < lower bound"
+        );
+        assert!(
+            src.contains("exit_code = 8"),
+            "RSI Overextension must set exit_code = 8"
+        );
+    }
+
+    #[test]
+    fn smart_exits_codegen_uses_correct_config_fields() {
+        let src = check_smart_exits_codegen();
+        assert!(
+            src.contains("cfg.smart_exit_adx_exhaustion_lt"),
+            "must use cfg.smart_exit_adx_exhaustion_lt"
+        );
+        assert!(
+            src.contains("cfg.smart_exit_adx_exhaustion_lt_low_conf"),
+            "must use cfg.smart_exit_adx_exhaustion_lt_low_conf"
+        );
+        assert!(
+            src.contains("cfg.require_macro_alignment"),
+            "must use cfg.require_macro_alignment"
+        );
+        assert!(
+            src.contains("cfg.tsme_min_profit_atr"),
+            "must use cfg.tsme_min_profit_atr"
+        );
+        assert!(
+            src.contains("cfg.tsme_require_adx_slope_negative"),
+            "must use cfg.tsme_require_adx_slope_negative"
+        );
+        assert!(
+            src.contains("cfg.enable_rsi_overextension_exit"),
+            "must use cfg.enable_rsi_overextension_exit"
+        );
+        assert!(
+            src.contains("cfg.rsi_exit_profit_atr_switch"),
+            "must use cfg.rsi_exit_profit_atr_switch"
+        );
+    }
+
+    #[test]
+    fn smart_exits_codegen_uses_fmax_not_std_max() {
+        let src = check_smart_exits_codegen();
+        assert!(src.contains("fmax("), "must use fmax for CUDA");
+        assert!(
+            !src.contains("std::max"),
+            "must not use std::max (use fmax for CUDA)"
+        );
+        assert!(
+            !src.contains("std::min"),
+            "must not use std::min (use fmin for CUDA)"
+        );
+    }
+
+    #[test]
+    fn smart_exits_codegen_has_atr_fallback() {
+        let src = check_smart_exits_codegen();
+        assert!(
+            src.contains("entry_price * 0.005"),
+            "must have ATR fallback for legacy positions"
+        );
+    }
+
+    #[test]
+    fn smart_exits_codegen_is_nonempty() {
+        let src = check_smart_exits_codegen();
         assert!(
             src.len() > 200,
             "generated code must be substantial, got {} bytes",

@@ -786,6 +786,248 @@ __device__ TpResult check_tp_codegen(
     result.exit_code = 11;  // full TP
     return result;
 }
+// Derived from bt-core/src/exits/smart_exits.rs
+// Smart exits: 8 independent sub-checks evaluated in priority order.
+// First triggered sub-check wins and sets exit_code.
+//
+// Sub-checks:
+//   1. Trend Breakdown (EMA Cross) + TBB buffer
+//   2. Trend Exhaustion (ADX < threshold)
+//   3. EMA Macro Breakdown (require_macro_alignment gate)
+//   4. Stagnation Exit (low-vol + underwater)
+//   5. Funding Headwind Exit (no-op: funding_rate = 0 in backtester v1)
+//   6. TSME (Trend Saturation Momentum Exit)
+//   7. MMDE (MACD Persistent Divergence Exit)
+//   8. RSI Overextension Exit (profit-switched thresholds)
+//
+// All indicator/price math in double precision (AQC-734).
+
+struct SmartExitResult {
+    bool should_exit;
+    int exit_code;     // 0=none, 1-8 for each sub-check
+};
+
+__device__ SmartExitResult check_smart_exits_codegen(
+    const GpuComboConfig& cfg,
+    int pos_type,
+    double entry_price,
+    double entry_atr,
+    double current_price,
+    double ema_fast,
+    double ema_slow,
+    double ema_macro,
+    double adx,
+    double adx_slope,
+    double atr,
+    double avg_atr,
+    double rsi,
+    double macd_hist,
+    double prev_macd_hist,
+    double prev2_macd_hist,
+    double prev3_macd_hist,
+    double profit_atr,
+    int confidence,
+    double entry_adx_threshold
+) {
+    SmartExitResult result;
+    result.should_exit = false;
+    result.exit_code = 0;
+
+    // ── ATR fallback (mirrors Rust: if entry_atr <= 0 use 0.5% of entry) ──
+    double eff_atr = (entry_atr > 0.0) ? entry_atr : (entry_price * 0.005);
+
+    // ── ADX exhaustion threshold: use entry's ADX threshold so entry and
+    // exit can never contradict; fall back to config value. ────────────────
+    double adx_exhaustion_lt = (double)cfg.smart_exit_adx_exhaustion_lt;
+    if (confidence == CONF_LOW
+        && (double)cfg.smart_exit_adx_exhaustion_lt_low_conf > 0.0) {
+        adx_exhaustion_lt = (double)cfg.smart_exit_adx_exhaustion_lt_low_conf;
+    }
+    if (entry_adx_threshold > 0.0) {
+        adx_exhaustion_lt = entry_adx_threshold;
+    }
+    adx_exhaustion_lt = fmax(adx_exhaustion_lt, 0.0);
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 1. Trend Breakdown (EMA Cross) with TBB buffer
+    // ══════════════════════════════════════════════════════════════════════
+    double ema_dev = 0.0;
+    if (ema_slow > 0.0) {
+        double diff = ema_fast - ema_slow;
+        if (diff < 0.0) { diff = -diff; }
+        ema_dev = diff / ema_slow;
+    }
+    bool is_weak_cross = (ema_dev < 0.001 && adx > 25.0);
+
+    bool ema_cross_exit;
+    if (pos_type == POS_LONG) {
+        ema_cross_exit = (ema_fast < ema_slow && !is_weak_cross);
+    } else {
+        ema_cross_exit = (ema_fast > ema_slow && !is_weak_cross);
+    }
+
+    if (ema_cross_exit) {
+        result.should_exit = true;
+        result.exit_code = 1;
+        return result;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 2. Trend Exhaustion (ADX below threshold)
+    // ══════════════════════════════════════════════════════════════════════
+    if (adx_exhaustion_lt > 0.0 && adx < adx_exhaustion_lt) {
+        result.should_exit = true;
+        result.exit_code = 2;
+        return result;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 3. EMA Macro Breakdown (only if require_macro_alignment enabled)
+    // ══════════════════════════════════════════════════════════════════════
+    if (cfg.require_macro_alignment != 0u && ema_macro > 0.0) {
+        if (pos_type == POS_LONG && current_price < ema_macro) {
+            result.should_exit = true;
+            result.exit_code = 3;
+            return result;
+        }
+        if (pos_type == POS_SHORT && current_price > ema_macro) {
+            result.should_exit = true;
+            result.exit_code = 3;
+            return result;
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 4. Stagnation Exit (low-volatility + underwater)
+    //    Note: PAXG exclusion is handled by the caller (symbol check).
+    // ══════════════════════════════════════════════════════════════════════
+    if (atr < (eff_atr * 0.70)) {
+        bool is_underwater;
+        if (pos_type == POS_LONG) {
+            is_underwater = (current_price < entry_price);
+        } else {
+            is_underwater = (current_price > entry_price);
+        }
+        if (is_underwater) {
+            result.should_exit = true;
+            result.exit_code = 4;
+            return result;
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 5. Funding Headwind Exit
+    //    No-op in backtester v1: funding_rate is always 0.0.
+    //    Implemented as a placeholder for structural parity with Rust SSOT.
+    //    exit_code = 5 (never fires)
+    // ══════════════════════════════════════════════════════════════════════
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 6. TSME (Trend Saturation Momentum Exit)
+    //    ADX > 50, profit >= tsme_min_profit_atr, optional ADX_slope < 0,
+    //    MACD momentum contracting (2 consecutive contractions).
+    // ══════════════════════════════════════════════════════════════════════
+    if (adx > 50.0) {
+        double tsme_min_profit = (double)cfg.tsme_min_profit_atr;
+        bool gate_profit_ok = (profit_atr >= tsme_min_profit);
+        bool gate_slope_ok = true;
+        if (cfg.tsme_require_adx_slope_negative != 0u) {
+            gate_slope_ok = (adx_slope < 0.0);
+        }
+
+        if (gate_profit_ok && gate_slope_ok) {
+            bool is_exhausted;
+            if (pos_type == POS_LONG) {
+                is_exhausted = (macd_hist < prev_macd_hist
+                                && prev_macd_hist < prev2_macd_hist);
+            } else {
+                is_exhausted = (macd_hist > prev_macd_hist
+                                && prev_macd_hist > prev2_macd_hist);
+            }
+
+            if (is_exhausted) {
+                result.should_exit = true;
+                result.exit_code = 6;
+                return result;
+            }
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 7. MMDE (MACD Persistent Divergence Exit)
+    //    profit > 1.5 ATR AND ADX > 35 AND 3 consecutive MACD histogram
+    //    moves against position (4 bars total).
+    // ══════════════════════════════════════════════════════════════════════
+    if (profit_atr > 1.5 && adx > 35.0) {
+        bool is_diverging;
+        if (pos_type == POS_LONG) {
+            is_diverging = (macd_hist < prev_macd_hist
+                            && prev_macd_hist < prev2_macd_hist
+                            && prev2_macd_hist < prev3_macd_hist);
+        } else {
+            is_diverging = (macd_hist > prev_macd_hist
+                            && prev_macd_hist > prev2_macd_hist
+                            && prev2_macd_hist > prev3_macd_hist);
+        }
+
+        if (is_diverging) {
+            result.should_exit = true;
+            result.exit_code = 7;
+            return result;
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 8. RSI Overextension Exit (profit-switched thresholds)
+    //    Configurable RSI thresholds with profit-regime switch and
+    //    low-confidence overrides.
+    // ══════════════════════════════════════════════════════════════════════
+    if (cfg.enable_rsi_overextension_exit != 0u) {
+        double sw = fmax((double)cfg.rsi_exit_profit_atr_switch, 0.0);
+
+        double rsi_ub;
+        double rsi_lb;
+
+        if (profit_atr < sw) {
+            // Low-profit regime: wider thresholds (less aggressive exit).
+            rsi_ub = (double)cfg.rsi_exit_ub_lo_profit;
+            rsi_lb = (double)cfg.rsi_exit_lb_lo_profit;
+            if (confidence == CONF_LOW) {
+                if ((double)cfg.rsi_exit_ub_lo_profit_low_conf > 0.0) {
+                    rsi_ub = (double)cfg.rsi_exit_ub_lo_profit_low_conf;
+                }
+                if ((double)cfg.rsi_exit_lb_lo_profit_low_conf > 0.0) {
+                    rsi_lb = (double)cfg.rsi_exit_lb_lo_profit_low_conf;
+                }
+            }
+        } else {
+            // High-profit regime: tighter thresholds (protect profits).
+            rsi_ub = (double)cfg.rsi_exit_ub_hi_profit;
+            rsi_lb = (double)cfg.rsi_exit_lb_hi_profit;
+            if (confidence == CONF_LOW) {
+                if ((double)cfg.rsi_exit_ub_hi_profit_low_conf > 0.0) {
+                    rsi_ub = (double)cfg.rsi_exit_ub_hi_profit_low_conf;
+                }
+                if ((double)cfg.rsi_exit_lb_hi_profit_low_conf > 0.0) {
+                    rsi_lb = (double)cfg.rsi_exit_lb_hi_profit_low_conf;
+                }
+            }
+        }
+
+        if (pos_type == POS_LONG && rsi > rsi_ub) {
+            result.should_exit = true;
+            result.exit_code = 8;
+            return result;
+        }
+        if (pos_type == POS_SHORT && rsi < rsi_lb) {
+            result.should_exit = true;
+            result.exit_code = 8;
+            return result;
+        }
+    }
+
+    return result;
+}
 // Derived from bt-core/src/engine.rs sizing logic
 // (SSOT: risk-core/src/lib.rs::compute_entry_sizing)
 //
