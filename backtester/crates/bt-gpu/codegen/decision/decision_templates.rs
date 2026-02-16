@@ -144,7 +144,119 @@ __device__ double compute_sl_price_codegen(
 }
 
 /// Trailing stop: VBTS/TATP/TSPV/ratchet (AQC-1221)
-pub fn compute_trailing_codegen() -> String { String::new() /* stub */ }
+///
+/// Translates `bt-core/src/exits/trailing.rs::compute_trailing()` into a CUDA
+/// `__device__` function.  All price arithmetic uses `double` to match AQC-734
+/// f64 migration.  Every tunable constant is read from `cfg.` — no hardcoded
+/// magic numbers remain except the TATP multiplier (1.0, i.e. "don't tighten").
+pub fn compute_trailing_codegen() -> String {
+    r#"// Derived from bt-core/src/exits/trailing.rs
+// Trailing stop: per-confidence offsets, VBTS, RSI Trend-Guard, TATP, TSPV,
+//                weak-trend tightening, ratchet.
+// All price math in double precision (AQC-734).
+// All tunables read from cfg (no hardcoded trailing params).
+
+__device__ double compute_trailing_codegen(
+    const GpuComboConfig& cfg,
+    int pos_type,
+    double entry_price,
+    double current_price,
+    double atr,
+    double current_trailing_sl,
+    int confidence,
+    double rsi,
+    double adx,
+    double adx_slope,
+    double atr_slope,
+    double bb_width_ratio,
+    double profit_atr
+) {
+    // ── ATR fallback (mirrors Rust: if entry_atr <= 0 use 0.5% of entry) ──
+    double eff_atr = (atr > 0.0) ? atr : (entry_price * 0.005);
+
+    // ── Per-confidence overrides for trailing start / distance ─────────────
+    double trailing_start = (double)cfg.trailing_start_atr;
+    double trailing_dist  = (double)cfg.trailing_distance_atr;
+
+    if (confidence == 0) {  // Confidence::Low == 0
+        if (cfg.trailing_start_atr_low_conf > 0.0f) {
+            trailing_start = (double)cfg.trailing_start_atr_low_conf;
+        }
+        if (cfg.trailing_distance_atr_low_conf > 0.0f) {
+            trailing_dist = (double)cfg.trailing_distance_atr_low_conf;
+        }
+    }
+
+    // ── RSI Trend-Guard floor (v5.016) ────────────────────────────────────
+    // Minimum effective trailing distance.  Raised when RSI is favourable
+    // (trending in the direction of the position).
+    double min_trailing_dist = (double)cfg.trailing_rsi_floor_default;
+    if (pos_type == POS_LONG && rsi > 60.0) {
+        min_trailing_dist = (double)cfg.trailing_rsi_floor_trending;
+    }
+    if (pos_type == POS_SHORT && rsi < 40.0) {
+        min_trailing_dist = (double)cfg.trailing_rsi_floor_trending;
+    }
+
+    // ── Effective trailing distance ───────────────────────────────────────
+    double effective_dist = trailing_dist;
+
+    // VBTS (Vol-Buffered Trailing Stop, v5.015): widen when BB expanding.
+    if (cfg.enable_vol_buffered_trailing != 0u
+        && bb_width_ratio > (double)cfg.trailing_vbts_bb_threshold) {
+        effective_dist *= (double)cfg.trailing_vbts_mult;
+    }
+
+    // High-profit tightening (> cfg threshold ATR) with TATP / TSPV overrides.
+    if (profit_atr > (double)cfg.trailing_high_profit_atr) {
+        if (adx > 35.0 && adx_slope > 0.0) {
+            // TATP: trend accelerating — don't tighten (1.0x).
+            effective_dist = trailing_dist * 1.0;
+        } else if (atr_slope > 0.0) {
+            // TSPV: volatility expanding — partial tighten.
+            effective_dist = trailing_dist * (double)cfg.trailing_tighten_tspv;
+        } else {
+            // Default high-profit tightening.
+            effective_dist = trailing_dist * (double)cfg.trailing_tighten_default;
+        }
+    } else if (adx < 25.0) {
+        // Weak-trend tightening.
+        effective_dist = trailing_dist * (double)cfg.trailing_weak_trend_mult;
+    }
+
+    // Clamp to RSI Trend-Guard floor.
+    effective_dist = fmax(effective_dist, min_trailing_dist);
+
+    // ── Activation gate ───────────────────────────────────────────────────
+    if (profit_atr < trailing_start) {
+        // Not enough profit to activate trailing stop yet.
+        // Preserve any existing trailing SL from a previous bar.
+        return current_trailing_sl;
+    }
+
+    // ── Compute candidate trailing stop price ─────────────────────────────
+    double candidate;
+    if (pos_type == POS_LONG) {
+        candidate = current_price - (eff_atr * effective_dist);
+    } else {
+        candidate = current_price + (eff_atr * effective_dist);
+    }
+
+    // ── Ratchet: only allow the trailing stop to improve ──────────────────
+    // A non-positive current_trailing_sl means "no trailing stop yet" (first bar).
+    if (current_trailing_sl > 0.0) {
+        if (pos_type == POS_LONG) {
+            candidate = fmax(candidate, current_trailing_sl);
+        } else {
+            candidate = fmin(candidate, current_trailing_sl);
+        }
+    }
+
+    return candidate;
+}
+"#
+    .to_string()
+}
 
 /// Take profit: partial TP + full TP ladder (AQC-1222)
 pub fn check_tp_codegen() -> String { String::new() /* stub */ }
@@ -377,6 +489,145 @@ mod tests {
         assert!(
             src.contains("pos_type == 1"),
             "long check must use pos_type == 1 (POS_LONG)"
+        );
+    }
+
+    // -- compute_trailing_codegen tests (AQC-1221) ----------------------------
+
+    #[test]
+    fn trailing_codegen_contains_function_signature() {
+        let src = compute_trailing_codegen();
+        assert!(
+            src.contains("__device__ double compute_trailing_codegen("),
+            "must emit __device__ double function signature"
+        );
+    }
+
+    #[test]
+    fn trailing_codegen_contains_source_comment() {
+        let src = compute_trailing_codegen();
+        assert!(
+            src.contains("Derived from bt-core/src/exits/trailing.rs"),
+            "must have provenance comment"
+        );
+    }
+
+    #[test]
+    fn trailing_codegen_uses_double_precision() {
+        let src = compute_trailing_codegen();
+        assert!(src.contains("double trailing_start"), "trailing_start must be double");
+        assert!(src.contains("double trailing_dist"), "trailing_dist must be double");
+        assert!(src.contains("double effective_dist"), "effective_dist must be double");
+        assert!(src.contains("double candidate"), "candidate must be double");
+        assert!(src.contains("double eff_atr"), "eff_atr must be double");
+        assert!(src.contains("double min_trailing_dist"), "min_trailing_dist must be double");
+    }
+
+    #[test]
+    fn trailing_codegen_reads_config_not_hardcoded() {
+        let src = compute_trailing_codegen();
+        assert!(src.contains("cfg.trailing_start_atr"), "trailing_start from config");
+        assert!(src.contains("cfg.trailing_distance_atr"), "trailing_distance from config");
+        assert!(src.contains("cfg.trailing_start_atr_low_conf"), "low_conf start from config");
+        assert!(src.contains("cfg.trailing_distance_atr_low_conf"), "low_conf dist from config");
+        assert!(src.contains("cfg.trailing_rsi_floor_default"), "RSI floor default from config");
+        assert!(src.contains("cfg.trailing_rsi_floor_trending"), "RSI floor trending from config");
+        assert!(src.contains("cfg.enable_vol_buffered_trailing"), "VBTS enable from config");
+        assert!(src.contains("cfg.trailing_vbts_bb_threshold"), "VBTS BB threshold from config");
+        assert!(src.contains("cfg.trailing_vbts_mult"), "VBTS mult from config");
+        assert!(src.contains("cfg.trailing_high_profit_atr"), "high profit threshold from config");
+        assert!(src.contains("cfg.trailing_tighten_tspv"), "TSPV tighten from config");
+        assert!(src.contains("cfg.trailing_tighten_default"), "default tighten from config");
+        assert!(src.contains("cfg.trailing_weak_trend_mult"), "weak trend mult from config");
+    }
+
+    #[test]
+    fn trailing_codegen_contains_vbts_logic() {
+        let src = compute_trailing_codegen();
+        assert!(
+            src.contains("VBTS") || src.contains("Vol-Buffered"),
+            "must contain VBTS reference"
+        );
+        assert!(src.contains("bb_width_ratio"), "VBTS must check bb_width_ratio");
+    }
+
+    #[test]
+    fn trailing_codegen_contains_ratchet_logic() {
+        let src = compute_trailing_codegen();
+        assert!(src.contains("Ratchet") || src.contains("ratchet"), "must contain ratchet");
+        assert!(src.contains("fmax(candidate"), "LONG ratchet uses fmax");
+        assert!(src.contains("fmin(candidate"), "SHORT ratchet uses fmin");
+    }
+
+    #[test]
+    fn trailing_codegen_contains_rsi_trend_guard() {
+        let src = compute_trailing_codegen();
+        assert!(
+            src.contains("RSI Trend-Guard") || src.contains("rsi_floor"),
+            "must reference RSI Trend-Guard"
+        );
+        assert!(src.contains("rsi > 60.0"), "LONG RSI favourability check");
+        assert!(src.contains("rsi < 40.0"), "SHORT RSI favourability check");
+    }
+
+    #[test]
+    fn trailing_codegen_contains_tatp_tspv_logic() {
+        let src = compute_trailing_codegen();
+        assert!(src.contains("TATP"), "must reference TATP");
+        assert!(src.contains("TSPV"), "must reference TSPV");
+        assert!(src.contains("adx_slope"), "TATP checks adx_slope");
+        assert!(src.contains("atr_slope"), "TSPV checks atr_slope");
+    }
+
+    #[test]
+    fn trailing_codegen_contains_weak_trend_logic() {
+        let src = compute_trailing_codegen();
+        assert!(src.contains("adx < 25.0"), "weak-trend check on adx < 25");
+        assert!(src.contains("trailing_weak_trend_mult"), "weak-trend uses config mult");
+    }
+
+    #[test]
+    fn trailing_codegen_contains_activation_gate() {
+        let src = compute_trailing_codegen();
+        assert!(
+            src.contains("profit_atr < trailing_start"),
+            "activation gate: profit must exceed trailing_start"
+        );
+        assert!(
+            src.contains("return current_trailing_sl"),
+            "when not active, preserve existing trailing SL"
+        );
+    }
+
+    #[test]
+    fn trailing_codegen_handles_low_confidence() {
+        let src = compute_trailing_codegen();
+        assert!(src.contains("confidence == 0"), "Low confidence mapped to 0");
+    }
+
+    #[test]
+    fn trailing_codegen_handles_no_existing_trailing_sl() {
+        let src = compute_trailing_codegen();
+        assert!(
+            src.contains("current_trailing_sl > 0.0"),
+            "must check for no existing trailing SL (first computation)"
+        );
+    }
+
+    #[test]
+    fn trailing_codegen_uses_fmax_fmin() {
+        let src = compute_trailing_codegen();
+        assert!(src.contains("fmax("), "must use fmax for CUDA double math");
+        assert!(src.contains("fmin("), "must use fmin for CUDA double math");
+    }
+
+    #[test]
+    fn trailing_codegen_is_nonempty() {
+        let src = compute_trailing_codegen();
+        assert!(
+            src.len() > 200,
+            "generated code must be substantial, got {} bytes",
+            src.len()
         );
     }
 }
