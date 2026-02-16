@@ -300,7 +300,13 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         self._last_entry_fail_reason: dict[str, str] = {}
         # Exit attempts can also be rejected transiently; avoid close-spam when state is stale.
         self._last_exit_attempt_at_s: dict[str, float] = {}
+        self._live_balance_usd = 0.0
         super().__init__()
+
+    @property
+    def balance(self) -> float:
+        """Override PaperTrader's kernel-backed balance with exchange withdrawable USD."""
+        return self._live_balance_usd
 
     def _pending_open_ttl_s(self) -> float:
         try:
@@ -350,8 +356,10 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             self._total_margin_used_usd = float(snap.total_margin_used_usd)
         except Exception:
             self._total_margin_used_usd = float(self._total_margin_used_usd or 0.0)
-        # Keep the name `balance` but treat it as withdrawable cash for display only.
-        self.balance = self._withdrawable_usd
+        # In live mode, balance is sourced from the exchange, not the Rust kernel.
+        # PaperTrader.balance is a read-only @property (AQC-755), so we store
+        # the exchange value in _live_balance_usd and override the property below.
+        self._live_balance_usd = self._withdrawable_usd
 
         live_positions = self.executor.get_positions(force=force)
         old_positions = dict(self.positions or {})
