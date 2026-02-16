@@ -1666,19 +1666,38 @@ class UnifiedEngine:
                     self._mark_analyzed("BTC")
 
                 # Market Breadth: % of watchlist with bullish EMA alignment (Fast > Slow).
-                # Computed from previous loop's cached analysis to avoid double-work.
+                # Primary: use cached analysis from kernel decisions.
+                # Fallback: compute directly from candle DB when cache is empty
+                # (avoids breadth_missing after restart while historical candles exist).
                 _breadth_pos = 0
                 _breadth_total = 0
                 for _bsym in watch_set:
                     _bc = self._analysis_cache.get(_bsym)
                     if not isinstance(_bc, dict):
-                        continue
-                    _bnow = _bc.get("now")
-                    if _bnow is None:
-                        continue
+                        _bc = None
+                    _bnow = _bc.get("now") if _bc else None
+                    _ef: float = 0.0
+                    _es: float = 0.0
+                    if isinstance(_bnow, dict):
+                        try:
+                            _ef = float(_bnow.get("EMA_fast", 0.0) or 0.0)
+                            _es = float(_bnow.get("EMA_slow", 0.0) or 0.0)
+                        except Exception:
+                            _ef = _es = 0.0
+                    # Fallback: compute EMA from candle DB when cache has no EMA.
+                    if not (_ef > 0 and _es > 0):
+                        try:
+                            _bdf = self.market.get_candles_df(_bsym, interval=self.interval, min_rows=self.lookback_bars)
+                            if _bdf is not None and len(_bdf) >= 20:
+                                _gcfg = (self.strategy.get_config("__GLOBAL__") or {})
+                                _ind_cfg = _gcfg.get("indicators") or {}
+                                _fw = int(_ind_cfg.get("ema_fast_window", 20))
+                                _sw = int(_ind_cfg.get("ema_slow_window", 50))
+                                _ef = float(mei_alpha_v1.ta.trend.ema_indicator(_bdf["Close"], window=_fw).iloc[-1])
+                                _es = float(mei_alpha_v1.ta.trend.ema_indicator(_bdf["Close"], window=_sw).iloc[-1])
+                        except Exception:
+                            _ef = _es = 0.0
                     try:
-                        _ef = float(_bnow.get("EMA_fast", 0.0) or 0.0)
-                        _es = float(_bnow.get("EMA_slow", 0.0) or 0.0)
                         if _ef > 0 and _es > 0:
                             _breadth_total += 1
                             if _ef > _es:
