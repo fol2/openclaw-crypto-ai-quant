@@ -26,13 +26,8 @@ axes:
   - 0.65
 - path: trade.bump_to_min_notional
   values:
-  - 0.0
-  - 1.0
-- path: trade.leverage_max_cap
-  values:
-  - 0.0
-  - 0.5
-  - 1.0
+  - 0
+  - 1
 - path: trade.rsi_exit_lb_hi_profit_low_conf
   values:
   - 0.0

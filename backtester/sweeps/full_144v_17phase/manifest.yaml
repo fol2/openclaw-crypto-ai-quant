@@ -1,13 +1,13 @@
 source_spec: backtester/sweeps/full_144v.yaml
 reference_spec: backtester/sweeps/full_34axis.yaml
 phase_count: 17
-total_axes: 142
+total_axes: 141
 base_combo: 16416
 target_combo: 100000
-achieved_combo: 103518
-total_combo: 103518
+achieved_combo: 100602
+total_combo: 100602
 four_value_axes_total: 10
-three_value_axes_total: 103
+three_value_axes_total: 102
 two_value_axes_total: 29
 notes:
 - All sweepable full_144v axes are included once across the 17 phases.
@@ -264,10 +264,10 @@ phases:
   - trade.trailing_distance_atr_low_conf
 - id: p16_144v
   file: p16_144v.yaml
-  axis_count: 8
-  combo: 4374
+  axis_count: 7
+  combo: 1458
   two_value_axes: 1
-  three_value_axes: 7
+  three_value_axes: 6
   four_value_axes: 0
   paths:
   - market_regime.auto_reverse_breadth_high
@@ -275,7 +275,6 @@ phases:
   - thresholds.ranging.bb_width_ratio_below
   - trade.add_min_profit_atr
   - trade.bump_to_min_notional
-  - trade.leverage_max_cap
   - trade.rsi_exit_lb_hi_profit_low_conf
   - trade.trailing_start_atr
 - id: p17_144v

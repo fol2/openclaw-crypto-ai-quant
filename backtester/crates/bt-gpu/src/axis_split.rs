@@ -75,14 +75,17 @@ mod tests {
             SweepAxis {
                 path: "trade.sl_atr_mult".to_string(),
                 values: vec![1.5, 2.0],
+                gate: None,
             },
             SweepAxis {
                 path: "indicators.ema_slow_window".to_string(),
                 values: vec![30.0, 50.0],
+                gate: None,
             },
             SweepAxis {
                 path: "trade.tp_atr_mult".to_string(),
                 values: vec![3.0, 5.0],
+                gate: None,
             },
         ];
         let (ind, trade) = split_axes(&axes);
@@ -97,10 +100,12 @@ mod tests {
             SweepAxis {
                 path: "a".to_string(),
                 values: vec![1.0, 2.0],
+                gate: None,
             },
             SweepAxis {
                 path: "b".to_string(),
                 values: vec![10.0, 20.0],
+                gate: None,
             },
         ];
         let combos = generate_combinations(&axes);

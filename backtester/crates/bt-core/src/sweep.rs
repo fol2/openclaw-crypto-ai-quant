@@ -18,6 +18,17 @@ use crate::report::{self, SimReport};
 // Sweep specification (loaded from YAML)
 // ---------------------------------------------------------------------------
 
+/// Optional gate condition: this axis is only expanded when the gate axis
+/// has a specific value.  When the gate is not satisfied, the axis freezes
+/// at its first value (reducing the combination count).
+#[derive(Debug, Clone, Deserialize)]
+pub struct AxisGate {
+    /// Dot-separated path of the gate axis.
+    pub path: String,
+    /// Gate is satisfied when the gate axis value equals this (±1e-9).
+    pub eq: f64,
+}
+
 /// A single axis in the parameter sweep.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SweepAxis {
@@ -25,6 +36,10 @@ pub struct SweepAxis {
     pub path: String,
     /// Values to test along this axis.
     pub values: Vec<f64>,
+    /// Optional gate: only expand this axis when the gate condition is met.
+    /// When the gate is not met, the axis freezes at its first value.
+    #[serde(default)]
+    pub gate: Option<AxisGate>,
 }
 
 /// Full sweep specification (loaded from YAML).
@@ -60,22 +75,53 @@ pub struct SweepResult {
 // Config generation (cartesian product)
 // ---------------------------------------------------------------------------
 
-/// Generate all combinations (cartesian product) from the sweep axes.
+/// Generate all combinations from the sweep axes, respecting gate conditions.
+///
+/// Axes are processed in dependency order (ungated first, then gated).
+/// When a gate condition is not met, the gated axis freezes at its first
+/// value, dramatically reducing the number of combinations.
 fn generate_combinations(axes: &[SweepAxis]) -> Vec<Vec<(String, f64)>> {
     if axes.is_empty() {
         return vec![vec![]];
     }
 
-    let mut result = Vec::new();
-    let sub = generate_combinations(&axes[1..]);
-    for val in &axes[0].values {
-        for combo in &sub {
-            let mut new_combo = vec![(axes[0].path.clone(), *val)];
-            new_combo.extend(combo.iter().cloned());
-            result.push(new_combo);
+    // Sort: ungated axes first, gated axes second.
+    // This ensures gate values are available when processing gated axes.
+    let mut sorted: Vec<&SweepAxis> = axes.iter().collect();
+    sorted.sort_by_key(|a| u8::from(a.gate.is_some()));
+
+    let mut combos: Vec<Vec<(String, f64)>> = vec![vec![]];
+
+    for axis in &sorted {
+        let mut new_combos = Vec::with_capacity(combos.len() * axis.values.len());
+        for combo in &combos {
+            let expand = if let Some(gate) = &axis.gate {
+                // Look up the gate axis value in the current partial combination.
+                combo
+                    .iter()
+                    .find(|(p, _)| *p == gate.path)
+                    .map_or(true, |(_, v)| (*v - gate.eq).abs() < 1e-9)
+            } else {
+                true
+            };
+
+            let vals = if expand {
+                &axis.values[..]
+            } else {
+                // Gate not met — freeze at first value.
+                &axis.values[..1]
+            };
+
+            for val in vals {
+                let mut new_combo = combo.clone();
+                new_combo.push((axis.path.clone(), *val));
+                new_combos.push(new_combo);
+            }
         }
+        combos = new_combos;
     }
-    result
+
+    combos
 }
 
 // ---------------------------------------------------------------------------
@@ -592,11 +638,48 @@ pub fn run_sweep(
     from_ts: Option<i64>,
     to_ts: Option<i64>,
 ) -> Vec<SweepResult> {
-    let combos = generate_combinations(&spec.axes);
+    // Pre-resolve gates whose gate axis is not being swept.
+    // If the gate axis is fixed (from base config), we can simplify:
+    //   - Gate permanently satisfied → remove the gate (always expand)
+    //   - Gate permanently unsatisfied → freeze at first value
+    let swept_paths: std::collections::HashSet<&str> =
+        spec.axes.iter().map(|a| a.path.as_str()).collect();
+
+    let resolved_axes: Vec<SweepAxis> = spec
+        .axes
+        .iter()
+        .map(|axis| {
+            if let Some(gate) = &axis.gate {
+                if !swept_paths.contains(gate.path.as_str()) {
+                    if let Some(base_val) = read_one(base_cfg, &gate.path) {
+                        if (base_val - gate.eq).abs() < 1e-9 {
+                            // Gate permanently satisfied — expand all values.
+                            return SweepAxis {
+                                path: axis.path.clone(),
+                                values: axis.values.clone(),
+                                gate: None,
+                            };
+                        } else {
+                            // Gate permanently unsatisfied — freeze.
+                            return SweepAxis {
+                                path: axis.path.clone(),
+                                values: vec![axis.values[0]],
+                                gate: None,
+                            };
+                        }
+                    }
+                }
+            }
+            axis.clone()
+        })
+        .collect();
+
+    let gated = resolved_axes.iter().filter(|a| a.gate.is_some()).count();
+    let combos = generate_combinations(&resolved_axes);
     let total = combos.len();
     eprintln!(
-        "[sweep] Generated {total} config combinations across {} axes",
-        spec.axes.len()
+        "[sweep] Generated {total} config combinations across {} axes ({gated} gated)",
+        resolved_axes.len()
     );
 
     let candles = Arc::new(candles.clone());
@@ -684,6 +767,7 @@ mod tests {
         let axes = vec![SweepAxis {
             path: "trade.sl_atr_mult".to_string(),
             values: vec![1.0, 2.0, 3.0],
+            gate: None,
         }];
         let combos = generate_combinations(&axes);
         assert_eq!(combos.len(), 3);
@@ -698,10 +782,12 @@ mod tests {
             SweepAxis {
                 path: "trade.sl_atr_mult".to_string(),
                 values: vec![1.0, 2.0],
+                gate: None,
             },
             SweepAxis {
                 path: "trade.tp_atr_mult".to_string(),
                 values: vec![3.0, 4.0, 5.0],
+                gate: None,
             },
         ];
         let combos = generate_combinations(&axes);
@@ -899,5 +985,123 @@ axes:
 
         // Unknown path returns None
         assert!(read_one(&cfg, "does.not.exist").is_none());
+    }
+
+    #[test]
+    fn test_generate_combinations_gate_satisfied() {
+        // When gate is satisfied (enable=1), gated axes expand normally.
+        let axes = vec![
+            SweepAxis {
+                path: "trade.enable_dynamic_leverage".to_string(),
+                values: vec![0.0, 1.0],
+                gate: None,
+            },
+            SweepAxis {
+                path: "trade.leverage".to_string(),
+                values: vec![1.0, 2.0, 3.0],
+                gate: Some(AxisGate {
+                    path: "trade.enable_dynamic_leverage".to_string(),
+                    eq: 0.0,
+                }),
+            },
+            SweepAxis {
+                path: "trade.leverage_low".to_string(),
+                values: vec![1.0, 2.0],
+                gate: Some(AxisGate {
+                    path: "trade.enable_dynamic_leverage".to_string(),
+                    eq: 1.0,
+                }),
+            },
+            SweepAxis {
+                path: "trade.leverage_high".to_string(),
+                values: vec![5.0, 7.0],
+                gate: Some(AxisGate {
+                    path: "trade.enable_dynamic_leverage".to_string(),
+                    eq: 1.0,
+                }),
+            },
+        ];
+        let combos = generate_combinations(&axes);
+        // enable=0: leverage expands (3), low freezes (1), high freezes (1) → 3
+        // enable=1: leverage freezes (1), low expands (2), high expands (2) → 4
+        // Total: 3 + 4 = 7
+        assert_eq!(combos.len(), 7);
+    }
+
+    #[test]
+    fn test_generate_combinations_no_gate_full_cartesian() {
+        // Without gates, same axes would produce full cartesian product.
+        let axes = vec![
+            SweepAxis {
+                path: "trade.enable_dynamic_leverage".to_string(),
+                values: vec![0.0, 1.0],
+                gate: None,
+            },
+            SweepAxis {
+                path: "trade.leverage".to_string(),
+                values: vec![1.0, 2.0, 3.0],
+                gate: None,
+            },
+            SweepAxis {
+                path: "trade.leverage_low".to_string(),
+                values: vec![1.0, 2.0],
+                gate: None,
+            },
+            SweepAxis {
+                path: "trade.leverage_high".to_string(),
+                values: vec![5.0, 7.0],
+                gate: None,
+            },
+        ];
+        let combos = generate_combinations(&axes);
+        // Full cartesian: 2 × 3 × 2 × 2 = 24
+        assert_eq!(combos.len(), 24);
+    }
+
+    #[test]
+    fn test_gate_deserialization() {
+        let yaml = r#"
+axes:
+  - path: trade.enable_dynamic_leverage
+    values: [0, 1]
+  - path: trade.leverage_low
+    values: [1, 2, 3]
+    gate:
+      path: trade.enable_dynamic_leverage
+      eq: 1
+initial_balance: 10000.0
+lookback: 200
+"#;
+        let spec: SweepSpec = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(spec.axes.len(), 2);
+        assert!(spec.axes[0].gate.is_none());
+        let gate = spec.axes[1].gate.as_ref().unwrap();
+        assert_eq!(gate.path, "trade.enable_dynamic_leverage");
+        assert!((gate.eq - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_gate_freezes_at_first_value() {
+        // When gate is NOT met, the axis should freeze at its first value.
+        let axes = vec![
+            SweepAxis {
+                path: "toggle".to_string(),
+                values: vec![0.0],
+                gate: None,
+            },
+            SweepAxis {
+                path: "sub_param".to_string(),
+                values: vec![10.0, 20.0, 30.0],
+                gate: Some(AxisGate {
+                    path: "toggle".to_string(),
+                    eq: 1.0,
+                }),
+            },
+        ];
+        let combos = generate_combinations(&axes);
+        // toggle=0 always → sub_param frozen at 10.0 → 1 combo
+        assert_eq!(combos.len(), 1);
+        let sub_val = combos[0].iter().find(|(p, _)| p == "sub_param").unwrap().1;
+        assert!((sub_val - 10.0).abs() < 1e-9);
     }
 }
