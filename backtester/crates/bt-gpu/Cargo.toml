@@ -25,3 +25,7 @@ tpe = "0.2"
 rand = "0.8"
 clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
+
+[build-dependencies]
+sha2 = "0.10"
+serde_json = "1"

@@ -2,6 +2,9 @@
 #[path = "codegen/mod.rs"]
 mod codegen;
 
+#[path = "codegen/drift.rs"]
+mod drift;
+
 fn main() {
     println!("cargo:rerun-if-changed=kernels/sweep_engine.cu");
     println!("cargo:rerun-if-changed=kernels/indicator_kernel.cu");
@@ -17,6 +20,37 @@ fn main() {
         let out_path = std::path::Path::new(&out_dir);
         let inspect_path = std::path::Path::new("kernels");
         codegen::run(out_path, inspect_path);
+    }
+
+    // -- Decision source drift detection --------------------------------------
+    {
+        // Add rerun-if-changed for all decision source files
+        for &src in drift::DECISION_SOURCE_FILES {
+            println!("cargo:rerun-if-changed={}", src);
+        }
+
+        let hashes = drift::compute_source_hashes();
+
+        // Write manifest for reference
+        let manifest = drift::format_manifest(&hashes);
+        std::fs::write("kernels/decision_source_hashes.json", &manifest).ok();
+
+        // Check against generated file
+        let generated_path = std::path::Path::new("kernels/generated_decision.cu");
+        if let Some(embedded) = drift::read_embedded_hashes(generated_path) {
+            let drifted = drift::check_drift(&hashes, &embedded);
+            if !drifted.is_empty() {
+                let msg = format!(
+                    "Decision source drift detected! Changed files: {}. Re-run codegen.",
+                    drifted.join(", ")
+                );
+                if std::env::var("STRICT_CODEGEN_PARITY").as_deref() == Ok("1") {
+                    panic!("{}", msg);
+                } else {
+                    println!("cargo:warning={}", msg);
+                }
+            }
+        }
     }
 
     // -- Compile sweep_engine.cu → PTX ----------------------------------------
