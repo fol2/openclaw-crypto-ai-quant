@@ -10,8 +10,12 @@ from typing import Any
 
 import pandas as pd
 
+import logging
+
 from .rest_client import HyperliquidRestClient
 from .utils import now_ms
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -156,6 +160,11 @@ class MarketDataHub:
         self._rest_candle_next_allowed_ms: dict[tuple[str, str], int] = {}
         self._rest_candle_last_err: dict[tuple[str, str], str] = {}
 
+        # Per-loop candle cache: avoids repeated DB reads for the same symbol+interval
+        # within a short time window (e.g. breadth EMA across 50 symbols).
+        self._candle_cache: dict[str, tuple[float, pd.DataFrame | None]] = {}
+        self._candle_cache_ttl_s: float = 5.0
+
     def ensure(self, *, symbols: list[str], interval: str, candle_limit: int, user: str | None = None) -> None:
         self._ws.ensure_started(
             symbols=list(symbols),
@@ -167,10 +176,11 @@ class MarketDataHub:
     def ws_health(self, *, symbols: list[str], interval: str) -> Any:
         return self._ws.health(symbols=list(symbols), interval=str(interval))
 
-    def candles_ready(self, *, symbols: list[str], interval: str) -> tuple[bool, list[str]]:
+    def candles_ready(self, *, symbols: list[str], interval: str, min_rows: int = 50) -> tuple[bool, list[str]]:
         # BUG-15: If we are in sidecar-only mode, candles_ready should be more permissive
-        # because the sidecar itself handles backfilling and may report not_ready 
+        # because the sidecar itself handles backfilling and may report not_ready
         # for symbols that actually have enough data in the DB for a trade.
+        required = max(int(min_rows), 50)
         fn = getattr(self._ws, "candles_ready", None)
         if not callable(fn):
             return True, []
@@ -178,7 +188,7 @@ class MarketDataHub:
             ready, not_ready = fn(symbols=list(symbols), interval=str(interval))
             if not isinstance(not_ready, list):
                 not_ready = []
-            
+
             # If the sidecar says not_ready, we check the DB directly as a second opinion.
             # This prevents the "not_ready" gate from blocking trades when data is actually present.
             if not_ready:
@@ -186,8 +196,8 @@ class MarketDataHub:
                 for sym in not_ready:
                     # If we can get a valid DF with min_rows, it's ready enough for us.
                     try:
-                        df = self.get_candles_df(sym, interval=interval, min_rows=10)
-                        if df is None or len(df) < 10:
+                        df = self.get_candles_df(sym, interval=interval, min_rows=required)
+                        if df is None or len(df) < required:
                             truly_not_ready.append(sym)
                     except Exception:
                         truly_not_ready.append(sym)
@@ -492,6 +502,16 @@ class MarketDataHub:
         interval_s = str(interval)
         want = int(min_rows)
 
+        # TTL cache: avoid repeated DB reads for the same symbol+interval within one loop.
+        cache_key = f"{sym}:{interval_s}"
+        now_mono = time.monotonic()
+        cached = self._candle_cache.get(cache_key)
+        if cached is not None:
+            ts, df_cached = cached
+            if now_mono - ts < self._candle_cache_ttl_s:
+                if df_cached is not None and len(df_cached) >= want:
+                    return df_cached
+
         # 1) WS cache first
         df = None
         try:
@@ -500,11 +520,13 @@ class MarketDataHub:
             df = None
 
         if self._df_is_fresh_enough(df, interval=interval_s, min_rows=want):
+            self._candle_cache[cache_key] = (now_mono, df)
             return df
 
         # 2) DB read fallback (covers cases where WS cache is empty after reconnect)
         df_db = self._read_candles_from_db(sym, interval_s, limit=max(want, want + 50))
         if self._df_is_fresh_enough(df_db, interval=interval_s, min_rows=want):
+            self._candle_cache[cache_key] = (now_mono, df_db)
             return df_db
 
         # 3) REST candleSnapshot backfill (async) into DB.
@@ -516,7 +538,10 @@ class MarketDataHub:
         df_best = df_db if (df_db is not None and len(df_db) >= (len(df) if df is not None else 0)) else df
         if df_best is None:
             return None
-        return df_best if len(df_best) >= want else None
+        result = df_best if len(df_best) >= want else None
+        if result is not None:
+            self._candle_cache[cache_key] = (now_mono, result)
+        return result
 
     def get_mid_price(self, symbol: str, *, max_age_s: float | None = None, interval: str | None = None) -> PriceQuote | None:
         sym = str(symbol).upper()
@@ -595,12 +620,15 @@ class MarketDataHub:
             return False
         try:
             interval_ms = _interval_to_ms(interval)
+            interval_s = interval_ms / 1000.0
+            # Scale staleness with interval: 3 bars or 5 minutes, whichever is larger.
+            max_stale_s = max(interval_s * 3.0, 300.0)
             now = now_ms()
             t_close = df["T"].iloc[-1] if "T" in df.columns else None
             if t_close is None or pd.isna(t_close):
                 t_close = int(df["timestamp"].iloc[-1]) + int(interval_ms)
             age_s = max(0.0, (now - int(t_close)) / 1000.0)
-            return age_s <= self._stale_candle_s
+            return age_s <= max_stale_s
         except Exception:
             # If we cannot compute freshness, treat it as unusable.
             return False
@@ -664,6 +692,23 @@ class MarketDataHub:
         for col in ["Open", "High", "Low", "Close", "Volume"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        # Gap detection: warn when candles have missing bars (produces wrong EMA/ATR/ADX).
+        if len(df) > 1:
+            try:
+                expected_interval_ms = _interval_to_ms(interval)
+                diffs = df["timestamp"].diff().dropna()
+                if not diffs.empty:
+                    max_gap = diffs.max()
+                    if max_gap > expected_interval_ms * 1.5:
+                        gap_count = int((diffs > expected_interval_ms * 1.5).sum())
+                        logger.warning(
+                            "[%s] %d candle gap(s) detected (max %.0fs, expected %.0fs)",
+                            symbol, gap_count, max_gap / 1000.0, expected_interval_ms / 1000.0,
+                        )
+            except Exception:
+                pass
+
         return df
 
     def _ensure_rest_candle_pool(self) -> ThreadPoolExecutor:
