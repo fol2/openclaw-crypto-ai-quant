@@ -347,7 +347,7 @@ def build_gate_result(snap: dict, symbol: str, cfg: dict | None = None,
 
     # Gate 4: Volume confirmation
     vol_confirm = True
-    if bool(flt.get("require_volume_confirmation", False)):
+    if bool(flt.get("require_volume_confirmation", True)):
         vol = float(snap.get("volume", 0.0))
         vol_sma = float(snap.get("vol_sma", 0.0))
         vol_trend = bool(snap.get("vol_trend", False))
@@ -1044,6 +1044,8 @@ def check_exit_with_kernel(df, symbol, state_json, params_json, current_price,
     pos_side = str(pos_data.get("side", "")).lower()
     entry_price = float(pos_data.get("entry_price", 0.0))
     entry_atr = float(pos_data.get("entry_atr", 0.0) or 0.0)
+    if entry_atr != entry_atr:  # NaN check
+        entry_atr = 0.0
     if entry_atr <= 0 and entry_price > 0:
         entry_atr = entry_price * 0.005
 
@@ -2111,7 +2113,10 @@ def _safe_float(val, default: float | None = None) -> float | None:
     try:
         if val is None:
             return default
-        return float(val)
+        v = float(val)
+        if v != v:  # NaN check
+            return default
+        return v
     except Exception:
         return default
 
@@ -4601,6 +4606,16 @@ class PaperTrader:
             f"notional~=${notional:.2f} lev={leverage:.0f} margin~=${margin_est:.2f} "
             f"fee=${fee_usd:.4f} conf={confidence}"
         )
+        # FLOW-2: create decision event for ADD fills (traceability)
+        try:
+            create_decision_event(
+                symbol=symbol, event_type="fill",
+                status="executed", phase="execution",
+                action_taken="add",
+                context={"add_price": fill_price, "confidence": confidence,
+                         "adds_count": int(pos.get("adds_count", 0))})
+        except Exception:
+            pass
         self._kernel_persist()
         return True
 
@@ -5591,6 +5606,8 @@ class PaperTrader:
         if not self._can_attempt_exit(symbol):
             _cd_entry = pos['entry_price']
             _cd_atr = pos.get('entry_atr', 0.0)
+            if _cd_atr != _cd_atr:  # NaN guard
+                _cd_atr = 0.0
             if _cd_atr <= 0:
                 _cd_atr = _cd_entry * 0.005
             _cd_sl = _cd_entry - (_cd_atr * sl_atr_mult) if pos['type'] == 'LONG' else _cd_entry + (_cd_atr * sl_atr_mult)
@@ -5600,6 +5617,8 @@ class PaperTrader:
 
         entry = pos['entry_price']
         atr = pos.get('entry_atr', 0.0)
+        if atr != atr:  # NaN guard
+            atr = 0.0
 
         # Fallback for legacy trades with no ATR
         if atr <= 0:
@@ -7163,6 +7182,11 @@ def analyze(df, symbol, btc_bullish=None):
         if _should_reverse and signal in ("BUY", "SELL"):
             signal = "SELL" if signal == "BUY" else "BUY"
             latest["_reversed_signal"] = True
+            # BUG-S2: patch audit/decision to reflect post-reversal signal
+            _audit = latest.get("audit") if hasattr(latest, "get") else None
+            if isinstance(_audit, dict):
+                _audit["signal"] = signal
+                _audit["action_taken"] = "open_short" if signal == "SELL" else "open_long"
     except Exception:
         pass
 
