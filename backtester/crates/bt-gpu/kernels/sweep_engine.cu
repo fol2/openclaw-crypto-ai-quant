@@ -858,6 +858,18 @@ extern "C" __global__ void sweep_engine_kernel(
                     // Pyramiding (immediate, not ranked)
                     if (pos.active != POS_EMPTY && cfg.enable_pyramiding != 0u) {
                         if (pos.adds_count < cfg.max_adds_per_symbol) {
+                            // AQC-1252: confidence gate for pyramid adds
+                            if (cfg.add_min_confidence > 0u) {
+                                bool is_btc_sym_pyr = (sym == params->btc_sym_idx);
+                                GateResult gates_pyr = check_gates(hybrid, &cfg, hybrid.ema_slow_slope_pct,
+                                                                    btc_bull, is_btc_sym_pyr);
+                                SignalResultLegacy sig_pyr = generate_signal(
+                                    hybrid, &cfg, gates_pyr, btc_bull, is_btc_sym_pyr,
+                                    hybrid.ema_slow_slope_pct);
+                                if (sig_pyr.confidence < cfg.add_min_confidence) {
+                                    continue;
+                                }
+                            }
                             float p_atr_pyr = profit_atr(pos, hybrid.close);
                             if (p_atr_pyr >= cfg.add_min_profit_atr) {
                                 unsigned int elapsed_sec = hybrid.t_sec - pos.last_add_time_sec;
@@ -1159,6 +1171,18 @@ extern "C" __global__ void sweep_engine_kernel(
                 // Pyramiding (same-direction add) -- not ranked, immediate
                 if (pos.active != POS_EMPTY && cfg.enable_pyramiding != 0u) {
                     if (pos.adds_count < cfg.max_adds_per_symbol) {
+                        // AQC-1252: confidence gate for pyramid adds
+                        if (cfg.add_min_confidence > 0u) {
+                            bool is_btc_sym_pyr = (sym == params->btc_sym_idx);
+                            GateResult gates_pyr = check_gates(snap, &cfg, snap.ema_slow_slope_pct,
+                                                                btc_bull, is_btc_sym_pyr);
+                            SignalResultLegacy sig_pyr = generate_signal(
+                                snap, &cfg, gates_pyr, btc_bull, is_btc_sym_pyr,
+                                snap.ema_slow_slope_pct);
+                            if (sig_pyr.confidence < cfg.add_min_confidence) {
+                                continue;
+                            }
+                        }
                         float p_atr_pyr = profit_atr(pos, snap.close);
                         if (p_atr_pyr >= cfg.add_min_profit_atr) {
                             unsigned int elapsed_sec = snap.t_sec - pos.last_add_time_sec;
