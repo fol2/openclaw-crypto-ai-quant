@@ -1,4 +1,4 @@
-//! CUDA code generator: derives GPU accounting functions from Rust kernel source.
+//! CUDA code generator: derives GPU accounting and decision functions from Rust kernel source.
 //!
 //! This module reads `decision_kernel.rs` and `accounting.rs` signatures and
 //! emits CUDA-compatible `.cu` device functions that mirror the Rust logic.
@@ -6,22 +6,26 @@
 //! The approach is string-template based (not full AST parsing) — pragmatic and
 //! sufficient to guarantee accounting parity by construction.
 
+pub mod decision;
 mod emit;
 mod templates;
 
 use std::path::Path;
 
-/// Run the full codegen pipeline: render templates and write output files.
+/// Run the full codegen pipeline: accounting + decision.
 pub fn run(out_dir: &Path, inspect_dir: &Path) {
-    let source = render_all();
-
-    emit::write_generated(out_dir, "generated_accounting.cu", &source);
-    emit::write_generated(inspect_dir, "generated_accounting.cu", &source);
-
+    // Accounting codegen (existing)
+    let accounting_source = render_all();
+    emit::write_generated(out_dir, "generated_accounting.cu", &accounting_source);
+    emit::write_generated(inspect_dir, "generated_accounting.cu", &accounting_source);
     eprintln!(
         "cargo:warning=codegen: wrote generated_accounting.cu ({} bytes)",
-        source.len()
+        accounting_source.len()
     );
+
+    // Decision codegen (new — AQC-1201)
+    // Source hashes will be passed from build.rs once AQC-1200 drift detector is integrated
+    decision::run(out_dir, inspect_dir, None);
 }
 
 /// Render all accounting templates into a single CUDA source string.
