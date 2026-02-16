@@ -432,7 +432,8 @@ class KernelDecisionRustBindingProvider:
                 "Kernel state file corrupt, creating fresh: %s\n%s",
                 state_path, traceback.format_exc(),
             )
-        fresh = self._runtime.default_kernel_state_json(10_000.0, now_ms())
+        _seed = float(os.getenv("AI_QUANT_PAPER_BALANCE", "10000.0"))
+        fresh = self._runtime.default_kernel_state_json(_seed, now_ms())
         logger.info("Kernel state created fresh")
         self._persist_state(fresh)
         return fresh

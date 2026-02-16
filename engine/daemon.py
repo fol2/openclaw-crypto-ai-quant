@@ -872,6 +872,9 @@ class LivePlugin:
 
 
 def main() -> None:
+    import logging
+    import sys
+
     mode = _mode()
     try:
         from .sqlite_logger import install_sqlite_stdio_logger
@@ -879,6 +882,14 @@ def main() -> None:
         install_sqlite_stdio_logger(db_path=_db_path(), mode=mode)
     except Exception:
         pass
+
+    # Configure logging AFTER sqlite_stdio_logger so the handler references
+    # the tee'd stdout, sending logger.info() output to both journalctl AND the DB.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+        stream=sys.stdout,
+    )
 
     # Apply promoted config from factory runs (paper daemons only).
     # Must run BEFORE StrategyManager.get() so AI_QUANT_STRATEGY_YAML is set.
@@ -891,6 +902,45 @@ def main() -> None:
         import traceback
 
         print(f"⚠️ promoted_config: failed to apply\n{traceback.format_exc()}")
+
+    # Sync paper balance from live account on startup
+    if mode == "paper" and os.getenv("AI_QUANT_PAPER_BALANCE_FROM_LIVE", "0") == "1":
+        try:
+            from exchange.executor import load_live_secrets, HyperliquidLiveExecutor
+
+            _secrets = load_live_secrets(
+                os.getenv(
+                    "AI_QUANT_SECRETS_PATH",
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "secrets.json"),
+                )
+            )
+            _exec = HyperliquidLiveExecutor(
+                secret_key=_secrets.secret_key,
+                main_address=_secrets.main_address,
+                timeout_s=4,
+            )
+            _snap = _exec.account_snapshot(force=True)
+            if _snap.withdrawable_usd and _snap.withdrawable_usd > 0:
+                os.environ["AI_QUANT_PAPER_BALANCE"] = str(_snap.withdrawable_usd)
+                print(f"paper balance synced from live: ${_snap.withdrawable_usd:,.2f}")
+                # Seed balance into DB so the monitor shows the correct value before any trades.
+                try:
+                    import sqlite3 as _sql
+
+                    _con = _sql.connect(_db_path(), timeout=5)
+                    _cur = _con.execute("SELECT COUNT(*) FROM trades")
+                    if _cur.fetchone()[0] == 0:
+                        _con.execute(
+                            "INSERT INTO trades (timestamp, symbol, type, action, price, size, notional, balance)"
+                            " VALUES (datetime('now'), '__SEED__', 'SYSTEM', 'SYSTEM', 0, 0, 0, ?)",
+                            (_snap.withdrawable_usd,),
+                        )
+                        _con.commit()
+                    _con.close()
+                except Exception:
+                    pass
+        except Exception as exc:
+            print(f"paper balance sync failed (using default): {exc}")
 
     import strategy.mei_alpha_v1 as mei_alpha_v1
 
