@@ -220,6 +220,243 @@ __device__ GateResultD check_gates_codegen(
 
     return result;
 }
+// Derived from bt-signals/src/entry.rs
+// Signal generation: Mode 1 (standard trend), Mode 2 (pullback continuation),
+// Mode 3 (slow drift).  All indicator math in double precision (AQC-734).
+// All config values accessed via cfg. prefix with (double) cast.
+
+struct SignalResult {
+    int signal;             // 0=neutral, 1=buy, 2=sell
+    int confidence;         // 0=low, 1=medium, 2=high
+    double effective_min_adx;  // ADX threshold used by the firing mode
+};
+
+// MACD histogram helpers (mirrors bt-signals/src/entry.rs check_macd_long/short)
+__device__ bool check_macd_long_codegen(unsigned int mode, double macd_hist, double prev_macd_hist) {
+    if (mode == 0u) {  // MACD_ACCEL
+        return macd_hist > prev_macd_hist;
+    } else if (mode == 1u) {  // MACD_SIGN
+        return macd_hist > 0.0;
+    }
+    // MACD_NONE (mode == 2)
+    return true;
+}
+
+__device__ bool check_macd_short_codegen(unsigned int mode, double macd_hist, double prev_macd_hist) {
+    if (mode == 0u) {  // MACD_ACCEL
+        return macd_hist < prev_macd_hist;
+    } else if (mode == 1u) {  // MACD_SIGN
+        return macd_hist < 0.0;
+    }
+    // MACD_NONE (mode == 2)
+    return true;
+}
+
+__device__ SignalResult generate_signal_codegen(
+    const GpuComboConfig& cfg,
+    double close,
+    double ema_fast,
+    double ema_slow,
+    double adx,
+    double rsi,
+    double macd_hist,
+    double prev_macd_hist,
+    double volume,
+    double vol_sma,
+    double atr,
+    double avg_atr,
+    double stoch_k,
+    double prev_close,
+    double prev_ema_fast,
+    double ema_slow_slope_pct,
+    bool all_gates_pass,
+    bool bullish_alignment,
+    bool bearish_alignment,
+    bool is_anomaly,
+    bool is_extended,
+    bool is_ranging,
+    bool vol_confirm,
+    unsigned int btc_bull,
+    bool is_btc_symbol
+) {
+    SignalResult neutral;
+    neutral.signal = 0;       // SIG_NEUTRAL
+    neutral.confidence = 0;   // CONF_LOW
+    neutral.effective_min_adx = 0.0;
+
+    // ── BTC alignment (mirrors bt-signals/src/gates.rs btc_ok_long/short) ──
+    bool btc_ok_long = true;
+    bool btc_ok_short = true;
+    if (cfg.require_btc_alignment != 0u
+        && !is_btc_symbol
+        && !(adx > (double)cfg.btc_adx_override)) {
+        if (btc_bull == 1u) {         // BTC_BULL_BULLISH
+            btc_ok_long = true;
+            btc_ok_short = false;
+        } else if (btc_bull == 0u) {  // BTC_BULL_BEARISH
+            btc_ok_long = false;
+            btc_ok_short = true;
+        } else {
+            // Unknown BTC state does not block entries (CPU parity).
+            btc_ok_long = true;
+            btc_ok_short = true;
+        }
+    }
+
+    // =================================================================
+    // Mode 1: Standard trend entry  (entry.rs lines 43-49)
+    // =================================================================
+    if (all_gates_pass) {
+        int signal = 0;    // SIG_NEUTRAL
+        int confidence = 1; // CONF_MEDIUM
+
+        // ── Direction from alignment + close vs EMA_fast ──
+        if (bullish_alignment && close > ema_fast && btc_ok_long) {
+            signal = 1;  // SIG_BUY
+        } else if (bearish_alignment && close < ema_fast && btc_ok_short) {
+            signal = 2;  // SIG_SELL
+        }
+        if (signal == 0) { return neutral; }
+
+        // ── DRE (Dynamic RSI Elasticity) ──
+        double adx_min = (double)cfg.dre_min_adx;
+        double adx_max = (double)cfg.dre_max_adx;
+        if (adx_max <= adx_min) { adx_max = adx_min + 1.0; }
+        double weight = fmax(fmin((adx - adx_min) / (adx_max - adx_min), 1.0), 0.0);
+        double rsi_long_limit = (double)cfg.dre_long_rsi_limit_low
+            + weight * ((double)cfg.dre_long_rsi_limit_high - (double)cfg.dre_long_rsi_limit_low);
+        double rsi_short_limit = (double)cfg.dre_short_rsi_limit_low
+            + weight * ((double)cfg.dre_short_rsi_limit_high - (double)cfg.dre_short_rsi_limit_low);
+
+        // ── RSI gate ──
+        if (signal == 1 && rsi <= rsi_long_limit) { return neutral; }
+        if (signal == 2 && rsi >= rsi_short_limit) { return neutral; }
+
+        // ── MACD histogram gate ──
+        bool macd_ok;
+        if (signal == 1) {
+            macd_ok = check_macd_long_codegen(cfg.macd_mode, macd_hist, prev_macd_hist);
+        } else {
+            macd_ok = check_macd_short_codegen(cfg.macd_mode, macd_hist, prev_macd_hist);
+        }
+        if (!macd_ok) { return neutral; }
+
+        // ── StochRSI filter ──
+        if (cfg.use_stoch_rsi_filter != 0u) {
+            if (signal == 1 && stoch_k > (double)cfg.stoch_rsi_block_long_gt) { return neutral; }
+            if (signal == 2 && stoch_k < (double)cfg.stoch_rsi_block_short_lt) { return neutral; }
+        }
+
+        // ── AVE (Adaptive Volatility Entry): upgrade confidence ──
+        if (cfg.ave_enabled != 0u && avg_atr > 0.0) {
+            double atr_ratio = atr / avg_atr;
+            if (atr_ratio > (double)cfg.ave_atr_ratio_gt) {
+                confidence = 2;  // CONF_HIGH
+            }
+        }
+
+        // ── Volume-based confidence upgrade to High ──
+        if (vol_sma > 0.0 && volume > vol_sma * (double)cfg.high_conf_volume_mult) {
+            confidence = 2;  // CONF_HIGH
+        }
+
+        SignalResult result;
+        result.signal = signal;
+        result.confidence = confidence;
+        result.effective_min_adx = adx;
+        return result;
+    }
+
+    // =================================================================
+    // Mode 2: Pullback continuation  (entry.rs lines 54-66)
+    // =================================================================
+    if (cfg.enable_pullback_entries != 0u) {
+        bool pullback_gates_ok =
+            !is_anomaly
+            && !is_extended
+            && !is_ranging
+            && vol_confirm
+            && adx >= (double)cfg.pullback_min_adx;
+
+        if (pullback_gates_ok) {
+            // Cross detection: EMA_fast cross-up / cross-down
+            bool cross_up = (prev_close <= prev_ema_fast) && (close > ema_fast);
+            bool cross_dn = (prev_close >= prev_ema_fast) && (close < ema_fast);
+
+            int pullback_conf = (int)cfg.pullback_confidence;
+
+            // ── Long pullback continuation ──
+            if (cross_up && bullish_alignment && btc_ok_long) {
+                bool macd_ok = (cfg.pullback_require_macd_sign == 0u) || (macd_hist > 0.0);
+                if (macd_ok && rsi >= (double)cfg.pullback_rsi_long_min) {
+                    SignalResult result;
+                    result.signal = 1;  // SIG_BUY
+                    result.confidence = pullback_conf;
+                    result.effective_min_adx = (double)cfg.pullback_min_adx;
+                    return result;
+                }
+            }
+            // ── Short pullback continuation (elif in Python) ──
+            else if (cross_dn && bearish_alignment && btc_ok_short) {
+                bool macd_ok = (cfg.pullback_require_macd_sign == 0u) || (macd_hist < 0.0);
+                if (macd_ok && rsi <= (double)cfg.pullback_rsi_short_max) {
+                    SignalResult result;
+                    result.signal = 2;  // SIG_SELL
+                    result.confidence = pullback_conf;
+                    result.effective_min_adx = (double)cfg.pullback_min_adx;
+                    return result;
+                }
+            }
+        }
+    }
+
+    // =================================================================
+    // Mode 3: Slow drift  (entry.rs lines 71-85)
+    // =================================================================
+    if (cfg.enable_slow_drift_entries != 0u) {
+        bool slow_gates_ok =
+            !is_anomaly
+            && !is_extended
+            && !is_ranging
+            && vol_confirm
+            && adx >= (double)cfg.slow_drift_min_adx;
+
+        if (slow_gates_ok) {
+            double min_slope = (double)cfg.slow_drift_min_slope_pct;
+
+            // ── Long drift: slope >= +threshold, price above EMA_slow ──
+            if (bullish_alignment
+                && close > ema_slow
+                && btc_ok_long
+                && ema_slow_slope_pct >= min_slope) {
+                bool macd_ok = (cfg.slow_drift_require_macd_sign == 0u) || (macd_hist > 0.0);
+                if (macd_ok && rsi >= (double)cfg.slow_drift_rsi_long_min) {
+                    SignalResult result;
+                    result.signal = 1;  // SIG_BUY
+                    result.confidence = 0;  // CONF_LOW (always Low for slow drift)
+                    result.effective_min_adx = (double)cfg.slow_drift_min_adx;
+                    return result;
+                }
+            }
+            // ── Short drift: slope <= -threshold, price below EMA_slow (elif) ──
+            else if (bearish_alignment
+                     && close < ema_slow
+                     && btc_ok_short
+                     && ema_slow_slope_pct <= -min_slope) {
+                bool macd_ok = (cfg.slow_drift_require_macd_sign == 0u) || (macd_hist < 0.0);
+                if (macd_ok && rsi <= (double)cfg.slow_drift_rsi_short_max) {
+                    SignalResult result;
+                    result.signal = 2;  // SIG_SELL
+                    result.confidence = 0;  // CONF_LOW (always Low for slow drift)
+                    result.effective_min_adx = (double)cfg.slow_drift_min_adx;
+                    return result;
+                }
+            }
+        }
+    }
+
+    return neutral;
+}
 // Derived from bt-core/src/exits/stop_loss.rs
 // Computes the dynamic stop-loss price for a position each bar.
 //
