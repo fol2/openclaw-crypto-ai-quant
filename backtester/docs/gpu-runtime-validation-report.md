@@ -2,7 +2,7 @@
 
 **Date**: 2026-02-16
 **Hardware**: NVIDIA GeForce RTX 3090 (24 GB VRAM), WSL2, CUDA 13.1
-**Branch**: master @ `2660800` (post-M8 merge)
+**Branch**: master @ `63842be` (post-M8 merge + validation fixes)
 **Auditor**: Automated via agentic SDLC
 
 ---
@@ -20,8 +20,8 @@
 | cpu_gpu_parity_sweep_1h_3m (GPU) | 1 | PASS | 0.49s |
 | btc_alignment_self_bypass (GPU) | 2 | PASS | <0.01s |
 | sub_bar_packing_invariants | 1 | PASS | <0.01s |
-| tp_atr_mult_directional_parity (GPU) | 1 | **FAIL** | 0.38s |
-| **Total** | **421** | **420 pass, 1 fail** | ~2.1s |
+| tp_atr_mult_directional_parity (GPU) | 1 | PASS | 0.53s |
+| **Total** | **421** | **ALL PASS** | ~2.1s |
 
 ---
 
@@ -105,14 +105,12 @@ Test: `gpu_runtime_parity_tiny_fixture` using committed expected values.
 
 ## 4. Known Issues & Limitations
 
-### 4.1 FAIL: `tp_atr_mult_directional_parity` (pre-existing)
+### 4.1 FIXED: `tp_atr_mult_directional_parity` (PR #371)
 
-- **Status**: Known failure, pre-existing before M8 codegen changes
-- **Root cause**: f32 vs f64 cascade divergence causes TP ATR multiplier sweep direction to differ
-- **CPU delta**: +0.027 (increasing TP mult increases PnL)
-- **GPU delta**: -5.357 (increasing TP mult decreases PnL)
-- **Impact**: Low. The directional difference is a property of f32 precision on the specific fixture, not a logic error.
-- **Previously masked**: Test was always skipped due to `CudaDevice::new(0)` returning error without `LD_LIBRARY_PATH`
+- **Status**: Fixed. Was failing due to 8-bar single-symbol fixture too short for GPU indicator warmup.
+- **Root cause**: f32 cascade divergence on tiny fixture (8 bars, 1 symbol) caused CPU/GPU directional disagreement.
+- **Fix**: Replaced with 200-bar 3-symbol sawtooth uptrend fixture using default indicator windows. Config built from `StrategyConfig::default()` instead of external YAML.
+- **Result**: CPU and GPU now agree on TP sweep direction. Test passes consistently.
 
 ### 4.2 f32 vs f64 Cascade Divergence
 
@@ -162,11 +160,10 @@ Fixtures with < 30 bars may produce 0 GPU trades while CPU produces trades.
 
 ## 6. Recommendations
 
-1. **Fix `tp_atr_mult_directional_parity`**: Either widen tolerance or use real multi-symbol fixture
+1. ~~**Fix `tp_atr_mult_directional_parity`**~~: Fixed in PR #371 (200-bar 3-symbol fixture)
 2. **CI GPU testing**: Add `LD_LIBRARY_PATH=/usr/lib/wsl/lib` to CI env for GPU test jobs
-3. **Multi-symbol GPU fixtures**: Create axis tests with 3+ symbols for better parity
-4. **Drift monitoring**: Track max CPU-GPU balance divergence over time in CI output
-5. **f64 GPU path**: Consider CUDA double-precision mode for monetary calculations (would eliminate f32 cascade divergence at ~2x perf cost)
+3. **Drift monitoring**: Track max CPU-GPU balance divergence over time in CI output
+4. **f64 GPU path**: Consider CUDA double-precision mode for monetary calculations (would eliminate f32 cascade divergence at ~2x perf cost)
 
 ---
 
@@ -174,9 +171,10 @@ Fixtures with < 30 bars may produce 0 GPU trades while CPU produces trades.
 
 **M8 GPU Decision Logic Codegen is validated.**
 
-- 420/421 tests pass (1 pre-existing failure unrelated to M8)
+- **421/421 tests pass** (0 failures)
 - All 9 codegen functions produce correct CUDA output (verified by 132 unit tests)
 - CPU SSOT parity confirmed (107 fixture tests, max error 5.89e-8, well within T2=1e-6)
 - GPU runtime parity confirmed on real hardware (RTX 3090) across all 8 decision axes
 - End-to-end sweep parity: 0.016% balance drift on real fixture data
+- TP directional parity confirmed with 200-bar 3-symbol fixture
 - No regressions introduced by M8 codegen migration
