@@ -79,11 +79,13 @@ def _import_mei_helpers():
         build_indicator_snapshot,
         compute_ema_slow_slope,
     )
+
     return build_indicator_snapshot, build_gate_result, build_entry_params, compute_ema_slow_slope
 
 
 def _import_extract_action():
     from strategy.parity_test import extract_action
+
     return extract_action
 
 
@@ -394,7 +396,10 @@ class KernelOrchestrator:
 
         # 5. Construct MarketEvent
         event = build_evaluate_event(
-            snap, gate_result, ema_slow_slope_pct, symbol,
+            snap,
+            gate_result,
+            ema_slow_slope_pct,
+            symbol,
         )
         event_json = json.dumps(event, default=_json_default)
 
@@ -407,11 +412,16 @@ class KernelOrchestrator:
         try:
             if exit_params_json is not None:
                 raw = _bt_runtime.step_full(
-                    kernel_state_json, event_json, merged_params_json, exit_params_json,
+                    kernel_state_json,
+                    event_json,
+                    merged_params_json,
+                    exit_params_json,
                 )
             else:
                 raw = _bt_runtime.step_decision(
-                    kernel_state_json, event_json, merged_params_json,
+                    kernel_state_json,
+                    event_json,
+                    merged_params_json,
                 )
         except Exception as exc:
             logger.error("[orchestrator] kernel call failed: %s", exc)
@@ -473,7 +483,10 @@ class KernelOrchestrator:
 
         try:
             raw = _bt_runtime.step_full(
-                kernel_state_json, event_json, params_json, exit_params_json,
+                kernel_state_json,
+                event_json,
+                params_json,
+                exit_params_json,
             )
         except Exception as exc:
             logger.error("[orchestrator] kernel price_update failed: %s", exc)
@@ -533,7 +546,8 @@ class KernelOrchestrator:
             return []
 
         fills = self._broker_adapter.execute_intents(
-            decision.intents, symbol_info=symbol_info,
+            decision.intents,
+            symbol_info=symbol_info,
         )
         logger.info(
             "[orchestrator] executed %d/%d intents, got %d fills",
@@ -605,6 +619,7 @@ class KernelOrchestrator:
         if db_path is None:
             try:
                 from strategy.mei_alpha_v1 import DB_PATH
+
                 db_path = DB_PATH
             except ImportError:
                 logger.warning("[orchestrator] cannot import DB_PATH; skipping decision logging")
@@ -660,7 +675,9 @@ class KernelOrchestrator:
     # ------------------------------------------------------------------
 
     def _parse_kernel_response(
-        self, raw_json: str, fallback_state_json: str,
+        self,
+        raw_json: str,
+        fallback_state_json: str,
     ) -> KernelDecision:
         """Parse a raw kernel JSON response into a ``KernelDecision``.
 
@@ -787,7 +804,8 @@ class KernelCandleDecisionProvider:
         try:
             state_json = _bt_runtime.load_state(self._state_path)
             logger.info(
-                "[candle-provider] kernel state loaded from %s", self._state_path,
+                "[candle-provider] kernel state loaded from %s",
+                self._state_path,
             )
             return state_json
         except OSError:
@@ -813,7 +831,8 @@ class KernelCandleDecisionProvider:
             _bt_runtime.save_state(state_json, self._state_path)
         except Exception:
             logger.warning(
-                "[candle-provider] failed to persist kernel state", exc_info=True,
+                "[candle-provider] failed to persist kernel state",
+                exc_info=True,
             )
 
     # ---- DecisionProvider protocol ---------------------------------------
@@ -861,12 +880,27 @@ class KernelCandleDecisionProvider:
                 pass
 
         decisions: list[Any] = []
-        state_json = self._state_json
+
+        # AQC-FIX: Reset kernel virtual cash and positions each cycle.
+        #
+        # The kernel state is purely virtual — actual position sizing and
+        # accounting is handled by PaperTrader / LiveTrader.  Over time the
+        # kernel's virtual cash can diverge (accumulated losses, positions
+        # opened by kernel but rejected by engine margin caps, etc.).  Once
+        # cash_usd drops below the default notional ($10 000) the kernel
+        # blocks ALL entry signals, silently halting trading.
+        #
+        # Fix: start each decision cycle with a fresh kernel state so that
+        # virtual cash never gates real trading decisions.
+        seed = float(os.getenv("AI_QUANT_KERNEL_CASH_SEED", "10000000.0"))
+        state_json = _bt_runtime.default_kernel_state_json(seed, now_ms)
 
         for sym in ready_symbols:
             try:
                 df = market.get_candles_df(
-                    sym, interval=interval, min_rows=lookback_bars,
+                    sym,
+                    interval=interval,
+                    min_rows=lookback_bars,
                 )
                 if df is None or len(df) < 20:
                     continue
@@ -905,7 +939,8 @@ class KernelCandleDecisionProvider:
                         "confidence": intent.get("confidence", "N/A"),
                         "now_series": intent.get("now_series"),
                         "entry_key": intent.get(
-                            "entry_key", intent.get("candle_key"),
+                            "entry_key",
+                            intent.get("candle_key"),
                         ),
                         "reason": f"kernel_candle:{kd.action.lower()}",
                     }
