@@ -259,7 +259,160 @@ __device__ double compute_trailing_codegen(
 }
 
 /// Take profit: partial TP + full TP ladder (AQC-1222)
-pub fn check_tp_codegen() -> String { String::new() /* stub */ }
+///
+/// Generates a CUDA `__device__` function that mirrors
+/// `bt-core/src/exits/take_profit.rs::check_tp`.
+///
+/// Returns a `TpResult` struct: `{ int action; double fraction; int exit_code; }`
+///   - action 0 = Hold, action 1 = Reduce (partial TP), action 2 = Close (full TP)
+///   - fraction: the reduce fraction (only meaningful when action == 1)
+///   - exit_code: 0 = no exit, 10 = partial TP, 11 = full TP
+///
+/// Uses `double` precision for all price arithmetic to match the f64 Rust
+/// source and satisfy T2 precision requirements.
+///
+/// The `tp_mult` parameter is resolved by the caller (confidence-dependent
+/// multipliers via `tp_mult_strong`/`tp_mult_weak`, or dynamic gate TP).
+pub fn check_tp_codegen() -> String {
+    r#"// Derived from bt-core/src/exits/take_profit.rs
+// Take profit: full TP + partial TP ladder.
+// All price math in double precision (AQC-734).
+//
+// Partial TP ladder:
+//   1. If enable_partial_tp AND tp1_taken == 0 AND price hits partial TP level
+//      -> Reduce by tp_partial_pct, caller sets trailing_sl = entry (breakeven)
+//   2. If tp1_taken == 1 AND tp_partial_atr_mult > 0 AND price hits full TP
+//      -> Close remainder at full TP
+//   3. If tp1_taken == 1 AND tp_partial_atr_mult == 0 -> Hold (trailing manages)
+//   4. If partial TP disabled or tp_partial_pct >= 1.0 -> full Close
+//
+// Confidence-dependent TP multipliers (tp_mult_strong for high ADX,
+// tp_mult_weak for low ADX) and dynamic gate TP multiplier are resolved
+// by the caller via get_tp_mult() before calling this function.
+
+struct TpResult {
+    int action;       // 0 = hold, 1 = reduce (partial), 2 = close (full)
+    double fraction;  // reduce fraction (meaningful only when action == 1)
+    int exit_code;    // 0 = no exit, 10 = partial TP, 11 = full TP
+};
+
+__device__ TpResult check_tp_codegen(
+    const GpuComboConfig& cfg,
+    int pos_type,
+    double entry_price,
+    double entry_atr,
+    double current_price,
+    double size,
+    unsigned int tp1_taken,
+    double tp_mult
+) {
+    TpResult result;
+    result.action = 0;
+    result.fraction = 0.0;
+    result.exit_code = 0;
+
+    // ── ATR fallback (mirrors Rust: if entry_atr <= 0 use 0.5% of entry) ──
+    double atr = (entry_atr > 0.0) ? entry_atr : (entry_price * 0.005);
+
+    // ── Full TP price (always based on tp_mult) ────────────────────────────
+    double tp_price;
+    if (pos_type == POS_LONG) {
+        tp_price = entry_price + (atr * tp_mult);
+    } else {
+        tp_price = entry_price - (atr * tp_mult);
+    }
+
+    // ── Partial TP path ────────────────────────────────────────────────────
+    if (cfg.enable_partial_tp != 0u) {
+        if (tp1_taken == 0u) {
+            // Determine partial TP level: use dedicated mult if set,
+            // otherwise same as full TP.
+            double partial_mult = (cfg.tp_partial_atr_mult > 0.0)
+                ? (double)cfg.tp_partial_atr_mult
+                : tp_mult;
+            double partial_tp_price;
+            if (pos_type == POS_LONG) {
+                partial_tp_price = entry_price + (atr * partial_mult);
+            } else {
+                partial_tp_price = entry_price - (atr * partial_mult);
+            }
+            bool partial_hit;
+            if (pos_type == POS_LONG) {
+                partial_hit = (current_price >= partial_tp_price);
+            } else {
+                partial_hit = (current_price <= partial_tp_price);
+            }
+
+            if (partial_hit) {
+                double pct = fmax(fmin((double)cfg.tp_partial_pct, 1.0), 0.0);
+
+                if (pct > 0.0 && pct < 1.0) {
+                    double remaining_notional = size * (1.0 - pct) * current_price;
+                    if (remaining_notional < (double)cfg.tp_partial_min_notional_usd) {
+                        // Remaining too small — hold instead of partial.
+                        return result;  // action=0, hold
+                    }
+
+                    // Partial reduce.
+                    result.action = 1;
+                    result.fraction = pct;
+                    result.exit_code = 10;  // partial TP
+                    return result;
+                }
+                // pct == 0 or pct >= 1.0 falls through to full close check.
+            } else {
+                // Partial TP not hit yet.
+                // When tp_partial_atr_mult == 0, partial == full,
+                // so full can't be hit either.
+                if (cfg.tp_partial_atr_mult <= 0.0f) {
+                    return result;  // action=0, hold
+                }
+                // When tp_partial_atr_mult > 0, fall through to check full TP
+                // (handles edge case where partial_mult > tp_mult).
+            }
+        } else {
+            // tp1 already taken.
+            if (cfg.tp_partial_atr_mult > 0.0f) {
+                // Separate partial level: check if full TP hit for remainder.
+                bool tp_hit;
+                if (pos_type == POS_LONG) {
+                    tp_hit = (current_price >= tp_price);
+                } else {
+                    tp_hit = (current_price <= tp_price);
+                }
+                if (tp_hit) {
+                    result.action = 2;
+                    result.fraction = 1.0;
+                    result.exit_code = 11;  // full TP
+                    return result;
+                }
+            }
+            // Same level (tp_partial_atr_mult == 0) or full TP not hit:
+            // trailing manages.
+            return result;  // action=0, hold
+        }
+    }
+
+    // ── Full TP check (partial TP disabled, or pct edge case) ──────────────
+    bool tp_hit;
+    if (pos_type == POS_LONG) {
+        tp_hit = (current_price >= tp_price);
+    } else {
+        tp_hit = (current_price <= tp_price);
+    }
+
+    if (!tp_hit) {
+        return result;  // action=0, hold
+    }
+
+    result.action = 2;
+    result.fraction = 1.0;
+    result.exit_code = 11;  // full TP
+    return result;
+}
+"#
+    .to_string()
+}
 
 /// Smart exits: all 8 sub-checks (AQC-1223)
 pub fn check_smart_exits_codegen() -> String { String::new() /* stub */ }
@@ -624,6 +777,260 @@ mod tests {
     #[test]
     fn trailing_codegen_is_nonempty() {
         let src = compute_trailing_codegen();
+        assert!(
+            src.len() > 200,
+            "generated code must be substantial, got {} bytes",
+            src.len()
+        );
+    }
+
+    // -- check_tp_codegen tests (AQC-1222) ------------------------------------
+
+    #[test]
+    fn tp_codegen_has_correct_function_signature() {
+        let src = check_tp_codegen();
+        assert!(
+            src.contains("__device__ TpResult check_tp_codegen("),
+            "must declare a __device__ TpResult function"
+        );
+        assert!(
+            src.contains("const GpuComboConfig& cfg"),
+            "must take GpuComboConfig by const ref"
+        );
+        assert!(
+            src.contains("int pos_type"),
+            "must take pos_type as int"
+        );
+        assert!(
+            src.contains("double entry_price"),
+            "must take entry_price as double"
+        );
+        assert!(
+            src.contains("double entry_atr"),
+            "must take entry_atr as double"
+        );
+        assert!(
+            src.contains("double current_price"),
+            "must take current_price as double"
+        );
+        assert!(
+            src.contains("double size"),
+            "must take size as double"
+        );
+        assert!(
+            src.contains("unsigned int tp1_taken"),
+            "must take tp1_taken as unsigned int"
+        );
+        assert!(
+            src.contains("double tp_mult"),
+            "must take tp_mult as double"
+        );
+    }
+
+    #[test]
+    fn tp_codegen_has_source_comment() {
+        let src = check_tp_codegen();
+        assert!(
+            src.contains("Derived from bt-core/src/exits/take_profit.rs"),
+            "must reference the Rust SSOT source file"
+        );
+    }
+
+    #[test]
+    fn tp_codegen_uses_double_precision() {
+        let src = check_tp_codegen();
+        // Return struct fields
+        assert!(src.contains("double fraction"), "fraction must be double");
+        // Internal arithmetic uses double variables
+        assert!(src.contains("double atr"), "atr must be double");
+        assert!(src.contains("double tp_price"), "tp_price must be double");
+        assert!(src.contains("double partial_mult"), "partial_mult must be double");
+        assert!(src.contains("double partial_tp_price"), "partial_tp_price must be double");
+        assert!(src.contains("double pct"), "pct must be double");
+        assert!(src.contains("double remaining_notional"), "remaining_notional must be double");
+        // Must NOT use float for price-critical variables
+        assert!(
+            !src.contains("float tp_price"),
+            "tp_price must be double, not float"
+        );
+        assert!(
+            !src.contains("float partial_tp_price"),
+            "partial_tp_price must be double, not float"
+        );
+    }
+
+    #[test]
+    fn tp_codegen_contains_partial_tp_logic() {
+        let src = check_tp_codegen();
+        assert!(
+            src.contains("Partial TP") || src.contains("partial TP"),
+            "must have partial TP comment marker"
+        );
+        assert!(
+            src.contains("cfg.enable_partial_tp"),
+            "must check enable_partial_tp config flag"
+        );
+        assert!(
+            src.contains("tp1_taken == 0u"),
+            "must check tp1_taken flag for first partial"
+        );
+        assert!(
+            src.contains("partial_hit"),
+            "must compute partial_hit condition"
+        );
+        assert!(
+            src.contains("result.action = 1"),
+            "partial TP must set action = 1 (reduce)"
+        );
+        assert!(
+            src.contains("result.fraction = pct"),
+            "partial TP must set fraction to pct"
+        );
+        assert!(
+            src.contains("result.exit_code = 10"),
+            "partial TP must set exit_code = 10"
+        );
+    }
+
+    #[test]
+    fn tp_codegen_contains_full_tp_logic() {
+        let src = check_tp_codegen();
+        assert!(
+            src.contains("Full TP") || src.contains("full TP"),
+            "must have full TP comment marker"
+        );
+        assert!(
+            src.contains("result.action = 2"),
+            "full TP must set action = 2 (close)"
+        );
+        assert!(
+            src.contains("result.exit_code = 11"),
+            "full TP must set exit_code = 11"
+        );
+        assert!(
+            src.contains("tp_hit"),
+            "must compute tp_hit condition for full TP"
+        );
+    }
+
+    #[test]
+    fn tp_codegen_uses_correct_config_fields() {
+        let src = check_tp_codegen();
+        assert!(
+            src.contains("cfg.enable_partial_tp"),
+            "must use cfg.enable_partial_tp"
+        );
+        assert!(
+            src.contains("cfg.tp_partial_pct"),
+            "must use cfg.tp_partial_pct"
+        );
+        assert!(
+            src.contains("cfg.tp_partial_atr_mult"),
+            "must use cfg.tp_partial_atr_mult"
+        );
+        assert!(
+            src.contains("cfg.tp_partial_min_notional_usd"),
+            "must use cfg.tp_partial_min_notional_usd"
+        );
+    }
+
+    #[test]
+    fn tp_codegen_has_atr_fallback() {
+        let src = check_tp_codegen();
+        assert!(
+            src.contains("entry_price * 0.005"),
+            "must have ATR fallback for legacy positions"
+        );
+    }
+
+    #[test]
+    fn tp_codegen_has_notional_check() {
+        let src = check_tp_codegen();
+        assert!(
+            src.contains("remaining_notional"),
+            "must compute remaining notional for partial TP min check"
+        );
+        assert!(
+            src.contains("tp_partial_min_notional_usd"),
+            "must check minimum notional threshold"
+        );
+    }
+
+    #[test]
+    fn tp_codegen_handles_tp1_taken() {
+        let src = check_tp_codegen();
+        assert!(
+            src.contains("tp1_taken == 0u"),
+            "must check tp1_taken for first partial TP"
+        );
+        assert!(
+            src.contains("tp1 already taken"),
+            "must have comment for tp1 already taken path"
+        );
+    }
+
+    #[test]
+    fn tp_codegen_handles_separate_partial_level() {
+        let src = check_tp_codegen();
+        // When tp_partial_atr_mult > 0, partial TP fires at a different level
+        assert!(
+            src.contains("cfg.tp_partial_atr_mult > 0.0"),
+            "must check for separate partial mult"
+        );
+        // When tp_partial_atr_mult == 0, partial == full
+        assert!(
+            src.contains("cfg.tp_partial_atr_mult <= 0.0"),
+            "must handle zero partial mult (legacy)"
+        );
+    }
+
+    #[test]
+    fn tp_codegen_has_long_short_direction() {
+        let src = check_tp_codegen();
+        // Long: TP above entry (entry + atr * mult)
+        assert!(
+            src.contains("entry_price + (atr * tp_mult)"),
+            "long full TP = entry + atr * mult"
+        );
+        // Short: TP below entry (entry - atr * mult)
+        assert!(
+            src.contains("entry_price - (atr * tp_mult)"),
+            "short full TP = entry - atr * mult"
+        );
+    }
+
+    #[test]
+    fn tp_codegen_uses_fmax_fmin() {
+        let src = check_tp_codegen();
+        // Used for clamping tp_partial_pct
+        assert!(src.contains("fmax("), "must use fmax for CUDA double math");
+        assert!(src.contains("fmin("), "must use fmin for CUDA double math");
+    }
+
+    #[test]
+    fn tp_codegen_has_tp_result_struct() {
+        let src = check_tp_codegen();
+        assert!(
+            src.contains("struct TpResult"),
+            "must define TpResult struct"
+        );
+        assert!(
+            src.contains("int action"),
+            "TpResult must have action field"
+        );
+        assert!(
+            src.contains("double fraction"),
+            "TpResult must have fraction field"
+        );
+        assert!(
+            src.contains("int exit_code"),
+            "TpResult must have exit_code field"
+        );
+    }
+
+    #[test]
+    fn tp_codegen_is_nonempty() {
+        let src = check_tp_codegen();
         assert!(
             src.len() > 200,
             "generated code must be substantial, got {} bytes",
