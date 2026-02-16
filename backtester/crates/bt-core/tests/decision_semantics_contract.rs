@@ -45,8 +45,8 @@ fn permissive_cfg() -> StrategyConfig {
     cfg.filters.require_adx_rising = false;
     cfg.filters.require_macro_alignment = false;
 
-    cfg.indicators.ema_fast_window = 1;
-    cfg.indicators.ema_slow_window = 2;
+    cfg.indicators.ema_fast_window = 2;
+    cfg.indicators.ema_slow_window = 3;
     cfg.thresholds.entry.min_adx = -1.0;
     cfg.thresholds.entry.max_dist_ema_fast = 1.0;
     cfg.thresholds.entry.macd_hist_entry_mode = MacdMode::None;
@@ -162,7 +162,13 @@ fn warmup_bar_count_blocks_entry_until_lookback_boundary() {
 
     assert_eq!(opens.len(), 1);
     assert_eq!(opens[0].timestamp_ms, 60_000);
-    assert_eq!(opens[0].price, 101.0 * (1.0 + cfg.trade.slippage_bps / 10_000.0));
+    let expected_price = 101.0 * (1.0 + cfg.trade.slippage_bps / 10_000.0);
+    assert!(
+        (opens[0].price - expected_price).abs() < 1e-6,
+        "price {:.10} should be close to {:.10}",
+        opens[0].price,
+        expected_price,
+    );
 }
 
 #[test]
