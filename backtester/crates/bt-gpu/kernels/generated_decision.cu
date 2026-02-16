@@ -105,3 +105,243 @@ __device__ double compute_sl_price_codegen(
 
     return sl_price;
 }
+// Derived from bt-core/src/exits/trailing.rs
+// Trailing stop: per-confidence offsets, VBTS, RSI Trend-Guard, TATP, TSPV,
+//                weak-trend tightening, ratchet.
+// All price math in double precision (AQC-734).
+// All tunables read from cfg (no hardcoded trailing params).
+
+__device__ double compute_trailing_codegen(
+    const GpuComboConfig& cfg,
+    int pos_type,
+    double entry_price,
+    double current_price,
+    double atr,
+    double current_trailing_sl,
+    int confidence,
+    double rsi,
+    double adx,
+    double adx_slope,
+    double atr_slope,
+    double bb_width_ratio,
+    double profit_atr
+) {
+    // ── ATR fallback (mirrors Rust: if entry_atr <= 0 use 0.5% of entry) ──
+    double eff_atr = (atr > 0.0) ? atr : (entry_price * 0.005);
+
+    // ── Per-confidence overrides for trailing start / distance ─────────────
+    double trailing_start = (double)cfg.trailing_start_atr;
+    double trailing_dist  = (double)cfg.trailing_distance_atr;
+
+    if (confidence == 0) {  // Confidence::Low == 0
+        if (cfg.trailing_start_atr_low_conf > 0.0f) {
+            trailing_start = (double)cfg.trailing_start_atr_low_conf;
+        }
+        if (cfg.trailing_distance_atr_low_conf > 0.0f) {
+            trailing_dist = (double)cfg.trailing_distance_atr_low_conf;
+        }
+    }
+
+    // ── RSI Trend-Guard floor (v5.016) ────────────────────────────────────
+    // Minimum effective trailing distance.  Raised when RSI is favourable
+    // (trending in the direction of the position).
+    double min_trailing_dist = (double)cfg.trailing_rsi_floor_default;
+    if (pos_type == POS_LONG && rsi > 60.0) {
+        min_trailing_dist = (double)cfg.trailing_rsi_floor_trending;
+    }
+    if (pos_type == POS_SHORT && rsi < 40.0) {
+        min_trailing_dist = (double)cfg.trailing_rsi_floor_trending;
+    }
+
+    // ── Effective trailing distance ───────────────────────────────────────
+    double effective_dist = trailing_dist;
+
+    // VBTS (Vol-Buffered Trailing Stop, v5.015): widen when BB expanding.
+    if (cfg.enable_vol_buffered_trailing != 0u
+        && bb_width_ratio > (double)cfg.trailing_vbts_bb_threshold) {
+        effective_dist *= (double)cfg.trailing_vbts_mult;
+    }
+
+    // High-profit tightening (> cfg threshold ATR) with TATP / TSPV overrides.
+    if (profit_atr > (double)cfg.trailing_high_profit_atr) {
+        if (adx > 35.0 && adx_slope > 0.0) {
+            // TATP: trend accelerating — don't tighten (1.0x).
+            effective_dist = trailing_dist * 1.0;
+        } else if (atr_slope > 0.0) {
+            // TSPV: volatility expanding — partial tighten.
+            effective_dist = trailing_dist * (double)cfg.trailing_tighten_tspv;
+        } else {
+            // Default high-profit tightening.
+            effective_dist = trailing_dist * (double)cfg.trailing_tighten_default;
+        }
+    } else if (adx < 25.0) {
+        // Weak-trend tightening.
+        effective_dist = trailing_dist * (double)cfg.trailing_weak_trend_mult;
+    }
+
+    // Clamp to RSI Trend-Guard floor.
+    effective_dist = fmax(effective_dist, min_trailing_dist);
+
+    // ── Activation gate ───────────────────────────────────────────────────
+    if (profit_atr < trailing_start) {
+        // Not enough profit to activate trailing stop yet.
+        // Preserve any existing trailing SL from a previous bar.
+        return current_trailing_sl;
+    }
+
+    // ── Compute candidate trailing stop price ─────────────────────────────
+    double candidate;
+    if (pos_type == POS_LONG) {
+        candidate = current_price - (eff_atr * effective_dist);
+    } else {
+        candidate = current_price + (eff_atr * effective_dist);
+    }
+
+    // ── Ratchet: only allow the trailing stop to improve ──────────────────
+    // A non-positive current_trailing_sl means "no trailing stop yet" (first bar).
+    if (current_trailing_sl > 0.0) {
+        if (pos_type == POS_LONG) {
+            candidate = fmax(candidate, current_trailing_sl);
+        } else {
+            candidate = fmin(candidate, current_trailing_sl);
+        }
+    }
+
+    return candidate;
+}
+// Derived from bt-core/src/exits/take_profit.rs
+// Take profit: full TP + partial TP ladder.
+// All price math in double precision (AQC-734).
+//
+// Partial TP ladder:
+//   1. If enable_partial_tp AND tp1_taken == 0 AND price hits partial TP level
+//      -> Reduce by tp_partial_pct, caller sets trailing_sl = entry (breakeven)
+//   2. If tp1_taken == 1 AND tp_partial_atr_mult > 0 AND price hits full TP
+//      -> Close remainder at full TP
+//   3. If tp1_taken == 1 AND tp_partial_atr_mult == 0 -> Hold (trailing manages)
+//   4. If partial TP disabled or tp_partial_pct >= 1.0 -> full Close
+//
+// Confidence-dependent TP multipliers (tp_mult_strong for high ADX,
+// tp_mult_weak for low ADX) and dynamic gate TP multiplier are resolved
+// by the caller via get_tp_mult() before calling this function.
+
+struct TpResult {
+    int action;       // 0 = hold, 1 = reduce (partial), 2 = close (full)
+    double fraction;  // reduce fraction (meaningful only when action == 1)
+    int exit_code;    // 0 = no exit, 10 = partial TP, 11 = full TP
+};
+
+__device__ TpResult check_tp_codegen(
+    const GpuComboConfig& cfg,
+    int pos_type,
+    double entry_price,
+    double entry_atr,
+    double current_price,
+    double size,
+    unsigned int tp1_taken,
+    double tp_mult
+) {
+    TpResult result;
+    result.action = 0;
+    result.fraction = 0.0;
+    result.exit_code = 0;
+
+    // ── ATR fallback (mirrors Rust: if entry_atr <= 0 use 0.5% of entry) ──
+    double atr = (entry_atr > 0.0) ? entry_atr : (entry_price * 0.005);
+
+    // ── Full TP price (always based on tp_mult) ────────────────────────────
+    double tp_price;
+    if (pos_type == POS_LONG) {
+        tp_price = entry_price + (atr * tp_mult);
+    } else {
+        tp_price = entry_price - (atr * tp_mult);
+    }
+
+    // ── Partial TP path ────────────────────────────────────────────────────
+    if (cfg.enable_partial_tp != 0u) {
+        if (tp1_taken == 0u) {
+            // Determine partial TP level: use dedicated mult if set,
+            // otherwise same as full TP.
+            double partial_mult = (cfg.tp_partial_atr_mult > 0.0)
+                ? (double)cfg.tp_partial_atr_mult
+                : tp_mult;
+            double partial_tp_price;
+            if (pos_type == POS_LONG) {
+                partial_tp_price = entry_price + (atr * partial_mult);
+            } else {
+                partial_tp_price = entry_price - (atr * partial_mult);
+            }
+            bool partial_hit;
+            if (pos_type == POS_LONG) {
+                partial_hit = (current_price >= partial_tp_price);
+            } else {
+                partial_hit = (current_price <= partial_tp_price);
+            }
+
+            if (partial_hit) {
+                double pct = fmax(fmin((double)cfg.tp_partial_pct, 1.0), 0.0);
+
+                if (pct > 0.0 && pct < 1.0) {
+                    double remaining_notional = size * (1.0 - pct) * current_price;
+                    if (remaining_notional < (double)cfg.tp_partial_min_notional_usd) {
+                        // Remaining too small — hold instead of partial.
+                        return result;  // action=0, hold
+                    }
+
+                    // Partial reduce.
+                    result.action = 1;
+                    result.fraction = pct;
+                    result.exit_code = 10;  // partial TP
+                    return result;
+                }
+                // pct == 0 or pct >= 1.0 falls through to full close check.
+            } else {
+                // Partial TP not hit yet.
+                // When tp_partial_atr_mult == 0, partial == full,
+                // so full can't be hit either.
+                if (cfg.tp_partial_atr_mult <= 0.0f) {
+                    return result;  // action=0, hold
+                }
+                // When tp_partial_atr_mult > 0, fall through to check full TP
+                // (handles edge case where partial_mult > tp_mult).
+            }
+        } else {
+            // tp1 already taken.
+            if (cfg.tp_partial_atr_mult > 0.0f) {
+                // Separate partial level: check if full TP hit for remainder.
+                bool tp_hit;
+                if (pos_type == POS_LONG) {
+                    tp_hit = (current_price >= tp_price);
+                } else {
+                    tp_hit = (current_price <= tp_price);
+                }
+                if (tp_hit) {
+                    result.action = 2;
+                    result.fraction = 1.0;
+                    result.exit_code = 11;  // full TP
+                    return result;
+                }
+            }
+            // Same level (tp_partial_atr_mult == 0) or full TP not hit:
+            // trailing manages.
+            return result;  // action=0, hold
+        }
+    }
+
+    // ── Full TP check (partial TP disabled, or pct edge case) ──────────────
+    bool tp_hit;
+    if (pos_type == POS_LONG) {
+        tp_hit = (current_price >= tp_price);
+    } else {
+        tp_hit = (current_price <= tp_price);
+    }
+
+    if (!tp_hit) {
+        return result;  // action=0, hold
+    }
+
+    result.action = 2;
+    result.fraction = 1.0;
+    result.exit_code = 11;  // full TP
+    return result;
+}
