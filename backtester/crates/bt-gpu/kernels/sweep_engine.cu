@@ -383,48 +383,20 @@ __device__ SignalResultLegacy generate_signal(const GpuSnapshot& snap, const Gpu
 }
 
 // -- Stop Loss ----------------------------------------------------------------
+// AQC-1226: replaced by codegen — delegates to compute_sl_price_codegen()
 
 __device__ float compute_sl_price(const GpuPosition& pos, const GpuSnapshot& snap, const GpuComboConfig* cfg) {
-    float entry = pos.entry_price;
-    float atr = (pos.entry_atr > 0.0f) ? pos.entry_atr : (entry * 0.005f);
-    float sl_mult = cfg->sl_atr_mult;
-
-    // ASE
-    bool is_underwater = (pos.active == POS_LONG) ? (snap.close < entry) : (snap.close > entry);
-    if (snap.adx_slope < 0.0f && is_underwater) { sl_mult *= 0.8f; }
-
-    // DASE
-    if (snap.adx > 40.0f) {
-        float p_atr = profit_atr(pos, snap.close);
-        if (p_atr > 0.5f) { sl_mult *= 1.15f; }
-    }
-
-    // SLB
-    if (snap.adx > 45.0f) { sl_mult *= 1.10f; }
-
-    float sl_price;
-    if (pos.active == POS_LONG) {
-        sl_price = entry - (atr * sl_mult);
-    } else {
-        sl_price = entry + (atr * sl_mult);
-    }
-
-    // Breakeven
-    if (cfg->enable_breakeven_stop != 0u && cfg->breakeven_start_atr > 0.0f) {
-        float be_start = atr * cfg->breakeven_start_atr;
-        float be_buffer = atr * cfg->breakeven_buffer_atr;
-        if (pos.active == POS_LONG) {
-            if ((snap.close - entry) >= be_start) {
-                sl_price = fmaxf(sl_price, entry + be_buffer);
-            }
-        } else {
-            if ((entry - snap.close) >= be_start) {
-                sl_price = fminf(sl_price, entry - be_buffer);
-            }
-        }
-    }
-
-    return sl_price;
+    // AQC-1226: delegate to double-precision codegen
+    double sl = compute_sl_price_codegen(
+        *cfg,
+        (int)pos.active,
+        (double)pos.entry_price,
+        (double)pos.entry_atr,
+        (double)snap.close,
+        (double)snap.adx,
+        (double)snap.adx_slope
+    );
+    return (float)sl;
 }
 
 __device__ bool stop_loss_hit(unsigned int pos_type, float price, float sl_price) {
@@ -440,67 +412,27 @@ __device__ bool check_stop_loss(const GpuPosition& pos, const GpuSnapshot& snap,
 }
 
 // -- Trailing Stop ------------------------------------------------------------
+// AQC-1226: replaced by codegen — delegates to compute_trailing_codegen()
 
 __device__ float compute_trailing(const GpuPosition& pos, const GpuSnapshot& snap,
                                   const GpuComboConfig* cfg, float p_atr) {
-    float entry = pos.entry_price;
-    float atr = (pos.entry_atr > 0.0f) ? pos.entry_atr : (entry * 0.005f);
-
-    float trailing_start = cfg->trailing_start_atr;
-    float trailing_dist = cfg->trailing_distance_atr;
-    if (pos.confidence == CONF_LOW) {
-        if (cfg->trailing_start_atr_low_conf > 0.0f) { trailing_start = cfg->trailing_start_atr_low_conf; }
-        if (cfg->trailing_distance_atr_low_conf > 0.0f) { trailing_dist = cfg->trailing_distance_atr_low_conf; }
-    }
-
-    // RSI Trend-Guard floor — read from config
-    float min_dist = cfg->trailing_rsi_floor_default;
-    if (pos.active == POS_LONG && snap.rsi > 60.0f) { min_dist = cfg->trailing_rsi_floor_trending; }
-    if (pos.active == POS_SHORT && snap.rsi < 40.0f) { min_dist = cfg->trailing_rsi_floor_trending; }
-
-    float eff_dist = trailing_dist;
-
-    // VBTS — read from config
-    if (cfg->enable_vol_buffered_trailing != 0u && snap.bb_width_ratio > cfg->trailing_vbts_bb_threshold) {
-        eff_dist *= cfg->trailing_vbts_mult;
-    }
-
-    // High-profit tightening — read from config
-    if (p_atr > cfg->trailing_high_profit_atr) {
-        if (snap.adx > 35.0f && snap.adx_slope > 0.0f) {
-            eff_dist = trailing_dist * 1.0f; // TATP: don't tighten (stays hardcoded)
-        } else if (snap.atr_slope > 0.0f) {
-            eff_dist = trailing_dist * cfg->trailing_tighten_tspv;
-        } else {
-            eff_dist = trailing_dist * cfg->trailing_tighten_default;
-        }
-    } else if (snap.adx < 25.0f) {
-        eff_dist = trailing_dist * cfg->trailing_weak_trend_mult;
-    }
-
-    eff_dist = fmaxf(eff_dist, min_dist);
-
-    if (p_atr < trailing_start) {
-        return pos.trailing_sl; // Not active yet, preserve existing
-    }
-
-    float candidate;
-    if (pos.active == POS_LONG) {
-        candidate = snap.close - (atr * eff_dist);
-    } else {
-        candidate = snap.close + (atr * eff_dist);
-    }
-
-    // Ratchet
-    if (pos.trailing_sl > 0.0f) {
-        if (pos.active == POS_LONG) {
-            candidate = fmaxf(candidate, pos.trailing_sl);
-        } else {
-            candidate = fminf(candidate, pos.trailing_sl);
-        }
-    }
-
-    return candidate;
+    // AQC-1226: delegate to double-precision codegen
+    double tsl = compute_trailing_codegen(
+        *cfg,
+        (int)pos.active,
+        (double)pos.entry_price,
+        (double)snap.close,
+        (double)pos.entry_atr,
+        (double)pos.trailing_sl,
+        (int)pos.confidence,
+        (double)snap.rsi,
+        (double)snap.adx,
+        (double)snap.adx_slope,
+        (double)snap.atr_slope,
+        (double)snap.bb_width_ratio,
+        (double)p_atr
+    );
+    return (float)tsl;
 }
 
 __device__ bool check_trailing_exit(const GpuPosition& pos, const GpuSnapshot& snap) {
@@ -510,138 +442,54 @@ __device__ bool check_trailing_exit(const GpuPosition& pos, const GpuSnapshot& s
 }
 
 // -- Take Profit --------------------------------------------------------------
+// AQC-1226: replaced by codegen — delegates to check_tp_codegen()
 
 // Returns: 0 = hold, 1 = partial, 2 = full close
 __device__ unsigned int check_tp(const GpuPosition& pos, const GpuSnapshot& snap,
                                  const GpuComboConfig* cfg, float tp_mult) {
-    float entry = pos.entry_price;
-    float atr = (pos.entry_atr > 0.0f) ? pos.entry_atr : (entry * 0.005f);
-
-    // ── Full TP price (always based on tp_mult) ──────────────────────────────
-    float tp_price = (pos.active == POS_LONG)
-        ? (entry + (atr * tp_mult))
-        : (entry - (atr * tp_mult));
-
-    // ── Partial TP path ──────────────────────────────────────────────────────
-    if (cfg->enable_partial_tp != 0u) {
-        if (pos.tp1_taken == 0u) {
-            // Determine partial TP level: use dedicated mult if set, otherwise same as full TP.
-            float partial_mult = (cfg->tp_partial_atr_mult > 0.0f) ? cfg->tp_partial_atr_mult : tp_mult;
-            float partial_tp_price = (pos.active == POS_LONG)
-                ? (entry + (atr * partial_mult))
-                : (entry - (atr * partial_mult));
-            bool partial_hit = (pos.active == POS_LONG)
-                ? (snap.close >= partial_tp_price)
-                : (snap.close <= partial_tp_price);
-
-            if (partial_hit) {
-                float pct = fmaxf(fminf(cfg->tp_partial_pct, 1.0f), 0.0f);
-                if (pct > 0.0f && pct < 1.0f) {
-                    float remaining = pos.size * (1.0f - pct) * snap.close;
-                    if (remaining < cfg->tp_partial_min_notional_usd) { return 0u; }
-                    return 1u; // Partial
-                }
-                // pct == 0 or pct >= 1.0 falls through to full close check.
-            } else {
-                // Partial TP not hit yet.
-                // When tp_partial_atr_mult == 0, partial == full, so full can't be hit either.
-                if (cfg->tp_partial_atr_mult <= 0.0f) { return 0u; }
-                // When tp_partial_atr_mult > 0, fall through to check full TP
-                // (handles edge case where partial_mult > tp_mult).
-            }
-        } else {
-            // tp1 already taken.
-            if (cfg->tp_partial_atr_mult > 0.0f) {
-                bool tp_hit = (pos.active == POS_LONG)
-                    ? (snap.close >= tp_price)
-                    : (snap.close <= tp_price);
-                if (tp_hit) { return 2u; }
-            }
-            // Same level (tp_partial_atr_mult == 0) or full TP not hit: trailing manages.
-            return 0u;
-        }
-    }
-
-    // ── Full TP check (partial TP disabled, or pct edge case) ────────────────
-    bool tp_hit = (pos.active == POS_LONG)
-        ? (snap.close >= tp_price)
-        : (snap.close <= tp_price);
-    if (!tp_hit) { return 0u; }
-    return 2u; // Full close
+    // AQC-1226: delegate to double-precision codegen
+    TpResult tp = check_tp_codegen(
+        *cfg,
+        (int)pos.active,
+        (double)pos.entry_price,
+        (double)pos.entry_atr,
+        (double)snap.close,
+        (double)pos.size,
+        pos.tp1_taken,
+        (double)tp_mult
+    );
+    return (unsigned int)tp.action;
 }
 
 // -- Smart Exits --------------------------------------------------------------
+// AQC-1226: replaced by codegen — delegates to check_smart_exits_codegen()
 
 __device__ bool check_smart_exits(const GpuPosition& pos, const GpuSnapshot& snap,
                                   const GpuComboConfig* cfg, float p_atr) {
-    // 1. Trend breakdown (EMA cross)
-    if (pos.active == POS_LONG && snap.ema_fast < snap.ema_slow) { return true; }
-    if (pos.active == POS_SHORT && snap.ema_fast > snap.ema_slow) { return true; }
-
-    // 2. Trend exhaustion (ADX < threshold)
-    float adx_thresh = cfg->smart_exit_adx_exhaustion_lt;
-    if (pos.confidence == CONF_LOW && cfg->smart_exit_adx_exhaustion_lt_low_conf > 0.0f) {
-        adx_thresh = cfg->smart_exit_adx_exhaustion_lt_low_conf;
-    }
-    if (pos.entry_adx_threshold > 0.0f && snap.adx < (pos.entry_adx_threshold * 0.5f)) {
-        if (snap.adx < adx_thresh) { return true; }
-    }
-
-    // 3. EMA macro breakdown
-    if (pos.active == POS_LONG && snap.close < snap.ema_macro) { return true; }
-    if (pos.active == POS_SHORT && snap.close > snap.ema_macro) { return true; }
-
-    // 5. TSME (Trend Saturation Momentum Exit)
-    if (snap.adx > 50.0f && p_atr >= cfg->tsme_min_profit_atr) {
-        bool macd_contracting = fabsf(snap.macd_hist) < fabsf(snap.prev_macd_hist);
-        bool adx_declining = true;
-        if (cfg->tsme_require_adx_slope_negative != 0u) {
-            adx_declining = snap.adx_slope < 0.0f;
-        }
-        if (macd_contracting && adx_declining) { return true; }
-    }
-
-    // 6. MMDE (4-bar MACD divergence)
-    if (pos.active == POS_LONG) {
-        if (snap.macd_hist < snap.prev_macd_hist
-            && snap.prev_macd_hist < snap.prev2_macd_hist
-            && snap.prev2_macd_hist < snap.prev3_macd_hist
-            && p_atr > 0.5f) { return true; }
-    }
-    if (pos.active == POS_SHORT) {
-        if (snap.macd_hist > snap.prev_macd_hist
-            && snap.prev_macd_hist > snap.prev2_macd_hist
-            && snap.prev2_macd_hist > snap.prev3_macd_hist
-            && p_atr > 0.5f) { return true; }
-    }
-
-    // 7. RSI overextension
-    if (cfg->enable_rsi_overextension_exit != 0u) {
-        float ub, lb;
-        if (pos.confidence == CONF_LOW && cfg->rsi_exit_ub_lo_profit_low_conf > 0.0f) {
-            if (p_atr >= cfg->rsi_exit_profit_atr_switch) {
-                ub = cfg->rsi_exit_ub_hi_profit_low_conf;
-                lb = cfg->rsi_exit_lb_hi_profit_low_conf;
-            } else {
-                ub = cfg->rsi_exit_ub_lo_profit_low_conf;
-                lb = cfg->rsi_exit_lb_lo_profit_low_conf;
-            }
-        } else {
-            if (p_atr >= cfg->rsi_exit_profit_atr_switch) {
-                ub = cfg->rsi_exit_ub_hi_profit;
-                lb = cfg->rsi_exit_lb_hi_profit;
-            } else {
-                ub = cfg->rsi_exit_ub_lo_profit;
-                lb = cfg->rsi_exit_lb_lo_profit;
-            }
-        }
-        if (ub > 0.0f && lb > 0.0f) {
-            if (pos.active == POS_LONG && snap.rsi > ub) { return true; }
-            if (pos.active == POS_SHORT && snap.rsi < lb) { return true; }
-        }
-    }
-
-    return false;
+    // AQC-1226: delegate to double-precision codegen
+    SmartExitResult se = check_smart_exits_codegen(
+        *cfg,
+        (int)pos.active,
+        (double)pos.entry_price,
+        (double)pos.entry_atr,
+        (double)snap.close,
+        (double)snap.ema_fast,
+        (double)snap.ema_slow,
+        (double)snap.ema_macro,
+        (double)snap.adx,
+        (double)snap.adx_slope,
+        (double)snap.atr,
+        (double)snap.avg_atr,
+        (double)snap.rsi,
+        (double)snap.macd_hist,
+        (double)snap.prev_macd_hist,
+        (double)snap.prev2_macd_hist,
+        (double)snap.prev3_macd_hist,
+        (double)p_atr,
+        (int)pos.confidence,
+        (double)pos.entry_adx_threshold
+    );
+    return se.should_exit;
 }
 
 // -- Entry Sizing -------------------------------------------------------------
