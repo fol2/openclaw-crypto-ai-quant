@@ -78,6 +78,11 @@ class KernelDecision:
             raw_side=raw.get("side"),
         )
         confidence = str(raw.get("confidence", "N/A"))
+        # Kernel decisions have confidence="N/A" (Rust kernel events lack a
+        # confidence field).  Normalise to "high" so the downstream confidence
+        # gate does not block them — the kernel already validated the signal.
+        if confidence.strip().upper() == "N/A":
+            confidence = "high"
 
         try:
             score = float(raw.get("score", 0.0) or 0.0)
@@ -1361,7 +1366,16 @@ class UnifiedEngine:
         except Exception:
             target_size_f = None
 
-        try:
+        # Detect whether trader.execute_trade supports the action-aware API (cached).
+        if not hasattr(self, "_trader_accepts_action"):
+            import inspect
+            try:
+                _sig = inspect.signature(self.trader.execute_trade)
+                self._trader_accepts_action = "action" in _sig.parameters
+            except (ValueError, TypeError):
+                self._trader_accepts_action = False
+
+        if self._trader_accepts_action:
             return self.trader.execute_trade(
                 symbol,
                 signal,
@@ -1374,69 +1388,6 @@ class UnifiedEngine:
                 target_size=target_size_f,
                 reason=reason,
             )
-        except TypeError:
-            # Fall back to legacy signal-only API when the trader doesn't accept ``action``.
-            if act in {"OPEN", "ADD"}:
-                # Legacy PaperTrader path: OPEN/ADD should be handled via execute_trade.
-                try:
-                    return self.trader.execute_trade(sym, signal, price, timestamp, confidence, atr=atr, indicators=indicators)
-                except Exception as e:
-                    import logging
-                    logger = logging.getLogger(__name__)
-                    logger.error("Legacy execute_trade fallback failed for %s: %s", sym, e, exc_info=True)
-
-            if act == "ADD":
-                fn = getattr(self.trader, "add_to_position", None)
-                if callable(fn):
-                    try:
-                        return fn(sym, price, timestamp, confidence, atr=atr, indicators=indicators, target_size=target_size_f)
-                    except TypeError:
-                        return fn(sym, price, timestamp, confidence, atr=atr, indicators=indicators)
-                return
-
-            if act in {"CLOSE", "REDUCE"}:
-                if sym not in ((self.trader.positions or {}) if isinstance(getattr(self.trader, "positions", None), dict) else {}):
-                    import logging
-                    logger = logging.getLogger(__name__)
-                    logger.debug("Skipping %s for %s: not in positions", act, sym)
-                    return
-                pos = (self.trader.positions or {}).get(sym, {})
-                try:
-                    pos_size = float(pos.get("size") or 0.0)
-                except Exception:
-                    pos_size = 0.0
-                try:
-                    reduce_sz = float(target_size_f) if target_size_f is not None else pos_size
-                except Exception:
-                    reduce_sz = pos_size
-                reduce_sz = float(max(0.0, min(pos_size, reduce_sz)))
-
-                if act == "CLOSE":
-                    fn = getattr(self.trader, "close_position", None)
-                    if callable(fn):
-                        try:
-                            return fn(
-                                sym,
-                                price,
-                                timestamp,
-                                reason=str(reason or "Kernel CLOSE"),
-                                meta={"reason": str(reason or "").strip() or None},
-                            )
-                        except TypeError:
-                            return fn(sym, price, timestamp, str(reason or "Kernel CLOSE"))
-                    return
-                fn = getattr(self.trader, "reduce_position", None)
-                if callable(fn):
-                    return fn(
-                        sym,
-                        reduce_sz,
-                        price,
-                        timestamp,
-                        str(reason or "Kernel REDUCE"),
-                        confidence=confidence,
-                        meta={"reason": str(reason or "").strip() or None},
-                    )
-                return
 
         if act == "ADD":
             fn = getattr(self.trader, "add_to_position", None)
@@ -1722,6 +1673,52 @@ class UnifiedEngine:
                         now_series = cached.get("now") if isinstance(cached.get("now"), dict) else {}
                         if not isinstance(now_series, dict):
                             now_series = {}
+
+                        # WARN-K3: When analysis cache is empty (e.g. after restart),
+                        # compute basic indicators from candle DB so exit logic has context.
+                        if not now_series or not any(
+                            now_series.get(k) for k in ("ADX", "ATR", "RSI_14", "EMA_fast")
+                        ):
+                            try:
+                                _edf = self.market.get_candles_df(
+                                    sym_u, interval=self.interval, min_rows=self.lookback_bars,
+                                )
+                                if _edf is not None and len(_edf) >= 50:
+                                    _gcfg = (self.strategy.get_config("__GLOBAL__") or {})
+                                    _ind = _gcfg.get("indicators") or {}
+                                    _fw = int(_ind.get("ema_fast_window", 20))
+                                    _sw = int(_ind.get("ema_slow_window", 50))
+                                    now_series["EMA_fast"] = float(
+                                        mei_alpha_v1.ta.trend.ema_indicator(_edf["Close"], window=_fw).iloc[-1]
+                                    )
+                                    now_series["EMA_slow"] = float(
+                                        mei_alpha_v1.ta.trend.ema_indicator(_edf["Close"], window=_sw).iloc[-1]
+                                    )
+                                    _adx = mei_alpha_v1.ta.trend.ADXIndicator(
+                                        _edf["High"], _edf["Low"], _edf["Close"], window=14,
+                                    )
+                                    now_series["ADX"] = float(_adx.adx().iloc[-1])
+                                    now_series["ATR"] = float(
+                                        mei_alpha_v1.ta.volatility.average_true_range(
+                                            _edf["High"], _edf["Low"], _edf["Close"], window=14,
+                                        ).iloc[-1]
+                                    )
+                                    now_series["RSI_14"] = float(
+                                        mei_alpha_v1.ta.momentum.rsi(_edf["Close"], window=14).iloc[-1]
+                                    )
+                                    now_series["Close"] = float(_edf["Close"].iloc[-1])
+                                    # Populate cache to avoid recomputing on every tick.
+                                    self._analysis_cache[sym_u] = {
+                                        "key": None,
+                                        "sig": cached.get("sig", "NEUTRAL"),
+                                        "conf": cached.get("conf", "high"),
+                                        "now": dict(now_series),
+                                        "computed_at_s": time.time(),
+                                        "action": cached.get("action", ""),
+                                    }
+                            except Exception:
+                                pass
+
                         is_exit_boundary = self._exit_reanalyze_due(sym_u)
                         if not is_exit_boundary:
                             continue
@@ -1920,6 +1917,11 @@ class UnifiedEngine:
                             quote = self.market.get_mid_price(sym_u, max_age_s=10.0, interval=self.interval)
                             current_price = float(quote.price) if quote is not None else float(now_series.get("Close") or 0.0)
 
+                        # WARN-E3: Guard against zero price when all sources fail.
+                        if current_price <= 0:
+                            logger.warning(f"[{sym_u}] all price sources failed, skipping {act}")
+                            continue
+
                         if act in {"OPEN", "ADD"}:
                             if entry_key is not None:
                                 now_ts = now_ms()
@@ -1950,9 +1952,6 @@ class UnifiedEngine:
                                 now_series["funding_rate"] = 0.0
 
                             self._attach_strategy_snapshot(symbol=sym_u, now_series=now_series)
-                            if entry_key is not None:
-                                self._last_entry_key[sym_u] = int(entry_key)
-                                self._last_entry_key_open_pos_count[sym_u] = open_pos_count
 
                             if isinstance(now_series, dict):
                                 try:
@@ -1976,6 +1975,12 @@ class UnifiedEngine:
                                 target_size=dec.target_size,
                                 reason=dec.reason,
                             )
+
+                            # BUG-E1: Set dedup key AFTER trade execution so a
+                            # gate-blocked entry can retry on the next tick.
+                            if entry_key is not None and sym_u in (self.trader.positions or {}):
+                                self._last_entry_key[sym_u] = int(entry_key)
+                                self._last_entry_key_open_pos_count[sym_u] = open_pos_count
 
                         elif act in {"CLOSE", "REDUCE"}:
                             self._decision_execute_trade(
