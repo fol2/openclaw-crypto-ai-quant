@@ -189,7 +189,12 @@ global:
     auto_reverse_breadth_low: 10.0    # default
     auto_reverse_breadth_high: 90.0   # default
 
-  watchlist_exclude: []               # engine-only (Rust ignores)
+  watchlist_exclude:
+    - BERA
+    - INJ
+    - STABLE
+    - ZK
+    - ZRO
 
   engine:                             # engine-only (Rust ignores)
     interval: 1h                      # main indicator candle (NOT hot-reloadable)
