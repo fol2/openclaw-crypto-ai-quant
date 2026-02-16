@@ -5,6 +5,8 @@
 //! audit trail.
 
 use crate::config::{Confidence, Signal};
+use crate::indicators::IndicatorSnapshot;
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Position type enum
@@ -135,6 +137,26 @@ impl Position {
 }
 
 // ---------------------------------------------------------------------------
+// Exit context (exit parameter snapshot attached to close/reduce trades)
+// ---------------------------------------------------------------------------
+
+/// Captures exit parameters and position state at the moment of exit.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ExitContext {
+    pub trailing_active: bool,
+    pub trailing_high_water_mark: f64,
+    pub sl_atr_mult_applied: f64,
+    pub tp_atr_mult_applied: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smart_exit_threshold: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indicator_at_exit: Option<IndicatorSnapshot>,
+    pub bars_held: u32,
+    pub max_unrealized_pnl: f64,
+    pub min_unrealized_pnl: f64,
+}
+
+// ---------------------------------------------------------------------------
 // Trade record (log entry for each trade action)
 // ---------------------------------------------------------------------------
 
@@ -162,6 +184,8 @@ pub struct TradeRecord {
     /// Most favourable excursion (maximum unrealised PnL) observed while the position was open.
     /// Only meaningful for close/reduce records.
     pub mfe_usd: f64,
+    /// Exit parameters and position state at exit. Only populated for close/reduce records.
+    pub exit_context: Option<ExitContext>,
 }
 
 impl TradeRecord {
@@ -303,6 +327,7 @@ mod tests {
             margin_used: 33.33,
             mae_usd: 0.0,
             mfe_usd: 0.0,
+            exit_context: None,
         };
         assert!(tr.is_close());
         assert!(!tr.is_open());

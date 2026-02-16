@@ -1,10 +1,10 @@
-# Full 37-axis TPE sweep spec
-# Usage: mei-backtester sweep --gpu --tpe --tpe-trials 500000 --tpe-batch 4096 --sweep-spec sweep_full_34axis.yaml
+# Full 34-axis TPE sweep spec
+# Usage: mei-backtester sweep --gpu --allow-unsafe-gpu-sweep --tpe --tpe-trials 500000 --tpe-batch 4096 --sweep-spec sweeps/full_34axis.yaml
 #
 # Grid equivalent: 2.71e+24 combos (impossible)
 # TPE 500K trials with batch=4096: ~4.4s per interval
 #
-# 14 indicator axes + 23 trade axes
+# 14 indicator axes + 20 trade axes
 # TPE samples continuously between min/max and rounds integer axes
 
 initial_balance: 10000.0
@@ -104,14 +104,6 @@ axes:
   # Breakeven
   - path: trade.breakeven_start_atr
     values: [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-
-  # Partial TP
-  - path: trade.enable_partial_tp
-    values: [0.0, 1.0]
-  - path: trade.tp_partial_pct
-    values: [0.3, 0.5, 0.7]
-  - path: trade.tp_partial_atr_mult
-    values: [0.0, 1.0, 2.0, 3.0, 4.0]
 
   # Filters
   - path: filters.enable_ranging_filter

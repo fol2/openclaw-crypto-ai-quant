@@ -30,20 +30,20 @@ def get_performance(conn, minutes=60):
     try:
         cutoff_dt = datetime.utcnow() - timedelta(minutes=minutes)
         cutoff_iso = cutoff_dt.isoformat()
-        
+
         cursor = conn.cursor()
         cursor.execute("SELECT count(*) as count, sum(pnl) as total_pnl, sum(fee_usd) as total_fee, sum(case when pnl > 0 then 1 else 0 end) as wins FROM trades WHERE timestamp > ? AND action = 'CLOSE'", (cutoff_iso,))
         stats = dict(cursor.fetchone())
-        
+
         cursor.execute("SELECT symbol, pnl FROM trades WHERE timestamp > ? AND action = 'CLOSE' ORDER BY pnl DESC LIMIT 3", (cutoff_iso,))
         winners = [dict(r) for r in cursor.fetchall()]
-        
+
         cursor.execute("SELECT symbol, pnl FROM trades WHERE timestamp > ? AND action = 'CLOSE' ORDER BY pnl ASC LIMIT 3", (cutoff_iso,))
         losers = [dict(r) for r in cursor.fetchall()]
-        
+
         cursor.execute("SELECT reason, count(*) as c FROM trades WHERE timestamp > ? AND action = 'CLOSE' GROUP BY reason", (cutoff_iso,))
         reasons = {r['reason']: r['c'] for r in cursor.fetchall()}
-        
+
         return {"stats": stats, "winners": winners, "losers": losers, "reasons": reasons}
     except Exception as e:
         return {"error": str(e)}
@@ -64,7 +64,7 @@ def get_open_positions(live_conn, candles_conn):
         """
         cursor.execute(query)
         positions = [dict(r) for r in cursor.fetchall()]
-        
+
         enriched_positions = []
         if candles_conn:
             c_cursor = candles_conn.cursor()
@@ -75,14 +75,14 @@ def get_open_positions(live_conn, candles_conn):
                     current_price = candle['c']
                     entry_price = p['entry_price']
                     size = p['size']
-                    
+
                     pnl = 0
                     direction = str(p['type']).upper()
                     if 'LONG' in direction or 'BUY' in direction:
                         pnl = (current_price - entry_price) * size
                     elif 'SHORT' in direction or 'SELL' in direction:
                         pnl = (entry_price - current_price) * size
-                        
+
                     p['current_price'] = current_price
                     p['unrealized_pnl'] = pnl
                     p['pnl_pct'] = (pnl / p['margin_used'] * 100) if p['margin_used'] else 0
@@ -90,7 +90,7 @@ def get_open_positions(live_conn, candles_conn):
                 enriched_positions.append(p)
         else:
             enriched_positions = positions
-            
+
         return enriched_positions
     except Exception as e:
         return {"error": str(e)}
@@ -100,27 +100,27 @@ def get_oms_health(conn, minutes=60):
     try:
         cutoff_ms = (time.time() - minutes * 60) * 1000
         cursor = conn.cursor()
-        
+
         # Intents status counts
         # oms_intents uses created_ts_ms (INTEGER)
         cursor.execute("SELECT status, count(*) as c FROM oms_intents WHERE created_ts_ms > ? GROUP BY status", (cutoff_ms,))
         intents_status = {r['status']: r['c'] for r in cursor.fetchall()}
-        
+
         # Unmatched fills
         # oms_fills uses ts_ms (INTEGER)
         cursor.execute("SELECT count(*) as c FROM oms_fills WHERE ts_ms > ? AND intent_id IS NULL", (cutoff_ms,))
         unmatched_fills = cursor.fetchone()['c']
-        
+
         # Open orders
         # oms_open_orders doesn't track history well, just current snapshot
         cursor.execute("SELECT count(*) as c FROM oms_open_orders")
         open_orders = cursor.fetchone()['c']
-        
+
         # Cancels/Reconciles
         # oms_reconcile_events uses ts_ms (INTEGER) and kind (TEXT)
         cursor.execute("SELECT count(*) as c FROM oms_reconcile_events WHERE ts_ms > ? AND kind LIKE '%CANCEL%'", (cutoff_ms,))
         cancels = cursor.fetchone()['c']
-        
+
         return {
             "intents_status": intents_status,
             "unmatched_fills": unmatched_fills,

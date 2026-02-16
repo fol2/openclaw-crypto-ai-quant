@@ -10,8 +10,9 @@
 //! - Layer 1: Fixed VRAM budget from total_vram (not fluctuating free_vram) + arena buffers
 //! - Layer 2: Indicator config dedup (many TPE trials share identical rounded int params)
 //! - Layer 3: TPE observation pruning (caps ask/tell complexity at O(4000))
+//! - Layer 4: Double-buffer pipeline — TPE ask() overlaps with GPU evaluation
 
-use std::collections::HashMap;
+use std::collections::{BinaryHeap, HashMap};
 use std::time::Instant;
 
 use bt_core::candle::{CandleData, FundingRateData};
@@ -28,7 +29,7 @@ use bytemuck::Zeroable;
 use crate::axis_split::INDICATOR_PATHS;
 use crate::buffers;
 use crate::gpu_host;
-use crate::layout::GpuSweepResult;
+use crate::layout::{GpuSweepResult, MinPnlHeapEntry};
 use crate::raw_candles;
 use crate::BAR_CHUNK_SIZE;
 
@@ -59,6 +60,31 @@ impl Default for TpeConfig {
     }
 }
 
+// =============================================================================
+// Double-buffer pipeline messages
+// =============================================================================
+
+/// TPE thread → GPU thread: sampled params for one batch.
+struct TpeBatchRequest {
+    batch_idx: usize,
+    batch_n: usize,
+    trial_overrides: Vec<Vec<(String, f64)>>,
+    trial_raw_values: Vec<Vec<f64>>,
+}
+
+/// GPU thread → TPE thread: evaluation results for one batch.
+struct GpuBatchResult {
+    #[allow(dead_code)]
+    batch_idx: usize,
+    results: Vec<buffers::GpuResult>,
+    trial_overrides: Vec<Vec<(String, f64)>>,
+    trial_raw_values: Vec<Vec<f64>>,
+}
+
+// =============================================================================
+// Per-axis optimizer state
+// =============================================================================
+
 /// Per-axis optimizer state.
 struct AxisOptimizer {
     path: String,
@@ -69,11 +95,315 @@ struct AxisOptimizer {
     is_integer: bool,
 }
 
-/// Run a TPE-guided GPU sweep.
+// =============================================================================
+// TPE worker (runs on dedicated thread)
+// =============================================================================
+
+/// TPE worker: runs on a dedicated thread. Owns all TpeOptimizer state.
 ///
-/// Instead of exhaustive grid search, uses Bayesian optimization (TPE) to
-/// intelligently sample the parameter space. Each batch of N trials is
-/// evaluated on GPU in parallel, then results are fed back to TPE.
+/// **Pre-fetch pipeline** — always stays one batch ahead of GPU:
+///   1. Sample batch 0 (priming) → send to GPU
+///   2. Immediately sample batch 1 (speculative, pre-fetch) → send to GPU
+///   3. Wait for GPU results of batch 0
+///   4. tell() batch 0 results
+///   5. Sample batch 2 (now informed by batch 0) → send to GPU
+///   6. Wait for GPU results of batch 1 → tell() → sample batch 3 → send ...
+///   7. Repeat until all trials exhausted
+///
+/// GPU never starves because there's always a pre-fetched batch in the channel.
+/// Quality loss: batch 1 is sampled before batch 0 results (same as random for
+/// the first batch; subsequent pre-fetches lag by one tell cycle, not two).
+fn tpe_worker(
+    mut axis_opts: Vec<AxisOptimizer>,
+    mut rng: StdRng,
+    tpe_cfg_trials: usize,
+    tpe_cfg_batch_size: usize,
+    result_rx: crossbeam_channel::Receiver<GpuBatchResult>,
+    request_tx: crossbeam_channel::Sender<Option<TpeBatchRequest>>,
+) {
+    let mut observation_cache: Vec<(Vec<f64>, f64)> = Vec::new();
+    let mut obs_count: usize = 0;
+    let mut trials_sampled: usize = 0;
+    let mut batch_idx: usize = 0;
+    let mut pending_results: usize = 0;
+
+    // --- Helper: sample and send one batch if trials remain ---
+    let send_batch =
+        |axis_opts: &mut Vec<AxisOptimizer>,
+         rng: &mut StdRng,
+         trials_sampled: &mut usize,
+         batch_idx: &mut usize,
+         pending: &mut usize,
+         tx: &crossbeam_channel::Sender<Option<TpeBatchRequest>>|
+         -> bool {
+            if *trials_sampled >= tpe_cfg_trials {
+                return false;
+            }
+            let batch_n = tpe_cfg_batch_size.min(tpe_cfg_trials - *trials_sampled);
+            let (overrides, raw_values) = sample_batch(axis_opts, rng, batch_n);
+            *trials_sampled += batch_n;
+
+            let ok = tx
+                .send(Some(TpeBatchRequest {
+                    batch_idx: *batch_idx,
+                    batch_n,
+                    trial_overrides: overrides,
+                    trial_raw_values: raw_values,
+                }))
+                .is_ok();
+            if ok {
+                *batch_idx += 1;
+                *pending += 1;
+            }
+            ok
+        };
+
+    // --- Priming: send batch 0 ---
+    send_batch(
+        &mut axis_opts,
+        &mut rng,
+        &mut trials_sampled,
+        &mut batch_idx,
+        &mut pending_results,
+        &request_tx,
+    );
+
+    // --- Pre-fetch: send batch 1 immediately (speculative, before any results) ---
+    send_batch(
+        &mut axis_opts,
+        &mut rng,
+        &mut trials_sampled,
+        &mut batch_idx,
+        &mut pending_results,
+        &request_tx,
+    );
+
+    // --- Main loop: receive results, tell, pre-fetch next ---
+    while pending_results > 0 {
+        let gpu_result = match result_rx.recv() {
+            Ok(r) => r,
+            Err(_) => break,
+        };
+        pending_results -= 1;
+
+        // tell() the results from the completed batch
+        tell_results(
+            &mut axis_opts,
+            &gpu_result,
+            &mut observation_cache,
+            &mut obs_count,
+        );
+
+        // Pre-fetch: sample and send next batch (overlaps with GPU processing
+        // the batch that's already in the channel)
+        if trials_sampled < tpe_cfg_trials {
+            send_batch(
+                &mut axis_opts,
+                &mut rng,
+                &mut trials_sampled,
+                &mut batch_idx,
+                &mut pending_results,
+                &request_tx,
+            );
+        }
+    }
+
+    // Signal GPU thread: no more batches
+    let _ = request_tx.send(None);
+}
+
+/// Sample one batch of trial parameters from TPE.
+fn sample_batch(
+    axis_opts: &mut [AxisOptimizer],
+    rng: &mut StdRng,
+    batch_n: usize,
+) -> (Vec<Vec<(String, f64)>>, Vec<Vec<f64>>) {
+    // Generate deterministic per-axis RNG seeds from main rng
+    let axis_seeds: Vec<u64> = (0..axis_opts.len()).map(|_| rng.gen()).collect();
+
+    // Parallel ask: each axis generates all batch_n samples independently
+    let axis_samples: Vec<Vec<f64>> = axis_opts
+        .par_iter_mut()
+        .zip(axis_seeds.par_iter())
+        .map(|(axis, &seed)| {
+            let mut local_rng = StdRng::seed_from_u64(seed);
+            (0..batch_n)
+                .map(|_| {
+                    if (axis.max_val - axis.min_val).abs() < 1e-12 {
+                        axis.min_val
+                    } else {
+                        axis.optimizer.ask(&mut local_rng).unwrap()
+                    }
+                })
+                .collect()
+        })
+        .collect();
+
+    // Transpose [axis][trial] → [trial][axis] and apply clamp/round
+    let mut trial_overrides: Vec<Vec<(String, f64)>> = Vec::with_capacity(batch_n);
+    let mut trial_raw_values: Vec<Vec<f64>> = Vec::with_capacity(batch_n);
+
+    for t in 0..batch_n {
+        let mut overrides = Vec::with_capacity(axis_opts.len());
+        let mut raw_vals = Vec::with_capacity(axis_opts.len());
+
+        for (a, axis) in axis_opts.iter().enumerate() {
+            let raw_val = axis_samples[a][t];
+            raw_vals.push(raw_val);
+
+            let val = if axis.is_integer {
+                raw_val.round().clamp(axis.min_val, axis.max_val)
+            } else {
+                raw_val.clamp(axis.min_val, axis.max_val)
+            };
+            overrides.push((axis.path.clone(), val));
+        }
+
+        trial_overrides.push(overrides);
+        trial_raw_values.push(raw_vals);
+    }
+
+    (trial_overrides, trial_raw_values)
+}
+
+/// Process GPU results: tell TPE + prune observations.
+fn tell_results(
+    axis_opts: &mut [AxisOptimizer],
+    gpu_result: &GpuBatchResult,
+    observation_cache: &mut Vec<(Vec<f64>, f64)>,
+    obs_count: &mut usize,
+) {
+    for (i, result) in gpu_result.results.iter().enumerate() {
+        let pnl = result.total_pnl as f64;
+        let objective = if crate::is_degenerate_overrides(&gpu_result.trial_overrides[i]) {
+            1e18
+        } else {
+            let trade_penalty = if result.total_trades < 20 { 0.5 } else { 1.0 };
+            -(pnl * trade_penalty)
+        };
+
+        for (j, axis) in axis_opts.iter_mut().enumerate() {
+            if (axis.max_val - axis.min_val).abs() < 1e-12 {
+                continue;
+            }
+            let _ = axis
+                .optimizer
+                .tell(gpu_result.trial_raw_values[i][j], objective);
+        }
+
+        observation_cache.push((gpu_result.trial_raw_values[i].clone(), objective));
+        *obs_count += 1;
+    }
+
+    // Layer 3: TPE observation pruning
+    if *obs_count > MAX_TPE_OBSERVATIONS {
+        let t_prune = Instant::now();
+
+        observation_cache
+            .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        observation_cache.truncate(PRUNED_OBSERVATIONS);
+        *obs_count = observation_cache.len();
+
+        for axis in axis_opts.iter_mut() {
+            if (axis.max_val - axis.min_val).abs() < 1e-12 {
+                continue;
+            }
+            axis.optimizer = tpe::TpeOptimizer::new(
+                tpe::parzen_estimator(),
+                tpe::range(axis.min_val, axis.max_val).unwrap(),
+            );
+        }
+
+        for (raw_vals, objective) in observation_cache.iter() {
+            for (j, axis) in axis_opts.iter_mut().enumerate() {
+                if (axis.max_val - axis.min_val).abs() < 1e-12 {
+                    continue;
+                }
+                let _ = axis.optimizer.tell(raw_vals[j], *objective);
+            }
+        }
+
+        let prune_ms = t_prune.elapsed().as_millis();
+        eprintln!(
+            "[TPE] Pruned observations: {} -> {} ({}ms)",
+            MAX_TPE_OBSERVATIONS, PRUNED_OBSERVATIONS, prune_ms,
+        );
+    }
+}
+
+// =============================================================================
+// GPU-side result builder
+// =============================================================================
+
+/// Build GpuSweepResult entries from raw GPU results + trial overrides.
+fn build_sweep_results(
+    gpu_results: &[buffers::GpuResult],
+    trial_overrides: &[Vec<(String, f64)>],
+    best_pnl: &mut f64,
+    best_trial: &mut usize,
+    trials_done: usize,
+) -> Vec<GpuSweepResult> {
+    let mut out = Vec::with_capacity(gpu_results.len());
+
+    for (i, result) in gpu_results.iter().enumerate() {
+        let pnl = result.total_pnl as f64;
+        let overrides = &trial_overrides[i];
+
+        let config_id = overrides
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let pf = if result.gross_loss.abs() > 0.001 {
+            result.gross_profit as f64 / result.gross_loss.abs() as f64
+        } else if result.gross_profit > 0.0 {
+            999.0
+        } else {
+            0.0
+        };
+
+        let wr = if result.total_trades > 0 {
+            result.total_wins as f64 / result.total_trades as f64
+        } else {
+            0.0
+        };
+
+        if pnl > *best_pnl {
+            *best_pnl = pnl;
+            *best_trial = trials_done + i;
+        }
+
+        out.push(GpuSweepResult {
+            config_id,
+            output_mode: "gpu_tpe".to_string(),
+            total_pnl: pnl,
+            final_balance: result.final_balance as f64,
+            total_trades: result.total_trades,
+            total_wins: result.total_wins,
+            win_rate: wr,
+            profit_factor: pf,
+            max_drawdown_pct: result.max_drawdown_pct as f64,
+            overrides: overrides.clone(),
+        });
+    }
+
+    out
+}
+
+// =============================================================================
+// Main entry point
+// =============================================================================
+
+/// Run a TPE-guided GPU sweep with double-buffer pipeline.
+///
+/// TPE sampling (CPU) overlaps with GPU evaluation using a dedicated TPE thread
+/// and crossbeam channels. Protocol:
+///   1. TPE thread samples batch 0 (priming)
+///   2. GPU evaluates batch 0 while TPE thread idles
+///   3. GPU sends results → TPE thread tells batch 0, samples batch 1
+///   4. GPU evaluates batch 1 while TPE samples batch 2 (full overlap)
+///   5. Repeat until all trials done
 pub fn run_tpe_sweep(
     candles: &CandleData,
     base_cfg: &StrategyConfig,
@@ -83,17 +413,21 @@ pub fn run_tpe_sweep(
     sub_candles: Option<&CandleData>,
     from_ts: Option<i64>,
     to_ts: Option<i64>,
+    top_k: usize,
 ) -> Vec<GpuSweepResult> {
-    let mut rng = StdRng::seed_from_u64(tpe_cfg.seed);
+    let rng = StdRng::seed_from_u64(tpe_cfg.seed);
 
     // -- 1. Create per-axis TPE optimizers ----------------------------------------
     let mut axis_opts: Vec<AxisOptimizer> = Vec::new();
     for axis in &spec.axes {
         let min_val = axis.values.iter().cloned().fold(f64::INFINITY, f64::min);
-        let max_val = axis.values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let max_val = axis
+            .values
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
 
         if (max_val - min_val).abs() < 1e-12 {
-            // Single-value axis: skip TPE, always use this value
             axis_opts.push(AxisOptimizer {
                 path: axis.path.clone(),
                 min_val,
@@ -145,35 +479,33 @@ pub fn run_tpe_sweep(
     }
 
     // -- 2. Init GPU, upload raw candles ------------------------------------------
-    let symbols: Vec<String> = {
-        let mut s: Vec<String> = candles.keys().cloned().collect();
-        s.sort();
-        s
-    };
+    let symbols = crate::sorted_symbols_with_kernel_cap(candles, "[TPE]");
     let num_symbols = symbols.len();
     let btc_sym_idx = symbols
         .iter()
         .position(|s| s == "BTC")
         .or_else(|| symbols.iter().position(|s| s == "BTCUSDT"))
-        .unwrap_or(0) as u32;
+        .map(|idx| idx as u32)
+        .unwrap_or(u32::MAX);
 
     let raw = raw_candles::prepare_raw_candles(candles, &symbols);
     let num_bars = raw.num_bars as u32;
 
-    // Compute trade bar range from time scope
-    let (trade_start, trade_end) = raw_candles::find_trade_bar_range(&raw.timestamps, from_ts, to_ts);
+    let (trade_start, trade_end) =
+        raw_candles::find_trade_bar_range(&raw.timestamps, from_ts, to_ts);
     eprintln!(
         "[TPE] Trade bar range: {}..{} ({} of {} bars)",
-        trade_start, trade_end, trade_end - trade_start, num_bars,
+        trade_start,
+        trade_end,
+        trade_end - trade_start,
+        num_bars,
     );
 
     let device_state = gpu_host::GpuDeviceState::new();
     let candles_gpu = device_state.dev.htod_sync_copy(&raw.candles).unwrap();
 
-    // Prepare sub-bar candles for GPU (if provided)
-    let sub_bar_result = sub_candles.map(|sc| {
-        raw_candles::prepare_sub_bar_candles(&raw.timestamps, sc, &symbols)
-    });
+    let sub_bar_result =
+        sub_candles.map(|sc| raw_candles::prepare_sub_bar_candles(&raw.timestamps, sc, &symbols));
     let sub_candles_gpu: Option<cudarc::driver::CudaSlice<buffers::GpuRawCandle>> =
         sub_bar_result.as_ref().and_then(|sbr| {
             if sbr.max_sub_per_bar == 0 || sbr.candles.is_empty() {
@@ -217,14 +549,13 @@ pub fn run_tpe_sweep(
     let btc_bytes_per_ind = breadth_stride * std::mem::size_of::<u32>();
     let ind_bytes_per_slot = snap_bytes_per_ind + breadth_bytes_per_ind + btc_bytes_per_ind;
 
-    let vram_budget = 22usize * 1024 * 1024 * 1024; // 22 GB fixed
+    let vram_budget = 22usize * 1024 * 1024 * 1024;
     let arena_cap = if ind_bytes_per_slot > 0 {
         (vram_budget / ind_bytes_per_slot).max(1)
     } else {
         tpe_cfg.batch_size
     };
 
-    // Cap per single contiguous alloc (20 GB — arena is alloc-once, no fragmentation risk)
     let arena_cap = if snap_bytes_per_ind > 0 {
         let max_by_alloc = (20usize * 1024 * 1024 * 1024) / snap_bytes_per_ind;
         arena_cap.min(max_by_alloc).max(1)
@@ -240,7 +571,7 @@ pub fn run_tpe_sweep(
         ind_bytes_per_slot as f64 / 1e6,
     );
 
-    // Pre-allocate arena buffers (Layer 1): alloc once, reuse every round
+    // Pre-allocate arena buffers
     let mut snap_arena: CudaSlice<buffers::GpuSnapshot> = device_state
         .dev
         .alloc_zeros::<buffers::GpuSnapshot>(arena_cap * snapshot_stride)
@@ -254,79 +585,53 @@ pub fn run_tpe_sweep(
         .alloc_zeros::<u32>(arena_cap * breadth_stride)
         .unwrap();
 
-    // -- Layer 3: Observation cache for TPE pruning -------------------------------
-    let mut observation_cache: Vec<(Vec<f64>, f64)> = Vec::new();
-    let mut obs_count: usize = 0;
+    // -- 3. Double-buffer pipeline ------------------------------------------------
+    // Request channel: bounded(2) so TPE can always have one pre-fetched batch
+    // queued while GPU processes the current one. This is the core of the
+    // double-buffer: GPU finishes → immediately grabs pre-fetched batch → zero stall.
+    let (request_tx, request_rx) = crossbeam_channel::bounded::<Option<TpeBatchRequest>>(2);
+    let (result_tx, result_rx) = crossbeam_channel::bounded::<GpuBatchResult>(1);
 
-    // -- 3. Main TPE loop ---------------------------------------------------------
-    let mut all_results: Vec<GpuSweepResult> = Vec::new();
+    let tpe_trials = tpe_cfg.trials;
+    let tpe_batch_size = tpe_cfg.batch_size;
+
+    // Spawn TPE thread — takes ownership of axis_opts + rng
+    let tpe_handle = std::thread::Builder::new()
+        .name("tpe-sampler".into())
+        .spawn(move || {
+            tpe_worker(
+                axis_opts,
+                rng,
+                tpe_trials,
+                tpe_batch_size,
+                result_rx,
+                request_tx,
+            );
+        })
+        .expect("Failed to spawn TPE thread");
+
+    // GPU thread: receive batches, evaluate, send results
+    // Bounded top-K heap: keeps only the best results by PnL to prevent OOM
+    let effective_top_k = if top_k == 0 { usize::MAX } else { top_k };
+    let mut top_heap: BinaryHeap<MinPnlHeapEntry> = BinaryHeap::with_capacity(
+        effective_top_k.min(tpe_cfg.trials).min(100_000) + 1,
+    );
     let mut best_pnl = f64::NEG_INFINITY;
     let mut best_trial = 0usize;
     let mut trials_done = 0usize;
 
-    while trials_done < tpe_cfg.trials {
-        let batch_n = tpe_cfg.batch_size.min(tpe_cfg.trials - trials_done);
+    eprintln!("[TPE] Pipeline mode: double-buffer (TPE thread + GPU thread)");
 
-        // a. Ask TPE for batch_n parameter sets (Rayon parallel across axes)
-        let t_ask = Instant::now();
-
-        // Generate deterministic per-axis RNG seeds from main rng
-        let axis_seeds: Vec<u64> = (0..axis_opts.len()).map(|_| rng.gen()).collect();
-
-        // Parallel ask: each axis generates all batch_n samples independently
-        // axis_samples[axis_idx] = Vec<f64> of length batch_n (raw TPE values)
-        let axis_samples: Vec<Vec<f64>> = axis_opts
-            .par_iter_mut()
-            .zip(axis_seeds.par_iter())
-            .map(|(axis, &seed)| {
-                let mut local_rng = StdRng::seed_from_u64(seed);
-                (0..batch_n)
-                    .map(|_| {
-                        if (axis.max_val - axis.min_val).abs() < 1e-12 {
-                            axis.min_val
-                        } else {
-                            axis.optimizer.ask(&mut local_rng).unwrap()
-                        }
-                    })
-                    .collect()
-            })
-            .collect();
-
-        // Transpose [axis][trial] → [trial][axis] and apply clamp/round
-        let mut trial_overrides: Vec<Vec<(String, f64)>> = Vec::with_capacity(batch_n);
-        let mut trial_raw_values: Vec<Vec<f64>> = Vec::with_capacity(batch_n);
-
-        for t in 0..batch_n {
-            let mut overrides = Vec::with_capacity(axis_opts.len());
-            let mut raw_vals = Vec::with_capacity(axis_opts.len());
-
-            for (a, axis) in axis_opts.iter().enumerate() {
-                let raw_val = axis_samples[a][t];
-                raw_vals.push(raw_val);
-
-                let val = if axis.is_integer {
-                    raw_val.round().clamp(axis.min_val, axis.max_val)
-                } else {
-                    raw_val.clamp(axis.min_val, axis.max_val)
-                };
-                overrides.push((axis.path.clone(), val));
-            }
-
-            trial_overrides.push(overrides);
-            trial_raw_values.push(raw_vals);
-        }
-
-        let ask_ms = t_ask.elapsed().as_millis();
-
-        // b. GPU evaluate all trials
+    while let Ok(Some(request)) = request_rx.recv() {
         let t_gpu = Instant::now();
 
+        // Evaluate batch on GPU
         let gpu_results = if has_indicator_axes {
             evaluate_mixed_batch_arena(
                 &device_state,
                 &candles_gpu,
                 base_cfg,
-                &trial_overrides,
+                &request.trial_overrides,
                 num_bars,
                 num_symbols as u32,
                 btc_sym_idx,
@@ -349,7 +654,7 @@ pub fn run_tpe_sweep(
                 &device_state,
                 &candles_gpu,
                 base_cfg,
-                &trial_overrides,
+                &request.trial_overrides,
                 num_bars,
                 num_symbols as u32,
                 btc_sym_idx,
@@ -365,134 +670,60 @@ pub fn run_tpe_sweep(
 
         let gpu_ms = t_gpu.elapsed().as_millis();
 
-        // c. Tell TPE the results + collect
-        let t_tell = Instant::now();
-
-        for (i, result) in gpu_results.iter().enumerate() {
-            let pnl = result.total_pnl as f64;
-            // Degenerate config guard: ema_fast >= ema_slow produces phantom
-            // f32 signals that don't reproduce in f64. Assign worst objective.
-            let objective = if crate::is_degenerate_overrides(&trial_overrides[i]) {
-                1e18 // very bad → TPE steers away
-            } else {
-                // TPE minimizes, so negate PnL. Also penalize if <20 trades (overfit).
-                let trade_penalty = if result.total_trades < 20 {
-                    0.5
-                } else {
-                    1.0
-                };
-                -(pnl * trade_penalty)
-            };
-
-            // Tell each axis optimizer
-            for (j, axis) in axis_opts.iter_mut().enumerate() {
-                if (axis.max_val - axis.min_val).abs() < 1e-12 {
-                    continue; // skip fixed axes
-                }
-                let _ = axis.optimizer.tell(trial_raw_values[i][j], objective);
-            }
-
-            // Layer 3: cache observation for pruning
-            observation_cache.push((trial_raw_values[i].clone(), objective));
-            obs_count += 1;
-
-            let overrides = &trial_overrides[i];
-            let config_id = overrides
-                .iter()
-                .map(|(k, v)| format!("{}={}", k, v))
-                .collect::<Vec<_>>()
-                .join(",");
-
-            let pf = if result.gross_loss.abs() > 0.001 {
-                result.gross_profit as f64 / result.gross_loss.abs() as f64
-            } else if result.gross_profit > 0.0 {
-                999.0
-            } else {
-                0.0
-            };
-
-            let wr = if result.total_trades > 0 {
-                result.total_wins as f64 / result.total_trades as f64
-            } else {
-                0.0
-            };
-
-            let gpu_sweep_result = GpuSweepResult {
-                config_id,
-                total_pnl: pnl,
-                final_balance: result.final_balance as f64,
-                total_trades: result.total_trades,
-                total_wins: result.total_wins,
-                win_rate: wr,
-                profit_factor: pf,
-                max_drawdown_pct: result.max_drawdown_pct as f64,
-                overrides: overrides.clone(),
-            };
-
-            if pnl > best_pnl {
-                best_pnl = pnl;
-                best_trial = trials_done + i;
-            }
-
-            all_results.push(gpu_sweep_result);
-        }
-
-        let tell_ms = t_tell.elapsed().as_millis();
-
-        trials_done += batch_n;
-        eprintln!(
-            "[TPE] {}/{} trials done, best PnL: ${:.2} (trial #{}) | ask={}ms gpu={}ms tell={}ms",
-            trials_done, tpe_cfg.trials, best_pnl, best_trial, ask_ms, gpu_ms, tell_ms,
+        // Build GpuSweepResult on GPU thread (no need to send back through channel)
+        let batch_results = build_sweep_results(
+            &gpu_results,
+            &request.trial_overrides,
+            &mut best_pnl,
+            &mut best_trial,
+            trials_done,
         );
 
-        // -- Layer 3: TPE observation pruning ------------------------------------
-        if obs_count > MAX_TPE_OBSERVATIONS {
-            let t_prune = Instant::now();
+        trials_done += request.batch_n;
 
-            // Sort by objective ascending (best = most negative = highest PnL first)
-            observation_cache.sort_by(|a, b| {
-                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
-            });
-            observation_cache.truncate(PRUNED_OBSERVATIONS);
-            obs_count = observation_cache.len();
+        eprintln!(
+            "[TPE] {}/{} trials done, best PnL: ${:.2} (trial #{}) | gpu={}ms batch={}",
+            trials_done, tpe_trials, best_pnl, best_trial, gpu_ms, request.batch_idx,
+        );
 
-            // Rebuild ALL TpeOptimizer instances from scratch
-            for axis in axis_opts.iter_mut() {
-                if (axis.max_val - axis.min_val).abs() < 1e-12 {
-                    continue;
-                }
-                axis.optimizer = tpe::TpeOptimizer::new(
-                    tpe::parzen_estimator(),
-                    tpe::range(axis.min_val, axis.max_val).unwrap(),
-                );
-            }
-
-            // Re-tell the pruned observations
-            for (raw_vals, objective) in &observation_cache {
-                for (j, axis) in axis_opts.iter_mut().enumerate() {
-                    if (axis.max_val - axis.min_val).abs() < 1e-12 {
-                        continue;
-                    }
-                    let _ = axis.optimizer.tell(raw_vals[j], *objective);
+        for r in batch_results {
+            if top_heap.len() < effective_top_k {
+                top_heap.push(MinPnlHeapEntry(r));
+            } else if let Some(worst) = top_heap.peek() {
+                if r.total_pnl > worst.0.total_pnl || worst.0.total_pnl.is_nan() {
+                    top_heap.pop();
+                    top_heap.push(MinPnlHeapEntry(r));
                 }
             }
+        }
 
-            let prune_ms = t_prune.elapsed().as_millis();
-            eprintln!(
-                "[TPE] Pruned observations: {} -> {} ({}ms)",
-                MAX_TPE_OBSERVATIONS, PRUNED_OBSERVATIONS, prune_ms,
-            );
+        // Send results to TPE thread (tell + ask next batch)
+        // This returns immediately — TPE thread will process while we wait for next request
+        if result_tx
+            .send(GpuBatchResult {
+                batch_idx: request.batch_idx,
+                results: gpu_results,
+                trial_overrides: request.trial_overrides,
+                trial_raw_values: request.trial_raw_values,
+            })
+            .is_err()
+        {
+            break; // TPE thread exited
         }
     }
 
-    // Sort by PnL descending
-    all_results.sort_by(|a, b| {
+    // Wait for TPE thread to finish
+    tpe_handle.join().expect("TPE thread panicked");
+
+    // Drain heap and sort by PnL descending
+    let mut results: Vec<GpuSweepResult> = top_heap.into_iter().map(|e| e.0).collect();
+    results.sort_by(|a, b| {
         b.total_pnl
             .partial_cmp(&a.total_pnl)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    all_results
+    results
 }
 
 // =============================================================================
@@ -517,10 +748,8 @@ fn evaluate_trade_only_batch(
     trade_start: u32,
     trade_end: u32,
 ) -> Vec<buffers::GpuResult> {
-    // Single indicator config from base
     let ind_config = buffers::GpuIndicatorConfig::from_strategy_config(base_cfg, lookback);
 
-    // Dispatch indicator kernel once (K=1)
     let mut ind_bufs = gpu_host::IndicatorBuffers::new(
         ds,
         candles_gpu,
@@ -531,7 +760,6 @@ fn evaluate_trade_only_batch(
     );
     gpu_host::dispatch_indicator_kernels(ds, &mut ind_bufs);
 
-    // Build trade configs for all trials (snapshot_offset=0, breadth_offset=0)
     let gpu_configs: Vec<buffers::GpuComboConfig> = trial_overrides
         .iter()
         .map(|overrides| {
@@ -556,18 +784,18 @@ fn evaluate_trade_only_batch(
     trade_bufs.sub_candles = sub_candles_gpu.cloned();
     trade_bufs.sub_counts = sub_counts_gpu.cloned();
 
-    gpu_host::dispatch_and_readback(ds, &mut trade_bufs, num_bars, BAR_CHUNK_SIZE, trade_start, trade_end)
+    gpu_host::dispatch_and_readback(
+        ds,
+        &mut trade_bufs,
+        num_bars,
+        BAR_CHUNK_SIZE,
+        trade_start,
+        trade_end,
+    )
 }
 
 /// Evaluate a batch of trials where indicator params may vary per trial.
 /// Uses Layer 1 (arena buffers) + Layer 2 (indicator config dedup).
-///
-/// Arena buffers are pre-allocated once and reused across rounds to avoid
-/// VRAM budget instability from fluctuating `free_vram_bytes()`.
-///
-/// Indicator configs are deduped: many TPE trials share identical indicator
-/// params after integer rounding, so we compute indicators only for unique
-/// configs and map trial trade configs to the correct unique slot.
 fn evaluate_mixed_batch_arena(
     ds: &gpu_host::GpuDeviceState,
     candles_gpu: &CudaSlice<buffers::GpuRawCandle>,
@@ -592,7 +820,6 @@ fn evaluate_mixed_batch_arena(
 ) -> Vec<buffers::GpuResult> {
     let n = trial_overrides.len();
 
-    // Build per-trial StrategyConfig + GpuIndicatorConfig
     let trial_cfgs: Vec<StrategyConfig> = trial_overrides
         .iter()
         .map(|overrides| {
@@ -609,11 +836,9 @@ fn evaluate_mixed_batch_arena(
         .map(|cfg| buffers::GpuIndicatorConfig::from_strategy_config(cfg, lookback))
         .collect();
 
-    // -- Layer 2: Indicator config dedup ------------------------------------------
-    // GpuIndicatorConfig is 80 bytes, all u32 fields, _pad zeroed -> safe byte compare
+    // Layer 2: Indicator config dedup
     let mut dedup_map: HashMap<[u8; 80], usize> = HashMap::new();
     let mut unique_ind_cfgs: Vec<buffers::GpuIndicatorConfig> = Vec::new();
-    // For each trial, which unique indicator slot it maps to
     let mut trial_to_unique: Vec<usize> = Vec::with_capacity(n);
 
     for ind_cfg in &trial_ind_cfgs {
@@ -642,7 +867,6 @@ fn evaluate_mixed_batch_arena(
         );
     }
 
-    // Process unique indicator configs in groups of arena_cap
     let mut all_results: Vec<buffers::GpuResult> = vec![buffers::GpuResult::zeroed(); n];
 
     let num_groups = (num_unique + arena_cap - 1) / arena_cap;
@@ -651,7 +875,6 @@ fn evaluate_mixed_batch_arena(
         let group_end = (group_start + arena_cap).min(num_unique);
         let group_ind_cfgs = &unique_ind_cfgs[group_start..group_end];
 
-        // --- Dispatch indicator kernel for K unique configs using arena buffers ---
         dispatch_indicator_arena(
             ds,
             candles_gpu,
@@ -664,14 +887,14 @@ fn evaluate_mixed_batch_arena(
             btc_arena,
         );
 
-        // --- Collect trials that map to this group's unique slots ---
         let mut group_trial_indices: Vec<usize> = Vec::new();
         let mut gpu_configs: Vec<buffers::GpuComboConfig> = Vec::new();
 
         for (trial_idx, &unique_slot) in trial_to_unique.iter().enumerate() {
             if unique_slot >= group_start && unique_slot < group_end {
                 let local_slot = unique_slot - group_start;
-                let mut gpu_cfg = buffers::GpuComboConfig::from_strategy_config(&trial_cfgs[trial_idx]);
+                let mut gpu_cfg =
+                    buffers::GpuComboConfig::from_strategy_config(&trial_cfgs[trial_idx]);
                 gpu_cfg.snapshot_offset = (local_slot * snapshot_stride) as u32;
                 gpu_cfg.breadth_offset = (local_slot * breadth_stride) as u32;
                 gpu_configs.push(gpu_cfg);
@@ -683,7 +906,6 @@ fn evaluate_mixed_batch_arena(
             continue;
         }
 
-        // --- Dispatch trade kernel using arena buffers (no clone!) ---
         let trade_results = dispatch_trade_arena(
             ds,
             snap_arena,
@@ -692,6 +914,7 @@ fn evaluate_mixed_batch_arena(
             &gpu_configs,
             initial_balance,
             num_symbols,
+            btc_sym_idx,
             num_bars,
             max_sub_per_bar,
             sub_candles_gpu,
@@ -700,7 +923,6 @@ fn evaluate_mixed_batch_arena(
             trade_end,
         );
 
-        // --- Scatter results back to original trial order ---
         for (local_idx, &trial_idx) in group_trial_indices.iter().enumerate() {
             all_results[trial_idx] = trade_results[local_idx];
         }
@@ -710,7 +932,6 @@ fn evaluate_mixed_batch_arena(
 }
 
 /// Dispatch indicator_kernel + breadth_kernel into pre-allocated arena buffers.
-/// Does NOT allocate any new GPU memory -- writes directly into the arena slices.
 fn dispatch_indicator_arena(
     ds: &gpu_host::GpuDeviceState,
     candles_gpu: &CudaSlice<buffers::GpuRawCandle>,
@@ -725,7 +946,6 @@ fn dispatch_indicator_arena(
     let k = ind_configs.len() as u32;
     let block_size = 64u32;
 
-    // Upload indicator configs (small, ~80 bytes * K)
     let ind_configs_gpu = ds.dev.htod_sync_copy(ind_configs).unwrap();
 
     let params = buffers::IndicatorParams {
@@ -737,7 +957,6 @@ fn dispatch_indicator_arena(
     };
     let ind_params_gpu = ds.dev.htod_sync_copy(&[params]).unwrap();
 
-    // -- Indicator kernel: K x S threads --
     let ind_threads = k * num_symbols;
     let ind_grid = (ind_threads + block_size - 1) / block_size;
 
@@ -765,7 +984,6 @@ fn dispatch_indicator_arena(
     }
     .expect("indicator_kernel launch failed");
 
-    // -- Breadth kernel: K x B threads --
     let br_threads = k * num_bars;
     let br_grid = (br_threads + block_size - 1) / block_size;
 
@@ -792,13 +1010,9 @@ fn dispatch_indicator_arena(
         )
     }
     .expect("breadth_kernel launch failed");
-
-    // ind_configs_gpu and ind_params_gpu are dropped here (tiny, fine to free)
 }
 
 /// Dispatch trade sweep kernel using pre-allocated arena snapshot/breadth/btc buffers.
-/// Allocates only the small per-trial trade buffers (configs/states/results/params).
-/// Does NOT clone the arena CudaSlice references (avoids deep copy).
 fn dispatch_trade_arena(
     ds: &gpu_host::GpuDeviceState,
     snap_arena: &mut CudaSlice<buffers::GpuSnapshot>,
@@ -807,6 +1021,7 @@ fn dispatch_trade_arena(
     gpu_configs: &[buffers::GpuComboConfig],
     initial_balance: f32,
     num_symbols: u32,
+    btc_sym_idx: u32,
     num_bars: u32,
     max_sub_per_bar: u32,
     sub_candles_gpu: Option<&CudaSlice<buffers::GpuRawCandle>>,
@@ -818,13 +1033,12 @@ fn dispatch_trade_arena(
     let block_size = 64u32;
     let grid_size = (num_combos + block_size - 1) / block_size;
 
-    // Allocate small per-trial buffers (these are tiny: ~4KB per trial)
     let configs_gpu = ds.dev.htod_sync_copy(gpu_configs).unwrap();
 
     let mut states_host = vec![buffers::GpuComboState::zeroed(); gpu_configs.len()];
     for s in &mut states_host {
-        s.balance = initial_balance;
-        s.peak_equity = initial_balance;
+        s.balance = initial_balance as f64;
+        s.peak_equity = initial_balance as f64;
     }
     let mut states_gpu = ds.dev.htod_sync_copy(&states_host).unwrap();
     let mut results_gpu = ds
@@ -832,7 +1046,6 @@ fn dispatch_trade_arena(
         .alloc_zeros::<buffers::GpuResult>(gpu_configs.len())
         .unwrap();
 
-    // Create sentinel buffers if no sub-bar data (cudarc needs valid pointers)
     let sentinel_candle: CudaSlice<buffers::GpuRawCandle>;
     let sentinel_counts: CudaSlice<u32>;
     let (sc_ref, sn_ref) = match (sub_candles_gpu, sub_counts_gpu) {
@@ -844,8 +1057,11 @@ fn dispatch_trade_arena(
         }
     };
 
-    // Dynamic chunk size: smaller when sub-bars active (TDR mitigation)
-    let effective_chunk = if max_sub_per_bar > 0 { BAR_CHUNK_SIZE.min(50) } else { BAR_CHUNK_SIZE };
+    let effective_chunk = if max_sub_per_bar > 0 {
+        BAR_CHUNK_SIZE.min(50)
+    } else {
+        BAR_CHUNK_SIZE
+    };
     let trade_range = trade_end - trade_start;
     let num_chunks = (trade_range + effective_chunk - 1) / effective_chunk;
 
@@ -857,10 +1073,12 @@ fn dispatch_trade_arena(
             num_combos,
             num_symbols,
             num_bars,
+            btc_sym_idx,
             chunk_start,
             chunk_end,
             initial_balance_bits: initial_balance.to_bits(),
-            fee_rate_bits: 0.00035f32.to_bits(),
+            maker_fee_rate_bits: 0.00035f32.to_bits(),
+            taker_fee_rate_bits: 0.00035f32.to_bits(),
             max_sub_per_bar,
             trade_end_bar: trade_end,
         };
@@ -894,8 +1112,6 @@ fn dispatch_trade_arena(
             )
         }
         .expect("sweep_engine_kernel launch failed");
-
-        // params_gpu is dropped here, fine (32 bytes)
     }
 
     ds.dev.dtoh_sync_copy(&results_gpu).unwrap()

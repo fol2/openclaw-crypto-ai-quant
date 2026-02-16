@@ -5,6 +5,9 @@
 
 use bytemuck::{Pod, Zeroable};
 
+/// Hard symbol ceiling imposed by GPU kernel state layout.
+pub const GPU_MAX_SYMBOLS: usize = 52;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // GpuSnapshot — precomputed indicator values per (bar, symbol)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -138,7 +141,7 @@ pub struct GpuIndicatorConfig {
 const _: () = assert!(std::mem::size_of::<GpuIndicatorConfig>() == 80);
 
 impl GpuIndicatorConfig {
-    /// Build from a StrategyConfig's indicator section.
+    /// Build from StrategyConfig using canonical runtime indicator windows.
     pub fn from_strategy_config(cfg: &bt_core::config::StrategyConfig, lookback: usize) -> Self {
         let ic = &cfg.indicators;
         Self {
@@ -155,7 +158,7 @@ impl GpuIndicatorConfig {
             stoch_rsi_window: ic.stoch_rsi_window as u32,
             stoch_rsi_smooth1: ic.stoch_rsi_smooth1 as u32,
             stoch_rsi_smooth2: ic.stoch_rsi_smooth2 as u32,
-            avg_atr_window: ic.ave_avg_atr_window as u32,
+            avg_atr_window: cfg.effective_ave_avg_atr_window() as u32,
             slow_drift_slope_window: cfg.thresholds.entry.slow_drift_slope_window as u32,
             lookback: lookback as u32,
             use_stoch_rsi: cfg.filters.use_stoch_rsi_filter as u32,
@@ -208,21 +211,23 @@ pub struct GpuComboConfig {
     pub reef_long_rsi_extreme_gt: f32,
     pub reef_short_rsi_extreme_lt: f32,
 
-    // Dynamic leverage [10-15]
+    // Dynamic leverage [10-14]
     pub enable_dynamic_leverage: u32,
     pub leverage_low: f32,
     pub leverage_medium: f32,
     pub leverage_high: f32,
     pub leverage_max_cap: f32,
-    pub _pad0: u32,
+    // Trailing config (repurposed pad slots) [15]
+    pub trailing_rsi_floor_default: f32,
 
-    // Execution [16-21]
+    // Execution [16-19]
     pub slippage_bps: f32,
     pub min_notional_usd: f32,
     pub bump_to_min_notional: u32,
     pub max_total_margin_pct: f32,
-    pub _pad1: u32,
-    pub _pad2: u32,
+    // Trailing config (repurposed pad slots) [20-21]
+    pub trailing_rsi_floor_trending: f32,
+    pub trailing_vbts_bb_threshold: f32,
 
     // Dynamic sizing [22-29]
     pub enable_dynamic_sizing: u32,
@@ -234,11 +239,11 @@ pub struct GpuComboConfig {
     pub vol_baseline_pct: f32,
     pub vol_scalar_min: f32,
 
-    // [30-31]
+    // [30] + trailing config [31]
     pub vol_scalar_max: f32,
-    pub _pad3: u32,
+    pub trailing_vbts_mult: f32,
 
-    // Pyramiding [32-39]
+    // Pyramiding [32-38] + trailing config [39]
     pub enable_pyramiding: u32,
     pub max_adds_per_symbol: u32,
     pub add_fraction_of_base_margin: f32,
@@ -246,7 +251,7 @@ pub struct GpuComboConfig {
     pub add_min_profit_atr: f32,
     pub add_min_confidence: u32, // 0=Low, 1=Medium, 2=High
     pub entry_min_confidence: u32,
-    pub enable_slow_drift_entries: u32,
+    pub trailing_high_profit_atr: f32,
 
     // Partial TP [40-45]
     pub enable_partial_tp: u32,
@@ -280,31 +285,31 @@ pub struct GpuComboConfig {
     pub rsi_exit_lb_lo_profit_low_conf: f32,
     pub rsi_exit_lb_hi_profit_low_conf: f32,
 
-    // Reentry cooldown [64-67]
+    // Reentry cooldown [64-66] + trailing config [67]
     pub reentry_cooldown_minutes: u32,
     pub reentry_cooldown_min_mins: u32,
     pub reentry_cooldown_max_mins: u32,
-    pub _pad6: u32,
+    pub trailing_tighten_default: f32,
 
-    // Volatility-buffered trailing + TSME [68-71]
+    // Volatility-buffered trailing + TSME [68-70] + trailing config [71]
     pub enable_vol_buffered_trailing: u32,
     pub tsme_min_profit_atr: f32,
     pub tsme_require_adx_slope_negative: u32,
-    pub _pad7: u32,
+    pub trailing_tighten_tspv: f32,
 
-    // ATR floor / signal reversal / glitch [72-77]
+    // ATR floor / signal reversal / glitch [72-76] + trailing config [77]
     pub min_atr_pct: f32,
     pub reverse_entry_signal: u32,
     pub block_exits_on_extreme_dev: u32,
     pub glitch_price_dev_pct: f32,
     pub glitch_atr_mult: f32,
-    pub _pad8: u32,
+    pub trailing_weak_trend_mult: f32,
 
-    // Rate limits [78-81]
+    // Rate limits + entry flags [78-81]
     pub max_open_positions: u32,
     pub max_entry_orders_per_loop: u32,
-    pub _pad9: u32,
-    pub _pad10: u32,
+    pub enable_slow_drift_entries: u32,
+    pub slow_drift_require_macd_sign: u32,
 
     // Filters (gates) [82-91]
     pub enable_ranging_filter: u32,
@@ -355,8 +360,8 @@ pub struct GpuComboConfig {
     pub ranging_bb_width_ratio_lt: f32,
     pub anomaly_bb_width_ratio_gt: f32,
     pub slow_drift_ranging_slope_override: f32,
-    pub snapshot_offset: u32,  // byte offset into concatenated snapshots array (in elements, not bytes)
-    pub breadth_offset: u32,   // offset into concatenated breadth/btc_bullish arrays (in elements)
+    pub snapshot_offset: u32, // byte offset into concatenated snapshots array (in elements, not bytes)
+    pub breadth_offset: u32,  // offset into concatenated breadth/btc_bullish arrays (in elements)
 
     // TP momentum [126-127]
     pub tp_strong_adx_gt: f32,
@@ -375,13 +380,13 @@ const _: () = assert!(std::mem::size_of::<GpuComboConfig>() == 512);
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuPosition {
-    pub active: u32,       // 0=empty, 1=LONG, 2=SHORT
+    pub active: u32, // 0=empty, 1=LONG, 2=SHORT
     pub entry_price: f32,
     pub size: f32,
-    pub confidence: u32,   // 0=Low, 1=Medium, 2=High
+    pub confidence: u32, // 0=Low, 1=Medium, 2=High
     pub entry_atr: f32,
     pub entry_adx_threshold: f32,
-    pub trailing_sl: f32,  // 0.0 = not set
+    pub trailing_sl: f32, // 0.0 = not set
     pub leverage: f32,
     pub margin_used: f32,
     pub adds_count: u32,
@@ -402,33 +407,35 @@ const _: () = assert!(std::mem::size_of::<GpuPosition>() == 64);
 /// Contains up to 52 symbol positions (matching max watchlist size)
 /// plus PESC cooldown arrays and result accumulators.
 ///
-/// Size: 64 + 52*64 + 52*4 + 52*4 + 52*4 + 32 = 3,608 bytes → round to 3,616 (16-aligned)
+/// Accumulator fields use f64 (double) for precision over 10K+ trade accumulations.
+///
+/// Size: 16 (header) + 52*64 (positions) + 3*52*4 (PESC) + 56 (accumulators) + 8 (pad) = 4,032
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct GpuComboState {
-    // Account state
-    pub balance: f32,
+    // Account state (f64 balance = 8 bytes, absorbs old _state_pad)
+    pub balance: f64,
     pub num_open: u32,
     pub entries_this_bar: u32,
-    pub _state_pad: u32,
 
     // Positions (fixed-size array)
     pub positions: [GpuPosition; 52],
 
     // PESC state (per-symbol)
     pub pesc_close_time_sec: [u32; 52],
-    pub pesc_close_type: [u32; 52],  // 0=none, 1=LONG, 2=SHORT
+    pub pesc_close_type: [u32; 52],   // 0=none, 1=LONG, 2=SHORT
     pub pesc_close_reason: [u32; 52], // 0=none, 1=signal_flip, 2=other
 
-    // Result accumulators
-    pub total_pnl: f32,
-    pub total_fees: f32,
+    // Result accumulators (f64 for precision)
+    pub total_pnl: f64,
+    pub total_fees: f64,
     pub total_trades: u32,
     pub total_wins: u32,
-    pub gross_profit: f32,
-    pub gross_loss: f32,
-    pub max_drawdown: f32,
-    pub peak_equity: f32,
+    pub gross_profit: f64,
+    pub gross_loss: f64,
+    pub max_drawdown: f64,
+    pub peak_equity: f64,
+    pub _acc_pad: [u32; 2],
 }
 
 // Manual impls because bytemuck derive doesn't support [T; 52]
@@ -436,6 +443,7 @@ pub struct GpuComboState {
 unsafe impl Pod for GpuComboState {}
 unsafe impl Zeroable for GpuComboState {}
 
+const _: () = assert!(std::mem::size_of::<GpuComboState>() == 4032);
 const _: () = assert!(std::mem::size_of::<GpuComboState>() % 16 == 0);
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -468,22 +476,24 @@ const _: () = assert!(std::mem::size_of::<GpuResult>() == 48);
 
 /// Global parameters passed as uniform to the compute shader.
 ///
-/// 32 bytes.
+/// 44 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuParams {
     pub num_combos: u32,
     pub num_symbols: u32,
     pub num_bars: u32,
+    pub btc_sym_idx: u32, // u32::MAX when unavailable
     pub chunk_start: u32,
     pub chunk_end: u32,
     pub initial_balance_bits: u32, // f32 bits
-    pub fee_rate_bits: u32,        // f32 bits (0.00035)
+    pub maker_fee_rate_bits: u32,  // f32 bits (3.5 bps)
+    pub taker_fee_rate_bits: u32,  // f32 bits (3.5 bps)
     pub max_sub_per_bar: u32,      // 0 = no sub-bars (backwards compatible)
     pub trade_end_bar: u32,        // last bar index for result write-back (scoped trade range)
 }
 
-const _: () = assert!(std::mem::size_of::<GpuParams>() == 36);
+const _: () = assert!(std::mem::size_of::<GpuParams>() == 44);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Conversion helpers
@@ -518,14 +528,14 @@ impl GpuComboConfig {
             leverage_medium: tc.leverage_medium as f32,
             leverage_high: tc.leverage_high as f32,
             leverage_max_cap: tc.leverage_max_cap as f32,
-            _pad0: 0,
+            trailing_rsi_floor_default: 0.5,
 
             slippage_bps: tc.slippage_bps as f32,
             min_notional_usd: tc.min_notional_usd as f32,
             bump_to_min_notional: tc.bump_to_min_notional as u32,
             max_total_margin_pct: tc.max_total_margin_pct as f32,
-            _pad1: 0,
-            _pad2: 0,
+            trailing_rsi_floor_trending: 0.7,
+            trailing_vbts_bb_threshold: 1.2,
 
             enable_dynamic_sizing: tc.enable_dynamic_sizing as u32,
             confidence_mult_high: tc.confidence_mult_high as f32,
@@ -537,7 +547,7 @@ impl GpuComboConfig {
             vol_scalar_min: tc.vol_scalar_min as f32,
 
             vol_scalar_max: tc.vol_scalar_max as f32,
-            _pad3: 0,
+            trailing_vbts_mult: 1.25,
 
             enable_pyramiding: tc.enable_pyramiding as u32,
             max_adds_per_symbol: tc.max_adds_per_symbol as u32,
@@ -546,7 +556,7 @@ impl GpuComboConfig {
             add_min_profit_atr: tc.add_min_profit_atr as f32,
             add_min_confidence: tc.add_min_confidence as u32,
             entry_min_confidence: tc.entry_min_confidence as u32,
-            enable_slow_drift_entries: et.enable_slow_drift_entries as u32,
+            trailing_high_profit_atr: 2.0,
 
             enable_partial_tp: tc.enable_partial_tp as u32,
             tp_partial_pct: tc.tp_partial_pct as f32,
@@ -579,24 +589,24 @@ impl GpuComboConfig {
             reentry_cooldown_minutes: tc.reentry_cooldown_minutes as u32,
             reentry_cooldown_min_mins: tc.reentry_cooldown_min_mins as u32,
             reentry_cooldown_max_mins: tc.reentry_cooldown_max_mins as u32,
-            _pad6: 0,
+            trailing_tighten_default: 0.5,
 
             enable_vol_buffered_trailing: tc.enable_vol_buffered_trailing as u32,
             tsme_min_profit_atr: tc.tsme_min_profit_atr as f32,
             tsme_require_adx_slope_negative: tc.tsme_require_adx_slope_negative as u32,
-            _pad7: 0,
+            trailing_tighten_tspv: 0.75,
 
             min_atr_pct: tc.min_atr_pct as f32,
             reverse_entry_signal: tc.reverse_entry_signal as u32,
             block_exits_on_extreme_dev: tc.block_exits_on_extreme_dev as u32,
             glitch_price_dev_pct: tc.glitch_price_dev_pct as f32,
             glitch_atr_mult: tc.glitch_atr_mult as f32,
-            _pad8: 0,
+            trailing_weak_trend_mult: 0.7,
 
             max_open_positions: tc.max_open_positions as u32,
             max_entry_orders_per_loop: tc.max_entry_orders_per_loop as u32,
-            _pad9: 0,
-            _pad10: 0,
+            enable_slow_drift_entries: et.enable_slow_drift_entries as u32,
+            slow_drift_require_macd_sign: et.slow_drift_require_macd_sign as u32,
 
             enable_ranging_filter: fc.enable_ranging_filter as u32,
             enable_anomaly_filter: fc.enable_anomaly_filter as u32,
@@ -653,5 +663,21 @@ impl GpuComboConfig {
             tp_strong_adx_gt: tp.adx_strong_gt as f32,
             tp_weak_adx_lt: tp.adx_weak_lt as f32,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GpuIndicatorConfig;
+    use bt_core::config::StrategyConfig;
+
+    #[test]
+    fn test_gpu_indicator_config_uses_threshold_ave_window() {
+        let mut cfg = StrategyConfig::default();
+        cfg.indicators.ave_avg_atr_window = 3;
+        cfg.thresholds.entry.ave_avg_atr_window = 17;
+
+        let out = GpuIndicatorConfig::from_strategy_config(&cfg, 200);
+        assert_eq!(out.avg_atr_window, 17);
     }
 }

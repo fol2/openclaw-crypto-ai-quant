@@ -1,13 +1,27 @@
-# Mei Backtester
+# Mei Backtester (V8 — Single Source of Truth)
 
 High-performance Rust backtesting simulator for the Mei Alpha strategy.
+
+> **V8 is the sole backtester.** The legacy main-branch backtester has been
+> archived as `archive/main-backtester-v6`. All execution paths (CPU replay,
+> GPU sweep, live/paper trading via PyO3 bridge) share a single decision
+> kernel (`decision_kernel.rs`). See the V8 SSOT migration issues AQC-711
+> through AQC-762 for details.
 
 ## Build
 
 ```bash
-cd workspace/dev/ai_quant/backtester
-cargo build --release
-# Binary: target/release/mei-backtester
+# From the repo root
+python3 tools/build_mei_backtester.py
+
+# Optional GPU build (requires CUDA toolchain)
+python3 tools/build_mei_backtester.py --gpu
+```
+
+The binary is version-stamped at build time and supports:
+
+```bash
+mei-backtester --version
 ```
 
 ## Commands
@@ -28,6 +42,103 @@ mei-backtester sweep --sweep-config sweep.yaml [OPTIONS]
 
 ```bash
 mei-backtester dump-indicators --symbol BTC [OPTIONS]
+```
+
+### Candle DB sets (AQC-204)
+
+The candle DB flags (`--candles-db`, `--exit-candles-db`, `--entry-candles-db`) accept:
+
+- A single SQLite DB file path
+- A comma-separated list of paths (files and/or directories)
+- A directory containing partition DB files (all `*.db` files are loaded)
+
+Examples:
+
+```bash
+# Hot DB only (single file)
+mei-backtester replay --candles-db candles_dbs/candles_5m.db
+
+# Hot DB + monthly partitions directory
+mei-backtester replay --candles-db candles_dbs/candles_5m.db,candles_dbs/partitions/5m
+```
+
+### Universe filter (AQC-205)
+
+If you maintain a universe history DB via `tools/sync_universe_history.py`, you can optionally filter backtests to symbols that were active during the tested period:
+
+```bash
+mei-backtester replay --universe-filter
+mei-backtester sweep --universe-filter
+```
+
+The universe DB defaults to `<candles_db_dir>/universe_history.db`. Override with `--universe-db`.
+
+### GPU smoke parity lanes (AQC-176)
+
+For 1h/3m smoke comparisons, use explicit parity lanes:
+
+- Lane A (`--parity-mode identical-symbol-universe`): CPU and GPU are pre-aligned to the same alphabetical symbol universe before scoring parity.
+- Lane B (`--parity-mode production`): production behaviour; GPU runtime may truncate symbol universe to the kernel state cap (52 symbols).
+
+Example commands:
+
+```bash
+# Lane A (identical symbol universe)
+mei-backtester sweep \
+  --parity-mode identical-symbol-universe \
+  --sweep-spec backtester/sweeps/smoke.yaml \
+  --interval 1h --entry-interval 3m --exit-interval 3m \
+  --output /tmp/lane_a_cpu.jsonl
+
+mei-backtester sweep \
+  --parity-mode identical-symbol-universe \
+  --gpu \
+  --sweep-spec backtester/sweeps/smoke.yaml \
+  --interval 1h --entry-interval 3m --exit-interval 3m \
+  --output /tmp/lane_a_gpu.jsonl
+
+# Lane B (production truncation behaviour)
+mei-backtester sweep \
+  --parity-mode production \
+  --sweep-spec backtester/sweeps/smoke.yaml \
+  --interval 1h --entry-interval 3m --exit-interval 3m \
+  --output /tmp/lane_b_cpu.jsonl
+
+mei-backtester sweep \
+  --parity-mode production \
+  --gpu \
+  --sweep-spec backtester/sweeps/smoke.yaml \
+  --interval 1h --entry-interval 3m --exit-interval 3m \
+  --output /tmp/lane_b_gpu.jsonl
+```
+
+Generate a unified lane report (includes ranking assertions):
+
+```bash
+python tools/compare_sweep_outputs.py \
+  --lane-a-cpu /tmp/lane_a_cpu.jsonl \
+  --lane-a-gpu /tmp/lane_a_gpu.jsonl \
+  --lane-b-cpu /tmp/lane_b_cpu.jsonl \
+  --lane-b-gpu /tmp/lane_b_gpu.jsonl \
+  --output /tmp/gpu_smoke_parity_report.json \
+  --print-summary
+```
+
+Use the scripted variant to run all four sweeps and generate the report in one step:
+
+```bash
+./scripts/ci_gpu_smoke_parity_gate.sh
+```
+
+Optional environment knobs:
+
+```bash
+export AQC_GPU_PARITY_STRICT=1
+export AQC_PARITY_CONFIG_PATH=/absolute/path/to/config/strategy_overrides.yaml
+export AQC_PARITY_BASELINE_ANY_MISMATCH_COUNT=288
+export AQC_PARITY_BASELINE_MAX_ABS_PNL_DIFF=25225.25
+export AQC_PARITY_BASELINE_MEAN_ABS_PNL_DIFF=8552.34
+export AQC_PARITY_BASELINE_TRADE_COUNT_MISMATCH_COUNT=288
 ```
 
 ---

@@ -11,13 +11,13 @@ import json
 import os
 import queue
 import sqlite3
-import subprocess
 import threading
 import time
 
 import exchange.meta as hyperliquid_meta
 import exchange.ws as hyperliquid_ws
 
+from engine.alerting import send_openclaw_message
 import strategy.mei_alpha_v1 as mei_alpha_v1
 
 try:
@@ -55,6 +55,42 @@ def _env_str(name: str, default: str = "") -> str:
     return default if raw is None else str(raw)
 
 
+def _pct_str_from_baseline(value_usd: float, *, baseline_usd: float, is_return: bool) -> str:
+    try:
+        b = float(baseline_usd)
+    except Exception:
+        b = 0.0
+    if b <= 1e-9:
+        return "n/a"
+    try:
+        v = float(value_usd)
+    except Exception:
+        v = 0.0
+    if is_return:
+        p = ((v - b) / b) * 100.0
+    else:
+        p = (v / b) * 100.0
+    return f"{p:+.2f}%"
+
+
+def _discord_label() -> str:
+    label = _env_str("AI_QUANT_DISCORD_LABEL", "").strip()
+    if label:
+        return label
+    return _env_str("AI_QUANT_INSTANCE_TAG", "").strip()
+
+
+def _decorate_discord_message(message: str) -> str:
+    msg = str(message)
+    label = _discord_label()
+    if not label:
+        return msg
+    prefix = f"[{label}]"
+    if msg.startswith(prefix):
+        return msg
+    return f"{prefix} {msg}"
+
+
 def _live_discord_target() -> str | None:
     target = _env_str("AI_QUANT_DISCORD_CHANNEL_LIVE", "").strip()
     return target or None
@@ -71,22 +107,11 @@ def _send_discord_message_sync(*, target: str, message: str) -> None:
         except Exception:
             timeout_s = 6.0
         timeout_s = max(1.0, min(30.0, timeout_s))
-        subprocess.run(
-            [
-                "openclaw",
-                "message",
-                "send",
-                "--channel",
-                "discord",
-                "--target",
-                str(target),
-                "--message",
-                str(message),
-            ],
-            capture_output=True,
-            check=True,
-            text=True,
-            timeout=timeout_s,
+        send_openclaw_message(
+            channel="discord",
+            target=str(target),
+            message=_decorate_discord_message(str(message)),
+            timeout_s=timeout_s,
         )
     except Exception as e:
         print(f"⚠️ Failed to send Discord message (target={target}): {e}")
@@ -176,6 +201,15 @@ def _notify_live_fill(
     if not target:
         return
 
+    # Baseline for percentage display in notifications.
+    # Priority: explicit notification baseline -> paper balance env -> current account value.
+    baseline_usd = _safe_float(_env_str("AI_QUANT_NOTIFY_BASELINE_USD", ""), 0.0)
+    if baseline_usd <= 1e-9:
+        baseline_usd = _safe_float(_env_str("AI_QUANT_PAPER_BALANCE", ""), 0.0)
+    if baseline_usd <= 1e-9:
+        baseline_usd = _safe_float(account_value_usd, 0.0)
+    unrealised_usd = float(account_value_usd or 0.0) - float(withdrawable_usd or 0.0)
+
     action_map = {"OPEN": "開倉", "ADD": "加倉", "REDUCE": "部分平倉", "CLOSE": "平倉"}
     emoji = "🟦"
     if action in {"OPEN", "ADD"}:
@@ -217,8 +251,18 @@ def _notify_live_fill(
         msg += f"• 信心 (Conf): `{confidence}`\n"
     if breadth_pct is not None:
         msg += f"• 廣度 (Breadth): `{breadth_pct:.1f}%`\n"
-    msg += f"• **AccountValue:** `${account_value_usd:,.2f}`\n"
-    msg += f"• **Withdrawable:** `${withdrawable_usd:,.2f}`"
+    msg += (
+        f"• **AccountValue:** `${account_value_usd:,.2f}` "
+        f"({_pct_str_from_baseline(float(account_value_usd or 0.0), baseline_usd=baseline_usd, is_return=True)})\n"
+    )
+    msg += (
+        f"• **Unrealised (est.):** `${unrealised_usd:,.2f}` "
+        f"({_pct_str_from_baseline(float(unrealised_usd or 0.0), baseline_usd=baseline_usd, is_return=False)})\n"
+    )
+    msg += (
+        f"• **Withdrawable (realised):** `${withdrawable_usd:,.2f}` "
+        f"({_pct_str_from_baseline(float(withdrawable_usd or 0.0), baseline_usd=baseline_usd, is_return=True)})"
+    )
 
     _send_discord_message(target=target, message=msg)
 
@@ -256,7 +300,13 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         self._last_entry_fail_reason: dict[str, str] = {}
         # Exit attempts can also be rejected transiently; avoid close-spam when state is stale.
         self._last_exit_attempt_at_s: dict[str, float] = {}
+        self._live_balance_usd = 0.0
         super().__init__()
+
+    @property
+    def balance(self) -> float:
+        """Override PaperTrader's kernel-backed balance with exchange withdrawable USD."""
+        return self._live_balance_usd
 
     def _pending_open_ttl_s(self) -> float:
         try:
@@ -306,8 +356,10 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             self._total_margin_used_usd = float(snap.total_margin_used_usd)
         except Exception:
             self._total_margin_used_usd = float(self._total_margin_used_usd or 0.0)
-        # Keep the name `balance` but treat it as withdrawable cash for display only.
-        self.balance = self._withdrawable_usd
+        # In live mode, balance is sourced from the exchange, not the Rust kernel.
+        # PaperTrader.balance is a read-only @property (AQC-755), so we store
+        # the exchange value in _live_balance_usd and override the property below.
+        self._live_balance_usd = self._withdrawable_usd
 
         live_positions = self.executor.get_positions(force=force)
         old_positions = dict(self.positions or {})
@@ -744,7 +796,18 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             return False
         return live_entries_enabled()
 
-    def add_to_position(self, symbol, price, timestamp, confidence, *, atr=0.0, indicators=None) -> bool:
+    def add_to_position(
+        self,
+        symbol,
+        price,
+        timestamp,
+        confidence,
+        *,
+        atr=0.0,
+        indicators=None,
+        target_size: float | None = None,
+        reason: str | None = None,
+    ) -> bool:
         sym = str(symbol or "").strip().upper()
         if sym not in (self.positions or {}):
             return False
@@ -888,6 +951,14 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             vol_scalar = max(vol_min, min(vol_max, vol_scalar))
             margin_target *= max(0.0, vol_scalar)
 
+        # Optional size multiplier (used for live rollout ramps, etc).
+        try:
+            size_mult = float(trade_cfg.get("size_multiplier", 1.0))
+        except Exception:
+            size_mult = 1.0
+        size_mult = max(0.0, float(size_mult))
+        margin_target *= float(size_mult)
+
         # Live-specific clamps
         min_margin_usd = _safe_float(trade_cfg.get("min_margin_usd"), 0.0)
         if min_margin_usd > 0:
@@ -898,7 +969,15 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         if max_notional > 0 and max_notional < min_notional:
             return False
 
+        try:
+            explicit_notional = float(target_size) if target_size is not None else None
+        except Exception:
+            explicit_notional = None
+
         desired_notional = margin_target * leverage
+        if explicit_notional is not None and explicit_notional > 0:
+            desired_notional = explicit_notional
+
         # Boost small adds up to the minimum notional (if within max_notional).
         if desired_notional < min_notional:
             desired_notional = min_notional
@@ -961,6 +1040,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             except Exception:
                 audit_for_oms = None
 
+        _add_reason = str(reason or "Pyramid Add")
         oms = getattr(self, "oms", None)
         oms_intent = None
         order_meta = {
@@ -989,7 +1069,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     requested_notional=float(notional),
                     leverage=float(leverage),
                     decision_ts=timestamp,
-                    reason="Pyramid Add",
+                    reason=_add_reason,
                     confidence=str(confidence or ""),
                     entry_atr=float(current_atr or 0.0),
                     meta={
@@ -1029,6 +1109,11 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     side=side,
                     notional_usd=float(notional),
                     leverage=float(leverage),
+                    equity_usd=float(equity_base or 0.0),
+                    entry_price=float(fill_price_est),
+                    entry_atr=float(current_atr or 0.0),
+                    sl_atr_mult=float(trade_cfg.get("sl_atr_mult", 1.5)),
+                    positions=getattr(self, "positions", None),
                     intent_id=getattr(oms_intent, "intent_id", None),
                     reduce_risk=False,
                 )
@@ -1256,6 +1341,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 "notional_est": float(notional),
                 "leverage": float(leverage),
                 "margin_est": float(margin_add),
+                "size_multiplier": float(size_mult),
             },
         )
 
@@ -1298,7 +1384,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 "confidence": confidence,
                 "entry_atr": current_atr,
                 "leverage": leverage,
-                "reason": "Pyramid Add",
+                "reason": _add_reason,
                 "breadth_pct": _breadth_pct_add,
                 "meta": {
                     "audit": audit if isinstance(audit, dict) else None,
@@ -1742,7 +1828,21 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             return
         self.reduce_position(sym, sz, price, timestamp, reason, confidence="N/A", meta=meta)
 
-    def execute_trade(self, symbol, signal, price, timestamp, confidence, atr=0.0, indicators=None):
+    def execute_trade(
+        self,
+        symbol,
+        signal,
+        price,
+        timestamp,
+        confidence,
+        atr=0.0,
+        indicators=None,
+        *,
+        action: str | None = None,
+        target_size: float | None = None,
+        reason: str | None = None,
+        _from_kernel_open: bool = False,
+    ):
         sym = str(symbol or "").strip().upper()
         if not sym:
             return
@@ -1755,8 +1855,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 audit = None
 
         # Persist the strategy decision for live monitoring (signals are not orders).
-        # This keeps the monitor UI "SIGNAL" column populated for live mode, even when
-        # execution is handled via OMS.
+        # This keeps the monitor UI "SIGNAL" column populated for live mode.
         log_live_signal(
             symbol=sym,
             signal=str(signal or "").strip().upper(),
@@ -1764,6 +1863,54 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             price=price,
             indicators=indicators,
         )
+
+        act = str(action or "").strip().upper()
+        if act in {"OPEN", "ADD", "CLOSE", "REDUCE"}:
+            if act == "OPEN":
+                if sym in (self.positions or {}):
+                    # OPEN action only maps to new-entry flow when no position exists.
+                    return
+            elif act == "ADD":
+                return self.add_to_position(
+                    sym,
+                    price,
+                    timestamp,
+                    confidence,
+                    atr=atr,
+                    indicators=indicators,
+                    target_size=target_size,
+                    reason=reason,
+                )
+            elif act == "CLOSE":
+                return self.close_position(
+                    sym,
+                    price,
+                    timestamp,
+                    reason=str(reason or "Kernel CLOSE"),
+                )
+            elif act == "REDUCE":
+                if sym not in (self.positions or {}):
+                    return
+                if target_size is not None:
+                    try:
+                        reduce_size = float(target_size)
+                    except Exception:
+                        reduce_size = None
+                else:
+                    reduce_size = None
+                if reduce_size is None:
+                    try:
+                        reduce_size = float((self.positions or {}).get(sym, {}).get("size") or 0.0)
+                    except Exception:
+                        reduce_size = 0.0
+                return self.reduce_position(
+                    sym,
+                    reduce_size,
+                    price,
+                    timestamp,
+                    reason=str(reason or "Kernel REDUCE"),
+                    confidence=confidence,
+                )
 
         pos = (self.positions or {}).get(sym)
         if pos:
@@ -2078,6 +2225,12 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             return
 
         desired_notional = float(sizing.desired_notional_usd)
+        try:
+            explicit_notional = float(target_size) if target_size is not None else None
+        except Exception:
+            explicit_notional = None
+        if explicit_notional is not None and explicit_notional > 0:
+            desired_notional = explicit_notional
         if desired_notional < min_notional:
             desired_notional = min_notional
         desired_notional = min(desired_notional, max_notional)
@@ -2202,6 +2355,11 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     side=entry_side,
                     notional_usd=float(notional),
                     leverage=float(leverage),
+                    equity_usd=float(equity_base or 0.0),
+                    entry_price=float(fill_price_est),
+                    entry_atr=float(atr or 0.0),
+                    sl_atr_mult=float(trade_cfg.get("sl_atr_mult", 1.5)),
+                    positions=getattr(self, "positions", None),
                     intent_id=getattr(oms_intent, "intent_id", None),
                     reduce_risk=False,
                 )
@@ -2448,6 +2606,11 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             except Exception:
                 pass
 
+        try:
+            size_mult = float(trade_cfg.get("size_multiplier", 1.0))
+        except Exception:
+            size_mult = 1.0
+
         print(
             f"🚀 LIVE ORDER sent: OPEN {('LONG' if signal == 'BUY' else 'SHORT')} {sym} "
             f"px~={float(fill_price_est):.4f} size={size:.6f} notional~=${notional:.2f} "
@@ -2464,6 +2627,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 "notional_est": float(notional),
                 "leverage": float(leverage),
                 "margin_est": float(margin_need),
+                "size_multiplier": float(size_mult),
             },
         )
 
@@ -2789,6 +2953,54 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                     withdrawable_usd=float(trader.balance or 0.0),
                     breadth_pct=_ctx_breadth_pct,
                 )
+                # Best-effort risk update (daily loss tracking, etc).
+                try:
+                    risk = getattr(trader, "risk", None)
+                    note = getattr(risk, "note_fill", None) if risk is not None else None
+                    if callable(note):
+                        fill_side = None
+                        try:
+                            dl = str(dir_s or "").strip().lower()
+                            if dl.startswith("open") and "long" in dl:
+                                fill_side = "BUY"
+                            elif dl.startswith("open") and "short" in dl:
+                                fill_side = "SELL"
+                            elif dl.startswith("close") and "long" in dl:
+                                fill_side = "SELL"
+                            elif dl.startswith("close") and "short" in dl:
+                                fill_side = "BUY"
+                        except Exception:
+                            fill_side = None
+
+                        ref_mid = None
+                        ref_bid = None
+                        ref_ask = None
+                        try:
+                            bbo = hyperliquid_ws.hl_ws.get_bbo(sym, max_age_s=10.0)
+                            if bbo is not None:
+                                ref_bid, ref_ask = float(bbo[0]), float(bbo[1])
+                            ref_mid = hyperliquid_ws.hl_ws.get_mid(sym, max_age_s=10.0)
+                            if ref_mid is not None:
+                                ref_mid = float(ref_mid)
+                        except Exception:
+                            ref_mid = None
+                            ref_bid = None
+                            ref_ask = None
+
+                        note(
+                            ts_ms=int(t_ms),
+                            symbol=str(sym),
+                            action=str(action),
+                            pnl_usd=float(pnl or 0.0),
+                            fee_usd=float(fee or 0.0),
+                            fill_price=float(px),
+                            side=str(fill_side or ""),
+                            ref_mid=ref_mid,
+                            ref_bid=ref_bid,
+                            ref_ask=ref_ask,
+                        )
+                except Exception:
+                    pass
                 try:
                     lev_s = "NA" if lev is None or lev <= 0 else f"{float(lev):.0f}x"
                 except Exception:
@@ -2881,6 +3093,54 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                 withdrawable_usd=float(trader.balance or 0.0),
                 breadth_pct=_ctx_breadth_pct,
             )
+            # Best-effort risk update (daily loss tracking, etc).
+            try:
+                risk = getattr(trader, "risk", None)
+                note = getattr(risk, "note_fill", None) if risk is not None else None
+                if callable(note):
+                    fill_side = None
+                    try:
+                        dl = str(dir_s or "").strip().lower()
+                        if dl.startswith("open") and "long" in dl:
+                            fill_side = "BUY"
+                        elif dl.startswith("open") and "short" in dl:
+                            fill_side = "SELL"
+                        elif dl.startswith("close") and "long" in dl:
+                            fill_side = "SELL"
+                        elif dl.startswith("close") and "short" in dl:
+                            fill_side = "BUY"
+                    except Exception:
+                        fill_side = None
+
+                    ref_mid = None
+                    ref_bid = None
+                    ref_ask = None
+                    try:
+                        bbo = hyperliquid_ws.hl_ws.get_bbo(sym, max_age_s=10.0)
+                        if bbo is not None:
+                            ref_bid, ref_ask = float(bbo[0]), float(bbo[1])
+                        ref_mid = hyperliquid_ws.hl_ws.get_mid(sym, max_age_s=10.0)
+                        if ref_mid is not None:
+                            ref_mid = float(ref_mid)
+                    except Exception:
+                        ref_mid = None
+                        ref_bid = None
+                        ref_ask = None
+
+                    note(
+                        ts_ms=int(t_ms),
+                        symbol=str(sym),
+                        action=str(action),
+                        pnl_usd=float(pnl or 0.0),
+                        fee_usd=float(fee or 0.0),
+                        fill_price=float(px),
+                        side=str(fill_side or ""),
+                        ref_mid=ref_mid,
+                        ref_bid=ref_bid,
+                        ref_ask=ref_ask,
+                    )
+            except Exception:
+                pass
             try:
                 lev_s = "NA" if lev is None or lev <= 0 else f"{float(lev):.0f}x"
             except Exception:

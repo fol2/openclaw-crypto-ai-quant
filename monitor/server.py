@@ -28,6 +28,14 @@ if str(MONITOR_DIR) not in sys.path:
 
 from heartbeat import parse_last_heartbeat  # noqa: E402
 
+try:
+    import bt_runtime as _bt_runtime  # noqa: E402
+
+    _BT_RUNTIME_OK = True
+except ImportError:
+    _bt_runtime = None  # type: ignore[assignment]
+    _BT_RUNTIME_OK = False
+
 
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
@@ -217,6 +225,13 @@ def _iso_utc(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
+def _utc_day(now_ms: int) -> str:
+    try:
+        return datetime.fromtimestamp(int(now_ms) / 1000.0, tz=timezone.utc).date().isoformat()
+    except Exception:
+        return ""
+
+
 def _parse_iso_ts_ms(ts: str | None) -> int | None:
     """Best-effort parse ISO timestamp to epoch milliseconds."""
     raw = str(ts or "").strip()
@@ -235,6 +250,63 @@ def _parse_iso_ts_ms(ts: str | None) -> int | None:
         return int(dt.timestamp() * 1000)
     except Exception:
         return None
+
+
+_KERNEL_STATE_HOME = Path("~/.mei/kernel_state.json").expanduser()
+
+
+def _find_kernel_state_path(db_path: Path) -> Path | None:
+    """Locate the kernel state JSON — next to the trading DB, or ~/.mei fallback."""
+    beside_db = db_path.parent / "kernel_state.json"
+    if beside_db.exists():
+        return beside_db
+    if _KERNEL_STATE_HOME.exists():
+        return _KERNEL_STATE_HOME
+    return None
+
+
+def get_kernel_equity(
+    db_path: Path,
+    mids: dict[str, float],
+) -> dict[str, Any]:
+    """Compute mark-to-market equity via the Rust kernel.
+
+    Returns a dict with ``ok``, ``equity_usd``, ``cash_usd``, ``state_path``, and
+    optionally ``error``.
+    """
+    if not _BT_RUNTIME_OK:
+        return {"ok": False, "error": "bt_runtime_not_available"}
+
+    state_path = _find_kernel_state_path(db_path)
+    if state_path is None:
+        return {"ok": False, "error": "kernel_state_not_found"}
+
+    try:
+        state_json = _bt_runtime.load_state(str(state_path))
+    except Exception as e:
+        return {"ok": False, "error": f"load_state_failed:{e}", "state_path": str(state_path)}
+
+    # Extract cash_usd from the state for reference.
+    cash_usd: float | None = None
+    try:
+        state = json.loads(state_json)
+        cash_usd = float(state.get("cash_usd", 0.0))
+    except Exception:
+        pass
+
+    # Build prices dict from mids (kernel expects symbol -> price).
+    prices_json = json.dumps(mids) if mids else "{}"
+
+    try:
+        equity = _bt_runtime.get_equity(state_json, prices_json)
+        return {
+            "ok": True,
+            "equity_usd": float(equity),
+            "cash_usd": cash_usd,
+            "state_path": str(state_path),
+        }
+    except Exception as e:
+        return {"ok": False, "error": f"get_equity_failed:{e}", "state_path": str(state_path)}
 
 
 _HL_ADDR_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
@@ -1407,6 +1479,27 @@ def build_snapshot(mode: str) -> dict[str, Any]:
             if realised_usd is not None:
                 equity_est_usd = float(realised_usd) + float(unreal_total) - float(close_fee_total)
 
+        # --- Kernel equity (AQC-745) ---
+        kernel_equity_result: dict[str, Any] | None = None
+        if _BT_RUNTIME_OK:
+            mid_snap = STATE.mids.snapshot()
+            kernel_mids = mid_snap.get("mids") or {}
+            kernel_equity_result = get_kernel_equity(db_path, kernel_mids)
+
+            # Log discrepancy between kernel and monitor equity estimates.
+            if (
+                kernel_equity_result.get("ok")
+                and equity_est_usd is not None
+                and kernel_equity_result.get("equity_usd") is not None
+            ):
+                diff = abs(float(kernel_equity_result["equity_usd"]) - float(equity_est_usd))
+                if diff > 0.01:
+                    snapshot["warnings"].append(
+                        f"kernel_equity_drift:{diff:.2f} "
+                        f"(kernel={kernel_equity_result['equity_usd']:.2f} "
+                        f"monitor={equity_est_usd:.2f})"
+                    )
+
         snapshot["balances"] = {
             "balance_source": balance_source,
             "realised_usd": realised_usd,
@@ -1421,7 +1514,76 @@ def build_snapshot(mode: str) -> dict[str, Any]:
             "fee_rate": fee_rate,
             "account_value_asof_usd": account_value_asof_usd,
             "hl_balance": hl_bal_public if mode2 == "live" else None,
+            "kernel_equity": kernel_equity_result,
         }
+
+        # Daily metrics (UTC day) for the dashboard summary.
+        day = _utc_day(now_ms)
+        daily: dict[str, Any] = {
+            "utc_day": day,
+            "trades": 0,
+            "start_balance": None,
+            "end_balance": None,
+            "pnl_usd": 0.0,
+            "fees_usd": 0.0,
+            "net_pnl_usd": 0.0,
+            "peak_realised_balance": None,
+            "drawdown_pct": 0.0,
+        }
+        if day:
+            like = f"{day}%"
+            row0 = _fetchone(
+                con,
+                "SELECT balance FROM trades WHERE timestamp LIKE ? AND balance IS NOT NULL ORDER BY id ASC LIMIT 1",
+                (like,),
+            )
+            row1 = _fetchone(
+                con,
+                "SELECT balance FROM trades WHERE timestamp LIKE ? AND balance IS NOT NULL ORDER BY id DESC LIMIT 1",
+                (like,),
+            )
+            row_peak = _fetchone(
+                con,
+                "SELECT MAX(balance) AS peak FROM trades WHERE timestamp LIKE ? AND balance IS NOT NULL",
+                (like,),
+            )
+            row_cnt = _fetchone(con, "SELECT COUNT(*) AS n FROM trades WHERE timestamp LIKE ?", (like,))
+            row_fees = _fetchone(
+                con,
+                "SELECT SUM(COALESCE(fee_usd, 0)) AS fees FROM trades WHERE timestamp LIKE ?",
+                (like,),
+            )
+
+            start_bal = float(row0["balance"]) if row0 and row0.get("balance") is not None else None
+            end_bal = float(row1["balance"]) if row1 and row1.get("balance") is not None else None
+            peak_bal = float(row_peak["peak"]) if row_peak and row_peak.get("peak") is not None else None
+            try:
+                daily["trades"] = int(row_cnt["n"]) if row_cnt and row_cnt.get("n") is not None else 0
+            except Exception:
+                daily["trades"] = 0
+            try:
+                daily["fees_usd"] = float(row_fees["fees"]) if row_fees and row_fees.get("fees") is not None else 0.0
+            except Exception:
+                daily["fees_usd"] = 0.0
+
+            daily["start_balance"] = start_bal
+            daily["end_balance"] = end_bal
+            daily["peak_realised_balance"] = peak_bal
+
+            pnl = 0.0
+            if start_bal is not None and end_bal is not None:
+                pnl = float(end_bal) - float(start_bal)
+            daily["pnl_usd"] = float(pnl)
+            daily["net_pnl_usd"] = float(pnl) - float(daily.get("fees_usd") or 0.0)
+
+            # Drawdown: compare current equity estimate to the daily peak realised balance.
+            peak = float(peak_bal) if peak_bal is not None and peak_bal > 0 else None
+            cur = float(equity_est_usd) if equity_est_usd is not None else (float(realised_usd) if realised_usd is not None else None)
+            if peak is not None and cur is not None and peak > 0:
+                dd = max(0.0, (peak - cur) / peak) * 100.0
+                daily["drawdown_pct"] = float(dd)
+
+        snapshot["daily"] = daily
 
         recent: dict[str, Any] = {}
         recent["trades"] = _fetchall(
@@ -1506,6 +1668,873 @@ def build_snapshot(mode: str) -> dict[str, Any]:
             pass
 
 
+def _prom_escape(v: str) -> str:
+    return str(v).replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+
+def _prom_labels(labels: dict[str, Any] | None) -> str:
+    if not labels:
+        return ""
+    parts: list[str] = []
+    for k, v in labels.items():
+        key = str(k or "").strip()
+        if not key:
+            continue
+        parts.append(f'{key}="{_prom_escape(str(v))}"')
+    return "{" + ",".join(parts) + "}" if parts else ""
+
+
+def _prom_line(name: str, value: float | int, labels: dict[str, Any] | None = None) -> str:
+    return f"{name}{_prom_labels(labels)} {value}\n"
+
+
+def build_metrics(mode: str) -> dict[str, Any]:
+    mode2 = (mode or "paper").strip().lower()
+    now_ms = _utc_now_ms()
+    db_path, log_path = mode_paths(mode2)
+
+    health = parse_last_heartbeat(db_path, log_path)
+    out: dict[str, Any] = {
+        "ok": True,
+        "now_ts_ms": now_ms,
+        "mode": mode2,
+        "db_path": str(db_path),
+        "health": health,
+        "gauges": {},
+        "counters": {},
+    }
+
+    gauges: dict[str, Any] = {}
+    counters: dict[str, Any] = {}
+
+    # Heartbeat-derived gauges.
+    gauges["engine_up"] = 1 if bool(health.get("ok")) else 0
+    if isinstance(health.get("ts_ms"), int) and int(health.get("ts_ms") or 0) > 0:
+        gauges["heartbeat_age_s"] = max(0.0, (float(now_ms) - float(health["ts_ms"])) / 1000.0)
+    if "open_pos" in health:
+        gauges["open_pos"] = int(health.get("open_pos") or 0)
+    if "ws_connected" in health:
+        gauges["ws_connected"] = 1 if bool(health.get("ws_connected")) else 0
+
+    kill_mode = str(health.get("kill_mode") or "off").strip().lower()
+    gauges["kill_mode"] = 2 if kill_mode == "halt_all" else (1 if kill_mode == "close_only" else 0)
+
+    # Slippage guard gauges (from heartbeat).
+    if "slip_enabled" in health:
+        gauges["slip_enabled"] = 1 if bool(health.get("slip_enabled")) else 0
+    if "slip_n" in health:
+        gauges["slip_n"] = int(health.get("slip_n") or 0)
+    if "slip_win" in health:
+        gauges["slip_win"] = int(health.get("slip_win") or 0)
+    if "slip_thr_bps" in health:
+        gauges["slip_thr_bps"] = float(health.get("slip_thr_bps") or 0.0)
+    if "slip_last_bps" in health:
+        gauges["slip_last_bps"] = float(health.get("slip_last_bps") or 0.0)
+    if "slip_median_bps" in health:
+        gauges["slip_median_bps"] = float(health.get("slip_median_bps") or 0.0)
+
+    if not db_path.exists():
+        out["ok"] = False
+        out["error"] = "db_missing"
+        out["gauges"] = gauges
+        out["counters"] = counters
+        return out
+
+    try:
+        con = connect_db_ro(db_path)
+    except Exception as e:
+        out["ok"] = False
+        out["error"] = f"db_open_failed:{e}"
+        out["gauges"] = gauges
+        out["counters"] = counters
+        return out
+
+    try:
+        row = _fetchone(con, "SELECT name FROM sqlite_master WHERE type='table' AND name='oms_intents'")
+        has_oms = bool(row)
+
+        # Orders + fills.
+        if has_oms:
+            row = _fetchone(con, "SELECT COUNT(*) AS n FROM oms_intents")
+            counters["orders_total"] = int(row.get("n") or 0) if row else 0
+            counters["orders_by_action"] = {str(r["action"]): int(r["n"]) for r in _fetchall(con, "SELECT action, COUNT(*) AS n FROM oms_intents GROUP BY action") if r.get("action")}
+
+            row = _fetchone(con, "SELECT COUNT(*) AS n FROM oms_fills")
+            counters["fills_total"] = int(row.get("n") or 0) if row else 0
+            counters["fills_by_action"] = {str(r["action"]): int(r["n"]) for r in _fetchall(con, "SELECT action, COUNT(*) AS n FROM oms_fills GROUP BY action") if r.get("action")}
+        else:
+            row = _fetchone(con, "SELECT COUNT(*) AS n FROM trades")
+            counters["orders_total"] = int(row.get("n") or 0) if row else 0
+            counters["fills_total"] = int(row.get("n") or 0) if row else 0
+
+        # Daily PnL + drawdown gauges.
+        day = _utc_day(now_ms)
+        if day:
+            like = f"{day}%"
+            row0 = _fetchone(
+                con,
+                "SELECT balance FROM trades WHERE timestamp LIKE ? AND balance IS NOT NULL ORDER BY id ASC LIMIT 1",
+                (like,),
+            )
+            row1 = _fetchone(
+                con,
+                "SELECT balance FROM trades WHERE timestamp LIKE ? AND balance IS NOT NULL ORDER BY id DESC LIMIT 1",
+                (like,),
+            )
+            row_peak = _fetchone(
+                con,
+                "SELECT MAX(balance) AS peak FROM trades WHERE timestamp LIKE ? AND balance IS NOT NULL",
+                (like,),
+            )
+            row_fees = _fetchone(
+                con,
+                "SELECT SUM(COALESCE(fee_usd, 0)) AS fees FROM trades WHERE timestamp LIKE ?",
+                (like,),
+            )
+
+            start_bal = float(row0["balance"]) if row0 and row0.get("balance") is not None else None
+            end_bal = float(row1["balance"]) if row1 and row1.get("balance") is not None else None
+            peak_bal = float(row_peak["peak"]) if row_peak and row_peak.get("peak") is not None else None
+            fees_usd = float(row_fees["fees"]) if row_fees and row_fees.get("fees") is not None else 0.0
+
+            pnl = float(end_bal - start_bal) if start_bal is not None and end_bal is not None else 0.0
+            gauges["pnl_today_usd"] = float(pnl)
+            gauges["fees_today_usd"] = float(fees_usd)
+            gauges["net_pnl_today_usd"] = float(pnl) - float(fees_usd)
+
+            if peak_bal is not None and end_bal is not None and peak_bal > 0:
+                dd = max(0.0, (float(peak_bal) - float(end_bal)) / float(peak_bal)) * 100.0
+                gauges["drawdown_today_pct"] = float(dd)
+
+        # Kill events.
+        row = _fetchone(con, "SELECT COUNT(*) AS n FROM audit_events WHERE event LIKE 'RISK_KILL_%'")
+        counters["kill_events_total"] = int(row.get("n") or 0) if row else 0
+        counters["kill_events_by_event"] = {
+            str(r["event"]): int(r["n"])
+            for r in _fetchall(con, "SELECT event, COUNT(*) AS n FROM audit_events WHERE event LIKE 'RISK_KILL_%' GROUP BY event")
+            if r.get("event")
+        }
+
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+    out["gauges"] = gauges
+    out["counters"] = counters
+    return out
+
+
+def build_prometheus_metrics(mode: str) -> str:
+    m = build_metrics(mode)
+    mode2 = str(m.get("mode") or (mode or "paper")).strip().lower()
+    gauges = m.get("gauges") if isinstance(m.get("gauges"), dict) else {}
+    counters = m.get("counters") if isinstance(m.get("counters"), dict) else {}
+
+    lines: list[str] = []
+
+    # Gauges.
+    for k, v in (gauges or {}).items():
+        name = f"aiq_{str(k)}"
+        try:
+            val = float(v)
+        except Exception:
+            continue
+        lines.append(_prom_line(name, val, {"mode": mode2}).rstrip("\n"))
+
+    def _emit_counter(name_key: str, by_key: str | None, *, label_key: str) -> None:
+        name = f"aiq_{name_key}"
+        total = counters.get(name_key)
+        if total is not None:
+            try:
+                val = float(total)
+            except Exception:
+                val = None
+            if val is not None:
+                lines.append(_prom_line(name, val, {"mode": mode2, label_key: "all"}).rstrip("\n"))
+        if by_key:
+            d = counters.get(by_key)
+            if isinstance(d, dict):
+                for lbl, val0 in d.items():
+                    try:
+                        val = float(val0)
+                    except Exception:
+                        continue
+                    lines.append(_prom_line(name, val, {"mode": mode2, label_key: str(lbl)}).rstrip("\n"))
+
+    _emit_counter("orders_total", "orders_by_action", label_key="action")
+    _emit_counter("fills_total", "fills_by_action", label_key="action")
+    _emit_counter("kill_events_total", "kill_events_by_event", label_key="event")
+
+    # Any other counters.
+    for k, v in (counters or {}).items():
+        if k in {"orders_total", "orders_by_action", "fills_total", "fills_by_action", "kill_events_total", "kill_events_by_event"}:
+            continue
+        if isinstance(v, dict):
+            continue
+        name = f"aiq_{str(k)}"
+        try:
+            val = float(v)
+        except Exception:
+            continue
+        lines.append(_prom_line(name, val, {"mode": mode2}).rstrip("\n"))
+
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _has_table(con: sqlite3.Connection, table: str) -> bool:
+    """Check if a SQLite table exists."""
+    row = _fetchone(con, "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+    return bool(row)
+
+
+def _parse_int(val: str | None, default: int) -> int:
+    """Parse an integer query-string value, returning *default* on failure."""
+    raw = str(val or "").strip()
+    if not raw:
+        return int(default)
+    try:
+        return int(raw)
+    except Exception:
+        return int(default)
+
+
+# ── Decision Trace API (AQC-805) ────────────────────────────────────────
+
+
+def build_decisions_list(
+    mode: str,
+    *,
+    symbol: str | None = None,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+    event_type: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """List decision events with optional filters and pagination."""
+    mode2 = (mode or "paper").strip().lower()
+    db_path, _log_path = mode_paths(mode2)
+
+    limit = max(1, min(1000, int(limit)))
+    offset = max(0, int(offset))
+
+    if not db_path.exists():
+        return {"data": [], "total": 0, "limit": limit, "offset": offset, "error": "db_missing"}
+
+    try:
+        con = connect_db_ro(db_path)
+    except Exception as e:
+        return {"data": [], "total": 0, "limit": limit, "offset": offset, "error": f"db_open_failed:{e}"}
+
+    try:
+        if not _has_table(con, "decision_events"):
+            return {"data": [], "total": 0, "limit": limit, "offset": offset}
+
+        where_clauses: list[str] = []
+        params: list[Any] = []
+
+        if symbol:
+            where_clauses.append("symbol = ?")
+            params.append(symbol.strip().upper())
+        if start_ms is not None:
+            where_clauses.append("timestamp_ms >= ?")
+            params.append(int(start_ms))
+        if end_ms is not None:
+            where_clauses.append("timestamp_ms <= ?")
+            params.append(int(end_ms))
+        if event_type:
+            where_clauses.append("event_type = ?")
+            params.append(event_type.strip())
+        if status:
+            where_clauses.append("status = ?")
+            params.append(status.strip())
+
+        where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+        count_row = _fetchone(con, f"SELECT COUNT(*) AS total FROM decision_events{where_sql}", tuple(params))
+        total = int(count_row["total"]) if count_row and count_row.get("total") is not None else 0
+
+        rows = _fetchall(
+            con,
+            f"""
+            SELECT id, timestamp_ms, symbol, event_type, status, decision_phase,
+                   parent_decision_id, trade_id, triggered_by, action_taken,
+                   rejection_reason, context_json
+            FROM decision_events
+            {where_sql}
+            ORDER BY timestamp_ms DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            tuple(params) + (limit, offset),
+        )
+
+        return {"data": rows, "total": total, "limit": limit, "offset": offset}
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
+def build_decision_detail(mode: str, decision_id: str) -> dict[str, Any] | None:
+    """Fetch a single decision event with its context and gate evaluations."""
+    mode2 = (mode or "paper").strip().lower()
+    db_path, _log_path = mode_paths(mode2)
+
+    if not db_path.exists():
+        return None
+
+    try:
+        con = connect_db_ro(db_path)
+    except Exception:
+        return None
+
+    try:
+        if not _has_table(con, "decision_events"):
+            return None
+
+        decision = _fetchone(
+            con,
+            """
+            SELECT id, timestamp_ms, symbol, event_type, status, decision_phase,
+                   parent_decision_id, trade_id, triggered_by, action_taken,
+                   rejection_reason, context_json
+            FROM decision_events WHERE id = ?
+            """,
+            (decision_id,),
+        )
+        if not decision:
+            return None
+
+        context: list[dict[str, Any]] = []
+        if _has_table(con, "decision_context"):
+            context = _fetchall(
+                con,
+                "SELECT * FROM decision_context WHERE decision_id = ?",
+                (decision_id,),
+            )
+
+        gates: list[dict[str, Any]] = []
+        if _has_table(con, "gate_evaluations"):
+            gates = _fetchall(
+                con,
+                """
+                SELECT id, decision_id, gate_name, gate_passed, metric_value,
+                       threshold_value, operator, explanation
+                FROM gate_evaluations WHERE decision_id = ?
+                ORDER BY id ASC
+                """,
+                (decision_id,),
+            )
+
+        return {"decision": decision, "context": context, "gates": gates}
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
+def build_trade_decision_trace(mode: str, trade_id: int) -> dict[str, Any]:
+    """Build the entry-to-exit decision chain for a trade."""
+    mode2 = (mode or "paper").strip().lower()
+    db_path, _log_path = mode_paths(mode2)
+
+    if not db_path.exists():
+        return {"chain": [], "lineage": None, "error": "db_missing"}
+
+    try:
+        con = connect_db_ro(db_path)
+    except Exception as e:
+        return {"chain": [], "lineage": None, "error": f"db_open_failed:{e}"}
+
+    try:
+        if not _has_table(con, "decision_lineage") or not _has_table(con, "decision_events"):
+            return {"chain": [], "lineage": None}
+
+        # Find lineage rows that reference this trade (as entry or exit).
+        lineage_rows = _fetchall(
+            con,
+            """
+            SELECT id, signal_decision_id, entry_trade_id, exit_decision_id,
+                   exit_trade_id, exit_reason, duration_ms
+            FROM decision_lineage
+            WHERE entry_trade_id = ? OR exit_trade_id = ?
+            """,
+            (trade_id, trade_id),
+        )
+
+        # Use first lineage row as the primary lineage record.
+        lineage = lineage_rows[0] if lineage_rows else None
+
+        # Collect all decision IDs and trade IDs referenced by lineage.
+        decision_ids: set[str] = set()
+        trade_ids: set[int] = set()
+        for row in lineage_rows:
+            if row.get("signal_decision_id"):
+                decision_ids.add(row["signal_decision_id"])
+            if row.get("exit_decision_id"):
+                decision_ids.add(row["exit_decision_id"])
+            if row.get("entry_trade_id") is not None:
+                trade_ids.add(int(row["entry_trade_id"]))
+            if row.get("exit_trade_id") is not None:
+                trade_ids.add(int(row["exit_trade_id"]))
+
+        # Also include decision_events directly linked to these trade_ids.
+        if trade_ids:
+            ph = _placeholders(len(trade_ids))
+            trade_linked = _fetchall(
+                con,
+                f"SELECT id FROM decision_events WHERE trade_id IN ({ph})",
+                tuple(trade_ids),
+            )
+            for r in trade_linked:
+                decision_ids.add(r["id"])
+
+        if not decision_ids:
+            return {"chain": [], "lineage": lineage}
+
+        # Fetch all matching decision events, ordered chronologically.
+        ph = _placeholders(len(decision_ids))
+        chain = _fetchall(
+            con,
+            f"""
+            SELECT id, timestamp_ms, symbol, event_type, status,
+                   decision_phase, parent_decision_id, trade_id,
+                   triggered_by, action_taken, rejection_reason, context_json
+            FROM decision_events
+            WHERE id IN ({ph})
+            ORDER BY timestamp_ms ASC, id ASC
+            """,
+            tuple(decision_ids),
+        )
+
+        return {"chain": chain, "lineage": lineage}
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
+def build_decision_gates(mode: str, decision_id: str) -> dict[str, Any] | None:
+    """Fetch gate evaluations for a single decision."""
+    mode2 = (mode or "paper").strip().lower()
+    db_path, _log_path = mode_paths(mode2)
+
+    if not db_path.exists():
+        return None
+
+    try:
+        con = connect_db_ro(db_path)
+    except Exception:
+        return None
+
+    try:
+        if not _has_table(con, "decision_events"):
+            return None
+
+        # Verify the decision exists.
+        decision = _fetchone(con, "SELECT id FROM decision_events WHERE id = ?", (decision_id,))
+        if not decision:
+            return None
+
+        gates: list[dict[str, Any]] = []
+        if _has_table(con, "gate_evaluations"):
+            gates = _fetchall(
+                con,
+                """
+                SELECT id, decision_id, gate_name, gate_passed, metric_value,
+                       threshold_value, operator, explanation
+                FROM gate_evaluations WHERE decision_id = ?
+                ORDER BY id ASC
+                """,
+                (decision_id,),
+            )
+
+        return {"gates": gates}
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
+# ── Decision Replay API (AQC-806) ───────────────────────────────────────
+
+
+# Column → IndicatorSnapshot field mapping for the kernel's MarketEvent.
+_CTX_TO_INDICATOR: dict[str, str] = {
+    "price": "close",
+    "rsi": "rsi",
+    "adx": "adx",
+    "adx_slope": "adx_slope",
+    "macd_hist": "macd_hist",
+    "ema_fast": "ema_fast",
+    "ema_slow": "ema_slow",
+    "ema_macro": "ema_macro",
+    "bb_width_ratio": "bb_width_ratio",
+    "stoch_k": "stoch_rsi_k",
+    "stoch_d": "stoch_rsi_d",
+    "atr": "atr",
+    "atr_slope": "atr_slope",
+    "volume": "volume",
+    "vol_sma": "vol_sma",
+}
+
+# Gate name → GateResult field mapping.
+_GATE_NAME_TO_FIELD: dict[str, str] = {
+    "ranging": "is_ranging",
+    "gate_ranging": "is_ranging",
+    "anomaly": "is_anomaly",
+    "gate_anomaly": "is_anomaly",
+    "extension": "is_extended",
+    "gate_extension": "is_extended",
+    "volume": "vol_confirm",
+    "gate_volume": "vol_confirm",
+    "adx_rising": "is_trending_up",
+    "gate_adx_rising": "is_trending_up",
+    "adx_threshold": "adx_above_min",
+    "adx": "adx_above_min",
+    "gate_adx": "adx_above_min",
+    "btc_alignment": "btc_ok_long",
+    "gate_btc_alignment": "btc_ok_long",
+}
+
+# Inverted gates: gate_passed=1 means the condition is NOT active.
+_INVERTED_GATES: set[str] = {
+    "is_ranging",
+    "is_anomaly",
+    "is_extended",
+}
+
+
+def _build_indicators_from_context(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Build a partial IndicatorSnapshot dict from a decision_context row."""
+    indicators: dict[str, Any] = {
+        "close": 0.0, "high": 0.0, "low": 0.0, "open": 0.0,
+        "volume": 0.0, "t": 0,
+        "ema_slow": 0.0, "ema_fast": 0.0, "ema_macro": 0.0,
+        "adx": 0.0, "adx_pos": 0.0, "adx_neg": 0.0, "adx_slope": 0.0,
+        "bb_upper": 0.0, "bb_lower": 0.0, "bb_width": 0.0,
+        "bb_width_avg": 0.0, "bb_width_ratio": 0.0,
+        "atr": 0.0, "atr_slope": 0.0, "avg_atr": 0.0,
+        "rsi": 50.0,
+        "stoch_rsi_k": 50.0, "stoch_rsi_d": 50.0,
+        "macd_hist": 0.0, "prev_macd_hist": 0.0,
+        "prev2_macd_hist": 0.0, "prev3_macd_hist": 0.0,
+        "vol_sma": 0.0, "vol_trend": False,
+        "prev_close": 0.0, "prev_ema_fast": 0.0, "prev_ema_slow": 0.0,
+        "bar_count": 100, "funding_rate": 0.0,
+    }
+    for ctx_col, ind_field in _CTX_TO_INDICATOR.items():
+        val = ctx.get(ctx_col)
+        if val is not None:
+            indicators[ind_field] = float(val)
+    # Also copy price → high/low/open for a minimal snapshot.
+    price = ctx.get("price")
+    if price is not None:
+        p = float(price)
+        indicators["close"] = p
+        indicators["high"] = p
+        indicators["low"] = p
+        indicators["open"] = p
+        indicators["prev_close"] = p
+    return indicators
+
+
+def _build_gate_result_from_evaluations(gates: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build a GateResult dict from gate_evaluations rows."""
+    result: dict[str, Any] = {
+        "is_ranging": False, "is_anomaly": False, "is_extended": False,
+        "vol_confirm": True, "is_trending_up": True, "adx_above_min": True,
+        "bullish_alignment": False, "bearish_alignment": False,
+        "btc_ok_long": True, "btc_ok_short": True,
+        "effective_min_adx": 20.0, "bb_width_ratio": 0.0, "dynamic_tp_mult": 1.0,
+        "rsi_long_limit": 70.0, "rsi_short_limit": 30.0,
+        "stoch_k": 50.0, "stoch_d": 50.0, "stoch_rsi_active": False,
+        "all_gates_pass": True,
+    }
+    for g in gates:
+        gate_name = str(g.get("gate_name", "")).strip().lower()
+        passed = bool(g.get("gate_passed", 0))
+        field = _GATE_NAME_TO_FIELD.get(gate_name)
+        if field:
+            if field in _INVERTED_GATES:
+                # For inverted gates: passed=True means NOT ranging/anomaly/extended.
+                result[field] = not passed
+            else:
+                result[field] = passed
+    # Recompute all_gates_pass from constituent gates.
+    result["all_gates_pass"] = (
+        result["adx_above_min"]
+        and not result["is_ranging"]
+        and not result["is_anomaly"]
+        and not result["is_extended"]
+        and result["vol_confirm"]
+        and result["is_trending_up"]
+    )
+    return result
+
+
+def _infer_signal(event_type: str, action_taken: str | None) -> str:
+    """Map decision event_type + action_taken to a MarketSignal string."""
+    et = (event_type or "").strip().lower()
+    act = (action_taken or "").strip().lower()
+    if et in ("entry_signal", "gate_block"):
+        if "short" in act or "sell" in act:
+            return "Sell"
+        return "Buy"
+    if et in ("exit_check", "exit_signal"):
+        return "PriceUpdate"
+    if et == "fill":
+        if "short" in act or "sell" in act:
+            return "Sell"
+        return "Buy"
+    # Default to Buy for unknown entry-like events.
+    return "Buy"
+
+
+def _compute_replay_diff(
+    original_event: dict[str, Any],
+    original_gates: list[dict[str, Any]],
+    replayed: dict[str, Any],
+) -> dict[str, Any]:
+    """Compare original decision outcome vs replayed kernel result."""
+    details: list[str] = []
+
+    # --- Gate comparison ---
+    replayed_diag = replayed.get("diagnostics") or {}
+    replayed_thresholds = replayed_diag.get("applied_thresholds") or []
+    replayed_gate_blocked = replayed_diag.get("gate_blocked", False)
+
+    # Build original gate pass/fail map.
+    orig_gate_map: dict[str, bool] = {}
+    for g in original_gates:
+        gn = str(g.get("gate_name", "")).strip().lower()
+        orig_gate_map[gn] = bool(g.get("gate_passed", 0))
+
+    # Build replayed gate map from applied_thresholds.
+    replay_gate_map: dict[str, bool] = {}
+    for t in replayed_thresholds:
+        tn = str(t.get("name", "")).strip().lower()
+        replay_gate_map[tn] = bool(t.get("passed", False))
+
+    gates_match = True
+    for gn, orig_passed in orig_gate_map.items():
+        # Try exact match, then normalized forms.
+        replay_passed = replay_gate_map.get(gn)
+        if replay_passed is None:
+            # Try with _gate suffix / prefix variations.
+            for rn, rp in replay_gate_map.items():
+                if gn in rn or rn in gn:
+                    replay_passed = rp
+                    break
+        if replay_passed is not None and replay_passed != orig_passed:
+            gates_match = False
+            details.append(f"gate '{gn}': original={orig_passed}, replayed={replay_passed}")
+
+    # --- Outcome comparison ---
+    orig_status = str(original_event.get("status", "")).strip().lower()
+    orig_approved = orig_status in ("executed", "approved", "filled")
+
+    replayed_intents = replayed.get("intents") or []
+    replay_approved = len(replayed_intents) > 0 and not replayed_gate_blocked
+
+    outcome_match = orig_approved == replay_approved
+    if not outcome_match:
+        details.append(
+            f"outcome: original={'approved' if orig_approved else 'rejected'}, "
+            f"replayed={'approved' if replay_approved else 'rejected'}"
+        )
+
+    return {
+        "gates_match": gates_match,
+        "outcome_match": outcome_match,
+        "details": details,
+    }
+
+
+def build_decision_replay(
+    mode: str,
+    decision_id: str,
+    *,
+    state_override_json: str | None = None,
+) -> dict[str, Any]:
+    """Replay a decision through the kernel and diff against the original.
+
+    Returns a dict with ``ok``, ``decision_id``, ``original``, ``replayed``,
+    and ``diff`` keys.
+    """
+    if not _BT_RUNTIME_OK:
+        return {"ok": False, "error": "bt_runtime_not_available", "decision_id": decision_id}
+
+    mode2 = (mode or "paper").strip().lower()
+    db_path, _log_path = mode_paths(mode2)
+
+    if not db_path.exists():
+        return {"ok": False, "error": "db_missing", "decision_id": decision_id}
+
+    try:
+        con = connect_db_ro(db_path)
+    except Exception as e:
+        return {"ok": False, "error": f"db_open_failed:{e}", "decision_id": decision_id}
+
+    try:
+        if not _has_table(con, "decision_events"):
+            return {"ok": False, "error": "table_missing", "decision_id": decision_id}
+
+        # 1. Fetch the original decision event.
+        decision = _fetchone(
+            con,
+            """
+            SELECT id, timestamp_ms, symbol, event_type, status, decision_phase,
+                   parent_decision_id, trade_id, triggered_by, action_taken,
+                   rejection_reason, context_json
+            FROM decision_events WHERE id = ?
+            """,
+            (decision_id,),
+        )
+        if not decision:
+            return {"ok": False, "error": "not_found", "decision_id": decision_id}
+
+        # 2. Fetch indicator context.
+        ctx: dict[str, Any] = {}
+        if _has_table(con, "decision_context"):
+            ctx_row = _fetchone(
+                con,
+                "SELECT * FROM decision_context WHERE decision_id = ?",
+                (decision_id,),
+            )
+            if ctx_row:
+                ctx = ctx_row
+
+        # 3. Fetch gate evaluations.
+        gates: list[dict[str, Any]] = []
+        if _has_table(con, "gate_evaluations"):
+            gates = _fetchall(
+                con,
+                """
+                SELECT id, decision_id, gate_name, gate_passed, metric_value,
+                       threshold_value, operator, explanation
+                FROM gate_evaluations WHERE decision_id = ?
+                ORDER BY id ASC
+                """,
+                (decision_id,),
+            )
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+    # 4. Build indicator snapshot from context.
+    indicators = _build_indicators_from_context(ctx)
+
+    # Build original response summary.
+    original_indicators = {k: v for k, v in ctx.items() if k not in ("decision_id", "symbol")}
+    original = {
+        "event_type": decision.get("event_type"),
+        "status": decision.get("status"),
+        "action_taken": decision.get("action_taken"),
+        "indicators": original_indicators,
+        "gates": gates,
+    }
+
+    # 5. Build gate result from evaluations.
+    gate_result = _build_gate_result_from_evaluations(gates)
+
+    # Carry over alignment from context if available.
+    if ctx.get("bullish_alignment") is not None:
+        gate_result["bullish_alignment"] = bool(ctx["bullish_alignment"])
+    if ctx.get("bearish_alignment") is not None:
+        gate_result["bearish_alignment"] = bool(ctx["bearish_alignment"])
+
+    # 6. Build the MarketEvent JSON.
+    signal = _infer_signal(
+        decision.get("event_type", ""),
+        decision.get("action_taken"),
+    )
+    event_json_obj: dict[str, Any] = {
+        "schema_version": 8,
+        "event_id": abs(hash(decision_id)) % (2**63),
+        "timestamp_ms": decision.get("timestamp_ms", 0),
+        "symbol": decision.get("symbol", "BTCUSDT"),
+        "signal": signal,
+        "price": float(ctx.get("price", 0) or 0),
+        "indicators": indicators if signal == "PriceUpdate" else None,
+        "gate_result": gate_result if signal in ("Buy", "Sell") else None,
+    }
+
+    # 7. Load strategy state.
+    if state_override_json:
+        state_json = state_override_json
+    else:
+        state_path = _find_kernel_state_path(db_path)
+        if state_path is None:
+            return {
+                "ok": False, "error": "kernel_state_not_found",
+                "decision_id": decision_id, "original": original,
+            }
+        try:
+            state_json = _bt_runtime.load_state(str(state_path))
+        except Exception as e:
+            return {
+                "ok": False, "error": f"load_state_failed:{e}",
+                "decision_id": decision_id, "original": original,
+            }
+
+    # 8. Load or default kernel params.
+    params_json: str | None = None
+    params_path = db_path.parent / "kernel_params.json"
+    if params_path.exists():
+        try:
+            params_json = params_path.read_text(encoding="utf-8")
+        except Exception:
+            params_json = None
+    if not params_json:
+        try:
+            params_json = _bt_runtime.default_kernel_params_json()
+        except Exception:
+            params_json = '{"schema_version":8}'
+
+    # 9. Call the kernel.
+    event_json_str = json.dumps(event_json_obj)
+    try:
+        result_json = _bt_runtime.step_decision(state_json, event_json_str, params_json)
+    except Exception as e:
+        return {
+            "ok": False, "error": f"step_decision_failed:{e}",
+            "decision_id": decision_id, "original": original,
+        }
+
+    try:
+        replayed = json.loads(result_json)
+    except Exception as e:
+        return {
+            "ok": False, "error": f"result_parse_failed:{e}",
+            "decision_id": decision_id, "original": original,
+        }
+
+    # 10. Compute diff.
+    diff = _compute_replay_diff(decision, gates, replayed)
+
+    return {
+        "ok": True,
+        "decision_id": decision_id,
+        "original": original,
+        "replayed": {
+            "intents": replayed.get("intents", []),
+            "fills": replayed.get("fills", []),
+            "diagnostics": replayed.get("diagnostics", {}),
+        },
+        "diff": diff,
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "aiq-monitor/0.1"
 
@@ -1566,6 +2595,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send_headers(200, "application/json; charset=utf-8", 0)
             return
 
+        if path == "/metrics":
+            self._send_headers(200, "text/plain; charset=utf-8", 0)
+            return
+
         self._send_headers(404, "text/plain; charset=utf-8", 0)
 
     def do_GET(self) -> None:  # noqa: N802
@@ -1618,6 +2651,121 @@ class Handler(BaseHTTPRequestHandler):
             mode = (qs.get("mode") or ["paper"])[0]
             snap = STATE.get_snapshot_cached(mode, lambda: build_snapshot(mode))
             self._send_json(snap)
+            return
+
+        # ── Decision Trace API v2 (AQC-805) ────────────────────────────
+        if path == "/api/v2/decisions":
+            qs = parse_qs(parsed.query or "")
+            mode = (qs.get("mode") or ["paper"])[0]
+            symbol = (qs.get("symbol") or [None])[0]
+            start_ms = _parse_int((qs.get("start") or [None])[0], 0) or None
+            end_ms = _parse_int((qs.get("end") or [None])[0], 0) or None
+            event_type = (qs.get("event_type") or [None])[0]
+            status = (qs.get("status") or [None])[0]
+            limit = _parse_int((qs.get("limit") or ["100"])[0], 100)
+            offset = _parse_int((qs.get("offset") or ["0"])[0], 0)
+            result = build_decisions_list(
+                mode,
+                symbol=symbol,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                event_type=event_type,
+                status=status,
+                limit=limit,
+                offset=offset,
+            )
+            self._send_json(result)
+            return
+
+        _m_decision_gates = re.match(r"^/api/v2/decisions/([^/]+)/gates$", path)
+        if _m_decision_gates:
+            qs = parse_qs(parsed.query or "")
+            mode = (qs.get("mode") or ["paper"])[0]
+            decision_id = _m_decision_gates.group(1)
+            result = build_decision_gates(mode, decision_id)
+            if result is None:
+                self._send_json({"error": "not_found"}, status=404)
+            else:
+                self._send_json(result)
+            return
+
+        _m_decision_detail = re.match(r"^/api/v2/decisions/([^/]+)$", path)
+        if _m_decision_detail:
+            qs = parse_qs(parsed.query or "")
+            mode = (qs.get("mode") or ["paper"])[0]
+            decision_id = _m_decision_detail.group(1)
+            result = build_decision_detail(mode, decision_id)
+            if result is None:
+                self._send_json({"error": "not_found"}, status=404)
+            else:
+                self._send_json(result)
+            return
+
+        _m_trade_trace = re.match(r"^/api/v2/trades/(\d+)/decision-trace$", path)
+        if _m_trade_trace:
+            qs = parse_qs(parsed.query or "")
+            mode = (qs.get("mode") or ["paper"])[0]
+            trade_id = int(_m_trade_trace.group(1))
+            result = build_trade_decision_trace(mode, trade_id)
+            self._send_json(result)
+            return
+
+        if path == "/api/metrics":
+            qs = parse_qs(parsed.query or "")
+            mode = (qs.get("mode") or ["paper"])[0]
+            self._send_json(build_metrics(mode))
+            return
+
+        if path == "/metrics":
+            qs = parse_qs(parsed.query or "")
+            mode = (qs.get("mode") or ["paper"])[0]
+            self._send_text(build_prometheus_metrics(mode))
+            return
+
+        self._send_text("not found", status=404)
+
+    # ── POST endpoints ───────────────────────────────────────────────
+    def do_POST(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        path = parsed.path or "/"
+
+        # Read request body.
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except (TypeError, ValueError):
+            content_length = 0
+        raw_body = self.rfile.read(content_length) if content_length > 0 else b""
+
+        if path == "/api/v2/decisions/replay":
+            try:
+                body = json.loads(raw_body) if raw_body else {}
+            except (json.JSONDecodeError, ValueError):
+                self._send_json({"ok": False, "error": "invalid_json"}, status=400)
+                return
+
+            decision_id = body.get("decision_id")
+            if not decision_id:
+                self._send_json({"ok": False, "error": "missing_decision_id"}, status=400)
+                return
+
+            qs = parse_qs(parsed.query or "")
+            mode = (qs.get("mode") or ["paper"])[0]
+            state_override_json = body.get("state_override_json")
+
+            result = build_decision_replay(
+                mode,
+                str(decision_id),
+                state_override_json=state_override_json,
+            )
+
+            if result.get("error") == "not_found":
+                self._send_json(result, status=404)
+            elif result.get("error") == "bt_runtime_not_available":
+                self._send_json(result, status=503)
+            elif not result.get("ok"):
+                self._send_json(result, status=500)
+            else:
+                self._send_json(result)
             return
 
         self._send_text("not found", status=404)

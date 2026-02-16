@@ -8,8 +8,10 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 
 use crate::config::Confidence;
+use crate::engine::DecisionKernelTrace;
 use crate::engine::GateStats;
 use crate::position::{SignalRecord, TradeRecord};
+use crate::reason_codes::{classify_reason_code, ReasonCode};
 
 // ---------------------------------------------------------------------------
 // Report types (all Serialize for JSON output)
@@ -42,11 +44,15 @@ pub struct SimReport {
     // Breakdowns
     pub by_confidence: Vec<ConfidenceBucket>,
     pub by_exit_reason: Vec<ExitBucket>,
+    pub by_reason_code: Vec<ReasonCodeBucket>,
     pub by_symbol: Vec<SymbolBucket>,
     pub by_side: Vec<SideBucket>,
 
     // Gate stats
     pub gate_stats: GateStatsReport,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision_diagnostics: Option<Vec<DecisionKernelTrace>>,
 
     // Optional (large payloads, gated by flags)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -67,6 +73,14 @@ pub struct ConfidenceBucket {
 #[derive(Debug, Clone, Serialize)]
 pub struct ExitBucket {
     pub reason: String,
+    pub trades: u32,
+    pub pnl: f64,
+    pub win_rate: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReasonCodeBucket {
+    pub reason_code: ReasonCode,
     pub trades: u32,
     pub pnl: f64,
     pub win_rate: f64,
@@ -98,6 +112,7 @@ pub struct TradeReportEntry {
     pub pnl: f64,
     pub fee: f64,
     pub reason: String,
+    pub reason_code: ReasonCode,
     pub confidence: String,
     pub balance: f64,
 }
@@ -223,6 +238,7 @@ pub fn build_report(
     // ── Breakdowns ───────────────────────────────────────────────────────
     let by_confidence = build_confidence_breakdown(&closes);
     let by_exit_reason = build_exit_reason_breakdown(&closes);
+    let by_reason_code = build_reason_code_breakdown(&closes);
     let by_symbol = build_symbol_breakdown(&closes);
     let by_side = build_side_breakdown(&closes);
 
@@ -265,6 +281,7 @@ pub fn build_report(
                     pnl: tr.pnl,
                     fee: tr.fee_usd,
                     reason: tr.reason.clone(),
+                    reason_code: classify_reason_code(&tr.action, &tr.reason),
                     confidence: tr.confidence.to_string(),
                     balance: tr.balance,
                 })
@@ -301,9 +318,11 @@ pub fn build_report(
         neutral_pct,
         by_confidence,
         by_exit_reason,
+        by_reason_code,
         by_symbol,
         by_side,
         gate_stats: gate_report,
+        decision_diagnostics: None,
         equity_curve: eq_curve,
         trades: trade_entries,
     }
@@ -462,6 +481,33 @@ fn build_exit_reason_breakdown(closes: &[&TradeRecord]) -> Vec<ExitBucket> {
         .collect()
 }
 
+fn build_reason_code_breakdown(closes: &[&TradeRecord]) -> Vec<ReasonCodeBucket> {
+    let mut map: BTreeMap<ReasonCode, (u32, f64, u32)> = BTreeMap::new();
+
+    for tr in closes {
+        let code = classify_reason_code(&tr.action, &tr.reason);
+        let entry = map.entry(code).or_insert((0, 0.0, 0));
+        entry.0 += 1;
+        entry.1 += tr.pnl;
+        if tr.pnl > 0.0 {
+            entry.2 += 1;
+        }
+    }
+
+    map.into_iter()
+        .map(|(reason_code, (trades, pnl, wins))| ReasonCodeBucket {
+            reason_code,
+            trades,
+            pnl,
+            win_rate: if trades > 0 {
+                wins as f64 / trades as f64
+            } else {
+                0.0
+            },
+        })
+        .collect()
+}
+
 /// Normalise exit reason strings into canonical categories.
 fn categorize_exit(reason: &str) -> String {
     if reason.contains("Stop Loss") {
@@ -591,6 +637,7 @@ mod tests {
             margin_used: 3.33,
             mae_usd: 0.0,
             mfe_usd: 0.0,
+            exit_context: None,
         }
     }
 

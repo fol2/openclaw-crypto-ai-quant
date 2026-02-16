@@ -8,8 +8,8 @@ use bt_core::candle::CandleData;
 use bt_core::config::StrategyConfig;
 use bt_core::indicators::IndicatorBank;
 
-use bytemuck::Zeroable;
 use crate::buffers::GpuSnapshot;
+use bytemuck::Zeroable;
 
 /// Result of CPU precomputation for one indicator config.
 pub struct PrecomputeResult {
@@ -27,6 +27,14 @@ pub struct PrecomputeResult {
     pub timestamps: Vec<i64>,
     /// EMA slow slope history per symbol per bar for slow-drift signal.
     pub ema_slow_slopes: Vec<f32>,
+}
+
+fn make_indicator_bank(cfg: &StrategyConfig) -> IndicatorBank {
+    IndicatorBank::new_with_ave_window(
+        &cfg.indicators,
+        cfg.filters.use_stoch_rsi_filter,
+        cfg.effective_ave_avg_atr_window(),
+    )
 }
 
 /// Precompute indicator snapshots for all symbols across all timestamps.
@@ -67,10 +75,7 @@ pub fn precompute_snapshots(
         .collect();
 
     // Initialize indicator banks per symbol
-    let mut banks: Vec<IndicatorBank> = symbols
-        .iter()
-        .map(|_| IndicatorBank::new(&cfg.indicators, cfg.filters.use_stoch_rsi_filter))
-        .collect();
+    let mut banks: Vec<IndicatorBank> = symbols.iter().map(|_| make_indicator_bank(cfg)).collect();
 
     // EMA slow history per symbol (for slope computation)
     let slope_window = cfg.thresholds.entry.slow_drift_slope_window;
@@ -80,7 +85,8 @@ pub fn precompute_snapshots(
     let total_slots = num_bars * num_symbols;
     let mut snapshots = vec![GpuSnapshot::zeroed(); total_slots];
     let mut breadth = vec![50.0f32; num_bars];
-    let mut btc_bullish = vec![0u32; num_bars];
+    // 0 = bearish, 1 = bullish, 2 = unavailable.
+    let mut btc_bullish = vec![2u32; num_bars];
     let mut ema_slow_slopes = vec![0.0f32; total_slots];
 
     // BTC symbol index
@@ -106,8 +112,7 @@ pub fn precompute_snapshots(
                 ema_slow_histories[sym_idx].push(snap.ema_slow);
 
                 // Compute EMA slow slope
-                let slope = if ema_slow_histories[sym_idx].len() >= slope_window
-                    && snap.close > 0.0
+                let slope = if ema_slow_histories[sym_idx].len() >= slope_window && snap.close > 0.0
                 {
                     let h = &ema_slow_histories[sym_idx];
                     let current = h[h.len() - 1];
@@ -200,5 +205,45 @@ pub fn precompute_snapshots(
         num_symbols,
         timestamps: all_ts,
         ema_slow_slopes,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bt_core::candle::OhlcvBar;
+
+    #[test]
+    fn test_precompute_bank_uses_threshold_ave_window() {
+        let mut cfg = StrategyConfig::default();
+        cfg.indicators.ave_avg_atr_window = 2;
+        cfg.thresholds.entry.ave_avg_atr_window = 4;
+
+        let mut bank = make_indicator_bank(&cfg);
+        for i in 0..3 {
+            bank.update(&OhlcvBar {
+                t: i * 60_000,
+                t_close: i * 60_000 + 59_999,
+                o: 100.0 + i as f64,
+                h: 101.0 + i as f64,
+                l: 99.0 + i as f64,
+                c: 100.5 + i as f64,
+                v: 10_000.0,
+                n: 100,
+            });
+        }
+        assert!(!bank.avg_atr.full());
+
+        bank.update(&OhlcvBar {
+            t: 3 * 60_000,
+            t_close: 3 * 60_000 + 59_999,
+            o: 103.0,
+            h: 104.0,
+            l: 102.0,
+            c: 103.5,
+            v: 10_000.0,
+            n: 100,
+        });
+        assert!(bank.avg_atr.full());
     }
 }

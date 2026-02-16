@@ -4,102 +4,13 @@
 //! YAML merge hierarchy: defaults <- global <- per-symbol <- live.
 
 use serde::Deserialize;
-use std::fmt;
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
 // Enums
 // ---------------------------------------------------------------------------
 
-/// Signal direction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Signal {
-    Buy,
-    Sell,
-    Neutral,
-}
-
-/// Confidence tier for entry and add filters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
-pub enum Confidence {
-    #[default]
-    Low = 0,
-    Medium = 1,
-    High = 2,
-}
-
-impl Confidence {
-    pub fn from_str(s: &str) -> Self {
-        match s.to_ascii_lowercase().as_str() {
-            "low" => Confidence::Low,
-            "medium" => Confidence::Medium,
-            "high" => Confidence::High,
-            _ => Confidence::High,
-        }
-    }
-}
-
-impl fmt::Display for Confidence {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Confidence::Low => write!(f, "low"),
-            Confidence::Medium => write!(f, "medium"),
-            Confidence::High => write!(f, "high"),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for Confidence {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        Ok(Confidence::from_str(&s))
-    }
-}
-
-/// MACD histogram gating mode for trend entries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MacdMode {
-    /// Require MACD_hist > prev_MACD_hist (acceleration).
-    Accel,
-    /// Require MACD_hist > 0 for BUY, < 0 for SELL.
-    Sign,
-    /// Ignore MACD_hist gate.
-    None,
-}
-
-impl MacdMode {
-    pub fn from_str(s: &str) -> Self {
-        match s.to_ascii_lowercase().as_str() {
-            "accel" => MacdMode::Accel,
-            "sign" => MacdMode::Sign,
-            "none" => MacdMode::None,
-            _ => MacdMode::Accel,
-        }
-    }
-}
-
-impl fmt::Display for MacdMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            MacdMode::Accel => write!(f, "accel"),
-            MacdMode::Sign => write!(f, "sign"),
-            MacdMode::None => write!(f, "none"),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for MacdMode {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        Ok(MacdMode::from_str(&s))
-    }
-}
+pub use bt_signals::{Confidence, MacdMode, Signal};
 
 // ---------------------------------------------------------------------------
 // Trade config
@@ -666,6 +577,13 @@ impl Default for StrategyConfig {
     }
 }
 
+impl StrategyConfig {
+    /// Canonical AVE average ATR window for runtime indicator paths.
+    pub fn effective_ave_avg_atr_window(&self) -> usize {
+        self.thresholds.entry.ave_avg_atr_window
+    }
+}
+
 // ---------------------------------------------------------------------------
 // YAML overlay structure
 // ---------------------------------------------------------------------------
@@ -825,12 +743,20 @@ fn trade_to_json(t: &TradeConfig) -> serde_json::Value {
         "enable_breakeven_stop": t.enable_breakeven_stop,
         "breakeven_start_atr": t.breakeven_start_atr,
         "breakeven_buffer_atr": t.breakeven_buffer_atr,
+        "trailing_start_atr_low_conf": t.trailing_start_atr_low_conf,
+        "trailing_distance_atr_low_conf": t.trailing_distance_atr_low_conf,
+        "smart_exit_adx_exhaustion_lt": t.smart_exit_adx_exhaustion_lt,
+        "smart_exit_adx_exhaustion_lt_low_conf": t.smart_exit_adx_exhaustion_lt_low_conf,
         "enable_rsi_overextension_exit": t.enable_rsi_overextension_exit,
         "rsi_exit_profit_atr_switch": t.rsi_exit_profit_atr_switch,
         "rsi_exit_ub_lo_profit": t.rsi_exit_ub_lo_profit,
         "rsi_exit_ub_hi_profit": t.rsi_exit_ub_hi_profit,
         "rsi_exit_lb_lo_profit": t.rsi_exit_lb_lo_profit,
         "rsi_exit_lb_hi_profit": t.rsi_exit_lb_hi_profit,
+        "rsi_exit_ub_lo_profit_low_conf": t.rsi_exit_ub_lo_profit_low_conf,
+        "rsi_exit_ub_hi_profit_low_conf": t.rsi_exit_ub_hi_profit_low_conf,
+        "rsi_exit_lb_lo_profit_low_conf": t.rsi_exit_lb_lo_profit_low_conf,
+        "rsi_exit_lb_hi_profit_low_conf": t.rsi_exit_lb_hi_profit_low_conf,
         "reentry_cooldown_minutes": t.reentry_cooldown_minutes,
         "reentry_cooldown_min_mins": t.reentry_cooldown_min_mins,
         "reentry_cooldown_max_mins": t.reentry_cooldown_max_mins,
@@ -966,11 +892,24 @@ fn engine_to_json(e: &EngineConfig) -> serde_json::Value {
 ///
 ///   defaults <- global <- symbols.<symbol> <- live (if `is_live`)
 ///
-/// If `yaml_path` does not exist, returns `StrategyConfig::default()`.
+/// If `yaml_path` does not exist, prints a warning to stderr and returns `StrategyConfig::default()`.
 pub fn load_config(yaml_path: &str, symbol: Option<&str>, is_live: bool) -> StrategyConfig {
     let path = Path::new(yaml_path);
-    if !path.exists() {
-        return StrategyConfig::default();
+    match std::fs::metadata(path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let cwd = std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "<unknown>".to_string());
+            eprintln!(
+                "[config] Warning: YAML config file does not exist: {yaml_path} (cwd: {cwd}). Using defaults."
+            );
+            return StrategyConfig::default();
+        }
+        Err(_) => {
+            // Preserve the previous behaviour: treat other metadata errors as "missing" and fall back silently.
+            return StrategyConfig::default();
+        }
     }
 
     let raw = match std::fs::read_to_string(path) {
@@ -1049,6 +988,14 @@ mod tests {
         assert!((cfg.thresholds.entry.min_adx - 22.0).abs() < f64::EPSILON);
         assert_eq!(cfg.thresholds.entry.macd_hist_entry_mode, MacdMode::Accel);
         assert!((cfg.thresholds.stoch_rsi.block_long_if_k_gt - 0.85).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_effective_ave_window_uses_thresholds_entry() {
+        let mut cfg = StrategyConfig::default();
+        cfg.indicators.ave_avg_atr_window = 7;
+        cfg.thresholds.entry.ave_avg_atr_window = 33;
+        assert_eq!(cfg.effective_ave_avg_atr_window(), 33);
     }
 
     #[test]
