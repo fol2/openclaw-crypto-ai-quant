@@ -421,7 +421,87 @@ pub fn check_smart_exits_codegen() -> String { String::new() /* stub */ }
 pub fn check_all_exits_codegen() -> String { String::new() /* stub */ }
 
 /// Entry sizing: dynamic sizing/leverage/vol scalar (AQC-1230)
-pub fn compute_entry_size_codegen() -> String { String::new() /* stub */ }
+///
+/// Generates a CUDA `__device__` function that mirrors
+/// `risk-core/src/lib.rs::compute_entry_sizing`.
+///
+/// Uses `double` precision for all monetary/size calculations to match the f64
+/// Rust source and satisfy T2 precision requirements.  Returns a struct with
+/// `size`, `margin`, and `leverage` — a local `SizingResultD` definition is
+/// emitted to avoid colliding with the hand-written `float` struct in
+/// `sweep_engine.cu`.
+pub fn compute_entry_size_codegen() -> String {
+    r#"// Derived from bt-core/src/engine.rs sizing logic
+// (SSOT: risk-core/src/lib.rs::compute_entry_sizing)
+//
+// Dynamic entry sizing: allocation % * confidence mult * ADX mult * vol scalar.
+// Dynamic leverage selects per-confidence leverage with optional max cap.
+// All monetary/size arithmetic in double precision (AQC-734).
+
+struct SizingResultD {
+    double size;
+    double margin;
+    double leverage;
+};
+
+__device__ SizingResultD compute_entry_size_codegen(
+    double equity,
+    double price,
+    unsigned int confidence,
+    double atr,
+    double adx,
+    const GpuComboConfig& cfg
+) {
+    // ── Base margin allocation ───────────────────────────────────────────
+    double margin = equity * (double)cfg.allocation_pct;
+
+    // ── Dynamic sizing (confidence * ADX * volatility) ──────────────────
+    if (cfg.enable_dynamic_sizing != 0u) {
+        // Confidence multiplier
+        double conf_mult = (double)cfg.confidence_mult_medium;
+        if (confidence == CONF_HIGH) { conf_mult = (double)cfg.confidence_mult_high; }
+        if (confidence == CONF_LOW)  { conf_mult = (double)cfg.confidence_mult_low; }
+
+        // ADX multiplier — linearly scales [min_mult, 1.0] over [0, full_adx]
+        double adx_ratio = adx / (double)cfg.adx_sizing_full_adx;
+        double adx_mult = fmax(fmin(adx_ratio, 1.0), (double)cfg.adx_sizing_min_mult);
+
+        // Volatility scalar — inverse of vol_ratio, clamped to [min, max]
+        double vol_scalar = 1.0;
+        if ((double)cfg.vol_baseline_pct > 0.0 && price > 0.0) {
+            double vol_ratio = (atr / price) / (double)cfg.vol_baseline_pct;
+            if (vol_ratio > 0.0) {
+                vol_scalar = fmax(fmin(1.0 / vol_ratio, (double)cfg.vol_scalar_max),
+                                  (double)cfg.vol_scalar_min);
+            }
+        }
+
+        margin *= conf_mult * adx_mult * vol_scalar;
+    }
+
+    // ── Leverage ─────────────────────────────────────────────────────────
+    double lev = (double)cfg.leverage;
+    if (cfg.enable_dynamic_leverage != 0u) {
+        if (confidence == CONF_HIGH)        { lev = (double)cfg.leverage_high; }
+        else if (confidence == CONF_MEDIUM) { lev = (double)cfg.leverage_medium; }
+        else                                { lev = (double)cfg.leverage_low; }
+        if ((double)cfg.leverage_max_cap > 0.0) { lev = fmin(lev, (double)cfg.leverage_max_cap); }
+    }
+
+    // ── Notional & position size ─────────────────────────────────────────
+    double notional = margin * lev;
+    double size = 0.0;
+    if (price > 0.0) { size = notional / price; }
+
+    SizingResultD result;
+    result.size = size;
+    result.margin = margin;
+    result.leverage = lev;
+    return result;
+}
+"#
+    .to_string()
+}
 
 /// PESC cooldown: reentry cooldown + ADX interpolation (AQC-1231)
 pub fn is_pesc_blocked_codegen() -> String { String::new() /* stub */ }
@@ -1031,6 +1111,265 @@ mod tests {
     #[test]
     fn tp_codegen_is_nonempty() {
         let src = check_tp_codegen();
+        assert!(
+            src.len() > 200,
+            "generated code must be substantial, got {} bytes",
+            src.len()
+        );
+    }
+
+    // -- compute_entry_size_codegen tests (AQC-1230) --------------------------
+
+    #[test]
+    fn sizing_codegen_has_correct_function_signature() {
+        let src = compute_entry_size_codegen();
+        assert!(
+            src.contains("__device__ SizingResultD compute_entry_size_codegen("),
+            "must declare a __device__ SizingResultD function"
+        );
+        assert!(
+            src.contains("const GpuComboConfig& cfg"),
+            "must take GpuComboConfig by const ref"
+        );
+        assert!(
+            src.contains("double equity"),
+            "must take equity as double"
+        );
+        assert!(
+            src.contains("double price"),
+            "must take price as double"
+        );
+        assert!(
+            src.contains("unsigned int confidence"),
+            "must take confidence as unsigned int"
+        );
+        assert!(
+            src.contains("double atr"),
+            "must take atr as double"
+        );
+        assert!(
+            src.contains("double adx"),
+            "must take adx as double"
+        );
+    }
+
+    #[test]
+    fn sizing_codegen_emits_result_struct() {
+        let src = compute_entry_size_codegen();
+        assert!(
+            src.contains("struct SizingResultD"),
+            "must define SizingResultD struct"
+        );
+        assert!(
+            src.contains("double size;"),
+            "SizingResultD must have double size field"
+        );
+        assert!(
+            src.contains("double margin;"),
+            "SizingResultD must have double margin field"
+        );
+        assert!(
+            src.contains("double leverage;"),
+            "SizingResultD must have double leverage field"
+        );
+    }
+
+    #[test]
+    fn sizing_codegen_uses_double_precision() {
+        let src = compute_entry_size_codegen();
+        assert!(src.contains("double margin ="), "margin must be double");
+        assert!(src.contains("double conf_mult"), "conf_mult must be double");
+        assert!(src.contains("double adx_mult"), "adx_mult must be double");
+        assert!(src.contains("double vol_scalar"), "vol_scalar must be double");
+        assert!(src.contains("double lev"), "lev must be double");
+        assert!(src.contains("double notional"), "notional must be double");
+        assert!(src.contains("double size"), "size must be double");
+        // Must NOT use float for monetary variables
+        assert!(
+            !src.contains("float margin"),
+            "margin must be double, not float"
+        );
+        assert!(
+            !src.contains("float notional"),
+            "notional must be double, not float"
+        );
+    }
+
+    #[test]
+    fn sizing_codegen_contains_confidence_multiplier() {
+        let src = compute_entry_size_codegen();
+        assert!(
+            src.contains("cfg.confidence_mult_high"),
+            "must use confidence_mult_high from config"
+        );
+        assert!(
+            src.contains("cfg.confidence_mult_medium"),
+            "must use confidence_mult_medium from config"
+        );
+        assert!(
+            src.contains("cfg.confidence_mult_low"),
+            "must use confidence_mult_low from config"
+        );
+        assert!(src.contains("CONF_HIGH"), "must check CONF_HIGH");
+        assert!(src.contains("CONF_LOW"), "must check CONF_LOW");
+    }
+
+    #[test]
+    fn sizing_codegen_contains_adx_multiplier() {
+        let src = compute_entry_size_codegen();
+        assert!(
+            src.contains("cfg.adx_sizing_full_adx"),
+            "must use adx_sizing_full_adx from config"
+        );
+        assert!(
+            src.contains("cfg.adx_sizing_min_mult"),
+            "must use adx_sizing_min_mult from config"
+        );
+        assert!(
+            src.contains("adx_mult"),
+            "must compute adx_mult"
+        );
+    }
+
+    #[test]
+    fn sizing_codegen_contains_vol_scalar() {
+        let src = compute_entry_size_codegen();
+        assert!(
+            src.contains("cfg.vol_baseline_pct"),
+            "must use vol_baseline_pct from config"
+        );
+        assert!(
+            src.contains("cfg.vol_scalar_min"),
+            "must use vol_scalar_min from config"
+        );
+        assert!(
+            src.contains("cfg.vol_scalar_max"),
+            "must use vol_scalar_max from config"
+        );
+        assert!(
+            src.contains("vol_ratio"),
+            "must compute vol_ratio"
+        );
+        assert!(
+            src.contains("1.0 / vol_ratio"),
+            "vol_scalar is inverse of vol_ratio"
+        );
+    }
+
+    #[test]
+    fn sizing_codegen_contains_dynamic_sizing_gate() {
+        let src = compute_entry_size_codegen();
+        assert!(
+            src.contains("cfg.enable_dynamic_sizing != 0u"),
+            "must gate dynamic sizing on config flag"
+        );
+    }
+
+    #[test]
+    fn sizing_codegen_contains_dynamic_leverage() {
+        let src = compute_entry_size_codegen();
+        assert!(
+            src.contains("cfg.enable_dynamic_leverage != 0u"),
+            "must gate dynamic leverage on config flag"
+        );
+        assert!(
+            src.contains("cfg.leverage_high"),
+            "must use leverage_high from config"
+        );
+        assert!(
+            src.contains("cfg.leverage_medium"),
+            "must use leverage_medium from config"
+        );
+        assert!(
+            src.contains("cfg.leverage_low"),
+            "must use leverage_low from config"
+        );
+        assert!(
+            src.contains("cfg.leverage_max_cap"),
+            "must use leverage_max_cap from config"
+        );
+    }
+
+    #[test]
+    fn sizing_codegen_contains_base_leverage_fallback() {
+        let src = compute_entry_size_codegen();
+        assert!(
+            src.contains("cfg.leverage"),
+            "must fall back to base leverage when dynamic leverage disabled"
+        );
+    }
+
+    #[test]
+    fn sizing_codegen_contains_notional_and_size() {
+        let src = compute_entry_size_codegen();
+        assert!(
+            src.contains("margin * lev"),
+            "notional = margin * leverage"
+        );
+        assert!(
+            src.contains("notional / price"),
+            "size = notional / price"
+        );
+    }
+
+    #[test]
+    fn sizing_codegen_handles_zero_price() {
+        let src = compute_entry_size_codegen();
+        assert!(
+            src.contains("price > 0.0"),
+            "must guard against zero/negative price"
+        );
+    }
+
+    #[test]
+    fn sizing_codegen_uses_allocation_pct() {
+        let src = compute_entry_size_codegen();
+        assert!(
+            src.contains("cfg.allocation_pct"),
+            "must use allocation_pct from config"
+        );
+        assert!(
+            src.contains("equity * (double)cfg.allocation_pct"),
+            "base margin = equity * allocation_pct"
+        );
+    }
+
+    #[test]
+    fn sizing_codegen_uses_fmax_fmin() {
+        let src = compute_entry_size_codegen();
+        assert!(src.contains("fmax("), "must use fmax for CUDA");
+        assert!(src.contains("fmin("), "must use fmin for CUDA");
+        assert!(
+            !src.contains("std::max"),
+            "must not use std::max (use fmax for CUDA)"
+        );
+        assert!(
+            !src.contains("std::min"),
+            "must not use std::min (use fmin for CUDA)"
+        );
+    }
+
+    #[test]
+    fn sizing_codegen_has_source_comment() {
+        let src = compute_entry_size_codegen();
+        assert!(
+            src.contains("Derived from bt-core/src/engine.rs sizing logic"),
+            "must reference the Rust SSOT source file"
+        );
+    }
+
+    #[test]
+    fn sizing_codegen_applies_multipliers_to_margin() {
+        let src = compute_entry_size_codegen();
+        assert!(
+            src.contains("margin *= conf_mult * adx_mult * vol_scalar"),
+            "dynamic sizing multiplies margin by all three factors"
+        );
+    }
+
+    #[test]
+    fn sizing_codegen_is_nonempty() {
+        let src = compute_entry_size_codegen();
         assert!(
             src.len() > 200,
             "generated code must be substantial, got {} bytes",
