@@ -159,6 +159,7 @@ _ALERT_QUEUE_MAX = max(10, min(5000, _env_int("AI_QUANT_ALERT_QUEUE_MAX", 200)))
 _ALERT_QUEUE: queue.Queue[tuple[str, str, str]] = queue.Queue(maxsize=_ALERT_QUEUE_MAX)
 _ALERT_WORKER_STARTED = False
 _ALERT_DROPPED_COUNT = 0
+_ALERT_DROPPED_COUNT_LOCK = threading.Lock()
 
 
 def _alert_worker() -> None:
@@ -186,6 +187,18 @@ def _ensure_worker_started() -> None:
         t = threading.Thread(target=_alert_worker, name="aiq_alert_sender", daemon=True)
         t.start()
         _ALERT_WORKER_STARTED = True
+
+
+def _note_alert_drop() -> None:
+    global _ALERT_DROPPED_COUNT
+    with _ALERT_DROPPED_COUNT_LOCK:
+        _ALERT_DROPPED_COUNT += 1
+        dropped_count = _ALERT_DROPPED_COUNT
+    if dropped_count % 100 == 1:
+        _alert_logger.warning(
+            "Alert queue full; dropped %d alert(s) total",
+            dropped_count,
+        )
 
 
 def send_alert(message: str, *, extra: dict[str, Any] | None = None) -> None:
@@ -230,10 +243,4 @@ def send_alert(message: str, *, extra: dict[str, Any] | None = None) -> None:
         except Exception:
             # Drop when overloaded; correctness > notifications.
             # Rate-limit the warning to avoid log spam when the queue is persistently full.
-            global _ALERT_DROPPED_COUNT
-            _ALERT_DROPPED_COUNT += 1
-            if _ALERT_DROPPED_COUNT % 100 == 1:
-                _alert_logger.warning(
-                    "Alert queue full; dropped %d alert(s) total",
-                    _ALERT_DROPPED_COUNT,
-                )
+            _note_alert_drop()
