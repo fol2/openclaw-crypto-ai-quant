@@ -3,6 +3,8 @@ Description=OpenClaw AI Quant Hyperliquid Live Trader Daemon
 After=network-online.target openclaw-ai-quant-ws-sidecar.service
 Wants=network-online.target
 Requires=openclaw-ai-quant-ws-sidecar.service
+StartLimitBurst=5
+StartLimitIntervalSec=60
 
 [Service]
 Type=simple
@@ -41,8 +43,6 @@ ReadWritePaths=$PROJECT_DIR
 MemoryMax=512M
 TasksMax=256
 TimeoutStopSec=15
-StartLimitBurst=5
-StartLimitIntervalSec=60
 
 [Install]
 WantedBy=default.target

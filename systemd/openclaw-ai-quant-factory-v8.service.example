@@ -3,6 +3,8 @@ Description=OpenClaw AI Quant Nightly Strategy Factory Cycle (v8 parallel instan
 After=network-online.target openclaw-ai-quant-ws-sidecar-v8.service
 Wants=network-online.target
 Requires=openclaw-ai-quant-ws-sidecar-v8.service
+StartLimitBurst=5
+StartLimitIntervalSec=60
 
 [Service]
 Type=oneshot
@@ -39,8 +41,6 @@ ReadWritePaths=$PROJECT_DIR
 MemoryMax=1G
 TasksMax=256
 TimeoutStopSec=15
-StartLimitBurst=5
-StartLimitIntervalSec=60
 
 [Install]
 WantedBy=default.target

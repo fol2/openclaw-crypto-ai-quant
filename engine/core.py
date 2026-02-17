@@ -1579,13 +1579,12 @@ class UnifiedEngine:
         def _handle_sigterm(signum, frame):
             nonlocal _shutdown_requested
             _shutdown_requested = True
-            logger.info("SIGTERM received, will exit after current iteration")
 
         signal.signal(signal.SIGTERM, _handle_sigterm)
 
         while True:
             if _shutdown_requested:
-                logger.info("Graceful shutdown complete")
+                logger.info("SIGTERM received — graceful shutdown")
                 break
 
             loop_start = time.time()

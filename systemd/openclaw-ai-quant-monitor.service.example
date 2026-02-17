@@ -2,6 +2,8 @@
 Description=OpenClaw AI Quant Monitor Dashboard
 After=network-online.target openclaw-ai-quant-ws-sidecar.service
 Wants=network-online.target openclaw-ai-quant-ws-sidecar.service
+StartLimitBurst=5
+StartLimitIntervalSec=60
 
 [Service]
 Type=simple
@@ -30,8 +32,6 @@ ReadWritePaths=$PROJECT_DIR
 MemoryMax=256M
 TasksMax=256
 TimeoutStopSec=15
-StartLimitBurst=5
-StartLimitIntervalSec=60
 
 [Install]
 WantedBy=default.target

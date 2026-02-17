@@ -2,6 +2,8 @@
 Description=OpenClaw AI Quant Funding Rates Fetch (v8 parallel instance)
 After=network-online.target
 Wants=network-online.target
+StartLimitBurst=5
+StartLimitIntervalSec=60
 
 [Service]
 Type=oneshot
@@ -27,8 +29,6 @@ ReadWritePaths=$PROJECT_DIR
 MemoryMax=256M
 TasksMax=256
 TimeoutStopSec=15
-StartLimitBurst=5
-StartLimitIntervalSec=60
 
 [Install]
 WantedBy=default.target

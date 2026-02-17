@@ -1,5 +1,7 @@
 [Unit]
 Description=OpenClaw AI Quant Prune Runtime Logs (SQLite)
+StartLimitBurst=5
+StartLimitIntervalSec=60
 
 [Service]
 Type=oneshot
@@ -25,8 +27,6 @@ ReadWritePaths=$PROJECT_DIR
 MemoryMax=256M
 TasksMax=256
 TimeoutStopSec=15
-StartLimitBurst=5
-StartLimitIntervalSec=60
 
 [Install]
 WantedBy=default.target
