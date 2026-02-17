@@ -1068,11 +1068,14 @@ def main() -> None:
         )
         secrets = live_trader.load_live_secrets(secrets_path)
 
-        executor = live_trader.HyperliquidLiveExecutor(
-            secret_key=secrets.secret_key,
-            main_address=secrets.main_address,
-            timeout_s=_hl_timeout_s(),
-        )
+        try:
+            executor = live_trader.HyperliquidLiveExecutor(
+                secret_key=secrets.secret_key,
+                main_address=secrets.main_address,
+                timeout_s=_hl_timeout_s(),
+            )
+        except Exception:
+            raise RuntimeError("Executor init failed — check secrets and network") from None
         trader = live_trader.LiveTrader(executor=executor)
         # Used by the engine to subscribe to WS user channels.
         trader.secrets = secrets
