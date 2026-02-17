@@ -44,6 +44,10 @@ impl RingBuf {
         self.len
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     /// Iterate over values in insertion order (oldest first).
     pub fn iter(&self) -> RingBufIter<'_> {
         RingBufIter {
