@@ -61,6 +61,14 @@ impl AdxIndicator {
     }
 
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> AdxOutput {
+        if self.window == 0 {
+            return AdxOutput {
+                adx: 0.0,
+                adx_pos: 0.0,
+                adx_neg: 0.0,
+            };
+        }
+
         match self.phase {
             Phase::Init => {
                 self.prev_high = high;
@@ -199,5 +207,29 @@ impl AdxIndicator {
             0.0
         };
         (di_pos, di_neg, dx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AdxIndicator;
+
+    #[test]
+    fn zero_window_returns_zero_without_nan() {
+        let mut adx = AdxIndicator::new(0);
+        let first = adx.update(101.0, 99.0, 100.0);
+        assert_eq!(first.adx, 0.0);
+        assert_eq!(first.adx_pos, 0.0);
+        assert_eq!(first.adx_neg, 0.0);
+
+        for _ in 0..8 {
+            let out = adx.update(102.0, 98.0, 100.0);
+            assert_eq!(out.adx, 0.0);
+            assert_eq!(out.adx_pos, 0.0);
+            assert_eq!(out.adx_neg, 0.0);
+            assert!(out.adx.is_finite());
+            assert!(out.adx_pos.is_finite());
+            assert!(out.adx_neg.is_finite());
+        }
     }
 }

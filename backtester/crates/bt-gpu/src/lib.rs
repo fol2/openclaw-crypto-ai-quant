@@ -62,6 +62,17 @@ pub(crate) fn sorted_symbols_with_kernel_cap(
     symbols
 }
 
+fn usize_to_u32(label: &str, value: usize) -> Result<u32, String> {
+    u32::try_from(value).map_err(|_| format!("{label} {value} exceeds u32::MAX"))
+}
+
+fn checked_offset_u32(label: &str, lhs: usize, rhs: usize) -> Result<u32, String> {
+    let value = lhs
+        .checked_mul(rhs)
+        .ok_or_else(|| format!("{label} overflow: {lhs} * {rhs}"))?;
+    usize_to_u32(label, value)
+}
+
 /// Run a GPU-accelerated parameter sweep.
 ///
 /// **All-GPU pipeline**: Raw candles uploaded once → indicator kernel computes
@@ -151,6 +162,21 @@ fn run_gpu_sweep_internal(
 
     let symbols = sorted_symbols_with_kernel_cap(candles, "[GPU]");
     let num_symbols = symbols.len();
+    let num_symbols_u32 = match usize_to_u32("num_symbols", num_symbols) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[GPU] {e} — skipping GPU sweep");
+            return (
+                Vec::new(),
+                if capture_states {
+                    Some(Vec::new())
+                } else {
+                    None
+                },
+                symbols,
+            );
+        }
+    };
 
     // BTC symbol index for breadth kernel.
     // Use u32::MAX sentinel when unavailable, so kernels can treat alignment as unknown.
@@ -173,8 +199,19 @@ fn run_gpu_sweep_internal(
     let num_bars = match u32::try_from(raw.num_bars) {
         Ok(n) => n,
         Err(_) => {
-            eprintln!("[GPU] num_bars {} exceeds u32::MAX — skipping GPU sweep", raw.num_bars);
-            return (Vec::new(), if capture_states { Some(Vec::new()) } else { None }, symbols);
+            eprintln!(
+                "[GPU] num_bars {} exceeds u32::MAX — skipping GPU sweep",
+                raw.num_bars
+            );
+            return (
+                Vec::new(),
+                if capture_states {
+                    Some(Vec::new())
+                } else {
+                    None
+                },
+                symbols,
+            );
         }
     };
 
@@ -216,7 +253,15 @@ fn run_gpu_sweep_internal(
         Ok(buf) => buf,
         Err(e) => {
             eprintln!("[GPU] candle upload failed: {e} — skipping GPU sweep");
-            return (Vec::new(), if capture_states { Some(Vec::new()) } else { None }, symbols);
+            return (
+                Vec::new(),
+                if capture_states {
+                    Some(Vec::new())
+                } else {
+                    None
+                },
+                symbols,
+            );
         }
     };
 
@@ -280,20 +325,34 @@ fn run_gpu_sweep_internal(
         Some(v) => v,
         None => {
             eprintln!("[GPU] overflow: num_bars * num_symbols — skipping GPU sweep");
-            return (Vec::new(), if capture_states { Some(Vec::new()) } else { None }, symbols);
+            return (
+                Vec::new(),
+                if capture_states {
+                    Some(Vec::new())
+                } else {
+                    None
+                },
+                symbols,
+            );
         }
     };
     let snapshot_bytes_per_ind: usize = match snapshot_elements
         .checked_mul(std::mem::size_of::<buffers::GpuSnapshot>())
-        .and_then(|v| v.checked_add(
-            (num_bars as usize).checked_mul(std::mem::size_of::<f32>())?))
-        .and_then(|v| v.checked_add(
-            (num_bars as usize).checked_mul(std::mem::size_of::<u32>())?))
+        .and_then(|v| v.checked_add((num_bars as usize).checked_mul(std::mem::size_of::<f32>())?))
+        .and_then(|v| v.checked_add((num_bars as usize).checked_mul(std::mem::size_of::<u32>())?))
     {
         Some(v) => v,
         None => {
             eprintln!("[GPU] overflow: snapshot_bytes_per_ind calculation — skipping GPU sweep");
-            return (Vec::new(), if capture_states { Some(Vec::new()) } else { None }, symbols);
+            return (
+                Vec::new(),
+                if capture_states {
+                    Some(Vec::new())
+                } else {
+                    None
+                },
+                symbols,
+            );
         }
     };
 
@@ -308,14 +367,30 @@ fn run_gpu_sweep_internal(
         Some(v) => v,
         None => {
             eprintln!("[GPU] overflow: t * combo_bytes — skipping GPU sweep");
-            return (Vec::new(), if capture_states { Some(Vec::new()) } else { None }, symbols);
+            return (
+                Vec::new(),
+                if capture_states {
+                    Some(Vec::new())
+                } else {
+                    None
+                },
+                symbols,
+            );
         }
     };
     let per_ind_total_vram = match snapshot_bytes_per_ind.checked_add(t_combo_bytes) {
         Some(v) => v,
         None => {
             eprintln!("[GPU] overflow: per_ind_total_vram — skipping GPU sweep");
-            return (Vec::new(), if capture_states { Some(Vec::new()) } else { None }, symbols);
+            return (
+                Vec::new(),
+                if capture_states {
+                    Some(Vec::new())
+                } else {
+                    None
+                },
+                symbols,
+            );
         }
     };
 
@@ -380,7 +455,7 @@ fn run_gpu_sweep_internal(
             &candles_gpu,
             &ind_configs,
             num_bars,
-            u32::try_from(num_symbols).expect("num_symbols exceeds u32::MAX"),
+            num_symbols_u32,
             btc_sym_idx,
             paxg_sym_idx,
         ) {
@@ -398,7 +473,7 @@ fn run_gpu_sweep_internal(
         }
 
         // c. Build K×T GpuComboConfigs with per-combo offsets
-        let snapshot_stride = (num_bars as usize) * num_symbols;
+        let snapshot_stride = snapshot_elements;
         let breadth_stride = num_bars as usize;
 
         // Also need per-indicator StrategyConfig for trade params
@@ -416,25 +491,51 @@ fn run_gpu_sweep_internal(
         let total_combos = k * t;
         let mut gpu_configs = Vec::with_capacity(total_combos);
         let mut combo_meta: Vec<(usize, usize)> = Vec::with_capacity(total_combos);
+        let mut skip_batch = false;
 
         for (ind_idx, (_ind_combo, ind_cfg)) in ind_cfgs.iter().enumerate() {
-            let snap_off =
-                u32::try_from(ind_idx * snapshot_stride).expect("snapshot offset exceeds u32::MAX");
-            let br_off =
-                u32::try_from(ind_idx * breadth_stride).expect("breadth offset exceeds u32::MAX");
+            let snap_off = match checked_offset_u32("snapshot offset", ind_idx, snapshot_stride) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("[GPU] {e} — skipping batch");
+                    skip_batch = true;
+                    break;
+                }
+            };
+            let br_off = match checked_offset_u32("breadth offset", ind_idx, breadth_stride) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("[GPU] {e} — skipping batch");
+                    skip_batch = true;
+                    break;
+                }
+            };
 
             for (trade_idx, trade_overrides) in trade_combos.iter().enumerate() {
                 let mut cfg = ind_cfg.clone();
                 for (path, value) in trade_overrides {
                     bt_core::sweep::apply_one_pub(&mut cfg, path, *value);
                 }
-                let mut gpu_cfg = buffers::GpuComboConfig::from_strategy_config(&cfg)
-                    .expect("f64→f32 overflow in GpuComboConfig");
+                let mut gpu_cfg = match buffers::GpuComboConfig::from_strategy_config(&cfg) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("[GPU] invalid combo config conversion: {e} — skipping batch");
+                        skip_batch = true;
+                        break;
+                    }
+                };
                 gpu_cfg.snapshot_offset = snap_off;
                 gpu_cfg.breadth_offset = br_off;
                 gpu_configs.push(gpu_cfg);
                 combo_meta.push((ind_idx, trade_idx));
             }
+            if skip_batch {
+                break;
+            }
+        }
+        if skip_batch {
+            done += chunk.len();
+            continue;
         }
 
         // d. Dispatch trade kernel using VRAM-resident indicator data
@@ -696,5 +797,31 @@ mod tests {
 
         let out = crate::sorted_symbols_with_kernel_cap(&candles, "[test]");
         assert_eq!(out, vec!["BTC".to_string(), "ETH".to_string()]);
+    }
+
+    #[test]
+    fn usize_to_u32_rejects_overflow() {
+        let err = crate::usize_to_u32("num_symbols", usize::MAX);
+        assert!(err.is_err());
+        assert!(
+            err.unwrap_err().contains("exceeds u32::MAX"),
+            "overflow error should mention u32 bound"
+        );
+    }
+
+    #[test]
+    fn checked_offset_u32_rejects_mul_overflow() {
+        let err = crate::checked_offset_u32("snapshot offset", usize::MAX, 2);
+        assert!(err.is_err());
+        assert!(
+            err.unwrap_err().contains("overflow"),
+            "overflow error should mention multiplication overflow"
+        );
+    }
+
+    #[test]
+    fn checked_offset_u32_accepts_valid_values() {
+        let off = crate::checked_offset_u32("snapshot offset", 7, 9).unwrap();
+        assert_eq!(off, 63);
     }
 }

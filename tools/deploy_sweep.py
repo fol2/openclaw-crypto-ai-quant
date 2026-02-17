@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Deploy optimised sweep results to live/paper config with optional position close + restart.
+"""Deploy optimised sweep results to paper/live config with safety gates.
 
 Usage:
     python deploy_sweep.py --sweep-results sweep_results.jsonl --rank 1 --dry-run
-    python deploy_sweep.py --sweep-results sweep_results.jsonl --rank 1 --close-paper --restart --yes
-    python deploy_sweep.py --sweep-results sweep_results.jsonl --rank 1 --close-live --close-paper --restart --yes
+    python deploy_sweep.py --sweep-results sweep_results.jsonl --rank 1 --yaml-path ./paper.yaml --no-live --yes
+    python deploy_sweep.py --sweep-results sweep_results.jsonl --rank 1 --allow-live --close-live --restart --yes
 """
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -15,19 +16,48 @@ import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
 import yaml
+
+try:
+    from tools.config_id import config_id_from_yaml_text
+except ImportError:  # pragma: no cover
+    from config_id import config_id_from_yaml_text  # type: ignore[no-redef]
+
+try:
+    from tools.deploy_validate import validate_yaml_text
+except ImportError:  # pragma: no cover
+    from deploy_validate import validate_yaml_text  # type: ignore[no-redef]
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
 YAML_PATH = os.path.join(PROJECT_DIR, "config", "strategy_overrides.yaml")
 CHANGELOG_PATH = os.path.join(PROJECT_DIR, "strategy_changelog.json")
+DEFAULT_ARTIFACTS_DIR = os.path.join(PROJECT_DIR, "artifacts")
 PAPER_DB = os.path.join(PROJECT_DIR, "trading_engine.db")
 LIVE_DB = os.path.join(PROJECT_DIR, "trading_engine_live.db")
 DEFAULT_SECRETS_PATH = os.path.expanduser("~/.config/openclaw/ai-quant-secrets.json")
 SECRETS_PATH = os.path.expanduser(
     str(os.getenv("AI_QUANT_SECRETS_PATH") or DEFAULT_SECRETS_PATH)
 )
+
+
+def _is_live_target_yaml(path: str) -> bool:
+    return Path(path).expanduser().resolve() == Path(YAML_PATH).expanduser().resolve()
+
+
+def _no_live_guard_error(*, no_live: bool, yaml_path: str, close_live: bool, restart: bool) -> str | None:
+    if not no_live:
+        return None
+    if _is_live_target_yaml(yaml_path):
+        return "Refusing live YAML deployment while --no-live guard is enabled."
+    if close_live:
+        return "Refusing --close-live while --no-live guard is enabled."
+    if restart:
+        return "Refusing --restart while --no-live guard is enabled (restarts live service)."
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +97,62 @@ def _backup_yaml(path: str):
     shutil.copy2(path, backup)
     print(f"[deploy] Backed up YAML → {backup}", file=sys.stderr)
     return backup
+
+
+def _atomic_write_text(path: str, text: str) -> None:
+    target = Path(path).expanduser().resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.tmp.{int(time.time() * 1000)}")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(str(tmp), str(target))
+    finally:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _write_deploy_event(
+    *,
+    artifacts_dir: str,
+    yaml_path: str,
+    prev_text: str,
+    next_text: str,
+    selected: dict[str, Any],
+    rank: int,
+    no_live: bool,
+) -> str:
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    next_hash = _sha256_text(next_text)
+    out_dir = Path(artifacts_dir).expanduser().resolve() / "deployments" / "sweep" / f"{ts}_{next_hash[:12]}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    event = {
+        "mode": "sweep_deploy",
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "yaml_path": str(Path(yaml_path).expanduser().resolve()),
+        "no_live_guard": bool(no_live),
+        "selection": {
+            "rank": int(rank),
+            "config_id": config_id_from_yaml_text(next_text),
+            "total_pnl": selected.get("total_pnl"),
+            "total_trades": selected.get("total_trades"),
+        },
+        "hashes": {
+            "prev_yaml_sha256": _sha256_text(prev_text) if prev_text else "",
+            "next_yaml_sha256": next_hash,
+        },
+    }
+    (out_dir / "deploy_event.json").write_text(
+        json.dumps(event, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (out_dir / "next_config.yaml").write_text(next_text, encoding="utf-8")
+    if prev_text:
+        (out_dir / "prev_config.yaml").write_text(prev_text, encoding="utf-8")
+    return str(out_dir)
 
 
 def _set_nested(data: dict, dotpath: str, value):
@@ -293,18 +379,44 @@ def restart_services():
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
+def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="Deploy sweep-optimised config")
     parser.add_argument("--sweep-results", required=True, help="Path to sweep results JSONL file")
     parser.add_argument("--rank", type=int, default=1, help="Pick Nth best result (1 = best PnL)")
+    parser.add_argument("--yaml-path", default=YAML_PATH, help="Target YAML path to update.")
+    parser.add_argument("--artifacts-dir", default=DEFAULT_ARTIFACTS_DIR, help="Artifacts root for deploy events.")
     parser.add_argument("--close-live", action="store_true", help="Close all live positions before deploy")
     parser.add_argument("--close-paper", action="store_true", help="Close all paper positions before deploy")
     parser.add_argument("--restart", action="store_true", help="Restart paper + live services after deploy")
     parser.add_argument("--dry-run", action="store_true", help="Show changes without applying")
     parser.add_argument("--yes", action="store_true", help="Skip confirmation prompt")
+    parser.set_defaults(no_live=True)
+    parser.add_argument(
+        "--no-live",
+        dest="no_live",
+        action="store_true",
+        help="Safety guard (default): block live-target writes/close-live/restart.",
+    )
+    parser.add_argument(
+        "--allow-live",
+        dest="no_live",
+        action="store_false",
+        help="Disable the --no-live guard (use with care).",
+    )
     parser.add_argument("--version", type=str, default=None,
                         help="Version tag for changelog (auto-incremented if omitted)")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+
+    yaml_path = str(Path(args.yaml_path).expanduser().resolve())
+    guard_err = _no_live_guard_error(
+        no_live=bool(args.no_live),
+        yaml_path=yaml_path,
+        close_live=bool(args.close_live),
+        restart=bool(args.restart),
+    )
+    if guard_err:
+        print(f"[deploy] {guard_err} Use --allow-live to override.", file=sys.stderr)
+        sys.exit(2)
 
     # Load sweep results
     results = load_sweep_results(args.sweep_results)
@@ -327,11 +439,35 @@ def main():
     overrides = {k: float(v) for k, v in overrides.items()}
 
     # Load current YAML
-    current_data = _load_yaml(YAML_PATH)
+    current_data = _load_yaml(yaml_path)
 
     # Show diff + metrics
     show_diff(current_data, overrides)
     show_metrics(selected)
+
+    # Build candidate config text and run deployment-time validation before
+    # any side effects (closing positions / writing files / restarting services).
+    int_params = {
+        "max_open_positions", "max_adds_per_symbol", "add_cooldown_minutes",
+        "reentry_cooldown_minutes", "reentry_cooldown_min_mins", "reentry_cooldown_max_mins",
+        "max_entry_orders_per_loop", "adx_window", "ema_fast_window", "ema_slow_window",
+        "bb_window", "ema_macro_window", "atr_window", "rsi_window", "bb_width_avg_window",
+        "vol_sma_window", "vol_trend_window", "stoch_rsi_window", "stoch_rsi_smooth1",
+        "stoch_rsi_smooth2", "slow_drift_slope_window", "min_signals",
+    }
+    for path, value in overrides.items():
+        param_name = path.split(".")[-1]
+        if param_name in int_params and value == int(value):
+            value = int(value)
+        _set_nested(current_data, path, value)
+
+    next_yaml_text = yaml.safe_dump(current_data, sort_keys=False)
+    errs = validate_yaml_text(next_yaml_text)
+    if errs:
+        print("[deploy] Invalid config YAML after applying sweep overrides:", file=sys.stderr)
+        for e in errs:
+            print(f"  - {e}", file=sys.stderr)
+        sys.exit(1)
 
     if args.dry_run:
         print("[deploy] --dry-run: no changes applied.", file=sys.stderr)
@@ -358,28 +494,21 @@ def main():
             print("[deploy] Paper close failed. Aborting deploy.", file=sys.stderr)
             sys.exit(1)
 
-    # Backup + apply YAML changes
-    _backup_yaml(YAML_PATH)
+    prev_text = Path(yaml_path).read_text(encoding="utf-8") if Path(yaml_path).exists() else ""
+    _backup_yaml(yaml_path)
+    _atomic_write_text(yaml_path, next_yaml_text)
 
-    for path, value in overrides.items():
-        # Convert float to int if it's a whole number and looks like an integer param
-        int_params = {
-            "max_open_positions", "max_adds_per_symbol", "add_cooldown_minutes",
-            "reentry_cooldown_minutes", "reentry_cooldown_min_mins", "reentry_cooldown_max_mins",
-            "max_entry_orders_per_loop", "adx_window", "ema_fast_window", "ema_slow_window",
-            "bb_window", "ema_macro_window", "atr_window", "rsi_window", "bb_width_avg_window",
-            "vol_sma_window", "vol_trend_window", "stoch_rsi_window", "stoch_rsi_smooth1",
-            "stoch_rsi_smooth2", "slow_drift_slope_window", "min_signals",
-        }
-        param_name = path.split(".")[-1]
-        if param_name in int_params and value == int(value):
-            value = int(value)
-        _set_nested(current_data, path, value)
-
-    with open(YAML_PATH, "w", encoding="utf-8") as f:
-        yaml.safe_dump(current_data, f, sort_keys=False)
-
-    print(f"[deploy] YAML updated: {YAML_PATH}", file=sys.stderr)
+    print(f"[deploy] YAML updated atomically: {yaml_path}", file=sys.stderr)
+    event_dir = _write_deploy_event(
+        artifacts_dir=args.artifacts_dir,
+        yaml_path=yaml_path,
+        prev_text=prev_text,
+        next_text=next_yaml_text,
+        selected=selected,
+        rank=args.rank,
+        no_live=bool(args.no_live),
+    )
+    print(f"[deploy] Deploy artefact written: {event_dir}", file=sys.stderr)
 
     # Determine version
     version = args.version

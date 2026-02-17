@@ -40,6 +40,10 @@ const MAX_TPE_OBSERVATIONS: usize = 1000;
 /// After pruning, keep only this many best observations.
 const PRUNED_OBSERVATIONS: usize = 500;
 
+fn checked_num_bars_u32(num_bars: usize) -> Result<u32, String> {
+    u32::try_from(num_bars).map_err(|_| format!("num_bars {num_bars} exceeds u32::MAX"))
+}
+
 /// Configuration for TPE-based sweep.
 pub struct TpeConfig {
     /// Total number of trials to evaluate.
@@ -494,9 +498,13 @@ pub fn run_tpe_sweep(
         .unwrap_or(u32::MAX);
 
     let raw = raw_candles::prepare_raw_candles(candles, &symbols);
-    let num_bars = u32::try_from(raw.num_bars)
-        .map_err(|_| format!("num_bars {} exceeds u32::MAX", raw.num_bars))
-        .expect("num_bars exceeds u32::MAX");
+    let num_bars = match checked_num_bars_u32(raw.num_bars) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[TPE] {e} — returning empty results");
+            return Vec::new();
+        }
+    };
 
     let (trade_start, trade_end) =
         raw_candles::find_trade_bar_range(&raw.timestamps, from_ts, to_ts);
@@ -1285,4 +1293,24 @@ fn is_integer_axis(path: &str) -> bool {
         || path == "trade.max_open_positions"
         || path == "trade.max_entry_orders_per_loop"
         || path == "trade.pyramid_max_adds"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checked_num_bars_u32;
+
+    #[test]
+    fn checked_num_bars_u32_accepts_small_values() {
+        assert_eq!(checked_num_bars_u32(123).unwrap(), 123);
+    }
+
+    #[test]
+    fn checked_num_bars_u32_rejects_overflow() {
+        let err = checked_num_bars_u32(usize::MAX);
+        assert!(err.is_err());
+        assert!(
+            err.unwrap_err().contains("exceeds u32::MAX"),
+            "overflow error should mention u32 bound"
+        );
+    }
 }

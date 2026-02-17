@@ -57,6 +57,7 @@ class CmdResult:
     cwd: str
     exit_code: int
     elapsed_s: float
+    timed_out: bool
     stdout_path: str | None
     stderr_path: str | None
 
@@ -67,6 +68,7 @@ def _run_cmd(
     cwd: Path,
     stdout_path: Path | None,
     stderr_path: Path | None,
+    timeout_s: float | None = 600.0,
 ) -> CmdResult:
     t0 = time.time()
 
@@ -82,16 +84,22 @@ def _run_cmd(
     else:
         stderr_f = subprocess.DEVNULL  # type: ignore[assignment]
 
+    timed_out = False
     try:
-        proc = subprocess.run(
-            argv,
-            cwd=str(cwd),
-            stdout=stdout_f,
-            stderr=stderr_f,
-            check=False,
-            text=True,
-        )
-        exit_code = int(proc.returncode)
+        try:
+            proc = subprocess.run(
+                argv,
+                cwd=str(cwd),
+                stdout=stdout_f,
+                stderr=stderr_f,
+                check=False,
+                text=True,
+                timeout=timeout_s if timeout_s and timeout_s > 0 else None,
+            )
+            exit_code = int(proc.returncode)
+        except subprocess.TimeoutExpired:
+            exit_code = 124
+            timed_out = True
     finally:
         if hasattr(stdout_f, "close"):
             stdout_f.close()  # type: ignore[call-arg]
@@ -103,6 +111,7 @@ def _run_cmd(
         cwd=str(cwd),
         exit_code=exit_code,
         elapsed_s=float(time.time() - t0),
+        timed_out=bool(timed_out),
         stdout_path=str(stdout_path) if stdout_path is not None else None,
         stderr_path=str(stderr_path) if stderr_path is not None else None,
     )
@@ -180,23 +189,40 @@ def _coerce_perturbed_value(old: Any, new_raw: float) -> Any:
 
 def _validate_variant(config: dict[str, Any]) -> tuple[bool, str]:
     """Return (ok, reason_if_not_ok)."""
+    def _parse_window_int(value: Any, *, name: str) -> int:
+        if isinstance(value, bool):
+            raise ValueError(f"{name} must be an integer")
+        if isinstance(value, int):
+            return int(value)
+
+        num = float(value)
+        if not num.is_integer():
+            raise ValueError(f"{name} must be an integer")
+        return int(num)
+
     # Basic sanity: windows must be >0.
     fast = _get_nested(config, "indicators.ema_fast_window", None)
     slow = _get_nested(config, "indicators.ema_slow_window", None)
+    parsed_fast: int | None = None
+    parsed_slow: int | None = None
     for name, v in [("ema_fast_window", fast), ("ema_slow_window", slow)]:
         if v is None:
             continue
         try:
-            if int(v) <= 0:
+            parsed = _parse_window_int(v, name=name)
+            if parsed <= 0:
                 return False, f"{name} must be > 0"
         except Exception:
             return False, f"{name} must be an integer"
+        if name == "ema_fast_window":
+            parsed_fast = parsed
+        else:
+            parsed_slow = parsed
     if fast is not None and slow is not None:
-        try:
-            if int(fast) >= int(slow):
-                return False, "ema_fast_window must be < ema_slow_window"
-        except Exception:
+        if parsed_fast is None or parsed_slow is None:
             return False, "ema windows must be integers"
+        if parsed_fast >= parsed_slow:
+            return False, "ema_fast_window must be < ema_slow_window"
 
     for dotpath in ["trade.sl_atr_mult", "trade.tp_atr_mult"]:
         v = _get_nested(config, dotpath, None)
@@ -262,7 +288,11 @@ def _parse_perturbations(csv: str | None) -> list[tuple[str, float]]:
         if ":" not in item:
             raise SystemExit(f"Invalid --perturb item (expected dotpath:delta): {item!r}")
         dotpath, delta_s = item.split(":", 1)
-        out.append((dotpath.strip(), float(delta_s.strip())))
+        try:
+            delta = float(delta_s.strip())
+        except ValueError as exc:
+            raise SystemExit(f"Invalid --perturb delta (expected number): {item!r}") from exc
+        out.append((dotpath.strip(), delta))
     return out
 
 
@@ -284,7 +314,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--out-dir", required=True, help="Output directory for configs/replays/logs.")
     ap.add_argument("--output", required=True, help="Write JSON summary to this path.")
-    ap.add_argument("--timeout-s", type=int, default=0, help="Per-replay timeout in seconds (0 = no timeout).")
+    ap.add_argument(
+        "--timeout-s",
+        type=int,
+        default=600,
+        help="Per-replay timeout in seconds (default: 600, 0 = no timeout).",
+    )
     args = ap.parse_args(argv)
 
     cfg_path = Path(args.config).expanduser().resolve()
@@ -377,39 +412,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.funding_db:
             replay_argv += ["--funding-db", str(args.funding_db)]
 
-        t0 = time.time()
-        try:
-            if int(args.timeout_s or 0) > 0:
-                with v_stdout.open("w", encoding="utf-8") as out_f, v_stderr.open("w", encoding="utf-8") as err_f:
-                    proc = subprocess.run(
-                        replay_argv,
-                        cwd=str(AIQ_ROOT / "backtester"),
-                        stdout=out_f,
-                        stderr=err_f,
-                        check=False,
-                        text=True,
-                        timeout=float(args.timeout_s),
-                    )
-                    exit_code = int(proc.returncode)
-                    res = CmdResult(
-                        argv=list(replay_argv),
-                        cwd=str(AIQ_ROOT / "backtester"),
-                        exit_code=exit_code,
-                        elapsed_s=float(time.time() - t0),
-                        stdout_path=str(v_stdout),
-                        stderr_path=str(v_stderr),
-                    )
-            else:
-                res = _run_cmd(replay_argv, cwd=AIQ_ROOT / "backtester", stdout_path=v_stdout, stderr_path=v_stderr)
-        except subprocess.TimeoutExpired:
-            res = CmdResult(
-                argv=list(replay_argv),
-                cwd=str(AIQ_ROOT / "backtester"),
-                exit_code=124,
-                elapsed_s=float(time.time() - t0),
-                stdout_path=str(v_stdout),
-                stderr_path=str(v_stderr),
-            )
+        timeout_s = float(args.timeout_s) if int(args.timeout_s or 0) > 0 else None
+        res = _run_cmd(
+            replay_argv,
+            cwd=AIQ_ROOT / "backtester",
+            stdout_path=v_stdout,
+            stderr_path=v_stderr,
+            timeout_s=timeout_s,
+        )
 
         entry: dict[str, Any] = {
             "dotpath": dotpath,

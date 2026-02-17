@@ -18,6 +18,9 @@ from typing import Any
 
 import yaml
 
+MAX_SAFE_LEVERAGE = 20.0
+MAX_ENTRY_ORDERS_PER_LOOP = 20
+
 
 def _is_number(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
@@ -83,11 +86,20 @@ def validate_config_obj(obj: Any) -> list[str]:
 
     # Core trade sizing/execution fields
     req_number("global.trade.allocation_pct", min_v=0.0, max_v=1.0)
-    req_number("global.trade.leverage", min_v=0.0)
+    req_number("global.trade.leverage", min_v=0.0, max_v=MAX_SAFE_LEVERAGE)
+    req_number("global.trade.leverage_low", min_v=0.0, max_v=MAX_SAFE_LEVERAGE)
+    req_number("global.trade.leverage_medium", min_v=0.0, max_v=MAX_SAFE_LEVERAGE)
+    req_number("global.trade.leverage_high", min_v=0.0, max_v=MAX_SAFE_LEVERAGE)
+    req_number("global.trade.leverage_max_cap", min_v=0.0, max_v=MAX_SAFE_LEVERAGE)
     req_number("global.trade.sl_atr_mult", min_v=0.0)
     req_number("global.trade.tp_atr_mult", min_v=0.0)
     req_number("global.trade.slippage_bps", min_v=0.0)
     req_int("global.trade.max_open_positions", min_v=1)
+    req_int(
+        "global.trade.max_entry_orders_per_loop",
+        min_v=1,
+        max_v=MAX_ENTRY_ORDERS_PER_LOOP,
+    )
     req_number("global.trade.max_total_margin_pct", min_v=0.0, max_v=1.0)
     req_number("global.trade.min_notional_usd", min_v=0.0)
     req_number("global.trade.min_atr_pct", min_v=0.0, max_v=1.0)
@@ -138,4 +150,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

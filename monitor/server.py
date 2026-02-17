@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from bisect import bisect_left
+import hmac
 import json
 import mimetypes
 import os
@@ -69,6 +70,94 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None:
         return bool(default)
     return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _is_local_bind(bind: str) -> bool:
+    b = str(bind or "").strip().lower()
+    return b in {"127.0.0.1", "localhost", "::1"}
+
+
+def _monitor_max_post_body_bytes() -> int:
+    raw = _env_int("AIQ_MONITOR_MAX_POST_BODY_BYTES", 1_048_576)
+    return int(max(1024, min(16 * 1024 * 1024, int(raw))))
+
+
+def _monitor_bind_security_error(*, bind: str, token: str, tls_terminated: bool) -> str:
+    if _is_local_bind(bind):
+        return ""
+    if not token:
+        return ""
+    if bool(tls_terminated):
+        return ""
+    return (
+        "Refusing non-local monitor bind with AIQ_MONITOR_TOKEN without TLS termination. "
+        "Use an HTTPS reverse proxy and set AIQ_MONITOR_TLS_TERMINATED=1."
+    )
+
+
+def _monitor_request_queue_size() -> int:
+    raw = _env_int("AIQ_MONITOR_REQUEST_QUEUE_SIZE", 128)
+    return int(max(1, min(1024, int(raw))))
+
+
+class _PerIpTokenBucketLimiter:
+    def __init__(self, *, rate_per_s: float, burst: float, max_ips: int = 10000):
+        self._rate_per_s = float(max(0.001, rate_per_s))
+        self._burst = float(max(1.0, burst))
+        self._max_ips = int(max(128, max_ips))
+        self._lock = threading.Lock()
+        self._state: dict[str, tuple[float, float]] = {}
+
+    def allow(self, ip: str, *, now_s: float | None = None) -> bool:
+        now = time.monotonic() if now_s is None else float(now_s)
+        key = str(ip or "").strip() or "unknown"
+        with self._lock:
+            if len(self._state) > self._max_ips and key not in self._state:
+                oldest_key = min(self._state.items(), key=lambda kv: kv[1][1])[0]
+                self._state.pop(oldest_key, None)
+
+            tokens, updated = self._state.get(key, (self._burst, now))
+            elapsed = max(0.0, now - float(updated))
+            tokens = min(self._burst, float(tokens) + (elapsed * self._rate_per_s))
+            allowed = tokens >= 1.0
+            if allowed:
+                tokens -= 1.0
+            self._state[key] = (tokens, now)
+            return bool(allowed)
+
+
+class _ActiveRequestLimiter:
+    def __init__(self, *, max_active: int):
+        self._max_active = int(max(1, max_active))
+        self._active = 0
+        self._lock = threading.Lock()
+
+    def acquire(self) -> bool:
+        with self._lock:
+            if self._active >= self._max_active:
+                return False
+            self._active += 1
+            return True
+
+    def release(self) -> None:
+        with self._lock:
+            if self._active > 0:
+                self._active -= 1
+
+
+_API_RATE_LIMIT_ENABLED = _env_bool("AIQ_MONITOR_API_RATE_LIMIT_ENABLED", True)
+_API_RATE_LIMIT_RPS = float(max(0.1, min(_env_float("AIQ_MONITOR_API_RATE_RPS", 10.0), 1000.0)))
+_API_RATE_LIMIT_BURST = float(max(1.0, min(float(_env_int("AIQ_MONITOR_API_RATE_BURST", 10)), 1000.0)))
+_API_RATE_LIMIT_MAX_IPS = int(max(128, min(_env_int("AIQ_MONITOR_API_RATE_MAX_IPS", 10000), 200000)))
+_API_RATE_LIMITER = _PerIpTokenBucketLimiter(
+    rate_per_s=_API_RATE_LIMIT_RPS,
+    burst=_API_RATE_LIMIT_BURST,
+    max_ips=_API_RATE_LIMIT_MAX_IPS,
+)
+_MAX_POST_BODY_BYTES = _monitor_max_post_body_bytes()
+_ACTIVE_REQUEST_LIMITER = _ActiveRequestLimiter(
+    max_active=int(max(1, min(_env_int("AIQ_MONITOR_MAX_ACTIVE_REQUESTS", 256), 20000)))
+)
 
 
 def _json(obj: Any) -> bytes:
@@ -2552,6 +2641,56 @@ def build_decision_replay(
 class Handler(BaseHTTPRequestHandler):
     server_version = "aiq-monitor/0.1"
 
+    def setup(self) -> None:
+        super().setup()
+        self._active_request_slot = _ACTIVE_REQUEST_LIMITER.acquire()
+
+    def finish(self) -> None:
+        try:
+            super().finish()
+        finally:
+            if getattr(self, "_active_request_slot", False):
+                _ACTIVE_REQUEST_LIMITER.release()
+
+    def _client_ip(self) -> str:
+        try:
+            host = self.client_address[0]
+        except Exception:
+            host = ""
+        return str(host or "").strip() or "unknown"
+
+    def _is_api_rate_limited(self, path: str) -> bool:
+        if not str(path or "").startswith("/api/"):
+            return False
+        if not _API_RATE_LIMIT_ENABLED:
+            return False
+        return not _API_RATE_LIMITER.allow(self._client_ip())
+
+    def _check_api_rate_limit(self, path: str, *, head: bool = False) -> bool:
+        if not self._is_api_rate_limited(path):
+            return True
+        if head:
+            self._send_headers(429, "application/json; charset=utf-8", 0)
+        else:
+            self._send_json(
+                {
+                    "error": "rate_limited",
+                    "retry_after_s": 1,
+                },
+                status=429,
+            )
+        return False
+
+    def _reject_overloaded(self, *, head: bool = False) -> bool:
+        if getattr(self, "_active_request_slot", True):
+            return False
+        if head:
+            self._send_headers(503, "text/plain; charset=utf-8", 0)
+        else:
+            self._send_json({"error": "server_busy", "reason": "too_many_active_requests"}, status=503)
+        self.close_connection = True
+        return True
+
     def _send_headers(self, status: int, content_type: str, length: int) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -2582,6 +2721,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, data, (ctype or "application/octet-stream") + "; charset=utf-8" if (ctype or "").startswith("text/") else (ctype or "application/octet-stream"))
 
     def do_HEAD(self) -> None:  # noqa: N802
+        if self._reject_overloaded(head=True):
+            return
         parsed = urlparse(self.path)
         path = parsed.path or "/"
 
@@ -2605,6 +2746,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path.startswith("/api/"):
+            if not self._check_api_rate_limit(path, head=True):
+                return
             # API responses are dynamic; omit body but respond OK.
             self._send_headers(200, "application/json; charset=utf-8", 0)
             return
@@ -2623,13 +2766,17 @@ class Handler(BaseHTTPRequestHandler):
         token = os.getenv("AIQ_MONITOR_TOKEN", "").strip()
         if not token:
             return True
-        auth = self.headers.get("Authorization", "")
-        if auth == f"Bearer {token}":
+        auth = str(self.headers.get("Authorization", "") or "")
+        expected = f"Bearer {token}".encode("utf-8", errors="replace")
+        auth_bytes = auth.encode("utf-8", errors="replace")
+        if hmac.compare_digest(auth_bytes, expected):
             return True
         self._send_json({"error": "unauthorized"}, status=401)
         return False
 
     def do_GET(self) -> None:  # noqa: N802
+        if self._reject_overloaded():
+            return
         parsed = urlparse(self.path)
         path = parsed.path or "/"
 
@@ -2643,6 +2790,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/static/"):
             self._serve_static(path[len("/static/") :])
+            return
+
+        if not self._check_api_rate_limit(path):
             return
 
         # All /api/ endpoints require auth when AIQ_MONITOR_TOKEN is set.
@@ -2763,8 +2913,13 @@ class Handler(BaseHTTPRequestHandler):
 
     # ── POST endpoints ───────────────────────────────────────────────
     def do_POST(self) -> None:  # noqa: N802
+        if self._reject_overloaded():
+            return
         parsed = urlparse(self.path)
         path = parsed.path or "/"
+
+        if not self._check_api_rate_limit(path):
+            return
 
         # All POST endpoints require auth when AIQ_MONITOR_TOKEN is set.
         if path.startswith("/api/") and not self._check_api_auth():
@@ -2775,6 +2930,12 @@ class Handler(BaseHTTPRequestHandler):
             content_length = int(self.headers.get("Content-Length", 0))
         except (TypeError, ValueError):
             content_length = 0
+        if content_length > int(_MAX_POST_BODY_BYTES):
+            self._send_json(
+                {"ok": False, "error": "payload_too_large", "max_bytes": int(_MAX_POST_BODY_BYTES)},
+                status=413,
+            )
+            return
         raw_body = self.rfile.read(content_length) if content_length > 0 else b""
 
         if path == "/api/v2/decisions/replay":
@@ -2812,16 +2973,40 @@ class Handler(BaseHTTPRequestHandler):
         self._send_text("not found", status=404)
 
     def log_message(self, fmt: str, *args) -> None:
-        # Keep the monitor quiet; use stdout prints only for explicit startup.
-        return
+        # Keep healthy traffic quiet; surface client/server errors for troubleshooting.
+        status_code = 0
+        try:
+            status_code = int(str(args[1]))
+        except Exception:
+            status_code = 0
+        if status_code < 400:
+            return
+        try:
+            super().log_message(fmt, *args)
+        except Exception:
+            return
+
+
+class MonitorHTTPServer(ThreadingHTTPServer):
+    # Keep socket backlog bounded to avoid unbounded pending-connection memory growth.
+    request_queue_size = _monitor_request_queue_size()
 
 
 def main() -> None:
     bind = os.getenv("AIQ_MONITOR_BIND", "127.0.0.1")
     port = _env_int("AIQ_MONITOR_PORT", 61010)
-    if bind not in ("127.0.0.1", "localhost", "::1") and not os.getenv("AIQ_MONITOR_TOKEN", "").strip():
+    token = os.getenv("AIQ_MONITOR_TOKEN", "").strip()
+    tls_terminated = _env_bool("AIQ_MONITOR_TLS_TERMINATED", False)
+    bind_security_error = _monitor_bind_security_error(bind=bind, token=token, tls_terminated=tls_terminated)
+    if bind_security_error:
+        raise SystemExit(bind_security_error)
+
+    if not _is_local_bind(bind) and not token:
         print(f"⚠️  WARNING: Monitor bound to {bind} without AIQ_MONITOR_TOKEN — API endpoints are unauthenticated")
-    srv = ThreadingHTTPServer((bind, port), Handler)
+    if not _is_local_bind(bind) and token and tls_terminated:
+        print("AI Quant Monitor non-local bind assumes HTTPS reverse-proxy TLS termination.")
+
+    srv = MonitorHTTPServer((bind, port), Handler)
     print(f"AI Quant Monitor listening on http://{bind}:{port}/")
     try:
         srv.serve_forever(poll_interval=0.5)

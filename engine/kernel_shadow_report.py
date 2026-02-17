@@ -9,10 +9,27 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
+from collections import deque
 from dataclasses import asdict, dataclass, field
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_SHADOW_MAX_COMPARISONS = 50000
+MIN_SHADOW_MAX_COMPARISONS = 1
+MAX_SHADOW_MAX_COMPARISONS = 5_000_000
+
+
+def _shadow_max_comparisons() -> int:
+    raw = os.getenv("AI_QUANT_SHADOW_MAX_COMPARISONS")
+    if raw is None:
+        return int(DEFAULT_SHADOW_MAX_COMPARISONS)
+    try:
+        value = int(float(str(raw).strip()))
+    except Exception:
+        return int(DEFAULT_SHADOW_MAX_COMPARISONS)
+    return int(max(MIN_SHADOW_MAX_COMPARISONS, min(MAX_SHADOW_MAX_COMPARISONS, value)))
 
 
 @dataclass
@@ -32,7 +49,7 @@ class ShadowComparison:
 class ShadowReport:
     """Accumulates kernel shadow comparisons and evaluates convergence."""
 
-    comparisons: list[ShadowComparison] = field(default_factory=list)
+    comparisons: deque[ShadowComparison] = field(default_factory=lambda: deque(maxlen=_shadow_max_comparisons()))
 
     # ── core API ────────────────────────────────────────────────────
 

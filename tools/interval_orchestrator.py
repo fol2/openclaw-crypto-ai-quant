@@ -17,6 +17,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+SYSTEMCTL_TIMEOUT_S = 120.0
+
 
 @dataclass(frozen=True)
 class ServiceResult:
@@ -44,12 +46,22 @@ def _clear_pause_file(path: Path) -> None:
 
 
 def _systemctl_restart(service: str) -> ServiceResult:
-    proc = subprocess.run(
-        ["systemctl", "--user", "restart", str(service)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            ["systemctl", "--user", "restart", str(service)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=SYSTEMCTL_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return ServiceResult(
+            service=str(service),
+            ok=False,
+            exit_code=124,
+            stdout=str(exc.stdout or ""),
+            stderr=f"systemctl restart timed out after {SYSTEMCTL_TIMEOUT_S:.0f}s",
+        )
     return ServiceResult(
         service=str(service),
         ok=int(proc.returncode) == 0,
@@ -60,12 +72,16 @@ def _systemctl_restart(service: str) -> ServiceResult:
 
 
 def _systemctl_is_active(service: str) -> bool:
-    proc = subprocess.run(
-        ["systemctl", "--user", "is-active", "--quiet", str(service)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            ["systemctl", "--user", "is-active", "--quiet", str(service)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=SYSTEMCTL_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return False
     return int(proc.returncode) == 0
 
 

@@ -509,12 +509,32 @@ pub struct GpuComboState {
     pub _acc_pad: [u32; 2],
 }
 
-// Manual impls because bytemuck derive doesn't support [T; 52]
-// SAFETY: All fields are f32/u32/arrays of Pod types, all valid as zeroed bytes
+// Manual impls because bytemuck derive doesn't support [T; 52].
+//
+// SAFETY invariants for `Pod`/`Zeroable`:
+// - `GpuComboState` is `#[repr(C)]` and contains only Pod field types
+//   (primitives or arrays of `GpuPosition`/`GpuTraceEvent`, which are Pod).
+// - Layout is validated by compile-time size/alignment checks below.
+// - Zeroed bytes are valid for all fields (numeric zero values are legal sentinels).
+//
+// If you add/remove/retype fields, update the expected-size formula and tests in this module.
 unsafe impl Pod for GpuComboState {}
 unsafe impl Zeroable for GpuComboState {}
 
+const GPU_COMBO_STATE_EXPECTED_LAYOUT_BYTES: usize = std::mem::size_of::<f64>()
+    + std::mem::size_of::<u32>() * 2
+    + std::mem::size_of::<[GpuPosition; 52]>()
+    + std::mem::size_of::<[u32; 52]>() * 4
+    + std::mem::size_of::<u32>() * 4
+    + std::mem::size_of::<[GpuTraceEvent; GPU_TRACE_CAP]>()
+    + std::mem::size_of::<f64>() * 6
+    + std::mem::size_of::<u32>() * 2
+    + std::mem::size_of::<[u32; 2]>();
+
+const _: () =
+    assert!(std::mem::size_of::<GpuComboState>() == GPU_COMBO_STATE_EXPECTED_LAYOUT_BYTES);
 const _: () = assert!(std::mem::size_of::<GpuComboState>() == 46880);
+const _: () = assert!(std::mem::align_of::<GpuComboState>() == 8);
 const _: () = assert!(std::mem::size_of::<GpuComboState>() % 16 == 0);
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -775,8 +795,11 @@ impl GpuComboConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{GpuComboConfig, GpuIndicatorConfig};
+    use super::{
+        GpuComboConfig, GpuComboState, GpuIndicatorConfig, GPU_COMBO_STATE_EXPECTED_LAYOUT_BYTES,
+    };
     use bt_core::config::StrategyConfig;
+    use bytemuck::{checked, Zeroable};
 
     #[test]
     fn test_gpu_indicator_config_uses_threshold_ave_window() {
@@ -873,5 +896,30 @@ mod tests {
             GpuComboConfig::from_strategy_config(&cfg).is_ok(),
             "default config should not overflow"
         );
+    }
+
+    #[test]
+    fn test_gpu_combo_state_layout_invariants() {
+        assert_eq!(
+            std::mem::size_of::<GpuComboState>(),
+            GPU_COMBO_STATE_EXPECTED_LAYOUT_BYTES
+        );
+        assert_eq!(std::mem::size_of::<GpuComboState>(), 46880);
+        assert_eq!(std::mem::align_of::<GpuComboState>(), 8);
+    }
+
+    #[test]
+    fn test_gpu_combo_state_checked_cast_slice_roundtrip() {
+        let states = [GpuComboState::zeroed(), GpuComboState::zeroed()];
+        let bytes: &[u8] = checked::cast_slice(&states);
+        assert_eq!(
+            bytes.len(),
+            states.len() * std::mem::size_of::<GpuComboState>()
+        );
+
+        let roundtrip: &[GpuComboState] = checked::cast_slice(bytes);
+        assert_eq!(roundtrip.len(), states.len());
+        assert_eq!(roundtrip[0].num_open, 0);
+        assert_eq!(roundtrip[1].trace_count, 0);
     }
 }

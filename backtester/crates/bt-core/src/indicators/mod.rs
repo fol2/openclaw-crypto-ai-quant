@@ -20,6 +20,7 @@ pub struct RingBuf {
 
 impl RingBuf {
     pub fn new(capacity: usize) -> Self {
+        assert!(capacity > 0, "RingBuf capacity must be > 0");
         Self {
             buf: vec![0.0; capacity],
             pos: 0,
@@ -385,5 +386,26 @@ impl IndicatorBank {
         self.latest_snap_cache = Some(snap.clone());
 
         snap
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RingBuf;
+
+    #[test]
+    #[should_panic(expected = "RingBuf capacity must be > 0")]
+    fn ring_buf_new_zero_capacity_panics() {
+        let _ = RingBuf::new(0);
+    }
+
+    #[test]
+    fn ring_buf_push_and_iterate_oldest_first() {
+        let mut buf = RingBuf::new(2);
+        buf.push(1.0);
+        buf.push(2.0);
+        buf.push(3.0);
+        let values: Vec<f64> = buf.iter().collect();
+        assert_eq!(values, vec![2.0, 3.0]);
     }
 }
