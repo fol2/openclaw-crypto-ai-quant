@@ -314,6 +314,7 @@ __device__ SignalResult generate_signal_codegen(
     double ema_fast,
     double ema_slow,
     double adx,
+    double effective_min_adx,
     double rsi,
     double macd_hist,
     double prev_macd_hist,
@@ -419,7 +420,7 @@ __device__ SignalResult generate_signal_codegen(
         SignalResult result;
         result.signal = signal;
         result.confidence = confidence;
-        result.effective_min_adx = adx;
+        result.effective_min_adx = effective_min_adx;
         return result;
     }
 

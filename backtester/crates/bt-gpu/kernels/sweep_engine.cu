@@ -320,6 +320,7 @@ struct GateResult {
     bool vol_confirm;
     bool bullish_alignment;
     bool bearish_alignment;
+    double effective_min_adx;
 };
 
 __device__ GateResult check_gates(const GpuSnapshot& snap, const GpuComboConfig* cfg,
@@ -357,6 +358,7 @@ __device__ GateResult check_gates(const GpuSnapshot& snap, const GpuComboConfig*
     result.vol_confirm      = gd.vol_confirm;
     result.bullish_alignment = gd.bullish_alignment;
     result.bearish_alignment = gd.bearish_alignment;
+    result.effective_min_adx = gd.effective_min_adx;
     return result;
 }
 
@@ -384,6 +386,7 @@ __device__ SignalResultLegacy generate_signal(const GpuSnapshot& snap, const Gpu
         (double)snap.ema_fast,
         (double)snap.ema_slow,
         (double)snap.adx,
+        (double)gates.effective_min_adx,
         (double)snap.rsi,
         (double)snap.macd_hist,
         (double)snap.prev_macd_hist,
