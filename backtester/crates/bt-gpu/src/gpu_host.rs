@@ -53,7 +53,7 @@ fn env_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn trace_env_config(num_combos: usize) -> Option<(usize, u32)> {
+fn trace_env_config(combo_base: usize, num_combos: usize) -> Option<(usize, u32)> {
     let trace_enabled = env_truthy("AQC_GPU_TRACE")
         || env::var("AQC_GPU_TRACE_COMBO").is_ok()
         || env::var("AQC_GPU_TRACE_SYMBOL").is_ok();
@@ -61,11 +61,15 @@ fn trace_env_config(num_combos: usize) -> Option<(usize, u32)> {
         return None;
     }
 
-    let combo_idx = env::var("AQC_GPU_TRACE_COMBO")
+    let combo_idx_global = env::var("AQC_GPU_TRACE_COMBO")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(0)
-        .min(num_combos.saturating_sub(1));
+        .unwrap_or(0);
+    let combo_end = combo_base.saturating_add(num_combos);
+    if combo_idx_global < combo_base || combo_idx_global >= combo_end {
+        return None;
+    }
+    let combo_idx = combo_idx_global - combo_base;
 
     let sym_idx = env::var("AQC_GPU_TRACE_SYMBOL")
         .ok()
@@ -303,6 +307,7 @@ impl BatchBuffers {
         ind_bufs: &IndicatorBuffers,
         configs: &[GpuComboConfig],
         initial_balance: f32,
+        combo_base: usize,
     ) -> Self {
         let num_combos = configs.len() as u32;
         let num_bars = ind_bufs.num_bars;
@@ -315,7 +320,7 @@ impl BatchBuffers {
             s.balance = initial_balance as f64;
             s.peak_equity = initial_balance as f64;
         }
-        if let Some((combo_idx, sym_idx)) = trace_env_config(states_host.len()) {
+        if let Some((combo_idx, sym_idx)) = trace_env_config(combo_base, states_host.len()) {
             states_host[combo_idx].trace_enabled = 1;
             states_host[combo_idx].trace_symbol = sym_idx;
         }
@@ -380,7 +385,7 @@ impl BatchBuffers {
             s.balance = initial_balance as f64;
             s.peak_equity = initial_balance as f64;
         }
-        if let Some((combo_idx, sym_idx)) = trace_env_config(states_host.len()) {
+        if let Some((combo_idx, sym_idx)) = trace_env_config(0, states_host.len()) {
             states_host[combo_idx].trace_enabled = 1;
             states_host[combo_idx].trace_symbol = sym_idx;
         }

@@ -365,11 +365,13 @@ fn run_gpu_sweep_internal(
         }
 
         // d. Dispatch trade kernel using VRAM-resident indicator data
+        let combo_base = done * t;
         let mut trade_bufs = gpu_host::BatchBuffers::from_indicator_buffers(
             &device_state,
             &ind_bufs,
             &gpu_configs,
             spec.initial_balance as f32,
+            combo_base,
         );
         trade_bufs.max_sub_per_bar = max_sub_per_bar;
         trade_bufs.sub_candles = sub_candles_gpu.clone();
