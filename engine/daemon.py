@@ -236,22 +236,20 @@ def acquire_lock_or_exit(lock_path: str):
 
     try:
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _write_pid()
     except BlockingIOError:
         try:
             lock_file.close()
         except Exception:
-            # Best-effort cleanup only; we are exiting anyway.
             pass
         raise SystemExit(f"Another ai-quant daemon is already running (lock held): {lock_path}")
     except Exception as e:
         try:
             lock_file.close()
         except Exception:
-            # Best-effort cleanup only; we are exiting anyway.
             pass
         raise SystemExit(f"Failed to acquire lock {lock_path}: {e}")
 
-    _write_pid()
     return lock_file
 
 
