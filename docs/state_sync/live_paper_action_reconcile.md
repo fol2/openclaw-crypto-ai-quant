@@ -48,6 +48,7 @@ python tools/audit_live_paper_action_reconcile.py \
 - deterministic logic divergences
 - numeric policy divergences
 - confidence mismatches
+- reason-code mismatches
 - unmatched non-funding actions on either side
 
 Funding-only one-sided events are captured under `accepted_residuals`.
