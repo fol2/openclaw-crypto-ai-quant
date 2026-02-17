@@ -1495,9 +1495,6 @@ class UnifiedEngine:
             if sym not in (
                 (self.trader.positions or {}) if isinstance(getattr(self.trader, "positions", None), dict) else {}
             ):
-                import logging
-
-                logger = logging.getLogger(__name__)
                 logger.debug("Skipping %s for %s: not in positions", act, sym)
                 return
             pos = (self.trader.positions or {}).get(sym, {})
