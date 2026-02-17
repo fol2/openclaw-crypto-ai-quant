@@ -19,6 +19,11 @@ class _FakeExchange:
         return self._slippage_result
 
     def order(self, symbol: str, **kwargs):
+        # Mirror SDK float_to_wire precision behaviour.
+        limit_px = float(kwargs.get("limit_px"))
+        rounded = float(f"{limit_px:.8f}")
+        if abs(rounded - limit_px) >= 1e-12:
+            raise ValueError("float_to_wire causes rounding")
         self.order_calls.append((symbol, kwargs))
         return {"status": "ok", "response": {"data": {"statuses": [{"filled": {}}]}}}
 
@@ -66,3 +71,15 @@ def test_market_close_blocks_when_no_price_for_local_fallback():
     assert fake.order_calls == []
     assert ex.last_order_error is not None
     assert ex.last_order_error.get("kind") == "preflight"
+
+
+def test_market_close_local_fallback_normalises_limit_px_to_wire_precision():
+    fake = _FakeExchange(slippage_result=None)
+    ex = _build_executor(fake)
+
+    res = ex.market_close("ETH", is_buy=True, sz=1.0, px=0.00012345, slippage_pct=0.01)
+
+    assert res is not None
+    assert len(fake.order_calls) == 1
+    _, kwargs = fake.order_calls[0]
+    assert kwargs["limit_px"] == pytest.approx(0.00012469)

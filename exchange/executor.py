@@ -5,6 +5,7 @@ import math
 import os
 import re
 import time
+from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_UP
 from dataclasses import dataclass
 
 from eth_account import Account
@@ -50,6 +51,28 @@ def _local_slippage_limit_px(*, px: float | None, is_buy: bool, slippage_pct: fl
 
     mult = (1.0 + slip) if bool(is_buy) else max(0.0, 1.0 - slip)
     out = base_px * mult
+    return _normalise_limit_px_for_wire(out, is_buy=bool(is_buy))
+
+
+def _normalise_limit_px_for_wire(px: float | None, *, is_buy: bool) -> float | None:
+    """Normalise limit price to SDK wire precision (8 dp) before order submit."""
+    if px is None:
+        return None
+    try:
+        d = Decimal(str(px))
+    except (InvalidOperation, ValueError):
+        return None
+    if d <= 0:
+        return None
+    rounding = ROUND_UP if bool(is_buy) else ROUND_DOWN
+    try:
+        d = d.quantize(Decimal("0.00000001"), rounding=rounding)
+    except InvalidOperation:
+        return None
+    try:
+        out = float(d)
+    except Exception:
+        return None
     if out <= 0 or not math.isfinite(out):
         return None
     return float(out)
@@ -441,7 +464,7 @@ class HyperliquidLiveExecutor:
                     _slip_exc,
                 )
                 limit_px = None
-            limit_px_f = _safe_float(limit_px, 0.0)
+            limit_px_f = _safe_float(_normalise_limit_px_for_wire(limit_px, is_buy=bool(is_buy)), 0.0)
             if limit_px_f <= 0 or not math.isfinite(limit_px_f):
                 if px_f is not None:
                     limit_px_f = _safe_float(_local_slippage_limit_px(px=px_f, is_buy=bool(is_buy), slippage_pct=slip), 0.0)
