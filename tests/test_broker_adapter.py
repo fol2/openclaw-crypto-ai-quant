@@ -250,6 +250,8 @@ class TestSizeRounding:
     def test_binary_float_edge_keeps_expected_precision(self):
         # 0.29 * 100 can become 28.999..., so flooring without epsilon would yield 0.28.
         assert round_size(0.29, 2) == pytest.approx(0.29)
+        assert round_size(256.03, 2) == pytest.approx(256.03)
+        assert round_size(2.0018, 4) == pytest.approx(2.0018)
 
 
 # ===========================================================================

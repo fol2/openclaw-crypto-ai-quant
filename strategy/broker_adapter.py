@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import time
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
@@ -654,9 +654,11 @@ def round_size(quantity: float, sz_decimals: int) -> float:
         return 0.0
     if sz_decimals < 0:
         sz_decimals = 0
-    factor = 10 ** sz_decimals
-    # Protect against binary floating-point edge cases, e.g. 0.29 * 100 = 28.999...
-    return math.floor((quantity * factor) + 1e-12) / factor
+    try:
+        quantum = Decimal("1").scaleb(-int(sz_decimals))
+        return float(Decimal(str(quantity)).quantize(quantum, rounding=ROUND_DOWN))
+    except (InvalidOperation, ValueError, OverflowError):
+        return 0.0
 
 
 def build_fill_event(
