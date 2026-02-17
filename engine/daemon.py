@@ -208,6 +208,42 @@ def _db_path() -> str:
     return str(os.getenv("AI_QUANT_DB_PATH", _default_db_path()) or _default_db_path())
 
 
+def _harden_db_permissions(*paths: str, project_root: Path | None = None) -> None:
+    """Best-effort DB permission hardening (`0600`) for existing SQLite data + sidecar files."""
+    root = Path(project_root) if project_root is not None else Path(__file__).resolve().parents[1]
+    candidates: set[Path] = set()
+    try:
+        for pattern in ("*.db", "*.db-wal", "*.db-shm", "*.db-journal"):
+            candidates.update(root.glob(pattern))
+    except Exception:
+        pass
+
+    for raw in paths:
+        try:
+            p = Path(str(raw or "").strip()).expanduser()
+        except Exception:
+            continue
+        if str(p):
+            candidates.add(p)
+
+    expanded: set[Path] = set(candidates)
+    for p in list(candidates):
+        p_s = str(p)
+        if p_s.endswith(".db"):
+            expanded.add(Path(p_s + "-wal"))
+            expanded.add(Path(p_s + "-shm"))
+            expanded.add(Path(p_s + "-journal"))
+    candidates = expanded
+
+    for p in candidates:
+        try:
+            if p.exists() and p.is_file():
+                os.chmod(str(p), 0o600)
+        except OSError:
+            # Best-effort hardening: never block daemon startup on chmod failure.
+            pass
+
+
 def _hl_timeout_s() -> float:
     # Never allow infinite REST hangs in the main loop.
     raw = os.getenv("AI_QUANT_HL_TIMEOUT_S", "10")
@@ -1009,6 +1045,7 @@ def main() -> None:
 
     strategy = StrategyManager.get()
     market_db_path = os.getenv("AI_QUANT_MARKET_DB_PATH", mei_alpha_v1.DB_PATH)
+    _harden_db_permissions(_db_path(), str(market_db_path))
     market = MarketDataHub(
         db_path=market_db_path,
         stale_mid_s=float(os.getenv("AI_QUANT_WS_STALE_MIDS_S", "60")),
@@ -1066,6 +1103,10 @@ def main() -> None:
 
     else:
         raise SystemExit(f"Unknown AI_QUANT_MODE={mode}")
+
+    # Run a second pass after initial component bootstrap so freshly created
+    # SQLite DB/sidecar files are hardened on first daemon start as well.
+    _harden_db_permissions(_db_path(), str(market_db_path), str(mei_alpha_v1.DB_PATH))
 
     interval = str(os.getenv("AI_QUANT_INTERVAL", mei_alpha_v1.INTERVAL) or mei_alpha_v1.INTERVAL).strip()
     try:
