@@ -240,14 +240,6 @@ struct EntryCandidate {
 
 // -- Helper functions ---------------------------------------------------------
 
-// H10: bounds-checked snapshot accessor. Returns a zeroed snapshot if idx is out of range.
-static __device__ GpuSnapshot safe_snapshot(const GpuSnapshot* snapshots, unsigned int idx, unsigned int max_idx) {
-    if (idx < max_idx) { return snapshots[idx]; }
-    GpuSnapshot z;
-    memset(&z, 0, sizeof(z));
-    return z;
-}
-
 __device__ float get_taker_fee_rate(const GpuParams* params) {
     return __uint_as_float(params->taker_fee_rate_bits);
 }

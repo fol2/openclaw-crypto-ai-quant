@@ -165,6 +165,7 @@ fn run_gpu_sweep_internal(
     // ── 1. Prepare raw candles (CPU, layout only, ~10ms) ─────────────────
     let raw = raw_candles::prepare_raw_candles(candles, &symbols);
     let num_bars = u32::try_from(raw.num_bars)
+        .map_err(|_| format!("num_bars {} exceeds u32::MAX", raw.num_bars))
         .expect("num_bars exceeds u32::MAX");
 
     // Compute trade bar range from time scope
@@ -197,7 +198,9 @@ fn run_gpu_sweep_internal(
             );
         }
     };
-    let candles_gpu = device_state.dev.htod_sync_copy(&raw.candles).unwrap();
+    let candles_gpu = device_state.dev.htod_sync_copy(&raw.candles)
+        .map_err(|e| format!("GPU candle upload failed: {e}"))
+        .expect("GPU candle upload failed");
 
     let candle_upload_mb =
         (raw.candles.len() * std::mem::size_of::<buffers::GpuRawCandle>()) as f64 / 1e6;
@@ -214,7 +217,13 @@ fn run_gpu_sweep_internal(
             if sbr.max_sub_per_bar == 0 || sbr.candles.is_empty() {
                 None
             } else {
-                Some(device_state.dev.htod_sync_copy(&sbr.candles).unwrap())
+                match device_state.dev.htod_sync_copy(&sbr.candles) {
+                    Ok(buf) => Some(buf),
+                    Err(e) => {
+                        eprintln!("[GPU] Sub-candle upload failed: {e}");
+                        None
+                    }
+                }
             }
         });
     let sub_counts_gpu: Option<cudarc::driver::CudaSlice<u32>> =
@@ -222,7 +231,13 @@ fn run_gpu_sweep_internal(
             if sbr.max_sub_per_bar == 0 || sbr.sub_counts.is_empty() {
                 None
             } else {
-                Some(device_state.dev.htod_sync_copy(&sbr.sub_counts).unwrap())
+                match device_state.dev.htod_sync_copy(&sbr.sub_counts) {
+                    Ok(buf) => Some(buf),
+                    Err(e) => {
+                        eprintln!("[GPU] Sub-counts upload failed: {e}");
+                        None
+                    }
+                }
             }
         });
     let max_sub_per_bar = sub_bar_result

@@ -485,11 +485,13 @@ pub fn run_tpe_sweep(
         .iter()
         .position(|s| s == "BTC")
         .or_else(|| symbols.iter().position(|s| s == "BTCUSDT"))
-        .map(|idx| idx as u32)
+        .and_then(|idx| u32::try_from(idx).ok())
         .unwrap_or(u32::MAX);
 
     let raw = raw_candles::prepare_raw_candles(candles, &symbols);
-    let num_bars = raw.num_bars as u32;
+    let num_bars = u32::try_from(raw.num_bars)
+        .map_err(|_| format!("num_bars {} exceeds u32::MAX", raw.num_bars))
+        .expect("num_bars exceeds u32::MAX");
 
     let (trade_start, trade_end) =
         raw_candles::find_trade_bar_range(&raw.timestamps, from_ts, to_ts);
@@ -509,7 +511,13 @@ pub fn run_tpe_sweep(
             return Vec::new();
         }
     };
-    let candles_gpu = device_state.dev.htod_sync_copy(&raw.candles).unwrap();
+    let candles_gpu = match device_state.dev.htod_sync_copy(&raw.candles) {
+        Ok(buf) => buf,
+        Err(e) => {
+            eprintln!("[TPE] GPU candle upload failed: {e} — returning empty results");
+            return Vec::new();
+        }
+    };
 
     let sub_bar_result =
         sub_candles.map(|sc| raw_candles::prepare_sub_bar_candles(&raw.timestamps, sc, &symbols));
@@ -518,7 +526,13 @@ pub fn run_tpe_sweep(
             if sbr.max_sub_per_bar == 0 || sbr.candles.is_empty() {
                 None
             } else {
-                Some(device_state.dev.htod_sync_copy(&sbr.candles).unwrap())
+                match device_state.dev.htod_sync_copy(&sbr.candles) {
+                    Ok(buf) => Some(buf),
+                    Err(e) => {
+                        eprintln!("[TPE] GPU sub-candle upload failed: {e}");
+                        None
+                    }
+                }
             }
         });
     let sub_counts_gpu: Option<cudarc::driver::CudaSlice<u32>> =
@@ -526,7 +540,13 @@ pub fn run_tpe_sweep(
             if sbr.max_sub_per_bar == 0 || sbr.sub_counts.is_empty() {
                 None
             } else {
-                Some(device_state.dev.htod_sync_copy(&sbr.sub_counts).unwrap())
+                match device_state.dev.htod_sync_copy(&sbr.sub_counts) {
+                    Ok(buf) => Some(buf),
+                    Err(e) => {
+                        eprintln!("[TPE] GPU sub-counts upload failed: {e}");
+                        None
+                    }
+                }
             }
         });
     let max_sub_per_bar = sub_bar_result
@@ -547,6 +567,9 @@ pub fn run_tpe_sweep(
     );
 
     // -- Layer 1: Fixed VRAM budget from total_vram (40%) -------------------------
+    let num_symbols_u32 = u32::try_from(num_symbols)
+        .map_err(|_| format!("num_symbols {} exceeds u32::MAX", num_symbols))
+        .expect("num_symbols exceeds u32::MAX");
     let total_vram = device_state.total_vram_bytes();
     let snapshot_stride = (num_bars as usize) * (num_symbols as usize);
     let breadth_stride = num_bars as usize;
@@ -579,18 +602,36 @@ pub fn run_tpe_sweep(
     );
 
     // Pre-allocate arena buffers
-    let mut snap_arena: CudaSlice<buffers::GpuSnapshot> = device_state
+    let mut snap_arena: CudaSlice<buffers::GpuSnapshot> = match device_state
         .dev
         .alloc_zeros::<buffers::GpuSnapshot>(arena_cap * snapshot_stride)
-        .unwrap();
-    let mut breadth_arena: CudaSlice<f32> = device_state
+    {
+        Ok(buf) => buf,
+        Err(e) => {
+            eprintln!("[TPE] GPU arena alloc (snapshots) failed: {e} — returning empty results");
+            return Vec::new();
+        }
+    };
+    let mut breadth_arena: CudaSlice<f32> = match device_state
         .dev
         .alloc_zeros::<f32>(arena_cap * breadth_stride)
-        .unwrap();
-    let mut btc_arena: CudaSlice<u32> = device_state
+    {
+        Ok(buf) => buf,
+        Err(e) => {
+            eprintln!("[TPE] GPU arena alloc (breadth) failed: {e} — returning empty results");
+            return Vec::new();
+        }
+    };
+    let mut btc_arena: CudaSlice<u32> = match device_state
         .dev
         .alloc_zeros::<u32>(arena_cap * breadth_stride)
-        .unwrap();
+    {
+        Ok(buf) => buf,
+        Err(e) => {
+            eprintln!("[TPE] GPU arena alloc (btc) failed: {e} — returning empty results");
+            return Vec::new();
+        }
+    };
 
     // -- 3. Double-buffer pipeline ------------------------------------------------
     // Request channel: bounded(2) so TPE can always have one pre-fetched batch
@@ -640,7 +681,7 @@ pub fn run_tpe_sweep(
                 base_cfg,
                 &request.trial_overrides,
                 num_bars,
-                num_symbols as u32,
+                num_symbols_u32,
                 btc_sym_idx,
                 spec.lookback,
                 spec.initial_balance as f32,
@@ -663,7 +704,7 @@ pub fn run_tpe_sweep(
                 base_cfg,
                 &request.trial_overrides,
                 num_bars,
-                num_symbols as u32,
+                num_symbols_u32,
                 btc_sym_idx,
                 spec.lookback,
                 spec.initial_balance as f32,
@@ -905,7 +946,7 @@ fn evaluate_mixed_batch_arena(
         let group_end = (group_start + arena_cap).min(num_unique);
         let group_ind_cfgs = &unique_ind_cfgs[group_start..group_end];
 
-        dispatch_indicator_arena(
+        if let Err(e) = dispatch_indicator_arena(
             ds,
             candles_gpu,
             group_ind_cfgs,
@@ -915,7 +956,10 @@ fn evaluate_mixed_batch_arena(
             snap_arena,
             breadth_arena,
             btc_arena,
-        );
+        ) {
+            eprintln!("[TPE] Indicator arena dispatch failed: {e} — skipping group");
+            continue;
+        }
 
         let mut group_trial_indices: Vec<usize> = Vec::new();
         let mut gpu_configs: Vec<buffers::GpuComboConfig> = Vec::new();
@@ -925,8 +969,12 @@ fn evaluate_mixed_batch_arena(
                 let local_slot = unique_slot - group_start;
                 let mut gpu_cfg =
                     buffers::GpuComboConfig::from_strategy_config(&trial_cfgs[trial_idx]);
-                gpu_cfg.snapshot_offset = (local_slot * snapshot_stride) as u32;
-                gpu_cfg.breadth_offset = (local_slot * breadth_stride) as u32;
+                gpu_cfg.snapshot_offset = u32::try_from(local_slot * snapshot_stride)
+                    .map_err(|_| format!("snapshot_offset {} exceeds u32::MAX", local_slot * snapshot_stride))
+                    .expect("snapshot_offset exceeds u32::MAX");
+                gpu_cfg.breadth_offset = u32::try_from(local_slot * breadth_stride)
+                    .map_err(|_| format!("breadth_offset {} exceeds u32::MAX", local_slot * breadth_stride))
+                    .expect("breadth_offset exceeds u32::MAX");
                 gpu_configs.push(gpu_cfg);
                 group_trial_indices.push(trial_idx);
             }
@@ -936,7 +984,7 @@ fn evaluate_mixed_batch_arena(
             continue;
         }
 
-        let trade_results = dispatch_trade_arena(
+        let trade_results = match dispatch_trade_arena(
             ds,
             snap_arena,
             breadth_arena,
@@ -951,7 +999,13 @@ fn evaluate_mixed_batch_arena(
             sub_counts_gpu,
             trade_start,
             trade_end,
-        );
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[TPE] Trade arena dispatch failed: {e} — skipping group");
+                continue;
+            }
+        };
 
         for (local_idx, &trial_idx) in group_trial_indices.iter().enumerate() {
             all_results[trial_idx] = trade_results[local_idx];
@@ -972,11 +1026,13 @@ fn dispatch_indicator_arena(
     snap_arena: &mut CudaSlice<buffers::GpuSnapshot>,
     breadth_arena: &mut CudaSlice<f32>,
     btc_arena: &mut CudaSlice<u32>,
-) {
-    let k = ind_configs.len() as u32;
+) -> Result<(), String> {
+    let k = u32::try_from(ind_configs.len())
+        .map_err(|_| format!("ind_configs.len() {} exceeds u32::MAX", ind_configs.len()))?;
     let block_size = 64u32;
 
-    let ind_configs_gpu = ds.dev.htod_sync_copy(ind_configs).unwrap();
+    let ind_configs_gpu = ds.dev.htod_sync_copy(ind_configs)
+        .map_err(|e| format!("GPU alloc failed: {e}"))?;
 
     let params = buffers::IndicatorParams {
         num_ind_combos: k,
@@ -985,7 +1041,8 @@ fn dispatch_indicator_arena(
         btc_sym_idx,
         _pad: [0; 4],
     };
-    let ind_params_gpu = ds.dev.htod_sync_copy(&[params]).unwrap();
+    let ind_params_gpu = ds.dev.htod_sync_copy(&[params])
+        .map_err(|e| format!("GPU alloc failed: {e}"))?;
 
     let ind_threads = k * num_symbols;
     let ind_grid = (ind_threads + block_size - 1) / block_size;
@@ -993,7 +1050,7 @@ fn dispatch_indicator_arena(
     let ind_func: CudaFunction = ds
         .dev
         .get_func("indicators", "indicator_kernel")
-        .expect("indicator_kernel not found in PTX");
+        .ok_or_else(|| "indicator_kernel not found in PTX".to_string())?;
 
     let ind_cfg = LaunchConfig {
         grid_dim: (ind_grid, 1, 1),
@@ -1012,7 +1069,7 @@ fn dispatch_indicator_arena(
             ),
         )
     }
-    .expect("indicator_kernel launch failed");
+    .map_err(|e| format!("indicator kernel launch: {e}"))?;
 
     let br_threads = k * num_bars;
     let br_grid = (br_threads + block_size - 1) / block_size;
@@ -1020,7 +1077,7 @@ fn dispatch_indicator_arena(
     let br_func: CudaFunction = ds
         .dev
         .get_func("indicators", "breadth_kernel")
-        .expect("breadth_kernel not found in PTX");
+        .ok_or_else(|| "breadth_kernel not found in PTX".to_string())?;
 
     let br_cfg = LaunchConfig {
         grid_dim: (br_grid, 1, 1),
@@ -1039,7 +1096,9 @@ fn dispatch_indicator_arena(
             ),
         )
     }
-    .expect("breadth_kernel launch failed");
+    .map_err(|e| format!("breadth kernel launch: {e}"))?;
+
+    Ok(())
 }
 
 /// Dispatch trade sweep kernel using pre-allocated arena snapshot/breadth/btc buffers.
@@ -1058,31 +1117,36 @@ fn dispatch_trade_arena(
     sub_counts_gpu: Option<&CudaSlice<u32>>,
     trade_start: u32,
     trade_end: u32,
-) -> Vec<buffers::GpuResult> {
-    let num_combos = gpu_configs.len() as u32;
+) -> Result<Vec<buffers::GpuResult>, String> {
+    let num_combos = u32::try_from(gpu_configs.len())
+        .map_err(|_| format!("gpu_configs.len() {} exceeds u32::MAX", gpu_configs.len()))?;
     let block_size = 64u32;
     let grid_size = (num_combos + block_size - 1) / block_size;
 
-    let configs_gpu = ds.dev.htod_sync_copy(gpu_configs).unwrap();
+    let configs_gpu = ds.dev.htod_sync_copy(gpu_configs)
+        .map_err(|e| format!("GPU alloc failed: {e}"))?;
 
     let mut states_host = vec![buffers::GpuComboState::zeroed(); gpu_configs.len()];
     for s in &mut states_host {
         s.balance = initial_balance as f64;
         s.peak_equity = initial_balance as f64;
     }
-    let mut states_gpu = ds.dev.htod_sync_copy(&states_host).unwrap();
+    let mut states_gpu = ds.dev.htod_sync_copy(&states_host)
+        .map_err(|e| format!("GPU alloc failed: {e}"))?;
     let mut results_gpu = ds
         .dev
         .alloc_zeros::<buffers::GpuResult>(gpu_configs.len())
-        .unwrap();
+        .map_err(|e| format!("GPU alloc failed: {e}"))?;
 
     let sentinel_candle: CudaSlice<buffers::GpuRawCandle>;
     let sentinel_counts: CudaSlice<u32>;
     let (sc_ref, sn_ref) = match (sub_candles_gpu, sub_counts_gpu) {
         (Some(sc), Some(sn)) => (sc, sn),
         _ => {
-            sentinel_candle = ds.dev.alloc_zeros::<buffers::GpuRawCandle>(1).unwrap();
-            sentinel_counts = ds.dev.alloc_zeros::<u32>(1).unwrap();
+            sentinel_candle = ds.dev.alloc_zeros::<buffers::GpuRawCandle>(1)
+                .map_err(|e| format!("GPU alloc failed: {e}"))?;
+            sentinel_counts = ds.dev.alloc_zeros::<u32>(1)
+                .map_err(|e| format!("GPU alloc failed: {e}"))?;
             (&sentinel_candle, &sentinel_counts)
         }
     };
@@ -1112,7 +1176,8 @@ fn dispatch_trade_arena(
             max_sub_per_bar,
             trade_end_bar: trade_end,
         };
-        let params_gpu = ds.dev.htod_sync_copy(&[params_host]).unwrap();
+        let params_gpu = ds.dev.htod_sync_copy(&[params_host])
+            .map_err(|e| format!("GPU alloc failed: {e}"))?;
 
         let cfg = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
@@ -1123,7 +1188,7 @@ fn dispatch_trade_arena(
         let func: CudaFunction = ds
             .dev
             .get_func("sweep", "sweep_engine_kernel")
-            .expect("sweep_engine_kernel not found in PTX");
+            .ok_or_else(|| "sweep_engine_kernel not found in PTX".to_string())?;
 
         unsafe {
             func.launch(
@@ -1141,10 +1206,11 @@ fn dispatch_trade_arena(
                 ),
             )
         }
-        .expect("sweep_engine_kernel launch failed");
+        .map_err(|e| format!("sweep_engine_kernel launch: {e}"))?;
     }
 
-    ds.dev.dtoh_sync_copy(&results_gpu).unwrap()
+    ds.dev.dtoh_sync_copy(&results_gpu)
+        .map_err(|e| format!("GPU readback failed: {e}"))
 }
 
 // =============================================================================
