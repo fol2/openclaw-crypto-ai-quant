@@ -999,7 +999,8 @@ def main() -> None:
                     main_address=_secrets.main_address,
                     timeout_s=4,
                 )
-            except Exception:
+            except Exception as exc:
+                logger.error("Executor init failed (%s); details redacted", exc.__class__.__name__)
                 raise RuntimeError("Executor init failed — check secrets and network") from None
             _snap = _exec.account_snapshot(force=True)
             if _snap.withdrawable_usd and _snap.withdrawable_usd > 0:
@@ -1068,11 +1069,15 @@ def main() -> None:
         )
         secrets = live_trader.load_live_secrets(secrets_path)
 
-        executor = live_trader.HyperliquidLiveExecutor(
-            secret_key=secrets.secret_key,
-            main_address=secrets.main_address,
-            timeout_s=_hl_timeout_s(),
-        )
+        try:
+            executor = live_trader.HyperliquidLiveExecutor(
+                secret_key=secrets.secret_key,
+                main_address=secrets.main_address,
+                timeout_s=_hl_timeout_s(),
+            )
+        except Exception as exc:
+            logger.error("Executor init failed (%s); details redacted", exc.__class__.__name__)
+            raise RuntimeError("Executor init failed — check secrets and network") from None
         trader = live_trader.LiveTrader(executor=executor)
         # Used by the engine to subscribe to WS user channels.
         trader.secrets = secrets
