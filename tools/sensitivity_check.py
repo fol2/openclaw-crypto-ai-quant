@@ -189,23 +189,40 @@ def _coerce_perturbed_value(old: Any, new_raw: float) -> Any:
 
 def _validate_variant(config: dict[str, Any]) -> tuple[bool, str]:
     """Return (ok, reason_if_not_ok)."""
+    def _parse_window_int(value: Any, *, name: str) -> int:
+        if isinstance(value, bool):
+            raise ValueError(f"{name} must be an integer")
+        if isinstance(value, int):
+            return int(value)
+
+        num = float(value)
+        if not num.is_integer():
+            raise ValueError(f"{name} must be an integer")
+        return int(num)
+
     # Basic sanity: windows must be >0.
     fast = _get_nested(config, "indicators.ema_fast_window", None)
     slow = _get_nested(config, "indicators.ema_slow_window", None)
+    parsed_fast: int | None = None
+    parsed_slow: int | None = None
     for name, v in [("ema_fast_window", fast), ("ema_slow_window", slow)]:
         if v is None:
             continue
         try:
-            if int(v) <= 0:
+            parsed = _parse_window_int(v, name=name)
+            if parsed <= 0:
                 return False, f"{name} must be > 0"
         except Exception:
             return False, f"{name} must be an integer"
+        if name == "ema_fast_window":
+            parsed_fast = parsed
+        else:
+            parsed_slow = parsed
     if fast is not None and slow is not None:
-        try:
-            if int(fast) >= int(slow):
-                return False, "ema_fast_window must be < ema_slow_window"
-        except Exception:
+        if parsed_fast is None or parsed_slow is None:
             return False, "ema windows must be integers"
+        if parsed_fast >= parsed_slow:
+            return False, "ema_fast_window must be < ema_slow_window"
 
     for dotpath in ["trade.sl_atr_mult", "trade.tp_atr_mult"]:
         v = _get_nested(config, dotpath, None)
@@ -271,7 +288,11 @@ def _parse_perturbations(csv: str | None) -> list[tuple[str, float]]:
         if ":" not in item:
             raise SystemExit(f"Invalid --perturb item (expected dotpath:delta): {item!r}")
         dotpath, delta_s = item.split(":", 1)
-        out.append((dotpath.strip(), float(delta_s.strip())))
+        try:
+            delta = float(delta_s.strip())
+        except ValueError as exc:
+            raise SystemExit(f"Invalid --perturb delta (expected number): {item!r}") from exc
+        out.append((dotpath.strip(), delta))
     return out
 
 

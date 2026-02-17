@@ -73,6 +73,11 @@ def test_parse_perturbations_rejects_invalid_item_format():
         _parse_perturbations("trade.sl_atr_mult")
 
 
+def test_parse_perturbations_rejects_non_numeric_delta():
+    with pytest.raises(SystemExit, match="Invalid --perturb delta"):
+        _parse_perturbations("trade.sl_atr_mult:not-a-number")
+
+
 def test_set_nested_creates_global_path_when_prefix_missing():
     cfg: dict = {}
     _set_nested(cfg, "trade.sl_atr_mult", 1.25)
@@ -107,6 +112,14 @@ def test_validate_variant_rejects_non_positive_atr_multiplier():
     ok, reason = _validate_variant(cfg)
     assert ok is False
     assert reason == "trade.sl_atr_mult must be > 0"
+
+
+def test_validate_variant_rejects_non_integer_window_value():
+    cfg = _base_config()
+    cfg["global"]["indicators"]["ema_fast_window"] = 10.5
+    ok, reason = _validate_variant(cfg)
+    assert ok is False
+    assert reason == "ema_fast_window must be an integer"
 
 
 def test_compute_aggregate_uses_only_successful_variants_for_positive_rate():
