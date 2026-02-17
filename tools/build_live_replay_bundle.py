@@ -68,6 +68,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--live-db", default="./trading_engine_live.db", help="Path to live SQLite DB")
     parser.add_argument("--paper-db", default="./trading_engine.db", help="Path to paper SQLite DB")
     parser.add_argument("--candles-db", required=True, help="Path to candles SQLite DB used for replay")
+    parser.add_argument("--funding-db", default=None, help="Optional funding SQLite DB used for replay funding events")
     parser.add_argument("--interval", default="1h", help="Replay interval (for command template)")
     parser.add_argument("--from-ts", type=int, required=True, help="Replay start timestamp (ms, inclusive)")
     parser.add_argument("--to-ts", type=int, required=True, help="Replay end timestamp (ms, inclusive)")
@@ -130,6 +131,7 @@ def main() -> int:
     live_db = Path(args.live_db).expanduser().resolve()
     paper_db = Path(args.paper_db).expanduser().resolve()
     candles_db = Path(args.candles_db).expanduser().resolve()
+    funding_db = Path(args.funding_db).expanduser().resolve() if args.funding_db else None
     bundle_dir = Path(args.bundle_dir).expanduser().resolve()
     snapshot_name = Path(args.snapshot_name).name
 
@@ -139,6 +141,8 @@ def main() -> int:
         parser.error(f"paper DB not found: {paper_db}")
     if not candles_db.exists():
         parser.error(f"candles DB not found: {candles_db}")
+    if funding_db is not None and not funding_db.exists():
+        parser.error(f"funding DB not found: {funding_db}")
     if args.from_ts > args.to_ts:
         parser.error("from-ts must be <= to-ts")
 
@@ -148,7 +152,9 @@ def main() -> int:
     live_trades_path = bundle_dir / "live_baseline_trades.jsonl"
     audit_report_path = bundle_dir / "state_alignment_report.json"
     replay_trades_csv = bundle_dir / "backtester_trades.csv"
+    replay_report_path = bundle_dir / "backtester_replay_report.json"
     trade_reconcile_path = bundle_dir / "trade_reconcile_report.json"
+    action_reconcile_path = bundle_dir / "action_reconcile_report.json"
     manifest_path = bundle_dir / "replay_bundle_manifest.json"
 
     baseline_trades = _load_live_baseline_trades(
@@ -174,16 +180,25 @@ def main() -> int:
         "python \"$REPO_ROOT/tools/apply_canonical_snapshot_to_paper.py\" --snapshot \"$SNAPSHOT_PATH\" --target-db \"$PAPER_DB\""
     )
 
+    if funding_db is not None:
+        funding_env = f"FUNDING_DB=\"${{FUNDING_DB:-{shlex.quote(str(funding_db))}}}\"\n"
+        funding_arg = " --funding-db \"$FUNDING_DB\""
+    else:
+        funding_env = ""
+        funding_arg = ""
+
     cmd_replay = (
         "set -euo pipefail\n"
         "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
         "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
         f"CANDLES_DB=\"${{CANDLES_DB:-{shlex.quote(str(candles_db))}}}\"\n"
+        f"{funding_env}"
         f"SNAPSHOT_PATH=\"$BUNDLE_DIR/{snapshot_name}\"\n"
         "cd \"$REPO_ROOT/backtester\"\n"
         f"./target/release/mei-backtester replay --candles-db \"$CANDLES_DB\" "
         f"--interval {shlex.quote(str(args.interval))} --from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
-        f"--init-state \"$SNAPSHOT_PATH\" --export-trades \"$BUNDLE_DIR/{replay_trades_csv.name}\""
+        f"--init-state \"$SNAPSHOT_PATH\" --export-trades \"$BUNDLE_DIR/{replay_trades_csv.name}\" "
+        f"--output \"$BUNDLE_DIR/{replay_report_path.name}\" --trades{funding_arg}"
     )
 
     cmd_audit = (
@@ -207,16 +222,28 @@ def main() -> int:
         f"--output \"$BUNDLE_DIR/{trade_reconcile_path.name}\""
     )
 
+    cmd_action_reconcile = (
+        "set -euo pipefail\n"
+        "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
+        "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
+        "python \"$REPO_ROOT/tools/audit_live_backtester_action_reconcile.py\" "
+        f"--live-baseline \"$BUNDLE_DIR/{live_trades_path.name}\" "
+        f"--backtester-replay-report \"$BUNDLE_DIR/{replay_report_path.name}\" "
+        f"--output \"$BUNDLE_DIR/{action_reconcile_path.name}\""
+    )
+
     (bundle_dir / "run_01_export_and_seed.sh").write_text(cmd_export_seed + "\n", encoding="utf-8")
     (bundle_dir / "run_02_replay.sh").write_text(cmd_replay + "\n", encoding="utf-8")
     (bundle_dir / "run_03_audit.sh").write_text(cmd_audit + "\n", encoding="utf-8")
     (bundle_dir / "run_04_trade_reconcile.sh").write_text(cmd_trade_reconcile + "\n", encoding="utf-8")
+    (bundle_dir / "run_05_action_reconcile.sh").write_text(cmd_action_reconcile + "\n", encoding="utf-8")
 
     for script_name in (
         "run_01_export_and_seed.sh",
         "run_02_replay.sh",
         "run_03_audit.sh",
         "run_04_trade_reconcile.sh",
+        "run_05_action_reconcile.sh",
     ):
         script_path = bundle_dir / script_name
         script_path.chmod(0o755)
@@ -229,6 +256,7 @@ def main() -> int:
             "live_db": str(live_db),
             "paper_db": str(paper_db),
             "candles_db": str(candles_db),
+            "funding_db": str(funding_db) if funding_db is not None else None,
             "interval": str(args.interval),
             "from_ts": int(args.from_ts),
             "to_ts": int(args.to_ts),
@@ -239,7 +267,9 @@ def main() -> int:
             "live_baseline_trades_sha256": _hash_file(live_trades_path),
             "audit_report_file": audit_report_path.name,
             "backtester_trades_csv": replay_trades_csv.name,
+            "backtester_replay_report_json": replay_report_path.name,
             "trade_reconcile_report_file": trade_reconcile_path.name,
+            "action_reconcile_report_file": action_reconcile_path.name,
         },
         "counts": {
             "live_baseline_trades": len(baseline_trades),
@@ -251,6 +281,7 @@ def main() -> int:
             "replay": cmd_replay,
             "audit": cmd_audit,
             "trade_reconcile": cmd_trade_reconcile,
+            "action_reconcile": cmd_action_reconcile,
         },
     }
 
