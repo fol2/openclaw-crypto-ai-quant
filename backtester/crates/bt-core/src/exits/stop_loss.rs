@@ -49,12 +49,14 @@ pub fn compute_sl_price(pos: &Position, snap: &IndicatorSnapshot, cfg: &Strategy
     let trade = &cfg.trade;
 
     let entry = pos.entry_price;
+    // C5: ATR zero-guard — prevent NaN/Inf from division by zero
     let atr = if pos.entry_atr > 0.0 {
         pos.entry_atr
     } else {
         // Fallback for legacy positions with no ATR recorded.
         entry * 0.005
-    };
+    }
+    .max(1e-12);
 
     let mut sl_mult = trade.sl_atr_mult;
 
