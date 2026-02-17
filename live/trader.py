@@ -307,6 +307,13 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         self._last_entry_fail_reason: dict[str, str] = {}
         # Exit attempts can also be rejected transiently; avoid close-spam when state is stale.
         self._last_exit_attempt_at_s: dict[str, float] = {}
+        try:
+            self._submit_unknown_reconcile_cooldown_s = float(
+                os.getenv("AI_QUANT_LIVE_SUBMIT_UNKNOWN_RECONCILE_COOLDOWN_S", "5")
+            )
+        except Exception:
+            self._submit_unknown_reconcile_cooldown_s = 5.0
+        self._last_submit_unknown_reconcile_s = 0.0
         self._live_balance_usd = 0.0
         super().__init__()
 
@@ -358,6 +365,11 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
 
     def _reconcile_after_submit_unknown(self, *, symbol: str, action: str) -> None:
         """Best-effort reconciliation after ambiguous submit outcomes (timeout/transport errors)."""
+        now_s = time.time()
+        cooldown = max(0.0, float(self._submit_unknown_reconcile_cooldown_s or 0.0))
+        if cooldown > 0 and (now_s - float(self._last_submit_unknown_reconcile_s or 0.0)) < cooldown:
+            return
+        self._last_submit_unknown_reconcile_s = now_s
         try:
             self.sync_from_exchange(force=True)
         except Exception:
