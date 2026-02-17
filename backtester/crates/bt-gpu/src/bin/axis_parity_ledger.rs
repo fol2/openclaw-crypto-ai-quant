@@ -79,6 +79,10 @@ struct Args {
     #[arg(long)]
     trace_symbol: Option<String>,
 
+    /// Maximum number of CPU trade events embedded in each trace artifact.
+    #[arg(long, default_value_t = 200)]
+    cpu_trace_limit: usize,
+
     /// Fail closed when baseline (no overrides) CPU/GPU parity already fails.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     require_baseline_pass: bool,
@@ -121,6 +125,7 @@ struct TraceArtifact {
     trace_count: u32,
     trace_head: u32,
     events: Vec<TraceEventRow>,
+    cpu_events: Vec<CpuTradeEventRow>,
 }
 
 #[derive(Debug, Serialize)]
@@ -135,6 +140,19 @@ struct TraceEventRow {
     price: f32,
     size: f32,
     pnl: f32,
+}
+
+#[derive(Debug, Serialize)]
+struct CpuTradeEventRow {
+    idx: usize,
+    t_sec: u32,
+    symbol: String,
+    action: String,
+    reason: String,
+    price: f64,
+    size: f64,
+    pnl: f64,
+    balance: f64,
 }
 
 #[cfg(target_os = "linux")]
@@ -253,6 +271,16 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             args.to_ts,
             trace_symbol_idx,
         )?;
+        let trace_symbol_name = symbol_name(trace_symbol_idx, &trace_symbols);
+        let cpu_events = run_cpu_single_with_trade_events(
+            &base_cfg,
+            &single_spec,
+            &candles,
+            args.from_ts,
+            args.to_ts,
+            trace_symbol_name.as_deref(),
+            args.cpu_trace_limit,
+        )?;
         let trace = TraceArtifact {
             axis_path: "__baseline__".to_string(),
             sample_index: 0,
@@ -260,7 +288,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             cause: baseline_cause.clone().unwrap_or_else(|| "UNKNOWN".to_string()),
             trace_symbol_requested: args.trace_symbol.clone(),
             trace_symbol_index: trace_symbol_idx,
-            trace_symbol_name: symbol_name(trace_symbol_idx, &trace_symbols),
+            trace_symbol_name,
             cpu: baseline_cpu.clone(),
             gpu: CompactResult {
                 total_trades: trace_gpu.total_trades,
@@ -270,6 +298,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             trace_count: trace_state.trace_count,
             trace_head: trace_state.trace_head,
             events: collect_trace_events(&trace_state, &trace_symbols),
+            cpu_events,
         };
         let trace_path = build_trace_path(
             &args.trace_dir,
@@ -374,6 +403,16 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     args.to_ts,
                     trace_symbol_idx,
                 )?;
+                let trace_symbol_name = symbol_name(trace_symbol_idx, &trace_symbols);
+                let cpu_events = run_cpu_single_with_trade_events(
+                    &cfg,
+                    &single_spec,
+                    &candles,
+                    args.from_ts,
+                    args.to_ts,
+                    trace_symbol_name.as_deref(),
+                    args.cpu_trace_limit,
+                )?;
                 let trace = TraceArtifact {
                     axis_path: axis.path.clone(),
                     sample_index,
@@ -381,7 +420,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     cause: cause.clone().unwrap_or_else(|| "UNKNOWN".to_string()),
                     trace_symbol_requested: args.trace_symbol.clone(),
                     trace_symbol_index: trace_symbol_idx,
-                    trace_symbol_name: symbol_name(trace_symbol_idx, &trace_symbols),
+                    trace_symbol_name,
                     cpu: cpu.clone(),
                     gpu: CompactResult {
                         total_trades: trace_gpu.total_trades,
@@ -391,6 +430,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     trace_count: trace_state.trace_count,
                     trace_head: trace_state.trace_head,
                     events: collect_trace_events(&trace_state, &trace_symbols),
+                    cpu_events,
                 };
                 let trace_path = build_trace_path(
                     &args.trace_dir,
@@ -462,6 +502,60 @@ fn run_cpu_single(
         final_balance: first.report.final_balance,
         total_pnl: first.report.total_pnl,
     })
+}
+
+fn run_cpu_single_with_trade_events(
+    cfg: &StrategyConfig,
+    spec: &SweepSpec,
+    candles: &CandleData,
+    from_ts: Option<i64>,
+    to_ts: Option<i64>,
+    symbol_filter: Option<&str>,
+    limit: usize,
+) -> Result<Vec<CpuTradeEventRow>, Box<dyn std::error::Error>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let sim = bt_core::engine::run_simulation(
+        candles,
+        cfg,
+        spec.initial_balance,
+        spec.lookback,
+        None,
+        None,
+        None,
+        None,
+        from_ts,
+        to_ts,
+    );
+    let mut out = Vec::with_capacity(limit.min(sim.trades.len()));
+    for trade in sim.trades {
+        if let Some(sym) = symbol_filter {
+            if trade.symbol != sym {
+                continue;
+            }
+        }
+        let t_sec = if trade.timestamp_ms <= 0 {
+            0u32
+        } else {
+            (trade.timestamp_ms / 1000) as u32
+        };
+        out.push(CpuTradeEventRow {
+            idx: out.len(),
+            t_sec,
+            symbol: trade.symbol,
+            action: trade.action,
+            reason: trade.reason,
+            price: trade.price,
+            size: trade.size,
+            pnl: trade.pnl,
+            balance: trade.balance,
+        });
+        if out.len() >= limit {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 fn run_gpu_single(
