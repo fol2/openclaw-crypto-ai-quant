@@ -22,9 +22,9 @@ from engine.alerting import send_openclaw_message
 import strategy.mei_alpha_v1 as mei_alpha_v1
 
 try:
-    _DB_TIMEOUT_S = float(os.getenv("AI_QUANT_DB_TIMEOUT_S", "30"))
+    _DB_TIMEOUT_S = min(float(os.getenv("AI_QUANT_DB_TIMEOUT_S", "5")), 5.0)
 except Exception:
-    _DB_TIMEOUT_S = 30.0
+    _DB_TIMEOUT_S = 5.0
 
 logger = logging.getLogger(__name__)
 
@@ -2832,7 +2832,7 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
         except Exception:
             pos_snap = {}
 
-        for f in fills:
+        for _fill_i, f in enumerate(fills):
             if not isinstance(f, dict):
                 continue
 
@@ -3275,6 +3275,9 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                         trader.upsert_position_state(sym)
                 except Exception:
                     pass
+
+            if (_fill_i + 1) % 100 == 0:
+                conn.commit()
 
         conn.commit()
     finally:
