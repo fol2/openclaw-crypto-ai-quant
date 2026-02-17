@@ -391,7 +391,8 @@ fn run_gpu_sweep_internal(
                 for (path, value) in trade_overrides {
                     bt_core::sweep::apply_one_pub(&mut cfg, path, *value);
                 }
-                let mut gpu_cfg = buffers::GpuComboConfig::from_strategy_config(&cfg);
+                let mut gpu_cfg = buffers::GpuComboConfig::from_strategy_config(&cfg)
+                    .expect("f64→f32 overflow in GpuComboConfig");
                 gpu_cfg.snapshot_offset = snap_off;
                 gpu_cfg.breadth_offset = br_off;
                 gpu_configs.push(gpu_cfg);
