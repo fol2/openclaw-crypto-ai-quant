@@ -91,9 +91,42 @@ For each successful change set:
 4. Clean up only the current agent/session branch and worktree (local + remote).
 5. Continue to the next axis.
 
-## 9. Immediate Next Execution Steps
+## 9. Current Delivery Status (as of 2026-02-17)
 
-1. Complete `CLOSE_PNL` numeric parity in current branch (`pr-444-close-pnl-numeric-parity`).
-2. Land via atomic PR workflow.
-3. Start State Sync foundation PR(s) (snapshot contract, export/import, replay harness).
-4. Resume axis-by-axis parity hardening on top of synced-state baseline.
+Completed foundations and parity controls:
+
+1. State sync foundation is live:
+   - canonical snapshot export/import for `live -> paper`
+   - backtester init-state v2 loading with runtime cooldown maps
+   - state alignment audit across live/paper/snapshot
+2. Deterministic replay bundle is live:
+   - bundle build with fixed inputs and manifest
+   - scripted sequence for seed, replay, audits, and strict gate
+3. Backtester parity audits are live:
+   - exit-trade reconciliation report
+   - action-level reconciliation report
+   - configurable timestamp bucketing with strict default (`1ms`)
+4. Live/paper parity audit is live:
+   - action-level reconciliation report against live and paper DB trade logs
+   - strict mismatch mode (`--fail-on-mismatch`) for automation
+5. Bundle hard gate is live:
+   - unified gate across state + trade + action reports
+   - deterministic pass/fail output for CI/manual enforcement
+
+## 10. Remaining Critical Work (Next Axes)
+
+1. Decision-reason canonicalisation:
+   - align live reason text with canonical reason codes used by replay outputs
+   - enforce machine-readable reason parity checks in audits
+2. Market data determinism hardening:
+   - record and validate replay candle provenance (window hash / universe lock)
+   - remove remaining market-data alignment ambiguity
+3. Paper deterministic replay harness:
+   - provide reproducible paper replay path from canonical snapshot + bounded data window
+   - verify event ordering parity against live baseline under equal state
+4. CPU/GPU parity continuation on synced-state baseline:
+   - continue axis-by-axis validation with zero deterministic/numeric drift tolerance
+   - classify any residual mismatch with the approved taxonomy
+5. Operational enforcement:
+   - automate replay bundle gate + live/paper reconcile in scheduled checks
+   - treat gate failures as release blockers for strategy/runtime changes
