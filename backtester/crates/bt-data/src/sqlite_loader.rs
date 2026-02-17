@@ -2,12 +2,22 @@ use bt_core::candle::{CandleData, FundingRateData, OhlcvBar};
 use rusqlite::{Connection, OpenFlags};
 use std::time::Instant;
 
+const VALID_INTERVALS: &[&str] = &["1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"];
+
+fn validate_interval(interval: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if !VALID_INTERVALS.contains(&interval) {
+        return Err(format!("invalid interval: {interval}").into());
+    }
+    Ok(())
+}
+
 /// Query the min/max timestamp for a given interval in the candle database.
 /// Returns `(min_t, max_t)` in milliseconds, or `None` if the table is empty.
 pub fn query_time_range(
     db_path: &str,
     interval: &str,
 ) -> Result<Option<(i64, i64)>, Box<dyn std::error::Error>> {
+    validate_interval(interval)?;
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut stmt = conn.prepare(
         "SELECT MIN(t), MAX(t) FROM candles WHERE interval = ?",
@@ -66,6 +76,8 @@ pub fn load_candles_filtered(
     from_ts: Option<i64>,
     to_ts: Option<i64>,
 ) -> Result<CandleData, Box<dyn std::error::Error>> {
+    validate_interval(interval)?;
+
     let start = Instant::now();
 
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -192,6 +204,8 @@ pub fn load_symbols(
     db_path: &str,
     interval: &str,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    validate_interval(interval)?;
+
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
 
     let mut stmt =

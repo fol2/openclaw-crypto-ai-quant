@@ -24,6 +24,10 @@ impl AtrIndicator {
     }
 
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> f64 {
+        if self.window == 0 {
+            return 0.0;
+        }
+
         let tr = if self.has_prev {
             (high - low)
                 .max((high - self.prev_close).abs())
