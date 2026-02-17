@@ -15,6 +15,8 @@ pub const GPU_MAX_SYMBOLS: usize = 52;
 pub const GPU_TRACE_CAP: usize = 128;
 /// Trace symbol selector sentinel: capture events for all symbols.
 pub const GPU_TRACE_SYMBOL_ALL: u32 = u32::MAX;
+/// Default anomaly Bollinger-Band width-ratio threshold (not part of sweep axes).
+pub const DEFAULT_ANOMALY_BB_WIDTH_RATIO_GT: f32 = 3.0;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GpuSnapshot — precomputed indicator values per (bar, symbol)
@@ -730,7 +732,7 @@ impl GpuComboConfig {
 
             ranging_adx_lt: rt.adx_below as f32,
             ranging_bb_width_ratio_lt: rt.bb_width_ratio_below as f32,
-            anomaly_bb_width_ratio_gt: 3.0, // hardcoded anomaly threshold (not in sweep)
+            anomaly_bb_width_ratio_gt: DEFAULT_ANOMALY_BB_WIDTH_RATIO_GT,
             slow_drift_ranging_slope_override: et.slow_drift_min_slope_pct as f32,
             snapshot_offset: 0,
             breadth_offset: 0,
