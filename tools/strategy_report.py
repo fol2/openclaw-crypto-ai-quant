@@ -1,8 +1,6 @@
 import sqlite3
 import json
 import time
-import datetime
-import re
 
 paper_db_path = '/home/fol2hk/.openclaw/workspace/dev/ai_quant/trading_engine.db'
 live_db_path = '/home/fol2hk/.openclaw/workspace/dev/ai_quant/trading_engine_live.db'
@@ -103,7 +101,7 @@ def get_current_prices(symbols):
             if row:
                 prices[sym] = row[0]
         conn.close()
-    except Exception as e:
+    except Exception:
         pass
     return prices
 
