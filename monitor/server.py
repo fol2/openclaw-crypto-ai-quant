@@ -2973,8 +2973,18 @@ class Handler(BaseHTTPRequestHandler):
         self._send_text("not found", status=404)
 
     def log_message(self, fmt: str, *args) -> None:
-        # Keep the monitor quiet; use stdout prints only for explicit startup.
-        return
+        # Keep healthy traffic quiet; surface client/server errors for troubleshooting.
+        status_code = 0
+        try:
+            status_code = int(str(args[1]))
+        except Exception:
+            status_code = 0
+        if status_code < 400:
+            return
+        try:
+            super().log_message(fmt, *args)
+        except Exception:
+            return
 
 
 class MonitorHTTPServer(ThreadingHTTPServer):

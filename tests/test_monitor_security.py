@@ -95,3 +95,44 @@ def test_main_refuses_non_local_bind_with_token_without_tls(monkeypatch) -> None
 
     with pytest.raises(SystemExit, match="TLS"):
         monitor_server.main()
+
+
+def test_log_message_suppresses_non_error_status(monkeypatch) -> None:
+    handler = object.__new__(monitor_server.Handler)
+    calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def _fake_base_log_message(self, fmt: str, *args) -> None:  # noqa: ARG001
+        calls.append((fmt, args))
+
+    monkeypatch.setattr(monitor_server.BaseHTTPRequestHandler, "log_message", _fake_base_log_message)
+
+    handler.log_message('"%s" %s %s', "GET / HTTP/1.1", "200", "123")
+    assert calls == []
+
+
+def test_log_message_forwards_4xx_status(monkeypatch) -> None:
+    handler = object.__new__(monitor_server.Handler)
+    calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def _fake_base_log_message(self, fmt: str, *args) -> None:  # noqa: ARG001
+        calls.append((fmt, args))
+
+    monkeypatch.setattr(monitor_server.BaseHTTPRequestHandler, "log_message", _fake_base_log_message)
+
+    handler.log_message('"%s" %s %s', "GET /api/unknown HTTP/1.1", "404", "19")
+    assert len(calls) == 1
+    assert calls[0][1][1] == "404"
+
+
+def test_log_message_forwards_5xx_status(monkeypatch) -> None:
+    handler = object.__new__(monitor_server.Handler)
+    calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def _fake_base_log_message(self, fmt: str, *args) -> None:  # noqa: ARG001
+        calls.append((fmt, args))
+
+    monkeypatch.setattr(monitor_server.BaseHTTPRequestHandler, "log_message", _fake_base_log_message)
+
+    handler.log_message('"%s" %s %s', "POST /api/v2/decisions/replay HTTP/1.1", "503", "57")
+    assert len(calls) == 1
+    assert calls[0][1][1] == "503"
