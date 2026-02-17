@@ -29,6 +29,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--live-baseline", required=True, help="Path to live_baseline_trades.jsonl")
     parser.add_argument("--backtester-replay-report", required=True, help="Path to backtester replay JSON report (with trades)")
     parser.add_argument("--output", required=True, help="Path to output JSON report")
+    parser.add_argument(
+        "--timestamp-bucket-ms",
+        type=int,
+        default=1,
+        help="Match timestamp bucket in milliseconds (1 = exact millisecond match)",
+    )
     parser.add_argument("--price-tol", type=float, default=DEFAULT_TOL, help="Absolute tolerance for price comparison")
     parser.add_argument("--size-tol", type=float, default=DEFAULT_TOL, help="Absolute tolerance for size comparison")
     parser.add_argument("--pnl-tol", type=float, default=DEFAULT_TOL, help="Absolute tolerance for pnl comparison")
@@ -95,6 +101,14 @@ def _normalise_confidence(value: Any) -> str:
 
 def _almost_equal(left: float, right: float, tol: float) -> bool:
     return math.isclose(float(left), float(right), rel_tol=0.0, abs_tol=tol)
+
+
+def _bucket_timestamp_ms(ts_ms: int, bucket_ms: int) -> int:
+    if bucket_ms <= 1:
+        return int(ts_ms)
+    if ts_ms >= 0:
+        return int((ts_ms // bucket_ms) * bucket_ms)
+    return int(-(((-ts_ms) // bucket_ms) * bucket_ms))
 
 
 def _canonical_live_action(action: Any, side: Any) -> str:
@@ -217,10 +231,14 @@ def _load_backtester_actions(path: Path) -> tuple[list[dict[str, Any]], dict[str
     return actions, counts
 
 
-def _group_events(rows: list[dict[str, Any]]) -> dict[tuple[str, str, int], list[dict[str, Any]]]:
+def _group_events(
+    rows: list[dict[str, Any]],
+    *,
+    timestamp_bucket_ms: int,
+) -> dict[tuple[str, str, int], list[dict[str, Any]]]:
     grouped: dict[tuple[str, str, int], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        key = (row["symbol"], row["action_code"], int(row["timestamp_ms"]))
+        key = (row["symbol"], row["action_code"], _bucket_timestamp_ms(int(row["timestamp_ms"]), timestamp_bucket_ms))
         grouped[key].append(row)
     for values in grouped.values():
         values.sort(
@@ -240,6 +258,7 @@ def _compare_actions(
     live_actions: list[dict[str, Any]],
     backtester_actions: list[dict[str, Any]],
     *,
+    timestamp_bucket_ms: int,
     price_tol: float,
     size_tol: float,
     pnl_tol: float,
@@ -281,8 +300,8 @@ def _compare_actions(
         stats["backtester_pnl_usd"] += float(row["pnl_usd"])
         stats["backtester_fee_usd"] += float(row["fee_usd"])
 
-    live_groups = _group_events(live_actions)
-    bt_groups = _group_events(backtester_actions)
+    live_groups = _group_events(live_actions, timestamp_bucket_ms=timestamp_bucket_ms)
+    bt_groups = _group_events(backtester_actions, timestamp_bucket_ms=timestamp_bucket_ms)
     all_keys = sorted(set(live_groups.keys()) | set(bt_groups.keys()))
 
     for key in all_keys:
@@ -327,7 +346,9 @@ def _compare_actions(
                     "kind": kind,
                     "symbol": symbol,
                     "action_code": action_code,
-                    "timestamp_ms": ts_ms,
+                    "match_key_timestamp_ms": ts_ms,
+                    "live_timestamp_ms": lrow["timestamp_ms"],
+                    "backtester_timestamp_ms": brow["timestamp_ms"],
                     "live_ref": {"id": lrow["source_id"], "line_no": lrow["line_no"]},
                     "backtester_ref": {"row_no": brow["row_no"]},
                     "live": {
@@ -380,7 +401,8 @@ def _compare_actions(
                             "kind": "missing_backtester_funding_action",
                             "symbol": symbol,
                             "action_code": action_code,
-                            "timestamp_ms": ts_ms,
+                            "match_key_timestamp_ms": ts_ms,
+                            "live_timestamp_ms": lrow["timestamp_ms"],
                             "live_ref": {"id": lrow["source_id"], "line_no": lrow["line_no"]},
                             "live": {
                                 "pnl_usd": lrow["pnl_usd"],
@@ -397,7 +419,8 @@ def _compare_actions(
                             "kind": "missing_backtester_action",
                             "symbol": symbol,
                             "action_code": action_code,
-                            "timestamp_ms": ts_ms,
+                            "match_key_timestamp_ms": ts_ms,
+                            "live_timestamp_ms": lrow["timestamp_ms"],
                             "live_ref": {"id": lrow["source_id"], "line_no": lrow["line_no"]},
                             "live": {
                                 "price": lrow["price"],
@@ -421,7 +444,8 @@ def _compare_actions(
                             "kind": "missing_live_funding_action",
                             "symbol": symbol,
                             "action_code": action_code,
-                            "timestamp_ms": ts_ms,
+                            "match_key_timestamp_ms": ts_ms,
+                            "backtester_timestamp_ms": brow["timestamp_ms"],
                             "backtester_ref": {"row_no": brow["row_no"]},
                             "backtester": {
                                 "pnl_usd": brow["pnl_usd"],
@@ -439,7 +463,8 @@ def _compare_actions(
                             "kind": "missing_live_action",
                             "symbol": symbol,
                             "action_code": action_code,
-                            "timestamp_ms": ts_ms,
+                            "match_key_timestamp_ms": ts_ms,
+                            "backtester_timestamp_ms": brow["timestamp_ms"],
                             "backtester_ref": {"row_no": brow["row_no"]},
                             "backtester": {
                                 "price": brow["price"],
@@ -499,6 +524,7 @@ def main() -> int:
     mismatches, compare_summary, per_symbol_rows = _compare_actions(
         live_actions,
         backtester_actions,
+        timestamp_bucket_ms=max(1, int(args.timestamp_bucket_ms)),
         price_tol=float(args.price_tol),
         size_tol=float(args.size_tol),
         pnl_tol=float(args.pnl_tol),
@@ -525,6 +551,7 @@ def main() -> int:
         "inputs": {
             "live_baseline": str(live_baseline),
             "backtester_replay_report": str(backtester_report),
+            "timestamp_bucket_ms": max(1, int(args.timestamp_bucket_ms)),
             "price_tol": float(args.price_tol),
             "size_tol": float(args.size_tol),
             "pnl_tol": float(args.pnl_tol),

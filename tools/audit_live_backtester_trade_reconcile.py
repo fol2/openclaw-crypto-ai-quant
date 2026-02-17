@@ -26,6 +26,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--live-baseline", required=True, help="Path to live_baseline_trades.jsonl")
     parser.add_argument("--backtester-trades", required=True, help="Path to backtester_trades.csv")
     parser.add_argument("--output", required=True, help="Path to output JSON report")
+    parser.add_argument(
+        "--timestamp-bucket-ms",
+        type=int,
+        default=1,
+        help="Match timestamp bucket in milliseconds (1 = exact millisecond match)",
+    )
     parser.add_argument("--size-tol", type=float, default=DEFAULT_TOL, help="Absolute tolerance for exit_size comparison")
     parser.add_argument("--pnl-tol", type=float, default=DEFAULT_TOL, help="Absolute tolerance for pnl comparison")
     parser.add_argument("--fee-tol", type=float, default=DEFAULT_TOL, help="Absolute tolerance for fee comparison")
@@ -83,6 +89,14 @@ def _normalise_side(value: Any) -> str:
 
 def _almost_equal(left: float, right: float, tol: float) -> bool:
     return math.isclose(float(left), float(right), rel_tol=0.0, abs_tol=tol)
+
+
+def _bucket_timestamp_ms(ts_ms: int, bucket_ms: int) -> int:
+    if bucket_ms <= 1:
+        return int(ts_ms)
+    if ts_ms >= 0:
+        return int((ts_ms // bucket_ms) * bucket_ms)
+    return int(-(((-ts_ms) // bucket_ms) * bucket_ms))
 
 
 def _load_live_simulatable_exits(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -176,10 +190,14 @@ def _load_backtester_exits(path: Path) -> list[dict[str, Any]]:
     return exits
 
 
-def _build_event_groups(rows: list[dict[str, Any]]) -> dict[tuple[str, str, int], list[dict[str, Any]]]:
+def _build_event_groups(
+    rows: list[dict[str, Any]],
+    *,
+    timestamp_bucket_ms: int,
+) -> dict[tuple[str, str, int], list[dict[str, Any]]]:
     grouped: dict[tuple[str, str, int], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        key = (row["symbol"], row["side"], int(row["exit_ts_ms"]))
+        key = (row["symbol"], row["side"], _bucket_timestamp_ms(int(row["exit_ts_ms"]), timestamp_bucket_ms))
         grouped[key].append(row)
 
     for values in grouped.values():
@@ -199,6 +217,7 @@ def _compare_exits(
     live_exits: list[dict[str, Any]],
     backtester_exits: list[dict[str, Any]],
     *,
+    timestamp_bucket_ms: int,
     size_tol: float,
     pnl_tol: float,
     fee_tol: float,
@@ -233,8 +252,8 @@ def _compare_exits(
         stats["backtester_pnl_usd"] += float(row["pnl_usd"])
         stats["backtester_fee_usd"] += float(row["fee_usd"])
 
-    live_groups = _build_event_groups(live_exits)
-    bt_groups = _build_event_groups(backtester_exits)
+    live_groups = _build_event_groups(live_exits, timestamp_bucket_ms=timestamp_bucket_ms)
+    bt_groups = _build_event_groups(backtester_exits, timestamp_bucket_ms=timestamp_bucket_ms)
     all_keys = sorted(set(live_groups.keys()) | set(bt_groups.keys()))
 
     unmatched_live = 0
@@ -266,7 +285,9 @@ def _compare_exits(
                     "kind": "exit_numeric_mismatch",
                     "symbol": symbol,
                     "side": side,
-                    "exit_ts_ms": ts_ms,
+                    "match_key_exit_ts_ms": ts_ms,
+                    "live_exit_ts_ms": lrow["exit_ts_ms"],
+                    "backtester_exit_ts_ms": brow["exit_ts_ms"],
                     "live_ref": {"id": lrow["source_id"], "line_no": lrow["line_no"]},
                     "backtester_ref": {"trade_id": brow["source_id"], "row_no": brow["row_no"]},
                     "live": {
@@ -303,7 +324,8 @@ def _compare_exits(
                         "kind": "missing_backtester_exit",
                         "symbol": symbol,
                         "side": side,
-                        "exit_ts_ms": ts_ms,
+                        "match_key_exit_ts_ms": ts_ms,
+                        "live_exit_ts_ms": lrow["exit_ts_ms"],
                         "live_ref": {"id": lrow["source_id"], "line_no": lrow["line_no"]},
                         "live": {
                             "exit_size": lrow["exit_size"],
@@ -323,7 +345,8 @@ def _compare_exits(
                         "kind": "missing_live_exit",
                         "symbol": symbol,
                         "side": side,
-                        "exit_ts_ms": ts_ms,
+                        "match_key_exit_ts_ms": ts_ms,
+                        "backtester_exit_ts_ms": brow["exit_ts_ms"],
                         "backtester_ref": {"trade_id": brow["source_id"], "row_no": brow["row_no"]},
                         "backtester": {
                             "exit_size": brow["exit_size"],
@@ -374,6 +397,7 @@ def main() -> int:
     mismatches, compare_summary, per_symbol_rows = _compare_exits(
         live_exits,
         backtester_exits,
+        timestamp_bucket_ms=max(1, int(args.timestamp_bucket_ms)),
         size_tol=float(args.size_tol),
         pnl_tol=float(args.pnl_tol),
         fee_tol=float(args.fee_tol),
@@ -406,6 +430,7 @@ def main() -> int:
         "inputs": {
             "live_baseline": str(live_baseline),
             "backtester_trades": str(backtester_trades),
+            "timestamp_bucket_ms": max(1, int(args.timestamp_bucket_ms)),
             "size_tol": float(args.size_tol),
             "pnl_tol": float(args.pnl_tol),
             "fee_tol": float(args.fee_tol),

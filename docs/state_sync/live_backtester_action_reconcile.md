@@ -23,8 +23,11 @@ Compared canonical actions:
 python tools/audit_live_backtester_action_reconcile.py \
   --live-baseline /tmp/live_replay_bundle_1h/live_baseline_trades.jsonl \
   --backtester-replay-report /tmp/live_replay_bundle_1h/backtester_replay_report.json \
+  --timestamp-bucket-ms 1 \
   --output /tmp/live_replay_bundle_1h/action_reconcile_report.json
 ```
+
+Use `--timestamp-bucket-ms > 1` only when your live timestamp serialisation is intentionally coarser.
 
 ## What Is Checked
 

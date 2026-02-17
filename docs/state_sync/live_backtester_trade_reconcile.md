@@ -15,8 +15,11 @@ This validates the simulatable exit path (`CLOSE` / `REDUCE`) for financial-grad
 python tools/audit_live_backtester_trade_reconcile.py \
   --live-baseline /tmp/live_replay_bundle_1h/live_baseline_trades.jsonl \
   --backtester-trades /tmp/live_replay_bundle_1h/backtester_trades.csv \
+  --timestamp-bucket-ms 1 \
   --output /tmp/live_replay_bundle_1h/trade_reconcile_report.json
 ```
+
+Set `--timestamp-bucket-ms` above `1` only when your live timestamp serialisation is coarser than replay timestamps.
 
 ## Comparison Scope
 
