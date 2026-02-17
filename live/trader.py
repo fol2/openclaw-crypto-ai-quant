@@ -140,13 +140,13 @@ def _discord_worker() -> None:
         target, message = _DISCORD_QUEUE.get()
         try:
             _send_discord_message_sync(target=target, message=message)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("failed to send discord message (target=%s): %s", target, e, exc_info=True)
         finally:
             try:
                 _DISCORD_QUEUE.task_done()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("failed to mark discord queue task done: %s", e, exc_info=True)
 
 
 def _ensure_discord_worker_started() -> None:
@@ -177,8 +177,8 @@ def _send_discord_message(*, target: str, message: str) -> None:
         # Drop when overloaded; trading correctness > notifications.
         try:
             print("⚠️ Discord queue full; dropping message")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("failed to print discord queue overflow warning: %s", e, exc_info=True)
 
 
 def _notify_live_fill(
@@ -408,7 +408,9 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             db_conn = sqlite3.connect(mei_alpha_v1.DB_PATH, timeout=_DB_TIMEOUT_S)
             db_cur = db_conn.cursor()
         except sqlite3.Error as exc:
-            logger.warning("sync_from_exchange: position_state DB unavailable, continuing without state recovery: %s", exc)
+            logger.warning(
+                "sync_from_exchange: position_state DB unavailable, continuing without state recovery: %s", exc
+            )
             db_conn = None
             db_cur = None
 
@@ -511,8 +513,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         try:
             if db_conn is not None:
                 db_conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("failed to close db connection: %s", e, exc_info=True)
 
         self.positions = new_positions
         # Clear pending OPEN intents once we see the position in exchange state.
@@ -522,8 +524,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 for sym in list((self._pending_open_sent_at_s or {}).keys()):
                     if sym in self.positions:
                         self._pending_open_sent_at_s.pop(sym, None)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("failed to prune pending opens: %s", e, exc_info=True)
         # Refresh leverage cache from exchange state (open positions only).
         try:
             for sym, p in (self.positions or {}).items():
@@ -532,19 +534,19 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 except Exception:
                     lev_i = 1
                 self._last_leverage_set[str(sym).upper()] = max(1, lev_i)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("failed to refresh leverage cache from exchange state: %s", e, exc_info=True)
         for sym in self.positions.keys():
             try:
                 self.upsert_position_state(sym)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("failed to upsert position state for %s: %s", sym, e, exc_info=True)
         # Reconcile position_state: delete any rows not in current open positions.
         # Self-healing: if a previous clear failed, the next loop fixes it.
         try:
             self._reconcile_position_state(set(self.positions.keys()))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("failed to reconcile position state: %s", e, exc_info=True)
 
     def get_live_balance(self):
         # In live mode, "equity" is exchange accountValue. Avoid REST calls in hot paths:
@@ -607,8 +609,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             try:
                 if conn is not None:
                     conn.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("failed to close sqlite connection: %s", e, exc_info=True)
 
     def clear_position_state(self, symbol):
         try:
@@ -632,8 +634,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             try:
                 if conn is not None:
                     conn.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("failed to close sqlite connection: %s", e, exc_info=True)
 
     def _reconcile_position_state(self, open_symbols: set):
         """Delete position_state rows for symbols NOT currently open on exchange.
@@ -669,8 +671,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             try:
                 if conn is not None:
                     conn.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("failed to close sqlite connection: %s", e, exc_info=True)
 
     def _estimate_margin_used(self, symbol: str, pos: dict, *, mark_price: float | None = None) -> float:
         """Live override: warns when WS price is stale and entry price fallback is used."""
@@ -1219,8 +1221,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     if oms_intent is not None and oms is not None:
                         try:
                             oms.mark_failed(oms_intent, error=f"risk blocked: {why}")
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("failed to mark oms intent as risk-blocked: %s", e, exc_info=True)
                     mei_alpha_v1.log_audit_event(
                         sym,
                         "LIVE_ORDER_BLOCKED_RISK",
@@ -1254,8 +1256,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     },
                 )
                 return False
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("failed to check entry loop budget (ADD): %s", e, exc_info=True)
 
         # Ensure leverage on exchange (cross margin). Avoid redundant calls when possible.
         lev_i = 1
@@ -1277,8 +1279,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 if oms_intent is not None and oms is not None:
                     try:
                         oms.mark_failed(oms_intent, error=f"update_leverage failed ({float(leverage):.0f}x)")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("failed to mark oms intent as leverage-failed: %s", e, exc_info=True)
                 mei_alpha_v1.log_audit_event(
                     sym,
                     "LIVE_ORDER_FAIL_UPDATE_LEVERAGE",
@@ -1292,8 +1294,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 return False
             try:
                 self._last_leverage_set[sym] = int(lev_i)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("failed to cache leverage for %s: %s", sym, e, exc_info=True)
         cloid = getattr(oms_intent, "client_order_id", None)
         try:
             result = self.executor.market_open(
@@ -1335,14 +1337,14 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                             notional_usd=float(notional),
                             reduce_risk=False,
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("failed to note ADD order sent to risk tracker: %s", e, exc_info=True)
                 try:
                     bud = getattr(self, "_entry_budget_remaining", None)
                     if bud is not None:
                         setattr(self, "_entry_budget_remaining", max(0, int(bud) - 1))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("failed to decrement entry budget (ADD timeout): %s", e, exc_info=True)
                 if oms_intent is not None and oms is not None:
                     try:
                         oms.mark_submit_unknown(
@@ -1354,16 +1356,16 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                             requested_size=float(add_size),
                             error=err_s or err_kind,
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("failed to mark oms intent as submit-unknown (ADD): %s", e, exc_info=True)
                 self._reconcile_after_submit_unknown(symbol=sym, action="ADD")
             else:
                 self._note_entry_fail(sym, "market_open rejected")
                 if oms_intent is not None and oms is not None:
                     try:
                         oms.mark_failed(oms_intent, error="market_open rejected")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("failed to mark oms intent as market_open rejected: %s", e, exc_info=True)
             mei_alpha_v1.log_audit_event(
                 sym,
                 "LIVE_ORDER_SUBMIT_UNKNOWN" if err_kind in {"timeout", "exception"} else "LIVE_ORDER_FAIL_MARKET_OPEN",
@@ -1408,8 +1410,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             bud = getattr(self, "_entry_budget_remaining", None)
             if bud is not None:
                 setattr(self, "_entry_budget_remaining", max(0, int(bud) - 1))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("failed to decrement entry budget after ADD send: %s", e, exc_info=True)
 
         if oms_intent is not None and oms is not None:
             try:
@@ -1422,8 +1424,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     requested_size=float(add_size),
                     result=result,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("failed to mark oms intent as sent (ADD): %s", e, exc_info=True)
 
         print(
             f"➕ LIVE ORDER sent: ADD {pos_type} {sym} "
@@ -1675,8 +1677,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     if oms_intent is not None and oms is not None:
                         try:
                             oms.mark_failed(oms_intent, error=f"risk blocked: {why}")
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("failed to mark oms intent as risk-blocked: %s", e, exc_info=True)
                     mei_alpha_v1.log_audit_event(
                         sym,
                         "LIVE_ORDER_BLOCKED_RISK",
@@ -1690,16 +1692,21 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                         },
                     )
                     return False
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    "risk.allow_order() raised for exit %s, allowing order (fail-open for exits): %s",
+                    sym,
+                    e,
+                    exc_info=True,
+                )
 
         if not self._can_send_orders():
             if oms_intent is not None and oms is not None:
                 try:
                     why = "DRY LIVE" if live_mode() == "dry_live" else "DISABLED"
                     oms.mark_would(oms_intent, note=why)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("failed to mark oms intent as would-send (exit): %s", e, exc_info=True)
             print(
                 f"🟡 LIVE ORDERS DISABLED: would {('CLOSE' if is_full_close else 'REDUCE')} "
                 f"{sym} size={reduce_size_f:.6f} lev={float(pos.get('leverage') or 1.0):.0f} reason={reason}"
@@ -1751,8 +1758,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 # Transport errors are ambiguous: the order may have been accepted even if the response timed out.
                 try:
                     self._last_exit_attempt_at_s[sym] = time.time()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("failed to record exit attempt timestamp for %s: %s", sym, e, exc_info=True)
                 if risk is not None:
                     try:
                         risk.note_order_sent(
@@ -1761,8 +1768,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                             notional_usd=float(notional_est2),
                             reduce_risk=True,
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("failed to note exit order sent to risk tracker: %s", e, exc_info=True)
                 if oms_intent is not None and oms is not None:
                     try:
                         oms.mark_submit_unknown(
@@ -1774,14 +1781,14 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                             requested_size=float(reduce_size_f),
                             error=err_s or err_kind,
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("failed to mark oms intent as submit-unknown (exit): %s", e, exc_info=True)
             else:
                 if oms_intent is not None and oms is not None:
                     try:
                         oms.mark_failed(oms_intent, error="market_close rejected")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("failed to mark oms intent as market_close rejected: %s", e, exc_info=True)
             mei_alpha_v1.log_audit_event(
                 sym,
                 "LIVE_ORDER_SUBMIT_UNKNOWN" if err_kind in {"timeout", "exception"} else "LIVE_ORDER_FAIL_MARKET_CLOSE",
@@ -1822,8 +1829,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         # Successful send: rate-limit future exit attempts for this symbol for a short cooldown window.
         try:
             self._last_exit_attempt_at_s[sym] = time.time()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("failed to record exit cooldown timestamp for %s: %s", sym, e, exc_info=True)
 
         if oms_intent is not None and oms is not None:
             try:
@@ -1836,16 +1843,16 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     requested_size=float(reduce_size_f),
                     result=result,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("failed to mark oms intent as sent (exit): %s", e, exc_info=True)
 
         if is_full_close:
             try:
                 self._last_full_close_sent_at_s[sym] = time.time()
                 self._last_full_close_sent_type[sym] = str(pos_type or "").upper()
                 self._last_full_close_sent_reason[sym] = str(reason or "")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("failed to record full close metadata for %s: %s", sym, e, exc_info=True)
 
         notional = abs(reduce_size_f) * float(fill_price_est)
         margin_est = notional / lev if lev > 0 else 0.0
@@ -1891,8 +1898,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 meta_final["order"] = {**meta_final["order"], **order_meta}
             else:
                 meta_final["order"] = order_meta
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("failed to build order meta for exit: %s", e, exc_info=True)
 
         if oms_intent is not None:
             try:
@@ -1900,8 +1907,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     "intent_id": getattr(oms_intent, "intent_id", None),
                     "client_order_id": getattr(oms_intent, "client_order_id", None),
                 }
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("failed to attach oms metadata to exit meta: %s", e, exc_info=True)
 
         self._push_pending(
             sym,
@@ -2473,8 +2480,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     if oms_intent is not None and oms is not None:
                         try:
                             oms.mark_failed(oms_intent, error=f"risk blocked: {why}")
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("failed to mark oms intent as risk-blocked: %s", e, exc_info=True)
                     mei_alpha_v1.log_audit_event(
                         sym,
                         "LIVE_ORDER_BLOCKED_RISK",
@@ -2501,8 +2508,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             if oms_intent is not None and oms is not None:
                 try:
                     oms.mark_would(oms_intent, note=str(why))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("failed to mark oms intent as would-send (OPEN): %s", e, exc_info=True)
             print(
                 f"🟡 LIVE {why}: would OPEN {sym} {('LONG' if signal == 'BUY' else 'SHORT')} "
                 f"size={size:.6f} notional~=${notional:.2f} margin~=${margin_need:.2f} lev={leverage:.0f} conf={confidence}"
@@ -2538,8 +2545,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     },
                 )
                 return
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("failed to check entry loop budget (OPEN): %s", e, exc_info=True)
 
         lev_i = 1
         try:
@@ -2560,8 +2567,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 if oms_intent is not None and oms is not None:
                     try:
                         oms.mark_failed(oms_intent, error=f"update_leverage failed ({float(leverage):.0f}x)")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("failed to mark oms intent as leverage-failed: %s", e, exc_info=True)
                 mei_alpha_v1.log_audit_event(
                     sym,
                     "LIVE_ORDER_FAIL_UPDATE_LEVERAGE",
@@ -2575,8 +2582,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 return
             try:
                 self._last_leverage_set[sym] = int(lev_i)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("failed to cache leverage for %s: %s", sym, e, exc_info=True)
         cloid = getattr(oms_intent, "client_order_id", None)
         try:
             result = self.executor.market_open(
@@ -2618,14 +2625,14 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                             notional_usd=float(notional),
                             reduce_risk=False,
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("failed to note OPEN order sent to risk tracker: %s", e, exc_info=True)
                 try:
                     bud = getattr(self, "_entry_budget_remaining", None)
                     if bud is not None:
                         setattr(self, "_entry_budget_remaining", max(0, int(bud) - 1))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("failed to decrement entry budget (OPEN timeout): %s", e, exc_info=True)
                 if oms_intent is not None and oms is not None:
                     try:
                         oms.mark_submit_unknown(
@@ -2637,22 +2644,22 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                             requested_size=float(size),
                             error=err_s or err_kind,
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("failed to mark oms intent as submit-unknown (OPEN): %s", e, exc_info=True)
                 # Conservatively count this as a pending open so we don't exceed capacity in-loop.
                 try:
                     with self._pending_open_lock:
                         self._pending_open_sent_at_s[sym] = time.time()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("failed to record pending open timestamp for %s (timeout): %s", sym, e, exc_info=True)
                 self._reconcile_after_submit_unknown(symbol=sym, action="OPEN")
             else:
                 self._note_entry_fail(sym, "market_open rejected")
                 if oms_intent is not None and oms is not None:
                     try:
                         oms.mark_failed(oms_intent, error="market_open rejected")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("failed to mark oms intent as market_open rejected: %s", e, exc_info=True)
             mei_alpha_v1.log_audit_event(
                 sym,
                 "LIVE_ORDER_SUBMIT_UNKNOWN" if err_kind in {"timeout", "exception"} else "LIVE_ORDER_FAIL_MARKET_OPEN",
@@ -2697,8 +2704,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             bud = getattr(self, "_entry_budget_remaining", None)
             if bud is not None:
                 setattr(self, "_entry_budget_remaining", max(0, int(bud) - 1))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("failed to decrement entry budget after OPEN send: %s", e, exc_info=True)
 
         if oms_intent is not None and oms is not None:
             try:
@@ -2711,8 +2718,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     requested_size=float(size),
                     result=result,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("failed to mark oms intent as sent (OPEN): %s", e, exc_info=True)
 
         try:
             size_mult = float(trade_cfg.get("size_multiplier", 1.0))
@@ -2789,8 +2796,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         try:
             with self._pending_open_lock:
                 self._pending_open_sent_at_s[sym] = time.time()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("failed to record pending open timestamp for %s: %s", sym, e, exc_info=True)
 
 
 _LIVE_TABLES_ENSURED = False
@@ -2888,8 +2895,8 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                     "INSERT INTO ws_events (ts, channel, data_json) VALUES (?, ?, ?)",
                     (t_ms, "userFills", json.dumps(f, separators=(",", ":"), sort_keys=True)),
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("failed to insert ws_events row for fill %s: %s", sym, e, exc_info=True)
 
             try:
                 px = float(f.get("px") or 0.0)
@@ -2996,8 +3003,8 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                 )
                 if cur.fetchone() is not None:
                     continue
-            except Exception:
-                pass  # secondary dedup failed; fall through to primary INSERT OR IGNORE
+            except Exception as e:
+                logger.debug("secondary fill dedup check failed for %s, falling through: %s", sym, e, exc_info=True)
 
             if {"fill_hash", "fill_tid"}.issubset(cols):
                 # Dedup at DB level via a unique index (added by mei_alpha_v1.ensure_db() migration).
@@ -3133,8 +3140,8 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                                 ref_bid=ref_bid,
                                 ref_ask=ref_ask,
                             )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("failed to call risk.note_fill for %s (deduped path): %s", sym, e, exc_info=True)
                     try:
                         lev_s = "NA" if lev is None or lev <= 0 else f"{float(lev):.0f}x"
                     except Exception:
@@ -3273,8 +3280,8 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                             ref_bid=ref_bid,
                             ref_ask=ref_ask,
                         )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("failed to call risk.note_fill for %s (insert path): %s", sym, e, exc_info=True)
                 try:
                     lev_s = "NA" if lev is None or lev <= 0 else f"{float(lev):.0f}x"
                 except Exception:
@@ -3301,8 +3308,8 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                     if row and row[0]:
                         pos["open_trade_id"] = int(row[0])
                         trader.upsert_position_state(sym)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("failed to update open_trade_id for %s: %s", sym, e, exc_info=True)
 
             if (_fill_i + 1) % 100 == 0:
                 conn.commit()
@@ -3585,8 +3592,8 @@ def process_user_fundings(trader: LiveTrader, events: list[dict]) -> int:
                 try:
                     trader.positions[sym]["last_funding_time"] = int(t_ms)
                     trader.upsert_position_state(sym)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("failed to update last_funding_time for %s: %s", sym, e, exc_info=True)
 
         conn.commit()
     finally:
@@ -3674,14 +3681,14 @@ def log_live_signal(*, symbol: str, signal: str, confidence: str, price: float, 
             ),
         )
         conn.commit()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("failed to insert live signal into db: %s", e, exc_info=True)
     finally:
         try:
             if conn is not None:
                 conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("failed to close sqlite connection: %s", e, exc_info=True)
 
 
 def run_trader():
