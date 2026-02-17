@@ -340,8 +340,7 @@ fn random_gpu_combo_config(rng: &mut StdRng) -> GpuComboConfig {
         ave_enabled: rng.gen_range(0_u32..2),
         tp_mult_strong: rng.gen_range(5.0_f32..10.0),
         tp_mult_weak: rng.gen_range(2.0_f32..5.0),
-
-        _codegen_pad: 0,
+        entry_cooldown_s: rng.gen_range(0_u32..61),
     }
 }
 

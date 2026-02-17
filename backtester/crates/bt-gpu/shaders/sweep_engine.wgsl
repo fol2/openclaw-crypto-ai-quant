@@ -153,7 +153,7 @@ struct GpuComboConfig {
     stoch_rsi_block_long_gt: f32, stoch_rsi_block_short_lt: f32,
     ave_enabled: u32,
     tp_mult_strong: f32, tp_mult_weak: f32,
-    _codegen_pad: u32,
+    entry_cooldown_s: u32,
 }
 
 struct GpuComboState {
