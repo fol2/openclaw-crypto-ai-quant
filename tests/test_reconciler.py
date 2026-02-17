@@ -319,8 +319,8 @@ class TestReconcile:
             "SOL": _make_kernel_position("SOL", "long", 100.0),
         }
         exchange = {
-            "ETH": _make_exchange_position("long", 1.0),   # match
-            "BTC": _make_exchange_position("long", 0.5),    # side mismatch
+            "ETH": _make_exchange_position("long", 1.0),  # match
+            "BTC": _make_exchange_position("long", 0.5),  # side mismatch
             # SOL missing on exchange — ghost
             "DOGE": _make_exchange_position("long", 10000.0),  # missing in kernel
         }
@@ -479,8 +479,7 @@ class TestBuildResolution:
             timestamp_ms=1700000000000,
             matched=[],
             discrepancies=[
-                Discrepancy("DOGE", "missing_kernel", "major", 0.0, 10000.0, "missing",
-                           exchange_side="short"),
+                Discrepancy("DOGE", "missing_kernel", "major", 0.0, 10000.0, "missing", exchange_side="short"),
             ],
             is_clean=False,
             severity="major",
@@ -812,66 +811,171 @@ class TestCalculateSeverity:
 
     def test_clean_no_discrepancies(self):
         report = ReconciliationReport(
-            timestamp_ms=0, matched=[], discrepancies=[],
-            is_clean=True, severity="clean", resolutions=[],
+            timestamp_ms=0,
+            matched=[],
+            discrepancies=[],
+            is_clean=True,
+            severity="clean",
+            resolutions=[],
         )
         assert calculate_severity(report) == "clean"
 
     def test_minor_small_size_mismatch(self):
         report = ReconciliationReport(
-            timestamp_ms=0, matched=[], discrepancies=[
+            timestamp_ms=0,
+            matched=[],
+            discrepancies=[
                 Discrepancy("ETH", "size_mismatch", "minor", 1.0, 1.05, ""),
             ],
-            is_clean=False, severity="", resolutions=[],
+            is_clean=False,
+            severity="",
+            resolutions=[],
         )
         assert calculate_severity(report) == "minor"
 
     def test_major_large_mismatch(self):
         report = ReconciliationReport(
-            timestamp_ms=0, matched=[], discrepancies=[
+            timestamp_ms=0,
+            matched=[],
+            discrepancies=[
                 Discrepancy("ETH", "size_mismatch", "major", 1.0, 2.0, ""),
             ],
-            is_clean=False, severity="", resolutions=[],
+            is_clean=False,
+            severity="",
+            resolutions=[],
         )
         assert calculate_severity(report) == "major"
 
     def test_major_ghost_position(self):
         report = ReconciliationReport(
-            timestamp_ms=0, matched=[], discrepancies=[
+            timestamp_ms=0,
+            matched=[],
+            discrepancies=[
                 Discrepancy("ETH", "missing_exchange", "major", 1.0, 0.0, "ghost"),
             ],
-            is_clean=False, severity="", resolutions=[],
+            is_clean=False,
+            severity="",
+            resolutions=[],
         )
         assert calculate_severity(report) == "major"
 
     def test_critical_side_mismatch(self):
         report = ReconciliationReport(
-            timestamp_ms=0, matched=[], discrepancies=[
+            timestamp_ms=0,
+            matched=[],
+            discrepancies=[
                 Discrepancy("ETH", "side_mismatch", "critical", 1.0, 1.0, ""),
             ],
-            is_clean=False, severity="", resolutions=[],
+            is_clean=False,
+            severity="",
+            resolutions=[],
         )
         assert calculate_severity(report) == "critical"
 
     def test_critical_dominates_mixed(self):
         """Critical severity should dominate even when minor/major also present."""
         report = ReconciliationReport(
-            timestamp_ms=0, matched=[], discrepancies=[
+            timestamp_ms=0,
+            matched=[],
+            discrepancies=[
                 Discrepancy("ETH", "size_mismatch", "minor", 1.0, 1.05, ""),
                 Discrepancy("SOL", "missing_exchange", "major", 100.0, 0.0, ""),
                 Discrepancy("BTC", "side_mismatch", "critical", 0.5, 0.5, ""),
             ],
-            is_clean=False, severity="", resolutions=[],
+            is_clean=False,
+            severity="",
+            resolutions=[],
         )
         assert calculate_severity(report) == "critical"
 
     def test_major_dominates_minor(self):
         """Major should dominate when mixed with minor."""
         report = ReconciliationReport(
-            timestamp_ms=0, matched=[], discrepancies=[
+            timestamp_ms=0,
+            matched=[],
+            discrepancies=[
                 Discrepancy("ETH", "size_mismatch", "minor", 1.0, 1.05, ""),
                 Discrepancy("SOL", "missing_exchange", "major", 100.0, 0.0, ""),
             ],
-            is_clean=False, severity="", resolutions=[],
+            is_clean=False,
+            severity="",
+            resolutions=[],
         )
         assert calculate_severity(report) == "major"
+
+
+# ---------------------------------------------------------------------------
+# TestKillSwitchOnCritical (H12)
+# ---------------------------------------------------------------------------
+
+
+class TestKillSwitchOnCritical:
+    """H12: Critical reconciliation mismatch should trigger the kill-switch."""
+
+    def test_critical_mismatch_triggers_kill_switch(self):
+        """Side mismatch (critical) should call risk_manager.kill()."""
+
+        class FakeRiskManager:
+            def __init__(self):
+                self.kill_calls: list[dict] = []
+
+            def kill(self, *, mode: str, reason: str) -> None:
+                self.kill_calls.append({"mode": mode, "reason": reason})
+
+        risk = FakeRiskManager()
+        rec = PositionReconciler(risk_manager=risk)
+        kernel = {"ETH": _make_kernel_position("ETH", "long", 1.0)}
+        exchange = {"ETH": _make_exchange_position("short", 1.0)}
+
+        report = rec.reconcile(kernel, exchange)
+
+        assert report.severity == "critical"
+        assert len(risk.kill_calls) == 1
+        assert risk.kill_calls[0]["mode"] == "close_only"
+        assert "reconciliation_critical" in risk.kill_calls[0]["reason"]
+
+    def test_non_critical_does_not_trigger_kill_switch(self):
+        """Minor/major mismatches should NOT trigger the kill-switch."""
+
+        class FakeRiskManager:
+            def __init__(self):
+                self.kill_calls: list[dict] = []
+
+            def kill(self, *, mode: str, reason: str) -> None:
+                self.kill_calls.append({"mode": mode, "reason": reason})
+
+        risk = FakeRiskManager()
+        rec = PositionReconciler(risk_manager=risk)
+        kernel = {"ETH": _make_kernel_position("ETH", "long", 1.0)}
+        exchange = {"ETH": _make_exchange_position("long", 1.5)}  # size mismatch, major
+
+        report = rec.reconcile(kernel, exchange)
+
+        assert report.severity in ("minor", "major")
+        assert len(risk.kill_calls) == 0
+
+    def test_no_risk_manager_still_works(self):
+        """Without risk_manager, critical mismatch logs but does not crash."""
+        rec = PositionReconciler()  # no risk_manager
+        kernel = {"ETH": _make_kernel_position("ETH", "long", 1.0)}
+        exchange = {"ETH": _make_exchange_position("short", 1.0)}
+
+        report = rec.reconcile(kernel, exchange)
+
+        assert report.severity == "critical"
+
+    def test_risk_manager_exception_does_not_crash(self):
+        """If risk_manager.kill() raises, reconciler should not crash."""
+
+        class BrokenRiskManager:
+            def kill(self, *, mode: str, reason: str) -> None:
+                raise RuntimeError("kill failed")
+
+        risk = BrokenRiskManager()
+        rec = PositionReconciler(risk_manager=risk)
+        kernel = {"ETH": _make_kernel_position("ETH", "long", 1.0)}
+        exchange = {"ETH": _make_exchange_position("short", 1.0)}
+
+        # Should not raise
+        report = rec.reconcile(kernel, exchange)
+        assert report.severity == "critical"
