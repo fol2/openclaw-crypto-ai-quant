@@ -13,6 +13,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import logging
 import time
 from unittest.mock import MagicMock
 
@@ -533,6 +534,34 @@ class TestExecuteIntent:
         # 1000 / 100 = 10.0
         _, kwargs = client.market_open.call_args
         assert kwargs["sz"] == pytest.approx(10.0)
+
+    def test_open_rejects_oversized_quantity(self):
+        client = _make_mock_client()
+        adapter = BrokerAdapter(
+            client,
+            config={"rate_limit_delay_s": 0, "max_quantity": 1.0, "max_notional_usd": 1_000_000.0},
+        )
+        intent = _make_intent(kind="open", quantity=1.5, price=3000.0, notional_usd=4500.0)
+
+        with pytest.raises(BrokerAdapterError, match="exceeds max_quantity"):
+            adapter.execute_intent(intent)
+
+        client.market_open.assert_not_called()
+
+    def test_open_rejects_oversized_notional(self, caplog: pytest.LogCaptureFixture):
+        client = _make_mock_client()
+        adapter = BrokerAdapter(
+            client,
+            config={"rate_limit_delay_s": 0, "max_notional_usd": 500.0, "max_quantity": 1000.0},
+        )
+        intent = _make_intent(kind="open", quantity=0.0, notional_usd=1000.0, price=100.0)
+
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(BrokerAdapterError, match="exceeds max_notional_usd"):
+                adapter.execute_intent(intent)
+
+        client.market_open.assert_not_called()
+        assert any("max_notional_usd" in rec.message for rec in caplog.records)
 
 
 # ===========================================================================
