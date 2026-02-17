@@ -6973,7 +6973,8 @@ def analyze(df, symbol, btc_bullish=None):
     ave_window = max(5, min(500, ave_window))
 
     df["avg_atr"] = df["ATR"].rolling(window=ave_window).mean()
-    latest_avg_atr = df["avg_atr"].iloc[-1]
+    _raw_avg_atr = df["avg_atr"].iloc[-1]
+    latest_avg_atr = 0.0 if (_raw_avg_atr != _raw_avg_atr) else float(_raw_avg_atr)
     atr_ratio = None
     vol_spike_mult = 1.0
     if ave_enabled and latest_avg_atr > 0:
@@ -7134,8 +7135,16 @@ def analyze(df, symbol, btc_bullish=None):
                 smooth1=int(ind["stoch_rsi_smooth1"]),
                 smooth2=int(ind["stoch_rsi_smooth2"]),
             )
-            stoch_k = float(stoch_rsi.stochrsi_k().iloc[-1])
-            stoch_d = float(stoch_rsi.stochrsi_d().iloc[-1])
+            try:
+                _sk = stoch_rsi.stochrsi_k().iloc[-1]
+                stoch_k = 0.0 if (_sk != _sk) else float(_sk)
+            except (IndexError, KeyError):
+                stoch_k = None
+            try:
+                _sd = stoch_rsi.stochrsi_d().iloc[-1]
+                stoch_d = 0.0 if (_sd != _sd) else float(_sd)
+            except (IndexError, KeyError):
+                stoch_d = None
 
         # v4.1: Dynamic RSI Elasticity (DRE) - Linear interpolation for RSI gating
         adx_val = latest["ADX"]
