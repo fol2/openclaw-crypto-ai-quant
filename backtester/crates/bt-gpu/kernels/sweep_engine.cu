@@ -1235,62 +1235,49 @@ extern "C" __global__ void sweep_engine_kernel(
                         || (snap.atr > 0.0f
                             && fabsf(snap.close - snap.prev_close) > snap.atr * cfg.glitch_atr_mult);
                 }
-                if (block_exits) {
-                    continue;  // CPU returns Hold — skip trailing update too
+                bool partial_tp_taken = false;
+                if (!block_exits) {
+                    // Stop loss
+                    if (check_stop_loss(pos, snap, &cfg)) {
+                        apply_close(&state, sym, snap, false, fee_rate, cfg.slippage_bps);
+                        continue;
+                    }
+
+                    // Update trailing stop
+                    float new_tsl = compute_trailing(pos, snap, &cfg, p_atr);
+                    if (new_tsl > 0.0f) {
+                        state.positions[sym].trailing_sl = new_tsl;
+                    }
+
+                    // Trailing stop exit
+                    if (check_trailing_exit(state.positions[sym], snap)) {
+                        apply_close(&state, sym, snap, false, fee_rate, cfg.slippage_bps);
+                        continue;
+                    }
+
+                    // Take profit
+                    float tp_mult = get_tp_mult(snap, &cfg);
+                    unsigned int tp_result = check_tp(pos, snap, &cfg, tp_mult);
+                    if (tp_result == 1u) {
+                        apply_partial_close(&state, sym, snap, cfg.tp_partial_pct, fee_rate, cfg.slippage_bps);
+                        partial_tp_taken = true;
+                    }
+                    if (tp_result == 2u) {
+                        apply_close(&state, sym, snap, false, fee_rate, cfg.slippage_bps);
+                        continue;
+                    }
+
+                    // Smart exits (skip when partial TP fired this bar, same as prior flow)
+                    if (!partial_tp_taken && check_smart_exits(pos, snap, &cfg, p_atr)) {
+                        apply_close(&state, sym, snap, false, fee_rate, cfg.slippage_bps);
+                        continue;
+                    }
                 }
-
-                // Stop loss
-                if (check_stop_loss(pos, snap, &cfg)) {
-                    apply_close(&state, sym, snap, false, fee_rate, cfg.slippage_bps);
-                    continue;
-                }
-
-                // Update trailing stop
-                float new_tsl = compute_trailing(pos, snap, &cfg, p_atr);
-                if (new_tsl > 0.0f) {
-                    state.positions[sym].trailing_sl = new_tsl;
-                }
-
-                // Trailing stop exit
-                if (check_trailing_exit(state.positions[sym], snap)) {
-                    apply_close(&state, sym, snap, false, fee_rate, cfg.slippage_bps);
-                    continue;
-                }
-
-                // Take profit
-                float tp_mult = get_tp_mult(snap, &cfg);
-                unsigned int tp_result = check_tp(pos, snap, &cfg, tp_mult);
-                if (tp_result == 1u) {
-                    apply_partial_close(&state, sym, snap, cfg.tp_partial_pct, fee_rate, cfg.slippage_bps);
-                    continue;
-                }
-                if (tp_result == 2u) {
-                    apply_close(&state, sym, snap, false, fee_rate, cfg.slippage_bps);
-                    continue;
-                }
-
-                // Smart exits
-                if (check_smart_exits(pos, snap, &cfg, p_atr)) {
-                    apply_close(&state, sym, snap, false, fee_rate, cfg.slippage_bps);
-                    continue;
-                }
-            }
-
-            // == Phase 2: Entry collection ===================================
-            EntryCandidate candidates[MAX_CANDIDATES];
-            unsigned int num_cands = 0u;
-
-            for (unsigned int sym = 0u; sym < ns; sym++) {
-                if (num_cands >= MAX_CANDIDATES) { break; }
-
-                const GpuSnapshot& snap = snapshots[cfg.snapshot_offset + bar * ns + sym];
-                if (snap.valid == 0u) { continue; }
-
-                const GpuPosition& pos = state.positions[sym];
 
                 // Pyramiding (same-direction add) -- not ranked, immediate
-                if (pos.active != POS_EMPTY && cfg.enable_pyramiding != 0u) {
-                    if (pos.adds_count < cfg.max_adds_per_symbol) {
+                const GpuPosition& pos_after_exit = state.positions[sym];
+                if (pos_after_exit.active != POS_EMPTY && cfg.enable_pyramiding != 0u) {
+                    if (pos_after_exit.adds_count < cfg.max_adds_per_symbol) {
                         // AQC-1252: confidence gate for pyramid adds
                         if (cfg.add_min_confidence > 0u) {
                             bool is_btc_sym_pyr = (sym == params->btc_sym_idx);
@@ -1303,14 +1290,14 @@ extern "C" __global__ void sweep_engine_kernel(
                                 continue;
                             }
                         }
-                        float p_atr_pyr = profit_atr(pos, snap.close);
+                        float p_atr_pyr = profit_atr(pos_after_exit, snap.close);
                         if (p_atr_pyr >= cfg.add_min_profit_atr) {
-                            unsigned int elapsed_sec = snap.t_sec - pos.last_add_time_sec;
+                            unsigned int elapsed_sec = snap.t_sec - pos_after_exit.last_add_time_sec;
                             if (elapsed_sec >= cfg.add_cooldown_minutes * 60u) {
                                 float equity = (float)state.balance;
                                 float base_margin = equity * cfg.allocation_pct;
                                 float add_margin = base_margin * cfg.add_fraction_of_base_margin;
-                                float lev = pos.leverage;
+                                float lev = pos_after_exit.leverage;
                                 float add_notional = add_margin * lev;
                                 float add_size = add_notional / snap.close;
 
@@ -1327,11 +1314,11 @@ extern "C" __global__ void sweep_engine_kernel(
                                 state.balance -= fee;
                                 state.total_fees += fee;
 
-                                float old_size = pos.size;
+                                float old_size = pos_after_exit.size;
                                 float new_size = old_size + add_size;
-                                float add_slip = (pos.active == POS_LONG) ? cfg.slippage_bps : -cfg.slippage_bps;
+                                float add_slip = (pos_after_exit.active == POS_LONG) ? cfg.slippage_bps : -cfg.slippage_bps;
                                 float add_fill_price = snap.close * (1.0f + add_slip / 10000.0f);
-                                float new_entry = (pos.entry_price * old_size + add_fill_price * add_size) / new_size;
+                                float new_entry = (pos_after_exit.entry_price * old_size + add_fill_price * add_size) / new_size;
                                 state.positions[sym].entry_price = new_entry;
                                 state.positions[sym].size = new_size;
                                 state.positions[sym].margin_used += add_margin;
@@ -1342,7 +1329,7 @@ extern "C" __global__ void sweep_engine_kernel(
                                     sym,
                                     snap.t_sec,
                                     TRACE_KIND_ADD,
-                                    pos.active,
+                                    pos_after_exit.active,
                                     TRACE_REASON_PYRAMID,
                                     add_fill_price,
                                     add_size,
@@ -1351,8 +1338,20 @@ extern "C" __global__ void sweep_engine_kernel(
                             }
                         }
                     }
-                    continue;
                 }
+            }
+
+            // == Phase 2: Entry collection ===================================
+            EntryCandidate candidates[MAX_CANDIDATES];
+            unsigned int num_cands = 0u;
+
+            for (unsigned int sym = 0u; sym < ns; sym++) {
+                if (num_cands >= MAX_CANDIDATES) { break; }
+
+                const GpuSnapshot& snap = snapshots[cfg.snapshot_offset + bar * ns + sym];
+                if (snap.valid == 0u) { continue; }
+
+                const GpuPosition& pos = state.positions[sym];
 
                 if (pos.active != POS_EMPTY) { continue; }
 
