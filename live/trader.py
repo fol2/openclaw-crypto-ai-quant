@@ -308,8 +308,9 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         # Exit attempts can also be rejected transiently; avoid close-spam when state is stale.
         self._last_exit_attempt_at_s: dict[str, float] = {}
         try:
-            self._submit_unknown_reconcile_cooldown_s = float(
-                os.getenv("AI_QUANT_LIVE_SUBMIT_UNKNOWN_RECONCILE_COOLDOWN_S", "5")
+            self._submit_unknown_reconcile_cooldown_s = min(
+                float(os.getenv("AI_QUANT_LIVE_SUBMIT_UNKNOWN_RECONCILE_COOLDOWN_S", "5")),
+                120.0,
             )
         except Exception:
             self._submit_unknown_reconcile_cooldown_s = 5.0
@@ -860,7 +861,10 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         if mode in {"live", "dry_live"}:
             if "max_open_positions" not in trade_cfg:
                 try:
-                    trade_cfg["max_open_positions"] = int(os.getenv("AI_QUANT_LIVE_MAX_OPEN_POSITIONS", "1"))
+                    trade_cfg["max_open_positions"] = min(
+                        int(os.getenv("AI_QUANT_LIVE_MAX_OPEN_POSITIONS", "1")),
+                        100,
+                    )
                 except Exception:
                     trade_cfg["max_open_positions"] = 1
             if "max_notional_usd_per_order" not in trade_cfg:
@@ -873,7 +877,10 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     trade_cfg["max_notional_usd_per_order"] = 15.0
             if "min_margin_usd" not in trade_cfg:
                 try:
-                    trade_cfg["min_margin_usd"] = float(os.getenv("AI_QUANT_LIVE_MIN_MARGIN_USD", "6.0"))
+                    trade_cfg["min_margin_usd"] = min(
+                        float(os.getenv("AI_QUANT_LIVE_MIN_MARGIN_USD", "6.0")),
+                        100_000.0,
+                    )
                 except Exception:
                     trade_cfg["min_margin_usd"] = 6.0
         return trade_cfg
@@ -1780,6 +1787,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                         )
                     except Exception as e:
                         logger.debug("failed to mark oms intent as submit-unknown (exit): %s", e, exc_info=True)
+                self._reconcile_after_submit_unknown(symbol=sym, action=str(action_kind))
             else:
                 if oms_intent is not None and oms is not None:
                     try:
