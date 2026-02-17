@@ -27,6 +27,7 @@ class _FakeInfo:
 
 
 def test_get_sz_decimals_respects_cache_lock(monkeypatch):
+    monkeypatch.setattr(meta, "_ensure_cache", lambda: None)
     monkeypatch.setattr(
         meta,
         "_cached_instruments",
@@ -66,7 +67,14 @@ def test_get_sz_decimals_respects_cache_lock(monkeypatch):
 
 
 def test_refresh_cache_respects_cache_lock(monkeypatch):
-    monkeypatch.setattr(meta, "Info", _FakeInfo)
+    meta_call_started = threading.Event()
+
+    class _GuardedFakeInfo(_FakeInfo):
+        def meta_and_asset_ctxs(self):
+            meta_call_started.set()
+            return super().meta_and_asset_ctxs()
+
+    monkeypatch.setattr(meta, "Info", _GuardedFakeInfo)
     monkeypatch.setattr(meta, "_cached_at_s", None)
     monkeypatch.setattr(meta, "_cached_instruments", {})
     monkeypatch.setattr(meta, "_cached_margin_tables", {})
@@ -84,9 +92,11 @@ def test_refresh_cache_respects_cache_lock(monkeypatch):
         thread = threading.Thread(target=_worker)
         thread.start()
         assert started.wait(timeout=1.0)
+        assert not meta_call_started.wait(timeout=0.05)
         assert not finished.wait(timeout=0.05)
 
     thread.join(timeout=1.0)
+    assert meta_call_started.is_set()
     assert finished.is_set()
     assert meta.get_sz_decimals("BTC") == 3
     assert meta.max_leverage("BTC", 1000.0) == 25.0
