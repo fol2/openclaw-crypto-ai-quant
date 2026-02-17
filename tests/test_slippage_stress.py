@@ -18,6 +18,15 @@ def test_parse_bps_list_rejects_invalid_value() -> None:
         slippage_stress._parse_bps_list("10,bad,30")
 
 
+def test_parse_bps_list_rejects_empty_zero_and_negative() -> None:
+    with pytest.raises(SystemExit, match="No slippage bps values provided"):
+        slippage_stress._parse_bps_list("")
+    with pytest.raises(SystemExit, match="Slippage bps must be > 0"):
+        slippage_stress._parse_bps_list("0,10")
+    with pytest.raises(SystemExit, match="Slippage bps must be > 0"):
+        slippage_stress._parse_bps_list("-1,10")
+
+
 def test_main_writes_summary_and_rejects_flip_sign(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config_path = tmp_path / "strategy.yaml"
     config_path.write_text("global: {}\n", encoding="utf-8")
@@ -97,6 +106,25 @@ def test_main_raises_when_replay_fails(tmp_path: Path, monkeypatch: pytest.Monke
                 str(config_path),
                 "--slippage-bps",
                 "10,20",
+                "--reject-flip-bps",
+                "20",
+                "--out-dir",
+                str(tmp_path / "out"),
+            ]
+        )
+
+
+def test_main_reject_flip_bps_must_be_in_levels(tmp_path: Path) -> None:
+    config_path = tmp_path / "strategy.yaml"
+    config_path.write_text("global: {}\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="must be included in --slippage-bps"):
+        slippage_stress.main(
+            [
+                "--config",
+                str(config_path),
+                "--slippage-bps",
+                "10,30",
                 "--reject-flip-bps",
                 "20",
                 "--out-dir",
