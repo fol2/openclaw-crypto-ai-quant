@@ -562,9 +562,21 @@ const _: () = assert!(std::mem::size_of::<GpuParams>() == 44);
 // Conversion helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Validate that an f64 value fits in f32 without becoming infinite.
+/// Returns `Err` if a finite f64 overflows to infinity in f32.
+fn checked_f32(name: &str, val: f64) -> Result<f32, String> {
+    let f = val as f32;
+    if !f.is_finite() && val.is_finite() {
+        return Err(format!("{name}: value {val} overflows f32"));
+    }
+    Ok(f)
+}
+
 impl GpuComboConfig {
     /// Convert a `StrategyConfig` (f64) into a `GpuComboConfig` (f32).
-    pub fn from_strategy_config(cfg: &bt_core::config::StrategyConfig) -> Self {
+    ///
+    /// Returns `Err` if any price, size, or leverage value overflows f32.
+    pub fn from_strategy_config(cfg: &bt_core::config::StrategyConfig) -> Result<Self, String> {
         let tc = &cfg.trade;
         let fc = &cfg.filters;
         let mc = &cfg.market_regime;
@@ -573,11 +585,11 @@ impl GpuComboConfig {
         let at = &cfg.thresholds.anomaly;
         let tp = &cfg.thresholds.tp_and_momentum;
 
-        Self {
-            allocation_pct: tc.allocation_pct as f32,
-            sl_atr_mult: tc.sl_atr_mult as f32,
-            tp_atr_mult: tc.tp_atr_mult as f32,
-            leverage: tc.leverage as f32,
+        Ok(Self {
+            allocation_pct: checked_f32("allocation_pct", tc.allocation_pct)?,
+            sl_atr_mult: checked_f32("sl_atr_mult", tc.sl_atr_mult)?,
+            tp_atr_mult: checked_f32("tp_atr_mult", tc.tp_atr_mult)?,
+            leverage: checked_f32("leverage", tc.leverage)?,
 
             enable_reef_filter: tc.enable_reef_filter as u32,
             reef_long_rsi_block_gt: tc.reef_long_rsi_block_gt as f32,
@@ -587,23 +599,23 @@ impl GpuComboConfig {
             reef_short_rsi_extreme_lt: tc.reef_short_rsi_extreme_lt as f32,
 
             enable_dynamic_leverage: tc.enable_dynamic_leverage as u32,
-            leverage_low: tc.leverage_low as f32,
-            leverage_medium: tc.leverage_medium as f32,
-            leverage_high: tc.leverage_high as f32,
-            leverage_max_cap: tc.leverage_max_cap as f32,
+            leverage_low: checked_f32("leverage_low", tc.leverage_low)?,
+            leverage_medium: checked_f32("leverage_medium", tc.leverage_medium)?,
+            leverage_high: checked_f32("leverage_high", tc.leverage_high)?,
+            leverage_max_cap: checked_f32("leverage_max_cap", tc.leverage_max_cap)?,
             trailing_rsi_floor_default: 0.5,
 
-            slippage_bps: tc.slippage_bps as f32,
-            min_notional_usd: tc.min_notional_usd as f32,
+            slippage_bps: checked_f32("slippage_bps", tc.slippage_bps)?,
+            min_notional_usd: checked_f32("min_notional_usd", tc.min_notional_usd)?,
             bump_to_min_notional: tc.bump_to_min_notional as u32,
-            max_total_margin_pct: tc.max_total_margin_pct as f32,
+            max_total_margin_pct: checked_f32("max_total_margin_pct", tc.max_total_margin_pct)?,
             trailing_rsi_floor_trending: 0.7,
             trailing_vbts_bb_threshold: 1.2,
 
             enable_dynamic_sizing: tc.enable_dynamic_sizing as u32,
-            confidence_mult_high: tc.confidence_mult_high as f32,
-            confidence_mult_medium: tc.confidence_mult_medium as f32,
-            confidence_mult_low: tc.confidence_mult_low as f32,
+            confidence_mult_high: checked_f32("confidence_mult_high", tc.confidence_mult_high)?,
+            confidence_mult_medium: checked_f32("confidence_mult_medium", tc.confidence_mult_medium)?,
+            confidence_mult_low: checked_f32("confidence_mult_low", tc.confidence_mult_low)?,
             adx_sizing_min_mult: tc.adx_sizing_min_mult as f32,
             adx_sizing_full_adx: tc.adx_sizing_full_adx as f32,
             vol_baseline_pct: tc.vol_baseline_pct as f32,
@@ -614,7 +626,7 @@ impl GpuComboConfig {
 
             enable_pyramiding: tc.enable_pyramiding as u32,
             max_adds_per_symbol: tc.max_adds_per_symbol as u32,
-            add_fraction_of_base_margin: tc.add_fraction_of_base_margin as f32,
+            add_fraction_of_base_margin: checked_f32("add_fraction_of_base_margin", tc.add_fraction_of_base_margin)?,
             add_cooldown_minutes: tc.add_cooldown_minutes as u32,
             add_min_profit_atr: tc.add_min_profit_atr as f32,
             add_min_confidence: tc.add_min_confidence as u32,
@@ -622,8 +634,8 @@ impl GpuComboConfig {
             trailing_high_profit_atr: 2.0,
 
             enable_partial_tp: tc.enable_partial_tp as u32,
-            tp_partial_pct: tc.tp_partial_pct as f32,
-            tp_partial_min_notional_usd: tc.tp_partial_min_notional_usd as f32,
+            tp_partial_pct: checked_f32("tp_partial_pct", tc.tp_partial_pct)?,
+            tp_partial_min_notional_usd: checked_f32("tp_partial_min_notional_usd", tc.tp_partial_min_notional_usd)?,
             trailing_start_atr: tc.trailing_start_atr as f32,
             trailing_distance_atr: tc.trailing_distance_atr as f32,
             tp_partial_atr_mult: tc.tp_partial_atr_mult as f32,
@@ -739,7 +751,7 @@ impl GpuComboConfig {
             tp_mult_strong: tp.tp_mult_strong as f32,
             tp_mult_weak: tp.tp_mult_weak as f32,
             _codegen_pad: 0,
-        }
+        })
     }
 }
 
@@ -777,7 +789,7 @@ mod tests {
         cfg.thresholds.tp_and_momentum.tp_mult_strong = 8.5;
         cfg.thresholds.tp_and_momentum.tp_mult_weak = 2.5;
 
-        let gpu = GpuComboConfig::from_strategy_config(&cfg);
+        let gpu = GpuComboConfig::from_strategy_config(&cfg).unwrap();
 
         assert_eq!(gpu.enable_pullback_entries, 1);
         assert!((gpu.anomaly_price_change_pct - 0.25).abs() < f32::EPSILON);
@@ -796,7 +808,7 @@ mod tests {
     #[test]
     fn test_codegen_fields_defaults() {
         let cfg = StrategyConfig::default();
-        let gpu = GpuComboConfig::from_strategy_config(&cfg);
+        let gpu = GpuComboConfig::from_strategy_config(&cfg).unwrap();
 
         // enable_pullback_entries defaults to false → 0
         assert_eq!(gpu.enable_pullback_entries, 0);
@@ -817,5 +829,28 @@ mod tests {
         assert!((gpu.tp_mult_weak - 3.0).abs() < f32::EPSILON);
         // Padding is zero
         assert_eq!(gpu._codegen_pad, 0);
+    }
+
+    /// H11: verify that extreme f64 values that overflow f32 are caught.
+    #[test]
+    fn test_checked_f32_overflow_detected() {
+        let mut cfg = StrategyConfig::default();
+        cfg.trade.leverage = f64::MAX; // way beyond f32::MAX
+        let err = GpuComboConfig::from_strategy_config(&cfg);
+        assert!(err.is_err(), "expected overflow error for f64::MAX leverage");
+        assert!(
+            err.unwrap_err().contains("leverage"),
+            "error should mention the field name"
+        );
+    }
+
+    /// H11: normal values still convert successfully.
+    #[test]
+    fn test_checked_f32_normal_values_pass() {
+        let cfg = StrategyConfig::default();
+        assert!(
+            GpuComboConfig::from_strategy_config(&cfg).is_ok(),
+            "default config should not overflow"
+        );
     }
 }

@@ -835,7 +835,8 @@ fn evaluate_trade_only_batch(
             for (path, value) in overrides {
                 bt_core::sweep::apply_one_pub(&mut cfg, path, *value);
             }
-            let mut gpu_cfg = buffers::GpuComboConfig::from_strategy_config(&cfg);
+            let mut gpu_cfg = buffers::GpuComboConfig::from_strategy_config(&cfg)
+                .expect("f64→f32 overflow in GpuComboConfig");
             gpu_cfg.snapshot_offset = 0;
             gpu_cfg.breadth_offset = 0;
             gpu_cfg
@@ -982,7 +983,8 @@ fn evaluate_mixed_batch_arena(
             if unique_slot >= group_start && unique_slot < group_end {
                 let local_slot = unique_slot - group_start;
                 let mut gpu_cfg =
-                    buffers::GpuComboConfig::from_strategy_config(&trial_cfgs[trial_idx]);
+                    buffers::GpuComboConfig::from_strategy_config(&trial_cfgs[trial_idx])
+                        .expect("f64→f32 overflow in GpuComboConfig");
                 gpu_cfg.snapshot_offset = u32::try_from(local_slot * snapshot_stride)
                     .map_err(|_| format!("snapshot_offset {} exceeds u32::MAX", local_slot * snapshot_stride))
                     .expect("snapshot_offset exceeds u32::MAX");
