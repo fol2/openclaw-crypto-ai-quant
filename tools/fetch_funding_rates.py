@@ -97,13 +97,16 @@ def fetch_and_store(
             continue
 
     if rows:
+        before_changes = int(conn.total_changes)
         conn.executemany(
             "INSERT OR IGNORE INTO funding_rates (symbol, time, funding_rate, premium) VALUES (?, ?, ?, ?)",
             rows,
         )
         conn.commit()
+        inserted = int(conn.total_changes) - before_changes
+        return max(0, inserted)
 
-    return len(rows)
+    return 0
 
 
 def main():
