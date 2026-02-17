@@ -98,6 +98,10 @@ struct Args {
     /// Include event parity summary in JSONL ledger rows.
     #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
     ledger_include_event_parity: bool,
+
+    /// Include first mismatch field names in event parity payloads.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+    trace_include_mismatch_fields: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -134,6 +138,8 @@ struct LedgerEventParitySummary {
     cpu_tail_offset: usize,
     gpu_tail_offset: usize,
     first_mismatch_at: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    first_mismatch_fields: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -210,6 +216,8 @@ struct EventParitySummary {
     cpu_tail_offset: usize,
     gpu_tail_offset: usize,
     first_mismatch_at: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    first_mismatch_fields: Option<Vec<String>>,
     cpu_event: Option<CanonicalEventRow>,
     gpu_event: Option<CanonicalEventRow>,
 }
@@ -390,7 +398,11 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             args.cpu_trace_from_tail,
         )?;
         let gpu_events = collect_trace_events(&trace_state, &trace_symbols);
-        let event_parity = compare_event_streams(&cpu_trace.events, &gpu_events);
+        let event_parity = compare_event_streams(
+            &cpu_trace.events,
+            &gpu_events,
+            args.trace_include_mismatch_fields,
+        );
         if args.ledger_include_event_parity {
             baseline_event_parity = Some(summarise_event_parity(&event_parity));
         }
@@ -537,7 +549,11 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     args.cpu_trace_from_tail,
                 )?;
                 let gpu_events = collect_trace_events(&trace_state, &trace_symbols);
-                let event_parity = compare_event_streams(&cpu_trace.events, &gpu_events);
+                let event_parity = compare_event_streams(
+                    &cpu_trace.events,
+                    &gpu_events,
+                    args.trace_include_mismatch_fields,
+                );
                 if args.ledger_include_event_parity {
                     event_parity_summary = Some(summarise_event_parity(&event_parity));
                 }
@@ -905,6 +921,7 @@ fn collect_trace_events(state: &GpuComboState, symbols: &[String]) -> Vec<TraceE
 fn compare_event_streams(
     cpu_events: &[CpuTradeEventRow],
     gpu_events: &[TraceEventRow],
+    include_mismatch_fields: bool,
 ) -> EventParitySummary {
     let cpu: Vec<CanonicalEventRow> = cpu_events.iter().map(canonicalise_cpu_event).collect();
     let gpu: Vec<CanonicalEventRow> = gpu_events.iter().map(canonicalise_gpu_event).collect();
@@ -924,6 +941,11 @@ fn compare_event_streams(
                 cpu_tail_offset,
                 gpu_tail_offset,
                 first_mismatch_at: Some(rel_idx),
+                first_mismatch_fields: if include_mismatch_fields {
+                    Some(diff_canonical_fields(cpu_ev, gpu_ev))
+                } else {
+                    None
+                },
                 cpu_event: Some(cpu_ev.clone()),
                 gpu_event: Some(gpu_ev.clone()),
             };
@@ -939,6 +961,7 @@ fn compare_event_streams(
             cpu_tail_offset,
             gpu_tail_offset,
             first_mismatch_at: None,
+            first_mismatch_fields: None,
             cpu_event: None,
             gpu_event: None,
         };
@@ -952,6 +975,7 @@ fn compare_event_streams(
         cpu_tail_offset,
         gpu_tail_offset,
         first_mismatch_at: None,
+        first_mismatch_fields: None,
         cpu_event: None,
         gpu_event: None,
     }
@@ -966,6 +990,7 @@ fn summarise_event_parity(summary: &EventParitySummary) -> LedgerEventParitySumm
         cpu_tail_offset: summary.cpu_tail_offset,
         gpu_tail_offset: summary.gpu_tail_offset,
         first_mismatch_at: summary.first_mismatch_at,
+        first_mismatch_fields: summary.first_mismatch_fields.clone(),
     }
 }
 
@@ -1164,6 +1189,50 @@ fn canonical_events_equal(a: &CanonicalEventRow, b: &CanonicalEventRow) -> bool 
         && scale_1e6(a.price) == scale_1e6(b.price)
         && scale_1e6(a.size) == scale_1e6(b.size)
         && scale_1e6(a.pnl) == scale_1e6(b.pnl)
+}
+
+fn diff_canonical_fields(a: &CanonicalEventRow, b: &CanonicalEventRow) -> Vec<String> {
+    let mut diff = Vec::new();
+    if a.t_sec != b.t_sec {
+        diff.push("t_sec".to_string());
+    }
+    if a.symbol != b.symbol {
+        diff.push("symbol".to_string());
+    }
+    if a.action_kind != b.action_kind {
+        diff.push("action_kind".to_string());
+    }
+    if a.action_side != b.action_side {
+        diff.push("action_side".to_string());
+    }
+    if a.intent_signal != b.intent_signal {
+        diff.push("intent_signal".to_string());
+    }
+    if a.event_type != b.event_type {
+        diff.push("event_type".to_string());
+    }
+    if a.status != b.status {
+        diff.push("status".to_string());
+    }
+    if a.decision_phase != b.decision_phase {
+        diff.push("decision_phase".to_string());
+    }
+    if a.triggered_by != b.triggered_by {
+        diff.push("triggered_by".to_string());
+    }
+    if a.reason_code != b.reason_code {
+        diff.push("reason_code".to_string());
+    }
+    if scale_1e6(a.price) != scale_1e6(b.price) {
+        diff.push("price".to_string());
+    }
+    if scale_1e6(a.size) != scale_1e6(b.size) {
+        diff.push("size".to_string());
+    }
+    if scale_1e6(a.pnl) != scale_1e6(b.pnl) {
+        diff.push("pnl".to_string());
+    }
+    diff
 }
 
 fn scale_1e6(v: f64) -> i64 {
