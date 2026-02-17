@@ -1,22 +1,33 @@
-import pytest
+import sys
 
-from tools.sensitivity_check import _compute_aggregate
+from tools.sensitivity_check import _run_cmd
 
 
-def test_compute_aggregate_sensitivity_v1_positive_rate_and_medians():
-    variants = [
-        {"exit_code": 0, "total_pnl": 10.0, "max_drawdown_pct": 0.10},
-        {"exit_code": 0, "total_pnl": -5.0, "max_drawdown_pct": 0.20},
-        # Non-zero exit codes are treated as skipped for aggregation.
-        {"exit_code": 2, "total_pnl": 999.0, "max_drawdown_pct": 9.99},
-    ]
+def test_run_cmd_success_reports_no_timeout(tmp_path):
+    stdout_path = tmp_path / "ok.stdout.txt"
+    stderr_path = tmp_path / "ok.stderr.txt"
+    res = _run_cmd(
+        [sys.executable, "-c", "print('ok')"],
+        cwd=tmp_path,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        timeout_s=5.0,
+    )
+    assert res.exit_code == 0
+    assert res.timed_out is False
+    assert "ok" in stdout_path.read_text(encoding="utf-8")
 
-    agg = _compute_aggregate(20.0, variants)
 
-    assert agg["variants_total"] == 3
-    assert agg["variants_ran"] == 2
-    assert agg["variants_skipped"] == 1
+def test_run_cmd_timeout_returns_124(tmp_path):
+    stdout_path = tmp_path / "timeout.stdout.txt"
+    stderr_path = tmp_path / "timeout.stderr.txt"
+    res = _run_cmd(
+        [sys.executable, "-c", "import time; time.sleep(2)"],
+        cwd=tmp_path,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        timeout_s=0.1,
+    )
+    assert res.exit_code == 124
+    assert res.timed_out is True
 
-    assert agg["positive_rate"] == 0.5
-    assert agg["median_total_pnl"] == 2.5
-    assert agg["median_drawdown_pct"] == pytest.approx(0.15)

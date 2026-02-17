@@ -57,6 +57,7 @@ class CmdResult:
     cwd: str
     exit_code: int
     elapsed_s: float
+    timed_out: bool
     stdout_path: str | None
     stderr_path: str | None
 
@@ -67,6 +68,7 @@ def _run_cmd(
     cwd: Path,
     stdout_path: Path | None,
     stderr_path: Path | None,
+    timeout_s: float | None = 600.0,
 ) -> CmdResult:
     t0 = time.time()
 
@@ -82,16 +84,22 @@ def _run_cmd(
     else:
         stderr_f = subprocess.DEVNULL  # type: ignore[assignment]
 
+    timed_out = False
     try:
-        proc = subprocess.run(
-            argv,
-            cwd=str(cwd),
-            stdout=stdout_f,
-            stderr=stderr_f,
-            check=False,
-            text=True,
-        )
-        exit_code = int(proc.returncode)
+        try:
+            proc = subprocess.run(
+                argv,
+                cwd=str(cwd),
+                stdout=stdout_f,
+                stderr=stderr_f,
+                check=False,
+                text=True,
+                timeout=timeout_s if timeout_s and timeout_s > 0 else None,
+            )
+            exit_code = int(proc.returncode)
+        except subprocess.TimeoutExpired:
+            exit_code = 124
+            timed_out = True
     finally:
         if hasattr(stdout_f, "close"):
             stdout_f.close()  # type: ignore[call-arg]
@@ -103,6 +111,7 @@ def _run_cmd(
         cwd=str(cwd),
         exit_code=exit_code,
         elapsed_s=float(time.time() - t0),
+        timed_out=bool(timed_out),
         stdout_path=str(stdout_path) if stdout_path is not None else None,
         stderr_path=str(stderr_path) if stderr_path is not None else None,
     )
@@ -284,7 +293,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--out-dir", required=True, help="Output directory for configs/replays/logs.")
     ap.add_argument("--output", required=True, help="Write JSON summary to this path.")
-    ap.add_argument("--timeout-s", type=int, default=0, help="Per-replay timeout in seconds (0 = no timeout).")
+    ap.add_argument(
+        "--timeout-s",
+        type=int,
+        default=600,
+        help="Per-replay timeout in seconds (default: 600, 0 = no timeout).",
+    )
     args = ap.parse_args(argv)
 
     cfg_path = Path(args.config).expanduser().resolve()
@@ -377,39 +391,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.funding_db:
             replay_argv += ["--funding-db", str(args.funding_db)]
 
-        t0 = time.time()
-        try:
-            if int(args.timeout_s or 0) > 0:
-                with v_stdout.open("w", encoding="utf-8") as out_f, v_stderr.open("w", encoding="utf-8") as err_f:
-                    proc = subprocess.run(
-                        replay_argv,
-                        cwd=str(AIQ_ROOT / "backtester"),
-                        stdout=out_f,
-                        stderr=err_f,
-                        check=False,
-                        text=True,
-                        timeout=float(args.timeout_s),
-                    )
-                    exit_code = int(proc.returncode)
-                    res = CmdResult(
-                        argv=list(replay_argv),
-                        cwd=str(AIQ_ROOT / "backtester"),
-                        exit_code=exit_code,
-                        elapsed_s=float(time.time() - t0),
-                        stdout_path=str(v_stdout),
-                        stderr_path=str(v_stderr),
-                    )
-            else:
-                res = _run_cmd(replay_argv, cwd=AIQ_ROOT / "backtester", stdout_path=v_stdout, stderr_path=v_stderr)
-        except subprocess.TimeoutExpired:
-            res = CmdResult(
-                argv=list(replay_argv),
-                cwd=str(AIQ_ROOT / "backtester"),
-                exit_code=124,
-                elapsed_s=float(time.time() - t0),
-                stdout_path=str(v_stdout),
-                stderr_path=str(v_stderr),
-            )
+        timeout_s = float(args.timeout_s) if int(args.timeout_s or 0) > 0 else None
+        res = _run_cmd(
+            replay_argv,
+            cwd=AIQ_ROOT / "backtester",
+            stdout_path=v_stdout,
+            stderr_path=v_stderr,
+            timeout_s=timeout_s,
+        )
 
         entry: dict[str, Any] = {
             "dotpath": dotpath,
