@@ -148,6 +148,7 @@ def main() -> int:
     live_trades_path = bundle_dir / "live_baseline_trades.jsonl"
     audit_report_path = bundle_dir / "state_alignment_report.json"
     replay_trades_csv = bundle_dir / "backtester_trades.csv"
+    trade_reconcile_path = bundle_dir / "trade_reconcile_report.json"
     manifest_path = bundle_dir / "replay_bundle_manifest.json"
 
     baseline_trades = _load_live_baseline_trades(
@@ -155,6 +156,8 @@ def main() -> int:
         from_ts=int(args.from_ts),
         to_ts=int(args.to_ts),
     )
+    baseline_trade_exit_count = sum(1 for row in baseline_trades if row.get("action") in {"CLOSE", "REDUCE"})
+    baseline_trade_funding_count = sum(1 for row in baseline_trades if row.get("action") == "FUNDING")
 
     with live_trades_path.open("w", encoding="utf-8") as fp:
         for row in baseline_trades:
@@ -194,14 +197,26 @@ def main() -> int:
         f"--paper-db \"$PAPER_DB\" --snapshot \"$SNAPSHOT_PATH\" --output \"$BUNDLE_DIR/{audit_report_path.name}\""
     )
 
+    cmd_trade_reconcile = (
+        "set -euo pipefail\n"
+        "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
+        "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
+        "python \"$REPO_ROOT/tools/audit_live_backtester_trade_reconcile.py\" "
+        f"--live-baseline \"$BUNDLE_DIR/{live_trades_path.name}\" "
+        f"--backtester-trades \"$BUNDLE_DIR/{replay_trades_csv.name}\" "
+        f"--output \"$BUNDLE_DIR/{trade_reconcile_path.name}\""
+    )
+
     (bundle_dir / "run_01_export_and_seed.sh").write_text(cmd_export_seed + "\n", encoding="utf-8")
     (bundle_dir / "run_02_replay.sh").write_text(cmd_replay + "\n", encoding="utf-8")
     (bundle_dir / "run_03_audit.sh").write_text(cmd_audit + "\n", encoding="utf-8")
+    (bundle_dir / "run_04_trade_reconcile.sh").write_text(cmd_trade_reconcile + "\n", encoding="utf-8")
 
     for script_name in (
         "run_01_export_and_seed.sh",
         "run_02_replay.sh",
         "run_03_audit.sh",
+        "run_04_trade_reconcile.sh",
     ):
         script_path = bundle_dir / script_name
         script_path.chmod(0o755)
@@ -224,14 +239,18 @@ def main() -> int:
             "live_baseline_trades_sha256": _hash_file(live_trades_path),
             "audit_report_file": audit_report_path.name,
             "backtester_trades_csv": replay_trades_csv.name,
+            "trade_reconcile_report_file": trade_reconcile_path.name,
         },
         "counts": {
             "live_baseline_trades": len(baseline_trades),
+            "live_baseline_simulatable_exits": baseline_trade_exit_count,
+            "live_baseline_funding_events": baseline_trade_funding_count,
         },
         "commands": {
             "export_and_seed": cmd_export_seed,
             "replay": cmd_replay,
             "audit": cmd_audit,
+            "trade_reconcile": cmd_trade_reconcile,
         },
     }
 

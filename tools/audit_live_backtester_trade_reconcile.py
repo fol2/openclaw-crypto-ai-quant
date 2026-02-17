@@ -1,0 +1,436 @@
+#!/usr/bin/env python3
+"""Audit trade-level alignment between live baseline and backtester replay output.
+
+This report compares only simulatable exit actions (CLOSE/REDUCE) and classifies
+mismatches using the project alignment taxonomy.
+"""
+
+from __future__ import annotations
+
+import argparse
+from collections import defaultdict
+import csv
+import datetime as dt
+import json
+import math
+from pathlib import Path
+from typing import Any
+
+SIMULATABLE_EXIT_ACTIONS = {"CLOSE", "REDUCE"}
+NON_SIMULATABLE_ACTIONS = {"FUNDING"}
+DEFAULT_TOL = 1e-9
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Audit live-vs-backtester trade alignment from replay bundle artefacts.")
+    parser.add_argument("--live-baseline", required=True, help="Path to live_baseline_trades.jsonl")
+    parser.add_argument("--backtester-trades", required=True, help="Path to backtester_trades.csv")
+    parser.add_argument("--output", required=True, help="Path to output JSON report")
+    parser.add_argument("--size-tol", type=float, default=DEFAULT_TOL, help="Absolute tolerance for exit_size comparison")
+    parser.add_argument("--pnl-tol", type=float, default=DEFAULT_TOL, help="Absolute tolerance for pnl comparison")
+    parser.add_argument("--fee-tol", type=float, default=DEFAULT_TOL, help="Absolute tolerance for fee comparison")
+    return parser
+
+
+def _parse_float(value: Any) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    raw = str(value).strip()
+    if not raw:
+        return 0.0
+    try:
+        return float(raw)
+    except Exception:
+        return 0.0
+
+
+def _parse_timestamp_ms(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, (int, float)):
+        iv = int(value)
+        if iv > 10_000_000_000:
+            return iv
+        return max(0, iv * 1000)
+
+    raw = str(value).strip()
+    if not raw:
+        return 0
+    if raw.isdigit():
+        iv = int(raw)
+        if iv > 10_000_000_000:
+            return iv
+        return iv * 1000
+    try:
+        ts = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return int(ts.timestamp() * 1000)
+    except Exception:
+        return 0
+
+
+def _normalise_symbol(value: Any) -> str:
+    return str(value or "").strip().upper()
+
+
+def _normalise_side(value: Any) -> str:
+    side = str(value or "").strip().upper()
+    if side in {"LONG", "SHORT"}:
+        return side
+    return ""
+
+
+def _almost_equal(left: float, right: float, tol: float) -> bool:
+    return math.isclose(float(left), float(right), rel_tol=0.0, abs_tol=tol)
+
+
+def _load_live_simulatable_exits(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    exits: list[dict[str, Any]] = []
+
+    total_actions = 0
+    total_non_simulatable_actions = 0
+    non_simulatable_pnl = 0.0
+    info_only_actions = 0
+
+    with path.open("r", encoding="utf-8") as fp:
+        for line_no, raw in enumerate(fp, start=1):
+            line = raw.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            total_actions += 1
+
+            action = str(row.get("action") or "").strip().upper()
+            symbol = _normalise_symbol(row.get("symbol"))
+            side = _normalise_side(row.get("type"))
+            ts_ms = _parse_timestamp_ms(row.get("timestamp_ms"))
+            if ts_ms <= 0:
+                ts_ms = _parse_timestamp_ms(row.get("timestamp"))
+
+            if action in NON_SIMULATABLE_ACTIONS:
+                total_non_simulatable_actions += 1
+                non_simulatable_pnl += _parse_float(row.get("pnl"))
+                continue
+
+            if action not in SIMULATABLE_EXIT_ACTIONS:
+                info_only_actions += 1
+                continue
+
+            if not symbol or not side or ts_ms <= 0:
+                continue
+
+            exits.append(
+                {
+                    "source": "live",
+                    "source_id": int(row.get("id") or 0),
+                    "line_no": line_no,
+                    "symbol": symbol,
+                    "side": side,
+                    "exit_ts_ms": ts_ms,
+                    "exit_size": _parse_float(row.get("size")),
+                    "pnl_usd": _parse_float(row.get("pnl")),
+                    "fee_usd": _parse_float(row.get("fee_usd")),
+                    "action": action,
+                }
+            )
+
+    exits.sort(key=lambda r: (r["exit_ts_ms"], r["symbol"], r["source_id"], r["line_no"]))
+
+    counts = {
+        "live_total_actions": total_actions,
+        "live_simulatable_exit_actions": len(exits),
+        "live_non_simulatable_actions": total_non_simulatable_actions,
+        "live_non_simulatable_pnl_usd": non_simulatable_pnl,
+        "live_info_only_actions": info_only_actions,
+    }
+    return exits, counts
+
+
+def _load_backtester_exits(path: Path) -> list[dict[str, Any]]:
+    exits: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8", newline="") as fp:
+        reader = csv.DictReader(fp)
+        for row_no, row in enumerate(reader, start=2):
+            symbol = _normalise_symbol(row.get("symbol"))
+            side = _normalise_side(row.get("side"))
+            ts_ms = int(_parse_float(row.get("exit_ts_ms")))
+            if not symbol or not side or ts_ms <= 0:
+                continue
+            exits.append(
+                {
+                    "source": "backtester",
+                    "source_id": str(row.get("trade_id") or ""),
+                    "row_no": row_no,
+                    "symbol": symbol,
+                    "side": side,
+                    "exit_ts_ms": ts_ms,
+                    "exit_size": _parse_float(row.get("exit_size")),
+                    "pnl_usd": _parse_float(row.get("pnl_usd")),
+                    "fee_usd": _parse_float(row.get("fee_usd")),
+                    "reason_code": str(row.get("reason_code") or ""),
+                    "reason": str(row.get("reason") or ""),
+                }
+            )
+    exits.sort(key=lambda r: (r["exit_ts_ms"], r["symbol"], str(r["source_id"]), r["row_no"]))
+    return exits
+
+
+def _build_event_groups(rows: list[dict[str, Any]]) -> dict[tuple[str, str, int], list[dict[str, Any]]]:
+    grouped: dict[tuple[str, str, int], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        key = (row["symbol"], row["side"], int(row["exit_ts_ms"]))
+        grouped[key].append(row)
+
+    for values in grouped.values():
+        values.sort(
+            key=lambda r: (
+                float(r["exit_size"]),
+                float(r["pnl_usd"]),
+                float(r["fee_usd"]),
+                str(r["source_id"]),
+            )
+        )
+
+    return grouped
+
+
+def _compare_exits(
+    live_exits: list[dict[str, Any]],
+    backtester_exits: list[dict[str, Any]],
+    *,
+    size_tol: float,
+    pnl_tol: float,
+    fee_tol: float,
+) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
+    mismatches: list[dict[str, Any]] = []
+    matched_pairs = 0
+
+    per_symbol: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {
+            "symbol": "",
+            "live_exit_count": 0,
+            "backtester_exit_count": 0,
+            "matched_pairs": 0,
+            "live_pnl_usd": 0.0,
+            "backtester_pnl_usd": 0.0,
+            "live_fee_usd": 0.0,
+            "backtester_fee_usd": 0.0,
+        }
+    )
+
+    for row in live_exits:
+        stats = per_symbol[row["symbol"]]
+        stats["symbol"] = row["symbol"]
+        stats["live_exit_count"] += 1
+        stats["live_pnl_usd"] += float(row["pnl_usd"])
+        stats["live_fee_usd"] += float(row["fee_usd"])
+
+    for row in backtester_exits:
+        stats = per_symbol[row["symbol"]]
+        stats["symbol"] = row["symbol"]
+        stats["backtester_exit_count"] += 1
+        stats["backtester_pnl_usd"] += float(row["pnl_usd"])
+        stats["backtester_fee_usd"] += float(row["fee_usd"])
+
+    live_groups = _build_event_groups(live_exits)
+    bt_groups = _build_event_groups(backtester_exits)
+    all_keys = sorted(set(live_groups.keys()) | set(bt_groups.keys()))
+
+    unmatched_live = 0
+    unmatched_backtester = 0
+    numeric_mismatch = 0
+
+    for key in all_keys:
+        symbol, side, ts_ms = key
+        live_rows = live_groups.get(key, [])
+        bt_rows = bt_groups.get(key, [])
+
+        pair_count = min(len(live_rows), len(bt_rows))
+        for idx in range(pair_count):
+            lrow = live_rows[idx]
+            brow = bt_rows[idx]
+            per_symbol[symbol]["matched_pairs"] += 1
+            matched_pairs += 1
+
+            size_match = _almost_equal(lrow["exit_size"], brow["exit_size"], size_tol)
+            pnl_match = _almost_equal(lrow["pnl_usd"], brow["pnl_usd"], pnl_tol)
+            fee_match = _almost_equal(lrow["fee_usd"], brow["fee_usd"], fee_tol)
+            if size_match and pnl_match and fee_match:
+                continue
+
+            numeric_mismatch += 1
+            mismatches.append(
+                {
+                    "classification": "numeric_policy_divergence",
+                    "kind": "exit_numeric_mismatch",
+                    "symbol": symbol,
+                    "side": side,
+                    "exit_ts_ms": ts_ms,
+                    "live_ref": {"id": lrow["source_id"], "line_no": lrow["line_no"]},
+                    "backtester_ref": {"trade_id": brow["source_id"], "row_no": brow["row_no"]},
+                    "live": {
+                        "exit_size": lrow["exit_size"],
+                        "pnl_usd": lrow["pnl_usd"],
+                        "fee_usd": lrow["fee_usd"],
+                        "action": lrow["action"],
+                    },
+                    "backtester": {
+                        "exit_size": brow["exit_size"],
+                        "pnl_usd": brow["pnl_usd"],
+                        "fee_usd": brow["fee_usd"],
+                        "reason_code": brow["reason_code"],
+                    },
+                    "delta": {
+                        "exit_size": lrow["exit_size"] - brow["exit_size"],
+                        "pnl_usd": lrow["pnl_usd"] - brow["pnl_usd"],
+                        "fee_usd": lrow["fee_usd"] - brow["fee_usd"],
+                    },
+                    "tolerance": {
+                        "size_tol": size_tol,
+                        "pnl_tol": pnl_tol,
+                        "fee_tol": fee_tol,
+                    },
+                }
+            )
+
+        if len(live_rows) > pair_count:
+            for lrow in live_rows[pair_count:]:
+                unmatched_live += 1
+                mismatches.append(
+                    {
+                        "classification": "deterministic_logic_divergence",
+                        "kind": "missing_backtester_exit",
+                        "symbol": symbol,
+                        "side": side,
+                        "exit_ts_ms": ts_ms,
+                        "live_ref": {"id": lrow["source_id"], "line_no": lrow["line_no"]},
+                        "live": {
+                            "exit_size": lrow["exit_size"],
+                            "pnl_usd": lrow["pnl_usd"],
+                            "fee_usd": lrow["fee_usd"],
+                            "action": lrow["action"],
+                        },
+                    }
+                )
+
+        if len(bt_rows) > pair_count:
+            for brow in bt_rows[pair_count:]:
+                unmatched_backtester += 1
+                mismatches.append(
+                    {
+                        "classification": "deterministic_logic_divergence",
+                        "kind": "missing_live_exit",
+                        "symbol": symbol,
+                        "side": side,
+                        "exit_ts_ms": ts_ms,
+                        "backtester_ref": {"trade_id": brow["source_id"], "row_no": brow["row_no"]},
+                        "backtester": {
+                            "exit_size": brow["exit_size"],
+                            "pnl_usd": brow["pnl_usd"],
+                            "fee_usd": brow["fee_usd"],
+                            "reason_code": brow["reason_code"],
+                        },
+                    }
+                )
+
+    per_symbol_rows = sorted(
+        (
+            {
+                **values,
+                "pnl_delta_usd": values["live_pnl_usd"] - values["backtester_pnl_usd"],
+                "fee_delta_usd": values["live_fee_usd"] - values["backtester_fee_usd"],
+            }
+            for values in per_symbol.values()
+        ),
+        key=lambda row: row["symbol"],
+    )
+
+    summary = {
+        "matched_pairs": matched_pairs,
+        "numeric_mismatch": numeric_mismatch,
+        "unmatched_live": unmatched_live,
+        "unmatched_backtester": unmatched_backtester,
+    }
+    return mismatches, summary, per_symbol_rows
+
+
+def main() -> int:
+    parser = _build_parser()
+    args = parser.parse_args()
+
+    live_baseline = Path(args.live_baseline).expanduser().resolve()
+    backtester_trades = Path(args.backtester_trades).expanduser().resolve()
+    output = Path(args.output).expanduser().resolve()
+
+    if not live_baseline.exists():
+        parser.error(f"live baseline not found: {live_baseline}")
+    if not backtester_trades.exists():
+        parser.error(f"backtester trades not found: {backtester_trades}")
+
+    live_exits, live_counts = _load_live_simulatable_exits(live_baseline)
+    backtester_exits = _load_backtester_exits(backtester_trades)
+
+    mismatches, compare_summary, per_symbol_rows = _compare_exits(
+        live_exits,
+        backtester_exits,
+        size_tol=float(args.size_tol),
+        pnl_tol=float(args.pnl_tol),
+        fee_tol=float(args.fee_tol),
+    )
+
+    mismatch_counts: dict[str, int] = defaultdict(int)
+    for item in mismatches:
+        mismatch_counts[str(item.get("classification") or "unknown")] += 1
+
+    non_simulatable_residuals: list[dict[str, Any]] = []
+    if live_counts["live_non_simulatable_actions"] > 0:
+        non_simulatable_residuals.append(
+            {
+                "classification": "non-simulatable_exchange_oms_effect",
+                "kind": "funding_events_not_in_replay_export",
+                "count": int(live_counts["live_non_simulatable_actions"]),
+                "pnl_usd": float(live_counts["live_non_simulatable_pnl_usd"]),
+            }
+        )
+
+    strict_alignment_pass = (
+        compare_summary["numeric_mismatch"] == 0
+        and compare_summary["unmatched_live"] == 0
+        and compare_summary["unmatched_backtester"] == 0
+    )
+
+    report = {
+        "schema_version": 1,
+        "generated_at_ms": int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000),
+        "inputs": {
+            "live_baseline": str(live_baseline),
+            "backtester_trades": str(backtester_trades),
+            "size_tol": float(args.size_tol),
+            "pnl_tol": float(args.pnl_tol),
+            "fee_tol": float(args.fee_tol),
+        },
+        "counts": {
+            **live_counts,
+            "backtester_exit_rows": len(backtester_exits),
+            **compare_summary,
+            "mismatch_total": len(mismatches),
+        },
+        "status": {
+            "strict_alignment_pass": strict_alignment_pass,
+            "accepted_residuals_only": strict_alignment_pass and bool(non_simulatable_residuals),
+        },
+        "mismatch_counts_by_classification": dict(sorted(mismatch_counts.items(), key=lambda x: x[0])),
+        "accepted_residuals": non_simulatable_residuals,
+        "per_symbol": per_symbol_rows,
+        "mismatches": mismatches,
+    }
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(output.as_posix())
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

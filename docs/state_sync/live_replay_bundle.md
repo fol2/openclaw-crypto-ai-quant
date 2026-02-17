@@ -24,14 +24,16 @@ python tools/build_live_replay_bundle.py \
 - `run_01_export_and_seed.sh`
 - `run_02_replay.sh`
 - `run_03_audit.sh`
+- `run_04_trade_reconcile.sh`
 
 ## Usage Sequence
 
 1. Run `run_01_export_and_seed.sh`
 2. Run `run_02_replay.sh`
 3. Run `run_03_audit.sh`
+4. Run `run_04_trade_reconcile.sh`
 
-This keeps snapshot seeding, replay execution, and alignment audit tied to one immutable bundle manifest.
+This keeps snapshot seeding, replay execution, state alignment audit, and trade parity reconciliation tied to one immutable bundle manifest.
 
 ## Execution Context
 
