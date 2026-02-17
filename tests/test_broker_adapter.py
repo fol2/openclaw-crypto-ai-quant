@@ -227,6 +227,7 @@ class TestSizeRounding:
 
     def test_round_to_zero_decimals(self):
         assert round_size(123.999, 0) == pytest.approx(123.0)
+        assert round_size(0.9999999999995, 0) == pytest.approx(0.0)
 
     def test_round_to_four_decimals(self):
         assert round_size(0.12345678, 4) == pytest.approx(0.1234)
