@@ -89,7 +89,7 @@ class _SqliteLogSink:
 
         # Create the DB + schema synchronously so readers never observe a DB
         # file without the expected tables (reduces test/runtime races).
-        with suppress(Exception):
+        with suppress(sqlite3.Error, OSError):
             con = self._open_con()
             con.close()
 
@@ -119,7 +119,7 @@ class _SqliteLogSink:
         if self._stop.is_set():
             return
         self._stop.set()
-        with suppress(Exception):
+        with suppress(RuntimeError):
             self._t.join(timeout=1.5)
 
     def _open_con(self) -> sqlite3.Connection:
@@ -127,11 +127,11 @@ class _SqliteLogSink:
         db_p.parent.mkdir(parents=True, exist_ok=True)
         timeout_s = max(0.1, min(5.0, float(os.getenv("AI_QUANT_SQLITE_LOG_TIMEOUT_S", "0.5") or 0.5)))
         con = sqlite3.connect(str(db_p), timeout=timeout_s)
-        with suppress(Exception):
+        with suppress(sqlite3.Error):
             con.execute("PRAGMA journal_mode=WAL")
             con.execute("PRAGMA synchronous=NORMAL")
         _ensure_runtime_logs_schema(con)
-        with suppress(Exception):
+        with suppress(OSError):
             import os as _os
 
             _os.chmod(str(db_p), 0o600)
@@ -178,14 +178,14 @@ class _SqliteLogSink:
 
             except Exception:
                 # Best-effort. Never block the main trading loop.
-                with suppress(Exception):
+                with suppress(sqlite3.Error, AttributeError):
                     con.close()  # type: ignore[union-attr]
                 con = None
                 pending.clear()
                 time.sleep(backoff_s)
                 backoff_s = min(2.0, backoff_s * 1.8)
 
-        with suppress(Exception):
+        with suppress(sqlite3.Error, AttributeError):
             con.close()  # type: ignore[union-attr]
 
 
@@ -205,15 +205,15 @@ class _LineBufferingWriter(io.TextIOBase):
         return getattr(self._stream, "errors", "replace")
 
     def isatty(self) -> bool:  # type: ignore[override]
-        with suppress(Exception):
+        with suppress(OSError, ValueError, RuntimeError):
             return bool(self._stream.isatty())
         return False
 
     def write(self, s: str) -> int:  # type: ignore[override]
-        with suppress(Exception):
+        with suppress(OSError, ValueError, RuntimeError):
             self._stream.write(s)
 
-        with suppress(Exception):
+        with suppress(TypeError, ValueError):
             self._buf += str(s)
             if "\n" not in self._buf:
                 return len(s)
@@ -224,7 +224,7 @@ class _LineBufferingWriter(io.TextIOBase):
         return len(s)
 
     def flush(self) -> None:  # type: ignore[override]
-        with suppress(Exception):
+        with suppress(OSError, ValueError, RuntimeError):
             self._stream.flush()
 
 
