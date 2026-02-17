@@ -111,10 +111,18 @@ mod tests {
         let expected = 1_000_000.0;
         // 1e-7 relative = 0.1 absolute on 1M
         let actual_t1_pass = expected + expected * 1.0e-7;
-        assert!(within_tolerance(expected, actual_t1_pass, TIER_T1_TOLERANCE));
+        assert!(within_tolerance(
+            expected,
+            actual_t1_pass,
+            TIER_T1_TOLERANCE
+        ));
 
         let actual_t1_fail = expected + expected * 2.0e-7;
-        assert!(!within_tolerance(expected, actual_t1_fail, TIER_T1_TOLERANCE));
+        assert!(!within_tolerance(
+            expected,
+            actual_t1_fail,
+            TIER_T1_TOLERANCE
+        ));
     }
 
     #[test]

@@ -86,7 +86,10 @@ mod tests {
         // Use a large range to guarantee a different ATR.
         let v_ok = atr.update(20.0, 5.0, 12.0);
         assert!(v_ok > 0.0);
-        assert!(v_ok != prev, "ATR should change after a valid candle with different range");
+        assert!(
+            v_ok != prev,
+            "ATR should change after a valid candle with different range"
+        );
     }
 
     #[test]

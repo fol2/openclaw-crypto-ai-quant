@@ -1,6 +1,6 @@
 use bt_core::candle::{CandleData, OhlcvBar};
 use bt_core::config::{Confidence, StrategyConfig};
-use bt_core::engine::run_simulation;
+use bt_core::engine::{run_simulation, RunSimulationInput};
 use bt_core::position::{Position, PositionType};
 use rustc_hash::FxHashMap;
 
@@ -70,31 +70,36 @@ fn exit_sub_bars_change_outcomes() {
     let mut positions = FxHashMap::default();
     positions.insert("BTC".to_string(), pos);
 
-    let with_exit = run_simulation(
-        &candles,
-        &cfg,
-        1_000.0,
-        0,
-        Some(&exit_candles),
-        None,
-        None,
-        Some((1_000.0, positions.clone())),
-        None,
-        None,
-    );
+    let with_exit = run_simulation(RunSimulationInput {
+        candles: &candles,
+        cfg: &cfg,
+        initial_balance: 1_000.0,
+        lookback: 0,
+        exit_candles: Some(&exit_candles),
+        entry_candles: None,
+        funding_rates: None,
+        init_state: Some((
+            1_000.0,
+            positions.clone(),
+            FxHashMap::default(),
+            FxHashMap::default(),
+        )),
+        from_ts: None,
+        to_ts: None,
+    });
 
-    let without_exit = run_simulation(
-        &candles,
-        &cfg,
-        1_000.0,
-        0,
-        None,
-        None,
-        None,
-        Some((1_000.0, positions)),
-        None,
-        None,
-    );
+    let without_exit = run_simulation(RunSimulationInput {
+        candles: &candles,
+        cfg: &cfg,
+        initial_balance: 1_000.0,
+        lookback: 0,
+        exit_candles: None,
+        entry_candles: None,
+        funding_rates: None,
+        init_state: Some((1_000.0, positions, FxHashMap::default(), FxHashMap::default())),
+        from_ts: None,
+        to_ts: None,
+    });
 
     assert!(with_exit.final_balance < without_exit.final_balance);
 

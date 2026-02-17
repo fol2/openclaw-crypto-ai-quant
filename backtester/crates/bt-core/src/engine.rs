@@ -4,21 +4,21 @@
 //! full trading lifecycle: indicator warmup → exit checks → gate evaluation →
 //! signal generation → engine-level transforms → entry execution → PnL.
 
-use crate::candle::{CandleData, FundingRateData, OhlcvBar};
 use crate::accounting;
+use crate::candle::{CandleData, FundingRateData, OhlcvBar};
 use crate::config::{Confidence, Signal, StrategyConfig};
+use crate::decision_kernel;
 use crate::exits::ExitResult;
 use crate::indicators::{IndicatorBank, IndicatorSnapshot};
 use crate::kernel_exits::{self, ExitParams, KernelExitResult};
 use crate::position::{ExitContext, Position, PositionType, SignalRecord, TradeRecord};
 use crate::signals::{entry, gates};
-use crate::decision_kernel;
-use serde::{Deserialize, Serialize};
 use risk_core::{
     compute_entry_sizing, compute_pyramid_sizing, evaluate_exposure_guard, ConfidenceTier,
     EntrySizingInput, ExposureBlockReason, ExposureGuardInput, PyramidSizingInput,
 };
 use rustc_hash::FxHashMap;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -290,10 +290,7 @@ fn signal_name(signal: Signal) -> &'static str {
 /// Sync engine position metadata into the corresponding kernel position so that
 /// kernel exit evaluation sees the correct entry_atr, confidence, and
 /// entry_adx_threshold values (these are set by the engine at entry time).
-fn sync_engine_to_kernel_pos(
-    engine_pos: &Position,
-    kernel_pos: &mut decision_kernel::Position,
-) {
+fn sync_engine_to_kernel_pos(engine_pos: &Position, kernel_pos: &mut decision_kernel::Position) {
     kernel_pos.entry_atr = Some(engine_pos.entry_atr);
     kernel_pos.confidence = Some(engine_pos.confidence.rank());
     kernel_pos.entry_adx_threshold = if engine_pos.entry_adx_threshold > 0.0 {
@@ -307,10 +304,7 @@ fn sync_engine_to_kernel_pos(
 
 /// Sync kernel position exit state (trailing_sl, tp1_taken) back to the engine
 /// position after kernel exit evaluation has updated them.
-fn sync_kernel_to_engine_pos(
-    kernel_pos: &decision_kernel::Position,
-    engine_pos: &mut Position,
-) {
+fn sync_kernel_to_engine_pos(kernel_pos: &decision_kernel::Position, engine_pos: &mut Position) {
     engine_pos.trailing_sl = kernel_pos.trailing_sl;
     engine_pos.tp1_taken = kernel_pos.tp1_taken;
 }
@@ -384,9 +378,18 @@ fn build_active_params(
     if is_entry {
         params.insert("min_adx".into(), cfg.thresholds.entry.min_adx);
         params.insert("reef_adx_threshold".into(), cfg.trade.reef_adx_threshold);
-        params.insert("reef_long_rsi_block_gt".into(), cfg.trade.reef_long_rsi_block_gt);
-        params.insert("pullback_rsi_long_min".into(), cfg.thresholds.entry.pullback_rsi_long_min);
-        params.insert("pullback_rsi_short_max".into(), cfg.thresholds.entry.pullback_rsi_short_max);
+        params.insert(
+            "reef_long_rsi_block_gt".into(),
+            cfg.trade.reef_long_rsi_block_gt,
+        );
+        params.insert(
+            "pullback_rsi_long_min".into(),
+            cfg.thresholds.entry.pullback_rsi_long_min,
+        );
+        params.insert(
+            "pullback_rsi_short_max".into(),
+            cfg.thresholds.entry.pullback_rsi_short_max,
+        );
         params.insert("leverage".into(), cfg.trade.leverage);
         params.insert("taker_fee_bps".into(), kernel_params.taker_fee_bps);
         params.insert("maker_fee_bps".into(), kernel_params.maker_fee_bps);
@@ -395,7 +398,10 @@ fn build_active_params(
         params.insert("tp_atr_mult".into(), cfg.trade.tp_atr_mult);
         params.insert("trailing_start_atr".into(), cfg.trade.trailing_start_atr);
         params.insert("tsme_min_profit_atr".into(), cfg.trade.tsme_min_profit_atr);
-        params.insert("smart_exit_adx_exhaustion_lt".into(), cfg.trade.smart_exit_adx_exhaustion_lt);
+        params.insert(
+            "smart_exit_adx_exhaustion_lt".into(),
+            cfg.trade.smart_exit_adx_exhaustion_lt,
+        );
     }
     params
 }
@@ -617,16 +623,29 @@ fn build_gate_evaluation(
     }
 }
 
-fn step_decision(
-    state: &mut SimState,
+struct StepDecisionInput<'a> {
     ts: i64,
-    symbol: &str,
+    symbol: &'a str,
     signal: Signal,
     price: f64,
     requested_notional_usd: Option<f64>,
-    source: &'static str,
-    cfg: &StrategyConfig,
+    source: &'a str,
+    cfg: &'a StrategyConfig,
+}
+
+fn step_decision(
+    state: &mut SimState,
+    input: StepDecisionInput<'_>,
 ) -> decision_kernel::DecisionResult {
+    let StepDecisionInput {
+        ts,
+        symbol,
+        signal,
+        price,
+        requested_notional_usd,
+        source,
+        cfg,
+    } = input;
     let event = decision_kernel::MarketEvent {
         schema_version: 1,
         event_id: state.next_kernel_event_id,
@@ -731,18 +750,32 @@ fn make_indicator_bank(cfg: &StrategyConfig, use_stoch_rsi: bool) -> IndicatorBa
 ///                       still update indicators (warmup) but no trading occurs.
 /// * `to_ts`           - Optional end timestamp (ms, inclusive). Bars after this are
 ///                       skipped for trading.
-pub fn run_simulation(
-    candles: &CandleData,
-    cfg: &StrategyConfig,
-    initial_balance: f64,
-    lookback: usize,
-    exit_candles: Option<&CandleData>,
-    entry_candles: Option<&CandleData>,
-    funding_rates: Option<&FundingRateData>,
-    init_state: Option<crate::init_state::SimInitState>,
-    from_ts: Option<i64>,
-    to_ts: Option<i64>,
-) -> SimResult {
+pub struct RunSimulationInput<'a> {
+    pub candles: &'a CandleData,
+    pub cfg: &'a StrategyConfig,
+    pub initial_balance: f64,
+    pub lookback: usize,
+    pub exit_candles: Option<&'a CandleData>,
+    pub entry_candles: Option<&'a CandleData>,
+    pub funding_rates: Option<&'a FundingRateData>,
+    pub init_state: Option<crate::init_state::SimInitState>,
+    pub from_ts: Option<i64>,
+    pub to_ts: Option<i64>,
+}
+
+pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
+    let RunSimulationInput {
+        candles,
+        cfg,
+        initial_balance,
+        lookback,
+        exit_candles,
+        entry_candles,
+        funding_rates,
+        init_state,
+        from_ts,
+        to_ts,
+    } = input;
     let use_stoch_rsi = cfg.filters.use_stoch_rsi_filter;
 
     // -- Build sorted timeline of unique timestamps --
@@ -762,15 +795,16 @@ pub fn run_simulation(
     let bar_index = build_bar_index(candles);
 
     // -- Initialize state (optionally from exported live/paper snapshot) --
-    let (init_balance, init_positions, init_last_entry_attempt_ms, init_last_exit_attempt_ms) = match init_state {
-        Some((b, p, entry_attempts, exit_attempts)) => (b, p, entry_attempts, exit_attempts),
-        None => (
-            initial_balance,
-            FxHashMap::default(),
-            FxHashMap::default(),
-            FxHashMap::default(),
-        ),
-    };
+    let (init_balance, init_positions, init_last_entry_attempt_ms, init_last_exit_attempt_ms) =
+        match init_state {
+            Some((b, p, entry_attempts, exit_attempts)) => (b, p, entry_attempts, exit_attempts),
+            None => (
+                initial_balance,
+                FxHashMap::default(),
+                FxHashMap::default(),
+                FxHashMap::default(),
+            ),
+        };
     let mut state = SimState {
         balance: init_balance,
         positions: init_positions.clone(),
@@ -901,7 +935,8 @@ pub fn run_simulation(
             // back to the engine position after each evaluation.
             if state.positions.contains_key(sym_str) {
                 if !is_exit_cooldown_active(&state, sym_str, ts, cfg) {
-                    if let Some(exit_result) = evaluate_kernel_exit(&mut state, sym_str, &snap, ts) {
+                    if let Some(exit_result) = evaluate_kernel_exit(&mut state, sym_str, &snap, ts)
+                    {
                         apply_exit(&mut state, sym_str, &exit_result, &snap, ts, cfg);
                     }
                 }
@@ -921,7 +956,9 @@ pub fn run_simulation(
                 let hist = match state.ema_slow_history.get(sym_str) {
                     Some(h) => h,
                     None => {
-                        eprintln!("[bt-core] BUG: ema_slow_history missing for {sym_str}, skipping");
+                        eprintln!(
+                            "[bt-core] BUG: ema_slow_history missing for {sym_str}, skipping"
+                        );
                         continue;
                     }
                 };
@@ -1010,22 +1047,26 @@ pub fn run_simulation(
                     if pos.pos_type != desired_type {
                         let decision = step_decision(
                             &mut state,
-                            ts,
-                            sym_str,
-                            signal,
-                            snap.close,
-                            None,
-                            "indicator-bar-close",
-                            cfg,
+                            StepDecisionInput {
+                                ts,
+                                symbol: sym_str,
+                                signal,
+                                price: snap.close,
+                                requested_notional_usd: None,
+                                source: "indicator-bar-close",
+                                cfg,
+                            },
                         );
                         if let Some(last) = state.decision_diagnostics.last_mut() {
                             last.indicator_snapshot = Some(snap.clone());
                         }
-                        if decision
-                            .intents
-                            .iter()
-                            .any(|intent| matches!(intent.kind, decision_kernel::OrderIntentKind::Close | decision_kernel::OrderIntentKind::Reverse))
-                        {
+                        if decision.intents.iter().any(|intent| {
+                            matches!(
+                                intent.kind,
+                                decision_kernel::OrderIntentKind::Close
+                                    | decision_kernel::OrderIntentKind::Reverse
+                            )
+                        }) {
                             let exit = ExitResult::exit("Signal Flip", snap.close);
                             apply_exit(&mut state, sym_str, &exit, &snap, ts, cfg);
                         }
@@ -1084,23 +1125,21 @@ pub fn run_simulation(
                     }
                 }
 
-            // Build per-signal gate evaluation chain
-            let gate_eval = build_gate_evaluation(
-                &gate_result, &snap, signal, confidence, cfg,
-            );
+                // Build per-signal gate evaluation chain
+                let gate_eval = build_gate_evaluation(&gate_result, &snap, signal, confidence, cfg);
 
-            // Collect as candidate for ranking
-            indicator_bar_candidates.push(EntryCandidate {
-                symbol: sym.to_string(),
-                signal,
-                confidence,
-                adx: snap.adx,
-                atr,
-                entry_adx_threshold,
-                snap: snap.clone(),
-                ts,
-                gate_eval,
-            });
+                // Collect as candidate for ranking
+                indicator_bar_candidates.push(EntryCandidate {
+                    symbol: sym.to_string(),
+                    signal,
+                    confidence,
+                    adx: snap.adx,
+                    atr,
+                    entry_adx_threshold,
+                    snap: snap.clone(),
+                    ts,
+                    gate_eval,
+                });
             }
         }
 
@@ -1169,7 +1208,11 @@ pub fn run_simulation(
                 );
                 let (mut size, mut margin_used) = if margin_used > margin_headroom {
                     // M13: zero-guard on margin_used division
-                    let ratio = if margin_used > 1e-12 { margin_headroom / margin_used } else { 0.0 };
+                    let ratio = if margin_used > 1e-12 {
+                        margin_headroom / margin_used
+                    } else {
+                        0.0
+                    };
                     (size * ratio, margin_headroom)
                 } else {
                     (size, margin_used)
@@ -1188,13 +1231,15 @@ pub fn run_simulation(
                 let kernel_notional = notional;
                 let decision = step_decision(
                     &mut state,
-                    cand.ts,
-                    &cand.symbol,
-                    cand.signal,
-                    cand.snap.close,
-                    Some(kernel_notional),
-                    "indicator-bar-open",
-                    cfg,
+                    StepDecisionInput {
+                        ts: cand.ts,
+                        symbol: &cand.symbol,
+                        signal: cand.signal,
+                        price: cand.snap.close,
+                        requested_notional_usd: Some(kernel_notional),
+                        source: "indicator-bar-open",
+                        cfg,
+                    },
                 );
                 // Attach per-signal gate evaluation and indicator snapshot to the trace entry
                 if let Some(last) = state.decision_diagnostics.last_mut() {
@@ -1204,7 +1249,8 @@ pub fn run_simulation(
                 let intent_open = decision.intents.iter().any(|intent| {
                     matches!(
                         intent.kind,
-                        decision_kernel::OrderIntentKind::Open | decision_kernel::OrderIntentKind::Add
+                        decision_kernel::OrderIntentKind::Open
+                            | decision_kernel::OrderIntentKind::Add
                     )
                 });
                 if intent_open
@@ -1217,7 +1263,8 @@ pub fn run_simulation(
                         kernel_notional,
                         cfg,
                         &format!("{:?} entry", cand.confidence),
-                    ) {
+                    )
+                {
                     entries_this_bar += 1;
                 }
             }
@@ -1410,16 +1457,18 @@ pub fn run_simulation(
 
                         let opened = execute_sub_bar_entry(
                             &mut state,
-                            &cand.symbol,
-                            &cand.snap,
-                            cfg,
-                            cand.confidence,
-                            cand.atr,
-                            cand.entry_adx_threshold,
-                            cand.signal,
-                            cand.ts,
-                            sub_equity,
-                            &cand.gate_eval,
+                            ExecuteSubBarEntryInput {
+                                sym: &cand.symbol,
+                                snap: &cand.snap,
+                                cfg,
+                                confidence: cand.confidence,
+                                atr: cand.atr,
+                                entry_adx_threshold: cand.entry_adx_threshold,
+                                signal: cand.signal,
+                                ts: cand.ts,
+                                equity: sub_equity,
+                                gate_eval: &cand.gate_eval,
+                            },
                         );
                         if opened {
                             entries_this_bar += 1;
@@ -1895,7 +1944,8 @@ fn apply_exit(
 
     if let Some(partial_pct) = exit.partial_pct {
         // Partial exit
-        let partial_fill = accounting::build_partial_close_plan(pos.size, pos.margin_used, partial_pct);
+        let partial_fill =
+            accounting::build_partial_close_plan(pos.size, pos.margin_used, partial_pct);
         let exit_size = partial_fill.closed_size;
         let close = accounting::apply_close_fill(
             matches!(pos.pos_type, PositionType::Long),
@@ -1917,11 +1967,12 @@ fn apply_exit(
             PositionType::Long => "REDUCE_LONG",
             PositionType::Short => "REDUCE_SHORT",
         };
-        let closed_margin = pos.margin_used * if pos.size > 0.0 {
-            partial_fill.closed_size / pos.size
-        } else {
-            0.0
-        };
+        let closed_margin = pos.margin_used
+            * if pos.size > 0.0 {
+                partial_fill.closed_size / pos.size
+            } else {
+                0.0
+            };
         state.trades.push(TradeRecord {
             timestamp_ms: ts,
             symbol: symbol.to_string(),
@@ -1956,11 +2007,16 @@ fn apply_exit(
 
         // Sync kernel state: reduce kernel position + return margin proportionally.
         if let Some(kpos) = state.kernel_state.positions.get_mut(symbol) {
-            let close_frac = if pos.size > 0.0 { exit_size / pos.size } else { 0.0 };
+            let close_frac = if pos.size > 0.0 {
+                exit_size / pos.size
+            } else {
+                0.0
+            };
             let returned_margin = accounting::quantize(kpos.margin_usd * close_frac);
             kpos.margin_usd = accounting::quantize(kpos.margin_usd - returned_margin);
             kpos.quantity = accounting::quantize(kpos.quantity - exit_size);
-            kpos.notional_usd = accounting::quantize(kpos.notional_usd - (exit_size * pos.entry_price));
+            kpos.notional_usd =
+                accounting::quantize(kpos.notional_usd - (exit_size * pos.entry_price));
             state.kernel_state.cash_usd = accounting::quantize(
                 state.kernel_state.cash_usd + returned_margin + close.pnl - close.fee_usd,
             );
@@ -2100,13 +2156,15 @@ fn try_pyramid(
     };
     let decision = step_decision(
         state,
-        ts,
-        symbol,
-        add_signal,
-        snap.close,
-        Some(add_notional),
-        "pyramid",
-        cfg,
+        StepDecisionInput {
+            ts,
+            symbol,
+            signal: add_signal,
+            price: snap.close,
+            requested_notional_usd: Some(add_notional),
+            source: "pyramid",
+            cfg,
+        },
     );
     if let Some(last) = state.decision_diagnostics.last_mut() {
         last.indicator_snapshot = Some(snap.clone());
@@ -2294,19 +2352,32 @@ fn evaluate_sub_bar_candidate(
 
 /// Execute a ranked sub-bar entry candidate. Opens a new position.
 /// Returns true if a new position was opened.
-fn execute_sub_bar_entry(
-    state: &mut SimState,
-    sym: &str,
-    snap: &IndicatorSnapshot,
-    cfg: &StrategyConfig,
+struct ExecuteSubBarEntryInput<'a> {
+    sym: &'a str,
+    snap: &'a IndicatorSnapshot,
+    cfg: &'a StrategyConfig,
     confidence: Confidence,
     atr: f64,
     entry_adx_threshold: f64,
     signal: Signal,
     ts: i64,
     equity: f64,
-    gate_eval: &GateEvaluation,
-) -> bool {
+    gate_eval: &'a GateEvaluation,
+}
+
+fn execute_sub_bar_entry(state: &mut SimState, input: ExecuteSubBarEntryInput<'_>) -> bool {
+    let ExecuteSubBarEntryInput {
+        sym,
+        snap,
+        cfg,
+        confidence,
+        atr,
+        entry_adx_threshold,
+        signal,
+        ts,
+        equity,
+        gate_eval,
+    } = input;
     if state.positions.contains_key(sym) {
         return false;
     }
@@ -2340,7 +2411,11 @@ fn execute_sub_bar_entry(
         compute_entry_size(sym, equity, snap.close, confidence, atr, snap, cfg);
     let (mut size, mut margin_used) = if margin_used > margin_headroom {
         // M13: zero-guard on margin_used division
-        let ratio = if margin_used > 1e-12 { margin_headroom / margin_used } else { 0.0 };
+        let ratio = if margin_used > 1e-12 {
+            margin_headroom / margin_used
+        } else {
+            0.0
+        };
         (size * ratio, margin_headroom)
     } else {
         (size, margin_used)
@@ -2359,28 +2434,27 @@ fn execute_sub_bar_entry(
 
     let decision = step_decision(
         state,
-        ts,
-        sym,
-        signal,
-        snap.close,
-        Some(notional),
-        "sub-bar-open",
-        cfg,
+        StepDecisionInput {
+            ts,
+            symbol: sym,
+            signal,
+            price: snap.close,
+            requested_notional_usd: Some(notional),
+            source: "sub-bar-open",
+            cfg,
+        },
     );
     // Attach per-signal gate evaluation and indicator snapshot to the trace entry
     if let Some(last) = state.decision_diagnostics.last_mut() {
         last.gate_result = Some(gate_eval.clone());
         last.indicator_snapshot = Some(snap.clone());
     }
-    let has_open = decision
-        .intents
-        .iter()
-        .any(|intent| {
-            matches!(
-                intent.kind,
-                decision_kernel::OrderIntentKind::Open | decision_kernel::OrderIntentKind::Add,
-            )
-        });
+    let has_open = decision.intents.iter().any(|intent| {
+        matches!(
+            intent.kind,
+            decision_kernel::OrderIntentKind::Open | decision_kernel::OrderIntentKind::Add,
+        )
+    });
     if !has_open {
         return false;
     }
@@ -2708,9 +2782,18 @@ mod tests {
     fn test_empty_candles() {
         let candles = FxHashMap::default();
         let cfg = StrategyConfig::default();
-        let result = run_simulation(
-            &candles, &cfg, 1000.0, 50, None, None, None, None, None, None,
-        );
+        let result = run_simulation(RunSimulationInput {
+            candles: &candles,
+            cfg: &cfg,
+            initial_balance: 1000.0,
+            lookback: 50,
+            exit_candles: None,
+            entry_candles: None,
+            funding_rates: None,
+            init_state: None,
+            from_ts: None,
+            to_ts: None,
+        });
         assert_eq!(result.trades.len(), 0);
         assert!((result.final_balance - 1000.0).abs() < 1e-9);
     }
@@ -3013,23 +3096,27 @@ mod tests {
         let cfg = StrategyConfig::default();
         let _ = step_decision(
             &mut state,
-            1_000,
-            "BTC",
-            Signal::Buy,
-            100.0,
-            Some(1_000.0),
-            "fixture-open",
-            &cfg,
+            StepDecisionInput {
+                ts: 1_000,
+                symbol: "BTC",
+                signal: Signal::Buy,
+                price: 100.0,
+                requested_notional_usd: Some(1_000.0),
+                source: "fixture-open",
+                cfg: &cfg,
+            },
         );
         let _ = step_decision(
             &mut state,
-            2_000,
-            "BTC",
-            Signal::Sell,
-            110.0,
-            Some(1_000.0),
-            "fixture-exit",
-            &cfg,
+            StepDecisionInput {
+                ts: 2_000,
+                symbol: "BTC",
+                signal: Signal::Sell,
+                price: 110.0,
+                requested_notional_usd: Some(1_000.0),
+                source: "fixture-exit",
+                cfg: &cfg,
+            },
         );
 
         assert_eq!(state.decision_diagnostics, fixture.traces);
@@ -3093,7 +3180,11 @@ mod tests {
             "Every individual gate check should be passed"
         );
         // Verify primary gates are present
-        let names: Vec<&str> = eval.checked_gates.iter().map(|c| c.gate_name.as_str()).collect();
+        let names: Vec<&str> = eval
+            .checked_gates
+            .iter()
+            .map(|c| c.gate_name.as_str())
+            .collect();
         assert!(names.contains(&"adx_min"));
         assert!(names.contains(&"ranging"));
         assert!(names.contains(&"anomaly"));
@@ -3309,13 +3400,15 @@ mod tests {
 
         let _ = step_decision(
             &mut state,
-            1_000,
-            "ETH",
-            Signal::Buy,
-            3500.0,
-            Some(500.0),
-            "fixture-open",
-            &cfg,
+            StepDecisionInput {
+                ts: 1_000,
+                symbol: "ETH",
+                signal: Signal::Buy,
+                price: 3500.0,
+                requested_notional_usd: Some(500.0),
+                source: "fixture-open",
+                cfg: &cfg,
+            },
         );
 
         // Simulate attaching an indicator snapshot (as the engine does after step_decision)
@@ -3368,15 +3461,30 @@ mod tests {
         assert!((trace_snap.adx - 28.5).abs() < 1e-9, "ADX should match");
         assert!((trace_snap.rsi - 58.0).abs() < 1e-9, "RSI should match");
         assert!((trace_snap.atr - 45.0).abs() < 1e-9, "ATR should match");
-        assert!((trace_snap.close - 3500.0).abs() < 1e-9, "close should match");
-        assert!((trace_snap.ema_slow - 3450.0).abs() < 1e-9, "EMA slow should match");
-        assert!((trace_snap.ema_fast - 3475.0).abs() < 1e-9, "EMA fast should match");
-        assert!((trace_snap.bb_width_ratio - 1.13).abs() < 1e-9, "BB width ratio should match");
+        assert!(
+            (trace_snap.close - 3500.0).abs() < 1e-9,
+            "close should match"
+        );
+        assert!(
+            (trace_snap.ema_slow - 3450.0).abs() < 1e-9,
+            "EMA slow should match"
+        );
+        assert!(
+            (trace_snap.ema_fast - 3475.0).abs() < 1e-9,
+            "EMA fast should match"
+        );
+        assert!(
+            (trace_snap.bb_width_ratio - 1.13).abs() < 1e-9,
+            "BB width ratio should match"
+        );
 
         // Verify full serde roundtrip of trace with snapshot
         let json = serde_json::to_string(trace).unwrap();
         let deser: DecisionKernelTrace = serde_json::from_str(&json).unwrap();
-        assert_eq!(*trace, deser, "Trace with indicator_snapshot serde roundtrip");
+        assert_eq!(
+            *trace, deser,
+            "Trace with indicator_snapshot serde roundtrip"
+        );
     }
 
     #[test]

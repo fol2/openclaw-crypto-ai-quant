@@ -153,17 +153,30 @@ pub struct GateStatsReport {
 /// * `config_id`            — Identifier string for this config variant.
 /// * `include_trades`       — If true, embed per-trade detail in the report.
 /// * `include_equity_curve` — If true, embed the full equity curve.
-pub fn build_report(
-    trades: &[TradeRecord],
-    signals: &[SignalRecord],
-    equity_curve: &[(i64, f64)],
-    gate_stats: &GateStats,
-    initial_balance: f64,
-    final_balance: f64,
-    config_id: &str,
-    include_trades: bool,
-    include_equity_curve: bool,
-) -> SimReport {
+pub struct BuildReportInput<'a> {
+    pub trades: &'a [TradeRecord],
+    pub signals: &'a [SignalRecord],
+    pub equity_curve: &'a [(i64, f64)],
+    pub gate_stats: &'a GateStats,
+    pub initial_balance: f64,
+    pub final_balance: f64,
+    pub config_id: &'a str,
+    pub include_trades: bool,
+    pub include_equity_curve: bool,
+}
+
+pub fn build_report(input: BuildReportInput<'_>) -> SimReport {
+    let BuildReportInput {
+        trades,
+        signals,
+        equity_curve,
+        gate_stats,
+        initial_balance,
+        final_balance,
+        config_id,
+        include_trades,
+        include_equity_curve,
+    } = input;
     // ── Separate closes from all trade records ───────────────────────────
     let closes: Vec<&TradeRecord> = trades.iter().filter(|t| t.is_close()).collect();
     let total_trades = closes.len() as u32;
@@ -444,7 +457,11 @@ fn build_confidence_breakdown(closes: &[&TradeRecord]) -> Vec<ConfidenceBucket> 
             confidence: conf,
             trades: count,
             pnl,
-            win_rate: if count > 0 { wins as f64 / count as f64 } else { 0.0 },
+            win_rate: if count > 0 {
+                wins as f64 / count as f64
+            } else {
+                0.0
+            },
             avg_pnl: if count > 0 { pnl / count as f64 } else { 0.0 },
         })
         .collect()
@@ -476,7 +493,11 @@ fn build_exit_reason_breakdown(closes: &[&TradeRecord]) -> Vec<ExitBucket> {
             reason,
             trades: count,
             pnl,
-            win_rate: if count > 0 { wins as f64 / count as f64 } else { 0.0 },
+            win_rate: if count > 0 {
+                wins as f64 / count as f64
+            } else {
+                0.0
+            },
         })
         .collect()
 }
@@ -569,7 +590,11 @@ fn build_symbol_breakdown(closes: &[&TradeRecord]) -> Vec<SymbolBucket> {
             symbol,
             trades: count,
             pnl,
-            win_rate: if count > 0 { wins as f64 / count as f64 } else { 0.0 },
+            win_rate: if count > 0 {
+                wins as f64 / count as f64
+            } else {
+                0.0
+            },
         })
         .collect()
 }
@@ -598,7 +623,11 @@ fn build_side_breakdown(closes: &[&TradeRecord]) -> Vec<SideBucket> {
             side,
             trades: count,
             pnl,
-            win_rate: if count > 0 { wins as f64 / count as f64 } else { 0.0 },
+            win_rate: if count > 0 {
+                wins as f64 / count as f64
+            } else {
+                0.0
+            },
         })
         .collect()
 }
@@ -656,10 +685,17 @@ mod tests {
 
     #[test]
     fn test_empty_report() {
-        let report = build_report(
-            &[], &[], &[], &GateStats::default(),
-            10000.0, 10000.0, "test", false, false,
-        );
+        let report = build_report(BuildReportInput {
+            trades: &[],
+            signals: &[],
+            equity_curve: &[],
+            gate_stats: &GateStats::default(),
+            initial_balance: 10000.0,
+            final_balance: 10000.0,
+            config_id: "test",
+            include_trades: false,
+            include_equity_curve: false,
+        });
         assert_eq!(report.total_trades, 0);
         assert_eq!(report.win_rate, 0.0);
         assert_eq!(report.total_pnl, 0.0);
@@ -675,10 +711,17 @@ mod tests {
             make_close("BTC", -3.0, "Stop Loss", Confidence::Low, "CLOSE_SHORT"),
             make_close("BTC", -2.0, "Stop Loss", Confidence::Low, "CLOSE_SHORT"),
         ];
-        let report = build_report(
-            &trades, &[], &[], &GateStats::default(),
-            10000.0, 10010.0, "test", false, false,
-        );
+        let report = build_report(BuildReportInput {
+            trades: &trades,
+            signals: &[],
+            equity_curve: &[],
+            gate_stats: &GateStats::default(),
+            initial_balance: 10000.0,
+            final_balance: 10010.0,
+            config_id: "test",
+            include_trades: false,
+            include_equity_curve: false,
+        });
         assert_eq!(report.total_trades, 4);
         assert_eq!(report.total_wins, 2);
         assert_eq!(report.total_losses, 2);
@@ -694,10 +737,17 @@ mod tests {
             make_close("ETH", 6.0, "TP", Confidence::High, "CLOSE_LONG"),
             make_close("ETH", -4.0, "SL", Confidence::Low, "CLOSE_SHORT"),
         ];
-        let report = build_report(
-            &trades, &[], &[], &GateStats::default(),
-            10000.0, 10012.0, "test", false, false,
-        );
+        let report = build_report(BuildReportInput {
+            trades: &trades,
+            signals: &[],
+            equity_curve: &[],
+            gate_stats: &GateStats::default(),
+            initial_balance: 10000.0,
+            final_balance: 10012.0,
+            config_id: "test",
+            include_trades: false,
+            include_equity_curve: false,
+        });
         assert!((report.avg_win - 8.0).abs() < 1e-9);
         assert!((report.avg_loss - (-4.0)).abs() < 1e-9);
     }
@@ -719,11 +769,7 @@ mod tests {
 
     #[test]
     fn test_sharpe_flat_curve() {
-        let curve = vec![
-            (0, 10000.0),
-            (86_400_000, 10000.0),
-            (172_800_000, 10000.0),
-        ];
+        let curve = vec![(0, 10000.0), (86_400_000, 10000.0), (172_800_000, 10000.0)];
         let sharpe = compute_sharpe(&curve);
         assert_eq!(sharpe, 0.0);
     }
@@ -740,7 +786,10 @@ mod tests {
             (259_200_000, 10353.51),
         ];
         let sharpe = compute_sharpe(&curve);
-        assert!(sharpe > 0.0, "Steadily increasing curve should have positive Sharpe");
+        assert!(
+            sharpe > 0.0,
+            "Steadily increasing curve should have positive Sharpe"
+        );
     }
 
     #[test]
@@ -751,10 +800,17 @@ mod tests {
             make_signal(Signal::Neutral),
             make_signal(Signal::Sell),
         ];
-        let report = build_report(
-            &[], &signals, &[], &GateStats::default(),
-            10000.0, 10000.0, "test", false, false,
-        );
+        let report = build_report(BuildReportInput {
+            trades: &[],
+            signals: &signals,
+            equity_curve: &[],
+            gate_stats: &GateStats::default(),
+            initial_balance: 10000.0,
+            final_balance: 10000.0,
+            config_id: "test",
+            include_trades: false,
+            include_equity_curve: false,
+        });
         assert!((report.neutral_pct - 0.5).abs() < 1e-9);
         assert_eq!(report.total_signals, 4);
     }
@@ -766,10 +822,17 @@ mod tests {
             make_close("ETH", -3.0, "SL", Confidence::High, "CLOSE_LONG"),
             make_close("ETH", 2.0, "TP", Confidence::Low, "CLOSE_LONG"),
         ];
-        let report = build_report(
-            &trades, &[], &[], &GateStats::default(),
-            10000.0, 10009.0, "test", false, false,
-        );
+        let report = build_report(BuildReportInput {
+            trades: &trades,
+            signals: &[],
+            equity_curve: &[],
+            gate_stats: &GateStats::default(),
+            initial_balance: 10000.0,
+            final_balance: 10009.0,
+            config_id: "test",
+            include_trades: false,
+            include_equity_curve: false,
+        });
         assert_eq!(report.by_confidence.len(), 2);
         // low (sort key 0) first, then high (sort key 2)
         assert_eq!(report.by_confidence[0].confidence, "low");
@@ -786,10 +849,17 @@ mod tests {
             make_close("ETH", 10.0, "TP", Confidence::High, "CLOSE_LONG"),
             make_close("ETH", -3.0, "SL", Confidence::High, "CLOSE_SHORT"),
         ];
-        let report = build_report(
-            &trades, &[], &[], &GateStats::default(),
-            10000.0, 10007.0, "test", false, false,
-        );
+        let report = build_report(BuildReportInput {
+            trades: &trades,
+            signals: &[],
+            equity_curve: &[],
+            gate_stats: &GateStats::default(),
+            initial_balance: 10000.0,
+            final_balance: 10007.0,
+            config_id: "test",
+            include_trades: false,
+            include_equity_curve: false,
+        });
         assert_eq!(report.by_side.len(), 2);
         // BTreeMap: LONG < SHORT alphabetically
         assert_eq!(report.by_side[0].side, "LONG");
@@ -803,10 +873,17 @@ mod tests {
             make_close("ETH", -2.0, "SL", Confidence::High, "CLOSE_LONG"),
             make_close("ETH", 3.0, "TP", Confidence::High, "CLOSE_LONG"),
         ];
-        let report = build_report(
-            &trades, &[], &[], &GateStats::default(),
-            10000.0, 10006.0, "test", false, false,
-        );
+        let report = build_report(BuildReportInput {
+            trades: &trades,
+            signals: &[],
+            equity_curve: &[],
+            gate_stats: &GateStats::default(),
+            initial_balance: 10000.0,
+            final_balance: 10006.0,
+            config_id: "test",
+            include_trades: false,
+            include_equity_curve: false,
+        });
         assert_eq!(report.by_symbol.len(), 2);
         assert_eq!(report.by_symbol[0].symbol, "BTC");
         assert_eq!(report.by_symbol[0].trades, 1);
@@ -818,13 +895,26 @@ mod tests {
     fn test_exit_reason_categorization() {
         let trades = vec![
             make_close("ETH", -5.0, "Stop Loss Hit", Confidence::High, "CLOSE_LONG"),
-            make_close("ETH", 8.0, "Take Profit Full", Confidence::High, "CLOSE_LONG"),
+            make_close(
+                "ETH",
+                8.0,
+                "Take Profit Full",
+                Confidence::High,
+                "CLOSE_LONG",
+            ),
             make_close("ETH", 3.0, "Trailing Stop", Confidence::High, "CLOSE_LONG"),
         ];
-        let report = build_report(
-            &trades, &[], &[], &GateStats::default(),
-            10000.0, 10006.0, "test", false, false,
-        );
+        let report = build_report(BuildReportInput {
+            trades: &trades,
+            signals: &[],
+            equity_curve: &[],
+            gate_stats: &GateStats::default(),
+            initial_balance: 10000.0,
+            final_balance: 10006.0,
+            config_id: "test",
+            include_trades: false,
+            include_equity_curve: false,
+        });
         assert_eq!(report.by_exit_reason.len(), 3);
         // BTreeMap alphabetical: "Stop Loss", "Take Profit", "Trailing Stop"
         assert_eq!(report.by_exit_reason[0].reason, "Stop Loss");
@@ -834,20 +924,38 @@ mod tests {
 
     #[test]
     fn test_include_trades_flag() {
-        let trades = vec![
-            make_close("ETH", 10.0, "TP", Confidence::High, "CLOSE_LONG"),
-        ];
-        let report_no = build_report(
-            &trades, &[], &[], &GateStats::default(),
-            10000.0, 10010.0, "test", false, false,
-        );
+        let trades = vec![make_close(
+            "ETH",
+            10.0,
+            "TP",
+            Confidence::High,
+            "CLOSE_LONG",
+        )];
+        let report_no = build_report(BuildReportInput {
+            trades: &trades,
+            signals: &[],
+            equity_curve: &[],
+            gate_stats: &GateStats::default(),
+            initial_balance: 10000.0,
+            final_balance: 10010.0,
+            config_id: "test",
+            include_trades: false,
+            include_equity_curve: false,
+        });
         assert!(report_no.trades.is_none());
         assert!(report_no.equity_curve.is_none());
 
-        let report_yes = build_report(
-            &trades, &[], &[], &GateStats::default(),
-            10000.0, 10010.0, "test", true, true,
-        );
+        let report_yes = build_report(BuildReportInput {
+            trades: &trades,
+            signals: &[],
+            equity_curve: &[],
+            gate_stats: &GateStats::default(),
+            initial_balance: 10000.0,
+            final_balance: 10010.0,
+            config_id: "test",
+            include_trades: true,
+            include_equity_curve: true,
+        });
         assert!(report_yes.trades.is_some());
         assert_eq!(report_yes.trades.unwrap().len(), 1);
         // equity_curve was empty but still Some([])
@@ -875,10 +983,17 @@ mod tests {
             blocked_by_reef: 0,
             blocked_by_margin: 0,
         };
-        let report = build_report(
-            &[], &[], &[], &gs,
-            10000.0, 10000.0, "test", false, false,
-        );
+        let report = build_report(BuildReportInput {
+            trades: &[],
+            signals: &[],
+            equity_curve: &[],
+            gate_stats: &gs,
+            initial_balance: 10000.0,
+            final_balance: 10000.0,
+            config_id: "test",
+            include_trades: false,
+            include_equity_curve: false,
+        });
         assert_eq!(report.gate_stats.total_checks, 1000);
         // signals_generated = buy_count + sell_count = 200
         assert_eq!(report.gate_stats.signals_generated, 200);
@@ -888,25 +1003,41 @@ mod tests {
 
     #[test]
     fn test_profit_factor_no_losses() {
-        let trades = vec![
-            make_close("ETH", 10.0, "TP", Confidence::High, "CLOSE_LONG"),
-        ];
-        let report = build_report(
-            &trades, &[], &[], &GateStats::default(),
-            10000.0, 10010.0, "test", false, false,
-        );
+        let trades = vec![make_close(
+            "ETH",
+            10.0,
+            "TP",
+            Confidence::High,
+            "CLOSE_LONG",
+        )];
+        let report = build_report(BuildReportInput {
+            trades: &trades,
+            signals: &[],
+            equity_curve: &[],
+            gate_stats: &GateStats::default(),
+            initial_balance: 10000.0,
+            final_balance: 10010.0,
+            config_id: "test",
+            include_trades: false,
+            include_equity_curve: false,
+        });
         assert!(report.profit_factor.is_infinite());
     }
 
     #[test]
     fn test_json_serialization() {
-        let trades = vec![
-            make_close("ETH", 5.0, "TP", Confidence::High, "CLOSE_LONG"),
-        ];
-        let report = build_report(
-            &trades, &[], &[], &GateStats::default(),
-            10000.0, 10005.0, "json_test", false, false,
-        );
+        let trades = vec![make_close("ETH", 5.0, "TP", Confidence::High, "CLOSE_LONG")];
+        let report = build_report(BuildReportInput {
+            trades: &trades,
+            signals: &[],
+            equity_curve: &[],
+            gate_stats: &GateStats::default(),
+            initial_balance: 10000.0,
+            final_balance: 10005.0,
+            config_id: "json_test",
+            include_trades: false,
+            include_equity_curve: false,
+        });
         let json = serde_json::to_string(&report).expect("report should serialize to JSON");
         assert!(json.contains("\"config_id\":\"json_test\""));
         assert!(json.contains("\"total_wins\":1"));

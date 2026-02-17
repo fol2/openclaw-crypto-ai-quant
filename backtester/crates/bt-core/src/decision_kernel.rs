@@ -66,8 +66,7 @@ pub enum PositionSide {
     Short,
 }
 
-impl PositionSide {
-}
+impl PositionSide {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -492,7 +491,9 @@ fn side_from_signal(signal: MarketSignal) -> Option<PositionSide> {
     match signal {
         MarketSignal::Buy => Some(PositionSide::Long),
         MarketSignal::Sell => Some(PositionSide::Short),
-        MarketSignal::Neutral | MarketSignal::Funding | MarketSignal::PriceUpdate
+        MarketSignal::Neutral
+        | MarketSignal::Funding
+        | MarketSignal::PriceUpdate
         | MarketSignal::Evaluate => None,
     }
 }
@@ -569,9 +570,8 @@ fn with_intent_id(step: u64, offset: u64) -> u64 {
     step.saturating_mul(1000).saturating_add(offset)
 }
 
-fn apply_open(
-    state: &mut StrategyState,
-    symbol: &str,
+struct ApplyOpenInput<'a> {
+    symbol: &'a str,
     side: PositionSide,
     notional: f64,
     price: f64,
@@ -580,8 +580,24 @@ fn apply_open(
     timestamp_ms: i64,
     intent_id: u64,
     kind: OrderIntentKind,
+}
+
+fn apply_open(
+    state: &mut StrategyState,
+    input: ApplyOpenInput<'_>,
     diagnostics: &mut Diagnostics,
 ) -> Option<(OrderIntent, FillEvent)> {
+    let ApplyOpenInput {
+        symbol,
+        side,
+        notional,
+        price,
+        fee_rate,
+        leverage,
+        timestamp_ms,
+        intent_id,
+        kind,
+    } = input;
     if notional <= 0.0 {
         diagnostics
             .warnings
@@ -713,9 +729,9 @@ fn apply_close(
     };
 
     if position.quantity <= 0.0 {
-        diagnostics
-            .warnings
-            .push(format!("close skipped for {symbol}: position quantity not positive"));
+        diagnostics.warnings.push(format!(
+            "close skipped for {symbol}: position quantity not positive"
+        ));
         return None;
     }
     if price <= 0.0 {
@@ -814,8 +830,7 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
             if rate != 0.0 {
                 if let Some(pos) = next_state.positions.get_mut(&event.symbol) {
                     let is_long = pos.side == PositionSide::Long;
-                    let delta =
-                        accounting::funding_delta(is_long, pos.quantity, event.price, rate);
+                    let delta = accounting::funding_delta(is_long, pos.quantity, event.price, rate);
                     next_state.cash_usd = quantise(next_state.cash_usd + delta);
                     pos.last_funding_ms = Some(event.timestamp_ms);
                     pos.updated_at_ms = event.timestamp_ms;
@@ -845,8 +860,15 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
 
         // Exit cooldown check
         if let Some(ref cd) = params.cooldown_params {
-            if is_exit_cooldown_active(&next_state, &event.symbol, event.timestamp_ms, cd.exit_cooldown_s) {
-                diagnostics.warnings.push(format!("exit cooldown active for {}", event.symbol));
+            if is_exit_cooldown_active(
+                &next_state,
+                &event.symbol,
+                event.timestamp_ms,
+                cd.exit_cooldown_s,
+            ) {
+                diagnostics
+                    .warnings
+                    .push(format!("exit cooldown active for {}", event.symbol));
                 diagnostics.cooldown_blocked = true;
                 diagnostics.intent_count = 0;
                 diagnostics.fill_count = 0;
@@ -895,7 +917,10 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
 
                 match result {
                     KernelExitResult::Hold => {}
-                    KernelExitResult::FullClose { exit_price, ref reason } => {
+                    KernelExitResult::FullClose {
+                        exit_price,
+                        ref reason,
+                    } => {
                         if let Some(pos) = next_state.positions.get(&event.symbol) {
                             let closed_side = pos.side;
                             if let Some((intent, fill)) = apply_close(
@@ -911,7 +936,9 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                                 intents.push(intent);
                                 fills.push(fill);
                                 // Record cooldown timestamps
-                                next_state.last_exit_ms.insert(event.symbol.clone(), event.timestamp_ms);
+                                next_state
+                                    .last_exit_ms
+                                    .insert(event.symbol.clone(), event.timestamp_ms);
                                 // Record PESC info from original state's position side
                                 if let Some(side) = pre_exit_side {
                                     let side_str = match side {
@@ -946,7 +973,9 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                                 intents.push(intent);
                                 fills.push(fill);
                                 // Record exit timestamp (partial exits also trigger exit cooldown)
-                                next_state.last_exit_ms.insert(event.symbol.clone(), event.timestamp_ms);
+                                next_state
+                                    .last_exit_ms
+                                    .insert(event.symbol.clone(), event.timestamp_ms);
                                 // Mark tp1_taken after successful partial close.
                                 if let Some(pos) = next_state.positions.get_mut(&event.symbol) {
                                     pos.tp1_taken = true;
@@ -991,31 +1020,30 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
         next_state.step = next_state.step.saturating_add(1);
         next_state.timestamp_ms = event.timestamp_ms;
 
-        let (entry_params, snap, gate_result) = match (
-            &params.entry_params,
-            &event.indicators,
-            &event.gate_result,
-        ) {
-            (Some(ep), Some(s), Some(gr)) => (ep, s, gr),
-            _ => {
-                diagnostics.warnings.push(
-                    "Evaluate signal requires entry_params, indicators, and gate_result".to_string()
-                );
-                return DecisionResult {
-                    schema_version: KERNEL_SCHEMA_VERSION,
-                    state: next_state,
-                    intents: vec![],
-                    fills: vec![],
-                    diagnostics,
-                };
-            }
-        };
+        let (entry_params, snap, gate_result) =
+            match (&params.entry_params, &event.indicators, &event.gate_result) {
+                (Some(ep), Some(s), Some(gr)) => (ep, s, gr),
+                _ => {
+                    diagnostics.warnings.push(
+                        "Evaluate signal requires entry_params, indicators, and gate_result"
+                            .to_string(),
+                    );
+                    return DecisionResult {
+                        schema_version: KERNEL_SCHEMA_VERSION,
+                        state: next_state,
+                        intents: vec![],
+                        fills: vec![],
+                        diagnostics,
+                    };
+                }
+            };
 
         // Capture indicator snapshot for diagnostics.
         diagnostics.indicator_snapshot = Some(IndicatorSnapshotTrace::from_snapshot(snap));
 
         let slope = event.ema_slow_slope_pct.unwrap_or(0.0);
-        let entry_result = crate::kernel_entries::evaluate_entry(snap, gate_result, entry_params, slope);
+        let entry_result =
+            crate::kernel_entries::evaluate_entry(snap, gate_result, entry_params, slope);
 
         // Record in diagnostics
         diagnostics.entry_signal = Some(match entry_result.signal {
@@ -1031,7 +1059,14 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
             factors.push(("adx".into(), snap.adx));
             factors.push(("rsi".into(), snap.rsi));
             factors.push(("bb_width_ratio".into(), snap.bb_width_ratio));
-            factors.push(("vol_sma_ratio".into(), if snap.vol_sma > 0.0 { snap.volume / snap.vol_sma } else { 0.0 }));
+            factors.push((
+                "vol_sma_ratio".into(),
+                if snap.vol_sma > 0.0 {
+                    snap.volume / snap.vol_sma
+                } else {
+                    0.0
+                },
+            ));
             factors.push(("macd_hist".into(), snap.macd_hist));
             factors.push(("adx_slope".into(), snap.adx_slope));
             factors.push(("confidence".into(), entry_result.confidence as f64));
@@ -1142,8 +1177,15 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
 
             if !is_opposite_close {
                 if let Some(ref cd) = params.cooldown_params {
-                    if is_entry_cooldown_active(&next_state, &event.symbol, event.timestamp_ms, cd.entry_cooldown_s) {
-                        diagnostics.warnings.push(format!("entry cooldown active for {}", event.symbol));
+                    if is_entry_cooldown_active(
+                        &next_state,
+                        &event.symbol,
+                        event.timestamp_ms,
+                        cd.entry_cooldown_s,
+                    ) {
+                        diagnostics
+                            .warnings
+                            .push(format!("entry cooldown active for {}", event.symbol));
                         diagnostics.cooldown_blocked = true;
                         diagnostics.intent_count = 0;
                         diagnostics.fill_count = 0;
@@ -1156,11 +1198,23 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                         };
                     }
 
-                    let adx = event.indicators.as_ref().map(|s| s.adx)
+                    let adx = event
+                        .indicators
+                        .as_ref()
+                        .map(|s| s.adx)
                         .or_else(|| event.gate_result.as_ref().map(|g| g.effective_min_adx))
                         .unwrap_or(30.0);
-                    if is_pesc_blocked(&next_state, &event.symbol, requested_side, event.timestamp_ms, adx, cd) {
-                        diagnostics.warnings.push(format!("PESC blocked for {}", event.symbol));
+                    if is_pesc_blocked(
+                        &next_state,
+                        &event.symbol,
+                        requested_side,
+                        event.timestamp_ms,
+                        adx,
+                        cd,
+                    ) {
+                        diagnostics
+                            .warnings
+                            .push(format!("PESC blocked for {}", event.symbol));
                         diagnostics.pesc_blocked = true;
                         diagnostics.intent_count = 0;
                         diagnostics.fill_count = 0;
@@ -1177,15 +1231,21 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
         }
 
         let (intents, fills) = execute_entry(
-            &mut next_state, event, params, requested_side, &mut diagnostics,
+            &mut next_state,
+            event,
+            params,
+            requested_side,
+            &mut diagnostics,
         );
 
         // Record entry timestamp only for actual entry fills (Open/Add), not closes
-        let has_entry_fill = intents.iter().any(|i| {
-            matches!(i.kind, OrderIntentKind::Open | OrderIntentKind::Add)
-        });
+        let has_entry_fill = intents
+            .iter()
+            .any(|i| matches!(i.kind, OrderIntentKind::Open | OrderIntentKind::Add));
         if has_entry_fill {
-            next_state.last_entry_ms.insert(event.symbol.clone(), event.timestamp_ms);
+            next_state
+                .last_entry_ms
+                .insert(event.symbol.clone(), event.timestamp_ms);
         }
 
         next_state.cash_usd = quantise(next_state.cash_usd);
@@ -1306,8 +1366,15 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
         if !is_opposite_close {
             if let Some(ref cd) = params.cooldown_params {
                 // Entry cooldown
-                if is_entry_cooldown_active(&next_state, &event.symbol, event.timestamp_ms, cd.entry_cooldown_s) {
-                    diagnostics.warnings.push(format!("entry cooldown active for {}", event.symbol));
+                if is_entry_cooldown_active(
+                    &next_state,
+                    &event.symbol,
+                    event.timestamp_ms,
+                    cd.entry_cooldown_s,
+                ) {
+                    diagnostics
+                        .warnings
+                        .push(format!("entry cooldown active for {}", event.symbol));
                     diagnostics.cooldown_blocked = true;
                     diagnostics.intent_count = 0;
                     diagnostics.fill_count = 0;
@@ -1321,11 +1388,23 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                 }
 
                 // PESC: need ADX from indicators or gate_result
-                let adx = event.indicators.as_ref().map(|s| s.adx)
+                let adx = event
+                    .indicators
+                    .as_ref()
+                    .map(|s| s.adx)
                     .or_else(|| event.gate_result.as_ref().map(|g| g.effective_min_adx))
                     .unwrap_or(30.0);
-                if is_pesc_blocked(&next_state, &event.symbol, requested_side, event.timestamp_ms, adx, cd) {
-                    diagnostics.warnings.push(format!("PESC blocked for {}", event.symbol));
+                if is_pesc_blocked(
+                    &next_state,
+                    &event.symbol,
+                    requested_side,
+                    event.timestamp_ms,
+                    adx,
+                    cd,
+                ) {
+                    diagnostics
+                        .warnings
+                        .push(format!("PESC blocked for {}", event.symbol));
                     diagnostics.pesc_blocked = true;
                     diagnostics.intent_count = 0;
                     diagnostics.fill_count = 0;
@@ -1342,15 +1421,21 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
     }
 
     let (intents, fills) = execute_entry(
-        &mut next_state, event, params, requested_side, &mut diagnostics,
+        &mut next_state,
+        event,
+        params,
+        requested_side,
+        &mut diagnostics,
     );
 
     // Record entry timestamp only for actual entry fills (Open/Add), not closes
-    let has_entry_fill = intents.iter().any(|i| {
-        matches!(i.kind, OrderIntentKind::Open | OrderIntentKind::Add)
-    });
+    let has_entry_fill = intents
+        .iter()
+        .any(|i| matches!(i.kind, OrderIntentKind::Open | OrderIntentKind::Add));
     if has_entry_fill {
-        next_state.last_entry_ms.insert(event.symbol.clone(), event.timestamp_ms);
+        next_state
+            .last_entry_ms
+            .insert(event.symbol.clone(), event.timestamp_ms);
     }
 
     next_state.cash_usd = quantise(next_state.cash_usd);
@@ -1397,15 +1482,17 @@ fn execute_entry(
         None => {
             if let Some((intent, fill)) = apply_open(
                 next_state,
-                &event.symbol,
-                requested_side,
-                notional,
-                event.price,
-                fee_rate,
-                leverage,
-                event.timestamp_ms,
-                open_id,
-                OrderIntentKind::Open,
+                ApplyOpenInput {
+                    symbol: &event.symbol,
+                    side: requested_side,
+                    notional,
+                    price: event.price,
+                    fee_rate,
+                    leverage,
+                    timestamp_ms: event.timestamp_ms,
+                    intent_id: open_id,
+                    kind: OrderIntentKind::Open,
+                },
                 diagnostics,
             ) {
                 intents.push(intent);
@@ -1416,15 +1503,17 @@ fn execute_entry(
             if params.allow_pyramid {
                 if let Some((intent, fill)) = apply_open(
                     next_state,
-                    &event.symbol,
-                    requested_side,
-                    notional,
-                    event.price,
-                    fee_rate,
-                    leverage,
-                    event.timestamp_ms,
-                    open_id,
-                    OrderIntentKind::Add,
+                    ApplyOpenInput {
+                        symbol: &event.symbol,
+                        side: requested_side,
+                        notional,
+                        price: event.price,
+                        fee_rate,
+                        leverage,
+                        timestamp_ms: event.timestamp_ms,
+                        intent_id: open_id,
+                        kind: OrderIntentKind::Add,
+                    },
                     diagnostics,
                 ) {
                     intents.push(intent);
@@ -1460,29 +1549,37 @@ fn execute_entry(
                 fills.push(fill);
 
                 // Record close/exit timestamps for cooldown tracking
-                next_state.last_exit_ms.insert(event.symbol.clone(), event.timestamp_ms);
+                next_state
+                    .last_exit_ms
+                    .insert(event.symbol.clone(), event.timestamp_ms);
                 let side_str = match closed_side {
                     PositionSide::Long => "long",
                     PositionSide::Short => "short",
                 };
                 next_state.last_close_info.insert(
                     event.symbol.clone(),
-                    (event.timestamp_ms, side_str.to_string(), "Signal Flip".to_string()),
+                    (
+                        event.timestamp_ms,
+                        side_str.to_string(),
+                        "Signal Flip".to_string(),
+                    ),
                 );
             }
 
             if params.allow_reverse {
                 if let Some((intent, fill)) = apply_open(
                     next_state,
-                    &event.symbol,
-                    requested_side,
-                    notional,
-                    event.price,
-                    fee_rate,
-                    leverage,
-                    event.timestamp_ms,
-                    reverse_id,
-                    OrderIntentKind::Open,
+                    ApplyOpenInput {
+                        symbol: &event.symbol,
+                        side: requested_side,
+                        notional,
+                        price: event.price,
+                        fee_rate,
+                        leverage,
+                        timestamp_ms: event.timestamp_ms,
+                        intent_id: reverse_id,
+                        kind: OrderIntentKind::Open,
+                    },
                     diagnostics,
                 ) {
                     intents.push(intent);
@@ -1582,7 +1679,8 @@ mod tests {
         let open_fill = accounting::apply_open_fill(10_000.0, accounting::DEFAULT_TAKER_FEE_RATE);
         let margin = accounting::quantize(10_000.0 / params.leverage.max(1.0));
         // Kernel deducts margin + fee from cash.
-        let expected_cash_after_open = accounting::quantize(initial_state.cash_usd - margin - open_fill.fee_usd);
+        let expected_cash_after_open =
+            accounting::quantize(initial_state.cash_usd - margin - open_fill.fee_usd);
         assert!(
             (open_result.state.cash_usd - expected_cash_after_open).abs() < 1e-12,
             "open cash: {} != expected {}",
@@ -1608,10 +1706,18 @@ mod tests {
         let close_state = open_result.state;
         let close_result = step(&close_state, &close_event, &params);
 
-        let expected_close = accounting::apply_close_fill(true, 10_000.0, 10_200.0, 1.0, accounting::DEFAULT_TAKER_FEE_RATE);
+        let expected_close = accounting::apply_close_fill(
+            true,
+            10_000.0,
+            10_200.0,
+            1.0,
+            accounting::DEFAULT_TAKER_FEE_RATE,
+        );
         // Round-trip: initial - margin - open_fee + margin + pnl - close_fee = initial + pnl - total_fees
         let expected_cash = accounting::quantize(
-            initial_state.cash_usd + expected_close.pnl - open_fill.fee_usd - expected_close.fee_usd,
+            initial_state.cash_usd + expected_close.pnl
+                - open_fill.fee_usd
+                - expected_close.fee_usd,
         );
         assert!(
             (close_result.state.cash_usd - expected_cash).abs() < 1e-12,
@@ -1689,7 +1795,10 @@ mod tests {
 
         // Fill should reflect partial quantity.
         assert_eq!(result.fills.len(), 1);
-        assert!((result.fills[0].quantity - accounting::quantize(pos_before.quantity * 0.5)).abs() < 1e-12);
+        assert!(
+            (result.fills[0].quantity - accounting::quantize(pos_before.quantity * 0.5)).abs()
+                < 1e-12
+        );
         assert!(result.fills[0].pnl_usd > 0.0); // price rose
     }
 
@@ -1707,7 +1816,9 @@ mod tests {
 
         let pos = result.state.positions.get("BTC").expect("position remains");
         assert!((pos.quantity - accounting::quantize(pos_before.quantity * 0.75)).abs() < 1e-12);
-        assert!((pos.margin_usd - accounting::quantize(pos_before.margin_usd * 0.75)).abs() < 1e-12);
+        assert!(
+            (pos.margin_usd - accounting::quantize(pos_before.margin_usd * 0.75)).abs() < 1e-12
+        );
     }
 
     #[test]
@@ -1724,7 +1835,9 @@ mod tests {
 
         let pos = result.state.positions.get("BTC").expect("position remains");
         assert!((pos.quantity - accounting::quantize(pos_before.quantity * 0.25)).abs() < 1e-12);
-        assert!((pos.margin_usd - accounting::quantize(pos_before.margin_usd * 0.25)).abs() < 1e-12);
+        assert!(
+            (pos.margin_usd - accounting::quantize(pos_before.margin_usd * 0.25)).abs() < 1e-12
+        );
         // Price dropped → PnL should be negative.
         assert!(result.fills[0].pnl_usd < 0.0);
     }
@@ -1790,8 +1903,11 @@ mod tests {
         // Manually compute expected cash after partial close.
         let close_qty = accounting::quantize(full_qty * frac);
         let returned_margin = accounting::quantize(full_margin * frac);
-        let close_acc = accounting::apply_close_fill(true, entry_price, exit_price, close_qty, fee_rate);
-        let expected_cash = accounting::quantize(cash_after_open + returned_margin + close_acc.pnl - close_acc.fee_usd);
+        let close_acc =
+            accounting::apply_close_fill(true, entry_price, exit_price, close_qty, fee_rate);
+        let expected_cash = accounting::quantize(
+            cash_after_open + returned_margin + close_acc.pnl - close_acc.fee_usd,
+        );
 
         assert!(
             (result.state.cash_usd - expected_cash).abs() < 1e-12,
@@ -1816,8 +1932,11 @@ mod tests {
         let total_pnl = accounting::mark_to_market_pnl(true, entry_price, exit_price, full_qty);
         let close1_fee = close_acc.fee_usd;
         let close2_qty = accounting::quantize(full_qty - close_qty);
-        let close2_fee = accounting::apply_close_fill(true, entry_price, exit_price, close2_qty, fee_rate).fee_usd;
-        let expected_final = accounting::quantize(initial_cash + total_pnl - open_fee - close1_fee - close2_fee);
+        let close2_fee =
+            accounting::apply_close_fill(true, entry_price, exit_price, close2_qty, fee_rate)
+                .fee_usd;
+        let expected_final =
+            accounting::quantize(initial_cash + total_pnl - open_fee - close1_fee - close2_fee);
 
         assert!(
             (result2.state.cash_usd - expected_final).abs() < 1e-12,
@@ -1928,9 +2047,8 @@ mod tests {
         let pos2 = r2.state.positions.get("BTC").unwrap();
 
         let add_qty = accounting::quantize(8_000.0 / 8_000.0); // 1.0
-        let expected_avg = accounting::quantize(
-            (10_000.0 * qty1 + 8_000.0 * add_qty) / (qty1 + add_qty),
-        );
+        let expected_avg =
+            accounting::quantize((10_000.0 * qty1 + 8_000.0 * add_qty) / (qty1 + add_qty));
         assert!(
             (pos2.avg_entry_price - expected_avg).abs() < 1e-12,
             "avg_entry after lower add: {} != expected {}",
@@ -2046,8 +2164,7 @@ mod tests {
         let p2 = r2.state.positions.get("BTC").unwrap();
         // Verify step-by-step: after step 2, avg = (10k*1 + 11k*1)/2 = 10_500
         let expected_avg2 = accounting::quantize(
-            (10_000.0 * p1.quantity + 11_000.0 * (p2.quantity - p1.quantity))
-                / p2.quantity,
+            (10_000.0 * p1.quantity + 11_000.0 * (p2.quantity - p1.quantity)) / p2.quantity,
         );
         assert!(
             (p2.avg_entry_price - expected_avg2).abs() < 1e-12,
@@ -2059,8 +2176,7 @@ mod tests {
         // After step 3: avg = (prev_avg * prev_qty + 9k * new_qty) / total_qty
         let qty3_added = accounting::quantize(9_000.0 / 9_000.0);
         let expected_avg3 = accounting::quantize(
-            (p2.avg_entry_price * p2.quantity + 9_000.0 * qty3_added)
-                / (p2.quantity + qty3_added),
+            (p2.avg_entry_price * p2.quantity + 9_000.0 * qty3_added) / (p2.quantity + qty3_added),
         );
         assert!(
             (pos3.avg_entry_price - expected_avg3).abs() < 1e-12,
@@ -2234,8 +2350,8 @@ mod tests {
 
     fn fee_role_params() -> KernelParams {
         KernelParams {
-            maker_fee_bps: 1.0,  // 0.01%
-            taker_fee_bps: 3.5,  // 0.035%
+            maker_fee_bps: 1.0, // 0.01%
+            taker_fee_bps: 3.5, // 0.035%
             ..KernelParams::default()
         }
     }
@@ -2365,7 +2481,10 @@ mod tests {
 
         // Long pays positive funding: cash should decrease.
         let expected_delta = accounting::funding_delta(true, qty, 10_000.0, rate);
-        assert!(expected_delta < 0.0, "long+positive rate delta should be negative");
+        assert!(
+            expected_delta < 0.0,
+            "long+positive rate delta should be negative"
+        );
         let expected_cash = accounting::quantize(cash_before + expected_delta);
         assert!(
             (result.state.cash_usd - expected_cash).abs() < 1e-12,
@@ -2405,7 +2524,10 @@ mod tests {
 
         // Short receives positive funding: cash should increase.
         let expected_delta = accounting::funding_delta(false, qty, 10_000.0, rate);
-        assert!(expected_delta > 0.0, "short+positive rate delta should be positive");
+        assert!(
+            expected_delta > 0.0,
+            "short+positive rate delta should be positive"
+        );
         let expected_cash = accounting::quantize(cash_before + expected_delta);
         assert!(
             (result.state.cash_usd - expected_cash).abs() < 1e-12,
@@ -2905,10 +3027,22 @@ mod tests {
         let result = step(&state, &event, &params);
 
         assert!(result.diagnostics.gate_blocked);
-        assert!(result.diagnostics.gate_block_reasons.contains(&"ranging".to_string()));
-        assert!(result.diagnostics.gate_block_reasons.contains(&"anomaly".to_string()));
-        assert!(result.diagnostics.gate_block_reasons.contains(&"bearish_alignment".to_string()));
-        assert!(result.diagnostics.gate_block_reasons.contains(&"btc_alignment".to_string()));
+        assert!(result
+            .diagnostics
+            .gate_block_reasons
+            .contains(&"ranging".to_string()));
+        assert!(result
+            .diagnostics
+            .gate_block_reasons
+            .contains(&"anomaly".to_string()));
+        assert!(result
+            .diagnostics
+            .gate_block_reasons
+            .contains(&"bearish_alignment".to_string()));
+        assert!(result
+            .diagnostics
+            .gate_block_reasons
+            .contains(&"btc_alignment".to_string()));
         assert_eq!(result.diagnostics.intent_count, 0);
         assert_eq!(result.diagnostics.fill_count, 0);
     }
@@ -3087,7 +3221,11 @@ mod tests {
             "Evaluate without entry_params should not open position"
         );
         assert!(result.intents.is_empty());
-        assert!(result.diagnostics.warnings.iter().any(|w| w.contains("entry_params")));
+        assert!(result
+            .diagnostics
+            .warnings
+            .iter()
+            .any(|w| w.contains("entry_params")));
     }
 
     #[test]
@@ -3165,7 +3303,10 @@ mod tests {
         event.price = price;
         event.timestamp_ms = 1_000;
         let result = step(&state, &event, &params);
-        assert!(result.state.positions.get("BTC").is_some(), "setup: position should open");
+        assert!(
+            result.state.positions.get("BTC").is_some(),
+            "setup: position should open"
+        );
         (result.state, params)
     }
 
@@ -3190,7 +3331,10 @@ mod tests {
             ema_slow_slope_pct: None,
         };
         let closed = step(&state_after_open, &close_evt, &params);
-        assert!(closed.state.positions.get("BTC").is_none(), "position should be closed");
+        assert!(
+            closed.state.positions.get("BTC").is_none(),
+            "position should be closed"
+        );
 
         // Try to reopen immediately (within 20s entry cooldown).
         // last_entry_ms was set at 1_000, now at 6_000 → 5s elapsed < 20s cooldown.
@@ -3269,7 +3413,9 @@ mod tests {
         // Set entry_atr for SL trigger
         state_after_open.positions.get_mut("BTC").unwrap().entry_atr = Some(100.0);
         // Simulate a previous exit that set last_exit_ms
-        state_after_open.last_exit_ms.insert("BTC".to_string(), 4_000);
+        state_after_open
+            .last_exit_ms
+            .insert("BTC".to_string(), 4_000);
 
         // PriceUpdate at 4_005 (5ms after last exit, within 15s cooldown)
         let snap = test_snap(9_750.0); // SL price
@@ -3288,7 +3434,9 @@ mod tests {
     fn exit_cooldown_allows_after_expiry() {
         let (mut state_after_open, params) = open_long_btc_with_cooldown(10_000.0, 10_000.0);
         state_after_open.positions.get_mut("BTC").unwrap().entry_atr = Some(100.0);
-        state_after_open.last_exit_ms.insert("BTC".to_string(), 4_000);
+        state_after_open
+            .last_exit_ms
+            .insert("BTC".to_string(), 4_000);
 
         // PriceUpdate at 19_001 (15.001s after last exit, cooldown expired)
         let snap = test_snap(9_750.0);
@@ -3322,7 +3470,10 @@ mod tests {
         let mut sl_event = price_update_event("BTC", 9_750.0, snap);
         sl_event.timestamp_ms = 100_000;
         let closed = step(&state_with_atr, &sl_event, &params);
-        assert!(closed.state.positions.get("BTC").is_none(), "should be closed by SL");
+        assert!(
+            closed.state.positions.get("BTC").is_none(),
+            "should be closed by SL"
+        );
         // Verify last_close_info was recorded
         assert!(closed.state.last_close_info.contains_key("BTC"));
         let (_, ref side, ref reason) = closed.state.last_close_info["BTC"];
@@ -3568,7 +3719,9 @@ mod tests {
 
         // Set up state as if we recently closed
         let mut state_with_close = result.state.clone();
-        state_with_close.last_entry_ms.insert("BTC".to_string(), 999);
+        state_with_close
+            .last_entry_ms
+            .insert("BTC".to_string(), 999);
         state_with_close.last_exit_ms.insert("BTC".to_string(), 999);
         state_with_close.last_close_info.insert(
             "BTC".to_string(),

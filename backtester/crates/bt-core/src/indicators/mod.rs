@@ -1,9 +1,9 @@
-pub mod ema;
 pub mod adx;
-pub mod bollinger;
 pub mod atr;
-pub mod rsi;
+pub mod bollinger;
+pub mod ema;
 pub mod macd;
+pub mod rsi;
 pub mod volume;
 
 use crate::candle::OhlcvBar;
@@ -238,8 +238,9 @@ impl IndicatorBank {
     /// Return the most recently computed IndicatorSnapshot.
     /// Panics if update() has never been called.
     pub fn latest_snap(&self) -> IndicatorSnapshot {
-        self.latest_snap_cache.clone().unwrap_or_else(|| {
-            IndicatorSnapshot {
+        self.latest_snap_cache
+            .clone()
+            .unwrap_or_else(|| IndicatorSnapshot {
                 close: self.prev_close,
                 high: self.prev_close,
                 low: self.prev_close,
@@ -275,8 +276,7 @@ impl IndicatorBank {
                 prev_ema_slow: self.prev_ema_slow,
                 bar_count: self.bar_count,
                 funding_rate: 0.0,
-            }
-        })
+            })
     }
 
     /// Feed one bar and return a snapshot of all indicator values.

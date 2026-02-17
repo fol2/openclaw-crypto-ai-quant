@@ -19,9 +19,7 @@ pub fn query_time_range(
 ) -> Result<Option<(i64, i64)>, Box<dyn std::error::Error>> {
     validate_interval(interval)?;
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let mut stmt = conn.prepare(
-        "SELECT MIN(t), MAX(t) FROM candles WHERE interval = ?",
-    )?;
+    let mut stmt = conn.prepare("SELECT MIN(t), MAX(t) FROM candles WHERE interval = ?")?;
     let result = stmt.query_row([interval], |row| {
         let min_t: Option<i64> = row.get(0)?;
         let max_t: Option<i64> = row.get(1)?;
@@ -140,7 +138,10 @@ pub fn load_candles_filtered(
         if symbol != current_symbol {
             // Flush the previous symbol's bars
             if !current_symbol.is_empty() {
-                data.insert(std::mem::take(&mut current_symbol), std::mem::take(&mut current_vec));
+                data.insert(
+                    std::mem::take(&mut current_symbol),
+                    std::mem::take(&mut current_vec),
+                );
             }
             current_symbol = symbol;
             current_vec = Vec::with_capacity(512);
@@ -263,9 +264,7 @@ pub fn load_universe_active_symbols(
 ///     PRIMARY KEY (symbol, time)
 /// );
 /// ```
-pub fn load_funding_rates(
-    db_path: &str,
-) -> Result<FundingRateData, Box<dyn std::error::Error>> {
+pub fn load_funding_rates(db_path: &str) -> Result<FundingRateData, Box<dyn std::error::Error>> {
     load_funding_rates_filtered(db_path, None, None)
 }
 
@@ -419,7 +418,10 @@ mod tests {
             insert_bar(&c2, "BTC", "5m", 4000);
         }
 
-        let paths = vec![p1.to_string_lossy().to_string(), p2.to_string_lossy().to_string()];
+        let paths = vec![
+            p1.to_string_lossy().to_string(),
+            p2.to_string_lossy().to_string(),
+        ];
         let got = query_time_range_multi(&paths, "5m").unwrap();
         assert_eq!(got, Some((1000, 4000)));
 
@@ -447,12 +449,18 @@ mod tests {
             insert_bar(&c2, "ETH", "5m", 1500);
         }
 
-        let paths = vec![p1.to_string_lossy().to_string(), p2.to_string_lossy().to_string()];
+        let paths = vec![
+            p1.to_string_lossy().to_string(),
+            p2.to_string_lossy().to_string(),
+        ];
         let data = load_candles_filtered_multi(&paths, "5m", None, None).unwrap();
 
         let btc = data.get("BTC").unwrap();
         let eth = data.get("ETH").unwrap();
-        assert_eq!(btc.iter().map(|b| b.t).collect::<Vec<_>>(), vec![1000, 2000, 3000]);
+        assert_eq!(
+            btc.iter().map(|b| b.t).collect::<Vec<_>>(),
+            vec![1000, 2000, 3000]
+        );
         assert_eq!(eth.iter().map(|b| b.t).collect::<Vec<_>>(), vec![1500]);
 
         let _ = std::fs::remove_file(&p1);

@@ -1652,37 +1652,40 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
             entry_attempt_ms.len(),
             exit_attempt_ms.len(),
         );
-        (balance, Some((balance, positions, entry_attempt_ms, exit_attempt_ms)))
+        (
+            balance,
+            Some((balance, positions, entry_attempt_ms, exit_attempt_ms)),
+        )
     } else {
         (base_balance, None)
     };
 
     let start = Instant::now();
-    let sim = bt_core::engine::run_simulation(
-        &candles,
-        &cfg,
-        effective_balance,
-        args.lookback,
-        exit_candles.as_ref(),
-        entry_candles.as_ref(),
-        funding_rates.as_ref(),
+    let sim = bt_core::engine::run_simulation(bt_core::engine::RunSimulationInput {
+        candles: &candles,
+        cfg: &cfg,
+        initial_balance: effective_balance,
+        lookback: args.lookback,
+        exit_candles: exit_candles.as_ref(),
+        entry_candles: entry_candles.as_ref(),
+        funding_rates: funding_rates.as_ref(),
         init_state,
         from_ts,
         to_ts,
-    );
+    });
     let elapsed = start.elapsed();
 
-    let mut report = bt_core::report::build_report(
-        &sim.trades,
-        &sim.signals,
-        &sim.equity_curve,
-        &sim.gate_stats,
-        effective_balance,
-        sim.final_balance,
-        "replay",
-        args.trades,
-        args.equity_curve,
-    );
+    let mut report = bt_core::report::build_report(bt_core::report::BuildReportInput {
+        trades: &sim.trades,
+        signals: &sim.signals,
+        equity_curve: &sim.equity_curve,
+        gate_stats: &sim.gate_stats,
+        initial_balance: effective_balance,
+        final_balance: sim.final_balance,
+        config_id: "replay",
+        include_trades: args.trades,
+        include_equity_curve: args.equity_curve,
+    });
 
     report.decision_diagnostics = Some(sim.decision_diagnostics);
 
@@ -2123,7 +2126,7 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
     let gpu_sub_candles: Option<&bt_core::candle::CandleData> =
         exit_candles.as_ref().or(entry_candles.as_ref());
 
-#[cfg(feature = "gpu")]
+    #[cfg(feature = "gpu")]
     if args.tpe {
         if !args.gpu {
             eprintln!("Error: --tpe requires --gpu");
@@ -2295,11 +2298,11 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // Write JSONL output (report + overrides flattened)
     {
-            let mut f = std::fs::File::create(&args.output)?;
-            for r in &results {
-                let mut obj = serde_json::to_value(&r.report)?;
-                if let serde_json::Value::Object(ref mut map) = obj {
-                    let mut ov = serde_json::Map::new();
+        let mut f = std::fs::File::create(&args.output)?;
+        for r in &results {
+            let mut obj = serde_json::to_value(&r.report)?;
+            if let serde_json::Value::Object(ref mut map) = obj {
+                let mut ov = serde_json::Map::new();
                 for (k, v) in &r.overrides {
                     ov.insert(k.clone(), serde_json::Value::from(*v));
                 }
@@ -2309,10 +2312,7 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
                     serde_json::Value::String(args.output_mode.as_str().to_string()),
                 );
                 if args.output_mode.is_candidate() {
-                    map.insert(
-                        "candidate_mode".to_string(),
-                        serde_json::Value::Bool(true),
-                    );
+                    map.insert("candidate_mode".to_string(), serde_json::Value::Bool(true));
                 }
                 if let Some(ref verifications) = override_verifications {
                     map.insert(
@@ -2321,8 +2321,8 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
             }
-                let line = if args.output_mode.is_candidate() {
-                    serde_json::json!({
+            let line = if args.output_mode.is_candidate() {
+                serde_json::json!({
                         "schema_version": 1,
                         "config_id": r.config_id,
                         "output_mode": args.output_mode.as_str(),
@@ -2701,8 +2701,7 @@ fn ensure_wsl_cuda_path() {
     let args: Vec<std::ffi::CString> = std::env::args()
         .map(|a| std::ffi::CString::new(a).unwrap_or_default())
         .collect();
-    let mut ptrs: Vec<*const libc::c_char> =
-        args.iter().map(|a| a.as_ptr()).collect();
+    let mut ptrs: Vec<*const libc::c_char> = args.iter().map(|a| a.as_ptr()).collect();
     ptrs.push(std::ptr::null());
 
     let exe_c = match std::ffi::CString::new(exe.to_string_lossy().into_owned()) {

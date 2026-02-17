@@ -1548,26 +1548,17 @@ mod tests {
             src.contains("const GpuComboConfig& cfg"),
             "must take GpuComboConfig by const ref"
         );
-        assert!(
-            src.contains("int pos_type"),
-            "must take pos_type as int"
-        );
+        assert!(src.contains("int pos_type"), "must take pos_type as int");
         assert!(
             src.contains("double entry_price"),
             "must take entry_price as double"
         );
-        assert!(
-            src.contains("double atr"),
-            "must take atr as double"
-        );
+        assert!(src.contains("double atr"), "must take atr as double");
         assert!(
             src.contains("double current_price"),
             "must take current_price as double"
         );
-        assert!(
-            src.contains("double adx"),
-            "must take adx as double"
-        );
+        assert!(src.contains("double adx"), "must take adx as double");
         assert!(
             src.contains("double adx_slope"),
             "must take adx_slope as double"
@@ -1615,10 +1606,7 @@ mod tests {
     fn sl_codegen_contains_dase_logic() {
         let src = compute_sl_price_codegen();
         assert!(src.contains("DASE"), "must have DASE comment marker");
-        assert!(
-            src.contains("adx > 40.0"),
-            "DASE triggers when ADX > 40"
-        );
+        assert!(src.contains("adx > 40.0"), "DASE triggers when ADX > 40");
         assert!(
             src.contains("profit_in_atr"),
             "DASE computes profit in ATR units"
@@ -1634,10 +1622,7 @@ mod tests {
     fn sl_codegen_contains_slb_logic() {
         let src = compute_sl_price_codegen();
         assert!(src.contains("SLB"), "must have SLB comment marker");
-        assert!(
-            src.contains("adx > 45.0"),
-            "SLB triggers when ADX > 45"
-        );
+        assert!(src.contains("adx > 45.0"), "SLB triggers when ADX > 45");
         assert!(src.contains("*= 1.10"), "SLB widens by 10% (x1.10)");
     }
 
@@ -1761,14 +1746,8 @@ mod tests {
             src.contains("const GpuComboConfig& cfg"),
             "must take GpuComboConfig by const ref"
         );
-        assert!(
-            src.contains("double rsi"),
-            "must take rsi as double"
-        );
-        assert!(
-            src.contains("double adx"),
-            "must take adx as double"
-        );
+        assert!(src.contains("double rsi"), "must take rsi as double");
+        assert!(src.contains("double adx"), "must take adx as double");
         assert!(
             src.contains("double adx_slope"),
             "must take adx_slope as double"
@@ -1789,26 +1768,17 @@ mod tests {
             src.contains("double ema_macro"),
             "must take ema_macro as double"
         );
-        assert!(
-            src.contains("double close"),
-            "must take close as double"
-        );
+        assert!(src.contains("double close"), "must take close as double");
         assert!(
             src.contains("double prev_close"),
             "must take prev_close as double"
         );
-        assert!(
-            src.contains("double volume"),
-            "must take volume as double"
-        );
+        assert!(src.contains("double volume"), "must take volume as double");
         assert!(
             src.contains("double vol_sma"),
             "must take vol_sma as double"
         );
-        assert!(
-            src.contains("double atr"),
-            "must take atr as double"
-        );
+        assert!(src.contains("double atr"), "must take atr as double");
         assert!(
             src.contains("double avg_atr"),
             "must take avg_atr as double"
@@ -1893,15 +1863,36 @@ mod tests {
     fn gates_codegen_uses_double_precision() {
         let src = check_gates_codegen();
         // Internal arithmetic uses double variables
-        assert!(src.contains("double price_change_pct"), "price_change_pct must be double");
-        assert!(src.contains("double ema_dev_pct"), "ema_dev_pct must be double");
-        assert!(src.contains("double dist"), "dist (extension) must be double");
-        assert!(src.contains("double effective_min_adx"), "effective_min_adx must be double");
-        assert!(src.contains("double saturation"), "saturation must be double");
+        assert!(
+            src.contains("double price_change_pct"),
+            "price_change_pct must be double"
+        );
+        assert!(
+            src.contains("double ema_dev_pct"),
+            "ema_dev_pct must be double"
+        );
+        assert!(
+            src.contains("double dist"),
+            "dist (extension) must be double"
+        );
+        assert!(
+            src.contains("double effective_min_adx"),
+            "effective_min_adx must be double"
+        );
+        assert!(
+            src.contains("double saturation"),
+            "saturation must be double"
+        );
         assert!(src.contains("double atr_ratio"), "atr_ratio must be double");
         assert!(src.contains("double weight"), "DRE weight must be double");
-        assert!(src.contains("double rsi_long_weak"), "DRE rsi_long_weak must be double");
-        assert!(src.contains("double rsi_short_weak"), "DRE rsi_short_weak must be double");
+        assert!(
+            src.contains("double rsi_long_weak"),
+            "DRE rsi_long_weak must be double"
+        );
+        assert!(
+            src.contains("double rsi_short_weak"),
+            "DRE rsi_short_weak must be double"
+        );
         // Must NOT use float for indicator-critical variables
         assert!(
             !src.contains("float price_change_pct"),
@@ -1973,10 +1964,7 @@ mod tests {
             src.contains("price_change_pct"),
             "must compute price_change_pct"
         );
-        assert!(
-            src.contains("ema_dev_pct"),
-            "must compute ema_dev_pct"
-        );
+        assert!(src.contains("ema_dev_pct"), "must compute ema_dev_pct");
     }
 
     #[test]
@@ -2074,10 +2062,7 @@ mod tests {
             src.contains("cfg.ave_adx_mult"),
             "must use ave_adx_mult from config"
         );
-        assert!(
-            src.contains("atr_ratio"),
-            "AVE must compute atr_ratio"
-        );
+        assert!(src.contains("atr_ratio"), "AVE must compute atr_ratio");
         assert!(
             src.contains("effective_min_adx *="),
             "AVE must multiply effective_min_adx"
@@ -2091,10 +2076,7 @@ mod tests {
             src.contains("Gate 6") || src.contains("ADX threshold"),
             "must have ADX threshold comment marker"
         );
-        assert!(
-            src.contains("cfg.min_adx"),
-            "must use min_adx from config"
-        );
+        assert!(src.contains("cfg.min_adx"), "must use min_adx from config");
         assert!(
             src.contains("adx > effective_min_adx"),
             "must check adx against effective_min_adx"
@@ -2249,19 +2231,49 @@ mod tests {
     fn gates_codegen_uses_correct_config_fields() {
         let src = check_gates_codegen();
         // Gate toggle flags
-        assert!(src.contains("cfg.enable_ranging_filter"), "must use enable_ranging_filter");
-        assert!(src.contains("cfg.enable_anomaly_filter"), "must use enable_anomaly_filter");
-        assert!(src.contains("cfg.enable_extension_filter"), "must use enable_extension_filter");
-        assert!(src.contains("cfg.require_adx_rising"), "must use require_adx_rising");
-        assert!(src.contains("cfg.require_volume_confirmation"), "must use require_volume_confirmation");
-        assert!(src.contains("cfg.require_macro_alignment"), "must use require_macro_alignment");
-        assert!(src.contains("cfg.enable_slow_drift_entries"), "must use enable_slow_drift_entries");
+        assert!(
+            src.contains("cfg.enable_ranging_filter"),
+            "must use enable_ranging_filter"
+        );
+        assert!(
+            src.contains("cfg.enable_anomaly_filter"),
+            "must use enable_anomaly_filter"
+        );
+        assert!(
+            src.contains("cfg.enable_extension_filter"),
+            "must use enable_extension_filter"
+        );
+        assert!(
+            src.contains("cfg.require_adx_rising"),
+            "must use require_adx_rising"
+        );
+        assert!(
+            src.contains("cfg.require_volume_confirmation"),
+            "must use require_volume_confirmation"
+        );
+        assert!(
+            src.contains("cfg.require_macro_alignment"),
+            "must use require_macro_alignment"
+        );
+        assert!(
+            src.contains("cfg.enable_slow_drift_entries"),
+            "must use enable_slow_drift_entries"
+        );
         // Threshold fields
         assert!(src.contains("cfg.min_adx"), "must use min_adx");
-        assert!(src.contains("cfg.max_dist_ema_fast"), "must use max_dist_ema_fast");
-        assert!(src.contains("cfg.adx_rising_saturation"), "must use adx_rising_saturation");
+        assert!(
+            src.contains("cfg.max_dist_ema_fast"),
+            "must use max_dist_ema_fast"
+        );
+        assert!(
+            src.contains("cfg.adx_rising_saturation"),
+            "must use adx_rising_saturation"
+        );
         assert!(src.contains("cfg.ave_enabled"), "must use ave_enabled");
-        assert!(src.contains("cfg.ave_atr_ratio_gt"), "must use ave_atr_ratio_gt");
+        assert!(
+            src.contains("cfg.ave_atr_ratio_gt"),
+            "must use ave_atr_ratio_gt"
+        );
         assert!(src.contains("cfg.ave_adx_mult"), "must use ave_adx_mult");
     }
 
@@ -2288,10 +2300,7 @@ mod tests {
             src.contains("const GpuComboConfig& cfg"),
             "must take GpuComboConfig by const ref"
         );
-        assert!(
-            src.contains("double close"),
-            "must take close as double"
-        );
+        assert!(src.contains("double close"), "must take close as double");
         assert!(
             src.contains("double ema_fast"),
             "must take ema_fast as double"
@@ -2300,14 +2309,8 @@ mod tests {
             src.contains("double ema_slow"),
             "must take ema_slow as double"
         );
-        assert!(
-            src.contains("double adx"),
-            "must take adx as double"
-        );
-        assert!(
-            src.contains("double rsi"),
-            "must take rsi as double"
-        );
+        assert!(src.contains("double adx"), "must take adx as double");
+        assert!(src.contains("double rsi"), "must take rsi as double");
         assert!(
             src.contains("double macd_hist"),
             "must take macd_hist as double"
@@ -2316,10 +2319,7 @@ mod tests {
             src.contains("double prev_macd_hist"),
             "must take prev_macd_hist as double"
         );
-        assert!(
-            src.contains("double volume"),
-            "must take volume as double"
-        );
+        assert!(src.contains("double volume"), "must take volume as double");
         assert!(
             src.contains("double vol_sma"),
             "must take vol_sma as double"
@@ -2416,73 +2416,172 @@ mod tests {
             src.contains("DRE") || src.contains("Dynamic RSI Elasticity"),
             "must reference DRE logic"
         );
-        assert!(src.contains("cfg.dre_min_adx"), "DRE uses dre_min_adx from config");
-        assert!(src.contains("cfg.dre_max_adx"), "DRE uses dre_max_adx from config");
-        assert!(src.contains("cfg.dre_long_rsi_limit_low"), "DRE uses dre_long_rsi_limit_low");
-        assert!(src.contains("cfg.dre_long_rsi_limit_high"), "DRE uses dre_long_rsi_limit_high");
-        assert!(src.contains("cfg.dre_short_rsi_limit_low"), "DRE uses dre_short_rsi_limit_low");
-        assert!(src.contains("cfg.dre_short_rsi_limit_high"), "DRE uses dre_short_rsi_limit_high");
-        assert!(src.contains("rsi_long_limit"), "DRE computes rsi_long_limit");
-        assert!(src.contains("rsi_short_limit"), "DRE computes rsi_short_limit");
+        assert!(
+            src.contains("cfg.dre_min_adx"),
+            "DRE uses dre_min_adx from config"
+        );
+        assert!(
+            src.contains("cfg.dre_max_adx"),
+            "DRE uses dre_max_adx from config"
+        );
+        assert!(
+            src.contains("cfg.dre_long_rsi_limit_low"),
+            "DRE uses dre_long_rsi_limit_low"
+        );
+        assert!(
+            src.contains("cfg.dre_long_rsi_limit_high"),
+            "DRE uses dre_long_rsi_limit_high"
+        );
+        assert!(
+            src.contains("cfg.dre_short_rsi_limit_low"),
+            "DRE uses dre_short_rsi_limit_low"
+        );
+        assert!(
+            src.contains("cfg.dre_short_rsi_limit_high"),
+            "DRE uses dre_short_rsi_limit_high"
+        );
+        assert!(
+            src.contains("rsi_long_limit"),
+            "DRE computes rsi_long_limit"
+        );
+        assert!(
+            src.contains("rsi_short_limit"),
+            "DRE computes rsi_short_limit"
+        );
     }
 
     #[test]
     fn signal_codegen_contains_macd_helpers() {
         let src = generate_signal_codegen();
-        assert!(src.contains("check_macd_long_codegen"), "must have check_macd_long_codegen helper");
-        assert!(src.contains("check_macd_short_codegen"), "must have check_macd_short_codegen helper");
-        assert!(src.contains("cfg.macd_mode"), "MACD gate reads macd_mode from config");
+        assert!(
+            src.contains("check_macd_long_codegen"),
+            "must have check_macd_long_codegen helper"
+        );
+        assert!(
+            src.contains("check_macd_short_codegen"),
+            "must have check_macd_short_codegen helper"
+        );
+        assert!(
+            src.contains("cfg.macd_mode"),
+            "MACD gate reads macd_mode from config"
+        );
     }
 
     #[test]
     fn signal_codegen_contains_stoch_rsi_filter() {
         let src = generate_signal_codegen();
-        assert!(src.contains("cfg.use_stoch_rsi_filter"), "must check use_stoch_rsi_filter config flag");
-        assert!(src.contains("cfg.stoch_rsi_block_long_gt"), "StochRSI uses block_long_gt from config");
-        assert!(src.contains("cfg.stoch_rsi_block_short_lt"), "StochRSI uses block_short_lt from config");
+        assert!(
+            src.contains("cfg.use_stoch_rsi_filter"),
+            "must check use_stoch_rsi_filter config flag"
+        );
+        assert!(
+            src.contains("cfg.stoch_rsi_block_long_gt"),
+            "StochRSI uses block_long_gt from config"
+        );
+        assert!(
+            src.contains("cfg.stoch_rsi_block_short_lt"),
+            "StochRSI uses block_short_lt from config"
+        );
     }
 
     #[test]
     fn signal_codegen_contains_volume_confidence_upgrade() {
         let src = generate_signal_codegen();
-        assert!(src.contains("cfg.high_conf_volume_mult"), "must use high_conf_volume_mult from config");
-        assert!(src.contains("volume > vol_sma"), "volume confidence check compares volume to vol_sma");
+        assert!(
+            src.contains("cfg.high_conf_volume_mult"),
+            "must use high_conf_volume_mult from config"
+        );
+        assert!(
+            src.contains("volume > vol_sma"),
+            "volume confidence check compares volume to vol_sma"
+        );
     }
 
     #[test]
     fn signal_codegen_contains_mode2_pullback() {
         let src = generate_signal_codegen();
-        assert!(src.contains("Mode 2") || src.contains("Pullback"), "must have Mode 2 pullback comment");
-        assert!(src.contains("cfg.enable_pullback_entries"), "Mode 2 checks enable_pullback_entries");
-        assert!(src.contains("cfg.pullback_min_adx"), "Mode 2 uses pullback_min_adx");
+        assert!(
+            src.contains("Mode 2") || src.contains("Pullback"),
+            "must have Mode 2 pullback comment"
+        );
+        assert!(
+            src.contains("cfg.enable_pullback_entries"),
+            "Mode 2 checks enable_pullback_entries"
+        );
+        assert!(
+            src.contains("cfg.pullback_min_adx"),
+            "Mode 2 uses pullback_min_adx"
+        );
         assert!(src.contains("cross_up"), "Mode 2 detects EMA cross-up");
         assert!(src.contains("cross_dn"), "Mode 2 detects EMA cross-down");
-        assert!(src.contains("cfg.pullback_rsi_long_min"), "Mode 2 uses pullback_rsi_long_min");
-        assert!(src.contains("cfg.pullback_rsi_short_max"), "Mode 2 uses pullback_rsi_short_max");
-        assert!(src.contains("cfg.pullback_require_macd_sign"), "Mode 2 checks pullback_require_macd_sign");
-        assert!(src.contains("cfg.pullback_confidence"), "Mode 2 uses pullback_confidence");
+        assert!(
+            src.contains("cfg.pullback_rsi_long_min"),
+            "Mode 2 uses pullback_rsi_long_min"
+        );
+        assert!(
+            src.contains("cfg.pullback_rsi_short_max"),
+            "Mode 2 uses pullback_rsi_short_max"
+        );
+        assert!(
+            src.contains("cfg.pullback_require_macd_sign"),
+            "Mode 2 checks pullback_require_macd_sign"
+        );
+        assert!(
+            src.contains("cfg.pullback_confidence"),
+            "Mode 2 uses pullback_confidence"
+        );
     }
 
     #[test]
     fn signal_codegen_contains_mode3_slow_drift() {
         let src = generate_signal_codegen();
-        assert!(src.contains("Mode 3") || src.contains("Slow drift"), "must have Mode 3 slow drift comment");
-        assert!(src.contains("cfg.enable_slow_drift_entries"), "Mode 3 checks enable_slow_drift_entries");
-        assert!(src.contains("cfg.slow_drift_min_adx"), "Mode 3 uses slow_drift_min_adx");
-        assert!(src.contains("cfg.slow_drift_min_slope_pct"), "Mode 3 uses slow_drift_min_slope_pct");
-        assert!(src.contains("cfg.slow_drift_rsi_long_min"), "Mode 3 uses slow_drift_rsi_long_min");
-        assert!(src.contains("cfg.slow_drift_rsi_short_max"), "Mode 3 uses slow_drift_rsi_short_max");
-        assert!(src.contains("cfg.slow_drift_require_macd_sign"), "Mode 3 checks slow_drift_require_macd_sign");
-        assert!(src.contains("ema_slow_slope_pct"), "Mode 3 uses ema_slow_slope_pct");
+        assert!(
+            src.contains("Mode 3") || src.contains("Slow drift"),
+            "must have Mode 3 slow drift comment"
+        );
+        assert!(
+            src.contains("cfg.enable_slow_drift_entries"),
+            "Mode 3 checks enable_slow_drift_entries"
+        );
+        assert!(
+            src.contains("cfg.slow_drift_min_adx"),
+            "Mode 3 uses slow_drift_min_adx"
+        );
+        assert!(
+            src.contains("cfg.slow_drift_min_slope_pct"),
+            "Mode 3 uses slow_drift_min_slope_pct"
+        );
+        assert!(
+            src.contains("cfg.slow_drift_rsi_long_min"),
+            "Mode 3 uses slow_drift_rsi_long_min"
+        );
+        assert!(
+            src.contains("cfg.slow_drift_rsi_short_max"),
+            "Mode 3 uses slow_drift_rsi_short_max"
+        );
+        assert!(
+            src.contains("cfg.slow_drift_require_macd_sign"),
+            "Mode 3 checks slow_drift_require_macd_sign"
+        );
+        assert!(
+            src.contains("ema_slow_slope_pct"),
+            "Mode 3 uses ema_slow_slope_pct"
+        );
     }
 
     #[test]
     fn signal_codegen_contains_btc_alignment() {
         let src = generate_signal_codegen();
-        assert!(src.contains("cfg.require_btc_alignment"), "must check require_btc_alignment");
+        assert!(
+            src.contains("cfg.require_btc_alignment"),
+            "must check require_btc_alignment"
+        );
         assert!(src.contains("btc_ok_long"), "must compute btc_ok_long");
         assert!(src.contains("btc_ok_short"), "must compute btc_ok_short");
-        assert!(src.contains("cfg.btc_adx_override"), "BTC alignment uses btc_adx_override");
+        assert!(
+            src.contains("cfg.btc_adx_override"),
+            "BTC alignment uses btc_adx_override"
+        );
     }
 
     #[test]
@@ -2491,11 +2590,23 @@ mod tests {
         assert!(src.contains("double adx_min"), "adx_min must be double");
         assert!(src.contains("double adx_max"), "adx_max must be double");
         assert!(src.contains("double weight"), "weight must be double");
-        assert!(src.contains("double rsi_long_limit"), "rsi_long_limit must be double");
-        assert!(src.contains("double rsi_short_limit"), "rsi_short_limit must be double");
+        assert!(
+            src.contains("double rsi_long_limit"),
+            "rsi_long_limit must be double"
+        );
+        assert!(
+            src.contains("double rsi_short_limit"),
+            "rsi_short_limit must be double"
+        );
         assert!(src.contains("double min_slope"), "min_slope must be double");
-        assert!(!src.contains("float rsi_long_limit"), "rsi_long_limit must be double, not float");
-        assert!(!src.contains("float rsi_short_limit"), "rsi_short_limit must be double, not float");
+        assert!(
+            !src.contains("float rsi_long_limit"),
+            "rsi_long_limit must be double, not float"
+        );
+        assert!(
+            !src.contains("float rsi_short_limit"),
+            "rsi_short_limit must be double, not float"
+        );
     }
 
     #[test]
@@ -2503,22 +2614,52 @@ mod tests {
         let src = generate_signal_codegen();
         assert!(src.contains("cfg.dre_min_adx"), "must use cfg.dre_min_adx");
         assert!(src.contains("cfg.macd_mode"), "must use cfg.macd_mode");
-        assert!(src.contains("cfg.use_stoch_rsi_filter"), "must use cfg.use_stoch_rsi_filter");
-        assert!(src.contains("cfg.high_conf_volume_mult"), "must use cfg.high_conf_volume_mult");
-        assert!(src.contains("cfg.require_btc_alignment"), "must use cfg.require_btc_alignment");
-        assert!(src.contains("cfg.enable_pullback_entries"), "must use cfg.enable_pullback_entries");
-        assert!(src.contains("cfg.pullback_min_adx"), "must use cfg.pullback_min_adx");
-        assert!(src.contains("cfg.pullback_confidence"), "must use cfg.pullback_confidence");
-        assert!(src.contains("cfg.enable_slow_drift_entries"), "must use cfg.enable_slow_drift_entries");
-        assert!(src.contains("cfg.slow_drift_min_adx"), "must use cfg.slow_drift_min_adx");
+        assert!(
+            src.contains("cfg.use_stoch_rsi_filter"),
+            "must use cfg.use_stoch_rsi_filter"
+        );
+        assert!(
+            src.contains("cfg.high_conf_volume_mult"),
+            "must use cfg.high_conf_volume_mult"
+        );
+        assert!(
+            src.contains("cfg.require_btc_alignment"),
+            "must use cfg.require_btc_alignment"
+        );
+        assert!(
+            src.contains("cfg.enable_pullback_entries"),
+            "must use cfg.enable_pullback_entries"
+        );
+        assert!(
+            src.contains("cfg.pullback_min_adx"),
+            "must use cfg.pullback_min_adx"
+        );
+        assert!(
+            src.contains("cfg.pullback_confidence"),
+            "must use cfg.pullback_confidence"
+        );
+        assert!(
+            src.contains("cfg.enable_slow_drift_entries"),
+            "must use cfg.enable_slow_drift_entries"
+        );
+        assert!(
+            src.contains("cfg.slow_drift_min_adx"),
+            "must use cfg.slow_drift_min_adx"
+        );
     }
 
     #[test]
     fn signal_codegen_mode_priority_order() {
         let src = generate_signal_codegen();
-        let mode1_pos = src.rfind("// Mode 1: Standard").expect("Mode 1 section header must exist");
-        let mode2_pos = src.rfind("// Mode 2: Pullback").expect("Mode 2 section header must exist");
-        let mode3_pos = src.rfind("// Mode 3: Slow drift").expect("Mode 3 section header must exist");
+        let mode1_pos = src
+            .rfind("// Mode 1: Standard")
+            .expect("Mode 1 section header must exist");
+        let mode2_pos = src
+            .rfind("// Mode 2: Pullback")
+            .expect("Mode 2 section header must exist");
+        let mode3_pos = src
+            .rfind("// Mode 3: Slow drift")
+            .expect("Mode 3 section header must exist");
         assert!(mode1_pos < mode2_pos, "Mode 1 must appear before Mode 2");
         assert!(mode2_pos < mode3_pos, "Mode 2 must appear before Mode 3");
     }
@@ -2529,9 +2670,13 @@ mod tests {
         let marker = "// Mode 3: Slow drift";
         let slow_drift_start = src.rfind(marker).expect("Mode 3 section header must exist");
         let slow_drift_section = &src[slow_drift_start..];
-        assert!(slow_drift_section.contains("confidence = 0"), "slow drift must always return CONF_LOW (0)");
         assert!(
-            !slow_drift_section.contains("confidence = 1") && !slow_drift_section.contains("confidence = 2"),
+            slow_drift_section.contains("confidence = 0"),
+            "slow drift must always return CONF_LOW (0)"
+        );
+        assert!(
+            !slow_drift_section.contains("confidence = 1")
+                && !slow_drift_section.contains("confidence = 2"),
             "slow drift must not set medium or high confidence"
         );
     }
@@ -2539,14 +2684,24 @@ mod tests {
     #[test]
     fn signal_codegen_is_nonempty() {
         let src = generate_signal_codegen();
-        assert!(src.len() > 200, "generated code must be substantial, got {} bytes", src.len());
+        assert!(
+            src.len() > 200,
+            "generated code must be substantial, got {} bytes",
+            src.len()
+        );
     }
 
     #[test]
     fn signal_codegen_contains_ave_logic() {
         let src = generate_signal_codegen();
-        assert!(src.contains("AVE") || src.contains("Adaptive Volatility"), "must reference AVE logic");
-        assert!(src.contains("cfg.ave_atr_ratio_gt"), "AVE uses ave_atr_ratio_gt");
+        assert!(
+            src.contains("AVE") || src.contains("Adaptive Volatility"),
+            "must reference AVE logic"
+        );
+        assert!(
+            src.contains("cfg.ave_atr_ratio_gt"),
+            "AVE uses ave_atr_ratio_gt"
+        );
         assert!(src.contains("cfg.ave_enabled"), "AVE uses ave_enabled");
     }
 
@@ -2568,14 +2723,33 @@ mod tests {
         let src = generate_signal_codegen();
         let marker2 = "// Mode 2: Pullback";
         let marker3 = "// Mode 3: Slow drift";
-        let mode2_start = src.rfind(marker2).expect("Mode 2 section header must exist");
-        let mode3_start = src.rfind(marker3).expect("Mode 3 section header must exist");
+        let mode2_start = src
+            .rfind(marker2)
+            .expect("Mode 2 section header must exist");
+        let mode3_start = src
+            .rfind(marker3)
+            .expect("Mode 3 section header must exist");
         let mode2_section = &src[mode2_start..mode3_start];
-        assert!(mode2_section.contains("!is_anomaly"), "pullback gate checks !is_anomaly");
-        assert!(mode2_section.contains("!is_extended"), "pullback gate checks !is_extended");
-        assert!(mode2_section.contains("!is_ranging"), "pullback gate checks !is_ranging");
-        assert!(mode2_section.contains("vol_confirm"), "pullback gate checks vol_confirm");
-        assert!(mode2_section.contains("cfg.pullback_min_adx"), "pullback gate checks pullback_min_adx");
+        assert!(
+            mode2_section.contains("!is_anomaly"),
+            "pullback gate checks !is_anomaly"
+        );
+        assert!(
+            mode2_section.contains("!is_extended"),
+            "pullback gate checks !is_extended"
+        );
+        assert!(
+            mode2_section.contains("!is_ranging"),
+            "pullback gate checks !is_ranging"
+        );
+        assert!(
+            mode2_section.contains("vol_confirm"),
+            "pullback gate checks vol_confirm"
+        );
+        assert!(
+            mode2_section.contains("cfg.pullback_min_adx"),
+            "pullback gate checks pullback_min_adx"
+        );
     }
 
     #[test]
@@ -2584,11 +2758,26 @@ mod tests {
         let marker = "// Mode 3: Slow drift";
         let mode3_start = src.rfind(marker).expect("Mode 3 section header must exist");
         let mode3_section = &src[mode3_start..];
-        assert!(mode3_section.contains("!is_anomaly"), "slow drift gate checks !is_anomaly");
-        assert!(mode3_section.contains("!is_extended"), "slow drift gate checks !is_extended");
-        assert!(mode3_section.contains("!is_ranging"), "slow drift gate checks !is_ranging");
-        assert!(mode3_section.contains("vol_confirm"), "slow drift gate checks vol_confirm");
-        assert!(mode3_section.contains("cfg.slow_drift_min_adx"), "slow drift gate checks slow_drift_min_adx");
+        assert!(
+            mode3_section.contains("!is_anomaly"),
+            "slow drift gate checks !is_anomaly"
+        );
+        assert!(
+            mode3_section.contains("!is_extended"),
+            "slow drift gate checks !is_extended"
+        );
+        assert!(
+            mode3_section.contains("!is_ranging"),
+            "slow drift gate checks !is_ranging"
+        );
+        assert!(
+            mode3_section.contains("vol_confirm"),
+            "slow drift gate checks vol_confirm"
+        );
+        assert!(
+            mode3_section.contains("cfg.slow_drift_min_adx"),
+            "slow drift gate checks slow_drift_min_adx"
+        );
     }
 
     // -- compute_trailing_codegen tests (AQC-1221) ----------------------------
@@ -2614,30 +2803,81 @@ mod tests {
     #[test]
     fn trailing_codegen_uses_double_precision() {
         let src = compute_trailing_codegen();
-        assert!(src.contains("double trailing_start"), "trailing_start must be double");
-        assert!(src.contains("double trailing_dist"), "trailing_dist must be double");
-        assert!(src.contains("double effective_dist"), "effective_dist must be double");
+        assert!(
+            src.contains("double trailing_start"),
+            "trailing_start must be double"
+        );
+        assert!(
+            src.contains("double trailing_dist"),
+            "trailing_dist must be double"
+        );
+        assert!(
+            src.contains("double effective_dist"),
+            "effective_dist must be double"
+        );
         assert!(src.contains("double candidate"), "candidate must be double");
         assert!(src.contains("double eff_atr"), "eff_atr must be double");
-        assert!(src.contains("double min_trailing_dist"), "min_trailing_dist must be double");
+        assert!(
+            src.contains("double min_trailing_dist"),
+            "min_trailing_dist must be double"
+        );
     }
 
     #[test]
     fn trailing_codegen_reads_config_not_hardcoded() {
         let src = compute_trailing_codegen();
-        assert!(src.contains("cfg.trailing_start_atr"), "trailing_start from config");
-        assert!(src.contains("cfg.trailing_distance_atr"), "trailing_distance from config");
-        assert!(src.contains("cfg.trailing_start_atr_low_conf"), "low_conf start from config");
-        assert!(src.contains("cfg.trailing_distance_atr_low_conf"), "low_conf dist from config");
-        assert!(src.contains("cfg.trailing_rsi_floor_default"), "RSI floor default from config");
-        assert!(src.contains("cfg.trailing_rsi_floor_trending"), "RSI floor trending from config");
-        assert!(src.contains("cfg.enable_vol_buffered_trailing"), "VBTS enable from config");
-        assert!(src.contains("cfg.trailing_vbts_bb_threshold"), "VBTS BB threshold from config");
-        assert!(src.contains("cfg.trailing_vbts_mult"), "VBTS mult from config");
-        assert!(src.contains("cfg.trailing_high_profit_atr"), "high profit threshold from config");
-        assert!(src.contains("cfg.trailing_tighten_tspv"), "TSPV tighten from config");
-        assert!(src.contains("cfg.trailing_tighten_default"), "default tighten from config");
-        assert!(src.contains("cfg.trailing_weak_trend_mult"), "weak trend mult from config");
+        assert!(
+            src.contains("cfg.trailing_start_atr"),
+            "trailing_start from config"
+        );
+        assert!(
+            src.contains("cfg.trailing_distance_atr"),
+            "trailing_distance from config"
+        );
+        assert!(
+            src.contains("cfg.trailing_start_atr_low_conf"),
+            "low_conf start from config"
+        );
+        assert!(
+            src.contains("cfg.trailing_distance_atr_low_conf"),
+            "low_conf dist from config"
+        );
+        assert!(
+            src.contains("cfg.trailing_rsi_floor_default"),
+            "RSI floor default from config"
+        );
+        assert!(
+            src.contains("cfg.trailing_rsi_floor_trending"),
+            "RSI floor trending from config"
+        );
+        assert!(
+            src.contains("cfg.enable_vol_buffered_trailing"),
+            "VBTS enable from config"
+        );
+        assert!(
+            src.contains("cfg.trailing_vbts_bb_threshold"),
+            "VBTS BB threshold from config"
+        );
+        assert!(
+            src.contains("cfg.trailing_vbts_mult"),
+            "VBTS mult from config"
+        );
+        assert!(
+            src.contains("cfg.trailing_high_profit_atr"),
+            "high profit threshold from config"
+        );
+        assert!(
+            src.contains("cfg.trailing_tighten_tspv"),
+            "TSPV tighten from config"
+        );
+        assert!(
+            src.contains("cfg.trailing_tighten_default"),
+            "default tighten from config"
+        );
+        assert!(
+            src.contains("cfg.trailing_weak_trend_mult"),
+            "weak trend mult from config"
+        );
     }
 
     #[test]
@@ -2647,13 +2887,19 @@ mod tests {
             src.contains("VBTS") || src.contains("Vol-Buffered"),
             "must contain VBTS reference"
         );
-        assert!(src.contains("bb_width_ratio"), "VBTS must check bb_width_ratio");
+        assert!(
+            src.contains("bb_width_ratio"),
+            "VBTS must check bb_width_ratio"
+        );
     }
 
     #[test]
     fn trailing_codegen_contains_ratchet_logic() {
         let src = compute_trailing_codegen();
-        assert!(src.contains("Ratchet") || src.contains("ratchet"), "must contain ratchet");
+        assert!(
+            src.contains("Ratchet") || src.contains("ratchet"),
+            "must contain ratchet"
+        );
         assert!(src.contains("fmax(candidate"), "LONG ratchet uses fmax");
         assert!(src.contains("fmin(candidate"), "SHORT ratchet uses fmin");
     }
@@ -2682,7 +2928,10 @@ mod tests {
     fn trailing_codegen_contains_weak_trend_logic() {
         let src = compute_trailing_codegen();
         assert!(src.contains("adx < 25.0"), "weak-trend check on adx < 25");
-        assert!(src.contains("trailing_weak_trend_mult"), "weak-trend uses config mult");
+        assert!(
+            src.contains("trailing_weak_trend_mult"),
+            "weak-trend uses config mult"
+        );
     }
 
     #[test]
@@ -2701,7 +2950,10 @@ mod tests {
     #[test]
     fn trailing_codegen_handles_low_confidence() {
         let src = compute_trailing_codegen();
-        assert!(src.contains("confidence == 0"), "Low confidence mapped to 0");
+        assert!(
+            src.contains("confidence == 0"),
+            "Low confidence mapped to 0"
+        );
     }
 
     #[test]
@@ -2743,10 +2995,7 @@ mod tests {
             src.contains("const GpuComboConfig& cfg"),
             "must take GpuComboConfig by const ref"
         );
-        assert!(
-            src.contains("int pos_type"),
-            "must take pos_type as int"
-        );
+        assert!(src.contains("int pos_type"), "must take pos_type as int");
         assert!(
             src.contains("double entry_price"),
             "must take entry_price as double"
@@ -2759,10 +3008,7 @@ mod tests {
             src.contains("double current_price"),
             "must take current_price as double"
         );
-        assert!(
-            src.contains("double size"),
-            "must take size as double"
-        );
+        assert!(src.contains("double size"), "must take size as double");
         assert!(
             src.contains("unsigned int tp1_taken"),
             "must take tp1_taken as unsigned int"
@@ -2790,10 +3036,19 @@ mod tests {
         // Internal arithmetic uses double variables
         assert!(src.contains("double atr"), "atr must be double");
         assert!(src.contains("double tp_price"), "tp_price must be double");
-        assert!(src.contains("double partial_mult"), "partial_mult must be double");
-        assert!(src.contains("double partial_tp_price"), "partial_tp_price must be double");
+        assert!(
+            src.contains("double partial_mult"),
+            "partial_mult must be double"
+        );
+        assert!(
+            src.contains("double partial_tp_price"),
+            "partial_tp_price must be double"
+        );
         assert!(src.contains("double pct"), "pct must be double");
-        assert!(src.contains("double remaining_notional"), "remaining_notional must be double");
+        assert!(
+            src.contains("double remaining_notional"),
+            "remaining_notional must be double"
+        );
         // Must NOT use float for price-critical variables
         assert!(
             !src.contains("float tp_price"),
@@ -2997,10 +3252,7 @@ mod tests {
             src.contains("const GpuComboConfig& cfg"),
             "must take GpuComboConfig by const ref"
         );
-        assert!(
-            src.contains("int pos_type"),
-            "must take pos_type as int"
-        );
+        assert!(src.contains("int pos_type"), "must take pos_type as int");
         assert!(
             src.contains("double entry_price"),
             "must take entry_price as double"
@@ -3025,18 +3277,12 @@ mod tests {
             src.contains("double ema_macro"),
             "must take ema_macro as double"
         );
-        assert!(
-            src.contains("double adx"),
-            "must take adx as double"
-        );
+        assert!(src.contains("double adx"), "must take adx as double");
         assert!(
             src.contains("double adx_slope"),
             "must take adx_slope as double"
         );
-        assert!(
-            src.contains("double rsi"),
-            "must take rsi as double"
-        );
+        assert!(src.contains("double rsi"), "must take rsi as double");
         assert!(
             src.contains("double macd_hist"),
             "must take macd_hist as double"
@@ -3085,9 +3331,15 @@ mod tests {
     fn smart_exits_codegen_uses_double_precision() {
         let src = check_smart_exits_codegen();
         assert!(src.contains("double eff_atr"), "eff_atr must be double");
-        assert!(src.contains("double adx_exhaustion_lt"), "adx_exhaustion_lt must be double");
+        assert!(
+            src.contains("double adx_exhaustion_lt"),
+            "adx_exhaustion_lt must be double"
+        );
         assert!(src.contains("double ema_dev"), "ema_dev must be double");
-        assert!(src.contains("double tsme_min_profit"), "tsme_min_profit must be double");
+        assert!(
+            src.contains("double tsme_min_profit"),
+            "tsme_min_profit must be double"
+        );
         assert!(src.contains("double rsi_ub"), "rsi_ub must be double");
         assert!(src.contains("double rsi_lb"), "rsi_lb must be double");
         assert!(src.contains("double sw"), "profit switch sw must be double");
@@ -3235,10 +3487,7 @@ mod tests {
             src.contains("TSME") || src.contains("Trend Saturation"),
             "must have TSME comment"
         );
-        assert!(
-            src.contains("adx > 50.0"),
-            "TSME triggers when ADX > 50"
-        );
+        assert!(src.contains("adx > 50.0"), "TSME triggers when ADX > 50");
         assert!(
             src.contains("cfg.tsme_min_profit_atr"),
             "TSME uses tsme_min_profit_atr from config"
@@ -3255,10 +3504,7 @@ mod tests {
             src.contains("prev_macd_hist < prev2_macd_hist"),
             "TSME checks 2 consecutive contractions"
         );
-        assert!(
-            src.contains("exit_code = 6"),
-            "TSME must set exit_code = 6"
-        );
+        assert!(src.contains("exit_code = 6"), "TSME must set exit_code = 6");
     }
 
     #[test]
@@ -3272,10 +3518,7 @@ mod tests {
             src.contains("profit_atr > 1.5"),
             "MMDE requires profit > 1.5 ATR"
         );
-        assert!(
-            src.contains("adx > 35.0"),
-            "MMDE requires ADX > 35"
-        );
+        assert!(src.contains("adx > 35.0"), "MMDE requires ADX > 35");
         assert!(
             src.contains("prev2_macd_hist < prev3_macd_hist"),
             "MMDE checks 3 consecutive MACD divergences (4 bars total, long)"
@@ -3284,10 +3527,7 @@ mod tests {
             src.contains("prev2_macd_hist > prev3_macd_hist"),
             "MMDE checks 3 consecutive MACD divergences (4 bars total, short)"
         );
-        assert!(
-            src.contains("exit_code = 7"),
-            "MMDE must set exit_code = 7"
-        );
+        assert!(src.contains("exit_code = 7"), "MMDE must set exit_code = 7");
     }
 
     #[test]
@@ -3426,10 +3666,7 @@ mod tests {
             src.contains("__device__ AllExitResult check_all_exits_codegen("),
             "must declare a __device__ AllExitResult function"
         );
-        assert!(
-            src.contains("int pos_type"),
-            "must take pos_type as int"
-        );
+        assert!(src.contains("int pos_type"), "must take pos_type as int");
         assert!(
             src.contains("double entry_price"),
             "must take entry_price as double"
@@ -3524,9 +3761,11 @@ mod tests {
     fn all_exits_codegen_sl_has_exit_code_100() {
         let src = check_all_exits_codegen();
         // Find the SL section and verify exit_code = 100 comes before trailing
-        let sl_pos = src.find("compute_sl_price_codegen(")
+        let sl_pos = src
+            .find("compute_sl_price_codegen(")
             .expect("must call compute_sl_price_codegen");
-        let trail_pos = src.find("compute_trailing_codegen(")
+        let trail_pos = src
+            .find("compute_trailing_codegen(")
             .expect("must call compute_trailing_codegen");
         assert!(
             sl_pos < trail_pos,
@@ -3543,9 +3782,11 @@ mod tests {
     #[test]
     fn all_exits_codegen_trailing_has_exit_code_101() {
         let src = check_all_exits_codegen();
-        let trail_pos = src.find("compute_trailing_codegen(")
+        let trail_pos = src
+            .find("compute_trailing_codegen(")
             .expect("must call compute_trailing_codegen");
-        let tp_pos = src.find("check_tp_codegen(")
+        let tp_pos = src
+            .find("check_tp_codegen(")
             .expect("must call check_tp_codegen");
         assert!(
             trail_pos < tp_pos,
@@ -3561,9 +3802,11 @@ mod tests {
     #[test]
     fn all_exits_codegen_tp_has_exit_code_102() {
         let src = check_all_exits_codegen();
-        let tp_pos = src.find("check_tp_codegen(")
+        let tp_pos = src
+            .find("check_tp_codegen(")
             .expect("must call check_tp_codegen");
-        let smart_pos = src.find("check_smart_exits_codegen(")
+        let smart_pos = src
+            .find("check_smart_exits_codegen(")
             .expect("must call check_smart_exits_codegen");
         assert!(
             tp_pos < smart_pos,
@@ -3608,26 +3851,14 @@ mod tests {
             src.contains("const GpuComboConfig& cfg"),
             "must take GpuComboConfig by const ref"
         );
-        assert!(
-            src.contains("double equity"),
-            "must take equity as double"
-        );
-        assert!(
-            src.contains("double price"),
-            "must take price as double"
-        );
+        assert!(src.contains("double equity"), "must take equity as double");
+        assert!(src.contains("double price"), "must take price as double");
         assert!(
             src.contains("unsigned int confidence"),
             "must take confidence as unsigned int"
         );
-        assert!(
-            src.contains("double atr"),
-            "must take atr as double"
-        );
-        assert!(
-            src.contains("double adx"),
-            "must take adx as double"
-        );
+        assert!(src.contains("double atr"), "must take atr as double");
+        assert!(src.contains("double adx"), "must take adx as double");
     }
 
     #[test]
@@ -3657,7 +3888,10 @@ mod tests {
         assert!(src.contains("double margin ="), "margin must be double");
         assert!(src.contains("double conf_mult"), "conf_mult must be double");
         assert!(src.contains("double adx_mult"), "adx_mult must be double");
-        assert!(src.contains("double vol_scalar"), "vol_scalar must be double");
+        assert!(
+            src.contains("double vol_scalar"),
+            "vol_scalar must be double"
+        );
         assert!(src.contains("double lev"), "lev must be double");
         assert!(src.contains("double notional"), "notional must be double");
         assert!(src.contains("double size"), "size must be double");
@@ -3702,10 +3936,7 @@ mod tests {
             src.contains("cfg.adx_sizing_min_mult"),
             "must use adx_sizing_min_mult from config"
         );
-        assert!(
-            src.contains("adx_mult"),
-            "must compute adx_mult"
-        );
+        assert!(src.contains("adx_mult"), "must compute adx_mult");
     }
 
     #[test]
@@ -3723,10 +3954,7 @@ mod tests {
             src.contains("cfg.vol_scalar_max"),
             "must use vol_scalar_max from config"
         );
-        assert!(
-            src.contains("vol_ratio"),
-            "must compute vol_ratio"
-        );
+        assert!(src.contains("vol_ratio"), "must compute vol_ratio");
         assert!(
             src.contains("1.0 / vol_ratio"),
             "vol_scalar is inverse of vol_ratio"
@@ -3779,14 +4007,8 @@ mod tests {
     #[test]
     fn sizing_codegen_contains_notional_and_size() {
         let src = compute_entry_size_codegen();
-        assert!(
-            src.contains("margin * lev"),
-            "notional = margin * leverage"
-        );
-        assert!(
-            src.contains("notional / price"),
-            "size = notional / price"
-        );
+        assert!(src.contains("margin * lev"), "notional = margin * leverage");
+        assert!(src.contains("notional / price"), "size = notional / price");
     }
 
     #[test]
@@ -3867,10 +4089,7 @@ mod tests {
             src.contains("const GpuComboConfig& cfg"),
             "must take GpuComboConfig by const ref"
         );
-        assert!(
-            src.contains("double adx"),
-            "must take adx as double"
-        );
+        assert!(src.contains("double adx"), "must take adx as double");
         assert!(
             src.contains("unsigned int current_sec"),
             "must take current_sec as unsigned int"
@@ -3960,8 +4179,14 @@ mod tests {
         let src = is_pesc_blocked_codegen();
         assert!(src.contains("double min_cd"), "min_cd must be double");
         assert!(src.contains("double max_cd"), "max_cd must be double");
-        assert!(src.contains("double cooldown_mins"), "cooldown_mins must be double");
-        assert!(src.contains("double t"), "interpolation factor t must be double");
+        assert!(
+            src.contains("double cooldown_mins"),
+            "cooldown_mins must be double"
+        );
+        assert!(
+            src.contains("double t"),
+            "interpolation factor t must be double"
+        );
     }
 
     #[test]
@@ -4011,10 +4236,7 @@ mod tests {
     #[test]
     fn pesc_codegen_returns_bool() {
         let src = is_pesc_blocked_codegen();
-        assert!(
-            src.contains("__device__ bool"),
-            "return type must be bool"
-        );
+        assert!(src.contains("__device__ bool"), "return type must be bool");
         assert!(
             src.contains("return false"),
             "must have early-return false paths for gate bypasses"

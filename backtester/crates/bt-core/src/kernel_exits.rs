@@ -100,8 +100,15 @@ impl Default for ExitParams {
 #[derive(Debug, Clone, PartialEq)]
 pub enum KernelExitResult {
     Hold,
-    FullClose { reason: String, exit_price: f64 },
-    PartialClose { reason: String, exit_price: f64, fraction: f64 },
+    FullClose {
+        reason: String,
+        exit_price: f64,
+    },
+    PartialClose {
+        reason: String,
+        exit_price: f64,
+        fraction: f64,
+    },
 }
 
 /// Bundled exit evaluation result with diagnostic threshold records and context.
@@ -206,16 +213,28 @@ fn compute_sl_price(
 /// Compute trailing stop price (or None if not yet active).
 /// Updates are ratcheted — the trailing SL can only improve.
 /// Mirrors `exits/trailing.rs::compute_trailing`.
-fn compute_trailing(
+struct ComputeTrailingInput<'a> {
     side: PositionSide,
     entry: f64,
     atr: f64,
     confidence: Option<u8>,
     current_trailing: Option<f64>,
-    snap: &IndicatorSnapshot,
-    params: &ExitParams,
+    snap: &'a IndicatorSnapshot,
+    params: &'a ExitParams,
     profit_atr_val: f64,
-) -> Option<f64> {
+}
+
+fn compute_trailing(input: ComputeTrailingInput<'_>) -> Option<f64> {
+    let ComputeTrailingInput {
+        side,
+        entry,
+        atr,
+        confidence,
+        current_trailing,
+        snap,
+        params,
+        profit_atr_val,
+    } = input;
     let is_low_conf = confidence == Some(0);
 
     let mut trailing_start = params.trailing_start_atr;
@@ -477,9 +496,7 @@ fn evaluate_smart_exits(
     }
 
     // ── 5. Funding Headwind Exit ────────────────────────────────────────
-    if let Some(result) =
-        check_funding_headwind_kernel(pos, snap, profit_atr_val, duration_hours)
-    {
+    if let Some(result) = check_funding_headwind_kernel(pos, snap, profit_atr_val, duration_hours) {
         return result;
     }
 
@@ -495,11 +512,9 @@ fn evaluate_smart_exits(
 
         if gate_profit_ok && gate_slope_ok {
             let is_exhausted = if is_long {
-                snap.macd_hist < snap.prev_macd_hist
-                    && snap.prev_macd_hist < snap.prev2_macd_hist
+                snap.macd_hist < snap.prev_macd_hist && snap.prev_macd_hist < snap.prev2_macd_hist
             } else {
-                snap.macd_hist > snap.prev_macd_hist
-                    && snap.prev_macd_hist > snap.prev2_macd_hist
+                snap.macd_hist > snap.prev_macd_hist && snap.prev_macd_hist > snap.prev2_macd_hist
             };
 
             if is_exhausted {
@@ -528,9 +543,7 @@ fn evaluate_smart_exits(
 
         if is_diverging {
             return KernelExitResult::FullClose {
-                reason: format!(
-                    "MACD Persistent Divergence (Profit: {profit_atr_val:.2} ATR)"
-                ),
+                reason: format!("MACD Persistent Divergence (Profit: {profit_atr_val:.2} ATR)"),
                 exit_price: snap.close,
             };
         }
@@ -794,7 +807,7 @@ pub fn evaluate_exits_with_diagnostics(
     params: &ExitParams,
     current_time_ms: i64,
 ) -> ExitEvaluation {
-    use crate::decision_kernel::{ThresholdRecord, ExitContext};
+    use crate::decision_kernel::{ExitContext, ThresholdRecord};
 
     let mut thresholds: Vec<ThresholdRecord> = Vec::new();
 
@@ -885,16 +898,16 @@ pub fn evaluate_exits_with_diagnostics(
     }
 
     // ── 2. Trailing Stop ────────────────────────────────────────────────
-    let new_tsl = compute_trailing(
-        pos.side,
+    let new_tsl = compute_trailing(ComputeTrailingInput {
+        side: pos.side,
         entry,
         atr,
-        pos.confidence,
-        pos.trailing_sl,
+        confidence: pos.confidence,
+        current_trailing: pos.trailing_sl,
         snap,
         params,
-        pa,
-    );
+        profit_atr_val: pa,
+    });
     pos.trailing_sl = new_tsl;
 
     if let Some(tsl_price) = new_tsl {
@@ -964,8 +977,12 @@ pub fn evaluate_exits_with_diagnostics(
     );
     if tp_result != KernelExitResult::Hold {
         let (exit_type, exit_reason) = match &tp_result {
-            KernelExitResult::PartialClose { reason, .. } => ("take_profit_partial".to_string(), reason.clone()),
-            KernelExitResult::FullClose { reason, .. } => ("take_profit".to_string(), reason.clone()),
+            KernelExitResult::PartialClose { reason, .. } => {
+                ("take_profit_partial".to_string(), reason.clone())
+            }
+            KernelExitResult::FullClose { reason, .. } => {
+                ("take_profit".to_string(), reason.clone())
+            }
             _ => unreachable!(),
         };
         return ExitEvaluation {
@@ -1283,7 +1300,11 @@ mod tests {
         };
         evaluate_exits(&mut pos, &snap, &params, 0);
         let tsl = pos.trailing_sl.unwrap();
-        assert!((tsl - 101.8).abs() < 0.01, "ratchet should keep 101.8, got {}", tsl);
+        assert!(
+            (tsl - 101.8).abs() < 0.01,
+            "ratchet should keep 101.8, got {}",
+            tsl
+        );
     }
 
     #[test]
@@ -1312,7 +1333,9 @@ mod tests {
         let snap = default_snap(104.0);
         let result = evaluate_exits(&mut pos, &snap, &default_params(), 0);
         match result {
-            KernelExitResult::PartialClose { reason, fraction, .. } => {
+            KernelExitResult::PartialClose {
+                reason, fraction, ..
+            } => {
                 assert_eq!(reason, "Take Profit (Partial)");
                 assert!((fraction - 0.5).abs() < 0.01);
             }
@@ -1395,7 +1418,9 @@ mod tests {
         let snap = default_snap(96.0);
         let result = evaluate_exits(&mut pos, &snap, &default_params(), 0);
         match result {
-            KernelExitResult::PartialClose { reason, fraction, .. } => {
+            KernelExitResult::PartialClose {
+                reason, fraction, ..
+            } => {
                 assert_eq!(reason, "Take Profit (Partial)");
                 assert!((fraction - 0.5).abs() < 0.01);
             }
@@ -1408,7 +1433,7 @@ mod tests {
         // When both SL and trailing would trigger, SL wins (higher priority)
         let mut pos = long_pos(100.0);
         pos.trailing_sl = Some(99.0); // trailing at 99.0
-        // SL = 98.0 (base); close = 97.5 → both SL and trailing trigger
+                                      // SL = 98.0 (base); close = 97.5 → both SL and trailing trigger
         let snap = default_snap(97.5);
         let params = ExitParams {
             enable_breakeven_stop: false,
@@ -1443,7 +1468,11 @@ mod tests {
             ..default_params()
         };
         let result = evaluate_exits(&mut pos, &snap, &params, 0);
-        assert_eq!(result, KernelExitResult::Hold, "Glitch guard should block exit on price spike");
+        assert_eq!(
+            result,
+            KernelExitResult::Hold,
+            "Glitch guard should block exit on price spike"
+        );
     }
 
     #[test]
@@ -1458,7 +1487,11 @@ mod tests {
             ..default_params()
         };
         let result = evaluate_exits(&mut pos, &snap, &params, 0);
-        assert_eq!(result, KernelExitResult::Hold, "Glitch guard should block exit on ATR spike");
+        assert_eq!(
+            result,
+            KernelExitResult::Hold,
+            "Glitch guard should block exit on ATR spike"
+        );
     }
 
     #[test]
@@ -1639,7 +1672,10 @@ mod tests {
         let result = evaluate_exits(&mut pos, &snap, &params, 0);
         match result {
             KernelExitResult::FullClose { reason, .. } => {
-                assert!(reason.contains("MACD Persistent Divergence"), "got: {reason}");
+                assert!(
+                    reason.contains("MACD Persistent Divergence"),
+                    "got: {reason}"
+                );
             }
             other => panic!("Expected FullClose(MMDE), got {:?}", other),
         }
@@ -1684,7 +1720,10 @@ mod tests {
             KernelExitResult::FullClose { reason, .. } => {
                 assert!(reason.contains("RSI Overbought"), "got: {reason}");
             }
-            other => panic!("Expected FullClose(RSI Overbought) with hi-profit, got {:?}", other),
+            other => panic!(
+                "Expected FullClose(RSI Overbought) with hi-profit, got {:?}",
+                other
+            ),
         }
     }
 

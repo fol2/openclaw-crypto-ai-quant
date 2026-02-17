@@ -135,11 +135,9 @@ pub fn check(
         if gate_profit_ok && gate_slope_ok {
             // Check 2 consecutive MACD contractions in the saturated zone.
             let is_exhausted = if is_long {
-                snap.macd_hist < snap.prev_macd_hist
-                    && snap.prev_macd_hist < snap.prev2_macd_hist
+                snap.macd_hist < snap.prev_macd_hist && snap.prev_macd_hist < snap.prev2_macd_hist
             } else {
-                snap.macd_hist > snap.prev_macd_hist
-                    && snap.prev_macd_hist > snap.prev2_macd_hist
+                snap.macd_hist > snap.prev_macd_hist && snap.prev_macd_hist > snap.prev2_macd_hist
             };
 
             if is_exhausted {
@@ -295,10 +293,7 @@ fn check_funding_headwind(
     }
 
     // ── TCFB (Triple Confirmation Funding Buffer) ────────────────────────
-    if is_momentum_improving
-        && is_macro_aligned
-        && matches!(pos.confidence, Confidence::High)
-    {
+    if is_momentum_improving && is_macro_aligned && matches!(pos.confidence, Confidence::High) {
         headwind_threshold *= 1.5;
     }
 

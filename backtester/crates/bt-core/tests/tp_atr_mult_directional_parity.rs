@@ -93,18 +93,18 @@ fn tp_atr_mult_fixture_reacts_to_low_to_high_changes() {
         let mut cfg = base_cfg.clone();
         cfg.trade.tp_atr_mult = tp_mult;
 
-        let sim = engine::run_simulation(
-            &main_candles,
-            &cfg,
-            INITIAL_BALANCE,
-            0,
-            Some(&sub_candles),
-            Some(&sub_candles),
-            None,
-            None,
-            None,
-            None,
-        );
+        let sim = engine::run_simulation(engine::RunSimulationInput {
+            candles: &main_candles,
+            cfg: &cfg,
+            initial_balance: INITIAL_BALANCE,
+            lookback: 0,
+            exit_candles: Some(&sub_candles),
+            entry_candles: Some(&sub_candles),
+            funding_rates: None,
+            init_state: None,
+            from_ts: None,
+            to_ts: None,
+        });
 
         cpu_pnl_by_axis_value.push(sim.final_balance - INITIAL_BALANCE);
     }

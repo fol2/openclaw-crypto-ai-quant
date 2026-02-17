@@ -128,35 +128,34 @@ fn tpe_worker(
     let mut pending_results: usize = 0;
 
     // --- Helper: sample and send one batch if trials remain ---
-    let send_batch =
-        |axis_opts: &mut Vec<AxisOptimizer>,
-         rng: &mut StdRng,
-         trials_sampled: &mut usize,
-         batch_idx: &mut usize,
-         pending: &mut usize,
-         tx: &crossbeam_channel::Sender<Option<TpeBatchRequest>>|
-         -> bool {
-            if *trials_sampled >= tpe_cfg_trials {
-                return false;
-            }
-            let batch_n = tpe_cfg_batch_size.min(tpe_cfg_trials - *trials_sampled);
-            let (overrides, raw_values) = sample_batch(axis_opts, rng, batch_n);
-            *trials_sampled += batch_n;
+    let send_batch = |axis_opts: &mut Vec<AxisOptimizer>,
+                      rng: &mut StdRng,
+                      trials_sampled: &mut usize,
+                      batch_idx: &mut usize,
+                      pending: &mut usize,
+                      tx: &crossbeam_channel::Sender<Option<TpeBatchRequest>>|
+     -> bool {
+        if *trials_sampled >= tpe_cfg_trials {
+            return false;
+        }
+        let batch_n = tpe_cfg_batch_size.min(tpe_cfg_trials - *trials_sampled);
+        let (overrides, raw_values) = sample_batch(axis_opts, rng, batch_n);
+        *trials_sampled += batch_n;
 
-            let ok = tx
-                .send(Some(TpeBatchRequest {
-                    batch_idx: *batch_idx,
-                    batch_n,
-                    trial_overrides: overrides,
-                    trial_raw_values: raw_values,
-                }))
-                .is_ok();
-            if ok {
-                *batch_idx += 1;
-                *pending += 1;
-            }
-            ok
-        };
+        let ok = tx
+            .send(Some(TpeBatchRequest {
+                batch_idx: *batch_idx,
+                batch_n,
+                trial_overrides: overrides,
+                trial_raw_values: raw_values,
+            }))
+            .is_ok();
+        if ok {
+            *batch_idx += 1;
+            *pending += 1;
+        }
+        ok
+    };
 
     // --- Priming: send batch 0 ---
     send_batch(
@@ -665,9 +664,8 @@ pub fn run_tpe_sweep(
     // GPU thread: receive batches, evaluate, send results
     // Bounded top-K heap: keeps only the best results by PnL to prevent OOM
     let effective_top_k = if top_k == 0 { usize::MAX } else { top_k };
-    let mut top_heap: BinaryHeap<MinPnlHeapEntry> = BinaryHeap::with_capacity(
-        effective_top_k.min(tpe_cfg.trials).min(100_000) + 1,
-    );
+    let mut top_heap: BinaryHeap<MinPnlHeapEntry> =
+        BinaryHeap::with_capacity(effective_top_k.min(tpe_cfg.trials).min(100_000) + 1);
     let mut best_pnl = f64::NEG_INFINITY;
     let mut best_trial = 0usize;
     let mut trials_done = 0usize;
@@ -986,10 +984,20 @@ fn evaluate_mixed_batch_arena(
                     buffers::GpuComboConfig::from_strategy_config(&trial_cfgs[trial_idx])
                         .expect("f64→f32 overflow in GpuComboConfig");
                 gpu_cfg.snapshot_offset = u32::try_from(local_slot * snapshot_stride)
-                    .map_err(|_| format!("snapshot_offset {} exceeds u32::MAX", local_slot * snapshot_stride))
+                    .map_err(|_| {
+                        format!(
+                            "snapshot_offset {} exceeds u32::MAX",
+                            local_slot * snapshot_stride
+                        )
+                    })
                     .expect("snapshot_offset exceeds u32::MAX");
                 gpu_cfg.breadth_offset = u32::try_from(local_slot * breadth_stride)
-                    .map_err(|_| format!("breadth_offset {} exceeds u32::MAX", local_slot * breadth_stride))
+                    .map_err(|_| {
+                        format!(
+                            "breadth_offset {} exceeds u32::MAX",
+                            local_slot * breadth_stride
+                        )
+                    })
                     .expect("breadth_offset exceeds u32::MAX");
                 gpu_configs.push(gpu_cfg);
                 group_trial_indices.push(trial_idx);
@@ -1049,7 +1057,9 @@ fn dispatch_indicator_arena(
         .map_err(|_| format!("ind_configs.len() {} exceeds u32::MAX", ind_configs.len()))?;
     let block_size = 64u32;
 
-    let ind_configs_gpu = ds.dev.htod_sync_copy(ind_configs)
+    let ind_configs_gpu = ds
+        .dev
+        .htod_sync_copy(ind_configs)
         .map_err(|e| format!("GPU alloc failed: {e}"))?;
 
     let params = buffers::IndicatorParams {
@@ -1059,7 +1069,9 @@ fn dispatch_indicator_arena(
         btc_sym_idx,
         _pad: [0; 4],
     };
-    let ind_params_gpu = ds.dev.htod_sync_copy(&[params])
+    let ind_params_gpu = ds
+        .dev
+        .htod_sync_copy(&[params])
         .map_err(|e| format!("GPU alloc failed: {e}"))?;
 
     let ind_threads = k * num_symbols;
@@ -1143,7 +1155,9 @@ fn dispatch_trade_arena(
     let block_size = 64u32;
     let grid_size = (num_combos + block_size - 1) / block_size;
 
-    let configs_gpu = ds.dev.htod_sync_copy(gpu_configs)
+    let configs_gpu = ds
+        .dev
+        .htod_sync_copy(gpu_configs)
         .map_err(|e| format!("GPU alloc failed: {e}"))?;
 
     let mut states_host = vec![buffers::GpuComboState::zeroed(); gpu_configs.len()];
@@ -1151,7 +1165,9 @@ fn dispatch_trade_arena(
         s.balance = initial_balance as f64;
         s.peak_equity = initial_balance as f64;
     }
-    let mut states_gpu = ds.dev.htod_sync_copy(&states_host)
+    let mut states_gpu = ds
+        .dev
+        .htod_sync_copy(&states_host)
         .map_err(|e| format!("GPU alloc failed: {e}"))?;
     let mut results_gpu = ds
         .dev
@@ -1163,9 +1179,13 @@ fn dispatch_trade_arena(
     let (sc_ref, sn_ref) = match (sub_candles_gpu, sub_counts_gpu) {
         (Some(sc), Some(sn)) => (sc, sn),
         _ => {
-            sentinel_candle = ds.dev.alloc_zeros::<buffers::GpuRawCandle>(1)
+            sentinel_candle = ds
+                .dev
+                .alloc_zeros::<buffers::GpuRawCandle>(1)
                 .map_err(|e| format!("GPU alloc failed: {e}"))?;
-            sentinel_counts = ds.dev.alloc_zeros::<u32>(1)
+            sentinel_counts = ds
+                .dev
+                .alloc_zeros::<u32>(1)
                 .map_err(|e| format!("GPU alloc failed: {e}"))?;
             (&sentinel_candle, &sentinel_counts)
         }
@@ -1196,7 +1216,9 @@ fn dispatch_trade_arena(
             max_sub_per_bar,
             trade_end_bar: trade_end,
         };
-        let params_gpu = ds.dev.htod_sync_copy(&[params_host])
+        let params_gpu = ds
+            .dev
+            .htod_sync_copy(&[params_host])
             .map_err(|e| format!("GPU alloc failed: {e}"))?;
 
         let cfg = LaunchConfig {
@@ -1229,7 +1251,8 @@ fn dispatch_trade_arena(
         .map_err(|e| format!("sweep_engine_kernel launch: {e}"))?;
     }
 
-    ds.dev.dtoh_sync_copy(&results_gpu)
+    ds.dev
+        .dtoh_sync_copy(&results_gpu)
         .map_err(|e| format!("GPU readback failed: {e}"))
 }
 

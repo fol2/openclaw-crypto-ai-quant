@@ -112,7 +112,11 @@ pub fn run_gpu_sweep_with_states(
     sub_candles: Option<&CandleData>,
     from_ts: Option<i64>,
     to_ts: Option<i64>,
-) -> (Vec<GpuSweepResult>, Vec<buffers::GpuComboState>, Vec<String>) {
+) -> (
+    Vec<GpuSweepResult>,
+    Vec<buffers::GpuComboState>,
+    Vec<String>,
+) {
     let (results, states, symbols) = run_gpu_sweep_internal(
         candles,
         base_cfg,
@@ -198,7 +202,9 @@ fn run_gpu_sweep_internal(
             );
         }
     };
-    let candles_gpu = device_state.dev.htod_sync_copy(&raw.candles)
+    let candles_gpu = device_state
+        .dev
+        .htod_sync_copy(&raw.candles)
         .map_err(|e| format!("GPU candle upload failed: {e}"))
         .expect("GPU candle upload failed");
 
@@ -258,14 +264,13 @@ fn run_gpu_sweep_internal(
 
     // Per-indicator-combo VRAM cost (snapshots + breadth + btc_bullish)
     // C8: use checked arithmetic to prevent overflow on large inputs
-    let snapshot_elements = (num_bars as usize).checked_mul(num_symbols)
+    let snapshot_elements = (num_bars as usize)
+        .checked_mul(num_symbols)
         .expect("overflow: num_bars * num_symbols");
     let snapshot_bytes_per_ind: usize = snapshot_elements
         .checked_mul(std::mem::size_of::<buffers::GpuSnapshot>())
-        .and_then(|v| v.checked_add(
-            (num_bars as usize).checked_mul(std::mem::size_of::<f32>())?))
-        .and_then(|v| v.checked_add(
-            (num_bars as usize).checked_mul(std::mem::size_of::<u32>())?))
+        .and_then(|v| v.checked_add((num_bars as usize).checked_mul(std::mem::size_of::<f32>())?))
+        .and_then(|v| v.checked_add((num_bars as usize).checked_mul(std::mem::size_of::<u32>())?))
         .expect("overflow: snapshot_bytes_per_ind calculation");
 
     // Per-trade-combo VRAM cost (config + state + result)
@@ -275,9 +280,12 @@ fn run_gpu_sweep_internal(
         + 32; // params overhead
 
     let t = trade_combos.len();
-    let per_ind_total_vram = snapshot_bytes_per_ind.checked_add(
-        t.checked_mul(combo_bytes).expect("overflow: t * combo_bytes")
-    ).expect("overflow: per_ind_total_vram");
+    let per_ind_total_vram = snapshot_bytes_per_ind
+        .checked_add(
+            t.checked_mul(combo_bytes)
+                .expect("overflow: t * combo_bytes"),
+        )
+        .expect("overflow: per_ind_total_vram");
 
     // Hard cap: max 10 GB per snapshot allocation (large contiguous allocs
     // can fail even with plenty of total free VRAM due to fragmentation)
@@ -377,10 +385,10 @@ fn run_gpu_sweep_internal(
         let mut combo_meta: Vec<(usize, usize)> = Vec::with_capacity(total_combos);
 
         for (ind_idx, (_ind_combo, ind_cfg)) in ind_cfgs.iter().enumerate() {
-            let snap_off = u32::try_from(ind_idx * snapshot_stride)
-                .expect("snapshot offset exceeds u32::MAX");
-            let br_off = u32::try_from(ind_idx * breadth_stride)
-                .expect("breadth offset exceeds u32::MAX");
+            let snap_off =
+                u32::try_from(ind_idx * snapshot_stride).expect("snapshot offset exceeds u32::MAX");
+            let br_off =
+                u32::try_from(ind_idx * breadth_stride).expect("breadth offset exceeds u32::MAX");
 
             for (trade_idx, trade_overrides) in trade_combos.iter().enumerate() {
                 let mut cfg = ind_cfg.clone();
