@@ -26,6 +26,7 @@ python tools/build_live_replay_bundle.py \
 - `live_paper_action_reconcile_report.json`
 - `live_paper_decision_trace_reconcile_report.json`
 - `alignment_gate_report.json`
+- `paper_deterministic_replay_run.json`
 - `run_01_export_and_seed.sh`
 - `run_02_replay.sh`
 - `run_03_audit.sh`
@@ -34,6 +35,7 @@ python tools/build_live_replay_bundle.py \
 - `run_06_live_paper_action_reconcile.sh`
 - `run_07_live_paper_decision_trace_reconcile.sh`
 - `run_08_assert_alignment.sh`
+- `run_09_paper_deterministic_replay.sh`
 
 ## Usage Sequence
 
@@ -45,6 +47,13 @@ python tools/build_live_replay_bundle.py \
 6. Run `run_06_live_paper_action_reconcile.sh`
 7. Run `run_07_live_paper_decision_trace_reconcile.sh`
 8. Run `run_08_assert_alignment.sh`
+9. Optional one-shot harness: `run_09_paper_deterministic_replay.sh`
+
+For strict shortcut mode:
+
+```bash
+STRICT_NO_RESIDUALS=1 /tmp/live_replay_bundle_1h/run_09_paper_deterministic_replay.sh
+```
 
 This keeps snapshot seeding, replay execution, state alignment audit, backtester trade/action reconciliation, live/paper action reconciliation, live/paper decision-trace reconciliation, and final strict alignment gate tied to one immutable bundle manifest.
 
