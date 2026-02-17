@@ -16,6 +16,7 @@ import json
 import os
 import socket
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,7 +50,7 @@ def _utc_compact() -> str:
 def _atomic_write_text(path: Path, text: str) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}")
     tmp.write_text(text, encoding="utf-8")
     os.replace(str(tmp), str(path))
 
@@ -147,10 +148,24 @@ def rollback_to_last_good(
     restart_required = bool(cur_interval and next_interval and cur_interval != next_interval)
 
     ts = _utc_compact()
-    rollback_dir = (artifacts_dir / "rollbacks" / "paper" / ts).resolve()
-    rollback_dir.mkdir(parents=True, exist_ok=True)
+    rollback_root = (artifacts_dir / "rollbacks" / "paper").resolve()
+    rollback_root.mkdir(parents=True, exist_ok=True)
+    rollback_dir = (rollback_root / ts).resolve()
+    try:
+        rollback_dir.mkdir(parents=False, exist_ok=False)
+    except FileExistsError:
+        # Same-second concurrent rollbacks should not overwrite each other's artifacts.
+        while True:
+            suffix = f"{os.getpid()}-{threading.get_ident()}-{time.time_ns()}"
+            candidate = (rollback_root / f"{ts}-{suffix}").resolve()
+            try:
+                candidate.mkdir(parents=False, exist_ok=False)
+                rollback_dir = candidate
+                break
+            except FileExistsError:
+                continue
 
-    (rollback_dir / "restored_config.yaml").write_text(restored_text + "\n", encoding="utf-8")
+    _atomic_write_text(rollback_dir / "restored_config.yaml", restored_text + "\n")
 
     event: dict[str, Any] = {
         "version": "rollback_event_v1",
@@ -183,10 +198,10 @@ def rollback_to_last_good(
         rr = _restart_systemd_user_service(str(service))
         event["restart"]["result"] = rr.__dict__
         if rr.attempted and rr.exit_code != 0:
-            (rollback_dir / "rollback_event.json").write_text(json.dumps(event, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            _atomic_write_text(rollback_dir / "rollback_event.json", json.dumps(event, indent=2, sort_keys=True) + "\n")
             raise RuntimeError(f"service restart failed: {service} (exit_code={rr.exit_code})")
 
-    (rollback_dir / "rollback_event.json").write_text(json.dumps(event, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _atomic_write_text(rollback_dir / "rollback_event.json", json.dumps(event, indent=2, sort_keys=True) + "\n")
     return rollback_dir
 
 
@@ -228,4 +243,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
