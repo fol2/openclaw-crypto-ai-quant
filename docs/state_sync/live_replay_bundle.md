@@ -23,11 +23,13 @@ python tools/build_live_replay_bundle.py \
 - `replay_bundle_manifest.json`
 - `live_baseline_trades.jsonl`
 - `backtester_replay_report.json`
+- `alignment_gate_report.json`
 - `run_01_export_and_seed.sh`
 - `run_02_replay.sh`
 - `run_03_audit.sh`
 - `run_04_trade_reconcile.sh`
 - `run_05_action_reconcile.sh`
+- `run_06_assert_alignment.sh`
 
 ## Usage Sequence
 
@@ -36,6 +38,7 @@ python tools/build_live_replay_bundle.py \
 3. Run `run_03_audit.sh`
 4. Run `run_04_trade_reconcile.sh`
 5. Run `run_05_action_reconcile.sh`
+6. Run `run_06_assert_alignment.sh`
 
 This keeps snapshot seeding, replay execution, state alignment audit, exit-trade reconciliation, and action-level reconciliation tied to one immutable bundle manifest.
 
