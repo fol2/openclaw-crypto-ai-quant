@@ -182,6 +182,10 @@ struct CpuTradeEventRow {
     action_side: String,
     intent_signal: String,
     action_taken: String,
+    event_type: String,
+    status: String,
+    decision_phase: String,
+    triggered_by: String,
     reason: String,
     price: f64,
     size: f64,
@@ -221,6 +225,10 @@ struct CanonicalEventRow {
     action_side: String,
     intent_signal: String,
     action_taken: String,
+    event_type: String,
+    status: String,
+    decision_phase: String,
+    triggered_by: String,
     reason: String,
     reason_code: String,
     price: f64,
@@ -234,6 +242,14 @@ struct DecisionActionCanonical {
     action_side: String,
     intent_signal: String,
     action_taken: String,
+}
+
+#[derive(Debug, Clone)]
+struct DecisionEventEnvelope {
+    event_type: String,
+    status: String,
+    decision_phase: String,
+    triggered_by: String,
 }
 
 #[cfg(target_os = "linux")]
@@ -700,6 +716,7 @@ fn run_cpu_single_with_trade_events(
             (trade.timestamp_ms / 1000) as u32
         };
         let decision = canonical_cpu_decision_action(&trade.action);
+        let envelope = derive_decision_event_envelope(&decision.action_kind, &trade.reason);
         out.push(CpuTradeEventRow {
             idx: window_idx - start,
             global_idx,
@@ -710,6 +727,10 @@ fn run_cpu_single_with_trade_events(
             action_side: decision.action_side,
             intent_signal: decision.intent_signal,
             action_taken: decision.action_taken,
+            event_type: envelope.event_type,
+            status: envelope.status,
+            decision_phase: envelope.decision_phase,
+            triggered_by: envelope.triggered_by,
             reason: trade.reason,
             price: trade.price,
             size: trade.size,
@@ -964,6 +985,10 @@ fn canonicalise_cpu_event(ev: &CpuTradeEventRow) -> CanonicalEventRow {
         action_side: ev.action_side.clone(),
         intent_signal: ev.intent_signal.clone(),
         action_taken: ev.action_taken.clone(),
+        event_type: ev.event_type.clone(),
+        status: ev.status.clone(),
+        decision_phase: ev.decision_phase.clone(),
+        triggered_by: ev.triggered_by.clone(),
         reason: ev.reason.clone(),
         reason_code,
         price: ev.price,
@@ -974,6 +999,7 @@ fn canonicalise_cpu_event(ev: &CpuTradeEventRow) -> CanonicalEventRow {
 
 fn canonicalise_gpu_event(ev: &TraceEventRow) -> CanonicalEventRow {
     let decision = canonical_gpu_decision_action(&ev.kind, &ev.side);
+    let envelope = derive_decision_event_envelope(&decision.action_kind, &ev.reason);
     let reason_code = canonical_gpu_reason_code(&ev.reason);
     CanonicalEventRow {
         source_idx: ev.idx,
@@ -988,6 +1014,10 @@ fn canonicalise_gpu_event(ev: &TraceEventRow) -> CanonicalEventRow {
         action_side: decision.action_side,
         intent_signal: decision.intent_signal,
         action_taken: decision.action_taken,
+        event_type: envelope.event_type,
+        status: envelope.status,
+        decision_phase: envelope.decision_phase,
+        triggered_by: envelope.triggered_by,
         reason: ev.reason.clone(),
         reason_code,
         price: ev.price as f64,
@@ -1062,6 +1092,33 @@ fn decision_action_taken(kind: &str, side: &str) -> String {
     kind.to_lowercase()
 }
 
+fn derive_decision_event_envelope(action_kind: &str, raw_reason: &str) -> DecisionEventEnvelope {
+    let reason = raw_reason.trim().to_uppercase();
+    let triggered_by = if action_kind == "FUNDING" {
+        "schedule"
+    } else if reason.contains("SIGNAL_FLIP") || reason.contains("SIGNAL FLIP") {
+        "signal_flip"
+    } else if reason.contains("STOP LOSS") || reason.contains("TRAILING STOP") {
+        "stop_loss"
+    } else if action_kind == "OPEN" || action_kind == "ADD" || reason.contains("ENTRY") || reason.contains("PYRAMID")
+    {
+        "schedule"
+    } else {
+        "price_update"
+    };
+
+    DecisionEventEnvelope {
+        event_type: if action_kind == "FUNDING" {
+            "funding".to_string()
+        } else {
+            "fill".to_string()
+        },
+        status: "executed".to_string(),
+        decision_phase: "execution".to_string(),
+        triggered_by: triggered_by.to_string(),
+    }
+}
+
 fn canonical_cpu_reason_code(action_kind: &str, raw_reason: &str) -> String {
     let reason_upper = raw_reason.trim().to_uppercase();
     if reason_upper.contains("SIGNAL FLIP") {
@@ -1099,6 +1156,10 @@ fn canonical_events_equal(a: &CanonicalEventRow, b: &CanonicalEventRow) -> bool 
         && a.action_kind == b.action_kind
         && a.action_side == b.action_side
         && a.intent_signal == b.intent_signal
+        && a.event_type == b.event_type
+        && a.status == b.status
+        && a.decision_phase == b.decision_phase
+        && a.triggered_by == b.triggered_by
         && a.reason_code == b.reason_code
         && scale_1e6(a.price) == scale_1e6(b.price)
         && scale_1e6(a.size) == scale_1e6(b.size)
