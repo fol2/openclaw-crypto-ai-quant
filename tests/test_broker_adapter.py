@@ -13,9 +13,8 @@ Covers:
 from __future__ import annotations
 
 import json
-import math
 import time
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -386,7 +385,7 @@ class TestExecuteIntent:
         adapter = BrokerAdapter(client, config={"rate_limit_delay_s": 0})
         intent = _make_intent(kind="close", side="short", quantity=1.0, price=2900.0)
 
-        fill = adapter.execute_intent(intent)
+        adapter.execute_intent(intent)
 
         _, kwargs = client.market_close.call_args
         # Close of a Short position -> is_buy=True (buy to close)
@@ -480,7 +479,7 @@ class TestExecuteIntent:
         intent = _make_intent(kind="open", quantity=1.12999)
 
         symbol_info = {"sz_decimals": 2}
-        fill = adapter.execute_intent(intent, symbol_info=symbol_info)
+        adapter.execute_intent(intent, symbol_info=symbol_info)
 
         _, kwargs = client.market_open.call_args
         # quantity should be truncated to 2 decimals
@@ -529,7 +528,7 @@ class TestExecuteIntent:
         adapter = BrokerAdapter(client, config={"rate_limit_delay_s": 0})
         intent = _make_intent(kind="open", quantity=0.0, notional_usd=1000.0, price=100.0)
 
-        fill = adapter.execute_intent(intent)
+        adapter.execute_intent(intent)
 
         # 1000 / 100 = 10.0
         _, kwargs = client.market_open.call_args

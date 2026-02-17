@@ -346,7 +346,6 @@ class TestRecordAndReplay:
     def test_replay_all_aggregates(self):
         """replay_all returns a ParityReport with correct aggregates."""
         result_ok = _make_result()
-        result_different = _make_result_with_intent("open", "long")
 
         harness = DecisionParityHarness()
         harness.record_decision(
@@ -697,7 +696,7 @@ class TestFixtures:
             mock_rt = _make_mock_bt_runtime(_make_result())
             with mock.patch("strategy.parity_test._bt_runtime", mock_rt), \
                  mock.patch("strategy.parity_test._BT_RUNTIME_AVAILABLE", True):
-                pr = new_harness.replay_decision(0)
+                new_harness.replay_decision(0)
             mock_rt.step_full.assert_called_once()
         finally:
             os.unlink(path)

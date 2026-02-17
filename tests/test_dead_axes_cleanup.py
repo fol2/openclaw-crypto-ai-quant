@@ -8,7 +8,6 @@ from __future__ import annotations
 import copy
 import sys
 import os
-import types
 
 # Ensure project root is on sys.path so local imports work.
 _proj = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -22,7 +21,6 @@ if _proj not in sys.path:
 
 def test_regime_gate_reads_enable_regime_filter():
     """Engine should accept `enable_regime_filter` as alias for `enable_regime_gate`."""
-    from engine.core import UnifiedEngine
 
     # Build a minimal config dict the engine would see.
     rc = {
@@ -118,7 +116,6 @@ def test_reverse_entry_signal_flips_buy_sell(monkeypatch):
     # Instead of calling full analyze, let's test the reversal logic in isolation.
     signal = "BUY"
     trade_cfg = test_cfg["trade"]
-    cfg = test_cfg
 
     _should_reverse = bool(trade_cfg.get("reverse_entry_signal", False))
     assert _should_reverse is True

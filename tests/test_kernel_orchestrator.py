@@ -18,7 +18,6 @@ import json
 import os
 import sqlite3
 import tempfile
-import time
 from unittest import mock
 
 import pytest
