@@ -18,6 +18,7 @@ YAML config hot-reload is handled by StrategyManager, without reloading mei_alph
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import time
@@ -294,6 +295,23 @@ def acquire_lock_or_exit(lock_path: str):
         raise SystemExit(f"Failed to acquire lock {lock_path}: {e}")
 
     return lock_file
+
+
+def _close_lock_file(lock_file) -> None:
+    try:
+        if lock_file is not None:
+            lock_file.close()
+    except Exception:
+        # Best-effort cleanup on process exit.
+        pass
+
+
+def _register_lock_cleanup(lock_file, *, register_fn=atexit.register) -> None:
+    """Keep lock FD for process lifetime, but close cleanly at interpreter exit."""
+    try:
+        register_fn(_close_lock_file, lock_file)
+    except Exception:
+        logger.debug("failed to register daemon lock cleanup", exc_info=True)
 
 
 class PaperPlugin:
@@ -1082,7 +1100,10 @@ def main() -> None:
         "AI_QUANT_LOCK_PATH",
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", default_lock_name),
     )
+    # Intentionally keep the lock FD open for the daemon lifetime. Register
+    # a best-effort atexit cleanup so clean interpreter shutdown releases it.
     _lock = acquire_lock_or_exit(lock_path)
+    _register_lock_cleanup(_lock)
 
     # If a strategy mode is persisted locally, load it on startup (only when env is unset).
     try:
