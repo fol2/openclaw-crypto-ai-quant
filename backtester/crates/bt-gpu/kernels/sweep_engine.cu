@@ -18,6 +18,10 @@
 
 #include <cstdint>
 
+// Bounds-checked array access macro (H10: prevent out-of-bounds GPU reads)
+#define SAFE_IDX(arr, idx, max_idx, fallback) \
+    ((idx) < (max_idx) ? (arr)[(idx)] : (fallback))
+
 #define MAX_SYMBOLS      52u
 // Candidate buffer must cover the full project symbol universe to keep
 // ranking parity with CPU (no early truncation while scanning symbols).
@@ -236,6 +240,14 @@ struct EntryCandidate {
 
 // -- Helper functions ---------------------------------------------------------
 
+// H10: bounds-checked snapshot accessor. Returns a zeroed snapshot if idx is out of range.
+static __device__ GpuSnapshot safe_snapshot(const GpuSnapshot* snapshots, unsigned int idx, unsigned int max_idx) {
+    if (idx < max_idx) { return snapshots[idx]; }
+    GpuSnapshot z;
+    memset(&z, 0, sizeof(z));
+    return z;
+}
+
 __device__ float get_taker_fee_rate(const GpuParams* params) {
     return __uint_as_float(params->taker_fee_rate_bits);
 }
@@ -243,11 +255,13 @@ __device__ float get_taker_fee_rate(const GpuParams* params) {
 __device__ float profit_atr(const GpuPosition& pos, float price) {
     float atr = (pos.entry_atr > 0.0f) ? pos.entry_atr : (pos.entry_price * 0.005f);
     if (atr <= 0.0f) { return 0.0f; }
+    float result;
     if (pos.active == POS_LONG) {
-        return (price - pos.entry_price) / atr;
+        result = (price - pos.entry_price) / atr;
     } else {
-        return (pos.entry_price - price) / atr;
+        result = (pos.entry_price - price) / atr;
     }
+    return isfinite(result) ? result : 0.0f;
 }
 
 __device__ float profit_usd(const GpuPosition& pos, float price) {
@@ -756,10 +770,14 @@ extern "C" __global__ void sweep_engine_kernel(
 
     unsigned int max_sub = params->max_sub_per_bar;
 
+    // H10: precompute snapshot/breadth buffer bounds for safe indexing
+    unsigned int snap_buf_size = cfg.snapshot_offset + params->num_bars * ns;
+    unsigned int br_buf_size = cfg.breadth_offset + params->num_bars;
+
     for (unsigned int bar = params->chunk_start; bar < params->chunk_end; bar++) {
         state.entries_this_bar = 0u;
-        float breadth_pct = breadth[cfg.breadth_offset + bar];
-        unsigned int btc_bull = btc_bullish[cfg.breadth_offset + bar];
+        float breadth_pct = SAFE_IDX(breadth, cfg.breadth_offset + bar, br_buf_size, 0.0f);
+        unsigned int btc_bull = SAFE_IDX(btc_bullish, cfg.breadth_offset + bar, br_buf_size, BTC_BULL_UNKNOWN);
 
         if (max_sub > 0u) {
             // ================================================================

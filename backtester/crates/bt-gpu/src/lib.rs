@@ -154,16 +154,18 @@ fn run_gpu_sweep_internal(
 
     // BTC symbol index for breadth kernel.
     // Use u32::MAX sentinel when unavailable, so kernels can treat alignment as unknown.
+    // C7: validated u32 cast (symbols capped at GPU_MAX_SYMBOLS=52, always fits)
     let btc_sym_idx = symbols
         .iter()
         .position(|s| s == "BTC")
         .or_else(|| symbols.iter().position(|s| s == "BTCUSDT"))
-        .map(|idx| idx as u32)
+        .and_then(|idx| u32::try_from(idx).ok())
         .unwrap_or(u32::MAX);
 
     // ── 1. Prepare raw candles (CPU, layout only, ~10ms) ─────────────────
     let raw = raw_candles::prepare_raw_candles(candles, &symbols);
-    let num_bars = raw.num_bars as u32;
+    let num_bars = u32::try_from(raw.num_bars)
+        .expect("num_bars exceeds u32::MAX");
 
     // Compute trade bar range from time scope
     let (trade_start, trade_end) =
@@ -240,10 +242,16 @@ fn run_gpu_sweep_internal(
     let free_vram = device_state.free_vram_bytes();
 
     // Per-indicator-combo VRAM cost (snapshots + breadth + btc_bullish)
-    let snapshot_elements = (num_bars as usize) * num_symbols;
-    let snapshot_bytes_per_ind: usize = snapshot_elements * std::mem::size_of::<buffers::GpuSnapshot>() // 160 each
-        + (num_bars as usize) * std::mem::size_of::<f32>()             // breadth
-        + (num_bars as usize) * std::mem::size_of::<u32>(); // btc_bullish
+    // C8: use checked arithmetic to prevent overflow on large inputs
+    let snapshot_elements = (num_bars as usize).checked_mul(num_symbols)
+        .expect("overflow: num_bars * num_symbols");
+    let snapshot_bytes_per_ind: usize = snapshot_elements
+        .checked_mul(std::mem::size_of::<buffers::GpuSnapshot>())
+        .and_then(|v| v.checked_add(
+            (num_bars as usize).checked_mul(std::mem::size_of::<f32>())?))
+        .and_then(|v| v.checked_add(
+            (num_bars as usize).checked_mul(std::mem::size_of::<u32>())?))
+        .expect("overflow: snapshot_bytes_per_ind calculation");
 
     // Per-trade-combo VRAM cost (config + state + result)
     let combo_bytes: usize = std::mem::size_of::<buffers::GpuComboConfig>()
@@ -252,7 +260,9 @@ fn run_gpu_sweep_internal(
         + 32; // params overhead
 
     let t = trade_combos.len();
-    let per_ind_total_vram = snapshot_bytes_per_ind + t * combo_bytes;
+    let per_ind_total_vram = snapshot_bytes_per_ind.checked_add(
+        t.checked_mul(combo_bytes).expect("overflow: t * combo_bytes")
+    ).expect("overflow: per_ind_total_vram");
 
     // Hard cap: max 10 GB per snapshot allocation (large contiguous allocs
     // can fail even with plenty of total free VRAM due to fragmentation)
@@ -315,7 +325,7 @@ fn run_gpu_sweep_internal(
             &candles_gpu,
             &ind_configs,
             num_bars,
-            num_symbols as u32,
+            u32::try_from(num_symbols).expect("num_symbols exceeds u32::MAX"),
             btc_sym_idx,
         ) {
             Ok(bufs) => bufs,
@@ -325,7 +335,11 @@ fn run_gpu_sweep_internal(
                 continue;
             }
         };
-        gpu_host::dispatch_indicator_kernels(&device_state, &mut ind_bufs);
+        if let Err(e) = gpu_host::dispatch_indicator_kernels(&device_state, &mut ind_bufs) {
+            eprintln!("[GPU] Indicator kernel dispatch failed: {e} — skipping batch");
+            done += chunk.len();
+            continue;
+        }
 
         // c. Build K×T GpuComboConfigs with per-combo offsets
         let snapshot_stride = (num_bars as usize) * num_symbols;
@@ -348,8 +362,10 @@ fn run_gpu_sweep_internal(
         let mut combo_meta: Vec<(usize, usize)> = Vec::with_capacity(total_combos);
 
         for (ind_idx, (_ind_combo, ind_cfg)) in ind_cfgs.iter().enumerate() {
-            let snap_off = (ind_idx * snapshot_stride) as u32;
-            let br_off = (ind_idx * breadth_stride) as u32;
+            let snap_off = u32::try_from(ind_idx * snapshot_stride)
+                .expect("snapshot offset exceeds u32::MAX");
+            let br_off = u32::try_from(ind_idx * breadth_stride)
+                .expect("breadth offset exceeds u32::MAX");
 
             for (trade_idx, trade_overrides) in trade_combos.iter().enumerate() {
                 let mut cfg = ind_cfg.clone();
@@ -366,27 +382,47 @@ fn run_gpu_sweep_internal(
 
         // d. Dispatch trade kernel using VRAM-resident indicator data
         let combo_base = done * t;
-        let mut trade_bufs = gpu_host::BatchBuffers::from_indicator_buffers(
+        let mut trade_bufs = match gpu_host::BatchBuffers::from_indicator_buffers(
             &device_state,
             &ind_bufs,
             &gpu_configs,
             spec.initial_balance as f32,
             combo_base,
-        );
+        ) {
+            Ok(bufs) => bufs,
+            Err(e) => {
+                eprintln!("[GPU] Trade buffer allocation failed: {e} — skipping batch");
+                done += chunk.len();
+                continue;
+            }
+        };
         trade_bufs.max_sub_per_bar = max_sub_per_bar;
         trade_bufs.sub_candles = sub_candles_gpu.clone();
         trade_bufs.sub_counts = sub_counts_gpu.clone();
 
-        let gpu_results = gpu_host::dispatch_and_readback(
+        let gpu_results = match gpu_host::dispatch_and_readback(
             &device_state,
             &mut trade_bufs,
             num_bars,
             BAR_CHUNK_SIZE,
             trade_start,
             trade_end,
-        );
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[GPU] Trade kernel dispatch/readback failed: {e} — skipping batch");
+                done += chunk.len();
+                continue;
+            }
+        };
         let gpu_states = if capture_states {
-            Some(gpu_host::readback_states(&device_state, &trade_bufs))
+            match gpu_host::readback_states(&device_state, &trade_bufs) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    eprintln!("[GPU] State readback failed: {e}");
+                    None
+                }
+            }
         } else {
             None
         };

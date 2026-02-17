@@ -772,7 +772,10 @@ fn evaluate_trade_only_batch(
             return Vec::new();
         }
     };
-    gpu_host::dispatch_indicator_kernels(ds, &mut ind_bufs);
+    if let Err(e) = gpu_host::dispatch_indicator_kernels(ds, &mut ind_bufs) {
+        eprintln!("[TPE] Indicator kernel dispatch failed: {e}");
+        return Vec::new();
+    }
 
     let gpu_configs: Vec<buffers::GpuComboConfig> = trial_overrides
         .iter()
@@ -788,25 +791,37 @@ fn evaluate_trade_only_batch(
         })
         .collect();
 
-    let mut trade_bufs = gpu_host::BatchBuffers::from_indicator_buffers(
+    let mut trade_bufs = match gpu_host::BatchBuffers::from_indicator_buffers(
         ds,
         &ind_bufs,
         &gpu_configs,
         initial_balance,
         0,
-    );
+    ) {
+        Ok(bufs) => bufs,
+        Err(e) => {
+            eprintln!("[TPE] Trade buffer allocation failed: {e}");
+            return Vec::new();
+        }
+    };
     trade_bufs.max_sub_per_bar = max_sub_per_bar;
     trade_bufs.sub_candles = sub_candles_gpu.cloned();
     trade_bufs.sub_counts = sub_counts_gpu.cloned();
 
-    gpu_host::dispatch_and_readback(
+    match gpu_host::dispatch_and_readback(
         ds,
         &mut trade_bufs,
         num_bars,
         BAR_CHUNK_SIZE,
         trade_start,
         trade_end,
-    )
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[TPE] Trade kernel dispatch/readback failed: {e}");
+            Vec::new()
+        }
+    }
 }
 
 /// Evaluate a batch of trials where indicator params may vary per trial.
