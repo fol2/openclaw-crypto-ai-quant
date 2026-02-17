@@ -679,20 +679,31 @@ class MarketDataHub:
             return f if math.isfinite(f) else None
 
         out_rows: list[dict[str, Any]] = []
+        nan_inf_count = 0
         for t_ms, T_ms, o, h, low_val, c, v, n in rows:
+            ohlcv_raw = {"Open": o, "High": h, "Low": low_val, "Close": c, "Volume": v}
+            ohlcv_clean: dict[str, float | None] = {}
+            for field_name, raw_val in ohlcv_raw.items():
+                cleaned = _finite_or_none(raw_val)
+                if raw_val is not None and cleaned is None:
+                    nan_inf_count += 1
+                ohlcv_clean[field_name] = cleaned
             out_rows.append(
                 {
                     "timestamp": int(t_ms),
                     "T": int(T_ms) if T_ms is not None else None,
                     "s": symbol,
                     "i": interval,
-                    "Open": _finite_or_none(o),
-                    "High": _finite_or_none(h),
-                    "Low": _finite_or_none(low_val),
-                    "Close": _finite_or_none(c),
-                    "Volume": _finite_or_none(v),
+                    **ohlcv_clean,
                     "n": int(n) if n is not None else None,
                 }
+            )
+        if nan_inf_count > 0:
+            logger.warning(
+                "[%s@%s] %d non-finite (NaN/Inf) candle value(s) replaced with None",
+                symbol,
+                interval,
+                nan_inf_count,
             )
 
         df = pd.DataFrame(out_rows)
@@ -832,6 +843,8 @@ class MarketDataHub:
             self._rest_candle_pool.shutdown(wait=False)
 
     def _upsert_candles(self, symbol: str, interval: str, candles: list[dict[str, Any]]) -> None:
+        import math
+
         db_path = self._candle_db_path(interval)
         try:
             conn = sqlite3.connect(db_path, timeout=self._db_timeout_s)
@@ -844,8 +857,19 @@ class MarketDataHub:
                 "CREATE TABLE IF NOT EXISTS candles (symbol TEXT, interval TEXT, t INTEGER, t_close INTEGER, o REAL, h REAL, l REAL, c REAL, v REAL, n INTEGER, updated_at TEXT, PRIMARY KEY (symbol, interval, t))"
             )
             updated_at = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+            nan_inf_skipped = 0
             for c in candles:
                 try:
+                    ohlcv = [
+                        float(c.get("o")),
+                        float(c.get("h")),
+                        float(c.get("l")),
+                        float(c.get("c")),
+                        float(c.get("v")),
+                    ]
+                    if not all(math.isfinite(v) for v in ohlcv):
+                        nan_inf_skipped += 1
+                        continue
                     cur.execute(
                         """
                         INSERT INTO candles (symbol, interval, t, t_close, o, h, l, c, v, n, updated_at)
@@ -865,11 +889,11 @@ class MarketDataHub:
                             interval,
                             int(c.get("t")),
                             int(c.get("T") if c.get("T") is not None else c.get("t_close")),
-                            float(c.get("o")),
-                            float(c.get("h")),
-                            float(c.get("l")),
-                            float(c.get("c")),
-                            float(c.get("v")),
+                            ohlcv[0],
+                            ohlcv[1],
+                            ohlcv[2],
+                            ohlcv[3],
+                            ohlcv[4],
                             int(c.get("n")) if c.get("n") is not None else None,
                             updated_at,
                         ),
@@ -880,6 +904,13 @@ class MarketDataHub:
                 except sqlite3.OperationalError as e:
                     logger.warning("candle upsert: DB lock/timeout for %s/%s: %s", symbol, interval, e)
                     break
+            if nan_inf_skipped > 0:
+                logger.warning(
+                    "[%s@%s] skipped %d candle(s) with non-finite OHLCV during REST backfill upsert",
+                    symbol,
+                    interval,
+                    nan_inf_skipped,
+                )
             conn.commit()
         except sqlite3.OperationalError as e:
             logger.warning("candle upsert: commit failed for %s/%s: %s", symbol, interval, e)
