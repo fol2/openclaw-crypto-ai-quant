@@ -396,8 +396,8 @@ pub struct GpuComboConfig {
     pub tp_mult_strong: f32,
     pub tp_mult_weak: f32,
 
-    // Padding to 560 bytes (140 x 4 bytes) [139]
-    pub _codegen_pad: u32,
+    // Entry cooldown (seconds) [139]
+    pub entry_cooldown_s: u32,
 }
 
 const _: () = assert!(std::mem::size_of::<GpuComboConfig>() == 560);
@@ -464,10 +464,10 @@ const _: () = assert!(std::mem::size_of::<GpuTraceEvent>() == 40);
 /// Size:
 /// 16 (header)
 /// + 52*64 (positions)
-/// + 3*52*4 (PESC)
+/// + 4*52*4 (PESC + entry cooldown map)
 /// + 16 + 128*40 (trace control + ring)
 /// + 56 (accumulators) + 8 (pad)
-/// = 9,168 bytes
+/// = 9,376 bytes
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct GpuComboState {
@@ -483,6 +483,7 @@ pub struct GpuComboState {
     pub pesc_close_time_sec: [u32; 52],
     pub pesc_close_type: [u32; 52],   // 0=none, 1=LONG, 2=SHORT
     pub pesc_close_reason: [u32; 52], // 0=none, 1=signal_flip, 2=other
+    pub last_entry_attempt_sec: [u32; 52], // per-symbol successful entry/add timestamp
 
     // Optional GPU event trace (single-combo/symbol diagnostics)
     pub trace_enabled: u32,                // 0=off, 1=on
@@ -508,7 +509,7 @@ pub struct GpuComboState {
 unsafe impl Pod for GpuComboState {}
 unsafe impl Zeroable for GpuComboState {}
 
-const _: () = assert!(std::mem::size_of::<GpuComboState>() == 9168);
+const _: () = assert!(std::mem::size_of::<GpuComboState>() == 9376);
 const _: () = assert!(std::mem::size_of::<GpuComboState>() % 16 == 0);
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -752,7 +753,7 @@ impl GpuComboConfig {
             ave_enabled: et.ave_enabled as u32,
             tp_mult_strong: tp.tp_mult_strong as f32,
             tp_mult_weak: tp.tp_mult_weak as f32,
-            _codegen_pad: 0,
+            entry_cooldown_s: tc.entry_cooldown_s as u32,
         })
     }
 }
@@ -829,8 +830,8 @@ mod tests {
         // Default TP multipliers
         assert!((gpu.tp_mult_strong - 7.0).abs() < f32::EPSILON);
         assert!((gpu.tp_mult_weak - 3.0).abs() < f32::EPSILON);
-        // Padding is zero
-        assert_eq!(gpu._codegen_pad, 0);
+        // Entry cooldown is propagated
+        assert_eq!(gpu.entry_cooldown_s, cfg.trade.entry_cooldown_s as u32);
     }
 
     /// H11: verify that extreme f64 values that overflow f32 are caught.

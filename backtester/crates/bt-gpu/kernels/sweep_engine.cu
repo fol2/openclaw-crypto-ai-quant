@@ -195,7 +195,7 @@ struct __align__(16) GpuComboConfig {
     float stoch_rsi_block_long_gt;  float stoch_rsi_block_short_lt;
     unsigned int ave_enabled;
     float tp_mult_strong;  float tp_mult_weak;
-    unsigned int _codegen_pad;
+    unsigned int entry_cooldown_s;
 };
 
 struct GpuComboState {
@@ -204,6 +204,7 @@ struct GpuComboState {
     unsigned int pesc_close_time_sec[52];
     unsigned int pesc_close_type[52];
     unsigned int pesc_close_reason[52];
+    unsigned int last_entry_attempt_sec[52];
     unsigned int trace_enabled;
     unsigned int trace_symbol;
     unsigned int trace_count;
@@ -732,6 +733,17 @@ __device__ bool is_pesc_blocked(const GpuComboState* state, unsigned int sym,
     );
 }
 
+__device__ __forceinline__ bool is_entry_cooldown_active(const GpuComboState* state,
+                                                          unsigned int sym,
+                                                          unsigned int ts_sec,
+                                                          const GpuComboConfig* cfg) {
+    if (cfg->entry_cooldown_s == 0u) { return false; }
+    unsigned int last_sec = state->last_entry_attempt_sec[sym];
+    if (last_sec == 0u) { return false; }
+    if (ts_sec <= last_sec) { return true; }
+    return (ts_sec - last_sec) < cfg->entry_cooldown_s;
+}
+
 // -- TP Multiplier (must mirror bt-core fixed tp_atr_mult semantics) ---------
 
 __device__ float get_tp_mult(const GpuSnapshot& snap, const GpuComboConfig* cfg) {
@@ -953,6 +965,9 @@ extern "C" __global__ void sweep_engine_kernel(
 
                     // Pyramiding (immediate, not ranked)
                     if (pos.active != POS_EMPTY && cfg.enable_pyramiding != 0u) {
+                        if (is_entry_cooldown_active(&state, sym, hybrid.t_sec, &cfg)) {
+                            continue;
+                        }
                         if (pos.adds_count < cfg.max_adds_per_symbol) {
                             // AQC-1252: confidence gate for pyramid adds
                             if (cfg.add_min_confidence > 0u) {
@@ -1010,6 +1025,7 @@ extern "C" __global__ void sweep_engine_kernel(
                                     state.positions[sym].margin_used += add_margin;
                                     state.positions[sym].adds_count += 1u;
                                     state.positions[sym].last_add_time_sec = hybrid.t_sec;
+                                    state.last_entry_attempt_sec[sym] = hybrid.t_sec;
                                     trace_record(
                                         &state,
                                         sym,
@@ -1028,6 +1044,7 @@ extern "C" __global__ void sweep_engine_kernel(
                     }
 
                     if (pos.active != POS_EMPTY) { continue; }
+                    if (is_entry_cooldown_active(&state, sym, hybrid.t_sec, &cfg)) { continue; }
 
                     // Gates, signal generation, filters (using hybrid snapshot with indicator values)
                     // AQC-1213: gates and signal now use codegen (double precision)
@@ -1195,6 +1212,7 @@ extern "C" __global__ void sweep_engine_kernel(
                     new_pos._pad[1] = 0u;
                     new_pos._pad[2] = 0u;
                     state.positions[cand.sym_idx] = new_pos;
+                    state.last_entry_attempt_sec[cand.sym_idx] = hybrid.t_sec;
 
                     state.num_open += 1u;
                     state.entries_this_bar += 1u;
@@ -1277,6 +1295,9 @@ extern "C" __global__ void sweep_engine_kernel(
                 // Pyramiding (same-direction add) -- not ranked, immediate
                 const GpuPosition& pos_after_exit = state.positions[sym];
                 if (pos_after_exit.active != POS_EMPTY && cfg.enable_pyramiding != 0u) {
+                    if (is_entry_cooldown_active(&state, sym, snap.t_sec, &cfg)) {
+                        continue;
+                    }
                     if (pos_after_exit.adds_count < cfg.max_adds_per_symbol) {
                         // AQC-1252: confidence gate for pyramid adds
                         if (cfg.add_min_confidence > 0u) {
@@ -1324,6 +1345,7 @@ extern "C" __global__ void sweep_engine_kernel(
                                 state.positions[sym].margin_used += add_margin;
                                 state.positions[sym].adds_count += 1u;
                                 state.positions[sym].last_add_time_sec = snap.t_sec;
+                                state.last_entry_attempt_sec[sym] = snap.t_sec;
                                 trace_record(
                                     &state,
                                     sym,
@@ -1354,6 +1376,7 @@ extern "C" __global__ void sweep_engine_kernel(
                 const GpuPosition& pos = state.positions[sym];
 
                 if (pos.active != POS_EMPTY) { continue; }
+                if (is_entry_cooldown_active(&state, sym, snap.t_sec, &cfg)) { continue; }
 
                 // AQC-1213: gates and signal now use codegen (double precision)
                 bool is_btc_symbol = (sym == params->btc_sym_idx);
@@ -1509,6 +1532,7 @@ extern "C" __global__ void sweep_engine_kernel(
                 new_pos._pad[1] = 0u;
                 new_pos._pad[2] = 0u;
                 state.positions[cand.sym_idx] = new_pos;
+                state.last_entry_attempt_sec[cand.sym_idx] = snap.t_sec;
 
                 state.num_open += 1u;
                 state.entries_this_bar += 1u;
