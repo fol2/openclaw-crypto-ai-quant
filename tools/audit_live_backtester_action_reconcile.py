@@ -99,6 +99,37 @@ def _normalise_confidence(value: Any) -> str:
     return conf
 
 
+def _classify_reason_code(action_code: str, reason: str) -> str:
+    action = str(action_code or "").strip().upper()
+    reason_text = str(reason or "")
+
+    if action == FUNDING_ACTION:
+        return "funding_payment"
+    if action.startswith("OPEN_"):
+        if "sub-bar" in reason_text:
+            return "entry_signal_sub_bar"
+        return "entry_signal"
+    if action.startswith("ADD_"):
+        return "entry_pyramid"
+    if action.startswith("CLOSE_") or action.startswith("REDUCE_"):
+        if "Stop Loss" in reason_text:
+            return "exit_stop_loss"
+        if "Trailing Stop" in reason_text:
+            return "exit_trailing_stop"
+        if "Take Profit" in reason_text:
+            return "exit_take_profit"
+        if "Signal Flip" in reason_text:
+            return "exit_signal_flip"
+        if "Funding" in reason_text:
+            return "exit_funding"
+        if "Force Close" in reason_text:
+            return "exit_force_close"
+        if "End of Backtest" in reason_text:
+            return "exit_end_of_backtest"
+        return "exit_filter"
+    return "unknown"
+
+
 def _almost_equal(left: float, right: float, tol: float) -> bool:
     return math.isclose(float(left), float(right), rel_tol=0.0, abs_tol=tol)
 
@@ -172,6 +203,7 @@ def _load_live_actions(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]
                     "balance": _parse_float(row.get("balance")),
                     "confidence": _normalise_confidence(row.get("confidence")),
                     "reason": str(row.get("reason") or ""),
+                    "reason_code": _classify_reason_code(action_code, str(row.get("reason") or "")),
                 }
             )
 
@@ -203,6 +235,11 @@ def _load_backtester_actions(path: Path) -> tuple[list[dict[str, Any]], dict[str
         if not symbol or ts_ms <= 0:
             continue
 
+        reason_text = str(row.get("reason") or "")
+        reason_code = str(row.get("reason_code") or "").strip().lower()
+        if not reason_code:
+            reason_code = _classify_reason_code(action_code, reason_text)
+
         actions.append(
             {
                 "source": "backtester",
@@ -217,8 +254,8 @@ def _load_backtester_actions(path: Path) -> tuple[list[dict[str, Any]], dict[str
                 "fee_usd": _parse_float(row.get("fee")),
                 "balance": _parse_float(row.get("balance")),
                 "confidence": _normalise_confidence(row.get("confidence")),
-                "reason": str(row.get("reason") or ""),
-                "reason_code": str(row.get("reason_code") or ""),
+                "reason": reason_text,
+                "reason_code": reason_code,
             }
         )
 
@@ -269,6 +306,7 @@ def _compare_actions(
     matched_pairs = 0
     numeric_mismatch = 0
     confidence_mismatch = 0
+    reason_code_mismatch = 0
     unmatched_live = 0
     unmatched_backtester = 0
     non_simulatable_residuals = 0
@@ -328,17 +366,27 @@ def _compare_actions(
             live_conf = str(lrow["confidence"] or "")
             bt_conf = str(brow["confidence"] or "")
             has_confidence_mismatch = bool(live_conf and bt_conf and live_conf != bt_conf)
+            live_reason_code = str(lrow["reason_code"] or "")
+            bt_reason_code = str(brow["reason_code"] or "")
+            has_reason_code_mismatch = bool(live_reason_code and bt_reason_code and live_reason_code != bt_reason_code)
 
-            if not has_numeric_mismatch and not has_confidence_mismatch:
+            if not has_numeric_mismatch and not has_confidence_mismatch and not has_reason_code_mismatch:
                 continue
 
             if has_numeric_mismatch:
                 numeric_mismatch += 1
             if has_confidence_mismatch:
                 confidence_mismatch += 1
+            if has_reason_code_mismatch:
+                reason_code_mismatch += 1
 
             classification = "numeric_policy_divergence" if has_numeric_mismatch else "deterministic_logic_divergence"
-            kind = "action_numeric_mismatch" if has_numeric_mismatch else "confidence_mismatch"
+            if has_numeric_mismatch:
+                kind = "action_numeric_mismatch"
+            elif has_reason_code_mismatch:
+                kind = "reason_code_mismatch"
+            else:
+                kind = "confidence_mismatch"
 
             mismatches.append(
                 {
@@ -358,6 +406,7 @@ def _compare_actions(
                         "fee_usd": lrow["fee_usd"],
                         "balance": lrow["balance"],
                         "confidence": live_conf,
+                        "reason_code": live_reason_code,
                         "reason": lrow["reason"],
                     },
                     "backtester": {
@@ -367,7 +416,7 @@ def _compare_actions(
                         "fee_usd": brow["fee_usd"],
                         "balance": brow["balance"],
                         "confidence": bt_conf,
-                        "reason_code": brow["reason_code"],
+                        "reason_code": bt_reason_code,
                         "reason": brow["reason"],
                     },
                     "delta": {
@@ -387,6 +436,7 @@ def _compare_actions(
                     "flags": {
                         "numeric_mismatch": has_numeric_mismatch,
                         "confidence_mismatch": has_confidence_mismatch,
+                        "reason_code_mismatch": has_reason_code_mismatch,
                     },
                 }
             )
@@ -429,6 +479,7 @@ def _compare_actions(
                                 "fee_usd": lrow["fee_usd"],
                                 "balance": lrow["balance"],
                                 "confidence": lrow["confidence"],
+                                "reason_code": lrow["reason_code"],
                                 "reason": lrow["reason"],
                             },
                         }
@@ -495,6 +546,7 @@ def _compare_actions(
         "matched_pairs": matched_pairs,
         "numeric_mismatch": numeric_mismatch,
         "confidence_mismatch": confidence_mismatch,
+        "reason_code_mismatch": reason_code_mismatch,
         "unmatched_live": unmatched_live,
         "unmatched_backtester": unmatched_backtester,
         "non_simulatable_residuals": non_simulatable_residuals,
@@ -541,6 +593,7 @@ def main() -> int:
     strict_alignment_pass = (
         compare_summary["numeric_mismatch"] == 0
         and compare_summary["confidence_mismatch"] == 0
+        and compare_summary["reason_code_mismatch"] == 0
         and compare_summary["unmatched_live"] == 0
         and compare_summary["unmatched_backtester"] == 0
     )
