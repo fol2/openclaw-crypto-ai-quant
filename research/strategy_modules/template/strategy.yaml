@@ -6,10 +6,15 @@ global:
   trade:
     allocation_pct: 0.03
     leverage: 3.0
+    leverage_low: 1.0
+    leverage_medium: 3.0
+    leverage_high: 5.0
+    leverage_max_cap: 10.0
     sl_atr_mult: 2.0
     tp_atr_mult: 4.0
     slippage_bps: 10.0
     max_open_positions: 20
+    max_entry_orders_per_loop: 6
     max_total_margin_pct: 0.60
     min_notional_usd: 10.0
     min_atr_pct: 0.003
@@ -30,4 +35,3 @@ global:
     interval: 1h
     entry_interval: 5m
     exit_interval: 5m
-
