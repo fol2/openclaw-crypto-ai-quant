@@ -362,21 +362,7 @@ def _normalise_kernel_target_size(raw_size: Any, raw_notional: Any, raw_price: A
             return quantity
     except (TypeError, ValueError):
         pass
-
-    try:
-        notional = float(raw_notional)
-        if notional <= 0.0:
-            return None
-    except (TypeError, ValueError):
-        return None
-
-    try:
-        price = float(raw_price)
-        if price <= 0.0:
-            return None
-        return notional / price
-    except (TypeError, ValueError, ZeroDivisionError):
-        return None
+    return None
 
 
 def _normalise_kernel_price(raw_price: Any, default: float = 0.0) -> float:
