@@ -356,6 +356,18 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         self.positions = {}
         self.sync_from_exchange(force=True)
 
+    def _reconcile_after_submit_unknown(self, *, symbol: str, action: str) -> None:
+        """Best-effort reconciliation after ambiguous submit outcomes (timeout/transport errors)."""
+        try:
+            self.sync_from_exchange(force=True)
+        except Exception:
+            logger.warning(
+                "post-timeout reconciliation failed for %s %s",
+                action,
+                symbol,
+                exc_info=True,
+            )
+
     def sync_from_exchange(self, *, force: bool = False) -> None:
         snap = self.executor.account_snapshot(force=force)
         self._account_value_usd = float(snap.account_value_usd)
@@ -1301,7 +1313,6 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
 
             if err_kind in {"timeout", "exception"}:
                 # Transport errors are ambiguous: the order may have been accepted even if the response timed out.
-                # TODO(H1): Trigger reconciliation check after timeout to detect state divergence.
                 logger.warning("order timeout/exception for ADD %s — exchange state may diverge", sym)
                 self._note_entry_fail(sym, f"market_open {err_kind}")
                 if risk is not None:
@@ -1333,6 +1344,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                         )
                     except Exception:
                         pass
+                self._reconcile_after_submit_unknown(symbol=sym, action="ADD")
             else:
                 self._note_entry_fail(sym, "market_open rejected")
                 if oms_intent is not None and oms is not None:
@@ -2584,7 +2596,6 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
 
             if err_kind in {"timeout", "exception"}:
                 # Transport errors are ambiguous: the order may have been accepted even if the response timed out.
-                # TODO(H1): Trigger reconciliation check after timeout to detect state divergence.
                 logger.warning("order timeout/exception for OPEN %s — exchange state may diverge", sym)
                 self._note_entry_fail(sym, f"market_open {err_kind}")
                 if risk is not None:
@@ -2622,6 +2633,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                         self._pending_open_sent_at_s[sym] = time.time()
                 except Exception:
                     pass
+                self._reconcile_after_submit_unknown(symbol=sym, action="OPEN")
             else:
                 self._note_entry_fail(sym, "market_open rejected")
                 if oms_intent is not None and oms is not None:
