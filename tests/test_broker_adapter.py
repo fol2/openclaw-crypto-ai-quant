@@ -227,6 +227,7 @@ class TestSizeRounding:
 
     def test_round_to_zero_decimals(self):
         assert round_size(123.999, 0) == pytest.approx(123.0)
+        assert round_size(0.9999999999995, 0) == pytest.approx(0.0)
 
     def test_round_to_four_decimals(self):
         assert round_size(0.12345678, 4) == pytest.approx(0.1234)
@@ -246,6 +247,12 @@ class TestSizeRounding:
     def test_truncates_not_rounds_up(self):
         # 1.999 with 2 decimals should truncate to 1.99, NOT round to 2.00
         assert round_size(1.999, 2) == pytest.approx(1.99)
+
+    def test_binary_float_edge_keeps_expected_precision(self):
+        # 0.29 * 100 can become 28.999..., so flooring without epsilon would yield 0.28.
+        assert round_size(0.29, 2) == pytest.approx(0.29)
+        assert round_size(256.03, 2) == pytest.approx(256.03)
+        assert round_size(2.0018, 4) == pytest.approx(2.0018)
 
 
 # ===========================================================================

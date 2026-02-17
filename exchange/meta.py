@@ -2,6 +2,7 @@ import os
 import time
 import math
 import threading
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from dataclasses import dataclass
 
 from hyperliquid.info import Info
@@ -220,8 +221,11 @@ def round_size(symbol: str, size: float) -> float:
     if size <= 0:
         return 0.0
     decimals = get_sz_decimals(symbol)
-    factor = 10**decimals
-    return int(size * factor) / factor
+    try:
+        quantum = Decimal("1").scaleb(-int(max(0, decimals)))
+        return float(Decimal(str(size)).quantize(quantum, rounding=ROUND_DOWN))
+    except (InvalidOperation, ValueError, OverflowError):
+        return 0.0
 
 
 def round_size_up(symbol: str, size: float) -> float:
