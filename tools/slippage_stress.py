@@ -167,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
             failure = {
                 "slippage_bps": float(bps),
                 "ok": False,
+                "metrics": None,
                 "exit_code": int(rc),
                 "stderr_path": str(replay_stderr),
                 "error": f"replay_failed_exit_{int(rc)}",
@@ -181,6 +182,7 @@ def main(argv: list[str] | None = None) -> int:
             failure = {
                 "slippage_bps": float(bps),
                 "ok": False,
+                "metrics": None,
                 "exit_code": int(rc),
                 "stderr_path": str(replay_stderr),
                 "error": f"report_parse_error: {type(e).__name__}: {e}",
@@ -216,6 +218,11 @@ def main(argv: list[str] | None = None) -> int:
 
     flip_sign = bool(has_baseline and has_reject and baseline_pnl > 0 and reject_pnl < 0)
     reject = bool(flip_sign or degraded)
+    reject_reasons: list[str] = []
+    if flip_sign:
+        reject_reasons.append("flip_sign_at_reject_bps")
+    if degraded:
+        reject_reasons.append("degraded_run")
 
     summary = {
         "config_path": str(config_path),
@@ -234,6 +241,8 @@ def main(argv: list[str] | None = None) -> int:
             "degraded": bool(degraded),
             "degraded_reasons": [str(x) for x in degraded_reasons],
             "failed_levels": [float(x.get("slippage_bps", 0.0)) for x in failed_levels],
+            "reject_reasons": [str(x) for x in reject_reasons],
+            "reject_reason": str(reject_reasons[0]) if reject_reasons else "",
             "reject": bool(reject),
         },
         "elapsed_s": float(time.time() - t0),
