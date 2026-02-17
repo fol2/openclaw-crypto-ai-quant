@@ -8,7 +8,7 @@
 //! - "sweep" — sweep_engine_kernel (trade logic)
 //! - "indicators" — indicator_kernel + breadth_kernel (indicator computation)
 
-use std::sync::Arc;
+use std::{env, sync::Arc};
 
 use cudarc::driver::{
     CudaDevice, CudaFunction, CudaSlice, DeviceRepr, LaunchAsync, LaunchConfig, ValidAsZeroBits,
@@ -18,7 +18,7 @@ use cudarc::nvrtc::Ptx;
 
 use crate::buffers::{
     GpuComboConfig, GpuComboState, GpuIndicatorConfig, GpuParams, GpuRawCandle, GpuResult,
-    GpuSnapshot, IndicatorParams,
+    GpuSnapshot, IndicatorParams, GPU_TRACE_SYMBOL_ALL,
 };
 use bytemuck::Zeroable;
 
@@ -43,6 +43,41 @@ unsafe impl ValidAsZeroBits for GpuParams {}
 unsafe impl ValidAsZeroBits for GpuRawCandle {}
 unsafe impl ValidAsZeroBits for GpuIndicatorConfig {}
 unsafe impl ValidAsZeroBits for IndicatorParams {}
+
+fn env_truthy(name: &str) -> bool {
+    env::var(name)
+        .map(|v| {
+            let s = v.trim().to_ascii_lowercase();
+            s == "1" || s == "true" || s == "yes" || s == "on"
+        })
+        .unwrap_or(false)
+}
+
+fn trace_env_config(combo_base: usize, num_combos: usize) -> Option<(usize, u32)> {
+    let trace_enabled = env_truthy("AQC_GPU_TRACE")
+        || env::var("AQC_GPU_TRACE_COMBO").is_ok()
+        || env::var("AQC_GPU_TRACE_SYMBOL").is_ok();
+    if !trace_enabled || num_combos == 0 {
+        return None;
+    }
+
+    let combo_idx_global = env::var("AQC_GPU_TRACE_COMBO")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    let combo_end = combo_base.saturating_add(num_combos);
+    if combo_idx_global < combo_base || combo_idx_global >= combo_end {
+        return None;
+    }
+    let combo_idx = combo_idx_global - combo_base;
+
+    let sym_idx = env::var("AQC_GPU_TRACE_SYMBOL")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(GPU_TRACE_SYMBOL_ALL);
+
+    Some((combo_idx, sym_idx))
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GpuDeviceState — persistent CUDA device (reused across batches)
@@ -272,6 +307,7 @@ impl BatchBuffers {
         ind_bufs: &IndicatorBuffers,
         configs: &[GpuComboConfig],
         initial_balance: f32,
+        combo_base: usize,
     ) -> Self {
         let num_combos = configs.len() as u32;
         let num_bars = ind_bufs.num_bars;
@@ -283,6 +319,10 @@ impl BatchBuffers {
         for s in &mut states_host {
             s.balance = initial_balance as f64;
             s.peak_equity = initial_balance as f64;
+        }
+        if let Some((combo_idx, sym_idx)) = trace_env_config(combo_base, states_host.len()) {
+            states_host[combo_idx].trace_enabled = 1;
+            states_host[combo_idx].trace_symbol = sym_idx;
         }
         let states = ds.dev.htod_sync_copy(&states_host).unwrap();
         let results = ds.dev.alloc_zeros::<GpuResult>(configs.len()).unwrap();
@@ -344,6 +384,10 @@ impl BatchBuffers {
         for s in &mut states_host {
             s.balance = initial_balance as f64;
             s.peak_equity = initial_balance as f64;
+        }
+        if let Some((combo_idx, sym_idx)) = trace_env_config(0, states_host.len()) {
+            states_host[combo_idx].trace_enabled = 1;
+            states_host[combo_idx].trace_symbol = sym_idx;
         }
         let states = ds.dev.htod_sync_copy(&states_host).unwrap();
         let results = ds.dev.alloc_zeros::<GpuResult>(configs.len()).unwrap();
@@ -480,4 +524,9 @@ pub fn dispatch_and_readback(
     }
 
     ds.dev.dtoh_sync_copy(&buffers.results).unwrap()
+}
+
+/// Read back mutable combo states from device.
+pub fn readback_states(ds: &GpuDeviceState, buffers: &BatchBuffers) -> Vec<GpuComboState> {
+    ds.dev.dtoh_sync_copy(&buffers.states).unwrap()
 }

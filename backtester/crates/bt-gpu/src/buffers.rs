@@ -11,6 +11,10 @@ use bytemuck::{Pod, Zeroable};
 
 /// Hard symbol ceiling imposed by GPU kernel state layout.
 pub const GPU_MAX_SYMBOLS: usize = 52;
+/// Fixed-size ring buffer capacity for per-combo GPU execution trace events.
+pub const GPU_TRACE_CAP: usize = 128;
+/// Trace symbol selector sentinel: capture events for all symbols.
+pub const GPU_TRACE_SYMBOL_ALL: u32 = u32::MAX;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GpuSnapshot — precomputed indicator values per (bar, symbol)
@@ -424,6 +428,26 @@ pub struct GpuPosition {
 
 const _: () = assert!(std::mem::size_of::<GpuPosition>() == 64);
 
+/// Compact trace event emitted by the GPU sweep kernel.
+///
+/// Stored in `GpuComboState::trace_events` ring buffer.
+///
+/// 32 bytes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct GpuTraceEvent {
+    pub t_sec: u32,
+    pub sym: u32,
+    pub kind: u32,
+    pub side: u32,
+    pub reason: u32,
+    pub price: f32,
+    pub size: f32,
+    pub pnl: f32,
+}
+
+const _: () = assert!(std::mem::size_of::<GpuTraceEvent>() == 32);
+
 // ═══════════════════════════════════════════════════════════════════════════
 // GpuComboState — mutable state per combo (positions + accumulators)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -435,7 +459,13 @@ const _: () = assert!(std::mem::size_of::<GpuPosition>() == 64);
 ///
 /// Accumulator fields use f64 (double) for precision over 10K+ trade accumulations.
 ///
-/// Size: 16 (header) + 52*64 (positions) + 3*52*4 (PESC) + 56 (accumulators) + 8 (pad) = 4,032
+/// Size:
+/// 16 (header)
+/// + 52*64 (positions)
+/// + 3*52*4 (PESC)
+/// + 16 + 128*32 (trace control + ring)
+/// + 56 (accumulators) + 8 (pad)
+/// = 8,144 bytes
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct GpuComboState {
@@ -451,6 +481,13 @@ pub struct GpuComboState {
     pub pesc_close_time_sec: [u32; 52],
     pub pesc_close_type: [u32; 52],   // 0=none, 1=LONG, 2=SHORT
     pub pesc_close_reason: [u32; 52], // 0=none, 1=signal_flip, 2=other
+
+    // Optional GPU event trace (single-combo/symbol diagnostics)
+    pub trace_enabled: u32,                // 0=off, 1=on
+    pub trace_symbol: u32,                 // symbol index, or GPU_TRACE_SYMBOL_ALL
+    pub trace_count: u32,                  // number of valid entries in ring (<= GPU_TRACE_CAP)
+    pub trace_head: u32,                   // monotonic write cursor
+    pub trace_events: [GpuTraceEvent; GPU_TRACE_CAP], // fixed ring buffer
 
     // Result accumulators (f64 for precision)
     pub total_pnl: f64,
@@ -469,7 +506,7 @@ pub struct GpuComboState {
 unsafe impl Pod for GpuComboState {}
 unsafe impl Zeroable for GpuComboState {}
 
-const _: () = assert!(std::mem::size_of::<GpuComboState>() == 4032);
+const _: () = assert!(std::mem::size_of::<GpuComboState>() == 8144);
 const _: () = assert!(std::mem::size_of::<GpuComboState>() % 16 == 0);
 
 // ═══════════════════════════════════════════════════════════════════════════

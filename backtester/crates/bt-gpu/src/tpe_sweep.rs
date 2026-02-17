@@ -793,6 +793,7 @@ fn evaluate_trade_only_batch(
         &ind_bufs,
         &gpu_configs,
         initial_balance,
+        0,
     );
     trade_bufs.max_sub_per_bar = max_sub_per_bar;
     trade_bufs.sub_candles = sub_candles_gpu.cloned();
