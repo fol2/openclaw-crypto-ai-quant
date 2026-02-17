@@ -1,6 +1,7 @@
 import os
 import time
 import math
+import threading
 from dataclasses import dataclass
 
 from hyperliquid.info import Info
@@ -23,6 +24,7 @@ _cached_at_s: float | None = None
 _cached_instruments: dict[str, PerpInstrument] = {}
 _cached_margin_tables: dict[int, dict] = {}
 _next_refresh_allowed_s: float | None = None
+_CACHE_LOCK = threading.RLock()
 
 
 def _hl_timeout_s() -> float:
@@ -38,8 +40,11 @@ def _refresh_cache() -> None:
     global _cached_at_s, _cached_instruments, _cached_margin_tables, _next_refresh_allowed_s
 
     now_s = time.time()
-    if _next_refresh_allowed_s is not None and now_s < _next_refresh_allowed_s:
-        return
+    with _CACHE_LOCK:
+        if _cached_at_s is not None and (now_s - _cached_at_s) <= _CACHE_TTL_S:
+            return
+        if _next_refresh_allowed_s is not None and now_s < _next_refresh_allowed_s:
+            return
 
     try:
         info = Info(constants.MAINNET_API_URL, skip_ws=True, timeout=_hl_timeout_s())
@@ -57,7 +62,8 @@ def _refresh_cache() -> None:
             cooldown_s = float(os.getenv("AI_QUANT_HL_META_FAIL_COOLDOWN_S", "60"))
         except Exception:
             cooldown_s = 60.0
-        _next_refresh_allowed_s = now_s + max(5.0, min(600.0, cooldown_s))
+        with _CACHE_LOCK:
+            _next_refresh_allowed_s = now_s + max(5.0, min(600.0, cooldown_s))
         return
         
     meta = data[0]
@@ -123,29 +129,33 @@ def _refresh_cache() -> None:
             if isinstance(entry[1], dict):
                 margin_tables[table_id] = entry[1]
 
-    _cached_instruments = instruments
-    _cached_margin_tables = margin_tables
-    _cached_at_s = now_s
-    _next_refresh_allowed_s = None
+    with _CACHE_LOCK:
+        _cached_instruments = instruments
+        _cached_margin_tables = margin_tables
+        _cached_at_s = now_s
+        _next_refresh_allowed_s = None
 
 
 def _ensure_cache() -> None:
-    global _cached_at_s
-    if _cached_at_s is None or (time.time() - _cached_at_s) > _CACHE_TTL_S:
+    with _CACHE_LOCK:
+        cached_at_s = _cached_at_s
+    if cached_at_s is None or (time.time() - cached_at_s) > _CACHE_TTL_S:
         _refresh_cache()
 
 
 def get_sz_decimals(symbol: str) -> int:
     _ensure_cache()
     sym = (symbol or "").upper()
-    inst = _cached_instruments.get(sym)
+    with _CACHE_LOCK:
+        inst = _cached_instruments.get(sym)
     return int(inst.sz_decimals) if inst else 4
 
 
 def get_funding_rate(symbol: str) -> float:
     _ensure_cache()
     sym = (symbol or "").upper()
-    inst = _cached_instruments.get(sym)
+    with _CACHE_LOCK:
+        inst = _cached_instruments.get(sym)
     return float(inst.funding_rate) if inst else 0.0
 
 
@@ -153,7 +163,8 @@ def get_day_notional_volume(symbol: str) -> float:
     """Returns the 24h notional volume (USD) for the perp, if available."""
     _ensure_cache()
     sym = (symbol or "").upper()
-    inst = _cached_instruments.get(sym)
+    with _CACHE_LOCK:
+        inst = _cached_instruments.get(sym)
     return float(inst.day_ntl_vlm) if inst else 0.0
 
 
@@ -172,7 +183,10 @@ def top_symbols_by_day_notional_volume(n: int, *, min_volume_usd: float = 0.0) -
 
     min_v = float(min_volume_usd or 0.0)
     rows: list[tuple[str, float]] = []
-    for sym, inst in _cached_instruments.items():
+    with _CACHE_LOCK:
+        rows_iter = list(_cached_instruments.items())
+
+    for sym, inst in rows_iter:
         try:
             v = float(inst.day_ntl_vlm or 0.0)
         except Exception:
@@ -229,11 +243,11 @@ def max_leverage(symbol: str, notional_usd: float) -> float | None:
     """Returns the max allowed leverage for the given notional, if metadata is available."""
     _ensure_cache()
     sym = (symbol or "").upper()
-    inst = _cached_instruments.get(sym)
-    if not inst or inst.margin_table_id is None:
-        return None
-
-    table = _cached_margin_tables.get(inst.margin_table_id)
+    with _CACHE_LOCK:
+        inst = _cached_instruments.get(sym)
+        if not inst or inst.margin_table_id is None:
+            return None
+        table = _cached_margin_tables.get(inst.margin_table_id)
     if not table:
         return None
 
