@@ -13,11 +13,18 @@ RestartSec=5
 KillMode=process
 
 # Security hardening
+NoNewPrivileges=true
 ProtectSystem=strict
-NoNewPrivileges=yes
-PrivateTmp=yes
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadWritePaths=/home/fol2hk/openclaw-plugins/ai_quant
+ReadWritePaths=$PROJECT_DIR
 
 [Install]
 WantedBy=default.target

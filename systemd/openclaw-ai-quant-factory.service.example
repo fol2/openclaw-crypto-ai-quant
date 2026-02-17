@@ -12,11 +12,18 @@ EnvironmentFile=-%h/.config/openclaw/ai-quant-live.env
 ExecStart=/usr/bin/env bash -lc "cd \"$PROJECT_DIR\" && \"$PROJECT_DIR/.venv/bin/python3\" -u factory_run.py --run-id nightly_$(date -u +%Y%m%dT%H%M%SZ) --profile daily"
 
 # Security hardening
+NoNewPrivileges=true
 ProtectSystem=strict
-NoNewPrivileges=yes
-PrivateTmp=yes
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadWritePaths=/home/fol2hk/openclaw-plugins/ai_quant
+ReadWritePaths=$PROJECT_DIR
 
 [Install]
 WantedBy=default.target
