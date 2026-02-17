@@ -1643,13 +1643,16 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
 
         // Collect valid symbols from candle data for filtering
         let sym_strs: Vec<&str> = candles.keys().map(|s| s.as_str()).collect();
-        let (balance, positions) = bt_core::init_state::into_sim_state(state_file, Some(&sym_strs));
+        let (balance, positions, entry_attempt_ms, exit_attempt_ms) =
+            bt_core::init_state::into_sim_state_with_runtime(state_file, Some(&sym_strs));
         eprintln!(
-            "[replay] Init-state: balance=${:.2}, {} position(s)",
+            "[replay] Init-state: balance=${:.2}, {} position(s), {} entry cooldown marker(s), {} exit cooldown marker(s)",
             balance,
-            positions.len()
+            positions.len(),
+            entry_attempt_ms.len(),
+            exit_attempt_ms.len(),
         );
-        (balance, Some((balance, positions)))
+        (balance, Some((balance, positions, entry_attempt_ms, exit_attempt_ms)))
     } else {
         (base_balance, None)
     };
