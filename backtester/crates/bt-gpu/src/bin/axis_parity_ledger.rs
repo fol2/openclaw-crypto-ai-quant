@@ -133,6 +133,7 @@ struct TraceArtifact {
     cpu_event_start: usize,
     cpu_event_end: usize,
     cpu_events: Vec<CpuTradeEventRow>,
+    event_parity: EventParitySummary,
 }
 
 #[derive(Debug, Serialize)]
@@ -169,6 +170,32 @@ struct CpuTraceWindow {
     start: usize,
     end: usize,
     events: Vec<CpuTradeEventRow>,
+}
+
+#[derive(Debug, Serialize)]
+struct EventParitySummary {
+    status: String,
+    aligned_len: usize,
+    cpu_len: usize,
+    gpu_len: usize,
+    cpu_tail_offset: usize,
+    gpu_tail_offset: usize,
+    first_mismatch_at: Option<usize>,
+    cpu_event: Option<CanonicalEventRow>,
+    gpu_event: Option<CanonicalEventRow>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CanonicalEventRow {
+    source_idx: usize,
+    global_idx: Option<usize>,
+    t_sec: u32,
+    symbol: String,
+    action: String,
+    reason: String,
+    price: f64,
+    size: f64,
+    pnl: f64,
 }
 
 #[cfg(target_os = "linux")]
@@ -298,6 +325,8 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             args.cpu_trace_limit,
             args.cpu_trace_from_tail,
         )?;
+        let gpu_events = collect_trace_events(&trace_state, &trace_symbols);
+        let event_parity = compare_event_streams(&cpu_trace.events, &gpu_events);
         let trace = TraceArtifact {
             axis_path: "__baseline__".to_string(),
             sample_index: 0,
@@ -314,11 +343,12 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             },
             trace_count: trace_state.trace_count,
             trace_head: trace_state.trace_head,
-            events: collect_trace_events(&trace_state, &trace_symbols),
+            events: gpu_events,
             cpu_event_total: cpu_trace.total,
             cpu_event_start: cpu_trace.start,
             cpu_event_end: cpu_trace.end,
             cpu_events: cpu_trace.events,
+            event_parity,
         };
         let trace_path = build_trace_path(
             &args.trace_dir,
@@ -434,6 +464,8 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     args.cpu_trace_limit,
                     args.cpu_trace_from_tail,
                 )?;
+                let gpu_events = collect_trace_events(&trace_state, &trace_symbols);
+                let event_parity = compare_event_streams(&cpu_trace.events, &gpu_events);
                 let trace = TraceArtifact {
                     axis_path: axis.path.clone(),
                     sample_index,
@@ -450,11 +482,12 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     },
                     trace_count: trace_state.trace_count,
                     trace_head: trace_state.trace_head,
-                    events: collect_trace_events(&trace_state, &trace_symbols),
+                    events: gpu_events,
                     cpu_event_total: cpu_trace.total,
                     cpu_event_start: cpu_trace.start,
                     cpu_event_end: cpu_trace.end,
                     cpu_events: cpu_trace.events,
+                    event_parity,
                 };
                 let trace_path = build_trace_path(
                     &args.trace_dir,
@@ -775,6 +808,113 @@ fn collect_trace_events(state: &GpuComboState, symbols: &[String]) -> Vec<TraceE
         });
     }
     out
+}
+
+fn compare_event_streams(
+    cpu_events: &[CpuTradeEventRow],
+    gpu_events: &[TraceEventRow],
+) -> EventParitySummary {
+    let cpu: Vec<CanonicalEventRow> = cpu_events.iter().map(canonicalise_cpu_event).collect();
+    let gpu: Vec<CanonicalEventRow> = gpu_events.iter().map(canonicalise_gpu_event).collect();
+    let aligned_len = cpu.len().min(gpu.len());
+    let cpu_tail_offset = cpu.len().saturating_sub(aligned_len);
+    let gpu_tail_offset = gpu.len().saturating_sub(aligned_len);
+
+    for rel_idx in 0..aligned_len {
+        let cpu_ev = &cpu[cpu_tail_offset + rel_idx];
+        let gpu_ev = &gpu[gpu_tail_offset + rel_idx];
+        if !canonical_events_equal(cpu_ev, gpu_ev) {
+            return EventParitySummary {
+                status: "MISMATCH".to_string(),
+                aligned_len,
+                cpu_len: cpu.len(),
+                gpu_len: gpu.len(),
+                cpu_tail_offset,
+                gpu_tail_offset,
+                first_mismatch_at: Some(rel_idx),
+                cpu_event: Some(cpu_ev.clone()),
+                gpu_event: Some(gpu_ev.clone()),
+            };
+        }
+    }
+
+    if cpu.len() != gpu.len() {
+        return EventParitySummary {
+            status: "LENGTH_MISMATCH".to_string(),
+            aligned_len,
+            cpu_len: cpu.len(),
+            gpu_len: gpu.len(),
+            cpu_tail_offset,
+            gpu_tail_offset,
+            first_mismatch_at: None,
+            cpu_event: None,
+            gpu_event: None,
+        };
+    }
+
+    EventParitySummary {
+        status: "MATCH".to_string(),
+        aligned_len,
+        cpu_len: cpu.len(),
+        gpu_len: gpu.len(),
+        cpu_tail_offset,
+        gpu_tail_offset,
+        first_mismatch_at: None,
+        cpu_event: None,
+        gpu_event: None,
+    }
+}
+
+fn canonicalise_cpu_event(ev: &CpuTradeEventRow) -> CanonicalEventRow {
+    CanonicalEventRow {
+        source_idx: ev.idx,
+        global_idx: Some(ev.global_idx),
+        t_sec: ev.t_sec,
+        symbol: ev.symbol.clone(),
+        action: ev.action.clone(),
+        reason: ev.reason.clone(),
+        price: ev.price,
+        size: ev.size,
+        pnl: ev.pnl,
+    }
+}
+
+fn canonicalise_gpu_event(ev: &TraceEventRow) -> CanonicalEventRow {
+    CanonicalEventRow {
+        source_idx: ev.idx,
+        global_idx: None,
+        t_sec: ev.t_sec,
+        symbol: ev
+            .symbol
+            .clone()
+            .unwrap_or_else(|| format!("SYM#{}", ev.sym_idx)),
+        action: canonical_gpu_action(&ev.kind, &ev.side),
+        reason: ev.reason.clone(),
+        price: ev.price as f64,
+        size: ev.size as f64,
+        pnl: ev.pnl as f64,
+    }
+}
+
+fn canonical_gpu_action(kind: &str, side: &str) -> String {
+    if side == "EMPTY" {
+        return kind.to_string();
+    }
+    format!("{kind}_{side}")
+}
+
+fn canonical_events_equal(a: &CanonicalEventRow, b: &CanonicalEventRow) -> bool {
+    a.t_sec == b.t_sec
+        && a.symbol == b.symbol
+        && a.action == b.action
+        && a.reason == b.reason
+        && scale_1e6(a.price) == scale_1e6(b.price)
+        && scale_1e6(a.size) == scale_1e6(b.size)
+        && scale_1e6(a.pnl) == scale_1e6(b.pnl)
+}
+
+fn scale_1e6(v: f64) -> i64 {
+    (v * 1_000_000.0).round() as i64
 }
 
 fn trace_kind_name(kind: u32) -> &'static str {
