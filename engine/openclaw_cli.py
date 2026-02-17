@@ -140,5 +140,6 @@ def send_openclaw_message(
         if i < attempts - 1:
             time.sleep(min(2.0, 0.35 * (i + 1)))
 
-    assert last_exc is not None
+    if last_exc is None:
+        raise RuntimeError("No exception captured during retries")
     raise last_exc

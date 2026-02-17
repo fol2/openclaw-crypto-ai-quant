@@ -2031,7 +2031,11 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         )
         with self._pending_open_lock:
             pending_syms = sorted(
-                [str(s or "").strip().upper() for s in (self._pending_open_sent_at_s or {}).keys() if str(s or "").strip()]
+                [
+                    str(s or "").strip().upper()
+                    for s in (self._pending_open_sent_at_s or {}).keys()
+                    if str(s or "").strip()
+                ]
             )
         open_n = int(len(open_syms))
         pending_n = int(len(pending_syms))
@@ -2813,227 +2817,368 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
 
     inserted = 0
     conn = sqlite3.connect(mei_alpha_v1.DB_PATH, timeout=_DB_TIMEOUT_S)
-    cur = conn.cursor()
-
-    # Best-effort: snapshot account value once to avoid repeated REST calls per fill.
     try:
-        account_value = float(trader.get_live_balance() or 0.0)
-    except Exception:
-        account_value = 0.0
+        cur = conn.cursor()
 
-    # Best-effort: snapshot positions once for leverage fallback (helps when pending ctx is missing after restarts).
-    try:
-        pos_snap = trader.executor.get_positions(force=False) or {}
-    except Exception:
-        pos_snap = {}
-
-    for f in fills:
-        if not isinstance(f, dict):
-            continue
-
+        # Best-effort: snapshot account value once to avoid repeated REST calls per fill.
         try:
-            sym = str(f.get("coin") or "").strip().upper()
+            account_value = float(trader.get_live_balance() or 0.0)
         except Exception:
-            sym = ""
-        if not sym:
-            continue
+            account_value = 0.0
 
+        # Best-effort: snapshot positions once for leverage fallback (helps when pending ctx is missing after restarts).
         try:
-            tid = int(f.get("tid")) if f.get("tid") is not None else None
+            pos_snap = trader.executor.get_positions(force=False) or {}
         except Exception:
-            tid = None
-        fill_hash = str(f.get("hash") or "").strip() or None
+            pos_snap = {}
 
-        try:
-            t_ms = int(f.get("time"))
-        except Exception:
-            t_ms = int(time.time() * 1000)
+        for f in fills:
+            if not isinstance(f, dict):
+                continue
 
-        # Always capture raw events (useful for unknown schema variants).
-        try:
-            cur.execute(
-                "INSERT INTO ws_events (ts, channel, data_json) VALUES (?, ?, ?)",
-                (t_ms, "userFills", json.dumps(f, separators=(",", ":"), sort_keys=True)),
-            )
-        except Exception:
-            pass
-
-        try:
-            px = float(f.get("px") or 0.0)
-            sz = float(f.get("sz") or 0.0)
-        except Exception:
-            continue
-        if px <= 0 or sz <= 0:
-            logger.warning("fill skipped: invalid px=%s sz=%s for %s", f.get("px"), f.get("sz"), sym)
-            continue
-
-        dir_s = str(f.get("dir") or "")
-        try:
-            start_pos = float(f.get("startPosition") or 0.0)
-        except Exception:
-            start_pos = 0.0
-
-        pos_type, action = _dir_to_action(dir_s, start_pos, sz)
-        if pos_type is None:
-            # Unknown direction: still keep raw ws_events; skip trades row.
-            logger.warning("fill skipped: unknown direction dir=%r for %s (px=%s sz=%s)", dir_s, sym, px, sz)
-            continue
-
-        fee = _safe_float(f.get("fee"), 0.0)
-        closed_pnl = _safe_float(f.get("closedPnl"), 0.0)
-        # Live: never simulate PnL. Persist the raw `closedPnl` reported by Hyperliquid,
-        # and persist `fee` separately. (Different frontends may present "net" differently.)
-        pnl = closed_pnl
-
-        ctx = trader.pop_pending(sym) or {}
-        conf = str(ctx.get("confidence") or "N/A")
-        _ctx_breadth_pct = _safe_float(ctx.get("breadth_pct"), None)
-        entry_atr = _safe_float(ctx.get("entry_atr"), None)
-        lev = _safe_float(ctx.get("leverage"), None)
-        if lev is None or lev <= 0:
-            # Some HL fill payloads include leverage; accept both dict {value:..} and scalar.
-            lev_raw = f.get("leverage")
-            if isinstance(lev_raw, dict):
-                lev = _safe_float(lev_raw.get("value"), None)
-            else:
-                lev = _safe_float(lev_raw, None)
-        if lev is None or lev <= 0:
             try:
-                lev = _safe_float(((trader.positions or {}).get(sym) or {}).get("leverage"), None)
+                sym = str(f.get("coin") or "").strip().upper()
             except Exception:
-                lev = None
-        if lev is None or lev <= 0:
+                sym = ""
+            if not sym:
+                continue
+
             try:
-                lev = _safe_float((pos_snap.get(sym) or {}).get("leverage"), None)
+                tid = int(f.get("tid")) if f.get("tid") is not None else None
             except Exception:
-                lev = None
-        if lev is None or lev <= 0:
-            # Fallback: best-effort from recent trades (helps when fills are backfilled after WS disconnect).
+                tid = None
+            fill_hash = str(f.get("hash") or "").strip() or None
+
+            try:
+                t_ms = int(f.get("time"))
+            except Exception:
+                t_ms = int(time.time() * 1000)
+
+            # Always capture raw events (useful for unknown schema variants).
             try:
                 cur.execute(
+                    "INSERT INTO ws_events (ts, channel, data_json) VALUES (?, ?, ?)",
+                    (t_ms, "userFills", json.dumps(f, separators=(",", ":"), sort_keys=True)),
+                )
+            except Exception:
+                pass
+
+            try:
+                px = float(f.get("px") or 0.0)
+                sz = float(f.get("sz") or 0.0)
+            except Exception:
+                continue
+            if px <= 0 or sz <= 0:
+                logger.warning("fill skipped: invalid px=%s sz=%s for %s", f.get("px"), f.get("sz"), sym)
+                continue
+
+            dir_s = str(f.get("dir") or "")
+            try:
+                start_pos = float(f.get("startPosition") or 0.0)
+            except Exception:
+                start_pos = 0.0
+
+            pos_type, action = _dir_to_action(dir_s, start_pos, sz)
+            if pos_type is None:
+                # Unknown direction: still keep raw ws_events; skip trades row.
+                logger.warning("fill skipped: unknown direction dir=%r for %s (px=%s sz=%s)", dir_s, sym, px, sz)
+                continue
+
+            fee = _safe_float(f.get("fee"), 0.0)
+            closed_pnl = _safe_float(f.get("closedPnl"), 0.0)
+            # Live: never simulate PnL. Persist the raw `closedPnl` reported by Hyperliquid,
+            # and persist `fee` separately. (Different frontends may present "net" differently.)
+            pnl = closed_pnl
+
+            ctx = trader.pop_pending(sym) or {}
+            conf = str(ctx.get("confidence") or "N/A")
+            _ctx_breadth_pct = _safe_float(ctx.get("breadth_pct"), None)
+            entry_atr = _safe_float(ctx.get("entry_atr"), None)
+            lev = _safe_float(ctx.get("leverage"), None)
+            if lev is None or lev <= 0:
+                # Some HL fill payloads include leverage; accept both dict {value:..} and scalar.
+                lev_raw = f.get("leverage")
+                if isinstance(lev_raw, dict):
+                    lev = _safe_float(lev_raw.get("value"), None)
+                else:
+                    lev = _safe_float(lev_raw, None)
+            if lev is None or lev <= 0:
+                try:
+                    lev = _safe_float(((trader.positions or {}).get(sym) or {}).get("leverage"), None)
+                except Exception:
+                    lev = None
+            if lev is None or lev <= 0:
+                try:
+                    lev = _safe_float((pos_snap.get(sym) or {}).get("leverage"), None)
+                except Exception:
+                    lev = None
+            if lev is None or lev <= 0:
+                # Fallback: best-effort from recent trades (helps when fills are backfilled after WS disconnect).
+                try:
+                    cur.execute(
+                        """
+                        SELECT leverage
+                        FROM trades
+                        WHERE symbol = ? AND leverage IS NOT NULL
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """,
+                        (sym,),
+                    )
+                    row = cur.fetchone()
+                    if row and row[0] is not None:
+                        lev = _safe_float(row[0], None)
+                except Exception:
+                    lev = None
+
+            notional = abs(sz) * px
+            fee_token = str(f.get("feeToken") or "").strip() or None
+            fee_rate = (fee / notional) if notional > 0 else None
+            margin_used = (notional / lev) if lev and lev > 0 else None
+
+            ts_iso = datetime.datetime.fromtimestamp(t_ms / 1000.0, tz=datetime.timezone.utc).isoformat()
+            reason = str(ctx.get("reason") or f"LIVE_FILL {dir_s}").strip()
+            meta = ctx.get("meta")
+            meta_json = mei_alpha_v1._json_dumps_safe(meta) if meta else None
+
+            # Insert into trades if schema supports fill_hash/tid; otherwise best-effort insert (may duplicate).
+            try:
+                cur.execute("PRAGMA table_info(trades)")
+                cols = {r[1] for r in cur.fetchall()}
+            except Exception:
+                cols = set()
+
+            has_meta = "meta_json" in cols
+
+            # Secondary dedup guard: REST backfill fills may have a different fill_hash than
+            # the WS fill for the same logical execution.  Check if a trade with the same
+            # (symbol, action, size, price) within a 1-second window already exists.
+            try:
+                ts_lo = datetime.datetime.fromtimestamp((t_ms - 1000) / 1000.0, tz=datetime.timezone.utc).isoformat()
+                ts_hi = datetime.datetime.fromtimestamp((t_ms + 1000) / 1000.0, tz=datetime.timezone.utc).isoformat()
+                cur.execute(
                     """
-                    SELECT leverage
-                    FROM trades
-                    WHERE symbol = ? AND leverage IS NOT NULL
-                    ORDER BY id DESC
+                    SELECT 1 FROM trades
+                    WHERE symbol = ? AND action = ? AND ABS(size - ?) < 1e-12
+                      AND ABS(price - ?) < 1e-8
+                      AND timestamp >= ? AND timestamp <= ?
                     LIMIT 1
                     """,
-                    (sym,),
+                    (sym, action, sz, px, ts_lo, ts_hi),
                 )
-                row = cur.fetchone()
-                if row and row[0] is not None:
-                    lev = _safe_float(row[0], None)
+                if cur.fetchone() is not None:
+                    continue
             except Exception:
-                lev = None
+                pass  # secondary dedup failed; fall through to primary INSERT OR IGNORE
 
-        notional = abs(sz) * px
-        fee_token = str(f.get("feeToken") or "").strip() or None
-        fee_rate = (fee / notional) if notional > 0 else None
-        margin_used = (notional / lev) if lev and lev > 0 else None
-
-        ts_iso = datetime.datetime.fromtimestamp(t_ms / 1000.0, tz=datetime.timezone.utc).isoformat()
-        reason = str(ctx.get("reason") or f"LIVE_FILL {dir_s}").strip()
-        meta = ctx.get("meta")
-        meta_json = mei_alpha_v1._json_dumps_safe(meta) if meta else None
-
-        # Insert into trades if schema supports fill_hash/tid; otherwise best-effort insert (may duplicate).
-        try:
-            cur.execute("PRAGMA table_info(trades)")
-            cols = {r[1] for r in cur.fetchall()}
-        except Exception:
-            cols = set()
-
-        has_meta = "meta_json" in cols
-
-        # Secondary dedup guard: REST backfill fills may have a different fill_hash than
-        # the WS fill for the same logical execution.  Check if a trade with the same
-        # (symbol, action, size, price) within a 1-second window already exists.
-        try:
-            ts_lo = datetime.datetime.fromtimestamp((t_ms - 1000) / 1000.0, tz=datetime.timezone.utc).isoformat()
-            ts_hi = datetime.datetime.fromtimestamp((t_ms + 1000) / 1000.0, tz=datetime.timezone.utc).isoformat()
-            cur.execute(
-                """
-                SELECT 1 FROM trades
-                WHERE symbol = ? AND action = ? AND ABS(size - ?) < 1e-12
-                  AND ABS(price - ?) < 1e-8
-                  AND timestamp >= ? AND timestamp <= ?
-                LIMIT 1
-                """,
-                (sym, action, sz, px, ts_lo, ts_hi),
-            )
-            if cur.fetchone() is not None:
-                continue
-        except Exception:
-            pass  # secondary dedup failed; fall through to primary INSERT OR IGNORE
-
-        if {"fill_hash", "fill_tid"}.issubset(cols):
-            # Dedup at DB level via a unique index (added by mei_alpha_v1.ensure_db() migration).
-            if has_meta:
-                cur.execute(
-                    """
-                    INSERT OR IGNORE INTO trades (
-                        timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                        pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
-                        meta_json, fill_hash, fill_tid
+            if {"fill_hash", "fill_tid"}.issubset(cols):
+                # Dedup at DB level via a unique index (added by mei_alpha_v1.ensure_db() migration).
+                if has_meta:
+                    cur.execute(
+                        """
+                        INSERT OR IGNORE INTO trades (
+                            timestamp, symbol, type, action, price, size, notional, reason, confidence,
+                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
+                            meta_json, fill_hash, fill_tid
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            ts_iso,
+                            sym,
+                            pos_type,
+                            action,
+                            px,
+                            sz,
+                            notional,
+                            reason,
+                            conf,
+                            pnl,
+                            fee,
+                            fee_token,
+                            fee_rate,
+                            account_value,
+                            entry_atr,
+                            lev,
+                            margin_used,
+                            meta_json,
+                            fill_hash,
+                            tid,
+                        ),
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        ts_iso,
-                        sym,
-                        pos_type,
-                        action,
-                        px,
-                        sz,
-                        notional,
-                        reason,
-                        conf,
-                        pnl,
-                        fee,
-                        fee_token,
-                        fee_rate,
-                        account_value,
-                        entry_atr,
-                        lev,
-                        margin_used,
-                        meta_json,
-                        fill_hash,
-                        tid,
-                    ),
-                )
+                else:
+                    cur.execute(
+                        """
+                        INSERT OR IGNORE INTO trades (
+                            timestamp, symbol, type, action, price, size, notional, reason, confidence,
+                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
+                            fill_hash, fill_tid
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            ts_iso,
+                            sym,
+                            pos_type,
+                            action,
+                            px,
+                            sz,
+                            notional,
+                            reason,
+                            conf,
+                            pnl,
+                            fee,
+                            fee_token,
+                            fee_rate,
+                            account_value,
+                            entry_atr,
+                            lev,
+                            margin_used,
+                            fill_hash,
+                            tid,
+                        ),
+                    )
+                if cur.rowcount and cur.rowcount > 0:
+                    inserted += 1
+                    _notify_live_fill(
+                        symbol=sym,
+                        action=action,
+                        pos_type=pos_type,
+                        price=px,
+                        size=sz,
+                        notional=notional,
+                        leverage=lev,
+                        margin_used_usd=margin_used,
+                        fee_usd=fee,
+                        fee_rate=fee_rate,
+                        fee_token=fee_token,
+                        pnl_usd=pnl,
+                        reason=reason,
+                        confidence=conf,
+                        account_value_usd=float(account_value or 0.0),
+                        withdrawable_usd=float(trader.balance or 0.0),
+                        breadth_pct=_ctx_breadth_pct,
+                    )
+                    # Best-effort risk update (daily loss tracking, etc).
+                    try:
+                        risk = getattr(trader, "risk", None)
+                        note = getattr(risk, "note_fill", None) if risk is not None else None
+                        if callable(note):
+                            fill_side = None
+                            try:
+                                dl = str(dir_s or "").strip().lower()
+                                if dl.startswith("open") and "long" in dl:
+                                    fill_side = "BUY"
+                                elif dl.startswith("open") and "short" in dl:
+                                    fill_side = "SELL"
+                                elif dl.startswith("close") and "long" in dl:
+                                    fill_side = "SELL"
+                                elif dl.startswith("close") and "short" in dl:
+                                    fill_side = "BUY"
+                            except Exception:
+                                fill_side = None
+
+                            ref_mid = None
+                            ref_bid = None
+                            ref_ask = None
+                            try:
+                                bbo = hyperliquid_ws.hl_ws.get_bbo(sym, max_age_s=10.0)
+                                if bbo is not None:
+                                    ref_bid, ref_ask = float(bbo[0]), float(bbo[1])
+                                ref_mid = hyperliquid_ws.hl_ws.get_mid(sym, max_age_s=10.0)
+                                if ref_mid is not None:
+                                    ref_mid = float(ref_mid)
+                            except Exception:
+                                ref_mid = None
+                                ref_bid = None
+                                ref_ask = None
+
+                            note(
+                                ts_ms=int(t_ms),
+                                symbol=str(sym),
+                                action=str(action),
+                                pnl_usd=float(pnl or 0.0),
+                                fee_usd=float(fee or 0.0),
+                                fill_price=float(px),
+                                side=str(fill_side or ""),
+                                ref_mid=ref_mid,
+                                ref_bid=ref_bid,
+                                ref_ask=ref_ask,
+                            )
+                    except Exception:
+                        pass
+                    try:
+                        lev_s = "NA" if lev is None or lev <= 0 else f"{float(lev):.0f}x"
+                    except Exception:
+                        lev_s = "NA"
+                    try:
+                        margin_s = "NA" if margin_used is None else f"${float(margin_used):.2f}"
+                    except Exception:
+                        margin_s = "NA"
+                    print(
+                        f"📥 LIVE FILL {action} {pos_type} {sym} px={px:.4f} size={sz:.6f} notional=${notional:.2f} "
+                        f"lev={lev_s} margin~={margin_s} fee=${fee:.4f} pnl=${pnl:.2f} conf={conf} reason={reason}"
+                    )
             else:
-                cur.execute(
-                    """
-                    INSERT OR IGNORE INTO trades (
-                        timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                        pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
-                        fill_hash, fill_tid
+                if has_meta:
+                    cur.execute(
+                        """
+                        INSERT INTO trades (
+                            timestamp, symbol, type, action, price, size, notional, reason, confidence,
+                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used, meta_json
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            ts_iso,
+                            sym,
+                            pos_type,
+                            action,
+                            px,
+                            sz,
+                            notional,
+                            reason,
+                            conf,
+                            pnl,
+                            fee,
+                            fee_token,
+                            fee_rate,
+                            account_value,
+                            entry_atr,
+                            lev,
+                            margin_used,
+                            meta_json,
+                        ),
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        ts_iso,
-                        sym,
-                        pos_type,
-                        action,
-                        px,
-                        sz,
-                        notional,
-                        reason,
-                        conf,
-                        pnl,
-                        fee,
-                        fee_token,
-                        fee_rate,
-                        account_value,
-                        entry_atr,
-                        lev,
-                        margin_used,
-                        fill_hash,
-                        tid,
-                    ),
-                )
-            if cur.rowcount and cur.rowcount > 0:
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO trades (
+                            timestamp, symbol, type, action, price, size, notional, reason, confidence,
+                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            ts_iso,
+                            sym,
+                            pos_type,
+                            action,
+                            px,
+                            sz,
+                            notional,
+                            reason,
+                            conf,
+                            pnl,
+                            fee,
+                            fee_token,
+                            fee_rate,
+                            account_value,
+                            entry_atr,
+                            lev,
+                            margin_used,
+                        ),
+                    )
                 inserted += 1
                 _notify_live_fill(
                     symbol=sym,
@@ -3114,164 +3259,23 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                     f"📥 LIVE FILL {action} {pos_type} {sym} px={px:.4f} size={sz:.6f} notional=${notional:.2f} "
                     f"lev={lev_s} margin~={margin_s} fee=${fee:.4f} pnl=${pnl:.2f} conf={conf} reason={reason}"
                 )
-        else:
-            if has_meta:
-                cur.execute(
-                    """
-                    INSERT INTO trades (
-                        timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                        pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used, meta_json
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        ts_iso,
-                        sym,
-                        pos_type,
-                        action,
-                        px,
-                        sz,
-                        notional,
-                        reason,
-                        conf,
-                        pnl,
-                        fee,
-                        fee_token,
-                        fee_rate,
-                        account_value,
-                        entry_atr,
-                        lev,
-                        margin_used,
-                        meta_json,
-                    ),
-                )
-            else:
-                cur.execute(
-                    """
-                    INSERT INTO trades (
-                        timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                        pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        ts_iso,
-                        sym,
-                        pos_type,
-                        action,
-                        px,
-                        sz,
-                        notional,
-                        reason,
-                        conf,
-                        pnl,
-                        fee,
-                        fee_token,
-                        fee_rate,
-                        account_value,
-                        entry_atr,
-                        lev,
-                        margin_used,
-                    ),
-                )
-            inserted += 1
-            _notify_live_fill(
-                symbol=sym,
-                action=action,
-                pos_type=pos_type,
-                price=px,
-                size=sz,
-                notional=notional,
-                leverage=lev,
-                margin_used_usd=margin_used,
-                fee_usd=fee,
-                fee_rate=fee_rate,
-                fee_token=fee_token,
-                pnl_usd=pnl,
-                reason=reason,
-                confidence=conf,
-                account_value_usd=float(account_value or 0.0),
-                withdrawable_usd=float(trader.balance or 0.0),
-                breadth_pct=_ctx_breadth_pct,
-            )
-            # Best-effort risk update (daily loss tracking, etc).
-            try:
-                risk = getattr(trader, "risk", None)
-                note = getattr(risk, "note_fill", None) if risk is not None else None
-                if callable(note):
-                    fill_side = None
-                    try:
-                        dl = str(dir_s or "").strip().lower()
-                        if dl.startswith("open") and "long" in dl:
-                            fill_side = "BUY"
-                        elif dl.startswith("open") and "short" in dl:
-                            fill_side = "SELL"
-                        elif dl.startswith("close") and "long" in dl:
-                            fill_side = "SELL"
-                        elif dl.startswith("close") and "short" in dl:
-                            fill_side = "BUY"
-                    except Exception:
-                        fill_side = None
 
-                    ref_mid = None
-                    ref_bid = None
-                    ref_ask = None
-                    try:
-                        bbo = hyperliquid_ws.hl_ws.get_bbo(sym, max_age_s=10.0)
-                        if bbo is not None:
-                            ref_bid, ref_ask = float(bbo[0]), float(bbo[1])
-                        ref_mid = hyperliquid_ws.hl_ws.get_mid(sym, max_age_s=10.0)
-                        if ref_mid is not None:
-                            ref_mid = float(ref_mid)
-                    except Exception:
-                        ref_mid = None
-                        ref_bid = None
-                        ref_ask = None
+            # Update in-memory strategy state on opens (so exits have correct entry_atr/confidence immediately).
+            if action == "OPEN" and sym in (trader.positions or {}):
+                pos = trader.positions[sym]
+                pos["confidence"] = conf
+                if entry_atr is not None and entry_atr > 0:
+                    pos["entry_atr"] = entry_atr
+                pos["open_timestamp"] = ts_iso
+                try:
+                    cur.execute("SELECT id FROM trades WHERE fill_hash = ? AND fill_tid = ? LIMIT 1", (fill_hash, tid))
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        pos["open_trade_id"] = int(row[0])
+                        trader.upsert_position_state(sym)
+                except Exception:
+                    pass
 
-                    note(
-                        ts_ms=int(t_ms),
-                        symbol=str(sym),
-                        action=str(action),
-                        pnl_usd=float(pnl or 0.0),
-                        fee_usd=float(fee or 0.0),
-                        fill_price=float(px),
-                        side=str(fill_side or ""),
-                        ref_mid=ref_mid,
-                        ref_bid=ref_bid,
-                        ref_ask=ref_ask,
-                    )
-            except Exception:
-                pass
-            try:
-                lev_s = "NA" if lev is None or lev <= 0 else f"{float(lev):.0f}x"
-            except Exception:
-                lev_s = "NA"
-            try:
-                margin_s = "NA" if margin_used is None else f"${float(margin_used):.2f}"
-            except Exception:
-                margin_s = "NA"
-            print(
-                f"📥 LIVE FILL {action} {pos_type} {sym} px={px:.4f} size={sz:.6f} notional=${notional:.2f} "
-                f"lev={lev_s} margin~={margin_s} fee=${fee:.4f} pnl=${pnl:.2f} conf={conf} reason={reason}"
-            )
-
-        # Update in-memory strategy state on opens (so exits have correct entry_atr/confidence immediately).
-        if action == "OPEN" and sym in (trader.positions or {}):
-            pos = trader.positions[sym]
-            pos["confidence"] = conf
-            if entry_atr is not None and entry_atr > 0:
-                pos["entry_atr"] = entry_atr
-            pos["open_timestamp"] = ts_iso
-            try:
-                cur.execute("SELECT id FROM trades WHERE fill_hash = ? AND fill_tid = ? LIMIT 1", (fill_hash, tid))
-                row = cur.fetchone()
-                if row and row[0]:
-                    pos["open_trade_id"] = int(row[0])
-                    trader.upsert_position_state(sym)
-            except Exception:
-                pass
-
-    try:
         conn.commit()
     finally:
         conn.close()
@@ -3283,22 +3287,22 @@ def process_ws_events(channel: str, events: list[dict]) -> int:
         return 0
     _ensure_live_tables()
     conn = sqlite3.connect(mei_alpha_v1.DB_PATH, timeout=_DB_TIMEOUT_S)
-    cur = conn.cursor()
-    n = 0
-    for ev in events:
-        if not isinstance(ev, dict):
-            continue
-        ts = int((ev.get("t") or time.time()) * 1000)
-        data = ev.get("data")
-        try:
-            cur.execute(
-                "INSERT INTO ws_events (ts, channel, data_json) VALUES (?, ?, ?)",
-                (ts, channel, json.dumps(data, separators=(",", ":"), sort_keys=True)),
-            )
-            n += 1
-        except Exception:
-            continue
     try:
+        cur = conn.cursor()
+        n = 0
+        for ev in events:
+            if not isinstance(ev, dict):
+                continue
+            ts = int((ev.get("t") or time.time()) * 1000)
+            data = ev.get("data")
+            try:
+                cur.execute(
+                    "INSERT INTO ws_events (ts, channel, data_json) VALUES (?, ?, ?)",
+                    (ts, channel, json.dumps(data, separators=(",", ":"), sort_keys=True)),
+                )
+                n += 1
+            except Exception:
+                continue
         conn.commit()
     finally:
         conn.close()
@@ -3321,238 +3325,238 @@ def process_user_fundings(trader: LiveTrader, events: list[dict]) -> int:
 
     _ensure_live_tables()
     conn = sqlite3.connect(mei_alpha_v1.DB_PATH, timeout=_DB_TIMEOUT_S)
-    cur = conn.cursor()
-
     try:
-        cur.execute("PRAGMA table_info(trades)")
-        cols = {r[1] for r in cur.fetchall()}
-    except Exception:
-        cols = set()
+        cur = conn.cursor()
 
-    supports_dedupe = {"fill_hash", "fill_tid"}.issubset(cols)
-    has_meta = "meta_json" in cols
+        try:
+            cur.execute("PRAGMA table_info(trades)")
+            cols = {r[1] for r in cur.fetchall()}
+        except Exception:
+            cols = set()
 
-    # Snapshot account value once.
-    try:
-        account_value = float(trader.get_live_balance() or 0.0)
-    except Exception:
-        account_value = 0.0
+        supports_dedupe = {"fill_hash", "fill_tid"}.issubset(cols)
+        has_meta = "meta_json" in cols
 
-    inserted = 0
+        # Snapshot account value once.
+        try:
+            account_value = float(trader.get_live_balance() or 0.0)
+        except Exception:
+            account_value = 0.0
 
-    def _iter_funding_items() -> list[dict]:
-        items: list[dict] = []
-        for ev in events:
-            if not isinstance(ev, dict):
-                continue
-            data = ev.get("data")
-            if data is None:
-                continue
+        inserted = 0
 
-            # Expected shape: { user, isSnapshot?, fundings: [...] }
-            if isinstance(data, dict):
-                fundings = data.get("fundings")
-                if isinstance(fundings, list):
-                    for f in fundings:
+        def _iter_funding_items() -> list[dict]:
+            items: list[dict] = []
+            for ev in events:
+                if not isinstance(ev, dict):
+                    continue
+                data = ev.get("data")
+                if data is None:
+                    continue
+
+                # Expected shape: { user, isSnapshot?, fundings: [...] }
+                if isinstance(data, dict):
+                    fundings = data.get("fundings")
+                    if isinstance(fundings, list):
+                        for f in fundings:
+                            if isinstance(f, dict):
+                                items.append(f)
+                        continue
+                    # Fallback: data itself might be a single funding item.
+                    if {"time", "coin", "usdc"}.issubset(set(data.keys())):
+                        items.append(data)
+                        continue
+
+                # Fallback: raw list of funding items.
+                if isinstance(data, list):
+                    for f in data:
                         if isinstance(f, dict):
                             items.append(f)
-                    continue
-                # Fallback: data itself might be a single funding item.
-                if {"time", "coin", "usdc"}.issubset(set(data.keys())):
-                    items.append(data)
-                    continue
 
-            # Fallback: raw list of funding items.
-            if isinstance(data, list):
-                for f in data:
-                    if isinstance(f, dict):
-                        items.append(f)
+            return items
 
-        return items
-
-    for f in _iter_funding_items():
-        try:
-            sym = str(f.get("coin") or "").strip().upper()
-        except Exception:
-            sym = ""
-        if not sym:
-            continue
-
-        try:
-            t_ms = int(f.get("time"))
-        except Exception:
-            t_ms = int(time.time() * 1000)
-
-        usdc_delta = _safe_float(f.get("usdc"), None)
-        if usdc_delta is None:
-            continue
-
-        szi = _safe_float(f.get("szi"), 0.0) or 0.0
-        pos_type = "LONG" if szi > 0 else ("SHORT" if szi < 0 else "N/A")
-        size = abs(float(szi))
-
-        rate = _safe_float(f.get("fundingRate"), None)
-        rate_s = "NA" if rate is None else f"{rate:+.10f}"
-        reason = f"Live Funding (rate={rate_s})"
-
-        # Best-effort price/notional (optional). This does NOT affect pnl because pnl is the realized USDC delta.
-        mid = hyperliquid_ws.hl_ws.get_mid(sym, max_age_s=60.0)
-        px = float(mid) if mid is not None else 0.0
-        notional = (size * px) if (size > 0 and px > 0) else 0.0
-
-        ts_iso = datetime.datetime.fromtimestamp(t_ms / 1000.0, tz=datetime.timezone.utc).isoformat()
-        meta_json = None
-        if has_meta:
-            meta_json = mei_alpha_v1._json_dumps_safe(
-                {
-                    "funding_rate": None if rate is None else float(rate),
-                    "delta_usdc": float(usdc_delta),
-                    "szi": float(szi),
-                    "event_time_ms": int(t_ms),
-                }
-            )
-
-        if supports_dedupe:
-            fill_hash = f"funding:{sym}:{t_ms}"
-            fill_tid = 0
-            if has_meta:
-                cur.execute(
-                    """
-                    INSERT OR IGNORE INTO trades (
-                        timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                        pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
-                        meta_json, fill_hash, fill_tid
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        ts_iso,
-                        sym,
-                        pos_type,
-                        "FUNDING",
-                        px,
-                        size,
-                        notional,
-                        reason,
-                        "N/A",
-                        usdc_delta,
-                        0.0,
-                        "USDC",
-                        0.0,
-                        account_value,
-                        None,
-                        None,
-                        None,
-                        meta_json,
-                        fill_hash,
-                        fill_tid,
-                    ),
-                )
-            else:
-                cur.execute(
-                    """
-                    INSERT OR IGNORE INTO trades (
-                        timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                        pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
-                        fill_hash, fill_tid
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        ts_iso,
-                        sym,
-                        pos_type,
-                        "FUNDING",
-                        px,
-                        size,
-                        notional,
-                        reason,
-                        "N/A",
-                        usdc_delta,
-                        0.0,
-                        "USDC",
-                        0.0,
-                        account_value,
-                        None,
-                        None,
-                        None,
-                        fill_hash,
-                        fill_tid,
-                    ),
-                )
-            if cur.rowcount and cur.rowcount > 0:
-                inserted += 1
-        else:
-            if has_meta:
-                cur.execute(
-                    """
-                    INSERT INTO trades (
-                        timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                        pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used, meta_json
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        ts_iso,
-                        sym,
-                        pos_type,
-                        "FUNDING",
-                        px,
-                        size,
-                        notional,
-                        reason,
-                        "N/A",
-                        usdc_delta,
-                        0.0,
-                        "USDC",
-                        0.0,
-                        account_value,
-                        None,
-                        None,
-                        None,
-                        meta_json,
-                    ),
-                )
-            else:
-                cur.execute(
-                    """
-                    INSERT INTO trades (
-                        timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                        pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        ts_iso,
-                        sym,
-                        pos_type,
-                        "FUNDING",
-                        px,
-                        size,
-                        notional,
-                        reason,
-                        "N/A",
-                        usdc_delta,
-                        0.0,
-                        "USDC",
-                        0.0,
-                        account_value,
-                        None,
-                        None,
-                        None,
-                    ),
-                )
-            inserted += 1
-
-        # Keep local state in sync (useful for funding-duration heuristics in shared exit logic).
-        if sym in (trader.positions or {}):
+        for f in _iter_funding_items():
             try:
-                trader.positions[sym]["last_funding_time"] = int(t_ms)
-                trader.upsert_position_state(sym)
+                sym = str(f.get("coin") or "").strip().upper()
             except Exception:
-                pass
+                sym = ""
+            if not sym:
+                continue
 
-    try:
+            try:
+                t_ms = int(f.get("time"))
+            except Exception:
+                t_ms = int(time.time() * 1000)
+
+            usdc_delta = _safe_float(f.get("usdc"), None)
+            if usdc_delta is None:
+                continue
+
+            szi = _safe_float(f.get("szi"), 0.0) or 0.0
+            pos_type = "LONG" if szi > 0 else ("SHORT" if szi < 0 else "N/A")
+            size = abs(float(szi))
+
+            rate = _safe_float(f.get("fundingRate"), None)
+            rate_s = "NA" if rate is None else f"{rate:+.10f}"
+            reason = f"Live Funding (rate={rate_s})"
+
+            # Best-effort price/notional (optional). This does NOT affect pnl because pnl is the realized USDC delta.
+            mid = hyperliquid_ws.hl_ws.get_mid(sym, max_age_s=60.0)
+            px = float(mid) if mid is not None else 0.0
+            notional = (size * px) if (size > 0 and px > 0) else 0.0
+
+            ts_iso = datetime.datetime.fromtimestamp(t_ms / 1000.0, tz=datetime.timezone.utc).isoformat()
+            meta_json = None
+            if has_meta:
+                meta_json = mei_alpha_v1._json_dumps_safe(
+                    {
+                        "funding_rate": None if rate is None else float(rate),
+                        "delta_usdc": float(usdc_delta),
+                        "szi": float(szi),
+                        "event_time_ms": int(t_ms),
+                    }
+                )
+
+            if supports_dedupe:
+                fill_hash = f"funding:{sym}:{t_ms}"
+                fill_tid = 0
+                if has_meta:
+                    cur.execute(
+                        """
+                        INSERT OR IGNORE INTO trades (
+                            timestamp, symbol, type, action, price, size, notional, reason, confidence,
+                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
+                            meta_json, fill_hash, fill_tid
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            ts_iso,
+                            sym,
+                            pos_type,
+                            "FUNDING",
+                            px,
+                            size,
+                            notional,
+                            reason,
+                            "N/A",
+                            usdc_delta,
+                            0.0,
+                            "USDC",
+                            0.0,
+                            account_value,
+                            None,
+                            None,
+                            None,
+                            meta_json,
+                            fill_hash,
+                            fill_tid,
+                        ),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT OR IGNORE INTO trades (
+                            timestamp, symbol, type, action, price, size, notional, reason, confidence,
+                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
+                            fill_hash, fill_tid
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            ts_iso,
+                            sym,
+                            pos_type,
+                            "FUNDING",
+                            px,
+                            size,
+                            notional,
+                            reason,
+                            "N/A",
+                            usdc_delta,
+                            0.0,
+                            "USDC",
+                            0.0,
+                            account_value,
+                            None,
+                            None,
+                            None,
+                            fill_hash,
+                            fill_tid,
+                        ),
+                    )
+                if cur.rowcount and cur.rowcount > 0:
+                    inserted += 1
+            else:
+                if has_meta:
+                    cur.execute(
+                        """
+                        INSERT INTO trades (
+                            timestamp, symbol, type, action, price, size, notional, reason, confidence,
+                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used, meta_json
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            ts_iso,
+                            sym,
+                            pos_type,
+                            "FUNDING",
+                            px,
+                            size,
+                            notional,
+                            reason,
+                            "N/A",
+                            usdc_delta,
+                            0.0,
+                            "USDC",
+                            0.0,
+                            account_value,
+                            None,
+                            None,
+                            None,
+                            meta_json,
+                        ),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO trades (
+                            timestamp, symbol, type, action, price, size, notional, reason, confidence,
+                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            ts_iso,
+                            sym,
+                            pos_type,
+                            "FUNDING",
+                            px,
+                            size,
+                            notional,
+                            reason,
+                            "N/A",
+                            usdc_delta,
+                            0.0,
+                            "USDC",
+                            0.0,
+                            account_value,
+                            None,
+                            None,
+                            None,
+                        ),
+                    )
+                inserted += 1
+
+            # Keep local state in sync (useful for funding-duration heuristics in shared exit logic).
+            if sym in (trader.positions or {}):
+                try:
+                    trader.positions[sym]["last_funding_time"] = int(t_ms)
+                    trader.upsert_position_state(sym)
+                except Exception:
+                    pass
+
         conn.commit()
     finally:
         conn.close()
