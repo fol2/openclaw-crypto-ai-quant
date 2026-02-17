@@ -19,6 +19,7 @@ Do not change this section unless the user explicitly asks to update `AGENTS.md`
   2. Run a reviewer subagent to review the PR.
   3. Merge only after the review is acceptable.
   4. Continue to the next task only after merge completion.
+  5. After merge, clean up local branches/worktrees and remote merged branches; keep only `master` and currently active PR branches.
 
 ## Project Overview
 
