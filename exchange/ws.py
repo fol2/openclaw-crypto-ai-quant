@@ -81,6 +81,10 @@ def _ensure_db():
         """
     )
     conn.commit()
+    try:
+        os.chmod(DB_PATH, 0o600)
+    except OSError:
+        pass
     conn.close()
 
 
@@ -706,7 +710,9 @@ class HyperliquidWS:
                                 self._user_fills.popleft()
                             except Exception:
                                 pass
-                            logger.warning("user_fills queue limit hit (%d); oldest item evicted", HL_WS_MAX_EVENT_QUEUE)
+                            logger.warning(
+                                "user_fills queue limit hit (%d); oldest item evicted", HL_WS_MAX_EVENT_QUEUE
+                            )
                         self._user_fills.append(item)
                     self._user_fills_updated_at = now
             return
@@ -751,7 +757,9 @@ class HyperliquidWS:
                         self._user_ledger_updates.popleft()
                     except Exception:
                         pass
-                    logger.warning("user_ledger_updates queue limit hit (%d); oldest item evicted", HL_WS_MAX_EVENT_QUEUE)
+                    logger.warning(
+                        "user_ledger_updates queue limit hit (%d); oldest item evicted", HL_WS_MAX_EVENT_QUEUE
+                    )
                 self._user_ledger_updates.append({"t": now, "data": data})
                 self._user_ledger_updated_at = now
             return

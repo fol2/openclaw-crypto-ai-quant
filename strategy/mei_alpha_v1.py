@@ -2757,6 +2757,10 @@ def ensure_db():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_dl_exit ON decision_lineage(exit_trade_id)")
 
     conn.commit()
+    try:
+        os.chmod(DB_PATH, 0o600)
+    except OSError:
+        pass
     conn.close()
 
 
