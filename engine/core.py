@@ -433,8 +433,16 @@ class KernelDecisionRustBindingProvider:
             # Parse to extract log fields.
             try:
                 state = json.loads(state_json)
+                if not isinstance(state, dict):
+                    logger.warning(
+                        "Kernel state: expected dict, got %s; loaded from %s",
+                        type(state).__name__,
+                        state_path,
+                    )
+                    return state_json
                 ts_ms = int(state.get("timestamp_ms", 0))
-                n_pos = len(state.get("positions") or {})
+                positions = state.get("positions")
+                n_pos = len(positions) if isinstance(positions, dict) else 0
                 cash = float(state.get("cash_usd", 0.0))
                 age_s = max(0.0, (now_ms() - ts_ms) / 1000.0) if ts_ms > 0 else 0.0
                 logger.info(
@@ -610,16 +618,36 @@ class KernelDecisionRustBindingProvider:
                 envelope = json.loads(response)
             except Exception:
                 continue
+            if not isinstance(envelope, dict):
+                logger.warning(
+                    "Kernel step response: expected dict, got %s",
+                    type(envelope).__name__,
+                )
+                continue
             if not bool(envelope.get("ok", False)):
                 continue
             decision_payload = envelope.get("decision")
             if not isinstance(decision_payload, dict):
                 continue
 
-            state_json = json.dumps(decision_payload.get("state"), ensure_ascii=False)
+            state_value = decision_payload.get("state")
+            if not isinstance(state_value, dict):
+                logger.warning(
+                    "Kernel decision state: expected dict, got %s",
+                    type(state_value).__name__,
+                )
+                continue
+            state_json = json.dumps(state_value, ensure_ascii=False)
             self._state_json = state_json
             self._persist_state(state_json)
-            for raw_intent in decision_payload.get("intents", []):
+            intents = decision_payload.get("intents", [])
+            if not isinstance(intents, list):
+                logger.warning(
+                    "Kernel decision intents: expected list, got %s",
+                    type(intents).__name__,
+                )
+                intents = []
+            for raw_intent in intents:
                 if not isinstance(raw_intent, Mapping):
                     continue
                 dec = self._intent_to_decision(raw_intent, raw)
@@ -1935,7 +1963,7 @@ class UnifiedEngine:
                         }
 
                         # Open-side decisions are always watchlist-controlled.
-                        if act in {"OPEN", "ADD"} and not sym_u in watch_set:
+                        if act in {"OPEN", "ADD"} and sym_u not in watch_set:
                             continue
 
                         # Skip decision entries where candle keys are not ready.
