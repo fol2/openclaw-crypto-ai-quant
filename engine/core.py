@@ -33,6 +33,7 @@ def _get_decision_event_fn():
 
             _decision_event_fn = create_decision_event
         except Exception:
+            logging.getLogger(__name__).debug("mei_alpha_v1.create_decision_event import failed", exc_info=True)
             _decision_event_fn = False  # sentinel: import failed, don't retry
     return _decision_event_fn if _decision_event_fn else None
 
@@ -60,7 +61,7 @@ def _interval_to_ms(interval: str) -> int:
             return int(float(s[:-1]) * 24.0 * 60.0 * 60.0 * 1000.0)
         # Fallback: assume seconds.
         return int(float(s) * 1000.0)
-    except Exception:
+    except (ValueError, TypeError, OverflowError):
         return 0
 
 
@@ -105,7 +106,7 @@ class KernelDecision:
 
         try:
             score = float(raw.get("score", 0.0) or 0.0)
-        except Exception:
+        except (TypeError, ValueError):
             score = 0.0
 
         now_series = raw.get("now_series")
@@ -129,7 +130,7 @@ class KernelDecision:
         )
         try:
             entry_key = int(entry_key) if entry_key is not None else None
-        except Exception:
+        except (TypeError, ValueError):
             entry_key = None
 
         reason = raw.get("reason")
@@ -140,7 +141,7 @@ class KernelDecision:
 
         try:
             open_pos_count = int(raw.get("open_pos_count", 0) or 0)
-        except Exception:
+        except (TypeError, ValueError):
             open_pos_count = 0
 
         return cls(
@@ -189,6 +190,7 @@ class KernelDecisionFileProvider:
         except FileNotFoundError:
             return []
         except Exception:
+            logger.warning("decision file unreadable: %s", path, exc_info=True)
             return []
 
         if isinstance(raw, dict):
@@ -365,7 +367,7 @@ def _normalise_kernel_target_size(raw_size: Any, raw_notional: Any, raw_price: A
         notional = float(raw_notional)
         if notional <= 0.0:
             return None
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
     try:
@@ -373,7 +375,7 @@ def _normalise_kernel_target_size(raw_size: Any, raw_notional: Any, raw_price: A
         if price <= 0.0:
             return None
         return notional / price
-    except Exception:
+    except (TypeError, ValueError, ZeroDivisionError):
         return None
 
 
@@ -382,7 +384,7 @@ def _normalise_kernel_price(raw_price: Any, default: float = 0.0) -> float:
         price = float(raw_price)
         if price > 0.0:
             return price
-    except Exception:
+    except (TypeError, ValueError):
         pass
     return default
 
@@ -392,13 +394,13 @@ def _normalise_kernel_notional(raw_notional: Any, raw_size: Any, price: float) -
         raw_value = float(raw_notional)
         if raw_value > 0.0:
             return raw_value
-    except Exception:
+    except (TypeError, ValueError):
         pass
     try:
         size_value = float(raw_size)
         if size_value > 0.0 and price > 0.0:
             return size_value * price
-    except Exception:
+    except (TypeError, ValueError):
         pass
     return 0.0
 
@@ -408,7 +410,7 @@ def _normalise_kernel_event_id(raw_id: Any, fallback: int) -> int:
         parsed = int(raw_id)
         if parsed >= 0:
             return parsed
-    except Exception:
+    except (TypeError, ValueError):
         pass
     return fallback
 
@@ -495,6 +497,7 @@ class KernelDecisionRustBindingProvider:
         except FileNotFoundError:
             return []
         except Exception:
+            logger.warning("event file unreadable: %s", self._path, exc_info=True)
             return []
 
         if isinstance(raw, dict):
@@ -539,7 +542,7 @@ class KernelDecisionRustBindingProvider:
             timestamp_ms = int(timestamp_ms)
             if timestamp_ms <= 0:
                 timestamp_ms = now_ms_value
-        except Exception:
+        except (TypeError, ValueError):
             timestamp_ms = now_ms_value
 
         event_id = _normalise_kernel_event_id(raw.get("event_id"), self._event_id)
@@ -616,7 +619,8 @@ class KernelDecisionRustBindingProvider:
             response = self._runtime.step_decision(state_json, event_json, self._params_json)
             try:
                 envelope = json.loads(response)
-            except Exception:
+            except (json.JSONDecodeError, TypeError) as exc:
+                logger.warning("kernel step response JSON parse failed: %s", exc)
                 continue
             if not isinstance(envelope, dict):
                 logger.warning(
@@ -781,9 +785,9 @@ def _build_default_decision_provider() -> DecisionProvider:
 
                 return KernelCandleDecisionProvider(decision_factory=KernelDecision.from_raw)
             except Exception:
-                pass  # fall through to old provider
+                logger.debug("KernelCandleDecisionProvider init failed, falling through", exc_info=True)
         except Exception:
-            pass
+            logger.debug("bt_runtime module unavailable for auto-mode candle provider", exc_info=True)
 
         try:
             return KernelDecisionRustBindingProvider(path=None)
@@ -965,11 +969,11 @@ class UnifiedEngine:
         # Optional: audit sampling for NEUTRAL signals (helps debug "why no entries" regimes).
         try:
             self._neutral_audit_sample_every_s = float(os.getenv("AI_QUANT_NEUTRAL_AUDIT_SAMPLE_EVERY_S", "0") or 0.0)
-        except Exception:
+        except (TypeError, ValueError):
             self._neutral_audit_sample_every_s = 0.0
         try:
             self._neutral_audit_sample_symbols = int(os.getenv("AI_QUANT_NEUTRAL_AUDIT_SAMPLE_SYMBOLS", "5") or 5)
-        except Exception:
+        except (TypeError, ValueError):
             self._neutral_audit_sample_symbols = 5
         self._neutral_audit_sample_every_s = float(max(0.0, self._neutral_audit_sample_every_s))
         self._neutral_audit_sample_symbols = int(max(0, min(250, self._neutral_audit_sample_symbols)))
@@ -984,7 +988,7 @@ class UnifiedEngine:
             self._debug_gates_symbols = {s.strip().upper() for s in raw_debug_syms.split(",") if s.strip()}
         try:
             self._debug_gates_every_s = float(os.getenv("AI_QUANT_DEBUG_GATES_EVERY_S", "0") or 0.0)
-        except Exception:
+        except (TypeError, ValueError):
             self._debug_gates_every_s = 0.0
         self._debug_gates_every_s = float(max(0.0, self._debug_gates_every_s))
 
@@ -993,12 +997,12 @@ class UnifiedEngine:
         # This prevents "late" entries when the candle-close signal is too old.
         try:
             max_delay_ms = int(float(os.getenv("AI_QUANT_ENTRY_MAX_DELAY_MS", "0") or 0.0))
-        except Exception:
+        except (TypeError, ValueError):
             max_delay_ms = 0
         if max_delay_ms <= 0:
             try:
                 max_delay_ms = int(float(os.getenv("AI_QUANT_ENTRY_MAX_DELAY_S", "0") or 0.0) * 1000.0)
-            except Exception:
+            except (TypeError, ValueError):
                 max_delay_ms = 0
         # Clamp to a sane range (0 disables).
         self._entry_max_delay_ms = int(max(0, min(max_delay_ms, 7 * 24 * 60 * 60 * 1000)))
@@ -1021,21 +1025,21 @@ class UnifiedEngine:
         try:
             if float(mids_age) > self._ws_stale_mids_s:
                 return True, f"mids_age_s={float(mids_age):.1f}s"
-        except Exception:
+        except (TypeError, ValueError):
             return True, "mids_age_s not numeric"
 
         try:
             if candle_age is not None and float(candle_age) > self._ws_stale_candle_s:
                 return True, f"candle_age_s={float(candle_age):.1f}s"
-        except Exception:
-            pass
+        except (TypeError, ValueError):
+            logger.debug("candle_age not numeric, ignoring staleness check")
 
         # BBO can be optional. Treat it as stale only when enabled (threshold > 0) and numeric.
         try:
             if self._ws_stale_bbo_s > 0 and bbo_age is not None and float(bbo_age) > self._ws_stale_bbo_s:
                 return True, f"bbo_age_s={float(bbo_age):.1f}s"
-        except Exception:
-            pass
+        except (TypeError, ValueError):
+            logger.debug("bbo_age not numeric, ignoring staleness check")
 
         return False, "ok"
 
@@ -1108,6 +1112,7 @@ class UnifiedEngine:
                         if len(df) >= 6:
                             return df.iloc[:-1]
             except Exception:
+                logger.debug("close-mode trim failed, returning full df", exc_info=True)
                 return df
 
         return df
@@ -1122,11 +1127,12 @@ class UnifiedEngine:
                 if pd.notna(t_close):
                     return int(t_close)
             except Exception:
-                pass
+                logger.debug("failed to extract close-mode analysis key from T column", exc_info=True)
 
         try:
             return int(df["timestamp"].iloc[-1])
         except Exception:
+            logger.debug("failed to extract analysis key from timestamp column", exc_info=True)
             return None
 
     def _entry_is_too_late(self, *, entry_key: int, now_ts_ms: int) -> bool:
@@ -1138,7 +1144,7 @@ class UnifiedEngine:
             return False
         try:
             delay = int(now_ts_ms) - int(entry_key)
-        except Exception:
+        except (TypeError, ValueError):
             return False
         if delay < 0:
             return False
@@ -1159,6 +1165,7 @@ class UnifiedEngine:
                 )
             return self.market.get_latest_candle_open_key(symbol, interval=self.interval)
         except Exception:
+            logger.debug("failed to get candle key for %s", symbol, exc_info=True)
             return None
 
     def _refresh_engine_config(self) -> None:
@@ -1239,6 +1246,7 @@ class UnifiedEngine:
             }
             now_series["audit"] = audit2
         except Exception:
+            logger.debug("failed to attach strategy snapshot for %s", symbol, exc_info=True)
             return
 
     def _update_regime_gate(
@@ -1256,7 +1264,7 @@ class UnifiedEngine:
         """
         try:
             key = int(btc_key_hint) if btc_key_hint is not None else None
-        except Exception:
+        except (TypeError, ValueError):
             key = None
 
         # Avoid recomputing every loop; BTC key only changes once per main bar (in close-mode).
@@ -1292,7 +1300,7 @@ class UnifiedEngine:
                         rc.get("regime_gate_breadth_low", rc.get("auto_reverse_breadth_low", 10.0)),
                     )
                 )
-            except Exception:
+            except (TypeError, ValueError):
                 chop_lo = 10.0
             try:
                 chop_hi = float(
@@ -1301,22 +1309,22 @@ class UnifiedEngine:
                         rc.get("regime_gate_breadth_high", rc.get("auto_reverse_breadth_high", 90.0)),
                     )
                 )
-            except Exception:
+            except (TypeError, ValueError):
                 chop_hi = 90.0
 
             try:
                 btc_adx_min = float(rc.get("regime_gate_btc_adx_min", 20.0))
-            except Exception:
+            except (TypeError, ValueError):
                 btc_adx_min = 20.0
             try:
                 btc_atr_pct_min = float(rc.get("regime_gate_btc_atr_pct_min", 0.003))
-            except Exception:
+            except (TypeError, ValueError):
                 btc_atr_pct_min = 0.003
 
             breadth = self._market_breadth_pct
             try:
                 b = float(breadth) if breadth is not None else None
-            except Exception:
+            except (TypeError, ValueError):
                 b = None
 
             if b is None:
@@ -1340,14 +1348,14 @@ class UnifiedEngine:
                 if isinstance(btc_now, dict):
                     try:
                         adx = float(btc_now.get("ADX") or 0.0)
-                    except Exception:
+                    except (TypeError, ValueError):
                         adx = None
                     try:
                         atr = float(btc_now.get("ATR") or 0.0)
                         close = float(btc_now.get("Close") or 0.0)
                         if close > 0:
                             atr_pct = atr / close
-                    except Exception:
+                    except (TypeError, ValueError, ZeroDivisionError):
                         atr_pct = None
 
                 if (adx is None or atr_pct is None) and btc_df is not None and (not btc_df.empty):
@@ -1355,11 +1363,11 @@ class UnifiedEngine:
                     ind = ind if isinstance(ind, dict) else {}
                     try:
                         adx_w = int(ind.get("adx_window", 14))
-                    except Exception:
+                    except (TypeError, ValueError):
                         adx_w = 14
                     try:
                         atr_w = int(ind.get("atr_window", 14))
-                    except Exception:
+                    except (TypeError, ValueError):
                         atr_w = 14
 
                     try:
@@ -1375,7 +1383,7 @@ class UnifiedEngine:
                             if pd.notna(_adx_v):
                                 adx = _adx_v
                     except Exception:
-                        pass
+                        logger.debug("regime gate ADX indicator computation failed", exc_info=True)
 
                     try:
                         atr_s = mei_alpha_v1.ta.volatility.average_true_range(
@@ -1392,7 +1400,7 @@ class UnifiedEngine:
                                 if close > 0:
                                     atr_pct = atr / close
                     except Exception:
-                        pass
+                        logger.debug("regime gate ATR indicator computation failed", exc_info=True)
 
                 if adx is None or atr_pct is None:
                     new_on = bool(fail_open)
@@ -1427,13 +1435,13 @@ class UnifiedEngine:
                     },
                 )
             except Exception:
-                pass
+                logger.debug("failed to log regime gate audit event", exc_info=True)
             try:
                 logger.info(
                     f"🧭 regime gate {'ON' if self._regime_gate_on else 'OFF'} reason={self._regime_gate_reason}"
                 )
             except Exception:
-                pass
+                logger.debug("failed to log regime gate state change", exc_info=True)
 
     def _decision_execute_trade(
         self,
@@ -1459,7 +1467,7 @@ class UnifiedEngine:
 
         try:
             target_size_f = float(target_size) if target_size is not None else None
-        except Exception:
+        except (TypeError, ValueError):
             target_size_f = None
 
         # Detect whether trader.execute_trade supports the action-aware API (cached).
@@ -1509,11 +1517,11 @@ class UnifiedEngine:
             pos = (self.trader.positions or {}).get(sym, {})
             try:
                 pos_size = float(pos.get("size") or 0.0)
-            except Exception:
+            except (TypeError, ValueError):
                 pos_size = 0.0
             try:
                 reduce_sz = float(target_size_f) if target_size_f is not None else pos_size
-            except Exception:
+            except (TypeError, ValueError):
                 reduce_sz = pos_size
             reduce_sz = float(max(0.0, min(pos_size, reduce_sz)))
 
@@ -1561,6 +1569,7 @@ class UnifiedEngine:
         try:
             import exchange.meta as hyperliquid_meta
         except Exception:
+            logger.debug("exchange.meta import failed, hyperliquid_meta unavailable", exc_info=True)
             hyperliquid_meta = None
 
         while True:
@@ -1586,7 +1595,7 @@ class UnifiedEngine:
                         if _wl_exclude:
                             watchlist = [s for s in watchlist if s.upper() not in _wl_exclude]
                 except Exception:
-                    pass
+                    logger.debug("failed to apply watchlist_exclude filter", exc_info=True)
 
                 watch_set = {s.upper() for s in watchlist}
 
@@ -1606,6 +1615,7 @@ class UnifiedEngine:
                 try:
                     open_syms = list((self.trader.positions or {}).keys())
                 except Exception:
+                    logger.debug("failed to list open position symbols", exc_info=True)
                     open_syms = []
 
                 active_symbols = list(dict.fromkeys(["BTC"] + watchlist + open_syms))
@@ -1638,6 +1648,7 @@ class UnifiedEngine:
                     _ready, not_ready = self.market.candles_ready(symbols=active_symbols, interval=self.interval)
                     not_ready_set = {str(s).upper() for s in (not_ready or [])}
                 except Exception:
+                    logger.warning("candles_ready check failed, pausing entries as precaution", exc_info=True)
                     # If we cannot determine readiness, be conservative and pause entries for watchlist symbols.
                     not_ready_set = {str(s).upper() for s in watchlist}
 
@@ -1671,6 +1682,7 @@ class UnifiedEngine:
                                     )
                                 not_ready_health = out
                     except Exception:
+                        logger.debug("failed to gather candles_health sample for not-ready symbols", exc_info=True)
                         not_ready_health = None
 
                     try:
@@ -1691,7 +1703,7 @@ class UnifiedEngine:
                             },
                         )
                     except Exception:
-                        pass
+                        logger.debug("failed to log CANDLES_NOT_READY_SAMPLE audit event", exc_info=True)
 
                 # BTC context (anchor) only refreshes when BTC candle key changes.
                 btc_key_hint = self._candle_key_hint("BTC")
@@ -1713,6 +1725,7 @@ class UnifiedEngine:
                                 if mei_alpha_v1.pd.notna(btc_ema_slow):
                                     btc_bullish = btc_df["Close"].iloc[-1] > btc_ema_slow
                         except Exception:
+                            logger.debug("BTC EMA bullish computation failed", exc_info=True)
                             btc_bullish = None
 
                     self._btc_ctx["key"] = btc_key_hint
@@ -1736,7 +1749,7 @@ class UnifiedEngine:
                         try:
                             _ef = float(_bnow.get("EMA_fast", 0.0) or 0.0)
                             _es = float(_bnow.get("EMA_slow", 0.0) or 0.0)
-                        except Exception:
+                        except (TypeError, ValueError):
                             _ef = _es = 0.0
                     # Fallback: compute EMA from candle DB when cache has no EMA.
                     if not (_ef > 0 and _es > 0):
@@ -1760,13 +1773,14 @@ class UnifiedEngine:
                                     _ef = float(_ema_f_s.iloc[-1])
                                     _es = float(_ema_s_s.iloc[-1])
                         except Exception:
+                            logger.debug("breadth EMA fallback failed for %s", _bsym, exc_info=True)
                             _ef = _es = 0.0
                     try:
                         if _ef > 0 and _es > 0:
                             _breadth_total += 1
                             if _ef > _es:
                                 _breadth_pos += 1
-                    except Exception:
+                    except (TypeError, ValueError):
                         continue
                 self._market_breadth_pct = ((_breadth_pos / _breadth_total) * 100.0) if _breadth_total > 0 else None
 
@@ -1774,7 +1788,7 @@ class UnifiedEngine:
                 try:
                     self._update_regime_gate(mei_alpha_v1=mei_alpha_v1, btc_key_hint=btc_key_hint, btc_df=btc_df)
                 except Exception:
-                    pass
+                    logger.warning("regime gate update failed", exc_info=True)
 
                 # Phase 1: Keep exit logic for open positions.
                 for sym_u in sorted((self.trader.positions or {}).keys()):
@@ -1838,7 +1852,7 @@ class UnifiedEngine:
                                         "action": cached.get("action", ""),
                                     }
                             except Exception:
-                                pass
+                                logger.debug("exit indicator backfill failed for %s", sym_u, exc_info=True)
 
                         is_exit_boundary = self._exit_reanalyze_due(sym_u)
                         if not is_exit_boundary:
@@ -1848,6 +1862,7 @@ class UnifiedEngine:
                             try:
                                 now_series["funding_rate"] = float(hyperliquid_meta.get_funding_rate(sym_u) or 0.0)
                             except Exception:
+                                logger.debug("funding_rate fetch failed for %s (exit)", sym_u, exc_info=True)
                                 now_series["funding_rate"] = 0.0
                         else:
                             now_series["funding_rate"] = 0.0
@@ -1869,6 +1884,9 @@ class UnifiedEngine:
                                         else float(now_series.get("Close") or 0.0)
                                     )
                             except Exception:
+                                logger.debug(
+                                    "exit candle price fetch failed for %s, falling back to mid", sym_u, exc_info=True
+                                )
                                 quote = self.market.get_mid_price(sym_u, max_age_s=10.0, interval=self.interval)
                                 current_price = (
                                     float(quote.price) if quote is not None else float(now_series.get("Close") or 0.0)
@@ -1888,7 +1906,7 @@ class UnifiedEngine:
                                             "age_s": float(getattr(quote, "age_s", 0.0) or 0.0),
                                         }
                                     except Exception:
-                                        pass
+                                        logger.debug("failed to attach quote metadata for %s", sym_u, exc_info=True)
                             self.trader.check_exit_conditions(
                                 sym_u,
                                 current_price,
@@ -1942,7 +1960,7 @@ class UnifiedEngine:
                         now_series = dec.now_series if isinstance(dec.now_series, dict) else {}
                         try:
                             now_series = dict(now_series)
-                        except Exception:
+                        except (TypeError, ValueError):
                             now_series = {}
 
                         if not isinstance(now_series, dict):
@@ -1997,7 +2015,7 @@ class UnifiedEngine:
                         now_series = dec.now_series if isinstance(dec.now_series, dict) else {}
                         try:
                             now_series = dict(now_series)
-                        except Exception:
+                        except (TypeError, ValueError):
                             now_series = {}
                         if not isinstance(now_series, dict):
                             now_series = {}
@@ -2009,6 +2027,7 @@ class UnifiedEngine:
                             try:
                                 now_series["funding_rate"] = float(hyperliquid_meta.get_funding_rate(sym_u) or 0.0)
                             except Exception:
+                                logger.debug("funding_rate fetch failed for %s (decision)", sym_u, exc_info=True)
                                 now_series["funding_rate"] = 0.0
                         else:
                             now_series["funding_rate"] = 0.0
@@ -2036,7 +2055,7 @@ class UnifiedEngine:
                                         },
                                     )
                                 except Exception:
-                                    pass
+                                    logger.debug("decision event (regime_gate) failed for %s", sym_u, exc_info=True)
                             continue
 
                         quote = None
@@ -2055,6 +2074,11 @@ class UnifiedEngine:
                                             else float(now_series.get("Close") or 0.0)
                                         )
                                 except Exception:
+                                    logger.debug(
+                                        "entry candle price fetch failed for %s, falling back to mid",
+                                        sym_u,
+                                        exc_info=True,
+                                    )
                                     quote = self.market.get_mid_price(sym_u, max_age_s=10.0, interval=self.interval)
                                     current_price = (
                                         float(quote.price)
@@ -2087,7 +2111,7 @@ class UnifiedEngine:
                                         context={"reason": "zero_price", "action": act},
                                     )
                                 except Exception:
-                                    pass
+                                    logger.debug("decision event (zero_price) failed for %s", sym_u, exc_info=True)
                             continue
 
                         if act in {"OPEN", "ADD"}:
@@ -2109,7 +2133,9 @@ class UnifiedEngine:
                                                 context={"reason": "stale_candle", "entry_key": int(entry_key)},
                                             )
                                         except Exception:
-                                            pass
+                                            logger.debug(
+                                                "decision event (stale_candle) failed for %s", sym_u, exc_info=True
+                                            )
                                     continue
 
                                 last_key = self._last_entry_key.get(sym_u)
@@ -2133,7 +2159,9 @@ class UnifiedEngine:
                                                         context={"reason": "dedup_key", "entry_key": int(entry_key)},
                                                     )
                                                 except Exception:
-                                                    pass
+                                                    logger.debug(
+                                                        "decision event (dedup_key) failed for %s", sym_u, exc_info=True
+                                                    )
                                             continue
                                     else:
                                         _cde = _get_decision_event_fn()
@@ -2148,13 +2176,16 @@ class UnifiedEngine:
                                                     context={"reason": "dedup_key", "entry_key": int(entry_key)},
                                                 )
                                             except Exception:
-                                                pass
+                                                logger.debug(
+                                                    "decision event (dedup_key) failed for %s", sym_u, exc_info=True
+                                                )
                                         continue
 
                             if self._rest_enabled and hyperliquid_meta is not None:
                                 try:
                                     now_series["funding_rate"] = float(hyperliquid_meta.get_funding_rate(sym_u) or 0.0)
                                 except Exception:
+                                    logger.debug("funding_rate fetch failed for %s (entry exec)", sym_u, exc_info=True)
                                     now_series["funding_rate"] = 0.0
                             else:
                                 now_series["funding_rate"] = 0.0
@@ -2169,7 +2200,9 @@ class UnifiedEngine:
                                             "age_s": float(getattr(quote, "age_s", 0.0) or 0.0),
                                         }
                                 except Exception:
-                                    pass
+                                    logger.debug(
+                                        "failed to attach quote metadata for %s (entry exec)", sym_u, exc_info=True
+                                    )
 
                             _did = None
                             _cde = _get_decision_event_fn()
@@ -2188,7 +2221,7 @@ class UnifiedEngine:
                                         },
                                     )
                                 except Exception:
-                                    pass
+                                    logger.debug("decision event (entry_signal) failed for %s", sym_u, exc_info=True)
 
                             self._decision_execute_trade(
                                 sym_u,
@@ -2230,7 +2263,7 @@ class UnifiedEngine:
                                         },
                                     )
                                 except Exception:
-                                    pass
+                                    logger.debug("decision event (exit_check) failed for %s", sym_u, exc_info=True)
 
                             self._decision_execute_trade(
                                 sym_u,
@@ -2263,6 +2296,7 @@ class UnifiedEngine:
                     try:
                         open_pos = len(self.trader.positions or {})
                     except Exception:
+                        logger.debug("failed to count open positions for heartbeat", exc_info=True)
                         open_pos = 0
 
                     loop_s = time.time() - loop_start
@@ -2271,7 +2305,7 @@ class UnifiedEngine:
                     _tc = (_btc_cfg.get("trade") or {}) if isinstance(_btc_cfg, dict) else {}
                     try:
                         _size_mult = float(_tc.get("size_multiplier", 1.0))
-                    except Exception:
+                    except (TypeError, ValueError):
                         _size_mult = 1.0
                     _auto_rev_on = (
                         bool(_rc.get("enable_auto_reverse", False))
@@ -2286,21 +2320,25 @@ class UnifiedEngine:
 
                         cfg_id = str(current_config_id() or "")
                     except Exception:
+                        logger.debug("failed to get current config id for heartbeat", exc_info=True)
                         cfg_id = ""
 
                     risk = getattr(self.trader, "risk", None)
                     try:
                         kill_mode = str(getattr(risk, "kill_mode", "off") or "off").strip().lower()
                     except Exception:
+                        logger.debug("failed to read kill_mode from risk tracker", exc_info=True)
                         kill_mode = "off"
                     try:
                         kill_reason = str(getattr(risk, "kill_reason", "") or "").strip() or "none"
                     except Exception:
+                        logger.debug("failed to read kill_reason from risk tracker", exc_info=True)
                         kill_reason = "none"
 
                     try:
                         strategy_mode = str(os.getenv("AI_QUANT_STRATEGY_MODE", "") or "").strip().lower() or "none"
                     except Exception:
+                        logger.debug("failed to read AI_QUANT_STRATEGY_MODE", exc_info=True)
                         strategy_mode = "none"
 
                     slip_enabled = 0
@@ -2326,7 +2364,7 @@ class UnifiedEngine:
                             if med is not None:
                                 slip_median_bps_s = f"{float(med):.3f}"
                     except Exception:
-                        pass
+                        logger.debug("failed to gather slippage guard stats for heartbeat", exc_info=True)
                     logger.info(
                         f"🫀 engine ok. loops={self.stats.loops} errors={self.stats.loop_errors} "
                         f"symbols={len(active_symbols)} open_pos={open_pos} loop={loop_s:.2f}s "
