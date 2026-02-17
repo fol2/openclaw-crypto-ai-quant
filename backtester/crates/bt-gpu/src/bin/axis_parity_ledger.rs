@@ -94,6 +94,10 @@ struct Args {
     /// Fail if trace event parity reports any mismatch in failed samples.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     fail_on_event_parity_mismatch: bool,
+
+    /// Include event parity summary in JSONL ledger rows.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+    ledger_include_event_parity: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -117,6 +121,7 @@ struct AxisLedgerRow {
     balance_delta_abs: f64,
     pnl_delta_abs: f64,
     trace_artifact: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     event_parity: Option<LedgerEventParitySummary>,
 }
 
@@ -353,7 +358,9 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         )?;
         let gpu_events = collect_trace_events(&trace_state, &trace_symbols);
         let event_parity = compare_event_streams(&cpu_trace.events, &gpu_events);
-        baseline_event_parity = Some(summarise_event_parity(&event_parity));
+        if args.ledger_include_event_parity {
+            baseline_event_parity = Some(summarise_event_parity(&event_parity));
+        }
         if is_event_parity_mismatch(&event_parity.status) {
             event_parity_mismatches += 1;
         }
@@ -498,7 +505,9 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 )?;
                 let gpu_events = collect_trace_events(&trace_state, &trace_symbols);
                 let event_parity = compare_event_streams(&cpu_trace.events, &gpu_events);
-                event_parity_summary = Some(summarise_event_parity(&event_parity));
+                if args.ledger_include_event_parity {
+                    event_parity_summary = Some(summarise_event_parity(&event_parity));
+                }
                 if is_event_parity_mismatch(&event_parity.status) {
                     event_parity_mismatches += 1;
                 }
