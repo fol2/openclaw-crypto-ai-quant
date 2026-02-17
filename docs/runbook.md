@@ -139,7 +139,7 @@ python tools/flat_now.py \
 
 ### Live flatten + pause (explicit, destructive)
 
-Live flatten requires `--yes`. Secrets are loaded from `AI_QUANT_SECRETS_PATH` (or `./secrets.json`).
+Live flatten requires `--yes`. Secrets are loaded from `AI_QUANT_SECRETS_PATH` (or `~/.config/openclaw/ai-quant-secrets.json`).
 
 ```bash
 python tools/flat_now.py \
