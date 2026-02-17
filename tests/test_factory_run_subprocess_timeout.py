@@ -60,3 +60,24 @@ def test_run_cmd_timeout_can_be_disabled(tmp_path: Path) -> None:
     assert res.exit_code == 0
     assert res.timeout_s is None
     assert out_path.read_text(encoding="utf-8").strip() == "done"
+
+
+def test_run_cmd_respects_env_default_timeout_disable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    out_path = tmp_path / "env_disable.stdout.txt"
+    err_path = tmp_path / "env_disable.stderr.txt"
+    monkeypatch.setenv("AI_QUANT_FACTORY_CMD_TIMEOUT_S", "0")
+
+    res = factory_run._run_cmd(
+        [sys.executable, "-c", "import time; time.sleep(0.2); print('done')"],
+        cwd=tmp_path,
+        stdout_path=out_path,
+        stderr_path=err_path,
+        timeout_s=None,
+    )
+
+    assert res.timed_out is False
+    assert res.exit_code == 0
+    assert res.timeout_s is None
+    assert out_path.read_text(encoding="utf-8").strip() == "done"

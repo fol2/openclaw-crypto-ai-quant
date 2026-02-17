@@ -639,9 +639,9 @@ def _default_cmd_timeout_s() -> float | None:
     Set ``AI_QUANT_FACTORY_CMD_TIMEOUT_S`` to override (seconds). Values <= 0 disable timeout.
     """
     try:
-        raw = float(os.getenv("AI_QUANT_FACTORY_CMD_TIMEOUT_S", "21600"))
+        raw = float(os.getenv("AI_QUANT_FACTORY_CMD_TIMEOUT_S", "86400"))
     except Exception:
-        raw = 21600.0
+        raw = 86400.0
     if raw <= 0.0:
         return None
     # Keep a sane upper bound (7 days) to avoid accidental runaway settings.
