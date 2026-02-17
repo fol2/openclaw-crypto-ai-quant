@@ -17,11 +17,14 @@ class _FakeCursor:
 class _FakeConn:
     def __init__(self):
         self.closed = False
+        self.executed_sql: list[str] = []
 
     def cursor(self):
         return _FakeCursor()
 
     def execute(self, *_args, **_kwargs):
+        if _args:
+            self.executed_sql.append(str(_args[0]))
         return None
 
     def commit(self):
@@ -41,6 +44,17 @@ class _FakeExecutor:
 
     def get_positions(self, *, force: bool = False):
         return {}
+
+
+def test_configure_live_db_connection_applies_wal_pragmas():
+    conn = _FakeConn()
+
+    live_trader._configure_live_db_connection(conn)
+
+    assert conn.executed_sql == [
+        "PRAGMA journal_mode=WAL",
+        "PRAGMA synchronous=NORMAL",
+    ]
 
 
 def test_sync_from_exchange_configures_wal(monkeypatch):
@@ -88,6 +102,34 @@ def test_upsert_position_state_configures_wal(monkeypatch):
     }
 
     trader.upsert_position_state("BTC")
+
+    assert wal_calls == [conn]
+    assert conn.closed is True
+
+
+def test_clear_position_state_configures_wal(monkeypatch):
+    conn = _FakeConn()
+    wal_calls: list[_FakeConn] = []
+
+    monkeypatch.setattr(live_trader.sqlite3, "connect", lambda *_args, **_kwargs: conn)
+    monkeypatch.setattr(live_trader, "_configure_live_db_connection", lambda c: wal_calls.append(c))
+
+    trader = live_trader.LiveTrader.__new__(live_trader.LiveTrader)
+    trader.clear_position_state("BTC")
+
+    assert wal_calls == [conn]
+    assert conn.closed is True
+
+
+def test_reconcile_position_state_configures_wal(monkeypatch):
+    conn = _FakeConn()
+    wal_calls: list[_FakeConn] = []
+
+    monkeypatch.setattr(live_trader.sqlite3, "connect", lambda *_args, **_kwargs: conn)
+    monkeypatch.setattr(live_trader, "_configure_live_db_connection", lambda c: wal_calls.append(c))
+
+    trader = live_trader.LiveTrader.__new__(live_trader.LiveTrader)
+    trader._reconcile_position_state({"BTC"})
 
     assert wal_calls == [conn]
     assert conn.closed is True

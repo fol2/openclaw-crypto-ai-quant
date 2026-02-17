@@ -644,6 +644,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         conn = None
         try:
             conn = sqlite3.connect(mei_alpha_v1.DB_PATH, timeout=timeout_s)
+            _configure_live_db_connection(conn)
             cur = conn.cursor()
             cur.execute("DELETE FROM position_state WHERE symbol = ?", (str(symbol).strip().upper(),))
             conn.commit()
@@ -674,6 +675,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         conn = None
         try:
             conn = sqlite3.connect(mei_alpha_v1.DB_PATH, timeout=timeout_s)
+            _configure_live_db_connection(conn)
             cur = conn.cursor()
             if open_symbols:
                 # Safety: `placeholders` contains only '?' chars — no user input in SQL structure.
