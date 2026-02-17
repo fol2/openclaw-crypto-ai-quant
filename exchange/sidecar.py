@@ -121,6 +121,7 @@ class SidecarWSClient:
         f = s.makefile("rwb")
         self._sock = s
         self._f = f
+        self._rpc_timeout_s = float(timeout_s)
 
         # Detect reconnection after a previous disconnect.
         reconnected = self._was_connected and not self._connected
@@ -167,6 +168,10 @@ class SidecarWSClient:
         with self._lock:
             try:
                 self._connect(timeout_s=float(timeout_s))
+                # Re-assert socket timeout before each RPC to guard against
+                # partial reads that could block indefinitely.
+                if self._sock is not None:
+                    self._sock.settimeout(getattr(self, "_rpc_timeout_s", float(timeout_s)))
                 rid = int(self._next_id)
                 self._next_id += 1
                 req = {"id": rid, "method": str(method), "params": params or {}}

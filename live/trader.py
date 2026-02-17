@@ -428,7 +428,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     (symbol,),
                 )
                 row = db_cur.fetchone()
-            except Exception:
+            except (sqlite3.Error, OSError) as exc:
+                logger.debug("load_pos_state(%s): DB read failed: %s", symbol, exc, exc_info=True)
                 row = None
             if not row:
                 return {}

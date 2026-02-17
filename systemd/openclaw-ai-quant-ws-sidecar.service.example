@@ -65,5 +65,12 @@ RestrictSUIDSGID=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ReadWritePaths=$PROJECT_DIR
 
+# Resource limits
+MemoryMax=512M
+TasksMax=256
+TimeoutStopSec=15
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
 [Install]
 WantedBy=default.target
