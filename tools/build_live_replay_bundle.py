@@ -155,6 +155,7 @@ def main() -> int:
     replay_report_path = bundle_dir / "backtester_replay_report.json"
     trade_reconcile_path = bundle_dir / "trade_reconcile_report.json"
     action_reconcile_path = bundle_dir / "action_reconcile_report.json"
+    alignment_gate_path = bundle_dir / "alignment_gate_report.json"
     manifest_path = bundle_dir / "replay_bundle_manifest.json"
 
     baseline_trades = _load_live_baseline_trades(
@@ -232,11 +233,21 @@ def main() -> int:
         f"--output \"$BUNDLE_DIR/{action_reconcile_path.name}\""
     )
 
+    cmd_alignment_gate = (
+        "set -euo pipefail\n"
+        "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
+        "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
+        "python \"$REPO_ROOT/tools/assert_replay_bundle_alignment.py\" "
+        "--bundle-dir \"$BUNDLE_DIR\" "
+        f"--output \"$BUNDLE_DIR/{alignment_gate_path.name}\""
+    )
+
     (bundle_dir / "run_01_export_and_seed.sh").write_text(cmd_export_seed + "\n", encoding="utf-8")
     (bundle_dir / "run_02_replay.sh").write_text(cmd_replay + "\n", encoding="utf-8")
     (bundle_dir / "run_03_audit.sh").write_text(cmd_audit + "\n", encoding="utf-8")
     (bundle_dir / "run_04_trade_reconcile.sh").write_text(cmd_trade_reconcile + "\n", encoding="utf-8")
     (bundle_dir / "run_05_action_reconcile.sh").write_text(cmd_action_reconcile + "\n", encoding="utf-8")
+    (bundle_dir / "run_06_assert_alignment.sh").write_text(cmd_alignment_gate + "\n", encoding="utf-8")
 
     for script_name in (
         "run_01_export_and_seed.sh",
@@ -244,6 +255,7 @@ def main() -> int:
         "run_03_audit.sh",
         "run_04_trade_reconcile.sh",
         "run_05_action_reconcile.sh",
+        "run_06_assert_alignment.sh",
     ):
         script_path = bundle_dir / script_name
         script_path.chmod(0o755)
@@ -270,6 +282,7 @@ def main() -> int:
             "backtester_replay_report_json": replay_report_path.name,
             "trade_reconcile_report_file": trade_reconcile_path.name,
             "action_reconcile_report_file": action_reconcile_path.name,
+            "alignment_gate_report_file": alignment_gate_path.name,
         },
         "counts": {
             "live_baseline_trades": len(baseline_trades),
@@ -282,6 +295,7 @@ def main() -> int:
             "audit": cmd_audit,
             "trade_reconcile": cmd_trade_reconcile,
             "action_reconcile": cmd_action_reconcile,
+            "alignment_gate": cmd_alignment_gate,
         },
     }
 
