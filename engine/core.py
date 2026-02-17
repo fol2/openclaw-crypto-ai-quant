@@ -1564,6 +1564,8 @@ class UnifiedEngine:
         )
 
     def run_forever(self) -> None:
+        import signal
+
         import strategy.mei_alpha_v1 as mei_alpha_v1
 
         try:
@@ -1572,7 +1574,19 @@ class UnifiedEngine:
             logger.debug("exchange.meta import failed, hyperliquid_meta unavailable", exc_info=True)
             hyperliquid_meta = None
 
+        _shutdown_requested = False
+
+        def _handle_sigterm(signum, frame):
+            nonlocal _shutdown_requested
+            _shutdown_requested = True
+
+        signal.signal(signal.SIGTERM, _handle_sigterm)
+
         while True:
+            if _shutdown_requested:
+                logger.info("SIGTERM received — graceful shutdown")
+                break
+
             loop_start = time.time()
             self.stats.loops += 1
 

@@ -65,23 +65,22 @@ class LiveSecrets:
 
 def load_live_secrets(path: str) -> LiveSecrets:
     path = os.path.expanduser(str(path or "").strip())
-    # Refuse to use secrets files that are group/world-readable on Unix.
+    # Atomic open + fstat to avoid TOCTOU race between permission check and read.
     # Private keys must be treated as production credentials.
-    st = None
+    fd = os.open(path, os.O_RDONLY)
     try:
-        st = os.stat(path)
-    except FileNotFoundError:
-        raise
-    except Exception:
-        st = None
-    if st is not None and os.name != "nt":
-        if (int(st.st_mode) & 0o077) != 0:
-            raise ValueError(
-                f"Secrets file permissions too open: {path} (expected no group/other permissions; suggested: chmod 600)"
-            )
-
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+        if os.name != "nt":
+            st = os.fstat(fd)
+            if (int(st.st_mode) & 0o077) != 0:
+                raise ValueError(
+                    f"Secrets file permissions too open: {path} (expected no group/other permissions; suggested: chmod 600)"
+                )
+        with os.fdopen(fd, "r", encoding="utf-8") as f:
+            fd = -1  # fdopen takes ownership
+            data = json.load(f)
+    finally:
+        if fd >= 0:
+            os.close(fd)
     if not isinstance(data, dict):
         raise ValueError(f"Secrets file must contain a JSON object, got {type(data).__name__}: {path}")
 

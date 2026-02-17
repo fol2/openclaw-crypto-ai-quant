@@ -13,6 +13,7 @@ from .utils import Backoff
 
 INFO_URL = "https://api.hyperliquid.xyz/info"
 
+
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None:
@@ -54,7 +55,8 @@ class HyperliquidRestClient:
         for attempt in range(1, max(1, int(max_retries)) + 1):
             try:
                 with urllib.request.urlopen(req, timeout=self._timeout_s) as resp:
-                    data = json.load(resp)
+                    raw_body = resp.read()
+                data = json.loads(raw_body)
                 return RestResult(ok=True, data=data, fetched_at_ms=int(time.time() * 1000))
             except urllib.error.HTTPError as e:
                 last_err = f"HTTP {getattr(e, 'code', '?')}: {e}"

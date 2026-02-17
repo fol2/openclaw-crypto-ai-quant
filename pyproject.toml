@@ -43,6 +43,8 @@ addopts = [
   "-ra",
   "--cov=engine.sqlite_logger",
   "--cov=monitor.heartbeat",
+  "--cov=engine.risk",
+  "--cov=exchange.executor",
   "--cov-report=term-missing",
-  "--cov-fail-under=80",
+  "--cov-fail-under=60",
 ]

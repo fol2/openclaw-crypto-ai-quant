@@ -36,7 +36,10 @@ def _env_float(name: str, default: float) -> float:
         raw = os.getenv(name)
         if raw is None:
             return float(default)
-        return float(str(raw).strip())
+        v = float(str(raw).strip())
+        if not math.isfinite(v):
+            return float(default)
+        return v
     except Exception:
         return float(default)
 

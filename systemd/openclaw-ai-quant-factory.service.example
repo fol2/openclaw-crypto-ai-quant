@@ -3,6 +3,8 @@ Description=OpenClaw AI Quant Nightly Strategy Factory Run
 After=network-online.target openclaw-ai-quant-ws-sidecar.service
 Wants=network-online.target
 Requires=openclaw-ai-quant-ws-sidecar.service
+StartLimitBurst=5
+StartLimitIntervalSec=60
 
 [Service]
 Type=oneshot
@@ -24,6 +26,11 @@ RestrictRealtime=true
 RestrictSUIDSGID=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ReadWritePaths=$PROJECT_DIR
+
+# Resource limits
+MemoryMax=1G
+TasksMax=256
+TimeoutStopSec=15
 
 [Install]
 WantedBy=default.target
