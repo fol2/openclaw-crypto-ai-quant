@@ -1692,13 +1692,9 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                         },
                     )
                     return False
-            except Exception as e:
-                logger.warning(
-                    "risk.allow_order() raised for exit %s, allowing order (fail-open for exits): %s",
-                    sym,
-                    e,
-                    exc_info=True,
-                )
+            except Exception:
+                logger.error("risk.allow_order() raised for exit %s, BLOCKING order as fail-closed", sym, exc_info=True)
+                return False
 
         if not self._can_send_orders():
             if oms_intent is not None and oms is not None:
