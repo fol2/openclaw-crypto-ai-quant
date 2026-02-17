@@ -178,6 +178,10 @@ struct CpuTradeEventRow {
     t_sec: u32,
     symbol: String,
     action: String,
+    action_kind: String,
+    action_side: String,
+    intent_signal: String,
+    action_taken: String,
     reason: String,
     price: f64,
     size: f64,
@@ -213,10 +217,22 @@ struct CanonicalEventRow {
     t_sec: u32,
     symbol: String,
     action: String,
+    action_kind: String,
+    action_side: String,
+    intent_signal: String,
+    action_taken: String,
     reason: String,
     price: f64,
     size: f64,
     pnl: f64,
+}
+
+#[derive(Debug, Clone)]
+struct DecisionActionCanonical {
+    action_kind: String,
+    action_side: String,
+    intent_signal: String,
+    action_taken: String,
 }
 
 #[cfg(target_os = "linux")]
@@ -682,12 +698,17 @@ fn run_cpu_single_with_trade_events(
         } else {
             (trade.timestamp_ms / 1000) as u32
         };
+        let decision = canonical_cpu_decision_action(&trade.action);
         out.push(CpuTradeEventRow {
             idx: window_idx - start,
             global_idx,
             t_sec,
             symbol: trade.symbol,
             action: trade.action,
+            action_kind: decision.action_kind,
+            action_side: decision.action_side,
+            intent_signal: decision.intent_signal,
+            action_taken: decision.action_taken,
             reason: trade.reason,
             price: trade.price,
             size: trade.size,
@@ -937,6 +958,10 @@ fn canonicalise_cpu_event(ev: &CpuTradeEventRow) -> CanonicalEventRow {
         t_sec: ev.t_sec,
         symbol: ev.symbol.clone(),
         action: ev.action.clone(),
+        action_kind: ev.action_kind.clone(),
+        action_side: ev.action_side.clone(),
+        intent_signal: ev.intent_signal.clone(),
+        action_taken: ev.action_taken.clone(),
         reason: ev.reason.clone(),
         price: ev.price,
         size: ev.size,
@@ -945,6 +970,7 @@ fn canonicalise_cpu_event(ev: &CpuTradeEventRow) -> CanonicalEventRow {
 }
 
 fn canonicalise_gpu_event(ev: &TraceEventRow) -> CanonicalEventRow {
+    let decision = canonical_gpu_decision_action(&ev.kind, &ev.side);
     CanonicalEventRow {
         source_idx: ev.idx,
         global_idx: None,
@@ -954,11 +980,81 @@ fn canonicalise_gpu_event(ev: &TraceEventRow) -> CanonicalEventRow {
             .clone()
             .unwrap_or_else(|| format!("SYM#{}", ev.sym_idx)),
         action: canonical_gpu_action(&ev.kind, &ev.side),
+        action_kind: decision.action_kind,
+        action_side: decision.action_side,
+        intent_signal: decision.intent_signal,
+        action_taken: decision.action_taken,
         reason: ev.reason.clone(),
         price: ev.price as f64,
         size: ev.size as f64,
         pnl: ev.pnl as f64,
     }
+}
+
+fn canonical_cpu_decision_action(action: &str) -> DecisionActionCanonical {
+    let raw = action.trim().to_uppercase();
+    if raw == "FUNDING" {
+        return DecisionActionCanonical {
+            action_kind: "FUNDING".to_string(),
+            action_side: "EMPTY".to_string(),
+            intent_signal: "NEUTRAL".to_string(),
+            action_taken: "funding".to_string(),
+        };
+    }
+
+    let (kind, side) = match raw.rsplit_once('_') {
+        Some((k, s)) if s == "LONG" || s == "SHORT" => (k.to_string(), s.to_string()),
+        _ => (raw.clone(), "EMPTY".to_string()),
+    };
+
+    let action_kind = normalise_decision_kind(&kind);
+    let intent_signal = decision_signal_for(&action_kind, &side).to_string();
+    let action_taken = decision_action_taken(&action_kind, &side);
+
+    DecisionActionCanonical {
+        action_kind,
+        action_side: side,
+        intent_signal,
+        action_taken,
+    }
+}
+
+fn canonical_gpu_decision_action(kind: &str, side: &str) -> DecisionActionCanonical {
+    let action_kind = normalise_decision_kind(kind);
+    let action_side = side.trim().to_uppercase();
+    let intent_signal = decision_signal_for(&action_kind, &action_side).to_string();
+    let action_taken = decision_action_taken(&action_kind, &action_side);
+    DecisionActionCanonical {
+        action_kind,
+        action_side,
+        intent_signal,
+        action_taken,
+    }
+}
+
+fn normalise_decision_kind(kind: &str) -> String {
+    let upper = kind.trim().to_uppercase();
+    match upper.as_str() {
+        "PARTIAL_CLOSE" => "REDUCE".to_string(),
+        _ => upper,
+    }
+}
+
+fn decision_signal_for(kind: &str, side: &str) -> &'static str {
+    match (kind, side) {
+        ("OPEN", "LONG") | ("ADD", "LONG") => "BUY",
+        ("OPEN", "SHORT") | ("ADD", "SHORT") => "SELL",
+        ("CLOSE", "LONG") | ("REDUCE", "LONG") => "SELL",
+        ("CLOSE", "SHORT") | ("REDUCE", "SHORT") => "BUY",
+        _ => "NEUTRAL",
+    }
+}
+
+fn decision_action_taken(kind: &str, side: &str) -> String {
+    if side == "LONG" || side == "SHORT" {
+        return format!("{}_{}", kind.to_lowercase(), side.to_lowercase());
+    }
+    kind.to_lowercase()
 }
 
 fn canonical_gpu_action(kind: &str, side: &str) -> String {
