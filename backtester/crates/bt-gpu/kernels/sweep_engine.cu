@@ -608,8 +608,9 @@ __device__ void apply_close(GpuComboState* state, unsigned int sym, const GpuSna
     const GpuPosition& pos = state->positions[sym];
     if (pos.active == POS_EMPTY) { return; }
 
-    float slip = (pos.active == POS_LONG) ? slippage_bps : -slippage_bps;
-    float fill_price = snap.close * (1.0f + slip / 10000.0f);
+    (void)slippage_bps;
+    float fill_price = snap.close * ((pos.active == POS_LONG) ? (1.0f - 0.5f / 10000.0f)
+                                                               : (1.0f + 0.5f / 10000.0f));
 
     // Use double for PnL/fee to prevent accumulation drift over 10K+ trades
     double pnl;
@@ -664,8 +665,9 @@ __device__ void apply_partial_close(GpuComboState* state, unsigned int sym, cons
     if (pos.active == POS_EMPTY) { return; }
 
     float exit_size = pos.size * pct;
-    float slip = (pos.active == POS_LONG) ? slippage_bps : -slippage_bps;
-    float fill_price = snap.close * (1.0f + slip / 10000.0f);
+    (void)slippage_bps;
+    float fill_price = snap.close * ((pos.active == POS_LONG) ? (1.0f - 0.5f / 10000.0f)
+                                                               : (1.0f + 0.5f / 10000.0f));
 
     // Use double for PnL/fee to prevent accumulation drift over 10K+ trades
     double pnl;
@@ -997,7 +999,9 @@ extern "C" __global__ void sweep_engine_kernel(
 
                                     float old_size = pos.size;
                                     float new_size = old_size + add_size;
-                                    float new_entry = (pos.entry_price * old_size + hybrid.close * add_size) / new_size;
+                                    float add_slip = (pos.active == POS_LONG) ? cfg.slippage_bps : -cfg.slippage_bps;
+                                    float add_fill_price = hybrid.close * (1.0f + add_slip / 10000.0f);
+                                    float new_entry = (pos.entry_price * old_size + add_fill_price * add_size) / new_size;
                                     state.positions[sym].entry_price = new_entry;
                                     state.positions[sym].size = new_size;
                                     state.positions[sym].margin_used += add_margin;
@@ -1010,7 +1014,7 @@ extern "C" __global__ void sweep_engine_kernel(
                                         TRACE_KIND_ADD,
                                         pos.active,
                                         TRACE_REASON_PYRAMID,
-                                        hybrid.close,
+                                        add_fill_price,
                                         add_size,
                                         0.0f
                                     );
@@ -1322,7 +1326,9 @@ extern "C" __global__ void sweep_engine_kernel(
 
                                 float old_size = pos.size;
                                 float new_size = old_size + add_size;
-                                float new_entry = (pos.entry_price * old_size + snap.close * add_size) / new_size;
+                                float add_slip = (pos.active == POS_LONG) ? cfg.slippage_bps : -cfg.slippage_bps;
+                                float add_fill_price = snap.close * (1.0f + add_slip / 10000.0f);
+                                float new_entry = (pos.entry_price * old_size + add_fill_price * add_size) / new_size;
                                 state.positions[sym].entry_price = new_entry;
                                 state.positions[sym].size = new_size;
                                 state.positions[sym].margin_used += add_margin;
@@ -1335,7 +1341,7 @@ extern "C" __global__ void sweep_engine_kernel(
                                     TRACE_KIND_ADD,
                                     pos.active,
                                     TRACE_REASON_PYRAMID,
-                                    snap.close,
+                                    add_fill_price,
                                     add_size,
                                     0.0f
                                 );
