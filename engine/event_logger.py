@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import hashlib
 import json
+import logging
 import os
 import queue
 import threading
@@ -14,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 
 AIQ_ROOT = Path(__file__).resolve().parents[1]
@@ -129,9 +132,8 @@ class _JsonlEventSink:
     def emit(self, payload: dict[str, Any]) -> None:
         try:
             line = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-        except Exception as exc:
-            import logging as _logging
-            _logging.getLogger(__name__).warning("event_logger: JSON encoding failed: %s", exc)
+        except Exception as e:
+            logger.warning("event logger JSON serialization failed: %s", e, exc_info=True)
             return
         try:
             self._q.put_nowait(_EventItem(line=line))
