@@ -1733,8 +1733,10 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
         if state.positions.contains_key(&sym) {
             let terminal_price = lookup_bar(&bar_index, &sym, terminal_ts, candles)
                 .map(|bar| bar.c)
-                .or_else(|| last_price_at_or_before(candles, &sym, terminal_ts))
-                .unwrap_or_else(|| last_price_for_symbol(candles, &sym));
+                .or_else(|| last_price_at_or_before(candles, &sym, terminal_ts));
+            let Some(terminal_price) = terminal_price else {
+                continue;
+            };
             if terminal_price <= 0.0 {
                 continue;
             }
@@ -2508,14 +2510,6 @@ fn unrealized_pnl_for_positions(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn last_price_for_symbol(candles: &CandleData, symbol: &str) -> f64 {
-    candles
-        .get(symbol)
-        .and_then(|bars| bars.last())
-        .map(|b| b.c)
-        .unwrap_or(0.0)
-}
 
 fn last_price_at_or_before(candles: &CandleData, symbol: &str, ts: i64) -> Option<f64> {
     let bars = candles.get(symbol)?;

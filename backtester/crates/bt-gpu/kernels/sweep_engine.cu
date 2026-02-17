@@ -1845,16 +1845,25 @@ extern "C" __global__ void sweep_engine_kernel(
         for (unsigned int s = 0u; s < ns; s++) {
             if (state.positions[s].active == POS_EMPTY) { continue; }
             unsigned int close_bar = final_bar;
+            bool found_close = false;
+            double final_market_close = 0.0;
             while (true) {
                 const GpuSnapshot& probe_snap = snapshots[cfg.snapshot_offset + close_bar * ns + s];
-                if (probe_snap.valid != 0u) { break; }
+                double probe_close = resolve_main_close(main_candles, close_bar, ns, s, probe_snap);
+                if (isfinite(probe_close) && probe_close > 0.0) {
+                    final_market_close = probe_close;
+                    found_close = true;
+                    break;
+                }
                 if (close_bar == 0u) { break; }
                 close_bar -= 1u;
             }
+            if (!found_close) { continue; }
             const GpuSnapshot& final_snap = snapshots[cfg.snapshot_offset + close_bar * ns + s];
-            if (final_snap.valid == 0u) { continue; }
-            double final_market_close = resolve_main_close(main_candles, close_bar, ns, s, final_snap);
-            apply_close(&state, s, final_snap, final_market_close, TRACE_REASON_EXIT_EOB, fee_rate, cfg.slippage_bps);
+            const GpuSnapshot& terminal_snap = snapshots[cfg.snapshot_offset + final_bar * ns + s];
+            GpuSnapshot close_snap = final_snap;
+            close_snap.t_sec = (terminal_snap.t_sec != 0u) ? terminal_snap.t_sec : final_snap.t_sec;
+            apply_close(&state, s, close_snap, final_market_close, TRACE_REASON_EXIT_EOB, fee_rate, cfg.slippage_bps);
         }
     }
 
