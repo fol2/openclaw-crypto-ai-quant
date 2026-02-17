@@ -124,6 +124,8 @@ def _make_kernel_response(
     action_kind: str = "hold",
     action_side: str = "long",
     diagnostics: dict | None = None,
+    state_schema_version: int = KERNEL_SCHEMA_VERSION,
+    envelope_schema_version: int | None = None,
 ) -> str:
     """Build a minimal kernel response envelope."""
     if intents is None:
@@ -146,7 +148,7 @@ def _make_kernel_response(
         fills = []
 
     state = {
-        "schema_version": 1,
+        "schema_version": state_schema_version,
         "timestamp_ms": _BASE_TS + 1000,
         "step": 1,
         "cash_usd": 10000.0,
@@ -154,7 +156,7 @@ def _make_kernel_response(
     }
 
     if ok:
-        return json.dumps({
+        envelope = {
             "ok": True,
             "decision": {
                 "intents": intents,
@@ -162,7 +164,10 @@ def _make_kernel_response(
                 "state": state,
                 "diagnostics": diagnostics or {"entry_signal": "neutral"},
             },
-        })
+        }
+        if envelope_schema_version is not None:
+            envelope["schema_version"] = envelope_schema_version
+        return json.dumps(envelope)
     else:
         return json.dumps({
             "ok": False,
@@ -940,6 +945,26 @@ class TestParseKernelResponse:
         decision = orch._parse_kernel_response(raw, _make_state())
         state = json.loads(decision.state_json)
         assert "cash_usd" in state
+
+    def test_state_schema_version_mismatch_rejected(self):
+        orch = KernelOrchestrator()
+        raw = _make_kernel_response(ok=True, state_schema_version=KERNEL_SCHEMA_VERSION + 1)
+        decision = orch._parse_kernel_response(raw, _make_state())
+        assert decision.ok is False
+        assert decision.action == "HOLD"
+        assert "schema_version mismatch" in str(decision.diagnostics.get("error", ""))
+
+    def test_envelope_schema_version_mismatch_rejected(self):
+        orch = KernelOrchestrator()
+        raw = _make_kernel_response(
+            ok=True,
+            state_schema_version=KERNEL_SCHEMA_VERSION,
+            envelope_schema_version=KERNEL_SCHEMA_VERSION + 1,
+        )
+        decision = orch._parse_kernel_response(raw, _make_state())
+        assert decision.ok is False
+        assert decision.action == "HOLD"
+        assert decision.diagnostics.get("schema_version") == KERNEL_SCHEMA_VERSION + 1
 
 
 # ===================================================================

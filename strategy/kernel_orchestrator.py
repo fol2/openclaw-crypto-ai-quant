@@ -706,6 +706,33 @@ class KernelOrchestrator:
                 raw_json=raw_json if isinstance(raw_json, str) else "{}",
             )
 
+        schema_version = None
+        if isinstance(envelope, dict):
+            raw_schema_version = envelope.get("schema_version", None)
+            if raw_schema_version is None:
+                raw_schema_version = ((envelope.get("decision") or {}).get("state") or {}).get("schema_version")
+            try:
+                schema_version = int(raw_schema_version) if raw_schema_version is not None else None
+            except (TypeError, ValueError):
+                schema_version = None
+
+        if schema_version is not None and schema_version != int(KERNEL_SCHEMA_VERSION):
+            msg = f"schema_version mismatch: got={schema_version} expected={int(KERNEL_SCHEMA_VERSION)}"
+            logger.error("[orchestrator] %s", msg)
+            return KernelDecision(
+                ok=False,
+                state_json=fallback_state_json,
+                intents=[],
+                fills=[],
+                diagnostics={
+                    "error": msg,
+                    "schema_version": schema_version,
+                    "expected_schema_version": int(KERNEL_SCHEMA_VERSION),
+                },
+                action="HOLD",
+                raw_json=raw_json,
+            )
+
         ok = bool(envelope.get("ok", False))
 
         if not ok:
