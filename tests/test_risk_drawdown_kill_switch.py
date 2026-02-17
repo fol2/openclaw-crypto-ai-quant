@@ -37,6 +37,9 @@ def _bootstrap_risk_manager(
     monkeypatch.setenv("AI_QUANT_STRATEGY_YAML", str(cfg))
     monkeypatch.delenv("AI_QUANT_KILL_SWITCH", raising=False)
     monkeypatch.delenv("AI_QUANT_KILL_SWITCH_MODE", raising=False)
+    monkeypatch.delenv("AI_QUANT_KILL_SWITCH_FILE", raising=False)
+    monkeypatch.delenv("AI_QUANT_RISK_MAX_DRAWDOWN_PCT", raising=False)
+    monkeypatch.delenv("AI_QUANT_RISK_DRAWDOWN_REDUCE_POLICY", raising=False)
 
     from engine.strategy_manager import StrategyManager
 
