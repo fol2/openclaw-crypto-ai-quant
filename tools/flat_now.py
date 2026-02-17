@@ -59,7 +59,14 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
     return row is not None
 
 
+def _validate_identifier(name: str) -> None:
+    """Raise ValueError if *name* is not a safe SQL identifier (alphanumeric + underscore)."""
+    if not name or not all(c.isalnum() or c == "_" for c in name):
+        raise ValueError(f"Invalid SQL identifier: {name!r}")
+
+
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    _validate_identifier(table)
     try:
         rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
     except Exception:
@@ -127,6 +134,8 @@ def close_paper_positions(db_path: Path, *, reason: str) -> int:
             }
             # Only insert columns that exist in the local DB schema.
             keep_cols = [k for k in base.keys() if k in cols]
+            for c in keep_cols:
+                _validate_identifier(c)
             if keep_cols:
                 col_sql = ", ".join(f'"{c}"' for c in keep_cols)
                 qs_sql = ", ".join(["?"] * len(keep_cols))
@@ -280,7 +289,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--max-retries", type=int, default=3, help="Max retries per symbol for live closes (default: 3).")
     ap.add_argument("--slippage-pct", type=float, default=0.02, help="Slippage bound for live closes (default: 0.02).")
-    ap.add_argument("--verify-sleep-s", type=float, default=5.0, help="Seconds to wait before verifying close (default: 5).")
+    ap.add_argument(
+        "--verify-sleep-s", type=float, default=5.0, help="Seconds to wait before verifying close (default: 5)."
+    )
 
     ap.add_argument("--no-pause", action="store_true", help="Do not write a kill-switch file.")
     ap.add_argument("--yes", action="store_true", help="Skip confirmation prompt (required for --live).")
