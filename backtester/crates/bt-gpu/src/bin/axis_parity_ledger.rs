@@ -102,6 +102,10 @@ struct Args {
     /// Include first mismatch field names in event parity payloads.
     #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
     trace_include_mismatch_fields: bool,
+
+    /// Maximum prefix offset scan window when aligning CPU/GPU event streams.
+    #[arg(long, default_value_t = 8)]
+    event_parity_max_offset_scan: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -402,6 +406,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             &cpu_trace.events,
             &gpu_events,
             args.trace_include_mismatch_fields,
+            args.event_parity_max_offset_scan,
         );
         if args.ledger_include_event_parity {
             baseline_event_parity = Some(summarise_event_parity(&event_parity));
@@ -553,6 +558,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     &cpu_trace.events,
                     &gpu_events,
                     args.trace_include_mismatch_fields,
+                    args.event_parity_max_offset_scan,
                 );
                 if args.ledger_include_event_parity {
                     event_parity_summary = Some(summarise_event_parity(&event_parity));
@@ -922,12 +928,12 @@ fn compare_event_streams(
     cpu_events: &[CpuTradeEventRow],
     gpu_events: &[TraceEventRow],
     include_mismatch_fields: bool,
+    max_offset_scan: usize,
 ) -> EventParitySummary {
     let cpu: Vec<CanonicalEventRow> = cpu_events.iter().map(canonicalise_cpu_event).collect();
     let gpu: Vec<CanonicalEventRow> = gpu_events.iter().map(canonicalise_gpu_event).collect();
-    let aligned_len = cpu.len().min(gpu.len());
-    let cpu_tail_offset = cpu.len().saturating_sub(aligned_len);
-    let gpu_tail_offset = gpu.len().saturating_sub(aligned_len);
+    let (cpu_tail_offset, gpu_tail_offset, aligned_len) =
+        choose_alignment_offsets(&cpu, &gpu, max_offset_scan);
 
     for rel_idx in 0..aligned_len {
         let cpu_ev = &cpu[cpu_tail_offset + rel_idx];
@@ -952,7 +958,7 @@ fn compare_event_streams(
         }
     }
 
-    if cpu.len() != gpu.len() {
+    if cpu.len() != gpu.len() || cpu_tail_offset != 0 || gpu_tail_offset != 0 {
         return EventParitySummary {
             status: "LENGTH_MISMATCH".to_string(),
             aligned_len,
@@ -979,6 +985,71 @@ fn compare_event_streams(
         cpu_event: None,
         gpu_event: None,
     }
+}
+
+fn choose_alignment_offsets(
+    cpu: &[CanonicalEventRow],
+    gpu: &[CanonicalEventRow],
+    max_offset_scan: usize,
+) -> (usize, usize, usize) {
+    let base_aligned = cpu.len().min(gpu.len());
+    let base_cpu_off = cpu.len().saturating_sub(base_aligned);
+    let base_gpu_off = gpu.len().saturating_sub(base_aligned);
+    if base_aligned == 0 {
+        return (base_cpu_off, base_gpu_off, 0);
+    }
+
+    if max_offset_scan == 0 {
+        return (base_cpu_off, base_gpu_off, base_aligned);
+    }
+
+    let mut best_cpu_off = base_cpu_off;
+    let mut best_gpu_off = base_gpu_off;
+    let mut best_aligned = base_aligned;
+    let mut best_prefix = matching_prefix_len(cpu, base_cpu_off, gpu, base_gpu_off, base_aligned);
+
+    let cpu_scan_max = cpu.len().min(max_offset_scan);
+    let gpu_scan_max = gpu.len().min(max_offset_scan);
+    for cpu_off in 0..=cpu_scan_max {
+        for gpu_off in 0..=gpu_scan_max {
+            let aligned = cpu.len().saturating_sub(cpu_off).min(gpu.len().saturating_sub(gpu_off));
+            if aligned == 0 {
+                continue;
+            }
+            let prefix = matching_prefix_len(cpu, cpu_off, gpu, gpu_off, aligned);
+            let better_prefix = prefix > best_prefix;
+            let better_coverage = prefix == best_prefix && aligned > best_aligned;
+            let better_compact = prefix == best_prefix
+                && aligned == best_aligned
+                && (cpu_off + gpu_off) < (best_cpu_off + best_gpu_off);
+            if better_prefix || better_coverage || better_compact {
+                best_prefix = prefix;
+                best_aligned = aligned;
+                best_cpu_off = cpu_off;
+                best_gpu_off = gpu_off;
+            }
+        }
+    }
+
+    (best_cpu_off, best_gpu_off, best_aligned)
+}
+
+fn matching_prefix_len(
+    cpu: &[CanonicalEventRow],
+    cpu_offset: usize,
+    gpu: &[CanonicalEventRow],
+    gpu_offset: usize,
+    aligned_len: usize,
+) -> usize {
+    let mut count = 0usize;
+    for idx in 0..aligned_len {
+        if canonical_events_equal(&cpu[cpu_offset + idx], &gpu[gpu_offset + idx]) {
+            count += 1;
+        } else {
+            break;
+        }
+    }
+    count
 }
 
 fn summarise_event_parity(summary: &EventParitySummary) -> LedgerEventParitySummary {
