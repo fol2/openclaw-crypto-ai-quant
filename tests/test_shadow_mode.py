@@ -365,6 +365,15 @@ class TestAgreementStats:
         # Overall should be 10/20 = 0.5
         assert abs(stats["overall_agreement_rate"] - 0.5) < 1e-9
 
+    def test_comparison_buffer_is_bounded(self):
+        tracker = _make_tracker(window_size=10)
+        _record_n_entry_matches(tracker, 35)
+
+        assert len(tracker._comparisons) == 20
+        stats = tracker.get_agreement_stats()
+        assert stats["total_comparisons"] == 35
+        assert stats["rolling_agreement_rate"] == 1.0
+
     def test_by_signal_type_breakdown(self):
         """Per-signal type stats are computed correctly."""
         tracker = _make_tracker()

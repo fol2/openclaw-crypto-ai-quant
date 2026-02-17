@@ -152,9 +152,17 @@ class ShadowDecisionTracker:
         self._alert_threshold: float = float(
             cfg.get("alert_threshold", alert_threshold)
         )
+        self._max_comparisons: int = int(
+            max(
+                1,
+                cfg.get("max_comparisons", max(self._window_size * 2, self._window_size)),
+            )
+        )
 
-        # All comparisons (append-only in chronological order).
-        self._comparisons: list[ComparisonResult] = []
+        # Recent comparisons (bounded to prevent unbounded memory growth).
+        self._comparisons: collections.deque[ComparisonResult] = collections.deque(
+            maxlen=self._max_comparisons
+        )
 
         # Per-signal-type agreement counters:
         #   _signal_total[signal] = number of comparisons
@@ -319,7 +327,7 @@ class ShadowDecisionTracker:
             * ``by_signal_type`` (dict[str, float])
             * ``alert_active`` (bool)
         """
-        total = len(self._comparisons)
+        total = self._entry_total + self._exit_total
 
         entry_rate = (
             self._entry_match / self._entry_total
@@ -551,7 +559,7 @@ class ShadowDecisionTracker:
         if not self._comparisons:
             return 1.0
 
-        window = self._comparisons[-self._window_size:]
+        window = list(self._comparisons)[-self._window_size:]
         matches = sum(1 for c in window if c.is_match)
         return matches / len(window)
 
