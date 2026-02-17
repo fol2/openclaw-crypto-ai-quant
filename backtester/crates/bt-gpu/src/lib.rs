@@ -520,8 +520,18 @@ fn run_gpu_sweep_internal(
         let mut results = Vec::with_capacity(all_results.len());
         let mut states = Vec::with_capacity(all_results.len());
         for (result, state) in all_results {
-            results.push(result);
-            states.push(state.expect("missing captured state"));
+            match state {
+                Some(s) => {
+                    results.push(result);
+                    states.push(s);
+                }
+                None => {
+                    eprintln!(
+                        "[GPU] WARNING: missing captured state for result index {} — skipping entry",
+                        results.len()
+                    );
+                }
+            }
         }
         (results, Some(states), symbols)
     } else {

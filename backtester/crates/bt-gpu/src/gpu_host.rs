@@ -126,7 +126,8 @@ impl GpuDeviceState {
     pub fn vram_info(&self) -> (usize, usize) {
         match cudarc::driver::result::mem_get_info() {
             Ok((free, total)) => (free, total),
-            Err(_) => {
+            Err(e) => {
+                eprintln!("[GPU] WARNING: cuMemGetInfo failed ({e:?}), assuming 24 GiB VRAM");
                 let total = 24 * 1024 * 1024 * 1024usize;
                 (total * 90 / 100, total)
             }
