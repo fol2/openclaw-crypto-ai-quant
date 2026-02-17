@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from bisect import bisect_left
+import hmac
 import json
 import mimetypes
 import os
@@ -71,6 +72,29 @@ def _env_bool(name: str, default: bool) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _is_local_bind(bind: str) -> bool:
+    b = str(bind or "").strip().lower()
+    return b in {"127.0.0.1", "localhost", "::1"}
+
+
+def _monitor_max_post_body_bytes() -> int:
+    raw = _env_int("AIQ_MONITOR_MAX_POST_BODY_BYTES", 1_048_576)
+    return int(max(1024, min(16 * 1024 * 1024, int(raw))))
+
+
+def _monitor_bind_security_error(*, bind: str, token: str, tls_terminated: bool) -> str:
+    if _is_local_bind(bind):
+        return ""
+    if not token:
+        return ""
+    if bool(tls_terminated):
+        return ""
+    return (
+        "Refusing non-local monitor bind with AIQ_MONITOR_TOKEN without TLS termination. "
+        "Use an HTTPS reverse proxy and set AIQ_MONITOR_TLS_TERMINATED=1."
+    )
+
+
 def _monitor_request_queue_size() -> int:
     raw = _env_int("AIQ_MONITOR_REQUEST_QUEUE_SIZE", 128)
     return int(max(1, min(1024, int(raw))))
@@ -130,6 +154,7 @@ _API_RATE_LIMITER = _PerIpTokenBucketLimiter(
     burst=_API_RATE_LIMIT_BURST,
     max_ips=_API_RATE_LIMIT_MAX_IPS,
 )
+_MAX_POST_BODY_BYTES = _monitor_max_post_body_bytes()
 _ACTIVE_REQUEST_LIMITER = _ActiveRequestLimiter(
     max_active=int(max(1, min(_env_int("AIQ_MONITOR_MAX_ACTIVE_REQUESTS", 256), 20000)))
 )
@@ -2741,8 +2766,9 @@ class Handler(BaseHTTPRequestHandler):
         token = os.getenv("AIQ_MONITOR_TOKEN", "").strip()
         if not token:
             return True
-        auth = self.headers.get("Authorization", "")
-        if auth == f"Bearer {token}":
+        auth = str(self.headers.get("Authorization", "") or "")
+        expected = f"Bearer {token}"
+        if hmac.compare_digest(auth, expected):
             return True
         self._send_json({"error": "unauthorized"}, status=401)
         return False
@@ -2903,6 +2929,12 @@ class Handler(BaseHTTPRequestHandler):
             content_length = int(self.headers.get("Content-Length", 0))
         except (TypeError, ValueError):
             content_length = 0
+        if content_length > int(_MAX_POST_BODY_BYTES):
+            self._send_json(
+                {"ok": False, "error": "payload_too_large", "max_bytes": int(_MAX_POST_BODY_BYTES)},
+                status=413,
+            )
+            return
         raw_body = self.rfile.read(content_length) if content_length > 0 else b""
 
         if path == "/api/v2/decisions/replay":
@@ -2952,8 +2984,17 @@ class MonitorHTTPServer(ThreadingHTTPServer):
 def main() -> None:
     bind = os.getenv("AIQ_MONITOR_BIND", "127.0.0.1")
     port = _env_int("AIQ_MONITOR_PORT", 61010)
-    if bind not in ("127.0.0.1", "localhost", "::1") and not os.getenv("AIQ_MONITOR_TOKEN", "").strip():
+    token = os.getenv("AIQ_MONITOR_TOKEN", "").strip()
+    tls_terminated = _env_bool("AIQ_MONITOR_TLS_TERMINATED", False)
+    bind_security_error = _monitor_bind_security_error(bind=bind, token=token, tls_terminated=tls_terminated)
+    if bind_security_error:
+        raise SystemExit(bind_security_error)
+
+    if not _is_local_bind(bind) and not token:
         print(f"⚠️  WARNING: Monitor bound to {bind} without AIQ_MONITOR_TOKEN — API endpoints are unauthenticated")
+    if not _is_local_bind(bind) and token and tls_terminated:
+        print("AI Quant Monitor non-local bind assumes HTTPS reverse-proxy TLS termination.")
+
     srv = MonitorHTTPServer((bind, port), Handler)
     print(f"AI Quant Monitor listening on http://{bind}:{port}/")
     try:
