@@ -1,6 +1,7 @@
 import datetime
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 
@@ -79,13 +80,29 @@ def load_live_secrets(path: str) -> LiveSecrets:
             )
 
     with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f) or {}
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"Secrets file must contain a JSON object, got {type(data).__name__}: {path}")
+
     secret_key = str(data.get("secret_key") or "").strip()
     main_address = str(data.get("main_address") or "").strip()
+
     if not secret_key:
         raise ValueError(f"Missing 'secret_key' in {path}")
-    if not main_address or not main_address.startswith("0x") or len(main_address) != 42:
-        raise ValueError(f"Missing/invalid 'main_address' in {path}")
+    # Accept 64 hex chars or 66 with 0x prefix (standard Ethereum private key).
+    _HEX_KEY_RE = re.compile(r"^(0x)?[0-9a-fA-F]{64}$")
+    if not _HEX_KEY_RE.match(secret_key):
+        raise ValueError(
+            f"Invalid 'secret_key' format in {path}: expected 64-char hex string (with optional 0x prefix)"
+        )
+
+    if not main_address:
+        raise ValueError(f"Missing 'main_address' in {path}")
+    if not re.match(r"^0x[0-9a-fA-F]{40}$", main_address):
+        raise ValueError(
+            f"Invalid 'main_address' format in {path}: expected 0x-prefixed 40-char hex string (42 chars total)"
+        )
+
     return LiveSecrets(secret_key=secret_key, main_address=main_address)
 
 
