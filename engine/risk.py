@@ -116,7 +116,7 @@ class RiskManager:
         self._cancel_bucket = TokenBucket(capacity=cancel_per_min, refill_per_s=cancel_per_min / 60.0)
 
         # Notional throttle (entry only by default)
-        self._notional_window_s = float(max(10.0, _env_float("AI_QUANT_RISK_NOTIONAL_WINDOW_S", 60.0)))
+        self._notional_window_s = float(max(10.0, min(3600.0, _env_float("AI_QUANT_RISK_NOTIONAL_WINDOW_S", 60.0))))
         self._max_notional_per_window = float(max(0.0, _env_float("AI_QUANT_RISK_MAX_NOTIONAL_PER_WINDOW_USD", 0.0)))
         self._notional_events: deque[tuple[float, float]] = deque()  # (ts_s, notional)
 
@@ -127,7 +127,7 @@ class RiskManager:
             self._min_order_gap_ms = 0
         else:
             try:
-                self._min_order_gap_ms = int(max(0.0, float(str(raw_gap).strip())))
+                self._min_order_gap_ms = int(max(0.0, min(60000.0, float(str(raw_gap).strip()))))
             except Exception:
                 self._min_order_gap_ms = 0
         self._last_order_ts_ms: int | None = None
@@ -135,7 +135,7 @@ class RiskManager:
         # Drawdown kill-switch
         # NOTE: This value can be sourced from YAML (preferred) or env. It is refreshed periodically
         # in refresh() so operators can tune risk controls without code changes.
-        self._max_drawdown_pct = float(max(0.0, _env_float("AI_QUANT_RISK_MAX_DRAWDOWN_PCT", 0.0)))
+        self._max_drawdown_pct = float(max(0.0, min(100.0, _env_float("AI_QUANT_RISK_MAX_DRAWDOWN_PCT", 0.0))))
         self._equity_peak: float | None = None
         self._drawdown_reduce_policy: str = "none"  # none | close_all
 
@@ -147,7 +147,9 @@ class RiskManager:
 
         # Slippage anomaly guard (entry fills). Uses median of recent fills vs mid/BBO.
         self._slippage_guard_enabled = _env_bool("AI_QUANT_RISK_SLIPPAGE_GUARD_ENABLED", False)
-        self._slippage_guard_window_fills = int(max(1, _env_int("AI_QUANT_RISK_SLIPPAGE_GUARD_WINDOW_FILLS", 20)))
+        self._slippage_guard_window_fills = int(
+            max(1, min(1000, _env_int("AI_QUANT_RISK_SLIPPAGE_GUARD_WINDOW_FILLS", 20)))
+        )
         self._slippage_guard_max_median_bps = float(
             max(0.0, _env_float("AI_QUANT_RISK_SLIPPAGE_GUARD_MAX_MEDIAN_BPS", 0.0))
         )
@@ -162,8 +164,10 @@ class RiskManager:
         # Portfolio heat limit (risk budget).
         self._heat_enabled = _env_bool("AI_QUANT_RISK_HEAT_ENABLED", False)
         self._heat_max_pct = float(max(0.0, _env_float("AI_QUANT_RISK_HEAT_MAX_PCT", 0.0)))
-        self._heat_sl_atr_mult = float(max(0.0, _env_float("AI_QUANT_RISK_HEAT_SL_ATR_MULT", 1.5)))
-        self._heat_fallback_atr_pct = float(max(0.0, _env_float("AI_QUANT_RISK_HEAT_FALLBACK_ATR_PCT", 0.005)))
+        self._heat_sl_atr_mult = float(max(0.0, min(100.0, _env_float("AI_QUANT_RISK_HEAT_SL_ATR_MULT", 1.5))))
+        self._heat_fallback_atr_pct = float(
+            max(0.0, min(1.0, _env_float("AI_QUANT_RISK_HEAT_FALLBACK_ATR_PCT", 0.005)))
+        )
 
         # Performance degradation soft stop (rolling PF/WR/Sharpe from realised exits).
         self._perf_stop_enabled = _env_bool("AI_QUANT_RISK_PERF_STOP_ENABLED", False)
@@ -541,7 +545,7 @@ class RiskManager:
                 pass
         if dd_pct is None:
             dd_pct = float(self._max_drawdown_pct or 0.0)
-        self._max_drawdown_pct = float(max(0.0, dd_pct))
+        self._max_drawdown_pct = float(max(0.0, min(100.0, dd_pct)))
 
         # Optional: reduce-risk policy on drawdown kill.
         pol = risk_cfg.get("drawdown_reduce_policy")
@@ -591,7 +595,7 @@ class RiskManager:
         if env_window is not None and str(env_window).strip() != "":
             window = env_window
         try:
-            self._slippage_guard_window_fills = int(max(1, int(float(window or 20))))
+            self._slippage_guard_window_fills = int(max(1, min(1000, int(float(window or 20)))))
         except Exception:
             self._slippage_guard_window_fills = 20
 
@@ -686,7 +690,7 @@ class RiskManager:
         if env_sl_mult is not None and str(env_sl_mult).strip() != "":
             sl_mult = env_sl_mult
         try:
-            self._heat_sl_atr_mult = float(max(0.0, float(sl_mult or 1.5)))
+            self._heat_sl_atr_mult = float(max(0.0, min(100.0, float(sl_mult or 1.5))))
         except Exception:
             self._heat_sl_atr_mult = 1.5
 
@@ -697,7 +701,7 @@ class RiskManager:
         try:
             if fb_atr is None:
                 fb_atr = 0.005
-            self._heat_fallback_atr_pct = float(max(0.0, float(fb_atr)))
+            self._heat_fallback_atr_pct = float(max(0.0, min(1.0, float(fb_atr))))
         except Exception:
             self._heat_fallback_atr_pct = 0.005
 
