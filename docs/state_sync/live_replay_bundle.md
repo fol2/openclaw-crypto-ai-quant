@@ -32,3 +32,10 @@ python tools/build_live_replay_bundle.py \
 3. Run `run_03_audit.sh`
 
 This keeps snapshot seeding, replay execution, and alignment audit tied to one immutable bundle manifest.
+
+## Execution Context
+
+The generated scripts auto-detect bundle-local artefact paths via `BUNDLE_DIR` and use `REPO_ROOT` for tool/binary paths.
+
+- default `REPO_ROOT` is the current shell working directory
+- set `REPO_ROOT=/path/to/openclaw-crypto-ai-quant` when running outside repo root

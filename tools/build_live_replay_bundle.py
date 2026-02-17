@@ -13,6 +13,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import shlex
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -130,6 +131,7 @@ def main() -> int:
     paper_db = Path(args.paper_db).expanduser().resolve()
     candles_db = Path(args.candles_db).expanduser().resolve()
     bundle_dir = Path(args.bundle_dir).expanduser().resolve()
+    snapshot_name = Path(args.snapshot_name).name
 
     if not live_db.exists():
         parser.error(f"live DB not found: {live_db}")
@@ -142,7 +144,7 @@ def main() -> int:
 
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
-    snapshot_path = bundle_dir / args.snapshot_name
+    snapshot_path = bundle_dir / snapshot_name
     live_trades_path = bundle_dir / "live_baseline_trades.jsonl"
     audit_report_path = bundle_dir / "state_alignment_report.json"
     replay_trades_csv = bundle_dir / "backtester_trades.csv"
@@ -159,23 +161,37 @@ def main() -> int:
             fp.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False) + "\n")
 
     cmd_export_seed = (
-        f"python tools/export_live_canonical_snapshot.py --source live --db-path {json.dumps(str(live_db))} "
-        f"--output {json.dumps(str(snapshot_path))}\n"
-        f"python tools/apply_canonical_snapshot_to_paper.py --snapshot {json.dumps(str(snapshot_path))} "
-        f"--target-db {json.dumps(str(paper_db))}"
+        "set -euo pipefail\n"
+        "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
+        "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
+        f"LIVE_DB=\"${{LIVE_DB:-{shlex.quote(str(live_db))}}}\"\n"
+        f"PAPER_DB=\"${{PAPER_DB:-{shlex.quote(str(paper_db))}}}\"\n"
+        f"SNAPSHOT_PATH=\"$BUNDLE_DIR/{snapshot_name}\"\n"
+        "python \"$REPO_ROOT/tools/export_live_canonical_snapshot.py\" --source live --db-path \"$LIVE_DB\" --output \"$SNAPSHOT_PATH\"\n"
+        "python \"$REPO_ROOT/tools/apply_canonical_snapshot_to_paper.py\" --snapshot \"$SNAPSHOT_PATH\" --target-db \"$PAPER_DB\""
     )
 
     cmd_replay = (
-        "cd backtester\n"
-        f"./target/release/mei-backtester replay --candles-db {json.dumps(str(candles_db))} "
-        f"--interval {json.dumps(str(args.interval))} --from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
-        f"--init-state {json.dumps(str(snapshot_path))} --export-trades {json.dumps(str(replay_trades_csv))}"
+        "set -euo pipefail\n"
+        "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
+        "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
+        f"CANDLES_DB=\"${{CANDLES_DB:-{shlex.quote(str(candles_db))}}}\"\n"
+        f"SNAPSHOT_PATH=\"$BUNDLE_DIR/{snapshot_name}\"\n"
+        "cd \"$REPO_ROOT/backtester\"\n"
+        f"./target/release/mei-backtester replay --candles-db \"$CANDLES_DB\" "
+        f"--interval {shlex.quote(str(args.interval))} --from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
+        f"--init-state \"$SNAPSHOT_PATH\" --export-trades \"$BUNDLE_DIR/{replay_trades_csv.name}\""
     )
 
     cmd_audit = (
-        f"python tools/audit_state_sync_alignment.py --live-db {json.dumps(str(live_db))} "
-        f"--paper-db {json.dumps(str(paper_db))} --snapshot {json.dumps(str(snapshot_path))} "
-        f"--output {json.dumps(str(audit_report_path))}"
+        "set -euo pipefail\n"
+        "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
+        "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
+        f"LIVE_DB=\"${{LIVE_DB:-{shlex.quote(str(live_db))}}}\"\n"
+        f"PAPER_DB=\"${{PAPER_DB:-{shlex.quote(str(paper_db))}}}\"\n"
+        f"SNAPSHOT_PATH=\"$BUNDLE_DIR/{snapshot_name}\"\n"
+        "python \"$REPO_ROOT/tools/audit_state_sync_alignment.py\" --live-db \"$LIVE_DB\" "
+        f"--paper-db \"$PAPER_DB\" --snapshot \"$SNAPSHOT_PATH\" --output \"$BUNDLE_DIR/{audit_report_path.name}\""
     )
 
     (bundle_dir / "run_01_export_and_seed.sh").write_text(cmd_export_seed + "\n", encoding="utf-8")
@@ -203,11 +219,11 @@ def main() -> int:
             "to_ts": int(args.to_ts),
         },
         "artefacts": {
-            "snapshot_path": str(snapshot_path),
-            "live_baseline_trades": str(live_trades_path),
+            "snapshot_file": snapshot_path.name,
+            "live_baseline_trades": live_trades_path.name,
             "live_baseline_trades_sha256": _hash_file(live_trades_path),
-            "audit_report_path": str(audit_report_path),
-            "backtester_trades_csv": str(replay_trades_csv),
+            "audit_report_file": audit_report_path.name,
+            "backtester_trades_csv": replay_trades_csv.name,
         },
         "counts": {
             "live_baseline_trades": len(baseline_trades),
