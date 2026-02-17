@@ -5,6 +5,8 @@ This tool reads:
 - state alignment report
 - trade reconciliation report
 - action reconciliation report
+- live/paper action reconciliation report (optional/required)
+- live/paper decision trace reconciliation report (optional/required)
 
 and emits one deterministic gate result for CI/manual workflows.
 """
@@ -34,6 +36,17 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Fail when live/paper action report is missing",
+    )
+    parser.add_argument(
+        "--live-paper-decision-trace-report",
+        default="live_paper_decision_trace_reconcile_report.json",
+        help="Optional live/paper decision trace reconcile report filename/path",
+    )
+    parser.add_argument(
+        "--require-live-paper-decision-trace",
+        action="store_true",
+        default=False,
+        help="Fail when live/paper decision trace report is missing",
     )
     parser.add_argument("--output", help="Optional output path for gate report JSON")
     parser.add_argument(
@@ -68,6 +81,7 @@ def main() -> int:
     trade_path = _resolve_report_path(bundle_dir, args.trade_report)
     action_path = _resolve_report_path(bundle_dir, args.action_report)
     live_paper_path = _resolve_report_path(bundle_dir, args.live_paper_report)
+    live_paper_decision_trace_path = _resolve_report_path(bundle_dir, args.live_paper_decision_trace_report)
 
     failures: list[dict[str, Any]] = []
 
@@ -192,6 +206,31 @@ def main() -> int:
                     }
                 )
 
+    live_paper_decision_trace_report: dict[str, Any] | None = None
+    if not live_paper_decision_trace_path.exists():
+        if args.require_live_paper_decision_trace:
+            failures.append(
+                {
+                    "code": "missing_live_paper_decision_trace_report",
+                    "classification": "deterministic_logic_divergence",
+                    "detail": str(live_paper_decision_trace_path),
+                }
+            )
+    else:
+        live_paper_decision_trace_report = _load_json(live_paper_decision_trace_path)
+        decision_trace_status = bool(
+            ((live_paper_decision_trace_report.get("status") or {}).get("strict_alignment_pass"))
+        )
+        if not decision_trace_status:
+            failures.append(
+                {
+                    "code": "live_paper_decision_trace_alignment_failed",
+                    "classification": "deterministic_logic_divergence",
+                    "detail": "live/paper decision trace strict alignment failed",
+                    "counts": live_paper_decision_trace_report.get("counts") or {},
+                }
+            )
+
     ok = len(failures) == 0
 
     report = {
@@ -204,6 +243,8 @@ def main() -> int:
             "action_report": str(action_path),
             "live_paper_report": str(live_paper_path),
             "require_live_paper": bool(args.require_live_paper),
+            "live_paper_decision_trace_report": str(live_paper_decision_trace_path),
+            "require_live_paper_decision_trace": bool(args.require_live_paper_decision_trace),
             "strict_no_residuals": bool(args.strict_no_residuals),
         },
         "checks": {
@@ -213,6 +254,11 @@ def main() -> int:
             "live_paper_ok": bool((live_paper_report.get("status") or {}).get("strict_alignment_pass"))
             if live_paper_report
             else (not bool(args.require_live_paper)),
+            "live_paper_decision_trace_ok": bool(
+                (live_paper_decision_trace_report.get("status") or {}).get("strict_alignment_pass")
+            )
+            if live_paper_decision_trace_report
+            else (not bool(args.require_live_paper_decision_trace)),
             "trade_residual_count": len((trade_report or {}).get("accepted_residuals") or []),
             "action_residual_count": len((action_report or {}).get("accepted_residuals") or []),
             "live_paper_residual_count": len((live_paper_report or {}).get("accepted_residuals") or []),

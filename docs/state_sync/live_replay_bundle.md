@@ -24,6 +24,7 @@ python tools/build_live_replay_bundle.py \
 - `live_baseline_trades.jsonl`
 - `backtester_replay_report.json`
 - `live_paper_action_reconcile_report.json`
+- `live_paper_decision_trace_reconcile_report.json`
 - `alignment_gate_report.json`
 - `run_01_export_and_seed.sh`
 - `run_02_replay.sh`
@@ -31,7 +32,8 @@ python tools/build_live_replay_bundle.py \
 - `run_04_trade_reconcile.sh`
 - `run_05_action_reconcile.sh`
 - `run_06_live_paper_action_reconcile.sh`
-- `run_07_assert_alignment.sh`
+- `run_07_live_paper_decision_trace_reconcile.sh`
+- `run_08_assert_alignment.sh`
 
 ## Usage Sequence
 
@@ -41,9 +43,10 @@ python tools/build_live_replay_bundle.py \
 4. Run `run_04_trade_reconcile.sh`
 5. Run `run_05_action_reconcile.sh`
 6. Run `run_06_live_paper_action_reconcile.sh`
-7. Run `run_07_assert_alignment.sh`
+7. Run `run_07_live_paper_decision_trace_reconcile.sh`
+8. Run `run_08_assert_alignment.sh`
 
-This keeps snapshot seeding, replay execution, state alignment audit, backtester trade/action reconciliation, live/paper action reconciliation, and final strict alignment gate tied to one immutable bundle manifest.
+This keeps snapshot seeding, replay execution, state alignment audit, backtester trade/action reconciliation, live/paper action reconciliation, live/paper decision-trace reconciliation, and final strict alignment gate tied to one immutable bundle manifest.
 
 The manifest records SHA256 hashes for the replay market-data inputs (`candles_db`, optional `funding_db`) to preserve data provenance.
 
