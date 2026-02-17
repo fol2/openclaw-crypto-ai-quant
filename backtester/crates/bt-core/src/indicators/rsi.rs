@@ -33,6 +33,13 @@ impl RsiIndicator {
     }
 
     pub fn update(&mut self, close: f64) -> f64 {
+        if self.window == 0 {
+            self.prev_close = close;
+            self.has_prev = true;
+            self.value = 50.0;
+            return 50.0;
+        }
+
         if !self.has_prev {
             self.prev_close = close;
             self.has_prev = true;
@@ -120,5 +127,22 @@ impl StochRsi {
         let d = self.d_ring.mean();
 
         (k, d)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RsiIndicator;
+
+    #[test]
+    fn zero_window_returns_neutral_and_stays_not_warm() {
+        let mut rsi = RsiIndicator::new(0);
+        for close in [100.0, 101.5, 99.0, 102.0, 98.0] {
+            let out = rsi.update(close);
+            assert_eq!(out, 50.0);
+            assert!(out.is_finite());
+        }
+        assert!(!rsi.warm);
+        assert_eq!(rsi.count, 0);
     }
 }
