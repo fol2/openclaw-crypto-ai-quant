@@ -148,14 +148,21 @@ class ShadowDecisionTracker:
         config: dict[str, Any] | None = None,
     ):
         cfg = config or {}
-        self._window_size: int = int(cfg.get("window_size", window_size))
+        self._window_size: int = max(1, int(cfg.get("window_size", window_size)))
         self._alert_threshold: float = float(
             cfg.get("alert_threshold", alert_threshold)
         )
+        try:
+            raw_max = int(
+                cfg.get("max_comparisons", max(self._window_size * 2, self._window_size))
+            )
+        except Exception:
+            raw_max = max(self._window_size * 2, self._window_size)
         self._max_comparisons: int = int(
             max(
                 1,
-                cfg.get("max_comparisons", max(self._window_size * 2, self._window_size)),
+                self._window_size,
+                raw_max,
             )
         )
 
