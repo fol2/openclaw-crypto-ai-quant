@@ -12,12 +12,12 @@ import tomllib
 import yaml
 from dataclasses import dataclass
 
-logger = logging.getLogger(__name__)
-
 import exchange.ws as hyperliquid_ws
 import exchange.meta as hyperliquid_meta
 from engine.alerting import send_openclaw_message
 from engine.kernel_shadow_report import ShadowReport
+
+logger = logging.getLogger(__name__)
 
 try:
     import bt_runtime as _bt_runtime
@@ -1066,7 +1066,6 @@ def check_exit_with_kernel(
     rsi = _ind_float("RSI", "rsi", 50.0)
     ema_fast = _ind_float("EMA_fast", "ema_fast", 0.0)
     ema_slow = _ind_float("EMA_slow", "ema_slow", 0.0)
-    atr = _ind_float("ATR", "atr", 0.0)
 
     # Determine position side from kernel state
     state_dict = json.loads(state_json)
@@ -3100,7 +3099,6 @@ def _log_gates_for_decision(decision_id: str, gates_dict: dict, values_dict: dic
         )
 
         is_ext = gates_dict.get("is_extended", False)
-        dist = float(values_dict.get("close", 0)) - float(values_dict.get("ema_fast", 0))
         dist_pct = float(gates_dict.get("dist_ema_fast", 0))
         max_dist = float(gates_dict.get("max_dist_ema_fast", 0.04))
         _g(
