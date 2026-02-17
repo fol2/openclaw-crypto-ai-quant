@@ -1,3 +1,3 @@
 # Claude Code Instructions
 
-See [docs/AGENTS.md](docs/AGENTS.md) for AI coding assistant instructions for this project.
+See [AGENTS.md](AGENTS.md) for AI coding assistant instructions for this project.

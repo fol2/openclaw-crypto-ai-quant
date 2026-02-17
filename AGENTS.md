@@ -6,12 +6,16 @@ This guide provides comprehensive instructions for AI coding assistants (Claude 
 
 These guardrails exist because the production branch (`master`) is live and trades real money.
 
-Do not change this section unless the user explicitly asks to update `docs/AGENTS.md`.
+Do not change this section unless the user explicitly asks to update `AGENTS.md`.
 
 - The production worktree at `/home/fol2hk/openclaw-plugins/ai_quant` MUST stay checked out on `master`. Never `checkout` or `switch` branches in that directory.
-- All AQC ticket work MUST be implemented and integrated on the `major-v8` branch (Version 8). Individual ticket branches/PRs should target `major-v8`, not `master`.
-- Merging into `master` is forbidden unless the user explicitly requests it. If asked to merge/retarget AQC PRs to `master`, refuse and request an explicit confirmation.
-- Use a separate long-lived worktree for `major-v8` (e.g. `/home/fol2hk/openclaw-plugins/ai_quant_wt/major-v8`) to run full tests and merge ticket PRs into `major-v8`.
+- All AQC ticket work MUST be delivered through atomic PRs targeting `master` (one logical change per PR, no batching of unrelated fixes).
+- Do not commit ticket changes directly on `master`. Use a dedicated ticket branch/worktree, open a PR, complete review, then merge.
+- Mandatory PR flow for every successful code update:
+  1. Create an atomic PR to `master`.
+  2. Run a reviewer subagent to review the PR.
+  3. Merge only after the review is acceptable.
+  4. Continue to the next task only after merge completion.
 
 ## Project Overview
 
