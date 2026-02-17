@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import tools.reality_check as reality_check
 
@@ -33,7 +33,9 @@ def test_audit_counts_and_recent_trades_parse_expected_rows(tmp_path) -> None:
     db_path = tmp_path / "reality.db"
     _setup_reality_db(db_path)
 
-    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_dt = datetime.now(timezone.utc)
+    now_iso = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    old_iso = (now_dt - timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
     con = sqlite3.connect(db_path)
     try:
         con.execute(
@@ -49,6 +51,14 @@ def test_audit_counts_and_recent_trades_parse_expected_rows(tmp_path) -> None:
             ("BTC", "", now_iso),
         )
         con.execute(
+            "INSERT INTO audit_events (symbol, event, timestamp) VALUES (?, ?, ?)",
+            ("BTC", "entry_signal", old_iso),
+        )
+        con.execute(
+            "INSERT INTO audit_events (symbol, event, timestamp) VALUES (?, ?, ?)",
+            ("ETH", "entry_signal", now_iso),
+        )
+        con.execute(
             "INSERT INTO trades (symbol, timestamp, action, type, price, size, reason, confidence) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             ("BTC", now_iso, "OPEN", "market_open", 100.0, 0.1, "test-one", "high"),
@@ -57,6 +67,11 @@ def test_audit_counts_and_recent_trades_parse_expected_rows(tmp_path) -> None:
             "INSERT INTO trades (symbol, timestamp, action, type, price, size, reason, confidence) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             ("BTC", now_iso, "CLOSE", "market_close", 101.0, 0.1, "test-two", "medium"),
+        )
+        con.execute(
+            "INSERT INTO trades (symbol, timestamp, action, type, price, size, reason, confidence) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("ETH", now_iso, "OPEN", "market_open", 10.0, 1.0, "other-symbol", "low"),
         )
         con.commit()
     finally:
