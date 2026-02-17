@@ -488,7 +488,8 @@ class MarketDataHub:
                     tc_i = None
                 out.append((t_i, tc_i))
             return out
-        except Exception:
+        except (sqlite3.Error, OSError) as exc:
+            logger.warning("db tail candles failed for %s@%s: %s", sym, interval_s, exc)
             return []
 
     def get_candles_df(self, symbol: str, *, interval: str, min_rows: int) -> pd.DataFrame | None:
