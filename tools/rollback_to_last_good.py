@@ -151,7 +151,7 @@ def rollback_to_last_good(
     rollback_dir = (artifacts_dir / "rollbacks" / "paper" / ts).resolve()
     rollback_dir.mkdir(parents=True, exist_ok=True)
 
-    (rollback_dir / "restored_config.yaml").write_text(restored_text + "\n", encoding="utf-8")
+    _atomic_write_text(rollback_dir / "restored_config.yaml", restored_text + "\n")
 
     event: dict[str, Any] = {
         "version": "rollback_event_v1",
@@ -184,10 +184,10 @@ def rollback_to_last_good(
         rr = _restart_systemd_user_service(str(service))
         event["restart"]["result"] = rr.__dict__
         if rr.attempted and rr.exit_code != 0:
-            (rollback_dir / "rollback_event.json").write_text(json.dumps(event, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            _atomic_write_text(rollback_dir / "rollback_event.json", json.dumps(event, indent=2, sort_keys=True) + "\n")
             raise RuntimeError(f"service restart failed: {service} (exit_code={rr.exit_code})")
 
-    (rollback_dir / "rollback_event.json").write_text(json.dumps(event, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _atomic_write_text(rollback_dir / "rollback_event.json", json.dumps(event, indent=2, sort_keys=True) + "\n")
     return rollback_dir
 
 

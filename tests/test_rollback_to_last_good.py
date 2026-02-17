@@ -183,23 +183,28 @@ def test_rollback_to_last_good_allows_concurrent_calls_for_same_timestamp(tmp_pa
     monkeypatch.setattr(rollback_tool, "_utc_compact", lambda: "20260217T120000Z")
     monkeypatch.setattr(rollback_tool, "_utc_now_iso", lambda: "2026-02-17T12:00:00Z")
 
-    def _run_once():
+    reasons = ["unit test concurrent rollback A", "unit test concurrent rollback B"]
+
+    def _run_once(reason: str):
         return rollback_to_last_good(
             artifacts_dir=artifacts,
             yaml_path=target_yaml,
             steps=1,
-            reason="unit test concurrent rollback",
+            reason=reason,
             restart="never",
             service="does-not-matter",
             dry_run=False,
         )
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        f1 = pool.submit(_run_once)
-        f2 = pool.submit(_run_once)
+        f1 = pool.submit(_run_once, reasons[0])
+        f2 = pool.submit(_run_once, reasons[1])
         rb1 = f1.result()
         rb2 = f2.result()
 
     assert rb1 == rb2
     assert target_yaml.read_text(encoding="utf-8").strip() == VALID_YAML.strip()
     assert (rb1 / "rollback_event.json").exists()
+    event = json.loads((rb1 / "rollback_event.json").read_text(encoding="utf-8"))
+    assert event["version"] == "rollback_event_v1"
+    assert event["why"]["reason"] in set(reasons)
