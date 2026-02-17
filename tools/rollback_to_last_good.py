@@ -16,6 +16,7 @@ import json
 import os
 import socket
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,7 +50,7 @@ def _utc_compact() -> str:
 def _atomic_write_text(path: Path, text: str) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}")
     tmp.write_text(text, encoding="utf-8")
     os.replace(str(tmp), str(path))
 
@@ -228,4 +229,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
