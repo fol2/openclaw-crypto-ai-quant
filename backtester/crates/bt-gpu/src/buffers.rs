@@ -481,15 +481,15 @@ pub struct GpuComboState {
 
     // PESC state (per-symbol)
     pub pesc_close_time_sec: [u32; 52],
-    pub pesc_close_type: [u32; 52],   // 0=none, 1=LONG, 2=SHORT
-    pub pesc_close_reason: [u32; 52], // 0=none, 1=signal_flip, 2=other
+    pub pesc_close_type: [u32; 52],        // 0=none, 1=LONG, 2=SHORT
+    pub pesc_close_reason: [u32; 52],      // 0=none, 1=signal_flip, 2=other
     pub last_entry_attempt_sec: [u32; 52], // per-symbol successful entry/add timestamp
 
     // Optional GPU event trace (single-combo/symbol diagnostics)
-    pub trace_enabled: u32,                // 0=off, 1=on
-    pub trace_symbol: u32,                 // symbol index, or GPU_TRACE_SYMBOL_ALL
-    pub trace_count: u32,                  // number of valid entries in ring (<= GPU_TRACE_CAP)
-    pub trace_head: u32,                   // monotonic write cursor
+    pub trace_enabled: u32,                           // 0=off, 1=on
+    pub trace_symbol: u32,                            // symbol index, or GPU_TRACE_SYMBOL_ALL
+    pub trace_count: u32, // number of valid entries in ring (<= GPU_TRACE_CAP)
+    pub trace_head: u32,  // monotonic write cursor
     pub trace_events: [GpuTraceEvent; GPU_TRACE_CAP], // fixed ring buffer
 
     // Result accumulators (f64 for precision)
@@ -617,7 +617,10 @@ impl GpuComboConfig {
 
             enable_dynamic_sizing: tc.enable_dynamic_sizing as u32,
             confidence_mult_high: checked_f32("confidence_mult_high", tc.confidence_mult_high)?,
-            confidence_mult_medium: checked_f32("confidence_mult_medium", tc.confidence_mult_medium)?,
+            confidence_mult_medium: checked_f32(
+                "confidence_mult_medium",
+                tc.confidence_mult_medium,
+            )?,
             confidence_mult_low: checked_f32("confidence_mult_low", tc.confidence_mult_low)?,
             adx_sizing_min_mult: tc.adx_sizing_min_mult as f32,
             adx_sizing_full_adx: tc.adx_sizing_full_adx as f32,
@@ -629,7 +632,10 @@ impl GpuComboConfig {
 
             enable_pyramiding: tc.enable_pyramiding as u32,
             max_adds_per_symbol: tc.max_adds_per_symbol as u32,
-            add_fraction_of_base_margin: checked_f32("add_fraction_of_base_margin", tc.add_fraction_of_base_margin)?,
+            add_fraction_of_base_margin: checked_f32(
+                "add_fraction_of_base_margin",
+                tc.add_fraction_of_base_margin,
+            )?,
             add_cooldown_minutes: tc.add_cooldown_minutes as u32,
             add_min_profit_atr: tc.add_min_profit_atr as f32,
             add_min_confidence: tc.add_min_confidence as u32,
@@ -638,7 +644,10 @@ impl GpuComboConfig {
 
             enable_partial_tp: tc.enable_partial_tp as u32,
             tp_partial_pct: checked_f32("tp_partial_pct", tc.tp_partial_pct)?,
-            tp_partial_min_notional_usd: checked_f32("tp_partial_min_notional_usd", tc.tp_partial_min_notional_usd)?,
+            tp_partial_min_notional_usd: checked_f32(
+                "tp_partial_min_notional_usd",
+                tc.tp_partial_min_notional_usd,
+            )?,
             trailing_start_atr: tc.trailing_start_atr as f32,
             trailing_distance_atr: tc.trailing_distance_atr as f32,
             tp_partial_atr_mult: tc.tp_partial_atr_mult as f32,
@@ -840,7 +849,10 @@ mod tests {
         let mut cfg = StrategyConfig::default();
         cfg.trade.leverage = f64::MAX; // way beyond f32::MAX
         let err = GpuComboConfig::from_strategy_config(&cfg);
-        assert!(err.is_err(), "expected overflow error for f64::MAX leverage");
+        assert!(
+            err.is_err(),
+            "expected overflow error for f64::MAX leverage"
+        );
         assert!(
             err.unwrap_err().contains("leverage"),
             "error should mention the field name"

@@ -37,7 +37,7 @@ pub struct Position {
     pub symbol: String,
     pub pos_type: PositionType,
     pub entry_price: f64,
-    pub size: f64,           // base asset units
+    pub size: f64, // base asset units
     pub confidence: Confidence,
     pub entry_atr: f64,
     /// ADX threshold used at entry — exit ADX exhaustion uses this value
@@ -112,14 +112,19 @@ impl Position {
     }
 
     /// Compute the weighted-average entry after adding `add_size` units at `add_price`.
-    pub fn add_to_position(&mut self, add_price: f64, add_size: f64, add_margin: f64, time_ms: i64) {
+    pub fn add_to_position(
+        &mut self,
+        add_price: f64,
+        add_size: f64,
+        add_margin: f64,
+        time_ms: i64,
+    ) {
         let total_size = self.size + add_size;
         // H10: near-zero guard — prevent extreme entry_price from tiny denominator
         if total_size < 1e-12 {
             self.entry_price = add_price;
         } else {
-            self.entry_price =
-                (self.entry_price * self.size + add_price * add_size) / total_size;
+            self.entry_price = (self.entry_price * self.size + add_price * add_size) / total_size;
         }
         self.size = total_size;
         self.margin_used += add_margin;
@@ -175,9 +180,9 @@ pub struct TradeRecord {
     pub notional: f64,
     pub reason: String,
     pub confidence: Confidence,
-    pub pnl: f64,            // 0 for opens/adds, realized PnL for closes
+    pub pnl: f64, // 0 for opens/adds, realized PnL for closes
     pub fee_usd: f64,
-    pub balance: f64,         // balance after trade
+    pub balance: f64, // balance after trade
     pub entry_atr: f64,
     pub leverage: f64,
     pub margin_used: f64,

@@ -112,7 +112,11 @@ pub fn run_gpu_sweep_with_states(
     sub_candles: Option<&CandleData>,
     from_ts: Option<i64>,
     to_ts: Option<i64>,
-) -> (Vec<GpuSweepResult>, Vec<buffers::GpuComboState>, Vec<String>) {
+) -> (
+    Vec<GpuSweepResult>,
+    Vec<buffers::GpuComboState>,
+    Vec<String>,
+) {
     let (results, states, symbols) = run_gpu_sweep_internal(
         candles,
         base_cfg,
@@ -407,10 +411,10 @@ fn run_gpu_sweep_internal(
         let mut combo_meta: Vec<(usize, usize)> = Vec::with_capacity(total_combos);
 
         for (ind_idx, (_ind_combo, ind_cfg)) in ind_cfgs.iter().enumerate() {
-            let snap_off = u32::try_from(ind_idx * snapshot_stride)
-                .expect("snapshot offset exceeds u32::MAX");
-            let br_off = u32::try_from(ind_idx * breadth_stride)
-                .expect("breadth offset exceeds u32::MAX");
+            let snap_off =
+                u32::try_from(ind_idx * snapshot_stride).expect("snapshot offset exceeds u32::MAX");
+            let br_off =
+                u32::try_from(ind_idx * breadth_stride).expect("breadth offset exceeds u32::MAX");
 
             for (trade_idx, trade_overrides) in trade_combos.iter().enumerate() {
                 let mut cfg = ind_cfg.clone();

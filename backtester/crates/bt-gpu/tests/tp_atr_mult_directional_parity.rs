@@ -138,18 +138,18 @@ fn tp_atr_mult_first_to_last_direction_matches_gpu_runtime() {
     for &tp_mult in &TP_AXIS_VALUES {
         let mut c = cfg.clone();
         c.trade.tp_atr_mult = tp_mult;
-        let sim = engine::run_simulation(
-            &candles,
-            &c,
-            INITIAL_BALANCE,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
+        let sim = engine::run_simulation(engine::RunSimulationInput {
+            candles: &candles,
+            cfg: &c,
+            initial_balance: INITIAL_BALANCE,
+            lookback: 0,
+            exit_candles: None,
+            entry_candles: None,
+            funding_rates: None,
+            init_state: None,
+            from_ts: None,
+            to_ts: None,
+        });
         cpu_pnl.push(sim.final_balance - INITIAL_BALANCE);
     }
 
@@ -164,15 +164,7 @@ fn tp_atr_mult_first_to_last_direction_matches_gpu_runtime() {
         lookback: 0,
     };
 
-    let gpu_results = bt_gpu::run_gpu_sweep(
-        &candles,
-        &cfg,
-        &spec,
-        None,
-        None,
-        None,
-        None,
-    );
+    let gpu_results = bt_gpu::run_gpu_sweep(&candles, &cfg, &spec, None, None, None, None);
 
     // Map GPU results back to axis order
     let mut gpu_pnl = vec![f64::NAN; TP_AXIS_VALUES.len()];

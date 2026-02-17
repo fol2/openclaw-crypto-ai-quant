@@ -366,8 +366,7 @@ fn t3_ema_deviation_chain() {
     for &c in &closes[1..] {
         ema_f32 = (c as f32) * k_f32 + ema_f32 * (1.0_f32 - k_f32);
     }
-    let deviation_f32 =
-        ((closes[closes.len() - 1] as f32) - ema_f32) / ema_f32;
+    let deviation_f32 = ((closes[closes.len() - 1] as f32) - ema_f32) / ema_f32;
 
     // Catastrophic cancellation pushes this to T4 territory (~1.3e-4)
     let rel_err = relative_error(deviation_f64, deviation_f32 as f64);
@@ -409,8 +408,7 @@ fn t3_adx_smoothing_chain() {
     let mut minus_di_f32 = minus_di_raw[0] as f32;
     let mut adx_f32 = 0.0_f32;
     for i in 1..plus_di_raw.len() {
-        plus_di_f32 =
-            plus_di_f32 * (1.0_f32 - smooth_f32) + (plus_di_raw[i] as f32) * smooth_f32;
+        plus_di_f32 = plus_di_f32 * (1.0_f32 - smooth_f32) + (plus_di_raw[i] as f32) * smooth_f32;
         minus_di_f32 =
             minus_di_f32 * (1.0_f32 - smooth_f32) + (minus_di_raw[i] as f32) * smooth_f32;
         let dx = (plus_di_f32 - minus_di_f32).abs() / (plus_di_f32 + minus_di_f32) * 100.0_f32;
@@ -460,10 +458,8 @@ fn t3_rsi_computation() {
             losses_f64.push(change.abs());
         }
     }
-    let avg_gain_f64: f64 =
-        gains_f64.iter().take(period).sum::<f64>() / period as f64;
-    let avg_loss_f64: f64 =
-        losses_f64.iter().take(period).sum::<f64>() / period as f64;
+    let avg_gain_f64: f64 = gains_f64.iter().take(period).sum::<f64>() / period as f64;
+    let avg_loss_f64: f64 = losses_f64.iter().take(period).sum::<f64>() / period as f64;
     let rs_f64 = if avg_loss_f64 > 0.0 {
         avg_gain_f64 / avg_loss_f64
     } else {
@@ -484,10 +480,8 @@ fn t3_rsi_computation() {
             losses_f32.push(change.abs());
         }
     }
-    let avg_gain_f32: f32 =
-        gains_f32.iter().take(period).sum::<f32>() / period as f32;
-    let avg_loss_f32: f32 =
-        losses_f32.iter().take(period).sum::<f32>() / period as f32;
+    let avg_gain_f32: f32 = gains_f32.iter().take(period).sum::<f32>() / period as f32;
+    let avg_loss_f32: f32 = losses_f32.iter().take(period).sum::<f32>() / period as f32;
     let rs_f32 = if avg_loss_f32 > 0.0_f32 {
         avg_gain_f32 / avg_loss_f32
     } else {
@@ -511,8 +505,7 @@ fn t3_bollinger_band_position() {
     let bb_lower = 49_000.00_f64;
 
     let pct_b_f64 = (close - bb_lower) / (bb_upper - bb_lower);
-    let pct_b_f32 = ((close as f32) - (bb_lower as f32))
-        / ((bb_upper as f32) - (bb_lower as f32));
+    let pct_b_f32 = ((close as f32) - (bb_lower as f32)) / ((bb_upper as f32) - (bb_lower as f32));
 
     let rel_err = relative_error(pct_b_f64, pct_b_f32 as f64);
     assert!(
@@ -528,8 +521,16 @@ fn t3_macd_line_short_chain_is_t4() {
     // a ~86 result — catastrophic cancellation amplifies relative error
     // to ~1.3e-4, firmly in T4 territory.
     let closes = [
-        50_000.0_f64, 50_120.0, 50_080.0, 50_200.0, 50_150.0,
-        50_280.0, 50_220.0, 50_350.0, 50_310.0, 50_400.0,
+        50_000.0_f64,
+        50_120.0,
+        50_080.0,
+        50_200.0,
+        50_150.0,
+        50_280.0,
+        50_220.0,
+        50_350.0,
+        50_310.0,
+        50_400.0,
     ];
 
     let k12 = 2.0 / 13.0_f64;
@@ -572,11 +573,36 @@ fn t3_macd_histogram_30_bars_is_t4() {
     // causing catastrophic cancellation. Empirically ~3.8e-4 relative error.
     // This documents that MACD histogram over 30 bars is T4-level.
     let closes = [
-        50_000.0_f64, 50_120.0, 50_080.0, 50_200.0, 50_150.0, 50_280.0,
-        50_220.0, 50_350.0, 50_310.0, 50_400.0, 50_380.0, 50_450.0,
-        50_420.0, 50_500.0, 50_470.0, 50_550.0, 50_520.0, 50_600.0,
-        50_580.0, 50_650.0, 50_620.0, 50_700.0, 50_680.0, 50_750.0,
-        50_720.0, 50_800.0, 50_780.0, 50_850.0, 50_830.0, 50_900.0,
+        50_000.0_f64,
+        50_120.0,
+        50_080.0,
+        50_200.0,
+        50_150.0,
+        50_280.0,
+        50_220.0,
+        50_350.0,
+        50_310.0,
+        50_400.0,
+        50_380.0,
+        50_450.0,
+        50_420.0,
+        50_500.0,
+        50_470.0,
+        50_550.0,
+        50_520.0,
+        50_600.0,
+        50_580.0,
+        50_650.0,
+        50_620.0,
+        50_700.0,
+        50_680.0,
+        50_750.0,
+        50_720.0,
+        50_800.0,
+        50_780.0,
+        50_850.0,
+        50_830.0,
+        50_900.0,
     ];
 
     let k12 = 2.0 / 13.0_f64;
@@ -962,7 +988,16 @@ fn cross_tier_error_magnitude_report() {
     });
 
     // T3: EMA chain (8 bars)
-    let closes = [50_100.0_f64, 50_250.0, 50_180.0, 50_320.0, 50_450.0, 50_380.0, 50_500.0, 50_420.0];
+    let closes = [
+        50_100.0_f64,
+        50_250.0,
+        50_180.0,
+        50_320.0,
+        50_450.0,
+        50_380.0,
+        50_500.0,
+        50_420.0,
+    ];
     let k = 2.0 / 6.0_f64;
     let mut ema_f64 = closes[0];
     for &c in &closes[1..] {

@@ -144,12 +144,12 @@ fn make_fixtures() -> Vec<TestFixture> {
 
     // ── Group 3: Profit levels (deep loss to large profit) ───────────────
     let profit_scenarios: &[(&str, PosType, f64, f64)] = &[
-        ("deep-loss-long", PosType::Long, 100.0, 95.0),      // -5 ATR
-        ("moderate-loss-long", PosType::Long, 100.0, 98.5),   // -1.5 ATR
-        ("slight-loss-long", PosType::Long, 100.0, 99.7),     // -0.3 ATR
-        ("breakeven-long", PosType::Long, 100.0, 100.0),      // 0 ATR
-        ("small-profit-long", PosType::Long, 100.0, 100.3),   // 0.3 ATR
-        ("half-atr-profit-long", PosType::Long, 100.0, 100.6),// 0.6 ATR (DASE boundary)
+        ("deep-loss-long", PosType::Long, 100.0, 95.0), // -5 ATR
+        ("moderate-loss-long", PosType::Long, 100.0, 98.5), // -1.5 ATR
+        ("slight-loss-long", PosType::Long, 100.0, 99.7), // -0.3 ATR
+        ("breakeven-long", PosType::Long, 100.0, 100.0), // 0 ATR
+        ("small-profit-long", PosType::Long, 100.0, 100.3), // 0.3 ATR
+        ("half-atr-profit-long", PosType::Long, 100.0, 100.6), // 0.6 ATR (DASE boundary)
         ("one-atr-profit-long", PosType::Long, 100.0, 101.0), // 1.0 ATR
         ("two-atr-profit-long", PosType::Long, 100.0, 102.0), // 2.0 ATR (trailing high-profit boundary)
         ("large-profit-long", PosType::Long, 100.0, 105.0),   // 5.0 ATR
@@ -184,14 +184,14 @@ fn make_fixtures() -> Vec<TestFixture> {
 
     // ── Group 4: ADX levels (weak trend to strong/saturated) ─────────────
     let adx_scenarios: &[(&str, f64, f64)] = &[
-        ("very-weak-trend", 10.0, -0.5),  // ADX < 25 (weak trend tightening)
-        ("weak-trend", 22.0, 0.3),         // ADX < 25 (weak trend tightening)
-        ("moderate-trend", 30.0, 0.5),     // Normal
-        ("strong-trend", 38.0, 1.2),       // Between 35 and 40
-        ("dase-boundary", 41.0, 0.8),      // ADX > 40 (DASE trigger)
-        ("slb-boundary", 46.0, 0.5),       // ADX > 45 (SLB trigger)
-        ("saturated-trend", 55.0, 1.5),    // Both DASE and SLB
-        ("extreme-trend", 75.0, 2.0),      // Extreme ADX
+        ("very-weak-trend", 10.0, -0.5), // ADX < 25 (weak trend tightening)
+        ("weak-trend", 22.0, 0.3),       // ADX < 25 (weak trend tightening)
+        ("moderate-trend", 30.0, 0.5),   // Normal
+        ("strong-trend", 38.0, 1.2),     // Between 35 and 40
+        ("dase-boundary", 41.0, 0.8),    // ADX > 40 (DASE trigger)
+        ("slb-boundary", 46.0, 0.5),     // ADX > 45 (SLB trigger)
+        ("saturated-trend", 55.0, 1.5),  // Both DASE and SLB
+        ("extreme-trend", 75.0, 2.0),    // Extreme ADX
     ];
     for &(label, adx, adx_slope) in adx_scenarios {
         fixtures.push(TestFixture {
@@ -216,7 +216,7 @@ fn make_fixtures() -> Vec<TestFixture> {
     let rsi_scenarios: &[(&str, PosType, f64)] = &[
         ("rsi-oversold-long", PosType::Long, 25.0),
         ("rsi-neutral-long", PosType::Long, 50.0),
-        ("rsi-trending-long", PosType::Long, 65.0),  // RSI > 60 (trending floor)
+        ("rsi-trending-long", PosType::Long, 65.0), // RSI > 60 (trending floor)
         ("rsi-overbought-long", PosType::Long, 80.0),
         ("rsi-oversold-short", PosType::Short, 25.0),
         ("rsi-trending-short", PosType::Short, 35.0), // RSI < 40 (trending floor)
@@ -227,7 +227,7 @@ fn make_fixtures() -> Vec<TestFixture> {
         let entry = 50000.0;
         let atr = 500.0;
         let current = match pos_type {
-            PosType::Long => entry + 2.5 * atr,  // 2.5 ATR profit (active trailing)
+            PosType::Long => entry + 2.5 * atr, // 2.5 ATR profit (active trailing)
             PosType::Short => entry - 2.5 * atr,
         };
         fixtures.push(TestFixture {
@@ -342,7 +342,7 @@ fn make_fixtures() -> Vec<TestFixture> {
         confidence: Confidence::High,
         current_trailing_sl: 0.0,
         atr: 500.0,
-        adx: 40.0,  // > 35
+        adx: 40.0,      // > 35
         adx_slope: 1.0, // > 0 (trend accelerating)
         rsi: 55.0,
         atr_slope: 0.0,
@@ -358,7 +358,7 @@ fn make_fixtures() -> Vec<TestFixture> {
         confidence: Confidence::High,
         current_trailing_sl: 0.0,
         atr: 500.0,
-        adx: 28.0,  // < 35 (TATP not active)
+        adx: 28.0, // < 35 (TATP not active)
         adx_slope: -0.5,
         rsi: 55.0,
         atr_slope: 0.5, // > 0 (vol expanding, TSPV path)
@@ -819,14 +819,8 @@ fn test_sl_codegen_modifier_ordering() {
         .find("5. Breakeven Stop")
         .expect("Breakeven section marker must exist");
 
-    assert!(
-        ase_pos < dase_pos,
-        "ASE must precede DASE (Rust order)"
-    );
-    assert!(
-        dase_pos < slb_pos,
-        "DASE must precede SLB (Rust order)"
-    );
+    assert!(ase_pos < dase_pos, "ASE must precede DASE (Rust order)");
+    assert!(dase_pos < slb_pos, "DASE must precede SLB (Rust order)");
     assert!(
         slb_pos < raw_sl_pos,
         "SLB must precede raw SL computation (Rust order)"
@@ -1158,10 +1152,7 @@ fn test_trailing_codegen_modifier_ordering() {
         conf_pos < rsi_floor_pos,
         "Per-confidence must precede RSI floor"
     );
-    assert!(
-        rsi_floor_pos < vbts_pos,
-        "RSI floor must precede VBTS"
-    );
+    assert!(rsi_floor_pos < vbts_pos, "RSI floor must precede VBTS");
     assert!(
         vbts_pos < high_profit_pos,
         "VBTS must precede high-profit tightening"
@@ -1238,13 +1229,12 @@ fn test_trailing_numerical_parity_with_fixtures() {
 
         // If trailing is active (profit >= trailing_start), the TSL should
         // be between the entry and the current price (for profitable positions)
-        let effective_start = if f.confidence == Confidence::Low
-            && trailing_start_atr_low_conf > 0.0
-        {
-            trailing_start_atr_low_conf
-        } else {
-            trailing_start_atr
-        };
+        let effective_start =
+            if f.confidence == Confidence::Low && trailing_start_atr_low_conf > 0.0 {
+                trailing_start_atr_low_conf
+            } else {
+                trailing_start_atr
+            };
 
         if f.profit_atr >= effective_start && f.profit_atr > 0.0 {
             match f.pos_type {
@@ -1389,9 +1379,7 @@ fn test_fixture_coverage() {
         "Fixtures must include deep-loss scenarios (< -3 ATR)"
     );
     assert!(
-        fixtures
-            .iter()
-            .any(|f| f.profit_atr.abs() < 0.01),
+        fixtures.iter().any(|f| f.profit_atr.abs() < 0.01),
         "Fixtures must include breakeven scenarios"
     );
     assert!(
@@ -1415,9 +1403,8 @@ fn test_fixture_coverage() {
 
     // Coverage: ASE conditions (underwater + negative slope)
     assert!(
-        fixtures
-            .iter()
-            .any(|f| f.adx_slope < 0.0 && match f.pos_type {
+        fixtures.iter().any(|f| f.adx_slope < 0.0
+            && match f.pos_type {
                 PosType::Long => f.current_price < f.entry_price,
                 PosType::Short => f.current_price > f.entry_price,
             }),
@@ -1454,19 +1441,15 @@ fn test_fixture_coverage() {
 
     // Coverage: TSPV (atr_slope > 0 && profit > 2.0 && adx <= 35)
     assert!(
-        fixtures
-            .iter()
-            .any(|f| f.atr_slope > 0.0
-                && f.profit_atr > 2.0
-                && !(f.adx > 35.0 && f.adx_slope > 0.0)),
+        fixtures.iter().any(|f| f.atr_slope > 0.0
+            && f.profit_atr > 2.0
+            && !(f.adx > 35.0 && f.adx_slope > 0.0)),
         "Fixtures must include TSPV scenario"
     );
 
     // Coverage: Low confidence
     assert!(
-        fixtures
-            .iter()
-            .any(|f| f.confidence == Confidence::Low),
+        fixtures.iter().any(|f| f.confidence == Confidence::Low),
         "Fixtures must include Low confidence scenarios"
     );
 
@@ -1509,11 +1492,7 @@ fn test_sl_codegen_uses_double_not_float() {
     }
 
     // Must NOT use float for critical variables
-    let forbidden_floats = [
-        "float sl_price",
-        "float sl_mult",
-        "float eff_atr",
-    ];
+    let forbidden_floats = ["float sl_price", "float sl_mult", "float eff_atr"];
     for pat in &forbidden_floats {
         assert!(
             !src.contains(pat),
@@ -1979,14 +1958,8 @@ fn test_signal_macd_gate_accel_and_sign() {
     );
 
     // MACD_SIGN mode (1): checks histogram sign
-    assert!(
-        src.contains("macd_hist > 0.0"),
-        "MACD_SIGN long: hist > 0"
-    );
-    assert!(
-        src.contains("macd_hist < 0.0"),
-        "MACD_SIGN short: hist < 0"
-    );
+    assert!(src.contains("macd_hist > 0.0"), "MACD_SIGN long: hist > 0");
+    assert!(src.contains("macd_hist < 0.0"), "MACD_SIGN short: hist < 0");
 }
 
 #[test]
@@ -2037,14 +2010,8 @@ fn test_signal_btc_alignment() {
         src.contains("cfg.require_btc_alignment"),
         "BTC alignment must check config flag"
     );
-    assert!(
-        src.contains("btc_ok_long"),
-        "Must compute btc_ok_long"
-    );
-    assert!(
-        src.contains("btc_ok_short"),
-        "Must compute btc_ok_short"
-    );
+    assert!(src.contains("btc_ok_long"), "Must compute btc_ok_long");
+    assert!(src.contains("btc_ok_short"), "Must compute btc_ok_short");
     assert!(
         src.contains("cfg.btc_adx_override"),
         "BTC alignment must use ADX override threshold"
@@ -2058,7 +2025,9 @@ fn test_signal_mode_priority_order() {
 
     let mode1_pos = src.rfind("// Mode 1: Standard").expect("Mode 1 must exist");
     let mode2_pos = src.rfind("// Mode 2: Pullback").expect("Mode 2 must exist");
-    let mode3_pos = src.rfind("// Mode 3: Slow drift").expect("Mode 3 must exist");
+    let mode3_pos = src
+        .rfind("// Mode 3: Slow drift")
+        .expect("Mode 3 must exist");
     assert!(mode1_pos < mode2_pos, "Mode 1 must precede Mode 2");
     assert!(mode2_pos < mode3_pos, "Mode 2 must precede Mode 3");
 }
@@ -2081,11 +2050,23 @@ fn test_sl_ase_tightening_underwater_adx_declining() {
             }
     }) {
         let sl = rust_compute_sl_price(
-            f.pos_type, f.entry_price, f.entry_atr, f.current_price,
-            f.adx, f.adx_slope, sl_atr_mult, false, 0.0, 0.0,
+            f.pos_type,
+            f.entry_price,
+            f.entry_atr,
+            f.current_price,
+            f.adx,
+            f.adx_slope,
+            sl_atr_mult,
+            false,
+            0.0,
+            0.0,
         );
         // ASE tightened: effective mult = 2.0 * 0.8 = 1.6
-        let atr = if f.entry_atr > 0.0 { f.entry_atr } else { f.entry_price * 0.005 };
+        let atr = if f.entry_atr > 0.0 {
+            f.entry_atr
+        } else {
+            f.entry_price * 0.005
+        };
         let expected_mult = sl_atr_mult * 0.8;
         let expected_sl = match f.pos_type {
             PosType::Long => f.entry_price - atr * expected_mult,
@@ -2101,12 +2082,16 @@ fn test_sl_ase_tightening_underwater_adx_declining() {
             PosType::Long => assert!(
                 sl >= base_sl - f64::EPSILON,
                 "ASE must tighten LONG SL for '{}': sl={}, base_sl={}",
-                f.label, sl, base_sl
+                f.label,
+                sl,
+                base_sl
             ),
             PosType::Short => assert!(
                 sl <= base_sl + f64::EPSILON,
                 "ASE must tighten SHORT SL for '{}': sl={}, base_sl={}",
-                f.label, sl, base_sl
+                f.label,
+                sl,
+                base_sl
             ),
         }
         // When no DASE/SLB, should match exactly
@@ -2114,7 +2099,9 @@ fn test_sl_ase_tightening_underwater_adx_declining() {
             assert!(
                 within_tolerance(expected_sl, sl, TIER_T2_TOLERANCE),
                 "ASE-only SL mismatch for '{}': expected={}, got={}",
-                f.label, expected_sl, sl
+                f.label,
+                expected_sl,
+                sl
             );
         }
     }
@@ -2124,8 +2111,16 @@ fn test_sl_ase_tightening_underwater_adx_declining() {
 fn test_sl_dase_widening_high_adx_profit() {
     // AQC-1263: DASE widens by 15% when ADX > 40 AND profit > 0.5 ATR
     let sl = rust_compute_sl_price(
-        PosType::Long, 50000.0, 500.0, 50300.0,  // profit_atr = 0.6
-        42.0, 0.5, 2.0, false, 0.0, 0.0,
+        PosType::Long,
+        50000.0,
+        500.0,
+        50300.0, // profit_atr = 0.6
+        42.0,
+        0.5,
+        2.0,
+        false,
+        0.0,
+        0.0,
     );
     let atr = 500.0;
     // DASE active: profit_atr = 0.6 > 0.5, ADX = 42 > 40
@@ -2133,7 +2128,9 @@ fn test_sl_dase_widening_high_adx_profit() {
     let expected = 50000.0 - atr * 2.0 * 1.15;
     assert!(
         within_tolerance(expected, sl, TIER_T2_TOLERANCE),
-        "DASE widening: expected={}, got={}", expected, sl
+        "DASE widening: expected={}, got={}",
+        expected,
+        sl
     );
 }
 
@@ -2141,8 +2138,16 @@ fn test_sl_dase_widening_high_adx_profit() {
 fn test_sl_slb_widening_very_high_adx() {
     // AQC-1263: SLB widens by 10% when ADX > 45
     let sl = rust_compute_sl_price(
-        PosType::Long, 50000.0, 500.0, 49900.0,  // underwater, no DASE
-        47.0, 0.5, 2.0, false, 0.0, 0.0,
+        PosType::Long,
+        50000.0,
+        500.0,
+        49900.0, // underwater, no DASE
+        47.0,
+        0.5,
+        2.0,
+        false,
+        0.0,
+        0.0,
     );
     let atr = 500.0;
     // SLB: ADX = 47 > 45, sl_mult = 2.0 * 1.10 = 2.20
@@ -2150,7 +2155,9 @@ fn test_sl_slb_widening_very_high_adx() {
     let expected = 50000.0 - atr * 2.0 * 1.10;
     assert!(
         within_tolerance(expected, sl, TIER_T2_TOLERANCE),
-        "SLB widening: expected={}, got={}", expected, sl
+        "SLB widening: expected={}, got={}",
+        expected,
+        sl
     );
 }
 
@@ -2158,8 +2165,16 @@ fn test_sl_slb_widening_very_high_adx() {
 fn test_sl_breakeven_activation() {
     // AQC-1263: Breakeven stop moves SL past entry when profit >= be_start ATR
     let sl = rust_compute_sl_price(
-        PosType::Long, 50000.0, 500.0, 50400.0,  // profit = 400, be_start = 500*0.7 = 350
-        30.0, 0.5, 2.0, true, 0.7, 0.05,
+        PosType::Long,
+        50000.0,
+        500.0,
+        50400.0, // profit = 400, be_start = 500*0.7 = 350
+        30.0,
+        0.5,
+        2.0,
+        true,
+        0.7,
+        0.05,
     );
     let atr = 500.0;
     let be_buffer = atr * 0.05;
@@ -2168,7 +2183,9 @@ fn test_sl_breakeven_activation() {
     let expected = 50000.0 + be_buffer;
     assert!(
         within_tolerance(expected, sl, TIER_T2_TOLERANCE),
-        "Breakeven activation: expected={}, got={}", expected, sl
+        "Breakeven activation: expected={}, got={}",
+        expected,
+        sl
     );
 }
 
@@ -2176,14 +2193,24 @@ fn test_sl_breakeven_activation() {
 fn test_sl_zero_atr_fallback() {
     // AQC-1263: Zero entry_atr uses fallback = entry_price * 0.005
     let sl = rust_compute_sl_price(
-        PosType::Long, 100.0, 0.0, 101.0,
-        30.0, 0.5, 2.0, false, 0.0, 0.0,
+        PosType::Long,
+        100.0,
+        0.0,
+        101.0,
+        30.0,
+        0.5,
+        2.0,
+        false,
+        0.0,
+        0.0,
     );
     let fallback_atr = 100.0 * 0.005;
     let expected = 100.0 - fallback_atr * 2.0;
     assert!(
         within_tolerance(expected, sl, TIER_T2_TOLERANCE),
-        "Zero ATR fallback: expected={}, got={}", expected, sl
+        "Zero ATR fallback: expected={}, got={}",
+        expected,
+        sl
     );
 }
 
@@ -2191,8 +2218,16 @@ fn test_sl_zero_atr_fallback() {
 fn test_sl_dase_and_slb_combined() {
     // AQC-1263: When ADX > 45 AND profitable, both DASE and SLB apply
     let sl = rust_compute_sl_price(
-        PosType::Long, 50000.0, 500.0, 50400.0,  // profit_atr = 0.8
-        50.0, 0.5, 2.0, false, 0.0, 0.0,
+        PosType::Long,
+        50000.0,
+        500.0,
+        50400.0, // profit_atr = 0.8
+        50.0,
+        0.5,
+        2.0,
+        false,
+        0.0,
+        0.0,
     );
     let atr = 500.0;
     // DASE: ADX=50 > 40, profit_atr=0.8 > 0.5 -> mult *= 1.15
@@ -2201,7 +2236,9 @@ fn test_sl_dase_and_slb_combined() {
     let expected = 50000.0 - atr * 2.0 * 1.15 * 1.10;
     assert!(
         within_tolerance(expected, sl, TIER_T2_TOLERANCE),
-        "DASE+SLB combined: expected={}, got={}", expected, sl
+        "DASE+SLB combined: expected={}, got={}",
+        expected,
+        sl
     );
 }
 
@@ -2209,21 +2246,35 @@ fn test_sl_dase_and_slb_combined() {
 // AQC-1264: Trailing stop axis validation (additional edge cases)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn trailing_defaults() -> (f64, f64, f64, f64, f64, f64, bool, f64, f64, f64, f64, f64, f64) {
+fn trailing_defaults() -> (
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    bool,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+) {
     (
-        1.0,   // trailing_start_atr
-        0.8,   // trailing_distance_atr
-        0.0,   // trailing_start_atr_low_conf
-        0.0,   // trailing_distance_atr_low_conf
-        0.5,   // trailing_rsi_floor_default
-        0.7,   // trailing_rsi_floor_trending
-        true,  // enable_vol_buffered_trailing
-        1.2,   // trailing_vbts_bb_threshold
-        1.25,  // trailing_vbts_mult
-        2.0,   // trailing_high_profit_atr
-        0.75,  // trailing_tighten_tspv
-        0.5,   // trailing_tighten_default
-        0.7,   // trailing_weak_trend_mult
+        1.0,  // trailing_start_atr
+        0.8,  // trailing_distance_atr
+        0.0,  // trailing_start_atr_low_conf
+        0.0,  // trailing_distance_atr_low_conf
+        0.5,  // trailing_rsi_floor_default
+        0.7,  // trailing_rsi_floor_trending
+        true, // enable_vol_buffered_trailing
+        1.2,  // trailing_vbts_bb_threshold
+        1.25, // trailing_vbts_mult
+        2.0,  // trailing_high_profit_atr
+        0.75, // trailing_tighten_tspv
+        0.5,  // trailing_tighten_default
+        0.7,  // trailing_weak_trend_mult
     )
 }
 
@@ -2233,11 +2284,31 @@ fn test_trailing_vbts_adjustment_high_bb_width() {
     let (ts, td, tslc, tdlc, rfd, rft, evb, vbt, vbm, hpa, ttp, ttd, twm) = trailing_defaults();
 
     let tsl = rust_compute_trailing(
-        PosType::Long, 50000.0, 51500.0, 500.0, 0.0,
-        Confidence::High, 55.0, 30.0, 0.5, 0.0,
-        1.5,  // bb_width_ratio > 1.2 (VBTS triggers)
-        3.0,  // profit > trailing_start
-        ts, td, tslc, tdlc, rfd, rft, evb, vbt, vbm, hpa, ttp, ttd, twm,
+        PosType::Long,
+        50000.0,
+        51500.0,
+        500.0,
+        0.0,
+        Confidence::High,
+        55.0,
+        30.0,
+        0.5,
+        0.0,
+        1.5, // bb_width_ratio > 1.2 (VBTS triggers)
+        3.0, // profit > trailing_start
+        ts,
+        td,
+        tslc,
+        tdlc,
+        rfd,
+        rft,
+        evb,
+        vbt,
+        vbm,
+        hpa,
+        ttp,
+        ttd,
+        twm,
     );
 
     // VBTS active: effective_dist = 0.8 * 1.25 = 1.0
@@ -2251,7 +2322,9 @@ fn test_trailing_vbts_adjustment_high_bb_width() {
     let expected = 51500.0 - atr * 0.5;
     assert!(
         within_tolerance(expected, tsl, TIER_T2_TOLERANCE),
-        "VBTS + high-profit: expected={}, got={}", expected, tsl
+        "VBTS + high-profit: expected={}, got={}",
+        expected,
+        tsl
     );
 }
 
@@ -2261,11 +2334,31 @@ fn test_trailing_tatp_preservation_trending_adx() {
     let (ts, td, tslc, tdlc, rfd, rft, evb, vbt, vbm, hpa, ttp, ttd, twm) = trailing_defaults();
 
     let tsl = rust_compute_trailing(
-        PosType::Long, 50000.0, 51500.0, 500.0, 0.0,
-        Confidence::High, 55.0, 40.0, 1.0, 0.0,
-        1.0,  // bb_width_ratio normal
-        3.0,  // profit > high_profit_atr (2.0)
-        ts, td, tslc, tdlc, rfd, rft, evb, vbt, vbm, hpa, ttp, ttd, twm,
+        PosType::Long,
+        50000.0,
+        51500.0,
+        500.0,
+        0.0,
+        Confidence::High,
+        55.0,
+        40.0,
+        1.0,
+        0.0,
+        1.0, // bb_width_ratio normal
+        3.0, // profit > high_profit_atr (2.0)
+        ts,
+        td,
+        tslc,
+        tdlc,
+        rfd,
+        rft,
+        evb,
+        vbt,
+        vbm,
+        hpa,
+        ttp,
+        ttd,
+        twm,
     );
 
     // TATP: adx=40 > 35 AND adx_slope=1.0 > 0 -> effective_dist = 0.8 * 1.0 = 0.8
@@ -2273,7 +2366,9 @@ fn test_trailing_tatp_preservation_trending_adx() {
     let expected = 51500.0 - atr * 0.8;
     assert!(
         within_tolerance(expected, tsl, TIER_T2_TOLERANCE),
-        "TATP preservation: expected={}, got={}", expected, tsl
+        "TATP preservation: expected={}, got={}",
+        expected,
+        tsl
     );
 }
 
@@ -2283,11 +2378,31 @@ fn test_trailing_tspv_tightening() {
     let (ts, td, tslc, tdlc, rfd, rft, evb, vbt, vbm, hpa, ttp, ttd, twm) = trailing_defaults();
 
     let tsl = rust_compute_trailing(
-        PosType::Long, 50000.0, 51500.0, 500.0, 0.0,
-        Confidence::High, 55.0, 28.0, -0.5, 0.5,  // atr_slope > 0, adx < 35
+        PosType::Long,
+        50000.0,
+        51500.0,
+        500.0,
+        0.0,
+        Confidence::High,
+        55.0,
+        28.0,
+        -0.5,
+        0.5, // atr_slope > 0, adx < 35
         1.0,
         3.0,
-        ts, td, tslc, tdlc, rfd, rft, evb, vbt, vbm, hpa, ttp, ttd, twm,
+        ts,
+        td,
+        tslc,
+        tdlc,
+        rfd,
+        rft,
+        evb,
+        vbt,
+        vbm,
+        hpa,
+        ttp,
+        ttd,
+        twm,
     );
 
     // TSPV: adx=28 (< 35 so TATP not active), atr_slope=0.5 > 0
@@ -2296,7 +2411,9 @@ fn test_trailing_tspv_tightening() {
     let expected = 51500.0 - atr * 0.6;
     assert!(
         within_tolerance(expected, tsl, TIER_T2_TOLERANCE),
-        "TSPV tightening: expected={}, got={}", expected, tsl
+        "TSPV tightening: expected={}, got={}",
+        expected,
+        tsl
     );
 }
 
@@ -2306,11 +2423,31 @@ fn test_trailing_weak_trend_widening_low_adx() {
     let (ts, td, tslc, tdlc, rfd, rft, evb, vbt, vbm, hpa, ttp, ttd, twm) = trailing_defaults();
 
     let tsl = rust_compute_trailing(
-        PosType::Long, 50000.0, 50600.0, 500.0, 0.0,
-        Confidence::High, 55.0, 20.0, 0.3, 0.0,
+        PosType::Long,
+        50000.0,
+        50600.0,
+        500.0,
+        0.0,
+        Confidence::High,
+        55.0,
+        20.0,
+        0.3,
+        0.0,
         1.0,
-        1.2,  // profit_atr = 1.2 (< 2.0, not high-profit, but >= start=1.0)
-        ts, td, tslc, tdlc, rfd, rft, evb, vbt, vbm, hpa, ttp, ttd, twm,
+        1.2, // profit_atr = 1.2 (< 2.0, not high-profit, but >= start=1.0)
+        ts,
+        td,
+        tslc,
+        tdlc,
+        rfd,
+        rft,
+        evb,
+        vbt,
+        vbm,
+        hpa,
+        ttp,
+        ttd,
+        twm,
     );
 
     // Weak-trend: adx=20 < 25 AND profit_atr=1.2 (not > 2.0)
@@ -2320,7 +2457,9 @@ fn test_trailing_weak_trend_widening_low_adx() {
     let expected = 50600.0 - atr * 0.56;
     assert!(
         within_tolerance(expected, tsl, TIER_T2_TOLERANCE),
-        "Weak-trend widening: expected={}, got={}", expected, tsl
+        "Weak-trend widening: expected={}, got={}",
+        expected,
+        tsl
     );
 }
 
@@ -2331,11 +2470,31 @@ fn test_trailing_rsi_trend_guard_floor() {
 
     // Long with RSI > 60 -> trending floor = 0.7
     let tsl = rust_compute_trailing(
-        PosType::Long, 50000.0, 50600.0, 500.0, 0.0,
-        Confidence::High, 65.0, 20.0, 0.3, 0.0,
+        PosType::Long,
+        50000.0,
+        50600.0,
+        500.0,
+        0.0,
+        Confidence::High,
+        65.0,
+        20.0,
+        0.3,
+        0.0,
         1.0,
-        1.2,  // not high-profit
-        ts, td, tslc, tdlc, rfd, rft, evb, vbt, vbm, hpa, ttp, ttd, twm,
+        1.2, // not high-profit
+        ts,
+        td,
+        tslc,
+        tdlc,
+        rfd,
+        rft,
+        evb,
+        vbt,
+        vbm,
+        hpa,
+        ttp,
+        ttd,
+        twm,
     );
 
     // Weak-trend: effective_dist = 0.8 * 0.7 = 0.56
@@ -2345,7 +2504,9 @@ fn test_trailing_rsi_trend_guard_floor() {
     let expected = 50600.0 - atr * 0.7;
     assert!(
         within_tolerance(expected, tsl, TIER_T2_TOLERANCE),
-        "RSI Trend-Guard floor: expected={}, got={}", expected, tsl
+        "RSI Trend-Guard floor: expected={}, got={}",
+        expected,
+        tsl
     );
 }
 
@@ -2355,15 +2516,35 @@ fn test_trailing_low_confidence_overrides() {
     let (ts, td, _tslc, _tdlc, rfd, rft, evb, vbt, vbm, hpa, ttp, ttd, twm) = trailing_defaults();
 
     // Set low-conf overrides
-    let tslc = 1.5;  // trailing_start_atr_low_conf
-    let tdlc = 1.0;  // trailing_distance_atr_low_conf
+    let tslc = 1.5; // trailing_start_atr_low_conf
+    let tdlc = 1.0; // trailing_distance_atr_low_conf
 
     let tsl = rust_compute_trailing(
-        PosType::Long, 50000.0, 51500.0, 500.0, 0.0,
-        Confidence::Low, 55.0, 30.0, 0.5, 0.0,
+        PosType::Long,
+        50000.0,
+        51500.0,
+        500.0,
+        0.0,
+        Confidence::Low,
+        55.0,
+        30.0,
+        0.5,
+        0.0,
         1.0,
-        3.0,  // profit = 3.0 ATR
-        ts, td, tslc, tdlc, rfd, rft, evb, vbt, vbm, hpa, ttp, ttd, twm,
+        3.0, // profit = 3.0 ATR
+        ts,
+        td,
+        tslc,
+        tdlc,
+        rfd,
+        rft,
+        evb,
+        vbt,
+        vbm,
+        hpa,
+        ttp,
+        ttd,
+        twm,
     );
 
     // Low confidence: trailing_start = 1.5, trailing_dist = 1.0
@@ -2374,7 +2555,9 @@ fn test_trailing_low_confidence_overrides() {
     let expected = 51500.0 - atr * 0.5;
     assert!(
         within_tolerance(expected, tsl, TIER_T2_TOLERANCE),
-        "Low confidence overrides: expected={}, got={}", expected, tsl
+        "Low confidence overrides: expected={}, got={}",
+        expected,
+        tsl
     );
 }
 
@@ -2499,7 +2682,9 @@ fn test_tp_atr_fallback() {
     let src = get_decision_cuda_source();
 
     // TP codegen contains the same ATR fallback pattern
-    let tp_section_start = src.find("check_tp_codegen").expect("check_tp_codegen must exist");
+    let tp_section_start = src
+        .find("check_tp_codegen")
+        .expect("check_tp_codegen must exist");
     let tp_section = &src[tp_section_start..];
     assert!(
         tp_section.contains("entry_price * 0.005"),
@@ -2543,7 +2728,9 @@ fn test_smart_exit_1_trend_breakdown() {
     let src = get_decision_cuda_source();
 
     // Find smart exits section
-    let se_start = src.find("check_smart_exits_codegen").expect("smart exits must exist");
+    let se_start = src
+        .find("check_smart_exits_codegen")
+        .expect("smart exits must exist");
     let se_section = &src[se_start..];
 
     assert!(
@@ -2573,7 +2760,9 @@ fn test_smart_exit_2_trend_exhaustion() {
     // AQC-1266: Trend Exhaustion (ADX below threshold)
     let src = get_decision_cuda_source();
 
-    let se_start = src.find("check_smart_exits_codegen").expect("smart exits must exist");
+    let se_start = src
+        .find("check_smart_exits_codegen")
+        .expect("smart exits must exist");
     let se_section = &src[se_start..];
 
     assert!(
@@ -2595,7 +2784,9 @@ fn test_smart_exit_3_ema_macro_breakdown() {
     // AQC-1266: EMA Macro Breakdown
     let src = get_decision_cuda_source();
 
-    let se_start = src.find("check_smart_exits_codegen").expect("smart exits must exist");
+    let se_start = src
+        .find("check_smart_exits_codegen")
+        .expect("smart exits must exist");
     let se_section = &src[se_start..];
 
     assert!(
@@ -2621,7 +2812,9 @@ fn test_smart_exit_4_stagnation() {
     // AQC-1266: Stagnation Exit (low-vol + underwater)
     let src = get_decision_cuda_source();
 
-    let se_start = src.find("check_smart_exits_codegen").expect("smart exits must exist");
+    let se_start = src
+        .find("check_smart_exits_codegen")
+        .expect("smart exits must exist");
     let se_section = &src[se_start..];
 
     assert!(
@@ -2639,7 +2832,9 @@ fn test_smart_exit_5_funding_headwind_noop() {
     // AQC-1266: Funding Headwind is a no-op (never fires in backtester v1)
     let src = get_decision_cuda_source();
 
-    let se_start = src.find("check_smart_exits_codegen").expect("smart exits must exist");
+    let se_start = src
+        .find("check_smart_exits_codegen")
+        .expect("smart exits must exist");
     let se_section = &src[se_start..];
 
     assert!(
@@ -2661,7 +2856,9 @@ fn test_smart_exit_6_tsme() {
     // AQC-1266: TSME (Trend Saturation Momentum Exit)
     let src = get_decision_cuda_source();
 
-    let se_start = src.find("check_smart_exits_codegen").expect("smart exits must exist");
+    let se_start = src
+        .find("check_smart_exits_codegen")
+        .expect("smart exits must exist");
     let se_section = &src[se_start..];
 
     assert!(
@@ -2687,7 +2884,9 @@ fn test_smart_exit_7_mmde() {
     // AQC-1266: MMDE (MACD Persistent Divergence Exit)
     let src = get_decision_cuda_source();
 
-    let se_start = src.find("check_smart_exits_codegen").expect("smart exits must exist");
+    let se_start = src
+        .find("check_smart_exits_codegen")
+        .expect("smart exits must exist");
     let se_section = &src[se_start..];
 
     assert!(
@@ -2713,7 +2912,9 @@ fn test_smart_exit_8_rsi_overextension() {
     // AQC-1266: RSI Overextension Exit with profit-switched thresholds
     let src = get_decision_cuda_source();
 
-    let se_start = src.find("check_smart_exits_codegen").expect("smart exits must exist");
+    let se_start = src
+        .find("check_smart_exits_codegen")
+        .expect("smart exits must exist");
     let se_section = &src[se_start..];
 
     assert!(
@@ -2725,7 +2926,8 @@ fn test_smart_exit_8_rsi_overextension() {
         "RSI Overextension must use profit_atr_switch"
     );
     assert!(
-        se_section.contains("cfg.rsi_exit_ub_lo_profit") && se_section.contains("cfg.rsi_exit_ub_hi_profit"),
+        se_section.contains("cfg.rsi_exit_ub_lo_profit")
+            && se_section.contains("cfg.rsi_exit_ub_hi_profit"),
         "RSI Overextension must have profit-switched thresholds"
     );
     assert!(
@@ -2739,18 +2941,38 @@ fn test_smart_exit_priority_order() {
     // AQC-1266: Sub-checks evaluated in order 1-8
     let src = get_decision_cuda_source();
 
-    let se_start = src.find("check_smart_exits_codegen").expect("smart exits must exist");
+    let se_start = src
+        .find("check_smart_exits_codegen")
+        .expect("smart exits must exist");
     let se_section = &src[se_start..];
 
-    let pos1 = se_section.find("exit_code = 1").expect("exit_code=1 must exist");
-    let pos2 = se_section.find("exit_code = 2").expect("exit_code=2 must exist");
-    let pos4 = se_section.find("exit_code = 4").expect("exit_code=4 must exist");
-    let pos6 = se_section.find("exit_code = 6").expect("exit_code=6 must exist");
-    let pos7 = se_section.find("exit_code = 7").expect("exit_code=7 must exist");
-    let pos8 = se_section.find("exit_code = 8").expect("exit_code=8 must exist");
+    let pos1 = se_section
+        .find("exit_code = 1")
+        .expect("exit_code=1 must exist");
+    let pos2 = se_section
+        .find("exit_code = 2")
+        .expect("exit_code=2 must exist");
+    let pos4 = se_section
+        .find("exit_code = 4")
+        .expect("exit_code=4 must exist");
+    let pos6 = se_section
+        .find("exit_code = 6")
+        .expect("exit_code=6 must exist");
+    let pos7 = se_section
+        .find("exit_code = 7")
+        .expect("exit_code=7 must exist");
+    let pos8 = se_section
+        .find("exit_code = 8")
+        .expect("exit_code=8 must exist");
 
-    assert!(pos1 < pos2, "Trend Breakdown (1) must precede Trend Exhaustion (2)");
-    assert!(pos2 < pos4, "Trend Exhaustion (2) must precede Stagnation (4)");
+    assert!(
+        pos1 < pos2,
+        "Trend Breakdown (1) must precede Trend Exhaustion (2)"
+    );
+    assert!(
+        pos2 < pos4,
+        "Trend Exhaustion (2) must precede Stagnation (4)"
+    );
     assert!(pos4 < pos6, "Stagnation (4) must precede TSME (6)");
     assert!(pos6 < pos7, "TSME (6) must precede MMDE (7)");
     assert!(pos7 < pos8, "MMDE (7) must precede RSI Overextension (8)");
@@ -2780,7 +3002,9 @@ fn test_all_exits_sl_triggers_first() {
     // AQC-1267: SL triggers first with exit_code=100
     let src = get_decision_cuda_source();
 
-    let orch_start = src.find("check_all_exits_codegen").expect("orchestrator must exist");
+    let orch_start = src
+        .find("check_all_exits_codegen")
+        .expect("orchestrator must exist");
     let orch_section = &src[orch_start..];
 
     assert!(
@@ -2798,7 +3022,9 @@ fn test_all_exits_trailing_triggers_second() {
     // AQC-1267: Trailing triggers second with exit_code=101
     let src = get_decision_cuda_source();
 
-    let orch_start = src.find("check_all_exits_codegen").expect("orchestrator must exist");
+    let orch_start = src
+        .find("check_all_exits_codegen")
+        .expect("orchestrator must exist");
     let orch_section = &src[orch_start..];
 
     assert!(
@@ -2816,7 +3042,9 @@ fn test_all_exits_tp_triggers_third() {
     // AQC-1267: TP triggers third with exit_code=102
     let src = get_decision_cuda_source();
 
-    let orch_start = src.find("check_all_exits_codegen").expect("orchestrator must exist");
+    let orch_start = src
+        .find("check_all_exits_codegen")
+        .expect("orchestrator must exist");
     let orch_section = &src[orch_start..];
 
     assert!(
@@ -2834,7 +3062,9 @@ fn test_all_exits_smart_triggers_fourth() {
     // AQC-1267: Smart exits trigger fourth with exit_code=1-8
     let src = get_decision_cuda_source();
 
-    let orch_start = src.find("check_all_exits_codegen").expect("orchestrator must exist");
+    let orch_start = src
+        .find("check_all_exits_codegen")
+        .expect("orchestrator must exist");
     let orch_section = &src[orch_start..];
 
     assert!(
@@ -2852,11 +3082,14 @@ fn test_all_exits_no_exit_returns_zero() {
     // AQC-1267: No exit when all checks pass (exit_code=0)
     let src = get_decision_cuda_source();
 
-    let orch_start = src.find("check_all_exits_codegen").expect("orchestrator must exist");
+    let orch_start = src
+        .find("check_all_exits_codegen")
+        .expect("orchestrator must exist");
     let orch_section = &src[orch_start..];
 
     assert!(
-        orch_section.contains("result.exit_code = 0") || orch_section.contains("result.should_exit = false"),
+        orch_section.contains("result.exit_code = 0")
+            || orch_section.contains("result.should_exit = false"),
         "No-exit path must return exit_code=0 or should_exit=false"
     );
 }
@@ -2866,13 +3099,23 @@ fn test_all_exits_priority_ordering() {
     // AQC-1267: Verify priority sequence: SL(100) > Trailing(101) > TP(102) > Smart(1-8)
     let src = get_decision_cuda_source();
 
-    let orch_start = src.find("check_all_exits_codegen").expect("orchestrator must exist");
+    let orch_start = src
+        .find("check_all_exits_codegen")
+        .expect("orchestrator must exist");
     let orch_section = &src[orch_start..];
 
-    let sl_pos = orch_section.find("exit_code = 100").expect("SL exit must exist");
-    let trail_pos = orch_section.find("exit_code = 101").expect("Trailing exit must exist");
-    let tp_pos = orch_section.find("exit_code = 102").expect("TP exit must exist");
-    let smart_pos = orch_section.find("smart.exit_code").expect("Smart exit must exist");
+    let sl_pos = orch_section
+        .find("exit_code = 100")
+        .expect("SL exit must exist");
+    let trail_pos = orch_section
+        .find("exit_code = 101")
+        .expect("Trailing exit must exist");
+    let tp_pos = orch_section
+        .find("exit_code = 102")
+        .expect("TP exit must exist");
+    let smart_pos = orch_section
+        .find("smart.exit_code")
+        .expect("Smart exit must exist");
 
     assert!(sl_pos < trail_pos, "SL must be checked before Trailing");
     assert!(trail_pos < tp_pos, "Trailing must be checked before TP");
@@ -2903,7 +3146,9 @@ fn test_entry_size_static_sizing() {
     // AQC-1268: Static sizing when dynamic disabled
     let src = get_decision_cuda_source();
 
-    let sz_start = src.find("compute_entry_size_codegen").expect("sizing fn must exist");
+    let sz_start = src
+        .find("compute_entry_size_codegen")
+        .expect("sizing fn must exist");
     let sz_section = &src[sz_start..];
 
     assert!(
@@ -2921,7 +3166,9 @@ fn test_entry_size_confidence_multiplier() {
     // AQC-1268: Confidence multiplier in dynamic sizing
     let src = get_decision_cuda_source();
 
-    let sz_start = src.find("compute_entry_size_codegen").expect("sizing fn must exist");
+    let sz_start = src
+        .find("compute_entry_size_codegen")
+        .expect("sizing fn must exist");
     let sz_section = &src[sz_start..];
 
     assert!(
@@ -2947,7 +3194,9 @@ fn test_entry_size_adx_multiplier() {
     // AQC-1268: ADX multiplier scaling in dynamic sizing
     let src = get_decision_cuda_source();
 
-    let sz_start = src.find("compute_entry_size_codegen").expect("sizing fn must exist");
+    let sz_start = src
+        .find("compute_entry_size_codegen")
+        .expect("sizing fn must exist");
     let sz_section = &src[sz_start..];
 
     assert!(
@@ -2969,7 +3218,9 @@ fn test_entry_size_vol_scalar() {
     // AQC-1268: Volatility scalar (inverse vol ratio)
     let src = get_decision_cuda_source();
 
-    let sz_start = src.find("compute_entry_size_codegen").expect("sizing fn must exist");
+    let sz_start = src
+        .find("compute_entry_size_codegen")
+        .expect("sizing fn must exist");
     let sz_section = &src[sz_start..];
 
     assert!(
@@ -2991,7 +3242,9 @@ fn test_entry_size_dynamic_leverage_tiers() {
     // AQC-1268: Dynamic leverage per-confidence tiers
     let src = get_decision_cuda_source();
 
-    let sz_start = src.find("compute_entry_size_codegen").expect("sizing fn must exist");
+    let sz_start = src
+        .find("compute_entry_size_codegen")
+        .expect("sizing fn must exist");
     let sz_section = &src[sz_start..];
 
     assert!(
@@ -3017,7 +3270,9 @@ fn test_entry_size_leverage_max_cap() {
     // AQC-1268: Leverage max cap
     let src = get_decision_cuda_source();
 
-    let sz_start = src.find("compute_entry_size_codegen").expect("sizing fn must exist");
+    let sz_start = src
+        .find("compute_entry_size_codegen")
+        .expect("sizing fn must exist");
     let sz_section = &src[sz_start..];
 
     assert!(
@@ -3035,7 +3290,9 @@ fn test_entry_size_uses_double_precision() {
     // AQC-1268: Sizing uses double precision
     let src = get_decision_cuda_source();
 
-    let sz_start = src.find("compute_entry_size_codegen").expect("sizing fn must exist");
+    let sz_start = src
+        .find("compute_entry_size_codegen")
+        .expect("sizing fn must exist");
     let sz_section = &src[sz_start..];
 
     assert!(
@@ -3046,14 +3303,8 @@ fn test_entry_size_uses_double_precision() {
         sz_section.contains("double notional"),
         "notional must be double"
     );
-    assert!(
-        sz_section.contains("double size"),
-        "size must be double"
-    );
-    assert!(
-        sz_section.contains("double lev"),
-        "leverage must be double"
-    );
+    assert!(sz_section.contains("double size"), "size must be double");
+    assert!(sz_section.contains("double lev"), "leverage must be double");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3080,7 +3331,9 @@ fn test_pesc_disabled_returns_false() {
     // AQC-1269: PESC disabled when reentry_cooldown_minutes == 0
     let src = get_decision_cuda_source();
 
-    let pesc_start = src.find("is_pesc_blocked_codegen").expect("PESC fn must exist");
+    let pesc_start = src
+        .find("is_pesc_blocked_codegen")
+        .expect("PESC fn must exist");
     let pesc_section = &src[pesc_start..];
 
     assert!(
@@ -3098,7 +3351,9 @@ fn test_pesc_signal_flip_bypass() {
     // AQC-1269: Signal flip exit reason bypasses cooldown
     let src = get_decision_cuda_source();
 
-    let pesc_start = src.find("is_pesc_blocked_codegen").expect("PESC fn must exist");
+    let pesc_start = src
+        .find("is_pesc_blocked_codegen")
+        .expect("PESC fn must exist");
     let pesc_section = &src[pesc_start..];
 
     assert!(
@@ -3112,7 +3367,9 @@ fn test_pesc_direction_gate() {
     // AQC-1269: PESC only blocks same-direction re-entry
     let src = get_decision_cuda_source();
 
-    let pesc_start = src.find("is_pesc_blocked_codegen").expect("PESC fn must exist");
+    let pesc_start = src
+        .find("is_pesc_blocked_codegen")
+        .expect("PESC fn must exist");
     let pesc_section = &src[pesc_start..];
 
     assert!(
@@ -3126,7 +3383,9 @@ fn test_pesc_adx_interpolation() {
     // AQC-1269: ADX interpolation of cooldown (25..40 linear)
     let src = get_decision_cuda_source();
 
-    let pesc_start = src.find("is_pesc_blocked_codegen").expect("PESC fn must exist");
+    let pesc_start = src
+        .find("is_pesc_blocked_codegen")
+        .expect("PESC fn must exist");
     let pesc_section = &src[pesc_start..];
 
     assert!(
@@ -3156,7 +3415,9 @@ fn test_pesc_no_prior_close_bypass() {
     // AQC-1269: No prior close recorded bypasses cooldown
     let src = get_decision_cuda_source();
 
-    let pesc_start = src.find("is_pesc_blocked_codegen").expect("PESC fn must exist");
+    let pesc_start = src
+        .find("is_pesc_blocked_codegen")
+        .expect("PESC fn must exist");
     let pesc_section = &src[pesc_start..];
 
     assert!(
@@ -3170,7 +3431,9 @@ fn test_pesc_elapsed_time_check() {
     // AQC-1269: PESC compares elapsed time against cooldown
     let src = get_decision_cuda_source();
 
-    let pesc_start = src.find("is_pesc_blocked_codegen").expect("PESC fn must exist");
+    let pesc_start = src
+        .find("is_pesc_blocked_codegen")
+        .expect("PESC fn must exist");
     let pesc_section = &src[pesc_start..];
 
     assert!(
@@ -3460,7 +3723,11 @@ fn rust_compute_entry_sizing(
         } else {
             1.0
         };
-        let vol_scalar_raw = if vol_ratio > 0.0 { 1.0 / vol_ratio } else { 1.0 };
+        let vol_scalar_raw = if vol_ratio > 0.0 {
+            1.0 / vol_ratio
+        } else {
+            1.0
+        };
         let vol_scalar = vol_scalar_raw.clamp(vol_scalar_min, vol_scalar_max);
 
         margin_used *= confidence_mult * adx_mult * vol_scalar;
@@ -3495,11 +3762,11 @@ fn rust_is_pesc_blocked(
     reentry_cooldown_minutes: u32,
     reentry_cooldown_min_mins: u32,
     reentry_cooldown_max_mins: u32,
-    close_ts: u32,        // seconds
-    close_type: u32,      // 0=none, 1=LONG, 2=SHORT
-    close_reason: u32,    // 0=none, 1=signal_flip, 2=other
-    desired_type: u32,    // 1=LONG, 2=SHORT
-    current_ts: u32,      // seconds
+    close_ts: u32,     // seconds
+    close_type: u32,   // 0=none, 1=LONG, 2=SHORT
+    close_reason: u32, // 0=none, 1=signal_flip, 2=other
+    desired_type: u32, // 1=LONG, 2=SHORT
+    current_ts: u32,   // seconds
     adx: f64,
 ) -> bool {
     // Gate: disabled when reentry_cooldown_minutes == 0
@@ -3593,9 +3860,9 @@ struct PescFixture {
     reentry_cooldown_min_mins: u32,
     reentry_cooldown_max_mins: u32,
     close_ts: u32,
-    close_type: u32,    // 0=none, 1=LONG, 2=SHORT
-    close_reason: u32,  // 0=none, 1=signal_flip, 2=other
-    desired_type: u32,  // 1=LONG, 2=SHORT
+    close_type: u32,   // 0=none, 1=LONG, 2=SHORT
+    close_reason: u32, // 0=none, 1=signal_flip, 2=other
+    desired_type: u32, // 1=LONG, 2=SHORT
     current_ts: u32,
     adx: f64,
     expected_blocked: bool,
@@ -4072,9 +4339,9 @@ fn make_pesc_fixtures() -> Vec<PescFixture> {
             reentry_cooldown_min_mins: 45,
             reentry_cooldown_max_mins: 180,
             close_ts: 1000,
-            close_type: 1, // LONG
-            close_reason: 2, // other
-            desired_type: 1, // LONG (same dir)
+            close_type: 1,    // LONG
+            close_reason: 2,  // other
+            desired_type: 1,  // LONG (same dir)
             current_ts: 1001, // 1 second later
             adx: 30.0,
             expected_blocked: false,
@@ -4114,7 +4381,7 @@ fn make_pesc_fixtures() -> Vec<PescFixture> {
             reentry_cooldown_min_mins: 45,
             reentry_cooldown_max_mins: 180,
             close_ts: 1000,
-            close_type: 1, // closed LONG
+            close_type: 1,   // closed LONG
             close_reason: 2, // other
             desired_type: 2, // want SHORT (different dir)
             current_ts: 1001,
@@ -4319,34 +4586,56 @@ fn test_sizing_local_reference_matches_risk_core() {
         });
 
         let (local_size, local_margin, local_lev, local_notional) = rust_compute_entry_sizing(
-            f.equity, f.price, f.atr, f.adx, f.confidence,
-            f.allocation_pct, f.enable_dynamic_sizing,
-            f.confidence_mult_high, f.confidence_mult_medium, f.confidence_mult_low,
-            f.adx_sizing_min_mult, f.adx_sizing_full_adx,
-            f.vol_baseline_pct, f.vol_scalar_min, f.vol_scalar_max,
-            f.enable_dynamic_leverage, f.leverage,
-            f.leverage_low, f.leverage_medium, f.leverage_high, f.leverage_max_cap,
+            f.equity,
+            f.price,
+            f.atr,
+            f.adx,
+            f.confidence,
+            f.allocation_pct,
+            f.enable_dynamic_sizing,
+            f.confidence_mult_high,
+            f.confidence_mult_medium,
+            f.confidence_mult_low,
+            f.adx_sizing_min_mult,
+            f.adx_sizing_full_adx,
+            f.vol_baseline_pct,
+            f.vol_scalar_min,
+            f.vol_scalar_max,
+            f.enable_dynamic_leverage,
+            f.leverage,
+            f.leverage_low,
+            f.leverage_medium,
+            f.leverage_high,
+            f.leverage_max_cap,
         );
 
         assert!(
             (canonical.size - local_size).abs() < 1e-10,
             "risk_core vs local size mismatch for '{}': canonical={}, local={}",
-            f.label, canonical.size, local_size
+            f.label,
+            canonical.size,
+            local_size
         );
         assert!(
             (canonical.margin_used - local_margin).abs() < 1e-10,
             "risk_core vs local margin mismatch for '{}': canonical={}, local={}",
-            f.label, canonical.margin_used, local_margin
+            f.label,
+            canonical.margin_used,
+            local_margin
         );
         assert!(
             (canonical.leverage - local_lev).abs() < 1e-10,
             "risk_core vs local leverage mismatch for '{}': canonical={}, local={}",
-            f.label, canonical.leverage, local_lev
+            f.label,
+            canonical.leverage,
+            local_lev
         );
         assert!(
             (canonical.notional - local_notional).abs() < 1e-10,
             "risk_core vs local notional mismatch for '{}': canonical={}, local={}",
-            f.label, canonical.notional, local_notional
+            f.label,
+            canonical.notional,
+            local_notional
         );
     }
 }
@@ -4363,34 +4652,56 @@ fn test_sizing_fixtures_match_expected_values() {
 
     for f in &fixtures {
         let (size, margin, lev, notional) = rust_compute_entry_sizing(
-            f.equity, f.price, f.atr, f.adx, f.confidence,
-            f.allocation_pct, f.enable_dynamic_sizing,
-            f.confidence_mult_high, f.confidence_mult_medium, f.confidence_mult_low,
-            f.adx_sizing_min_mult, f.adx_sizing_full_adx,
-            f.vol_baseline_pct, f.vol_scalar_min, f.vol_scalar_max,
-            f.enable_dynamic_leverage, f.leverage,
-            f.leverage_low, f.leverage_medium, f.leverage_high, f.leverage_max_cap,
+            f.equity,
+            f.price,
+            f.atr,
+            f.adx,
+            f.confidence,
+            f.allocation_pct,
+            f.enable_dynamic_sizing,
+            f.confidence_mult_high,
+            f.confidence_mult_medium,
+            f.confidence_mult_low,
+            f.adx_sizing_min_mult,
+            f.adx_sizing_full_adx,
+            f.vol_baseline_pct,
+            f.vol_scalar_min,
+            f.vol_scalar_max,
+            f.enable_dynamic_leverage,
+            f.leverage,
+            f.leverage_low,
+            f.leverage_medium,
+            f.leverage_high,
+            f.leverage_max_cap,
         );
 
         assert!(
             (margin - f.expected_margin).abs() < tol,
             "[{}] margin mismatch: got={}, expected={}",
-            f.label, margin, f.expected_margin
+            f.label,
+            margin,
+            f.expected_margin
         );
         assert!(
             (lev - f.expected_leverage).abs() < tol,
             "[{}] leverage mismatch: got={}, expected={}",
-            f.label, lev, f.expected_leverage
+            f.label,
+            lev,
+            f.expected_leverage
         );
         assert!(
             (notional - f.expected_notional).abs() < tol,
             "[{}] notional mismatch: got={}, expected={}",
-            f.label, notional, f.expected_notional
+            f.label,
+            notional,
+            f.expected_notional
         );
         assert!(
             (size - f.expected_size).abs() < tol,
             "[{}] size mismatch: got={}, expected={}",
-            f.label, size, f.expected_size
+            f.label,
+            size,
+            f.expected_size
         );
     }
 }
@@ -4446,7 +4757,11 @@ fn test_sizing_f32_roundtrip_within_t2() {
                 assert!(
                     within_tolerance(*val, f32_rt, TIER_T2_TOLERANCE),
                     "[{}] {} f32 round-trip exceeds T2: f64={}, f32_rt={}, rel_err={:.2e}",
-                    f.label, name, val, f32_rt, relative_error(*val, f32_rt)
+                    f.label,
+                    name,
+                    val,
+                    f32_rt,
+                    relative_error(*val, f32_rt)
                 );
             }
         }
@@ -4463,7 +4778,9 @@ fn test_sizing_f32_roundtrip_within_t2() {
 
 use bt_core::decision_kernel::{Position, PositionSide};
 use bt_core::indicators::IndicatorSnapshot;
-use bt_core::kernel_exits::{evaluate_exits, evaluate_exits_with_diagnostics, ExitParams, KernelExitResult};
+use bt_core::kernel_exits::{
+    evaluate_exits, evaluate_exits_with_diagnostics, ExitParams, KernelExitResult,
+};
 
 // ── Helpers: build bt-core types from fixture data ─────────────────────────
 
@@ -4529,86 +4846,170 @@ fn test_aqc1225_sl_price_cpu_vs_reference_multiple_configs() {
         // 1. Baseline long, no modifiers
         SlTestCase {
             label: "baseline-long",
-            pos_type: PosType::Long, entry: 50000.0, atr: 500.0, close: 50100.0,
-            adx: 30.0, adx_slope: 0.5, sl_atr_mult: 2.0,
-            enable_be: false, be_start: 0.0, be_buffer: 0.0,
+            pos_type: PosType::Long,
+            entry: 50000.0,
+            atr: 500.0,
+            close: 50100.0,
+            adx: 30.0,
+            adx_slope: 0.5,
+            sl_atr_mult: 2.0,
+            enable_be: false,
+            be_start: 0.0,
+            be_buffer: 0.0,
         },
         // 2. Baseline short, no modifiers
         SlTestCase {
             label: "baseline-short",
-            pos_type: PosType::Short, entry: 50000.0, atr: 500.0, close: 49900.0,
-            adx: 30.0, adx_slope: 0.5, sl_atr_mult: 2.0,
-            enable_be: false, be_start: 0.0, be_buffer: 0.0,
+            pos_type: PosType::Short,
+            entry: 50000.0,
+            atr: 500.0,
+            close: 49900.0,
+            adx: 30.0,
+            adx_slope: 0.5,
+            sl_atr_mult: 2.0,
+            enable_be: false,
+            be_start: 0.0,
+            be_buffer: 0.0,
         },
         // 3. ASE tightening (underwater + negative slope)
         SlTestCase {
             label: "ase-long",
-            pos_type: PosType::Long, entry: 50000.0, atr: 500.0, close: 49500.0,
-            adx: 30.0, adx_slope: -1.0, sl_atr_mult: 2.0,
-            enable_be: false, be_start: 0.0, be_buffer: 0.0,
+            pos_type: PosType::Long,
+            entry: 50000.0,
+            atr: 500.0,
+            close: 49500.0,
+            adx: 30.0,
+            adx_slope: -1.0,
+            sl_atr_mult: 2.0,
+            enable_be: false,
+            be_start: 0.0,
+            be_buffer: 0.0,
         },
         // 4. DASE widening (ADX>40, profit>0.5 ATR)
         SlTestCase {
             label: "dase-long",
-            pos_type: PosType::Long, entry: 50000.0, atr: 500.0, close: 50300.0,
-            adx: 42.0, adx_slope: 0.5, sl_atr_mult: 2.0,
-            enable_be: false, be_start: 0.0, be_buffer: 0.0,
+            pos_type: PosType::Long,
+            entry: 50000.0,
+            atr: 500.0,
+            close: 50300.0,
+            adx: 42.0,
+            adx_slope: 0.5,
+            sl_atr_mult: 2.0,
+            enable_be: false,
+            be_start: 0.0,
+            be_buffer: 0.0,
         },
         // 5. SLB widening (ADX>45, underwater so no DASE)
         SlTestCase {
             label: "slb-short-underwater",
-            pos_type: PosType::Short, entry: 50000.0, atr: 500.0, close: 50200.0,
-            adx: 47.0, adx_slope: 0.5, sl_atr_mult: 2.0,
-            enable_be: false, be_start: 0.0, be_buffer: 0.0,
+            pos_type: PosType::Short,
+            entry: 50000.0,
+            atr: 500.0,
+            close: 50200.0,
+            adx: 47.0,
+            adx_slope: 0.5,
+            sl_atr_mult: 2.0,
+            enable_be: false,
+            be_start: 0.0,
+            be_buffer: 0.0,
         },
         // 6. DASE + SLB combined (ADX>45, profitable)
         SlTestCase {
             label: "dase-slb-combined",
-            pos_type: PosType::Long, entry: 50000.0, atr: 500.0, close: 50400.0,
-            adx: 50.0, adx_slope: 0.5, sl_atr_mult: 2.0,
-            enable_be: false, be_start: 0.0, be_buffer: 0.0,
+            pos_type: PosType::Long,
+            entry: 50000.0,
+            atr: 500.0,
+            close: 50400.0,
+            adx: 50.0,
+            adx_slope: 0.5,
+            sl_atr_mult: 2.0,
+            enable_be: false,
+            be_start: 0.0,
+            be_buffer: 0.0,
         },
         // 7. Breakeven active (profit >= be_start)
         SlTestCase {
             label: "breakeven-long",
-            pos_type: PosType::Long, entry: 50000.0, atr: 500.0, close: 50400.0,
-            adx: 30.0, adx_slope: 0.5, sl_atr_mult: 2.0,
-            enable_be: true, be_start: 0.7, be_buffer: 0.05,
+            pos_type: PosType::Long,
+            entry: 50000.0,
+            atr: 500.0,
+            close: 50400.0,
+            adx: 30.0,
+            adx_slope: 0.5,
+            sl_atr_mult: 2.0,
+            enable_be: true,
+            be_start: 0.7,
+            be_buffer: 0.05,
         },
         // 8. Breakeven short active
         SlTestCase {
             label: "breakeven-short",
-            pos_type: PosType::Short, entry: 50000.0, atr: 500.0, close: 49600.0,
-            adx: 30.0, adx_slope: 0.5, sl_atr_mult: 2.0,
-            enable_be: true, be_start: 0.7, be_buffer: 0.05,
+            pos_type: PosType::Short,
+            entry: 50000.0,
+            atr: 500.0,
+            close: 49600.0,
+            adx: 30.0,
+            adx_slope: 0.5,
+            sl_atr_mult: 2.0,
+            enable_be: true,
+            be_start: 0.7,
+            be_buffer: 0.05,
         },
         // 9. ASE + breakeven (underwater, so breakeven won't fire)
         SlTestCase {
             label: "ase-with-be-inactive",
-            pos_type: PosType::Long, entry: 50000.0, atr: 500.0, close: 49500.0,
-            adx: 30.0, adx_slope: -0.5, sl_atr_mult: 2.0,
-            enable_be: true, be_start: 0.7, be_buffer: 0.05,
+            pos_type: PosType::Long,
+            entry: 50000.0,
+            atr: 500.0,
+            close: 49500.0,
+            adx: 30.0,
+            adx_slope: -0.5,
+            sl_atr_mult: 2.0,
+            enable_be: true,
+            be_start: 0.7,
+            be_buffer: 0.05,
         },
         // 10. Wide SL multiplier with penny stock
         SlTestCase {
             label: "penny-wide-sl",
-            pos_type: PosType::Long, entry: 0.0025, atr: 0.000025, close: 0.0026,
-            adx: 30.0, adx_slope: 0.5, sl_atr_mult: 3.5,
-            enable_be: false, be_start: 0.0, be_buffer: 0.0,
+            pos_type: PosType::Long,
+            entry: 0.0025,
+            atr: 0.000025,
+            close: 0.0026,
+            adx: 30.0,
+            adx_slope: 0.5,
+            sl_atr_mult: 3.5,
+            enable_be: false,
+            be_start: 0.0,
+            be_buffer: 0.0,
         },
         // 11. Zero ATR with breakeven
         SlTestCase {
             label: "zero-atr-be",
-            pos_type: PosType::Long, entry: 100.0, atr: 0.0, close: 104.0,
-            adx: 30.0, adx_slope: 0.5, sl_atr_mult: 2.0,
-            enable_be: true, be_start: 0.7, be_buffer: 0.05,
+            pos_type: PosType::Long,
+            entry: 100.0,
+            atr: 0.0,
+            close: 104.0,
+            adx: 30.0,
+            adx_slope: 0.5,
+            sl_atr_mult: 2.0,
+            enable_be: true,
+            be_start: 0.7,
+            be_buffer: 0.05,
         },
         // 12. ASE tightening for short (underwater short = close > entry)
         SlTestCase {
             label: "ase-short",
-            pos_type: PosType::Short, entry: 50000.0, atr: 500.0, close: 50500.0,
-            adx: 30.0, adx_slope: -0.5, sl_atr_mult: 2.0,
-            enable_be: false, be_start: 0.0, be_buffer: 0.0,
+            pos_type: PosType::Short,
+            entry: 50000.0,
+            atr: 500.0,
+            close: 50500.0,
+            adx: 30.0,
+            adx_slope: -0.5,
+            sl_atr_mult: 2.0,
+            enable_be: false,
+            be_start: 0.0,
+            be_buffer: 0.0,
         },
     ];
 
@@ -4617,9 +5018,16 @@ fn test_aqc1225_sl_price_cpu_vs_reference_multiple_configs() {
 
         // Compute via inline reference
         let ref_sl = rust_compute_sl_price(
-            c.pos_type, c.entry, c.atr, c.close,
-            c.adx, c.adx_slope, c.sl_atr_mult,
-            c.enable_be, c.be_start, c.be_buffer,
+            c.pos_type,
+            c.entry,
+            c.atr,
+            c.close,
+            c.adx,
+            c.adx_slope,
+            c.sl_atr_mult,
+            c.enable_be,
+            c.be_start,
+            c.be_buffer,
         );
 
         // Manually compute expected SL applying each modifier in order
@@ -4676,13 +5084,18 @@ fn test_aqc1225_sl_price_cpu_vs_reference_multiple_configs() {
         assert!(
             within_tolerance(expected_sl, ref_sl, TIER_T2_TOLERANCE),
             "[{}] SL mismatch: manual={}, reference={}, rel_err={:.2e}",
-            c.label, expected_sl, ref_sl, relative_error(expected_sl, ref_sl)
+            c.label,
+            expected_sl,
+            ref_sl,
+            relative_error(expected_sl, ref_sl)
         );
 
         // Verify SL is finite
         assert!(
             ref_sl.is_finite(),
-            "[{}] SL must be finite: {}", c.label, ref_sl
+            "[{}] SL must be finite: {}",
+            c.label,
+            ref_sl
         );
 
         // Verify directional sanity (unless breakeven moved it past entry)
@@ -4690,18 +5103,23 @@ fn test_aqc1225_sl_price_cpu_vs_reference_multiple_configs() {
             PosType::Long => c.close - c.entry,
             PosType::Short => c.entry - c.close,
         };
-        let be_active = c.enable_be && c.be_start > 0.0
-            && profit >= eff_atr * c.be_start;
+        let be_active = c.enable_be && c.be_start > 0.0 && profit >= eff_atr * c.be_start;
 
         if !be_active {
             match c.pos_type {
                 PosType::Long => assert!(
                     ref_sl <= c.entry + f64::EPSILON,
-                    "[{}] LONG SL {} must be <= entry {}", c.label, ref_sl, c.entry
+                    "[{}] LONG SL {} must be <= entry {}",
+                    c.label,
+                    ref_sl,
+                    c.entry
                 ),
                 PosType::Short => assert!(
                     ref_sl >= c.entry - f64::EPSILON,
-                    "[{}] SHORT SL {} must be >= entry {}", c.label, ref_sl, c.entry
+                    "[{}] SHORT SL {} must be >= entry {}",
+                    c.label,
+                    ref_sl,
+                    c.entry
                 ),
             }
         }
@@ -4711,7 +5129,10 @@ fn test_aqc1225_sl_price_cpu_vs_reference_multiple_configs() {
         assert!(
             within_tolerance(ref_sl, rt, TIER_T2_TOLERANCE),
             "[{}] SL f32 round-trip: f64={}, f32_rt={}, rel_err={:.2e}",
-            c.label, ref_sl, rt, relative_error(ref_sl, rt)
+            c.label,
+            ref_sl,
+            rt,
+            relative_error(ref_sl, rt)
         );
 
         // Cross-validate: use bt-core evaluate_exits_with_diagnostics with
@@ -4795,7 +5216,11 @@ fn test_aqc1225_sl_price_cpu_vs_reference_multiple_configs() {
 
         let eval = evaluate_exits_with_diagnostics(&mut pos, &snap, &params, 1_000_000);
         // Extract sl_price from threshold record (always recorded)
-        if let Some(sl_rec) = eval.threshold_records.iter().find(|r| r.name == "sl_distance") {
+        if let Some(sl_rec) = eval
+            .threshold_records
+            .iter()
+            .find(|r| r.name == "sl_distance")
+        {
             let cpu_sl = match side {
                 PositionSide::Long => c.close - sl_rec.actual,
                 PositionSide::Short => c.close + sl_rec.actual,
@@ -4803,7 +5228,10 @@ fn test_aqc1225_sl_price_cpu_vs_reference_multiple_configs() {
             assert!(
                 within_tolerance(ref_sl, cpu_sl, TIER_T2_TOLERANCE),
                 "[{}] CPU SL mismatch: reference={}, cpu={}, rel_err={:.2e}",
-                c.label, ref_sl, cpu_sl, relative_error(ref_sl, cpu_sl)
+                c.label,
+                ref_sl,
+                cpu_sl,
+                relative_error(ref_sl, cpu_sl)
             );
         }
     }
@@ -4835,90 +5263,178 @@ fn test_aqc1225_trailing_cpu_vs_reference_multiple_configs() {
         // 1. Active trailing, normal conditions
         TrailCase {
             label: "active-normal-long",
-            pos_type: PosType::Long, entry: 50000.0, close: 51000.0, atr: 500.0,
-            trailing_sl: 0.0, confidence: Confidence::High,
-            rsi: 55.0, adx: 30.0, adx_slope: 0.5, atr_slope: 0.0,
-            bb_width_ratio: 1.0, profit_atr: 2.0,
+            pos_type: PosType::Long,
+            entry: 50000.0,
+            close: 51000.0,
+            atr: 500.0,
+            trailing_sl: 0.0,
+            confidence: Confidence::High,
+            rsi: 55.0,
+            adx: 30.0,
+            adx_slope: 0.5,
+            atr_slope: 0.0,
+            bb_width_ratio: 1.0,
+            profit_atr: 2.0,
         },
         // 2. Active trailing, short
         TrailCase {
             label: "active-normal-short",
-            pos_type: PosType::Short, entry: 50000.0, close: 49000.0, atr: 500.0,
-            trailing_sl: 0.0, confidence: Confidence::High,
-            rsi: 45.0, adx: 30.0, adx_slope: 0.5, atr_slope: 0.0,
-            bb_width_ratio: 1.0, profit_atr: 2.0,
+            pos_type: PosType::Short,
+            entry: 50000.0,
+            close: 49000.0,
+            atr: 500.0,
+            trailing_sl: 0.0,
+            confidence: Confidence::High,
+            rsi: 45.0,
+            adx: 30.0,
+            adx_slope: 0.5,
+            atr_slope: 0.0,
+            bb_width_ratio: 1.0,
+            profit_atr: 2.0,
         },
         // 3. Not yet active (profit < start)
         TrailCase {
             label: "not-active-low-profit",
-            pos_type: PosType::Long, entry: 50000.0, close: 50200.0, atr: 500.0,
-            trailing_sl: 0.0, confidence: Confidence::High,
-            rsi: 55.0, adx: 30.0, adx_slope: 0.5, atr_slope: 0.0,
-            bb_width_ratio: 1.0, profit_atr: 0.4,
+            pos_type: PosType::Long,
+            entry: 50000.0,
+            close: 50200.0,
+            atr: 500.0,
+            trailing_sl: 0.0,
+            confidence: Confidence::High,
+            rsi: 55.0,
+            adx: 30.0,
+            adx_slope: 0.5,
+            atr_slope: 0.0,
+            bb_width_ratio: 1.0,
+            profit_atr: 0.4,
         },
         // 4. Ratchet improvement
         TrailCase {
             label: "ratchet-improve-long",
-            pos_type: PosType::Long, entry: 50000.0, close: 52000.0, atr: 500.0,
-            trailing_sl: 51200.0, confidence: Confidence::High,
-            rsi: 55.0, adx: 30.0, adx_slope: 0.5, atr_slope: 0.0,
-            bb_width_ratio: 1.0, profit_atr: 4.0,
+            pos_type: PosType::Long,
+            entry: 50000.0,
+            close: 52000.0,
+            atr: 500.0,
+            trailing_sl: 51200.0,
+            confidence: Confidence::High,
+            rsi: 55.0,
+            adx: 30.0,
+            adx_slope: 0.5,
+            atr_slope: 0.0,
+            bb_width_ratio: 1.0,
+            profit_atr: 4.0,
         },
         // 5. VBTS active (bb_width_ratio > 1.2)
         TrailCase {
             label: "vbts-active",
-            pos_type: PosType::Long, entry: 50000.0, close: 50800.0, atr: 500.0,
-            trailing_sl: 0.0, confidence: Confidence::High,
-            rsi: 55.0, adx: 30.0, adx_slope: 0.5, atr_slope: 0.0,
-            bb_width_ratio: 1.5, profit_atr: 1.6,
+            pos_type: PosType::Long,
+            entry: 50000.0,
+            close: 50800.0,
+            atr: 500.0,
+            trailing_sl: 0.0,
+            confidence: Confidence::High,
+            rsi: 55.0,
+            adx: 30.0,
+            adx_slope: 0.5,
+            atr_slope: 0.0,
+            bb_width_ratio: 1.5,
+            profit_atr: 1.6,
         },
         // 6. TATP (adx>35, slope>0, high profit)
         TrailCase {
             label: "tatp-active",
-            pos_type: PosType::Long, entry: 50000.0, close: 51500.0, atr: 500.0,
-            trailing_sl: 0.0, confidence: Confidence::High,
-            rsi: 55.0, adx: 40.0, adx_slope: 1.0, atr_slope: 0.0,
-            bb_width_ratio: 1.0, profit_atr: 3.0,
+            pos_type: PosType::Long,
+            entry: 50000.0,
+            close: 51500.0,
+            atr: 500.0,
+            trailing_sl: 0.0,
+            confidence: Confidence::High,
+            rsi: 55.0,
+            adx: 40.0,
+            adx_slope: 1.0,
+            atr_slope: 0.0,
+            bb_width_ratio: 1.0,
+            profit_atr: 3.0,
         },
         // 7. TSPV (atr_slope>0, adx<35, high profit)
         TrailCase {
             label: "tspv-active",
-            pos_type: PosType::Long, entry: 50000.0, close: 51500.0, atr: 500.0,
-            trailing_sl: 0.0, confidence: Confidence::High,
-            rsi: 55.0, adx: 28.0, adx_slope: -0.5, atr_slope: 0.5,
-            bb_width_ratio: 1.0, profit_atr: 3.0,
+            pos_type: PosType::Long,
+            entry: 50000.0,
+            close: 51500.0,
+            atr: 500.0,
+            trailing_sl: 0.0,
+            confidence: Confidence::High,
+            rsi: 55.0,
+            adx: 28.0,
+            adx_slope: -0.5,
+            atr_slope: 0.5,
+            bb_width_ratio: 1.0,
+            profit_atr: 3.0,
         },
         // 8. Weak trend (adx<25)
         TrailCase {
             label: "weak-trend",
-            pos_type: PosType::Long, entry: 50000.0, close: 50600.0, atr: 500.0,
-            trailing_sl: 0.0, confidence: Confidence::High,
-            rsi: 55.0, adx: 20.0, adx_slope: 0.3, atr_slope: 0.0,
-            bb_width_ratio: 1.0, profit_atr: 1.2,
+            pos_type: PosType::Long,
+            entry: 50000.0,
+            close: 50600.0,
+            atr: 500.0,
+            trailing_sl: 0.0,
+            confidence: Confidence::High,
+            rsi: 55.0,
+            adx: 20.0,
+            adx_slope: 0.3,
+            atr_slope: 0.0,
+            bb_width_ratio: 1.0,
+            profit_atr: 1.2,
         },
         // 9. RSI Trend-Guard floor (long, RSI>60)
         TrailCase {
             label: "rsi-guard-long",
-            pos_type: PosType::Long, entry: 50000.0, close: 50600.0, atr: 500.0,
-            trailing_sl: 0.0, confidence: Confidence::High,
-            rsi: 65.0, adx: 20.0, adx_slope: 0.3, atr_slope: 0.0,
-            bb_width_ratio: 1.0, profit_atr: 1.2,
+            pos_type: PosType::Long,
+            entry: 50000.0,
+            close: 50600.0,
+            atr: 500.0,
+            trailing_sl: 0.0,
+            confidence: Confidence::High,
+            rsi: 65.0,
+            adx: 20.0,
+            adx_slope: 0.3,
+            atr_slope: 0.0,
+            bb_width_ratio: 1.0,
+            profit_atr: 1.2,
         },
         // 10. RSI Trend-Guard floor (short, RSI<40)
         TrailCase {
             label: "rsi-guard-short",
-            pos_type: PosType::Short, entry: 50000.0, close: 49400.0, atr: 500.0,
-            trailing_sl: 0.0, confidence: Confidence::High,
-            rsi: 35.0, adx: 20.0, adx_slope: 0.3, atr_slope: 0.0,
-            bb_width_ratio: 1.0, profit_atr: 1.2,
+            pos_type: PosType::Short,
+            entry: 50000.0,
+            close: 49400.0,
+            atr: 500.0,
+            trailing_sl: 0.0,
+            confidence: Confidence::High,
+            rsi: 35.0,
+            adx: 20.0,
+            adx_slope: 0.3,
+            atr_slope: 0.0,
+            bb_width_ratio: 1.0,
+            profit_atr: 1.2,
         },
         // 11. Low confidence overrides
         TrailCase {
             label: "low-conf-override",
-            pos_type: PosType::Long, entry: 50000.0, close: 51500.0, atr: 500.0,
-            trailing_sl: 0.0, confidence: Confidence::Low,
-            rsi: 55.0, adx: 30.0, adx_slope: 0.5, atr_slope: 0.0,
-            bb_width_ratio: 1.0, profit_atr: 3.0,
+            pos_type: PosType::Long,
+            entry: 50000.0,
+            close: 51500.0,
+            atr: 500.0,
+            trailing_sl: 0.0,
+            confidence: Confidence::Low,
+            rsi: 55.0,
+            adx: 30.0,
+            adx_slope: 0.5,
+            atr_slope: 0.0,
+            bb_width_ratio: 1.0,
+            profit_atr: 3.0,
         },
     ];
 
@@ -4926,20 +5442,51 @@ fn test_aqc1225_trailing_cpu_vs_reference_multiple_configs() {
 
     for c in &cases {
         // Use low-conf overrides when testing low confidence
-        let use_tslc = if c.confidence == Confidence::Low { 1.5 } else { tslc };
-        let use_tdlc = if c.confidence == Confidence::Low { 1.0 } else { tdlc };
+        let use_tslc = if c.confidence == Confidence::Low {
+            1.5
+        } else {
+            tslc
+        };
+        let use_tdlc = if c.confidence == Confidence::Low {
+            1.0
+        } else {
+            tdlc
+        };
 
         let ref_tsl = rust_compute_trailing(
-            c.pos_type, c.entry, c.close, c.atr, c.trailing_sl,
-            c.confidence, c.rsi, c.adx, c.adx_slope, c.atr_slope,
-            c.bb_width_ratio, c.profit_atr,
-            ts, td, use_tslc, use_tdlc, rfd, rft, evb, vbt, vbm, hpa, ttp, ttd, twm,
+            c.pos_type,
+            c.entry,
+            c.close,
+            c.atr,
+            c.trailing_sl,
+            c.confidence,
+            c.rsi,
+            c.adx,
+            c.adx_slope,
+            c.atr_slope,
+            c.bb_width_ratio,
+            c.profit_atr,
+            ts,
+            td,
+            use_tslc,
+            use_tdlc,
+            rfd,
+            rft,
+            evb,
+            vbt,
+            vbm,
+            hpa,
+            ttp,
+            ttd,
+            twm,
         );
 
         // Verify inline reference produces finite result
         assert!(
             ref_tsl.is_finite(),
-            "[{}] Trailing SL must be finite: got {}", c.label, ref_tsl
+            "[{}] Trailing SL must be finite: got {}",
+            c.label,
+            ref_tsl
         );
 
         // For active trailing (profit >= start), verify directional sanity
@@ -4954,12 +5501,16 @@ fn test_aqc1225_trailing_cpu_vs_reference_multiple_configs() {
                 PosType::Long => assert!(
                     ref_tsl < c.close,
                     "[{}] LONG trailing SL ({}) must be below close ({})",
-                    c.label, ref_tsl, c.close
+                    c.label,
+                    ref_tsl,
+                    c.close
                 ),
                 PosType::Short => assert!(
                     ref_tsl > c.close,
                     "[{}] SHORT trailing SL ({}) must be above close ({})",
-                    c.label, ref_tsl, c.close
+                    c.label,
+                    ref_tsl,
+                    c.close
                 ),
             }
         }
@@ -4970,7 +5521,10 @@ fn test_aqc1225_trailing_cpu_vs_reference_multiple_configs() {
             assert!(
                 within_tolerance(ref_tsl, rt, TIER_T2_TOLERANCE),
                 "[{}] Trailing SL f32 round-trip: f64={}, f32_rt={}, rel_err={:.2e}",
-                c.label, ref_tsl, rt, relative_error(ref_tsl, rt)
+                c.label,
+                ref_tsl,
+                rt,
+                relative_error(ref_tsl, rt)
             );
         }
     }
@@ -5006,43 +5560,73 @@ fn test_aqc1225_tp_decision_correctness() {
         // 1. Long: price below TP -> Hold
         TpCase {
             label: "long-below-tp",
-            side: PositionSide::Long, entry: 50000.0, atr: 500.0, close: 51500.0,
-            tp1_taken: false, enable_partial: true, tp_partial_atr_mult: 0.0,
+            side: PositionSide::Long,
+            entry: 50000.0,
+            atr: 500.0,
+            close: 51500.0,
+            tp1_taken: false,
+            enable_partial: true,
+            tp_partial_atr_mult: 0.0,
             expected: TpExpect::Hold,
         },
         // 2. Long: price at TP (partial enabled, tp1 not taken) -> Partial
         TpCase {
             label: "long-partial-tp-hit",
-            side: PositionSide::Long, entry: 50000.0, atr: 500.0, close: 52100.0,
-            tp1_taken: false, enable_partial: true, tp_partial_atr_mult: 0.0,
+            side: PositionSide::Long,
+            entry: 50000.0,
+            atr: 500.0,
+            close: 52100.0,
+            tp1_taken: false,
+            enable_partial: true,
+            tp_partial_atr_mult: 0.0,
             expected: TpExpect::Partial,
         },
         // 3. Long: price at TP (partial disabled) -> Full
         TpCase {
             label: "long-full-tp-hit",
-            side: PositionSide::Long, entry: 50000.0, atr: 500.0, close: 52100.0,
-            tp1_taken: false, enable_partial: false, tp_partial_atr_mult: 0.0,
+            side: PositionSide::Long,
+            entry: 50000.0,
+            atr: 500.0,
+            close: 52100.0,
+            tp1_taken: false,
+            enable_partial: false,
+            tp_partial_atr_mult: 0.0,
             expected: TpExpect::Full,
         },
         // 4. Short: price at TP -> Partial
         TpCase {
             label: "short-partial-tp-hit",
-            side: PositionSide::Short, entry: 50000.0, atr: 500.0, close: 47900.0,
-            tp1_taken: false, enable_partial: true, tp_partial_atr_mult: 0.0,
+            side: PositionSide::Short,
+            entry: 50000.0,
+            atr: 500.0,
+            close: 47900.0,
+            tp1_taken: false,
+            enable_partial: true,
+            tp_partial_atr_mult: 0.0,
             expected: TpExpect::Partial,
         },
         // 5. Short: price below TP (hold)
         TpCase {
             label: "short-above-tp",
-            side: PositionSide::Short, entry: 50000.0, atr: 500.0, close: 48500.0,
-            tp1_taken: false, enable_partial: true, tp_partial_atr_mult: 0.0,
+            side: PositionSide::Short,
+            entry: 50000.0,
+            atr: 500.0,
+            close: 48500.0,
+            tp1_taken: false,
+            enable_partial: true,
+            tp_partial_atr_mult: 0.0,
             expected: TpExpect::Hold,
         },
         // 6. Separate partial level: price hits partial but not full
         TpCase {
             label: "long-separate-partial-level",
-            side: PositionSide::Long, entry: 50000.0, atr: 500.0, close: 51100.0,
-            tp1_taken: false, enable_partial: true, tp_partial_atr_mult: 2.0,
+            side: PositionSide::Long,
+            entry: 50000.0,
+            atr: 500.0,
+            close: 51100.0,
+            tp1_taken: false,
+            enable_partial: true,
+            tp_partial_atr_mult: 2.0,
             // partial at entry + 2.0*atr = 51000, full at entry + 4.0*atr = 52000
             // close=51100 > 51000 partial -> Partial
             expected: TpExpect::Partial,
@@ -5050,32 +5634,52 @@ fn test_aqc1225_tp_decision_correctness() {
         // 7. tp1 already taken, separate partial level, full TP hit
         TpCase {
             label: "long-tp1-taken-full-hit",
-            side: PositionSide::Long, entry: 50000.0, atr: 500.0, close: 52100.0,
-            tp1_taken: true, enable_partial: true, tp_partial_atr_mult: 2.0,
+            side: PositionSide::Long,
+            entry: 50000.0,
+            atr: 500.0,
+            close: 52100.0,
+            tp1_taken: true,
+            enable_partial: true,
+            tp_partial_atr_mult: 2.0,
             // tp1 taken, tp_partial_atr_mult > 0, full TP at 52000, close=52100 -> Full
             expected: TpExpect::Full,
         },
         // 8. tp1 already taken, no separate level -> Hold
         TpCase {
             label: "long-tp1-taken-no-separate-hold",
-            side: PositionSide::Long, entry: 50000.0, atr: 500.0, close: 52100.0,
-            tp1_taken: true, enable_partial: true, tp_partial_atr_mult: 0.0,
+            side: PositionSide::Long,
+            entry: 50000.0,
+            atr: 500.0,
+            close: 52100.0,
+            tp1_taken: true,
+            enable_partial: true,
+            tp_partial_atr_mult: 0.0,
             // tp1 taken, tp_partial_atr_mult=0 -> Hold (no further TP check after tp1)
             expected: TpExpect::Hold,
         },
         // 9. BTC-scale short TP
         TpCase {
             label: "btc-short-full-tp",
-            side: PositionSide::Short, entry: 65000.0, atr: 650.0, close: 62300.0,
-            tp1_taken: false, enable_partial: false, tp_partial_atr_mult: 0.0,
+            side: PositionSide::Short,
+            entry: 65000.0,
+            atr: 650.0,
+            close: 62300.0,
+            tp1_taken: false,
+            enable_partial: false,
+            tp_partial_atr_mult: 0.0,
             // TP at 65000 - 4*650 = 62400; close=62300 < 62400 -> Full
             expected: TpExpect::Full,
         },
         // 10. Penny stock long TP (use large quantity so notional check passes)
         TpCase {
             label: "penny-long-full-tp",
-            side: PositionSide::Long, entry: 0.0025, atr: 0.000025, close: 0.0026,
-            tp1_taken: false, enable_partial: false, tp_partial_atr_mult: 0.0,
+            side: PositionSide::Long,
+            entry: 0.0025,
+            atr: 0.000025,
+            close: 0.0026,
+            tp1_taken: false,
+            enable_partial: false,
+            tp_partial_atr_mult: 0.0,
             // TP at 0.0025 + 4*0.000025 = 0.0026; close=0.0026 >= TP, partial disabled -> Full
             expected: TpExpect::Full,
         },
@@ -5086,8 +5690,8 @@ fn test_aqc1225_tp_decision_correctness() {
             enable_partial_tp: c.enable_partial,
             tp_partial_atr_mult: c.tp_partial_atr_mult,
             // Disable SL/trailing/smart to isolate TP
-            sl_atr_mult: 100.0, // very wide SL
-            trailing_start_atr: 1000.0, // never active
+            sl_atr_mult: 100.0,                // very wide SL
+            trailing_start_atr: 1000.0,        // never active
             smart_exit_adx_exhaustion_lt: 0.0, // disable exhaustion
             enable_rsi_overextension_exit: false,
             require_macro_alignment: false,
@@ -5160,39 +5764,41 @@ fn test_aqc1225_tp_decision_correctness() {
                 assert_eq!(
                     result,
                     KernelExitResult::Hold,
-                    "[{}] Expected Hold, got {:?}", c.label, result
+                    "[{}] Expected Hold, got {:?}",
+                    c.label,
+                    result
                 );
             }
-            TpExpect::Partial => {
-                match &result {
-                    KernelExitResult::PartialClose { reason, fraction, .. } => {
-                        assert!(
-                            reason.contains("Partial"),
-                            "[{}] Expected 'Partial' in reason, got: {}", c.label, reason
-                        );
-                        assert!(
-                            *fraction > 0.0 && *fraction < 1.0,
-                            "[{}] Partial fraction must be in (0,1), got {}", c.label, fraction
-                        );
-                    }
-                    other => panic!(
-                        "[{}] Expected PartialClose, got {:?}", c.label, other
-                    ),
+            TpExpect::Partial => match &result {
+                KernelExitResult::PartialClose {
+                    reason, fraction, ..
+                } => {
+                    assert!(
+                        reason.contains("Partial"),
+                        "[{}] Expected 'Partial' in reason, got: {}",
+                        c.label,
+                        reason
+                    );
+                    assert!(
+                        *fraction > 0.0 && *fraction < 1.0,
+                        "[{}] Partial fraction must be in (0,1), got {}",
+                        c.label,
+                        fraction
+                    );
                 }
-            }
-            TpExpect::Full => {
-                match &result {
-                    KernelExitResult::FullClose { reason, .. } => {
-                        assert!(
-                            reason.contains("Take Profit"),
-                            "[{}] Expected 'Take Profit' in reason, got: {}", c.label, reason
-                        );
-                    }
-                    other => panic!(
-                        "[{}] Expected FullClose, got {:?}", c.label, other
-                    ),
+                other => panic!("[{}] Expected PartialClose, got {:?}", c.label, other),
+            },
+            TpExpect::Full => match &result {
+                KernelExitResult::FullClose { reason, .. } => {
+                    assert!(
+                        reason.contains("Take Profit"),
+                        "[{}] Expected 'Take Profit' in reason, got: {}",
+                        c.label,
+                        reason
+                    );
                 }
-            }
+                other => panic!("[{}] Expected FullClose, got {:?}", c.label, other),
+            },
         }
     }
 }
@@ -5219,12 +5825,17 @@ fn test_pesc_fixtures_match_expected_blocked() {
         );
 
         assert_eq!(
-            blocked, f.expected_blocked,
+            blocked,
+            f.expected_blocked,
             "[{}] PESC blocked mismatch: got={}, expected={} \
              (cooldown_min={}min, cooldown_max={}min, ADX={}, elapsed={}s)",
-            f.label, blocked, f.expected_blocked,
-            f.reentry_cooldown_min_mins, f.reentry_cooldown_max_mins,
-            f.adx, f.current_ts.saturating_sub(f.close_ts)
+            f.label,
+            blocked,
+            f.expected_blocked,
+            f.reentry_cooldown_min_mins,
+            f.reentry_cooldown_max_mins,
+            f.adx,
+            f.current_ts.saturating_sub(f.close_ts)
         );
     }
 }
@@ -5245,8 +5856,8 @@ fn test_pesc_adx_interpolation_numerical_accuracy() {
         ("adx=32.5 (mid)", 32.5, 112.5),
         ("adx=30 (1/3)", 30.0, 180.0 + (5.0 / 15.0) * (45.0 - 180.0)),
         ("adx=35 (2/3)", 35.0, 180.0 + (10.0 / 15.0) * (45.0 - 180.0)),
-        ("adx=10 (below range)", 10.0, 180.0),   // clamps to max
-        ("adx=60 (above range)", 60.0, 45.0),     // clamps to min
+        ("adx=10 (below range)", 10.0, 180.0), // clamps to max
+        ("adx=60 (above range)", 60.0, 45.0),  // clamps to min
     ];
 
     for &(label, adx, expected_cooldown) in test_points {
@@ -5262,7 +5873,9 @@ fn test_pesc_adx_interpolation_numerical_accuracy() {
         assert!(
             (cooldown_mins - expected_cooldown).abs() < 1e-10,
             "[{}] cooldown mismatch: got={:.4}min, expected={:.4}min",
-            label, cooldown_mins, expected_cooldown
+            label,
+            cooldown_mins,
+            expected_cooldown
         );
     }
 }
@@ -5300,11 +5913,14 @@ fn test_sizing_risk_core_equity_scaling() {
         leverage_max_cap: 0.0,
     };
 
-    let results: Vec<_> = equities.iter().map(|&eq| {
-        let mut input = base_input;
-        input.equity = eq;
-        compute_entry_sizing(input)
-    }).collect();
+    let results: Vec<_> = equities
+        .iter()
+        .map(|&eq| {
+            let mut input = base_input;
+            input.equity = eq;
+            compute_entry_sizing(input)
+        })
+        .collect();
 
     // Static sizing: margin = equity * alloc_pct, so 10x equity = 10x margin
     for i in 1..results.len() {
@@ -5313,13 +5929,17 @@ fn test_sizing_risk_core_equity_scaling() {
         assert!(
             (margin_ratio - ratio).abs() < 1e-10,
             "Margin should scale {}x with equity: got {}x (eq {}->{})",
-            ratio, margin_ratio, equities[i - 1], equities[i]
+            ratio,
+            margin_ratio,
+            equities[i - 1],
+            equities[i]
         );
         let size_ratio = results[i].size / results[i - 1].size;
         assert!(
             (size_ratio - ratio).abs() < 1e-10,
             "Size should scale {}x with equity: got {}x",
-            ratio, size_ratio
+            ratio,
+            size_ratio
         );
     }
 
@@ -5379,7 +5999,9 @@ fn test_sizing_dynamic_leverage_tier_selection() {
         assert!(
             (r.leverage - expected_lev).abs() < 1e-10,
             "Dynamic leverage {:?} should be {}, got {}",
-            conf, expected_lev, r.leverage
+            conf,
+            expected_lev,
+            r.leverage
         );
     }
 
@@ -5398,7 +6020,9 @@ fn test_sizing_dynamic_leverage_tier_selection() {
         assert!(
             (r.leverage - expected_lev).abs() < 1e-10,
             "Capped leverage {:?} should be {}, got {}",
-            conf, expected_lev, r.leverage
+            conf,
+            expected_lev,
+            r.leverage
         );
     }
 }
@@ -5439,7 +6063,8 @@ fn test_sizing_dynamic_multiplier_chain() {
     let r = compute_entry_sizing(base);
     assert!(
         (r.margin_used - 300.0).abs() < 1e-10,
-        "All-ones margin should be 300, got {}", r.margin_used
+        "All-ones margin should be 300, got {}",
+        r.margin_used
     );
 
     // Only confidence mult active (Low = 0.6): margin = 300 * 0.6 = 180
@@ -5449,7 +6074,8 @@ fn test_sizing_dynamic_multiplier_chain() {
     // adx=40 -> adx_mult=1.0, vol unchanged -> margin = 300 * 0.6 = 180
     assert!(
         (r.margin_used - 180.0).abs() < 1e-10,
-        "Low-conf margin should be 180, got {}", r.margin_used
+        "Low-conf margin should be 180, got {}",
+        r.margin_used
     );
 
     // ADX at zero (adx_mult floors to 0.6): margin = 300 * 1.0 * 0.6 = 180
@@ -5458,7 +6084,8 @@ fn test_sizing_dynamic_multiplier_chain() {
     let r = compute_entry_sizing(input);
     assert!(
         (r.margin_used - 180.0).abs() < 1e-10,
-        "Zero-ADX margin should be 180, got {}", r.margin_used
+        "Zero-ADX margin should be 180, got {}",
+        r.margin_used
     );
 
     // High vol (atr=2.0, vol_ratio=2.0, vol_scalar=0.5 clamped to 0.6):
@@ -5468,7 +6095,8 @@ fn test_sizing_dynamic_multiplier_chain() {
     let r = compute_entry_sizing(input);
     assert!(
         (r.margin_used - 180.0).abs() < 1e-10,
-        "High-vol margin should be 180, got {}", r.margin_used
+        "High-vol margin should be 180, got {}",
+        r.margin_used
     );
 
     // Low vol (atr=0.25, vol_ratio=0.25, vol_scalar=4.0 clamped to 1.4):
@@ -5478,7 +6106,8 @@ fn test_sizing_dynamic_multiplier_chain() {
     let r = compute_entry_sizing(input);
     assert!(
         (r.margin_used - 420.0).abs() < 1e-10,
-        "Low-vol margin should be 420, got {}", r.margin_used
+        "Low-vol margin should be 420, got {}",
+        r.margin_used
     );
 }
 
@@ -5494,47 +6123,27 @@ fn test_pesc_cooldown_seconds_conversion() {
 
     // At ADX=25 (max cooldown = 180min = 10800s):
     // Exactly at boundary: elapsed = 10800 -> NOT blocked (not strictly less than)
-    let blocked = rust_is_pesc_blocked(
-        60, min_cd, max_cd,
-        base_ts, 1, 2, 1,
-        base_ts + 10800,
-        25.0,
-    );
+    let blocked = rust_is_pesc_blocked(60, min_cd, max_cd, base_ts, 1, 2, 1, base_ts + 10800, 25.0);
     assert!(
         !blocked,
         "At exactly cooldown boundary (10800s), should NOT be blocked"
     );
 
     // 1 second before boundary: elapsed = 10799 -> blocked
-    let blocked = rust_is_pesc_blocked(
-        60, min_cd, max_cd,
-        base_ts, 1, 2, 1,
-        base_ts + 10799,
-        25.0,
-    );
+    let blocked = rust_is_pesc_blocked(60, min_cd, max_cd, base_ts, 1, 2, 1, base_ts + 10799, 25.0);
     assert!(
         blocked,
         "1 second before cooldown boundary (10799s), should be blocked"
     );
 
     // At ADX=40 (min cooldown = 45min = 2700s):
-    let blocked = rust_is_pesc_blocked(
-        60, min_cd, max_cd,
-        base_ts, 1, 2, 1,
-        base_ts + 2700,
-        40.0,
-    );
+    let blocked = rust_is_pesc_blocked(60, min_cd, max_cd, base_ts, 1, 2, 1, base_ts + 2700, 40.0);
     assert!(
         !blocked,
         "At exactly min cooldown boundary (2700s), should NOT be blocked"
     );
 
-    let blocked = rust_is_pesc_blocked(
-        60, min_cd, max_cd,
-        base_ts, 1, 2, 1,
-        base_ts + 2699,
-        40.0,
-    );
+    let blocked = rust_is_pesc_blocked(60, min_cd, max_cd, base_ts, 1, 2, 1, base_ts + 2699, 40.0);
     assert!(
         blocked,
         "1 second before min cooldown boundary (2699s), should be blocked"
@@ -5612,7 +6221,9 @@ fn test_sizing_fixture_diversity() {
         "Must include $1k equity"
     );
     assert!(
-        fixtures.iter().any(|f| f.equity >= 10_000.0 && f.equity < 100_000.0),
+        fixtures
+            .iter()
+            .any(|f| f.equity >= 10_000.0 && f.equity < 100_000.0),
         "Must include $10k equity"
     );
     assert!(
@@ -5654,7 +6265,9 @@ fn test_pesc_fixture_diversity() {
 
     // Must cover direction gate
     assert!(
-        fixtures.iter().any(|f| f.close_type != f.desired_type && f.close_ts > 0),
+        fixtures
+            .iter()
+            .any(|f| f.close_type != f.desired_type && f.close_ts > 0),
         "Must include opposite-direction bypass"
     );
 
@@ -5666,8 +6279,10 @@ fn test_pesc_fixture_diversity() {
 
     // Must cover unblocked-past-cooldown case
     assert!(
-        fixtures.iter().any(|f| !f.expected_blocked && f.close_ts > 0
-            && f.close_reason == 2 && f.close_type == f.desired_type),
+        fixtures.iter().any(|f| !f.expected_blocked
+            && f.close_ts > 0
+            && f.close_reason == 2
+            && f.close_type == f.desired_type),
         "Must include unblocked-past-cooldown scenarios"
     );
 
@@ -5685,9 +6300,9 @@ fn test_aqc1225_smart_exit_trend_breakdown() {
     // Smart exit #1: Trend Breakdown (EMA Cross) fires when EMAs cross
     // against position direction.
     let params = ExitParams {
-        sl_atr_mult: 100.0,          // wide SL
-        trailing_start_atr: 1000.0,  // never active
-        tp_atr_mult: 100.0,          // very far TP
+        sl_atr_mult: 100.0,         // wide SL
+        trailing_start_atr: 1000.0, // never active
+        tp_atr_mult: 100.0,         // very far TP
         enable_partial_tp: false,
         smart_exit_adx_exhaustion_lt: 0.0, // disable exhaustion
         enable_rsi_overextension_exit: false,
@@ -5703,7 +6318,7 @@ fn test_aqc1225_smart_exit_trend_breakdown() {
         open: 50500.0,
         volume: 1000.0,
         t: 1_000_000,
-        ema_fast: 50400.0,  // below slow -> bearish cross
+        ema_fast: 50400.0, // below slow -> bearish cross
         ema_slow: 50600.0,
         ema_macro: 50000.0,
         adx: 30.0,
@@ -5759,7 +6374,8 @@ fn test_aqc1225_smart_exit_trend_breakdown() {
         KernelExitResult::FullClose { reason, .. } => {
             assert!(
                 reason.contains("Trend Breakdown") || reason.contains("EMA Cross"),
-                "Expected Trend Breakdown exit, got: {}", reason
+                "Expected Trend Breakdown exit, got: {}",
+                reason
             );
         }
         other => panic!("Expected FullClose for trend breakdown, got {:?}", other),
@@ -5774,7 +6390,7 @@ fn test_aqc1225_smart_exit_trend_exhaustion() {
         trailing_start_atr: 1000.0,
         tp_atr_mult: 100.0,
         enable_partial_tp: false,
-        smart_exit_adx_exhaustion_lt: 25.0,  // exit when ADX < 25
+        smart_exit_adx_exhaustion_lt: 25.0, // exit when ADX < 25
         enable_rsi_overextension_exit: false,
         require_macro_alignment: false,
         ..default_exit_params()
@@ -5788,10 +6404,10 @@ fn test_aqc1225_smart_exit_trend_exhaustion() {
         open: 50500.0,
         volume: 1000.0,
         t: 1_000_000,
-        ema_fast: 50600.0,  // still bullish (no trend breakdown)
+        ema_fast: 50600.0, // still bullish (no trend breakdown)
         ema_slow: 50400.0,
         ema_macro: 50000.0,
-        adx: 20.0,  // below threshold
+        adx: 20.0, // below threshold
         adx_pos: 12.0,
         adx_neg: 8.0,
         adx_slope: -0.5,
@@ -5844,7 +6460,8 @@ fn test_aqc1225_smart_exit_trend_exhaustion() {
         KernelExitResult::FullClose { reason, .. } => {
             assert!(
                 reason.contains("Trend Exhaustion"),
-                "Expected Trend Exhaustion exit, got: {}", reason
+                "Expected Trend Exhaustion exit, got: {}",
+                reason
             );
         }
         other => panic!("Expected FullClose for trend exhaustion, got {:?}", other),
@@ -5868,16 +6485,16 @@ fn test_aqc1225_smart_exit_stagnation() {
     // Long position, underwater, ATR dropped to < 70% of entry ATR
     let entry_atr = 500.0;
     let snap = IndicatorSnapshot {
-        close: 49800.0,  // underwater
+        close: 49800.0, // underwater
         high: 49900.0,
         low: 49700.0,
         open: 49800.0,
         volume: 1000.0,
         t: 1_000_000,
-        ema_fast: 49900.0,  // still bullish (no trend breakdown)
+        ema_fast: 49900.0, // still bullish (no trend breakdown)
         ema_slow: 49800.0,
         ema_macro: 49000.0,
-        adx: 30.0,  // above any exhaustion threshold
+        adx: 30.0, // above any exhaustion threshold
         adx_pos: 18.0,
         adx_neg: 12.0,
         adx_slope: 0.5,
@@ -5886,7 +6503,7 @@ fn test_aqc1225_smart_exit_stagnation() {
         bb_width: 0.02,
         bb_width_avg: 0.02,
         bb_width_ratio: 1.0,
-        atr: entry_atr * 0.60,  // 60% of entry ATR, below 70% threshold
+        atr: entry_atr * 0.60, // 60% of entry ATR, below 70% threshold
         atr_slope: -0.5,
         avg_atr: entry_atr,
         rsi: 50.0,
@@ -5930,7 +6547,8 @@ fn test_aqc1225_smart_exit_stagnation() {
         KernelExitResult::FullClose { reason, .. } => {
             assert!(
                 reason.contains("Stagnation"),
-                "Expected Stagnation Exit, got: {}", reason
+                "Expected Stagnation Exit, got: {}",
+                reason
             );
         }
         other => panic!("Expected FullClose for stagnation, got {:?}", other),
@@ -5956,7 +6574,7 @@ fn test_aqc1225_smart_exit_tsme() {
 
     // Long position, ADX=55, slope negative, MACD contracting
     let snap = IndicatorSnapshot {
-        close: 51000.0,  // profit = 2 ATR
+        close: 51000.0, // profit = 2 ATR
         high: 51100.0,
         low: 50900.0,
         open: 51000.0,
@@ -5965,7 +6583,7 @@ fn test_aqc1225_smart_exit_tsme() {
         ema_fast: 51100.0,
         ema_slow: 50900.0,
         ema_macro: 50000.0,
-        adx: 55.0,     // > 50 (TSME gate)
+        adx: 55.0, // > 50 (TSME gate)
         adx_pos: 33.0,
         adx_neg: 22.0,
         adx_slope: -0.5, // negative slope
@@ -6019,7 +6637,8 @@ fn test_aqc1225_smart_exit_tsme() {
         KernelExitResult::FullClose { reason, .. } => {
             assert!(
                 reason.contains("Trend Saturation") || reason.contains("TSME"),
-                "Expected TSME exit, got: {}", reason
+                "Expected TSME exit, got: {}",
+                reason
             );
         }
         other => panic!("Expected FullClose for TSME, got {:?}", other),
@@ -6037,7 +6656,7 @@ fn test_aqc1225_smart_exit_rsi_overextension_long() {
         smart_exit_adx_exhaustion_lt: 0.0,
         enable_rsi_overextension_exit: true,
         rsi_exit_profit_atr_switch: 1.5,
-        rsi_exit_ub_hi_profit: 70.0,  // high-profit upper bound for long
+        rsi_exit_ub_hi_profit: 70.0, // high-profit upper bound for long
         rsi_exit_lb_hi_profit: 30.0,
         require_macro_alignment: false,
         ..default_exit_params()
@@ -6045,7 +6664,7 @@ fn test_aqc1225_smart_exit_rsi_overextension_long() {
 
     // Long position, profit > 1.5 ATR (high-profit regime), RSI = 75 (> 70 threshold)
     let snap = IndicatorSnapshot {
-        close: 51000.0,  // profit = 2 ATR
+        close: 51000.0, // profit = 2 ATR
         high: 51100.0,
         low: 50900.0,
         open: 51000.0,
@@ -6066,7 +6685,7 @@ fn test_aqc1225_smart_exit_rsi_overextension_long() {
         atr: 500.0,
         atr_slope: 0.0,
         avg_atr: 500.0,
-        rsi: 75.0,  // above hi-profit upper bound of 70
+        rsi: 75.0, // above hi-profit upper bound of 70
         stoch_rsi_k: 50.0,
         stoch_rsi_d: 50.0,
         macd_hist: 0.0,
@@ -6107,7 +6726,8 @@ fn test_aqc1225_smart_exit_rsi_overextension_long() {
         KernelExitResult::FullClose { reason, .. } => {
             assert!(
                 reason.contains("RSI Overbought") || reason.contains("RSI Overextension"),
-                "Expected RSI overbought exit, got: {}", reason
+                "Expected RSI overbought exit, got: {}",
+                reason
             );
         }
         other => panic!("Expected FullClose for RSI overextension, got {:?}", other),
@@ -6126,20 +6746,20 @@ fn test_aqc1225_smart_exit_rsi_overextension_short() {
         enable_rsi_overextension_exit: true,
         rsi_exit_profit_atr_switch: 1.5,
         rsi_exit_ub_hi_profit: 70.0,
-        rsi_exit_lb_hi_profit: 30.0,  // high-profit lower bound for short
+        rsi_exit_lb_hi_profit: 30.0, // high-profit lower bound for short
         require_macro_alignment: false,
         ..default_exit_params()
     };
 
     // Short position, profit > 1.5 ATR, RSI = 25 (< 30 threshold)
     let snap = IndicatorSnapshot {
-        close: 49000.0,  // profit = 2 ATR for short
+        close: 49000.0, // profit = 2 ATR for short
         high: 49100.0,
         low: 48900.0,
         open: 49000.0,
         volume: 1000.0,
         t: 1_000_000,
-        ema_fast: 48900.0,  // bearish (no trend breakdown for short)
+        ema_fast: 48900.0, // bearish (no trend breakdown for short)
         ema_slow: 49100.0,
         ema_macro: 50000.0,
         adx: 30.0,
@@ -6154,7 +6774,7 @@ fn test_aqc1225_smart_exit_rsi_overextension_short() {
         atr: 500.0,
         atr_slope: 0.0,
         avg_atr: 500.0,
-        rsi: 25.0,  // below hi-profit lower bound of 30
+        rsi: 25.0, // below hi-profit lower bound of 30
         stoch_rsi_k: 50.0,
         stoch_rsi_d: 50.0,
         macd_hist: 0.0,
@@ -6195,10 +6815,14 @@ fn test_aqc1225_smart_exit_rsi_overextension_short() {
         KernelExitResult::FullClose { reason, .. } => {
             assert!(
                 reason.contains("RSI Oversold") || reason.contains("RSI Overextension"),
-                "Expected RSI oversold exit, got: {}", reason
+                "Expected RSI oversold exit, got: {}",
+                reason
             );
         }
-        other => panic!("Expected FullClose for RSI overextension short, got {:?}", other),
+        other => panic!(
+            "Expected FullClose for RSI overextension short, got {:?}",
+            other
+        ),
     }
 }
 
@@ -6227,16 +6851,16 @@ fn test_aqc1225_exit_priority_sl_beats_all() {
 
     // Price at SL level (close <= sl_price for long)
     let snap = IndicatorSnapshot {
-        close: sl_price - 10.0,  // below SL
+        close: sl_price - 10.0, // below SL
         high: sl_price,
         low: sl_price - 20.0,
         open: sl_price,
         volume: 1000.0,
         t: 1_000_000,
-        ema_fast: sl_price - 100.0,  // bearish cross
+        ema_fast: sl_price - 100.0, // bearish cross
         ema_slow: sl_price + 100.0,
         ema_macro: 50000.0,
-        adx: 20.0,  // below exhaustion threshold
+        adx: 20.0, // below exhaustion threshold
         adx_pos: 10.0,
         adx_neg: 10.0,
         adx_slope: -1.0,
@@ -6289,7 +6913,8 @@ fn test_aqc1225_exit_priority_sl_beats_all() {
         KernelExitResult::FullClose { reason, .. } => {
             assert!(
                 reason == "Stop Loss",
-                "SL must take priority, got: {}", reason
+                "SL must take priority, got: {}",
+                reason
             );
         }
         other => panic!("Expected Stop Loss FullClose, got {:?}", other),
@@ -6304,7 +6929,7 @@ fn test_aqc1225_exit_priority_trailing_beats_tp_and_smart() {
 
     let params = ExitParams {
         sl_atr_mult: 2.0,
-        tp_atr_mult: 100.0,  // very far TP (won't hit)
+        tp_atr_mult: 100.0, // very far TP (won't hit)
         trailing_start_atr: 1.0,
         trailing_distance_atr: 0.5,
         smart_exit_adx_exhaustion_lt: 25.0,
@@ -6328,10 +6953,10 @@ fn test_aqc1225_exit_priority_trailing_beats_tp_and_smart() {
         open: 50700.0,
         volume: 1000.0,
         t: 2_000_000,
-        ema_fast: 50800.0,  // still bullish (no trend breakdown)
+        ema_fast: 50800.0, // still bullish (no trend breakdown)
         ema_slow: 50600.0,
         ema_macro: 50000.0,
-        adx: 20.0,  // below exhaustion threshold (would trigger smart exit)
+        adx: 20.0, // below exhaustion threshold (would trigger smart exit)
         adx_pos: 12.0,
         adx_neg: 8.0,
         adx_slope: -0.5,
@@ -6385,7 +7010,8 @@ fn test_aqc1225_exit_priority_trailing_beats_tp_and_smart() {
         KernelExitResult::FullClose { reason, .. } => {
             assert!(
                 reason == "Trailing Stop",
-                "Trailing must take priority over smart exits, got: {}", reason
+                "Trailing must take priority over smart exits, got: {}",
+                reason
             );
         }
         other => panic!("Expected Trailing Stop FullClose, got {:?}", other),
@@ -6423,10 +7049,10 @@ fn test_aqc1225_exit_orchestrator_hold() {
         open: 50250.0,
         volume: 1000.0,
         t: 1_000_000,
-        ema_fast: 50300.0,  // bullish (no trend breakdown)
+        ema_fast: 50300.0, // bullish (no trend breakdown)
         ema_slow: 50200.0,
         ema_macro: 50000.0,
-        adx: 30.0,  // healthy
+        adx: 30.0, // healthy
         adx_pos: 18.0,
         adx_neg: 12.0,
         adx_slope: 0.5,
@@ -6493,7 +7119,7 @@ fn test_aqc1225_glitch_guard_blocks_exit() {
     let params = ExitParams {
         sl_atr_mult: 2.0,
         block_exits_on_extreme_dev: true,
-        glitch_price_dev_pct: 0.05,  // 5% price change triggers glitch
+        glitch_price_dev_pct: 0.05, // 5% price change triggers glitch
         glitch_atr_mult: 12.0,
         ..default_exit_params()
     };
@@ -6531,7 +7157,7 @@ fn test_aqc1225_glitch_guard_blocks_exit() {
         prev3_macd_hist: 0.0,
         vol_sma: 1000.0,
         vol_trend: true,
-        prev_close: entry,  // previous close at entry (10% drop)
+        prev_close: entry, // previous close at entry (10% drop)
         prev_ema_fast: entry,
         prev_ema_slow: entry,
         bar_count: 200,
@@ -6580,16 +7206,29 @@ fn test_aqc1225_sl_all_fixtures_sanity() {
     let params = default_exit_params();
 
     for f in &fixtures {
-        let atr = if f.entry_atr > 0.0 { f.entry_atr } else { f.entry_price * 0.005 };
+        let atr = if f.entry_atr > 0.0 {
+            f.entry_atr
+        } else {
+            f.entry_price * 0.005
+        };
         let ref_sl = rust_compute_sl_price(
-            f.pos_type, f.entry_price, f.entry_atr, f.current_price,
-            f.adx, f.adx_slope, params.sl_atr_mult,
-            params.enable_breakeven_stop, params.breakeven_start_atr, params.breakeven_buffer_atr,
+            f.pos_type,
+            f.entry_price,
+            f.entry_atr,
+            f.current_price,
+            f.adx,
+            f.adx_slope,
+            params.sl_atr_mult,
+            params.enable_breakeven_stop,
+            params.breakeven_start_atr,
+            params.breakeven_buffer_atr,
         );
 
         assert!(
             ref_sl.is_finite(),
-            "[{}] SL must be finite: {}", f.label, ref_sl
+            "[{}] SL must be finite: {}",
+            f.label,
+            ref_sl
         );
 
         // When not breakeven-active, check directional sanity
@@ -6605,11 +7244,17 @@ fn test_aqc1225_sl_all_fixtures_sanity() {
             match f.pos_type {
                 PosType::Long => assert!(
                     ref_sl <= f.entry_price + f64::EPSILON,
-                    "[{}] LONG SL {} must be <= entry {}", f.label, ref_sl, f.entry_price
+                    "[{}] LONG SL {} must be <= entry {}",
+                    f.label,
+                    ref_sl,
+                    f.entry_price
                 ),
                 PosType::Short => assert!(
                     ref_sl >= f.entry_price - f64::EPSILON,
-                    "[{}] SHORT SL {} must be >= entry {}", f.label, ref_sl, f.entry_price
+                    "[{}] SHORT SL {} must be >= entry {}",
+                    f.label,
+                    ref_sl,
+                    f.entry_price
                 ),
             }
         }
@@ -6626,15 +7271,38 @@ fn test_aqc1225_trailing_all_fixtures_sanity() {
 
     for f in &fixtures {
         let tsl = rust_compute_trailing(
-            f.pos_type, f.entry_price, f.current_price, f.entry_atr,
-            f.current_trailing_sl, f.confidence, f.rsi, f.adx,
-            f.adx_slope, f.atr_slope, f.bb_width_ratio, f.profit_atr,
-            ts, td, tslc, tdlc, rfd, rft, evb, vbt, vbm, hpa, ttp, ttd, twm,
+            f.pos_type,
+            f.entry_price,
+            f.current_price,
+            f.entry_atr,
+            f.current_trailing_sl,
+            f.confidence,
+            f.rsi,
+            f.adx,
+            f.adx_slope,
+            f.atr_slope,
+            f.bb_width_ratio,
+            f.profit_atr,
+            ts,
+            td,
+            tslc,
+            tdlc,
+            rfd,
+            rft,
+            evb,
+            vbt,
+            vbm,
+            hpa,
+            ttp,
+            ttd,
+            twm,
         );
 
         assert!(
             tsl.is_finite(),
-            "[{}] Trailing SL must be finite: {}", f.label, tsl
+            "[{}] Trailing SL must be finite: {}",
+            f.label,
+            tsl
         );
 
         // Ratchet: if existing trailing SL, new must not worsen
@@ -6643,12 +7311,16 @@ fn test_aqc1225_trailing_all_fixtures_sanity() {
                 PosType::Long => assert!(
                     tsl >= f.current_trailing_sl - f64::EPSILON,
                     "[{}] Ratchet violation: new TSL {} < old {}",
-                    f.label, tsl, f.current_trailing_sl
+                    f.label,
+                    tsl,
+                    f.current_trailing_sl
                 ),
                 PosType::Short => assert!(
                     tsl <= f.current_trailing_sl + f64::EPSILON,
                     "[{}] Ratchet violation: new TSL {} > old {}",
-                    f.label, tsl, f.current_trailing_sl
+                    f.label,
+                    tsl,
+                    f.current_trailing_sl
                 ),
             }
         }
@@ -6679,10 +7351,10 @@ fn test_aqc1225_smart_exit_mmde() {
         open: 51000.0,
         volume: 1000.0,
         t: 1_000_000,
-        ema_fast: 51100.0,  // bullish (no trend breakdown)
+        ema_fast: 51100.0, // bullish (no trend breakdown)
         ema_slow: 50900.0,
         ema_macro: 50000.0,
-        adx: 38.0,  // > 35 (MMDE gate)
+        adx: 38.0, // > 35 (MMDE gate)
         adx_pos: 23.0,
         adx_neg: 15.0,
         adx_slope: 0.3,
@@ -6736,7 +7408,8 @@ fn test_aqc1225_smart_exit_mmde() {
         KernelExitResult::FullClose { reason, .. } => {
             assert!(
                 reason.contains("MACD Persistent Divergence"),
-                "Expected MMDE exit, got: {}", reason
+                "Expected MMDE exit, got: {}",
+                reason
             );
         }
         other => panic!("Expected FullClose for MMDE, got {:?}", other),
@@ -6756,7 +7429,7 @@ fn test_aqc1225_smart_exit_ema_macro_breakdown() {
         enable_partial_tp: false,
         smart_exit_adx_exhaustion_lt: 0.0,
         enable_rsi_overextension_exit: false,
-        require_macro_alignment: true,  // enabled
+        require_macro_alignment: true, // enabled
         ..default_exit_params()
     };
 
@@ -6768,9 +7441,9 @@ fn test_aqc1225_smart_exit_ema_macro_breakdown() {
         open: 49800.0,
         volume: 1000.0,
         t: 1_000_000,
-        ema_fast: 50100.0,  // still bullish (no trend breakdown)
+        ema_fast: 50100.0, // still bullish (no trend breakdown)
         ema_slow: 49900.0,
-        ema_macro: 50000.0,  // close (49800) < ema_macro (50000) -> breakdown
+        ema_macro: 50000.0, // close (49800) < ema_macro (50000) -> breakdown
         adx: 30.0,
         adx_pos: 18.0,
         adx_neg: 12.0,
@@ -6824,10 +7497,14 @@ fn test_aqc1225_smart_exit_ema_macro_breakdown() {
         KernelExitResult::FullClose { reason, .. } => {
             assert!(
                 reason.contains("EMA Macro"),
-                "Expected EMA Macro Breakdown exit, got: {}", reason
+                "Expected EMA Macro Breakdown exit, got: {}",
+                reason
             );
         }
-        other => panic!("Expected FullClose for EMA Macro Breakdown, got {:?}", other),
+        other => panic!(
+            "Expected FullClose for EMA Macro Breakdown, got {:?}",
+            other
+        ),
     }
 }
 
@@ -6925,15 +7602,21 @@ fn test_aqc1225_evaluate_exits_diagnostics_context() {
     }
 
     // Verify context is populated
-    let ctx = eval.exit_context.expect("ExitContext must be populated for exits");
+    let ctx = eval
+        .exit_context
+        .expect("ExitContext must be populated for exits");
     assert_eq!(ctx.exit_type, "stop_loss", "exit_type must be stop_loss");
     assert!(
         (ctx.exit_price - close).abs() < 1e-10,
-        "exit_price must match close: {} vs {}", ctx.exit_price, close
+        "exit_price must match close: {} vs {}",
+        ctx.exit_price,
+        close
     );
     assert!(
         (ctx.entry_price - entry).abs() < 1e-10,
-        "entry_price must match: {} vs {}", ctx.entry_price, entry
+        "entry_price must match: {} vs {}",
+        ctx.entry_price,
+        entry
     );
 
     // Verify SL and TP prices in context
@@ -6941,17 +7624,22 @@ fn test_aqc1225_evaluate_exits_diagnostics_context() {
     let expected_tp = entry + atr * tp_mult;
     assert!(
         within_tolerance(expected_sl, ctx.sl_price.unwrap(), TIER_T2_TOLERANCE),
-        "SL price in context: expected={}, got={}", expected_sl, ctx.sl_price.unwrap()
+        "SL price in context: expected={}, got={}",
+        expected_sl,
+        ctx.sl_price.unwrap()
     );
     assert!(
         within_tolerance(expected_tp, ctx.tp_price.unwrap(), TIER_T2_TOLERANCE),
-        "TP price in context: expected={}, got={}", expected_tp, ctx.tp_price.unwrap()
+        "TP price in context: expected={}, got={}",
+        expected_tp,
+        ctx.tp_price.unwrap()
     );
 
     // Verify profit_atr is negative (underwater)
     assert!(
         ctx.profit_atr < 0.0,
-        "profit_atr must be negative for SL hit: {}", ctx.profit_atr
+        "profit_atr must be negative for SL hit: {}",
+        ctx.profit_atr
     );
 
     // Verify threshold records present (sl_distance at minimum)
@@ -6959,7 +7647,10 @@ fn test_aqc1225_evaluate_exits_diagnostics_context() {
         !eval.threshold_records.is_empty(),
         "threshold_records must not be empty"
     );
-    let has_sl = eval.threshold_records.iter().any(|r| r.name == "sl_distance");
+    let has_sl = eval
+        .threshold_records
+        .iter()
+        .any(|r| r.name == "sl_distance");
     assert!(has_sl, "Must have sl_distance threshold record");
 }
 
@@ -7052,7 +7743,9 @@ fn test_aqc1225_short_position_exit_symmetry() {
             assert_eq!(reason, "Stop Loss", "Short SL must fire");
             assert!(
                 (*exit_price - close).abs() < 1e-10,
-                "Exit price must be close: {} vs {}", exit_price, close
+                "Exit price must be close: {} vs {}",
+                exit_price,
+                close
             );
         }
         other => panic!("Expected Stop Loss for short, got {:?}", other),
@@ -7462,10 +8155,10 @@ fn rust_check_gates(
         adx_min + 1.0
     };
     let weight = ((snap.adx - adx_min) / (adx_max - adx_min)).clamp(0.0, 1.0);
-    let rsi_long_limit =
-        cfg.dre_long_rsi_limit_low + weight * (cfg.dre_long_rsi_limit_high - cfg.dre_long_rsi_limit_low);
-    let rsi_short_limit =
-        cfg.dre_short_rsi_limit_low + weight * (cfg.dre_short_rsi_limit_high - cfg.dre_short_rsi_limit_low);
+    let rsi_long_limit = cfg.dre_long_rsi_limit_low
+        + weight * (cfg.dre_long_rsi_limit_high - cfg.dre_long_rsi_limit_low);
+    let rsi_short_limit = cfg.dre_short_rsi_limit_low
+        + weight * (cfg.dre_short_rsi_limit_high - cfg.dre_short_rsi_limit_low);
 
     // Combined all_gates_pass
     let all_gates_pass = adx_above_min
@@ -7500,7 +8193,7 @@ fn check_macd_long_ref(mode: u32, macd_hist: f64, prev_macd_hist: f64) -> bool {
     match mode {
         0 => macd_hist > prev_macd_hist, // Accel
         1 => macd_hist > 0.0,            // Sign
-        _ => true,                        // None
+        _ => true,                       // None
     }
 }
 
@@ -7508,7 +8201,7 @@ fn check_macd_short_ref(mode: u32, macd_hist: f64, prev_macd_hist: f64) -> bool 
     match mode {
         0 => macd_hist < prev_macd_hist, // Accel
         1 => macd_hist < 0.0,            // Sign
-        _ => true,                        // None
+        _ => true,                       // None
     }
 }
 
@@ -7750,14 +8443,24 @@ fn test_gates_fixture_all_pass_bullish() {
     let cfg = GateConfig::default_config();
     let result = rust_check_gates(&snap, &cfg, Some(true), false);
 
-    assert!(result.all_gates_pass, "All gates should pass for strong bullish: {:?}", result);
+    assert!(
+        result.all_gates_pass,
+        "All gates should pass for strong bullish: {:?}",
+        result
+    );
     assert!(result.bullish_alignment, "Bullish alignment expected");
     assert!(!result.bearish_alignment, "No bearish alignment expected");
     assert!(result.adx_above_min, "ADX 32 should be above min_adx 22");
     assert!(!result.is_ranging, "Strong trend should not be ranging");
-    assert!(!result.is_anomaly, "Normal price move should not trigger anomaly");
+    assert!(
+        !result.is_anomaly,
+        "Normal price move should not trigger anomaly"
+    );
     assert!(!result.is_extended, "Close near EMA should not be extended");
-    assert!(result.vol_confirm, "Volume confirmation disabled by default => pass");
+    assert!(
+        result.vol_confirm,
+        "Volume confirmation disabled by default => pass"
+    );
     assert!(result.is_trending_up, "ADX slope 1.5 > 0 => trending up");
     assert!(result.btc_ok_long, "BTC bullish => long OK");
 }
@@ -7769,7 +8472,11 @@ fn test_gates_fixture_all_pass_bearish() {
     let cfg = GateConfig::default_config();
     let result = rust_check_gates(&snap, &cfg, Some(false), false);
 
-    assert!(result.all_gates_pass, "All gates should pass for strong bearish: {:?}", result);
+    assert!(
+        result.all_gates_pass,
+        "All gates should pass for strong bearish: {:?}",
+        result
+    );
     assert!(!result.bullish_alignment, "No bullish alignment expected");
     assert!(result.bearish_alignment, "Bearish alignment expected");
     assert!(result.btc_ok_short, "BTC bearish => short OK");
@@ -7780,12 +8487,18 @@ fn test_gates_fixture_adx_rising_gate() {
     // ADX declining and below saturation: is_trending_up = false.
     let mut snap = MarketSnapshot::strong_bullish();
     snap.adx_slope = -0.5; // declining
-    snap.adx = 30.0;       // below saturation (40)
+    snap.adx = 30.0; // below saturation (40)
     let cfg = GateConfig::default_config();
     let result = rust_check_gates(&snap, &cfg, Some(true), false);
 
-    assert!(!result.is_trending_up, "ADX slope < 0 and ADX < saturation => not trending");
-    assert!(!result.all_gates_pass, "Gates should fail without trending_up");
+    assert!(
+        !result.is_trending_up,
+        "ADX slope < 0 and ADX < saturation => not trending"
+    );
+    assert!(
+        !result.all_gates_pass,
+        "Gates should fail without trending_up"
+    );
 }
 
 #[test]
@@ -7793,69 +8506,93 @@ fn test_gates_fixture_adx_rising_saturation_override() {
     // ADX declining but above saturation: is_trending_up = true (saturated override).
     let mut snap = MarketSnapshot::strong_bullish();
     snap.adx_slope = -0.5; // declining
-    snap.adx = 42.0;       // above saturation (40)
+    snap.adx = 42.0; // above saturation (40)
     let cfg = GateConfig::default_config();
     let result = rust_check_gates(&snap, &cfg, Some(true), false);
 
-    assert!(result.is_trending_up, "ADX > saturation => trending even with declining slope");
+    assert!(
+        result.is_trending_up,
+        "ADX > saturation => trending even with declining slope"
+    );
 }
 
 #[test]
 fn test_gates_fixture_volume_confirmation_strict() {
     // Volume confirmation enabled, strict mode (include_prev = false).
     let mut snap = MarketSnapshot::strong_bullish();
-    snap.volume = 700.0;     // below vol_sma (800)
-    snap.vol_trend = true;   // vol_trend is true
+    snap.volume = 700.0; // below vol_sma (800)
+    snap.vol_trend = true; // vol_trend is true
     let mut cfg = GateConfig::default_config();
     cfg.require_volume_confirmation = true;
     cfg.vol_confirm_include_prev = false;
 
     let result = rust_check_gates(&snap, &cfg, Some(true), false);
-    assert!(!result.vol_confirm, "Strict mode: volume < vol_sma => fail even with vol_trend");
-    assert!(!result.all_gates_pass, "Gates should fail without vol_confirm");
+    assert!(
+        !result.vol_confirm,
+        "Strict mode: volume < vol_sma => fail even with vol_trend"
+    );
+    assert!(
+        !result.all_gates_pass,
+        "Gates should fail without vol_confirm"
+    );
 }
 
 #[test]
 fn test_gates_fixture_volume_confirmation_relaxed() {
     // Volume confirmation enabled, relaxed mode (include_prev = true).
     let mut snap = MarketSnapshot::strong_bullish();
-    snap.volume = 700.0;     // below vol_sma (800)
-    snap.vol_trend = true;   // vol_trend is true
+    snap.volume = 700.0; // below vol_sma (800)
+    snap.vol_trend = true; // vol_trend is true
     let mut cfg = GateConfig::default_config();
     cfg.require_volume_confirmation = true;
     cfg.vol_confirm_include_prev = true;
 
     let result = rust_check_gates(&snap, &cfg, Some(true), false);
-    assert!(result.vol_confirm, "Relaxed mode: vol_trend true => pass despite low volume");
+    assert!(
+        result.vol_confirm,
+        "Relaxed mode: vol_trend true => pass despite low volume"
+    );
 }
 
 #[test]
 fn test_gates_fixture_ranging_filter_all_three_votes() {
     // All three ranging votes fire: ADX < 21, BB < 0.8, RSI in 47-53.
     let mut snap = MarketSnapshot::strong_bullish();
-    snap.adx = 18.0;            // < 21
-    snap.bb_width_ratio = 0.6;  // < 0.8
-    snap.rsi = 50.0;            // 47 < 50 < 53
+    snap.adx = 18.0; // < 21
+    snap.bb_width_ratio = 0.6; // < 0.8
+    snap.rsi = 50.0; // 47 < 50 < 53
     let cfg = GateConfig::default_config();
     let result = rust_check_gates(&snap, &cfg, Some(true), false);
 
-    assert!(result.is_ranging, "All 3 ranging votes => ranging with min_signals=2");
-    assert!(!result.all_gates_pass, "Ranging should block all_gates_pass");
+    assert!(
+        result.is_ranging,
+        "All 3 ranging votes => ranging with min_signals=2"
+    );
+    assert!(
+        !result.all_gates_pass,
+        "Ranging should block all_gates_pass"
+    );
 }
 
 #[test]
 fn test_gates_fixture_ranging_filter_one_vote_insufficient() {
     // Only one ranging vote fires: ADX < 21, but BB and RSI not in range.
     let mut snap = MarketSnapshot::strong_bullish();
-    snap.adx = 18.0;            // < 21 (vote 1)
-    snap.bb_width_ratio = 1.2;  // >= 0.8 (no vote)
-    snap.rsi = 57.0;            // not in 47-53 (no vote)
+    snap.adx = 18.0; // < 21 (vote 1)
+    snap.bb_width_ratio = 1.2; // >= 0.8 (no vote)
+    snap.rsi = 57.0; // not in 47-53 (no vote)
     let cfg = GateConfig::default_config();
     let result = rust_check_gates(&snap, &cfg, Some(true), false);
 
-    assert!(!result.is_ranging, "Only 1 vote < min_signals=2 => not ranging");
+    assert!(
+        !result.is_ranging,
+        "Only 1 vote < min_signals=2 => not ranging"
+    );
     // But adx_above_min = 18 > 22? No => still blocked by ADX threshold
-    assert!(!result.adx_above_min, "ADX 18 < min_adx 22 => adx_above_min = false");
+    assert!(
+        !result.adx_above_min,
+        "ADX 18 < min_adx 22 => adx_above_min = false"
+    );
     assert!(!result.all_gates_pass, "ADX below min should block");
 }
 
@@ -7868,7 +8605,10 @@ fn test_gates_fixture_anomaly_filter_large_price_move() {
     let cfg = GateConfig::default_config();
     let result = rust_check_gates(&snap, &cfg, Some(true), false);
 
-    assert!(result.is_anomaly, "12% price move > 10% threshold => anomaly");
+    assert!(
+        result.is_anomaly,
+        "12% price move > 10% threshold => anomaly"
+    );
     assert!(!result.all_gates_pass, "Anomaly should block");
 }
 
@@ -7881,7 +8621,10 @@ fn test_gates_fixture_anomaly_filter_small_price_move() {
     let cfg = GateConfig::default_config();
     let result = rust_check_gates(&snap, &cfg, Some(true), false);
 
-    assert!(!result.is_anomaly, "0.5% price move < 10% threshold => not anomaly");
+    assert!(
+        !result.is_anomaly,
+        "0.5% price move < 10% threshold => not anomaly"
+    );
 }
 
 #[test]
@@ -7893,7 +8636,10 @@ fn test_gates_fixture_extension_filter() {
     let cfg = GateConfig::default_config();
     let result = rust_check_gates(&snap, &cfg, Some(true), false);
 
-    assert!(result.is_extended, "6% distance from EMA_fast > 4% threshold => extended");
+    assert!(
+        result.is_extended,
+        "6% distance from EMA_fast > 4% threshold => extended"
+    );
     assert!(!result.all_gates_pass, "Extension should block");
 }
 
@@ -7914,7 +8660,10 @@ fn test_gates_fixture_tmc_caps_min_adx() {
         result.effective_min_adx
     );
     // ADX 24 < 25 so it still fails the threshold
-    assert!(!result.adx_above_min, "ADX 24 < capped 25 => adx_above_min = false");
+    assert!(
+        !result.adx_above_min,
+        "ADX 24 < capped 25 => adx_above_min = false"
+    );
 }
 
 #[test]
@@ -7936,7 +8685,7 @@ fn test_gates_fixture_tmc_caps_and_passes() {
 fn test_gates_fixture_ave_raises_threshold() {
     // AVE: high ATR/avg_ATR ratio raises effective_min_adx.
     let mut snap = MarketSnapshot::strong_bullish();
-    snap.atr = 3.0;     // ratio = 3.0 / 1.4 = 2.14 > 1.5
+    snap.atr = 3.0; // ratio = 3.0 / 1.4 = 2.14 > 1.5
     snap.avg_atr = 1.4;
     snap.adx = 26.0;
     snap.adx_slope = 0.3; // <= 0.5, so TMC does NOT fire
@@ -7959,7 +8708,7 @@ fn test_gates_fixture_tmc_and_ave_interaction() {
     // With min_adx=22, TMC caps at min(22, 25) = 22. AVE: 22 * 1.25 = 27.5.
     let mut snap = MarketSnapshot::strong_bullish();
     snap.adx_slope = 1.0; // TMC: slope > 0.5
-    snap.atr = 3.0;       // AVE: ratio 2.14 > 1.5
+    snap.atr = 3.0; // AVE: ratio 2.14 > 1.5
     snap.avg_atr = 1.4;
     snap.adx = 26.0;
     let cfg = GateConfig::default_config();
@@ -7980,7 +8729,7 @@ fn test_gates_fixture_tmc_and_ave_high_min_adx() {
     // TMC + AVE with high min_adx: TMC caps at 25 (< 35), then AVE multiplies.
     let mut snap = MarketSnapshot::strong_bullish();
     snap.adx_slope = 1.0; // TMC: slope > 0.5
-    snap.atr = 3.0;       // AVE: ratio 2.14 > 1.5
+    snap.atr = 3.0; // AVE: ratio 2.14 > 1.5
     snap.avg_atr = 1.4;
     snap.adx = 30.0;
     let mut cfg = GateConfig::default_config();
@@ -8008,7 +8757,10 @@ fn test_gates_fixture_macro_alignment() {
 
     let result = rust_check_gates(&snap, &cfg, Some(true), false);
 
-    assert!(!result.bullish_alignment, "ema_slow 97 < ema_macro 98 => bullish fails with macro");
+    assert!(
+        !result.bullish_alignment,
+        "ema_slow 97 < ema_macro 98 => bullish fails with macro"
+    );
 }
 
 #[test]
@@ -8018,7 +8770,10 @@ fn test_gates_fixture_btc_alignment_blocks_long() {
     let cfg = GateConfig::default_config();
     let result = rust_check_gates(&snap, &cfg, Some(false), false);
 
-    assert!(!result.btc_ok_long, "BTC bearish => btc_ok_long = false for non-BTC");
+    assert!(
+        !result.btc_ok_long,
+        "BTC bearish => btc_ok_long = false for non-BTC"
+    );
     assert!(result.btc_ok_short, "BTC bearish => btc_ok_short = true");
 }
 
@@ -8030,7 +8785,10 @@ fn test_gates_fixture_btc_alignment_high_adx_overrides() {
     let cfg = GateConfig::default_config();
     let result = rust_check_gates(&snap, &cfg, Some(false), false);
 
-    assert!(result.btc_ok_long, "High ADX overrides BTC alignment for long");
+    assert!(
+        result.btc_ok_long,
+        "High ADX overrides BTC alignment for long"
+    );
 }
 
 #[test]
@@ -8048,9 +8806,9 @@ fn test_gates_fixture_btc_symbol_always_ok() {
 fn test_gates_fixture_slow_drift_ranging_override() {
     // Slow drift enabled, ranging active, but slope exceeds override threshold.
     let mut snap = MarketSnapshot::strong_bullish();
-    snap.adx = 18.0;            // < 21 => vote 1
-    snap.bb_width_ratio = 0.6;  // < 0.8 => vote 2
-    snap.rsi = 50.0;            // 47-53 => vote 3
+    snap.adx = 18.0; // < 21 => vote 1
+    snap.bb_width_ratio = 0.6; // < 0.8 => vote 2
+    snap.rsi = 50.0; // 47-53 => vote 3
     snap.ema_slow_slope_pct = 0.001; // > 0.0006
 
     let mut cfg = GateConfig::default_config();
@@ -8059,7 +8817,10 @@ fn test_gates_fixture_slow_drift_ranging_override() {
 
     let result = rust_check_gates(&snap, &cfg, Some(true), false);
 
-    assert!(!result.is_ranging, "Slow drift override should clear ranging");
+    assert!(
+        !result.is_ranging,
+        "Slow drift override should clear ranging"
+    );
 }
 
 #[test]
@@ -8163,7 +8924,10 @@ fn test_gates_fixture_stoch_rsi_passthrough() {
     cfg.use_stoch_rsi_filter = false;
     let result = rust_check_gates(&snap, &cfg, Some(true), false);
 
-    assert!(!result.stoch_rsi_active, "StochRSI disabled => stoch_rsi_active = false");
+    assert!(
+        !result.stoch_rsi_active,
+        "StochRSI disabled => stoch_rsi_active = false"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -8179,7 +8943,11 @@ fn test_signal_fixture_standard_buy() {
     let signal = rust_generate_signal(&snap, &gates, &cfg);
 
     assert_eq!(signal.signal, SignalDir::Buy, "Standard bullish => BUY");
-    assert_eq!(signal.confidence, ConfLevel::Medium, "Volume 1200 < vol_sma*2.5=2000 => Medium");
+    assert_eq!(
+        signal.confidence,
+        ConfLevel::Medium,
+        "Volume 1200 < vol_sma*2.5=2000 => Medium"
+    );
 }
 
 #[test]
@@ -8191,7 +8959,11 @@ fn test_signal_fixture_standard_sell() {
     let signal = rust_generate_signal(&snap, &gates, &cfg);
 
     assert_eq!(signal.signal, SignalDir::Sell, "Standard bearish => SELL");
-    assert_eq!(signal.confidence, ConfLevel::Medium, "Medium confidence expected");
+    assert_eq!(
+        signal.confidence,
+        ConfLevel::Medium,
+        "Medium confidence expected"
+    );
 }
 
 #[test]
@@ -8204,7 +8976,11 @@ fn test_signal_fixture_high_volume_upgrades_confidence() {
     let signal = rust_generate_signal(&snap, &gates, &cfg);
 
     assert_eq!(signal.signal, SignalDir::Buy);
-    assert_eq!(signal.confidence, ConfLevel::High, "High volume => High confidence");
+    assert_eq!(
+        signal.confidence,
+        ConfLevel::High,
+        "High volume => High confidence"
+    );
 }
 
 #[test]
@@ -8216,7 +8992,11 @@ fn test_signal_fixture_rsi_below_dre_limit_blocks() {
     let gates = rust_check_gates(&snap, &cfg, Some(true), false);
     let signal = rust_generate_signal(&snap, &gates, &cfg);
 
-    assert_eq!(signal.signal, SignalDir::Neutral, "RSI below DRE limit => Neutral");
+    assert_eq!(
+        signal.signal,
+        SignalDir::Neutral,
+        "RSI below DRE limit => Neutral"
+    );
 }
 
 #[test]
@@ -8229,7 +9009,11 @@ fn test_signal_fixture_macd_accel_blocks_decelerating() {
     let gates = rust_check_gates(&snap, &cfg, Some(true), false);
     let signal = rust_generate_signal(&snap, &gates, &cfg);
 
-    assert_eq!(signal.signal, SignalDir::Neutral, "MACD decelerating => Neutral in Accel mode");
+    assert_eq!(
+        signal.signal,
+        SignalDir::Neutral,
+        "MACD decelerating => Neutral in Accel mode"
+    );
 }
 
 #[test]
@@ -8244,7 +9028,11 @@ fn test_signal_fixture_macd_sign_mode_passes() {
     let gates = rust_check_gates(&snap, &cfg, Some(true), false);
     let signal = rust_generate_signal(&snap, &gates, &cfg);
 
-    assert_eq!(signal.signal, SignalDir::Buy, "MACD Sign mode: hist > 0 => Buy");
+    assert_eq!(
+        signal.signal,
+        SignalDir::Buy,
+        "MACD Sign mode: hist > 0 => Buy"
+    );
 }
 
 #[test]
@@ -8259,7 +9047,11 @@ fn test_signal_fixture_macd_none_mode_always_passes() {
     let gates = rust_check_gates(&snap, &cfg, Some(true), false);
     let signal = rust_generate_signal(&snap, &gates, &cfg);
 
-    assert_eq!(signal.signal, SignalDir::Buy, "MACD None mode => always passes");
+    assert_eq!(
+        signal.signal,
+        SignalDir::Buy,
+        "MACD None mode => always passes"
+    );
 }
 
 #[test]
@@ -8271,7 +9063,11 @@ fn test_signal_fixture_stoch_rsi_blocks_overbought_long() {
     let gates = rust_check_gates(&snap, &cfg, Some(true), false);
     let signal = rust_generate_signal(&snap, &gates, &cfg);
 
-    assert_eq!(signal.signal, SignalDir::Neutral, "StochRSI K=0.90 > 0.85 blocks long");
+    assert_eq!(
+        signal.signal,
+        SignalDir::Neutral,
+        "StochRSI K=0.90 > 0.85 blocks long"
+    );
 }
 
 #[test]
@@ -8283,7 +9079,11 @@ fn test_signal_fixture_stoch_rsi_blocks_oversold_short() {
     let gates = rust_check_gates(&snap, &cfg, Some(false), false);
     let signal = rust_generate_signal(&snap, &gates, &cfg);
 
-    assert_eq!(signal.signal, SignalDir::Neutral, "StochRSI K=0.10 < 0.15 blocks short");
+    assert_eq!(
+        signal.signal,
+        SignalDir::Neutral,
+        "StochRSI K=0.10 < 0.15 blocks short"
+    );
 }
 
 #[test]
@@ -8303,7 +9103,7 @@ fn test_signal_fixture_pullback_long() {
     let mut snap = MarketSnapshot::strong_bullish();
     snap.prev_close = 98.0;
     snap.prev_ema_fast = 98.5; // prev_close <= prev_ema_fast
-    snap.close = 99.5;         // close > ema_fast (99.0)
+    snap.close = 99.5; // close > ema_fast (99.0)
     snap.macd_hist = 0.2;
     snap.prev_macd_hist = 0.3; // decelerating => standard blocked
     snap.adx = 25.0;
@@ -8319,7 +9119,11 @@ fn test_signal_fixture_pullback_long() {
     let signal = rust_generate_signal(&snap, &gates, &cfg);
 
     assert_eq!(signal.signal, SignalDir::Buy, "Pullback cross-up => Buy");
-    assert_eq!(signal.confidence, ConfLevel::Low, "Pullback default confidence = Low");
+    assert_eq!(
+        signal.confidence,
+        ConfLevel::Low,
+        "Pullback default confidence = Low"
+    );
     assert!(
         (signal.effective_min_adx - 20.0).abs() < 1e-9,
         "Pullback uses pullback_min_adx"
@@ -8332,7 +9136,7 @@ fn test_signal_fixture_pullback_short() {
     let mut snap = MarketSnapshot::strong_bearish();
     snap.prev_close = 97.0;
     snap.prev_ema_fast = 96.5; // prev_close >= prev_ema_fast
-    snap.close = 95.0;         // close < ema_fast (96.0)
+    snap.close = 95.0; // close < ema_fast (96.0)
     snap.macd_hist = -0.2;
     snap.prev_macd_hist = -0.1; // decel for short (would need hist < prev, but -0.2 < -0.1)
     snap.adx = 25.0;
@@ -8346,10 +9150,17 @@ fn test_signal_fixture_pullback_short() {
 
     let gates = rust_check_gates(&snap, &cfg, Some(false), false);
     // Standard blocked because is_trending_up = false
-    assert!(!gates.all_gates_pass, "Standard should be blocked (not trending)");
+    assert!(
+        !gates.all_gates_pass,
+        "Standard should be blocked (not trending)"
+    );
 
     let signal = rust_generate_signal(&snap, &gates, &cfg);
-    assert_eq!(signal.signal, SignalDir::Sell, "Pullback cross-down => Sell");
+    assert_eq!(
+        signal.signal,
+        SignalDir::Sell,
+        "Pullback cross-down => Sell"
+    );
     assert_eq!(signal.confidence, ConfLevel::Low);
 }
 
@@ -8374,11 +9185,18 @@ fn test_signal_fixture_slow_drift_long() {
     cfg.require_btc_alignment = false;
 
     let gates = rust_check_gates(&snap, &cfg, Some(true), false);
-    assert!(!gates.all_gates_pass, "Standard should fail (low ADX, not trending)");
+    assert!(
+        !gates.all_gates_pass,
+        "Standard should fail (low ADX, not trending)"
+    );
 
     let signal = rust_generate_signal(&snap, &gates, &cfg);
     assert_eq!(signal.signal, SignalDir::Buy, "Slow drift => Buy");
-    assert_eq!(signal.confidence, ConfLevel::Low, "Slow drift always Low confidence");
+    assert_eq!(
+        signal.confidence,
+        ConfLevel::Low,
+        "Slow drift always Low confidence"
+    );
     assert!(
         (signal.effective_min_adx - 10.0).abs() < 1e-9,
         "Slow drift uses slow_drift_min_adx"
@@ -8450,14 +9268,18 @@ fn test_signal_fixture_mode_priority_standard_over_pullback() {
 
     let signal = rust_generate_signal(&snap, &gates, &cfg);
     assert_eq!(signal.signal, SignalDir::Buy);
-    assert_eq!(signal.confidence, ConfLevel::Medium, "Standard wins with Medium confidence");
+    assert_eq!(
+        signal.confidence,
+        ConfLevel::Medium,
+        "Standard wins with Medium confidence"
+    );
 }
 
 #[test]
 fn test_signal_fixture_neutral_when_nothing_qualifies() {
     // ADX too low for everything, ranging active.
     let mut snap = MarketSnapshot::strong_bullish();
-    snap.adx = 8.0;             // below slow_drift_min_adx (10)
+    snap.adx = 8.0; // below slow_drift_min_adx (10)
     snap.adx_slope = -1.0;
     snap.rsi = 50.0;
     snap.bb_width_ratio = 0.6;
@@ -8471,7 +9293,11 @@ fn test_signal_fixture_neutral_when_nothing_qualifies() {
     let gates = rust_check_gates(&snap, &cfg, Some(true), false);
     let signal = rust_generate_signal(&snap, &gates, &cfg);
 
-    assert_eq!(signal.signal, SignalDir::Neutral, "Nothing qualifies => Neutral");
+    assert_eq!(
+        signal.signal,
+        SignalDir::Neutral,
+        "Nothing qualifies => Neutral"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -8684,37 +9510,61 @@ fn test_gates_config_permutations_x_market_states() {
             // Self-consistency checks:
             // 1. all_gates_pass implies all individual gates passed
             if gates.all_gates_pass {
-                assert!(gates.adx_above_min,
-                    "[{}/{}] all_gates_pass but adx_above_min=false", cfg_label, mkt_label);
-                assert!(!gates.is_ranging,
-                    "[{}/{}] all_gates_pass but is_ranging=true", cfg_label, mkt_label);
-                assert!(!gates.is_anomaly,
-                    "[{}/{}] all_gates_pass but is_anomaly=true", cfg_label, mkt_label);
-                assert!(!gates.is_extended,
-                    "[{}/{}] all_gates_pass but is_extended=true", cfg_label, mkt_label);
-                assert!(gates.vol_confirm,
-                    "[{}/{}] all_gates_pass but vol_confirm=false", cfg_label, mkt_label);
-                assert!(gates.is_trending_up,
-                    "[{}/{}] all_gates_pass but is_trending_up=false", cfg_label, mkt_label);
+                assert!(
+                    gates.adx_above_min,
+                    "[{}/{}] all_gates_pass but adx_above_min=false",
+                    cfg_label, mkt_label
+                );
+                assert!(
+                    !gates.is_ranging,
+                    "[{}/{}] all_gates_pass but is_ranging=true",
+                    cfg_label, mkt_label
+                );
+                assert!(
+                    !gates.is_anomaly,
+                    "[{}/{}] all_gates_pass but is_anomaly=true",
+                    cfg_label, mkt_label
+                );
+                assert!(
+                    !gates.is_extended,
+                    "[{}/{}] all_gates_pass but is_extended=true",
+                    cfg_label, mkt_label
+                );
+                assert!(
+                    gates.vol_confirm,
+                    "[{}/{}] all_gates_pass but vol_confirm=false",
+                    cfg_label, mkt_label
+                );
+                assert!(
+                    gates.is_trending_up,
+                    "[{}/{}] all_gates_pass but is_trending_up=false",
+                    cfg_label, mkt_label
+                );
             }
 
             // 2. effective_min_adx must be finite and positive
             assert!(
                 gates.effective_min_adx.is_finite() && gates.effective_min_adx > 0.0,
                 "[{}/{}] effective_min_adx must be finite+positive, got {}",
-                cfg_label, mkt_label, gates.effective_min_adx
+                cfg_label,
+                mkt_label,
+                gates.effective_min_adx
             );
 
             // 3. DRE limits must be finite and in [0, 100] range
             assert!(
                 gates.rsi_long_limit >= 0.0 && gates.rsi_long_limit <= 100.0,
                 "[{}/{}] rsi_long_limit out of range: {}",
-                cfg_label, mkt_label, gates.rsi_long_limit
+                cfg_label,
+                mkt_label,
+                gates.rsi_long_limit
             );
             assert!(
                 gates.rsi_short_limit >= 0.0 && gates.rsi_short_limit <= 100.0,
                 "[{}/{}] rsi_short_limit out of range: {}",
-                cfg_label, mkt_label, gates.rsi_short_limit
+                cfg_label,
+                mkt_label,
+                gates.rsi_short_limit
             );
 
             // 4. Alignment is mutually exclusive (unless EMA_fast == EMA_slow)
@@ -8722,7 +9572,8 @@ fn test_gates_config_permutations_x_market_states() {
                 assert!(
                     !(gates.bullish_alignment && gates.bearish_alignment),
                     "[{}/{}] Cannot be both bullish and bearish aligned",
-                    cfg_label, mkt_label
+                    cfg_label,
+                    mkt_label
                 );
             }
 
@@ -8731,7 +9582,10 @@ fn test_gates_config_permutations_x_market_states() {
             assert!(
                 within_tolerance(gates.rsi_long_limit, rsi_long_f32, TIER_T2_TOLERANCE),
                 "[{}/{}] DRE rsi_long_limit f32 round-trip exceeds T2: {} vs {}",
-                cfg_label, mkt_label, gates.rsi_long_limit, rsi_long_f32
+                cfg_label,
+                mkt_label,
+                gates.rsi_long_limit,
+                rsi_long_f32
             );
 
             total_evaluated += 1;
@@ -8797,9 +9651,12 @@ fn test_signals_config_permutations_x_market_states() {
             if gates.is_anomaly && !gates.all_gates_pass {
                 // Anomaly blocks all modes
                 assert_eq!(
-                    signal.signal, SignalDir::Neutral,
+                    signal.signal,
+                    SignalDir::Neutral,
                     "[{}/{}] Anomaly active but signal is not Neutral: {:?}",
-                    cfg_label, mkt_label, signal.signal
+                    cfg_label,
+                    mkt_label,
+                    signal.signal
                 );
             }
 
@@ -8808,7 +9665,9 @@ fn test_signals_config_permutations_x_market_states() {
                 assert!(
                     signal.effective_min_adx > 0.0,
                     "[{}/{}] Non-neutral signal but effective_min_adx={}",
-                    cfg_label, mkt_label, signal.effective_min_adx
+                    cfg_label,
+                    mkt_label,
+                    signal.effective_min_adx
                 );
             }
 
@@ -8817,9 +9676,18 @@ fn test_signals_config_permutations_x_market_states() {
     }
 
     // Verify diversity: we should see all three signal types
-    assert!(buy_count > 0, "Cross-product should produce at least one BUY, got 0");
-    assert!(sell_count > 0, "Cross-product should produce at least one SELL, got 0");
-    assert!(neutral_count > 0, "Cross-product should produce at least one NEUTRAL, got 0");
+    assert!(
+        buy_count > 0,
+        "Cross-product should produce at least one BUY, got 0"
+    );
+    assert!(
+        sell_count > 0,
+        "Cross-product should produce at least one SELL, got 0"
+    );
+    assert!(
+        neutral_count > 0,
+        "Cross-product should produce at least one NEUTRAL, got 0"
+    );
     assert!(
         total_evaluated >= 200,
         "Expected at least 200 signal evaluations, got {}",
@@ -8836,11 +9704,11 @@ fn test_dre_interpolation_sweep() {
     // Sweep ADX from 15 to 55 in steps of 1.0 and verify DRE interpolation
     // matches expected linear interpolation with T2 precision.
     let cfg = GateConfig::default_config();
-    let adx_min = cfg.dre_min_adx;       // 22
-    let adx_max = cfg.dre_max_adx;       // 40
-    let rsi_long_weak = cfg.dre_long_rsi_limit_low;    // 56
-    let rsi_long_strong = cfg.dre_long_rsi_limit_high;  // 52
-    let rsi_short_weak = cfg.dre_short_rsi_limit_low;   // 44
+    let adx_min = cfg.dre_min_adx; // 22
+    let adx_max = cfg.dre_max_adx; // 40
+    let rsi_long_weak = cfg.dre_long_rsi_limit_low; // 56
+    let rsi_long_strong = cfg.dre_long_rsi_limit_high; // 52
+    let rsi_short_weak = cfg.dre_short_rsi_limit_low; // 44
     let rsi_short_strong = cfg.dre_short_rsi_limit_high; // 48
 
     for adx_i in 15..=55 {
@@ -8859,13 +9727,17 @@ fn test_dre_interpolation_sweep() {
         assert!(
             within_tolerance(expected_long, result.rsi_long_limit, TIER_T2_TOLERANCE),
             "DRE long mismatch at ADX={}: expected={}, got={}, err={:.2e}",
-            adx, expected_long, result.rsi_long_limit,
+            adx,
+            expected_long,
+            result.rsi_long_limit,
             relative_error(expected_long, result.rsi_long_limit)
         );
         assert!(
             within_tolerance(expected_short, result.rsi_short_limit, TIER_T2_TOLERANCE),
             "DRE short mismatch at ADX={}: expected={}, got={}, err={:.2e}",
-            adx, expected_short, result.rsi_short_limit,
+            adx,
+            expected_short,
+            result.rsi_short_limit,
             relative_error(expected_short, result.rsi_short_limit)
         );
 
@@ -8913,7 +9785,9 @@ impl Default for ReefConfig {
 
 /// Inline REEF reference: returns true if entry is BLOCKED (should skip).
 fn reef_blocks_entry(signal: SignalDir, adx: f64, rsi: f64, cfg: &ReefConfig) -> bool {
-    if !cfg.enabled { return false; }
+    if !cfg.enabled {
+        return false;
+    }
     match signal {
         SignalDir::Buy => {
             if adx < cfg.adx_threshold {
@@ -8935,95 +9809,155 @@ fn reef_blocks_entry(signal: SignalDir, adx: f64, rsi: f64, cfg: &ReefConfig) ->
 
 #[test]
 fn test_reef_filter_disabled_allows_all() {
-    let cfg = ReefConfig { enabled: false, ..Default::default() };
+    let cfg = ReefConfig {
+        enabled: false,
+        ..Default::default()
+    };
     // Even extreme RSI should pass when disabled
-    assert!(!reef_blocks_entry(SignalDir::Buy, 15.0, 95.0, &cfg),
-        "REEF disabled: BUY with RSI=95 should NOT be blocked");
-    assert!(!reef_blocks_entry(SignalDir::Sell, 15.0, 5.0, &cfg),
-        "REEF disabled: SELL with RSI=5 should NOT be blocked");
+    assert!(
+        !reef_blocks_entry(SignalDir::Buy, 15.0, 95.0, &cfg),
+        "REEF disabled: BUY with RSI=95 should NOT be blocked"
+    );
+    assert!(
+        !reef_blocks_entry(SignalDir::Sell, 15.0, 5.0, &cfg),
+        "REEF disabled: SELL with RSI=5 should NOT be blocked"
+    );
 }
 
 #[test]
 fn test_reef_filter_buy_low_adx_blocked() {
-    let cfg = ReefConfig { enabled: true, ..Default::default() };
+    let cfg = ReefConfig {
+        enabled: true,
+        ..Default::default()
+    };
     // ADX=25 < threshold=30, RSI=75 > block_gt=70 => blocked
-    assert!(reef_blocks_entry(SignalDir::Buy, 25.0, 75.0, &cfg),
-        "REEF: BUY with low ADX and high RSI should be blocked");
+    assert!(
+        reef_blocks_entry(SignalDir::Buy, 25.0, 75.0, &cfg),
+        "REEF: BUY with low ADX and high RSI should be blocked"
+    );
 }
 
 #[test]
 fn test_reef_filter_buy_low_adx_passes() {
-    let cfg = ReefConfig { enabled: true, ..Default::default() };
+    let cfg = ReefConfig {
+        enabled: true,
+        ..Default::default()
+    };
     // ADX=25 < threshold=30, RSI=65 <= block_gt=70 => passes
-    assert!(!reef_blocks_entry(SignalDir::Buy, 25.0, 65.0, &cfg),
-        "REEF: BUY with low ADX and moderate RSI should pass");
+    assert!(
+        !reef_blocks_entry(SignalDir::Buy, 25.0, 65.0, &cfg),
+        "REEF: BUY with low ADX and moderate RSI should pass"
+    );
 }
 
 #[test]
 fn test_reef_filter_buy_high_adx_extreme_blocked() {
-    let cfg = ReefConfig { enabled: true, ..Default::default() };
+    let cfg = ReefConfig {
+        enabled: true,
+        ..Default::default()
+    };
     // ADX=35 >= threshold=30, RSI=85 > extreme_gt=80 => blocked
-    assert!(reef_blocks_entry(SignalDir::Buy, 35.0, 85.0, &cfg),
-        "REEF: BUY with high ADX and extreme RSI should be blocked");
+    assert!(
+        reef_blocks_entry(SignalDir::Buy, 35.0, 85.0, &cfg),
+        "REEF: BUY with high ADX and extreme RSI should be blocked"
+    );
 }
 
 #[test]
 fn test_reef_filter_buy_high_adx_extreme_passes() {
-    let cfg = ReefConfig { enabled: true, ..Default::default() };
+    let cfg = ReefConfig {
+        enabled: true,
+        ..Default::default()
+    };
     // ADX=35 >= threshold=30, RSI=75 <= extreme_gt=80 => passes
-    assert!(!reef_blocks_entry(SignalDir::Buy, 35.0, 75.0, &cfg),
-        "REEF: BUY with high ADX and sub-extreme RSI should pass");
+    assert!(
+        !reef_blocks_entry(SignalDir::Buy, 35.0, 75.0, &cfg),
+        "REEF: BUY with high ADX and sub-extreme RSI should pass"
+    );
 }
 
 #[test]
 fn test_reef_filter_sell_low_adx_blocked() {
-    let cfg = ReefConfig { enabled: true, ..Default::default() };
+    let cfg = ReefConfig {
+        enabled: true,
+        ..Default::default()
+    };
     // ADX=25 < threshold=30, RSI=25 < block_lt=30 => blocked
-    assert!(reef_blocks_entry(SignalDir::Sell, 25.0, 25.0, &cfg),
-        "REEF: SELL with low ADX and low RSI should be blocked");
+    assert!(
+        reef_blocks_entry(SignalDir::Sell, 25.0, 25.0, &cfg),
+        "REEF: SELL with low ADX and low RSI should be blocked"
+    );
 }
 
 #[test]
 fn test_reef_filter_sell_low_adx_passes() {
-    let cfg = ReefConfig { enabled: true, ..Default::default() };
+    let cfg = ReefConfig {
+        enabled: true,
+        ..Default::default()
+    };
     // ADX=25 < threshold=30, RSI=35 >= block_lt=30 => passes
-    assert!(!reef_blocks_entry(SignalDir::Sell, 25.0, 35.0, &cfg),
-        "REEF: SELL with low ADX and moderate RSI should pass");
+    assert!(
+        !reef_blocks_entry(SignalDir::Sell, 25.0, 35.0, &cfg),
+        "REEF: SELL with low ADX and moderate RSI should pass"
+    );
 }
 
 #[test]
 fn test_reef_filter_sell_high_adx_extreme_blocked() {
-    let cfg = ReefConfig { enabled: true, ..Default::default() };
+    let cfg = ReefConfig {
+        enabled: true,
+        ..Default::default()
+    };
     // ADX=35 >= threshold=30, RSI=15 < extreme_lt=20 => blocked
-    assert!(reef_blocks_entry(SignalDir::Sell, 35.0, 15.0, &cfg),
-        "REEF: SELL with high ADX and extreme-low RSI should be blocked");
+    assert!(
+        reef_blocks_entry(SignalDir::Sell, 35.0, 15.0, &cfg),
+        "REEF: SELL with high ADX and extreme-low RSI should be blocked"
+    );
 }
 
 #[test]
 fn test_reef_filter_sell_high_adx_extreme_passes() {
-    let cfg = ReefConfig { enabled: true, ..Default::default() };
+    let cfg = ReefConfig {
+        enabled: true,
+        ..Default::default()
+    };
     // ADX=35 >= threshold=30, RSI=25 >= extreme_lt=20 => passes
-    assert!(!reef_blocks_entry(SignalDir::Sell, 35.0, 25.0, &cfg),
-        "REEF: SELL with high ADX and sub-extreme RSI should pass");
+    assert!(
+        !reef_blocks_entry(SignalDir::Sell, 35.0, 25.0, &cfg),
+        "REEF: SELL with high ADX and sub-extreme RSI should pass"
+    );
 }
 
 #[test]
 fn test_reef_filter_boundary_adx_at_threshold() {
-    let cfg = ReefConfig { enabled: true, adx_threshold: 30.0, ..Default::default() };
+    let cfg = ReefConfig {
+        enabled: true,
+        adx_threshold: 30.0,
+        ..Default::default()
+    };
     // ADX exactly at threshold => NOT less than threshold => use extreme limits
     // BUY: RSI=75 <= extreme_gt=80 => passes
-    assert!(!reef_blocks_entry(SignalDir::Buy, 30.0, 75.0, &cfg),
-        "REEF: BUY at exact ADX threshold should use extreme limits");
+    assert!(
+        !reef_blocks_entry(SignalDir::Buy, 30.0, 75.0, &cfg),
+        "REEF: BUY at exact ADX threshold should use extreme limits"
+    );
     // BUY: RSI=85 > extreme_gt=80 => blocked
-    assert!(reef_blocks_entry(SignalDir::Buy, 30.0, 85.0, &cfg),
-        "REEF: BUY at exact ADX threshold with extreme RSI should block");
+    assert!(
+        reef_blocks_entry(SignalDir::Buy, 30.0, 85.0, &cfg),
+        "REEF: BUY at exact ADX threshold with extreme RSI should block"
+    );
 }
 
 #[test]
 fn test_reef_neutral_never_blocked() {
-    let cfg = ReefConfig { enabled: true, ..Default::default() };
-    assert!(!reef_blocks_entry(SignalDir::Neutral, 10.0, 99.0, &cfg),
-        "REEF: Neutral signals should never be blocked");
+    let cfg = ReefConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    assert!(
+        !reef_blocks_entry(SignalDir::Neutral, 10.0, 99.0, &cfg),
+        "REEF: Neutral signals should never be blocked"
+    );
 }
 
 #[test]
@@ -9051,7 +9985,9 @@ fn test_reef_config_f32_roundtrip_precision() {
         assert!(
             within_tolerance(*val, rt, TIER_T2_TOLERANCE),
             "REEF {}: f32 round-trip exceeds T2: {} vs {}",
-            name, val, rt
+            name,
+            val,
+            rt
         );
     }
 }
@@ -9061,7 +9997,10 @@ fn test_reef_config_fields_in_gpu_combo() {
     // Verify REEF fields exist in GpuComboConfig by checking sweep engine CUDA source.
     // REEF operates at the sweep-engine level (not in per-bar decision codegen).
     let gpu_config_size = std::mem::size_of::<GpuComboConfig>();
-    assert!(gpu_config_size >= 560, "GpuComboConfig must be at least 560 bytes (has REEF fields)");
+    assert!(
+        gpu_config_size >= 560,
+        "GpuComboConfig must be at least 560 bytes (has REEF fields)"
+    );
 
     // Verify REEF fields are packed at expected offsets by constructing a zeroed config
     // and checking the struct has the fields.
@@ -9085,7 +10024,9 @@ fn test_reef_config_fields_in_gpu_combo() {
 
 /// Inline SSF reference: returns true if entry is BLOCKED.
 fn ssf_blocks_entry(signal: SignalDir, macd_hist: f64, enabled: bool) -> bool {
-    if !enabled { return false; }
+    if !enabled {
+        return false;
+    }
     match signal {
         SignalDir::Buy => macd_hist <= 0.0,
         SignalDir::Sell => macd_hist >= 0.0,
@@ -9095,52 +10036,70 @@ fn ssf_blocks_entry(signal: SignalDir, macd_hist: f64, enabled: bool) -> bool {
 
 #[test]
 fn test_ssf_filter_disabled_allows_all() {
-    assert!(!ssf_blocks_entry(SignalDir::Buy, -1.0, false),
-        "SSF disabled: BUY with negative MACD should NOT be blocked");
-    assert!(!ssf_blocks_entry(SignalDir::Sell, 1.0, false),
-        "SSF disabled: SELL with positive MACD should NOT be blocked");
+    assert!(
+        !ssf_blocks_entry(SignalDir::Buy, -1.0, false),
+        "SSF disabled: BUY with negative MACD should NOT be blocked"
+    );
+    assert!(
+        !ssf_blocks_entry(SignalDir::Sell, 1.0, false),
+        "SSF disabled: SELL with positive MACD should NOT be blocked"
+    );
 }
 
 #[test]
 fn test_ssf_filter_buy_positive_hist_passes() {
-    assert!(!ssf_blocks_entry(SignalDir::Buy, 0.5, true),
-        "SSF: BUY with positive MACD hist should pass");
+    assert!(
+        !ssf_blocks_entry(SignalDir::Buy, 0.5, true),
+        "SSF: BUY with positive MACD hist should pass"
+    );
 }
 
 #[test]
 fn test_ssf_filter_buy_negative_hist_blocked() {
-    assert!(ssf_blocks_entry(SignalDir::Buy, -0.5, true),
-        "SSF: BUY with negative MACD hist should be blocked");
+    assert!(
+        ssf_blocks_entry(SignalDir::Buy, -0.5, true),
+        "SSF: BUY with negative MACD hist should be blocked"
+    );
 }
 
 #[test]
 fn test_ssf_filter_buy_zero_hist_blocked() {
-    assert!(ssf_blocks_entry(SignalDir::Buy, 0.0, true),
-        "SSF: BUY with zero MACD hist should be blocked (<=0)");
+    assert!(
+        ssf_blocks_entry(SignalDir::Buy, 0.0, true),
+        "SSF: BUY with zero MACD hist should be blocked (<=0)"
+    );
 }
 
 #[test]
 fn test_ssf_filter_sell_negative_hist_passes() {
-    assert!(!ssf_blocks_entry(SignalDir::Sell, -0.5, true),
-        "SSF: SELL with negative MACD hist should pass");
+    assert!(
+        !ssf_blocks_entry(SignalDir::Sell, -0.5, true),
+        "SSF: SELL with negative MACD hist should pass"
+    );
 }
 
 #[test]
 fn test_ssf_filter_sell_positive_hist_blocked() {
-    assert!(ssf_blocks_entry(SignalDir::Sell, 0.5, true),
-        "SSF: SELL with positive MACD hist should be blocked");
+    assert!(
+        ssf_blocks_entry(SignalDir::Sell, 0.5, true),
+        "SSF: SELL with positive MACD hist should be blocked"
+    );
 }
 
 #[test]
 fn test_ssf_filter_sell_zero_hist_blocked() {
-    assert!(ssf_blocks_entry(SignalDir::Sell, 0.0, true),
-        "SSF: SELL with zero MACD hist should be blocked (>=0)");
+    assert!(
+        ssf_blocks_entry(SignalDir::Sell, 0.0, true),
+        "SSF: SELL with zero MACD hist should be blocked (>=0)"
+    );
 }
 
 #[test]
 fn test_ssf_neutral_never_blocked() {
-    assert!(!ssf_blocks_entry(SignalDir::Neutral, 0.0, true),
-        "SSF: Neutral should never be blocked");
+    assert!(
+        !ssf_blocks_entry(SignalDir::Neutral, 0.0, true),
+        "SSF: Neutral should never be blocked"
+    );
 }
 
 #[test]
@@ -9177,7 +10136,9 @@ impl Default for RegimeConfig {
 
 /// Inline regime filter reference: returns the possibly-neutralized signal.
 fn apply_regime_filter_ref(signal: SignalDir, breadth_pct: f64, cfg: &RegimeConfig) -> SignalDir {
-    if !cfg.enabled { return signal; }
+    if !cfg.enabled {
+        return signal;
+    }
     match signal {
         SignalDir::Sell if breadth_pct > cfg.breadth_block_short_above => SignalDir::Neutral,
         SignalDir::Buy if breadth_pct < cfg.breadth_block_long_below => SignalDir::Neutral,
@@ -9187,50 +10148,89 @@ fn apply_regime_filter_ref(signal: SignalDir, breadth_pct: f64, cfg: &RegimeConf
 
 #[test]
 fn test_regime_filter_disabled_allows_all() {
-    let cfg = RegimeConfig { enabled: false, ..Default::default() };
-    assert_eq!(apply_regime_filter_ref(SignalDir::Buy, 0.1, &cfg), SignalDir::Buy,
-        "Regime disabled: BUY with low breadth should pass");
-    assert_eq!(apply_regime_filter_ref(SignalDir::Sell, 0.9, &cfg), SignalDir::Sell,
-        "Regime disabled: SELL with high breadth should pass");
+    let cfg = RegimeConfig {
+        enabled: false,
+        ..Default::default()
+    };
+    assert_eq!(
+        apply_regime_filter_ref(SignalDir::Buy, 0.1, &cfg),
+        SignalDir::Buy,
+        "Regime disabled: BUY with low breadth should pass"
+    );
+    assert_eq!(
+        apply_regime_filter_ref(SignalDir::Sell, 0.9, &cfg),
+        SignalDir::Sell,
+        "Regime disabled: SELL with high breadth should pass"
+    );
 }
 
 #[test]
 fn test_regime_filter_buy_blocked_low_breadth() {
-    let cfg = RegimeConfig { enabled: true, ..Default::default() };
+    let cfg = RegimeConfig {
+        enabled: true,
+        ..Default::default()
+    };
     // breadth_pct=0.2 < breadth_block_long_below=0.3 => BUY blocked
-    assert_eq!(apply_regime_filter_ref(SignalDir::Buy, 0.2, &cfg), SignalDir::Neutral,
-        "Regime: BUY should be blocked when breadth < threshold");
+    assert_eq!(
+        apply_regime_filter_ref(SignalDir::Buy, 0.2, &cfg),
+        SignalDir::Neutral,
+        "Regime: BUY should be blocked when breadth < threshold"
+    );
 }
 
 #[test]
 fn test_regime_filter_buy_passes_adequate_breadth() {
-    let cfg = RegimeConfig { enabled: true, ..Default::default() };
+    let cfg = RegimeConfig {
+        enabled: true,
+        ..Default::default()
+    };
     // breadth_pct=0.5 >= breadth_block_long_below=0.3 => BUY passes
-    assert_eq!(apply_regime_filter_ref(SignalDir::Buy, 0.5, &cfg), SignalDir::Buy,
-        "Regime: BUY should pass with adequate breadth");
+    assert_eq!(
+        apply_regime_filter_ref(SignalDir::Buy, 0.5, &cfg),
+        SignalDir::Buy,
+        "Regime: BUY should pass with adequate breadth"
+    );
 }
 
 #[test]
 fn test_regime_filter_sell_blocked_high_breadth() {
-    let cfg = RegimeConfig { enabled: true, ..Default::default() };
+    let cfg = RegimeConfig {
+        enabled: true,
+        ..Default::default()
+    };
     // breadth_pct=0.8 > breadth_block_short_above=0.7 => SELL blocked
-    assert_eq!(apply_regime_filter_ref(SignalDir::Sell, 0.8, &cfg), SignalDir::Neutral,
-        "Regime: SELL should be blocked when breadth > threshold");
+    assert_eq!(
+        apply_regime_filter_ref(SignalDir::Sell, 0.8, &cfg),
+        SignalDir::Neutral,
+        "Regime: SELL should be blocked when breadth > threshold"
+    );
 }
 
 #[test]
 fn test_regime_filter_sell_passes_moderate_breadth() {
-    let cfg = RegimeConfig { enabled: true, ..Default::default() };
+    let cfg = RegimeConfig {
+        enabled: true,
+        ..Default::default()
+    };
     // breadth_pct=0.5 <= breadth_block_short_above=0.7 => SELL passes
-    assert_eq!(apply_regime_filter_ref(SignalDir::Sell, 0.5, &cfg), SignalDir::Sell,
-        "Regime: SELL should pass with moderate breadth");
+    assert_eq!(
+        apply_regime_filter_ref(SignalDir::Sell, 0.5, &cfg),
+        SignalDir::Sell,
+        "Regime: SELL should pass with moderate breadth"
+    );
 }
 
 #[test]
 fn test_regime_filter_neutral_unchanged() {
-    let cfg = RegimeConfig { enabled: true, ..Default::default() };
-    assert_eq!(apply_regime_filter_ref(SignalDir::Neutral, 0.1, &cfg), SignalDir::Neutral,
-        "Regime: Neutral should remain neutral regardless of breadth");
+    let cfg = RegimeConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        apply_regime_filter_ref(SignalDir::Neutral, 0.1, &cfg),
+        SignalDir::Neutral,
+        "Regime: Neutral should remain neutral regardless of breadth"
+    );
 }
 
 #[test]
@@ -9241,11 +10241,17 @@ fn test_regime_filter_boundary_exact_threshold() {
         breadth_block_long_below: 0.3,
     };
     // BUY at exact threshold: breadth_pct=0.3, NOT less than 0.3 => passes
-    assert_eq!(apply_regime_filter_ref(SignalDir::Buy, 0.3, &cfg), SignalDir::Buy,
-        "Regime: BUY at exact threshold should pass (not strictly less)");
+    assert_eq!(
+        apply_regime_filter_ref(SignalDir::Buy, 0.3, &cfg),
+        SignalDir::Buy,
+        "Regime: BUY at exact threshold should pass (not strictly less)"
+    );
     // SELL at exact threshold: breadth_pct=0.7, NOT greater than 0.7 => passes
-    assert_eq!(apply_regime_filter_ref(SignalDir::Sell, 0.7, &cfg), SignalDir::Sell,
-        "Regime: SELL at exact threshold should pass (not strictly greater)");
+    assert_eq!(
+        apply_regime_filter_ref(SignalDir::Sell, 0.7, &cfg),
+        SignalDir::Sell,
+        "Regime: SELL at exact threshold should pass (not strictly greater)"
+    );
 }
 
 #[test]
@@ -9261,7 +10267,9 @@ fn test_regime_config_f32_roundtrip_precision() {
         assert!(
             within_tolerance(*val, rt, TIER_T2_TOLERANCE),
             "Regime {}: f32 round-trip exceeds T2: {} vs {}",
-            name, val, rt
+            name,
+            val,
+            rt
         );
     }
 }
@@ -9284,18 +10292,18 @@ fn test_macd_helpers_all_modes_exhaustive() {
     let test_cases: &[(u32, f64, f64, bool, bool)] = &[
         // (mode, hist, prev_hist, expected_long, expected_short)
         // Accel mode
-        (0, 0.5, 0.3, true, false),   // rising hist: long accel ok, short accel not
-        (0, 0.3, 0.5, false, true),   // falling hist: short accel ok, long not
-        (0, 0.5, 0.5, false, false),  // flat: neither
+        (0, 0.5, 0.3, true, false), // rising hist: long accel ok, short accel not
+        (0, 0.3, 0.5, false, true), // falling hist: short accel ok, long not
+        (0, 0.5, 0.5, false, false), // flat: neither
         (0, -0.3, -0.5, true, false), // rising (less negative): long accel ok
         (0, -0.5, -0.3, false, true), // falling (more negative): short accel ok
         // Sign mode
-        (1, 0.5, -999.0, true, false),   // positive hist: long sign ok
-        (1, -0.5, 999.0, false, true),   // negative hist: short sign ok
-        (1, 0.0, 0.0, false, false),     // zero: neither (> 0 false, < 0 false)
+        (1, 0.5, -999.0, true, false), // positive hist: long sign ok
+        (1, -0.5, 999.0, false, true), // negative hist: short sign ok
+        (1, 0.0, 0.0, false, false),   // zero: neither (> 0 false, < 0 false)
         // None mode
-        (2, -999.0, 999.0, true, true),  // always true
-        (2, 0.0, 0.0, true, true),       // always true
+        (2, -999.0, 999.0, true, true), // always true
+        (2, 0.0, 0.0, true, true),      // always true
     ];
 
     for &(mode, hist, prev, exp_long, exp_short) in test_cases {
@@ -9354,7 +10362,10 @@ fn test_effective_min_adx_tmc_ave_precision_sweep() {
             assert!(
                 within_tolerance(expected, result.effective_min_adx, TIER_T2_TOLERANCE),
                 "TMC+AVE mismatch: slope={}, atr_ratio={}: expected={}, got={}, err={:.2e}",
-                slope, ratio, expected, result.effective_min_adx,
+                slope,
+                ratio,
+                expected,
+                result.effective_min_adx,
                 relative_error(expected, result.effective_min_adx)
             );
 
@@ -9363,7 +10374,8 @@ fn test_effective_min_adx_tmc_ave_precision_sweep() {
             assert!(
                 within_tolerance(result.effective_min_adx, f32_rt, TIER_T2_TOLERANCE),
                 "effective_min_adx f32 round-trip exceeds T2: slope={}, ratio={}",
-                slope, ratio
+                slope,
+                ratio
             );
         }
     }

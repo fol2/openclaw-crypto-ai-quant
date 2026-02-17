@@ -71,8 +71,8 @@ pub type SimInitState = (
 pub fn load(path: &str) -> Result<InitStateFile, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read init-state file {:?}: {}", path, e))?;
-    let state: InitStateFile =
-        serde_json::from_str(&content).map_err(|e| format!("Failed to parse init-state JSON: {}", e))?;
+    let state: InitStateFile = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse init-state JSON: {}", e))?;
 
     if !SUPPORTED_VERSIONS.contains(&state.version) {
         return Err(format!(
@@ -98,7 +98,10 @@ fn symbol_allowed(symbol: &str, valid_symbols: Option<&[&str]>) -> bool {
 /// runtime cooldown snapshots.
 ///
 /// Returns `(balance, positions, last_entry_attempt_ms, last_exit_attempt_ms)`.
-pub fn into_sim_state_with_runtime(state: InitStateFile, valid_symbols: Option<&[&str]>) -> SimInitState {
+pub fn into_sim_state_with_runtime(
+    state: InitStateFile,
+    valid_symbols: Option<&[&str]>,
+) -> SimInitState {
     let mut positions = FxHashMap::default();
 
     for ip in state.positions {
@@ -323,10 +326,8 @@ mod tests {
 
         let result = load(path.to_str().expect("path should be utf-8"));
         assert!(result.is_err());
-        assert!(
-            result
-                .expect_err("version 99 should fail")
-                .contains("Unsupported init-state version")
-        );
+        assert!(result
+            .expect_err("version 99 should fail")
+            .contains("Unsupported init-state version"));
     }
 }

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
-use serde_json::{self, Value, json};
+use serde_json::{self, json, Value};
 
 use bt_core::candle::OhlcvBar;
 use bt_core::config::IndicatorsConfig;
@@ -93,10 +93,14 @@ fn ensure_matching_schema_version(
 
     let mut errors = Vec::with_capacity(3);
     if state_version != expected_version {
-        errors.push(format!("state schema_version={state_version}, expected={expected_version}"));
+        errors.push(format!(
+            "state schema_version={state_version}, expected={expected_version}"
+        ));
     }
     if event_version != expected_version {
-        errors.push(format!("event schema_version={event_version}, expected={expected_version}"));
+        errors.push(format!(
+            "event schema_version={event_version}, expected={expected_version}"
+        ));
     }
     if params_version != expected_version {
         errors.push(format!(
@@ -156,7 +160,8 @@ fn step_decision(state_json: &str, event_json: &str, params_json: &str) -> PyRes
     };
 
     let expected = default_schema_version();
-    if let Some(details) = ensure_matching_schema_version(state_version, event_version, params_version, expected)
+    if let Some(details) =
+        ensure_matching_schema_version(state_version, event_version, params_version, expected)
     {
         return Ok(validation_error(
             "SCHEMA_VERSION_MISMATCH",
@@ -260,9 +265,7 @@ fn step_full(
         .insert("exit_params".to_string(), exit_params_val);
 
     let merged_params = serde_json::to_string(&params_val).map_err(|e| {
-        pyo3::exceptions::PyRuntimeError::new_err(format!(
-            "Failed to serialise merged params: {e}"
-        ))
+        pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to serialise merged params: {e}"))
     })?;
 
     step_decision(state_json, event_json, &merged_params)
@@ -278,14 +281,11 @@ fn apply_funding(
     price: f64,
     params_json: &str,
 ) -> PyResult<String> {
-    let state: decision_kernel::StrategyState =
-        serde_json::from_str(state_json).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Invalid state JSON: {e}"))
-        })?;
-    let params: decision_kernel::KernelParams =
-        serde_json::from_str(params_json).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Invalid params JSON: {e}"))
-        })?;
+    let state: decision_kernel::StrategyState = serde_json::from_str(state_json)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid state JSON: {e}")))?;
+    let params: decision_kernel::KernelParams = serde_json::from_str(params_json).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("Invalid params JSON: {e}"))
+    })?;
 
     let event = decision_kernel::MarketEvent {
         schema_version: default_schema_version(),
@@ -312,10 +312,8 @@ fn apply_funding(
 /// Mark-to-market equity: `cash_usd + sum(unrealized PnL)`.
 #[pyfunction]
 fn get_equity(state_json: &str, prices_json: &str) -> PyResult<f64> {
-    let state: decision_kernel::StrategyState =
-        serde_json::from_str(state_json).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Invalid state JSON: {e}"))
-        })?;
+    let state: decision_kernel::StrategyState = serde_json::from_str(state_json)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid state JSON: {e}")))?;
     let prices: HashMap<String, f64> = serde_json::from_str(prices_json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Invalid prices JSON: {e}"))
     })?;
@@ -323,9 +321,7 @@ fn get_equity(state_json: &str, prices_json: &str) -> PyResult<f64> {
     let mut equity = state.cash_usd;
     for (symbol, pos) in &state.positions {
         let current_price = prices.get(symbol).copied().ok_or_else(|| {
-            pyo3::exceptions::PyValueError::new_err(format!(
-                "Missing price for symbol: {symbol}"
-            ))
+            pyo3::exceptions::PyValueError::new_err(format!("Missing price for symbol: {symbol}"))
         })?;
         let unrealized_pnl = match pos.side {
             decision_kernel::PositionSide::Long => {
@@ -347,23 +343,18 @@ fn get_equity(state_json: &str, prices_json: &str) -> PyResult<f64> {
 /// (AQC-814).
 #[pyfunction]
 fn get_positions(state_json: &str) -> PyResult<String> {
-    let state: decision_kernel::StrategyState =
-        serde_json::from_str(state_json).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Invalid state JSON: {e}"))
-        })?;
+    let state: decision_kernel::StrategyState = serde_json::from_str(state_json)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid state JSON: {e}")))?;
     serde_json::to_string(&state.positions).map_err(|e| {
-        pyo3::exceptions::PyRuntimeError::new_err(format!(
-            "Failed to serialise positions: {e}"
-        ))
+        pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to serialise positions: {e}"))
     })
 }
 
 /// Validate and persist state JSON to a file.
 #[pyfunction]
 fn save_state(state_json: &str, path: &str) -> PyResult<()> {
-    let _: decision_kernel::StrategyState = serde_json::from_str(state_json).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("Invalid state JSON: {e}"))
-    })?;
+    let _: decision_kernel::StrategyState = serde_json::from_str(state_json)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid state JSON: {e}")))?;
     std::fs::write(path, state_json).map_err(|e| {
         pyo3::exceptions::PyIOError::new_err(format!("Failed to write {path}: {e}"))
     })?;
@@ -373,9 +364,8 @@ fn save_state(state_json: &str, path: &str) -> PyResult<()> {
 /// Load and validate state JSON from a file.
 #[pyfunction]
 fn load_state(path: &str) -> PyResult<String> {
-    let json = std::fs::read_to_string(path).map_err(|e| {
-        pyo3::exceptions::PyIOError::new_err(format!("Failed to read {path}: {e}"))
-    })?;
+    let json = std::fs::read_to_string(path)
+        .map_err(|e| pyo3::exceptions::PyIOError::new_err(format!("Failed to read {path}: {e}")))?;
     let _: decision_kernel::StrategyState = serde_json::from_str(&json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Invalid state JSON at {path}: {e}"))
     })?;

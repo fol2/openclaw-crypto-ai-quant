@@ -556,9 +556,12 @@ fn rust_compute_entry_sizing(
         } else {
             1.0
         };
-        let vol_scalar_raw = if vol_ratio > 0.0 { 1.0 / vol_ratio } else { 1.0 };
-        let vol_scalar =
-            vol_scalar_raw.clamp(cfg.vol_scalar_min as f64, cfg.vol_scalar_max as f64);
+        let vol_scalar_raw = if vol_ratio > 0.0 {
+            1.0 / vol_ratio
+        } else {
+            1.0
+        };
+        let vol_scalar = vol_scalar_raw.clamp(cfg.vol_scalar_min as f64, cfg.vol_scalar_max as f64);
 
         margin_used *= confidence_mult * adx_mult * vol_scalar;
     }
@@ -637,7 +640,11 @@ struct GateResult {
     rsi_short_limit: f64,
 }
 
-fn rust_check_gates(bar: &SyntheticBar, cfg: &GpuComboConfig, btc_bullish: Option<bool>) -> GateResult {
+fn rust_check_gates(
+    bar: &SyntheticBar,
+    cfg: &GpuComboConfig,
+    btc_bullish: Option<bool>,
+) -> GateResult {
     // Gate 1: Ranging filter (vote system)
     let mut is_ranging = false;
     if cfg.enable_ranging_filter != 0 {
@@ -763,8 +770,12 @@ fn rust_check_gates(bar: &SyntheticBar, cfg: &GpuComboConfig, btc_bullish: Optio
         + weight * (cfg.dre_short_rsi_limit_high as f64 - cfg.dre_short_rsi_limit_low as f64);
 
     // Combined all_gates_pass
-    let all_gates_pass =
-        adx_above_min && !is_ranging && !is_anomaly && !is_extended && vol_confirm && is_trending_up;
+    let all_gates_pass = adx_above_min
+        && !is_ranging
+        && !is_anomaly
+        && !is_extended
+        && vol_confirm
+        && is_trending_up;
 
     // We also need btc_ok for the signal generation, but for gate-level
     // parity we validate all_gates_pass (which does NOT include btc alignment
@@ -840,14 +851,11 @@ fn rust_generate_signal(bar: &SyntheticBar, gates: &GateResult, cfg: &GpuComboCo
 
     // Mode 2: Pullback continuation
     if cfg.enable_pullback_entries != 0 {
-        let pullback_gates_ok = !gates.is_ranging
-            && bar.adx >= cfg.pullback_min_adx as f64;
+        let pullback_gates_ok = !gates.is_ranging && bar.adx >= cfg.pullback_min_adx as f64;
 
         if pullback_gates_ok {
-            let cross_up =
-                bar.prev_close <= bar.prev_ema_fast && bar.close > bar.ema_fast;
-            let cross_dn =
-                bar.prev_close >= bar.prev_ema_fast && bar.close < bar.ema_fast;
+            let cross_up = bar.prev_close <= bar.prev_ema_fast && bar.close > bar.ema_fast;
+            let cross_dn = bar.prev_close >= bar.prev_ema_fast && bar.close < bar.ema_fast;
 
             if cross_up && gates.bullish_alignment {
                 let macd_ok = if cfg.pullback_require_macd_sign != 0 {
@@ -873,8 +881,7 @@ fn rust_generate_signal(bar: &SyntheticBar, gates: &GateResult, cfg: &GpuComboCo
 
     // Mode 3: Slow drift
     if cfg.enable_slow_drift_entries != 0 {
-        let slow_gates_ok = !gates.is_ranging
-            && bar.adx >= cfg.slow_drift_min_adx as f64;
+        let slow_gates_ok = !gates.is_ranging && bar.adx >= cfg.slow_drift_min_adx as f64;
 
         if slow_gates_ok {
             if gates.bullish_alignment
@@ -982,11 +989,7 @@ fn full_sweep_100_configs_decision_parity() {
 
     // Generate synthetic market data
     let bars = generate_synthetic_bars(&mut rng, 50_000.0);
-    assert!(
-        bars.len() >= 2160,
-        "Expected 2160 bars, got {}",
-        bars.len()
-    );
+    assert!(bars.len() >= 2160, "Expected 2160 bars, got {}", bars.len());
 
     let mut total_sl_checks = 0_u64;
     let mut total_trailing_checks = 0_u64;
@@ -1153,8 +1156,14 @@ fn full_sweep_100_configs_decision_parity() {
 
             // ── 3. Entry sizing parity ──────────────────────────────────
             let equity = 10_000.0;
-            let (size, margin, lev, notional) =
-                rust_compute_entry_sizing(equity, bar.close, bar.atr, bar.adx, pos.confidence, &cfg);
+            let (size, margin, lev, notional) = rust_compute_entry_sizing(
+                equity,
+                bar.close,
+                bar.atr,
+                bar.adx,
+                pos.confidence,
+                &cfg,
+            );
 
             // All outputs must be non-negative
             assert!(
@@ -1244,9 +1253,7 @@ fn full_sweep_100_configs_decision_parity() {
                 assert!(
                     !still_blocked,
                     "PESC still blocked after 1 day: cfg={}, close_ts={}, current_ts={}",
-                    cfg_idx,
-                    close_ts,
-                    far_future
+                    cfg_idx, close_ts, far_future
                 );
             }
 
@@ -1346,13 +1353,34 @@ fn full_sweep_100_configs_decision_parity() {
     eprintln!("╔══════════════════════════════════════════════════════════════╗");
     eprintln!("║  Full-sweep parity test: 100 configs complete              ║");
     eprintln!("╠══════════════════════════════════════════════════════════════╣");
-    eprintln!("║  Total checks:     {:>8}                                ║", total_checks);
-    eprintln!("║  SL checks:        {:>8}  (max rel err: {:.2e})      ║", total_sl_checks, sl_max_rel_err);
-    eprintln!("║  Trailing checks:  {:>8}  (max rel err: {:.2e})      ║", total_trailing_checks, trailing_max_rel_err);
-    eprintln!("║  Sizing checks:    {:>8}  (max rel err: {:.2e})      ║", total_sizing_checks, sizing_max_rel_err);
-    eprintln!("║  PESC checks:      {:>8}                                ║", total_pesc_checks);
-    eprintln!("║  Gate checks:      {:>8}  (f32 disagreements: {})    ║", total_gate_checks, gate_disagreements);
-    eprintln!("║  Signal checks:    {:>8}                                ║", total_signal_checks);
+    eprintln!(
+        "║  Total checks:     {:>8}                                ║",
+        total_checks
+    );
+    eprintln!(
+        "║  SL checks:        {:>8}  (max rel err: {:.2e})      ║",
+        total_sl_checks, sl_max_rel_err
+    );
+    eprintln!(
+        "║  Trailing checks:  {:>8}  (max rel err: {:.2e})      ║",
+        total_trailing_checks, trailing_max_rel_err
+    );
+    eprintln!(
+        "║  Sizing checks:    {:>8}  (max rel err: {:.2e})      ║",
+        total_sizing_checks, sizing_max_rel_err
+    );
+    eprintln!(
+        "║  PESC checks:      {:>8}                                ║",
+        total_pesc_checks
+    );
+    eprintln!(
+        "║  Gate checks:      {:>8}  (f32 disagreements: {})    ║",
+        total_gate_checks, gate_disagreements
+    );
+    eprintln!(
+        "║  Signal checks:    {:>8}                                ║",
+        total_signal_checks
+    );
     eprintln!("╚══════════════════════════════════════════════════════════════╝");
 
     // Gate disagreements from f32 boundary effects should be rare (<5%)
@@ -1461,13 +1489,22 @@ fn random_configs_survive_f32_roundtrip() {
             ("enable_partial_tp", cfg.enable_partial_tp),
             ("enable_ssf_filter", cfg.enable_ssf_filter),
             ("enable_breakeven_stop", cfg.enable_breakeven_stop),
-            ("enable_rsi_overextension_exit", cfg.enable_rsi_overextension_exit),
-            ("enable_vol_buffered_trailing", cfg.enable_vol_buffered_trailing),
+            (
+                "enable_rsi_overextension_exit",
+                cfg.enable_rsi_overextension_exit,
+            ),
+            (
+                "enable_vol_buffered_trailing",
+                cfg.enable_vol_buffered_trailing,
+            ),
             ("enable_ranging_filter", cfg.enable_ranging_filter),
             ("enable_anomaly_filter", cfg.enable_anomaly_filter),
             ("enable_extension_filter", cfg.enable_extension_filter),
             ("require_adx_rising", cfg.require_adx_rising),
-            ("require_volume_confirmation", cfg.require_volume_confirmation),
+            (
+                "require_volume_confirmation",
+                cfg.require_volume_confirmation,
+            ),
             ("use_stoch_rsi_filter", cfg.use_stoch_rsi_filter),
             ("require_btc_alignment", cfg.require_btc_alignment),
             ("require_macro_alignment", cfg.require_macro_alignment),

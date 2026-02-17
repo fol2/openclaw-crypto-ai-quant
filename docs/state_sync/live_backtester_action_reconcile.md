@@ -34,12 +34,14 @@ Use `--timestamp-bucket-ms > 1` only when your live timestamp serialisation is i
 - Key match: `symbol + action_code + timestamp_ms`
 - Numeric fields: `price`, `size`, `pnl_usd`, `fee_usd`, `balance`
 - Confidence parity when both sides provide a confidence value
+- Canonical reason-code parity (live reason text is classified with the same taxonomy used by backtester)
 
 ## Taxonomy
 
 - `deterministic_logic_divergence`
   - missing action on either side
   - confidence mismatch
+  - reason-code mismatch
 - `numeric_policy_divergence`
   - matched key exists but numeric deltas exceed tolerance
 - `non-simulatable_exchange_oms_effect`

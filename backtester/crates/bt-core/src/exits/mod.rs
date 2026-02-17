@@ -7,10 +7,10 @@
 //! All functions are pure computations — the caller is responsible for mutating
 //! `Position` fields (e.g., `trailing_sl`, `tp1_taken`) after applying the result.
 
-pub mod stop_loss;
-pub mod trailing;
-pub mod take_profit;
 pub mod smart_exits;
+pub mod stop_loss;
+pub mod take_profit;
+pub mod trailing;
 
 use crate::config::StrategyConfig;
 use crate::indicators::IndicatorSnapshot;

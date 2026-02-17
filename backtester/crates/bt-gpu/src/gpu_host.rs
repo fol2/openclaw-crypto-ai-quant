@@ -176,7 +176,9 @@ impl IndicatorBuffers {
     ) -> Result<Self, String> {
         let k = ind_configs.len() as u32;
 
-        let ind_configs_gpu = ds.dev.htod_sync_copy(ind_configs)
+        let ind_configs_gpu = ds
+            .dev
+            .htod_sync_copy(ind_configs)
             .map_err(|e| format!("GPU: htod ind_configs failed: {e}"))?;
 
         let params = IndicatorParams {
@@ -186,18 +188,26 @@ impl IndicatorBuffers {
             btc_sym_idx,
             _pad: [0; 4],
         };
-        let ind_params_gpu = ds.dev.htod_sync_copy(&[params])
+        let ind_params_gpu = ds
+            .dev
+            .htod_sync_copy(&[params])
             .map_err(|e| format!("GPU: htod ind_params failed: {e}"))?;
 
         // Allocate output buffers in VRAM (zeroed)
         let snap_count = (k as usize) * (num_bars as usize) * (num_symbols as usize);
         let breadth_count = (k as usize) * (num_bars as usize);
 
-        let snapshots_gpu = ds.dev.alloc_zeros::<GpuSnapshot>(snap_count)
+        let snapshots_gpu = ds
+            .dev
+            .alloc_zeros::<GpuSnapshot>(snap_count)
             .map_err(|e| format!("GPU: alloc snapshots ({snap_count} elems) failed: {e}"))?;
-        let breadth_gpu = ds.dev.alloc_zeros::<f32>(breadth_count)
+        let breadth_gpu = ds
+            .dev
+            .alloc_zeros::<f32>(breadth_count)
             .map_err(|e| format!("GPU: alloc breadth ({breadth_count} elems) failed: {e}"))?;
-        let btc_bullish_gpu = ds.dev.alloc_zeros::<u32>(breadth_count)
+        let btc_bullish_gpu = ds
+            .dev
+            .alloc_zeros::<u32>(breadth_count)
             .map_err(|e| format!("GPU: alloc btc_bullish ({breadth_count} elems) failed: {e}"))?;
 
         Ok(Self {
@@ -217,7 +227,10 @@ impl IndicatorBuffers {
 
 /// Dispatch indicator_kernel + breadth_kernel on GPU.
 /// After this returns, snapshots/breadth/btc_bullish are ready in VRAM.
-pub fn dispatch_indicator_kernels(ds: &GpuDeviceState, buffers: &mut IndicatorBuffers) -> Result<(), String> {
+pub fn dispatch_indicator_kernels(
+    ds: &GpuDeviceState,
+    buffers: &mut IndicatorBuffers,
+) -> Result<(), String> {
     let block_size = 64u32;
 
     // ── Indicator kernel: K × S threads ─────────────────────────────────
@@ -320,7 +333,9 @@ impl BatchBuffers {
         let num_bars = ind_bufs.num_bars;
         let num_symbols = ind_bufs.num_symbols;
 
-        let configs_gpu = ds.dev.htod_sync_copy(configs)
+        let configs_gpu = ds
+            .dev
+            .htod_sync_copy(configs)
             .map_err(|e| format!("GPU alloc failed: {e}"))?;
 
         let mut states_host = vec![GpuComboState::zeroed(); configs.len()];
@@ -332,9 +347,13 @@ impl BatchBuffers {
             states_host[combo_idx].trace_enabled = 1;
             states_host[combo_idx].trace_symbol = sym_idx;
         }
-        let states = ds.dev.htod_sync_copy(&states_host)
+        let states = ds
+            .dev
+            .htod_sync_copy(&states_host)
             .map_err(|e| format!("GPU alloc failed: {e}"))?;
-        let results = ds.dev.alloc_zeros::<GpuResult>(configs.len())
+        let results = ds
+            .dev
+            .alloc_zeros::<GpuResult>(configs.len())
             .map_err(|e| format!("GPU alloc failed: {e}"))?;
 
         let params_host = GpuParams {
@@ -350,7 +369,9 @@ impl BatchBuffers {
             max_sub_per_bar: 0,
             trade_end_bar: num_bars,
         };
-        let params = ds.dev.htod_sync_copy(&[params_host])
+        let params = ds
+            .dev
+            .htod_sync_copy(&[params_host])
             .map_err(|e| format!("GPU alloc failed: {e}"))?;
 
         Ok(Self {
@@ -390,13 +411,21 @@ impl BatchBuffers {
     ) -> Result<Self, String> {
         let num_combos = configs.len() as u32;
 
-        let snapshots = ds.dev.htod_sync_copy(all_snapshots)
+        let snapshots = ds
+            .dev
+            .htod_sync_copy(all_snapshots)
             .map_err(|e| format!("GPU alloc failed: {e}"))?;
-        let breadth = ds.dev.htod_sync_copy(all_breadth)
+        let breadth = ds
+            .dev
+            .htod_sync_copy(all_breadth)
             .map_err(|e| format!("GPU alloc failed: {e}"))?;
-        let btc_bullish = ds.dev.htod_sync_copy(all_btc_bullish)
+        let btc_bullish = ds
+            .dev
+            .htod_sync_copy(all_btc_bullish)
             .map_err(|e| format!("GPU alloc failed: {e}"))?;
-        let configs_gpu = ds.dev.htod_sync_copy(configs)
+        let configs_gpu = ds
+            .dev
+            .htod_sync_copy(configs)
             .map_err(|e| format!("GPU alloc failed: {e}"))?;
 
         let mut states_host = vec![GpuComboState::zeroed(); configs.len()];
@@ -408,9 +437,13 @@ impl BatchBuffers {
             states_host[combo_idx].trace_enabled = 1;
             states_host[combo_idx].trace_symbol = sym_idx;
         }
-        let states = ds.dev.htod_sync_copy(&states_host)
+        let states = ds
+            .dev
+            .htod_sync_copy(&states_host)
             .map_err(|e| format!("GPU alloc failed: {e}"))?;
-        let results = ds.dev.alloc_zeros::<GpuResult>(configs.len())
+        let results = ds
+            .dev
+            .alloc_zeros::<GpuResult>(configs.len())
             .map_err(|e| format!("GPU alloc failed: {e}"))?;
 
         let params_host = GpuParams {
@@ -426,7 +459,9 @@ impl BatchBuffers {
             max_sub_per_bar: 0,
             trade_end_bar: num_bars,
         };
-        let params = ds.dev.htod_sync_copy(&[params_host])
+        let params = ds
+            .dev
+            .htod_sync_copy(&[params_host])
             .map_err(|e| format!("GPU alloc failed: {e}"))?;
 
         Ok(Self {
@@ -490,9 +525,13 @@ pub fn dispatch_and_readback(
     let (sub_candles_ref, sub_counts_ref) = match (&buffers.sub_candles, &buffers.sub_counts) {
         (Some(sc), Some(sn)) => (sc, sn),
         _ => {
-            sentinel_candle = ds.dev.alloc_zeros::<GpuRawCandle>(1)
+            sentinel_candle = ds
+                .dev
+                .alloc_zeros::<GpuRawCandle>(1)
                 .map_err(|e| format!("GPU alloc failed: {e}"))?;
-            sentinel_counts = ds.dev.alloc_zeros::<u32>(1)
+            sentinel_counts = ds
+                .dev
+                .alloc_zeros::<u32>(1)
                 .map_err(|e| format!("GPU alloc failed: {e}"))?;
             (&sentinel_candle, &sentinel_counts)
         }
@@ -549,12 +588,17 @@ pub fn dispatch_and_readback(
         .map_err(|e| format!("Kernel launch failed: {e}"))?;
     }
 
-    ds.dev.dtoh_sync_copy(&buffers.results)
+    ds.dev
+        .dtoh_sync_copy(&buffers.results)
         .map_err(|e| format!("GPU readback failed: {e}"))
 }
 
 /// Read back mutable combo states from device.
-pub fn readback_states(ds: &GpuDeviceState, buffers: &BatchBuffers) -> Result<Vec<GpuComboState>, String> {
-    ds.dev.dtoh_sync_copy(&buffers.states)
+pub fn readback_states(
+    ds: &GpuDeviceState,
+    buffers: &BatchBuffers,
+) -> Result<Vec<GpuComboState>, String> {
+    ds.dev
+        .dtoh_sync_copy(&buffers.states)
         .map_err(|e| format!("GPU readback failed: {e}"))
 }

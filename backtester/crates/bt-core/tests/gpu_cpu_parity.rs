@@ -86,7 +86,8 @@ fn print_parity_table(checks: &[ParityCheck]) {
 // ---------------------------------------------------------------------------
 
 fn load_candles_fixture(path: &Path) -> CandleData {
-    let raw = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("Failed to read {path:?}: {e}"));
+    let raw =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("Failed to read {path:?}: {e}"));
     let parsed: std::collections::BTreeMap<String, Vec<FixtureBar>> =
         serde_json::from_str(&raw).unwrap_or_else(|e| panic!("Invalid JSON in {path:?}: {e}"));
 
@@ -111,7 +112,8 @@ fn load_candles_fixture(path: &Path) -> CandleData {
 }
 
 fn load_expected(path: &Path) -> ExpectedGpuSweepResult {
-    let raw = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("Failed to read {path:?}: {e}"));
+    let raw =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("Failed to read {path:?}: {e}"));
     serde_json::from_str(&raw).unwrap_or_else(|e| panic!("Invalid JSON in {path:?}: {e}"))
 }
 
@@ -141,33 +143,39 @@ fn gpu_cpu_parity_fixture_is_within_tolerance() {
     let initial_balance = 10_000.0;
     let lookback = 200;
 
-    let sim = engine::run_simulation(
-        &candles,
-        &cfg,
+    let sim = engine::run_simulation(engine::RunSimulationInput {
+        candles: &candles,
+        cfg: &cfg,
         initial_balance,
         lookback,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    );
+        exit_candles: None,
+        entry_candles: None,
+        funding_rates: None,
+        init_state: None,
+        from_ts: None,
+        to_ts: None,
+    });
 
-    let rpt = report::build_report(
-        &sim.trades,
-        &sim.signals,
-        &sim.equity_curve,
-        &sim.gate_stats,
+    let rpt = report::build_report(report::BuildReportInput {
+        trades: &sim.trades,
+        signals: &sim.signals,
+        equity_curve: &sim.equity_curve,
+        gate_stats: &sim.gate_stats,
         initial_balance,
-        sim.final_balance,
-        "cpu_parity",
-        false,
-        false,
-    );
+        final_balance: sim.final_balance,
+        config_id: "cpu_parity",
+        include_trades: false,
+        include_equity_curve: false,
+    });
 
-    assert!(rpt.total_trades > 0, "Fixture produced no trades; adjust strategy.yaml or candles fixture");
-    assert!(expected.total_trades > 0, "Expected GPU fixture produced no trades; regenerate expected_gpu_sweep.json");
+    assert!(
+        rpt.total_trades > 0,
+        "Fixture produced no trades; adjust strategy.yaml or candles fixture"
+    );
+    assert!(
+        expected.total_trades > 0,
+        "Expected GPU fixture produced no trades; regenerate expected_gpu_sweep.json"
+    );
 
     // Ensure the fixture files stay in sync with the generator.
     assert!(
@@ -259,6 +267,10 @@ fn gpu_cpu_parity_fixture_is_within_tolerance() {
         failures.is_empty(),
         "GPU↔CPU parity failed for {} metric(s): [{}]",
         failures.len(),
-        failures.iter().map(|c| c.metric).collect::<Vec<_>>().join(", ")
+        failures
+            .iter()
+            .map(|c| c.metric)
+            .collect::<Vec<_>>()
+            .join(", ")
     );
 }

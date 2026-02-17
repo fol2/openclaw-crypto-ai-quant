@@ -87,9 +87,8 @@ pub fn load_state(db_path: &Path) -> Result<Option<StrategyState>, StoreError> {
     let conn = Connection::open(db_path)?;
     ensure_table(&conn)?;
 
-    let mut stmt = conn.prepare(
-        "SELECT state_json, checksum FROM kernel_state ORDER BY id DESC LIMIT 1",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT state_json, checksum FROM kernel_state ORDER BY id DESC LIMIT 1")?;
 
     let row = stmt.query_row([], |row| {
         let json: String = row.get(0)?;
@@ -250,7 +249,7 @@ mod tests {
                 mae_usd: -500.0,
                 mfe_usd: 2_000.0,
                 last_funding_ms: None,
-            }
+            },
         );
 
         save_state(&db_path, &state, state.timestamp_ms).unwrap();

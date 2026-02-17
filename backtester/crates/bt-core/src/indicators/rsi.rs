@@ -83,8 +83,8 @@ impl RsiIndicator {
 #[derive(Debug, Clone)]
 pub struct StochRsi {
     rsi_ring: RingBuf,
-    k_ring: RingBuf,   // smooth1 window for K
-    d_ring: RingBuf,   // smooth2 window for D
+    k_ring: RingBuf, // smooth1 window for K
+    d_ring: RingBuf, // smooth2 window for D
 }
 
 impl StochRsi {

@@ -377,7 +377,8 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         rel: args.event_numeric_rel_tol.max(0.0),
     };
     let sorted_symbols = sorted_symbols_with_cap(&candles);
-    let trace_symbol_idx = resolve_trace_symbol_index(args.trace_symbol.as_deref(), &sorted_symbols);
+    let trace_symbol_idx =
+        resolve_trace_symbol_index(args.trace_symbol.as_deref(), &sorted_symbols);
 
     let axes: Vec<_> = match args.max_axes {
         Some(limit) => spec.axes.iter().take(limit).cloned().collect(),
@@ -395,7 +396,8 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let baseline_cpu = run_cpu_single(&base_cfg, &single_spec, &candles, args.from_ts, args.to_ts)?;
     let baseline_gpu = run_gpu_single(&base_cfg, &single_spec, &candles, args.from_ts, args.to_ts)?;
     let baseline_trade_delta = baseline_gpu.total_trades as i64 - baseline_cpu.total_trades as i64;
-    let baseline_balance_delta_abs = (baseline_gpu.final_balance - baseline_cpu.final_balance).abs();
+    let baseline_balance_delta_abs =
+        (baseline_gpu.final_balance - baseline_cpu.final_balance).abs();
     let baseline_pnl_delta_abs = (baseline_gpu.total_pnl - baseline_cpu.total_pnl).abs();
     let baseline_pass = baseline_trade_delta == 0
         && baseline_balance_delta_abs <= args.balance_eps
@@ -450,7 +452,9 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             axis_path: "__baseline__".to_string(),
             sample_index: 0,
             sample_value: 0.0,
-            cause: baseline_cause.clone().unwrap_or_else(|| "UNKNOWN".to_string()),
+            cause: baseline_cause
+                .clone()
+                .unwrap_or_else(|| "UNKNOWN".to_string()),
             trace_symbol_requested: args.trace_symbol.clone(),
             trace_symbol_index: trace_symbol_idx,
             trace_symbol_name,
@@ -647,7 +651,11 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 axis_path: axis.path.clone(),
                 sample_index,
                 sample_value,
-                status: if pass { "PASS".to_string() } else { "FAIL".to_string() },
+                status: if pass {
+                    "PASS".to_string()
+                } else {
+                    "FAIL".to_string()
+                },
                 cause,
                 cpu,
                 gpu: CompactResult {
@@ -717,18 +725,18 @@ fn run_cpu_single_with_trade_events(
             events: Vec::new(),
         });
     }
-    let sim = bt_core::engine::run_simulation(
+    let sim = bt_core::engine::run_simulation(bt_core::engine::RunSimulationInput {
         candles,
         cfg,
-        spec.initial_balance,
-        spec.lookback,
-        None,
-        None,
-        None,
-        None,
+        initial_balance: spec.initial_balance,
+        lookback: spec.lookback,
+        exit_candles: None,
+        entry_candles: None,
+        funding_rates: None,
+        init_state: None,
         from_ts,
         to_ts,
-    );
+    });
     let mut filtered: Vec<(usize, bt_core::position::TradeRecord)> = Vec::new();
     for (global_idx, trade) in sim.trades.into_iter().enumerate() {
         if let Some(sym) = symbol_filter {
@@ -754,11 +762,7 @@ fn run_cpu_single_with_trade_events(
     } else {
         0usize
     };
-    let end = if from_tail {
-        total
-    } else {
-        limit.min(total)
-    };
+    let end = if from_tail { total } else { limit.min(total) };
     let mut out = Vec::with_capacity(end - start);
     for (window_idx, (global_idx, trade)) in filtered
         .into_iter()
@@ -831,9 +835,8 @@ fn run_gpu_single_with_trace(
     trace_symbol_idx: u32,
 ) -> Result<(CompactResult, GpuComboState, Vec<String>), Box<dyn std::error::Error>> {
     with_trace_env(0, trace_symbol_idx, || {
-        let (rows, states, symbols) = run_gpu_sweep_with_states(
-            candles, cfg, spec, None, None, from_ts, to_ts,
-        );
+        let (rows, states, symbols) =
+            run_gpu_sweep_with_states(candles, cfg, spec, None, None, from_ts, to_ts);
         let first = rows.first().ok_or(
             "gpu trace sweep returned no rows for single config. \
 likely no CUDA-capable device (or driver visibility failure) in this runtime; \
@@ -859,7 +862,11 @@ fn with_trace_env<T, E, F>(combo_idx: usize, symbol_idx: u32, f: F) -> Result<T,
 where
     F: FnOnce() -> Result<T, E>,
 {
-    const KEYS: [&str; 3] = ["AQC_GPU_TRACE", "AQC_GPU_TRACE_COMBO", "AQC_GPU_TRACE_SYMBOL"];
+    const KEYS: [&str; 3] = [
+        "AQC_GPU_TRACE",
+        "AQC_GPU_TRACE_COMBO",
+        "AQC_GPU_TRACE_SYMBOL",
+    ];
     let mut prev: Vec<(&str, Option<OsString>)> = Vec::with_capacity(KEYS.len());
     for key in KEYS {
         prev.push((key, std::env::var_os(key)));
@@ -1048,15 +1055,24 @@ fn choose_alignment_offsets(
     let mut best_cpu_off = base_cpu_off;
     let mut best_gpu_off = base_gpu_off;
     let mut best_aligned = base_aligned;
-    let mut best_prefix =
-        matching_prefix_len(cpu, base_cpu_off, gpu, base_gpu_off, base_aligned, event_tol);
+    let mut best_prefix = matching_prefix_len(
+        cpu,
+        base_cpu_off,
+        gpu,
+        base_gpu_off,
+        base_aligned,
+        event_tol,
+    );
 
     if allow_absolute_scan {
         let cpu_scan_max = cpu.len().min(max_offset_scan);
         let gpu_scan_max = gpu.len().min(max_offset_scan);
         for cpu_off in 0..=cpu_scan_max {
             for gpu_off in 0..=gpu_scan_max {
-                let aligned = cpu.len().saturating_sub(cpu_off).min(gpu.len().saturating_sub(gpu_off));
+                let aligned = cpu
+                    .len()
+                    .saturating_sub(cpu_off)
+                    .min(gpu.len().saturating_sub(gpu_off));
                 if aligned == 0 {
                     continue;
                 }
@@ -1258,7 +1274,10 @@ fn derive_decision_event_envelope(action_kind: &str, raw_reason: &str) -> Decisi
         "signal_flip"
     } else if reason.contains("STOP LOSS") || reason.contains("TRAILING STOP") {
         "stop_loss"
-    } else if action_kind == "OPEN" || action_kind == "ADD" || reason.contains("ENTRY") || reason.contains("PYRAMID")
+    } else if action_kind == "OPEN"
+        || action_kind == "ADD"
+        || reason.contains("ENTRY")
+        || reason.contains("PYRAMID")
     {
         "schedule"
     } else {
@@ -1438,7 +1457,10 @@ fn build_trace_path(
     ))
 }
 
-fn write_json_pretty<T: Serialize>(path: &Path, value: &T) -> Result<(), Box<dyn std::error::Error>> {
+fn write_json_pretty<T: Serialize>(
+    path: &Path,
+    value: &T,
+) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }

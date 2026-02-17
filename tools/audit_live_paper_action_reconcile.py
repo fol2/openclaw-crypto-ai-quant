@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""Audit action-level alignment between live baseline and backtester replay report.
-
-This report compares canonical action events from:
-- `live_baseline_trades.jsonl`
-- replay JSON output generated with `mei-backtester replay --trades --output ...`
-
-It validates event parity (OPEN/ADD/REDUCE/CLOSE) and numeric parity, while
-classifying funding-only gaps as accepted non-simulatable residuals.
-"""
+"""Audit action-level alignment between live and paper trading databases."""
 
 from __future__ import annotations
 
@@ -16,19 +8,23 @@ from collections import defaultdict
 import datetime as dt
 import json
 import math
+import sqlite3
 from pathlib import Path
 from typing import Any
 
 SIDE_ACTIONS = {"OPEN", "ADD", "REDUCE", "CLOSE"}
 FUNDING_ACTION = "FUNDING"
+TRADE_ACTIONS = SIDE_ACTIONS | {FUNDING_ACTION}
 DEFAULT_TOL = 1e-9
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Audit live-vs-backtester action-level parity from replay bundle artefacts.")
-    parser.add_argument("--live-baseline", required=True, help="Path to live_baseline_trades.jsonl")
-    parser.add_argument("--backtester-replay-report", required=True, help="Path to backtester replay JSON report (with trades)")
+    parser = argparse.ArgumentParser(description="Audit live-vs-paper action parity from SQLite trade logs.")
+    parser.add_argument("--live-db", required=True, help="Path to live SQLite DB")
+    parser.add_argument("--paper-db", required=True, help="Path to paper SQLite DB")
     parser.add_argument("--output", required=True, help="Path to output JSON report")
+    parser.add_argument("--from-ts", type=int, help="Filter start timestamp (ms, inclusive)")
+    parser.add_argument("--to-ts", type=int, help="Filter end timestamp (ms, inclusive)")
     parser.add_argument(
         "--timestamp-bucket-ms",
         type=int,
@@ -40,7 +36,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pnl-tol", type=float, default=DEFAULT_TOL, help="Absolute tolerance for pnl comparison")
     parser.add_argument("--fee-tol", type=float, default=DEFAULT_TOL, help="Absolute tolerance for fee comparison")
     parser.add_argument("--balance-tol", type=float, default=DEFAULT_TOL, help="Absolute tolerance for balance comparison")
+    parser.add_argument("--fail-on-mismatch", action="store_true", default=False, help="Return exit code 1 when strict parity fails")
     return parser
+
+
+def _connect_ro(path: Path) -> sqlite3.Connection:
+    uri = f"file:{path}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=10)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def _parse_float(value: Any) -> float:
@@ -142,7 +146,7 @@ def _bucket_timestamp_ms(ts_ms: int, bucket_ms: int) -> int:
     return int(-(((-ts_ms) // bucket_ms) * bucket_ms))
 
 
-def _canonical_live_action(action: Any, side: Any) -> str:
+def _canonical_action(action: Any, side: Any) -> str:
     act = str(action or "").strip().upper()
     if act in SIDE_ACTIONS:
         s = _normalise_side(side)
@@ -154,116 +158,67 @@ def _canonical_live_action(action: Any, side: Any) -> str:
     return ""
 
 
-def _canonical_backtester_action(action: Any) -> str:
-    act = str(action or "").strip().upper()
-    if act == FUNDING_ACTION:
-        return FUNDING_ACTION
-    if any(act == f"{base}_LONG" or act == f"{base}_SHORT" for base in SIDE_ACTIONS):
-        return act
-    return ""
-
-
-def _load_live_actions(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    actions: list[dict[str, Any]] = []
-    total_actions = 0
-    unknown_actions = 0
-
-    with path.open("r", encoding="utf-8") as fp:
-        for line_no, raw in enumerate(fp, start=1):
-            line = raw.strip()
-            if not line:
-                continue
-            row = json.loads(line)
-            total_actions += 1
-
-            action_code = _canonical_live_action(row.get("action"), row.get("type"))
-            if not action_code:
-                unknown_actions += 1
-                continue
-
-            symbol = _normalise_symbol(row.get("symbol"))
-            ts_ms = _parse_timestamp_ms(row.get("timestamp_ms"))
-            if ts_ms <= 0:
-                ts_ms = _parse_timestamp_ms(row.get("timestamp"))
-            if not symbol or ts_ms <= 0:
-                continue
-
-            actions.append(
-                {
-                    "source": "live",
-                    "source_id": int(row.get("id") or 0),
-                    "line_no": line_no,
-                    "symbol": symbol,
-                    "timestamp_ms": ts_ms,
-                    "action_code": action_code,
-                    "price": _parse_float(row.get("price")),
-                    "size": _parse_float(row.get("size")),
-                    "pnl_usd": _parse_float(row.get("pnl")),
-                    "fee_usd": _parse_float(row.get("fee_usd")),
-                    "balance": _parse_float(row.get("balance")),
-                    "confidence": _normalise_confidence(row.get("confidence")),
-                    "reason": str(row.get("reason") or ""),
-                    "reason_code": _classify_reason_code(action_code, str(row.get("reason") or "")),
-                }
-            )
-
-    actions.sort(key=lambda r: (r["timestamp_ms"], r["symbol"], r["action_code"], r["source_id"], r["line_no"]))
-    counts = {
-        "live_total_actions": total_actions,
-        "live_canonical_actions": len(actions),
-        "live_unknown_actions": unknown_actions,
-    }
-    return actions, counts
-
-
-def _load_backtester_actions(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    trades = payload.get("trades")
-    if not isinstance(trades, list):
-        raise ValueError("backtester replay report does not include `trades`; run replay with `--trades --output`")
+def _load_actions(
+    db_path: Path,
+    *,
+    source_name: str,
+    from_ts: int | None,
+    to_ts: int | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    conn = _connect_ro(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id, timestamp, symbol, action, type, price, size, pnl, balance, reason, confidence, fee_usd "
+            "FROM trades ORDER BY id ASC"
+        ).fetchall()
+    finally:
+        conn.close()
 
     actions: list[dict[str, Any]] = []
     unknown_actions = 0
-    for idx, row in enumerate(trades, start=1):
-        action_code = _canonical_backtester_action(row.get("action"))
+
+    for row in rows:
+        action = str(row["action"] or "").strip().upper()
+        if action not in TRADE_ACTIONS:
+            continue
+
+        ts_ms = _parse_timestamp_ms(row["timestamp"])
+        if from_ts is not None and ts_ms < from_ts:
+            continue
+        if to_ts is not None and ts_ms > to_ts:
+            continue
+
+        action_code = _canonical_action(action, row["type"])
         if not action_code:
             unknown_actions += 1
             continue
 
-        symbol = _normalise_symbol(row.get("symbol"))
-        ts_ms = _parse_timestamp_ms(row.get("timestamp"))
+        symbol = _normalise_symbol(row["symbol"])
         if not symbol or ts_ms <= 0:
             continue
 
-        reason_text = str(row.get("reason") or "")
-        reason_code = str(row.get("reason_code") or "").strip().lower()
-        if not reason_code:
-            reason_code = _classify_reason_code(action_code, reason_text)
-
         actions.append(
             {
-                "source": "backtester",
-                "source_id": idx,
-                "row_no": idx,
+                "source": source_name,
+                "source_id": int(row["id"] or 0),
                 "symbol": symbol,
                 "timestamp_ms": ts_ms,
                 "action_code": action_code,
-                "price": _parse_float(row.get("price")),
-                "size": _parse_float(row.get("size")),
-                "pnl_usd": _parse_float(row.get("pnl")),
-                "fee_usd": _parse_float(row.get("fee")),
-                "balance": _parse_float(row.get("balance")),
-                "confidence": _normalise_confidence(row.get("confidence")),
-                "reason": reason_text,
-                "reason_code": reason_code,
+                "price": _parse_float(row["price"]),
+                "size": _parse_float(row["size"]),
+                "pnl_usd": _parse_float(row["pnl"]),
+                "fee_usd": _parse_float(row["fee_usd"]),
+                "balance": _parse_float(row["balance"]),
+                "confidence": _normalise_confidence(row["confidence"]),
+                "reason": str(row["reason"] or ""),
+                "reason_code": _classify_reason_code(action_code, str(row["reason"] or "")),
             }
         )
 
-    actions.sort(key=lambda r: (r["timestamp_ms"], r["symbol"], r["action_code"], r["source_id"], r["row_no"]))
+    actions.sort(key=lambda r: (r["timestamp_ms"], r["symbol"], r["action_code"], r["source_id"]))
     counts = {
-        "backtester_total_actions": len(trades),
-        "backtester_canonical_actions": len(actions),
-        "backtester_unknown_actions": unknown_actions,
+        f"{source_name}_canonical_actions": len(actions),
+        f"{source_name}_unknown_actions": unknown_actions,
     }
     return actions, counts
 
@@ -293,7 +248,7 @@ def _group_events(
 
 def _compare_actions(
     live_actions: list[dict[str, Any]],
-    backtester_actions: list[dict[str, Any]],
+    paper_actions: list[dict[str, Any]],
     *,
     timestamp_bucket_ms: int,
     price_tol: float,
@@ -308,19 +263,19 @@ def _compare_actions(
     confidence_mismatch = 0
     reason_code_mismatch = 0
     unmatched_live = 0
-    unmatched_backtester = 0
+    unmatched_paper = 0
     non_simulatable_residuals = 0
 
     per_symbol: dict[str, dict[str, Any]] = defaultdict(
         lambda: {
             "symbol": "",
             "live_actions": 0,
-            "backtester_actions": 0,
+            "paper_actions": 0,
             "matched_pairs": 0,
             "live_pnl_usd": 0.0,
-            "backtester_pnl_usd": 0.0,
+            "paper_pnl_usd": 0.0,
             "live_fee_usd": 0.0,
-            "backtester_fee_usd": 0.0,
+            "paper_fee_usd": 0.0,
         }
     )
 
@@ -331,44 +286,46 @@ def _compare_actions(
         stats["live_pnl_usd"] += float(row["pnl_usd"])
         stats["live_fee_usd"] += float(row["fee_usd"])
 
-    for row in backtester_actions:
+    for row in paper_actions:
         stats = per_symbol[row["symbol"]]
         stats["symbol"] = row["symbol"]
-        stats["backtester_actions"] += 1
-        stats["backtester_pnl_usd"] += float(row["pnl_usd"])
-        stats["backtester_fee_usd"] += float(row["fee_usd"])
+        stats["paper_actions"] += 1
+        stats["paper_pnl_usd"] += float(row["pnl_usd"])
+        stats["paper_fee_usd"] += float(row["fee_usd"])
 
     live_groups = _group_events(live_actions, timestamp_bucket_ms=timestamp_bucket_ms)
-    bt_groups = _group_events(backtester_actions, timestamp_bucket_ms=timestamp_bucket_ms)
-    all_keys = sorted(set(live_groups.keys()) | set(bt_groups.keys()))
+    paper_groups = _group_events(paper_actions, timestamp_bucket_ms=timestamp_bucket_ms)
+    all_keys = sorted(set(live_groups.keys()) | set(paper_groups.keys()))
 
     for key in all_keys:
         symbol, action_code, ts_ms = key
         live_rows = live_groups.get(key, [])
-        bt_rows = bt_groups.get(key, [])
-        pair_count = min(len(live_rows), len(bt_rows))
+        paper_rows = paper_groups.get(key, [])
+        pair_count = min(len(live_rows), len(paper_rows))
 
         for idx in range(pair_count):
             lrow = live_rows[idx]
-            brow = bt_rows[idx]
+            prow = paper_rows[idx]
             per_symbol[symbol]["matched_pairs"] += 1
             matched_pairs += 1
 
             numeric_checks = {
-                "price": _almost_equal(lrow["price"], brow["price"], price_tol),
-                "size": _almost_equal(lrow["size"], brow["size"], size_tol),
-                "pnl_usd": _almost_equal(lrow["pnl_usd"], brow["pnl_usd"], pnl_tol),
-                "fee_usd": _almost_equal(lrow["fee_usd"], brow["fee_usd"], fee_tol),
-                "balance": _almost_equal(lrow["balance"], brow["balance"], balance_tol),
+                "price": _almost_equal(lrow["price"], prow["price"], price_tol),
+                "size": _almost_equal(lrow["size"], prow["size"], size_tol),
+                "pnl_usd": _almost_equal(lrow["pnl_usd"], prow["pnl_usd"], pnl_tol),
+                "fee_usd": _almost_equal(lrow["fee_usd"], prow["fee_usd"], fee_tol),
+                "balance": _almost_equal(lrow["balance"], prow["balance"], balance_tol),
             }
             has_numeric_mismatch = not all(numeric_checks.values())
 
             live_conf = str(lrow["confidence"] or "")
-            bt_conf = str(brow["confidence"] or "")
-            has_confidence_mismatch = bool(live_conf and bt_conf and live_conf != bt_conf)
+            paper_conf = str(prow["confidence"] or "")
+            has_confidence_mismatch = bool(live_conf and paper_conf and live_conf != paper_conf)
             live_reason_code = str(lrow["reason_code"] or "")
-            bt_reason_code = str(brow["reason_code"] or "")
-            has_reason_code_mismatch = bool(live_reason_code and bt_reason_code and live_reason_code != bt_reason_code)
+            paper_reason_code = str(prow["reason_code"] or "")
+            has_reason_code_mismatch = bool(
+                live_reason_code and paper_reason_code and live_reason_code != paper_reason_code
+            )
 
             if not has_numeric_mismatch and not has_confidence_mismatch and not has_reason_code_mismatch:
                 continue
@@ -387,7 +344,6 @@ def _compare_actions(
                 kind = "reason_code_mismatch"
             else:
                 kind = "confidence_mismatch"
-
             mismatches.append(
                 {
                     "classification": classification,
@@ -396,42 +352,17 @@ def _compare_actions(
                     "action_code": action_code,
                     "match_key_timestamp_ms": ts_ms,
                     "live_timestamp_ms": lrow["timestamp_ms"],
-                    "backtester_timestamp_ms": brow["timestamp_ms"],
-                    "live_ref": {"id": lrow["source_id"], "line_no": lrow["line_no"]},
-                    "backtester_ref": {"row_no": brow["row_no"]},
-                    "live": {
-                        "price": lrow["price"],
-                        "size": lrow["size"],
-                        "pnl_usd": lrow["pnl_usd"],
-                        "fee_usd": lrow["fee_usd"],
-                        "balance": lrow["balance"],
-                        "confidence": live_conf,
-                        "reason_code": live_reason_code,
-                        "reason": lrow["reason"],
-                    },
-                    "backtester": {
-                        "price": brow["price"],
-                        "size": brow["size"],
-                        "pnl_usd": brow["pnl_usd"],
-                        "fee_usd": brow["fee_usd"],
-                        "balance": brow["balance"],
-                        "confidence": bt_conf,
-                        "reason_code": bt_reason_code,
-                        "reason": brow["reason"],
-                    },
+                    "paper_timestamp_ms": prow["timestamp_ms"],
+                    "live_ref": {"id": lrow["source_id"]},
+                    "paper_ref": {"id": prow["source_id"]},
+                    "live_reason_code": live_reason_code,
+                    "paper_reason_code": paper_reason_code,
                     "delta": {
-                        "price": lrow["price"] - brow["price"],
-                        "size": lrow["size"] - brow["size"],
-                        "pnl_usd": lrow["pnl_usd"] - brow["pnl_usd"],
-                        "fee_usd": lrow["fee_usd"] - brow["fee_usd"],
-                        "balance": lrow["balance"] - brow["balance"],
-                    },
-                    "tolerance": {
-                        "price_tol": price_tol,
-                        "size_tol": size_tol,
-                        "pnl_tol": pnl_tol,
-                        "fee_tol": fee_tol,
-                        "balance_tol": balance_tol,
+                        "price": lrow["price"] - prow["price"],
+                        "size": lrow["size"] - prow["size"],
+                        "pnl_usd": lrow["pnl_usd"] - prow["pnl_usd"],
+                        "fee_usd": lrow["fee_usd"] - prow["fee_usd"],
+                        "balance": lrow["balance"] - prow["balance"],
                     },
                     "flags": {
                         "numeric_mismatch": has_numeric_mismatch,
@@ -448,17 +379,12 @@ def _compare_actions(
                     mismatches.append(
                         {
                             "classification": "non-simulatable_exchange_oms_effect",
-                            "kind": "missing_backtester_funding_action",
+                            "kind": "missing_paper_funding_action",
                             "symbol": symbol,
                             "action_code": action_code,
                             "match_key_timestamp_ms": ts_ms,
                             "live_timestamp_ms": lrow["timestamp_ms"],
-                            "live_ref": {"id": lrow["source_id"], "line_no": lrow["line_no"]},
-                            "live": {
-                                "pnl_usd": lrow["pnl_usd"],
-                                "fee_usd": lrow["fee_usd"],
-                                "reason": lrow["reason"],
-                            },
+                            "live_ref": {"id": lrow["source_id"]},
                         }
                     )
                 else:
@@ -466,27 +392,17 @@ def _compare_actions(
                     mismatches.append(
                         {
                             "classification": "deterministic_logic_divergence",
-                            "kind": "missing_backtester_action",
+                            "kind": "missing_paper_action",
                             "symbol": symbol,
                             "action_code": action_code,
                             "match_key_timestamp_ms": ts_ms,
                             "live_timestamp_ms": lrow["timestamp_ms"],
-                            "live_ref": {"id": lrow["source_id"], "line_no": lrow["line_no"]},
-                            "live": {
-                                "price": lrow["price"],
-                                "size": lrow["size"],
-                                "pnl_usd": lrow["pnl_usd"],
-                                "fee_usd": lrow["fee_usd"],
-                                "balance": lrow["balance"],
-                                "confidence": lrow["confidence"],
-                                "reason_code": lrow["reason_code"],
-                                "reason": lrow["reason"],
-                            },
+                            "live_ref": {"id": lrow["source_id"]},
                         }
                     )
 
-        if len(bt_rows) > pair_count:
-            for brow in bt_rows[pair_count:]:
+        if len(paper_rows) > pair_count:
+            for prow in paper_rows[pair_count:]:
                 if action_code == FUNDING_ACTION:
                     non_simulatable_residuals += 1
                     mismatches.append(
@@ -496,18 +412,12 @@ def _compare_actions(
                             "symbol": symbol,
                             "action_code": action_code,
                             "match_key_timestamp_ms": ts_ms,
-                            "backtester_timestamp_ms": brow["timestamp_ms"],
-                            "backtester_ref": {"row_no": brow["row_no"]},
-                            "backtester": {
-                                "pnl_usd": brow["pnl_usd"],
-                                "fee_usd": brow["fee_usd"],
-                                "reason_code": brow["reason_code"],
-                                "reason": brow["reason"],
-                            },
+                            "paper_timestamp_ms": prow["timestamp_ms"],
+                            "paper_ref": {"id": prow["source_id"]},
                         }
                     )
                 else:
-                    unmatched_backtester += 1
+                    unmatched_paper += 1
                     mismatches.append(
                         {
                             "classification": "deterministic_logic_divergence",
@@ -515,18 +425,8 @@ def _compare_actions(
                             "symbol": symbol,
                             "action_code": action_code,
                             "match_key_timestamp_ms": ts_ms,
-                            "backtester_timestamp_ms": brow["timestamp_ms"],
-                            "backtester_ref": {"row_no": brow["row_no"]},
-                            "backtester": {
-                                "price": brow["price"],
-                                "size": brow["size"],
-                                "pnl_usd": brow["pnl_usd"],
-                                "fee_usd": brow["fee_usd"],
-                                "balance": brow["balance"],
-                                "confidence": brow["confidence"],
-                                "reason_code": brow["reason_code"],
-                                "reason": brow["reason"],
-                            },
+                            "paper_timestamp_ms": prow["timestamp_ms"],
+                            "paper_ref": {"id": prow["source_id"]},
                         }
                     )
 
@@ -534,8 +434,8 @@ def _compare_actions(
         (
             {
                 **values,
-                "pnl_delta_usd": values["live_pnl_usd"] - values["backtester_pnl_usd"],
-                "fee_delta_usd": values["live_fee_usd"] - values["backtester_fee_usd"],
+                "pnl_delta_usd": values["live_pnl_usd"] - values["paper_pnl_usd"],
+                "fee_delta_usd": values["live_fee_usd"] - values["paper_fee_usd"],
             }
             for values in per_symbol.values()
         ),
@@ -548,7 +448,7 @@ def _compare_actions(
         "confidence_mismatch": confidence_mismatch,
         "reason_code_mismatch": reason_code_mismatch,
         "unmatched_live": unmatched_live,
-        "unmatched_backtester": unmatched_backtester,
+        "unmatched_paper": unmatched_paper,
         "non_simulatable_residuals": non_simulatable_residuals,
     }
     return mismatches, summary, per_symbol_rows
@@ -558,24 +458,25 @@ def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
 
-    live_baseline = Path(args.live_baseline).expanduser().resolve()
-    backtester_report = Path(args.backtester_replay_report).expanduser().resolve()
+    live_db = Path(args.live_db).expanduser().resolve()
+    paper_db = Path(args.paper_db).expanduser().resolve()
     output = Path(args.output).expanduser().resolve()
+    from_ts = int(args.from_ts) if args.from_ts is not None else None
+    to_ts = int(args.to_ts) if args.to_ts is not None else None
 
-    if not live_baseline.exists():
-        parser.error(f"live baseline not found: {live_baseline}")
-    if not backtester_report.exists():
-        parser.error(f"backtester replay report not found: {backtester_report}")
+    if not live_db.exists():
+        parser.error(f"live DB not found: {live_db}")
+    if not paper_db.exists():
+        parser.error(f"paper DB not found: {paper_db}")
+    if from_ts is not None and to_ts is not None and from_ts > to_ts:
+        parser.error("from-ts must be <= to-ts")
 
-    live_actions, live_counts = _load_live_actions(live_baseline)
-    try:
-        backtester_actions, backtester_counts = _load_backtester_actions(backtester_report)
-    except ValueError as exc:
-        parser.error(str(exc))
+    live_actions, live_counts = _load_actions(live_db, source_name="live", from_ts=from_ts, to_ts=to_ts)
+    paper_actions, paper_counts = _load_actions(paper_db, source_name="paper", from_ts=from_ts, to_ts=to_ts)
 
     mismatches, compare_summary, per_symbol_rows = _compare_actions(
         live_actions,
-        backtester_actions,
+        paper_actions,
         timestamp_bucket_ms=max(1, int(args.timestamp_bucket_ms)),
         price_tol=float(args.price_tol),
         size_tol=float(args.size_tol),
@@ -589,21 +490,22 @@ def main() -> int:
         mismatch_counts[str(item.get("classification") or "unknown")] += 1
 
     accepted_residuals = [m for m in mismatches if m.get("classification") == "non-simulatable_exchange_oms_effect"]
-
     strict_alignment_pass = (
         compare_summary["numeric_mismatch"] == 0
         and compare_summary["confidence_mismatch"] == 0
         and compare_summary["reason_code_mismatch"] == 0
         and compare_summary["unmatched_live"] == 0
-        and compare_summary["unmatched_backtester"] == 0
+        and compare_summary["unmatched_paper"] == 0
     )
 
     report = {
         "schema_version": 1,
         "generated_at_ms": int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000),
         "inputs": {
-            "live_baseline": str(live_baseline),
-            "backtester_replay_report": str(backtester_report),
+            "live_db": str(live_db),
+            "paper_db": str(paper_db),
+            "from_ts": from_ts,
+            "to_ts": to_ts,
             "timestamp_bucket_ms": max(1, int(args.timestamp_bucket_ms)),
             "price_tol": float(args.price_tol),
             "size_tol": float(args.size_tol),
@@ -613,7 +515,7 @@ def main() -> int:
         },
         "counts": {
             **live_counts,
-            **backtester_counts,
+            **paper_counts,
             **compare_summary,
             "mismatch_total": len(mismatches),
         },
@@ -630,6 +532,9 @@ def main() -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(output.as_posix())
+
+    if args.fail_on_mismatch and not strict_alignment_pass:
+        return 1
     return 0
 
 

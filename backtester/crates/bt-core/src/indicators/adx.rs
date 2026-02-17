@@ -38,8 +38,8 @@ enum Phase {
 #[derive(Debug, Clone, Copy)]
 pub struct AdxOutput {
     pub adx: f64,
-    pub adx_pos: f64,  // +DI
-    pub adx_neg: f64,  // -DI
+    pub adx_pos: f64, // +DI
+    pub adx_neg: f64, // -DI
 }
 
 impl AdxIndicator {
@@ -68,7 +68,11 @@ impl AdxIndicator {
                 self.prev_close = close;
                 self.phase = Phase::Accumulate;
                 self.count = 0;
-                AdxOutput { adx: 0.0, adx_pos: 0.0, adx_neg: 0.0 }
+                AdxOutput {
+                    adx: 0.0,
+                    adx_pos: 0.0,
+                    adx_neg: 0.0,
+                }
             }
             Phase::Accumulate => {
                 let (plus_dm, minus_dm, tr) = self.compute_dm_tr(high, low, close);
@@ -87,9 +91,17 @@ impl AdxIndicator {
                     let (di_p, di_n, dx) = self.compute_di_dx();
                     self.adx_sum = dx;
                     self.dx_count = 1;
-                    AdxOutput { adx: dx, adx_pos: di_p, adx_neg: di_n }
+                    AdxOutput {
+                        adx: dx,
+                        adx_pos: di_p,
+                        adx_neg: di_n,
+                    }
                 } else {
-                    AdxOutput { adx: 0.0, adx_pos: 0.0, adx_neg: 0.0 }
+                    AdxOutput {
+                        adx: 0.0,
+                        adx_pos: 0.0,
+                        adx_neg: 0.0,
+                    }
                 }
             }
             Phase::DxAccumulate => {
@@ -105,22 +117,35 @@ impl AdxIndicator {
                 if self.dx_count >= self.window {
                     self.adx_value = self.adx_sum / self.window as f64;
                     self.phase = Phase::Warm;
-                    AdxOutput { adx: self.adx_value, adx_pos: di_p, adx_neg: di_n }
+                    AdxOutput {
+                        adx: self.adx_value,
+                        adx_pos: di_p,
+                        adx_neg: di_n,
+                    }
                 } else {
-                    AdxOutput { adx: self.adx_sum / self.dx_count as f64, adx_pos: di_p, adx_neg: di_n }
+                    AdxOutput {
+                        adx: self.adx_sum / self.dx_count as f64,
+                        adx_pos: di_p,
+                        adx_neg: di_n,
+                    }
                 }
             }
             Phase::Warm => {
                 self.wilder_step(high, low, close);
                 let (di_p, di_n, dx) = self.compute_di_dx();
                 // Wilder smooth the ADX itself
-                self.adx_value = (self.adx_value * (self.window as f64 - 1.0) + dx) / self.window as f64;
+                self.adx_value =
+                    (self.adx_value * (self.window as f64 - 1.0) + dx) / self.window as f64;
 
                 self.prev_high = high;
                 self.prev_low = low;
                 self.prev_close = close;
 
-                AdxOutput { adx: self.adx_value, adx_pos: di_p, adx_neg: di_n }
+                AdxOutput {
+                    adx: self.adx_value,
+                    adx_pos: di_p,
+                    adx_neg: di_n,
+                }
             }
         }
     }
@@ -129,8 +154,16 @@ impl AdxIndicator {
         let up_move = high - self.prev_high;
         let down_move = self.prev_low - low;
 
-        let plus_dm = if up_move > down_move && up_move > 0.0 { up_move } else { 0.0 };
-        let minus_dm = if down_move > up_move && down_move > 0.0 { down_move } else { 0.0 };
+        let plus_dm = if up_move > down_move && up_move > 0.0 {
+            up_move
+        } else {
+            0.0
+        };
+        let minus_dm = if down_move > up_move && down_move > 0.0 {
+            down_move
+        } else {
+            0.0
+        };
 
         let tr = (high - low)
             .max((high - self.prev_close).abs())

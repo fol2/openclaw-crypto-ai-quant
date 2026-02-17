@@ -92,14 +92,8 @@ fn cpu_gpu_parity_sweep_1h_3m_tiny_fixture() {
     };
 
     let cpu = bt_core::sweep::run_sweep(
-        &cfg,
-        &spec,
-        &candles,
-        None,  // no sub-bar candles
-        None,
-        None,
-        None,
-        None,
+        &cfg, &spec, &candles, None, // no sub-bar candles
+        None, None, None, None,
     );
     assert_eq!(cpu.len(), 1);
     let cpu_rpt = &cpu[0].report;
