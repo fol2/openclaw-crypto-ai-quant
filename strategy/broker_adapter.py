@@ -42,6 +42,12 @@ DEFAULT_MAX_RETRIES = 2
 #: Default retry backoff base (seconds); actual delay = base * 2^attempt.
 DEFAULT_RETRY_BACKOFF_S = 0.5
 
+#: Default hard cap for notional per open/add/reverse intent (USD).
+DEFAULT_MAX_NOTIONAL_USD = 1_000_000.0
+
+#: Default hard cap for quantity per open/add/reverse intent (base units).
+DEFAULT_MAX_QUANTITY = 1_000_000.0
+
 
 # ---------------------------------------------------------------------------
 # Exchange client protocol (duck-typing contract)
@@ -165,6 +171,8 @@ class BrokerAdapter:
                 "max_retries": 2,             # retries on transient error
                 "retry_backoff_s": 0.5,       # base backoff (exponential)
                 "abort_batch_on_error": True,  # stop batch on first failure
+                "max_notional_usd": 1_000_000.0,  # hard risk cap per intent
+                "max_quantity": 1_000_000.0,      # hard size cap per intent
             }
     """
 
@@ -177,6 +185,12 @@ class BrokerAdapter:
         self._max_retries: int = int(cfg.get("max_retries", DEFAULT_MAX_RETRIES))
         self._retry_backoff_s: float = float(cfg.get("retry_backoff_s", DEFAULT_RETRY_BACKOFF_S))
         self._abort_batch_on_error: bool = bool(cfg.get("abort_batch_on_error", True))
+        self._max_notional_usd: float = float(cfg.get("max_notional_usd", DEFAULT_MAX_NOTIONAL_USD))
+        self._max_quantity: float = float(cfg.get("max_quantity", DEFAULT_MAX_QUANTITY))
+        if self._max_notional_usd <= 0.0:
+            self._max_notional_usd = float("inf")
+        if self._max_quantity <= 0.0:
+            self._max_quantity = float("inf")
 
         # Timestamp of last order submission (for rate limiting).
         self._last_submit_ts: float = 0.0
@@ -305,6 +319,7 @@ class BrokerAdapter:
             raise BrokerAdapterError(
                 f"Open: computed quantity is zero for {symbol}", intent=intent
             )
+        self._validate_open_risk_limits(intent=intent, symbol=symbol, quantity=quantity, price=price)
 
         limit_price = self._apply_slippage(price, is_buy)
 
@@ -327,6 +342,41 @@ class BrokerAdapter:
         fee_usd = self._estimate_fee(fill_price, fill_qty, intent)
 
         return self._build_fill_event(intent, fill_price, fill_qty, fee_usd=fee_usd)
+
+    def _validate_open_risk_limits(
+        self,
+        *,
+        intent: dict[str, Any],
+        symbol: str,
+        quantity: float,
+        price: float,
+    ) -> None:
+        if quantity > self._max_quantity:
+            msg = (
+                f"Open: quantity {quantity:.8f} exceeds max_quantity {self._max_quantity:.8f} "
+                f"for {symbol}"
+            )
+            logger.error(msg)
+            raise BrokerAdapterError(msg, intent=intent)
+
+        intent_notional = 0.0
+        try:
+            parsed_notional = float(intent.get("notional_usd", 0.0))
+            if parsed_notional > 0.0:
+                intent_notional = parsed_notional
+        except (TypeError, ValueError):
+            intent_notional = 0.0
+
+        if intent_notional <= 0.0 and price > 0.0:
+            intent_notional = quantity * price
+
+        if intent_notional > self._max_notional_usd:
+            msg = (
+                f"Open: notional {intent_notional:.2f} exceeds max_notional_usd "
+                f"{self._max_notional_usd:.2f} for {symbol}"
+            )
+            logger.error(msg)
+            raise BrokerAdapterError(msg, intent=intent)
 
     def _execute_add(
         self,
