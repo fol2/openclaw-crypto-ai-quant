@@ -173,6 +173,22 @@ def test_fetch_and_store_does_not_retry_non_retryable_error(monkeypatch):
         con.close()
 
 
+def test_fetch_and_store_does_not_retry_numeric_substring_false_positive(monkeypatch):
+    con = _conn_with_schema()
+    info = _FakeInfo(exc=RuntimeError("remote code 5030: permanent failure"))
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(fetch_funding_rates.time, "sleep", lambda s: sleeps.append(float(s)))
+
+    try:
+        count = fetch_funding_rates.fetch_and_store(info, con, "BTC", 0, 9999)
+        assert count == 0
+        assert len(info.calls) == 1
+        assert sleeps == []
+    finally:
+        con.close()
+
+
 def test_fetch_and_store_stops_after_retry_budget(monkeypatch):
     con = _conn_with_schema()
     info = _FakeInfoSequence([_TransientApiError(429, "rate limited")] * 5)

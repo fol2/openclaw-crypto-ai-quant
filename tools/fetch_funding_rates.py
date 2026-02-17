@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -82,12 +83,12 @@ def _status_code_from_exception(exc: Exception) -> int | None:
             continue
 
     text = str(exc)
-    for token in ("429", "503"):
-        if token in text:
-            try:
-                return int(token)
-            except ValueError:
-                continue
+    m = re.search(r"(?<!\d)(429|503)(?!\d)", text)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            pass
     return None
 
 
