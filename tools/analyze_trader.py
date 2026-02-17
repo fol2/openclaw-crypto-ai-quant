@@ -16,7 +16,8 @@ def get_db_connection(db_file):
     return conn
 
 def get_heartbeat(conn):
-    if not conn: return None
+    if not conn:
+        return None
     try:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM runtime_logs WHERE message LIKE '🫀 engine ok%' ORDER BY ts_ms DESC LIMIT 1")
@@ -26,7 +27,8 @@ def get_heartbeat(conn):
         return {"error": str(e)}
 
 def get_performance(conn, minutes=60):
-    if not conn: return None
+    if not conn:
+        return None
     try:
         cutoff_dt = datetime.utcnow() - timedelta(minutes=minutes)
         cutoff_iso = cutoff_dt.isoformat()
@@ -49,7 +51,8 @@ def get_performance(conn, minutes=60):
         return {"error": str(e)}
 
 def get_open_positions(live_conn, candles_conn):
-    if not live_conn: return None
+    if not live_conn:
+        return None
     try:
         cursor = live_conn.cursor()
         query = """
@@ -96,7 +99,8 @@ def get_open_positions(live_conn, candles_conn):
         return {"error": str(e)}
 
 def get_oms_health(conn, minutes=60):
-    if not conn: return None
+    if not conn:
+        return None
     try:
         cutoff_ms = (time.time() - minutes * 60) * 1000
         cursor = conn.cursor()
@@ -136,7 +140,8 @@ results = {}
 p_conn = get_db_connection(PAPER_DB)
 results['paper_heartbeat'] = get_heartbeat(p_conn)
 results['paper_perf'] = get_performance(p_conn)
-if p_conn: p_conn.close()
+if p_conn:
+    p_conn.close()
 
 # Live
 l_conn = get_db_connection(LIVE_DB)
@@ -147,7 +152,9 @@ results['live_perf'] = get_performance(l_conn)
 results['oms_health'] = get_oms_health(l_conn)
 results['positions'] = get_open_positions(l_conn, c_conn)
 
-if l_conn: l_conn.close()
-if c_conn: c_conn.close()
+if l_conn:
+    l_conn.close()
+if c_conn:
+    c_conn.close()
 
 print(json.dumps(results, indent=2, default=str))
