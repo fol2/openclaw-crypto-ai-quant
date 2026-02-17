@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -237,16 +238,46 @@ class OmsStore:
     def __init__(self, *, db_path: str, timeout_s: float = 30.0):
         self._db_path = str(db_path)
         self._timeout_s = float(timeout_s)
+        self._thread_local = threading.local()
+        raw = str(os.getenv("AI_QUANT_OMS_PERSISTENT_CONN", "1") or "1").strip().lower()
+        self._persistent_conn = raw not in {"0", "false", "no", "off"}
 
     def _connect(self, *, timeout_s: float | None = None) -> sqlite3.Connection:
         timeout = self._timeout_s if timeout_s is None else float(timeout_s)
+        if self._persistent_conn and timeout_s is None:
+            conn = getattr(self._thread_local, "conn", None)
+            if isinstance(conn, sqlite3.Connection):
+                return conn
         conn = sqlite3.connect(self._db_path, timeout=timeout)
         try:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
         except Exception:
             logger.debug("PRAGMA setup failed for OMS DB", exc_info=True)
+        if self._persistent_conn and timeout_s is None:
+            self._thread_local.conn = conn
         return conn
+
+    def _close(self, conn: sqlite3.Connection | None) -> None:
+        if conn is None:
+            return
+        if self._persistent_conn and conn is getattr(self._thread_local, "conn", None):
+            return
+        try:
+            conn.close()
+        except Exception:
+            logger.debug("failed to close OMS DB connection", exc_info=True)
+
+    def close(self) -> None:
+        conn = getattr(self._thread_local, "conn", None)
+        if conn is None:
+            return
+        try:
+            conn.close()
+        except Exception:
+            logger.debug("failed to close persistent OMS DB connection", exc_info=True)
+        finally:
+            self._thread_local.conn = None
 
     def ensure(self) -> None:
         conn = self._connect()
@@ -383,7 +414,7 @@ class OmsStore:
             except OSError:
                 pass
         finally:
-            conn.close()
+            self._close(conn)
 
     def get_intent_by_dedupe_key(self, dedupe_key: str) -> tuple[str, str | None] | None:
         if not dedupe_key:
@@ -400,7 +431,7 @@ class OmsStore:
                 return None
             return str(row[0]), (str(row[1]) if row[1] else None)
         finally:
-            conn.close()
+            self._close(conn)
 
     def insert_intent(
         self,
@@ -462,7 +493,7 @@ class OmsStore:
             conn.commit()
             return bool(cur.rowcount and cur.rowcount > 0)
         finally:
-            conn.close()
+            self._close(conn)
 
     def update_intent(
         self,
@@ -514,7 +545,7 @@ class OmsStore:
             )
             conn.commit()
         finally:
-            conn.close()
+            self._close(conn)
 
     def insert_order(
         self,
@@ -558,7 +589,7 @@ class OmsStore:
             )
             conn.commit()
         finally:
-            conn.close()
+            self._close(conn)
 
     def find_intent_by_client_order_id(self, client_order_id: str) -> str | None:
         if not client_order_id:
@@ -573,7 +604,7 @@ class OmsStore:
             row = cur.fetchone()
             return str(row[0]) if row and row[0] else None
         finally:
-            conn.close()
+            self._close(conn)
 
     def find_intent_by_exchange_order_id(self, exchange_order_id: str) -> str | None:
         if not exchange_order_id:
@@ -588,7 +619,7 @@ class OmsStore:
             row = cur.fetchone()
             return str(row[0]) if row and row[0] else None
         finally:
-            conn.close()
+            self._close(conn)
 
     def find_intent_by_fill_hash(self, fill_hash: str) -> str | None:
         """Find intent via a sibling fill that shares the same fill_hash (partial fill from same order)."""
@@ -604,7 +635,7 @@ class OmsStore:
             row = cur.fetchone()
             return str(row[0]) if row and row[0] else None
         finally:
-            conn.close()
+            self._close(conn)
 
     def list_active_intents(
         self, *, statuses: tuple[str, ...] = ("SENT", "PARTIAL"), limit: int = 5000
@@ -644,7 +675,7 @@ class OmsStore:
                 )
             return out
         finally:
-            conn.close()
+            self._close(conn)
 
     def upsert_open_order(
         self,
@@ -702,7 +733,7 @@ class OmsStore:
             )
             conn.commit()
         finally:
-            conn.close()
+            self._close(conn)
 
     def prune_open_orders(self, *, older_than_ms: int) -> int:
         """Delete open-order snapshots that haven't been seen recently."""
@@ -716,7 +747,7 @@ class OmsStore:
             conn.commit()
             return int(cur.rowcount or 0)
         finally:
-            conn.close()
+            self._close(conn)
 
     def insert_reconcile_event(
         self,
@@ -752,7 +783,7 @@ class OmsStore:
             )
             conn.commit()
         finally:
-            conn.close()
+            self._close(conn)
 
     def find_pending_intent(
         self,
@@ -792,7 +823,7 @@ class OmsStore:
             row = cur.fetchone()
             return str(row[0]) if row and row[0] else None
         finally:
-            conn.close()
+            self._close(conn)
 
     def get_intent_fields(self, intent_id: str) -> dict[str, Any] | None:
         conn = self._connect()
@@ -827,7 +858,7 @@ class OmsStore:
             out = {k: row[i] for i, k in enumerate(keys)}
             return out
         finally:
-            conn.close()
+            self._close(conn)
 
     def insert_fill(
         self,
@@ -888,7 +919,7 @@ class OmsStore:
             conn.commit()
             return bool(cur.rowcount and cur.rowcount > 0)
         finally:
-            conn.close()
+            self._close(conn)
 
     def sum_filled_size(self, intent_id: str) -> float:
         conn = self._connect()
@@ -898,7 +929,7 @@ class OmsStore:
             row = cur.fetchone()
             return float(row[0] or 0.0) if row else 0.0
         finally:
-            conn.close()
+            self._close(conn)
 
     def expire_old_sent_intents(self, *, older_than_ms: int) -> int:
         conn = self._connect()
@@ -917,7 +948,7 @@ class OmsStore:
             conn.commit()
             return int(cur.rowcount or 0)
         finally:
-            conn.close()
+            self._close(conn)
 
 
 class LiveOms:
