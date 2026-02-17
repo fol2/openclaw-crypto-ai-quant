@@ -701,6 +701,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             return 0.0
 
         px = None
+        mid_age_s = None
+        ws_disconnect_age_s = None
         if mark_price is not None:
             px = mark_price
         else:
@@ -708,6 +710,14 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             if mid is not None:
                 px = float(mid)
             else:
+                try:
+                    mid_age_s = hyperliquid_ws.hl_ws.get_mid_age_s(symbol)
+                except Exception:
+                    mid_age_s = None
+                try:
+                    ws_disconnect_age_s = hyperliquid_ws.hl_ws.get_ws_disconnect_age_s()
+                except Exception:
+                    ws_disconnect_age_s = None
                 bbo = hyperliquid_ws.hl_ws.get_bbo(symbol, max_age_s=15.0)
                 if bbo is not None:
                     bid, ask = bbo
@@ -719,7 +729,21 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 entry_price = float(pos.get("entry_price") or 0.0)
             except Exception:
                 entry_price = 0.0
-            print(f"⚠️ [{symbol}] margin estimate using entry price (WS mid stale)")
+            if mid_age_s is None:
+                logger.warning("[%s] margin estimate using entry price (WS mid unavailable)", symbol)
+            elif ws_disconnect_age_s is None:
+                logger.warning(
+                    "[%s] margin estimate using entry price (WS mid stale age=%.1fs)",
+                    symbol,
+                    float(mid_age_s),
+                )
+            else:
+                logger.warning(
+                    "[%s] margin estimate using entry price (WS mid stale age=%.1fs, ws_disconnect_age=%.1fs)",
+                    symbol,
+                    float(mid_age_s),
+                    float(ws_disconnect_age_s),
+                )
             px = entry_price
 
         if px <= 0:

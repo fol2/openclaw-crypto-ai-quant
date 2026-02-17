@@ -112,9 +112,11 @@ class HyperliquidWS:
 
         self._mids: dict[str, float] = {}
         self._mids_updated_at: dict[str, float] = {}
+        self._mids_last_disconnect_at: float | None = None
 
         self._bbo: dict[str, tuple[float, float]] = {}
         self._bbo_updated_at: dict[str, float] = {}
+        self._bbo_last_disconnect_at: float | None = None
 
         self._candles: dict[tuple[str, str], OrderedDict[int, dict]] = {}
         self._candle_updated_at: dict[tuple[str, str], float] = {}
@@ -439,6 +441,22 @@ class HyperliquidWS:
                     return None
             return mid
 
+    def get_mid_age_s(self, symbol: str) -> float | None:
+        now = time.time()
+        with self._lock:
+            ts = self._mids_updated_at.get(symbol)
+            if ts is None:
+                return None
+            return max(0.0, now - ts)
+
+    def get_ws_disconnect_age_s(self) -> float | None:
+        now = time.time()
+        with self._lock:
+            ts = self._mids_last_disconnect_at
+            if ts is None:
+                return None
+            return max(0.0, now - ts)
+
     def get_candles_df(self, symbol: str, interval: str, *, min_rows: int) -> pd.DataFrame | None:
         key = (symbol, interval)
         with self._lock:
@@ -583,6 +601,8 @@ class HyperliquidWS:
         with self._lock:
             self._ws_app = ws
             self._connected = True
+            self._mids_last_disconnect_at = None
+            self._bbo_last_disconnect_at = None
             subs = list(self._subscriptions)
 
         for sub in subs:
@@ -776,10 +796,11 @@ class HyperliquidWS:
         logger.info(f"🟡 HL WS closed: {status_code} {msg}")
         with self._lock:
             self._connected = False
-            self._bbo.clear()
-            self._bbo_updated_at.clear()
-            self._mids.clear()
-            self._mids_updated_at.clear()
+            # Keep latest market snapshots on disconnect so callers can still use
+            # bounded-staleness reads via max_age_s during reconnect windows.
+            now = time.time()
+            self._mids_last_disconnect_at = now
+            self._bbo_last_disconnect_at = now
 
     def _ping_loop(self):
         while not self._stop_event.wait(HL_WS_PING_SECS):
