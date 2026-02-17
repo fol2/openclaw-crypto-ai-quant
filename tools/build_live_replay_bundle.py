@@ -155,6 +155,7 @@ def main() -> int:
     replay_report_path = bundle_dir / "backtester_replay_report.json"
     trade_reconcile_path = bundle_dir / "trade_reconcile_report.json"
     action_reconcile_path = bundle_dir / "action_reconcile_report.json"
+    live_paper_action_reconcile_path = bundle_dir / "live_paper_action_reconcile_report.json"
     alignment_gate_path = bundle_dir / "alignment_gate_report.json"
     manifest_path = bundle_dir / "replay_bundle_manifest.json"
 
@@ -233,12 +234,27 @@ def main() -> int:
         f"--output \"$BUNDLE_DIR/{action_reconcile_path.name}\""
     )
 
+    cmd_live_paper_action_reconcile = (
+        "set -euo pipefail\n"
+        "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
+        "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
+        f"LIVE_DB=\"${{LIVE_DB:-{shlex.quote(str(live_db))}}}\"\n"
+        f"PAPER_DB=\"${{PAPER_DB:-{shlex.quote(str(paper_db))}}}\"\n"
+        "python \"$REPO_ROOT/tools/audit_live_paper_action_reconcile.py\" "
+        "--live-db \"$LIVE_DB\" "
+        "--paper-db \"$PAPER_DB\" "
+        f"--from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
+        f"--output \"$BUNDLE_DIR/{live_paper_action_reconcile_path.name}\""
+    )
+
     cmd_alignment_gate = (
         "set -euo pipefail\n"
         "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
         "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
         "python \"$REPO_ROOT/tools/assert_replay_bundle_alignment.py\" "
         "--bundle-dir \"$BUNDLE_DIR\" "
+        f"--live-paper-report \"$BUNDLE_DIR/{live_paper_action_reconcile_path.name}\" "
+        "--require-live-paper "
         f"--output \"$BUNDLE_DIR/{alignment_gate_path.name}\""
     )
 
@@ -247,7 +263,8 @@ def main() -> int:
     (bundle_dir / "run_03_audit.sh").write_text(cmd_audit + "\n", encoding="utf-8")
     (bundle_dir / "run_04_trade_reconcile.sh").write_text(cmd_trade_reconcile + "\n", encoding="utf-8")
     (bundle_dir / "run_05_action_reconcile.sh").write_text(cmd_action_reconcile + "\n", encoding="utf-8")
-    (bundle_dir / "run_06_assert_alignment.sh").write_text(cmd_alignment_gate + "\n", encoding="utf-8")
+    (bundle_dir / "run_06_live_paper_action_reconcile.sh").write_text(cmd_live_paper_action_reconcile + "\n", encoding="utf-8")
+    (bundle_dir / "run_07_assert_alignment.sh").write_text(cmd_alignment_gate + "\n", encoding="utf-8")
 
     for script_name in (
         "run_01_export_and_seed.sh",
@@ -255,7 +272,8 @@ def main() -> int:
         "run_03_audit.sh",
         "run_04_trade_reconcile.sh",
         "run_05_action_reconcile.sh",
-        "run_06_assert_alignment.sh",
+        "run_06_live_paper_action_reconcile.sh",
+        "run_07_assert_alignment.sh",
     ):
         script_path = bundle_dir / script_name
         script_path.chmod(0o755)
@@ -286,6 +304,7 @@ def main() -> int:
             "backtester_replay_report_json": replay_report_path.name,
             "trade_reconcile_report_file": trade_reconcile_path.name,
             "action_reconcile_report_file": action_reconcile_path.name,
+            "live_paper_action_reconcile_report_file": live_paper_action_reconcile_path.name,
             "alignment_gate_report_file": alignment_gate_path.name,
         },
         "counts": {
@@ -299,6 +318,7 @@ def main() -> int:
             "audit": cmd_audit,
             "trade_reconcile": cmd_trade_reconcile,
             "action_reconcile": cmd_action_reconcile,
+            "live_paper_action_reconcile": cmd_live_paper_action_reconcile,
             "alignment_gate": cmd_alignment_gate,
         },
     }

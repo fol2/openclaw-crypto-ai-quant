@@ -24,6 +24,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-report", default="state_alignment_report.json", help="State alignment report filename/path")
     parser.add_argument("--trade-report", default="trade_reconcile_report.json", help="Trade reconcile report filename/path")
     parser.add_argument("--action-report", default="action_reconcile_report.json", help="Action reconcile report filename/path")
+    parser.add_argument(
+        "--live-paper-report",
+        default="live_paper_action_reconcile_report.json",
+        help="Optional live/paper action reconcile report filename/path",
+    )
+    parser.add_argument(
+        "--require-live-paper",
+        action="store_true",
+        default=False,
+        help="Fail when live/paper action report is missing",
+    )
     parser.add_argument("--output", help="Optional output path for gate report JSON")
     parser.add_argument(
         "--strict-no-residuals",
@@ -56,6 +67,7 @@ def main() -> int:
     state_path = _resolve_report_path(bundle_dir, args.state_report)
     trade_path = _resolve_report_path(bundle_dir, args.trade_report)
     action_path = _resolve_report_path(bundle_dir, args.action_report)
+    live_paper_path = _resolve_report_path(bundle_dir, args.live_paper_report)
 
     failures: list[dict[str, Any]] = []
 
@@ -146,6 +158,40 @@ def main() -> int:
                     }
                 )
 
+    live_paper_report: dict[str, Any] | None = None
+    if not live_paper_path.exists():
+        if args.require_live_paper:
+            failures.append(
+                {
+                    "code": "missing_live_paper_report",
+                    "classification": "deterministic_logic_divergence",
+                    "detail": str(live_paper_path),
+                }
+            )
+    else:
+        live_paper_report = _load_json(live_paper_path)
+        live_paper_status = bool(((live_paper_report.get("status") or {}).get("strict_alignment_pass")))
+        if not live_paper_status:
+            failures.append(
+                {
+                    "code": "live_paper_alignment_failed",
+                    "classification": "deterministic_logic_divergence",
+                    "detail": "live/paper reconciliation strict alignment failed",
+                    "counts": live_paper_report.get("counts") or {},
+                }
+            )
+        if args.strict_no_residuals:
+            live_paper_residuals = list(live_paper_report.get("accepted_residuals") or [])
+            if live_paper_residuals:
+                failures.append(
+                    {
+                        "code": "live_paper_residuals_present",
+                        "classification": "non-simulatable_exchange_oms_effect",
+                        "detail": "live/paper reconciliation has accepted residuals",
+                        "count": len(live_paper_residuals),
+                    }
+                )
+
     ok = len(failures) == 0
 
     report = {
@@ -156,14 +202,20 @@ def main() -> int:
             "state_report": str(state_path),
             "trade_report": str(trade_path),
             "action_report": str(action_path),
+            "live_paper_report": str(live_paper_path),
+            "require_live_paper": bool(args.require_live_paper),
             "strict_no_residuals": bool(args.strict_no_residuals),
         },
         "checks": {
             "state_ok": bool(state_report.get("ok")) if state_report is not None else False,
             "trade_ok": bool((trade_report.get("status") or {}).get("strict_alignment_pass")) if trade_report else False,
             "action_ok": bool((action_report.get("status") or {}).get("strict_alignment_pass")) if action_report else False,
+            "live_paper_ok": bool((live_paper_report.get("status") or {}).get("strict_alignment_pass"))
+            if live_paper_report
+            else (not bool(args.require_live_paper)),
             "trade_residual_count": len((trade_report or {}).get("accepted_residuals") or []),
             "action_residual_count": len((action_report or {}).get("accepted_residuals") or []),
+            "live_paper_residual_count": len((live_paper_report or {}).get("accepted_residuals") or []),
         },
         "failure_count": len(failures),
         "failures": failures,

@@ -7,6 +7,7 @@ Provide one strict pass/fail gate across all bundle alignment reports:
 - `state_alignment_report.json`
 - `trade_reconcile_report.json`
 - `action_reconcile_report.json`
+- `live_paper_action_reconcile_report.json` (optional unless required)
 
 This enables deterministic validation in CI or manual workflows.
 
@@ -15,6 +16,8 @@ This enables deterministic validation in CI or manual workflows.
 ```bash
 python tools/assert_replay_bundle_alignment.py \
   --bundle-dir /tmp/live_replay_bundle_1h \
+  --live-paper-report /tmp/live_replay_bundle_1h/live_paper_action_reconcile_report.json \
+  --require-live-paper \
   --output /tmp/live_replay_bundle_1h/alignment_gate_report.json
 ```
 
@@ -22,6 +25,7 @@ Default behaviour:
 
 - requires state report `ok = true`
 - requires trade/action report `status.strict_alignment_pass = true`
+- when `--require-live-paper` is set, requires live/paper report `status.strict_alignment_pass = true`
 - allows accepted residuals unless explicitly disabled
 
 To fail on any accepted residuals:
