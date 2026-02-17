@@ -10,7 +10,7 @@ from importlib import util
 import sys
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Protocol
+from typing import Any, Callable, Iterable, Mapping, Protocol
 
 import pandas as pd
 
@@ -25,7 +25,7 @@ _decision_event_fn = None
 _link_trade_fn = None
 
 
-def _get_decision_event_fn():
+def _get_decision_event_fn() -> Callable[..., dict[str, Any]] | None:
     global _decision_event_fn
     if _decision_event_fn is None:
         try:
@@ -227,7 +227,7 @@ class KernelDecisionFileProvider:
             yield dec
 
 
-def _load_kernel_runtime_module(module_name: str = "bt_runtime"):
+def _load_kernel_runtime_module(module_name: str = "bt_runtime") -> object:
     """Import and return the Rust runtime binding module."""
 
     def _try_import() -> object:

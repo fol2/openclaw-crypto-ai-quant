@@ -11,6 +11,7 @@ import sqlite3
 import tomllib
 import yaml
 from dataclasses import dataclass
+from typing import Any
 
 import exchange.ws as hyperliquid_ws
 import exchange.meta as hyperliquid_meta
@@ -72,7 +73,11 @@ _INDICATOR_SNAPSHOT_FIELDS: list[tuple[str, type]] = [
 ]
 
 
-def build_indicator_snapshot(df, symbol=None, config=None):
+def build_indicator_snapshot(
+    df: pd.DataFrame,
+    symbol: str | None = None,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build an IndicatorSnapshot dict matching the Rust schema from a pandas DataFrame.
 
     If bt_runtime is available, uses the Rust IndicatorBank for exact numerical
@@ -134,7 +139,11 @@ def build_indicator_snapshot(df, symbol=None, config=None):
     return _build_indicator_snapshot_python(df, timestamps, config)
 
 
-def _build_indicator_snapshot_python(df, timestamps, config):
+def _build_indicator_snapshot_python(
+    df: pd.DataFrame,
+    timestamps: Any,
+    config: dict[str, Any] | None,
+) -> dict[str, Any]:
     """Pure-Python fallback using the ``ta`` library.
 
     Mirrors the Rust IndicatorBank computation as closely as possible given
