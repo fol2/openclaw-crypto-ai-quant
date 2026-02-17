@@ -166,6 +166,7 @@ class SidecarWSClient:
     def _rpc(self, method: str, params: dict[str, Any] | None = None, *, timeout_s: float = 2.0) -> Any:
         # Single-flight RPC (locked) keeps client logic simple and avoids response demuxing.
         with self._lock:
+            raw = b""
             try:
                 self._connect(timeout_s=float(timeout_s))
                 # Re-assert socket timeout before each RPC to guard against
@@ -184,12 +185,23 @@ class SidecarWSClient:
                 raw = self._f.readline()
                 if not raw:
                     raise ConnectionError("sidecar closed")
-                resp = json.loads(raw.decode("utf-8", errors="replace"))
+                resp = json.loads(raw.decode("utf-8", errors="strict"))
                 if int(resp.get("id", -1)) != rid:
                     raise RuntimeError("sidecar response id mismatch")
                 if not bool(resp.get("ok", False)):
                     raise RuntimeError(str(resp.get("error") or "sidecar error"))
                 return resp.get("result")
+            except UnicodeDecodeError:
+                preview_hex = raw[:64].hex() if raw else ""
+                logger.error(
+                    "sidecar RPC decode failed: method=%s bytes=%d preview_hex=%s",
+                    method,
+                    len(raw or b""),
+                    preview_hex,
+                    exc_info=True,
+                )
+                self._close()
+                raise
             except Exception as e:
                 # Broken connection: close and let callers retry via higher-level logic.
                 logger.error("sidecar RPC failed: method=%s error=%s", method, e)
