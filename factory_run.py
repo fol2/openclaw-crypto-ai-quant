@@ -629,6 +629,23 @@ class CmdResult:
     elapsed_s: float
     stdout_path: str | None
     stderr_path: str | None
+    timed_out: bool = False
+    timeout_s: float | None = None
+
+
+def _default_cmd_timeout_s() -> float | None:
+    """Return default subprocess timeout for factory commands.
+
+    Set ``AI_QUANT_FACTORY_CMD_TIMEOUT_S`` to override (seconds). Values <= 0 disable timeout.
+    """
+    try:
+        raw = float(os.getenv("AI_QUANT_FACTORY_CMD_TIMEOUT_S", "86400"))
+    except Exception:
+        raw = 86400.0
+    if raw <= 0.0:
+        return None
+    # Keep a sane upper bound (7 days) to avoid accidental runaway settings.
+    return float(max(1.0, min(raw, 7 * 24 * 60 * 60.0)))
 
 
 def _run_cmd(
@@ -638,8 +655,20 @@ def _run_cmd(
     stdout_path: Path | None,
     stderr_path: Path | None,
     env: dict[str, str] | None = None,
+    timeout_s: float | None = None,
 ) -> CmdResult:
     t0 = time.time()
+    timed_out = False
+    effective_timeout_s: float | None = _default_cmd_timeout_s() if timeout_s is None else None
+    if timeout_s is not None:
+        try:
+            parsed_timeout = float(timeout_s)
+        except Exception:
+            parsed_timeout = _default_cmd_timeout_s() or 0.0
+        if parsed_timeout > 0:
+            effective_timeout_s = parsed_timeout
+        else:
+            effective_timeout_s = None
 
     if stdout_path is not None:
         stdout_path.parent.mkdir(parents=True, exist_ok=True)
@@ -662,8 +691,20 @@ def _run_cmd(
             env=env,
             check=False,
             text=True,
+            timeout=effective_timeout_s,
         )
         exit_code = int(proc.returncode)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        exit_code = 124
+        if hasattr(stderr_f, "write"):
+            try:
+                stderr_f.write(
+                    f"Command timed out after {float(effective_timeout_s or 0.0):.2f}s: {list(argv)}\n"
+                )
+                stderr_f.flush()
+            except Exception:
+                pass
     finally:
         if hasattr(stdout_f, "close"):
             stdout_f.close()  # type: ignore[call-arg]
@@ -677,6 +718,8 @@ def _run_cmd(
         elapsed_s=float(time.time() - t0),
         stdout_path=str(stdout_path) if stdout_path is not None else None,
         stderr_path=str(stderr_path) if stderr_path is not None else None,
+        timed_out=bool(timed_out),
+        timeout_s=effective_timeout_s,
     )
 
 
