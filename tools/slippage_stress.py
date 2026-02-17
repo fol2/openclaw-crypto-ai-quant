@@ -130,6 +130,7 @@ def main(argv: list[str] | None = None) -> int:
     pnl_by_bps: dict[float, float] = {}
     dd_by_bps: dict[float, float] = {}
     init_balance: float = 0.0
+    failed_levels: list[dict[str, Any]] = []
 
     for bps in bps_levels:
         lvl_dir = out_dir / f"{bps:g}bps"
@@ -163,25 +164,65 @@ def main(argv: list[str] | None = None) -> int:
 
         rc = _run_cmd(replay_argv, cwd=AIQ_ROOT / "backtester", stdout_path=replay_stdout, stderr_path=replay_stderr)
         if rc != 0:
-            raise SystemExit(f"Replay failed for slippage_bps={bps:g} (exit {rc}). See {replay_stderr}.")
+            failure = {
+                "slippage_bps": float(bps),
+                "ok": False,
+                "metrics": None,
+                "exit_code": int(rc),
+                "stderr_path": str(replay_stderr),
+                "error": f"replay_failed_exit_{int(rc)}",
+            }
+            failed_levels.append(failure)
+            results.append(failure)
+            continue
 
-        rpt = _summarise_replay_report(replay_out)
+        try:
+            rpt = _summarise_replay_report(replay_out)
+        except Exception as e:
+            failure = {
+                "slippage_bps": float(bps),
+                "ok": False,
+                "metrics": None,
+                "exit_code": int(rc),
+                "stderr_path": str(replay_stderr),
+                "error": f"report_parse_error: {type(e).__name__}: {e}",
+            }
+            failed_levels.append(failure)
+            results.append(failure)
+            continue
+
         init_balance = float(rpt.get("initial_balance", 0.0) or 0.0)
         pnl = float(rpt.get("total_pnl", 0.0) or 0.0)
         dd = float(rpt.get("max_drawdown_pct", 0.0) or 0.0)
         pnl_by_bps[float(bps)] = pnl
         dd_by_bps[float(bps)] = dd
-        results.append({"slippage_bps": float(bps), "metrics": rpt})
+        results.append({"slippage_bps": float(bps), "ok": True, "metrics": rpt})
 
     baseline_bps = float(bps_levels[0])
+    has_baseline = baseline_bps in pnl_by_bps
+    has_reject = reject_bps in pnl_by_bps
     baseline_pnl = float(pnl_by_bps.get(baseline_bps, 0.0))
     reject_pnl = float(pnl_by_bps.get(reject_bps, 0.0))
 
     pnl_drop_reject = baseline_pnl - reject_pnl
     fragility_frac = pnl_drop_reject / init_balance if init_balance > 0 else 0.0
 
-    flip_sign = bool(baseline_pnl > 0 and reject_pnl < 0)
-    reject = bool(flip_sign)
+    degraded_reasons: list[str] = []
+    if failed_levels:
+        degraded_reasons.append("replay_failure")
+    if not has_baseline:
+        degraded_reasons.append("missing_baseline_level")
+    if not has_reject:
+        degraded_reasons.append("missing_reject_level")
+    degraded = bool(degraded_reasons)
+
+    flip_sign = bool(has_baseline and has_reject and baseline_pnl > 0 and reject_pnl < 0)
+    reject = bool(flip_sign or degraded)
+    reject_reasons: list[str] = []
+    if flip_sign:
+        reject_reasons.append("flip_sign_at_reject_bps")
+    if degraded:
+        reject_reasons.append("degraded_run")
 
     summary = {
         "config_path": str(config_path),
@@ -197,6 +238,11 @@ def main(argv: list[str] | None = None) -> int:
             "slippage_fragility": float(fragility_frac),
             "max_drawdown_pct_worst": float(max(dd_by_bps.values()) if dd_by_bps else 0.0),
             "flip_sign_at_reject_bps": bool(flip_sign),
+            "degraded": bool(degraded),
+            "degraded_reasons": [str(x) for x in degraded_reasons],
+            "failed_levels": [float(x.get("slippage_bps", 0.0)) for x in failed_levels],
+            "reject_reasons": [str(x) for x in reject_reasons],
+            "reject_reason": str(reject_reasons[0]) if reject_reasons else "",
             "reject": bool(reject),
         },
         "elapsed_s": float(time.time() - t0),

@@ -1175,6 +1175,21 @@ def _append_reject_reason(it: dict[str, Any], reason: str) -> None:
     it["reject_reason"] = f"{prev}; {reason}"
 
 
+def _slippage_reject_reason(*, agg: dict[str, Any], reject_bps: float, flip_sign: bool) -> str:
+    if bool(agg.get("degraded", False)):
+        degraded_reasons = agg.get("degraded_reasons", [])
+        reasons_text = ", ".join(str(x) for x in degraded_reasons if str(x).strip())
+        if reasons_text:
+            return f"slippage degraded: {reasons_text}"
+        return "slippage degraded run"
+    if bool(flip_sign):
+        return f"slippage flip at {float(reject_bps):g} bps"
+    reject_reason = str(agg.get("reject_reason", "")).strip()
+    if reject_reason:
+        return f"slippage reject: {reject_reason}"
+    return "slippage reject"
+
+
 def _compute_score_v1(
     it: dict[str, Any],
     *,
@@ -3624,7 +3639,14 @@ def main(argv: list[str] | None = None) -> int:
                         if abs(float(reject_bps) - 20.0) < 1e-9:
                             summary["pnl_drop_when_slippage_20bps"] = float(summary.get("pnl_drop_at_reject_bps", 0.0))
                         if bool(summary.get("slippage_reject")):
-                            _append_reject_reason(summary, f"slippage flip at {float(reject_bps):g} bps")
+                            _append_reject_reason(
+                                summary,
+                                _slippage_reject_reason(
+                                    agg=agg,
+                                    reject_bps=float(reject_bps),
+                                    flip_sign=bool(summary.get("slippage_flip_sign_at_reject_bps", False)),
+                                ),
+                            )
                 except Exception:
                     summary["slippage_error"] = "failed to load slippage_stress summary.json"
     
