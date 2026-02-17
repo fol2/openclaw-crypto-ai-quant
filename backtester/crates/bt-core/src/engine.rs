@@ -847,7 +847,15 @@ pub fn run_simulation(
             };
 
             // Feed bar to indicator bank
-            let bank = state.indicators.get_mut(sym_str).unwrap();
+            // H9: replace .unwrap() with defensive continue (key is guaranteed
+            // by pre-creation loop above, but avoid panic on impossible state).
+            let bank = match state.indicators.get_mut(sym_str) {
+                Some(b) => b,
+                None => {
+                    eprintln!("[bt-core] BUG: indicator bank missing for {sym_str}, skipping bar");
+                    continue;
+                }
+            };
             let snap = bank.update(bar);
 
             // Store EMA slow for slope computation (borrow ends immediately)
@@ -902,7 +910,16 @@ pub fn run_simulation(
             // Compute EMA slow slope (re-borrow immutably after exit check)
             let slope_window = cfg.thresholds.entry.slow_drift_slope_window;
             let ema_slow_slope_pct = {
-                let hist = state.ema_slow_history.get(sym_str).unwrap();
+                // H9: replace .unwrap() with defensive continue (history is
+                // populated a few lines above on this same iteration, but
+                // avoid panic on impossible state).
+                let hist = match state.ema_slow_history.get(sym_str) {
+                    Some(h) => h,
+                    None => {
+                        eprintln!("[bt-core] BUG: ema_slow_history missing for {sym_str}, skipping");
+                        continue;
+                    }
+                };
                 compute_ema_slow_slope(hist, slope_window, snap.close)
             };
             sub_bar_slopes.insert(sym.to_string(), ema_slow_slope_pct);
