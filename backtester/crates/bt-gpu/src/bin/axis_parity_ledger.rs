@@ -999,6 +999,10 @@ fn choose_alignment_offsets(
         return (base_cpu_off, base_gpu_off, 0);
     }
 
+    if cpu.len() == gpu.len() {
+        return (0, 0, base_aligned);
+    }
+
     if max_offset_scan == 0 {
         return (base_cpu_off, base_gpu_off, base_aligned);
     }
@@ -1008,26 +1012,22 @@ fn choose_alignment_offsets(
     let mut best_aligned = base_aligned;
     let mut best_prefix = matching_prefix_len(cpu, base_cpu_off, gpu, base_gpu_off, base_aligned);
 
-    let cpu_scan_max = cpu.len().min(max_offset_scan);
-    let gpu_scan_max = gpu.len().min(max_offset_scan);
-    for cpu_off in 0..=cpu_scan_max {
-        for gpu_off in 0..=gpu_scan_max {
-            let aligned = cpu.len().saturating_sub(cpu_off).min(gpu.len().saturating_sub(gpu_off));
-            if aligned == 0 {
-                continue;
-            }
-            let prefix = matching_prefix_len(cpu, cpu_off, gpu, gpu_off, aligned);
-            let better_prefix = prefix > best_prefix;
-            let better_coverage = prefix == best_prefix && aligned > best_aligned;
-            let better_compact = prefix == best_prefix
-                && aligned == best_aligned
-                && (cpu_off + gpu_off) < (best_cpu_off + best_gpu_off);
-            if better_prefix || better_coverage || better_compact {
-                best_prefix = prefix;
-                best_aligned = aligned;
-                best_cpu_off = cpu_off;
-                best_gpu_off = gpu_off;
-            }
+    let scan_cap = base_aligned.min(max_offset_scan);
+    for shared_trim in 1..=scan_cap {
+        let cpu_off = base_cpu_off + shared_trim;
+        let gpu_off = base_gpu_off + shared_trim;
+        let aligned = base_aligned - shared_trim;
+        if aligned == 0 {
+            break;
+        }
+        let prefix = matching_prefix_len(cpu, cpu_off, gpu, gpu_off, aligned);
+        let better_prefix = prefix > best_prefix;
+        let better_coverage = prefix == best_prefix && aligned > best_aligned;
+        if better_prefix || better_coverage {
+            best_prefix = prefix;
+            best_aligned = aligned;
+            best_cpu_off = cpu_off;
+            best_gpu_off = gpu_off;
         }
     }
 
