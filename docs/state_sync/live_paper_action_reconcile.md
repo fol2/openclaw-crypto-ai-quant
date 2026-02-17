@@ -21,6 +21,11 @@ python tools/audit_live_paper_action_reconcile.py \
   --from-ts 1770700000000 \
   --to-ts 1771200000000 \
   --timestamp-bucket-ms 1 \
+  --price-tol 1e-9 \
+  --size-tol 1e-9 \
+  --pnl-tol 1e-9 \
+  --fee-tol 1e-9 \
+  --balance-tol 1e-9 \
   --output /tmp/live_paper_action_reconcile.json
 ```
 
@@ -42,5 +47,9 @@ python tools/audit_live_paper_action_reconcile.py \
 
 - deterministic logic divergences
 - numeric policy divergences
+- confidence mismatches
+- unmatched non-funding actions on either side
 
 Funding-only one-sided events are captured under `accepted_residuals`.
+
+`status.accepted_residuals_only = true` means strict alignment passed and only accepted residual classes remain.
