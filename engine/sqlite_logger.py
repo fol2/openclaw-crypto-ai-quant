@@ -213,8 +213,22 @@ class _LineBufferingWriter(io.TextIOBase):
         return False
 
     def write(self, s: str) -> int:  # type: ignore[override]
-        with suppress(OSError, ValueError, RuntimeError):
+        try:
             self._stream.write(s)
+        except BrokenPipeError:
+            # Legitimate when stdout/stderr pipe consumer exits early.
+            pass
+        except Exception as exc:
+            try:
+                self._sink.emit(
+                    stream="stderr",
+                    message=(
+                        "sqlite_logger stream write failed: "
+                        f"{exc.__class__.__name__}: {exc}"
+                    ),
+                )
+            except Exception:
+                pass
 
         with suppress(TypeError, ValueError):
             self._buf += str(s)
