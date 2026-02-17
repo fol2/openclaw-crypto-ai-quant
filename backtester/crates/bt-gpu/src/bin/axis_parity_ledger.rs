@@ -106,6 +106,10 @@ struct Args {
     /// Maximum prefix offset scan window when aligning CPU/GPU event streams.
     #[arg(long, default_value_t = 8)]
     event_parity_max_offset_scan: usize,
+
+    /// Allow absolute 2D offset scan (head/tail skew) instead of baseline-relative scan.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+    event_parity_allow_absolute_scan: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -407,6 +411,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             &gpu_events,
             args.trace_include_mismatch_fields,
             args.event_parity_max_offset_scan,
+            args.event_parity_allow_absolute_scan,
         );
         if args.ledger_include_event_parity {
             baseline_event_parity = Some(summarise_event_parity(&event_parity));
@@ -559,6 +564,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     &gpu_events,
                     args.trace_include_mismatch_fields,
                     args.event_parity_max_offset_scan,
+                    args.event_parity_allow_absolute_scan,
                 );
                 if args.ledger_include_event_parity {
                     event_parity_summary = Some(summarise_event_parity(&event_parity));
@@ -929,11 +935,12 @@ fn compare_event_streams(
     gpu_events: &[TraceEventRow],
     include_mismatch_fields: bool,
     max_offset_scan: usize,
+    allow_absolute_scan: bool,
 ) -> EventParitySummary {
     let cpu: Vec<CanonicalEventRow> = cpu_events.iter().map(canonicalise_cpu_event).collect();
     let gpu: Vec<CanonicalEventRow> = gpu_events.iter().map(canonicalise_gpu_event).collect();
     let (cpu_tail_offset, gpu_tail_offset, aligned_len) =
-        choose_alignment_offsets(&cpu, &gpu, max_offset_scan);
+        choose_alignment_offsets(&cpu, &gpu, max_offset_scan, allow_absolute_scan);
 
     for rel_idx in 0..aligned_len {
         let cpu_ev = &cpu[cpu_tail_offset + rel_idx];
@@ -991,6 +998,7 @@ fn choose_alignment_offsets(
     cpu: &[CanonicalEventRow],
     gpu: &[CanonicalEventRow],
     max_offset_scan: usize,
+    allow_absolute_scan: bool,
 ) -> (usize, usize, usize) {
     let base_aligned = cpu.len().min(gpu.len());
     let base_cpu_off = cpu.len().saturating_sub(base_aligned);
@@ -1012,13 +1020,34 @@ fn choose_alignment_offsets(
     let mut best_aligned = base_aligned;
     let mut best_prefix = matching_prefix_len(cpu, base_cpu_off, gpu, base_gpu_off, base_aligned);
 
-    let cpu_scan_max = cpu.len().min(max_offset_scan);
-    let gpu_scan_max = gpu.len().min(max_offset_scan);
-    for cpu_off in 0..=cpu_scan_max {
-        for gpu_off in 0..=gpu_scan_max {
-            let aligned = cpu.len().saturating_sub(cpu_off).min(gpu.len().saturating_sub(gpu_off));
+    if allow_absolute_scan {
+        let cpu_scan_max = cpu.len().min(max_offset_scan);
+        let gpu_scan_max = gpu.len().min(max_offset_scan);
+        for cpu_off in 0..=cpu_scan_max {
+            for gpu_off in 0..=gpu_scan_max {
+                let aligned = cpu.len().saturating_sub(cpu_off).min(gpu.len().saturating_sub(gpu_off));
+                if aligned == 0 {
+                    continue;
+                }
+                let prefix = matching_prefix_len(cpu, cpu_off, gpu, gpu_off, aligned);
+                let better_prefix = prefix > best_prefix;
+                let better_coverage = prefix == best_prefix && aligned > best_aligned;
+                if better_prefix || better_coverage {
+                    best_prefix = prefix;
+                    best_aligned = aligned;
+                    best_cpu_off = cpu_off;
+                    best_gpu_off = gpu_off;
+                }
+            }
+        }
+    } else {
+        let scan_cap = base_aligned.min(max_offset_scan);
+        for shared_trim in 1..=scan_cap {
+            let cpu_off = base_cpu_off + shared_trim;
+            let gpu_off = base_gpu_off + shared_trim;
+            let aligned = base_aligned - shared_trim;
             if aligned == 0 {
-                continue;
+                break;
             }
             let prefix = matching_prefix_len(cpu, cpu_off, gpu, gpu_off, aligned);
             let better_prefix = prefix > best_prefix;
