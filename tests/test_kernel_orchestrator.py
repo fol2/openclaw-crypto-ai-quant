@@ -124,7 +124,8 @@ def _make_kernel_response(
     action_kind: str = "hold",
     action_side: str = "long",
     diagnostics: dict | None = None,
-    state_schema_version: int = KERNEL_SCHEMA_VERSION,
+    state_schema_version: int | None = KERNEL_SCHEMA_VERSION,
+    decision_schema_version: int | None = None,
     envelope_schema_version: int | None = None,
 ) -> str:
     """Build a minimal kernel response envelope."""
@@ -148,12 +149,13 @@ def _make_kernel_response(
         fills = []
 
     state = {
-        "schema_version": state_schema_version,
         "timestamp_ms": _BASE_TS + 1000,
         "step": 1,
         "cash_usd": 10000.0,
         "positions": {},
     }
+    if state_schema_version is not None:
+        state["schema_version"] = state_schema_version
 
     if ok:
         envelope = {
@@ -165,6 +167,8 @@ def _make_kernel_response(
                 "diagnostics": diagnostics or {"entry_signal": "neutral"},
             },
         }
+        if decision_schema_version is not None:
+            envelope["decision"]["schema_version"] = decision_schema_version
         if envelope_schema_version is not None:
             envelope["schema_version"] = envelope_schema_version
         return json.dumps(envelope)
@@ -964,7 +968,69 @@ class TestParseKernelResponse:
         decision = orch._parse_kernel_response(raw, _make_state())
         assert decision.ok is False
         assert decision.action == "HOLD"
-        assert decision.diagnostics.get("schema_version") == KERNEL_SCHEMA_VERSION + 1
+        assert decision.diagnostics.get("schema_versions", {}).get("envelope") == KERNEL_SCHEMA_VERSION + 1
+
+    def test_state_schema_version_mismatch_rejected_when_envelope_matches(self):
+        orch = KernelOrchestrator()
+        raw = _make_kernel_response(
+            ok=True,
+            state_schema_version=KERNEL_SCHEMA_VERSION + 1,
+            envelope_schema_version=KERNEL_SCHEMA_VERSION,
+        )
+        decision = orch._parse_kernel_response(raw, _make_state())
+        assert decision.ok is False
+        assert "schema_version" in str(decision.diagnostics.get("error", ""))
+        assert decision.diagnostics.get("schema_versions", {}).get("state") == KERNEL_SCHEMA_VERSION + 1
+
+    def test_decision_schema_version_mismatch_rejected(self):
+        orch = KernelOrchestrator()
+        raw = _make_kernel_response(
+            ok=True,
+            state_schema_version=None,
+            decision_schema_version=KERNEL_SCHEMA_VERSION + 1,
+        )
+        decision = orch._parse_kernel_response(raw, _make_state())
+        assert decision.ok is False
+        assert "schema_version mismatch" in str(decision.diagnostics.get("error", ""))
+        assert decision.diagnostics.get("schema_versions", {}).get("decision") == KERNEL_SCHEMA_VERSION + 1
+
+    def test_conflicting_schema_versions_rejected(self):
+        orch = KernelOrchestrator()
+        raw = _make_kernel_response(
+            ok=True,
+            state_schema_version=KERNEL_SCHEMA_VERSION,
+            decision_schema_version=KERNEL_SCHEMA_VERSION + 1,
+            envelope_schema_version=KERNEL_SCHEMA_VERSION,
+        )
+        decision = orch._parse_kernel_response(raw, _make_state())
+        assert decision.ok is False
+        assert "conflicting schema_version fields" in str(decision.diagnostics.get("error", ""))
+
+    def test_legacy_payload_without_schema_versions_still_parses(self):
+        orch = KernelOrchestrator()
+        raw = _make_kernel_response(
+            ok=True,
+            state_schema_version=None,
+            decision_schema_version=None,
+            envelope_schema_version=None,
+        )
+        decision = orch._parse_kernel_response(raw, _make_state())
+        assert decision.ok is True
+        assert decision.action == "HOLD"
+
+    def test_non_mapping_decision_payload_rejected_cleanly(self):
+        orch = KernelOrchestrator()
+        raw = json.dumps({"ok": True, "decision": []})
+        decision = orch._parse_kernel_response(raw, _make_state())
+        assert decision.ok is False
+        assert "invalid kernel decision payload type" in str(decision.diagnostics.get("error", ""))
+
+    def test_non_mapping_decision_payload_in_error_response(self):
+        orch = KernelOrchestrator()
+        raw = json.dumps({"ok": False, "decision": [], "error": {"code": "TEST_ERROR"}})
+        decision = orch._parse_kernel_response(raw, _make_state())
+        assert decision.ok is False
+        assert decision.action == "HOLD"
 
 
 # ===================================================================

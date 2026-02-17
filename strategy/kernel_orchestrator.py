@@ -706,18 +706,61 @@ class KernelOrchestrator:
                 raw_json=raw_json if isinstance(raw_json, str) else "{}",
             )
 
-        schema_version = None
-        if isinstance(envelope, dict):
-            raw_schema_version = envelope.get("schema_version", None)
-            if raw_schema_version is None:
-                raw_schema_version = ((envelope.get("decision") or {}).get("state") or {}).get("schema_version")
-            try:
-                schema_version = int(raw_schema_version) if raw_schema_version is not None else None
-            except (TypeError, ValueError):
-                schema_version = None
+        if not isinstance(envelope, dict):
+            msg = f"invalid kernel response envelope type: {type(envelope).__name__}"
+            logger.error("[orchestrator] %s", msg)
+            return KernelDecision(
+                ok=False,
+                state_json=fallback_state_json,
+                intents=[],
+                fills=[],
+                diagnostics={"error": msg},
+                action="HOLD",
+                raw_json=raw_json,
+            )
 
-        if schema_version is not None and schema_version != int(KERNEL_SCHEMA_VERSION):
-            msg = f"schema_version mismatch: got={schema_version} expected={int(KERNEL_SCHEMA_VERSION)}"
+        expected_schema_version = int(KERNEL_SCHEMA_VERSION)
+        decision_obj = envelope.get("decision")
+        decision = decision_obj if isinstance(decision_obj, dict) else {}
+        state_obj = decision.get("state")
+        state = state_obj if isinstance(state_obj, dict) else {}
+
+        raw_schema_versions: dict[str, Any] = {}
+        for source, raw_schema_version in (
+            ("envelope", envelope.get("schema_version")),
+            ("decision", decision.get("schema_version")),
+            ("state", state.get("schema_version")),
+        ):
+            if raw_schema_version is not None:
+                raw_schema_versions[source] = raw_schema_version
+
+        parsed_schema_versions: dict[str, int] = {}
+        for source, raw_schema_version in raw_schema_versions.items():
+            try:
+                parsed_schema_versions[source] = int(raw_schema_version)
+            except (TypeError, ValueError, OverflowError):
+                msg = f"invalid schema_version value in {source}: {raw_schema_version!r}"
+                logger.error("[orchestrator] %s", msg)
+                return KernelDecision(
+                    ok=False,
+                    state_json=fallback_state_json,
+                    intents=[],
+                    fills=[],
+                    diagnostics={
+                        "error": msg,
+                        "schema_versions": raw_schema_versions,
+                        "expected_schema_version": expected_schema_version,
+                    },
+                    action="HOLD",
+                    raw_json=raw_json,
+                )
+
+        unique_schema_versions = sorted(set(parsed_schema_versions.values()))
+        if len(unique_schema_versions) > 1:
+            msg = (
+                "conflicting schema_version fields: "
+                + ", ".join(f"{src}={version}" for src, version in sorted(parsed_schema_versions.items()))
+            )
             logger.error("[orchestrator] %s", msg)
             return KernelDecision(
                 ok=False,
@@ -726,12 +769,31 @@ class KernelOrchestrator:
                 fills=[],
                 diagnostics={
                     "error": msg,
-                    "schema_version": schema_version,
-                    "expected_schema_version": int(KERNEL_SCHEMA_VERSION),
+                    "schema_versions": parsed_schema_versions,
+                    "expected_schema_version": expected_schema_version,
                 },
                 action="HOLD",
                 raw_json=raw_json,
             )
+
+        for source, schema_version in parsed_schema_versions.items():
+            if schema_version != expected_schema_version:
+                msg = f"schema_version mismatch at {source}: got={schema_version} expected={expected_schema_version}"
+                logger.error("[orchestrator] %s", msg)
+                return KernelDecision(
+                    ok=False,
+                    state_json=fallback_state_json,
+                    intents=[],
+                    fills=[],
+                    diagnostics={
+                        "error": msg,
+                        "schema_version": schema_version,
+                        "schema_versions": parsed_schema_versions,
+                        "expected_schema_version": expected_schema_version,
+                    },
+                    action="HOLD",
+                    raw_json=raw_json,
+                )
 
         ok = bool(envelope.get("ok", False))
 
@@ -747,13 +809,37 @@ class KernelOrchestrator:
                 raw_json=raw_json,
             )
 
-        decision = envelope.get("decision", {})
+        if not isinstance(decision_obj, dict):
+            msg = f"invalid kernel decision payload type: {type(decision_obj).__name__}"
+            logger.error("[orchestrator] %s", msg)
+            return KernelDecision(
+                ok=False,
+                state_json=fallback_state_json,
+                intents=[],
+                fills=[],
+                diagnostics={"error": msg},
+                action="HOLD",
+                raw_json=raw_json,
+            )
+
         intents = decision.get("intents", [])
         fills = decision.get("fills", [])
         diagnostics = decision.get("diagnostics", {})
 
         # Extract new state
         state = decision.get("state", {})
+        if not isinstance(state, dict):
+            msg = f"invalid kernel state payload type: {type(state).__name__}"
+            logger.error("[orchestrator] %s", msg)
+            return KernelDecision(
+                ok=False,
+                state_json=fallback_state_json,
+                intents=[],
+                fills=[],
+                diagnostics={"error": msg},
+                action="HOLD",
+                raw_json=raw_json,
+            )
         state_json = json.dumps(state, separators=(",", ":"), sort_keys=True)
 
         # Extract action
