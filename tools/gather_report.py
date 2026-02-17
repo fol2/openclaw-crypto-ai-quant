@@ -2,13 +2,13 @@ import sqlite3
 import time
 import json
 import datetime
-import math
 
-DB_PAPER = '/home/fol2hk/.openclaw/workspace/dev/ai_quant/trading_engine.db'
-DB_LIVE = '/home/fol2hk/.openclaw/workspace/dev/ai_quant/trading_engine_live.db'
-DB_CANDLES = '/home/fol2hk/.openclaw/workspace/dev/ai_quant/candles_dbs/candles_1m.db'
+DB_PAPER = "/home/fol2hk/.openclaw/workspace/dev/ai_quant/trading_engine.db"
+DB_LIVE = "/home/fol2hk/.openclaw/workspace/dev/ai_quant/trading_engine_live.db"
+DB_CANDLES = "/home/fol2hk/.openclaw/workspace/dev/ai_quant/candles_dbs/candles_1m.db"
 
 results = {}
+
 
 def get_heartbeat(db_path):
     try:
@@ -21,6 +21,7 @@ def get_heartbeat(db_path):
     except Exception as e:
         return str(e)
 
+
 def get_perf_60m(db_path):
     try:
         # Calculate cutoff time (60 mins ago)
@@ -32,45 +33,58 @@ def get_perf_60m(db_path):
         c = conn.cursor()
 
         # PnL Summary
-        c.execute("""
+        c.execute(
+            """
             SELECT count(*) as count, sum(pnl) as pnl, sum(fee_usd) as fees,
                    count(CASE WHEN pnl > 0 THEN 1 END) as wins
             FROM trades
             WHERE timestamp > ? AND action IN ('OPEN', 'CLOSE', 'ADD', 'REDUCE', 'SL', 'TP', 'LIQ')
-        """, (cutoff_iso,))
+        """,
+            (cutoff_iso,),
+        )
         summary = dict(c.fetchone())
 
         # Top Winners
-        c.execute("""
+        c.execute(
+            """
             SELECT symbol, pnl, reason as exit_reason
             FROM trades
             WHERE timestamp > ? AND pnl > 0 AND action IN ('CLOSE', 'REDUCE', 'SL', 'TP', 'LIQ')
             ORDER BY pnl DESC LIMIT 3
-        """, (cutoff_iso,))
+        """,
+            (cutoff_iso,),
+        )
         winners = [dict(r) for r in c.fetchall()]
 
         # Top Losers
-        c.execute("""
+        c.execute(
+            """
             SELECT symbol, pnl, reason as exit_reason
             FROM trades
             WHERE timestamp > ? AND pnl < 0 AND action IN ('CLOSE', 'REDUCE', 'SL', 'TP', 'LIQ')
             ORDER BY pnl ASC LIMIT 3
-        """, (cutoff_iso,))
+        """,
+            (cutoff_iso,),
+        )
         losers = [dict(r) for r in c.fetchall()]
 
         # Exit Reasons
-        c.execute("""
+        c.execute(
+            """
             SELECT reason, count(*) as c
             FROM trades
             WHERE timestamp > ? AND action IN ('CLOSE', 'REDUCE', 'SL', 'TP', 'LIQ')
             GROUP BY reason
-        """, (cutoff_iso,))
-        reasons = {r['reason']: r['c'] for r in c.fetchall()}
+        """,
+            (cutoff_iso,),
+        )
+        reasons = {r["reason"]: r["c"] for r in c.fetchall()}
 
         conn.close()
-        return {'summary': summary, 'winners': winners, 'losers': losers, 'reasons': reasons}
+        return {"summary": summary, "winners": winners, "losers": losers, "reasons": reasons}
     except Exception as e:
-        return {'error': str(e)}
+        return {"error": str(e)}
+
 
 def get_open_positions_live():
     try:
@@ -97,58 +111,61 @@ def get_open_positions_live():
         cc = conn_candles.cursor()
 
         annotated = []
-        summary = {'total_pos': 0, 'total_margin': 0.0, 'total_unrealized_pnl': 0.0, 'longs': 0, 'shorts': 0}
+        summary = {"total_pos": 0, "total_margin": 0.0, "total_unrealized_pnl": 0.0, "longs": 0, "shorts": 0}
 
         for p in positions:
-            cc.execute("SELECT c, t FROM candles WHERE symbol = ? AND interval = '1m' ORDER BY t DESC LIMIT 1", (p['symbol'],))
+            cc.execute(
+                "SELECT c, t FROM candles WHERE symbol = ? AND interval = '1m' ORDER BY t DESC LIMIT 1", (p["symbol"],)
+            )
             row = cc.fetchone()
 
-            current_price = row['c'] if row else None
-            candle_ts = row['t'] if row else None
+            current_price = row["c"] if row else None
+            candle_ts = row["t"] if row else None
 
-            p['current_price'] = current_price
-            p['candle_ts'] = candle_ts
+            p["current_price"] = current_price
+            p["candle_ts"] = candle_ts
 
             # Calculate Unrealized PnL
-            if current_price and p['entry_price']:
-                diff = current_price - p['entry_price']
-                if p['direction'] == 'SHORT':
+            if current_price and p["entry_price"]:
+                diff = current_price - p["entry_price"]
+                if p["direction"] == "SHORT":
                     diff = -diff
 
                 # Size is usually positive in trades table? Need to check. Assume positive.
-                unrealized_pnl = diff * p['size']
-                p['unrealized_pnl'] = unrealized_pnl
+                unrealized_pnl = diff * p["size"]
+                p["unrealized_pnl"] = unrealized_pnl
 
-                margin = p['margin_used'] if p['margin_used'] else 0
-                p['pnl_pct'] = (unrealized_pnl / margin * 100) if margin > 0 else 0
+                margin = p["margin_used"] if p["margin_used"] else 0
+                p["pnl_pct"] = (unrealized_pnl / margin * 100) if margin > 0 else 0
 
                 # Duration
                 try:
-                    entry_dt = datetime.datetime.fromisoformat(p['entry_time_iso'])
+                    entry_dt = datetime.datetime.fromisoformat(p["entry_time_iso"])
                     duration_min = (datetime.datetime.utcnow() - entry_dt).total_seconds() / 60
-                    p['duration_min'] = duration_min
-                except:
-                    p['duration_min'] = 0
+                    p["duration_min"] = duration_min
+                except Exception:
+                    p["duration_min"] = 0
             else:
-                p['unrealized_pnl'] = 0.0
-                p['pnl_pct'] = 0.0
-                p['duration_min'] = 0
+                p["unrealized_pnl"] = 0.0
+                p["pnl_pct"] = 0.0
+                p["duration_min"] = 0
 
             annotated.append(p)
 
             # Summary stats
-            summary['total_pos'] += 1
-            summary['total_margin'] += (p['margin_used'] or 0)
-            summary['total_unrealized_pnl'] += (p.get('unrealized_pnl', 0) or 0)
-            if p['direction'] == 'LONG':
-                summary['longs'] += 1
-            elif p['direction'] == 'SHORT':
-                summary['shorts'] += 1
+            summary["total_pos"] += 1
+            summary["total_margin"] += p["margin_used"] or 0
+            summary["total_unrealized_pnl"] += p.get("unrealized_pnl", 0) or 0
+            if p["direction"] == "LONG":
+                summary["longs"] += 1
+            elif p["direction"] == "SHORT":
+                summary["shorts"] += 1
 
         conn_candles.close()
-        return {'positions': annotated, 'summary': summary}
+        return {"positions": annotated, "summary": summary}
     except Exception as e:
-        return {'error': str(e)}
+        return {"error": str(e)}
+
 
 def get_oms_health():
     try:
@@ -157,28 +174,33 @@ def get_oms_health():
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
 
-        c.execute("SELECT status, count(*) as c FROM oms_intents WHERE created_ts_ms > ? GROUP BY status", (ts_cutoff_ms,))
-        intents = {r['status']: r['c'] for r in c.fetchall()}
+        c.execute(
+            "SELECT status, count(*) as c FROM oms_intents WHERE created_ts_ms > ? GROUP BY status", (ts_cutoff_ms,)
+        )
+        intents = {r["status"]: r["c"] for r in c.fetchall()}
 
         c.execute("SELECT count(*) as c FROM oms_fills WHERE intent_id IS NULL AND ts_ms > ?", (ts_cutoff_ms,))
-        unmatched_fills = c.fetchone()['c']
+        unmatched_fills = c.fetchone()["c"]
 
         c.execute("SELECT count(*) as c FROM oms_open_orders")
-        open_orders = c.fetchone()['c']
+        open_orders = c.fetchone()["c"]
 
-        c.execute("SELECT count(*) as c FROM oms_reconcile_events WHERE ts_ms > ? AND action='CANCEL_STALE'", (ts_cutoff_ms,))
-        cancels = c.fetchone()['c']
+        c.execute(
+            "SELECT count(*) as c FROM oms_reconcile_events WHERE ts_ms > ? AND action='CANCEL_STALE'", (ts_cutoff_ms,)
+        )
+        cancels = c.fetchone()["c"]
 
         conn.close()
-        return {'intents': intents, 'unmatched_fills': unmatched_fills, 'open_orders': open_orders, 'cancels': cancels}
+        return {"intents": intents, "unmatched_fills": unmatched_fills, "open_orders": open_orders, "cancels": cancels}
     except Exception as e:
-        return {'error': str(e)}
+        return {"error": str(e)}
 
-results['paper_heartbeat'] = get_heartbeat(DB_PAPER)
-results['live_heartbeat'] = get_heartbeat(DB_LIVE)
-results['paper_perf'] = get_perf_60m(DB_PAPER)
-results['live_perf'] = get_perf_60m(DB_LIVE)
-results['open_positions'] = get_open_positions_live()
-results['oms_health'] = get_oms_health()
+
+results["paper_heartbeat"] = get_heartbeat(DB_PAPER)
+results["live_heartbeat"] = get_heartbeat(DB_LIVE)
+results["paper_perf"] = get_perf_60m(DB_PAPER)
+results["live_perf"] = get_perf_60m(DB_LIVE)
+results["open_positions"] = get_open_positions_live()
+results["oms_health"] = get_oms_health()
 
 print(json.dumps(results, indent=2))
