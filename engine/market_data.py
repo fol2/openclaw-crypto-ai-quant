@@ -836,12 +836,12 @@ class MarketDataHub:
         except sqlite3.OperationalError as e:
             logger.warning("candle upsert: failed to connect for %s/%s: %s", symbol, interval, e)
             return
-        cur = conn.cursor()
-        cur.execute(
-            "CREATE TABLE IF NOT EXISTS candles (symbol TEXT, interval TEXT, t INTEGER, t_close INTEGER, o REAL, h REAL, l REAL, c REAL, v REAL, n INTEGER, updated_at TEXT, PRIMARY KEY (symbol, interval, t))"
-        )
-        updated_at = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
         try:
+            cur = conn.cursor()
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS candles (symbol TEXT, interval TEXT, t INTEGER, t_close INTEGER, o REAL, h REAL, l REAL, c REAL, v REAL, n INTEGER, updated_at TEXT, PRIMARY KEY (symbol, interval, t))"
+            )
+            updated_at = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
             for c in candles:
                 try:
                     cur.execute(
