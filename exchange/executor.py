@@ -1,5 +1,6 @@
 import datetime
 import json
+import math
 import os
 import re
 import time
@@ -247,12 +248,20 @@ class HyperliquidLiveExecutor:
             }
         return out
 
+    _MAX_LEVERAGE = 50
+
     def update_leverage(self, symbol: str, leverage: float, *, is_cross: bool = True) -> bool:
         try:
-            lev_i = int(round(float(leverage)))
+            lev_f = float(leverage)
         except Exception:
-            lev_i = 1
-        lev_i = max(1, lev_i)
+            lev_f = 1.0
+        if not math.isfinite(lev_f) or lev_f <= 0:
+            print(f"[preflight] update_leverage blocked: invalid leverage={leverage!r}")
+            return False
+        lev_i = max(1, int(round(lev_f)))
+        if lev_i > self._MAX_LEVERAGE:
+            print(f"[preflight] update_leverage blocked: leverage {lev_i}x exceeds max {self._MAX_LEVERAGE}x")
+            return False
 
         sym = str(symbol or "").strip().upper()
         if not sym:
@@ -285,7 +294,8 @@ class HyperliquidLiveExecutor:
             sz_f = float(sz)
         except Exception:
             return None
-        if sz_f <= 0:
+        if sz_f <= 0 or not math.isfinite(sz_f):
+            print(f"[preflight] market_open blocked: invalid sz={sz!r} for {sym}")
             return None
 
         try:
@@ -300,7 +310,8 @@ class HyperliquidLiveExecutor:
                 px_f = float(px)
             except Exception:
                 px_f = None
-            if px_f is not None and px_f <= 0:
+            if px_f is not None and (px_f <= 0 or not math.isfinite(px_f)):
+                print(f"[preflight] market_open: ignoring invalid px={px!r} for {sym}")
                 px_f = None
 
         cloid_obj = None
@@ -364,7 +375,8 @@ class HyperliquidLiveExecutor:
             sz_f = float(sz)
         except Exception:
             return None
-        if sz_f <= 0:
+        if sz_f <= 0 or not math.isfinite(sz_f):
+            print(f"[preflight] market_close blocked: invalid sz={sz!r} for {sym}")
             return None
 
         try:
@@ -379,7 +391,8 @@ class HyperliquidLiveExecutor:
                 px_f = float(px)
             except Exception:
                 px_f = None
-            if px_f is not None and px_f <= 0:
+            if px_f is not None and (px_f <= 0 or not math.isfinite(px_f)):
+                print(f"[preflight] market_close: ignoring invalid px={px!r} for {sym}")
                 px_f = None
 
         cloid_obj = None
