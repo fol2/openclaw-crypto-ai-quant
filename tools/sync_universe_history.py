@@ -186,6 +186,10 @@ def main() -> int:
         conn.execute("PRAGMA journal_mode = WAL;")
         conn.execute("PRAGMA synchronous = NORMAL;")
         ensure_schema(conn)
+        try:
+            os.chmod(str(db_path), 0o600)
+        except OSError:
+            pass
 
         # Pre-read for simple counters
         existing = {r[0] for r in conn.execute("SELECT symbol FROM universe_listings").fetchall()}

@@ -38,6 +38,7 @@ def _market_db_path() -> str:
         or os.path.join(here, "..", "trading_engine.db")
     )
 
+
 def _candles_db_dir() -> str:
     raw = str(os.getenv("AI_QUANT_CANDLES_DB_DIR", "") or "").strip()
     if raw:
@@ -49,6 +50,7 @@ def _candles_db_dir() -> str:
     except Exception:
         return "candles_dbs"
 
+
 def _sanitize_interval(interval: str) -> str:
     out = []
     for ch in str(interval or ""):
@@ -59,13 +61,16 @@ def _sanitize_interval(interval: str) -> str:
     s = "".join(out).strip("_")
     return s if s else "unknown"
 
+
 def _candles_db_path(interval: str) -> str:
     name = _sanitize_interval(interval)
     return os.path.join(_candles_db_dir(), f"candles_{name}.db")
 
+
 def _default_client_id() -> str:
     mode = str(os.getenv("AI_QUANT_MODE", "paper") or "paper").strip().lower() or "paper"
     return f"{mode}:{os.getpid()}"
+
 
 def _client_id() -> str:
     raw = str(os.getenv("AI_QUANT_WS_CLIENT_ID", "") or "").strip()
@@ -124,6 +129,7 @@ class SidecarWSClient:
 
         if reconnected and self._disconnect_ts is not None:
             import time as _time
+
             gap_s = _time.monotonic() - self._disconnect_ts
             if gap_s > 5.0:
                 logger.warning(
@@ -152,6 +158,7 @@ class SidecarWSClient:
             self._sock = None
             if self._connected:
                 import time as _time
+
                 self._disconnect_ts = _time.monotonic()
             self._connected = False
 
@@ -268,7 +275,10 @@ class SidecarWSClient:
     def get_mids(self, *, symbols: list[str], max_age_s: float | None = None) -> tuple[dict[str, float], float | None]:
         res = self._rpc(
             "get_mids",
-            {"symbols": [str(s).upper() for s in (symbols or [])], "max_age_s": (float(max_age_s) if max_age_s is not None else None)},
+            {
+                "symbols": [str(s).upper() for s in (symbols or [])],
+                "max_age_s": (float(max_age_s) if max_age_s is not None else None),
+            },
             timeout_s=1.0,
         )
         if not isinstance(res, dict):
@@ -322,7 +332,9 @@ class SidecarWSClient:
             t_close_i = None
         return t_open_i, t_close_i
 
-    def get_last_closed_candle_times(self, symbol: str, interval: str, *, grace_ms: int = 2000) -> tuple[int | None, int | None]:
+    def get_last_closed_candle_times(
+        self, symbol: str, interval: str, *, grace_ms: int = 2000
+    ) -> tuple[int | None, int | None]:
         res = self._rpc(
             "get_last_closed_candle_times",
             {"symbol": str(symbol).upper(), "interval": str(interval), "grace_ms": int(grace_ms)},

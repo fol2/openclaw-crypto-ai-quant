@@ -11,6 +11,7 @@ The script:
 
 Run manually or via cron (every 4-6 hours) to keep the DB up to date.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -63,9 +64,7 @@ def get_symbols() -> list[str]:
 
 def get_last_time(conn: sqlite3.Connection, symbol: str) -> int | None:
     """Get the latest timestamp for a symbol in the DB."""
-    row = conn.execute(
-        "SELECT MAX(time) FROM funding_rates WHERE symbol = ?", (symbol,)
-    ).fetchone()
+    row = conn.execute("SELECT MAX(time) FROM funding_rates WHERE symbol = ?", (symbol,)).fetchone()
     return row[0] if row and row[0] is not None else None
 
 
@@ -133,6 +132,10 @@ def main():
     conn = sqlite3.connect(args.db)
     conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(DB_SCHEMA)
+    try:
+        os.chmod(args.db, 0o600)
+    except OSError:
+        pass
 
     info = Info(constants.MAINNET_API_URL, skip_ws=True)
 
@@ -145,12 +148,12 @@ def main():
         start_ms = (last + 1) if last is not None else default_start_ms
 
         if start_ms >= now_ms:
-            print(f"  [{i+1}/{len(symbols)}] {sym}: up to date")
+            print(f"  [{i + 1}/{len(symbols)}] {sym}: up to date")
             continue
 
         count = fetch_and_store(info, conn, sym, start_ms, now_ms)
         total_inserted += count
-        print(f"  [{i+1}/{len(symbols)}] {sym}: +{count} rows (from {start_ms})")
+        print(f"  [{i + 1}/{len(symbols)}] {sym}: +{count} rows (from {start_ms})")
 
         # Rate limit: be polite to HL API
         time.sleep(0.2)
