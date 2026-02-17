@@ -384,15 +384,15 @@ class KernelOrchestrator:
             symbol=symbol,
             config=effective_cfg.get("indicators"),
         )
+        ema_slow_slope_pct = compute_ema_slow_slope(candle_df, effective_cfg)
         gate_result = build_gate_result(
             snap,
             symbol,
             cfg=effective_cfg,
             btc_bullish=btc_bullish,
-            ema_slow_slope_pct=compute_ema_slow_slope(candle_df, effective_cfg),
+            ema_slow_slope_pct=ema_slow_slope_pct,
         )
         entry_params = build_entry_params(effective_cfg)
-        ema_slow_slope_pct = compute_ema_slow_slope(candle_df, effective_cfg)
 
         # 5. Construct MarketEvent
         event = build_evaluate_event(
