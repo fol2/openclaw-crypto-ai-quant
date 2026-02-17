@@ -164,9 +164,13 @@ fn run_gpu_sweep_internal(
 
     // ── 1. Prepare raw candles (CPU, layout only, ~10ms) ─────────────────
     let raw = raw_candles::prepare_raw_candles(candles, &symbols);
-    let num_bars = u32::try_from(raw.num_bars)
-        .map_err(|_| format!("num_bars {} exceeds u32::MAX", raw.num_bars))
-        .expect("num_bars exceeds u32::MAX");
+    let num_bars = match u32::try_from(raw.num_bars) {
+        Ok(n) => n,
+        Err(_) => {
+            eprintln!("[GPU] num_bars {} exceeds u32::MAX — skipping GPU sweep", raw.num_bars);
+            return (Vec::new(), if capture_states { Some(Vec::new()) } else { None }, symbols);
+        }
+    };
 
     // Compute trade bar range from time scope
     let (trade_start, trade_end) =
@@ -202,11 +206,13 @@ fn run_gpu_sweep_internal(
             );
         }
     };
-    let candles_gpu = device_state
-        .dev
-        .htod_sync_copy(&raw.candles)
-        .map_err(|e| format!("GPU candle upload failed: {e}"))
-        .expect("GPU candle upload failed");
+    let candles_gpu = match device_state.dev.htod_sync_copy(&raw.candles) {
+        Ok(buf) => buf,
+        Err(e) => {
+            eprintln!("[GPU] candle upload failed: {e} — skipping GPU sweep");
+            return (Vec::new(), if capture_states { Some(Vec::new()) } else { None }, symbols);
+        }
+    };
 
     let candle_upload_mb =
         (raw.candles.len() * std::mem::size_of::<buffers::GpuRawCandle>()) as f64 / 1e6;
@@ -264,14 +270,26 @@ fn run_gpu_sweep_internal(
 
     // Per-indicator-combo VRAM cost (snapshots + breadth + btc_bullish)
     // C8: use checked arithmetic to prevent overflow on large inputs
-    let snapshot_elements = (num_bars as usize)
-        .checked_mul(num_symbols)
-        .expect("overflow: num_bars * num_symbols");
-    let snapshot_bytes_per_ind: usize = snapshot_elements
+    let snapshot_elements = match (num_bars as usize).checked_mul(num_symbols) {
+        Some(v) => v,
+        None => {
+            eprintln!("[GPU] overflow: num_bars * num_symbols — skipping GPU sweep");
+            return (Vec::new(), if capture_states { Some(Vec::new()) } else { None }, symbols);
+        }
+    };
+    let snapshot_bytes_per_ind: usize = match snapshot_elements
         .checked_mul(std::mem::size_of::<buffers::GpuSnapshot>())
-        .and_then(|v| v.checked_add((num_bars as usize).checked_mul(std::mem::size_of::<f32>())?))
-        .and_then(|v| v.checked_add((num_bars as usize).checked_mul(std::mem::size_of::<u32>())?))
-        .expect("overflow: snapshot_bytes_per_ind calculation");
+        .and_then(|v| v.checked_add(
+            (num_bars as usize).checked_mul(std::mem::size_of::<f32>())?))
+        .and_then(|v| v.checked_add(
+            (num_bars as usize).checked_mul(std::mem::size_of::<u32>())?))
+    {
+        Some(v) => v,
+        None => {
+            eprintln!("[GPU] overflow: snapshot_bytes_per_ind calculation — skipping GPU sweep");
+            return (Vec::new(), if capture_states { Some(Vec::new()) } else { None }, symbols);
+        }
+    };
 
     // Per-trade-combo VRAM cost (config + state + result)
     let combo_bytes: usize = std::mem::size_of::<buffers::GpuComboConfig>()
@@ -280,12 +298,20 @@ fn run_gpu_sweep_internal(
         + 32; // params overhead
 
     let t = trade_combos.len();
-    let per_ind_total_vram = snapshot_bytes_per_ind
-        .checked_add(
-            t.checked_mul(combo_bytes)
-                .expect("overflow: t * combo_bytes"),
-        )
-        .expect("overflow: per_ind_total_vram");
+    let t_combo_bytes = match t.checked_mul(combo_bytes) {
+        Some(v) => v,
+        None => {
+            eprintln!("[GPU] overflow: t * combo_bytes — skipping GPU sweep");
+            return (Vec::new(), if capture_states { Some(Vec::new()) } else { None }, symbols);
+        }
+    };
+    let per_ind_total_vram = match snapshot_bytes_per_ind.checked_add(t_combo_bytes) {
+        Some(v) => v,
+        None => {
+            eprintln!("[GPU] overflow: per_ind_total_vram — skipping GPU sweep");
+            return (Vec::new(), if capture_states { Some(Vec::new()) } else { None }, symbols);
+        }
+    };
 
     // Hard cap: max 10 GB per snapshot allocation (large contiguous allocs
     // can fail even with plenty of total free VRAM due to fragmentation)

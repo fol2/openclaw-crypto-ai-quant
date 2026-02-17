@@ -505,6 +505,8 @@ class OmsStore:
         conn = self._connect()
         cur = conn.cursor()
         try:
+            # Safety: column names in `sets` are compile-time constants (hardcoded
+            # above), not external input.  The allowlist check above is defence-in-depth.
             cur.execute(
                 f"UPDATE oms_intents SET {', '.join(sets)} WHERE intent_id = ?",
                 tuple(vals),

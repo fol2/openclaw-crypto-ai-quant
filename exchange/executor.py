@@ -1,5 +1,6 @@
 import datetime
 import json
+import logging
 import math
 import os
 import re
@@ -10,6 +11,8 @@ from eth_account import Account
 from hyperliquid.exchange import Exchange
 from hyperliquid.info import Info
 from hyperliquid.utils import constants, types
+
+logger = logging.getLogger(__name__)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -406,7 +409,8 @@ class HyperliquidLiveExecutor:
             # We already know side + size in the strategy, so submit a reduce-only IOC limit.
             try:
                 limit_px = self._exchange._slippage_price(sym, bool(is_buy), slip, px=px_f)  # type: ignore[attr-defined]
-            except Exception:
+            except Exception as _slip_exc:
+                logger.debug("_slippage_price failed for %s: %s", sym, _slip_exc, exc_info=True)
                 limit_px = None
             if limit_px is None:
                 return None

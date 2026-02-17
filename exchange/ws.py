@@ -83,8 +83,10 @@ def _ensure_db():
     conn.commit()
     try:
         os.chmod(DB_PATH, 0o600)
-    except OSError:
-        pass
+    except OSError as _perm_exc:
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning("Failed to set DB permissions on %s: %s", DB_PATH, _perm_exc)
     conn.close()
 
 

@@ -112,6 +112,7 @@ fn default_sock_path() -> String {
             return format!("{}/openclaw-ai-quant-ws.sock", xdg.trim_end_matches('/'));
         }
     }
+    eprintln!("[WARN] XDG_RUNTIME_DIR not set — falling back to /tmp (world-writable, less secure)");
     "/tmp/openclaw-ai-quant-ws.sock".to_string()
 }
 

@@ -149,7 +149,7 @@ def _read_balance_from_live_db(*, db_path: Path) -> float | None:
     try:
         if not db_path.exists():
             return None
-        conn = sqlite3.connect(str(db_path), timeout=10)
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10)
         try:
             row = conn.execute("SELECT balance FROM trades ORDER BY id DESC LIMIT 1").fetchone()
         finally:

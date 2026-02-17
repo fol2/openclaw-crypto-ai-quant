@@ -133,6 +133,9 @@ def close_paper_positions(db_path: Path, *, reason: str) -> int:
                 "meta_json": '{"flat_now": true}',
             }
             # Only insert columns that exist in the local DB schema.
+            # Safety: `keep_cols` originates from the hardcoded `base` dict above,
+            # filtered by actual DB columns.  `_validate_identifier` rejects any
+            # non-alphanumeric/underscore names as defence-in-depth.
             keep_cols = [k for k in base.keys() if k in cols]
             for c in keep_cols:
                 _validate_identifier(c)
@@ -311,6 +314,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if not bool(args.yes):
+        if not sys.stdin.isatty():
+            print("[flat_now] Non-interactive shell detected. Use --yes to skip confirmation.", file=sys.stderr)
+            return 2
         print("--- flat_now plan ---", file=sys.stderr)
         if pause_file is not None:
             print(f"  pause: write {args.pause_mode} -> {pause_file}", file=sys.stderr)
