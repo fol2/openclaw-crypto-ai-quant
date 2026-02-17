@@ -199,15 +199,15 @@ class MarketDataHub:
                         df = self.get_candles_df(sym, interval=interval, min_rows=required)
                         if df is None or len(df) < required:
                             truly_not_ready.append(sym)
-                    except Exception:
-                        logger.debug("candle readiness check failed for %s", sym, exc_info=True)
+                    except (sqlite3.Error, OSError, ValueError, TypeError):
+                        logger.warning("candle readiness check failed for %s", sym, exc_info=True)
                         truly_not_ready.append(sym)
                 not_ready = truly_not_ready
                 ready = len(not_ready) == 0
 
             return bool(ready), [str(s).upper() for s in not_ready]
-        except Exception:
-            logger.debug("ensure_ready() outer fallback", exc_info=True)
+        except (sqlite3.Error, OSError, RuntimeError, ValueError, TypeError):
+            logger.warning("ensure_ready() fallback path triggered", exc_info=True)
             return False, [str(s).upper() for s in (symbols or [])]
 
     def candles_health(self, *, symbols: list[str], interval: str) -> dict[str, Any] | None:
