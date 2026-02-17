@@ -27,7 +27,7 @@ from typing import Any
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_PAPER_DB = PROJECT_DIR / "trading_engine.db"
 DEFAULT_SECRETS_PATH = Path(
-    os.getenv("AI_QUANT_SECRETS_PATH") or (PROJECT_DIR / "secrets.json")
+    os.getenv("AI_QUANT_SECRETS_PATH") or "~/.config/openclaw/ai-quant-secrets.json"
 ).expanduser()
 
 
@@ -276,7 +276,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--secrets-path",
         default=str(DEFAULT_SECRETS_PATH),
-        help="Path to live secrets JSON (default: AI_QUANT_SECRETS_PATH or ./secrets.json).",
+        help="Path to live secrets JSON (default: AI_QUANT_SECRETS_PATH or ~/.config/openclaw/ai-quant-secrets.json).",
     )
     ap.add_argument("--max-retries", type=int, default=3, help="Max retries per symbol for live closes (default: 3).")
     ap.add_argument("--slippage-pct", type=float, default=0.02, help="Slippage bound for live closes (default: 0.02).")
@@ -338,4 +338,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

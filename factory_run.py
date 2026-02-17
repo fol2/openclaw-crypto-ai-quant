@@ -41,6 +41,10 @@ except ImportError:  # pragma: no cover
 AIQ_ROOT = Path(__file__).resolve().parent
 
 
+def _default_secrets_path() -> Path:
+    return Path("~/.config/openclaw/ai-quant-secrets.json").expanduser()
+
+
 def _env_float(env_name: str, *, default: float | None = None) -> float | None:
     raw = str(os.getenv(env_name, "") or "").strip()
     if not raw:
@@ -173,13 +177,9 @@ def _export_live_balance_via_cli(*, output: Path) -> tuple[float | None, dict[st
     if secrets_raw:
         env["AI_QUANT_SECRETS_PATH"] = str(Path(secrets_raw).expanduser())
     else:
-        for default_secret_path in [
-            AIQ_ROOT / "secrets.json",
-            Path("~/.config/openclaw/ai-quant-secrets.json").expanduser(),
-        ]:
-            if default_secret_path.exists():
-                env["AI_QUANT_SECRETS_PATH"] = str(default_secret_path)
-                break
+        default_secret_path = _default_secrets_path()
+        if default_secret_path.exists():
+            env["AI_QUANT_SECRETS_PATH"] = str(default_secret_path)
 
     cmd = [
         _resolve_live_export_python(),
@@ -3543,11 +3543,6 @@ def _promote_candidates(
 
     Returns a dict of promotion metadata suitable for embedding in run_metadata.json.
     """
-
-    try:
-        import yaml as _yaml  # noqa: F811
-    except ImportError:  # pragma: no cover
-        import json as _yaml  # type: ignore[no-redef]  # fallback: write JSON
 
     if promote_count <= 0:
         return {"skipped": True, "reason": "promote_count=0"}

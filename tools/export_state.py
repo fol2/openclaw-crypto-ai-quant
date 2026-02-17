@@ -15,6 +15,7 @@ import time
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
+DEFAULT_SECRETS_PATH = os.path.expanduser("~/.config/openclaw/ai-quant-secrets.json")
 
 # ---------------------------------------------------------------------------
 # Paper state export (reconstruct from SQLite — mirrors PaperTrader.load_state)
@@ -168,10 +169,14 @@ def _export_live() -> tuple[float, list[dict]]:
     from exchange.executor import load_live_secrets, HyperliquidLiveExecutor
 
     secrets_path = os.path.expanduser(
-        str(os.getenv("AI_QUANT_SECRETS_PATH") or os.path.join(PROJECT_DIR, "secrets.json"))
+        str(os.getenv("AI_QUANT_SECRETS_PATH") or DEFAULT_SECRETS_PATH)
     )
     if not os.path.exists(secrets_path):
-        print(f"[export] Secrets file not found at {secrets_path} (set AI_QUANT_SECRETS_PATH)", file=sys.stderr)
+        print(
+            f"[export] Secrets file not found at {secrets_path} "
+            f"(set AI_QUANT_SECRETS_PATH or create {DEFAULT_SECRETS_PATH})",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     secrets = load_live_secrets(secrets_path)

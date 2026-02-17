@@ -18,6 +18,7 @@ YAML config hot-reload is handled by StrategyManager, without reloading mei_alph
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from collections import deque
@@ -31,6 +32,8 @@ from .oms_reconciler import LiveOmsReconciler
 from .risk import RiskManager
 from . import alerting
 
+logger = logging.getLogger(__name__)
+
 
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
@@ -41,6 +44,10 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 def _mode() -> str:
     return str(os.getenv("AI_QUANT_MODE", "paper") or "paper").strip().lower()
+
+
+def _default_secrets_path() -> str:
+    return str(Path("~/.config/openclaw/ai-quant-secrets.json").expanduser())
 
 
 def _norm_strategy_mode(raw: str) -> str:
@@ -947,7 +954,7 @@ def main() -> None:
             _secrets = load_live_secrets(
                 os.getenv(
                     "AI_QUANT_SECRETS_PATH",
-                    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "secrets.json"),
+                    _default_secrets_path(),
                 )
             )
             try:
@@ -1020,7 +1027,7 @@ def main() -> None:
 
         secrets_path = os.getenv(
             "AI_QUANT_SECRETS_PATH",
-            os.path.join(os.path.dirname(__file__), "..", "secrets.json"),
+            _default_secrets_path(),
         )
         secrets = live_trader.load_live_secrets(secrets_path)
 

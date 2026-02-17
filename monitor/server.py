@@ -325,7 +325,7 @@ def _infer_hl_main_address() -> str | None:
     # Fall back to a secrets file path (we only read main_address).
     secrets_path = _env_str("AIQ_MONITOR_SECRETS_PATH", "") or _env_str("AI_QUANT_SECRETS_PATH", "")
     if not secrets_path:
-        secrets_path = str(AIQ_ROOT / "secrets.json")
+        secrets_path = str(Path("~/.config/openclaw/ai-quant-secrets.json").expanduser())
     secrets_path = os.path.expanduser(str(secrets_path))
 
     try:
