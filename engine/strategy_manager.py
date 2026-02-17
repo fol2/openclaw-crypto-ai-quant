@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import copy
+import logging
 import os
+import stat
 import threading
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -10,16 +12,20 @@ import yaml
 
 from .utils import deep_merge, file_mtime, sha1_json
 
+logger = logging.getLogger(__name__)
+
 
 def _env_str(name: str, default: str = "") -> str:
     val = os.getenv(name)
     return default if val is None else str(val)
+
 
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
     if raw is None:
         return bool(default)
     return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
 
 def _norm_mode_key(raw: str) -> str:
     s = str(raw or "").strip().lower()
@@ -192,8 +198,35 @@ class StrategyManager:
         except Exception:
             return self._version
 
+    @staticmethod
+    def _check_yaml_path(yaml_path: str) -> bool:
+        """Best-effort safety checks on the YAML config path.
+
+        Returns ``True`` if the file looks safe to load, ``False`` if it
+        should be skipped (caller keeps the last known-good config).
+        """
+        try:
+            if os.path.islink(yaml_path):
+                logger.warning(
+                    "Strategy YAML %s is a symlink — skipping reload for safety",
+                    yaml_path,
+                )
+                return False
+            mode = os.stat(yaml_path).st_mode
+            if mode & stat.S_IWOTH:
+                logger.warning(
+                    "Strategy YAML %s is world-writable (mode %s) — loading anyway",
+                    yaml_path,
+                    oct(mode),
+                )
+        except OSError:
+            pass  # best-effort; don't block on stat failures
+        return True
+
     def _load_yaml(self) -> dict[str, Any]:
         if not os.path.exists(self._yaml_path):
+            return {}
+        if not self._check_yaml_path(self._yaml_path):
             return {}
         with open(self._yaml_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
