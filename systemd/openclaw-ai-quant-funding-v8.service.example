@@ -10,11 +10,18 @@ EnvironmentFile=-%h/.config/openclaw/ai-quant-universe-v8.env
 ExecStart=$PROJECT_DIR/.venv/bin/python3 -u tools/fetch_funding_rates.py --days 30 --db $PROJECT_DIR/candles_dbs/funding_rates.db
 
 # Security hardening
+NoNewPrivileges=true
 ProtectSystem=strict
-NoNewPrivileges=yes
-PrivateTmp=yes
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadWritePaths=/home/fol2hk/openclaw-plugins/ai_quant
+ReadWritePaths=$PROJECT_DIR
 
 [Install]
 WantedBy=default.target
