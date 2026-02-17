@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import logging
 import os
+import re
 import shutil
 import subprocess
 import time
 from functools import lru_cache
+
+_log = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=1)
@@ -76,6 +80,32 @@ def openclaw_exec_env() -> dict[str, str]:
 
 VALID_CHANNELS = frozenset({"discord", "telegram", "slack", "webhook", "email"})
 
+# Target format whitelist — one pattern per channel type.
+# Discord / Slack: numeric snowflake ID or #channel-name
+# Telegram: @handle or numeric chat-id (possibly negative for groups)
+# Webhook: https:// URL (no other schemes)
+# Email: simplified addr pattern (user@domain)
+_TARGET_PATTERNS: dict[str, re.Pattern[str]] = {
+    "discord": re.compile(r"^(\d{1,20}|#[\w-]{1,100})$"),
+    "slack": re.compile(r"^(\d{1,20}|#[\w-]{1,100}|[A-Z0-9]{9,12})$"),
+    "telegram": re.compile(r"^(@[\w]{1,100}|-?\d{1,20})$"),
+    "webhook": re.compile(r"^https://[\w./?&=:%+#@~!$',;*()\[\]-]{1,2000}$"),
+    "email": re.compile(r"^[\w.+-]{1,200}@[\w.-]{1,200}\.[a-zA-Z]{2,20}$"),
+}
+
+# Fallback pattern when channel is valid but has no specific rule.
+_TARGET_FALLBACK = re.compile(r"^[\w@#.:/ -]{1,500}$")
+
+_MAX_MESSAGE_LEN = 8000
+
+
+def _validate_target(channel: str, target: str) -> str | None:
+    """Return *None* if target is valid, or an error message string."""
+    pat = _TARGET_PATTERNS.get(channel, _TARGET_FALLBACK)
+    if not pat.match(target):
+        return f"Target {target!r} does not match expected format for channel {channel!r}"
+    return None
+
 
 def send_openclaw_message(
     *,
@@ -88,6 +118,24 @@ def send_openclaw_message(
     ch = str(channel or "").strip().lower()
     if ch not in VALID_CHANNELS:
         raise ValueError(f"Invalid channel {ch!r}; allowed: {sorted(VALID_CHANNELS)}")
+
+    tgt = str(target or "").strip()
+    if not tgt:
+        raise ValueError("target must not be empty")
+    target_err = _validate_target(ch, tgt)
+    if target_err is not None:
+        _log.warning("Subprocess arg rejected: %s", target_err)
+        raise ValueError(target_err)
+
+    msg = str(message or "").strip()
+    if not msg:
+        raise ValueError("message must not be empty")
+    if "\x00" in msg:
+        raise ValueError("message contains null bytes")
+    if len(msg) > _MAX_MESSAGE_LEN:
+        _log.warning("Message truncated from %d to %d chars", len(msg), _MAX_MESSAGE_LEN)
+        msg = msg[:_MAX_MESSAGE_LEN]
+
     cmd = [
         resolve_openclaw_bin(),
         "message",
@@ -95,9 +143,9 @@ def send_openclaw_message(
         "--channel",
         ch,
         "--target",
-        str(target),
+        tgt,
         "--message",
-        str(message),
+        msg,
     ]
 
     try:
