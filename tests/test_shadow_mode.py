@@ -376,13 +376,14 @@ class TestAgreementStats:
 
     def test_max_comparisons_is_clamped_to_window_size(self):
         tracker = ShadowDecisionTracker(window_size=10, config={"max_comparisons": 1})
-        tracker.record_entry_comparison("ETH", "BUY", "BUY", "high", "high", _BASE_TS)
-        tracker.record_entry_comparison("ETH", "BUY", "SELL", "high", "high", _BASE_TS + 1)
+        assert tracker._max_comparisons == 10
 
-        assert len(tracker._comparisons) == 2
+        _record_n_entry_matches(tracker, 25)
+
+        assert len(tracker._comparisons) == 10
         stats = tracker.get_agreement_stats()
-        assert stats["total_comparisons"] == 2
-        assert stats["rolling_agreement_rate"] == 0.5
+        assert stats["total_comparisons"] == 25
+        assert stats["rolling_agreement_rate"] == 1.0
 
     def test_by_signal_type_breakdown(self):
         """Per-signal type stats are computed correctly."""
