@@ -1,6 +1,10 @@
 # v6.100 — Unified config: backtester + engine share this file
 # ALL params explicit. Both systems read identical values from this YAML.
 # v6.100: tp_partial_atr_mult sweep optimal (1h/3m, 13-day, $253 balance).
+# WARNING: This example contains sweep-optimised parameters from a specific period.
+# WARNING: It is NOT a conservative live-trading template.
+# WARNING: Validate in paper mode first and reduce risk before live deployment.
+# Typical first reductions: allocation_pct, leverage, max_open_positions, tp_atr_mult.
 global:
   trade:
     # --- Core sizing ---
