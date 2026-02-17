@@ -90,6 +90,10 @@ struct Args {
     /// Fail closed when baseline (no overrides) CPU/GPU parity already fails.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     require_baseline_pass: bool,
+
+    /// Fail if trace event parity reports any mismatch in failed samples.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    fail_on_event_parity_mismatch: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -255,6 +259,14 @@ fn main() {
 }
 
 fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
+    if args.fail_on_event_parity_mismatch && !args.trace_on_failure {
+        return Err(
+            "--fail-on-event-parity-mismatch requires --trace-on-failure=true"
+                .to_string()
+                .into(),
+        );
+    }
+
     let base_cfg = bt_core::config::load_config(&args.config, None, false);
     let spec = bt_core::sweep::load_sweep_spec(&args.sweep_spec)
         .map_err(|e| format!("failed to load sweep spec {}: {e}", args.sweep_spec))?;
@@ -305,6 +317,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut baseline_trace_artifact = None;
+    let mut event_parity_mismatches = 0usize;
     if !baseline_pass && args.trace_on_failure {
         let (trace_gpu, trace_state, trace_symbols) = run_gpu_single_with_trace(
             &base_cfg,
@@ -327,6 +340,9 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         )?;
         let gpu_events = collect_trace_events(&trace_state, &trace_symbols);
         let event_parity = compare_event_streams(&cpu_trace.events, &gpu_events);
+        if is_event_parity_mismatch(&event_parity.status) {
+            event_parity_mismatches += 1;
+        }
         let trace = TraceArtifact {
             axis_path: "__baseline__".to_string(),
             sample_index: 0,
@@ -466,6 +482,9 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 )?;
                 let gpu_events = collect_trace_events(&trace_state, &trace_symbols);
                 let event_parity = compare_event_streams(&cpu_trace.events, &gpu_events);
+                if is_event_parity_mismatch(&event_parity.status) {
+                    event_parity_mismatches += 1;
+                }
                 let trace = TraceArtifact {
                     axis_path: axis.path.clone(),
                     sample_index,
@@ -532,11 +551,14 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     out.flush()?;
 
     eprintln!(
-        "[axis-parity] completed={} passed={} failed={} failures_by_cause={:?}",
-        total, passed, failed, failures_by_cause
+        "[axis-parity] completed={} passed={} failed={} event_parity_mismatches={} failures_by_cause={:?}",
+        total, passed, failed, event_parity_mismatches, failures_by_cause
     );
     eprintln!("[axis-parity] ledger={}", args.output.display());
 
+    if args.fail_on_event_parity_mismatch && event_parity_mismatches > 0 {
+        std::process::exit(3);
+    }
     if failed > 0 {
         std::process::exit(2);
     }
@@ -863,6 +885,10 @@ fn compare_event_streams(
         cpu_event: None,
         gpu_event: None,
     }
+}
+
+fn is_event_parity_mismatch(status: &str) -> bool {
+    matches!(status, "MISMATCH" | "LENGTH_MISMATCH")
 }
 
 fn canonicalise_cpu_event(ev: &CpuTradeEventRow) -> CanonicalEventRow {
