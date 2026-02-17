@@ -78,6 +78,10 @@ struct Args {
     /// Restrict trace to one symbol (for example BTC). Defaults to all symbols.
     #[arg(long)]
     trace_symbol: Option<String>,
+
+    /// Fail closed when baseline (no overrides) CPU/GPU parity already fails.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    require_baseline_pass: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -222,6 +226,100 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     run_gpu_single(&base_cfg, &single_spec, &candles, args.from_ts, args.to_ts)
         .map_err(|e| format!("gpu preflight failed before axis loop: {e}"))?;
+
+    let baseline_cpu = run_cpu_single(&base_cfg, &single_spec, &candles, args.from_ts, args.to_ts)?;
+    let baseline_gpu = run_gpu_single(&base_cfg, &single_spec, &candles, args.from_ts, args.to_ts)?;
+    let baseline_trade_delta = baseline_gpu.total_trades as i64 - baseline_cpu.total_trades as i64;
+    let baseline_balance_delta_abs = (baseline_gpu.final_balance - baseline_cpu.final_balance).abs();
+    let baseline_pnl_delta_abs = (baseline_gpu.total_pnl - baseline_cpu.total_pnl).abs();
+    let baseline_pass = baseline_trade_delta == 0
+        && baseline_balance_delta_abs <= args.balance_eps
+        && baseline_pnl_delta_abs <= args.pnl_eps;
+    let baseline_cause = if baseline_pass {
+        None
+    } else if baseline_trade_delta != 0 {
+        Some("STATE_MACHINE".to_string())
+    } else {
+        Some("REDUCTION_ORDER".to_string())
+    };
+
+    let mut baseline_trace_artifact = None;
+    if !baseline_pass && args.trace_on_failure {
+        let (trace_gpu, trace_state, trace_symbols) = run_gpu_single_with_trace(
+            &base_cfg,
+            &single_spec,
+            &candles,
+            args.from_ts,
+            args.to_ts,
+            trace_symbol_idx,
+        )?;
+        let trace = TraceArtifact {
+            axis_path: "__baseline__".to_string(),
+            sample_index: 0,
+            sample_value: 0.0,
+            cause: baseline_cause.clone().unwrap_or_else(|| "UNKNOWN".to_string()),
+            trace_symbol_requested: args.trace_symbol.clone(),
+            trace_symbol_index: trace_symbol_idx,
+            trace_symbol_name: symbol_name(trace_symbol_idx, &trace_symbols),
+            cpu: baseline_cpu.clone(),
+            gpu: CompactResult {
+                total_trades: trace_gpu.total_trades,
+                final_balance: trace_gpu.final_balance,
+                total_pnl: trace_gpu.total_pnl,
+            },
+            trace_count: trace_state.trace_count,
+            trace_head: trace_state.trace_head,
+            events: collect_trace_events(&trace_state, &trace_symbols),
+        };
+        let trace_path = build_trace_path(
+            &args.trace_dir,
+            "__baseline__",
+            0,
+            0.0,
+            baseline_cause.as_deref().unwrap_or("UNKNOWN"),
+        );
+        write_json_pretty(&trace_path, &trace)?;
+        baseline_trace_artifact = Some(trace_path.display().to_string());
+    }
+
+    let baseline_row = AxisLedgerRow {
+        axis_index: 0,
+        axis_path: "__baseline__".to_string(),
+        sample_index: 0,
+        sample_value: 0.0,
+        status: if baseline_pass {
+            "PASS".to_string()
+        } else {
+            "FAIL".to_string()
+        },
+        cause: baseline_cause.clone(),
+        cpu: baseline_cpu.clone(),
+        gpu: CompactResult {
+            total_trades: baseline_gpu.total_trades,
+            final_balance: baseline_gpu.final_balance,
+            total_pnl: baseline_gpu.total_pnl,
+        },
+        trade_delta: baseline_trade_delta,
+        balance_delta_abs: baseline_balance_delta_abs,
+        pnl_delta_abs: baseline_pnl_delta_abs,
+        trace_artifact: baseline_trace_artifact,
+    };
+    writeln!(out, "{}", serde_json::to_string(&baseline_row)?)?;
+
+    if !baseline_pass {
+        eprintln!(
+            "[axis-parity] baseline mismatch: trade_delta={} balance_delta_abs={} pnl_delta_abs={}",
+            baseline_trade_delta, baseline_balance_delta_abs, baseline_pnl_delta_abs
+        );
+        if args.require_baseline_pass {
+            out.flush()?;
+            return Err(
+                "baseline CPU/GPU parity failed before axis loop; fix global mismatch first"
+                    .to_string()
+                    .into(),
+            );
+        }
+    }
 
     let mut total = 0usize;
     let mut passed = 0usize;
