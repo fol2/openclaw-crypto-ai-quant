@@ -208,6 +208,32 @@ def _db_path() -> str:
     return str(os.getenv("AI_QUANT_DB_PATH", _default_db_path()) or _default_db_path())
 
 
+def _harden_db_permissions(*paths: str, project_root: Path | None = None) -> None:
+    """Best-effort DB permission hardening (`0600`) for existing local SQLite files."""
+    root = Path(project_root) if project_root is not None else Path(__file__).resolve().parents[1]
+    candidates: set[Path] = set()
+    try:
+        candidates.update(root.glob("*.db"))
+    except Exception:
+        pass
+
+    for raw in paths:
+        try:
+            p = Path(str(raw or "").strip()).expanduser()
+        except Exception:
+            continue
+        if str(p):
+            candidates.add(p)
+
+    for p in candidates:
+        try:
+            if p.exists() and p.is_file():
+                os.chmod(str(p), 0o600)
+        except OSError:
+            # Best-effort hardening: never block daemon startup on chmod failure.
+            pass
+
+
 def _hl_timeout_s() -> float:
     # Never allow infinite REST hangs in the main loop.
     raw = os.getenv("AI_QUANT_HL_TIMEOUT_S", "10")
@@ -1009,6 +1035,7 @@ def main() -> None:
 
     strategy = StrategyManager.get()
     market_db_path = os.getenv("AI_QUANT_MARKET_DB_PATH", mei_alpha_v1.DB_PATH)
+    _harden_db_permissions(_db_path(), str(market_db_path))
     market = MarketDataHub(
         db_path=market_db_path,
         stale_mid_s=float(os.getenv("AI_QUANT_WS_STALE_MIDS_S", "60")),
