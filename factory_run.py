@@ -19,6 +19,7 @@ import json
 import os
 import platform
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -39,6 +40,46 @@ except ImportError:  # pragma: no cover
 
 
 AIQ_ROOT = Path(__file__).resolve().parent
+_SHUTDOWN_REQUESTED = False
+_SHUTDOWN_SIGNAL: int | None = None
+_ACTIVE_CHILD_PROCESS: subprocess.Popen[str] | None = None
+
+
+def _reset_shutdown_state() -> None:
+    global _SHUTDOWN_REQUESTED, _SHUTDOWN_SIGNAL, _ACTIVE_CHILD_PROCESS
+    _SHUTDOWN_REQUESTED = False
+    _SHUTDOWN_SIGNAL = None
+    _ACTIVE_CHILD_PROCESS = None
+
+
+def _request_shutdown(signum: int, _frame: Any) -> None:
+    global _SHUTDOWN_REQUESTED, _SHUTDOWN_SIGNAL
+    _SHUTDOWN_REQUESTED = True
+    _SHUTDOWN_SIGNAL = int(signum)
+    proc = _ACTIVE_CHILD_PROCESS
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+
+def _install_shutdown_handlers() -> dict[int, Any]:
+    previous = {
+        signal.SIGINT: signal.getsignal(signal.SIGINT),
+        signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+    }
+    signal.signal(signal.SIGINT, _request_shutdown)
+    signal.signal(signal.SIGTERM, _request_shutdown)
+    return previous
+
+
+def _restore_shutdown_handlers(previous: dict[int, Any]) -> None:
+    for sig, handler in previous.items():
+        try:
+            signal.signal(sig, handler)
+        except Exception:
+            pass
 
 
 def _default_secrets_path() -> Path:
@@ -630,6 +671,7 @@ class CmdResult:
     stdout_path: str | None
     stderr_path: str | None
     timed_out: bool = False
+    interrupted: bool = False
     timeout_s: float | None = None
 
 
@@ -657,8 +699,10 @@ def _run_cmd(
     env: dict[str, str] | None = None,
     timeout_s: float | None = None,
 ) -> CmdResult:
+    global _ACTIVE_CHILD_PROCESS
     t0 = time.time()
     timed_out = False
+    interrupted = False
     effective_timeout_s: float | None = _default_cmd_timeout_s() if timeout_s is None else None
     if timeout_s is not None:
         try:
@@ -669,6 +713,19 @@ def _run_cmd(
             effective_timeout_s = parsed_timeout
         else:
             effective_timeout_s = None
+
+    if _SHUTDOWN_REQUESTED:
+        return CmdResult(
+            argv=list(argv),
+            cwd=str(cwd),
+            exit_code=130,
+            elapsed_s=float(time.time() - t0),
+            stdout_path=str(stdout_path) if stdout_path is not None else None,
+            stderr_path=str(stderr_path) if stderr_path is not None else None,
+            timed_out=False,
+            interrupted=True,
+            timeout_s=effective_timeout_s,
+        )
 
     if stdout_path is not None:
         stdout_path.parent.mkdir(parents=True, exist_ok=True)
@@ -683,29 +740,96 @@ def _run_cmd(
         stderr_f = subprocess.DEVNULL  # type: ignore[assignment]
 
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             argv,
             cwd=str(cwd),
             stdout=stdout_f,
             stderr=stderr_f,
             env=env,
-            check=False,
             text=True,
-            timeout=effective_timeout_s,
         )
-        exit_code = int(proc.returncode)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        exit_code = 124
-        if hasattr(stderr_f, "write"):
-            try:
-                stderr_f.write(
-                    f"Command timed out after {float(effective_timeout_s or 0.0):.2f}s: {list(argv)}\n"
-                )
-                stderr_f.flush()
-            except Exception:
-                pass
+        _ACTIVE_CHILD_PROCESS = proc
+        deadline = None
+        if effective_timeout_s is not None and effective_timeout_s > 0:
+            deadline = t0 + float(effective_timeout_s)
+
+        exit_code: int | None = None
+        while True:
+            polled = proc.poll()
+            if polled is not None:
+                if _SHUTDOWN_REQUESTED:
+                    interrupted = True
+                    exit_code = 130
+                    if hasattr(stderr_f, "write"):
+                        try:
+                            stderr_f.write(f"Command interrupted by signal {_SHUTDOWN_SIGNAL}: {list(argv)}\n")
+                            stderr_f.flush()
+                        except Exception:
+                            pass
+                else:
+                    exit_code = int(polled)
+                break
+
+            if _SHUTDOWN_REQUESTED:
+                interrupted = True
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+                try:
+                    proc.wait(timeout=5.0)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    try:
+                        proc.wait(timeout=2.0)
+                    except Exception:
+                        pass
+                exit_code = 130
+                if hasattr(stderr_f, "write"):
+                    try:
+                        stderr_f.write(f"Command interrupted by signal {_SHUTDOWN_SIGNAL}: {list(argv)}\n")
+                        stderr_f.flush()
+                    except Exception:
+                        pass
+                break
+
+            if deadline is not None and time.time() >= deadline:
+                timed_out = True
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+                try:
+                    proc.wait(timeout=5.0)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    try:
+                        proc.wait(timeout=2.0)
+                    except Exception:
+                        pass
+                exit_code = 124
+                if hasattr(stderr_f, "write"):
+                    try:
+                        stderr_f.write(
+                            f"Command timed out after {float(effective_timeout_s or 0.0):.2f}s: {list(argv)}\n"
+                        )
+                        stderr_f.flush()
+                    except Exception:
+                        pass
+                break
+
+            time.sleep(0.1)
+
+        if exit_code is None:
+            exit_code = 1
     finally:
+        _ACTIVE_CHILD_PROCESS = None
         if hasattr(stdout_f, "close"):
             stdout_f.close()  # type: ignore[call-arg]
         if hasattr(stderr_f, "close"):
@@ -719,6 +843,7 @@ def _run_cmd(
         stdout_path=str(stdout_path) if stdout_path is not None else None,
         stderr_path=str(stderr_path) if stderr_path is not None else None,
         timed_out=bool(timed_out),
+        interrupted=bool(interrupted),
         timeout_s=effective_timeout_s,
     )
 
@@ -984,6 +1109,39 @@ def _is_nonempty_file(path: Path) -> bool:
 def _write_json(path: Path, obj: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _mark_run_interrupted(*, run_dir: Path, meta: dict[str, Any], stage: str | None = None) -> None:
+    meta["status"] = "interrupted"
+    meta["interrupted_at_ms"] = int(time.time() * 1000)
+    if stage:
+        meta["shutdown_requested_stage"] = str(stage)
+    if _SHUTDOWN_SIGNAL is not None:
+        meta["interrupt_signal"] = int(_SHUTDOWN_SIGNAL)
+    steps = meta.get("steps")
+    if isinstance(steps, list):
+        steps.append(
+            {
+                "name": "shutdown_interrupt",
+                "exit_code": 130,
+                "signal": int(_SHUTDOWN_SIGNAL) if _SHUTDOWN_SIGNAL is not None else None,
+            }
+        )
+    _write_json(run_dir / "run_metadata.json", meta)
+    (run_dir / "reports").mkdir(parents=True, exist_ok=True)
+    report_path = run_dir / "reports" / "report.md"
+    if not report_path.exists():
+        report_path.write_text(
+            "# Factory Run Report\n\nRun interrupted by shutdown signal.\n",
+            encoding="utf-8",
+        )
+
+
+def _shutdown_stage_guard(*, run_dir: Path, meta: dict[str, Any], stage: str) -> bool:
+    if not _SHUTDOWN_REQUESTED:
+        return False
+    _mark_run_interrupted(run_dir=run_dir, meta=meta, stage=stage)
+    return True
 
 
 def _append_reject_reason(it: dict[str, Any], reason: str) -> None:
@@ -2201,722 +2359,803 @@ def _ensure_cuda_env() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     _ensure_cuda_env()
-    args = _parse_cli_args(argv)
-
-    artifacts_root = (AIQ_ROOT / str(args.artifacts_dir)).resolve()
-    if args.reproduce and args.resume:
-        raise SystemExit("--resume cannot be used with --reproduce")
-    if args.reproduce:
-        return _reproduce_run(artifacts_root=artifacts_root, source_run_id=str(args.reproduce))
-
-    run_id = str(args.run_id).strip()
-    if not run_id:
-        raise SystemExit("--run-id cannot be empty")
-
-    existing_run_dir: Path | None = None
+    _reset_shutdown_state()
+    prev_handlers = _install_shutdown_handlers()
+    run_dir: Path | None = None
+    meta: dict[str, Any] | None = None
+    current_stage = "initialisation"
     try:
-        existing_run_dir = _find_existing_run_dir(artifacts_root=artifacts_root, run_id=run_id)
-    except FileNotFoundError:
-        existing_run_dir = None
+        args = _parse_cli_args(argv)
 
-    now_ms = int(time.time() * 1000)
+        artifacts_root = (AIQ_ROOT / str(args.artifacts_dir)).resolve()
+        if args.reproduce and args.resume:
+            raise SystemExit("--resume cannot be used with --reproduce")
+        if args.reproduce:
+            return _reproduce_run(artifacts_root=artifacts_root, source_run_id=str(args.reproduce))
 
-    if existing_run_dir is not None:
-        if not bool(args.resume):
-            raise SystemExit(f"run_id already exists; use --resume to continue: {run_id}")
-        run_dir = existing_run_dir
-        (run_dir / "logs").mkdir(parents=True, exist_ok=True)
-        meta_path = run_dir / "run_metadata.json"
-        meta_obj = _load_json(meta_path) if meta_path.exists() else {}
-        meta = meta_obj if isinstance(meta_obj, dict) else {}
+        run_id = str(args.run_id).strip()
+        if not run_id:
+            raise SystemExit("--run-id cannot be empty")
 
-        # Safety: do not allow resuming with different core parameters.
-        orig_args = meta.get("args", {}) if isinstance(meta.get("args", {}), dict) else {}
-        guard_keys = {
-            "config",
-            "interval",
-            "candles_db",
-            "funding_db",
-            "max_age_fail_hours",
-            "funding_max_stale_symbols",
-            "sweep_spec",
-            "gpu",
-            "concentration_checks",
-            "conc_max_top1_pnl_pct",
-            "conc_max_top5_pnl_pct",
-            "conc_min_symbols_traded",
-            "walk_forward",
-            "walk_forward_splits_json",
-            "walk_forward_min_test_days",
-            "slippage_stress",
-            "slippage_stress_bps",
-            "slippage_stress_reject_bps",
-            "sensitivity_checks",
-            "sensitivity_perturb",
-            "sensitivity_timeout_s",
-            "monte_carlo",
-            "monte_carlo_iters",
-            "monte_carlo_seed",
-            "monte_carlo_methods",
-            "cross_universe_set",
-            "score_min_trades",
-            "score_trades_penalty_weight",
-            "tpe",
-            "tpe_trials",
-            "tpe_batch",
-            "tpe_seed",
-            "top_n",
-            "num_candidates",
-            "sort_by",
-            "shortlist_modes",
-            "shortlist_per_mode",
-            "shortlist_max_rank",
-        }
-        mismatches: list[str] = []
-        for k in sorted(guard_keys):
-            if k not in orig_args:
-                continue
-            if getattr(args, k, None) != orig_args.get(k):
-                mismatches.append(k)
-        if mismatches:
-            raise SystemExit(f"--resume args mismatch for keys: {', '.join(mismatches)}")
+        existing_run_dir: Path | None = None
+        try:
+            existing_run_dir = _find_existing_run_dir(artifacts_root=artifacts_root, run_id=run_id)
+        except FileNotFoundError:
+            existing_run_dir = None
 
-        # Use original args when available to keep the run reproducible.
-        for k, v in orig_args.items():
-            if k == "resume":
-                continue
-            if hasattr(args, k):
-                setattr(args, k, v)
+        now_ms = int(time.time() * 1000)
 
-        meta.setdefault("run_id", run_id)
-        meta.setdefault("run_dir", str(run_dir))
-        meta.setdefault("steps", [])
-        meta["resumed_at_ms"] = now_ms
-        meta["resumed_git_head"] = _git_head_sha()
-    else:
-        generated_at_ms = now_ms
-        run_dir = resolve_run_dir(artifacts_root=artifacts_root, run_id=run_id, generated_at_ms=generated_at_ms)
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "logs").mkdir(parents=True, exist_ok=True)
+        if existing_run_dir is not None:
+            if not bool(args.resume):
+                raise SystemExit(f"run_id already exists; use --resume to continue: {run_id}")
+            run_dir = existing_run_dir
+            (run_dir / "logs").mkdir(parents=True, exist_ok=True)
+            meta_path = run_dir / "run_metadata.json"
+            meta_obj = _load_json(meta_path) if meta_path.exists() else {}
+            meta = meta_obj if isinstance(meta_obj, dict) else {}
 
-        args_meta = dict(vars(args))
-        args_meta.pop("resume", None)
-        meta = {
-            "run_id": run_id,
-            "generated_at_ms": generated_at_ms,
-            "run_date_utc": _run_date_utc(generated_at_ms),
-            "run_dir": str(run_dir),
-            "git_head": _git_head_sha(),
-            "args": args_meta,
-            "steps": [],
-        }
-
-    # Resolve backtester cmd once and persist early metadata.
-    bt_cmd = _resolve_backtester_cmd()
-    if "repro" not in meta:
-        _capture_repro_metadata(run_dir=run_dir, artifacts_root=artifacts_root, bt_cmd=bt_cmd, meta=meta)
-    _write_json(run_dir / "run_metadata.json", meta)
-
-    # The backtester is executed with cwd=AIQ_ROOT/backtester, so normalise common repo-relative paths.
-    bt_config = _resolve_path_for_backtester(str(args.config)) or str(args.config)
-    bt_sweep_spec = _resolve_path_for_backtester(str(args.sweep_spec)) or str(args.sweep_spec)
-    bt_candles_db = _normalise_candles_db_arg_for_backtester(str(args.candles_db)) if args.candles_db else None
-    bt_funding_db = _resolve_path_for_backtester(str(args.funding_db)) if args.funding_db else None
-    candles_db_for_checks = _resolve_path_for_backtester(str(args.candles_db)) if args.candles_db else None
-    bt_wf_splits_json = (
-        _resolve_path_for_backtester(str(getattr(args, "walk_forward_splits_json", "")))
-        if getattr(args, "walk_forward_splits_json", None)
-        else None
-    )
-
-    # ------------------------------------------------------------------
-    # 1) Data checks
-    # ------------------------------------------------------------------
-    candle_out = run_dir / "data_checks" / "candle_dbs.json"
-    candle_err = run_dir / "data_checks" / "candle_dbs.stderr.txt"
-    if bool(args.resume) and _is_nonempty_file(candle_out):
-        meta["steps"].append(
-            {
-                "name": "check_candle_dbs_skip",
-                "argv": [],
-                "cwd": str(AIQ_ROOT),
-                "exit_code": 0,
-                "elapsed_s": 0.0,
-                "stdout_path": str(candle_out),
-                "stderr_path": str(candle_err),
+            # Safety: do not allow resuming with different core parameters.
+            orig_args = meta.get("args", {}) if isinstance(meta.get("args", {}), dict) else {}
+            guard_keys = {
+                "config",
+                "interval",
+                "candles_db",
+                "funding_db",
+                "max_age_fail_hours",
+                "funding_max_stale_symbols",
+                "sweep_spec",
+                "gpu",
+                "concentration_checks",
+                "conc_max_top1_pnl_pct",
+                "conc_max_top5_pnl_pct",
+                "conc_min_symbols_traded",
+                "walk_forward",
+                "walk_forward_splits_json",
+                "walk_forward_min_test_days",
+                "slippage_stress",
+                "slippage_stress_bps",
+                "slippage_stress_reject_bps",
+                "sensitivity_checks",
+                "sensitivity_perturb",
+                "sensitivity_timeout_s",
+                "monte_carlo",
+                "monte_carlo_iters",
+                "monte_carlo_seed",
+                "monte_carlo_methods",
+                "cross_universe_set",
+                "score_min_trades",
+                "score_trades_penalty_weight",
+                "tpe",
+                "tpe_trials",
+                "tpe_batch",
+                "tpe_seed",
+                "top_n",
+                "num_candidates",
+                "sort_by",
+                "shortlist_modes",
+                "shortlist_per_mode",
+                "shortlist_max_rank",
             }
-        )
-    else:
-        check_intervals = _factory_candle_check_intervals(default="1m,3m,5m,15m,30m,1h")
-        sidecar_bin = shutil.which("openclaw-ai-quant-ws-sidecar") or "openclaw-ai-quant-ws-sidecar"
-        check_targets: list[dict[str, Any]] = []
-        check_failed = False
-        check_errors: list[str] = []
+            mismatches: list[str] = []
+            for k in sorted(guard_keys):
+                if k not in orig_args:
+                    continue
+                if getattr(args, k, None) != orig_args.get(k):
+                    mismatches.append(k)
+            if mismatches:
+                raise SystemExit(f"--resume args mismatch for keys: {', '.join(mismatches)}")
 
-        if not candles_db_for_checks:
-            candles_db_for_checks = str(AIQ_ROOT / "candles_dbs")
-        db_paths = _iter_candle_db_paths(str(candles_db_for_checks))
-        if not db_paths:
-            err_text = f"no candle DBs resolved from --candles-db={candles_db_for_checks}\n"
-            check_targets.append(
+            # Use original args when available to keep the run reproducible.
+            for k, v in orig_args.items():
+                if k == "resume":
+                    continue
+                if hasattr(args, k):
+                    setattr(args, k, v)
+
+            meta.setdefault("run_id", run_id)
+            meta.setdefault("run_dir", str(run_dir))
+            meta.setdefault("steps", [])
+            meta["resumed_at_ms"] = now_ms
+            meta["resumed_git_head"] = _git_head_sha()
+        else:
+            generated_at_ms = now_ms
+            run_dir = resolve_run_dir(artifacts_root=artifacts_root, run_id=run_id, generated_at_ms=generated_at_ms)
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "logs").mkdir(parents=True, exist_ok=True)
+
+            args_meta = dict(vars(args))
+            args_meta.pop("resume", None)
+            meta = {
+                "run_id": run_id,
+                "generated_at_ms": generated_at_ms,
+                "run_date_utc": _run_date_utc(generated_at_ms),
+                "run_dir": str(run_dir),
+                "git_head": _git_head_sha(),
+                "args": args_meta,
+                "steps": [],
+            }
+
+        # Resolve backtester cmd once and persist early metadata.
+        bt_cmd = _resolve_backtester_cmd()
+        if "repro" not in meta:
+            _capture_repro_metadata(run_dir=run_dir, artifacts_root=artifacts_root, bt_cmd=bt_cmd, meta=meta)
+        _write_json(run_dir / "run_metadata.json", meta)
+
+        # The backtester is executed with cwd=AIQ_ROOT/backtester, so normalise common repo-relative paths.
+        bt_config = _resolve_path_for_backtester(str(args.config)) or str(args.config)
+        bt_sweep_spec = _resolve_path_for_backtester(str(args.sweep_spec)) or str(args.sweep_spec)
+        bt_candles_db = _normalise_candles_db_arg_for_backtester(str(args.candles_db)) if args.candles_db else None
+        bt_funding_db = _resolve_path_for_backtester(str(args.funding_db)) if args.funding_db else None
+        candles_db_for_checks = _resolve_path_for_backtester(str(args.candles_db)) if args.candles_db else None
+        bt_wf_splits_json = (
+            _resolve_path_for_backtester(str(getattr(args, "walk_forward_splits_json", "")))
+            if getattr(args, "walk_forward_splits_json", None)
+            else None
+        )
+        assert run_dir is not None
+        assert meta is not None
+
+        # ------------------------------------------------------------------
+        # 1) Data checks
+        # ------------------------------------------------------------------
+        current_stage = "data_checks"
+        if _shutdown_stage_guard(run_dir=run_dir, meta=meta, stage=current_stage):
+            return 130
+        candle_out = run_dir / "data_checks" / "candle_dbs.json"
+        candle_err = run_dir / "data_checks" / "candle_dbs.stderr.txt"
+        if bool(args.resume) and _is_nonempty_file(candle_out):
+            meta["steps"].append(
                 {
-                    "interval": "n/a",
-                    "db_path": str(candles_db_for_checks),
-                    "db_dir": str(Path(candles_db_for_checks).expanduser()),
-                    "symbols": [],
-                    "status": "FAIL",
-                    "reason": "no_db_paths",
+                    "name": "check_candle_dbs_skip",
+                    "argv": [],
+                    "cwd": str(AIQ_ROOT),
+                    "exit_code": 0,
+                    "elapsed_s": 0.0,
+                    "stdout_path": str(candle_out),
+                    "stderr_path": str(candle_err),
                 }
             )
-            candle_err.write_text(err_text, encoding="utf-8")
-            check_failed = True
         else:
-            for db_path in db_paths:
-                interval = _candle_db_interval(db_path)
-                if not interval:
-                    continue
-                if check_intervals and interval not in check_intervals:
-                    continue
-
-                symbols = _symbols_from_candle_db(db_path)
-                out_path = run_dir / "data_checks" / f"candle_{interval}_{db_path.stem}.json"
-                err_path = run_dir / "data_checks" / f"candle_{interval}_{db_path.stem}.stderr.txt"
-
-                if not symbols:
+            check_intervals = _factory_candle_check_intervals(default="1m,3m,5m,15m,30m,1h")
+            sidecar_bin = shutil.which("openclaw-ai-quant-ws-sidecar") or "openclaw-ai-quant-ws-sidecar"
+            check_targets: list[dict[str, Any]] = []
+            check_failed = False
+            check_errors: list[str] = []
+    
+            if not candles_db_for_checks:
+                candles_db_for_checks = str(AIQ_ROOT / "candles_dbs")
+            db_paths = _iter_candle_db_paths(str(candles_db_for_checks))
+            if not db_paths:
+                err_text = f"no candle DBs resolved from --candles-db={candles_db_for_checks}\n"
+                check_targets.append(
+                    {
+                        "interval": "n/a",
+                        "db_path": str(candles_db_for_checks),
+                        "db_dir": str(Path(candles_db_for_checks).expanduser()),
+                        "symbols": [],
+                        "status": "FAIL",
+                        "reason": "no_db_paths",
+                    }
+                )
+                candle_err.write_text(err_text, encoding="utf-8")
+                check_failed = True
+            else:
+                for db_path in db_paths:
+                    interval = _candle_db_interval(db_path)
+                    if not interval:
+                        continue
+                    if check_intervals and interval not in check_intervals:
+                        continue
+    
+                    symbols = _symbols_from_candle_db(db_path)
+                    out_path = run_dir / "data_checks" / f"candle_{interval}_{db_path.stem}.json"
+                    err_path = run_dir / "data_checks" / f"candle_{interval}_{db_path.stem}.stderr.txt"
+    
+                    if not symbols:
+                        check_targets.append(
+                            {
+                                "interval": interval,
+                                "db_path": str(db_path),
+                                "symbol_count": 0,
+                                "symbols": [],
+                                "status": "PASS",
+                                "reason": "no_symbols",
+                                "items": [],
+                            }
+                        )
+                        continue
+    
+                    stat_exit, stat_items, bad_symbols, fail_reason = _run_stat_check(
+                        sidecar_bin=sidecar_bin,
+                        interval=interval,
+                        db_path=db_path,
+                        symbols=symbols,
+                        out_path=out_path,
+                        err_path=err_path,
+                    )
+                    fail_interval = (stat_exit != 0) or (fail_reason != "pass")
+                    if fail_interval:
+                        check_failed = True
+    
                     check_targets.append(
                         {
                             "interval": interval,
                             "db_path": str(db_path),
-                            "symbol_count": 0,
-                            "symbols": [],
-                            "status": "PASS",
-                            "reason": "no_symbols",
-                            "items": [],
+                            "db_dir": str(db_path.parent),
+                            "symbol_count": len(symbols),
+                            "symbols": symbols[:500],
+                            "status": "FAIL" if fail_interval else "PASS",
+                            "exit_code": int(stat_exit),
+                            "failed_symbols": bad_symbols,
+                            "items": stat_items,
                         }
                     )
-                    continue
-
-                stat_exit, stat_items, bad_symbols, fail_reason = _run_stat_check(
-                    sidecar_bin=sidecar_bin,
-                    interval=interval,
-                    db_path=db_path,
-                    symbols=symbols,
-                    out_path=out_path,
-                    err_path=err_path,
-                )
-                fail_interval = (stat_exit != 0) or (fail_reason != "pass")
-                if fail_interval:
-                    check_failed = True
-
-                check_targets.append(
-                    {
-                        "interval": interval,
-                        "db_path": str(db_path),
-                        "db_dir": str(db_path.parent),
-                        "symbol_count": len(symbols),
-                        "symbols": symbols[:500],
-                        "status": "FAIL" if fail_interval else "PASS",
-                        "exit_code": int(stat_exit),
-                        "failed_symbols": bad_symbols,
-                        "items": stat_items,
-                    }
-                )
-                if err_path.is_file():
-                    try:
-                        err_text = err_path.read_text(encoding="utf-8")
-                        if err_text.strip():
-                            check_errors.append(f"[{interval}] {err_path}\n{err_text.strip()}\n")
-                    except Exception:
-                        pass
-
-                if fail_interval:
-                    check_targets[-1]["status"] = "FAIL"
-
-                if fail_interval and bad_symbols:
-                    check_targets[-1]["failed_symbols"] = bad_symbols
-
-        if check_errors:
-            check_err_text = "".join(check_errors)
-            candle_err.parent.mkdir(parents=True, exist_ok=True)
-            candle_err.write_text(check_err_text, encoding="utf-8")
-
-        _write_json(
-            candle_out,
-            {
-                "status": "FAIL" if check_failed else "PASS",
-                "checks": check_targets,
-                "intervals": check_intervals,
-                "candle_db_root": str(candles_db_for_checks),
-            },
-        )
-        if check_failed:
-            for interval_check in check_targets:
-                interval = str(interval_check.get("interval", ""))
-                symbols_csv = ",".join(interval_check.get("symbols", []))
+                    if err_path.is_file():
+                        try:
+                            err_text = err_path.read_text(encoding="utf-8")
+                            if err_text.strip():
+                                check_errors.append(f"[{interval}] {err_path}\n{err_text.strip()}\n")
+                        except Exception:
+                            pass
+    
+                    if fail_interval:
+                        check_targets[-1]["status"] = "FAIL"
+    
+                    if fail_interval and bad_symbols:
+                        check_targets[-1]["failed_symbols"] = bad_symbols
+    
+            if check_errors:
+                check_err_text = "".join(check_errors)
+                candle_err.parent.mkdir(parents=True, exist_ok=True)
+                candle_err.write_text(check_err_text, encoding="utf-8")
+    
+            _write_json(
+                candle_out,
+                {
+                    "status": "FAIL" if check_failed else "PASS",
+                    "checks": check_targets,
+                    "intervals": check_intervals,
+                    "candle_db_root": str(candles_db_for_checks),
+                },
+            )
+            if check_failed:
+                for interval_check in check_targets:
+                    interval = str(interval_check.get("interval", ""))
+                    symbols_csv = ",".join(interval_check.get("symbols", []))
+                    meta["steps"].append(
+                        {
+                            "name": f"check_candle_dbs_rust_{interval}",
+                            "cwd": str(AIQ_ROOT),
+                            "argv": [
+                                sidecar_bin,
+                                "stat",
+                                "--interval",
+                                interval,
+                                "--symbols",
+                                symbols_csv,
+                                "--db-dir",
+                                str(Path(interval_check.get("db_path", "")).parent)
+                                if interval_check.get("db_path")
+                                else str(AIQ_ROOT),
+                            ],
+                            "exit_code": int(1 if str(interval_check.get("status", "FAIL")) == "FAIL" else 0),
+                            "elapsed_s": 0.0,
+                            "stdout_path": str(candle_out),
+                            "stderr_path": str(candle_err),
+                            "status": str(interval_check.get("status", "PASS")),
+                            "items": interval_check.get("items", []),
+                            "failed_symbols": interval_check.get("failed_symbols", []),
+                        }
+                    )
+    
+                if not candle_err.exists():
+                    # Keep metadata consistent; create empty file even when all failing intervals had no stderr details.
+                    candle_err.parent.mkdir(parents=True, exist_ok=True)
+                    candle_err.write_text("", encoding="utf-8")
+    
                 meta["steps"].append(
                     {
-                        "name": f"check_candle_dbs_rust_{interval}",
+                        "name": "check_candle_dbs",
+                        "argv": [],
                         "cwd": str(AIQ_ROOT),
-                        "argv": [
-                            sidecar_bin,
-                            "stat",
-                            "--interval",
-                            interval,
-                            "--symbols",
-                            symbols_csv,
-                            "--db-dir",
-                            str(Path(interval_check.get("db_path", "")).parent)
-                            if interval_check.get("db_path")
-                            else str(AIQ_ROOT),
-                        ],
-                        "exit_code": int(1 if str(interval_check.get("status", "FAIL")) == "FAIL" else 0),
+                        "exit_code": 1,
                         "elapsed_s": 0.0,
                         "stdout_path": str(candle_out),
                         "stderr_path": str(candle_err),
-                        "status": str(interval_check.get("status", "PASS")),
-                        "items": interval_check.get("items", []),
-                        "failed_symbols": interval_check.get("failed_symbols", []),
+                        "status": "FAIL",
                     }
                 )
-
-            if not candle_err.exists():
-                # Keep metadata consistent; create empty file even when all failing intervals had no stderr details.
-                candle_err.parent.mkdir(parents=True, exist_ok=True)
-                candle_err.write_text("", encoding="utf-8")
-
+                _write_json(run_dir / "run_metadata.json", meta)
+                return 1
+    
             meta["steps"].append(
                 {
                     "name": "check_candle_dbs",
                     "argv": [],
                     "cwd": str(AIQ_ROOT),
-                    "exit_code": 1,
+                    "exit_code": 0,
                     "elapsed_s": 0.0,
                     "stdout_path": str(candle_out),
                     "stderr_path": str(candle_err),
-                    "status": "FAIL",
+                    "status": "PASS",
+                    "checks": check_targets,
+                    "intervals": check_intervals,
                 }
             )
-            _write_json(run_dir / "run_metadata.json", meta)
-            return 1
-
-        meta["steps"].append(
-            {
-                "name": "check_candle_dbs",
-                "argv": [],
-                "cwd": str(AIQ_ROOT),
-                "exit_code": 0,
-                "elapsed_s": 0.0,
-                "stdout_path": str(candle_out),
-                "stderr_path": str(candle_err),
-                "status": "PASS",
-                "checks": check_targets,
-                "intervals": check_intervals,
-            }
-        )
-    _write_json(run_dir / "run_metadata.json", meta)
-
-    # ── Pre-sweep funding refresh ───────────────────────────────────────
-    # Fetch latest funding rates before the freshness check to avoid stale-data failures.
-    funding_refresh_out = run_dir / "data_checks" / "funding_refresh.stdout.txt"
-    funding_refresh_err = run_dir / "data_checks" / "funding_refresh.stderr.txt"
-    funding_refresh_res = _run_cmd(
-        [sys.executable, "tools/fetch_funding_rates.py", "--days", "7"],
-        cwd=AIQ_ROOT,
-        stdout_path=funding_refresh_out,
-        stderr_path=funding_refresh_err,
-    )
-    meta["steps"].append({"name": "refresh_funding_rates", **funding_refresh_res.__dict__})
-    if funding_refresh_res.exit_code != 0:
-        print(f"⚠️ Funding refresh failed (exit={funding_refresh_res.exit_code}), proceeding with existing data")
-    _write_json(run_dir / "run_metadata.json", meta)
-
-    funding_out = run_dir / "data_checks" / "funding_rates.json"
-    funding_err = run_dir / "data_checks" / "funding_rates.stderr.txt"
-    if bool(args.resume) and _is_nonempty_file(funding_out):
-        meta["steps"].append(
-            {
-                "name": "check_funding_rates_db_skip",
-                "argv": [],
-                "cwd": str(AIQ_ROOT),
-                "exit_code": 0,
-                "elapsed_s": 0.0,
-                "stdout_path": str(funding_out),
-                "stderr_path": str(funding_err),
-            }
-        )
-    else:
-        funding_argv = ["python3", "tools/check_funding_rates_db.py"]
-        if bt_funding_db:
-            funding_argv += ["--db", str(bt_funding_db)]
-        if args.max_age_fail_hours is not None:
-            funding_argv += ["--max-age-fail-hours", str(float(args.max_age_fail_hours))]
-        funding_check = _run_cmd(
-            funding_argv,
+        _write_json(run_dir / "run_metadata.json", meta)
+    
+        # ── Pre-sweep funding refresh ───────────────────────────────────────
+        # Fetch latest funding rates before the freshness check to avoid stale-data failures.
+        funding_refresh_out = run_dir / "data_checks" / "funding_refresh.stdout.txt"
+        funding_refresh_err = run_dir / "data_checks" / "funding_refresh.stderr.txt"
+        funding_refresh_res = _run_cmd(
+            [sys.executable, "tools/fetch_funding_rates.py", "--days", "7"],
             cwd=AIQ_ROOT,
-            stdout_path=funding_out,
-            stderr_path=funding_err,
+            stdout_path=funding_refresh_out,
+            stderr_path=funding_refresh_err,
         )
-        funding_check_step = {"name": "check_funding_rates_db", **funding_check.__dict__}
-        if funding_check.exit_code != 0:
-            if funding_check.exit_code != 2:
-                meta["steps"].append(funding_check_step)
-                _write_json(run_dir / "run_metadata.json", meta)
-                return int(funding_check.exit_code)
-
-            funding_json = _load_json_payload(funding_out)
-            allow_stale = int(args.funding_max_stale_symbols or 0)
-            can_degrade, degrade_meta = _funding_check_degraded_allowance(
-                funding_json,
-                max_stale_symbols=allow_stale,
-            )
-            if not can_degrade:
-                meta["steps"].append(funding_check_step)
-                _write_json(run_dir / "run_metadata.json", meta)
-                return int(funding_check.exit_code)
-
-            if isinstance(degrade_meta, dict):
-                funding_check_step["funding_check_degrade_meta"] = {
-                    "warn_legacy_exit_code": funding_check.exit_code,
-                    "allowed_stale_symbols": allow_stale,
-                    "symbols": list(degrade_meta.get("symbols", [])),
-                    "fail_issues": int(degrade_meta.get("fail_issues", 0)),
-                    "status": str(degrade_meta.get("status") or ""),
+        meta["steps"].append({"name": "refresh_funding_rates", **funding_refresh_res.__dict__})
+        if funding_refresh_res.exit_code != 0:
+            print(f"⚠️ Funding refresh failed (exit={funding_refresh_res.exit_code}), proceeding with existing data")
+        _write_json(run_dir / "run_metadata.json", meta)
+    
+        funding_out = run_dir / "data_checks" / "funding_rates.json"
+        funding_err = run_dir / "data_checks" / "funding_rates.stderr.txt"
+        if bool(args.resume) and _is_nonempty_file(funding_out):
+            meta["steps"].append(
+                {
+                    "name": "check_funding_rates_db_skip",
+                    "argv": [],
+                    "cwd": str(AIQ_ROOT),
+                    "exit_code": 0,
+                    "elapsed_s": 0.0,
+                    "stdout_path": str(funding_out),
+                    "stderr_path": str(funding_err),
                 }
-            else:
-                funding_check_step["funding_check_degrade_meta"] = {
-                    "warn_legacy_exit_code": funding_check.exit_code,
-                    "allowed_stale_symbols": allow_stale,
-                }
-            funding_check_step["funding_check_degraded"] = True
-            funding_check_step["exit_code_original"] = funding_check.exit_code
-            funding_check_step["exit_code"] = 0
-
-            meta["funding_check_degraded"] = {
-                "status": "warn",
-                "symbols": funding_check_step.get("funding_check_degrade_meta", {}).get("symbols", []),
-                "allowed_symbols": allow_stale,
-            }
-            funding_check = CmdResult(
-                argv=funding_check_step["argv"],
-                cwd=funding_check_step["cwd"],
-                exit_code=int(funding_check_step["exit_code"]),
-                elapsed_s=float(funding_check_step["elapsed_s"]),
-                stdout_path=str(funding_check_step["stdout_path"]),
-                stderr_path=str(funding_check_step["stderr_path"]),
             )
         else:
-            meta.pop("funding_check_degraded", None)
-
-        if bool(funding_check_step.get("funding_check_degraded")):
-            (run_dir / "logs" / "factory_run_warn.log").write_text(
-                "WARN: funding check passed with stale-symbol allowance\n",
-                encoding="utf-8",
+            funding_argv = ["python3", "tools/check_funding_rates_db.py"]
+            if bt_funding_db:
+                funding_argv += ["--db", str(bt_funding_db)]
+            if args.max_age_fail_hours is not None:
+                funding_argv += ["--max-age-fail-hours", str(float(args.max_age_fail_hours))]
+            funding_check = _run_cmd(
+                funding_argv,
+                cwd=AIQ_ROOT,
+                stdout_path=funding_out,
+                stderr_path=funding_err,
             )
-
-        meta["steps"].append(funding_check_step)
-
-    _write_json(run_dir / "run_metadata.json", meta)
-
-    # Resolve live-initial balance for daily/deep/weekly profiles.
-    live_initial_balance, live_initial_balance_path, live_initial_balance_meta = _resolve_factory_initial_balance(
-        run_dir=run_dir,
-        args=args,
-    )
-    meta["initial_balance"] = {
-        "value": live_initial_balance,
-        "path": str(live_initial_balance_path) if live_initial_balance_path else "",
-        "profile": str(getattr(args, "profile", "daily")).strip(),
-        **live_initial_balance_meta,
-    }
-
-    # ------------------------------------------------------------------
-    # 2) Sweep
-    # ------------------------------------------------------------------
-    sweep_out = run_dir / "sweeps" / "sweep_results.jsonl"
-    if bool(args.resume) and _is_nonempty_file(sweep_out):
-        sweep_res = CmdResult(
-            argv=[],
-            cwd=str(AIQ_ROOT / "backtester"),
-            exit_code=0,
-            elapsed_s=0.0,
-            stdout_path=str(run_dir / "sweeps" / "sweep.stdout.txt"),
-            stderr_path=str(run_dir / "sweeps" / "sweep.stderr.txt"),
+            funding_check_step = {"name": "check_funding_rates_db", **funding_check.__dict__}
+            if funding_check.exit_code != 0:
+                if funding_check.exit_code != 2:
+                    meta["steps"].append(funding_check_step)
+                    _write_json(run_dir / "run_metadata.json", meta)
+                    return int(funding_check.exit_code)
+    
+                funding_json = _load_json_payload(funding_out)
+                allow_stale = int(args.funding_max_stale_symbols or 0)
+                can_degrade, degrade_meta = _funding_check_degraded_allowance(
+                    funding_json,
+                    max_stale_symbols=allow_stale,
+                )
+                if not can_degrade:
+                    meta["steps"].append(funding_check_step)
+                    _write_json(run_dir / "run_metadata.json", meta)
+                    return int(funding_check.exit_code)
+    
+                if isinstance(degrade_meta, dict):
+                    funding_check_step["funding_check_degrade_meta"] = {
+                        "warn_legacy_exit_code": funding_check.exit_code,
+                        "allowed_stale_symbols": allow_stale,
+                        "symbols": list(degrade_meta.get("symbols", [])),
+                        "fail_issues": int(degrade_meta.get("fail_issues", 0)),
+                        "status": str(degrade_meta.get("status") or ""),
+                    }
+                else:
+                    funding_check_step["funding_check_degrade_meta"] = {
+                        "warn_legacy_exit_code": funding_check.exit_code,
+                        "allowed_stale_symbols": allow_stale,
+                    }
+                funding_check_step["funding_check_degraded"] = True
+                funding_check_step["exit_code_original"] = funding_check.exit_code
+                funding_check_step["exit_code"] = 0
+    
+                meta["funding_check_degraded"] = {
+                    "status": "warn",
+                    "symbols": funding_check_step.get("funding_check_degrade_meta", {}).get("symbols", []),
+                    "allowed_symbols": allow_stale,
+                }
+                funding_check = CmdResult(
+                    argv=funding_check_step["argv"],
+                    cwd=funding_check_step["cwd"],
+                    exit_code=int(funding_check_step["exit_code"]),
+                    elapsed_s=float(funding_check_step["elapsed_s"]),
+                    stdout_path=str(funding_check_step["stdout_path"]),
+                    stderr_path=str(funding_check_step["stderr_path"]),
+                )
+            else:
+                meta.pop("funding_check_degraded", None)
+    
+            if bool(funding_check_step.get("funding_check_degraded")):
+                (run_dir / "logs" / "factory_run_warn.log").write_text(
+                    "WARN: funding check passed with stale-symbol allowance\n",
+                    encoding="utf-8",
+                )
+    
+            meta["steps"].append(funding_check_step)
+    
+        _write_json(run_dir / "run_metadata.json", meta)
+    
+        # Resolve live-initial balance for daily/deep/weekly profiles.
+        live_initial_balance, live_initial_balance_path, live_initial_balance_meta = _resolve_factory_initial_balance(
+            run_dir=run_dir,
+            args=args,
         )
-        meta["steps"].append({"name": "sweep_skip", **sweep_res.__dict__})
-    else:
-        if bool(args.gpu):
-            rc = _ensure_gpu_idle_or_exit(
-                run_dir=run_dir,
-                meta=meta,
-                wait_s=int(getattr(args, "gpu_wait_s", 0) or 0),
-                poll_s=int(getattr(args, "gpu_poll_s", 0) or 0),
+        meta["initial_balance"] = {
+            "value": live_initial_balance,
+            "path": str(live_initial_balance_path) if live_initial_balance_path else "",
+            "profile": str(getattr(args, "profile", "daily")).strip(),
+            **live_initial_balance_meta,
+        }
+
+        # ------------------------------------------------------------------
+        # 2) Sweep
+        # ------------------------------------------------------------------
+        current_stage = "sweep"
+        if _shutdown_stage_guard(run_dir=run_dir, meta=meta, stage=current_stage):
+            return 130
+        sweep_out = run_dir / "sweeps" / "sweep_results.jsonl"
+        if bool(args.resume) and _is_nonempty_file(sweep_out):
+            sweep_res = CmdResult(
+                argv=[],
+                cwd=str(AIQ_ROOT / "backtester"),
+                exit_code=0,
+                elapsed_s=0.0,
+                stdout_path=str(run_dir / "sweeps" / "sweep.stdout.txt"),
+                stderr_path=str(run_dir / "sweeps" / "sweep.stderr.txt"),
             )
-            if rc != 0:
-                return int(rc)
-
-        sweep_argv = bt_cmd + [
-            "sweep",
-            "--config",
-            str(bt_config),
-            "--sweep-spec",
-            str(bt_sweep_spec),
-            "--interval",
-            str(args.interval),
-            "--output",
-            str(sweep_out),
-            "--output-mode",
-            _sweep_output_mode_from_args(args),
-        ]
-        if live_initial_balance_path is not None:
-            sweep_argv += ["--balance-from", str(live_initial_balance_path)]
-        top_n = int(args.top_n or 0)
-        if top_n <= 0:
-            # Auto-derive --top-n from profile to reduce sweep output size.
-            # A 5× safety margin over shortlist_max_rank ensures multi-criteria
-            # extraction has ample headroom while cutting output from GBs to MBs.
-            _slm = int(getattr(args, "shortlist_max_rank", 0) or 0)
-            _spm = int(getattr(args, "shortlist_per_mode", 0) or 0)
-            _effective_max_rank = _slm if _slm > 0 else (max(10, _spm * 5) if _spm > 0 else 200)
-            top_n = _effective_max_rank * 5
-        if top_n > 0:
-            sweep_argv += ["--top-n", str(top_n)]
-        if bt_candles_db:
-            sweep_argv += [
-                "--candles-db",
-                str(bt_candles_db),
-                "--exit-candles-db",
-                str(bt_candles_db),
-                "--entry-candles-db",
-                str(bt_candles_db),
-            ]
-        if bt_funding_db:
-            sweep_argv += ["--funding-db", str(bt_funding_db)]
-        if bool(args.gpu):
-            sweep_argv += ["--gpu"]
-        allow_unsafe = bool(getattr(args, "allow_unsafe_gpu_sweep", False)) or os.getenv(
-            "AI_QUANT_FACTORY_ALLOW_UNSAFE_GPU_SWEEP", ""
-        ).strip().lower() in {"1", "true", "yes", "on"}
-        if allow_unsafe and "--allow-unsafe-gpu-sweep" not in sweep_argv:
-            sweep_argv += ["--allow-unsafe-gpu-sweep"]
-        if bool(getattr(args, "tpe", False)):
-            if not bool(args.gpu):
-                (run_dir / "reports").mkdir(parents=True, exist_ok=True)
-                (run_dir / "reports" / "report.md").write_text(
-                    "# Factory Run Report\n\nError: --tpe requires --gpu.\n", encoding="utf-8"
+            meta["steps"].append({"name": "sweep_skip", **sweep_res.__dict__})
+        else:
+            if bool(args.gpu):
+                rc = _ensure_gpu_idle_or_exit(
+                    run_dir=run_dir,
+                    meta=meta,
+                    wait_s=int(getattr(args, "gpu_wait_s", 0) or 0),
+                    poll_s=int(getattr(args, "gpu_poll_s", 0) or 0),
                 )
-                _write_json(run_dir / "run_metadata.json", meta)
-                return 1
-            sweep_argv += [
-                "--tpe",
-                "--tpe-trials",
-                str(int(getattr(args, "tpe_trials", 5000))),
-                "--tpe-batch",
-                str(int(getattr(args, "tpe_batch", 256))),
-                "--tpe-seed",
-                str(int(getattr(args, "tpe_seed", 42))),
+                if rc != 0:
+                    return int(rc)
+    
+            sweep_argv = bt_cmd + [
+                "sweep",
+                "--config",
+                str(bt_config),
+                "--sweep-spec",
+                str(bt_sweep_spec),
+                "--interval",
+                str(args.interval),
+                "--output",
+                str(sweep_out),
+                "--output-mode",
+                _sweep_output_mode_from_args(args),
             ]
-
-        sweep_output_mode = _sweep_output_mode_from_args(args)
-        fallback_to_legacy_output = False
-        sweep_res = _run_cmd(
-            sweep_argv,
-            cwd=AIQ_ROOT / "backtester",
-            stdout_path=run_dir / "sweeps" / "sweep.stdout.txt",
-            stderr_path=run_dir / "sweeps" / "sweep.stderr.txt",
-        )
-        if sweep_res.exit_code != 0:
-            try:
-                sweep_stderr = (
-                    Path(sweep_res.stderr_path or "").read_text(encoding="utf-8") if sweep_res.stderr_path else ""
-                )
-            except Exception:
-                sweep_stderr = ""
-            unsupported_output_mode = "--output-mode" in str(sweep_argv) and (
-                "unexpected argument '--output-mode'" in sweep_stderr
-                or "unexpected argument `--output-mode'" in sweep_stderr
-                or "unrecognized argument '--output-mode'" in sweep_stderr
-                or "invalid argument '--output-mode'" in sweep_stderr
+            if live_initial_balance_path is not None:
+                sweep_argv += ["--balance-from", str(live_initial_balance_path)]
+            top_n = int(args.top_n or 0)
+            if top_n <= 0:
+                # Auto-derive --top-n from profile to reduce sweep output size.
+                # A 5× safety margin over shortlist_max_rank ensures multi-criteria
+                # extraction has ample headroom while cutting output from GBs to MBs.
+                _slm = int(getattr(args, "shortlist_max_rank", 0) or 0)
+                _spm = int(getattr(args, "shortlist_per_mode", 0) or 0)
+                _effective_max_rank = _slm if _slm > 0 else (max(10, _spm * 5) if _spm > 0 else 200)
+                top_n = _effective_max_rank * 5
+            if top_n > 0:
+                sweep_argv += ["--top-n", str(top_n)]
+            if bt_candles_db:
+                sweep_argv += [
+                    "--candles-db",
+                    str(bt_candles_db),
+                    "--exit-candles-db",
+                    str(bt_candles_db),
+                    "--entry-candles-db",
+                    str(bt_candles_db),
+                ]
+            if bt_funding_db:
+                sweep_argv += ["--funding-db", str(bt_funding_db)]
+            if bool(args.gpu):
+                sweep_argv += ["--gpu"]
+            allow_unsafe = bool(getattr(args, "allow_unsafe_gpu_sweep", False)) or os.getenv(
+                "AI_QUANT_FACTORY_ALLOW_UNSAFE_GPU_SWEEP", ""
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            if allow_unsafe and "--allow-unsafe-gpu-sweep" not in sweep_argv:
+                sweep_argv += ["--allow-unsafe-gpu-sweep"]
+            if bool(getattr(args, "tpe", False)):
+                if not bool(args.gpu):
+                    (run_dir / "reports").mkdir(parents=True, exist_ok=True)
+                    (run_dir / "reports" / "report.md").write_text(
+                        "# Factory Run Report\n\nError: --tpe requires --gpu.\n", encoding="utf-8"
+                    )
+                    _write_json(run_dir / "run_metadata.json", meta)
+                    return 1
+                sweep_argv += [
+                    "--tpe",
+                    "--tpe-trials",
+                    str(int(getattr(args, "tpe_trials", 5000))),
+                    "--tpe-batch",
+                    str(int(getattr(args, "tpe_batch", 256))),
+                    "--tpe-seed",
+                    str(int(getattr(args, "tpe_seed", 42))),
+                ]
+    
+            sweep_output_mode = _sweep_output_mode_from_args(args)
+            fallback_to_legacy_output = False
+            sweep_res = _run_cmd(
+                sweep_argv,
+                cwd=AIQ_ROOT / "backtester",
+                stdout_path=run_dir / "sweeps" / "sweep.stdout.txt",
+                stderr_path=run_dir / "sweeps" / "sweep.stderr.txt",
             )
-            if unsupported_output_mode:
-                fallback_to_legacy_output = True
-                filtered_argv = []
-                skip_next = False
-                for idx, token in enumerate(sweep_argv):
-                    if skip_next:
-                        skip_next = False
-                        continue
-                    if token == "--output-mode":
-                        if idx + 1 < len(sweep_argv):
-                            skip_next = True
-                        continue
-                    filtered_argv.append(token)
-
-                sweep_res = _run_cmd(
-                    filtered_argv,
-                    cwd=AIQ_ROOT / "backtester",
-                    stdout_path=run_dir / "sweeps" / "sweep.stdout.txt",
-                    stderr_path=run_dir / "sweeps" / "sweep.stderr.txt",
+            if sweep_res.exit_code != 0:
+                try:
+                    sweep_stderr = (
+                        Path(sweep_res.stderr_path or "").read_text(encoding="utf-8") if sweep_res.stderr_path else ""
+                    )
+                except Exception:
+                    sweep_stderr = ""
+                unsupported_output_mode = "--output-mode" in str(sweep_argv) and (
+                    "unexpected argument '--output-mode'" in sweep_stderr
+                    or "unexpected argument `--output-mode'" in sweep_stderr
+                    or "unrecognized argument '--output-mode'" in sweep_stderr
+                    or "invalid argument '--output-mode'" in sweep_stderr
                 )
-                if sweep_res.exit_code == 0:
+                if unsupported_output_mode:
                     fallback_to_legacy_output = True
-
-        meta["steps"].append(
-            {
-                "name": "sweep",
-                "fallback_to_legacy_output_mode": fallback_to_legacy_output,
-                "sweep_output_mode_request": sweep_output_mode,
-                **sweep_res.__dict__,
-            }
-        )
-        if sweep_res.exit_code != 0:
-            _write_json(run_dir / "run_metadata.json", meta)
-            return int(sweep_res.exit_code)
-        if sweep_output_mode == "candidate" and not fallback_to_legacy_output:
-            ok, schema_errors = _validate_candidate_output_schema(sweep_out)
-            if not ok:
-                _write_json(
-                    run_dir / "run_metadata.json",
-                    {
-                        **meta,
-                        "candidate_schema_validation": {
-                            "status": "fail",
-                            "path": str(sweep_out),
-                            "errors": schema_errors,
+                    filtered_argv = []
+                    skip_next = False
+                    for idx, token in enumerate(sweep_argv):
+                        if skip_next:
+                            skip_next = False
+                            continue
+                        if token == "--output-mode":
+                            if idx + 1 < len(sweep_argv):
+                                skip_next = True
+                            continue
+                        filtered_argv.append(token)
+    
+                    sweep_res = _run_cmd(
+                        filtered_argv,
+                        cwd=AIQ_ROOT / "backtester",
+                        stdout_path=run_dir / "sweeps" / "sweep.stdout.txt",
+                        stderr_path=run_dir / "sweeps" / "sweep.stderr.txt",
+                    )
+                    if sweep_res.exit_code == 0:
+                        fallback_to_legacy_output = True
+    
+            meta["steps"].append(
+                {
+                    "name": "sweep",
+                    "fallback_to_legacy_output_mode": fallback_to_legacy_output,
+                    "sweep_output_mode_request": sweep_output_mode,
+                    **sweep_res.__dict__,
+                }
+            )
+            if sweep_res.exit_code != 0:
+                _write_json(run_dir / "run_metadata.json", meta)
+                return int(sweep_res.exit_code)
+            if sweep_output_mode == "candidate" and not fallback_to_legacy_output:
+                ok, schema_errors = _validate_candidate_output_schema(sweep_out)
+                if not ok:
+                    _write_json(
+                        run_dir / "run_metadata.json",
+                        {
+                            **meta,
+                            "candidate_schema_validation": {
+                                "status": "fail",
+                                "path": str(sweep_out),
+                                "errors": schema_errors,
+                            },
                         },
-                    },
-                )
-                return 2
-            meta["candidate_schema_validation"] = {
-                "status": "pass",
-                "path": str(sweep_out),
-                "errors": [],
-            }
-
-    _write_json(run_dir / "run_metadata.json", meta)
-
-    # ------------------------------------------------------------------
-    # 2b) Extract top candidates (single-pass streaming)
-    # ------------------------------------------------------------------
-    shortlist_per_mode = int(getattr(args, "shortlist_per_mode", 0) or 0)
-    shortlist_max_rank = int(getattr(args, "shortlist_max_rank", 0) or 0)
-    shortlist_modes_raw = str(getattr(args, "shortlist_modes", "") or "").strip()
-
-    allowed_modes = {"pnl", "dd", "pf", "wr", "sharpe", "trades", "balanced"}
-    extract_modes = [m.strip() for m in shortlist_modes_raw.split(",") if m.strip()]
-    extract_modes = [m for m in extract_modes if m in allowed_modes]
-    if not extract_modes:
-        extract_modes = ["dd", "balanced"]
-    # Always include the legacy sort-by mode so single-mode generation works.
-    legacy_sort = str(getattr(args, "sort_by", "balanced") or "balanced").strip()
-    if legacy_sort in allowed_modes and legacy_sort not in extract_modes:
-        extract_modes.append(legacy_sort)
-    # Always include "pnl" so default ranking is available.
-    if "pnl" not in extract_modes:
-        extract_modes.append("pnl")
-
-    if shortlist_max_rank <= 0:
-        shortlist_max_rank = max(10, shortlist_per_mode * 5) if shortlist_per_mode > 0 else 200
-
-    candidate_min_trades = max(0, int(getattr(args, "candidate_min_trades", 1) or 0))
-
-    sweep_candidates_out = run_dir / "sweeps" / "sweep_candidates.jsonl"
-    if bool(args.resume) and _is_nonempty_file(sweep_candidates_out):
-        meta["steps"].append({"name": "extract_top_candidates_skip", "path": str(sweep_candidates_out)})
-    else:
-        t0 = time.monotonic()
-        extract_rows, extract_schema_errors = _extract_top_candidates(
-            sweep_out,
-            sweep_candidates_out,
-            max_rank=shortlist_max_rank,
-            modes=extract_modes,
-            min_trades=candidate_min_trades,
-        )
-        elapsed = time.monotonic() - t0
-        meta["steps"].append({
-            "name": "extract_top_candidates",
-            "path": str(sweep_candidates_out),
-            "source_path": str(sweep_out),
-            "total_rows_scanned": extract_rows,
-            "modes": extract_modes,
-            "max_rank": shortlist_max_rank,
-            "min_trades": candidate_min_trades,
-            "elapsed_s": round(elapsed, 2),
-            "output_size_bytes": sweep_candidates_out.stat().st_size if sweep_candidates_out.exists() else 0,
-        })
-
-    _write_json(run_dir / "run_metadata.json", meta)
-
-    # All downstream generate_config calls use the compact candidates file.
-    sweep_gen_source = sweep_candidates_out
-
-    # ------------------------------------------------------------------
-    # 3) Candidate config generation
-    # ------------------------------------------------------------------
-    configs_dir = run_dir / "configs"
-    configs_dir.mkdir(parents=True, exist_ok=True)
-
-    candidate_paths: list[Path] = []
-    candidate_config_ids: dict[str, str] = {}
-    candidate_entries: list[dict[str, Any]] = []
-    entry_by_path: dict[str, dict[str, Any]] = {}
-    skip_generation = False
-    default_entry_stage = _stage_defaults_for_candidate(args=args)
-
-    if bool(args.resume):
-        existing_entries = meta.get("candidate_configs", [])
-        if isinstance(existing_entries, list) and existing_entries:
-            candidate_entries = [it for it in existing_entries if isinstance(it, dict)]
-            for it in candidate_entries:
-                defaults = dict(default_entry_stage)
-                had_candidate_mode = "candidate_mode" in it
-                for k, v in it.items():
-                    if isinstance(v, (str, int, float, bool, dict, list, tuple, type(None))):
-                        defaults[k] = v
-                defaults.setdefault("canonical_cpu_verified", False)
-                defaults.setdefault("pipeline_stage", "candidate_generation")
-                defaults.setdefault("sweep_stage", _infer_sweep_stage_from_args(args))
-                defaults.setdefault("replay_stage", "")
-                defaults.setdefault("validation_gate", _infer_validation_gate_from_args(args))
-                if not had_candidate_mode:
-                    defaults["candidate_mode"] = False
-                it.update(defaults)
-                p = str(it.get("path", "")).strip()
-                if p:
-                    entry_by_path[p] = it
-
-            for it in candidate_entries:
-                p_raw = str(it.get("path", "")).strip()
-                if not p_raw:
-                    continue
-                if "selected" in it and not bool(it.get("selected")):
-                    continue
-                p = Path(p_raw).expanduser().resolve()
-                if not _is_nonempty_file(p):
-                    continue
-                candidate_paths.append(p)
-                cid = str(it.get("config_id", "")).strip()
-                if not cid:
-                    cid = config_id_from_yaml_file(p)
-                    it["config_id"] = cid
-                candidate_config_ids[str(p)] = cid
-
-            skip_generation = bool(candidate_paths)
-
-    # Multi-mode shortlist generation (AQC-403). Deduplicate across modes by config_id.
-    if not skip_generation and shortlist_per_mode > 0:
+                    )
+                    return 2
+                meta["candidate_schema_validation"] = {
+                    "status": "pass",
+                    "path": str(sweep_out),
+                    "errors": [],
+                }
+    
+        _write_json(run_dir / "run_metadata.json", meta)
+    
+        # ------------------------------------------------------------------
+        # 2b) Extract top candidates (single-pass streaming)
+        # ------------------------------------------------------------------
+        shortlist_per_mode = int(getattr(args, "shortlist_per_mode", 0) or 0)
+        shortlist_max_rank = int(getattr(args, "shortlist_max_rank", 0) or 0)
+        shortlist_modes_raw = str(getattr(args, "shortlist_modes", "") or "").strip()
+    
         allowed_modes = {"pnl", "dd", "pf", "wr", "sharpe", "trades", "balanced"}
-        modes = [m.strip() for m in shortlist_modes_raw.split(",") if m.strip()]
-        modes = [m for m in modes if m in allowed_modes]
-        if not modes:
-            modes = ["dd", "balanced"]
+        extract_modes = [m.strip() for m in shortlist_modes_raw.split(",") if m.strip()]
+        extract_modes = [m for m in extract_modes if m in allowed_modes]
+        if not extract_modes:
+            extract_modes = ["dd", "balanced"]
+        # Always include the legacy sort-by mode so single-mode generation works.
+        legacy_sort = str(getattr(args, "sort_by", "balanced") or "balanced").strip()
+        if legacy_sort in allowed_modes and legacy_sort not in extract_modes:
+            extract_modes.append(legacy_sort)
+        # Always include "pnl" so default ranking is available.
+        if "pnl" not in extract_modes:
+            extract_modes.append("pnl")
+    
         if shortlist_max_rank <= 0:
-            shortlist_max_rank = max(10, shortlist_per_mode * 5)
+            shortlist_max_rank = max(10, shortlist_per_mode * 5) if shortlist_per_mode > 0 else 200
+    
+        candidate_min_trades = max(0, int(getattr(args, "candidate_min_trades", 1) or 0))
+    
+        sweep_candidates_out = run_dir / "sweeps" / "sweep_candidates.jsonl"
+        if bool(args.resume) and _is_nonempty_file(sweep_candidates_out):
+            meta["steps"].append({"name": "extract_top_candidates_skip", "path": str(sweep_candidates_out)})
+        else:
+            t0 = time.monotonic()
+            extract_rows, extract_schema_errors = _extract_top_candidates(
+                sweep_out,
+                sweep_candidates_out,
+                max_rank=shortlist_max_rank,
+                modes=extract_modes,
+                min_trades=candidate_min_trades,
+            )
+            elapsed = time.monotonic() - t0
+            meta["steps"].append({
+                "name": "extract_top_candidates",
+                "path": str(sweep_candidates_out),
+                "source_path": str(sweep_out),
+                "total_rows_scanned": extract_rows,
+                "modes": extract_modes,
+                "max_rank": shortlist_max_rank,
+                "min_trades": candidate_min_trades,
+                "elapsed_s": round(elapsed, 2),
+                "output_size_bytes": sweep_candidates_out.stat().st_size if sweep_candidates_out.exists() else 0,
+            })
+    
+        _write_json(run_dir / "run_metadata.json", meta)
+    
+        # All downstream generate_config calls use the compact candidates file.
+        sweep_gen_source = sweep_candidates_out
 
-        seen_ids: set[str] = set()
-        for mode in modes:
-            kept = 0
-            for rank in range(1, shortlist_max_rank + 1):
-                out_yaml = configs_dir / f"candidate_{mode}_rank{rank}.yaml"
+        # ------------------------------------------------------------------
+        # 3) Candidate config generation
+        # ------------------------------------------------------------------
+        current_stage = "candidate_generation"
+        if _shutdown_stage_guard(run_dir=run_dir, meta=meta, stage=current_stage):
+            return 130
+        configs_dir = run_dir / "configs"
+        configs_dir.mkdir(parents=True, exist_ok=True)
+    
+        candidate_paths: list[Path] = []
+        candidate_config_ids: dict[str, str] = {}
+        candidate_entries: list[dict[str, Any]] = []
+        entry_by_path: dict[str, dict[str, Any]] = {}
+        skip_generation = False
+        default_entry_stage = _stage_defaults_for_candidate(args=args)
+    
+        if bool(args.resume):
+            existing_entries = meta.get("candidate_configs", [])
+            if isinstance(existing_entries, list) and existing_entries:
+                candidate_entries = [it for it in existing_entries if isinstance(it, dict)]
+                for it in candidate_entries:
+                    defaults = dict(default_entry_stage)
+                    had_candidate_mode = "candidate_mode" in it
+                    for k, v in it.items():
+                        if isinstance(v, (str, int, float, bool, dict, list, tuple, type(None))):
+                            defaults[k] = v
+                    defaults.setdefault("canonical_cpu_verified", False)
+                    defaults.setdefault("pipeline_stage", "candidate_generation")
+                    defaults.setdefault("sweep_stage", _infer_sweep_stage_from_args(args))
+                    defaults.setdefault("replay_stage", "")
+                    defaults.setdefault("validation_gate", _infer_validation_gate_from_args(args))
+                    if not had_candidate_mode:
+                        defaults["candidate_mode"] = False
+                    it.update(defaults)
+                    p = str(it.get("path", "")).strip()
+                    if p:
+                        entry_by_path[p] = it
+    
+                for it in candidate_entries:
+                    p_raw = str(it.get("path", "")).strip()
+                    if not p_raw:
+                        continue
+                    if "selected" in it and not bool(it.get("selected")):
+                        continue
+                    p = Path(p_raw).expanduser().resolve()
+                    if not _is_nonempty_file(p):
+                        continue
+                    candidate_paths.append(p)
+                    cid = str(it.get("config_id", "")).strip()
+                    if not cid:
+                        cid = config_id_from_yaml_file(p)
+                        it["config_id"] = cid
+                    candidate_config_ids[str(p)] = cid
+    
+                skip_generation = bool(candidate_paths)
+    
+        # Multi-mode shortlist generation (AQC-403). Deduplicate across modes by config_id.
+        if not skip_generation and shortlist_per_mode > 0:
+            allowed_modes = {"pnl", "dd", "pf", "wr", "sharpe", "trades", "balanced"}
+            modes = [m.strip() for m in shortlist_modes_raw.split(",") if m.strip()]
+            modes = [m for m in modes if m in allowed_modes]
+            if not modes:
+                modes = ["dd", "balanced"]
+            if shortlist_max_rank <= 0:
+                shortlist_max_rank = max(10, shortlist_per_mode * 5)
+    
+            seen_ids: set[str] = set()
+            for mode in modes:
+                kept = 0
+                for rank in range(1, shortlist_max_rank + 1):
+                    out_yaml = configs_dir / f"candidate_{mode}_rank{rank}.yaml"
+                    gen_argv = [
+                        "python3",
+                        "tools/generate_config.py",
+                        "--sweep-results",
+                        str(sweep_gen_source),
+                        "--base-config",
+                        str(args.config),
+                        "--sort-by",
+                        str(mode),
+                        "--rank",
+                        str(rank),
+                        "--min-trades",
+                        str(candidate_min_trades),
+                        "-o",
+                        str(out_yaml),
+                    ]
+                    gen_res = _run_cmd(
+                        gen_argv,
+                        cwd=AIQ_ROOT,
+                        stdout_path=run_dir / "configs" / f"generate_config_{mode}_rank{rank}.stdout.txt",
+                        stderr_path=run_dir / "configs" / f"generate_config_{mode}_rank{rank}.stderr.txt",
+                    )
+                    meta["steps"].append({"name": f"generate_config_{mode}_rank{rank}", **gen_res.__dict__})
+                    if gen_res.exit_code != 0:
+                        _write_json(run_dir / "run_metadata.json", meta)
+                        return int(gen_res.exit_code)
+    
+                    cfg_id = config_id_from_yaml_file(out_yaml)
+                    candidate_config_ids[str(out_yaml)] = cfg_id
+    
+                    is_dup = cfg_id in seen_ids
+                    selected = (not is_dup) and kept < shortlist_per_mode
+                    if selected:
+                        seen_ids.add(cfg_id)
+                        candidate_paths.append(out_yaml)
+                        kept += 1
+    
+                    entry = {
+                        **default_entry_stage,
+                        "path": str(out_yaml),
+                        "config_id": cfg_id,
+                        "sort_by": mode,
+                        "rank": int(rank),
+                        "selected": bool(selected),
+                        "deduped": bool(is_dup),
+                        "interval": str(args.interval),
+                        "base_config_path": str(args.config),
+                        "sweep_spec_path": str(args.sweep_spec),
+                        "sweep_results_path": str(sweep_out),
+                        "sweep_stdout_path": str(sweep_res.stdout_path or ""),
+                        "sweep_stderr_path": str(sweep_res.stderr_path or ""),
+                        "generate_stdout_path": str(gen_res.stdout_path or ""),
+                        "generate_stderr_path": str(gen_res.stderr_path or ""),
+                    }
+                    candidate_entries.append(entry)
+                    entry_by_path[str(out_yaml)] = entry
+    
+                    if kept >= shortlist_per_mode:
+                        break
+    
+        # Single-mode generation (legacy): args.num_candidates + args.sort_by.
+        elif not skip_generation:
+            for rank in range(1, int(args.num_candidates) + 1):
+                out_yaml = configs_dir / f"candidate_{args.sort_by}_rank{rank}.yaml"
                 gen_argv = [
                     "python3",
                     "tools/generate_config.py",
@@ -2925,7 +3164,7 @@ def main(argv: list[str] | None = None) -> int:
                     "--base-config",
                     str(args.config),
                     "--sort-by",
-                    str(mode),
+                    str(args.sort_by),
                     "--rank",
                     str(rank),
                     "--min-trades",
@@ -2936,32 +3175,24 @@ def main(argv: list[str] | None = None) -> int:
                 gen_res = _run_cmd(
                     gen_argv,
                     cwd=AIQ_ROOT,
-                    stdout_path=run_dir / "configs" / f"generate_config_{mode}_rank{rank}.stdout.txt",
-                    stderr_path=run_dir / "configs" / f"generate_config_{mode}_rank{rank}.stderr.txt",
+                    stdout_path=run_dir / "configs" / f"generate_config_rank{rank}.stdout.txt",
+                    stderr_path=run_dir / "configs" / f"generate_config_rank{rank}.stderr.txt",
                 )
-                meta["steps"].append({"name": f"generate_config_{mode}_rank{rank}", **gen_res.__dict__})
+                meta["steps"].append({"name": f"generate_config_rank{rank}", **gen_res.__dict__})
                 if gen_res.exit_code != 0:
                     _write_json(run_dir / "run_metadata.json", meta)
                     return int(gen_res.exit_code)
-
+                candidate_paths.append(out_yaml)
                 cfg_id = config_id_from_yaml_file(out_yaml)
                 candidate_config_ids[str(out_yaml)] = cfg_id
-
-                is_dup = cfg_id in seen_ids
-                selected = (not is_dup) and kept < shortlist_per_mode
-                if selected:
-                    seen_ids.add(cfg_id)
-                    candidate_paths.append(out_yaml)
-                    kept += 1
-
                 entry = {
                     **default_entry_stage,
                     "path": str(out_yaml),
                     "config_id": cfg_id,
-                    "sort_by": mode,
+                    "sort_by": str(args.sort_by),
                     "rank": int(rank),
-                    "selected": bool(selected),
-                    "deduped": bool(is_dup),
+                    "selected": True,
+                    "deduped": False,
                     "interval": str(args.interval),
                     "base_config_path": str(args.config),
                     "sweep_spec_path": str(args.sweep_spec),
@@ -2973,588 +3204,547 @@ def main(argv: list[str] | None = None) -> int:
                 }
                 candidate_entries.append(entry)
                 entry_by_path[str(out_yaml)] = entry
-
-                if kept >= shortlist_per_mode:
-                    break
-
-    # Single-mode generation (legacy): args.num_candidates + args.sort_by.
-    elif not skip_generation:
-        for rank in range(1, int(args.num_candidates) + 1):
-            out_yaml = configs_dir / f"candidate_{args.sort_by}_rank{rank}.yaml"
-            gen_argv = [
-                "python3",
-                "tools/generate_config.py",
-                "--sweep-results",
-                str(sweep_gen_source),
-                "--base-config",
-                str(args.config),
-                "--sort-by",
-                str(args.sort_by),
-                "--rank",
-                str(rank),
-                "--min-trades",
-                str(candidate_min_trades),
-                "-o",
-                str(out_yaml),
-            ]
-            gen_res = _run_cmd(
-                gen_argv,
-                cwd=AIQ_ROOT,
-                stdout_path=run_dir / "configs" / f"generate_config_rank{rank}.stdout.txt",
-                stderr_path=run_dir / "configs" / f"generate_config_rank{rank}.stderr.txt",
-            )
-            meta["steps"].append({"name": f"generate_config_rank{rank}", **gen_res.__dict__})
-            if gen_res.exit_code != 0:
-                _write_json(run_dir / "run_metadata.json", meta)
-                return int(gen_res.exit_code)
-            candidate_paths.append(out_yaml)
-            cfg_id = config_id_from_yaml_file(out_yaml)
-            candidate_config_ids[str(out_yaml)] = cfg_id
-            entry = {
-                **default_entry_stage,
-                "path": str(out_yaml),
-                "config_id": cfg_id,
-                "sort_by": str(args.sort_by),
-                "rank": int(rank),
-                "selected": True,
-                "deduped": False,
-                "interval": str(args.interval),
-                "base_config_path": str(args.config),
-                "sweep_spec_path": str(args.sweep_spec),
-                "sweep_results_path": str(sweep_out),
-                "sweep_stdout_path": str(sweep_res.stdout_path or ""),
-                "sweep_stderr_path": str(sweep_res.stderr_path or ""),
-                "generate_stdout_path": str(gen_res.stdout_path or ""),
-                "generate_stderr_path": str(gen_res.stderr_path or ""),
-            }
-            candidate_entries.append(entry)
-            entry_by_path[str(out_yaml)] = entry
-
-    meta["candidate_configs"] = candidate_entries
-    _write_json(run_dir / "run_metadata.json", meta)
-
-    if not candidate_paths:
-        (run_dir / "reports").mkdir(parents=True, exist_ok=True)
-        (run_dir / "reports" / "report.md").write_text(
-            "# Factory Run Report\n\nNo candidate configs were selected.\n", encoding="utf-8"
-        )
+    
+        meta["candidate_configs"] = candidate_entries
         _write_json(run_dir / "run_metadata.json", meta)
-        return 1
-
-    # ------------------------------------------------------------------
-    # 4) CPU replay / validation (minimal v1: run replay once per candidate)
-    # ------------------------------------------------------------------
-    replays_dir = run_dir / "replays"
-    replays_dir.mkdir(parents=True, exist_ok=True)
-
-    replay_reports: list[dict[str, Any]] = []
-    for cfg_path in candidate_paths:
-        out_json = replays_dir / f"{cfg_path.stem}.replay.json"
-
-        trades_csv: Path | None = None
-        if bool(getattr(args, "monte_carlo", False)):
-            trades_dir = run_dir / "trades"
-            trades_dir.mkdir(parents=True, exist_ok=True)
-            trades_csv = trades_dir / f"{cfg_path.stem}.trades.csv"
-
-        replay_argv = bt_cmd + [
-            "replay",
-            "--config",
-            str(cfg_path),
-            "--interval",
-            str(args.interval),
-            "--output",
-            str(out_json),
-        ]
-        if live_initial_balance_path is not None:
-            replay_argv += ["--balance-from", str(live_initial_balance_path)]
-        if bt_candles_db:
-            replay_argv += [
-                "--candles-db",
-                str(bt_candles_db),
-                "--exit-candles-db",
-                str(bt_candles_db),
-                "--entry-candles-db",
-                str(bt_candles_db),
-            ]
-        if bt_funding_db:
-            replay_argv += ["--funding-db", str(bt_funding_db)]
-        if trades_csv is not None:
-            replay_argv += ["--export-trades", str(trades_csv)]
-
-        replay_stdout = run_dir / "replays" / f"{cfg_path.stem}.stdout.txt"
-        replay_stderr = run_dir / "replays" / f"{cfg_path.stem}.stderr.txt"
-
-        if bool(args.resume) and _is_nonempty_file(out_json) and (trades_csv is None or _is_nonempty_file(trades_csv)):
-            replay_res = CmdResult(
-                argv=[],
-                cwd=str(AIQ_ROOT / "backtester"),
-                exit_code=0,
-                elapsed_s=0.0,
-                stdout_path=str(replay_stdout),
-                stderr_path=str(replay_stderr),
+    
+        if not candidate_paths:
+            (run_dir / "reports").mkdir(parents=True, exist_ok=True)
+            (run_dir / "reports" / "report.md").write_text(
+                "# Factory Run Report\n\nNo candidate configs were selected.\n", encoding="utf-8"
             )
-            meta["steps"].append({"name": f"replay_{cfg_path.stem}_skip", **replay_res.__dict__})
-        else:
-            replay_res = _run_cmd(
-                replay_argv,
-                cwd=AIQ_ROOT / "backtester",
-                stdout_path=replay_stdout,
-                stderr_path=replay_stderr,
-            )
-            meta["steps"].append({"name": f"replay_{cfg_path.stem}", **replay_res.__dict__})
-            if replay_res.exit_code != 0:
-                _write_json(run_dir / "run_metadata.json", meta)
-                return int(replay_res.exit_code)
-
-        summary = _summarise_replay_report(out_json)
-        summary["config_path"] = str(cfg_path)
-        summary["config_id"] = candidate_config_ids[str(cfg_path)]
-        if not _run_replay_equivalence_check(right_report=out_json, summary=summary):
             _write_json(run_dir / "run_metadata.json", meta)
             return 1
-        replay_entry = entry_by_path.get(str(cfg_path))
-        _attach_replay_metadata(summary=summary, entry=replay_entry, args=args)
-        if replay_entry is None:
+    
+        # ------------------------------------------------------------------
+        # 4) CPU replay / validation (minimal v1: run replay once per candidate)
+        # ------------------------------------------------------------------
+        current_stage = "cpu_replay_validation"
+        if _shutdown_stage_guard(run_dir=run_dir, meta=meta, stage=current_stage):
+            return 130
+        replays_dir = run_dir / "replays"
+        replays_dir.mkdir(parents=True, exist_ok=True)
+    
+        replay_reports: list[dict[str, Any]] = []
+        for cfg_path in candidate_paths:
+            out_json = replays_dir / f"{cfg_path.stem}.replay.json"
+    
+            trades_csv: Path | None = None
+            if bool(getattr(args, "monte_carlo", False)):
+                trades_dir = run_dir / "trades"
+                trades_dir.mkdir(parents=True, exist_ok=True)
+                trades_csv = trades_dir / f"{cfg_path.stem}.trades.csv"
+    
+            replay_argv = bt_cmd + [
+                "replay",
+                "--config",
+                str(cfg_path),
+                "--interval",
+                str(args.interval),
+                "--output",
+                str(out_json),
+            ]
+            if live_initial_balance_path is not None:
+                replay_argv += ["--balance-from", str(live_initial_balance_path)]
+            if bt_candles_db:
+                replay_argv += [
+                    "--candles-db",
+                    str(bt_candles_db),
+                    "--exit-candles-db",
+                    str(bt_candles_db),
+                    "--entry-candles-db",
+                    str(bt_candles_db),
+                ]
+            if bt_funding_db:
+                replay_argv += ["--funding-db", str(bt_funding_db)]
+            if trades_csv is not None:
+                replay_argv += ["--export-trades", str(trades_csv)]
+    
+            replay_stdout = run_dir / "replays" / f"{cfg_path.stem}.stdout.txt"
+            replay_stderr = run_dir / "replays" / f"{cfg_path.stem}.stderr.txt"
+    
+            if bool(args.resume) and _is_nonempty_file(out_json) and (trades_csv is None or _is_nonempty_file(trades_csv)):
+                replay_res = CmdResult(
+                    argv=[],
+                    cwd=str(AIQ_ROOT / "backtester"),
+                    exit_code=0,
+                    elapsed_s=0.0,
+                    stdout_path=str(replay_stdout),
+                    stderr_path=str(replay_stderr),
+                )
+                meta["steps"].append({"name": f"replay_{cfg_path.stem}_skip", **replay_res.__dict__})
+            else:
+                replay_res = _run_cmd(
+                    replay_argv,
+                    cwd=AIQ_ROOT / "backtester",
+                    stdout_path=replay_stdout,
+                    stderr_path=replay_stderr,
+                )
+                meta["steps"].append({"name": f"replay_{cfg_path.stem}", **replay_res.__dict__})
+                if replay_res.exit_code != 0:
+                    _write_json(run_dir / "run_metadata.json", meta)
+                    return int(replay_res.exit_code)
+    
+            summary = _summarise_replay_report(out_json)
             summary["config_path"] = str(cfg_path)
-
-        if bool(getattr(args, "monte_carlo", False)) and trades_csv is not None:
-            mc_dir = run_dir / "monte_carlo" / str(cfg_path.stem)
-            mc_dir.mkdir(parents=True, exist_ok=True)
-            mc_summary_path = mc_dir / "summary.json"
-
-            mc_stdout = mc_dir / "monte_carlo.stdout.txt"
-            mc_stderr = mc_dir / "monte_carlo.stderr.txt"
-
-            if bool(args.resume) and _is_nonempty_file(mc_summary_path):
-                mc_res = CmdResult(
-                    argv=[],
-                    cwd=str(AIQ_ROOT),
-                    exit_code=0,
-                    elapsed_s=0.0,
-                    stdout_path=str(mc_stdout),
-                    stderr_path=str(mc_stderr),
-                )
-                meta["steps"].append({"name": f"monte_carlo_{cfg_path.stem}_skip", **mc_res.__dict__})
-            else:
-                if not _is_nonempty_file(trades_csv):
-                    summary["monte_carlo_error"] = "missing trade export CSV (rerun replay without --resume)"
-                else:
-                    init_bal = float(summary.get("initial_balance", 0.0) or 0.0)
-                    mc_argv = [
-                        "python3",
-                        "tools/monte_carlo_bootstrap.py",
-                        "--trades-csv",
-                        str(trades_csv),
-                        "--initial-balance",
-                        str(init_bal),
-                        "--iters",
-                        str(int(getattr(args, "monte_carlo_iters", 2000) or 2000)),
-                        "--seed",
-                        str(int(getattr(args, "monte_carlo_seed", 42) or 42)),
-                        "--methods",
-                        str(getattr(args, "monte_carlo_methods", "bootstrap") or "bootstrap"),
-                        "--output",
-                        str(mc_summary_path),
-                    ]
-
-                    mc_res = _run_cmd(mc_argv, cwd=AIQ_ROOT, stdout_path=mc_stdout, stderr_path=mc_stderr)
-                    meta["steps"].append({"name": f"monte_carlo_{cfg_path.stem}", **mc_res.__dict__})
-                    if mc_res.exit_code != 0:
-                        _write_json(run_dir / "run_metadata.json", meta)
-                        return int(mc_res.exit_code)
-
-            summary["monte_carlo_summary_path"] = str(mc_summary_path)
-            try:
-                mc_obj = _load_json(mc_summary_path)
-                dists = mc_obj.get("distributions", {}) if isinstance(mc_obj, dict) else {}
-                mc_ci: dict[str, Any] = {}
-                if isinstance(dists, dict):
-                    for method, payload in dists.items():
-                        if not isinstance(payload, dict):
-                            continue
-                        ret = payload.get("return_pct", {}) if isinstance(payload.get("return_pct", {}), dict) else {}
-                        dd = (
-                            payload.get("max_drawdown_pct", {})
-                            if isinstance(payload.get("max_drawdown_pct", {}), dict)
-                            else {}
-                        )
-                        mc_ci[str(method)] = {
-                            "return_pct_ci95": [float(ret.get("p02_5", 0.0)), float(ret.get("p97_5", 0.0))],
-                            "max_drawdown_pct_ci95": [float(dd.get("p02_5", 0.0)), float(dd.get("p97_5", 0.0))],
-                            "return_pct_median": float(ret.get("p50", 0.0)),
-                            "max_drawdown_pct_median": float(dd.get("p50", 0.0)),
-                        }
-                summary["monte_carlo_ci"] = mc_ci
-            except Exception:
-                summary["monte_carlo_error"] = "failed to load monte_carlo summary.json"
-
-        cu_sets = getattr(args, "cross_universe_set", None)
-        if isinstance(cu_sets, list) and cu_sets:
-            cu_dir = run_dir / "cross_universe" / str(cfg_path.stem)
-            cu_dir.mkdir(parents=True, exist_ok=True)
-            cu_summary_path = cu_dir / "summary.json"
-
-            cu_stdout = cu_dir / "cross_universe.stdout.txt"
-            cu_stderr = cu_dir / "cross_universe.stderr.txt"
-
-            if bool(args.resume) and _is_nonempty_file(cu_summary_path):
-                cu_res = CmdResult(
-                    argv=[],
-                    cwd=str(AIQ_ROOT),
-                    exit_code=0,
-                    elapsed_s=0.0,
-                    stdout_path=str(cu_stdout),
-                    stderr_path=str(cu_stderr),
-                )
-                meta["steps"].append({"name": f"cross_universe_{cfg_path.stem}_skip", **cu_res.__dict__})
-            else:
-                cu_argv = [
-                    "python3",
-                    "tools/cross_universe_validate.py",
-                    "--replay-report",
-                    str(out_json),
-                ]
-                for it in cu_sets:
-                    if it:
-                        cu_argv += ["--symbol-set", str(it)]
-                cu_argv += ["--output", str(cu_summary_path)]
-
-                cu_res = _run_cmd(cu_argv, cwd=AIQ_ROOT, stdout_path=cu_stdout, stderr_path=cu_stderr)
-                meta["steps"].append({"name": f"cross_universe_{cfg_path.stem}", **cu_res.__dict__})
-                if cu_res.exit_code != 0:
-                    _write_json(run_dir / "run_metadata.json", meta)
-                    return int(cu_res.exit_code)
-
-            summary["cross_universe_summary_path"] = str(cu_summary_path)
-            try:
-                cu_obj = _load_json(cu_summary_path)
-                sets_obj = cu_obj.get("sets", []) if isinstance(cu_obj, dict) else []
-                cu_map: dict[str, Any] = {}
-                if isinstance(sets_obj, list):
-                    for s in sets_obj:
-                        if not isinstance(s, dict):
-                            continue
-                        name = str(s.get("name", "")).strip() or "set"
-                        subset = s.get("subset", {}) if isinstance(s.get("subset", {}), dict) else {}
-                        shares = s.get("shares", {}) if isinstance(s.get("shares", {}), dict) else {}
-                        cu_map[name] = {
-                            "subset_net_pnl_usd": float(subset.get("net_pnl_usd", 0.0) or 0.0),
-                            "subset_trades": float(subset.get("trades", 0.0) or 0.0),
-                            "share_net_pnl_usd": float(shares.get("net_pnl_usd", 0.0) or 0.0),
-                            "share_trades": float(shares.get("trades", 0.0) or 0.0),
-                        }
-                summary["cross_universe"] = cu_map
-            except Exception:
-                summary["cross_universe_error"] = "failed to load cross_universe summary.json"
-
-        if bool(getattr(args, "concentration_checks", False)):
-            cc_dir = run_dir / "concentration" / str(cfg_path.stem)
-            cc_dir.mkdir(parents=True, exist_ok=True)
-            cc_summary_path = cc_dir / "summary.json"
-
-            cc_stdout = cc_dir / "concentration.stdout.txt"
-            cc_stderr = cc_dir / "concentration.stderr.txt"
-
-            if bool(args.resume) and _is_nonempty_file(cc_summary_path):
-                cc_res = CmdResult(
-                    argv=[],
-                    cwd=str(AIQ_ROOT),
-                    exit_code=0,
-                    elapsed_s=0.0,
-                    stdout_path=str(cc_stdout),
-                    stderr_path=str(cc_stderr),
-                )
-                meta["steps"].append({"name": f"concentration_{cfg_path.stem}_skip", **cc_res.__dict__})
-            else:
-                cc_argv = [
-                    "python3",
-                    "tools/concentration_checks.py",
-                    "--replay-report",
-                    str(out_json),
-                    "--output",
-                    str(cc_summary_path),
-                    "--max-top1-pnl-pct",
-                    str(float(getattr(args, "conc_max_top1_pnl_pct", 0.65) or 0.65)),
-                    "--max-top5-pnl-pct",
-                    str(float(getattr(args, "conc_max_top5_pnl_pct", 0.90) or 0.90)),
-                    "--min-symbols-traded",
-                    str(int(getattr(args, "conc_min_symbols_traded", 5) or 5)),
-                ]
-
-                cc_res = _run_cmd(cc_argv, cwd=AIQ_ROOT, stdout_path=cc_stdout, stderr_path=cc_stderr)
-                meta["steps"].append({"name": f"concentration_{cfg_path.stem}", **cc_res.__dict__})
-                if cc_res.exit_code != 0:
-                    _write_json(run_dir / "run_metadata.json", meta)
-                    return int(cc_res.exit_code)
-
-            summary["concentration_summary_path"] = str(cc_summary_path)
-            try:
-                cc_obj = _load_json(cc_summary_path)
-                summary["concentration_reject"] = (
-                    bool(cc_obj.get("reject", False)) if isinstance(cc_obj, dict) else False
-                )
-                metrics = cc_obj.get("metrics", {}) if isinstance(cc_obj, dict) else {}
-                if isinstance(metrics, dict):
-                    summary["symbols_traded"] = int(metrics.get("symbols_traded", 0) or 0)
-                    summary["top1_pnl_pct"] = float(metrics.get("top1_pnl_pct", 0.0) or 0.0)
-                    summary["top5_pnl_pct"] = float(metrics.get("top5_pnl_pct", 0.0) or 0.0)
-                    summary["long_pnl_usd"] = float(metrics.get("long_pnl_usd", 0.0) or 0.0)
-                    summary["short_pnl_usd"] = float(metrics.get("short_pnl_usd", 0.0) or 0.0)
-
-                if bool(summary.get("concentration_reject")):
-                    reasons = cc_obj.get("reject_reasons", []) if isinstance(cc_obj, dict) else []
-                    if isinstance(reasons, list) and reasons:
-                        _append_reject_reason(summary, "concentration: " + ", ".join([str(r) for r in reasons]))
-                    else:
-                        _append_reject_reason(summary, "concentration")
-            except Exception:
-                summary["concentration_error"] = "failed to load concentration summary.json"
-
-        if bool(getattr(args, "walk_forward", False)):
-            wf_dir = run_dir / "walk_forward" / str(cfg_path.stem)
-            wf_dir.mkdir(parents=True, exist_ok=True)
-            wf_summary_path = wf_dir / "summary.json"
-
-            wf_stdout = wf_dir / "walk_forward.stdout.txt"
-            wf_stderr = wf_dir / "walk_forward.stderr.txt"
-
-            if bool(args.resume) and _is_nonempty_file(wf_summary_path):
-                wf_res = CmdResult(
-                    argv=[],
-                    cwd=str(AIQ_ROOT),
-                    exit_code=0,
-                    elapsed_s=0.0,
-                    stdout_path=str(wf_stdout),
-                    stderr_path=str(wf_stderr),
-                )
-                meta["steps"].append({"name": f"walk_forward_{cfg_path.stem}_skip", **wf_res.__dict__})
-            else:
-                wf_argv = [
-                    "python3",
-                    "tools/walk_forward_validate.py",
-                    "--config",
-                    str(cfg_path),
-                    "--interval",
-                    str(args.interval),
-                    "--min-test-days",
-                    str(int(getattr(args, "walk_forward_min_test_days", 1) or 1)),
-                    "--out-dir",
-                    str(wf_dir),
-                    "--output",
-                    str(wf_summary_path),
-                ]
-                if bt_wf_splits_json:
-                    wf_argv += ["--splits-json", str(bt_wf_splits_json)]
-                if bt_candles_db:
-                    wf_argv += ["--candles-db", str(bt_candles_db)]
-                if bt_funding_db:
-                    wf_argv += ["--funding-db", str(bt_funding_db)]
-
-                wf_res = _run_cmd(wf_argv, cwd=AIQ_ROOT, stdout_path=wf_stdout, stderr_path=wf_stderr)
-                meta["steps"].append({"name": f"walk_forward_{cfg_path.stem}", **wf_res.__dict__})
-                if wf_res.exit_code != 0:
-                    _write_json(run_dir / "run_metadata.json", meta)
-                    return int(wf_res.exit_code)
-
-            summary["walk_forward_summary_path"] = str(wf_summary_path)
-            try:
-                wf_obj = _load_json(wf_summary_path)
-                agg = wf_obj.get("aggregate", {}) if isinstance(wf_obj, dict) else {}
-                if isinstance(agg, dict):
-                    summary["wf_median_oos_daily_return"] = float(agg.get("median_oos_daily_return", 0.0))
-                    summary["wf_max_oos_drawdown_pct"] = float(agg.get("max_oos_drawdown_pct", 0.0))
-                    summary["wf_walk_forward_score_v1"] = float(agg.get("walk_forward_score_v1", 0.0))
-            except Exception:
-                # Keep the factory pipeline resilient: store the path and continue.
-                summary["wf_error"] = "failed to load walk_forward summary.json"
-
-        if bool(getattr(args, "slippage_stress", False)):
-            ss_dir = run_dir / "slippage_stress" / str(cfg_path.stem)
-            ss_dir.mkdir(parents=True, exist_ok=True)
-            ss_summary_path = ss_dir / "summary.json"
-
-            ss_stdout = ss_dir / "slippage_stress.stdout.txt"
-            ss_stderr = ss_dir / "slippage_stress.stderr.txt"
-
-            if bool(args.resume) and _is_nonempty_file(ss_summary_path):
-                ss_res = CmdResult(
-                    argv=[],
-                    cwd=str(AIQ_ROOT),
-                    exit_code=0,
-                    elapsed_s=0.0,
-                    stdout_path=str(ss_stdout),
-                    stderr_path=str(ss_stderr),
-                )
-                meta["steps"].append({"name": f"slippage_stress_{cfg_path.stem}_skip", **ss_res.__dict__})
-            else:
-                ss_argv = [
-                    "python3",
-                    "tools/slippage_stress.py",
-                    "--config",
-                    str(cfg_path),
-                    "--interval",
-                    str(args.interval),
-                    "--slippage-bps",
-                    str(getattr(args, "slippage_stress_bps", "10,20,30") or "10,20,30"),
-                    "--reject-flip-bps",
-                    str(float(getattr(args, "slippage_stress_reject_bps", 20.0) or 20.0)),
-                    "--out-dir",
-                    str(ss_dir),
-                    "--output",
-                    str(ss_summary_path),
-                ]
-                if bt_candles_db:
-                    ss_argv += ["--candles-db", str(bt_candles_db)]
-                if bt_funding_db:
-                    ss_argv += ["--funding-db", str(bt_funding_db)]
-
-                ss_res = _run_cmd(ss_argv, cwd=AIQ_ROOT, stdout_path=ss_stdout, stderr_path=ss_stderr)
-                meta["steps"].append({"name": f"slippage_stress_{cfg_path.stem}", **ss_res.__dict__})
-                if ss_res.exit_code != 0:
-                    _write_json(run_dir / "run_metadata.json", meta)
-                    return int(ss_res.exit_code)
-
-            summary["slippage_stress_summary_path"] = str(ss_summary_path)
-            try:
-                ss_obj = _load_json(ss_summary_path)
-                agg = ss_obj.get("aggregate", {}) if isinstance(ss_obj, dict) else {}
-                if isinstance(agg, dict):
-                    reject_bps = float(getattr(args, "slippage_stress_reject_bps", 20.0) or 20.0)
-                    summary["slippage_fragility"] = float(agg.get("slippage_fragility", 0.0))
-                    summary["slippage_flip_sign_at_reject_bps"] = bool(agg.get("flip_sign_at_reject_bps", False))
-                    summary["slippage_reject"] = bool(agg.get("reject", False))
-                    summary["slippage_reject_bps"] = float(reject_bps)
-                    summary["pnl_drop_at_reject_bps"] = float(agg.get("pnl_drop_at_reject_bps", 0.0))
-                    summary["slippage_pnl_at_reject_bps"] = float(agg.get("pnl_at_reject_bps", 0.0))
-
-                    # Canonical key for AQC-504 scoring (when using the default 20 bps).
-                    if abs(float(reject_bps) - 20.0) < 1e-9:
-                        summary["pnl_drop_when_slippage_20bps"] = float(summary.get("pnl_drop_at_reject_bps", 0.0))
-                    if bool(summary.get("slippage_reject")):
-                        _append_reject_reason(summary, f"slippage flip at {float(reject_bps):g} bps")
-            except Exception:
-                summary["slippage_error"] = "failed to load slippage_stress summary.json"
-
-        if bool(getattr(args, "sensitivity_checks", False)):
-            sens_dir = run_dir / "sensitivity" / str(cfg_path.stem)
-            sens_dir.mkdir(parents=True, exist_ok=True)
-            sens_summary_path = sens_dir / "summary.json"
-
-            sens_stdout = sens_dir / "sensitivity.stdout.txt"
-            sens_stderr = sens_dir / "sensitivity.stderr.txt"
-
-            if bool(args.resume) and _is_nonempty_file(sens_summary_path):
-                sens_res = CmdResult(
-                    argv=[],
-                    cwd=str(AIQ_ROOT),
-                    exit_code=0,
-                    elapsed_s=0.0,
-                    stdout_path=str(sens_stdout),
-                    stderr_path=str(sens_stderr),
-                )
-                meta["steps"].append({"name": f"sensitivity_{cfg_path.stem}_skip", **sens_res.__dict__})
-            else:
-                sens_argv = [
-                    "python3",
-                    "tools/sensitivity_check.py",
-                    "--config",
-                    str(cfg_path),
-                    "--interval",
-                    str(args.interval),
-                    "--baseline-replay-report",
-                    str(out_json),
-                    "--out-dir",
-                    str(sens_dir),
-                    "--output",
-                    str(sens_summary_path),
-                    "--timeout-s",
-                    str(int(getattr(args, "sensitivity_timeout_s", 0) or 0)),
-                ]
-                if getattr(args, "sensitivity_perturb", None):
-                    sens_argv += ["--perturb", str(args.sensitivity_perturb)]
-                if bt_candles_db:
-                    sens_argv += ["--candles-db", str(bt_candles_db)]
-                if bt_funding_db:
-                    sens_argv += ["--funding-db", str(bt_funding_db)]
-
-                sens_res = _run_cmd(sens_argv, cwd=AIQ_ROOT, stdout_path=sens_stdout, stderr_path=sens_stderr)
-                meta["steps"].append({"name": f"sensitivity_{cfg_path.stem}", **sens_res.__dict__})
-                if sens_res.exit_code != 0:
-                    _write_json(run_dir / "run_metadata.json", meta)
-                    return int(sens_res.exit_code)
-
-            summary["sensitivity_summary_path"] = str(sens_summary_path)
-            try:
-                sens_obj = _load_json(sens_summary_path)
-                agg = sens_obj.get("aggregate", {}) if isinstance(sens_obj, dict) else {}
-                if isinstance(agg, dict):
-                    summary["sensitivity_positive_rate"] = float(agg.get("positive_rate", 0.0))
-                    summary["sensitivity_median_total_pnl"] = float(agg.get("median_total_pnl", 0.0))
-                    summary["sensitivity_median_pnl_ratio_vs_baseline_abs"] = float(
-                        agg.get("median_pnl_ratio_vs_baseline_abs", 0.0)
+            summary["config_id"] = candidate_config_ids[str(cfg_path)]
+            if not _run_replay_equivalence_check(right_report=out_json, summary=summary):
+                _write_json(run_dir / "run_metadata.json", meta)
+                return 1
+            replay_entry = entry_by_path.get(str(cfg_path))
+            _attach_replay_metadata(summary=summary, entry=replay_entry, args=args)
+            if replay_entry is None:
+                summary["config_path"] = str(cfg_path)
+    
+            if bool(getattr(args, "monte_carlo", False)) and trades_csv is not None:
+                mc_dir = run_dir / "monte_carlo" / str(cfg_path.stem)
+                mc_dir.mkdir(parents=True, exist_ok=True)
+                mc_summary_path = mc_dir / "summary.json"
+    
+                mc_stdout = mc_dir / "monte_carlo.stdout.txt"
+                mc_stderr = mc_dir / "monte_carlo.stderr.txt"
+    
+                if bool(args.resume) and _is_nonempty_file(mc_summary_path):
+                    mc_res = CmdResult(
+                        argv=[],
+                        cwd=str(AIQ_ROOT),
+                        exit_code=0,
+                        elapsed_s=0.0,
+                        stdout_path=str(mc_stdout),
+                        stderr_path=str(mc_stderr),
                     )
-                    summary["sensitivity_metric_v1"] = float(agg.get("sensitivity_metric_v1", 0.0))
-            except Exception:
-                summary["sensitivity_error"] = "failed to load sensitivity summary.json"
-
-        score_obj = _compute_score_v1(
-            summary,
-            min_trades=int(getattr(args, "score_min_trades", 30) or 30),
-            trades_penalty_weight=float(getattr(args, "score_trades_penalty_weight", 0.05) or 0.05),
+                    meta["steps"].append({"name": f"monte_carlo_{cfg_path.stem}_skip", **mc_res.__dict__})
+                else:
+                    if not _is_nonempty_file(trades_csv):
+                        summary["monte_carlo_error"] = "missing trade export CSV (rerun replay without --resume)"
+                    else:
+                        init_bal = float(summary.get("initial_balance", 0.0) or 0.0)
+                        mc_argv = [
+                            "python3",
+                            "tools/monte_carlo_bootstrap.py",
+                            "--trades-csv",
+                            str(trades_csv),
+                            "--initial-balance",
+                            str(init_bal),
+                            "--iters",
+                            str(int(getattr(args, "monte_carlo_iters", 2000) or 2000)),
+                            "--seed",
+                            str(int(getattr(args, "monte_carlo_seed", 42) or 42)),
+                            "--methods",
+                            str(getattr(args, "monte_carlo_methods", "bootstrap") or "bootstrap"),
+                            "--output",
+                            str(mc_summary_path),
+                        ]
+    
+                        mc_res = _run_cmd(mc_argv, cwd=AIQ_ROOT, stdout_path=mc_stdout, stderr_path=mc_stderr)
+                        meta["steps"].append({"name": f"monte_carlo_{cfg_path.stem}", **mc_res.__dict__})
+                        if mc_res.exit_code != 0:
+                            _write_json(run_dir / "run_metadata.json", meta)
+                            return int(mc_res.exit_code)
+    
+                summary["monte_carlo_summary_path"] = str(mc_summary_path)
+                try:
+                    mc_obj = _load_json(mc_summary_path)
+                    dists = mc_obj.get("distributions", {}) if isinstance(mc_obj, dict) else {}
+                    mc_ci: dict[str, Any] = {}
+                    if isinstance(dists, dict):
+                        for method, payload in dists.items():
+                            if not isinstance(payload, dict):
+                                continue
+                            ret = payload.get("return_pct", {}) if isinstance(payload.get("return_pct", {}), dict) else {}
+                            dd = (
+                                payload.get("max_drawdown_pct", {})
+                                if isinstance(payload.get("max_drawdown_pct", {}), dict)
+                                else {}
+                            )
+                            mc_ci[str(method)] = {
+                                "return_pct_ci95": [float(ret.get("p02_5", 0.0)), float(ret.get("p97_5", 0.0))],
+                                "max_drawdown_pct_ci95": [float(dd.get("p02_5", 0.0)), float(dd.get("p97_5", 0.0))],
+                                "return_pct_median": float(ret.get("p50", 0.0)),
+                                "max_drawdown_pct_median": float(dd.get("p50", 0.0)),
+                            }
+                    summary["monte_carlo_ci"] = mc_ci
+                except Exception:
+                    summary["monte_carlo_error"] = "failed to load monte_carlo summary.json"
+    
+            cu_sets = getattr(args, "cross_universe_set", None)
+            if isinstance(cu_sets, list) and cu_sets:
+                cu_dir = run_dir / "cross_universe" / str(cfg_path.stem)
+                cu_dir.mkdir(parents=True, exist_ok=True)
+                cu_summary_path = cu_dir / "summary.json"
+    
+                cu_stdout = cu_dir / "cross_universe.stdout.txt"
+                cu_stderr = cu_dir / "cross_universe.stderr.txt"
+    
+                if bool(args.resume) and _is_nonempty_file(cu_summary_path):
+                    cu_res = CmdResult(
+                        argv=[],
+                        cwd=str(AIQ_ROOT),
+                        exit_code=0,
+                        elapsed_s=0.0,
+                        stdout_path=str(cu_stdout),
+                        stderr_path=str(cu_stderr),
+                    )
+                    meta["steps"].append({"name": f"cross_universe_{cfg_path.stem}_skip", **cu_res.__dict__})
+                else:
+                    cu_argv = [
+                        "python3",
+                        "tools/cross_universe_validate.py",
+                        "--replay-report",
+                        str(out_json),
+                    ]
+                    for it in cu_sets:
+                        if it:
+                            cu_argv += ["--symbol-set", str(it)]
+                    cu_argv += ["--output", str(cu_summary_path)]
+    
+                    cu_res = _run_cmd(cu_argv, cwd=AIQ_ROOT, stdout_path=cu_stdout, stderr_path=cu_stderr)
+                    meta["steps"].append({"name": f"cross_universe_{cfg_path.stem}", **cu_res.__dict__})
+                    if cu_res.exit_code != 0:
+                        _write_json(run_dir / "run_metadata.json", meta)
+                        return int(cu_res.exit_code)
+    
+                summary["cross_universe_summary_path"] = str(cu_summary_path)
+                try:
+                    cu_obj = _load_json(cu_summary_path)
+                    sets_obj = cu_obj.get("sets", []) if isinstance(cu_obj, dict) else []
+                    cu_map: dict[str, Any] = {}
+                    if isinstance(sets_obj, list):
+                        for s in sets_obj:
+                            if not isinstance(s, dict):
+                                continue
+                            name = str(s.get("name", "")).strip() or "set"
+                            subset = s.get("subset", {}) if isinstance(s.get("subset", {}), dict) else {}
+                            shares = s.get("shares", {}) if isinstance(s.get("shares", {}), dict) else {}
+                            cu_map[name] = {
+                                "subset_net_pnl_usd": float(subset.get("net_pnl_usd", 0.0) or 0.0),
+                                "subset_trades": float(subset.get("trades", 0.0) or 0.0),
+                                "share_net_pnl_usd": float(shares.get("net_pnl_usd", 0.0) or 0.0),
+                                "share_trades": float(shares.get("trades", 0.0) or 0.0),
+                            }
+                    summary["cross_universe"] = cu_map
+                except Exception:
+                    summary["cross_universe_error"] = "failed to load cross_universe summary.json"
+    
+            if bool(getattr(args, "concentration_checks", False)):
+                cc_dir = run_dir / "concentration" / str(cfg_path.stem)
+                cc_dir.mkdir(parents=True, exist_ok=True)
+                cc_summary_path = cc_dir / "summary.json"
+    
+                cc_stdout = cc_dir / "concentration.stdout.txt"
+                cc_stderr = cc_dir / "concentration.stderr.txt"
+    
+                if bool(args.resume) and _is_nonempty_file(cc_summary_path):
+                    cc_res = CmdResult(
+                        argv=[],
+                        cwd=str(AIQ_ROOT),
+                        exit_code=0,
+                        elapsed_s=0.0,
+                        stdout_path=str(cc_stdout),
+                        stderr_path=str(cc_stderr),
+                    )
+                    meta["steps"].append({"name": f"concentration_{cfg_path.stem}_skip", **cc_res.__dict__})
+                else:
+                    cc_argv = [
+                        "python3",
+                        "tools/concentration_checks.py",
+                        "--replay-report",
+                        str(out_json),
+                        "--output",
+                        str(cc_summary_path),
+                        "--max-top1-pnl-pct",
+                        str(float(getattr(args, "conc_max_top1_pnl_pct", 0.65) or 0.65)),
+                        "--max-top5-pnl-pct",
+                        str(float(getattr(args, "conc_max_top5_pnl_pct", 0.90) or 0.90)),
+                        "--min-symbols-traded",
+                        str(int(getattr(args, "conc_min_symbols_traded", 5) or 5)),
+                    ]
+    
+                    cc_res = _run_cmd(cc_argv, cwd=AIQ_ROOT, stdout_path=cc_stdout, stderr_path=cc_stderr)
+                    meta["steps"].append({"name": f"concentration_{cfg_path.stem}", **cc_res.__dict__})
+                    if cc_res.exit_code != 0:
+                        _write_json(run_dir / "run_metadata.json", meta)
+                        return int(cc_res.exit_code)
+    
+                summary["concentration_summary_path"] = str(cc_summary_path)
+                try:
+                    cc_obj = _load_json(cc_summary_path)
+                    summary["concentration_reject"] = (
+                        bool(cc_obj.get("reject", False)) if isinstance(cc_obj, dict) else False
+                    )
+                    metrics = cc_obj.get("metrics", {}) if isinstance(cc_obj, dict) else {}
+                    if isinstance(metrics, dict):
+                        summary["symbols_traded"] = int(metrics.get("symbols_traded", 0) or 0)
+                        summary["top1_pnl_pct"] = float(metrics.get("top1_pnl_pct", 0.0) or 0.0)
+                        summary["top5_pnl_pct"] = float(metrics.get("top5_pnl_pct", 0.0) or 0.0)
+                        summary["long_pnl_usd"] = float(metrics.get("long_pnl_usd", 0.0) or 0.0)
+                        summary["short_pnl_usd"] = float(metrics.get("short_pnl_usd", 0.0) or 0.0)
+    
+                    if bool(summary.get("concentration_reject")):
+                        reasons = cc_obj.get("reject_reasons", []) if isinstance(cc_obj, dict) else []
+                        if isinstance(reasons, list) and reasons:
+                            _append_reject_reason(summary, "concentration: " + ", ".join([str(r) for r in reasons]))
+                        else:
+                            _append_reject_reason(summary, "concentration")
+                except Exception:
+                    summary["concentration_error"] = "failed to load concentration summary.json"
+    
+            if bool(getattr(args, "walk_forward", False)):
+                wf_dir = run_dir / "walk_forward" / str(cfg_path.stem)
+                wf_dir.mkdir(parents=True, exist_ok=True)
+                wf_summary_path = wf_dir / "summary.json"
+    
+                wf_stdout = wf_dir / "walk_forward.stdout.txt"
+                wf_stderr = wf_dir / "walk_forward.stderr.txt"
+    
+                if bool(args.resume) and _is_nonempty_file(wf_summary_path):
+                    wf_res = CmdResult(
+                        argv=[],
+                        cwd=str(AIQ_ROOT),
+                        exit_code=0,
+                        elapsed_s=0.0,
+                        stdout_path=str(wf_stdout),
+                        stderr_path=str(wf_stderr),
+                    )
+                    meta["steps"].append({"name": f"walk_forward_{cfg_path.stem}_skip", **wf_res.__dict__})
+                else:
+                    wf_argv = [
+                        "python3",
+                        "tools/walk_forward_validate.py",
+                        "--config",
+                        str(cfg_path),
+                        "--interval",
+                        str(args.interval),
+                        "--min-test-days",
+                        str(int(getattr(args, "walk_forward_min_test_days", 1) or 1)),
+                        "--out-dir",
+                        str(wf_dir),
+                        "--output",
+                        str(wf_summary_path),
+                    ]
+                    if bt_wf_splits_json:
+                        wf_argv += ["--splits-json", str(bt_wf_splits_json)]
+                    if bt_candles_db:
+                        wf_argv += ["--candles-db", str(bt_candles_db)]
+                    if bt_funding_db:
+                        wf_argv += ["--funding-db", str(bt_funding_db)]
+    
+                    wf_res = _run_cmd(wf_argv, cwd=AIQ_ROOT, stdout_path=wf_stdout, stderr_path=wf_stderr)
+                    meta["steps"].append({"name": f"walk_forward_{cfg_path.stem}", **wf_res.__dict__})
+                    if wf_res.exit_code != 0:
+                        _write_json(run_dir / "run_metadata.json", meta)
+                        return int(wf_res.exit_code)
+    
+                summary["walk_forward_summary_path"] = str(wf_summary_path)
+                try:
+                    wf_obj = _load_json(wf_summary_path)
+                    agg = wf_obj.get("aggregate", {}) if isinstance(wf_obj, dict) else {}
+                    if isinstance(agg, dict):
+                        summary["wf_median_oos_daily_return"] = float(agg.get("median_oos_daily_return", 0.0))
+                        summary["wf_max_oos_drawdown_pct"] = float(agg.get("max_oos_drawdown_pct", 0.0))
+                        summary["wf_walk_forward_score_v1"] = float(agg.get("walk_forward_score_v1", 0.0))
+                except Exception:
+                    # Keep the factory pipeline resilient: store the path and continue.
+                    summary["wf_error"] = "failed to load walk_forward summary.json"
+    
+            if bool(getattr(args, "slippage_stress", False)):
+                ss_dir = run_dir / "slippage_stress" / str(cfg_path.stem)
+                ss_dir.mkdir(parents=True, exist_ok=True)
+                ss_summary_path = ss_dir / "summary.json"
+    
+                ss_stdout = ss_dir / "slippage_stress.stdout.txt"
+                ss_stderr = ss_dir / "slippage_stress.stderr.txt"
+    
+                if bool(args.resume) and _is_nonempty_file(ss_summary_path):
+                    ss_res = CmdResult(
+                        argv=[],
+                        cwd=str(AIQ_ROOT),
+                        exit_code=0,
+                        elapsed_s=0.0,
+                        stdout_path=str(ss_stdout),
+                        stderr_path=str(ss_stderr),
+                    )
+                    meta["steps"].append({"name": f"slippage_stress_{cfg_path.stem}_skip", **ss_res.__dict__})
+                else:
+                    ss_argv = [
+                        "python3",
+                        "tools/slippage_stress.py",
+                        "--config",
+                        str(cfg_path),
+                        "--interval",
+                        str(args.interval),
+                        "--slippage-bps",
+                        str(getattr(args, "slippage_stress_bps", "10,20,30") or "10,20,30"),
+                        "--reject-flip-bps",
+                        str(float(getattr(args, "slippage_stress_reject_bps", 20.0) or 20.0)),
+                        "--out-dir",
+                        str(ss_dir),
+                        "--output",
+                        str(ss_summary_path),
+                    ]
+                    if bt_candles_db:
+                        ss_argv += ["--candles-db", str(bt_candles_db)]
+                    if bt_funding_db:
+                        ss_argv += ["--funding-db", str(bt_funding_db)]
+    
+                    ss_res = _run_cmd(ss_argv, cwd=AIQ_ROOT, stdout_path=ss_stdout, stderr_path=ss_stderr)
+                    meta["steps"].append({"name": f"slippage_stress_{cfg_path.stem}", **ss_res.__dict__})
+                    if ss_res.exit_code != 0:
+                        _write_json(run_dir / "run_metadata.json", meta)
+                        return int(ss_res.exit_code)
+    
+                summary["slippage_stress_summary_path"] = str(ss_summary_path)
+                try:
+                    ss_obj = _load_json(ss_summary_path)
+                    agg = ss_obj.get("aggregate", {}) if isinstance(ss_obj, dict) else {}
+                    if isinstance(agg, dict):
+                        reject_bps = float(getattr(args, "slippage_stress_reject_bps", 20.0) or 20.0)
+                        summary["slippage_fragility"] = float(agg.get("slippage_fragility", 0.0))
+                        summary["slippage_flip_sign_at_reject_bps"] = bool(agg.get("flip_sign_at_reject_bps", False))
+                        summary["slippage_reject"] = bool(agg.get("reject", False))
+                        summary["slippage_reject_bps"] = float(reject_bps)
+                        summary["pnl_drop_at_reject_bps"] = float(agg.get("pnl_drop_at_reject_bps", 0.0))
+                        summary["slippage_pnl_at_reject_bps"] = float(agg.get("pnl_at_reject_bps", 0.0))
+    
+                        # Canonical key for AQC-504 scoring (when using the default 20 bps).
+                        if abs(float(reject_bps) - 20.0) < 1e-9:
+                            summary["pnl_drop_when_slippage_20bps"] = float(summary.get("pnl_drop_at_reject_bps", 0.0))
+                        if bool(summary.get("slippage_reject")):
+                            _append_reject_reason(summary, f"slippage flip at {float(reject_bps):g} bps")
+                except Exception:
+                    summary["slippage_error"] = "failed to load slippage_stress summary.json"
+    
+            if bool(getattr(args, "sensitivity_checks", False)):
+                sens_dir = run_dir / "sensitivity" / str(cfg_path.stem)
+                sens_dir.mkdir(parents=True, exist_ok=True)
+                sens_summary_path = sens_dir / "summary.json"
+    
+                sens_stdout = sens_dir / "sensitivity.stdout.txt"
+                sens_stderr = sens_dir / "sensitivity.stderr.txt"
+    
+                if bool(args.resume) and _is_nonempty_file(sens_summary_path):
+                    sens_res = CmdResult(
+                        argv=[],
+                        cwd=str(AIQ_ROOT),
+                        exit_code=0,
+                        elapsed_s=0.0,
+                        stdout_path=str(sens_stdout),
+                        stderr_path=str(sens_stderr),
+                    )
+                    meta["steps"].append({"name": f"sensitivity_{cfg_path.stem}_skip", **sens_res.__dict__})
+                else:
+                    sens_argv = [
+                        "python3",
+                        "tools/sensitivity_check.py",
+                        "--config",
+                        str(cfg_path),
+                        "--interval",
+                        str(args.interval),
+                        "--baseline-replay-report",
+                        str(out_json),
+                        "--out-dir",
+                        str(sens_dir),
+                        "--output",
+                        str(sens_summary_path),
+                        "--timeout-s",
+                        str(int(getattr(args, "sensitivity_timeout_s", 0) or 0)),
+                    ]
+                    if getattr(args, "sensitivity_perturb", None):
+                        sens_argv += ["--perturb", str(args.sensitivity_perturb)]
+                    if bt_candles_db:
+                        sens_argv += ["--candles-db", str(bt_candles_db)]
+                    if bt_funding_db:
+                        sens_argv += ["--funding-db", str(bt_funding_db)]
+    
+                    sens_res = _run_cmd(sens_argv, cwd=AIQ_ROOT, stdout_path=sens_stdout, stderr_path=sens_stderr)
+                    meta["steps"].append({"name": f"sensitivity_{cfg_path.stem}", **sens_res.__dict__})
+                    if sens_res.exit_code != 0:
+                        _write_json(run_dir / "run_metadata.json", meta)
+                        return int(sens_res.exit_code)
+    
+                summary["sensitivity_summary_path"] = str(sens_summary_path)
+                try:
+                    sens_obj = _load_json(sens_summary_path)
+                    agg = sens_obj.get("aggregate", {}) if isinstance(sens_obj, dict) else {}
+                    if isinstance(agg, dict):
+                        summary["sensitivity_positive_rate"] = float(agg.get("positive_rate", 0.0))
+                        summary["sensitivity_median_total_pnl"] = float(agg.get("median_total_pnl", 0.0))
+                        summary["sensitivity_median_pnl_ratio_vs_baseline_abs"] = float(
+                            agg.get("median_pnl_ratio_vs_baseline_abs", 0.0)
+                        )
+                        summary["sensitivity_metric_v1"] = float(agg.get("sensitivity_metric_v1", 0.0))
+                except Exception:
+                    summary["sensitivity_error"] = "failed to load sensitivity summary.json"
+    
+            score_obj = _compute_score_v1(
+                summary,
+                min_trades=int(getattr(args, "score_min_trades", 30) or 30),
+                trades_penalty_weight=float(getattr(args, "score_trades_penalty_weight", 0.05) or 0.05),
+            )
+            if score_obj is not None:
+                summary["score_v1"] = float(score_obj.get("score", 0.0))
+                summary["score_v1_components"] = score_obj.get("components", {})
+    
+            replay_reports.append(summary)
+    
+        # ------------------------------------------------------------------
+        # 5) Final report
+        # ------------------------------------------------------------------
+        current_stage = "final_report"
+        if _shutdown_stage_guard(run_dir=run_dir, meta=meta, stage=current_stage):
+            return 130
+        report_md = _render_ranked_report_md(replay_reports)
+        (run_dir / "reports").mkdir(parents=True, exist_ok=True)
+        (run_dir / "reports" / "report.md").write_text(report_md, encoding="utf-8")
+        _write_json(run_dir / "reports" / "report.json", {"items": replay_reports})
+        validation_md = _render_validation_report_md(
+            replay_reports, score_min_trades=int(getattr(args, "score_min_trades", 30) or 30)
         )
-        if score_obj is not None:
-            summary["score_v1"] = float(score_obj.get("score", 0.0))
-            summary["score_v1_components"] = score_obj.get("components", {})
-
-        replay_reports.append(summary)
-
-    # ------------------------------------------------------------------
-    # 5) Final report
-    # ------------------------------------------------------------------
-    report_md = _render_ranked_report_md(replay_reports)
-    (run_dir / "reports").mkdir(parents=True, exist_ok=True)
-    (run_dir / "reports" / "report.md").write_text(report_md, encoding="utf-8")
-    _write_json(run_dir / "reports" / "report.json", {"items": replay_reports})
-    validation_md = _render_validation_report_md(
-        replay_reports, score_min_trades=int(getattr(args, "score_min_trades", 30) or 30)
-    )
-    (run_dir / "reports" / "validation_report.md").write_text(validation_md, encoding="utf-8")
-
-    # ------------------------------------------------------------------
-    # 5b) Candidate promotion (20→3)
-    # ------------------------------------------------------------------
-    promote_count = int(getattr(args, "promote_count", 3) or 0)
-    promote_dir = str(getattr(args, "promote_dir", "promoted_configs") or "promoted_configs")
-    if promote_count > 0 and replay_reports:
-        promotion_meta = _promote_candidates(
-            replay_reports,
-            run_dir=run_dir,
-            promote_dir=promote_dir,
-            promote_count=promote_count,
-        )
-        meta["promotion"] = promotion_meta
-    else:
-        meta["promotion"] = {"skipped": True, "reason": "promote_count=0 or no replay reports"}
-
-    # Persist metadata before registry ingestion (ingest reads run_metadata.json).
-    _write_json(run_dir / "run_metadata.json", meta)
-
-    # ------------------------------------------------------------------
-    # 6) Registry index
-    # ------------------------------------------------------------------
-    registry_db = default_registry_db_path(artifacts_root=artifacts_root)
-    meta["registry_db"] = str(registry_db)
-    try:
-        res = ingest_run_dir(registry_db=registry_db, run_dir=run_dir)
-        meta["registry_ingest"] = res.__dict__
-    except Exception as e:
-        meta["registry_error"] = str(e)
+        (run_dir / "reports" / "validation_report.md").write_text(validation_md, encoding="utf-8")
+    
+        # ------------------------------------------------------------------
+        # 5b) Candidate promotion (20→3)
+        # ------------------------------------------------------------------
+        promote_count = int(getattr(args, "promote_count", 3) or 0)
+        promote_dir = str(getattr(args, "promote_dir", "promoted_configs") or "promoted_configs")
+        if promote_count > 0 and replay_reports:
+            promotion_meta = _promote_candidates(
+                replay_reports,
+                run_dir=run_dir,
+                promote_dir=promote_dir,
+                promote_count=promote_count,
+            )
+            meta["promotion"] = promotion_meta
+        else:
+            meta["promotion"] = {"skipped": True, "reason": "promote_count=0 or no replay reports"}
+    
+        # Persist metadata before registry ingestion (ingest reads run_metadata.json).
         _write_json(run_dir / "run_metadata.json", meta)
-        return 1
+    
+        # ------------------------------------------------------------------
+        # 6) Registry index
+        # ------------------------------------------------------------------
+        current_stage = "registry_index"
+        if _shutdown_stage_guard(run_dir=run_dir, meta=meta, stage=current_stage):
+            return 130
+        registry_db = default_registry_db_path(artifacts_root=artifacts_root)
+        meta["registry_db"] = str(registry_db)
+        try:
+            res = ingest_run_dir(registry_db=registry_db, run_dir=run_dir)
+            meta["registry_ingest"] = res.__dict__
+        except Exception as e:
+            meta["registry_error"] = str(e)
+            _write_json(run_dir / "run_metadata.json", meta)
+            return 1
 
-    _write_json(run_dir / "run_metadata.json", meta)
-    return 0
+        _write_json(run_dir / "run_metadata.json", meta)
+        return 0
+    finally:
+        _restore_shutdown_handlers(prev_handlers)
+        if _SHUTDOWN_REQUESTED:
+            if run_dir is not None and isinstance(meta, dict) and str(meta.get("status", "")) != "interrupted":
+                _mark_run_interrupted(run_dir=run_dir, meta=meta, stage=current_stage)
+            return 130
 
 
 def _apply_profile_defaults(args: argparse.Namespace) -> None:
