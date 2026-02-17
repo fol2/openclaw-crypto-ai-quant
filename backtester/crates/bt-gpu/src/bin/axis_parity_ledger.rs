@@ -222,6 +222,7 @@ struct CanonicalEventRow {
     intent_signal: String,
     action_taken: String,
     reason: String,
+    reason_code: String,
     price: f64,
     size: f64,
     pnl: f64,
@@ -952,6 +953,7 @@ fn is_event_parity_mismatch(status: &str) -> bool {
 }
 
 fn canonicalise_cpu_event(ev: &CpuTradeEventRow) -> CanonicalEventRow {
+    let reason_code = canonical_cpu_reason_code(&ev.action_kind, &ev.reason);
     CanonicalEventRow {
         source_idx: ev.idx,
         global_idx: Some(ev.global_idx),
@@ -963,6 +965,7 @@ fn canonicalise_cpu_event(ev: &CpuTradeEventRow) -> CanonicalEventRow {
         intent_signal: ev.intent_signal.clone(),
         action_taken: ev.action_taken.clone(),
         reason: ev.reason.clone(),
+        reason_code,
         price: ev.price,
         size: ev.size,
         pnl: ev.pnl,
@@ -971,6 +974,7 @@ fn canonicalise_cpu_event(ev: &CpuTradeEventRow) -> CanonicalEventRow {
 
 fn canonicalise_gpu_event(ev: &TraceEventRow) -> CanonicalEventRow {
     let decision = canonical_gpu_decision_action(&ev.kind, &ev.side);
+    let reason_code = canonical_gpu_reason_code(&ev.reason);
     CanonicalEventRow {
         source_idx: ev.idx,
         global_idx: None,
@@ -985,6 +989,7 @@ fn canonicalise_gpu_event(ev: &TraceEventRow) -> CanonicalEventRow {
         intent_signal: decision.intent_signal,
         action_taken: decision.action_taken,
         reason: ev.reason.clone(),
+        reason_code,
         price: ev.price as f64,
         size: ev.size as f64,
         pnl: ev.pnl as f64,
@@ -1057,6 +1062,30 @@ fn decision_action_taken(kind: &str, side: &str) -> String {
     kind.to_lowercase()
 }
 
+fn canonical_cpu_reason_code(action_kind: &str, raw_reason: &str) -> String {
+    let reason_upper = raw_reason.trim().to_uppercase();
+    if reason_upper.contains("SIGNAL FLIP") {
+        return "SIGNAL_FLIP".to_string();
+    }
+    match action_kind {
+        "OPEN" => "ENTRY".to_string(),
+        "ADD" => "PYRAMID".to_string(),
+        "CLOSE" => "EXIT".to_string(),
+        "REDUCE" => "PARTIAL".to_string(),
+        "FUNDING" => "FUNDING".to_string(),
+        _ => "UNKNOWN".to_string(),
+    }
+}
+
+fn canonical_gpu_reason_code(raw_reason: &str) -> String {
+    let reason = raw_reason.trim().to_uppercase();
+    if reason.is_empty() {
+        "UNKNOWN".to_string()
+    } else {
+        reason
+    }
+}
+
 fn canonical_gpu_action(kind: &str, side: &str) -> String {
     if side == "EMPTY" {
         return kind.to_string();
@@ -1067,8 +1096,10 @@ fn canonical_gpu_action(kind: &str, side: &str) -> String {
 fn canonical_events_equal(a: &CanonicalEventRow, b: &CanonicalEventRow) -> bool {
     a.t_sec == b.t_sec
         && a.symbol == b.symbol
-        && a.action == b.action
-        && a.reason == b.reason
+        && a.action_kind == b.action_kind
+        && a.action_side == b.action_side
+        && a.intent_signal == b.intent_signal
+        && a.reason_code == b.reason_code
         && scale_1e6(a.price) == scale_1e6(b.price)
         && scale_1e6(a.size) == scale_1e6(b.size)
         && scale_1e6(a.pnl) == scale_1e6(b.pnl)
