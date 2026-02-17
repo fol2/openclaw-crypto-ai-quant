@@ -1111,9 +1111,11 @@ def _write_json(path: Path, obj: Any) -> None:
     path.write_text(json.dumps(obj, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _mark_run_interrupted(*, run_dir: Path, meta: dict[str, Any]) -> None:
+def _mark_run_interrupted(*, run_dir: Path, meta: dict[str, Any], stage: str | None = None) -> None:
     meta["status"] = "interrupted"
     meta["interrupted_at_ms"] = int(time.time() * 1000)
+    if stage:
+        meta["shutdown_requested_stage"] = str(stage)
     if _SHUTDOWN_SIGNAL is not None:
         meta["interrupt_signal"] = int(_SHUTDOWN_SIGNAL)
     steps = meta.get("steps")
@@ -1138,8 +1140,7 @@ def _mark_run_interrupted(*, run_dir: Path, meta: dict[str, Any]) -> None:
 def _shutdown_stage_guard(*, run_dir: Path, meta: dict[str, Any], stage: str) -> bool:
     if not _SHUTDOWN_REQUESTED:
         return False
-    meta["shutdown_requested_stage"] = str(stage)
-    _mark_run_interrupted(run_dir=run_dir, meta=meta)
+    _mark_run_interrupted(run_dir=run_dir, meta=meta, stage=stage)
     return True
 
 
@@ -2362,6 +2363,7 @@ def main(argv: list[str] | None = None) -> int:
     prev_handlers = _install_shutdown_handlers()
     run_dir: Path | None = None
     meta: dict[str, Any] | None = None
+    current_stage = "initialisation"
     try:
         args = _parse_cli_args(argv)
 
@@ -2496,7 +2498,8 @@ def main(argv: list[str] | None = None) -> int:
         # ------------------------------------------------------------------
         # 1) Data checks
         # ------------------------------------------------------------------
-        if _shutdown_stage_guard(run_dir=run_dir, meta=meta, stage="data_checks"):
+        current_stage = "data_checks"
+        if _shutdown_stage_guard(run_dir=run_dir, meta=meta, stage=current_stage):
             return 130
         candle_out = run_dir / "data_checks" / "candle_dbs.json"
         candle_err = run_dir / "data_checks" / "candle_dbs.stderr.txt"
@@ -2798,7 +2801,8 @@ def main(argv: list[str] | None = None) -> int:
         # ------------------------------------------------------------------
         # 2) Sweep
         # ------------------------------------------------------------------
-        if _shutdown_stage_guard(run_dir=run_dir, meta=meta, stage="sweep"):
+        current_stage = "sweep"
+        if _shutdown_stage_guard(run_dir=run_dir, meta=meta, stage=current_stage):
             return 130
         sweep_out = run_dir / "sweeps" / "sweep_results.jsonl"
         if bool(args.resume) and _is_nonempty_file(sweep_out):
@@ -3020,7 +3024,8 @@ def main(argv: list[str] | None = None) -> int:
         # ------------------------------------------------------------------
         # 3) Candidate config generation
         # ------------------------------------------------------------------
-        if _shutdown_stage_guard(run_dir=run_dir, meta=meta, stage="candidate_generation"):
+        current_stage = "candidate_generation"
+        if _shutdown_stage_guard(run_dir=run_dir, meta=meta, stage=current_stage):
             return 130
         configs_dir = run_dir / "configs"
         configs_dir.mkdir(parents=True, exist_ok=True)
@@ -3214,7 +3219,8 @@ def main(argv: list[str] | None = None) -> int:
         # ------------------------------------------------------------------
         # 4) CPU replay / validation (minimal v1: run replay once per candidate)
         # ------------------------------------------------------------------
-        if _shutdown_stage_guard(run_dir=run_dir, meta=meta, stage="cpu_replay_validation"):
+        current_stage = "cpu_replay_validation"
+        if _shutdown_stage_guard(run_dir=run_dir, meta=meta, stage=current_stage):
             return 130
         replays_dir = run_dir / "replays"
         replays_dir.mkdir(parents=True, exist_ok=True)
@@ -3684,7 +3690,8 @@ def main(argv: list[str] | None = None) -> int:
         # ------------------------------------------------------------------
         # 5) Final report
         # ------------------------------------------------------------------
-        if _shutdown_stage_guard(run_dir=run_dir, meta=meta, stage="final_report"):
+        current_stage = "final_report"
+        if _shutdown_stage_guard(run_dir=run_dir, meta=meta, stage=current_stage):
             return 130
         report_md = _render_ranked_report_md(replay_reports)
         (run_dir / "reports").mkdir(parents=True, exist_ok=True)
@@ -3717,7 +3724,8 @@ def main(argv: list[str] | None = None) -> int:
         # ------------------------------------------------------------------
         # 6) Registry index
         # ------------------------------------------------------------------
-        if _shutdown_stage_guard(run_dir=run_dir, meta=meta, stage="registry_index"):
+        current_stage = "registry_index"
+        if _shutdown_stage_guard(run_dir=run_dir, meta=meta, stage=current_stage):
             return 130
         registry_db = default_registry_db_path(artifacts_root=artifacts_root)
         meta["registry_db"] = str(registry_db)
@@ -3735,7 +3743,7 @@ def main(argv: list[str] | None = None) -> int:
         _restore_shutdown_handlers(prev_handlers)
         if _SHUTDOWN_REQUESTED:
             if run_dir is not None and isinstance(meta, dict) and str(meta.get("status", "")) != "interrupted":
-                _mark_run_interrupted(run_dir=run_dir, meta=meta)
+                _mark_run_interrupted(run_dir=run_dir, meta=meta, stage=current_stage)
             return 130
 
 

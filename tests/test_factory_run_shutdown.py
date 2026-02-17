@@ -70,13 +70,14 @@ def test_mark_run_interrupted_writes_metadata_and_report(tmp_path: Path) -> None
     meta: dict[str, object] = {"steps": []}
     factory_run._request_shutdown(signal.SIGTERM, None)
 
-    factory_run._mark_run_interrupted(run_dir=run_dir, meta=meta)
+    factory_run._mark_run_interrupted(run_dir=run_dir, meta=meta, stage="cpu_replay_validation")
 
     meta_path = run_dir / "run_metadata.json"
     assert meta_path.exists()
     meta_json = json.loads(meta_path.read_text(encoding="utf-8"))
 
     assert meta_json["status"] == "interrupted"
+    assert meta_json["shutdown_requested_stage"] == "cpu_replay_validation"
     assert int(meta_json["interrupt_signal"]) == signal.SIGTERM
     assert isinstance(meta_json.get("interrupted_at_ms"), int)
     assert any(str(step.get("name", "")) == "shutdown_interrupt" for step in meta_json.get("steps", []))
@@ -84,3 +85,18 @@ def test_mark_run_interrupted_writes_metadata_and_report(tmp_path: Path) -> None
     report_path = run_dir / "reports" / "report.md"
     assert report_path.exists()
     assert "interrupted" in report_path.read_text(encoding="utf-8").lower()
+
+
+def test_shutdown_stage_guard_records_stage_in_metadata(tmp_path: Path) -> None:
+    run_dir = tmp_path / "artifacts" / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    meta: dict[str, object] = {"steps": []}
+    factory_run._request_shutdown(signal.SIGINT, None)
+
+    interrupted = factory_run._shutdown_stage_guard(run_dir=run_dir, meta=meta, stage="sweep")
+
+    assert interrupted is True
+    assert meta["shutdown_requested_stage"] == "sweep"
+    meta_json = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
+    assert meta_json["status"] == "interrupted"
+    assert meta_json["shutdown_requested_stage"] == "sweep"
