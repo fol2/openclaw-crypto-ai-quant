@@ -26,8 +26,6 @@ try:
 except Exception:
     _DB_TIMEOUT_S = 5.0
 
-logger = logging.getLogger(__name__)
-
 from exchange.executor import (
     HyperliquidLiveExecutor,
     live_entries_enabled,
@@ -36,6 +34,8 @@ from exchange.executor import (
     load_live_secrets,  # noqa: F401  (re-exported for engine.daemon)
     utc_iso,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -383,7 +383,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         try:
             db_conn = sqlite3.connect(mei_alpha_v1.DB_PATH, timeout=_DB_TIMEOUT_S)
             db_cur = db_conn.cursor()
-        except Exception:
+        except sqlite3.Error as exc:
+            logger.warning("sync_from_exchange: position_state DB unavailable, continuing without state recovery: %s", exc)
             db_conn = None
             db_cur = None
 
@@ -575,8 +576,9 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 ),
             )
             conn.commit()
-        except Exception:
-            pass
+        except sqlite3.Error as exc:
+            if "locked" not in str(exc).lower():
+                logger.warning("upsert_position_state failed for %s: %s", symbol, exc)
         finally:
             try:
                 if conn is not None:
@@ -599,8 +601,9 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             cur = conn.cursor()
             cur.execute("DELETE FROM position_state WHERE symbol = ?", (str(symbol).strip().upper(),))
             conn.commit()
-        except Exception:
-            pass
+        except sqlite3.Error as exc:
+            if "locked" not in str(exc).lower():
+                logger.warning("clear_position_state failed for %s: %s", symbol, exc)
         finally:
             try:
                 if conn is not None:
@@ -635,8 +638,9 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             else:
                 cur.execute("DELETE FROM position_state")
             conn.commit()
-        except Exception:
-            pass
+        except sqlite3.Error as exc:
+            if "locked" not in str(exc).lower():
+                logger.warning("reconcile_position_state failed: %s", exc)
         finally:
             try:
                 if conn is not None:

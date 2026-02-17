@@ -581,8 +581,8 @@ class HyperliquidWS:
         for sub in subs:
             try:
                 ws.send(json.dumps({"method": "subscribe", "subscription": sub}))
-            except Exception:
-                pass
+            except (TypeError, ValueError, OSError, websocket.WebSocketException) as exc:
+                logger.warning("WS subscribe resend failed for %s: %s", sub, exc)
 
     def _on_message(self, _ws, message: str):
         try:
