@@ -28,6 +28,7 @@ class _FakeInfo:
 
 def test_get_sz_decimals_respects_cache_lock(monkeypatch):
     monkeypatch.setattr(meta, "_ensure_cache", lambda: None)
+    monkeypatch.setattr(meta, "_refresh_in_progress", False)
     monkeypatch.setattr(
         meta,
         "_cached_instruments",
@@ -75,6 +76,7 @@ def test_refresh_cache_respects_cache_lock(monkeypatch):
             return super().meta_and_asset_ctxs()
 
     monkeypatch.setattr(meta, "Info", _GuardedFakeInfo)
+    monkeypatch.setattr(meta, "_refresh_in_progress", False)
     monkeypatch.setattr(meta, "_cached_at_s", None)
     monkeypatch.setattr(meta, "_cached_instruments", {})
     monkeypatch.setattr(meta, "_cached_margin_tables", {})
@@ -100,3 +102,42 @@ def test_refresh_cache_respects_cache_lock(monkeypatch):
     assert finished.is_set()
     assert meta.get_sz_decimals("BTC") == 3
     assert meta.max_leverage("BTC", 1000.0) == 25.0
+
+
+def test_refresh_cache_single_flight(monkeypatch):
+    calls_lock = threading.Lock()
+    refresh_started = threading.Event()
+    allow_finish = threading.Event()
+    calls = {"n": 0}
+
+    class _BlockingFakeInfo(_FakeInfo):
+        def meta_and_asset_ctxs(self):
+            with calls_lock:
+                calls["n"] += 1
+            refresh_started.set()
+            assert allow_finish.wait(timeout=1.0)
+            return super().meta_and_asset_ctxs()
+
+    monkeypatch.setattr(meta, "Info", _BlockingFakeInfo)
+    monkeypatch.setattr(meta, "_refresh_in_progress", False)
+    monkeypatch.setattr(meta, "_cached_at_s", None)
+    monkeypatch.setattr(meta, "_cached_instruments", {})
+    monkeypatch.setattr(meta, "_cached_margin_tables", {})
+    monkeypatch.setattr(meta, "_next_refresh_allowed_s", None)
+
+    t1 = threading.Thread(target=meta._refresh_cache)
+    t2 = threading.Thread(target=meta._refresh_cache)
+    t1.start()
+    assert refresh_started.wait(timeout=1.0)
+    t2.start()
+    time.sleep(0.05)
+    with calls_lock:
+        assert calls["n"] == 1
+
+    allow_finish.set()
+    t1.join(timeout=1.0)
+    t2.join(timeout=1.0)
+    assert not t1.is_alive()
+    assert not t2.is_alive()
+    with calls_lock:
+        assert calls["n"] == 1
