@@ -189,6 +189,70 @@ def _replace_open_orders(conn: sqlite3.Connection, open_orders: list[dict[str, A
     return inserted
 
 
+def _seed_runtime_cooldowns(
+    conn: sqlite3.Connection,
+    *,
+    runtime: dict[str, Any],
+    exported_at_ms: int,
+) -> int:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS runtime_cooldowns (
+            symbol TEXT PRIMARY KEY,
+            last_entry_attempt_s REAL,
+            last_exit_attempt_s REAL,
+            updated_at TEXT
+        )
+        """
+    )
+
+    conn.execute("DELETE FROM runtime_cooldowns")
+    entry_map = runtime.get("entry_attempt_ms_by_symbol") or {}
+    exit_map = runtime.get("exit_attempt_ms_by_symbol") or {}
+    if not isinstance(entry_map, dict):
+        entry_map = {}
+    if not isinstance(exit_map, dict):
+        exit_map = {}
+
+    symbols = set()
+    symbols.update(str(k or "").strip().upper() for k in entry_map.keys())
+    symbols.update(str(k or "").strip().upper() for k in exit_map.keys())
+    symbols.discard("")
+
+    now_iso = _iso_from_ms(exported_at_ms)
+    inserted = 0
+
+    for symbol in sorted(symbols):
+        entry_ms = entry_map.get(symbol) if symbol in entry_map else entry_map.get(symbol.lower())
+        exit_ms = exit_map.get(symbol) if symbol in exit_map else exit_map.get(symbol.lower())
+        entry_s = None
+        exit_s = None
+        try:
+            if entry_ms is not None:
+                entry_s = float(entry_ms) / 1000.0
+        except Exception:
+            entry_s = None
+        try:
+            if exit_ms is not None:
+                exit_s = float(exit_ms) / 1000.0
+        except Exception:
+            exit_s = None
+
+        _insert_projection(
+            conn,
+            "runtime_cooldowns",
+            {
+                "symbol": symbol,
+                "last_entry_attempt_s": entry_s,
+                "last_exit_attempt_s": exit_s,
+                "updated_at": now_iso,
+            },
+        )
+        inserted += 1
+
+    return inserted
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Apply a canonical snapshot JSON to a paper DB for deterministic state seeding."
@@ -222,6 +286,9 @@ def main() -> int:
     open_orders = canonical.get("open_orders") or []
     if not isinstance(open_orders, list):
         open_orders = []
+    runtime = snapshot.get("runtime") or {}
+    if not isinstance(runtime, dict):
+        runtime = {}
 
     if args.dry_run:
         print("--- DRY RUN ---")
@@ -230,6 +297,10 @@ def main() -> int:
         print(f"balance: {balance:.8f}")
         print(f"positions: {len(positions)}")
         print(f"open_orders: {len(open_orders)}")
+        print(
+            "runtime_cooldown_symbols: "
+            f"{len((runtime.get('entry_attempt_ms_by_symbol') or {})) + len((runtime.get('exit_attempt_ms_by_symbol') or {}))}"
+        )
         print("--- END DRY RUN ---")
         return 0
 
@@ -243,6 +314,11 @@ def main() -> int:
             positions=positions,
         )
         seeded_open_orders = _replace_open_orders(conn, open_orders)
+        seeded_runtime_cooldowns = _seed_runtime_cooldowns(
+            conn,
+            runtime=runtime,
+            exported_at_ms=exported_at_ms,
+        )
         conn.commit()
     except Exception:
         conn.rollback()
@@ -258,6 +334,7 @@ def main() -> int:
             "seeded_trades": int(seeded_trades),
             "seeded_positions": int(seeded_positions),
             "seeded_open_orders": int(seeded_open_orders),
+            "seeded_runtime_cooldowns": int(seeded_runtime_cooldowns),
         },
         indent=2,
         sort_keys=True,
