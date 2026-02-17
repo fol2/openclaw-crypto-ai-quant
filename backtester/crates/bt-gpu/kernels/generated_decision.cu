@@ -1083,14 +1083,14 @@ __device__ AllExitResult check_all_exits_codegen(
         if (current_price <= sl_price) {
             result.should_exit = true;
             result.exit_code = 100;
-            result.exit_price = sl_price;
+            result.exit_price = current_price;
             return result;
         }
     } else {              // POS_SHORT
         if (current_price >= sl_price) {
             result.should_exit = true;
             result.exit_code = 100;
-            result.exit_price = sl_price;
+            result.exit_price = current_price;
             return result;
         }
     }
@@ -1118,7 +1118,7 @@ __device__ AllExitResult check_all_exits_codegen(
         if (trail_triggered) {
             result.should_exit = true;
             result.exit_code = 101;
-            result.exit_price = trail_price;
+            result.exit_price = current_price;
             return result;
         }
     }
