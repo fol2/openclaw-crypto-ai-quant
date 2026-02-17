@@ -12,11 +12,11 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
-import time
 import types
-from pathlib import Path
 
 import pytest
+
+_FIXED_TS_MS = 1_700_000_000_000  # 2023-11-14T22:13:20Z — stable test anchor
 
 
 def _stub_missing_modules():
@@ -160,11 +160,18 @@ def _seed_decision_events(db_path: str, events: list[dict]) -> None:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                e["id"], e["timestamp_ms"], e["symbol"], e["event_type"],
-                e["status"], e["decision_phase"],
-                e.get("parent_decision_id"), e.get("trade_id"),
-                e.get("triggered_by"), e.get("action_taken"),
-                e.get("rejection_reason"), e.get("context_json"),
+                e["id"],
+                e["timestamp_ms"],
+                e["symbol"],
+                e["event_type"],
+                e["status"],
+                e["decision_phase"],
+                e.get("parent_decision_id"),
+                e.get("trade_id"),
+                e.get("triggered_by"),
+                e.get("action_taken"),
+                e.get("rejection_reason"),
+                e.get("context_json"),
             ),
         )
     con.commit()
@@ -183,9 +190,16 @@ def _seed_decision_context(db_path: str, rows: list[dict]) -> None:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                r["decision_id"], r["symbol"], r.get("price"), r.get("rsi"),
-                r.get("adx"), r.get("atr"), r.get("gate_adx"), r.get("gate_volume"),
-                r.get("bullish_alignment"), r.get("bearish_alignment"),
+                r["decision_id"],
+                r["symbol"],
+                r.get("price"),
+                r.get("rsi"),
+                r.get("adx"),
+                r.get("atr"),
+                r.get("gate_adx"),
+                r.get("gate_volume"),
+                r.get("bullish_alignment"),
+                r.get("bearish_alignment"),
             ),
         )
     con.commit()
@@ -203,9 +217,13 @@ def _seed_gate_evaluations(db_path: str, rows: list[dict]) -> None:
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                r["decision_id"], r["gate_name"], r["gate_passed"],
-                r.get("metric_value"), r.get("threshold_value"),
-                r.get("operator"), r.get("explanation"),
+                r["decision_id"],
+                r["gate_name"],
+                r["gate_passed"],
+                r.get("metric_value"),
+                r.get("threshold_value"),
+                r.get("operator"),
+                r.get("explanation"),
             ),
         )
     con.commit()
@@ -223,9 +241,12 @@ def _seed_lineage(db_path: str, rows: list[dict]) -> None:
             VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
-                r.get("signal_decision_id"), r.get("entry_trade_id"),
-                r.get("exit_decision_id"), r.get("exit_trade_id"),
-                r.get("exit_reason"), r.get("duration_ms"),
+                r.get("signal_decision_id"),
+                r.get("entry_trade_id"),
+                r.get("exit_decision_id"),
+                r.get("exit_trade_id"),
+                r.get("exit_reason"),
+                r.get("duration_ms"),
             ),
         )
     con.commit()
@@ -236,7 +257,6 @@ def _seed_lineage(db_path: str, rows: list[dict]) -> None:
 
 
 class TestDecisionsList:
-
     def test_empty_table(self, monitor_db):
         db_path, mod = monitor_db
         result = mod.build_decisions_list("paper")
@@ -247,12 +267,36 @@ class TestDecisionsList:
 
     def test_list_all(self, monitor_db):
         db_path, mod = monitor_db
-        now_ms = int(time.time() * 1000)
-        _seed_decision_events(db_path, [
-            {"id": "D001", "timestamp_ms": now_ms - 2000, "symbol": "ETH", "event_type": "entry_signal", "status": "executed", "decision_phase": "signal_generation"},
-            {"id": "D002", "timestamp_ms": now_ms - 1000, "symbol": "BTC", "event_type": "gate_block", "status": "blocked", "decision_phase": "gate_evaluation"},
-            {"id": "D003", "timestamp_ms": now_ms, "symbol": "ETH", "event_type": "fill", "status": "executed", "decision_phase": "execution"},
-        ])
+        now_ms = _FIXED_TS_MS
+        _seed_decision_events(
+            db_path,
+            [
+                {
+                    "id": "D001",
+                    "timestamp_ms": now_ms - 2000,
+                    "symbol": "ETH",
+                    "event_type": "entry_signal",
+                    "status": "executed",
+                    "decision_phase": "signal_generation",
+                },
+                {
+                    "id": "D002",
+                    "timestamp_ms": now_ms - 1000,
+                    "symbol": "BTC",
+                    "event_type": "gate_block",
+                    "status": "blocked",
+                    "decision_phase": "gate_evaluation",
+                },
+                {
+                    "id": "D003",
+                    "timestamp_ms": now_ms,
+                    "symbol": "ETH",
+                    "event_type": "fill",
+                    "status": "executed",
+                    "decision_phase": "execution",
+                },
+            ],
+        )
         result = mod.build_decisions_list("paper")
         assert result["total"] == 3
         assert len(result["data"]) == 3
@@ -262,44 +306,119 @@ class TestDecisionsList:
 
     def test_filter_by_symbol(self, monitor_db):
         db_path, mod = monitor_db
-        now_ms = int(time.time() * 1000)
-        _seed_decision_events(db_path, [
-            {"id": "D001", "timestamp_ms": now_ms, "symbol": "ETH", "event_type": "entry_signal", "status": "executed", "decision_phase": "signal_generation"},
-            {"id": "D002", "timestamp_ms": now_ms, "symbol": "BTC", "event_type": "entry_signal", "status": "executed", "decision_phase": "signal_generation"},
-        ])
+        now_ms = _FIXED_TS_MS
+        _seed_decision_events(
+            db_path,
+            [
+                {
+                    "id": "D001",
+                    "timestamp_ms": now_ms,
+                    "symbol": "ETH",
+                    "event_type": "entry_signal",
+                    "status": "executed",
+                    "decision_phase": "signal_generation",
+                },
+                {
+                    "id": "D002",
+                    "timestamp_ms": now_ms,
+                    "symbol": "BTC",
+                    "event_type": "entry_signal",
+                    "status": "executed",
+                    "decision_phase": "signal_generation",
+                },
+            ],
+        )
         result = mod.build_decisions_list("paper", symbol="ETH")
         assert result["total"] == 1
         assert result["data"][0]["symbol"] == "ETH"
 
     def test_filter_by_time_window(self, monitor_db):
         db_path, mod = monitor_db
-        _seed_decision_events(db_path, [
-            {"id": "D001", "timestamp_ms": 1000, "symbol": "ETH", "event_type": "entry_signal", "status": "executed", "decision_phase": "signal_generation"},
-            {"id": "D002", "timestamp_ms": 2000, "symbol": "ETH", "event_type": "fill", "status": "executed", "decision_phase": "execution"},
-            {"id": "D003", "timestamp_ms": 3000, "symbol": "ETH", "event_type": "exit_check", "status": "executed", "decision_phase": "execution"},
-        ])
+        _seed_decision_events(
+            db_path,
+            [
+                {
+                    "id": "D001",
+                    "timestamp_ms": 1000,
+                    "symbol": "ETH",
+                    "event_type": "entry_signal",
+                    "status": "executed",
+                    "decision_phase": "signal_generation",
+                },
+                {
+                    "id": "D002",
+                    "timestamp_ms": 2000,
+                    "symbol": "ETH",
+                    "event_type": "fill",
+                    "status": "executed",
+                    "decision_phase": "execution",
+                },
+                {
+                    "id": "D003",
+                    "timestamp_ms": 3000,
+                    "symbol": "ETH",
+                    "event_type": "exit_check",
+                    "status": "executed",
+                    "decision_phase": "execution",
+                },
+            ],
+        )
         result = mod.build_decisions_list("paper", start_ms=1500, end_ms=2500)
         assert result["total"] == 1
         assert result["data"][0]["id"] == "D002"
 
     def test_filter_by_event_type(self, monitor_db):
         db_path, mod = monitor_db
-        now_ms = int(time.time() * 1000)
-        _seed_decision_events(db_path, [
-            {"id": "D001", "timestamp_ms": now_ms, "symbol": "ETH", "event_type": "entry_signal", "status": "executed", "decision_phase": "signal_generation"},
-            {"id": "D002", "timestamp_ms": now_ms, "symbol": "ETH", "event_type": "gate_block", "status": "blocked", "decision_phase": "gate_evaluation"},
-        ])
+        now_ms = _FIXED_TS_MS
+        _seed_decision_events(
+            db_path,
+            [
+                {
+                    "id": "D001",
+                    "timestamp_ms": now_ms,
+                    "symbol": "ETH",
+                    "event_type": "entry_signal",
+                    "status": "executed",
+                    "decision_phase": "signal_generation",
+                },
+                {
+                    "id": "D002",
+                    "timestamp_ms": now_ms,
+                    "symbol": "ETH",
+                    "event_type": "gate_block",
+                    "status": "blocked",
+                    "decision_phase": "gate_evaluation",
+                },
+            ],
+        )
         result = mod.build_decisions_list("paper", event_type="gate_block")
         assert result["total"] == 1
         assert result["data"][0]["event_type"] == "gate_block"
 
     def test_filter_by_status(self, monitor_db):
         db_path, mod = monitor_db
-        now_ms = int(time.time() * 1000)
-        _seed_decision_events(db_path, [
-            {"id": "D001", "timestamp_ms": now_ms, "symbol": "ETH", "event_type": "entry_signal", "status": "executed", "decision_phase": "signal_generation"},
-            {"id": "D002", "timestamp_ms": now_ms, "symbol": "ETH", "event_type": "gate_block", "status": "blocked", "decision_phase": "gate_evaluation"},
-        ])
+        now_ms = _FIXED_TS_MS
+        _seed_decision_events(
+            db_path,
+            [
+                {
+                    "id": "D001",
+                    "timestamp_ms": now_ms,
+                    "symbol": "ETH",
+                    "event_type": "entry_signal",
+                    "status": "executed",
+                    "decision_phase": "signal_generation",
+                },
+                {
+                    "id": "D002",
+                    "timestamp_ms": now_ms,
+                    "symbol": "ETH",
+                    "event_type": "gate_block",
+                    "status": "blocked",
+                    "decision_phase": "gate_evaluation",
+                },
+            ],
+        )
         result = mod.build_decisions_list("paper", status="blocked")
         assert result["total"] == 1
         assert result["data"][0]["status"] == "blocked"
@@ -307,7 +426,14 @@ class TestDecisionsList:
     def test_pagination(self, monitor_db):
         db_path, mod = monitor_db
         events = [
-            {"id": f"D{i:03d}", "timestamp_ms": 1000 + i, "symbol": "ETH", "event_type": "entry_signal", "status": "executed", "decision_phase": "signal_generation"}
+            {
+                "id": f"D{i:03d}",
+                "timestamp_ms": 1000 + i,
+                "symbol": "ETH",
+                "event_type": "entry_signal",
+                "status": "executed",
+                "decision_phase": "signal_generation",
+            }
             for i in range(10)
         ]
         _seed_decision_events(db_path, events)
@@ -349,7 +475,6 @@ class TestDecisionsList:
 
 
 class TestDecisionDetail:
-
     def test_not_found(self, monitor_db):
         _db_path, mod = monitor_db
         result = mod.build_decision_detail("paper", "NONEXISTENT")
@@ -357,23 +482,63 @@ class TestDecisionDetail:
 
     def test_found_with_context_and_gates(self, monitor_db):
         db_path, mod = monitor_db
-        now_ms = int(time.time() * 1000)
-        _seed_decision_events(db_path, [
-            {
-                "id": "D100", "timestamp_ms": now_ms, "symbol": "ETH",
-                "event_type": "entry_signal", "status": "executed",
-                "decision_phase": "signal_generation", "triggered_by": "schedule",
-                "action_taken": "open_long",
-                "context_json": json.dumps({"rsi": 42.5}),
-            },
-        ])
-        _seed_decision_context(db_path, [
-            {"decision_id": "D100", "symbol": "ETH", "price": 2500.0, "rsi": 42.5, "adx": 28.0, "atr": 35.0, "gate_adx": 1, "gate_volume": 1, "bullish_alignment": 1, "bearish_alignment": 0},
-        ])
-        _seed_gate_evaluations(db_path, [
-            {"decision_id": "D100", "gate_name": "adx", "gate_passed": 1, "metric_value": 28.0, "threshold_value": 25.0, "operator": ">", "explanation": "ADX OK"},
-            {"decision_id": "D100", "gate_name": "volume", "gate_passed": 1, "metric_value": 1500000.0, "threshold_value": 1000000.0, "operator": ">", "explanation": "Volume OK"},
-        ])
+        now_ms = _FIXED_TS_MS
+        _seed_decision_events(
+            db_path,
+            [
+                {
+                    "id": "D100",
+                    "timestamp_ms": now_ms,
+                    "symbol": "ETH",
+                    "event_type": "entry_signal",
+                    "status": "executed",
+                    "decision_phase": "signal_generation",
+                    "triggered_by": "schedule",
+                    "action_taken": "open_long",
+                    "context_json": json.dumps({"rsi": 42.5}),
+                },
+            ],
+        )
+        _seed_decision_context(
+            db_path,
+            [
+                {
+                    "decision_id": "D100",
+                    "symbol": "ETH",
+                    "price": 2500.0,
+                    "rsi": 42.5,
+                    "adx": 28.0,
+                    "atr": 35.0,
+                    "gate_adx": 1,
+                    "gate_volume": 1,
+                    "bullish_alignment": 1,
+                    "bearish_alignment": 0,
+                },
+            ],
+        )
+        _seed_gate_evaluations(
+            db_path,
+            [
+                {
+                    "decision_id": "D100",
+                    "gate_name": "adx",
+                    "gate_passed": 1,
+                    "metric_value": 28.0,
+                    "threshold_value": 25.0,
+                    "operator": ">",
+                    "explanation": "ADX OK",
+                },
+                {
+                    "decision_id": "D100",
+                    "gate_name": "volume",
+                    "gate_passed": 1,
+                    "metric_value": 1500000.0,
+                    "threshold_value": 1000000.0,
+                    "operator": ">",
+                    "explanation": "Volume OK",
+                },
+            ],
+        )
 
         result = mod.build_decision_detail("paper", "D100")
         assert result is not None
@@ -388,10 +553,20 @@ class TestDecisionDetail:
 
     def test_found_without_context_or_gates(self, monitor_db):
         db_path, mod = monitor_db
-        now_ms = int(time.time() * 1000)
-        _seed_decision_events(db_path, [
-            {"id": "D200", "timestamp_ms": now_ms, "symbol": "BTC", "event_type": "fill", "status": "executed", "decision_phase": "execution"},
-        ])
+        now_ms = _FIXED_TS_MS
+        _seed_decision_events(
+            db_path,
+            [
+                {
+                    "id": "D200",
+                    "timestamp_ms": now_ms,
+                    "symbol": "BTC",
+                    "event_type": "fill",
+                    "status": "executed",
+                    "decision_phase": "execution",
+                },
+            ],
+        )
         result = mod.build_decision_detail("paper", "D200")
         assert result is not None
         assert result["decision"]["id"] == "D200"
@@ -403,7 +578,6 @@ class TestDecisionDetail:
 
 
 class TestTradeDecisionTrace:
-
     def test_no_lineage(self, monitor_db):
         db_path, mod = monitor_db
         result = mod.build_trade_decision_trace("paper", 999)
@@ -412,17 +586,55 @@ class TestTradeDecisionTrace:
 
     def test_full_chain(self, monitor_db):
         db_path, mod = monitor_db
-        now_ms = int(time.time() * 1000)
+        now_ms = _FIXED_TS_MS
 
         # Signal -> Fill (entry) -> Exit decision
-        _seed_decision_events(db_path, [
-            {"id": "SIG01", "timestamp_ms": now_ms - 3000, "symbol": "ETH", "event_type": "entry_signal", "status": "executed", "decision_phase": "signal_generation", "trade_id": 500},
-            {"id": "FILL01", "timestamp_ms": now_ms - 2000, "symbol": "ETH", "event_type": "fill", "status": "executed", "decision_phase": "execution", "trade_id": 500, "parent_decision_id": "SIG01"},
-            {"id": "EXIT01", "timestamp_ms": now_ms - 1000, "symbol": "ETH", "event_type": "exit_check", "status": "executed", "decision_phase": "execution", "trade_id": 501},
-        ])
-        _seed_lineage(db_path, [
-            {"signal_decision_id": "SIG01", "entry_trade_id": 500, "exit_decision_id": "EXIT01", "exit_trade_id": 501, "exit_reason": "stop_loss", "duration_ms": 2000},
-        ])
+        _seed_decision_events(
+            db_path,
+            [
+                {
+                    "id": "SIG01",
+                    "timestamp_ms": now_ms - 3000,
+                    "symbol": "ETH",
+                    "event_type": "entry_signal",
+                    "status": "executed",
+                    "decision_phase": "signal_generation",
+                    "trade_id": 500,
+                },
+                {
+                    "id": "FILL01",
+                    "timestamp_ms": now_ms - 2000,
+                    "symbol": "ETH",
+                    "event_type": "fill",
+                    "status": "executed",
+                    "decision_phase": "execution",
+                    "trade_id": 500,
+                    "parent_decision_id": "SIG01",
+                },
+                {
+                    "id": "EXIT01",
+                    "timestamp_ms": now_ms - 1000,
+                    "symbol": "ETH",
+                    "event_type": "exit_check",
+                    "status": "executed",
+                    "decision_phase": "execution",
+                    "trade_id": 501,
+                },
+            ],
+        )
+        _seed_lineage(
+            db_path,
+            [
+                {
+                    "signal_decision_id": "SIG01",
+                    "entry_trade_id": 500,
+                    "exit_decision_id": "EXIT01",
+                    "exit_trade_id": 501,
+                    "exit_reason": "stop_loss",
+                    "duration_ms": 2000,
+                },
+            ],
+        )
 
         result = mod.build_trade_decision_trace("paper", 500)
         assert result["lineage"] is not None
@@ -438,14 +650,43 @@ class TestTradeDecisionTrace:
 
     def test_chain_via_exit_trade(self, monitor_db):
         db_path, mod = monitor_db
-        now_ms = int(time.time() * 1000)
-        _seed_decision_events(db_path, [
-            {"id": "SIG02", "timestamp_ms": now_ms - 2000, "symbol": "BTC", "event_type": "entry_signal", "status": "executed", "decision_phase": "signal_generation", "trade_id": 600},
-            {"id": "EXIT02", "timestamp_ms": now_ms - 1000, "symbol": "BTC", "event_type": "exit_check", "status": "executed", "decision_phase": "execution", "trade_id": 601},
-        ])
-        _seed_lineage(db_path, [
-            {"signal_decision_id": "SIG02", "entry_trade_id": 600, "exit_decision_id": "EXIT02", "exit_trade_id": 601, "exit_reason": "signal_flip", "duration_ms": 1000},
-        ])
+        now_ms = _FIXED_TS_MS
+        _seed_decision_events(
+            db_path,
+            [
+                {
+                    "id": "SIG02",
+                    "timestamp_ms": now_ms - 2000,
+                    "symbol": "BTC",
+                    "event_type": "entry_signal",
+                    "status": "executed",
+                    "decision_phase": "signal_generation",
+                    "trade_id": 600,
+                },
+                {
+                    "id": "EXIT02",
+                    "timestamp_ms": now_ms - 1000,
+                    "symbol": "BTC",
+                    "event_type": "exit_check",
+                    "status": "executed",
+                    "decision_phase": "execution",
+                    "trade_id": 601,
+                },
+            ],
+        )
+        _seed_lineage(
+            db_path,
+            [
+                {
+                    "signal_decision_id": "SIG02",
+                    "entry_trade_id": 600,
+                    "exit_decision_id": "EXIT02",
+                    "exit_trade_id": 601,
+                    "exit_reason": "signal_flip",
+                    "duration_ms": 1000,
+                },
+            ],
+        )
 
         # Query via exit trade_id.
         result = mod.build_trade_decision_trace("paper", 601)
@@ -465,7 +706,6 @@ class TestTradeDecisionTrace:
 
 
 class TestDecisionGates:
-
     def test_not_found(self, monitor_db):
         _db_path, mod = monitor_db
         result = mod.build_decision_gates("paper", "NONEXISTENT")
@@ -473,15 +713,52 @@ class TestDecisionGates:
 
     def test_gates_returned(self, monitor_db):
         db_path, mod = monitor_db
-        now_ms = int(time.time() * 1000)
-        _seed_decision_events(db_path, [
-            {"id": "G001", "timestamp_ms": now_ms, "symbol": "ETH", "event_type": "gate_block", "status": "blocked", "decision_phase": "gate_evaluation"},
-        ])
-        _seed_gate_evaluations(db_path, [
-            {"decision_id": "G001", "gate_name": "adx_rising", "gate_passed": 0, "metric_value": 18.5, "threshold_value": 25.0, "operator": ">", "explanation": "ADX too low"},
-            {"decision_id": "G001", "gate_name": "volume", "gate_passed": 1, "metric_value": 1500000.0, "threshold_value": 1000000.0, "operator": ">", "explanation": "Volume OK"},
-            {"decision_id": "G001", "gate_name": "ranging", "gate_passed": 0, "metric_value": 0.85, "threshold_value": 0.80, "operator": "<", "explanation": "In ranging regime"},
-        ])
+        now_ms = _FIXED_TS_MS
+        _seed_decision_events(
+            db_path,
+            [
+                {
+                    "id": "G001",
+                    "timestamp_ms": now_ms,
+                    "symbol": "ETH",
+                    "event_type": "gate_block",
+                    "status": "blocked",
+                    "decision_phase": "gate_evaluation",
+                },
+            ],
+        )
+        _seed_gate_evaluations(
+            db_path,
+            [
+                {
+                    "decision_id": "G001",
+                    "gate_name": "adx_rising",
+                    "gate_passed": 0,
+                    "metric_value": 18.5,
+                    "threshold_value": 25.0,
+                    "operator": ">",
+                    "explanation": "ADX too low",
+                },
+                {
+                    "decision_id": "G001",
+                    "gate_name": "volume",
+                    "gate_passed": 1,
+                    "metric_value": 1500000.0,
+                    "threshold_value": 1000000.0,
+                    "operator": ">",
+                    "explanation": "Volume OK",
+                },
+                {
+                    "decision_id": "G001",
+                    "gate_name": "ranging",
+                    "gate_passed": 0,
+                    "metric_value": 0.85,
+                    "threshold_value": 0.80,
+                    "operator": "<",
+                    "explanation": "In ranging regime",
+                },
+            ],
+        )
 
         result = mod.build_decision_gates("paper", "G001")
         assert result is not None
@@ -494,10 +771,20 @@ class TestDecisionGates:
 
     def test_decision_exists_no_gates(self, monitor_db):
         db_path, mod = monitor_db
-        now_ms = int(time.time() * 1000)
-        _seed_decision_events(db_path, [
-            {"id": "G002", "timestamp_ms": now_ms, "symbol": "ETH", "event_type": "fill", "status": "executed", "decision_phase": "execution"},
-        ])
+        now_ms = _FIXED_TS_MS
+        _seed_decision_events(
+            db_path,
+            [
+                {
+                    "id": "G002",
+                    "timestamp_ms": now_ms,
+                    "symbol": "ETH",
+                    "event_type": "fill",
+                    "status": "executed",
+                    "decision_phase": "execution",
+                },
+            ],
+        )
         result = mod.build_decision_gates("paper", "G002")
         assert result is not None
         assert result["gates"] == []
@@ -557,16 +844,20 @@ def replay_db(tmp_path, monkeypatch):
 
     # Create a kernel state file next to the DB.
     state_path = tmp_path / "kernel_state.json"
-    state_path.write_text(json.dumps({
-        "schema_version": 8,
-        "timestamp_ms": 0,
-        "step": 0,
-        "cash_usd": 10000.0,
-        "positions": {},
-        "last_entry_ms": {},
-        "last_exit_ms": {},
-        "last_close_info": {},
-    }))
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 8,
+                "timestamp_ms": 0,
+                "step": 0,
+                "cash_usd": 10000.0,
+                "positions": {},
+                "last_entry_ms": {},
+                "last_exit_ms": {},
+                "last_close_info": {},
+            }
+        )
+    )
 
     stubbed = _stub_missing_modules()
 
@@ -639,43 +930,88 @@ def replay_db(tmp_path, monkeypatch):
 
 def _seed_replay_decision(db_path: str, *, decision_id: str = "R001") -> None:
     """Insert a complete decision event with context and gates for replay."""
-    now_ms = int(time.time() * 1000)
-    _seed_decision_events(db_path, [
-        {
-            "id": decision_id, "timestamp_ms": now_ms, "symbol": "BTCUSDT",
-            "event_type": "entry_signal", "status": "executed",
-            "decision_phase": "signal_generation", "action_taken": "open_long",
-        },
-    ])
-    _seed_decision_context(db_path, [
-        {
-            "decision_id": decision_id, "symbol": "BTCUSDT",
-            "price": 95000.0, "rsi": 45.2, "adx": 28.0, "atr": 1200.0,
-            "gate_adx": 1, "gate_volume": 1,
-            "bullish_alignment": 1, "bearish_alignment": 0,
-        },
-    ])
-    _seed_gate_evaluations(db_path, [
-        {"decision_id": decision_id, "gate_name": "adx", "gate_passed": 1,
-         "metric_value": 28.0, "threshold_value": 25.0, "operator": ">", "explanation": "ADX OK"},
-        {"decision_id": decision_id, "gate_name": "volume", "gate_passed": 1,
-         "metric_value": 5000000.0, "threshold_value": 3000000.0, "operator": ">", "explanation": "Volume OK"},
-        {"decision_id": decision_id, "gate_name": "ranging", "gate_passed": 1,
-         "metric_value": 0.5, "threshold_value": 0.8, "operator": "<", "explanation": "Not ranging"},
-    ])
+    now_ms = _FIXED_TS_MS
+    _seed_decision_events(
+        db_path,
+        [
+            {
+                "id": decision_id,
+                "timestamp_ms": now_ms,
+                "symbol": "BTCUSDT",
+                "event_type": "entry_signal",
+                "status": "executed",
+                "decision_phase": "signal_generation",
+                "action_taken": "open_long",
+            },
+        ],
+    )
+    _seed_decision_context(
+        db_path,
+        [
+            {
+                "decision_id": decision_id,
+                "symbol": "BTCUSDT",
+                "price": 95000.0,
+                "rsi": 45.2,
+                "adx": 28.0,
+                "atr": 1200.0,
+                "gate_adx": 1,
+                "gate_volume": 1,
+                "bullish_alignment": 1,
+                "bearish_alignment": 0,
+            },
+        ],
+    )
+    _seed_gate_evaluations(
+        db_path,
+        [
+            {
+                "decision_id": decision_id,
+                "gate_name": "adx",
+                "gate_passed": 1,
+                "metric_value": 28.0,
+                "threshold_value": 25.0,
+                "operator": ">",
+                "explanation": "ADX OK",
+            },
+            {
+                "decision_id": decision_id,
+                "gate_name": "volume",
+                "gate_passed": 1,
+                "metric_value": 5000000.0,
+                "threshold_value": 3000000.0,
+                "operator": ">",
+                "explanation": "Volume OK",
+            },
+            {
+                "decision_id": decision_id,
+                "gate_name": "ranging",
+                "gate_passed": 1,
+                "metric_value": 0.5,
+                "threshold_value": 0.8,
+                "operator": "<",
+                "explanation": "Not ranging",
+            },
+        ],
+    )
 
 
 class TestDecisionReplay:
-
     def test_replay_valid_decision(self, replay_db):
         db_path, mod, bt_stub = replay_db
         _seed_replay_decision(db_path)
 
         # Stub step_decision to return an approved result.
         intent = {
-            "schema_version": 8, "intent_id": 1, "symbol": "BTCUSDT",
-            "kind": "Open", "side": "Long", "quantity": 0.1,
-            "price": 95000.0, "notional_usd": 9500.0, "fee_rate": 0.00045,
+            "schema_version": 8,
+            "intent_id": 1,
+            "symbol": "BTCUSDT",
+            "kind": "Open",
+            "side": "Long",
+            "quantity": 0.1,
+            "price": 95000.0,
+            "notional_usd": 9500.0,
+            "fee_rate": 0.00045,
         }
         stub_fn = _make_step_decision_stub(
             intents=[intent],
@@ -685,11 +1021,18 @@ class TestDecisionReplay:
             ],
         )
         bt_stub.step_decision = stub_fn
-        bt_stub.load_state = lambda path: json.dumps({
-            "schema_version": 8, "timestamp_ms": 0, "step": 0,
-            "cash_usd": 10000.0, "positions": {},
-            "last_entry_ms": {}, "last_exit_ms": {}, "last_close_info": {},
-        })
+        bt_stub.load_state = lambda path: json.dumps(
+            {
+                "schema_version": 8,
+                "timestamp_ms": 0,
+                "step": 0,
+                "cash_usd": 10000.0,
+                "positions": {},
+                "last_entry_ms": {},
+                "last_exit_ms": {},
+                "last_close_info": {},
+            }
+        )
         bt_stub.default_kernel_params_json = lambda: json.dumps({"schema_version": 8})
 
         # Ensure module sees bt_runtime.
@@ -768,11 +1111,18 @@ class TestDecisionReplay:
         bt_stub.load_state = lambda path: json.dumps({"schema_version": 8})
         bt_stub.default_kernel_params_json = lambda: '{"schema_version":8}'
 
-        custom_state = json.dumps({
-            "schema_version": 8, "timestamp_ms": 999, "step": 42,
-            "cash_usd": 50000.0, "positions": {},
-            "last_entry_ms": {}, "last_exit_ms": {}, "last_close_info": {},
-        })
+        custom_state = json.dumps(
+            {
+                "schema_version": 8,
+                "timestamp_ms": 999,
+                "step": 42,
+                "cash_usd": 50000.0,
+                "positions": {},
+                "last_entry_ms": {},
+                "last_exit_ms": {},
+                "last_close_info": {},
+            }
+        )
 
         orig_ok = mod._BT_RUNTIME_OK
         orig_rt = mod._bt_runtime
@@ -780,7 +1130,9 @@ class TestDecisionReplay:
         mod._bt_runtime = bt_stub
         try:
             result = mod.build_decision_replay(
-                "paper", "R001", state_override_json=custom_state,
+                "paper",
+                "R001",
+                state_override_json=custom_state,
             )
         finally:
             mod._BT_RUNTIME_OK = orig_ok
@@ -807,11 +1159,18 @@ class TestDecisionReplay:
             ],
         )
         bt_stub.step_decision = stub_fn
-        bt_stub.load_state = lambda path: json.dumps({
-            "schema_version": 8, "timestamp_ms": 0, "step": 0,
-            "cash_usd": 10000.0, "positions": {},
-            "last_entry_ms": {}, "last_exit_ms": {}, "last_close_info": {},
-        })
+        bt_stub.load_state = lambda path: json.dumps(
+            {
+                "schema_version": 8,
+                "timestamp_ms": 0,
+                "step": 0,
+                "cash_usd": 10000.0,
+                "positions": {},
+                "last_entry_ms": {},
+                "last_exit_ms": {},
+                "last_close_info": {},
+            }
+        )
         bt_stub.default_kernel_params_json = lambda: '{"schema_version":8}'
 
         orig_ok = mod._BT_RUNTIME_OK
@@ -847,11 +1206,18 @@ class TestDecisionReplay:
             return _make_step_decision_stub()(state_json, event_json, params_json)
 
         bt_stub.step_decision = _capturing_step
-        bt_stub.load_state = lambda path: json.dumps({
-            "schema_version": 8, "timestamp_ms": 0, "step": 0,
-            "cash_usd": 10000.0, "positions": {},
-            "last_entry_ms": {}, "last_exit_ms": {}, "last_close_info": {},
-        })
+        bt_stub.load_state = lambda path: json.dumps(
+            {
+                "schema_version": 8,
+                "timestamp_ms": 0,
+                "step": 0,
+                "cash_usd": 10000.0,
+                "positions": {},
+                "last_entry_ms": {},
+                "last_exit_ms": {},
+                "last_close_info": {},
+            }
+        )
         bt_stub.default_kernel_params_json = lambda: '{"schema_version":8}'
 
         orig_ok = mod._BT_RUNTIME_OK

@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import sqlite3
 import stat
-import time
 from pathlib import Path
 
 import factory_run
+
+_FIXED_TS_MS = 1_700_000_000_000  # 2023-11-14T22:13:20Z — stable test anchor
 
 
 _CANDLES_SCHEMA = """
@@ -46,7 +47,7 @@ def _mk_candles_db(path: Path, *, symbol: str, interval: str) -> None:
     try:
         con.executescript(_CANDLES_SCHEMA)
         interval_ms = 3_600_000 if interval == "1h" else 60_000
-        now_ms = int(time.time() * 1000)
+        now_ms = _FIXED_TS_MS
         anchor = (now_ms // interval_ms) * interval_ms
 
         # Generate enough contiguous history so default factory data checks pass (200 bars).
@@ -81,7 +82,7 @@ def _mk_funding_db(path: Path, *, symbol: str) -> None:
     con = sqlite3.connect(str(path))
     try:
         con.executescript(_FUNDING_SCHEMA)
-        now_ms = int(time.time() * 1000)
+        now_ms = _FIXED_TS_MS
         h = 3_600_000
         rows = []
         # Generate >72h of hourly rows to satisfy the default lookback window.
@@ -253,7 +254,11 @@ def test_factory_smoke_run_produces_artifacts(tmp_path, monkeypatch) -> None:
     assert isinstance(candidates, list)
     assert candidates, "candidate metadata should be recorded"
     assert candidates[0].get("sweep_stage") in {"cpu", "gpu", "gpu_tpe"}
-    assert candidates[0].get("validation_gate") in {"replay_only", "score_v1+walk_forward", "score_v1+walk_forward+slippage"}
+    assert candidates[0].get("validation_gate") in {
+        "replay_only",
+        "score_v1+walk_forward",
+        "score_v1+walk_forward+slippage",
+    }
     assert "canonical_cpu_verified" in candidates[0]
 
     report = json.loads((run_dir / "reports" / "report.json").read_text(encoding="utf-8"))
