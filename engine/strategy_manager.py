@@ -158,7 +158,7 @@ class StrategyManager:
                     import strategy.mei_alpha_v1 as mei_alpha_v1
 
                     return copy.deepcopy(getattr(mei_alpha_v1, "_DEFAULT_STRATEGY_CONFIG"))
-                except Exception:
+                except (ImportError, AttributeError, TypeError):
                     return {"trade": {}, "indicators": {}, "filters": {}, "thresholds": {}}
 
             cls._instance = cls(
@@ -195,7 +195,7 @@ class StrategyManager:
             if v:
                 self._version = str(v)
             return self._version
-        except Exception:
+        except (OSError, json.JSONDecodeError, ValueError, TypeError):
             return self._version
 
     @staticmethod
@@ -261,7 +261,7 @@ class StrategyManager:
                 try:
                     overrides = self._load_yaml()
                     overrides_sha1 = sha1_json(overrides)
-                except Exception:
+                except (OSError, ValueError):
                     return
 
                 self._yaml_mtime = yaml_mtime

@@ -56,8 +56,11 @@ pub fn compute_entry_sizing(input: EntrySizingInput) -> EntrySizingResult {
             ConfidenceTier::Low => input.confidence_mult_low,
         };
 
-        let adx_mult =
-            (input.adx / input.adx_sizing_full_adx).clamp(input.adx_sizing_min_mult, 1.0);
+        let adx_mult = if input.adx_sizing_full_adx > 0.0 {
+            (input.adx / input.adx_sizing_full_adx).clamp(input.adx_sizing_min_mult, 1.0)
+        } else {
+            input.adx_sizing_min_mult
+        };
 
         let vol_ratio = if input.vol_baseline_pct > 0.0 && input.price > 0.0 {
             (input.atr / input.price) / input.vol_baseline_pct

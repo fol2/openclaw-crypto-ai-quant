@@ -2615,15 +2615,38 @@ class Handler(BaseHTTPRequestHandler):
 
         self._send_headers(404, "text/plain; charset=utf-8", 0)
 
+    def _check_api_auth(self) -> bool:
+        """Return True if request is authorised for /api/ access.
+
+        When ``AIQ_MONITOR_TOKEN`` is unset, all requests are allowed (backwards-compatible).
+        """
+        token = os.getenv("AIQ_MONITOR_TOKEN", "").strip()
+        if not token:
+            return True
+        auth = self.headers.get("Authorization", "")
+        if auth == f"Bearer {token}":
+            return True
+        self._send_json({"error": "unauthorized"}, status=401)
+        return False
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path or "/"
+
+        # /health — lightweight, no auth required
+        if path == "/health":
+            self._send_json({"status": "ok", "ts": _utc_now_ms()})
+            return
 
         if path == "/" or path == "/index.html":
             self._serve_static("index.html")
             return
         if path.startswith("/static/"):
             self._serve_static(path[len("/static/") :])
+            return
+
+        # All /api/ endpoints require auth when AIQ_MONITOR_TOKEN is set.
+        if path.startswith("/api/") and not self._check_api_auth():
             return
 
         if path == "/api/health":
@@ -2743,6 +2766,10 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path or "/"
 
+        # All POST endpoints require auth when AIQ_MONITOR_TOKEN is set.
+        if path.startswith("/api/") and not self._check_api_auth():
+            return
+
         # Read request body.
         try:
             content_length = int(self.headers.get("Content-Length", 0))
@@ -2792,6 +2819,8 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     bind = os.getenv("AIQ_MONITOR_BIND", "127.0.0.1")
     port = _env_int("AIQ_MONITOR_PORT", 61010)
+    if bind not in ("127.0.0.1", "localhost", "::1") and not os.getenv("AIQ_MONITOR_TOKEN", "").strip():
+        print(f"⚠️  WARNING: Monitor bound to {bind} without AIQ_MONITOR_TOKEN — API endpoints are unauthenticated")
     srv = ThreadingHTTPServer((bind, port), Handler)
     print(f"AI Quant Monitor listening on http://{bind}:{port}/")
     try:

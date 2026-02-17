@@ -659,6 +659,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             conn = sqlite3.connect(mei_alpha_v1.DB_PATH, timeout=timeout_s)
             cur = conn.cursor()
             if open_symbols:
+                # Safety: `placeholders` contains only '?' chars — no user input in SQL structure.
                 placeholders = ",".join("?" for _ in open_symbols)
                 cur.execute(
                     f"DELETE FROM position_state WHERE symbol NOT IN ({placeholders})",
@@ -1185,7 +1186,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     },
                     dedupe_open=False,
                 )
-            except Exception:
+            except Exception as _oms_exc:
+                logger.debug("OMS create_intent failed for ADD %s: %s", sym, _oms_exc, exc_info=True)
                 oms_intent = None
 
         if oms is not None and oms_intent is None and _env_bool("AI_QUANT_OMS_REQUIRE_INTENT_FOR_ENTRY", True):
@@ -1315,7 +1317,9 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 slippage_pct=self._live_slippage_pct(),
                 cloid=cloid,
             )
-        except TypeError:
+        except TypeError as _te:
+            # Fallback for older executor builds that lack `cloid` kwarg.
+            logger.debug("market_open TypeError (likely missing cloid kwarg): %s", _te)
             result = self.executor.market_open(
                 sym,
                 is_buy=(pos_type == "LONG"),

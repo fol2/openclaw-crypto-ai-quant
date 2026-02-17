@@ -78,7 +78,7 @@ def _read_strategy_mode_file(path: Path) -> str:
         if not path.exists():
             return ""
         return _norm_strategy_mode(path.read_text(encoding="utf-8").strip())
-    except Exception:
+    except (OSError, ValueError):
         return ""
 
 
@@ -200,7 +200,7 @@ def _default_db_path() -> str:
     try:
         here = os.path.dirname(os.path.abspath(__file__))
         return os.path.abspath(os.path.join(here, "..", "trading_engine.db"))
-    except Exception:
+    except (OSError, ValueError):
         return "trading_engine.db"
 
 

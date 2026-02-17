@@ -339,6 +339,9 @@ def main():
 
     # Confirm
     if not args.yes:
+        if not sys.stdin.isatty():
+            print("[deploy] Non-interactive shell detected. Use --yes to skip confirmation.", file=sys.stderr)
+            sys.exit(2)
         answer = input("Apply these changes? [y/N] ").strip().lower()
         if answer not in ("y", "yes"):
             print("[deploy] Aborted.", file=sys.stderr)

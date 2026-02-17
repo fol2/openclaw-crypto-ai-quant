@@ -131,10 +131,13 @@ class _SqliteLogSink:
             con.execute("PRAGMA journal_mode=WAL")
             con.execute("PRAGMA synchronous=NORMAL")
         _ensure_runtime_logs_schema(con)
-        with suppress(OSError):
+        try:
+            import logging as _logging
             import os as _os
 
             _os.chmod(str(db_p), 0o600)
+        except OSError as _perm_exc:
+            _logging.getLogger(__name__).warning("Failed to set DB permissions on %s: %s", db_p, _perm_exc)
         return con
 
     def _run(self) -> None:

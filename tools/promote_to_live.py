@@ -16,6 +16,7 @@ atomically and emits a promotion artefact under artifacts/deployments/live/.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import getpass
 import hashlib
 import json
@@ -60,11 +61,18 @@ def _utc_compact() -> str:
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
+    import uuid
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(str(tmp), str(path))
+    tmp = path.with_name(f".{path.name}.tmp.{uuid.uuid4().hex[:12]}")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(str(tmp), str(path))
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def _parse_iso_to_epoch_s(ts: str) -> float | None:
