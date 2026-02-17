@@ -229,6 +229,11 @@ def send_alert(message: str, *, extra: dict[str, Any] | None = None) -> None:
             _ALERT_QUEUE.put_nowait((str(ch), str(tgt), msg))
         except Exception:
             # Drop when overloaded; correctness > notifications.
+            # Rate-limit the warning to avoid log spam when the queue is persistently full.
             global _ALERT_DROPPED_COUNT
             _ALERT_DROPPED_COUNT += 1
-            _alert_logger.warning("Alert queue full; dropping message (total dropped: %d)", _ALERT_DROPPED_COUNT)
+            if _ALERT_DROPPED_COUNT % 100 == 1:
+                _alert_logger.warning(
+                    "Alert queue full; dropped %d alert(s) total",
+                    _ALERT_DROPPED_COUNT,
+                )
