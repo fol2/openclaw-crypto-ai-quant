@@ -49,6 +49,12 @@ python tools/build_live_replay_bundle.py \
 8. Run `run_08_assert_alignment.sh`
 9. Optional one-shot harness: `run_09_paper_deterministic_replay.sh`
 
+For strict shortcut mode:
+
+```bash
+STRICT_NO_RESIDUALS=1 /tmp/live_replay_bundle_1h/run_09_paper_deterministic_replay.sh
+```
+
 This keeps snapshot seeding, replay execution, state alignment audit, backtester trade/action reconciliation, live/paper action reconciliation, live/paper decision-trace reconciliation, and final strict alignment gate tied to one immutable bundle manifest.
 
 The manifest records SHA256 hashes for the replay market-data inputs (`candles_db`, optional `funding_db`) to preserve data provenance.

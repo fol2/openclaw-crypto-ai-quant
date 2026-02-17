@@ -279,9 +279,12 @@ def main() -> int:
         "set -euo pipefail\n"
         "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
         "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
+        "STRICT_FLAG=\"\"\n"
+        "if [ \"${STRICT_NO_RESIDUALS:-0}\" = \"1\" ]; then STRICT_FLAG=\"--strict-no-residuals\"; fi\n"
         "python \"$REPO_ROOT/tools/run_paper_deterministic_replay.py\" "
         "--bundle-dir \"$BUNDLE_DIR\" "
         "--repo-root \"$REPO_ROOT\" "
+        "$STRICT_FLAG "
         f"--output \"$BUNDLE_DIR/{paper_harness_report_path.name}\""
     )
 
