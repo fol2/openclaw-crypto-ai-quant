@@ -739,7 +739,7 @@ pub fn run_simulation(
     exit_candles: Option<&CandleData>,
     entry_candles: Option<&CandleData>,
     funding_rates: Option<&FundingRateData>,
-    init_state: Option<(f64, FxHashMap<String, Position>)>,
+    init_state: Option<crate::init_state::SimInitState>,
     from_ts: Option<i64>,
     to_ts: Option<i64>,
 ) -> SimResult {
@@ -762,15 +762,20 @@ pub fn run_simulation(
     let bar_index = build_bar_index(candles);
 
     // -- Initialize state (optionally from exported live/paper snapshot) --
-    let (init_balance, init_positions) = match init_state {
-        Some((b, p)) => (b, p),
-        None => (initial_balance, FxHashMap::default()),
+    let (init_balance, init_positions, init_last_entry_attempt_ms, init_last_exit_attempt_ms) = match init_state {
+        Some((b, p, entry_attempts, exit_attempts)) => (b, p, entry_attempts, exit_attempts),
+        None => (
+            initial_balance,
+            FxHashMap::default(),
+            FxHashMap::default(),
+            FxHashMap::default(),
+        ),
     };
     let mut state = SimState {
         balance: init_balance,
         positions: init_positions.clone(),
-        last_entry_attempt_ms: FxHashMap::default(),
-        last_exit_attempt_ms: FxHashMap::default(),
+        last_entry_attempt_ms: init_last_entry_attempt_ms,
+        last_exit_attempt_ms: init_last_exit_attempt_ms,
         indicators: FxHashMap::default(),
         ema_slow_history: FxHashMap::default(),
         bar_counts: FxHashMap::default(),

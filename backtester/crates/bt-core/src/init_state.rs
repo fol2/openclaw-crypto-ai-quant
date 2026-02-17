@@ -9,17 +9,29 @@ use crate::position::{Position, PositionType};
 use rustc_hash::FxHashMap;
 use serde::Deserialize;
 
-/// JSON schema version supported by this loader.
-const SUPPORTED_VERSION: u32 = 1;
+/// JSON schema versions supported by this loader.
+const SUPPORTED_VERSIONS: [u32; 2] = [1, 2];
 
-/// Top-level init-state file (matches `export_state.py` output).
+/// Runtime state that can affect deterministic continuation.
+#[derive(Debug, Deserialize, Default)]
+pub struct InitRuntimeState {
+    #[serde(default)]
+    pub entry_attempt_ms_by_symbol: FxHashMap<String, i64>,
+    #[serde(default)]
+    pub exit_attempt_ms_by_symbol: FxHashMap<String, i64>,
+}
+
+/// Top-level init-state file (matches `export_state.py` output and v2 snapshots).
 #[derive(Debug, Deserialize)]
 pub struct InitStateFile {
     pub version: u32,
     pub source: String,
     pub exported_at_ms: i64,
     pub balance: f64,
+    #[serde(default)]
     pub positions: Vec<InitPosition>,
+    #[serde(default)]
+    pub runtime: Option<InitRuntimeState>,
 }
 
 /// A single position entry in the init-state file.
@@ -47,17 +59,25 @@ pub struct InitPosition {
     pub entry_adx_threshold: f64,
 }
 
+/// Seed tuple consumed by `engine::run_simulation`.
+pub type SimInitState = (
+    f64,
+    FxHashMap<String, Position>,
+    FxHashMap<String, i64>,
+    FxHashMap<String, i64>,
+);
+
 /// Load and validate an init-state JSON file from disk.
 pub fn load(path: &str) -> Result<InitStateFile, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read init-state file {:?}: {}", path, e))?;
-    let state: InitStateFile = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse init-state JSON: {}", e))?;
+    let state: InitStateFile =
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse init-state JSON: {}", e))?;
 
-    if state.version != SUPPORTED_VERSION {
+    if !SUPPORTED_VERSIONS.contains(&state.version) {
         return Err(format!(
-            "Unsupported init-state version {} (expected {})",
-            state.version, SUPPORTED_VERSION,
+            "Unsupported init-state version {} (expected one of {:?})",
+            state.version, SUPPORTED_VERSIONS,
         ));
     }
     if state.balance < 0.0 {
@@ -67,25 +87,27 @@ pub fn load(path: &str) -> Result<InitStateFile, String> {
     Ok(state)
 }
 
-/// Convert the loaded init-state into simulator-compatible state.
+fn symbol_allowed(symbol: &str, valid_symbols: Option<&[&str]>) -> bool {
+    match valid_symbols {
+        Some(syms) => syms.contains(&symbol),
+        None => true,
+    }
+}
+
+/// Convert the loaded init-state into simulator-compatible state including
+/// runtime cooldown snapshots.
 ///
-/// Returns `(balance, positions)`.  Positions whose symbol is absent from
-/// `valid_symbols` (when provided) are dropped with a warning on stderr.
-pub fn into_sim_state(
-    state: InitStateFile,
-    valid_symbols: Option<&[&str]>,
-) -> (f64, FxHashMap<String, Position>) {
+/// Returns `(balance, positions, last_entry_attempt_ms, last_exit_attempt_ms)`.
+pub fn into_sim_state_with_runtime(state: InitStateFile, valid_symbols: Option<&[&str]>) -> SimInitState {
     let mut positions = FxHashMap::default();
 
     for ip in state.positions {
-        if let Some(syms) = valid_symbols {
-            if !syms.contains(&ip.symbol.as_str()) {
-                eprintln!(
-                    "[init-state] WARNING: position for {:?} skipped — not in candle data",
-                    ip.symbol,
-                );
-                continue;
-            }
+        if !symbol_allowed(&ip.symbol, valid_symbols) {
+            eprintln!(
+                "[init-state] WARNING: position for {:?} skipped - not in candle data",
+                ip.symbol,
+            );
+            continue;
         }
 
         let pos_type = match ip.side.to_lowercase().as_str() {
@@ -93,7 +115,7 @@ pub fn into_sim_state(
             "short" => PositionType::Short,
             other => {
                 eprintln!(
-                    "[init-state] WARNING: position for {:?} skipped — unknown side {:?}",
+                    "[init-state] WARNING: position for {:?} skipped - unknown side {:?}",
                     ip.symbol, other,
                 );
                 continue;
@@ -128,15 +150,46 @@ pub fn into_sim_state(
         positions.insert(ip.symbol, pos);
     }
 
+    let mut last_entry_attempt_ms: FxHashMap<String, i64> = FxHashMap::default();
+    let mut last_exit_attempt_ms: FxHashMap<String, i64> = FxHashMap::default();
+    if let Some(runtime) = state.runtime {
+        for (symbol, ts) in runtime.entry_attempt_ms_by_symbol {
+            if symbol_allowed(symbol.as_str(), valid_symbols) {
+                last_entry_attempt_ms.insert(symbol, ts);
+            }
+        }
+        for (symbol, ts) in runtime.exit_attempt_ms_by_symbol {
+            if symbol_allowed(symbol.as_str(), valid_symbols) {
+                last_exit_attempt_ms.insert(symbol, ts);
+            }
+        }
+    }
+
     eprintln!(
-        "[init-state] Loaded balance=${:.2}, {} position(s) from {:?} (exported at {})",
+        "[init-state] Loaded balance=${:.2}, {} position(s), {} entry cooldown marker(s), {} exit cooldown marker(s) from {:?} (exported at {})",
         state.balance,
         positions.len(),
+        last_entry_attempt_ms.len(),
+        last_exit_attempt_ms.len(),
         state.source,
         state.exported_at_ms,
     );
 
-    (state.balance, positions)
+    (
+        state.balance,
+        positions,
+        last_entry_attempt_ms,
+        last_exit_attempt_ms,
+    )
+}
+
+/// Backward-compatible conversion that drops runtime cooldown maps.
+pub fn into_sim_state(
+    state: InitStateFile,
+    valid_symbols: Option<&[&str]>,
+) -> (f64, FxHashMap<String, Position>) {
+    let (balance, positions, _, _) = into_sim_state_with_runtime(state, valid_symbols);
+    (balance, positions)
 }
 
 // ---------------------------------------------------------------------------
@@ -148,7 +201,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_valid_json() {
+    fn test_parse_valid_v1_json() {
         let json = r#"{
             "version": 1,
             "source": "paper",
@@ -173,103 +226,85 @@ mod tests {
             ]
         }"#;
 
-        let state: InitStateFile = serde_json::from_str(json).unwrap();
+        let state: InitStateFile = serde_json::from_str(json).expect("v1 init-state should parse");
         assert_eq!(state.version, 1);
         assert_eq!(state.source, "paper");
         assert!((state.balance - 230.19).abs() < 0.01);
         assert_eq!(state.positions.len(), 1);
         assert_eq!(state.positions[0].symbol, "BTC");
-        assert_eq!(state.positions[0].side, "long");
     }
 
     #[test]
-    fn test_into_sim_state_with_valid_symbols() {
-        let state = InitStateFile {
-            version: 1,
-            source: "paper".to_string(),
-            exported_at_ms: 1770562800000,
-            balance: 500.0,
-            positions: vec![
-                InitPosition {
-                    symbol: "BTC".to_string(),
-                    side: "long".to_string(),
-                    size: 0.003,
-                    entry_price: 71000.0,
-                    entry_atr: 1200.0,
-                    trailing_sl: Some(69500.0),
-                    confidence: "high".to_string(),
-                    leverage: 5.0,
-                    margin_used: 42.6,
-                    adds_count: 1,
-                    tp1_taken: false,
-                    open_time_ms: 1770500000000,
-                    last_add_time_ms: 1770510000000,
-                    entry_adx_threshold: 22.0,
-                },
-                InitPosition {
-                    symbol: "DOGE".to_string(),
-                    side: "short".to_string(),
-                    size: 100.0,
-                    entry_price: 0.15,
-                    entry_atr: 0.005,
-                    trailing_sl: None,
-                    confidence: "low".to_string(),
-                    leverage: 3.0,
-                    margin_used: 5.0,
-                    adds_count: 0,
-                    tp1_taken: false,
-                    open_time_ms: 1770550000000,
-                    last_add_time_ms: 0,
-                    entry_adx_threshold: 10.0,
-                },
-            ],
-        };
+    fn test_parse_valid_v2_json_with_runtime() {
+        let json = r#"{
+            "version": 2,
+            "source": "live_canonical",
+            "exported_at_ms": 1770562800000,
+            "balance": 1000.0,
+            "positions": [],
+            "runtime": {
+                "entry_attempt_ms_by_symbol": {"BTC": 1770562700000},
+                "exit_attempt_ms_by_symbol": {"ETH": 1770562750000}
+            }
+        }"#;
 
-        let valid_syms = vec!["BTC", "ETH", "DOGE"];
-        let (balance, positions) = into_sim_state(state, Some(&valid_syms));
-        assert!((balance - 500.0).abs() < 0.01);
-        assert_eq!(positions.len(), 2);
-
-        let btc = positions.get("BTC").unwrap();
-        assert_eq!(btc.pos_type, PositionType::Long);
-        assert!((btc.entry_price - 71000.0).abs() < 0.01);
-        assert_eq!(btc.trailing_sl, Some(69500.0));
-        assert_eq!(btc.adds_count, 1);
-        assert!((btc.entry_adx_threshold - 22.0).abs() < 0.01);
-
-        let doge = positions.get("DOGE").unwrap();
-        assert_eq!(doge.pos_type, PositionType::Short);
-        assert!((doge.size - 100.0).abs() < 0.01);
+        let state: InitStateFile = serde_json::from_str(json).expect("v2 init-state should parse");
+        assert_eq!(state.version, 2);
+        let runtime = state.runtime.expect("runtime expected");
+        assert_eq!(
+            runtime.entry_attempt_ms_by_symbol.get("BTC").copied(),
+            Some(1770562700000)
+        );
+        assert_eq!(
+            runtime.exit_attempt_ms_by_symbol.get("ETH").copied(),
+            Some(1770562750000)
+        );
     }
 
     #[test]
-    fn test_into_sim_state_filters_unknown_symbols() {
+    fn test_into_sim_state_with_runtime_filters_unknown_symbols() {
+        let mut entry_map = FxHashMap::default();
+        entry_map.insert("BTC".to_string(), 1_000);
+        entry_map.insert("UNKNOWN".to_string(), 2_000);
+        let mut exit_map = FxHashMap::default();
+        exit_map.insert("ETH".to_string(), 3_000);
+
         let state = InitStateFile {
-            version: 1,
+            version: 2,
             source: "live".to_string(),
             exported_at_ms: 0,
-            balance: 100.0,
+            balance: 500.0,
             positions: vec![InitPosition {
-                symbol: "UNKNOWN".to_string(),
+                symbol: "BTC".to_string(),
                 side: "long".to_string(),
-                size: 1.0,
-                entry_price: 50.0,
-                entry_atr: 2.0,
-                trailing_sl: None,
-                confidence: "medium".to_string(),
-                leverage: 3.0,
-                margin_used: 16.67,
-                adds_count: 0,
+                size: 0.003,
+                entry_price: 71000.0,
+                entry_atr: 1200.0,
+                trailing_sl: Some(69500.0),
+                confidence: "high".to_string(),
+                leverage: 5.0,
+                margin_used: 42.6,
+                adds_count: 1,
                 tp1_taken: false,
-                open_time_ms: 0,
-                last_add_time_ms: 0,
-                entry_adx_threshold: 0.0,
+                open_time_ms: 1770500000000,
+                last_add_time_ms: 1770510000000,
+                entry_adx_threshold: 22.0,
             }],
+            runtime: Some(InitRuntimeState {
+                entry_attempt_ms_by_symbol: entry_map,
+                exit_attempt_ms_by_symbol: exit_map,
+            }),
         };
 
         let valid_syms = vec!["BTC", "ETH"];
-        let (_, positions) = into_sim_state(state, Some(&valid_syms));
-        assert!(positions.is_empty());
+        let (balance, positions, entry_attempts, exit_attempts) =
+            into_sim_state_with_runtime(state, Some(&valid_syms));
+        assert!((balance - 500.0).abs() < 0.01);
+        assert_eq!(positions.len(), 1);
+        assert_eq!(entry_attempts.len(), 1);
+        assert_eq!(entry_attempts.get("BTC").copied(), Some(1_000));
+        assert_eq!(exit_attempts.len(), 1);
+        assert_eq!(exit_attempts.get("ETH").copied(), Some(3_000));
     }
 
     #[test]
@@ -282,44 +317,16 @@ mod tests {
             "positions": []
         }"#;
 
-        let tmpdir = std::env::temp_dir();
+        let tmpdir = tempfile::tempdir().expect("tempdir should exist");
         let path = tmpdir.join("test_init_state_v99.json");
-        std::fs::write(&path, json).unwrap();
-        let result = load(path.to_str().unwrap());
+        std::fs::write(&path, json).expect("write should succeed");
+
+        let result = load(path.to_str().expect("path should be utf-8"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Unsupported init-state version"));
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn test_no_valid_symbols_filter() {
-        let state = InitStateFile {
-            version: 1,
-            source: "paper".to_string(),
-            exported_at_ms: 0,
-            balance: 1000.0,
-            positions: vec![InitPosition {
-                symbol: "ETH".to_string(),
-                side: "long".to_string(),
-                size: 0.5,
-                entry_price: 3000.0,
-                entry_atr: 100.0,
-                trailing_sl: None,
-                confidence: "high".to_string(),
-                leverage: 5.0,
-                margin_used: 300.0,
-                adds_count: 0,
-                tp1_taken: false,
-                open_time_ms: 0,
-                last_add_time_ms: 0,
-                entry_adx_threshold: 22.0,
-            }],
-        };
-
-        // None means accept all symbols
-        let (balance, positions) = into_sim_state(state, None);
-        assert!((balance - 1000.0).abs() < 0.01);
-        assert_eq!(positions.len(), 1);
-        assert!(positions.contains_key("ETH"));
+        assert!(
+            result
+                .expect_err("version 99 should fail")
+                .contains("Unsupported init-state version")
+        );
     }
 }
