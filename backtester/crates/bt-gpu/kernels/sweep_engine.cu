@@ -53,6 +53,19 @@
 #define PESC_SIGNAL_FLIP 1u
 #define PESC_OTHER       2u
 
+// Trace capture
+#define TRACE_SYMBOL_ALL        0xFFFFFFFFu
+#define TRACE_CAPACITY          128u
+#define TRACE_KIND_OPEN         1u
+#define TRACE_KIND_ADD          2u
+#define TRACE_KIND_CLOSE        3u
+#define TRACE_KIND_PARTIAL      4u
+#define TRACE_REASON_ENTRY      1u
+#define TRACE_REASON_PYRAMID    2u
+#define TRACE_REASON_EXIT       3u
+#define TRACE_REASON_SIGNAL_FLIP 4u
+#define TRACE_REASON_PARTIAL    5u
+
 // -- Structs (match Rust #[repr(C)] exactly) ----------------------------------
 
 struct GpuRawCandle {
@@ -104,6 +117,17 @@ struct __align__(16) GpuPosition {
     float margin_used;  unsigned int adds_count;  unsigned int tp1_taken; // 44
     unsigned int open_time_sec;  unsigned int last_add_time_sec;   // 52
     unsigned int _pad[3];                                          // 64
+};
+
+struct GpuTraceEvent {
+    unsigned int t_sec;
+    unsigned int sym;
+    unsigned int kind;
+    unsigned int side;
+    unsigned int reason;
+    float price;
+    float size;
+    float pnl;
 };
 
 struct __align__(16) GpuComboConfig {
@@ -176,6 +200,11 @@ struct GpuComboState {
     unsigned int pesc_close_time_sec[52];
     unsigned int pesc_close_type[52];
     unsigned int pesc_close_reason[52];
+    unsigned int trace_enabled;
+    unsigned int trace_symbol;
+    unsigned int trace_count;
+    unsigned int trace_head;
+    GpuTraceEvent trace_events[128];
     double total_pnl;  double total_fees;  unsigned int total_trades;  unsigned int total_wins;
     double gross_profit;  double gross_loss;  double max_drawdown;  double peak_equity;
     unsigned int _acc_pad[2];
@@ -536,6 +565,38 @@ __device__ void clear_position(GpuPosition* pos) {
     pos->_pad[2] = 0u;
 }
 
+__device__ __forceinline__ void trace_record(
+    GpuComboState* state,
+    unsigned int sym,
+    unsigned int t_sec,
+    unsigned int kind,
+    unsigned int side,
+    unsigned int reason,
+    float price,
+    float size,
+    float pnl
+) {
+    if (state->trace_enabled == 0u) { return; }
+    if (state->trace_symbol != TRACE_SYMBOL_ALL && state->trace_symbol != sym) { return; }
+
+    unsigned int idx = state->trace_head % TRACE_CAPACITY;
+    GpuTraceEvent ev;
+    ev.t_sec = t_sec;
+    ev.sym = sym;
+    ev.kind = kind;
+    ev.side = side;
+    ev.reason = reason;
+    ev.price = price;
+    ev.size = size;
+    ev.pnl = pnl;
+    state->trace_events[idx] = ev;
+
+    state->trace_head += 1u;
+    if (state->trace_count < TRACE_CAPACITY) {
+        state->trace_count += 1u;
+    }
+}
+
 __device__ void apply_close(GpuComboState* state, unsigned int sym, const GpuSnapshot& snap,
                             bool reason_is_signal_flip, float fee_rate, float slippage_bps) {
     const GpuPosition& pos = state->positions[sym];
@@ -565,6 +626,18 @@ __device__ void apply_close(GpuComboState* state, unsigned int sym, const GpuSna
         state->gross_loss += fabs(pnl);
     }
     state->num_open -= 1u;
+
+    trace_record(
+        state,
+        sym,
+        snap.t_sec,
+        TRACE_KIND_CLOSE,
+        pos.active,
+        reason_is_signal_flip ? TRACE_REASON_SIGNAL_FLIP : TRACE_REASON_EXIT,
+        fill_price,
+        pos.size,
+        (float)pnl
+    );
 
     // PESC tracking
     state->pesc_close_time_sec[sym] = snap.t_sec;
@@ -608,6 +681,18 @@ __device__ void apply_partial_close(GpuComboState* state, unsigned int sym, cons
     } else {
         state->gross_loss += fabs(pnl);
     }
+
+    trace_record(
+        state,
+        sym,
+        snap.t_sec,
+        TRACE_KIND_PARTIAL,
+        pos.active,
+        TRACE_REASON_PARTIAL,
+        fill_price,
+        exit_size,
+        (float)pnl
+    );
 
     // Reduce position
     state->positions[sym].size -= exit_size;
@@ -908,6 +993,17 @@ extern "C" __global__ void sweep_engine_kernel(
                                     state.positions[sym].margin_used += add_margin;
                                     state.positions[sym].adds_count += 1u;
                                     state.positions[sym].last_add_time_sec = hybrid.t_sec;
+                                    trace_record(
+                                        &state,
+                                        sym,
+                                        hybrid.t_sec,
+                                        TRACE_KIND_ADD,
+                                        pos.active,
+                                        TRACE_REASON_PYRAMID,
+                                        hybrid.close,
+                                        add_size,
+                                        0.0f
+                                    );
                                 }
                             }
                         }
@@ -1085,6 +1181,17 @@ extern "C" __global__ void sweep_engine_kernel(
 
                     state.num_open += 1u;
                     state.entries_this_bar += 1u;
+                    trace_record(
+                        &state,
+                        cand.sym_idx,
+                        hybrid.t_sec,
+                        TRACE_KIND_OPEN,
+                        new_pos.active,
+                        TRACE_REASON_ENTRY,
+                        fill_price,
+                        size,
+                        0.0f
+                    );
                 }
             }
 
@@ -1211,6 +1318,17 @@ extern "C" __global__ void sweep_engine_kernel(
                                 state.positions[sym].margin_used += add_margin;
                                 state.positions[sym].adds_count += 1u;
                                 state.positions[sym].last_add_time_sec = snap.t_sec;
+                                trace_record(
+                                    &state,
+                                    sym,
+                                    snap.t_sec,
+                                    TRACE_KIND_ADD,
+                                    pos.active,
+                                    TRACE_REASON_PYRAMID,
+                                    snap.close,
+                                    add_size,
+                                    0.0f
+                                );
                             }
                         }
                     }
@@ -1376,6 +1494,17 @@ extern "C" __global__ void sweep_engine_kernel(
 
                 state.num_open += 1u;
                 state.entries_this_bar += 1u;
+                trace_record(
+                    &state,
+                    cand.sym_idx,
+                    snap.t_sec,
+                    TRACE_KIND_OPEN,
+                    new_pos.active,
+                    TRACE_REASON_ENTRY,
+                    fill_price,
+                    size,
+                    0.0f
+                );
             }
         } // end if/else max_sub
 

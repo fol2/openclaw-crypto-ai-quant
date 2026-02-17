@@ -91,6 +91,59 @@ pub fn run_gpu_sweep(
     from_ts: Option<i64>,
     to_ts: Option<i64>,
 ) -> Vec<GpuSweepResult> {
+    let (results, _states, _symbols) = run_gpu_sweep_internal(
+        candles,
+        base_cfg,
+        spec,
+        _funding,
+        sub_candles,
+        from_ts,
+        to_ts,
+        false,
+    );
+    results
+}
+
+/// Run a GPU sweep and also return final GPU combo states plus the symbol
+/// ordering used by the kernel.
+///
+/// Intended for diagnostic tooling (for example axis parity trace capture).
+pub fn run_gpu_sweep_with_states(
+    candles: &CandleData,
+    base_cfg: &StrategyConfig,
+    spec: &SweepSpec,
+    _funding: Option<&FundingRateData>,
+    sub_candles: Option<&CandleData>,
+    from_ts: Option<i64>,
+    to_ts: Option<i64>,
+) -> (Vec<GpuSweepResult>, Vec<buffers::GpuComboState>, Vec<String>) {
+    let (results, states, symbols) = run_gpu_sweep_internal(
+        candles,
+        base_cfg,
+        spec,
+        _funding,
+        sub_candles,
+        from_ts,
+        to_ts,
+        true,
+    );
+    (results, states.unwrap_or_default(), symbols)
+}
+
+fn run_gpu_sweep_internal(
+    candles: &CandleData,
+    base_cfg: &StrategyConfig,
+    spec: &SweepSpec,
+    _funding: Option<&FundingRateData>,
+    sub_candles: Option<&CandleData>,
+    from_ts: Option<i64>,
+    to_ts: Option<i64>,
+    capture_states: bool,
+) -> (
+    Vec<GpuSweepResult>,
+    Option<Vec<buffers::GpuComboState>>,
+    Vec<String>,
+) {
     let (indicator_axes, trade_axes) = axis_split::split_axes(&spec.axes);
 
     let indicator_combos = axis_split::generate_combinations(&indicator_axes);
@@ -131,7 +184,15 @@ pub fn run_gpu_sweep(
         Ok(ds) => ds,
         Err(e) => {
             eprintln!("[GPU] {e} — GPU sweep unavailable, returning empty results");
-            return Vec::new();
+            return (
+                Vec::new(),
+                if capture_states {
+                    Some(Vec::new())
+                } else {
+                    None
+                },
+                symbols,
+            );
         }
     };
     let candles_gpu = device_state.dev.htod_sync_copy(&raw.candles).unwrap();
@@ -228,7 +289,7 @@ pub fn run_gpu_sweep(
     eprintln!("[GPU] Pipeline: ALL-GPU (indicator + breadth + trade kernels)");
 
     // ── 4. Main sweep loop ───────────────────────────────────────────────
-    let mut all_results: Vec<GpuSweepResult> = Vec::new();
+    let mut all_results: Vec<(GpuSweepResult, Option<buffers::GpuComboState>)> = Vec::new();
     let mut done = 0usize;
     let total_ind = indicator_combos.len();
 
@@ -322,6 +383,11 @@ pub fn run_gpu_sweep(
             trade_start,
             trade_end,
         );
+        let gpu_states = if capture_states {
+            Some(gpu_host::readback_states(&device_state, &trade_bufs))
+        } else {
+            None
+        };
 
         // e. Map results back
         for (i, result) in gpu_results.iter().enumerate() {
@@ -358,7 +424,7 @@ pub fn run_gpu_sweep(
                 0.0
             };
 
-            all_results.push(GpuSweepResult {
+            let mapped = GpuSweepResult {
                 config_id,
                 output_mode: "gpu".to_string(),
                 total_pnl: result.total_pnl as f64,
@@ -369,7 +435,9 @@ pub fn run_gpu_sweep(
                 profit_factor: pf,
                 max_drawdown_pct: result.max_drawdown_pct as f64,
                 overrides: all_overrides,
-            });
+            };
+            let state_opt = gpu_states.as_ref().map(|states| states[i]);
+            all_results.push((mapped, state_opt));
         }
 
         done += chunk.len();
@@ -383,11 +451,23 @@ pub fn run_gpu_sweep(
     }
 
     all_results.sort_by(|a, b| {
-        b.total_pnl
-            .partial_cmp(&a.total_pnl)
+        b.0.total_pnl
+            .partial_cmp(&a.0.total_pnl)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    all_results
+
+    if capture_states {
+        let mut results = Vec::with_capacity(all_results.len());
+        let mut states = Vec::with_capacity(all_results.len());
+        for (result, state) in all_results {
+            results.push(result);
+            states.push(state.expect("missing captured state"));
+        }
+        (results, Some(states), symbols)
+    } else {
+        let results = all_results.into_iter().map(|(result, _)| result).collect();
+        (results, None, symbols)
+    }
 }
 
 #[cfg(test)]
