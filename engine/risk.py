@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import math
 import os
+import threading
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -69,22 +70,27 @@ class TokenBucket:
         self.refill_per_s = float(max(0.0, refill_per_s))
         self._tokens = float(self.capacity)
         self._last_s = time.monotonic()
+        self._lock = threading.Lock()
 
-    def _refill(self) -> None:
-        now = time.monotonic()
+    def _refill_unlocked(self, now: float) -> None:
         dt = max(0.0, now - self._last_s)
-        self._last_s = now
+        self._last_s = float(now)
         if dt <= 0 or self.refill_per_s <= 0:
             return
         self._tokens = min(self.capacity, self._tokens + (dt * self.refill_per_s))
 
+    def _refill(self) -> None:
+        with self._lock:
+            self._refill_unlocked(time.monotonic())
+
     def allow(self, *, cost: float = 1.0) -> bool:
         c = float(max(0.0, cost))
-        self._refill()
-        if self._tokens >= c:
-            self._tokens -= c
-            return True
-        return False
+        with self._lock:
+            self._refill_unlocked(time.monotonic())
+            if self._tokens >= c:
+                self._tokens -= c
+                return True
+            return False
 
 
 @dataclass(frozen=True)
