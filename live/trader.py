@@ -412,8 +412,14 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             logger.warning(
                 "sync_from_exchange: position_state DB unavailable, continuing without state recovery: %s", exc
             )
-            db_conn = None
             db_cur = None
+            if db_conn is not None:
+                try:
+                    db_conn.close()
+                except sqlite3.Error as close_exc:
+                    logger.debug("sync_from_exchange: failed to close DB after setup error: %s", close_exc, exc_info=True)
+                finally:
+                    db_conn = None
 
         def load_pos_state(symbol: str) -> dict:
             if db_cur is None:
