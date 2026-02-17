@@ -3763,9 +3763,12 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         _restore_shutdown_handlers(prev_handlers)
         if _SHUTDOWN_REQUESTED:
-            if run_dir is not None and isinstance(meta, dict) and str(meta.get("status", "")) != "interrupted":
+            status = str(meta.get("status", "")) if isinstance(meta, dict) else ""
+            if run_dir is not None and isinstance(meta, dict) and status not in {"interrupted", "failed"}:
                 _mark_run_interrupted(run_dir=run_dir, meta=meta, stage=current_stage)
-            return 130
+                return 130
+            if status != "failed":
+                return 130
 
 
 def _apply_profile_defaults(args: argparse.Namespace) -> None:
