@@ -7,7 +7,6 @@ blocked while CLOSE / REDUCE exits still execute.
 from __future__ import annotations
 
 import types
-from unittest.mock import Mock
 
 import pytest
 

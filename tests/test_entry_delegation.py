@@ -706,7 +706,6 @@ class TestKernelIntegration:
 
     def test_gate_result_matches_rust(self):
         """Verify Python build_gate_result is consistent with kernel behavior."""
-        import bt_runtime
 
         df = _make_trending_df(200)
         snap = build_indicator_snapshot(df)

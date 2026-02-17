@@ -5,6 +5,7 @@ import types
 from dataclasses import dataclass
 import importlib
 from collections.abc import Mapping
+from typing import Any
 
 import pytest
 from unittest.mock import Mock

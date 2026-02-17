@@ -1,7 +1,6 @@
 """Tests for _promote_candidates() — the 20→3 candidate promotion logic."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from factory_run import _promote_candidates
@@ -16,7 +15,6 @@ def _make_candidate(
     config_name: str | None = None,
 ) -> dict[str, object]:
     """Return a minimal mock candidate dict."""
-    name = config_name or f"{config_id}.yaml"
     return {
         "config_id": config_id,
         "total_pnl": total_pnl,
@@ -137,7 +135,7 @@ def test_custom_promote_dir(tmp_path: Path) -> None:
     ]
     _write_dummy_configs(tmp_path, candidates)
 
-    result = _promote_candidates(candidates, run_dir=tmp_path, promote_dir="my_promoted", promote_count=3)
+    _promote_candidates(candidates, run_dir=tmp_path, promote_dir="my_promoted", promote_count=3)
 
     assert (tmp_path / "my_promoted" / "primary.yaml").is_file()
 
