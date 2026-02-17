@@ -222,6 +222,17 @@ class IntentHandle:
     duplicate: bool = False
 
 
+_OMS_INTENTS_MUTABLE_COLUMNS = frozenset(
+    {
+        "status",
+        "sent_ts_ms",
+        "client_order_id",
+        "exchange_order_id",
+        "last_error",
+    }
+)
+
+
 class OmsStore:
     def __init__(self, *, db_path: str, timeout_s: float = 30.0):
         self._db_path = str(db_path)
@@ -482,6 +493,13 @@ class OmsStore:
 
         if not sets:
             return
+
+        # Validate column names against allowlist (defence-in-depth).
+        used_cols = {s.split(" = ?")[0] for s in sets}
+        invalid = used_cols - _OMS_INTENTS_MUTABLE_COLUMNS
+        if invalid:
+            raise ValueError(f"Invalid OMS column names: {invalid}")
+
         vals.append(str(intent_id))
 
         conn = self._connect()
