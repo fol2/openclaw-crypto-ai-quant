@@ -238,8 +238,9 @@ class OmsStore:
         self._db_path = str(db_path)
         self._timeout_s = float(timeout_s)
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._db_path, timeout=self._timeout_s)
+    def _connect(self, *, timeout_s: float | None = None) -> sqlite3.Connection:
+        timeout = self._timeout_s if timeout_s is None else float(timeout_s)
+        conn = sqlite3.connect(self._db_path, timeout=timeout)
         try:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
@@ -1320,7 +1321,7 @@ class LiveOms:
         _t0 = time.monotonic()
 
         try:
-            conn = sqlite3.connect(self.store._db_path, timeout=timeout_s)
+            conn = self.store._connect(timeout_s=timeout_s)
             cur = conn.cursor()
 
             cutoff_ms = int(now_ms_i - grace_ms)
