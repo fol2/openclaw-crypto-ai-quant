@@ -24,6 +24,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1135,6 +1136,19 @@ def _mark_run_interrupted(*, run_dir: Path, meta: dict[str, Any], stage: str | N
             "# Factory Run Report\n\nRun interrupted by shutdown signal.\n",
             encoding="utf-8",
         )
+
+
+def _mark_run_fatal_error(*, run_dir: Path, meta: dict[str, Any], stage: str, exc: Exception) -> None:
+    meta["status"] = "failed"
+    meta["fatal_error"] = f"{type(exc).__name__}: {exc}"
+    meta["fatal_error_type"] = type(exc).__name__
+    meta["fatal_error_stage"] = str(stage)
+    meta["fatal_error_at_ms"] = int(time.time() * 1000)
+    try:
+        meta["fatal_error_traceback"] = traceback.format_exc()
+    except Exception:
+        pass
+    _write_json(run_dir / "run_metadata.json", meta)
 
 
 def _shutdown_stage_guard(*, run_dir: Path, meta: dict[str, Any], stage: str) -> bool:
@@ -3739,6 +3753,13 @@ def main(argv: list[str] | None = None) -> int:
 
         _write_json(run_dir / "run_metadata.json", meta)
         return 0
+    except Exception as exc:
+        if run_dir is not None and isinstance(meta, dict):
+            try:
+                _mark_run_fatal_error(run_dir=run_dir, meta=meta, stage=current_stage, exc=exc)
+            except Exception:
+                pass
+        raise
     finally:
         _restore_shutdown_handlers(prev_handlers)
         if _SHUTDOWN_REQUESTED:
