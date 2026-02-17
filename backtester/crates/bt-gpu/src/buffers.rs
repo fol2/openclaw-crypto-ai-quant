@@ -434,7 +434,7 @@ const _: () = assert!(std::mem::size_of::<GpuPosition>() == 64);
 ///
 /// Stored in `GpuComboState::trace_events` ring buffer.
 ///
-/// 32 bytes.
+/// 40 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuTraceEvent {
@@ -445,10 +445,10 @@ pub struct GpuTraceEvent {
     pub reason: u32,
     pub price: f32,
     pub size: f32,
-    pub pnl: f32,
+    pub pnl: f64,
 }
 
-const _: () = assert!(std::mem::size_of::<GpuTraceEvent>() == 32);
+const _: () = assert!(std::mem::size_of::<GpuTraceEvent>() == 40);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GpuComboState — mutable state per combo (positions + accumulators)
@@ -465,9 +465,9 @@ const _: () = assert!(std::mem::size_of::<GpuTraceEvent>() == 32);
 /// 16 (header)
 /// + 52*64 (positions)
 /// + 3*52*4 (PESC)
-/// + 16 + 128*32 (trace control + ring)
+/// + 16 + 128*40 (trace control + ring)
 /// + 56 (accumulators) + 8 (pad)
-/// = 8,144 bytes
+/// = 9,168 bytes
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct GpuComboState {
@@ -508,7 +508,7 @@ pub struct GpuComboState {
 unsafe impl Pod for GpuComboState {}
 unsafe impl Zeroable for GpuComboState {}
 
-const _: () = assert!(std::mem::size_of::<GpuComboState>() == 8144);
+const _: () = assert!(std::mem::size_of::<GpuComboState>() == 9168);
 const _: () = assert!(std::mem::size_of::<GpuComboState>() % 16 == 0);
 
 // ═══════════════════════════════════════════════════════════════════════════
