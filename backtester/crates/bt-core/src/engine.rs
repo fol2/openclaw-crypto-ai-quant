@@ -1721,7 +1721,7 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
     let terminal_ts = if let Some(to) = to_ts {
         match timestamps.binary_search(&to) {
             Ok(i) => timestamps[i],
-            Err(0) => timestamps[0],
+            Err(0) => to,
             Err(i) => timestamps[i - 1],
         }
     } else {

@@ -1842,6 +1842,14 @@ extern "C" __global__ void sweep_engine_kernel(
     // Mirrors CPU backtester behaviour ("End of Backtest" closes at to_ts end).
     if (params->chunk_end >= params->trade_end_bar && params->num_bars > 0u) {
         unsigned int final_bar = params->trade_end_bar - 1u;
+        unsigned int terminal_t_sec = 0u;
+        for (unsigned int ts = 0u; ts < ns; ts++) {
+            const GpuRawCandle& term_mc = main_candles[final_bar * ns + ts];
+            if (term_mc.t_sec != 0u) {
+                terminal_t_sec = term_mc.t_sec;
+                break;
+            }
+        }
         for (unsigned int s = 0u; s < ns; s++) {
             if (state.positions[s].active == POS_EMPTY) { continue; }
             unsigned int close_bar = final_bar;
@@ -1860,9 +1868,8 @@ extern "C" __global__ void sweep_engine_kernel(
             }
             if (!found_close) { continue; }
             const GpuSnapshot& final_snap = snapshots[cfg.snapshot_offset + close_bar * ns + s];
-            const GpuSnapshot& terminal_snap = snapshots[cfg.snapshot_offset + final_bar * ns + s];
             GpuSnapshot close_snap = final_snap;
-            close_snap.t_sec = (terminal_snap.t_sec != 0u) ? terminal_snap.t_sec : final_snap.t_sec;
+            close_snap.t_sec = (terminal_t_sec != 0u) ? terminal_t_sec : final_snap.t_sec;
             apply_close(&state, s, close_snap, final_market_close, TRACE_REASON_EXIT_EOB, fee_rate, cfg.slippage_bps);
         }
     }
