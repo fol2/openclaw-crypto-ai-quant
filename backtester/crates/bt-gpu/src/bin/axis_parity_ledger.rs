@@ -339,6 +339,14 @@ fn main() {
 }
 
 fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
+    if !args.event_numeric_abs_tol.is_finite() || !args.event_numeric_rel_tol.is_finite() {
+        return Err(
+            "--event-numeric-abs-tol and --event-numeric-rel-tol must be finite values"
+                .to_string()
+                .into(),
+        );
+    }
+
     if args.fail_on_event_parity_mismatch && !args.trace_on_failure {
         return Err(
             "--fail-on-event-parity-mismatch requires --trace-on-failure=true"
@@ -1369,6 +1377,9 @@ fn diff_canonical_fields(
 }
 
 fn numeric_eq(a: f64, b: f64, tol: EventNumericTolerance) -> bool {
+    if !a.is_finite() || !b.is_finite() || !tol.abs.is_finite() || !tol.rel.is_finite() {
+        return false;
+    }
     let diff = (a - b).abs();
     if diff <= tol.abs {
         return true;
