@@ -468,53 +468,54 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 return None
             return v if v > 0 else None
 
-        new_positions: dict[str, dict] = {}
-        for sym, lp in live_positions.items():
-            prev = old_positions.get(sym) or {}
-            st = load_pos_state(sym)
-
-            # Crash recovery warning: if no in-memory state exists (cold start) and
-            # DB position_state has trailing_sl / adds_count, log it for visibility.
-            if not prev and st:
-                _db_tsl = st.get("trailing_sl")
-                _db_adds = st.get("adds_count")
-                if _db_tsl is not None or (_db_adds is not None and int(_db_adds or 0) > 0):
-                    print(
-                        f"⚠️ [{sym}] crash recovery: restoring trailing_sl={_db_tsl}, "
-                        f"adds_count={_db_adds} from position_state DB"
-                    )
-
-            entry_atr = _safe_float(prev.get("entry_atr"), 0.0)
-            if entry_atr <= 0:
-                entry_atr2 = load_last_entry_atr(sym)
-                if entry_atr2 is not None and entry_atr2 > 0:
-                    entry_atr = float(entry_atr2)
-
-            new_positions[sym] = {
-                "open_trade_id": prev.get("open_trade_id") or st.get("open_trade_id"),
-                "open_timestamp": prev.get("open_timestamp") or now_iso,
-                "type": lp.get("type") or prev.get("type"),
-                "entry_price": float(lp.get("entry_price") or prev.get("entry_price") or 0.0),
-                "size": float(lp.get("size") or prev.get("size") or 0.0),
-                "confidence": prev.get("confidence") or "N/A",
-                "entry_atr": float(entry_atr),
-                "entry_adx_threshold": float(prev.get("entry_adx_threshold") or st.get("entry_adx_threshold") or 0),
-                "trailing_sl": prev.get("trailing_sl")
-                if prev.get("trailing_sl") is not None
-                else st.get("trailing_sl"),
-                "last_funding_time": int(prev.get("last_funding_time") or st.get("last_funding_time") or now_ms),
-                "leverage": float(lp.get("leverage") or prev.get("leverage") or 1.0),
-                "margin_used": float(lp.get("margin_used") or prev.get("margin_used") or 0.0),
-                "adds_count": int(prev.get("adds_count") or st.get("adds_count") or 0),
-                "tp1_taken": int(prev.get("tp1_taken") or st.get("tp1_taken") or 0),
-                "last_add_time": int(prev.get("last_add_time") or st.get("last_add_time") or 0),
-            }
-
         try:
-            if db_conn is not None:
-                db_conn.close()
-        except Exception as e:
-            logger.debug("failed to close db connection: %s", e, exc_info=True)
+            new_positions: dict[str, dict] = {}
+            for sym, lp in live_positions.items():
+                prev = old_positions.get(sym) or {}
+                st = load_pos_state(sym)
+
+                # Crash recovery warning: if no in-memory state exists (cold start) and
+                # DB position_state has trailing_sl / adds_count, log it for visibility.
+                if not prev and st:
+                    _db_tsl = st.get("trailing_sl")
+                    _db_adds = st.get("adds_count")
+                    if _db_tsl is not None or (_db_adds is not None and int(_db_adds or 0) > 0):
+                        print(
+                            f"⚠️ [{sym}] crash recovery: restoring trailing_sl={_db_tsl}, "
+                            f"adds_count={_db_adds} from position_state DB"
+                        )
+
+                entry_atr = _safe_float(prev.get("entry_atr"), 0.0)
+                if entry_atr <= 0:
+                    entry_atr2 = load_last_entry_atr(sym)
+                    if entry_atr2 is not None and entry_atr2 > 0:
+                        entry_atr = float(entry_atr2)
+
+                new_positions[sym] = {
+                    "open_trade_id": prev.get("open_trade_id") or st.get("open_trade_id"),
+                    "open_timestamp": prev.get("open_timestamp") or now_iso,
+                    "type": lp.get("type") or prev.get("type"),
+                    "entry_price": float(lp.get("entry_price") or prev.get("entry_price") or 0.0),
+                    "size": float(lp.get("size") or prev.get("size") or 0.0),
+                    "confidence": prev.get("confidence") or "N/A",
+                    "entry_atr": float(entry_atr),
+                    "entry_adx_threshold": float(prev.get("entry_adx_threshold") or st.get("entry_adx_threshold") or 0),
+                    "trailing_sl": prev.get("trailing_sl")
+                    if prev.get("trailing_sl") is not None
+                    else st.get("trailing_sl"),
+                    "last_funding_time": int(prev.get("last_funding_time") or st.get("last_funding_time") or now_ms),
+                    "leverage": float(lp.get("leverage") or prev.get("leverage") or 1.0),
+                    "margin_used": float(lp.get("margin_used") or prev.get("margin_used") or 0.0),
+                    "adds_count": int(prev.get("adds_count") or st.get("adds_count") or 0),
+                    "tp1_taken": int(prev.get("tp1_taken") or st.get("tp1_taken") or 0),
+                    "last_add_time": int(prev.get("last_add_time") or st.get("last_add_time") or 0),
+                }
+        finally:
+            try:
+                if db_conn is not None:
+                    db_conn.close()
+            except Exception as e:
+                logger.debug("failed to close db connection: %s", e, exc_info=True)
 
         self.positions = new_positions
         # Clear pending OPEN intents once we see the position in exchange state.
