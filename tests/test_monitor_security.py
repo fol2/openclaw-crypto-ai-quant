@@ -15,7 +15,7 @@ def test_check_api_auth_uses_constant_time_compare(monkeypatch) -> None:
     monkeypatch.setenv("AIQ_MONITOR_TOKEN", "super-secret")
     called: dict[str, object] = {}
 
-    def _fake_compare_digest(left: str, right: str) -> bool:
+    def _fake_compare_digest(left: bytes, right: bytes) -> bool:
         called["left"] = left
         called["right"] = right
         return True
@@ -23,8 +23,25 @@ def test_check_api_auth_uses_constant_time_compare(monkeypatch) -> None:
     monkeypatch.setattr(monitor_server.hmac, "compare_digest", _fake_compare_digest)
 
     assert handler._check_api_auth() is True
-    assert called["left"] == "Bearer super-secret"
-    assert called["right"] == "Bearer super-secret"
+    assert called["left"] == b"Bearer super-secret"
+    assert called["right"] == b"Bearer super-secret"
+
+
+def test_check_api_auth_non_ascii_header_returns_401_without_exception(monkeypatch) -> None:
+    handler = object.__new__(monitor_server.Handler)
+    handler.headers = {"Authorization": "Bearer bad-\u2603"}
+
+    sent: dict[str, object] = {}
+
+    def _fake_send_json(obj, status: int = 200) -> None:
+        sent["status"] = int(status)
+        sent["obj"] = obj
+
+    handler._send_json = _fake_send_json
+    monkeypatch.setenv("AIQ_MONITOR_TOKEN", "super-secret")
+
+    assert handler._check_api_auth() is False
+    assert sent["status"] == 401
 
 
 def test_do_post_rejects_payload_larger_than_limit(monkeypatch) -> None:

@@ -2767,8 +2767,9 @@ class Handler(BaseHTTPRequestHandler):
         if not token:
             return True
         auth = str(self.headers.get("Authorization", "") or "")
-        expected = f"Bearer {token}"
-        if hmac.compare_digest(auth, expected):
+        expected = f"Bearer {token}".encode("utf-8", errors="replace")
+        auth_bytes = auth.encode("utf-8", errors="replace")
+        if hmac.compare_digest(auth_bytes, expected):
             return True
         self._send_json({"error": "unauthorized"}, status=401)
         return False
