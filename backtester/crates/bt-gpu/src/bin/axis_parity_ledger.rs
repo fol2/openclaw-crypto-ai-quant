@@ -1321,7 +1321,6 @@ fn canonical_events_equal(
         && a.event_type == b.event_type
         && a.status == b.status
         && a.decision_phase == b.decision_phase
-        && a.triggered_by == b.triggered_by
         && a.reason_code == b.reason_code
         && numeric_eq(a.price, b.price, event_tol)
         && numeric_eq(a.size, b.size, event_tol)
@@ -1357,9 +1356,6 @@ fn diff_canonical_fields(
     }
     if a.decision_phase != b.decision_phase {
         diff.push("decision_phase".to_string());
-    }
-    if a.triggered_by != b.triggered_by {
-        diff.push("triggered_by".to_string());
     }
     if a.reason_code != b.reason_code {
         diff.push("reason_code".to_string());
