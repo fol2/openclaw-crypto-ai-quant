@@ -32,8 +32,8 @@ def _get_decision_event_fn():
             from strategy.mei_alpha_v1 import create_decision_event
 
             _decision_event_fn = create_decision_event
-        except Exception:
-            logging.getLogger(__name__).debug("mei_alpha_v1.create_decision_event import failed", exc_info=True)
+        except (ImportError, AttributeError):
+            logging.getLogger(__name__).warning("mei_alpha_v1.create_decision_event import failed", exc_info=True)
             _decision_event_fn = False  # sentinel: import failed, don't retry
     return _decision_event_fn if _decision_event_fn else None
 
@@ -2404,10 +2404,18 @@ class UnifiedEngine:
                 self.stats.loop_errors += 1
                 logger.error(f"🔥 Engine loop error\n{traceback.format_exc()}")
             finally:
+                if _shutdown_requested:
+                    continue
                 # Align sleep to wall-clock boundaries (e.g., :00 for 60s target).
                 # This ensures loops fire at predictable times matching candle closes.
                 now = time.time()
                 interval = int(self._loop_target_s) or 1
                 next_boundary = ((int(now) // interval) + 1) * interval
                 sleep_s = max(0.1, next_boundary - now)
-                time.sleep(sleep_s)
+                # Sleep in short chunks so SIGTERM can stop promptly even during boundary sleep.
+                deadline = now + sleep_s
+                while not _shutdown_requested:
+                    remain = deadline - time.time()
+                    if remain <= 0:
+                        break
+                    time.sleep(min(0.25, remain))
