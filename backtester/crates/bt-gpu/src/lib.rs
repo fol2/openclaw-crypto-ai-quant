@@ -3,10 +3,6 @@ pub mod buffers;
 pub mod gpu_host;
 pub mod layout;
 pub mod precision;
-/// Legacy CPU-side indicator precompute path, superseded by the all-GPU
-/// indicator kernel pipeline. Retained for reference and potential fallback.
-#[allow(dead_code)]
-mod precompute;
 pub mod raw_candles;
 pub mod tpe_sweep;
 
