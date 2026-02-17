@@ -57,6 +57,14 @@ def test_configure_live_db_connection_applies_wal_pragmas():
     ]
 
 
+def test_configure_live_db_connection_swallows_pragma_errors():
+    class _FailingConn:
+        def execute(self, *_args, **_kwargs):
+            raise RuntimeError("boom")
+
+    live_trader._configure_live_db_connection(_FailingConn())
+
+
 def test_sync_from_exchange_configures_wal(monkeypatch):
     conn = _FakeConn()
     wal_calls: list[_FakeConn] = []
