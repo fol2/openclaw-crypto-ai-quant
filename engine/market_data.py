@@ -280,7 +280,7 @@ class MarketDataHub:
             try:
                 self._ws.stop()
             except Exception:
-                pass
+                logger.debug("WS stop() failed during restart", exc_info=True)
 
             # Recreate the module-global singleton so other imports pick it up too.
             self._ws_mod.hl_ws = self._ws_mod.HyperliquidWS()
@@ -343,12 +343,12 @@ class MarketDataHub:
             try:
                 if tclose_ms is not None:
                     return int(tclose_ms)
-            except Exception:
+            except (TypeError, ValueError):
                 pass
             try:
                 if t_ms is not None:
                     return int(t_ms)
-            except Exception:
+            except (TypeError, ValueError):
                 return None
             return None
 
@@ -356,7 +356,7 @@ class MarketDataHub:
         try:
             if tclose0 is not None and int(now) < (int(tclose0) - int(grace)) and t1 is not None:
                 return _key_for(t1, tclose1)
-        except Exception:
+        except (TypeError, ValueError):
             pass
 
         return _key_for(t0, tclose0)
@@ -372,7 +372,7 @@ class MarketDataHub:
                 if t_ms is not None:
                     return int(t_ms)
             except Exception:
-                pass
+                logger.debug("get_latest_candle_times failed for %s@%s", symbol, interval, exc_info=True)
 
         # Fallback: read private cache (still safe, but not ideal).
         try:
@@ -389,6 +389,7 @@ class MarketDataHub:
                 t_ms = last.get("timestamp") or last_t
                 return int(t_ms)
         except Exception:
+            logger.debug("WS candle cache read failed for %s@%s", symbol, interval, exc_info=True)
             return None
 
     def _ws_last_closed_candle_key(self, symbol: str, interval: str, *, grace_ms: int) -> int | None:
@@ -402,7 +403,7 @@ class MarketDataHub:
                 if tclose_ms is not None:
                     return int(tclose_ms)
             except Exception:
-                pass
+                logger.debug("get_last_closed_candle_times failed for %s@%s", symbol, interval, exc_info=True)
 
         # Fallback: read private cache.
         try:
@@ -434,15 +435,16 @@ class MarketDataHub:
                                 return int(tclose_prev)
                             return int(prev.get("timestamp") or keys[-2])
                         return int(tclose_i)
-                    except Exception:
-                        pass
+                    except (TypeError, ValueError):
+                        logger.debug("candle close key parse failed for %s@%s", symbol, interval, exc_info=True)
 
                 # No close time. Best-effort return the last open time.
                 try:
                     return int(last.get("timestamp") or last_t)
-                except Exception:
+                except (TypeError, ValueError):
                     return None
         except Exception:
+            logger.debug("WS closed candle cache read failed for %s@%s", symbol, interval, exc_info=True)
             return None
 
     def _candle_db_path(self, interval: str) -> str:
@@ -586,7 +588,7 @@ class MarketDataHub:
                 if px > 0:
                     return PriceQuote(symbol=sym, price=px, source="candle_close", age_s=None)
             except Exception:
-                pass
+                logger.debug("candle close price extraction failed for %s", sym, exc_info=True)
 
         return None
 
@@ -717,7 +719,7 @@ class MarketDataHub:
                             expected_interval_ms / 1000.0,
                         )
             except Exception:
-                pass
+                logger.debug("candle gap detection failed for %s@%s", symbol, interval, exc_info=True)
 
         return df
 
@@ -823,7 +825,7 @@ class MarketDataHub:
                 fut2.add_done_callback(lambda f, k=key: self._on_rest_candle_backfill_done(k, f))
             except Exception:
                 # If callbacks are unavailable for some reason, we'll clean up on the next call.
-                pass
+                logger.debug("failed to attach REST candle backfill callback for %s", key, exc_info=True)
 
     def close(self):
         if self._rest_candle_pool is not None:

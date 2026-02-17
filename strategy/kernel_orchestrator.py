@@ -877,7 +877,7 @@ class KernelCandleDecisionProvider:
                 if global_cfg:
                     effective_cfg = global_cfg
             except Exception:
-                pass
+                logger.debug("failed to get strategy global config for indicator computation", exc_info=True)
 
         decisions: list[Any] = []
 
@@ -1002,5 +1002,5 @@ def _json_default(o: Any) -> Any:
         if hasattr(o, "item"):
             return o.item()
     except Exception:
-        pass
+        logger.debug("_json_default: .item() failed for %s, falling back to str()", type(o).__name__)
     return str(o)

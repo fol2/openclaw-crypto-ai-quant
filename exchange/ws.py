@@ -54,7 +54,7 @@ def _ensure_db():
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
     except Exception:
-        pass
+        logger.debug("PRAGMA setup failed for candle DB", exc_info=True)
     cursor = conn.cursor()
     cursor.execute(
         """
@@ -242,7 +242,7 @@ class HyperliquidWS:
                     ws_app.send(json.dumps({"method": "subscribe", "subscription": sub}))
                 except Exception:
                     # A reconnect will re-send the full subscription set.
-                    pass
+                    logger.debug("WS subscribe send failed (will retry on reconnect)", exc_info=True)
 
     def stop(self):
         self._stop_event.set()
@@ -252,7 +252,7 @@ class HyperliquidWS:
             try:
                 ws_app.close()
             except Exception:
-                pass
+                logger.debug("WS close failed during stop()", exc_info=True)
 
     def status(self) -> dict[str, bool]:
         with self._lock:
@@ -271,7 +271,7 @@ class HyperliquidWS:
                 try:
                     self._ws_app.close()
                 except Exception:
-                    pass
+                    logger.debug("WS close failed during restart()", exc_info=True)
             t = self._thread
             p = self._ping_thread
 
@@ -280,12 +280,12 @@ class HyperliquidWS:
             try:
                 t.join(timeout=float(join_timeout_s))
             except Exception:
-                pass
+                logger.debug("WS thread join failed during restart()", exc_info=True)
         if p is not None:
             try:
                 p.join(timeout=float(join_timeout_s))
             except Exception:
-                pass
+                logger.debug("WS ping thread join failed during restart()", exc_info=True)
 
         with self._lock:
             self._restarting = True
@@ -311,17 +311,18 @@ class HyperliquidWS:
             try:
                 last_t = next(reversed(od))
             except Exception:
+                logger.debug("candle key lookup failed for %s@%s", symbol, interval, exc_info=True)
                 return None, None
             last = od.get(last_t) or {}
             t_open = last.get("timestamp") or last_t
             t_close = last.get("T")
             try:
                 t_open_i = int(t_open) if t_open is not None else None
-            except Exception:
+            except (TypeError, ValueError):
                 t_open_i = None
             try:
                 t_close_i = int(t_close) if t_close is not None else None
-            except Exception:
+            except (TypeError, ValueError):
                 t_close_i = None
             return t_open_i, t_close_i
 
@@ -363,14 +364,14 @@ class HyperliquidWS:
                             int(t_open2) if t_open2 is not None else None,
                             int(t_close2) if t_close2 is not None else None,
                         )
-                    except Exception:
+                    except (TypeError, ValueError):
                         return None, None
-            except Exception:
-                pass
+            except (TypeError, ValueError):
+                logger.debug("candle close time comparison failed", exc_info=True)
 
             try:
                 return int(t_open) if t_open is not None else None, int(t_close) if t_close is not None else None
-            except Exception:
+            except (TypeError, ValueError):
                 return None, None
 
     def health(self, *, symbols: list[str], interval: str) -> WsHealth:
@@ -459,7 +460,7 @@ class HyperliquidWS:
         while q and (max_items is None or len(items) < int(max_items)):
             try:
                 items.append(q.popleft())
-            except Exception:
+            except IndexError:
                 break
         return items
 
@@ -510,7 +511,7 @@ class HyperliquidWS:
                 if conn is not None:
                     conn.close()
             except Exception:
-                pass
+                logger.debug("failed to close candle DB connection (load)", exc_info=True)
 
         od: OrderedDict[int, dict] = OrderedDict()
         for t_ms, T_ms, o, h, l, c, v, n in reversed(rows):
@@ -574,7 +575,7 @@ class HyperliquidWS:
                 if conn is not None:
                     conn.close()
             except Exception:
-                pass
+                logger.debug("failed to close candle DB connection (persist)", exc_info=True)
 
     def _on_open(self, ws):
         with self._lock:
@@ -617,7 +618,7 @@ class HyperliquidWS:
                     try:
                         self._mids[sym] = float(mid)
                         self._mids_updated_at[sym] = now
-                    except Exception:
+                    except (TypeError, ValueError):
                         continue
             return
 
@@ -637,7 +638,7 @@ class HyperliquidWS:
             try:
                 bid = float(bbo[0].get("px"))
                 ask = float(bbo[1].get("px"))
-            except Exception:
+            except (TypeError, ValueError, KeyError, IndexError):
                 return
             with self._lock:
                 self._bbo[sym] = (bid, ask)
@@ -665,7 +666,8 @@ class HyperliquidWS:
                     "Volume": float(data["v"]),
                     "n": int(data["n"]) if data.get("n") is not None else None,
                 }
-            except Exception:
+            except (TypeError, ValueError, KeyError) as exc:
+                logger.debug("candle message parse failed: %s", exc)
                 return
 
             key = (sym, interval)
@@ -708,7 +710,7 @@ class HyperliquidWS:
                         if len(self._user_fills) >= HL_WS_MAX_EVENT_QUEUE:
                             try:
                                 self._user_fills.popleft()
-                            except Exception:
+                            except IndexError:
                                 pass
                             logger.warning(
                                 "user_fills queue limit hit (%d); oldest item evicted", HL_WS_MAX_EVENT_QUEUE
@@ -725,7 +727,7 @@ class HyperliquidWS:
                 if len(self._order_updates) >= HL_WS_MAX_EVENT_QUEUE:
                     try:
                         self._order_updates.popleft()
-                    except Exception:
+                    except IndexError:
                         pass
                     logger.warning("order_updates queue limit hit (%d); oldest item evicted", HL_WS_MAX_EVENT_QUEUE)
                 self._order_updates.append({"t": now, "data": data})
@@ -740,7 +742,7 @@ class HyperliquidWS:
                 if len(self._user_fundings) >= HL_WS_MAX_EVENT_QUEUE:
                     try:
                         self._user_fundings.popleft()
-                    except Exception:
+                    except IndexError:
                         pass
                     logger.warning("user_fundings queue limit hit (%d); oldest item evicted", HL_WS_MAX_EVENT_QUEUE)
                 self._user_fundings.append({"t": now, "data": data})
@@ -755,7 +757,7 @@ class HyperliquidWS:
                 if len(self._user_ledger_updates) >= HL_WS_MAX_EVENT_QUEUE:
                     try:
                         self._user_ledger_updates.popleft()
-                    except Exception:
+                    except IndexError:
                         pass
                     logger.warning(
                         "user_ledger_updates queue limit hit (%d); oldest item evicted", HL_WS_MAX_EVENT_QUEUE
@@ -786,7 +788,7 @@ class HyperliquidWS:
             try:
                 ws_app.send(json.dumps({"method": "ping"}))
             except Exception:
-                pass
+                logger.debug("WS ping send failed", exc_info=True)
 
     def _run(self):
         ws = websocket.WebSocketApp(

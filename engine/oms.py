@@ -244,7 +244,7 @@ class OmsStore:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
         except Exception:
-            pass
+            logger.debug("PRAGMA setup failed for OMS DB", exc_info=True)
         return conn
 
     def ensure(self) -> None:
@@ -956,7 +956,7 @@ class LiveOms:
 
             mei_alpha_v1.ensure_db()
         except Exception:
-            pass
+            logger.debug("mei_alpha_v1.ensure_db() failed during OMS init", exc_info=True)
 
         # Exposed to the daemon for health checks / alerts.
         self.last_ingest_stats: dict[str, Any] = {}
@@ -1049,7 +1049,7 @@ class LiveOms:
             strategy_version = snap.version
             strategy_sha1 = snap.overrides_sha1
         except Exception:
-            pass
+            logger.debug("failed to get strategy snapshot for OMS intent", exc_info=True)
 
         meta2 = dict(meta or {})
         # Inject strategy snapshot even if caller didn't.
@@ -1059,7 +1059,7 @@ class LiveOms:
                 meta2["strategy"].setdefault("version", strategy_version)
                 meta2["strategy"].setdefault("overrides_sha1", strategy_sha1)
         except Exception:
-            pass
+            logger.debug("failed to inject strategy snapshot into OMS intent meta", exc_info=True)
 
         meta_json = json_dumps_safe(meta2) if meta2 else None
 
@@ -1097,7 +1097,7 @@ class LiveOms:
                         existing_client = upgraded
                     except Exception:
                         # If we cannot update, keep the stored value to avoid lying to the caller.
-                        pass
+                        logger.debug("failed to upgrade cloid for intent %s", existing_id, exc_info=True)
                 return IntentHandle(
                     intent_id=str(existing_id),
                     client_order_id=existing_client,
@@ -1267,7 +1267,7 @@ class LiveOms:
                 data={"expired": int(n), "cutoff_ms": int(cutoff)},
             )
         except Exception:
-            pass
+            logger.debug("failed to log OMS_EXPIRE_INTENTS audit event", exc_info=True)
 
         self._maybe_reconcile_unmatched_fills(trader=trader)
 
@@ -1282,7 +1282,7 @@ class LiveOms:
             self.reconcile_unmatched_fills(trader=trader)
         except Exception:
             # Never let reconciliation break the main loop.
-            pass
+            logger.warning("reconcile_unmatched_fills failed", exc_info=True)
 
     def reconcile_unmatched_fills(self, *, trader: Any | None = None) -> dict[str, Any]:
         """Best-effort: resolve fills that were ingested without an OMS intent.
@@ -1485,7 +1485,7 @@ class LiveOms:
                             (int(ts_ms), (str(oid) if oid else None), str(intent_id)),
                         )
                     except Exception:
-                        pass
+                        logger.debug("failed to update OMS intent for manual reconcile", exc_info=True)
 
                     manual += 1
 
@@ -1499,7 +1499,7 @@ class LiveOms:
                         (str(intent_id), str(matched_via), int(fill_row_id)),
                     )
                 except Exception:
-                    pass
+                    logger.debug("failed to update OMS fill row for reconcile", exc_info=True)
 
                 # Best-effort update corresponding trades.meta_json.
                 if has_trade_meta:
@@ -1532,7 +1532,7 @@ class LiveOms:
                                 (json_dumps_safe(obj), int(trade_id)),
                             )
                     except Exception:
-                        pass
+                        logger.debug("failed to update trades.meta_json for reconcile", exc_info=True)
 
                 if len(samples) < 5:
                     try:
@@ -1547,7 +1547,7 @@ class LiveOms:
                             }
                         )
                     except Exception:
-                        pass
+                        logger.debug("failed to build reconcile sample entry", exc_info=True)
 
             conn.commit()
 
@@ -1576,14 +1576,14 @@ class LiveOms:
                     )
                     conn.commit()
             except Exception:
-                pass
+                logger.debug("failed to record reconcile event", exc_info=True)
 
         finally:
             try:
                 if conn is not None:
                     conn.close()
             except Exception:
-                pass
+                logger.debug("failed to close OMS DB after reconcile", exc_info=True)
 
         _elapsed = time.monotonic() - _t0
         if _elapsed > 2.0:
@@ -1727,12 +1727,12 @@ class LiveOms:
             if isinstance(meta2.get("audit"), dict):
                 meta_sig["audit"] = meta2.get("audit")
         except Exception:
-            pass
+            logger.debug("failed to extract audit from meta for signal backfill", exc_info=True)
         try:
             if isinstance(meta2.get("order"), dict):
                 meta_sig["order"] = meta2.get("order")
         except Exception:
-            pass
+            logger.debug("failed to extract order from meta for signal backfill", exc_info=True)
         meta_sig["backfill"] = {
             "source": "oms_fill_ingest",
             "reason": reason_s,
@@ -1923,7 +1923,7 @@ class LiveOms:
             try:
                 conn.close()
             except Exception:
-                pass
+                logger.debug("failed to close DB connection after signal backfill", exc_info=True)
 
     def process_user_fills(self, *, trader: Any, fills: list[dict]) -> int:
         """Persist live fills into trades + OMS tables.
@@ -2021,7 +2021,7 @@ class LiveOms:
                         (int(t_ms), "userFills", json.dumps(f, separators=(",", ":"), sort_keys=True, default=str)),
                     )
                 except Exception:
-                    pass
+                    logger.debug("failed to insert ws_events row for fill %s", sym, exc_info=True)
 
                 px = _safe_float(f.get("px"), None)
                 sz = _safe_float(f.get("sz"), None)
@@ -2072,8 +2072,8 @@ class LiveOms:
                             ctx_meta = json.loads(mj)
                             if isinstance(ctx_meta, dict):
                                 ctx["meta"] = ctx_meta
-                    except Exception:
-                        pass
+                    except (json.JSONDecodeError, TypeError):
+                        logger.debug("failed to parse intent meta_json for fill context", exc_info=True)
 
                 # Fallback to the in-memory pending ctx (best for immediate fills).
                 if (not ctx.get("confidence")) or (not ctx.get("reason")):
@@ -2086,7 +2086,7 @@ class LiveOms:
                                     if ctx.get(k) is None and ctx2.get(k) is not None:
                                         ctx[k] = ctx2.get(k)
                     except Exception:
-                        pass
+                        logger.debug("failed to pop pending context for %s", sym, exc_info=True)
 
                 conf = str(ctx.get("confidence") or "N/A")
                 entry_atr = _safe_float(ctx.get("entry_atr"), None)
@@ -2124,7 +2124,7 @@ class LiveOms:
                     if isinstance(ctx.get("meta"), dict):
                         meta.update(ctx.get("meta") or {})
                 except Exception:
-                    pass
+                    logger.debug("failed to merge pending ctx meta for %s", sym, exc_info=True)
 
                 meta.setdefault("fill", f)
                 meta.setdefault("oms", {})
@@ -2180,7 +2180,7 @@ class LiveOms:
                     else:
                         deduped_oms_fills += 1
                 except Exception:
-                    pass
+                    logger.debug("OMS fill insert/dedupe failed for %s", sym, exc_info=True)
 
                 # Best-effort: if we matched an intent, attach the exchange order id from the fill (oid).
                 try:
@@ -2191,7 +2191,7 @@ class LiveOms:
                             (str(oid), str(intent_id)),
                         )
                 except Exception:
-                    pass
+                    logger.debug("failed to attach exchange_order_id to OMS intent for %s", sym, exc_info=True)
 
                 # Insert into trades (dedupe if schema supports it).
                 if has_dedupe:
@@ -2348,7 +2348,7 @@ class LiveOms:
                                     }
                                 )
                             except Exception:
-                                pass
+                                logger.debug("unmatched_fills audit event failed for %s", sym, exc_info=True)
                 else:
                     deduped_trades += 1
 
@@ -2360,7 +2360,7 @@ class LiveOms:
                     try:
                         if isinstance(meta.get("order"), dict):
                             sig2 = meta.get("order", {}).get("signal")
-                    except Exception:
+                    except (TypeError, KeyError):
                         sig2 = None
                     sig2_u = str(sig2 or side or "").strip().upper()
                     try:
@@ -2378,7 +2378,7 @@ class LiveOms:
                             meta=meta,
                         )
                     except Exception:
-                        pass
+                        logger.debug("failed to backfill signal for %s", sym, exc_info=True)
 
                 # If we matched an intent, update its status.
                 if intent_id:
@@ -2411,7 +2411,7 @@ class LiveOms:
                                 (str(intent_id),),
                             )
                     except Exception:
-                        pass
+                        logger.debug("failed to update OMS intent status for %s", sym, exc_info=True)
 
                 # Notifications/logging should be idempotent. REST backfill replays fills.
                 # Only announce when the fill was newly persisted (OMS or trades).
@@ -2462,7 +2462,7 @@ class LiveOms:
                                 if callable(upsert):
                                     upsert(sym)
                 except Exception:
-                    pass
+                    logger.debug("failed to update in-memory position state for %s", sym, exc_info=True)
 
             conn.commit()
 
@@ -2504,9 +2504,10 @@ class LiveOms:
                                 ref_ask=ref_ask,
                             )
                         except Exception:
+                            logger.debug("risk.note_fill failed for %s", row.get("symbol"), exc_info=True)
                             continue
             except Exception:
-                pass
+                logger.debug("post-commit risk state update failed", exc_info=True)
 
             # After commit: send notifications and console logs once per new fill.
             if notify_rows:
@@ -2533,18 +2534,18 @@ class LiveOms:
                                 withdrawable_usd=float(row.get("withdrawable") or 0.0),
                             )
                         except Exception:
-                            pass
+                            logger.debug("fill notification send failed for %s", row.get("symbol"), exc_info=True)
 
                     # Console
                     lev = row.get("leverage")
                     margin_used = row.get("margin_used")
                     try:
                         lev_s = "NA" if lev is None or float(lev) <= 0 else f"{float(lev):.0f}x"
-                    except Exception:
+                    except (TypeError, ValueError):
                         lev_s = "NA"
                     try:
                         margin_s = "NA" if margin_used is None else f"${float(margin_used):.2f}"
-                    except Exception:
+                    except (TypeError, ValueError):
                         margin_s = "NA"
                     try:
                         print(
@@ -2554,7 +2555,7 @@ class LiveOms:
                             f"conf={row.get('confidence', 'N/A')} reason={row.get('reason', '')}"
                         )
                     except Exception:
-                        pass
+                        logger.debug("fill console print failed", exc_info=True)
 
             # After commit: update kernel state from confirmed fills and reconcile positions.
             # Only newly-inserted fills (notify_rows) are processed — OMS fill_hash dedup
@@ -2563,14 +2564,14 @@ class LiveOms:
                 try:
                     self._update_kernel_for_fills(notify_rows, trader)
                 except Exception:
-                    pass
+                    logger.warning("_update_kernel_for_fills failed", exc_info=True)
 
         except Exception as e:
             try:
                 if conn is not None:
                     conn.rollback()
             except Exception:
-                pass
+                logger.debug("rollback failed after fill processing error", exc_info=True)
             self.last_ingest_stats = {
                 "success": False,
                 "error": str(e),
@@ -2589,7 +2590,7 @@ class LiveOms:
                 if conn is not None:
                     conn.close()
             except Exception:
-                pass
+                logger.debug("failed to close OMS DB connection after fill processing", exc_info=True)
 
         self.last_ingest_stats = {
             "success": True,
