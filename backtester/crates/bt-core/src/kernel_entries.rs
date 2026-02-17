@@ -6,8 +6,10 @@
 
 use crate::indicators::IndicatorSnapshot;
 use crate::signals::gates::GateResult;
-use bt_signals::{Confidence, MacdMode, Signal, SignalConfigView, EntryThresholdsView,
-    StochRsiThresholdsView, ThresholdsView, FiltersView, TradeView};
+use bt_signals::{
+    Confidence, EntryThresholdsView, FiltersView, MacdMode, Signal, SignalConfigView,
+    StochRsiThresholdsView, ThresholdsView, TradeView,
+};
 use serde::{Deserialize, Serialize};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -323,7 +325,10 @@ mod tests {
         let params = EntryParams::default();
         let result = evaluate_entry(&snap, &gates, &params, 0.0);
         assert_eq!(result.signal, Signal::Buy);
-        assert!(result.confidence >= 1, "should be at least Medium confidence");
+        assert!(
+            result.confidence >= 1,
+            "should be at least Medium confidence"
+        );
     }
 
     #[test]
@@ -333,7 +338,10 @@ mod tests {
         let params = EntryParams::default();
         let result = evaluate_entry(&snap, &gates, &params, 0.0);
         assert_eq!(result.signal, Signal::Sell);
-        assert!(result.confidence >= 1, "should be at least Medium confidence");
+        assert!(
+            result.confidence >= 1,
+            "should be at least Medium confidence"
+        );
     }
 
     #[test]

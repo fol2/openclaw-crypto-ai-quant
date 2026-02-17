@@ -167,13 +167,7 @@ mod tests {
         assert_eq!(open.fee_usd, 3.5);
         assert_eq!(open.cash_delta, -10_003.5);
 
-        let close = apply_close_fill(
-            true,
-            10_000.0,
-            10_200.0,
-            0.001,
-            DEFAULT_TAKER_FEE_RATE,
-        );
+        let close = apply_close_fill(true, 10_000.0, 10_200.0, 0.001, DEFAULT_TAKER_FEE_RATE);
         assert_eq!(close.notional, 10.2);
         assert_eq!(close.fee_usd, 0.00357);
         assert_eq!(close.pnl, 0.2);

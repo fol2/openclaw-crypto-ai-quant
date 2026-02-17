@@ -128,9 +128,9 @@ pub fn check_tp(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Confidence;
     use crate::indicators::IndicatorSnapshot;
     use crate::position::{Position, PositionType};
-    use crate::config::Confidence;
 
     fn default_snap(close: f64) -> IndicatorSnapshot {
         IndicatorSnapshot {

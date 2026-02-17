@@ -1,6 +1,6 @@
 use bt_core::candle::{CandleData, OhlcvBar};
 use bt_core::config::{Confidence, MacdMode, StrategyConfig};
-use bt_core::engine::run_simulation;
+use bt_core::engine::{run_simulation, RunSimulationInput};
 use rustc_hash::FxHashMap;
 
 fn candle(t: i64, close: f64) -> OhlcvBar {
@@ -99,31 +99,31 @@ fn bar_close_vs_partial_bar_exits_close_earlier() {
         },
     );
 
-    let with_exit = run_simulation(
-        &candles,
-        &cfg,
-        1_000.0,
-        0,
-        Some(&exit_candles),
-        None,
-        None,
-        Some((1_000.0, pos.clone())),
-        None,
-        None,
-    );
+    let with_exit = run_simulation(RunSimulationInput {
+        candles: &candles,
+        cfg: &cfg,
+        initial_balance: 1_000.0,
+        lookback: 0,
+        exit_candles: Some(&exit_candles),
+        entry_candles: None,
+        funding_rates: None,
+        init_state: Some((1_000.0, pos.clone(), FxHashMap::default(), FxHashMap::default())),
+        from_ts: None,
+        to_ts: None,
+    });
 
-    let without_exit = run_simulation(
-        &candles,
-        &cfg,
-        1_000.0,
-        0,
-        None,
-        None,
-        None,
-        Some((1_000.0, pos)),
-        None,
-        None,
-    );
+    let without_exit = run_simulation(RunSimulationInput {
+        candles: &candles,
+        cfg: &cfg,
+        initial_balance: 1_000.0,
+        lookback: 0,
+        exit_candles: None,
+        entry_candles: None,
+        funding_rates: None,
+        init_state: Some((1_000.0, pos, FxHashMap::default(), FxHashMap::default())),
+        from_ts: None,
+        to_ts: None,
+    });
 
     assert!(with_exit.final_balance < without_exit.final_balance);
     let exit_trade = with_exit
@@ -148,11 +148,26 @@ fn warmup_bar_count_blocks_entry_until_lookback_boundary() {
     let mut candles: CandleData = FxHashMap::default();
     candles.insert(
         "BTC".to_string(),
-        vec![candle(0, 100.0), candle(60_000, 101.0), candle(120_000, 102.0)],
+        vec![
+            candle(0, 100.0),
+            candle(60_000, 101.0),
+            candle(120_000, 102.0),
+        ],
     );
 
     let cfg = permissive_cfg();
-    let sim = run_simulation(&candles, &cfg, 1_000.0, 2, None, None, None, None, None, None);
+    let sim = run_simulation(RunSimulationInput {
+        candles: &candles,
+        cfg: &cfg,
+        initial_balance: 1_000.0,
+        lookback: 2,
+        exit_candles: None,
+        entry_candles: None,
+        funding_rates: None,
+        init_state: None,
+        from_ts: None,
+        to_ts: None,
+    });
 
     let opens: Vec<_> = sim
         .trades
@@ -176,7 +191,11 @@ fn missing_candle_delays_symbol_eligibility_for_entry() {
     let mut candles: CandleData = FxHashMap::default();
     candles.insert(
         "BTC".to_string(),
-        vec![candle(0, 100.0), candle(60_000, 101.0), candle(120_000, 102.0)],
+        vec![
+            candle(0, 100.0),
+            candle(60_000, 101.0),
+            candle(120_000, 102.0),
+        ],
     );
     // ETH misses the middle bar and therefore warms later.
     candles.insert(
@@ -185,7 +204,18 @@ fn missing_candle_delays_symbol_eligibility_for_entry() {
     );
 
     let cfg = permissive_cfg();
-    let sim = run_simulation(&candles, &cfg, 1_000.0, 2, None, None, None, None, None, None);
+    let sim = run_simulation(RunSimulationInput {
+        candles: &candles,
+        cfg: &cfg,
+        initial_balance: 1_000.0,
+        lookback: 2,
+        exit_candles: None,
+        entry_candles: None,
+        funding_rates: None,
+        init_state: None,
+        from_ts: None,
+        to_ts: None,
+    });
 
     let btc_open = sim
         .trades

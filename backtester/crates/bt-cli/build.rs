@@ -43,11 +43,14 @@ fn main() {
     let build_unix = _build_unix_s();
     println!("cargo:rustc-env=AIQ_BUILD_UNIX={build_unix}");
 
-    let gpu = if std::env::var_os("CARGO_FEATURE_GPU").is_some() { "1" } else { "0" };
+    let gpu = if std::env::var_os("CARGO_FEATURE_GPU").is_some() {
+        "1"
+    } else {
+        "0"
+    };
     println!("cargo:rustc-env=AIQ_GPU={gpu}");
 
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_GPU");
 }
-

@@ -16,8 +16,8 @@
 use bt_core::candle::{CandleData, OhlcvBar};
 use bt_core::config::{Confidence, MacdMode, StrategyConfig};
 use bt_core::sweep::{SweepAxis, SweepSpec};
-use bt_gpu::run_gpu_sweep;
 use bt_gpu::layout::GpuSweepResult;
+use bt_gpu::run_gpu_sweep;
 use cudarc::driver::CudaDevice;
 use rustc_hash::FxHashMap;
 
@@ -66,7 +66,7 @@ fn build_500bar_fixture() -> CandleData {
 
         let close = trend + wave + pullback;
         let high = close + close * 0.008; // ~0.8% above close
-        let low = close - close * 0.008;  // ~0.8% below close
+        let low = close - close * 0.008; // ~0.8% below close
         let open = close - (close * 0.002 * (t * 0.1).cos()); // slight jitter
 
         bars.push(OhlcvBar {
@@ -177,8 +177,7 @@ fn assert_parity(
 ) {
     eprintln!(
         "[{label}] CPU: trades={} bal={:.2} pnl={:.2} | GPU: trades={} bal={:.2} pnl={:.2}",
-        cpu_trades, cpu_balance, cpu_pnl,
-        gpu.total_trades, gpu.final_balance, gpu.total_pnl,
+        cpu_trades, cpu_balance, cpu_pnl, gpu.total_trades, gpu.final_balance, gpu.total_pnl,
     );
 
     // If CPU produced zero trades, GPU zero is fine (perfect parity).
@@ -340,12 +339,14 @@ fn test_gpu_parity_entry_gates() {
     assert!(
         cpu_a_trades >= cpu_b_trades,
         "[entry-gates] CPU: permissive config A ({}) should have >= trades than restrictive B ({})",
-        cpu_a_trades, cpu_b_trades,
+        cpu_a_trades,
+        cpu_b_trades,
     );
     assert!(
         gpu_a.total_trades >= gpu_b.total_trades,
         "[entry-gates] GPU: permissive config A ({}) should have >= trades than restrictive B ({})",
-        gpu_a.total_trades, gpu_b.total_trades,
+        gpu_a.total_trades,
+        gpu_b.total_trades,
     );
 }
 
@@ -625,12 +626,14 @@ fn test_gpu_parity_pesc_cooldown() {
     assert!(
         cpu_a_trades >= cpu_b_trades,
         "[pesc] CPU: no-cooldown A ({}) should have >= trades than cooldown B ({})",
-        cpu_a_trades, cpu_b_trades,
+        cpu_a_trades,
+        cpu_b_trades,
     );
     assert!(
         gpu_a.total_trades >= gpu_b.total_trades,
         "[pesc] GPU: no-cooldown A ({}) should have >= trades than cooldown B ({})",
-        gpu_a.total_trades, gpu_b.total_trades,
+        gpu_a.total_trades,
+        gpu_b.total_trades,
     );
 }
 

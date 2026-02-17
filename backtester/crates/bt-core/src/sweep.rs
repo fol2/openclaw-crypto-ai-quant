@@ -214,7 +214,9 @@ fn apply_one(cfg: &mut StrategyConfig, path: &str, value: f64) {
         "trade.trailing_start_atr_low_conf" => cfg.trade.trailing_start_atr_low_conf = value,
         "trade.trailing_distance_atr_low_conf" => cfg.trade.trailing_distance_atr_low_conf = value,
         "trade.smart_exit_adx_exhaustion_lt" => cfg.trade.smart_exit_adx_exhaustion_lt = value,
-        "trade.smart_exit_adx_exhaustion_lt_low_conf" => cfg.trade.smart_exit_adx_exhaustion_lt_low_conf = value,
+        "trade.smart_exit_adx_exhaustion_lt_low_conf" => {
+            cfg.trade.smart_exit_adx_exhaustion_lt_low_conf = value
+        }
 
         // === Confidence enums (0=low, 1=medium, 2=high) ===
         "trade.entry_min_confidence" => {
@@ -241,20 +243,34 @@ fn apply_one(cfg: &mut StrategyConfig, path: &str, value: f64) {
 
         // === Thresholds — entry ===
         "thresholds.entry.min_adx" => cfg.thresholds.entry.min_adx = value,
-        "thresholds.entry.high_conf_volume_mult" => cfg.thresholds.entry.high_conf_volume_mult = value,
+        "thresholds.entry.high_conf_volume_mult" => {
+            cfg.thresholds.entry.high_conf_volume_mult = value
+        }
         "thresholds.entry.btc_adx_override" => cfg.thresholds.entry.btc_adx_override = value,
         "thresholds.entry.max_dist_ema_fast" => cfg.thresholds.entry.max_dist_ema_fast = value,
         "thresholds.entry.ave_atr_ratio_gt" => cfg.thresholds.entry.ave_atr_ratio_gt = value,
         "thresholds.entry.ave_adx_mult" => cfg.thresholds.entry.ave_adx_mult = value,
         "thresholds.entry.ave_avg_atr_window" => set_ave_avg_atr_window(cfg, value as usize),
         "thresholds.entry.pullback_min_adx" => cfg.thresholds.entry.pullback_min_adx = value,
-        "thresholds.entry.pullback_rsi_long_min" => cfg.thresholds.entry.pullback_rsi_long_min = value,
-        "thresholds.entry.pullback_rsi_short_max" => cfg.thresholds.entry.pullback_rsi_short_max = value,
-        "thresholds.entry.slow_drift_slope_window" => cfg.thresholds.entry.slow_drift_slope_window = value as usize,
-        "thresholds.entry.slow_drift_min_slope_pct" => cfg.thresholds.entry.slow_drift_min_slope_pct = value,
+        "thresholds.entry.pullback_rsi_long_min" => {
+            cfg.thresholds.entry.pullback_rsi_long_min = value
+        }
+        "thresholds.entry.pullback_rsi_short_max" => {
+            cfg.thresholds.entry.pullback_rsi_short_max = value
+        }
+        "thresholds.entry.slow_drift_slope_window" => {
+            cfg.thresholds.entry.slow_drift_slope_window = value as usize
+        }
+        "thresholds.entry.slow_drift_min_slope_pct" => {
+            cfg.thresholds.entry.slow_drift_min_slope_pct = value
+        }
         "thresholds.entry.slow_drift_min_adx" => cfg.thresholds.entry.slow_drift_min_adx = value,
-        "thresholds.entry.slow_drift_rsi_long_min" => cfg.thresholds.entry.slow_drift_rsi_long_min = value,
-        "thresholds.entry.slow_drift_rsi_short_max" => cfg.thresholds.entry.slow_drift_rsi_short_max = value,
+        "thresholds.entry.slow_drift_rsi_long_min" => {
+            cfg.thresholds.entry.slow_drift_rsi_long_min = value
+        }
+        "thresholds.entry.slow_drift_rsi_short_max" => {
+            cfg.thresholds.entry.slow_drift_rsi_short_max = value
+        }
         "thresholds.entry.macd_hist_entry_mode" => {
             cfg.thresholds.entry.macd_hist_entry_mode = match value as u8 {
                 0 => MacdMode::Accel,
@@ -266,27 +282,53 @@ fn apply_one(cfg: &mut StrategyConfig, path: &str, value: f64) {
         // === Thresholds — ranging ===
         "thresholds.ranging.min_signals" => cfg.thresholds.ranging.min_signals = value as usize,
         "thresholds.ranging.adx_below" => cfg.thresholds.ranging.adx_below = value,
-        "thresholds.ranging.bb_width_ratio_below" => cfg.thresholds.ranging.bb_width_ratio_below = value,
+        "thresholds.ranging.bb_width_ratio_below" => {
+            cfg.thresholds.ranging.bb_width_ratio_below = value
+        }
         "thresholds.ranging.rsi_low" => cfg.thresholds.ranging.rsi_low = value,
         "thresholds.ranging.rsi_high" => cfg.thresholds.ranging.rsi_high = value,
 
         // === Thresholds — anomaly ===
-        "thresholds.anomaly.price_change_pct_gt" => cfg.thresholds.anomaly.price_change_pct_gt = value,
-        "thresholds.anomaly.ema_fast_dev_pct_gt" => cfg.thresholds.anomaly.ema_fast_dev_pct_gt = value,
+        "thresholds.anomaly.price_change_pct_gt" => {
+            cfg.thresholds.anomaly.price_change_pct_gt = value
+        }
+        "thresholds.anomaly.ema_fast_dev_pct_gt" => {
+            cfg.thresholds.anomaly.ema_fast_dev_pct_gt = value
+        }
 
         // === Thresholds — tp_and_momentum ===
-        "thresholds.tp_and_momentum.adx_strong_gt" => cfg.thresholds.tp_and_momentum.adx_strong_gt = value,
-        "thresholds.tp_and_momentum.adx_weak_lt" => cfg.thresholds.tp_and_momentum.adx_weak_lt = value,
-        "thresholds.tp_and_momentum.tp_mult_strong" => cfg.thresholds.tp_and_momentum.tp_mult_strong = value,
-        "thresholds.tp_and_momentum.tp_mult_weak" => cfg.thresholds.tp_and_momentum.tp_mult_weak = value,
-        "thresholds.tp_and_momentum.rsi_long_strong" => cfg.thresholds.tp_and_momentum.rsi_long_strong = value,
-        "thresholds.tp_and_momentum.rsi_long_weak" => cfg.thresholds.tp_and_momentum.rsi_long_weak = value,
-        "thresholds.tp_and_momentum.rsi_short_strong" => cfg.thresholds.tp_and_momentum.rsi_short_strong = value,
-        "thresholds.tp_and_momentum.rsi_short_weak" => cfg.thresholds.tp_and_momentum.rsi_short_weak = value,
+        "thresholds.tp_and_momentum.adx_strong_gt" => {
+            cfg.thresholds.tp_and_momentum.adx_strong_gt = value
+        }
+        "thresholds.tp_and_momentum.adx_weak_lt" => {
+            cfg.thresholds.tp_and_momentum.adx_weak_lt = value
+        }
+        "thresholds.tp_and_momentum.tp_mult_strong" => {
+            cfg.thresholds.tp_and_momentum.tp_mult_strong = value
+        }
+        "thresholds.tp_and_momentum.tp_mult_weak" => {
+            cfg.thresholds.tp_and_momentum.tp_mult_weak = value
+        }
+        "thresholds.tp_and_momentum.rsi_long_strong" => {
+            cfg.thresholds.tp_and_momentum.rsi_long_strong = value
+        }
+        "thresholds.tp_and_momentum.rsi_long_weak" => {
+            cfg.thresholds.tp_and_momentum.rsi_long_weak = value
+        }
+        "thresholds.tp_and_momentum.rsi_short_strong" => {
+            cfg.thresholds.tp_and_momentum.rsi_short_strong = value
+        }
+        "thresholds.tp_and_momentum.rsi_short_weak" => {
+            cfg.thresholds.tp_and_momentum.rsi_short_weak = value
+        }
 
         // === Thresholds — stoch_rsi ===
-        "thresholds.stoch_rsi.block_long_if_k_gt" => cfg.thresholds.stoch_rsi.block_long_if_k_gt = value,
-        "thresholds.stoch_rsi.block_short_if_k_lt" => cfg.thresholds.stoch_rsi.block_short_if_k_lt = value,
+        "thresholds.stoch_rsi.block_long_if_k_gt" => {
+            cfg.thresholds.stoch_rsi.block_long_if_k_gt = value
+        }
+        "thresholds.stoch_rsi.block_short_if_k_lt" => {
+            cfg.thresholds.stoch_rsi.block_short_if_k_lt = value
+        }
 
         // === Boolean toggles (0.0 = false, else true) ===
         "trade.enable_dynamic_sizing" => cfg.trade.enable_dynamic_sizing = value != 0.0,
@@ -296,9 +338,15 @@ fn apply_one(cfg: &mut StrategyConfig, path: &str, value: f64) {
         "trade.enable_ssf_filter" => cfg.trade.enable_ssf_filter = value != 0.0,
         "trade.enable_reef_filter" => cfg.trade.enable_reef_filter = value != 0.0,
         "trade.enable_breakeven_stop" => cfg.trade.enable_breakeven_stop = value != 0.0,
-        "trade.enable_rsi_overextension_exit" => cfg.trade.enable_rsi_overextension_exit = value != 0.0,
-        "trade.enable_vol_buffered_trailing" => cfg.trade.enable_vol_buffered_trailing = value != 0.0,
-        "trade.tsme_require_adx_slope_negative" => cfg.trade.tsme_require_adx_slope_negative = value != 0.0,
+        "trade.enable_rsi_overextension_exit" => {
+            cfg.trade.enable_rsi_overextension_exit = value != 0.0
+        }
+        "trade.enable_vol_buffered_trailing" => {
+            cfg.trade.enable_vol_buffered_trailing = value != 0.0
+        }
+        "trade.tsme_require_adx_slope_negative" => {
+            cfg.trade.tsme_require_adx_slope_negative = value != 0.0
+        }
         "trade.reverse_entry_signal" => cfg.trade.reverse_entry_signal = value != 0.0,
         "trade.block_exits_on_extreme_dev" => cfg.trade.block_exits_on_extreme_dev = value != 0.0,
         "filters.vol_confirm_include_prev" => cfg.filters.vol_confirm_include_prev = value != 0.0,
@@ -309,20 +357,32 @@ fn apply_one(cfg: &mut StrategyConfig, path: &str, value: f64) {
         "filters.enable_extension_filter" => cfg.filters.enable_extension_filter = value != 0.0,
         "filters.require_adx_rising" => cfg.filters.require_adx_rising = value != 0.0,
         "filters.adx_rising_saturation" => cfg.filters.adx_rising_saturation = value,
-        "filters.require_volume_confirmation" => cfg.filters.require_volume_confirmation = value != 0.0,
+        "filters.require_volume_confirmation" => {
+            cfg.filters.require_volume_confirmation = value != 0.0
+        }
         "filters.use_stoch_rsi_filter" => cfg.filters.use_stoch_rsi_filter = value != 0.0,
         "filters.require_btc_alignment" => cfg.filters.require_btc_alignment = value != 0.0,
         "filters.require_macro_alignment" => cfg.filters.require_macro_alignment = value != 0.0,
 
         // === Entry toggles ===
-        "thresholds.entry.enable_pullback_entries" => cfg.thresholds.entry.enable_pullback_entries = value != 0.0,
-        "thresholds.entry.enable_slow_drift_entries" => cfg.thresholds.entry.enable_slow_drift_entries = value != 0.0,
+        "thresholds.entry.enable_pullback_entries" => {
+            cfg.thresholds.entry.enable_pullback_entries = value != 0.0
+        }
+        "thresholds.entry.enable_slow_drift_entries" => {
+            cfg.thresholds.entry.enable_slow_drift_entries = value != 0.0
+        }
         "thresholds.entry.ave_enabled" => cfg.thresholds.entry.ave_enabled = value != 0.0,
-        "thresholds.entry.pullback_require_macd_sign" => cfg.thresholds.entry.pullback_require_macd_sign = value != 0.0,
-        "thresholds.entry.slow_drift_require_macd_sign" => cfg.thresholds.entry.slow_drift_require_macd_sign = value != 0.0,
+        "thresholds.entry.pullback_require_macd_sign" => {
+            cfg.thresholds.entry.pullback_require_macd_sign = value != 0.0
+        }
+        "thresholds.entry.slow_drift_require_macd_sign" => {
+            cfg.thresholds.entry.slow_drift_require_macd_sign = value != 0.0
+        }
 
         // === Market regime toggles ===
-        "market_regime.enable_regime_filter" => cfg.market_regime.enable_regime_filter = value != 0.0,
+        "market_regime.enable_regime_filter" => {
+            cfg.market_regime.enable_regime_filter = value != 0.0
+        }
         "market_regime.enable_auto_reverse" => cfg.market_regime.enable_auto_reverse = value != 0.0,
 
         // === Indicators ===
@@ -343,10 +403,18 @@ fn apply_one(cfg: &mut StrategyConfig, path: &str, value: f64) {
         "indicators.ave_avg_atr_window" => set_ave_avg_atr_window(cfg, value as usize),
 
         // === Market regime ===
-        "market_regime.breadth_block_short_above" => cfg.market_regime.breadth_block_short_above = value,
-        "market_regime.breadth_block_long_below" => cfg.market_regime.breadth_block_long_below = value,
-        "market_regime.auto_reverse_breadth_low" => cfg.market_regime.auto_reverse_breadth_low = value,
-        "market_regime.auto_reverse_breadth_high" => cfg.market_regime.auto_reverse_breadth_high = value,
+        "market_regime.breadth_block_short_above" => {
+            cfg.market_regime.breadth_block_short_above = value
+        }
+        "market_regime.breadth_block_long_below" => {
+            cfg.market_regime.breadth_block_long_below = value
+        }
+        "market_regime.auto_reverse_breadth_low" => {
+            cfg.market_regime.auto_reverse_breadth_low = value
+        }
+        "market_regime.auto_reverse_breadth_high" => {
+            cfg.market_regime.auto_reverse_breadth_high = value
+        }
 
         _ => eprintln!("[sweep] Unknown override path: {path}"),
     }
@@ -391,8 +459,20 @@ fn read_one(cfg: &StrategyConfig, path: &str) -> Option<f64> {
         "trade.min_atr_pct" => cfg.trade.min_atr_pct,
         "trade.slippage_bps" => cfg.trade.slippage_bps,
         "trade.min_notional_usd" => cfg.trade.min_notional_usd,
-        "trade.use_bbo_for_fills" => if cfg.trade.use_bbo_for_fills { 1.0 } else { 0.0 },
-        "trade.bump_to_min_notional" => if cfg.trade.bump_to_min_notional { 1.0 } else { 0.0 },
+        "trade.use_bbo_for_fills" => {
+            if cfg.trade.use_bbo_for_fills {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        "trade.bump_to_min_notional" => {
+            if cfg.trade.bump_to_min_notional {
+                1.0
+            } else {
+                0.0
+            }
+        }
         "trade.max_total_margin_pct" => cfg.trade.max_total_margin_pct,
         "trade.reentry_cooldown_minutes" => cfg.trade.reentry_cooldown_minutes as f64,
         "trade.reentry_cooldown_min_mins" => cfg.trade.reentry_cooldown_min_mins as f64,
@@ -441,7 +521,9 @@ fn read_one(cfg: &StrategyConfig, path: &str) -> Option<f64> {
         "trade.trailing_start_atr_low_conf" => cfg.trade.trailing_start_atr_low_conf,
         "trade.trailing_distance_atr_low_conf" => cfg.trade.trailing_distance_atr_low_conf,
         "trade.smart_exit_adx_exhaustion_lt" => cfg.trade.smart_exit_adx_exhaustion_lt,
-        "trade.smart_exit_adx_exhaustion_lt_low_conf" => cfg.trade.smart_exit_adx_exhaustion_lt_low_conf,
+        "trade.smart_exit_adx_exhaustion_lt_low_conf" => {
+            cfg.trade.smart_exit_adx_exhaustion_lt_low_conf
+        }
 
         // === Confidence enums (0=low, 1=medium, 2=high) ===
         "trade.entry_min_confidence" => match cfg.trade.entry_min_confidence {
@@ -471,16 +553,24 @@ fn read_one(cfg: &StrategyConfig, path: &str) -> Option<f64> {
         "thresholds.entry.pullback_min_adx" => cfg.thresholds.entry.pullback_min_adx,
         "thresholds.entry.pullback_rsi_long_min" => cfg.thresholds.entry.pullback_rsi_long_min,
         "thresholds.entry.pullback_rsi_short_max" => cfg.thresholds.entry.pullback_rsi_short_max,
-        "thresholds.entry.slow_drift_slope_window" => cfg.thresholds.entry.slow_drift_slope_window as f64,
-        "thresholds.entry.slow_drift_min_slope_pct" => cfg.thresholds.entry.slow_drift_min_slope_pct,
+        "thresholds.entry.slow_drift_slope_window" => {
+            cfg.thresholds.entry.slow_drift_slope_window as f64
+        }
+        "thresholds.entry.slow_drift_min_slope_pct" => {
+            cfg.thresholds.entry.slow_drift_min_slope_pct
+        }
         "thresholds.entry.slow_drift_min_adx" => cfg.thresholds.entry.slow_drift_min_adx,
         "thresholds.entry.slow_drift_rsi_long_min" => cfg.thresholds.entry.slow_drift_rsi_long_min,
-        "thresholds.entry.slow_drift_rsi_short_max" => cfg.thresholds.entry.slow_drift_rsi_short_max,
-        "thresholds.entry.macd_hist_entry_mode" => match cfg.thresholds.entry.macd_hist_entry_mode {
-            MacdMode::Accel => 0.0,
-            MacdMode::Sign => 1.0,
-            MacdMode::None => 2.0,
-        },
+        "thresholds.entry.slow_drift_rsi_short_max" => {
+            cfg.thresholds.entry.slow_drift_rsi_short_max
+        }
+        "thresholds.entry.macd_hist_entry_mode" => {
+            match cfg.thresholds.entry.macd_hist_entry_mode {
+                MacdMode::Accel => 0.0,
+                MacdMode::Sign => 1.0,
+                MacdMode::None => 2.0,
+            }
+        }
 
         // === Thresholds — ranging ===
         "thresholds.ranging.min_signals" => cfg.thresholds.ranging.min_signals as f64,
@@ -496,53 +586,229 @@ fn read_one(cfg: &StrategyConfig, path: &str) -> Option<f64> {
         // === Thresholds — tp_and_momentum ===
         "thresholds.tp_and_momentum.adx_strong_gt" => cfg.thresholds.tp_and_momentum.adx_strong_gt,
         "thresholds.tp_and_momentum.adx_weak_lt" => cfg.thresholds.tp_and_momentum.adx_weak_lt,
-        "thresholds.tp_and_momentum.tp_mult_strong" => cfg.thresholds.tp_and_momentum.tp_mult_strong,
+        "thresholds.tp_and_momentum.tp_mult_strong" => {
+            cfg.thresholds.tp_and_momentum.tp_mult_strong
+        }
         "thresholds.tp_and_momentum.tp_mult_weak" => cfg.thresholds.tp_and_momentum.tp_mult_weak,
-        "thresholds.tp_and_momentum.rsi_long_strong" => cfg.thresholds.tp_and_momentum.rsi_long_strong,
+        "thresholds.tp_and_momentum.rsi_long_strong" => {
+            cfg.thresholds.tp_and_momentum.rsi_long_strong
+        }
         "thresholds.tp_and_momentum.rsi_long_weak" => cfg.thresholds.tp_and_momentum.rsi_long_weak,
-        "thresholds.tp_and_momentum.rsi_short_strong" => cfg.thresholds.tp_and_momentum.rsi_short_strong,
-        "thresholds.tp_and_momentum.rsi_short_weak" => cfg.thresholds.tp_and_momentum.rsi_short_weak,
+        "thresholds.tp_and_momentum.rsi_short_strong" => {
+            cfg.thresholds.tp_and_momentum.rsi_short_strong
+        }
+        "thresholds.tp_and_momentum.rsi_short_weak" => {
+            cfg.thresholds.tp_and_momentum.rsi_short_weak
+        }
 
         // === Thresholds — stoch_rsi ===
         "thresholds.stoch_rsi.block_long_if_k_gt" => cfg.thresholds.stoch_rsi.block_long_if_k_gt,
         "thresholds.stoch_rsi.block_short_if_k_lt" => cfg.thresholds.stoch_rsi.block_short_if_k_lt,
 
         // === Boolean toggles ===
-        "trade.enable_dynamic_sizing" => if cfg.trade.enable_dynamic_sizing { 1.0 } else { 0.0 },
-        "trade.enable_dynamic_leverage" => if cfg.trade.enable_dynamic_leverage { 1.0 } else { 0.0 },
-        "trade.enable_pyramiding" => if cfg.trade.enable_pyramiding { 1.0 } else { 0.0 },
-        "trade.enable_partial_tp" => if cfg.trade.enable_partial_tp { 1.0 } else { 0.0 },
-        "trade.enable_ssf_filter" => if cfg.trade.enable_ssf_filter { 1.0 } else { 0.0 },
-        "trade.enable_reef_filter" => if cfg.trade.enable_reef_filter { 1.0 } else { 0.0 },
-        "trade.enable_breakeven_stop" => if cfg.trade.enable_breakeven_stop { 1.0 } else { 0.0 },
-        "trade.enable_rsi_overextension_exit" => if cfg.trade.enable_rsi_overextension_exit { 1.0 } else { 0.0 },
-        "trade.enable_vol_buffered_trailing" => if cfg.trade.enable_vol_buffered_trailing { 1.0 } else { 0.0 },
-        "trade.tsme_require_adx_slope_negative" => if cfg.trade.tsme_require_adx_slope_negative { 1.0 } else { 0.0 },
-        "trade.reverse_entry_signal" => if cfg.trade.reverse_entry_signal { 1.0 } else { 0.0 },
-        "trade.block_exits_on_extreme_dev" => if cfg.trade.block_exits_on_extreme_dev { 1.0 } else { 0.0 },
-        "filters.vol_confirm_include_prev" => if cfg.filters.vol_confirm_include_prev { 1.0 } else { 0.0 },
+        "trade.enable_dynamic_sizing" => {
+            if cfg.trade.enable_dynamic_sizing {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        "trade.enable_dynamic_leverage" => {
+            if cfg.trade.enable_dynamic_leverage {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        "trade.enable_pyramiding" => {
+            if cfg.trade.enable_pyramiding {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        "trade.enable_partial_tp" => {
+            if cfg.trade.enable_partial_tp {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        "trade.enable_ssf_filter" => {
+            if cfg.trade.enable_ssf_filter {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        "trade.enable_reef_filter" => {
+            if cfg.trade.enable_reef_filter {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        "trade.enable_breakeven_stop" => {
+            if cfg.trade.enable_breakeven_stop {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        "trade.enable_rsi_overextension_exit" => {
+            if cfg.trade.enable_rsi_overextension_exit {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        "trade.enable_vol_buffered_trailing" => {
+            if cfg.trade.enable_vol_buffered_trailing {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        "trade.tsme_require_adx_slope_negative" => {
+            if cfg.trade.tsme_require_adx_slope_negative {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        "trade.reverse_entry_signal" => {
+            if cfg.trade.reverse_entry_signal {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        "trade.block_exits_on_extreme_dev" => {
+            if cfg.trade.block_exits_on_extreme_dev {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        "filters.vol_confirm_include_prev" => {
+            if cfg.filters.vol_confirm_include_prev {
+                1.0
+            } else {
+                0.0
+            }
+        }
 
         // === Filters ===
-        "filters.enable_ranging_filter" => if cfg.filters.enable_ranging_filter { 1.0 } else { 0.0 },
-        "filters.enable_anomaly_filter" => if cfg.filters.enable_anomaly_filter { 1.0 } else { 0.0 },
-        "filters.enable_extension_filter" => if cfg.filters.enable_extension_filter { 1.0 } else { 0.0 },
-        "filters.require_adx_rising" => if cfg.filters.require_adx_rising { 1.0 } else { 0.0 },
+        "filters.enable_ranging_filter" => {
+            if cfg.filters.enable_ranging_filter {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        "filters.enable_anomaly_filter" => {
+            if cfg.filters.enable_anomaly_filter {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        "filters.enable_extension_filter" => {
+            if cfg.filters.enable_extension_filter {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        "filters.require_adx_rising" => {
+            if cfg.filters.require_adx_rising {
+                1.0
+            } else {
+                0.0
+            }
+        }
         "filters.adx_rising_saturation" => cfg.filters.adx_rising_saturation,
-        "filters.require_volume_confirmation" => if cfg.filters.require_volume_confirmation { 1.0 } else { 0.0 },
-        "filters.use_stoch_rsi_filter" => if cfg.filters.use_stoch_rsi_filter { 1.0 } else { 0.0 },
-        "filters.require_btc_alignment" => if cfg.filters.require_btc_alignment { 1.0 } else { 0.0 },
-        "filters.require_macro_alignment" => if cfg.filters.require_macro_alignment { 1.0 } else { 0.0 },
+        "filters.require_volume_confirmation" => {
+            if cfg.filters.require_volume_confirmation {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        "filters.use_stoch_rsi_filter" => {
+            if cfg.filters.use_stoch_rsi_filter {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        "filters.require_btc_alignment" => {
+            if cfg.filters.require_btc_alignment {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        "filters.require_macro_alignment" => {
+            if cfg.filters.require_macro_alignment {
+                1.0
+            } else {
+                0.0
+            }
+        }
 
         // === Entry toggles ===
-        "thresholds.entry.enable_pullback_entries" => if cfg.thresholds.entry.enable_pullback_entries { 1.0 } else { 0.0 },
-        "thresholds.entry.enable_slow_drift_entries" => if cfg.thresholds.entry.enable_slow_drift_entries { 1.0 } else { 0.0 },
-        "thresholds.entry.ave_enabled" => if cfg.thresholds.entry.ave_enabled { 1.0 } else { 0.0 },
-        "thresholds.entry.pullback_require_macd_sign" => if cfg.thresholds.entry.pullback_require_macd_sign { 1.0 } else { 0.0 },
-        "thresholds.entry.slow_drift_require_macd_sign" => if cfg.thresholds.entry.slow_drift_require_macd_sign { 1.0 } else { 0.0 },
+        "thresholds.entry.enable_pullback_entries" => {
+            if cfg.thresholds.entry.enable_pullback_entries {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        "thresholds.entry.enable_slow_drift_entries" => {
+            if cfg.thresholds.entry.enable_slow_drift_entries {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        "thresholds.entry.ave_enabled" => {
+            if cfg.thresholds.entry.ave_enabled {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        "thresholds.entry.pullback_require_macd_sign" => {
+            if cfg.thresholds.entry.pullback_require_macd_sign {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        "thresholds.entry.slow_drift_require_macd_sign" => {
+            if cfg.thresholds.entry.slow_drift_require_macd_sign {
+                1.0
+            } else {
+                0.0
+            }
+        }
 
         // === Market regime toggles ===
-        "market_regime.enable_regime_filter" => if cfg.market_regime.enable_regime_filter { 1.0 } else { 0.0 },
-        "market_regime.enable_auto_reverse" => if cfg.market_regime.enable_auto_reverse { 1.0 } else { 0.0 },
+        "market_regime.enable_regime_filter" => {
+            if cfg.market_regime.enable_regime_filter {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        "market_regime.enable_auto_reverse" => {
+            if cfg.market_regime.enable_auto_reverse {
+                1.0
+            } else {
+                0.0
+            }
+        }
 
         // === Indicators ===
         "indicators.ema_slow_window" => cfg.indicators.ema_slow_window as f64,
@@ -696,30 +962,30 @@ pub fn run_sweep(
             let cfg = apply_overrides(base_cfg, overrides);
             let config_id = format!("sweep_{:04}", i);
 
-            let sim = engine::run_simulation(
-                &candles,
-                &cfg,
+            let sim = engine::run_simulation(engine::RunSimulationInput {
+                candles: &candles,
+                cfg: &cfg,
                 initial_balance,
                 lookback,
-                exit_candles_arc.as_deref(),
-                entry_candles_arc.as_deref(),
-                funding_rates_arc.as_deref(),
-                None, // sweeps always start clean (no init-state)
+                exit_candles: exit_candles_arc.as_deref(),
+                entry_candles: entry_candles_arc.as_deref(),
+                funding_rates: funding_rates_arc.as_deref(),
+                init_state: None, // sweeps always start clean (no init-state)
                 from_ts,
                 to_ts,
-            );
+            });
 
-            let rpt = report::build_report(
-                &sim.trades,
-                &sim.signals,
-                &sim.equity_curve,
-                &sim.gate_stats,
+            let rpt = report::build_report(report::BuildReportInput {
+                trades: &sim.trades,
+                signals: &sim.signals,
+                equity_curve: &sim.equity_curve,
+                gate_stats: &sim.gate_stats,
                 initial_balance,
-                sim.final_balance,
-                &config_id,
-                false, // don't embed per-trade detail in sweep
-                false, // don't embed equity curve in sweep
-            );
+                final_balance: sim.final_balance,
+                config_id: &config_id,
+                include_trades: false, // don't embed per-trade detail in sweep
+                include_equity_curve: false, // don't embed equity curve in sweep
+            });
 
             SweepResult {
                 config_id,
@@ -820,7 +1086,10 @@ mod tests {
         let base = StrategyConfig::default();
         let overrides = vec![
             ("thresholds.entry.min_adx".to_string(), 18.0),
-            ("thresholds.entry.slow_drift_min_slope_pct".to_string(), 0.001),
+            (
+                "thresholds.entry.slow_drift_min_slope_pct".to_string(),
+                0.001,
+            ),
             ("thresholds.ranging.adx_below".to_string(), 25.0),
         ];
         let cfg = apply_overrides(&base, &overrides);
@@ -885,7 +1154,10 @@ mod tests {
         // Preserved
         assert!((cfg.trade.allocation_pct - base.trade.allocation_pct).abs() < 1e-9);
         assert!((cfg.trade.sl_atr_mult - base.trade.sl_atr_mult).abs() < 1e-9);
-        assert_eq!(cfg.indicators.ema_slow_window, base.indicators.ema_slow_window);
+        assert_eq!(
+            cfg.indicators.ema_slow_window,
+            base.indicators.ema_slow_window
+        );
     }
 
     #[test]

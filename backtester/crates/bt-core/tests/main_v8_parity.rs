@@ -155,30 +155,30 @@ fn main_v8_parity_is_within_tolerance() {
     let initial_balance = expected.initial_balance;
     let lookback = 200;
 
-    let sim = engine::run_simulation(
-        &candles,
-        &cfg,
+    let sim = engine::run_simulation(engine::RunSimulationInput {
+        candles: &candles,
+        cfg: &cfg,
         initial_balance,
         lookback,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    );
+        exit_candles: None,
+        entry_candles: None,
+        funding_rates: None,
+        init_state: None,
+        from_ts: None,
+        to_ts: None,
+    });
 
-    let rpt = report::build_report(
-        &sim.trades,
-        &sim.signals,
-        &sim.equity_curve,
-        &sim.gate_stats,
+    let rpt = report::build_report(report::BuildReportInput {
+        trades: &sim.trades,
+        signals: &sim.signals,
+        equity_curve: &sim.equity_curve,
+        gate_stats: &sim.gate_stats,
         initial_balance,
-        sim.final_balance,
-        "v8_parity",
-        false,
-        false,
-    );
+        final_balance: sim.final_balance,
+        config_id: "v8_parity",
+        include_trades: false,
+        include_equity_curve: false,
+    });
 
     assert!(
         rpt.total_trades > 0,
