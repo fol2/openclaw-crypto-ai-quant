@@ -47,7 +47,9 @@ jobs:
         run: uv sync --frozen --dev
 
       - name: Run pip-audit
-        run: uvx --from pip-audit pip-audit --progress-spinner off --path .venv
+        run: |
+          uv export --frozen --format requirements-txt > requirements.audit.txt
+          uvx --from pip-audit pip-audit --progress-spinner off -r requirements.audit.txt
 
   cargo-audit:
     name: Rust dependency audit
