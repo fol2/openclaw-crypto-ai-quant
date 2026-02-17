@@ -171,6 +171,9 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         lookback: spec.lookback,
     };
 
+    run_gpu_single(&base_cfg, &single_spec, &candles, args.from_ts, args.to_ts)
+        .map_err(|e| format!("gpu preflight failed before axis loop: {e}"))?;
+
     let mut total = 0usize;
     let mut passed = 0usize;
     let mut failed = 0usize;
@@ -322,9 +325,11 @@ fn run_gpu_single(
     to_ts: Option<i64>,
 ) -> Result<CompactResult, Box<dyn std::error::Error>> {
     let rows = run_gpu_sweep(candles, cfg, spec, None, None, from_ts, to_ts);
-    let first = rows
-        .first()
-        .ok_or("gpu sweep returned no rows for single config")?;
+    let first = rows.first().ok_or(
+        "gpu sweep returned no rows for single config. \
+likely no CUDA-capable device (or driver visibility failure) in this runtime; \
+verify with `nvidia-smi` in the same environment",
+    )?;
     Ok(CompactResult {
         total_trades: first.total_trades,
         final_balance: first.final_balance,
@@ -344,13 +349,15 @@ fn run_gpu_single_with_trace(
         let (rows, states, symbols) = run_gpu_sweep_with_states(
             candles, cfg, spec, None, None, from_ts, to_ts,
         );
-        let first = rows
-            .first()
-            .ok_or("gpu trace sweep returned no rows for single config")?;
-        let state = states
-            .first()
-            .copied()
-            .ok_or("gpu trace sweep returned no state for single config")?;
+        let first = rows.first().ok_or(
+            "gpu trace sweep returned no rows for single config. \
+likely no CUDA-capable device (or driver visibility failure) in this runtime; \
+verify with `nvidia-smi` in the same environment",
+        )?;
+        let state = states.first().copied().ok_or(
+            "gpu trace sweep returned no state for single config; \
+gpu runtime likely unavailable in this environment",
+        )?;
         Ok((
             CompactResult {
                 total_trades: first.total_trades,
