@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import logging
 import os
 import json
@@ -40,6 +41,8 @@ def _get_decision_event_fn() -> Callable[..., dict[str, Any]] | None:
 
 logger = logging.getLogger(__name__)
 
+ENTRY_MAX_DELAY_MS_HARD_MAX = 2 * 60 * 60 * 1000
+
 
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
@@ -63,6 +66,32 @@ def _interval_to_ms(interval: str) -> int:
         return int(float(s) * 1000.0)
     except (ValueError, TypeError, OverflowError):
         return 0
+
+
+def _resolve_entry_max_delay_ms(*, raw_ms: str | None, raw_s: str | None) -> tuple[int, bool]:
+    """Resolve entry delay env values to milliseconds.
+
+    Returns `(value_ms, clamped)` where `clamped=True` indicates the configured
+    value exceeded the hard safety maximum and was reduced.
+    """
+
+    max_delay_ms = 0
+    try:
+        raw_ms_f = float(raw_ms or 0.0)
+        max_delay_ms = int(raw_ms_f) if math.isfinite(raw_ms_f) else 0
+    except (TypeError, ValueError, OverflowError):
+        max_delay_ms = 0
+    if max_delay_ms <= 0:
+        try:
+            raw_s_f = float(raw_s or 0.0)
+            max_delay_ms = int(raw_s_f * 1000.0) if math.isfinite(raw_s_f) else 0
+        except (TypeError, ValueError, OverflowError):
+            max_delay_ms = 0
+    if max_delay_ms <= 0:
+        return 0, False
+    if max_delay_ms > ENTRY_MAX_DELAY_MS_HARD_MAX:
+        return int(ENTRY_MAX_DELAY_MS_HARD_MAX), True
+    return int(max_delay_ms), False
 
 
 @dataclass
@@ -981,17 +1010,16 @@ class UnifiedEngine:
         # Entry timing guard (close-mode only).
         # If the engine restarts (or stalls) it may act on an older closed candle key.
         # This prevents "late" entries when the candle-close signal is too old.
-        try:
-            max_delay_ms = int(float(os.getenv("AI_QUANT_ENTRY_MAX_DELAY_MS", "0") or 0.0))
-        except (TypeError, ValueError):
-            max_delay_ms = 0
-        if max_delay_ms <= 0:
-            try:
-                max_delay_ms = int(float(os.getenv("AI_QUANT_ENTRY_MAX_DELAY_S", "0") or 0.0) * 1000.0)
-            except (TypeError, ValueError):
-                max_delay_ms = 0
-        # Clamp to a sane range (0 disables).
-        self._entry_max_delay_ms = int(max(0, min(max_delay_ms, 7 * 24 * 60 * 60 * 1000)))
+        max_delay_ms, clamped = _resolve_entry_max_delay_ms(
+            raw_ms=os.getenv("AI_QUANT_ENTRY_MAX_DELAY_MS"),
+            raw_s=os.getenv("AI_QUANT_ENTRY_MAX_DELAY_S"),
+        )
+        if clamped:
+            logger.warning(
+                "AI_QUANT_ENTRY_MAX_DELAY exceeds hard max; clamped to %dms",
+                int(ENTRY_MAX_DELAY_MS_HARD_MAX),
+            )
+        self._entry_max_delay_ms = int(max_delay_ms)
 
         # Optional: if a symbol was blocked by max_open_positions, allow re-try within the same candle
         # only when open position count decreased.
