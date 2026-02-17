@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import logging
 import os
 import queue
-import subprocess
 import threading
 from typing import Any
 
-from .openclaw_cli import send_openclaw_message
+from .openclaw_cli import send_openclaw_message as _send_openclaw_message_cli
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -149,28 +149,10 @@ def send_openclaw_message(*, channel: str, target: str, message: str, timeout_s:
         timeout = 6.0
     timeout = max(1.0, min(30.0, timeout))
 
-    subprocess.run(
-        [
-            "openclaw",
-            "message",
-            "send",
-            "--channel",
-            ch,
-            "--target",
-            tgt,
-            "--message",
-            msg,
-        ],
-        capture_output=True,
-        check=True,
-        text=True,
-        timeout=timeout,
-    )
+    _send_openclaw_message_cli(channel=ch, target=tgt, message=msg, timeout_s=timeout)
 
 
-import logging as _logging
-
-_alert_logger = _logging.getLogger(__name__)
+_alert_logger = logging.getLogger(__name__)
 
 _ALERT_QUEUE_LOCK = threading.RLock()
 _ALERT_QUEUE_MAX = max(10, min(5000, _env_int("AI_QUANT_ALERT_QUEUE_MAX", 200)))
