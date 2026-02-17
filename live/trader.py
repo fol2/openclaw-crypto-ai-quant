@@ -54,6 +54,15 @@ def _safe_float(val, default: float = 0.0) -> float:
         return default
 
 
+def _configure_live_db_connection(conn: sqlite3.Connection) -> None:
+    """Apply SQLite pragmas for low-latency live-path reads/writes."""
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except Exception as exc:
+        logger.debug("failed to apply live DB pragmas: %s", exc, exc_info=True)
+
+
 def _env_str(name: str, default: str = "") -> str:
     raw = os.getenv(name)
     return default if raw is None else str(raw)
@@ -407,6 +416,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         db_cur = None
         try:
             db_conn = sqlite3.connect(mei_alpha_v1.DB_PATH, timeout=_DB_TIMEOUT_S)
+            _configure_live_db_connection(db_conn)
             db_cur = db_conn.cursor()
         except sqlite3.Error as exc:
             logger.warning(
@@ -581,6 +591,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         conn = None
         try:
             conn = sqlite3.connect(mei_alpha_v1.DB_PATH, timeout=timeout_s)
+            _configure_live_db_connection(conn)
             cur = conn.cursor()
             cur.execute(
                 """
