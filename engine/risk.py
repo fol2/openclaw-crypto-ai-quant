@@ -9,6 +9,19 @@ from dataclasses import dataclass
 from typing import Any
 
 
+MIN_ORDERS_PER_MIN = 1.0
+MAX_ORDERS_PER_MIN = 1000.0
+MIN_SLIPPAGE_WINDOW_FILLS = 1
+MAX_SLIPPAGE_WINDOW_FILLS = 1000
+MIN_NOTIONAL_WINDOW_S = 10.0
+DEFAULT_NOTIONAL_WINDOW_S = 60.0
+MAX_NOTIONAL_WINDOW_S = 3600.0
+MAX_ORDER_GAP_MS = 60000.0
+SECONDS_PER_MINUTE = 60.0
+MS_PER_SECOND = 1000.0
+BASIS_POINTS_PER_UNIT = 10000.0
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -101,25 +114,36 @@ class RiskManager:
         self._kill_mode_env = _env_str("AI_QUANT_KILL_SWITCH_MODE", "close_only").strip().lower()
 
         # Rate limits (entry orders)
-        entry_per_min = float(min(1000.0, max(1.0, _env_float("AI_QUANT_RISK_MAX_ENTRY_ORDERS_PER_MIN", 30.0))))
-        self._entry_bucket = TokenBucket(capacity=entry_per_min, refill_per_s=entry_per_min / 60.0)
+        entry_per_min = float(
+            min(MAX_ORDERS_PER_MIN, max(MIN_ORDERS_PER_MIN, _env_float("AI_QUANT_RISK_MAX_ENTRY_ORDERS_PER_MIN", 30.0)))
+        )
+        self._entry_bucket = TokenBucket(capacity=entry_per_min, refill_per_s=entry_per_min / SECONDS_PER_MINUTE)
 
         entry_sym_per_min = float(
-            min(1000.0, max(1.0, _env_float("AI_QUANT_RISK_MAX_ENTRY_ORDERS_PER_MIN_PER_SYMBOL", 6.0)))
+            min(
+                MAX_ORDERS_PER_MIN,
+                max(MIN_ORDERS_PER_MIN, _env_float("AI_QUANT_RISK_MAX_ENTRY_ORDERS_PER_MIN_PER_SYMBOL", 6.0)),
+            )
         )
         self._entry_symbol_per_min = float(entry_sym_per_min)
         self._entry_symbol_events: dict[str, deque[float]] = defaultdict(deque)
 
         # Rate limits (exit orders)
-        exit_per_min = float(min(1000.0, max(1.0, _env_float("AI_QUANT_RISK_MAX_EXIT_ORDERS_PER_MIN", 120.0))))
-        self._exit_bucket = TokenBucket(capacity=exit_per_min, refill_per_s=exit_per_min / 60.0)
+        exit_per_min = float(
+            min(MAX_ORDERS_PER_MIN, max(MIN_ORDERS_PER_MIN, _env_float("AI_QUANT_RISK_MAX_EXIT_ORDERS_PER_MIN", 120.0)))
+        )
+        self._exit_bucket = TokenBucket(capacity=exit_per_min, refill_per_s=exit_per_min / SECONDS_PER_MINUTE)
 
         # Cancels
-        cancel_per_min = float(min(1000.0, max(1.0, _env_float("AI_QUANT_RISK_MAX_CANCELS_PER_MIN", 120.0))))
-        self._cancel_bucket = TokenBucket(capacity=cancel_per_min, refill_per_s=cancel_per_min / 60.0)
+        cancel_per_min = float(
+            min(MAX_ORDERS_PER_MIN, max(MIN_ORDERS_PER_MIN, _env_float("AI_QUANT_RISK_MAX_CANCELS_PER_MIN", 120.0)))
+        )
+        self._cancel_bucket = TokenBucket(capacity=cancel_per_min, refill_per_s=cancel_per_min / SECONDS_PER_MINUTE)
 
         # Notional throttle (entry only by default)
-        self._notional_window_s = float(max(10.0, min(3600.0, _env_float("AI_QUANT_RISK_NOTIONAL_WINDOW_S", 60.0))))
+        self._notional_window_s = float(
+            max(MIN_NOTIONAL_WINDOW_S, min(MAX_NOTIONAL_WINDOW_S, _env_float("AI_QUANT_RISK_NOTIONAL_WINDOW_S", DEFAULT_NOTIONAL_WINDOW_S)))
+        )
         self._max_notional_per_window = float(max(0.0, _env_float("AI_QUANT_RISK_MAX_NOTIONAL_PER_WINDOW_USD", 0.0)))
         self._notional_events: deque[tuple[float, float]] = deque()  # (ts_s, notional)
 
@@ -130,7 +154,7 @@ class RiskManager:
             self._min_order_gap_ms = 0
         else:
             try:
-                self._min_order_gap_ms = int(max(0.0, min(60000.0, float(str(raw_gap).strip()))))
+                self._min_order_gap_ms = int(max(0.0, min(MAX_ORDER_GAP_MS, float(str(raw_gap).strip()))))
             except Exception:
                 self._min_order_gap_ms = 0
         self._last_order_ts_ms: int | None = None
@@ -151,7 +175,10 @@ class RiskManager:
         # Slippage anomaly guard (entry fills). Uses median of recent fills vs mid/BBO.
         self._slippage_guard_enabled = _env_bool("AI_QUANT_RISK_SLIPPAGE_GUARD_ENABLED", False)
         self._slippage_guard_window_fills = int(
-            max(1, min(1000, _env_int("AI_QUANT_RISK_SLIPPAGE_GUARD_WINDOW_FILLS", 20)))
+            max(
+                MIN_SLIPPAGE_WINDOW_FILLS,
+                min(MAX_SLIPPAGE_WINDOW_FILLS, _env_int("AI_QUANT_RISK_SLIPPAGE_GUARD_WINDOW_FILLS", 20)),
+            )
         )
         self._slippage_guard_max_median_bps = float(
             max(0.0, _env_float("AI_QUANT_RISK_SLIPPAGE_GUARD_MAX_MEDIAN_BPS", 0.0))
@@ -598,7 +625,9 @@ class RiskManager:
         if env_window is not None and str(env_window).strip() != "":
             window = env_window
         try:
-            self._slippage_guard_window_fills = int(max(1, min(1000, int(float(window or 20)))))
+            self._slippage_guard_window_fills = int(
+                max(MIN_SLIPPAGE_WINDOW_FILLS, min(MAX_SLIPPAGE_WINDOW_FILLS, int(float(window or 20))))
+            )
         except Exception:
             self._slippage_guard_window_fills = 20
 
@@ -890,7 +919,7 @@ class RiskManager:
         if t_ms <= 0:
             return
 
-        day = datetime.datetime.fromtimestamp(t_ms / 1000.0, tz=datetime.timezone.utc).date().isoformat()
+        day = datetime.datetime.fromtimestamp(t_ms / MS_PER_SECOND, tz=datetime.timezone.utc).date().isoformat()
         if not day:
             return
 
@@ -977,9 +1006,9 @@ class RiskManager:
             return
 
         if sd == "BUY":
-            slip_bps = ((px - ref_px) / ref_px) * 10000.0
+            slip_bps = ((px - ref_px) / ref_px) * BASIS_POINTS_PER_UNIT
         else:
-            slip_bps = ((ref_px - px) / ref_px) * 10000.0
+            slip_bps = ((ref_px - px) / ref_px) * BASIS_POINTS_PER_UNIT
         slip_bps = float(max(0.0, slip_bps))
 
         self._slippage_bps.append(slip_bps)
@@ -1035,7 +1064,7 @@ class RiskManager:
         t_ms = int(ts_ms or 0)
         if t_ms <= 0:
             return
-        now_s = float(t_ms) / 1000.0
+        now_s = float(t_ms) / MS_PER_SECOND
 
         try:
             pnl = float(pnl_usd or 0.0)
