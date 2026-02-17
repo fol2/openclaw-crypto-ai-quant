@@ -14,12 +14,13 @@ Do not change this section unless the user explicitly asks to update `AGENTS.md`
 - All code changes MUST be done in a separate worktree folder on a non-`master` branch (for example `/home/fol2hk/openclaw-plugins/ai_quant_wt/<ticket-branch>`).
 - All AQC ticket work MUST be delivered through atomic PRs targeting `master` (one logical change per PR, no batching of unrelated fixes).
 - Do not commit ticket changes directly on `master`. Use a dedicated ticket branch/worktree, open a PR, complete review, then merge.
+- Multi-agent collaboration is expected: multiple active worktrees/branches/PRs may coexist at the same time.
 - Mandatory PR flow for every successful code update:
   1. Create an atomic PR to `master`.
   2. Run a reviewer subagent to review the PR.
   3. Merge only after the review is acceptable.
   4. Continue to the next task only after merge completion.
-  5. After merge, clean up local branches/worktrees and remote merged branches; keep only `master` and currently active PR branches.
+  5. After merge, clean up only branches/worktrees created by the current agent/session (local + remote); never delete branches/worktrees owned by other concurrent agents.
 
 ## Project Overview
 
