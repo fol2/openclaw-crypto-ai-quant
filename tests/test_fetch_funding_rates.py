@@ -18,6 +18,27 @@ class _FakeInfo:
         return list(self._payload)
 
 
+class _FakeInfoSequence:
+    def __init__(self, steps) -> None:
+        self._steps = list(steps)
+        self.calls: list[tuple[str, int, int]] = []
+
+    def funding_history(self, symbol: str, start_ms: int, end_ms: int):
+        self.calls.append((symbol, int(start_ms), int(end_ms)))
+        if not self._steps:
+            return []
+        nxt = self._steps.pop(0)
+        if isinstance(nxt, Exception):
+            raise nxt
+        return list(nxt)
+
+
+class _TransientApiError(Exception):
+    def __init__(self, status_code: int, msg: str = "transient") -> None:
+        super().__init__(msg)
+        self.status_code = int(status_code)
+
+
 def _conn_with_schema() -> sqlite3.Connection:
     con = sqlite3.connect(":memory:")
     con.executescript(fetch_funding_rates.DB_SCHEMA)
@@ -110,5 +131,60 @@ def test_fetch_and_store_returns_zero_on_api_error():
         assert count == 0
         row = con.execute("SELECT COUNT(*) FROM funding_rates").fetchone()
         assert int(row[0] if row else 0) == 0
+    finally:
+        con.close()
+
+
+def test_fetch_and_store_retries_transient_errors_then_succeeds(monkeypatch):
+    con = _conn_with_schema()
+    info = _FakeInfoSequence(
+        [
+            _TransientApiError(429, "rate limited"),
+            _TransientApiError(503, "service unavailable"),
+            [{"time": "1000", "fundingRate": "0.001"}],
+        ]
+    )
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(fetch_funding_rates.time, "sleep", lambda s: sleeps.append(float(s)))
+
+    try:
+        count = fetch_funding_rates.fetch_and_store(info, con, "BTC", 0, 9999)
+        assert count == 1
+        assert len(info.calls) == 3
+        assert sleeps == [0.5, 1.0]
+    finally:
+        con.close()
+
+
+def test_fetch_and_store_does_not_retry_non_retryable_error(monkeypatch):
+    con = _conn_with_schema()
+    info = _FakeInfo(exc=RuntimeError("invalid symbol"))
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(fetch_funding_rates.time, "sleep", lambda s: sleeps.append(float(s)))
+
+    try:
+        count = fetch_funding_rates.fetch_and_store(info, con, "BTC", 0, 9999)
+        assert count == 0
+        assert len(info.calls) == 1
+        assert sleeps == []
+    finally:
+        con.close()
+
+
+def test_fetch_and_store_stops_after_retry_budget(monkeypatch):
+    con = _conn_with_schema()
+    info = _FakeInfoSequence([_TransientApiError(429, "rate limited")] * 5)
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(fetch_funding_rates.time, "sleep", lambda s: sleeps.append(float(s)))
+
+    try:
+        count = fetch_funding_rates.fetch_and_store(info, con, "BTC", 0, 9999)
+        assert count == 0
+        # initial attempt + 3 retries
+        assert len(info.calls) == 4
+        assert sleeps == [0.5, 1.0, 2.0]
     finally:
         con.close()

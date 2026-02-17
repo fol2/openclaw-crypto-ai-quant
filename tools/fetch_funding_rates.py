@@ -24,6 +24,9 @@ from hyperliquid.info import Info
 from hyperliquid.utils import constants
 
 
+_FUNDING_FETCH_MAX_RETRIES = 3
+_FUNDING_FETCH_BASE_BACKOFF_S = 0.5
+
 DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS funding_rates (
     symbol TEXT NOT NULL,
@@ -68,6 +71,60 @@ def get_last_time(conn: sqlite3.Connection, symbol: str) -> int | None:
     return row[0] if row and row[0] is not None else None
 
 
+def _status_code_from_exception(exc: Exception) -> int | None:
+    for attr in ("status_code", "status", "http_status"):
+        value = getattr(exc, attr, None)
+        try:
+            code = int(value)
+            if code > 0:
+                return code
+        except (TypeError, ValueError):
+            continue
+
+    text = str(exc)
+    for token in ("429", "503"):
+        if token in text:
+            try:
+                return int(token)
+            except ValueError:
+                continue
+    return None
+
+
+def _is_retryable_funding_error(exc: Exception) -> bool:
+    code = _status_code_from_exception(exc)
+    return code in {429, 503}
+
+
+def _fetch_funding_history_with_retry(
+    info: Info,
+    symbol: str,
+    start_ms: int,
+    end_ms: int,
+    *,
+    max_retries: int = _FUNDING_FETCH_MAX_RETRIES,
+    base_backoff_s: float = _FUNDING_FETCH_BASE_BACKOFF_S,
+):
+    retries = int(max(0, max_retries))
+    for attempt in range(retries + 1):
+        try:
+            return info.funding_history(symbol, start_ms, end_ms)
+        except Exception as e:
+            retryable = _is_retryable_funding_error(e)
+            is_last = attempt >= retries
+            if (not retryable) or is_last:
+                raise
+            delay_s = float(base_backoff_s) * (2.0**float(attempt))
+            print(
+                (
+                    f"  WARN: transient API error for {symbol}: {e} "
+                    f"(retry {attempt + 1}/{retries} after {delay_s:.2f}s)"
+                ),
+                file=sys.stderr,
+            )
+            time.sleep(delay_s)
+
+
 def fetch_and_store(
     info: Info,
     conn: sqlite3.Connection,
@@ -77,7 +134,7 @@ def fetch_and_store(
 ) -> int:
     """Fetch funding history for one symbol and insert into DB. Returns rows inserted."""
     try:
-        data = info.funding_history(symbol, start_ms, end_ms)
+        data = _fetch_funding_history_with_retry(info, symbol, start_ms, end_ms)
     except Exception as e:
         print(f"  WARN: API error for {symbol}: {e}", file=sys.stderr)
         return 0
