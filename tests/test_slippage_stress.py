@@ -254,3 +254,63 @@ def test_main_records_parse_error_and_continues(tmp_path: Path, monkeypatch: pyt
     agg = summary["aggregate"]
     assert agg["degraded"] is True
     assert "replay_failure" in agg["degraded_reasons"]
+
+
+def test_main_marks_missing_reject_level_when_reject_run_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config_path = tmp_path / "strategy.yaml"
+    config_path.write_text("global: {}\n", encoding="utf-8")
+    out_dir = tmp_path / "out"
+    summary_path = tmp_path / "summary.json"
+
+    def _fake_run_cmd(argv: list[str], *, cwd: Path, stdout_path: Path, stderr_path: Path) -> int:  # noqa: ARG001
+        bps = float(argv[argv.index("--slippage-bps") + 1])
+        replay_out = Path(argv[argv.index("--output") + 1])
+        replay_out.parent.mkdir(parents=True, exist_ok=True)
+        stdout_path.parent.mkdir(parents=True, exist_ok=True)
+        stderr_path.parent.mkdir(parents=True, exist_ok=True)
+        stdout_path.write_text("", encoding="utf-8")
+        stderr_path.write_text("", encoding="utf-8")
+        if bps == 20.0:
+            return 7
+        replay_out.write_text(
+            json.dumps(
+                {
+                    "config_id": "cfg",
+                    "initial_balance": 1000.0,
+                    "final_balance": 1020.0,
+                    "total_pnl": 20.0,
+                    "total_trades": 8,
+                    "win_rate": 0.6,
+                    "profit_factor": 1.2,
+                    "sharpe_ratio": 0.3,
+                    "max_drawdown_pct": 0.12,
+                    "total_fees": 1.0,
+                    "slippage_bps": float(bps),
+                }
+            ),
+            encoding="utf-8",
+        )
+        return 0
+
+    monkeypatch.setattr(slippage_stress, "_resolve_backtester_cmd", lambda: ["mei-backtester"])
+    monkeypatch.setattr(slippage_stress, "_run_cmd", _fake_run_cmd)
+
+    rc = slippage_stress.main(
+        [
+            "--config",
+            str(config_path),
+            "--slippage-bps",
+            "10,20",
+            "--reject-flip-bps",
+            "20",
+            "--out-dir",
+            str(out_dir),
+            "--output",
+            str(summary_path),
+        ]
+    )
+    assert rc == 0
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    agg = summary["aggregate"]
+    assert agg["degraded"] is True
+    assert "missing_reject_level" in agg["degraded_reasons"]
