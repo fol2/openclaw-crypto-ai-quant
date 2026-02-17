@@ -296,6 +296,8 @@ pub struct BatchBuffers {
     pub num_symbols: u32,
     pub btc_sym_idx: u32,
     pub initial_balance: f32,
+    pub maker_fee_rate: f32,
+    pub taker_fee_rate: f32,
     pub max_sub_per_bar: u32,
     pub sub_candles: Option<CudaSlice<GpuRawCandle>>,
     pub sub_counts: Option<CudaSlice<u32>>,
@@ -310,6 +312,8 @@ impl BatchBuffers {
         configs: &[GpuComboConfig],
         initial_balance: f32,
         combo_base: usize,
+        maker_fee_rate: f32,
+        taker_fee_rate: f32,
     ) -> Result<Self, String> {
         let num_combos = configs.len() as u32;
         let num_bars = ind_bufs.num_bars;
@@ -340,8 +344,8 @@ impl BatchBuffers {
             chunk_start: 0,
             chunk_end: num_bars,
             initial_balance_bits: initial_balance.to_bits(),
-            maker_fee_rate_bits: 0.00035f32.to_bits(),
-            taker_fee_rate_bits: 0.00035f32.to_bits(),
+            maker_fee_rate_bits: maker_fee_rate.to_bits(),
+            taker_fee_rate_bits: taker_fee_rate.to_bits(),
             max_sub_per_bar: 0,
             trade_end_bar: num_bars,
         };
@@ -360,6 +364,8 @@ impl BatchBuffers {
             num_symbols,
             btc_sym_idx: ind_bufs.btc_sym_idx,
             initial_balance,
+            maker_fee_rate,
+            taker_fee_rate,
             max_sub_per_bar: 0,
             sub_candles: None,
             sub_counts: None,
@@ -378,6 +384,8 @@ impl BatchBuffers {
         num_symbols: u32,
         btc_sym_idx: u32,
         num_bars: u32,
+        maker_fee_rate: f32,
+        taker_fee_rate: f32,
     ) -> Result<Self, String> {
         let num_combos = configs.len() as u32;
 
@@ -412,8 +420,8 @@ impl BatchBuffers {
             chunk_start: 0,
             chunk_end: num_bars,
             initial_balance_bits: initial_balance.to_bits(),
-            maker_fee_rate_bits: 0.00035f32.to_bits(),
-            taker_fee_rate_bits: 0.00035f32.to_bits(),
+            maker_fee_rate_bits: maker_fee_rate.to_bits(),
+            taker_fee_rate_bits: taker_fee_rate.to_bits(),
             max_sub_per_bar: 0,
             trade_end_bar: num_bars,
         };
@@ -432,6 +440,8 @@ impl BatchBuffers {
             num_symbols,
             btc_sym_idx,
             initial_balance,
+            maker_fee_rate,
+            taker_fee_rate,
             max_sub_per_bar: 0,
             sub_candles: None,
             sub_counts: None,
@@ -499,8 +509,8 @@ pub fn dispatch_and_readback(
             chunk_start,
             chunk_end,
             initial_balance_bits: buffers.initial_balance.to_bits(),
-            maker_fee_rate_bits: 0.00035f32.to_bits(),
-            taker_fee_rate_bits: 0.00035f32.to_bits(),
+            maker_fee_rate_bits: buffers.maker_fee_rate.to_bits(),
+            taker_fee_rate_bits: buffers.taker_fee_rate.to_bits(),
             max_sub_per_bar: buffers.max_sub_per_bar,
             trade_end_bar: trade_end,
         };

@@ -566,6 +566,10 @@ pub fn run_tpe_sweep(
         num_bars, num_symbols,
     );
 
+    // Fee rates from bt_core accounting constants (H9: not hardcoded)
+    let maker_fee_rate = bt_core::accounting::DEFAULT_MAKER_FEE_RATE as f32;
+    let taker_fee_rate = bt_core::accounting::DEFAULT_TAKER_FEE_RATE as f32;
+
     // -- Layer 1: Fixed VRAM budget from total_vram (40%) -------------------------
     let num_symbols_u32 = u32::try_from(num_symbols)
         .map_err(|_| format!("num_symbols {} exceeds u32::MAX", num_symbols))
@@ -685,6 +689,8 @@ pub fn run_tpe_sweep(
                 btc_sym_idx,
                 spec.lookback,
                 spec.initial_balance as f32,
+                maker_fee_rate,
+                taker_fee_rate,
                 arena_cap,
                 snapshot_stride,
                 breadth_stride,
@@ -708,6 +714,8 @@ pub fn run_tpe_sweep(
                 btc_sym_idx,
                 spec.lookback,
                 spec.initial_balance as f32,
+                maker_fee_rate,
+                taker_fee_rate,
                 max_sub_per_bar,
                 sub_candles_gpu.as_ref(),
                 sub_counts_gpu.as_ref(),
@@ -790,6 +798,8 @@ fn evaluate_trade_only_batch(
     btc_sym_idx: u32,
     lookback: usize,
     initial_balance: f32,
+    maker_fee_rate: f32,
+    taker_fee_rate: f32,
     max_sub_per_bar: u32,
     sub_candles_gpu: Option<&CudaSlice<buffers::GpuRawCandle>>,
     sub_counts_gpu: Option<&CudaSlice<u32>>,
@@ -838,6 +848,8 @@ fn evaluate_trade_only_batch(
         &gpu_configs,
         initial_balance,
         0,
+        maker_fee_rate,
+        taker_fee_rate,
     ) {
         Ok(bufs) => bufs,
         Err(e) => {
@@ -877,6 +889,8 @@ fn evaluate_mixed_batch_arena(
     btc_sym_idx: u32,
     lookback: usize,
     initial_balance: f32,
+    maker_fee_rate: f32,
+    taker_fee_rate: f32,
     arena_cap: usize,
     snapshot_stride: usize,
     breadth_stride: usize,
@@ -994,6 +1008,8 @@ fn evaluate_mixed_batch_arena(
             num_symbols,
             btc_sym_idx,
             num_bars,
+            maker_fee_rate,
+            taker_fee_rate,
             max_sub_per_bar,
             sub_candles_gpu,
             sub_counts_gpu,
@@ -1112,6 +1128,8 @@ fn dispatch_trade_arena(
     num_symbols: u32,
     btc_sym_idx: u32,
     num_bars: u32,
+    maker_fee_rate: f32,
+    taker_fee_rate: f32,
     max_sub_per_bar: u32,
     sub_candles_gpu: Option<&CudaSlice<buffers::GpuRawCandle>>,
     sub_counts_gpu: Option<&CudaSlice<u32>>,
@@ -1171,8 +1189,8 @@ fn dispatch_trade_arena(
             chunk_start,
             chunk_end,
             initial_balance_bits: initial_balance.to_bits(),
-            maker_fee_rate_bits: 0.00035f32.to_bits(),
-            taker_fee_rate_bits: 0.00035f32.to_bits(),
+            maker_fee_rate_bits: maker_fee_rate.to_bits(),
+            taker_fee_rate_bits: taker_fee_rate.to_bits(),
             max_sub_per_bar,
             trade_end_bar: trade_end,
         };

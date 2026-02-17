@@ -550,8 +550,8 @@ pub struct GpuParams {
     pub chunk_start: u32,
     pub chunk_end: u32,
     pub initial_balance_bits: u32, // f32 bits
-    pub maker_fee_rate_bits: u32,  // f32 bits (3.5 bps)
-    pub taker_fee_rate_bits: u32,  // f32 bits (3.5 bps)
+    pub maker_fee_rate_bits: u32,  // f32 bits (from config, default 3.5 bps)
+    pub taker_fee_rate_bits: u32,  // f32 bits (from config, default 3.5 bps)
     pub max_sub_per_bar: u32,      // 0 = no sub-bars (backwards compatible)
     pub trade_end_bar: u32,        // last bar index for result write-back (scoped trade range)
 }

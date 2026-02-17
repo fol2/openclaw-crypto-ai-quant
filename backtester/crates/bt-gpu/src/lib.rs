@@ -181,6 +181,10 @@ fn run_gpu_sweep_internal(
         num_symbols,
     );
 
+    // Fee rates from bt_core accounting constants (H9: not hardcoded)
+    let maker_fee_rate = bt_core::accounting::DEFAULT_MAKER_FEE_RATE as f32;
+    let taker_fee_rate = bt_core::accounting::DEFAULT_TAKER_FEE_RATE as f32;
+
     // ── 2. Init CUDA device, upload raw candles ONCE ─────────────────────
     // C6: graceful fallback — return empty results if GPU init fails
     let device_state = match gpu_host::GpuDeviceState::new() {
@@ -403,6 +407,8 @@ fn run_gpu_sweep_internal(
             &gpu_configs,
             spec.initial_balance as f32,
             combo_base,
+            maker_fee_rate,
+            taker_fee_rate,
         ) {
             Ok(bufs) => bufs,
             Err(e) => {
