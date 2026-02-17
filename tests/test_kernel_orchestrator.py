@@ -584,6 +584,35 @@ class TestProcessCandle:
         assert decision.ok is False
         assert "segfault simulation" in decision.diagnostics.get("error", "")
 
+    def test_process_candle_computes_ema_slow_slope_once(self):
+        """EMA slow slope should be computed once and reused across gate + event."""
+        resp = _make_kernel_response(ok=True, action_kind="hold")
+        mock_bt = mock.MagicMock()
+        mock_bt.step_decision.return_value = resp
+
+        snap = _make_indicator_snapshot()
+        gate = _make_gate_result()
+        entry_params = {"macd_mode": 0}
+        compute_ema_slow_slope = mock.MagicMock(return_value=0.001)
+
+        with mock.patch.multiple(
+            "strategy.kernel_orchestrator",
+            _bt_runtime=mock_bt,
+            _BT_RUNTIME_AVAILABLE=True,
+            _import_mei_helpers=lambda: (
+                lambda df, **kw: snap,
+                lambda s, sym, **kw: gate,
+                lambda cfg=None: entry_params,
+                compute_ema_slow_slope,
+            ),
+        ):
+            orch = KernelOrchestrator()
+            orch.process_candle(
+                "ETH", mock.MagicMock(), _make_state(), _make_params(),
+            )
+
+        assert compute_ema_slow_slope.call_count == 1
+
     def test_process_candle_with_exit_params_uses_step_full(self):
         """When exit_params_json is provided, step_full is called."""
         resp = _make_kernel_response(ok=True, action_kind="hold")
