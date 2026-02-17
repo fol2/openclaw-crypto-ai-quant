@@ -55,3 +55,21 @@ def test_all_mids_honours_env_retry_and_timeout(monkeypatch) -> None:
     assert len(timeouts) == 2
     assert timeouts == [1.5, 1.5]
     assert sleep_calls == 1
+
+
+def test_all_mids_falls_back_to_client_timeout_when_env_unset(monkeypatch) -> None:
+    timeouts: list[float] = []
+
+    def _fake_urlopen(_req, timeout):
+        timeouts.append(float(timeout))
+        raise RuntimeError("boom")
+
+    monkeypatch.delenv("AI_QUANT_REST_ALL_MIDS_TIMEOUT_S", raising=False)
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    monkeypatch.setattr("engine.rest_client.time.sleep", lambda _seconds: None)
+
+    client = HyperliquidRestClient(timeout_s=2.5)
+    res = client.all_mids()
+
+    assert res.ok is False
+    assert timeouts == [2.5]

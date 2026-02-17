@@ -98,7 +98,7 @@ class HyperliquidRestClient:
         # Main-loop fallback path: fail fast to avoid long stalls.
         max_retries = _env_int("AI_QUANT_REST_ALL_MIDS_RETRIES", 1)
         max_retries = max(1, min(3, int(max_retries)))
-        timeout_s = _env_float("AI_QUANT_REST_ALL_MIDS_TIMEOUT_S", 3.0)
+        timeout_s = _env_float("AI_QUANT_REST_ALL_MIDS_TIMEOUT_S", self._timeout_s)
         timeout_s = max(0.2, min(10.0, float(timeout_s)))
         return self._post({"type": "allMids"}, max_retries=max_retries, timeout_s=timeout_s)
 
