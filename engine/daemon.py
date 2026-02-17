@@ -922,14 +922,63 @@ class LivePlugin:
         if not positions:
             return
 
+        try:
+            stale_mid_max_age_s = float(os.getenv("AI_QUANT_DRAWDOWN_CLOSE_ALL_STALE_MID_MAX_AGE_S", "60"))
+        except Exception:
+            stale_mid_max_age_s = 60.0
+        stale_mid_max_age_s = float(max(1.0, min(stale_mid_max_age_s, 600.0)))
+
         for sym in sorted(positions.keys()):
             mid = None
+            stale_mid_age_s = None
+            ws_disconnect_age_s = None
             try:
-                mid = self._ws.get_mid(sym)
+                mid = self._ws.get_mid(sym, max_age_s=10.0)
             except Exception:
                 mid = None
             if mid is None or float(mid) <= 0:
-                continue
+                stale_mid = None
+                try:
+                    stale_mid = self._ws.get_mid(sym, max_age_s=None)
+                except Exception:
+                    stale_mid = None
+
+                try:
+                    get_mid_age = getattr(self._ws, "get_mid_age_s", None)
+                    if callable(get_mid_age):
+                        stale_mid_age_s = get_mid_age(sym)
+                except Exception:
+                    stale_mid_age_s = None
+                try:
+                    get_disconnect_age = getattr(self._ws, "get_ws_disconnect_age_s", None)
+                    if callable(get_disconnect_age):
+                        ws_disconnect_age_s = get_disconnect_age()
+                except Exception:
+                    ws_disconnect_age_s = None
+
+                stale_mid_ok = (
+                    stale_mid is not None
+                    and float(stale_mid) > 0.0
+                    and stale_mid_age_s is not None
+                    and float(stale_mid_age_s) <= stale_mid_max_age_s
+                )
+                if stale_mid_ok and (
+                    ws_disconnect_age_s is None or float(ws_disconnect_age_s) <= stale_mid_max_age_s
+                ):
+                    mid = float(stale_mid)
+                    logger.warning(
+                        "drawdown close_all using stale WS mid for %s (mid_age=%.1fs, disconnect_age=%s)",
+                        sym,
+                        float(stale_mid_age_s),
+                        (
+                            f"{float(ws_disconnect_age_s):.1f}s"
+                            if ws_disconnect_age_s is not None
+                            else "n/a"
+                        ),
+                    )
+                else:
+                    logger.warning("drawdown close_all skipped %s due to missing/stale WS mid", sym)
+                    continue
             try:
                 self.trader.close_position(
                     sym,
