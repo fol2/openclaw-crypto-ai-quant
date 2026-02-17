@@ -11,6 +11,7 @@ use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use bt_core::candle::CandleData;
 use bt_core::config::StrategyConfig;
@@ -132,7 +133,55 @@ struct TraceEventRow {
     pnl: f32,
 }
 
+#[cfg(target_os = "linux")]
+fn ensure_wsl_cuda_path() {
+    const WSL_LIB: &str = "/usr/lib/wsl/lib";
+    const MARKER: &str = "__AQC_WSL_CUDA_REEXEC";
+
+    if std::env::var_os(MARKER).is_some() {
+        return;
+    }
+    if !Path::new("/usr/lib/wsl/lib/libcuda.so.1").exists() {
+        return;
+    }
+
+    let current = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
+    if current.split(':').any(|seg| seg == WSL_LIB) {
+        return;
+    }
+
+    let next = if current.is_empty() {
+        WSL_LIB.to_string()
+    } else {
+        format!("{WSL_LIB}:{current}")
+    };
+
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(err) => {
+            eprintln!("[axis-parity] WSL2 CUDA env fix skipped (current_exe failed: {err})");
+            return;
+        }
+    };
+
+    eprintln!("[axis-parity] WSL2 detected — re-exec with LD_LIBRARY_PATH={next}");
+    match Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .env("LD_LIBRARY_PATH", &next)
+        .env(MARKER, "1")
+        .status()
+    {
+        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+        Err(err) => {
+            eprintln!("[axis-parity] WSL2 re-exec failed ({err}), continuing without env fix");
+        }
+    }
+}
+
 fn main() {
+    #[cfg(target_os = "linux")]
+    ensure_wsl_cuda_path();
+
     let args = Args::parse();
     if let Err(err) = run(args) {
         eprintln!("[axis-parity] ERROR: {err}");
