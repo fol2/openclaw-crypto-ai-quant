@@ -925,10 +925,11 @@ class LivePlugin:
         for sym in sorted(positions.keys()):
             mid = None
             try:
-                mid = self._ws.get_mid(sym)
+                mid = self._ws.get_mid(sym, max_age_s=10.0)
             except Exception:
                 mid = None
             if mid is None or float(mid) <= 0:
+                logger.warning("drawdown close_all skipped %s due to missing/stale WS mid", sym)
                 continue
             try:
                 self.trader.close_position(
