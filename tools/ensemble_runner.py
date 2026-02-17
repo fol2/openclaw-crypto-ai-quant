@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -245,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:
 
     spec_path = Path(args.spec).expanduser().resolve()
     out_dir = Path(args.out_dir).expanduser().resolve()
-    daemon_argv = [p for p in str(args.daemon_cmd).strip().split(" ") if p]
+    daemon_argv = shlex.split(str(args.daemon_cmd).strip())
 
     try:
         plans = build_launch_plan(
@@ -299,4 +300,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
