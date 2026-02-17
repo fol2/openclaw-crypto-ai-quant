@@ -190,7 +190,7 @@ struct TraceEventRow {
     reason: String,
     price: f32,
     size: f32,
-    pnl: f32,
+    pnl: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -1180,7 +1180,7 @@ fn canonicalise_gpu_event(ev: &TraceEventRow) -> CanonicalEventRow {
         reason_code,
         price: ev.price as f64,
         size: ev.size as f64,
-        pnl: ev.pnl as f64,
+        pnl: ev.pnl,
     }
 }
 

@@ -131,7 +131,7 @@ struct GpuTraceEvent {
     unsigned int reason;
     float price;
     float size;
-    float pnl;
+    double pnl;
 };
 
 struct __align__(16) GpuComboConfig {
@@ -583,7 +583,7 @@ __device__ __forceinline__ void trace_record(
     unsigned int reason,
     float price,
     float size,
-    float pnl
+    double pnl
 ) {
     if (state->trace_enabled == 0u) { return; }
     if (state->trace_symbol != TRACE_SYMBOL_ALL && state->trace_symbol != sym) { return; }
@@ -646,7 +646,7 @@ __device__ void apply_close(GpuComboState* state, unsigned int sym, const GpuSna
         reason_is_signal_flip ? TRACE_REASON_SIGNAL_FLIP : TRACE_REASON_EXIT,
         fill_price,
         pos.size,
-        (float)pnl
+        pnl
     );
 
     // PESC tracking
@@ -702,7 +702,7 @@ __device__ void apply_partial_close(GpuComboState* state, unsigned int sym, cons
         TRACE_REASON_PARTIAL,
         fill_price,
         exit_size,
-        (float)pnl
+        pnl
     );
 
     // Reduce position
