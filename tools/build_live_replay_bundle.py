@@ -273,6 +273,10 @@ def main() -> int:
             "from_ts": int(args.from_ts),
             "to_ts": int(args.to_ts),
         },
+        "input_hashes": {
+            "candles_db_sha256": _hash_file(candles_db),
+            "funding_db_sha256": _hash_file(funding_db) if funding_db is not None else None,
+        },
         "artefacts": {
             "snapshot_file": snapshot_path.name,
             "live_baseline_trades": live_trades_path.name,

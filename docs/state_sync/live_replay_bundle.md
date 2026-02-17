@@ -42,6 +42,8 @@ python tools/build_live_replay_bundle.py \
 
 This keeps snapshot seeding, replay execution, state alignment audit, exit-trade reconciliation, and action-level reconciliation tied to one immutable bundle manifest.
 
+The manifest records SHA256 hashes for the replay market-data inputs (`candles_db`, optional `funding_db`) to preserve data provenance.
+
 ## Execution Context
 
 The generated scripts auto-detect bundle-local artefact paths via `BUNDLE_DIR` and use `REPO_ROOT` for tool/binary paths.
