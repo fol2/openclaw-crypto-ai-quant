@@ -633,6 +633,21 @@ class CmdResult:
     timeout_s: float | None = None
 
 
+def _default_cmd_timeout_s() -> float | None:
+    """Return default subprocess timeout for factory commands.
+
+    Set ``AI_QUANT_FACTORY_CMD_TIMEOUT_S`` to override (seconds). Values <= 0 disable timeout.
+    """
+    try:
+        raw = float(os.getenv("AI_QUANT_FACTORY_CMD_TIMEOUT_S", "21600"))
+    except Exception:
+        raw = 21600.0
+    if raw <= 0.0:
+        return None
+    # Keep a sane upper bound (7 days) to avoid accidental runaway settings.
+    return float(max(1.0, min(raw, 7 * 24 * 60 * 60.0)))
+
+
 def _run_cmd(
     argv: list[str],
     *,
@@ -640,18 +655,20 @@ def _run_cmd(
     stdout_path: Path | None,
     stderr_path: Path | None,
     env: dict[str, str] | None = None,
-    timeout_s: float | None = 3600.0,
+    timeout_s: float | None = None,
 ) -> CmdResult:
     t0 = time.time()
     timed_out = False
-    effective_timeout_s: float | None = None
+    effective_timeout_s: float | None = _default_cmd_timeout_s() if timeout_s is None else None
     if timeout_s is not None:
         try:
             parsed_timeout = float(timeout_s)
         except Exception:
-            parsed_timeout = 3600.0
+            parsed_timeout = _default_cmd_timeout_s() or 0.0
         if parsed_timeout > 0:
             effective_timeout_s = parsed_timeout
+        else:
+            effective_timeout_s = None
 
     if stdout_path is not None:
         stdout_path.parent.mkdir(parents=True, exist_ok=True)
