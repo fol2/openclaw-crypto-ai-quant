@@ -134,6 +134,8 @@ struct LedgerEventParitySummary {
     cpu_tail_offset: usize,
     gpu_tail_offset: usize,
     first_mismatch_at: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    first_mismatch_fields: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -210,6 +212,7 @@ struct EventParitySummary {
     cpu_tail_offset: usize,
     gpu_tail_offset: usize,
     first_mismatch_at: Option<usize>,
+    first_mismatch_fields: Vec<String>,
     cpu_event: Option<CanonicalEventRow>,
     gpu_event: Option<CanonicalEventRow>,
 }
@@ -924,6 +927,7 @@ fn compare_event_streams(
                 cpu_tail_offset,
                 gpu_tail_offset,
                 first_mismatch_at: Some(rel_idx),
+                first_mismatch_fields: diff_canonical_fields(cpu_ev, gpu_ev),
                 cpu_event: Some(cpu_ev.clone()),
                 gpu_event: Some(gpu_ev.clone()),
             };
@@ -939,6 +943,7 @@ fn compare_event_streams(
             cpu_tail_offset,
             gpu_tail_offset,
             first_mismatch_at: None,
+            first_mismatch_fields: Vec::new(),
             cpu_event: None,
             gpu_event: None,
         };
@@ -952,6 +957,7 @@ fn compare_event_streams(
         cpu_tail_offset,
         gpu_tail_offset,
         first_mismatch_at: None,
+        first_mismatch_fields: Vec::new(),
         cpu_event: None,
         gpu_event: None,
     }
@@ -966,6 +972,11 @@ fn summarise_event_parity(summary: &EventParitySummary) -> LedgerEventParitySumm
         cpu_tail_offset: summary.cpu_tail_offset,
         gpu_tail_offset: summary.gpu_tail_offset,
         first_mismatch_at: summary.first_mismatch_at,
+        first_mismatch_fields: if summary.first_mismatch_fields.is_empty() {
+            None
+        } else {
+            Some(summary.first_mismatch_fields.clone())
+        },
     }
 }
 
@@ -1164,6 +1175,50 @@ fn canonical_events_equal(a: &CanonicalEventRow, b: &CanonicalEventRow) -> bool 
         && scale_1e6(a.price) == scale_1e6(b.price)
         && scale_1e6(a.size) == scale_1e6(b.size)
         && scale_1e6(a.pnl) == scale_1e6(b.pnl)
+}
+
+fn diff_canonical_fields(a: &CanonicalEventRow, b: &CanonicalEventRow) -> Vec<String> {
+    let mut diff = Vec::new();
+    if a.t_sec != b.t_sec {
+        diff.push("t_sec".to_string());
+    }
+    if a.symbol != b.symbol {
+        diff.push("symbol".to_string());
+    }
+    if a.action_kind != b.action_kind {
+        diff.push("action_kind".to_string());
+    }
+    if a.action_side != b.action_side {
+        diff.push("action_side".to_string());
+    }
+    if a.intent_signal != b.intent_signal {
+        diff.push("intent_signal".to_string());
+    }
+    if a.event_type != b.event_type {
+        diff.push("event_type".to_string());
+    }
+    if a.status != b.status {
+        diff.push("status".to_string());
+    }
+    if a.decision_phase != b.decision_phase {
+        diff.push("decision_phase".to_string());
+    }
+    if a.triggered_by != b.triggered_by {
+        diff.push("triggered_by".to_string());
+    }
+    if a.reason_code != b.reason_code {
+        diff.push("reason_code".to_string());
+    }
+    if scale_1e6(a.price) != scale_1e6(b.price) {
+        diff.push("price".to_string());
+    }
+    if scale_1e6(a.size) != scale_1e6(b.size) {
+        diff.push("size".to_string());
+    }
+    if scale_1e6(a.pnl) != scale_1e6(b.pnl) {
+        diff.push("pnl".to_string());
+    }
+    diff
 }
 
 fn scale_1e6(v: f64) -> i64 {
