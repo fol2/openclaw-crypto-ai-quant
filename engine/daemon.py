@@ -19,6 +19,7 @@ YAML config hot-reload is handled by StrategyManager, without reloading mei_alph
 from __future__ import annotations
 
 import atexit
+import json
 import logging
 import os
 import time
@@ -72,6 +73,14 @@ def _strategy_mode_file() -> Path:
         return Path(p).expanduser().resolve()
     root = Path(__file__).resolve().parents[1]
     return (root / "artifacts" / "state" / "strategy_mode.txt").resolve()
+
+
+def _ws_fills_overflow_path() -> Path:
+    p = str(os.getenv("AI_QUANT_LIVE_DROPPED_FILLS_PATH", "") or "").strip()
+    if p:
+        return Path(p).expanduser().resolve()
+    root = Path(__file__).resolve().parents[1]
+    return (root / "artifacts" / "state" / "ws_fills_overflow.jsonl").resolve()
 
 
 def _read_strategy_mode_file(path: Path) -> str:
@@ -412,6 +421,8 @@ class LivePlugin:
             self._max_pending_ws_fills = int(float(os.getenv("AI_QUANT_LIVE_MAX_PENDING_FILLS", "50000")))
         except Exception:
             self._max_pending_ws_fills = 50000
+        self._ws_fills_overflow_path = _ws_fills_overflow_path()
+        self._force_rest_fills_sync = False
 
         # Health guard (alerts + optional kill-switch).
         self._health_enabled = _env_bool("AI_QUANT_HEALTH_GUARD", True)
@@ -503,6 +514,132 @@ class LivePlugin:
                 print(f"⚠️ {msg}")
             except Exception:
                 pass
+
+    def _fill_symbol_time_sample(self, fill: dict) -> str:
+        try:
+            sym = str(fill.get("coin") or fill.get("symbol") or "?").strip().upper() or "?"
+        except Exception:
+            sym = "?"
+        t_raw = fill.get("time")
+        if t_raw is None:
+            t_raw = fill.get("timestamp")
+        try:
+            t_ms = str(int(float(t_raw)))
+        except Exception:
+            t_ms = "?"
+        return f"{sym}@{t_ms}"
+
+    def _persist_dropped_ws_fill_keys(self, fills: list[dict]) -> None:
+        if not fills:
+            return
+        try:
+            path = Path(self._ws_fills_overflow_path).expanduser().resolve()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            dropped_at_ms = int(time.time() * 1000)
+            with path.open("a", encoding="utf-8") as fh:
+                for fill in fills:
+                    try:
+                        sym = str(fill.get("coin") or fill.get("symbol") or "").strip().upper()
+                    except Exception:
+                        sym = ""
+                    tid_raw = fill.get("tid")
+                    try:
+                        tid = int(tid_raw) if tid_raw is not None else None
+                    except Exception:
+                        tid = None
+                    try:
+                        fill_hash = str(fill.get("hash") or "").strip() or None
+                    except Exception:
+                        fill_hash = None
+                    t_raw = fill.get("time")
+                    if t_raw is None:
+                        t_raw = fill.get("timestamp")
+                    try:
+                        t_ms = int(float(t_raw)) if t_raw is not None else None
+                    except Exception:
+                        t_ms = None
+                    payload = {
+                        "dropped_at_ms": dropped_at_ms,
+                        "symbol": sym or None,
+                        "time_ms": t_ms,
+                        "tid": tid,
+                        "hash": fill_hash,
+                    }
+                    fh.write(json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n")
+        except Exception:
+            self._log_exc("pending_fills_overflow_log", "failed to persist dropped WS fills overflow records")
+
+    def _handle_ws_fills_overflow(self) -> None:
+        if self._max_pending_ws_fills <= 0:
+            return
+        n_pending = len(self._pending_ws_fills)
+        if n_pending <= self._max_pending_ws_fills:
+            return
+
+        drop = n_pending - self._max_pending_ws_fills
+        dropped = list(self._pending_ws_fills[:drop])
+        self._pending_ws_fills = self._pending_ws_fills[drop:]
+        self._force_rest_fills_sync = True
+        self._persist_dropped_ws_fill_keys(dropped)
+
+        samples = ", ".join(self._fill_symbol_time_sample(fill) for fill in dropped[:5]) or "n/a"
+        print(
+            f"⚠️ WS fills buffer exceeded {self._max_pending_ws_fills}; "
+            f"dropped {drop} oldest; samples={samples}; forcing REST backfill"
+        )
+
+    def _should_run_rest_fills_sync(self, *, now: float) -> bool:
+        if self._force_rest_fills_sync:
+            return True
+        if self._rest_sync_s <= 0:
+            return False
+        return (float(now) - float(self._last_rest_fills_sync)) >= float(self._rest_sync_s)
+
+    def _sync_rest_fills(self, *, now: float) -> None:
+        if not self._should_run_rest_fills_sync(now=now):
+            return
+
+        force_sync = bool(self._force_rest_fills_sync)
+        if force_sync:
+            self._force_rest_fills_sync = False
+
+        self._last_rest_fills_sync = float(now)
+        now_ms = int(time.time() * 1000)
+        start_ms = max(0, int(self._last_rest_fills_ms) - (5 * 60 * 1000))  # overlap
+        try:
+            rest_fills = (
+                self._rest_info.user_fills_by_time(
+                    self.main_address,
+                    start_ms,
+                    now_ms,
+                    aggregate_by_time=False,
+                )
+                or []
+            )
+            if rest_fills:
+                if self._oms is not None:
+                    inserted = self._oms.process_user_fills(trader=self.trader, fills=rest_fills)
+                else:
+                    inserted = self._lt.process_user_fills(self.trader, rest_fills)
+                if inserted:
+                    try:
+                        self.trader.sync_from_exchange(force=True)
+                    except Exception:
+                        self._log_exc("sync_after_rest_fills", "sync_from_exchange(force=True) failed after REST fills")
+            # Advance the cursor only after a successful REST call.
+            self._last_rest_fills_ms = now_ms
+        except Exception:
+            # Do not advance the cursor on failures; we'll retry on the next cycle.
+            if force_sync:
+                self._force_rest_fills_sync = True
+            if (now - self._last_rest_fills_err_s) >= 30.0:
+                self._last_rest_fills_err_s = now
+                try:
+                    import traceback
+
+                    print(f"⚠️ REST fills backfill failed\n{traceback.format_exc()}")
+                except Exception:
+                    pass
 
     def _health_alert(self, key: str, message: str, *, kill: bool, kill_mode: str) -> None:
         if not self._health_enabled:
@@ -737,14 +874,7 @@ class LivePlugin:
                         kill=bool(self._pending_fills_kill),
                         kill_mode=str(self._pending_fills_kill_mode or "close_only"),
                     )
-                if self._max_pending_ws_fills > 0 and len(self._pending_ws_fills) > self._max_pending_ws_fills:
-                    # Keep the newest; REST backfill should be able to recover the dropped ones.
-                    drop = len(self._pending_ws_fills) - self._max_pending_ws_fills
-                    self._pending_ws_fills = self._pending_ws_fills[drop:]
-                    print(
-                        f"⚠️ WS fills buffer exceeded {self._max_pending_ws_fills}; "
-                        f"dropped {drop} oldest (REST backfill should recover)"
-                    )
+                self._handle_ws_fills_overflow()
         except Exception:
             self._log_exc("drain_user_fills", "WS drain_user_fills failed")
 
@@ -847,44 +977,10 @@ class LivePlugin:
             self._log_exc("order_updates", "WS drain/process orderUpdates failed")
 
         # REST fill backfill safety. Useful if WS drops for a while.
-        if self._rest_sync_s > 0 and (now - self._last_rest_fills_sync) >= self._rest_sync_s:
-            self._last_rest_fills_sync = now
-            now_ms = int(time.time() * 1000)
-            start_ms = max(0, int(self._last_rest_fills_ms) - (5 * 60 * 1000))  # overlap
-            try:
-                rest_fills = (
-                    self._rest_info.user_fills_by_time(
-                        self.main_address,
-                        start_ms,
-                        now_ms,
-                        aggregate_by_time=False,
-                    )
-                    or []
-                )
-                if rest_fills:
-                    if self._oms is not None:
-                        inserted = self._oms.process_user_fills(trader=self.trader, fills=rest_fills)
-                    else:
-                        inserted = self._lt.process_user_fills(self.trader, rest_fills)
-                    if inserted:
-                        try:
-                            self.trader.sync_from_exchange(force=True)
-                        except Exception:
-                            self._log_exc(
-                                "sync_after_rest_fills", "sync_from_exchange(force=True) failed after REST fills"
-                            )
-                # Advance the cursor only after a successful REST call.
-                self._last_rest_fills_ms = now_ms
-            except Exception:
-                # Do not advance the cursor on failures; we'll retry on the next cycle.
-                if (now - self._last_rest_fills_err_s) >= 30.0:
-                    self._last_rest_fills_err_s = now
-                    try:
-                        import traceback
-
-                        print(f"⚠️ REST fills backfill failed\n{traceback.format_exc()}")
-                    except Exception:
-                        pass
+        try:
+            self._sync_rest_fills(now=now)
+        except Exception:
+            self._log_exc("rest_fills_backfill", "REST fills backfill failed")
 
         # Repair missing signals from recent trades (best-effort, throttled).
         if (
