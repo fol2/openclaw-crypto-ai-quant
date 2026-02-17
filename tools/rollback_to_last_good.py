@@ -148,8 +148,22 @@ def rollback_to_last_good(
     restart_required = bool(cur_interval and next_interval and cur_interval != next_interval)
 
     ts = _utc_compact()
-    rollback_dir = (artifacts_dir / "rollbacks" / "paper" / ts).resolve()
-    rollback_dir.mkdir(parents=True, exist_ok=True)
+    rollback_root = (artifacts_dir / "rollbacks" / "paper").resolve()
+    rollback_root.mkdir(parents=True, exist_ok=True)
+    rollback_dir = (rollback_root / ts).resolve()
+    try:
+        rollback_dir.mkdir(parents=False, exist_ok=False)
+    except FileExistsError:
+        # Same-second concurrent rollbacks should not overwrite each other's artifacts.
+        while True:
+            suffix = f"{os.getpid()}-{threading.get_ident()}-{time.time_ns()}"
+            candidate = (rollback_root / f"{ts}-{suffix}").resolve()
+            try:
+                candidate.mkdir(parents=False, exist_ok=False)
+                rollback_dir = candidate
+                break
+            except FileExistsError:
+                continue
 
     _atomic_write_text(rollback_dir / "restored_config.yaml", restored_text + "\n")
 

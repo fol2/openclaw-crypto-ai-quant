@@ -202,9 +202,12 @@ def test_rollback_to_last_good_allows_concurrent_calls_for_same_timestamp(tmp_pa
         rb1 = f1.result()
         rb2 = f2.result()
 
-    assert rb1 == rb2
+    assert rb1 != rb2
+    assert rb1.name.startswith("20260217T120000Z")
+    assert rb2.name.startswith("20260217T120000Z")
     assert target_yaml.read_text(encoding="utf-8").strip() == VALID_YAML.strip()
-    assert (rb1 / "rollback_event.json").exists()
-    event = json.loads((rb1 / "rollback_event.json").read_text(encoding="utf-8"))
-    assert event["version"] == "rollback_event_v1"
-    assert event["why"]["reason"] in set(reasons)
+    event1 = json.loads((rb1 / "rollback_event.json").read_text(encoding="utf-8"))
+    event2 = json.loads((rb2 / "rollback_event.json").read_text(encoding="utf-8"))
+    assert event1["version"] == "rollback_event_v1"
+    assert event2["version"] == "rollback_event_v1"
+    assert {event1["why"]["reason"], event2["why"]["reason"]} == set(reasons)
