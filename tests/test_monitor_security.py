@@ -122,3 +122,17 @@ def test_log_message_forwards_4xx_status(monkeypatch) -> None:
     handler.log_message('"%s" %s %s', "GET /api/unknown HTTP/1.1", "404", "19")
     assert len(calls) == 1
     assert calls[0][1][1] == "404"
+
+
+def test_log_message_forwards_5xx_status(monkeypatch) -> None:
+    handler = object.__new__(monitor_server.Handler)
+    calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def _fake_base_log_message(self, fmt: str, *args) -> None:  # noqa: ARG001
+        calls.append((fmt, args))
+
+    monkeypatch.setattr(monitor_server.BaseHTTPRequestHandler, "log_message", _fake_base_log_message)
+
+    handler.log_message('"%s" %s %s', "POST /api/v2/decisions/replay HTTP/1.1", "503", "57")
+    assert len(calls) == 1
+    assert calls[0][1][1] == "503"
