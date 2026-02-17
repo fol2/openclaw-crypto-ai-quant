@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import logging
 import os
 import json
@@ -76,13 +77,15 @@ def _resolve_entry_max_delay_ms(*, raw_ms: str | None, raw_s: str | None) -> tup
 
     max_delay_ms = 0
     try:
-        max_delay_ms = int(float(raw_ms or 0.0))
-    except (TypeError, ValueError):
+        raw_ms_f = float(raw_ms or 0.0)
+        max_delay_ms = int(raw_ms_f) if math.isfinite(raw_ms_f) else 0
+    except (TypeError, ValueError, OverflowError):
         max_delay_ms = 0
     if max_delay_ms <= 0:
         try:
-            max_delay_ms = int(float(raw_s or 0.0) * 1000.0)
-        except (TypeError, ValueError):
+            raw_s_f = float(raw_s or 0.0)
+            max_delay_ms = int(raw_s_f * 1000.0) if math.isfinite(raw_s_f) else 0
+        except (TypeError, ValueError, OverflowError):
             max_delay_ms = 0
     if max_delay_ms <= 0:
         return 0, False

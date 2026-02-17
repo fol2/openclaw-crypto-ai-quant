@@ -26,3 +26,9 @@ def test_resolve_entry_max_delay_invalid_values_disable_guard():
     value_ms, clamped = _resolve_entry_max_delay_ms(raw_ms="not-a-number", raw_s="also-bad")
     assert value_ms == 0
     assert clamped is False
+
+
+def test_resolve_entry_max_delay_non_finite_values_disable_guard():
+    value_ms, clamped = _resolve_entry_max_delay_ms(raw_ms="1e309", raw_s="inf")
+    assert value_ms == 0
+    assert clamped is False
