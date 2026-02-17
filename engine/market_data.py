@@ -104,7 +104,7 @@ class MarketDataHub:
         db_timeout_s: float = 30.0,
     ):
         self._db_path = str(db_path)
-        self._db_timeout_s = float(db_timeout_s)
+        self._db_timeout_s = min(float(db_timeout_s), 5.0)
 
         self._stale_mid_s = float(stale_mid_s)
         self._stale_bbo_s = float(stale_bbo_s)
@@ -202,7 +202,7 @@ class MarketDataHub:
                     except Exception:
                         truly_not_ready.append(sym)
                 not_ready = truly_not_ready
-                ready = (len(not_ready) == 0)
+                ready = len(not_ready) == 0
 
             return bool(ready), [str(s).upper() for s in not_ready]
         except Exception:
@@ -501,7 +501,7 @@ class MarketDataHub:
         now_mono = time.monotonic()
 
         # Periodic cache cleanup: evict entries older than 10× TTL every 60s.
-        if now_mono - getattr(self, '_last_cache_cleanup', 0.0) > 60.0:
+        if now_mono - getattr(self, "_last_cache_cleanup", 0.0) > 60.0:
             self._last_cache_cleanup = now_mono
             expired = [k for k, (t, _) in self._candle_cache.items() if now_mono - t > self._candle_cache_ttl_s * 10]
             for k in expired:
@@ -545,7 +545,9 @@ class MarketDataHub:
             self._candle_cache[cache_key] = (now_mono, result)
         return result
 
-    def get_mid_price(self, symbol: str, *, max_age_s: float | None = None, interval: str | None = None) -> PriceQuote | None:
+    def get_mid_price(
+        self, symbol: str, *, max_age_s: float | None = None, interval: str | None = None
+    ) -> PriceQuote | None:
         sym = str(symbol).upper()
         max_age = self._stale_mid_s if max_age_s is None else float(max_age_s)
 
@@ -708,7 +710,10 @@ class MarketDataHub:
                         gap_count = int((diffs > expected_interval_ms * 1.5).sum())
                         logger.warning(
                             "[%s] %d candle gap(s) detected (max %.0fs, expected %.0fs)",
-                            symbol, gap_count, max_gap / 1000.0, expected_interval_ms / 1000.0,
+                            symbol,
+                            gap_count,
+                            max_gap / 1000.0,
+                            expected_interval_ms / 1000.0,
                         )
             except Exception:
                 pass
@@ -825,7 +830,11 @@ class MarketDataHub:
 
     def _upsert_candles(self, symbol: str, interval: str, candles: list[dict[str, Any]]) -> None:
         db_path = self._candle_db_path(interval)
-        conn = sqlite3.connect(db_path, timeout=self._db_timeout_s)
+        try:
+            conn = sqlite3.connect(db_path, timeout=self._db_timeout_s)
+        except sqlite3.OperationalError as e:
+            logger.warning("candle upsert: failed to connect for %s/%s: %s", symbol, interval, e)
+            return
         cur = conn.cursor()
         cur.execute(
             "CREATE TABLE IF NOT EXISTS candles (symbol TEXT, interval TEXT, t INTEGER, t_close INTEGER, o REAL, h REAL, l REAL, c REAL, v REAL, n INTEGER, updated_at TEXT, PRIMARY KEY (symbol, interval, t))"
@@ -863,11 +872,13 @@ class MarketDataHub:
                         ),
                     )
                 except (TypeError, ValueError) as e:
-                    import logging
-
-                    logger = logging.getLogger(__name__)
                     logger.warning("Skipping bad candle for %s: %s", symbol, e)
                     continue
+                except sqlite3.OperationalError as e:
+                    logger.warning("candle upsert: DB lock/timeout for %s/%s: %s", symbol, interval, e)
+                    break
             conn.commit()
+        except sqlite3.OperationalError as e:
+            logger.warning("candle upsert: commit failed for %s/%s: %s", symbol, interval, e)
         finally:
             conn.close()

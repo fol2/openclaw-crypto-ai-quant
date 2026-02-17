@@ -1297,6 +1297,7 @@ class LiveOms:
         manual = 0
         scanned = 0
         samples: list[dict[str, Any]] = []
+        _t0 = time.monotonic()
 
         try:
             conn = sqlite3.connect(self.store._db_path, timeout=timeout_s)
@@ -1565,6 +1566,10 @@ class LiveOms:
                     conn.close()
             except Exception:
                 pass
+
+        _elapsed = time.monotonic() - _t0
+        if _elapsed > 2.0:
+            logger.warning("reconcile_unmatched_fills took %.2fs (scanned=%d)", _elapsed, scanned)
 
         return {"scanned": int(scanned), "matched": int(matched), "manual": int(manual), "samples": samples}
 
@@ -2699,7 +2704,9 @@ class LiveOms:
                 if k_qty > 1e-9:
                     logger.warning(
                         "[kernel-reconcile] MISMATCH %s: kernel has %s qty=%.6f but trader has no position",
-                        sym, k_side, k_qty,
+                        sym,
+                        k_side,
+                        k_qty,
                     )
                 continue
 
@@ -2710,7 +2717,9 @@ class LiveOms:
                 if t_qty > 1e-9:
                     logger.warning(
                         "[kernel-reconcile] MISMATCH %s: trader has %s qty=%.6f but kernel has no position",
-                        sym, t_side, t_qty,
+                        sym,
+                        t_side,
+                        t_qty,
                     )
                 continue
 
@@ -2739,5 +2748,11 @@ class LiveOms:
                     logger.warning(
                         "[kernel-reconcile] MISMATCH %s: kernel(%s qty=%.6f entry=%.2f) vs "
                         "trader(%s qty=%.6f entry=%.2f)",
-                        sym, k_side, k_qty, k_entry, t_side, t_qty, t_entry,
+                        sym,
+                        k_side,
+                        k_qty,
+                        k_entry,
+                        t_side,
+                        t_qty,
+                        t_entry,
                     )
