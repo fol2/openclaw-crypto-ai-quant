@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_SIZE_TOLERANCE_PCT = 0.01
 
 #: Size delta percentage thresholds for severity classification.
-MAJOR_SIZE_THRESHOLD_PCT = 0.10   # >  10 % = major
+MAJOR_SIZE_THRESHOLD_PCT = 0.10  # >  10 % = major
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -207,13 +207,21 @@ class PositionReconciler:
                 "size_tolerance_pct": 0.01,   # 1 % default tolerance
                 "heartbeat_interval_s": 30,   # reconciliation interval
             }
+    risk_manager : object, optional
+        A ``RiskManager`` instance (from ``engine.risk``).  When provided and a
+        critical reconciliation mismatch is detected, the reconciler activates
+        the kill-switch (``close_only`` mode) to prevent further entries while
+        the exchange state diverges from the kernel.
     """
 
-    def __init__(self, config: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        config: dict[str, Any] | None = None,
+        risk_manager: Any | None = None,
+    ):
         cfg = config or {}
-        self._size_tolerance_pct: float = float(
-            cfg.get("size_tolerance_pct", DEFAULT_SIZE_TOLERANCE_PCT)
-        )
+        self._size_tolerance_pct: float = float(cfg.get("size_tolerance_pct", DEFAULT_SIZE_TOLERANCE_PCT))
+        self._risk_manager = risk_manager
 
     # ------------------------------------------------------------------
     # Core reconciliation
@@ -283,8 +291,7 @@ class PositionReconciler:
                     severity="major",
                     kernel_size=0.0,
                     exchange_size=float(e_pos.get("size", 0.0)),
-                    details=f"{symbol}: on exchange but not in kernel (manual open "
-                    f"or circuit breaker recovery needed)",
+                    details=f"{symbol}: on exchange but not in kernel (manual open or circuit breaker recovery needed)",
                     exchange_side=e_pos.get("side", "long"),
                 )
                 discrepancies.append(disc)
@@ -299,13 +306,34 @@ class PositionReconciler:
         )
         report.severity = calculate_severity(report)
 
-        # H12: When reconciliation severity is critical, emit an alert and log at CRITICAL level.
+        # H12: When reconciliation severity is critical, trigger kill-switch, emit alert,
+        # and log at CRITICAL level.
         if report.severity == "critical":
             crit_details = "; ".join(d.details for d in discrepancies if d.severity == "critical")
             logger.critical("RECONCILIATION CRITICAL: %s", crit_details)
+
+            # Activate kill-switch (close_only) so no new entries are placed while
+            # the exchange state diverges from kernel state.
+            if self._risk_manager is not None:
+                try:
+                    self._risk_manager.kill(
+                        mode="close_only",
+                        reason=f"reconciliation_critical: {crit_details}",
+                    )
+                    logger.critical(
+                        "KILL-SWITCH ACTIVATED by reconciler due to critical mismatch: %s",
+                        crit_details,
+                    )
+                except Exception:
+                    logger.error(
+                        "reconciler: failed to activate kill-switch on critical mismatch",
+                        exc_info=True,
+                    )
+
             try:
                 from engine.alerting import send_alert
-                send_alert(f"RECONCILIATION CRITICAL: {crit_details}")
+
+                send_alert(f"RECONCILIATION CRITICAL (kill-switch activated): {crit_details}")
             except Exception:
                 logger.warning("failed to send critical reconciliation alert", exc_info=True)
 
@@ -375,9 +403,7 @@ class PositionReconciler:
     # Resolution building
     # ------------------------------------------------------------------
 
-    def build_resolution(
-        self, report: ReconciliationReport
-    ) -> list[dict[str, Any]]:
+    def build_resolution(self, report: ReconciliationReport) -> list[dict[str, Any]]:
         """Generate resolution actions for each discrepancy in a report.
 
         Resolution actions describe how to bring the kernel state back in
@@ -394,42 +420,50 @@ class PositionReconciler:
 
         for disc in report.discrepancies:
             if disc.type == "size_mismatch":
-                resolutions.append({
-                    "action": "adjust",
-                    "symbol": disc.symbol,
-                    "details": {
-                        "kernel_size": disc.kernel_size,
-                        "exchange_size": disc.exchange_size,
-                        "delta": abs(disc.kernel_size - disc.exchange_size),
-                    },
-                })
+                resolutions.append(
+                    {
+                        "action": "adjust",
+                        "symbol": disc.symbol,
+                        "details": {
+                            "kernel_size": disc.kernel_size,
+                            "exchange_size": disc.exchange_size,
+                            "delta": abs(disc.kernel_size - disc.exchange_size),
+                        },
+                    }
+                )
             elif disc.type == "missing_kernel":
-                resolutions.append({
-                    "action": "add",
-                    "symbol": disc.symbol,
-                    "details": {
-                        "exchange_size": disc.exchange_size,
-                        "exchange_side": disc.exchange_side,
-                    },
-                })
+                resolutions.append(
+                    {
+                        "action": "add",
+                        "symbol": disc.symbol,
+                        "details": {
+                            "exchange_size": disc.exchange_size,
+                            "exchange_side": disc.exchange_side,
+                        },
+                    }
+                )
             elif disc.type == "missing_exchange":
-                resolutions.append({
-                    "action": "remove",
-                    "symbol": disc.symbol,
-                    "details": {
-                        "kernel_size": disc.kernel_size,
-                    },
-                })
+                resolutions.append(
+                    {
+                        "action": "remove",
+                        "symbol": disc.symbol,
+                        "details": {
+                            "kernel_size": disc.kernel_size,
+                        },
+                    }
+                )
             elif disc.type == "side_mismatch":
-                resolutions.append({
-                    "action": "alert",
-                    "symbol": disc.symbol,
-                    "details": {
-                        "kernel_size": disc.kernel_size,
-                        "exchange_size": disc.exchange_size,
-                        "reason": "Side mismatch requires manual intervention",
-                    },
-                })
+                resolutions.append(
+                    {
+                        "action": "alert",
+                        "symbol": disc.symbol,
+                        "details": {
+                            "kernel_size": disc.kernel_size,
+                            "exchange_size": disc.exchange_size,
+                            "reason": "Side mismatch requires manual intervention",
+                        },
+                    }
+                )
 
         return resolutions
 
@@ -482,9 +516,7 @@ class PositionReconciler:
 
         if action == "adjust":
             if symbol in positions:
-                positions[symbol]["quantity"] = details.get(
-                    "exchange_size", positions[symbol].get("quantity", 0.0)
-                )
+                positions[symbol]["quantity"] = details.get("exchange_size", positions[symbol].get("quantity", 0.0))
                 logger.info(
                     "reconciler: adjusted %s size to %.8f",
                     symbol,
@@ -561,6 +593,7 @@ class PositionReconciler:
         if db_path is None:
             try:
                 from strategy.mei_alpha_v1 import DB_PATH
+
                 db_path = DB_PATH
             except ImportError:
                 logger.warning("reconciler: cannot import DB_PATH; skipping DB logging")
