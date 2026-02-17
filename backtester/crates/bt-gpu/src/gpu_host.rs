@@ -159,6 +159,7 @@ pub struct IndicatorBuffers {
     pub num_symbols: u32,
     pub num_bars: u32,
     pub btc_sym_idx: u32,
+    pub paxg_sym_idx: u32,
 }
 
 impl IndicatorBuffers {
@@ -173,6 +174,7 @@ impl IndicatorBuffers {
         num_bars: u32,
         num_symbols: u32,
         btc_sym_idx: u32,
+        paxg_sym_idx: u32,
     ) -> Result<Self, String> {
         let k = ind_configs.len() as u32;
 
@@ -221,6 +223,7 @@ impl IndicatorBuffers {
             num_symbols,
             num_bars,
             btc_sym_idx,
+            paxg_sym_idx,
         })
     }
 }
@@ -299,6 +302,7 @@ pub fn dispatch_indicator_kernels(
 /// Buffers for one trade sweep dispatch batch.
 /// Snapshots/breadth/btc_bullish come from IndicatorBuffers (already in VRAM).
 pub struct BatchBuffers {
+    pub candles: Option<CudaSlice<GpuRawCandle>>,
     pub snapshots: CudaSlice<GpuSnapshot>,
     pub breadth: CudaSlice<f32>,
     pub btc_bullish: CudaSlice<u32>,
@@ -309,6 +313,7 @@ pub struct BatchBuffers {
     pub num_combos: u32,
     pub num_symbols: u32,
     pub btc_sym_idx: u32,
+    pub paxg_sym_idx: u32,
     pub initial_balance: f32,
     pub maker_fee_rate: f32,
     pub taker_fee_rate: f32,
@@ -361,6 +366,7 @@ impl BatchBuffers {
             num_symbols,
             num_bars,
             btc_sym_idx: ind_bufs.btc_sym_idx,
+            paxg_sym_idx: ind_bufs.paxg_sym_idx,
             chunk_start: 0,
             chunk_end: num_bars,
             initial_balance_bits: initial_balance.to_bits(),
@@ -375,6 +381,7 @@ impl BatchBuffers {
             .map_err(|e| format!("GPU alloc failed: {e}"))?;
 
         Ok(Self {
+            candles: Some(ind_bufs.candles_gpu.clone()),
             snapshots: ind_bufs.snapshots_gpu.clone(),
             breadth: ind_bufs.breadth_gpu.clone(),
             btc_bullish: ind_bufs.btc_bullish_gpu.clone(),
@@ -385,6 +392,7 @@ impl BatchBuffers {
             num_combos,
             num_symbols,
             btc_sym_idx: ind_bufs.btc_sym_idx,
+            paxg_sym_idx: ind_bufs.paxg_sym_idx,
             initial_balance,
             maker_fee_rate,
             taker_fee_rate,
@@ -405,6 +413,7 @@ impl BatchBuffers {
         initial_balance: f32,
         num_symbols: u32,
         btc_sym_idx: u32,
+        paxg_sym_idx: u32,
         num_bars: u32,
         maker_fee_rate: f32,
         taker_fee_rate: f32,
@@ -451,6 +460,7 @@ impl BatchBuffers {
             num_symbols,
             num_bars,
             btc_sym_idx,
+            paxg_sym_idx,
             chunk_start: 0,
             chunk_end: num_bars,
             initial_balance_bits: initial_balance.to_bits(),
@@ -465,6 +475,7 @@ impl BatchBuffers {
             .map_err(|e| format!("GPU alloc failed: {e}"))?;
 
         Ok(Self {
+            candles: None,
             snapshots,
             breadth,
             btc_bullish,
@@ -475,6 +486,7 @@ impl BatchBuffers {
             num_combos,
             num_symbols,
             btc_sym_idx,
+            paxg_sym_idx,
             initial_balance,
             maker_fee_rate,
             taker_fee_rate,
@@ -519,13 +531,25 @@ pub fn dispatch_and_readback(
     };
     let num_chunks = (trade_range + effective_chunk - 1) / effective_chunk;
 
-    // Create sentinel buffers if no sub-bar data (cudarc needs valid pointers)
-    let sentinel_candle: CudaSlice<GpuRawCandle>;
+    // Create sentinel buffers when candle pointers are absent (cudarc requires valid pointers).
+    let sentinel_main_candle: CudaSlice<GpuRawCandle>;
+    let main_candles_ref = match &buffers.candles {
+        Some(c) => c,
+        None => {
+            sentinel_main_candle = ds
+                .dev
+                .alloc_zeros::<GpuRawCandle>(1)
+                .map_err(|e| format!("GPU alloc failed: {e}"))?;
+            &sentinel_main_candle
+        }
+    };
+
+    let sentinel_sub_candle: CudaSlice<GpuRawCandle>;
     let sentinel_counts: CudaSlice<u32>;
     let (sub_candles_ref, sub_counts_ref) = match (&buffers.sub_candles, &buffers.sub_counts) {
         (Some(sc), Some(sn)) => (sc, sn),
         _ => {
-            sentinel_candle = ds
+            sentinel_sub_candle = ds
                 .dev
                 .alloc_zeros::<GpuRawCandle>(1)
                 .map_err(|e| format!("GPU alloc failed: {e}"))?;
@@ -533,7 +557,7 @@ pub fn dispatch_and_readback(
                 .dev
                 .alloc_zeros::<u32>(1)
                 .map_err(|e| format!("GPU alloc failed: {e}"))?;
-            (&sentinel_candle, &sentinel_counts)
+            (&sentinel_sub_candle, &sentinel_counts)
         }
     };
 
@@ -546,6 +570,7 @@ pub fn dispatch_and_readback(
             num_symbols: buffers.num_symbols,
             num_bars,
             btc_sym_idx: buffers.btc_sym_idx,
+            paxg_sym_idx: buffers.paxg_sym_idx,
             chunk_start,
             chunk_end,
             initial_balance_bits: buffers.initial_balance.to_bits(),
@@ -580,6 +605,7 @@ pub fn dispatch_and_readback(
                     &buffers.configs,
                     &mut buffers.states,
                     &mut buffers.results,
+                    main_candles_ref,
                     sub_candles_ref,
                     sub_counts_ref,
                 ),

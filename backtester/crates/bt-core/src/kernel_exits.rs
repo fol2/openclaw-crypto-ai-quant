@@ -210,6 +210,48 @@ fn compute_sl_price(
     sl_price
 }
 
+fn maybe_debug_stop_snapshot(
+    pos: &Position,
+    snap: &IndicatorSnapshot,
+    current_time_ms: i64,
+    entry: f64,
+    atr: f64,
+    sl_price: f64,
+    sl_hit: bool,
+) {
+    let Ok(symbol_filter) = std::env::var("AQC_DEBUG_EXIT_SYMBOL") else {
+        return;
+    };
+    if pos.symbol != symbol_filter {
+        return;
+    }
+
+    let Ok(ts_filter_raw) = std::env::var("AQC_DEBUG_EXIT_TS_MS") else {
+        return;
+    };
+    let Ok(ts_filter) = ts_filter_raw.parse::<i64>() else {
+        return;
+    };
+    if current_time_ms != ts_filter {
+        return;
+    }
+
+    eprintln!(
+        "[exit-debug] symbol={} ts_ms={} side={:?} close={:.10} entry={:.10} atr={:.10} adx={:.10} adx_slope={:.10} trailing_sl={:?} sl_price={:.10} sl_hit={}",
+        pos.symbol,
+        current_time_ms,
+        pos.side,
+        snap.close,
+        entry,
+        atr,
+        snap.adx,
+        snap.adx_slope,
+        pos.trailing_sl,
+        sl_price,
+        sl_hit
+    );
+}
+
 /// Compute trailing stop price (or None if not yet active).
 /// Updates are ratcheted — the trailing SL can only improve.
 /// Mirrors `exits/trailing.rs::compute_trailing`.
@@ -862,6 +904,7 @@ pub fn evaluate_exits_with_diagnostics(
         PositionSide::Long => snap.close <= sl_price,
         PositionSide::Short => snap.close >= sl_price,
     };
+    maybe_debug_stop_snapshot(pos, snap, current_time_ms, entry, atr, sl_price, sl_hit);
     let sl_distance = match pos.side {
         PositionSide::Long => snap.close - sl_price,
         PositionSide::Short => sl_price - snap.close,

@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <cfloat>
+#include <cmath>
 
 // -- Constants ----------------------------------------------------------------
 
@@ -22,9 +23,9 @@
 // -- Structs (match Rust #[repr(C)] exactly) ----------------------------------
 
 struct GpuRawCandle {
-    float open;  float high;  float low;  float close;
-    float volume;  unsigned int t_sec;
-    unsigned int _pad[2];
+    double open;  double high;  double low;  double close;
+    double volume;  unsigned int t_sec;
+    unsigned int _pad[3];
 };
 
 struct GpuIndicatorConfig {
@@ -169,7 +170,7 @@ __global__ void indicator_kernel(
     unsigned int ema_fast_count = 0, ema_slow_count = 0, ema_macro_count = 0;
 
     // === ADX state ===
-    float adx_prev_high = 0.0f, adx_prev_low = 0.0f, adx_prev_close = 0.0f;
+    double adx_prev_high = 0.0, adx_prev_low = 0.0, adx_prev_close = 0.0;
     double sm_plus_dm = 0.0, sm_minus_dm = 0.0, sm_tr = 0.0;
     double adx_value = 0.0, adx_sum = 0.0;
     unsigned int adx_count = 0, adx_dx_count = 0;
@@ -281,11 +282,11 @@ __global__ void indicator_kernel(
             adx_count = 0;
         } else if (adx_phase == 1) {
             // Accumulate: sum +DM, -DM, TR for window bars
-            float up_move = c.high - adx_prev_high;
-            float down_move = adx_prev_low - c.low;
-            float plus_dm = (up_move > down_move && up_move > 0.0f) ? up_move : 0.0f;
-            float minus_dm = (down_move > up_move && down_move > 0.0f) ? down_move : 0.0f;
-            float tr = fmaxf(c.high - c.low, fmaxf(fabsf(c.high - adx_prev_close), fabsf(c.low - adx_prev_close)));
+            double up_move = c.high - adx_prev_high;
+            double down_move = adx_prev_low - c.low;
+            double plus_dm = (up_move > down_move && up_move > 0.0) ? up_move : 0.0;
+            double minus_dm = (down_move > up_move && down_move > 0.0) ? down_move : 0.0;
+            double tr = fmax(c.high - c.low, fmax(fabs(c.high - adx_prev_close), fabs(c.low - adx_prev_close)));
 
             sm_plus_dm += plus_dm;
             sm_minus_dm += minus_dm;
@@ -298,38 +299,38 @@ __global__ void indicator_kernel(
 
             if (adx_count >= cfg.adx_window) {
                 // Compute first DI/DX
-                float di_pos = (sm_tr > 0.0f) ? (sm_plus_dm / sm_tr * 100.0f) : 0.0f;
-                float di_neg = (sm_tr > 0.0f) ? (sm_minus_dm / sm_tr * 100.0f) : 0.0f;
-                float di_sum = di_pos + di_neg;
-                float dx = (di_sum > 0.0f) ? (fabsf(di_pos - di_neg) / di_sum * 100.0f) : 0.0f;
-                cur_adx_pos = di_pos;
-                cur_adx_neg = di_neg;
-                cur_adx = dx;
+                double di_pos = (sm_tr > 0.0) ? (sm_plus_dm / sm_tr * 100.0) : 0.0;
+                double di_neg = (sm_tr > 0.0) ? (sm_minus_dm / sm_tr * 100.0) : 0.0;
+                double di_sum = di_pos + di_neg;
+                double dx = (di_sum > 0.0) ? (fabs(di_pos - di_neg) / di_sum * 100.0) : 0.0;
+                cur_adx_pos = (float)di_pos;
+                cur_adx_neg = (float)di_neg;
+                cur_adx = (float)dx;
                 adx_sum = dx;
                 adx_dx_count = 1;
                 adx_phase = 2;
             }
         } else if (adx_phase == 2) {
             // DX accumulate: Wilder smooth +DM/-DM/TR, accumulate DX
-            float up_move = c.high - adx_prev_high;
-            float down_move = adx_prev_low - c.low;
-            float plus_dm = (up_move > down_move && up_move > 0.0f) ? up_move : 0.0f;
-            float minus_dm = (down_move > up_move && down_move > 0.0f) ? down_move : 0.0f;
-            float tr = fmaxf(c.high - c.low, fmaxf(fabsf(c.high - adx_prev_close), fabsf(c.low - adx_prev_close)));
+            double up_move = c.high - adx_prev_high;
+            double down_move = adx_prev_low - c.low;
+            double plus_dm = (up_move > down_move && up_move > 0.0) ? up_move : 0.0;
+            double minus_dm = (down_move > up_move && down_move > 0.0) ? down_move : 0.0;
+            double tr = fmax(c.high - c.low, fmax(fabs(c.high - adx_prev_close), fabs(c.low - adx_prev_close)));
             double w = (double)cfg.adx_window;
             sm_plus_dm = sm_plus_dm - sm_plus_dm / w + plus_dm;
             sm_minus_dm = sm_minus_dm - sm_minus_dm / w + minus_dm;
             sm_tr = sm_tr - sm_tr / w + tr;
 
-            float di_pos = (sm_tr > 0.0f) ? (sm_plus_dm / sm_tr * 100.0f) : 0.0f;
-            float di_neg = (sm_tr > 0.0f) ? (sm_minus_dm / sm_tr * 100.0f) : 0.0f;
-            float di_sum = di_pos + di_neg;
-            float dx = (di_sum > 0.0f) ? (fabsf(di_pos - di_neg) / di_sum * 100.0f) : 0.0f;
+            double di_pos = (sm_tr > 0.0) ? (sm_plus_dm / sm_tr * 100.0) : 0.0;
+            double di_neg = (sm_tr > 0.0) ? (sm_minus_dm / sm_tr * 100.0) : 0.0;
+            double di_sum = di_pos + di_neg;
+            double dx = (di_sum > 0.0) ? (fabs(di_pos - di_neg) / di_sum * 100.0) : 0.0;
 
             adx_sum += dx;
             adx_dx_count++;
-            cur_adx_pos = di_pos;
-            cur_adx_neg = di_neg;
+            cur_adx_pos = (float)di_pos;
+            cur_adx_neg = (float)di_neg;
 
             adx_prev_high = c.high;
             adx_prev_low = c.low;
@@ -343,25 +344,25 @@ __global__ void indicator_kernel(
                 cur_adx = (float)(adx_sum / (double)adx_dx_count);
             }
         } else { // adx_phase == 3 (warm)
-            float up_move = c.high - adx_prev_high;
-            float down_move = adx_prev_low - c.low;
-            float plus_dm = (up_move > down_move && up_move > 0.0f) ? up_move : 0.0f;
-            float minus_dm = (down_move > up_move && down_move > 0.0f) ? down_move : 0.0f;
-            float tr = fmaxf(c.high - c.low, fmaxf(fabsf(c.high - adx_prev_close), fabsf(c.low - adx_prev_close)));
+            double up_move = c.high - adx_prev_high;
+            double down_move = adx_prev_low - c.low;
+            double plus_dm = (up_move > down_move && up_move > 0.0) ? up_move : 0.0;
+            double minus_dm = (down_move > up_move && down_move > 0.0) ? down_move : 0.0;
+            double tr = fmax(c.high - c.low, fmax(fabs(c.high - adx_prev_close), fabs(c.low - adx_prev_close)));
             double w = (double)cfg.adx_window;
             sm_plus_dm = sm_plus_dm - sm_plus_dm / w + plus_dm;
             sm_minus_dm = sm_minus_dm - sm_minus_dm / w + minus_dm;
             sm_tr = sm_tr - sm_tr / w + tr;
 
-            float di_pos = (sm_tr > 0.0f) ? (sm_plus_dm / sm_tr * 100.0f) : 0.0f;
-            float di_neg = (sm_tr > 0.0f) ? (sm_minus_dm / sm_tr * 100.0f) : 0.0f;
-            float di_sum = di_pos + di_neg;
-            float dx = (di_sum > 0.0f) ? (fabsf(di_pos - di_neg) / di_sum * 100.0f) : 0.0f;
+            double di_pos = (sm_tr > 0.0) ? (sm_plus_dm / sm_tr * 100.0) : 0.0;
+            double di_neg = (sm_tr > 0.0) ? (sm_minus_dm / sm_tr * 100.0) : 0.0;
+            double di_sum = di_pos + di_neg;
+            double dx = (di_sum > 0.0) ? (fabs(di_pos - di_neg) / di_sum * 100.0) : 0.0;
 
             adx_value = (adx_value * (w - 1.0) + (double)dx) / w;
             cur_adx = (float)adx_value;
-            cur_adx_pos = di_pos;
-            cur_adx_neg = di_neg;
+            cur_adx_pos = (float)di_pos;
+            cur_adx_neg = (float)di_neg;
 
             adx_prev_high = c.high;
             adx_prev_low = c.low;
