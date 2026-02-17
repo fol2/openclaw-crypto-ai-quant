@@ -307,6 +307,13 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         self._last_entry_fail_reason: dict[str, str] = {}
         # Exit attempts can also be rejected transiently; avoid close-spam when state is stale.
         self._last_exit_attempt_at_s: dict[str, float] = {}
+        try:
+            self._submit_unknown_reconcile_cooldown_s = float(
+                os.getenv("AI_QUANT_LIVE_SUBMIT_UNKNOWN_RECONCILE_COOLDOWN_S", "5")
+            )
+        except Exception:
+            self._submit_unknown_reconcile_cooldown_s = 5.0
+        self._last_submit_unknown_reconcile_s = 0.0
         self._live_balance_usd = 0.0
         super().__init__()
 
@@ -355,6 +362,23 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         # Replace the default DB-based paper reconstruction with a live exchange sync.
         self.positions = {}
         self.sync_from_exchange(force=True)
+
+    def _reconcile_after_submit_unknown(self, *, symbol: str, action: str) -> None:
+        """Best-effort reconciliation after ambiguous submit outcomes (timeout/transport errors)."""
+        now_s = time.time()
+        cooldown = max(0.0, float(self._submit_unknown_reconcile_cooldown_s or 0.0))
+        if cooldown > 0 and (now_s - float(self._last_submit_unknown_reconcile_s or 0.0)) < cooldown:
+            return
+        self._last_submit_unknown_reconcile_s = now_s
+        try:
+            self.sync_from_exchange(force=True)
+        except Exception:
+            logger.warning(
+                "post-timeout reconciliation failed for %s %s",
+                action,
+                symbol,
+                exc_info=True,
+            )
 
     def sync_from_exchange(self, *, force: bool = False) -> None:
         snap = self.executor.account_snapshot(force=force)
@@ -1301,7 +1325,6 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
 
             if err_kind in {"timeout", "exception"}:
                 # Transport errors are ambiguous: the order may have been accepted even if the response timed out.
-                # TODO(H1): Trigger reconciliation check after timeout to detect state divergence.
                 logger.warning("order timeout/exception for ADD %s — exchange state may diverge", sym)
                 self._note_entry_fail(sym, f"market_open {err_kind}")
                 if risk is not None:
@@ -1333,6 +1356,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                         )
                     except Exception:
                         pass
+                self._reconcile_after_submit_unknown(symbol=sym, action="ADD")
             else:
                 self._note_entry_fail(sym, "market_open rejected")
                 if oms_intent is not None and oms is not None:
@@ -2584,7 +2608,6 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
 
             if err_kind in {"timeout", "exception"}:
                 # Transport errors are ambiguous: the order may have been accepted even if the response timed out.
-                # TODO(H1): Trigger reconciliation check after timeout to detect state divergence.
                 logger.warning("order timeout/exception for OPEN %s — exchange state may diverge", sym)
                 self._note_entry_fail(sym, f"market_open {err_kind}")
                 if risk is not None:
@@ -2622,6 +2645,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                         self._pending_open_sent_at_s[sym] = time.time()
                 except Exception:
                     pass
+                self._reconcile_after_submit_unknown(symbol=sym, action="OPEN")
             else:
                 self._note_entry_fail(sym, "market_open rejected")
                 if oms_intent is not None and oms is not None:
