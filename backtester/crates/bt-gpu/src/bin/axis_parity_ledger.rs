@@ -1094,7 +1094,9 @@ fn decision_action_taken(kind: &str, side: &str) -> String {
 
 fn derive_decision_event_envelope(action_kind: &str, raw_reason: &str) -> DecisionEventEnvelope {
     let reason = raw_reason.trim().to_uppercase();
-    let triggered_by = if reason.contains("SIGNAL_FLIP") || reason.contains("SIGNAL FLIP") {
+    let triggered_by = if action_kind == "FUNDING" {
+        "schedule"
+    } else if reason.contains("SIGNAL_FLIP") || reason.contains("SIGNAL FLIP") {
         "signal_flip"
     } else if reason.contains("STOP LOSS") || reason.contains("TRAILING STOP") {
         "stop_loss"
@@ -1154,6 +1156,10 @@ fn canonical_events_equal(a: &CanonicalEventRow, b: &CanonicalEventRow) -> bool 
         && a.action_kind == b.action_kind
         && a.action_side == b.action_side
         && a.intent_signal == b.intent_signal
+        && a.event_type == b.event_type
+        && a.status == b.status
+        && a.decision_phase == b.decision_phase
+        && a.triggered_by == b.triggered_by
         && a.reason_code == b.reason_code
         && scale_1e6(a.price) == scale_1e6(b.price)
         && scale_1e6(a.size) == scale_1e6(b.size)
