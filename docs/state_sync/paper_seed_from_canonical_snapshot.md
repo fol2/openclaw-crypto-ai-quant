@@ -25,6 +25,7 @@ This performs:
 - synthetic `trades` seed rows (`reason=state_sync_seed`)
 - balance seed row (`reason=state_sync_balance_seed`)
 - `position_state` refresh aligned to seeded open trade IDs
+- `runtime_cooldowns` seed (entry/exit cooldown maps from snapshot runtime state)
 - optional `oms_open_orders` replacement from snapshot canonical metadata
 
 ## Deterministic Replay Pairing

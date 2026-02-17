@@ -2651,6 +2651,19 @@ def ensure_db():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_runtime_logs_ts_ms ON runtime_logs(ts_ms)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_runtime_logs_mode_ts_ms ON runtime_logs(mode, ts_ms)")
 
+    # Persisted runtime cooldown state for deterministic restart/sync behaviour.
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS runtime_cooldowns (
+            symbol TEXT PRIMARY KEY,
+            last_entry_attempt_s REAL,
+            last_exit_attempt_s REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_runtime_cooldowns_updated_at ON runtime_cooldowns(updated_at)")
+
     # Migration: ensure `meta_json` exists on signals (optional, but useful for audits).
     cursor.execute("PRAGMA table_info(signals)")
     sig_cols = {row[1] for row in cursor.fetchall()}
@@ -3839,6 +3852,47 @@ class PaperTrader:
                 "tp1_taken": int(tp1_taken or 0),
                 "last_add_time": int(last_add_time or 0),
             }
+
+        # Restore persisted runtime cooldown maps (state-sync deterministic continuation).
+        self._last_entry_attempt_at_s = {}
+        self._last_exit_attempt_at_s = {}
+        try:
+            cursor.execute(
+                """
+                SELECT symbol, last_entry_attempt_s, last_exit_attempt_s
+                FROM runtime_cooldowns
+                """
+            )
+            now_s = time.time()
+            for sym_raw, last_entry_s_raw, last_exit_s_raw in cursor.fetchall():
+                symbol = str(sym_raw or "").strip().upper()
+                if not symbol:
+                    continue
+
+                def _normalise_runtime_ts_s(raw_val):
+                    if raw_val is None:
+                        return None
+                    try:
+                        v = float(raw_val)
+                    except Exception:
+                        return None
+                    if v <= 0.0:
+                        return None
+                    if v > 10_000_000_000:
+                        v /= 1000.0
+                    # Defensive guard against corrupted future timestamps.
+                    if v > (now_s + 86400.0):
+                        return None
+                    return v
+
+                last_entry_s = _normalise_runtime_ts_s(last_entry_s_raw)
+                if last_entry_s is not None:
+                    self._last_entry_attempt_at_s[symbol] = last_entry_s
+                last_exit_s = _normalise_runtime_ts_s(last_exit_s_raw)
+                if last_exit_s is not None:
+                    self._last_exit_attempt_at_s[symbol] = last_exit_s
+        except Exception as e:
+            logger.debug("runtime_cooldowns restore skipped: %s", e)
         conn.close()
         # Restore kernel state from disk if available (AQC-742).
         self._kernel_restore()
@@ -3894,12 +3948,46 @@ class PaperTrader:
     def _note_entry_attempt(self, symbol: str) -> None:
         """Record timestamp + decrement budget after a successful entry/add."""
         self._last_entry_attempt_at_s[symbol] = time.time()
+        self._upsert_runtime_cooldown_state(symbol)
         if self._entry_budget_remaining is not None and self._entry_budget_remaining > 0:
             self._entry_budget_remaining -= 1
 
     def _note_exit_attempt(self, symbol: str) -> None:
         """Record timestamp after a successful exit."""
         self._last_exit_attempt_at_s[symbol] = time.time()
+        self._upsert_runtime_cooldown_state(symbol)
+
+    def _upsert_runtime_cooldown_state(self, symbol: str) -> None:
+        sym = str(symbol or "").strip().upper()
+        if not sym:
+            return
+        ensure_db()
+        conn = sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT_S)
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                INSERT INTO runtime_cooldowns (
+                    symbol, last_entry_attempt_s, last_exit_attempt_s, updated_at
+                )
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    last_entry_attempt_s = excluded.last_entry_attempt_s,
+                    last_exit_attempt_s = excluded.last_exit_attempt_s,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    sym,
+                    self._last_entry_attempt_at_s.get(sym),
+                    self._last_exit_attempt_at_s.get(sym),
+                    datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                ),
+            )
+            conn.commit()
+        except Exception as e:
+            logger.debug("runtime_cooldowns upsert skipped for %s: %s", sym, e)
+        finally:
+            conn.close()
 
     def upsert_position_state(self, symbol):
         pos = self.positions.get(symbol)
