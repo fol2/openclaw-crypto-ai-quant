@@ -221,7 +221,8 @@ def round_size(symbol: str, size: float) -> float:
         return 0.0
     decimals = get_sz_decimals(symbol)
     factor = 10**decimals
-    return int(size * factor) / factor
+    # Protect against binary floating-point edge cases, e.g. 0.29 * 100 = 28.999...
+    return math.floor((size * factor) + 1e-12) / factor
 
 
 def round_size_up(symbol: str, size: float) -> float:

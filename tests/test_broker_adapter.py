@@ -247,6 +247,10 @@ class TestSizeRounding:
         # 1.999 with 2 decimals should truncate to 1.99, NOT round to 2.00
         assert round_size(1.999, 2) == pytest.approx(1.99)
 
+    def test_binary_float_edge_keeps_expected_precision(self):
+        # 0.29 * 100 can become 28.999..., so flooring without epsilon would yield 0.28.
+        assert round_size(0.29, 2) == pytest.approx(0.29)
+
 
 # ===========================================================================
 # TestBuildFillEvent

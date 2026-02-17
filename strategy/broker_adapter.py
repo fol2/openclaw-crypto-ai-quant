@@ -655,7 +655,8 @@ def round_size(quantity: float, sz_decimals: int) -> float:
     if sz_decimals < 0:
         sz_decimals = 0
     factor = 10 ** sz_decimals
-    return math.floor(quantity * factor) / factor
+    # Protect against binary floating-point edge cases, e.g. 0.29 * 100 = 28.999...
+    return math.floor((quantity * factor) + 1e-12) / factor
 
 
 def build_fill_event(

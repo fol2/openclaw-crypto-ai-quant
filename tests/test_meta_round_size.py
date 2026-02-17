@@ -1,0 +1,15 @@
+from __future__ import annotations
+
+import pytest
+
+import exchange.meta as meta
+
+
+def test_meta_round_size_handles_binary_float_edge(monkeypatch):
+    monkeypatch.setattr(meta, "get_sz_decimals", lambda _symbol: 2)
+    assert meta.round_size("BTC", 0.29) == pytest.approx(0.29)
+
+
+def test_meta_round_size_still_truncates_down(monkeypatch):
+    monkeypatch.setattr(meta, "get_sz_decimals", lambda _symbol: 2)
+    assert meta.round_size("BTC", 1.239) == pytest.approx(1.23)
