@@ -38,6 +38,13 @@ def test_get_symbols_reads_sidecar_universe_env_file(tmp_path, monkeypatch):
     assert fetch_funding_rates.get_symbols() == ["ARB", "BTC"]
 
 
+def test_get_symbols_uses_absolute_fallback_when_no_env_sources(monkeypatch):
+    monkeypatch.delenv("AI_QUANT_SYMBOLS", raising=False)
+    monkeypatch.setattr(fetch_funding_rates.os.path, "expanduser", lambda _: "/tmp/definitely-missing.env")
+    monkeypatch.setattr(fetch_funding_rates.os.path, "isfile", lambda _: False)
+    assert fetch_funding_rates.get_symbols() == ["BTC", "ETH", "SOL"]
+
+
 def test_get_last_time_returns_latest_timestamp_for_symbol():
     con = _conn_with_schema()
     try:
@@ -85,8 +92,10 @@ def test_fetch_and_store_is_idempotent_via_insert_or_ignore():
     con = _conn_with_schema()
     info = _FakeInfo(payload=[{"time": 1000, "fundingRate": "0.001", "premium": "0.0"}])
     try:
-        fetch_funding_rates.fetch_and_store(info, con, "BTC", 0, 2000)
-        fetch_funding_rates.fetch_and_store(info, con, "BTC", 0, 2000)
+        first = fetch_funding_rates.fetch_and_store(info, con, "BTC", 0, 2000)
+        second = fetch_funding_rates.fetch_and_store(info, con, "BTC", 0, 2000)
+        assert first == 1
+        assert second == 0
         row = con.execute("SELECT COUNT(*) FROM funding_rates WHERE symbol = 'BTC'").fetchone()
         assert int(row[0] if row else 0) == 1
     finally:
