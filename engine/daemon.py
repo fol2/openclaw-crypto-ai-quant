@@ -589,10 +589,10 @@ class LivePlugin:
         )
 
     def _should_run_rest_fills_sync(self, *, now: float) -> bool:
-        if self._rest_sync_s <= 0:
-            return False
         if self._force_rest_fills_sync:
             return True
+        if self._rest_sync_s <= 0:
+            return False
         return (float(now) - float(self._last_rest_fills_sync)) >= float(self._rest_sync_s)
 
     def _sync_rest_fills(self, *, now: float) -> None:

@@ -83,6 +83,16 @@ def test_forced_rest_backfill_runs_immediately_and_clears_force_flag():
     assert plugin._last_rest_fills_sync == 1001.0
 
 
+def test_forced_rest_backfill_runs_when_periodic_sync_is_disabled():
+    plugin, rest = _build_rest_sync_plugin(should_raise=False)
+    plugin._rest_sync_s = 0.0
+
+    plugin._sync_rest_fills(now=1001.0)
+
+    assert len(rest.calls) == 1
+    assert plugin._force_rest_fills_sync is False
+
+
 def test_forced_rest_backfill_failure_keeps_force_flag_for_retry():
     plugin, rest = _build_rest_sync_plugin(should_raise=True)
 
