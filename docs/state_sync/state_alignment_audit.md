@@ -27,4 +27,10 @@ Current mismatch classifications:
 - `state_initialisation_gap`
 - `numeric_policy_divergence`
 
+The typed diffs cover:
+
+- balance mismatches
+- reconstructed open-position mismatches
+- open-order mismatches
+
 Use this report as a required artefact for state-sync checkpoints before CPU/GPU parity replay runs.

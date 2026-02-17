@@ -7,6 +7,7 @@ The report is intended for financial-grade state-sync tracing before replay/pari
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import datetime as dt
 import json
 import math
@@ -306,6 +307,84 @@ def _compare_positions(
     return diffs
 
 
+def _normalise_open_order(row: dict[str, Any]) -> tuple[str, str, float, float, str]:
+    symbol = str(row.get("symbol") or row.get("coin") or "").strip().upper()
+    if not symbol:
+        symbol = "UNKNOWN"
+
+    side_raw = row.get("side")
+    if side_raw is None:
+        side_raw = row.get("order_side")
+    if side_raw is None and row.get("is_buy") is not None:
+        side_raw = "buy" if bool(row.get("is_buy")) else "sell"
+    side = str(side_raw or "").strip().lower()
+    if side not in {"buy", "sell", "long", "short"}:
+        side = "unknown"
+
+    size_val = row.get("size")
+    if size_val is None:
+        size_val = row.get("sz")
+    if size_val is None:
+        size_val = row.get("remaining")
+    try:
+        size = round(float(size_val or 0.0), 10)
+    except Exception:
+        size = 0.0
+
+    price_val = row.get("price")
+    if price_val is None:
+        price_val = row.get("limit_px")
+    try:
+        price = round(float(price_val or 0.0), 10)
+    except Exception:
+        price = 0.0
+
+    oid = row.get("oid")
+    if oid is None:
+        oid = row.get("order_id")
+    if oid is None:
+        oid = row.get("cloid")
+    oid_str = str(oid or "")
+
+    return symbol, side, size, price, oid_str
+
+
+def _compare_open_orders(
+    left: list[dict[str, Any]],
+    right: list[dict[str, Any]],
+    *,
+    left_name: str,
+    right_name: str,
+) -> list[dict[str, Any]]:
+    l_counter = Counter(_normalise_open_order(r) for r in left if isinstance(r, dict))
+    r_counter = Counter(_normalise_open_order(r) for r in right if isinstance(r, dict))
+
+    diffs: list[dict[str, Any]] = []
+    for sig in set(l_counter.keys()) | set(r_counter.keys()):
+        l_count = int(l_counter.get(sig, 0))
+        r_count = int(r_counter.get(sig, 0))
+        if l_count == r_count:
+            continue
+        symbol, side, size, price, oid = sig
+        diffs.append(
+            {
+                "classification": "state_initialisation_gap",
+                "kind": "open_order_mismatch",
+                "left_source": left_name,
+                "right_source": right_name,
+                "symbol": symbol,
+                "side": side,
+                "size": size,
+                "price": price,
+                "oid": oid,
+                "left_count": l_count,
+                "right_count": r_count,
+            }
+        )
+
+    return diffs
+
+
 def _build_state(db_path: Path) -> dict[str, Any]:
     conn = _connect_ro(db_path)
     try:
@@ -380,6 +459,14 @@ def main() -> int:
             tol=float(args.tolerance),
         )
     )
+    diffs.extend(
+        _compare_open_orders(
+            live_state["open_orders"],
+            paper_state["open_orders"],
+            left_name="live_db",
+            right_name="paper_db",
+        )
+    )
 
     if snapshot_state is not None:
         if not _almost_equal(live_state["balance"], snapshot_state["balance"], args.tolerance):
@@ -402,6 +489,14 @@ def main() -> int:
                 left_name="live_db",
                 right_name="snapshot",
                 tol=float(args.tolerance),
+            )
+        )
+        diffs.extend(
+            _compare_open_orders(
+                live_state["open_orders"],
+                snapshot_state["open_orders"],
+                left_name="live_db",
+                right_name="snapshot",
             )
         )
 
