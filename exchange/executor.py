@@ -5,6 +5,7 @@ import math
 import os
 import re
 import time
+from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_UP
 from dataclasses import dataclass
 
 from eth_account import Account
@@ -29,6 +30,52 @@ def _safe_float(val, default: float = 0.0) -> float:
         return float(val)
     except Exception:
         return default
+
+
+def _local_slippage_limit_px(*, px: float | None, is_buy: bool, slippage_pct: float) -> float | None:
+    """Compute a local IOC limit price fallback when SDK helpers are unavailable."""
+    if px is None:
+        return None
+    try:
+        base_px = float(px)
+    except Exception:
+        return None
+    if base_px <= 0 or not math.isfinite(base_px):
+        return None
+
+    try:
+        slip = float(slippage_pct)
+    except Exception:
+        slip = 0.0
+    slip = max(0.0, slip)
+
+    mult = (1.0 + slip) if bool(is_buy) else max(0.0, 1.0 - slip)
+    out = base_px * mult
+    return _normalise_limit_px_for_wire(out, is_buy=bool(is_buy))
+
+
+def _normalise_limit_px_for_wire(px: float | None, *, is_buy: bool) -> float | None:
+    """Normalise limit price to SDK wire precision (8 dp) before order submit."""
+    if px is None:
+        return None
+    try:
+        d = Decimal(str(px))
+    except (InvalidOperation, ValueError):
+        return None
+    if d <= 0:
+        return None
+    rounding = ROUND_UP if bool(is_buy) else ROUND_DOWN
+    try:
+        d = d.quantize(Decimal("0.00000001"), rounding=rounding)
+    except InvalidOperation:
+        return None
+    try:
+        out = float(d)
+    except Exception:
+        return None
+    if out <= 0 or not math.isfinite(out):
+        return None
+    return float(out)
 
 
 def _is_ok_response(res) -> bool:
@@ -407,19 +454,40 @@ class HyperliquidLiveExecutor:
         try:
             # Avoid Exchange.market_close(): it performs an extra Info.user_state() REST call.
             # We already know side + size in the strategy, so submit a reduce-only IOC limit.
+            used_local_fallback = False
             try:
                 limit_px = self._exchange._slippage_price(sym, bool(is_buy), slip, px=px_f)  # type: ignore[attr-defined]
             except Exception as _slip_exc:
-                logger.debug("_slippage_price failed for %s: %s", sym, _slip_exc, exc_info=True)
+                logger.warning(
+                    "_slippage_price unavailable for %s; falling back to local slippage calc: %s",
+                    sym,
+                    _slip_exc,
+                )
                 limit_px = None
-            if limit_px is None:
+            limit_px_f = _safe_float(_normalise_limit_px_for_wire(limit_px, is_buy=bool(is_buy)), 0.0)
+            if limit_px_f <= 0 or not math.isfinite(limit_px_f):
+                if px_f is not None:
+                    limit_px_f = _safe_float(_local_slippage_limit_px(px=px_f, is_buy=bool(is_buy), slippage_pct=slip), 0.0)
+                    used_local_fallback = limit_px_f > 0 and math.isfinite(limit_px_f)
+                if used_local_fallback:
+                    logger.warning("market_close using local slippage fallback for %s", sym)
+            if limit_px_f <= 0 or not math.isfinite(limit_px_f):
+                self.last_order_error = {
+                    "kind": "preflight",
+                    "op": "market_close",
+                    "symbol": sym,
+                    "is_buy": bool(is_buy),
+                    "sz": float(sz_f),
+                    "error": "unable to derive limit price for market_close",
+                }
+                print(f"[preflight] market_close blocked: unable to derive limit price for {sym}")
                 return None
 
             res = self._exchange.order(
                 sym,
                 is_buy=bool(is_buy),
                 sz=sz_f,
-                limit_px=float(limit_px),
+                limit_px=float(limit_px_f),
                 order_type={"limit": {"tif": "Ioc"}},
                 reduce_only=True,
                 cloid=cloid_obj,
