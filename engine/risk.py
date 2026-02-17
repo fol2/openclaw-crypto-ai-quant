@@ -101,7 +101,9 @@ class RiskManager:
         entry_per_min = float(min(1000.0, max(1.0, _env_float("AI_QUANT_RISK_MAX_ENTRY_ORDERS_PER_MIN", 30.0))))
         self._entry_bucket = TokenBucket(capacity=entry_per_min, refill_per_s=entry_per_min / 60.0)
 
-        entry_sym_per_min = float(min(1000.0, max(1.0, _env_float("AI_QUANT_RISK_MAX_ENTRY_ORDERS_PER_MIN_PER_SYMBOL", 6.0))))
+        entry_sym_per_min = float(
+            min(1000.0, max(1.0, _env_float("AI_QUANT_RISK_MAX_ENTRY_ORDERS_PER_MIN_PER_SYMBOL", 6.0)))
+        )
         self._entry_symbol_per_min = float(entry_sym_per_min)
         self._entry_symbol_events: dict[str, deque[float]] = defaultdict(deque)
 
@@ -392,9 +394,17 @@ class RiskManager:
                                 elif d == "SHORT":
                                     shorts += 1
 
-                            if want == "LONG" and self._exposure_alts_max_longs > 0 and longs >= self._exposure_alts_max_longs:
+                            if (
+                                want == "LONG"
+                                and self._exposure_alts_max_longs > 0
+                                and longs >= self._exposure_alts_max_longs
+                            ):
                                 return self._block("exposure_alts_longs", sym=sym_u, action=ac, intent_id=intent_id)
-                            if want == "SHORT" and self._exposure_alts_max_shorts > 0 and shorts >= self._exposure_alts_max_shorts:
+                            if (
+                                want == "SHORT"
+                                and self._exposure_alts_max_shorts > 0
+                                and shorts >= self._exposure_alts_max_shorts
+                            ):
                                 return self._block("exposure_alts_shorts", sym=sym_u, action=ac, intent_id=intent_id)
             except Exception:
                 pass
@@ -1073,6 +1083,7 @@ class RiskManager:
                 losses += float(-x)
 
         pf = (profits / losses) if losses > 0 else (float("inf") if profits > 0 else 0.0)
+        pf = min(float(pf), 9999.0)
         wr = float(wins) / float(n) if n > 0 else 0.0
 
         mean = sum(pnls) / float(n) if n > 0 else 0.0
@@ -1085,13 +1096,18 @@ class RiskManager:
             sharpe = float(mean / std)
         else:
             sharpe = float("inf") if mean > 0 else (-float("inf") if mean < 0 else 0.0)
+        sharpe = max(-999.0, min(float(sharpe), 999.0))
 
         breaches: list[str] = []
-        if self._perf_stop_min_pf > 0 and float(pf) < float(self._perf_stop_min_pf):
+        if self._perf_stop_min_pf > 0 and math.isfinite(pf) and float(pf) < float(self._perf_stop_min_pf):
             breaches.append("pf")
-        if self._perf_stop_min_wr > 0 and float(wr) < float(self._perf_stop_min_wr):
+        if self._perf_stop_min_wr > 0 and math.isfinite(wr) and float(wr) < float(self._perf_stop_min_wr):
             breaches.append("wr")
-        if self._perf_stop_min_sharpe is not None and float(sharpe) < float(self._perf_stop_min_sharpe):
+        if (
+            self._perf_stop_min_sharpe is not None
+            and math.isfinite(sharpe)
+            and float(sharpe) < float(self._perf_stop_min_sharpe)
+        ):
             breaches.append("sharpe")
 
         if not breaches:
@@ -1296,7 +1312,9 @@ class RiskManager:
                 "kill_reason": self._kill_reason,
             },
         )
-        return RiskDecision(allowed=False, reason=reason, kill_mode=self._kill_mode if self._kill_mode != "off" else None)
+        return RiskDecision(
+            allowed=False, reason=reason, kill_mode=self._kill_mode if self._kill_mode != "off" else None
+        )
 
     def _audit(self, *, symbol: str, event: str, level: str, data: dict[str, Any] | None) -> None:
         try:

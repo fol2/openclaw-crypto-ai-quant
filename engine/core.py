@@ -30,10 +30,12 @@ def _get_decision_event_fn():
     if _decision_event_fn is None:
         try:
             from strategy.mei_alpha_v1 import create_decision_event
+
             _decision_event_fn = create_decision_event
         except Exception:
             _decision_event_fn = False  # sentinel: import failed, don't retry
     return _decision_event_fn if _decision_event_fn else None
+
 
 logger = logging.getLogger(__name__)
 
@@ -169,8 +171,7 @@ class DecisionProvider(Protocol):
         not_ready_symbols: set[str],
         strategy: Any,
         now_ms: int,
-    ) -> Iterable[KernelDecision]:
-        ...
+    ) -> Iterable[KernelDecision]: ...
 
 
 class KernelDecisionFileProvider:
@@ -226,6 +227,7 @@ class KernelDecisionFileProvider:
 
 def _load_kernel_runtime_module(module_name: str = "bt_runtime"):
     """Import and return the Rust runtime binding module."""
+
     def _try_import() -> object:
         return importlib.import_module(module_name)
 
@@ -437,11 +439,14 @@ class KernelDecisionRustBindingProvider:
                 age_s = max(0.0, (now_ms() - ts_ms) / 1000.0) if ts_ms > 0 else 0.0
                 logger.info(
                     "Kernel state loaded, age=%.1fs, positions=%d, cash=$%.2f",
-                    age_s, n_pos, cash,
+                    age_s,
+                    n_pos,
+                    cash,
                 )
                 if age_s > 300.0:
                     logger.warning(
-                        "Kernel state stale by %.0fs", age_s,
+                        "Kernel state stale by %.0fs",
+                        age_s,
                     )
             except (ValueError, TypeError, KeyError) as exc:
                 logger.warning("Kernel state metadata parsing failed: %s; loaded from %s", exc, state_path)
@@ -452,7 +457,8 @@ class KernelDecisionRustBindingProvider:
         except Exception:
             logger.error(
                 "Kernel state file corrupt, creating fresh: %s\n%s",
-                state_path, traceback.format_exc(),
+                state_path,
+                traceback.format_exc(),
             )
         _seed = float(os.getenv("AI_QUANT_PAPER_BALANCE", "10000.0"))
         fresh = self._runtime.default_kernel_state_json(_seed, now_ms())
@@ -468,7 +474,8 @@ class KernelDecisionRustBindingProvider:
             self._runtime.save_state(state_json, self._KERNEL_STATE_PATH)
         except Exception:
             logger.warning(
-                "Failed to persist kernel state: %s", traceback.format_exc(),
+                "Failed to persist kernel state: %s",
+                traceback.format_exc(),
             )
 
     def _load_raw_events(self) -> list[dict[str, Any]]:
@@ -693,7 +700,8 @@ def _build_default_decision_provider() -> DecisionProvider:
                 logger.fatal(
                     "FATAL: bt_runtime extension unavailable — cannot initialise "
                     "Rust kernel decision provider.  Ensure the bt_runtime shared "
-                    "library is built and accessible.  Error: %s", exc,
+                    "library is built and accessible.  Error: %s",
+                    exc,
                 )
                 raise SystemExit(1) from exc
 
@@ -705,13 +713,15 @@ def _build_default_decision_provider() -> DecisionProvider:
                 "AI_QUANT_KERNEL_DECISION_FILE not configured. "
                 "The Rust kernel is REQUIRED for live/paper trading (AQC-825). "
                 "Build bt_runtime or set AI_QUANT_KERNEL_DECISION_PROVIDER=none "
-                "for dry-run mode.  Error: %s", exc,
+                "for dry-run mode.  Error: %s",
+                exc,
             )
             raise SystemExit(1) from exc
 
     if provider_mode == "candle":
         try:
             from strategy.kernel_orchestrator import KernelCandleDecisionProvider
+
             return KernelCandleDecisionProvider(
                 decision_factory=KernelDecision.from_raw,
             )
@@ -740,6 +750,7 @@ def _build_default_decision_provider() -> DecisionProvider:
             # bt_runtime is available — try candle provider first
             try:
                 from strategy.kernel_orchestrator import KernelCandleDecisionProvider
+
                 return KernelCandleDecisionProvider(decision_factory=KernelDecision.from_raw)
             except Exception:
                 pass  # fall through to old provider
@@ -754,7 +765,8 @@ def _build_default_decision_provider() -> DecisionProvider:
                 "AI_QUANT_KERNEL_DECISION_FILE not configured. "
                 "The Rust kernel is REQUIRED for live/paper trading (AQC-825). "
                 "Build bt_runtime or set AI_QUANT_KERNEL_DECISION_PROVIDER=none "
-                "for dry-run mode.  Error: %s", exc,
+                "for dry-run mode.  Error: %s",
+                exc,
             )
             raise SystemExit(1) from exc
 
@@ -907,13 +919,15 @@ class UnifiedEngine:
         self._rest_enabled = _env_bool("AI_QUANT_REST_ENABLE", True)
 
         # Performance and behavior knobs (init-time, not hot-reloadable)
-        self._signal_on_candle_close = _cfg_bool(_init_engine_cfg, "signal_on_candle_close", "SIGNAL_ON_CANDLE_CLOSE", True)
+        self._signal_on_candle_close = _cfg_bool(
+            _init_engine_cfg, "signal_on_candle_close", "SIGNAL_ON_CANDLE_CLOSE", True
+        )
         self._candle_close_grace_ms = _cfg_int(_init_engine_cfg, "candle_close_grace_ms", "CANDLE_CLOSE_GRACE_MS", 2000)
 
         # --- Hot-reloadable engine params: entry_interval, exit_interval ---
         # These are refreshed each loop via _refresh_engine_config().
-        self._entry_interval: str = ""   # e.g. "3m" — determines reanalyze cadence
-        self._exit_interval: str = ""    # e.g. "3m" — determines exit candle DB
+        self._entry_interval: str = ""  # e.g. "3m" — determines reanalyze cadence
+        self._exit_interval: str = ""  # e.g. "3m" — determines exit candle DB
         self._reanalyze_interval_s: float = 0.0
         self._last_analyze_ts: dict[str, int] = {}  # symbol → wall-clock bucket
         self._exit_reanalyze_interval_s: float = 0.0
@@ -1012,7 +1026,9 @@ class UnifiedEngine:
         if self.stats.last_ws_restart_s and (now_s - self.stats.last_ws_restart_s) < self._ws_restart_cooldown_s:
             return
 
-        if (not self._ws_restart_window_started_s) or ((now_s - self._ws_restart_window_started_s) > self._ws_restart_window_s):
+        if (not self._ws_restart_window_started_s) or (
+            (now_s - self._ws_restart_window_started_s) > self._ws_restart_window_s
+        ):
             self._ws_restart_window_started_s = now_s
             self._ws_restart_count_in_window = 0
 
@@ -1230,10 +1246,7 @@ class UnifiedEngine:
         # Sweep-compatible alias: enable_regime_filter → enable_regime_gate
         # The sweep spec (Rust side) uses enable_regime_filter; the Python engine
         # historically used enable_regime_gate. Accept both, sweep name takes precedence.
-        enabled = bool(
-            rc.get("enable_regime_filter",
-                    rc.get("enable_regime_gate", False))
-        )
+        enabled = bool(rc.get("enable_regime_filter", rc.get("enable_regime_gate", False)))
         fail_open = bool(rc.get("regime_gate_fail_open", False))
 
         if not enabled:
@@ -1245,15 +1258,21 @@ class UnifiedEngine:
             #                          breadth_block_short_above → regime_gate_breadth_high
             # Sweep names take precedence when set.
             try:
-                chop_lo = float(rc.get("breadth_block_long_below",
-                                       rc.get("regime_gate_breadth_low",
-                                              rc.get("auto_reverse_breadth_low", 10.0))))
+                chop_lo = float(
+                    rc.get(
+                        "breadth_block_long_below",
+                        rc.get("regime_gate_breadth_low", rc.get("auto_reverse_breadth_low", 10.0)),
+                    )
+                )
             except Exception:
                 chop_lo = 10.0
             try:
-                chop_hi = float(rc.get("breadth_block_short_above",
-                                       rc.get("regime_gate_breadth_high",
-                                              rc.get("auto_reverse_breadth_high", 90.0))))
+                chop_hi = float(
+                    rc.get(
+                        "breadth_block_short_above",
+                        rc.get("regime_gate_breadth_high", rc.get("auto_reverse_breadth_high", 90.0)),
+                    )
+                )
             except Exception:
                 chop_hi = 90.0
 
@@ -1324,7 +1343,9 @@ class UnifiedEngine:
                         )
                         adx_s = adx_obj.adx()
                         if not adx_s.empty:
-                            adx = float(adx_s.iloc[-1])
+                            _adx_v = float(adx_s.iloc[-1])
+                            if pd.notna(_adx_v):
+                                adx = _adx_v
                     except Exception:
                         pass
 
@@ -1336,10 +1357,12 @@ class UnifiedEngine:
                             window=int(atr_w),
                         )
                         if not atr_s.empty:
-                            atr = float(atr_s.iloc[-1])
-                            close = float(btc_df["Close"].iloc[-1])
-                            if close > 0:
-                                atr_pct = atr / close
+                            _atr_v = float(atr_s.iloc[-1])
+                            if pd.notna(_atr_v):
+                                atr = _atr_v
+                                close = float(btc_df["Close"].iloc[-1])
+                                if close > 0:
+                                    atr_pct = atr / close
                     except Exception:
                         pass
 
@@ -1359,7 +1382,9 @@ class UnifiedEngine:
         self._regime_gate_on = bool(new_on)
         self._regime_gate_reason = str(new_reason or "none").strip() or "none"
 
-        if self._regime_gate_last_logged_on is None or bool(self._regime_gate_on) != bool(self._regime_gate_last_logged_on):
+        if self._regime_gate_last_logged_on is None or bool(self._regime_gate_on) != bool(
+            self._regime_gate_last_logged_on
+        ):
             self._regime_gate_last_logged_on = bool(self._regime_gate_on)
             try:
                 mei_alpha_v1.log_audit_event(
@@ -1376,7 +1401,9 @@ class UnifiedEngine:
             except Exception:
                 pass
             try:
-                logger.info(f"🧭 regime gate {'ON' if self._regime_gate_on else 'OFF'} reason={self._regime_gate_reason}")
+                logger.info(
+                    f"🧭 regime gate {'ON' if self._regime_gate_on else 'OFF'} reason={self._regime_gate_reason}"
+                )
             except Exception:
                 pass
 
@@ -1410,6 +1437,7 @@ class UnifiedEngine:
         # Detect whether trader.execute_trade supports the action-aware API (cached).
         if not hasattr(self, "_trader_accepts_action"):
             import inspect
+
             try:
                 _sig = inspect.signature(self.trader.execute_trade)
                 self._trader_accepts_action = "action" in _sig.parameters
@@ -1434,14 +1462,19 @@ class UnifiedEngine:
             fn = getattr(self.trader, "add_to_position", None)
             if callable(fn):
                 try:
-                    return fn(sym, price, timestamp, confidence, atr=atr, indicators=indicators, target_size=target_size_f)
+                    return fn(
+                        sym, price, timestamp, confidence, atr=atr, indicators=indicators, target_size=target_size_f
+                    )
                 except TypeError:
                     return fn(sym, price, timestamp, confidence, atr=atr, indicators=indicators)
             return
 
         if act in {"CLOSE", "REDUCE"}:
-            if sym not in ((self.trader.positions or {}) if isinstance(getattr(self.trader, "positions", None), dict) else {}):
+            if sym not in (
+                (self.trader.positions or {}) if isinstance(getattr(self.trader, "positions", None), dict) else {}
+            ):
                 import logging
+
                 logger = logging.getLogger(__name__)
                 logger.debug("Skipping %s for %s: not in positions", act, sym)
                 return
@@ -1638,18 +1671,19 @@ class UnifiedEngine:
                 btc_df: pd.DataFrame | None = None
                 btc_bullish = self._btc_ctx.get("btc_bullish")
 
-                if (
-                    ("BTC" not in not_ready_set)
-                    and (self._reanalyze_due("BTC") or (btc_key_hint is None) or (btc_key_hint != self._btc_ctx.get("key")))
+                if ("BTC" not in not_ready_set) and (
+                    self._reanalyze_due("BTC") or (btc_key_hint is None) or (btc_key_hint != self._btc_ctx.get("key"))
                 ):
                     btc_df_raw = self.market.get_candles_df("BTC", interval=self.interval, min_rows=self.lookback_bars)
                     btc_df = self._prepare_df_for_analysis(btc_df_raw)
                     btc_bullish = None
                     if btc_df is not None and not btc_df.empty:
                         try:
-                            btc_ema_slow = mei_alpha_v1.ta.trend.ema_indicator(btc_df["Close"], window=50).iloc[-1]
-                            if mei_alpha_v1.pd.notna(btc_ema_slow):
-                                btc_bullish = btc_df["Close"].iloc[-1] > btc_ema_slow
+                            _btc_ema_s = mei_alpha_v1.ta.trend.ema_indicator(btc_df["Close"], window=50)
+                            if _btc_ema_s is not None and not _btc_ema_s.empty:
+                                btc_ema_slow = _btc_ema_s.iloc[-1]
+                                if mei_alpha_v1.pd.notna(btc_ema_slow):
+                                    btc_bullish = btc_df["Close"].iloc[-1] > btc_ema_slow
                         except Exception:
                             btc_bullish = None
 
@@ -1679,14 +1713,24 @@ class UnifiedEngine:
                     # Fallback: compute EMA from candle DB when cache has no EMA.
                     if not (_ef > 0 and _es > 0):
                         try:
-                            _bdf = self.market.get_candles_df(_bsym, interval=self.interval, min_rows=self.lookback_bars)
+                            _bdf = self.market.get_candles_df(
+                                _bsym, interval=self.interval, min_rows=self.lookback_bars
+                            )
                             if _bdf is not None and len(_bdf) >= 20:
-                                _gcfg = (self.strategy.get_config("__GLOBAL__") or {})
+                                _gcfg = self.strategy.get_config("__GLOBAL__") or {}
                                 _ind_cfg = _gcfg.get("indicators") or {}
                                 _fw = int(_ind_cfg.get("ema_fast_window", 20))
                                 _sw = int(_ind_cfg.get("ema_slow_window", 50))
-                                _ef = float(mei_alpha_v1.ta.trend.ema_indicator(_bdf["Close"], window=_fw).iloc[-1])
-                                _es = float(mei_alpha_v1.ta.trend.ema_indicator(_bdf["Close"], window=_sw).iloc[-1])
+                                _ema_f_s = mei_alpha_v1.ta.trend.ema_indicator(_bdf["Close"], window=_fw)
+                                _ema_s_s = mei_alpha_v1.ta.trend.ema_indicator(_bdf["Close"], window=_sw)
+                                if (
+                                    _ema_f_s is not None
+                                    and not _ema_f_s.empty
+                                    and _ema_s_s is not None
+                                    and not _ema_s_s.empty
+                                ):
+                                    _ef = float(_ema_f_s.iloc[-1])
+                                    _es = float(_ema_s_s.iloc[-1])
                         except Exception:
                             _ef = _es = 0.0
                     try:
@@ -1717,36 +1761,44 @@ class UnifiedEngine:
 
                         # WARN-K3: When analysis cache is empty (e.g. after restart),
                         # compute basic indicators from candle DB so exit logic has context.
-                        if not now_series or not any(
-                            now_series.get(k) for k in ("ADX", "ATR", "RSI_14", "EMA_fast")
-                        ):
+                        if not now_series or not any(now_series.get(k) for k in ("ADX", "ATR", "RSI_14", "EMA_fast")):
                             try:
                                 _edf = self.market.get_candles_df(
-                                    sym_u, interval=self.interval, min_rows=self.lookback_bars,
+                                    sym_u,
+                                    interval=self.interval,
+                                    min_rows=self.lookback_bars,
                                 )
                                 if _edf is not None and len(_edf) >= 50:
-                                    _gcfg = (self.strategy.get_config("__GLOBAL__") or {})
+                                    _gcfg = self.strategy.get_config("__GLOBAL__") or {}
                                     _ind = _gcfg.get("indicators") or {}
                                     _fw = int(_ind.get("ema_fast_window", 20))
                                     _sw = int(_ind.get("ema_slow_window", 50))
-                                    now_series["EMA_fast"] = float(
-                                        mei_alpha_v1.ta.trend.ema_indicator(_edf["Close"], window=_fw).iloc[-1]
-                                    )
-                                    now_series["EMA_slow"] = float(
-                                        mei_alpha_v1.ta.trend.ema_indicator(_edf["Close"], window=_sw).iloc[-1]
-                                    )
+                                    _ema_f = mei_alpha_v1.ta.trend.ema_indicator(_edf["Close"], window=_fw)
+                                    if _ema_f is not None and not _ema_f.empty:
+                                        now_series["EMA_fast"] = float(_ema_f.iloc[-1])
+                                    _ema_s = mei_alpha_v1.ta.trend.ema_indicator(_edf["Close"], window=_sw)
+                                    if _ema_s is not None and not _ema_s.empty:
+                                        now_series["EMA_slow"] = float(_ema_s.iloc[-1])
                                     _adx = mei_alpha_v1.ta.trend.ADXIndicator(
-                                        _edf["High"], _edf["Low"], _edf["Close"], window=14,
+                                        _edf["High"],
+                                        _edf["Low"],
+                                        _edf["Close"],
+                                        window=14,
                                     )
-                                    now_series["ADX"] = float(_adx.adx().iloc[-1])
-                                    now_series["ATR"] = float(
-                                        mei_alpha_v1.ta.volatility.average_true_range(
-                                            _edf["High"], _edf["Low"], _edf["Close"], window=14,
-                                        ).iloc[-1]
+                                    _adx_s = _adx.adx()
+                                    if _adx_s is not None and not _adx_s.empty:
+                                        now_series["ADX"] = float(_adx_s.iloc[-1])
+                                    _atr_s = mei_alpha_v1.ta.volatility.average_true_range(
+                                        _edf["High"],
+                                        _edf["Low"],
+                                        _edf["Close"],
+                                        window=14,
                                     )
-                                    now_series["RSI_14"] = float(
-                                        mei_alpha_v1.ta.momentum.rsi(_edf["Close"], window=14).iloc[-1]
-                                    )
+                                    if _atr_s is not None and not _atr_s.empty:
+                                        now_series["ATR"] = float(_atr_s.iloc[-1])
+                                    _rsi_s = mei_alpha_v1.ta.momentum.rsi(_edf["Close"], window=14)
+                                    if _rsi_s is not None and not _rsi_s.empty:
+                                        now_series["RSI_14"] = float(_rsi_s.iloc[-1])
                                     now_series["Close"] = float(_edf["Close"].iloc[-1])
                                     # Populate cache to avoid recomputing on every tick.
                                     self._analysis_cache[sym_u] = {
@@ -1783,13 +1835,21 @@ class UnifiedEngine:
                                     current_price = float(df_exit["Close"].iloc[-1])
                                 else:
                                     quote = self.market.get_mid_price(sym_u, max_age_s=10.0, interval=self.interval)
-                                    current_price = float(quote.price) if quote is not None else float(now_series.get("Close") or 0.0)
+                                    current_price = (
+                                        float(quote.price)
+                                        if quote is not None
+                                        else float(now_series.get("Close") or 0.0)
+                                    )
                             except Exception:
                                 quote = self.market.get_mid_price(sym_u, max_age_s=10.0, interval=self.interval)
-                                current_price = float(quote.price) if quote is not None else float(now_series.get("Close") or 0.0)
+                                current_price = (
+                                    float(quote.price) if quote is not None else float(now_series.get("Close") or 0.0)
+                                )
                         else:
                             quote = self.market.get_mid_price(sym_u, max_age_s=10.0, interval=self.interval)
-                            current_price = float(quote.price) if quote is not None else float(now_series.get("Close") or 0.0)
+                            current_price = (
+                                float(quote.price) if quote is not None else float(now_series.get("Close") or 0.0)
+                            )
 
                         try:
                             if isinstance(now_series, dict):
@@ -1931,17 +1991,22 @@ class UnifiedEngine:
                         # _regime_gate_on is already True when enable_regime_gate is
                         # False, so this single check covers the disabled case too.
                         if act in {"OPEN", "ADD"} and not self._regime_gate_on:
-                            logger.info(
-                                f"🚫 regime gate blocked {act} for {sym_u} "
-                                f"reason={self._regime_gate_reason}"
-                            )
+                            logger.info(f"🚫 regime gate blocked {act} for {sym_u} reason={self._regime_gate_reason}")
                             _cde = _get_decision_event_fn()
                             if _cde:
                                 try:
-                                    _cde(sym_u, "gate_block", "blocked", "gate_evaluation",
-                                         action_taken="blocked",
-                                         context={"reason": "regime_gate_off", "gate_on": self._regime_gate_on,
-                                                  "breadth_pct": self._market_breadth_pct})
+                                    _cde(
+                                        sym_u,
+                                        "gate_block",
+                                        "blocked",
+                                        "gate_evaluation",
+                                        action_taken="blocked",
+                                        context={
+                                            "reason": "regime_gate_off",
+                                            "gate_on": self._regime_gate_on,
+                                            "breadth_pct": self._market_breadth_pct,
+                                        },
+                                    )
                                 except Exception:
                                     pass
                             continue
@@ -1956,16 +2021,28 @@ class UnifiedEngine:
                                         current_price = float(df_entry["Close"].iloc[-1])
                                     else:
                                         quote = self.market.get_mid_price(sym_u, max_age_s=10.0, interval=self.interval)
-                                        current_price = float(quote.price) if quote is not None else float(now_series.get("Close") or 0.0)
+                                        current_price = (
+                                            float(quote.price)
+                                            if quote is not None
+                                            else float(now_series.get("Close") or 0.0)
+                                        )
                                 except Exception:
                                     quote = self.market.get_mid_price(sym_u, max_age_s=10.0, interval=self.interval)
-                                    current_price = float(quote.price) if quote is not None else float(now_series.get("Close") or 0.0)
+                                    current_price = (
+                                        float(quote.price)
+                                        if quote is not None
+                                        else float(now_series.get("Close") or 0.0)
+                                    )
                             else:
                                 quote = self.market.get_mid_price(sym_u, max_age_s=10.0, interval=self.interval)
-                                current_price = float(quote.price) if quote is not None else float(now_series.get("Close") or 0.0)
+                                current_price = (
+                                    float(quote.price) if quote is not None else float(now_series.get("Close") or 0.0)
+                                )
                         else:
                             quote = self.market.get_mid_price(sym_u, max_age_s=10.0, interval=self.interval)
-                            current_price = float(quote.price) if quote is not None else float(now_series.get("Close") or 0.0)
+                            current_price = (
+                                float(quote.price) if quote is not None else float(now_series.get("Close") or 0.0)
+                            )
 
                         # WARN-E3: Guard against zero price when all sources fail.
                         if current_price <= 0:
@@ -1973,9 +2050,14 @@ class UnifiedEngine:
                             _cde = _get_decision_event_fn()
                             if _cde:
                                 try:
-                                    _cde(sym_u, "gate_block", "blocked", "gate_evaluation",
-                                         action_taken="blocked",
-                                         context={"reason": "zero_price", "action": act})
+                                    _cde(
+                                        sym_u,
+                                        "gate_block",
+                                        "blocked",
+                                        "gate_evaluation",
+                                        action_taken="blocked",
+                                        context={"reason": "zero_price", "action": act},
+                                    )
                                 except Exception:
                                     pass
                             continue
@@ -1985,15 +2067,19 @@ class UnifiedEngine:
                                 now_ts = now_ms()
                                 if self._entry_is_too_late(entry_key=int(entry_key), now_ts_ms=int(now_ts)):
                                     logger.debug(
-                                        f"🕒 skip {sym_u} {act}: stale candle-close signal "
-                                        f"key={int(entry_key)}"
+                                        f"🕒 skip {sym_u} {act}: stale candle-close signal key={int(entry_key)}"
                                     )
                                     _cde = _get_decision_event_fn()
                                     if _cde:
                                         try:
-                                            _cde(sym_u, "gate_block", "blocked", "gate_evaluation",
-                                                 action_taken="blocked",
-                                                 context={"reason": "stale_candle", "entry_key": int(entry_key)})
+                                            _cde(
+                                                sym_u,
+                                                "gate_block",
+                                                "blocked",
+                                                "gate_evaluation",
+                                                action_taken="blocked",
+                                                context={"reason": "stale_candle", "entry_key": int(entry_key)},
+                                            )
                                         except Exception:
                                             pass
                                     continue
@@ -2002,15 +2088,22 @@ class UnifiedEngine:
                                 if last_key is not None and int(last_key) == int(entry_key):
                                     if self._entry_retry_on_capacity:
                                         last_open_count = self._last_entry_key_open_pos_count.get(sym_u)
-                                        if last_open_count is not None and int(len(self.trader.positions or {})) < int(last_open_count):
+                                        if last_open_count is not None and int(len(self.trader.positions or {})) < int(
+                                            last_open_count
+                                        ):
                                             self._last_entry_key_open_pos_count[sym_u] = int(open_pos_count)
                                         else:
                                             _cde = _get_decision_event_fn()
                                             if _cde:
                                                 try:
-                                                    _cde(sym_u, "gate_block", "blocked", "gate_evaluation",
-                                                         action_taken="blocked",
-                                                         context={"reason": "dedup_key", "entry_key": int(entry_key)})
+                                                    _cde(
+                                                        sym_u,
+                                                        "gate_block",
+                                                        "blocked",
+                                                        "gate_evaluation",
+                                                        action_taken="blocked",
+                                                        context={"reason": "dedup_key", "entry_key": int(entry_key)},
+                                                    )
                                                 except Exception:
                                                     pass
                                             continue
@@ -2018,9 +2111,14 @@ class UnifiedEngine:
                                         _cde = _get_decision_event_fn()
                                         if _cde:
                                             try:
-                                                _cde(sym_u, "gate_block", "blocked", "gate_evaluation",
-                                                     action_taken="blocked",
-                                                     context={"reason": "dedup_key", "entry_key": int(entry_key)})
+                                                _cde(
+                                                    sym_u,
+                                                    "gate_block",
+                                                    "blocked",
+                                                    "gate_evaluation",
+                                                    action_taken="blocked",
+                                                    context={"reason": "dedup_key", "entry_key": int(entry_key)},
+                                                )
                                             except Exception:
                                                 pass
                                         continue
@@ -2049,10 +2147,18 @@ class UnifiedEngine:
                             _cde = _get_decision_event_fn()
                             if _cde:
                                 try:
-                                    _did = _cde(sym_u, "entry_signal", "executed", "execution",
-                                                action_taken=act.lower(),
-                                                context={"confidence": dec.confidence, "action": act,
-                                                         "source": "kernel_candle"})
+                                    _did = _cde(
+                                        sym_u,
+                                        "entry_signal",
+                                        "executed",
+                                        "execution",
+                                        action_taken=act.lower(),
+                                        context={
+                                            "confidence": dec.confidence,
+                                            "action": act,
+                                            "source": "kernel_candle",
+                                        },
+                                    )
                                 except Exception:
                                     pass
 
@@ -2083,10 +2189,18 @@ class UnifiedEngine:
                             _cde = _get_decision_event_fn()
                             if _cde:
                                 try:
-                                    _did = _cde(sym_u, "exit_check", "executed", "execution",
-                                                action_taken=act.lower(),
-                                                context={"confidence": dec.confidence, "action": act,
-                                                         "source": "kernel_candle"})
+                                    _did = _cde(
+                                        sym_u,
+                                        "exit_check",
+                                        "executed",
+                                        "execution",
+                                        action_taken=act.lower(),
+                                        context={
+                                            "confidence": dec.confidence,
+                                            "action": act,
+                                            "source": "kernel_candle",
+                                        },
+                                    )
                                 except Exception:
                                     pass
 
@@ -2134,7 +2248,9 @@ class UnifiedEngine:
                     _auto_rev_on = (
                         bool(_rc.get("enable_auto_reverse", False))
                         and self._market_breadth_pct is not None
-                        and float(_rc.get("auto_reverse_breadth_low", 20.0)) <= self._market_breadth_pct <= float(_rc.get("auto_reverse_breadth_high", 80.0))
+                        and float(_rc.get("auto_reverse_breadth_low", 20.0))
+                        <= self._market_breadth_pct
+                        <= float(_rc.get("auto_reverse_breadth_high", 80.0))
                     )
                     cfg_id = ""
                     try:
