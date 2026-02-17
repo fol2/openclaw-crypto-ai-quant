@@ -209,11 +209,12 @@ def _db_path() -> str:
 
 
 def _harden_db_permissions(*paths: str, project_root: Path | None = None) -> None:
-    """Best-effort DB permission hardening (`0600`) for existing local SQLite files."""
+    """Best-effort DB permission hardening (`0600`) for existing SQLite data + sidecar files."""
     root = Path(project_root) if project_root is not None else Path(__file__).resolve().parents[1]
     candidates: set[Path] = set()
     try:
-        candidates.update(root.glob("*.db"))
+        for pattern in ("*.db", "*.db-wal", "*.db-shm", "*.db-journal"):
+            candidates.update(root.glob(pattern))
     except Exception:
         pass
 
@@ -224,6 +225,15 @@ def _harden_db_permissions(*paths: str, project_root: Path | None = None) -> Non
             continue
         if str(p):
             candidates.add(p)
+
+    expanded: set[Path] = set(candidates)
+    for p in list(candidates):
+        p_s = str(p)
+        if p_s.endswith(".db"):
+            expanded.add(Path(p_s + "-wal"))
+            expanded.add(Path(p_s + "-shm"))
+            expanded.add(Path(p_s + "-journal"))
+    candidates = expanded
 
     for p in candidates:
         try:
