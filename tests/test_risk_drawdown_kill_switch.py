@@ -1,16 +1,42 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from pathlib import Path
 
-def test_drawdown_kill_switch_requires_explicit_resume(tmp_path, monkeypatch):
+
+@dataclass
+class _FakeTrader:
+    values: list[float]
+
+    def __post_init__(self) -> None:
+        self._idx = 0
+
+    def get_live_balance(self) -> float:
+        v = float(self.values[self._idx])
+        self._idx += 1
+        return v
+
+
+def _bootstrap_risk_manager(
+    *,
+    tmp_path: Path,
+    monkeypatch,
+    max_drawdown_pct: float = 5.0,
+    drawdown_reduce_policy: str | None = None,
+):
     cfg = tmp_path / "strategy_overrides.yaml"
-    cfg.write_text(
+    body = (
         "global:\n"
         "  risk:\n"
-        "    max_drawdown_pct: 5.0\n",
-        encoding="utf-8",
+        f"    max_drawdown_pct: {float(max_drawdown_pct)}\n"
     )
+    if drawdown_reduce_policy is not None:
+        body += f"    drawdown_reduce_policy: {drawdown_reduce_policy}\n"
+    cfg.write_text(body, encoding="utf-8")
 
     monkeypatch.setenv("AI_QUANT_STRATEGY_YAML", str(cfg))
+    monkeypatch.delenv("AI_QUANT_KILL_SWITCH", raising=False)
+    monkeypatch.delenv("AI_QUANT_KILL_SWITCH_MODE", raising=False)
 
     from engine.strategy_manager import StrategyManager
 
@@ -22,56 +48,160 @@ def test_drawdown_kill_switch_requires_explicit_resume(tmp_path, monkeypatch):
 
     from engine.risk import RiskManager
 
-    class FakeTrader:
-        def __init__(self, values):
-            self._it = iter(values)
+    return RiskManager()
 
-        def get_live_balance(self):
-            return next(self._it)
 
-    trader = FakeTrader([100.0, 94.0, 100.0, 100.0])
-    risk = RiskManager()
+def test_drawdown_kill_switch_requires_explicit_resume(tmp_path, monkeypatch):
+    risk = _bootstrap_risk_manager(tmp_path=tmp_path, monkeypatch=monkeypatch, max_drawdown_pct=5.0)
+    trader = _FakeTrader([100.0, 94.0, 100.0, 100.0])
 
-    # Establish the equity peak first.
     risk.refresh(trader=trader)
     assert risk.kill_mode == "off"
 
-    # 6% drawdown breaches the 5% threshold.
     risk.refresh(trader=trader)
     assert risk.kill_mode == "close_only"
 
-    # Do not auto-clear when equity recovers.
     risk.refresh(trader=trader)
     assert risk.kill_mode == "close_only"
 
-    # Explicit operator resume.
     monkeypatch.setenv("AI_QUANT_KILL_SWITCH", "clear")
     risk.refresh(trader=trader)
     assert risk.kill_mode == "off"
 
 
 def test_drawdown_reduce_policy_is_loaded_from_yaml(tmp_path, monkeypatch):
-    cfg = tmp_path / "strategy_overrides.yaml"
-    cfg.write_text(
-        "global:\n"
-        "  risk:\n"
-        "    max_drawdown_pct: 5.0\n"
-        "    drawdown_reduce_policy: close_all\n",
-        encoding="utf-8",
+    risk = _bootstrap_risk_manager(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        max_drawdown_pct=5.0,
+        drawdown_reduce_policy="close_all",
     )
-
-    monkeypatch.setenv("AI_QUANT_STRATEGY_YAML", str(cfg))
-
-    from engine.strategy_manager import StrategyManager
-
-    StrategyManager.bootstrap(
-        defaults={"trade": {}, "indicators": {}, "filters": {}, "thresholds": {}},
-        yaml_path=str(cfg),
-        changelog_path=None,
-    )
-
-    from engine.risk import RiskManager
-
-    risk = RiskManager()
     risk.refresh(trader=None)
     assert risk.drawdown_reduce_policy == "close_all"
+
+
+def test_drawdown_does_not_trigger_just_below_threshold(tmp_path, monkeypatch):
+    risk = _bootstrap_risk_manager(tmp_path=tmp_path, monkeypatch=monkeypatch, max_drawdown_pct=5.0)
+    trader = _FakeTrader([100.0, 95.1])
+
+    risk.refresh(trader=trader)
+    risk.refresh(trader=trader)
+
+    assert risk.kill_mode == "off"
+
+
+def test_drawdown_triggers_at_exact_threshold_boundary(tmp_path, monkeypatch):
+    risk = _bootstrap_risk_manager(tmp_path=tmp_path, monkeypatch=monkeypatch, max_drawdown_pct=5.0)
+    trader = _FakeTrader([100.0, 95.0])
+
+    risk.refresh(trader=trader)
+    risk.refresh(trader=trader)
+
+    assert risk.kill_mode == "close_only"
+    assert risk.kill_reason == "drawdown"
+
+
+def test_allow_order_blocks_open_but_allows_reduce_risk_when_killed(tmp_path, monkeypatch):
+    risk = _bootstrap_risk_manager(tmp_path=tmp_path, monkeypatch=monkeypatch, max_drawdown_pct=5.0)
+    trader = _FakeTrader([100.0, 94.0])
+
+    risk.refresh(trader=trader)
+    risk.refresh(trader=trader)
+    assert risk.kill_mode == "close_only"
+
+    open_decision = risk.allow_order(
+        symbol="BTC",
+        action="OPEN",
+        side="BUY",
+        notional_usd=100.0,
+        leverage=3.0,
+    )
+    close_decision = risk.allow_order(
+        symbol="BTC",
+        action="CLOSE",
+        side="SELL",
+        notional_usd=100.0,
+        leverage=3.0,
+        reduce_risk=True,
+    )
+
+    assert open_decision.allowed is False
+    assert open_decision.reason.startswith("close_only")
+    assert close_decision.allowed is True
+    assert close_decision.reason == "ok"
+
+
+def test_clear_kill_resets_peak_and_prevents_immediate_retrigger(tmp_path, monkeypatch):
+    risk = _bootstrap_risk_manager(tmp_path=tmp_path, monkeypatch=monkeypatch, max_drawdown_pct=5.0)
+    trader = _FakeTrader([100.0, 94.0, 100.0, 96.0, 90.0])
+
+    risk.refresh(trader=trader)
+    risk.refresh(trader=trader)
+    assert risk.kill_mode == "close_only"
+
+    monkeypatch.setenv("AI_QUANT_KILL_SWITCH", "clear")
+    risk.refresh(trader=trader)
+    assert risk.kill_mode == "off"
+    monkeypatch.delenv("AI_QUANT_KILL_SWITCH", raising=False)
+
+    risk.refresh(trader=trader)
+    assert risk.kill_mode == "off"
+
+    risk.refresh(trader=trader)
+    assert risk.kill_mode == "close_only"
+
+
+def test_refresh_drawdown_uses_account_value_fallback(tmp_path, monkeypatch):
+    risk = _bootstrap_risk_manager(tmp_path=tmp_path, monkeypatch=monkeypatch, max_drawdown_pct=5.0)
+
+    class _AccountValueTrader:
+        def __init__(self, value: float) -> None:
+            self._account_value_usd = float(value)
+
+    trader = _AccountValueTrader(100.0)
+    risk.refresh(trader=trader)
+    assert risk.kill_mode == "off"
+
+    trader._account_value_usd = 94.0
+    risk.refresh(trader=trader)
+    assert risk.kill_mode == "close_only"
+    assert risk.kill_reason == "drawdown"
+
+
+def test_refresh_drawdown_ignores_non_positive_equity(tmp_path, monkeypatch):
+    risk = _bootstrap_risk_manager(tmp_path=tmp_path, monkeypatch=monkeypatch, max_drawdown_pct=6.0)
+    trader = _FakeTrader([100.0, 0.0, -10.0, 95.0])
+
+    risk.refresh(trader=trader)
+    risk.refresh(trader=trader)
+    risk.refresh(trader=trader)
+    risk.refresh(trader=trader)
+
+    assert risk.kill_mode == "off"
+
+
+def test_drawdown_then_manual_halt_all_interaction(tmp_path, monkeypatch):
+    risk = _bootstrap_risk_manager(tmp_path=tmp_path, monkeypatch=monkeypatch, max_drawdown_pct=5.0)
+    trader = _FakeTrader([100.0, 94.0, 110.0])
+
+    risk.refresh(trader=trader)
+    risk.refresh(trader=trader)
+    assert risk.kill_mode == "close_only"
+    assert risk.kill_reason == "drawdown"
+
+    monkeypatch.setenv("AI_QUANT_KILL_SWITCH", "halt")
+    risk.refresh(trader=trader)
+    assert risk.kill_mode == "halt_all"
+    assert risk.kill_reason == "env"
+
+
+def test_drawdown_sets_kill_reason_and_kill_since(tmp_path, monkeypatch):
+    risk = _bootstrap_risk_manager(tmp_path=tmp_path, monkeypatch=monkeypatch, max_drawdown_pct=5.0)
+    trader = _FakeTrader([100.0, 94.0])
+
+    risk.refresh(trader=trader)
+    risk.refresh(trader=trader)
+
+    assert risk.kill_mode == "close_only"
+    assert risk.kill_reason == "drawdown"
+    assert isinstance(risk.kill_since_s, float)
