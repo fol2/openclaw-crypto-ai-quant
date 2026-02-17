@@ -98,6 +98,10 @@ struct Args {
     /// Include event parity summary in JSONL ledger rows.
     #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
     ledger_include_event_parity: bool,
+
+    /// Include first mismatch field names in event parity payloads.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+    trace_include_mismatch_fields: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -212,7 +216,8 @@ struct EventParitySummary {
     cpu_tail_offset: usize,
     gpu_tail_offset: usize,
     first_mismatch_at: Option<usize>,
-    first_mismatch_fields: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    first_mismatch_fields: Option<Vec<String>>,
     cpu_event: Option<CanonicalEventRow>,
     gpu_event: Option<CanonicalEventRow>,
 }
@@ -393,7 +398,11 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             args.cpu_trace_from_tail,
         )?;
         let gpu_events = collect_trace_events(&trace_state, &trace_symbols);
-        let event_parity = compare_event_streams(&cpu_trace.events, &gpu_events);
+        let event_parity = compare_event_streams(
+            &cpu_trace.events,
+            &gpu_events,
+            args.trace_include_mismatch_fields,
+        );
         if args.ledger_include_event_parity {
             baseline_event_parity = Some(summarise_event_parity(&event_parity));
         }
@@ -540,7 +549,11 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     args.cpu_trace_from_tail,
                 )?;
                 let gpu_events = collect_trace_events(&trace_state, &trace_symbols);
-                let event_parity = compare_event_streams(&cpu_trace.events, &gpu_events);
+                let event_parity = compare_event_streams(
+                    &cpu_trace.events,
+                    &gpu_events,
+                    args.trace_include_mismatch_fields,
+                );
                 if args.ledger_include_event_parity {
                     event_parity_summary = Some(summarise_event_parity(&event_parity));
                 }
@@ -908,6 +921,7 @@ fn collect_trace_events(state: &GpuComboState, symbols: &[String]) -> Vec<TraceE
 fn compare_event_streams(
     cpu_events: &[CpuTradeEventRow],
     gpu_events: &[TraceEventRow],
+    include_mismatch_fields: bool,
 ) -> EventParitySummary {
     let cpu: Vec<CanonicalEventRow> = cpu_events.iter().map(canonicalise_cpu_event).collect();
     let gpu: Vec<CanonicalEventRow> = gpu_events.iter().map(canonicalise_gpu_event).collect();
@@ -927,7 +941,11 @@ fn compare_event_streams(
                 cpu_tail_offset,
                 gpu_tail_offset,
                 first_mismatch_at: Some(rel_idx),
-                first_mismatch_fields: diff_canonical_fields(cpu_ev, gpu_ev),
+                first_mismatch_fields: if include_mismatch_fields {
+                    Some(diff_canonical_fields(cpu_ev, gpu_ev))
+                } else {
+                    None
+                },
                 cpu_event: Some(cpu_ev.clone()),
                 gpu_event: Some(gpu_ev.clone()),
             };
@@ -943,7 +961,7 @@ fn compare_event_streams(
             cpu_tail_offset,
             gpu_tail_offset,
             first_mismatch_at: None,
-            first_mismatch_fields: Vec::new(),
+            first_mismatch_fields: None,
             cpu_event: None,
             gpu_event: None,
         };
@@ -957,7 +975,7 @@ fn compare_event_streams(
         cpu_tail_offset,
         gpu_tail_offset,
         first_mismatch_at: None,
-        first_mismatch_fields: Vec::new(),
+        first_mismatch_fields: None,
         cpu_event: None,
         gpu_event: None,
     }
@@ -972,11 +990,7 @@ fn summarise_event_parity(summary: &EventParitySummary) -> LedgerEventParitySumm
         cpu_tail_offset: summary.cpu_tail_offset,
         gpu_tail_offset: summary.gpu_tail_offset,
         first_mismatch_at: summary.first_mismatch_at,
-        first_mismatch_fields: if summary.first_mismatch_fields.is_empty() {
-            None
-        } else {
-            Some(summary.first_mismatch_fields.clone())
-        },
+        first_mismatch_fields: summary.first_mismatch_fields.clone(),
     }
 }
 
