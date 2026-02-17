@@ -8,7 +8,10 @@ These guardrails exist because the production branch (`master`) is live and trad
 
 Do not change this section unless the user explicitly asks to update `AGENTS.md`.
 
-- The production worktree at `/home/fol2hk/openclaw-plugins/ai_quant` MUST stay checked out on `master`. Never `checkout` or `switch` branches in that directory.
+- The production worktree at `/home/fol2hk/openclaw-plugins/ai_quant` MUST stay checked out on `master` at all times.
+- Never run `git checkout`, `git switch`, or any branch-changing command inside `/home/fol2hk/openclaw-plugins/ai_quant`.
+- Never edit application code in `/home/fol2hk/openclaw-plugins/ai_quant` directly. Treat this folder as production-run only.
+- All code changes MUST be done in a separate worktree folder on a non-`master` branch (for example `/home/fol2hk/openclaw-plugins/ai_quant_wt/<ticket-branch>`).
 - All AQC ticket work MUST be delivered through atomic PRs targeting `master` (one logical change per PR, no batching of unrelated fixes).
 - Do not commit ticket changes directly on `master`. Use a dedicated ticket branch/worktree, open a PR, complete review, then merge.
 - Mandatory PR flow for every successful code update:
