@@ -158,6 +158,7 @@ def main() -> int:
     live_paper_action_reconcile_path = bundle_dir / "live_paper_action_reconcile_report.json"
     live_paper_decision_trace_reconcile_path = bundle_dir / "live_paper_decision_trace_reconcile_report.json"
     alignment_gate_path = bundle_dir / "alignment_gate_report.json"
+    paper_harness_report_path = bundle_dir / "paper_deterministic_replay_run.json"
     manifest_path = bundle_dir / "replay_bundle_manifest.json"
 
     baseline_trades = _load_live_baseline_trades(
@@ -274,6 +275,16 @@ def main() -> int:
         f"--output \"$BUNDLE_DIR/{alignment_gate_path.name}\""
     )
 
+    cmd_paper_harness = (
+        "set -euo pipefail\n"
+        "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
+        "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
+        "python \"$REPO_ROOT/tools/run_paper_deterministic_replay.py\" "
+        "--bundle-dir \"$BUNDLE_DIR\" "
+        "--repo-root \"$REPO_ROOT\" "
+        f"--output \"$BUNDLE_DIR/{paper_harness_report_path.name}\""
+    )
+
     (bundle_dir / "run_01_export_and_seed.sh").write_text(cmd_export_seed + "\n", encoding="utf-8")
     (bundle_dir / "run_02_replay.sh").write_text(cmd_replay + "\n", encoding="utf-8")
     (bundle_dir / "run_03_audit.sh").write_text(cmd_audit + "\n", encoding="utf-8")
@@ -285,6 +296,7 @@ def main() -> int:
         encoding="utf-8",
     )
     (bundle_dir / "run_08_assert_alignment.sh").write_text(cmd_alignment_gate + "\n", encoding="utf-8")
+    (bundle_dir / "run_09_paper_deterministic_replay.sh").write_text(cmd_paper_harness + "\n", encoding="utf-8")
 
     for script_name in (
         "run_01_export_and_seed.sh",
@@ -295,6 +307,7 @@ def main() -> int:
         "run_06_live_paper_action_reconcile.sh",
         "run_07_live_paper_decision_trace_reconcile.sh",
         "run_08_assert_alignment.sh",
+        "run_09_paper_deterministic_replay.sh",
     ):
         script_path = bundle_dir / script_name
         script_path.chmod(0o755)
@@ -328,6 +341,7 @@ def main() -> int:
             "live_paper_action_reconcile_report_file": live_paper_action_reconcile_path.name,
             "live_paper_decision_trace_reconcile_report_file": live_paper_decision_trace_reconcile_path.name,
             "alignment_gate_report_file": alignment_gate_path.name,
+            "paper_deterministic_replay_run_report_file": paper_harness_report_path.name,
         },
         "counts": {
             "live_baseline_trades": len(baseline_trades),
@@ -343,6 +357,7 @@ def main() -> int:
             "live_paper_action_reconcile": cmd_live_paper_action_reconcile,
             "live_paper_decision_trace_reconcile": cmd_live_paper_decision_trace_reconcile,
             "alignment_gate": cmd_alignment_gate,
+            "paper_deterministic_replay_harness": cmd_paper_harness,
         },
     }
 
