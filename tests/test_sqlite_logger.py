@@ -69,6 +69,44 @@ def test_line_buffering_writer_emits_lines():
     assert w2.isatty() is False
 
 
+def test_line_buffering_writer_emits_warning_when_stream_write_fails():
+    class FakeSink:
+        def __init__(self):
+            self.items = []
+
+        def emit(self, *, stream: str, message: str) -> None:
+            self.items.append((stream, message))
+
+    class BadWriteStream(io.StringIO):
+        def write(self, _s: str) -> int:
+            raise ValueError("write failure")
+
+    sink = FakeSink()
+    w = sl._LineBufferingWriter(stream=BadWriteStream(), sink=sink, stream_name="stdout")
+    w.write("hello\n")
+
+    assert any("stream write failed" in msg for _stream, msg in sink.items)
+
+
+def test_line_buffering_writer_suppresses_broken_pipe_without_warning():
+    class FakeSink:
+        def __init__(self):
+            self.items = []
+
+        def emit(self, *, stream: str, message: str) -> None:
+            self.items.append((stream, message))
+
+    class BrokenPipeStream(io.StringIO):
+        def write(self, _s: str) -> int:
+            raise BrokenPipeError("pipe closed")
+
+    sink = FakeSink()
+    w = sl._LineBufferingWriter(stream=BrokenPipeStream(), sink=sink, stream_name="stdout")
+    w.write("hello\n")
+
+    assert not any("stream write failed" in msg for _stream, msg in sink.items)
+
+
 def test_sink_writes_rows_to_sqlite(tmp_path, monkeypatch):
     db_path = tmp_path / "runtime_logs.db"
     monkeypatch.setenv("AI_QUANT_SQLITE_LOG_MAX_CHARS", "200")
