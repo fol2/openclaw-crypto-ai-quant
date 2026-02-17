@@ -1104,6 +1104,10 @@ def main() -> None:
     else:
         raise SystemExit(f"Unknown AI_QUANT_MODE={mode}")
 
+    # Run a second pass after initial component bootstrap so freshly created
+    # SQLite DB/sidecar files are hardened on first daemon start as well.
+    _harden_db_permissions(_db_path(), str(market_db_path), str(mei_alpha_v1.DB_PATH))
+
     interval = str(os.getenv("AI_QUANT_INTERVAL", mei_alpha_v1.INTERVAL) or mei_alpha_v1.INTERVAL).strip()
     try:
         lookback_bars = int(os.getenv("AI_QUANT_LOOKBACK_BARS", str(mei_alpha_v1.LOOKBACK_HOURS)))
