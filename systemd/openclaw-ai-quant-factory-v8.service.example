@@ -21,8 +21,12 @@ Environment=AI_QUANT_FACTORY_HEALTH_SERVICES=openclaw-ai-quant-trader-v8-paper1,
 # Prevent overlapping runs.
 ExecStart=/usr/bin/flock -n %t/openclaw-ai-quant-factory-v8.lock /usr/bin/env bash -lc "cd \"$PROJECT_DIR\" && \"$PROJECT_DIR/.venv/bin/python3\" -u tools/factory_cycle.py --profile daily --strategy-mode primary --gpu --tpe --walk-forward --slippage-stress --concentration-checks --sensitivity-checks --max-age-fail-hours 24 --funding-max-stale-symbols 1 --service openclaw-ai-quant-trader-v8-paper1 --yaml-path \"$PROJECT_DIR/config/strategy_overrides.paper1.yaml\" --candidate-count 3 --candidate-services openclaw-ai-quant-trader-v8-paper1,openclaw-ai-quant-trader-v8-paper2,openclaw-ai-quant-trader-v8-paper3 --candidate-yaml-paths \"$PROJECT_DIR/config/strategy_overrides.paper1.yaml,$PROJECT_DIR/config/strategy_overrides.paper2.yaml,$PROJECT_DIR/config/strategy_overrides.paper3.yaml\" --enable-livepaper-promotion --livepaper-service openclaw-ai-quant-trader-v8-livepaper --livepaper-yaml-path \"$PROJECT_DIR/config/strategy_overrides.livepaper.yaml\" --ws-service openclaw-ai-quant-ws-sidecar-v8 --discord-target 1470924841858236446"
 
+# Security hardening
+ProtectSystem=strict
 NoNewPrivileges=yes
 PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/home/fol2hk/openclaw-plugins/ai_quant
 
 [Install]
 WantedBy=default.target

@@ -44,8 +44,12 @@ Environment=AI_QUANT_NEUTRAL_AUDIT_SAMPLE_SYMBOLS=5
 
 Environment=PYTHONUNBUFFERED=1
 
+# Security hardening
+ProtectSystem=strict
 NoNewPrivileges=yes
 PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/home/fol2hk/openclaw-plugins/ai_quant
 
 [Install]
 WantedBy=default.target
