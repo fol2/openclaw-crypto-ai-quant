@@ -1844,9 +1844,16 @@ extern "C" __global__ void sweep_engine_kernel(
         unsigned int final_bar = params->trade_end_bar - 1u;
         for (unsigned int s = 0u; s < ns; s++) {
             if (state.positions[s].active == POS_EMPTY) { continue; }
-            const GpuSnapshot& final_snap = snapshots[cfg.snapshot_offset + final_bar * ns + s];
+            unsigned int close_bar = final_bar;
+            while (true) {
+                const GpuSnapshot& probe_snap = snapshots[cfg.snapshot_offset + close_bar * ns + s];
+                if (probe_snap.valid != 0u) { break; }
+                if (close_bar == 0u) { break; }
+                close_bar -= 1u;
+            }
+            const GpuSnapshot& final_snap = snapshots[cfg.snapshot_offset + close_bar * ns + s];
             if (final_snap.valid == 0u) { continue; }
-            double final_market_close = resolve_main_close(main_candles, final_bar, ns, s, final_snap);
+            double final_market_close = resolve_main_close(main_candles, close_bar, ns, s, final_snap);
             apply_close(&state, s, final_snap, final_market_close, TRACE_REASON_EXIT_EOB, fee_rate, cfg.slippage_bps);
         }
     }

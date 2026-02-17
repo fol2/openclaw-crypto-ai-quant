@@ -1731,10 +1731,13 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
     let remaining: Vec<String> = state.positions.keys().cloned().collect();
     for sym in remaining {
         if state.positions.contains_key(&sym) {
-            let terminal_price = match lookup_bar(&bar_index, &sym, terminal_ts, candles) {
-                Some(bar) => bar.c,
-                None => continue,
-            };
+            let terminal_price = lookup_bar(&bar_index, &sym, terminal_ts, candles)
+                .map(|bar| bar.c)
+                .or_else(|| last_price_at_or_before(candles, &sym, terminal_ts))
+                .unwrap_or_else(|| last_price_for_symbol(candles, &sym));
+            if terminal_price <= 0.0 {
+                continue;
+            }
             let exit = ExitResult::exit("End of Backtest", terminal_price);
             let snap = make_minimal_snap(terminal_price, terminal_ts);
             apply_exit(
@@ -2512,6 +2515,15 @@ fn last_price_for_symbol(candles: &CandleData, symbol: &str) -> f64 {
         .and_then(|bars| bars.last())
         .map(|b| b.c)
         .unwrap_or(0.0)
+}
+
+fn last_price_at_or_before(candles: &CandleData, symbol: &str, ts: i64) -> Option<f64> {
+    let bars = candles.get(symbol)?;
+    match bars.binary_search_by_key(&ts, |b| b.t) {
+        Ok(i) => bars.get(i).map(|b| b.c),
+        Err(0) => None,
+        Err(i) => bars.get(i - 1).map(|b| b.c),
+    }
 }
 
 /// Evaluate whether a sub-bar entry candidate should be collected for ranking.
