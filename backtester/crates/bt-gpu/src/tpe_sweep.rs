@@ -783,8 +783,20 @@ pub fn run_tpe_sweep(
         }
     }
 
-    // Wait for TPE thread to finish
-    tpe_handle.join().expect("TPE thread panicked");
+    // Wait for TPE thread to finish; if it panics, keep and return collected GPU results.
+    if let Err(panic_payload) = tpe_handle.join() {
+        let panic_msg = if let Some(msg) = panic_payload.downcast_ref::<&str>() {
+            *msg
+        } else if let Some(msg) = panic_payload.downcast_ref::<String>() {
+            msg.as_str()
+        } else {
+            "<non-string panic payload>"
+        };
+        eprintln!(
+            "[TPE] sampler thread panicked: {panic_msg}; returning {} collected results",
+            top_heap.len()
+        );
+    }
 
     // Drain heap and sort by PnL descending
     let mut results: Vec<GpuSweepResult> = top_heap.into_iter().map(|e| e.0).collect();
