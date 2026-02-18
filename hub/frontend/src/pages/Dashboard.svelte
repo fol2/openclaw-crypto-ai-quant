@@ -21,6 +21,7 @@
   let detailExpanded = $state(false);
   let chartHeight = $state(240);
   let chartDragging = $state(false);
+  let chartPrefsLoaded = $state(false);
   const CHART_MIN = 120;
   const CHART_MAX = 600;
 
@@ -438,12 +439,14 @@
 
   // Persist last chart controls for the next visit.
   $effect(() => {
+    if (!chartPrefsLoaded) return;
     writeCookie(CHART_PREF_INTERVAL_COOKIE, selectedInterval);
     writeCookie(CHART_PREF_BARS_COOKIE, String(selectedBars));
   });
 
   $effect(() => {
     loadChartPrefsFromCookie();
+    chartPrefsLoaded = true;
     refresh();
     pollTimer = setInterval(refresh, 5000);
     hubWs.connect();
