@@ -3,10 +3,13 @@
   import { getSnapshot, getCandles, getMarks, postFlashDebug } from '../lib/api';
   import { hubWs } from '../lib/ws';
 
+  const INTERVALS = ['1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d'] as const;
+
   let snap: any = $state(null);
   let focusSym = $state('');
   let candles: any[] = $state([]);
   let marks: any = $state(null);
+  let selectedInterval = $state('1h');
   let pollTimer: any = null;
   let error = $state('');
   let mobileTab: 'symbols' | 'detail' | 'feed' = $state('symbols');
@@ -165,14 +168,22 @@
     if (!sym) return;
     mobileTab = 'detail';
     try {
-      const [c, m] = await Promise.all([
-        getCandles(sym, undefined, 200),
-        getMarks(sym, appState.mode),
-      ]);
-      candles = c.candles || [];
-      marks = m;
+      marks = await getMarks(sym, appState.mode);
     } catch { /* ignore */ }
   }
+
+  // Re-fetch candles whenever the focused symbol or interval changes.
+  $effect(() => {
+    const sym = focusSym;
+    const iv  = selectedInterval;
+    if (!sym) { candles = []; return; }
+    let cancelled = false;
+    candles = [];
+    getCandles(sym, iv, 200)
+      .then(r => { if (!cancelled) candles = r.candles || []; })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  });
 
   function setMode(m: string) {
     appState.mode = m;
@@ -411,6 +422,25 @@
         </button>
       </div>
 
+      <!-- Interval selector + chart (always shown when symbol focused) -->
+      <div class="iv-bar">
+        {#each INTERVALS as iv}
+          <button
+            class="iv-tab"
+            class:is-on={selectedInterval === iv}
+            onclick={() => { selectedInterval = iv; }}
+          >{iv.toUpperCase()}</button>
+        {/each}
+      </div>
+      <div class="chart-wrap">
+        <candle-chart
+          candles={JSON.stringify(candles)}
+          entries={JSON.stringify(marks?.entries || [])}
+          symbol={focusSym}
+          interval={selectedInterval}
+        ></candle-chart>
+      </div>
+
       {#if marks?.position}
         {@const p = marks.position}
         <div class="kv-section">
@@ -436,15 +466,6 @@
         <div class="empty-state">
           <span class="empty-label">Flat</span>
           <span class="empty-sub">No open position</span>
-        </div>
-      {/if}
-
-      {#if candles.length > 0}
-        <div class="kv-section">
-          <h4>Candles ({candles.length})</h4>
-          <div class="kv"><span class="k">Last close</span><span class="v mono">{fmtNum(candles[candles.length - 1]?.c, 6)}</span></div>
-          <div class="kv"><span class="k">Last high</span><span class="v mono">{fmtNum(candles[candles.length - 1]?.h, 6)}</span></div>
-          <div class="kv"><span class="k">Last low</span><span class="v mono">{fmtNum(candles[candles.length - 1]?.l, 6)}</span></div>
         </div>
       {/if}
 
@@ -887,6 +908,42 @@
 
   /* ─── Detail panel ─── */
   .detail-panel { overflow-y: auto; }
+
+  /* ─── Interval selector ─── */
+  .iv-bar {
+    display: flex;
+    gap: 1px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border-subtle);
+    flex-shrink: 0;
+    background: var(--surface);
+  }
+  .iv-tab {
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    padding: 3px 7px;
+    cursor: pointer;
+    font-size: 10px;
+    font-weight: 600;
+    border-radius: 3px;
+    letter-spacing: 0.05em;
+    font-family: 'IBM Plex Mono', monospace;
+    transition: all var(--t-fast);
+  }
+  .iv-tab:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+  .iv-tab.is-on { color: var(--accent); background: var(--accent-bg); }
+
+  /* ─── Candle chart container ─── */
+  .chart-wrap {
+    height: 240px;
+    flex-shrink: 0;
+    border-bottom: 1px solid var(--border-subtle);
+    overflow: hidden;
+  }
+  @media (max-width: 768px) {
+    .chart-wrap { height: 200px; }
+  }
   .detail-header {
     gap: 8px;
   }
