@@ -163,50 +163,66 @@ class SidecarWSClient:
                 self._disconnect_ts = _time.monotonic()
             self._connected = False
 
+    @staticmethod
+    def _is_retryable_rpc_exception(err: Exception) -> bool:
+        if isinstance(err, (ConnectionError, TimeoutError, socket.timeout, OSError, json.JSONDecodeError)):
+            return True
+        if isinstance(err, RuntimeError):
+            msg = str(err).strip().lower()
+            if "connection broken" in msg or "sidecar closed" in msg:
+                return True
+        return False
+
     def _rpc(self, method: str, params: dict[str, Any] | None = None, *, timeout_s: float = 2.0) -> Any:
         # Single-flight RPC (locked) keeps client logic simple and avoids response demuxing.
         with self._lock:
-            raw = b""
-            try:
-                self._connect(timeout_s=float(timeout_s))
-                # Re-assert socket timeout before each RPC to guard against
-                # partial reads that could block indefinitely.
-                if self._sock is not None:
-                    self._sock.settimeout(getattr(self, "_rpc_timeout_s", float(timeout_s)))
-                rid = int(self._next_id)
-                self._next_id += 1
-                req = {"id": rid, "method": str(method), "params": params or {}}
-                line = (json.dumps(req, separators=(",", ":")) + "\n").encode("utf-8")
-                if self._f is None:
-                    raise RuntimeError("sidecar connection broken")
-                self._f.write(line)
-                self._f.flush()
+            for attempt in (1, 2):
+                raw = b""
+                try:
+                    self._connect(timeout_s=float(timeout_s))
+                    # Re-assert socket timeout before each RPC to guard against
+                    # partial reads that could block indefinitely.
+                    if self._sock is not None:
+                        self._sock.settimeout(getattr(self, "_rpc_timeout_s", float(timeout_s)))
+                    rid = int(self._next_id)
+                    self._next_id += 1
+                    req = {"id": rid, "method": str(method), "params": params or {}}
+                    line = (json.dumps(req, separators=(",", ":")) + "\n").encode("utf-8")
+                    if self._f is None:
+                        raise RuntimeError("sidecar connection broken")
+                    self._f.write(line)
+                    self._f.flush()
 
-                raw = self._f.readline()
-                if not raw:
-                    raise ConnectionError("sidecar closed")
-                resp = json.loads(raw.decode("utf-8", errors="strict"))
-                if int(resp.get("id", -1)) != rid:
-                    raise RuntimeError("sidecar response id mismatch")
-                if not bool(resp.get("ok", False)):
-                    raise RuntimeError(str(resp.get("error") or "sidecar error"))
-                return resp.get("result")
-            except UnicodeDecodeError:
-                preview_hex = raw[:64].hex() if raw else ""
-                logger.error(
-                    "sidecar RPC decode failed: method=%s bytes=%d preview_hex=%s",
-                    method,
-                    len(raw or b""),
-                    preview_hex,
-                    exc_info=True,
-                )
-                self._close()
-                raise
-            except Exception as e:
-                # Broken connection: close and let callers retry via higher-level logic.
-                logger.error("sidecar RPC failed: method=%s error=%s", method, e)
-                self._close()
-                raise
+                    raw = self._f.readline()
+                    if not raw:
+                        raise ConnectionError("sidecar closed")
+                    resp = json.loads(raw.decode("utf-8", errors="strict"))
+                    if int(resp.get("id", -1)) != rid:
+                        raise RuntimeError("sidecar response id mismatch")
+                    if not bool(resp.get("ok", False)):
+                        raise RuntimeError(str(resp.get("error") or "sidecar error"))
+                    return resp.get("result")
+                except UnicodeDecodeError:
+                    preview_hex = raw[:64].hex() if raw else ""
+                    logger.error(
+                        "sidecar RPC decode failed: method=%s bytes=%d preview_hex=%s",
+                        method,
+                        len(raw or b""),
+                        preview_hex,
+                        exc_info=True,
+                    )
+                    self._close()
+                    if attempt == 1:
+                        logger.warning("sidecar RPC reconnect retry: method=%s reason=decode_error", method)
+                        continue
+                    raise
+                except Exception as e:
+                    logger.error("sidecar RPC failed: method=%s error=%s", method, e)
+                    self._close()
+                    if attempt == 1 and self._is_retryable_rpc_exception(e):
+                        logger.warning("sidecar RPC reconnect retry: method=%s reason=%s", method, type(e).__name__)
+                        continue
+                    raise
 
     def ensure_started(self, *, symbols: list[str], interval: str, candle_limit: int, user: str | None = None):
         self._rpc(
