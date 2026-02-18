@@ -63,6 +63,12 @@ struct Args {
     #[arg(long)]
     max_values_per_axis: Option<usize>,
 
+    /// Apply the first value of each selected axis to the base config before baseline parity.
+    ///
+    /// Useful for full-combo parity checks when the sweep spec contains single-value axes.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
+    apply_all_axes_as_base: bool,
+
     /// Absolute tolerance for final balance.
     #[arg(long, default_value_t = 1e-6)]
     balance_eps: f64,
@@ -355,7 +361,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let base_cfg = bt_core::config::load_config(&args.config, None, false);
+    let mut base_cfg = bt_core::config::load_config(&args.config, None, false);
     let spec = bt_core::sweep::load_sweep_spec(&args.sweep_spec)
         .map_err(|e| format!("failed to load sweep spec {}: {e}", args.sweep_spec))?;
 
@@ -384,6 +390,21 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Some(limit) => spec.axes.iter().take(limit).cloned().collect(),
         None => spec.axes.clone(),
     };
+
+    if args.apply_all_axes_as_base {
+        let mut applied = 0usize;
+        for axis in &spec.axes {
+            if let Some(first) = axis.values.first() {
+                apply_one_pub(&mut base_cfg, &axis.path, *first);
+                applied += 1;
+            }
+        }
+        eprintln!(
+            "[axis-parity] Applied first values from {} axes (full sweep spec) onto base config before baseline parity",
+            applied
+        );
+    }
+
     let single_spec = SweepSpec {
         axes: vec![],
         initial_balance: spec.initial_balance,

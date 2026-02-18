@@ -308,7 +308,7 @@ __device__ SignalResult generate_signal_codegen(
     // Mode 1: Standard trend entry  (entry.rs lines 43-49)
     // =================================================================
     if (all_gates_pass) {
-        int signal = 0;    // SIG_NEUTRAL
+        int signal = 0;     // SIG_NEUTRAL
         int confidence = 1; // CONF_MEDIUM
 
         // ── Direction from alignment + close vs EMA_fast ──
@@ -317,47 +317,55 @@ __device__ SignalResult generate_signal_codegen(
         } else if (bearish_alignment && close < ema_fast && btc_ok_short) {
             signal = 2;  // SIG_SELL
         }
-        if (signal == 0) { return neutral; }
+        // CPU parity: failing Mode 1 must fall through to Mode 2/3,
+        // not return neutral early.
+        if (signal != 0) {
+            // ── DRE (Dynamic RSI Elasticity) ──
+            double adx_min = (double)cfg.dre_min_adx;
+            double adx_max = (double)cfg.dre_max_adx;
+            if (adx_max <= adx_min) { adx_max = adx_min + 1.0; }
+            double weight = fmax(fmin((adx - adx_min) / (adx_max - adx_min), 1.0), 0.0);
+            double rsi_long_limit = (double)cfg.dre_long_rsi_limit_low
+                + weight * ((double)cfg.dre_long_rsi_limit_high - (double)cfg.dre_long_rsi_limit_low);
+            double rsi_short_limit = (double)cfg.dre_short_rsi_limit_low
+                + weight * ((double)cfg.dre_short_rsi_limit_high - (double)cfg.dre_short_rsi_limit_low);
 
-        // ── DRE (Dynamic RSI Elasticity) ──
-        double adx_min = (double)cfg.dre_min_adx;
-        double adx_max = (double)cfg.dre_max_adx;
-        if (adx_max <= adx_min) { adx_max = adx_min + 1.0; }
-        double weight = fmax(fmin((adx - adx_min) / (adx_max - adx_min), 1.0), 0.0);
-        double rsi_long_limit = (double)cfg.dre_long_rsi_limit_low
-            + weight * ((double)cfg.dre_long_rsi_limit_high - (double)cfg.dre_long_rsi_limit_low);
-        double rsi_short_limit = (double)cfg.dre_short_rsi_limit_low
-            + weight * ((double)cfg.dre_short_rsi_limit_high - (double)cfg.dre_short_rsi_limit_low);
+            bool mode1_ok = true;
 
-        // ── RSI gate ──
-        if (signal == 1 && rsi <= rsi_long_limit) { return neutral; }
-        if (signal == 2 && rsi >= rsi_short_limit) { return neutral; }
+            // ── RSI gate ──
+            if (signal == 1 && rsi <= rsi_long_limit) { mode1_ok = false; }
+            if (signal == 2 && rsi >= rsi_short_limit) { mode1_ok = false; }
 
-        // ── MACD histogram gate ──
-        bool macd_ok;
-        if (signal == 1) {
-            macd_ok = check_macd_long_codegen(cfg.macd_mode, macd_hist, prev_macd_hist);
-        } else {
-            macd_ok = check_macd_short_codegen(cfg.macd_mode, macd_hist, prev_macd_hist);
+            // ── MACD histogram gate ──
+            if (mode1_ok) {
+                bool macd_ok;
+                if (signal == 1) {
+                    macd_ok = check_macd_long_codegen(cfg.macd_mode, macd_hist, prev_macd_hist);
+                } else {
+                    macd_ok = check_macd_short_codegen(cfg.macd_mode, macd_hist, prev_macd_hist);
+                }
+                if (!macd_ok) { mode1_ok = false; }
+            }
+
+            // ── StochRSI filter ──
+            if (mode1_ok && cfg.use_stoch_rsi_filter != 0u) {
+                if (signal == 1 && stoch_k > (double)cfg.stoch_rsi_block_long_gt) { mode1_ok = false; }
+                if (signal == 2 && stoch_k < (double)cfg.stoch_rsi_block_short_lt) { mode1_ok = false; }
+            }
+
+            if (mode1_ok) {
+                // ── Volume-based confidence upgrade to High ──
+                if (vol_sma > 0.0 && volume > vol_sma * (double)cfg.high_conf_volume_mult) {
+                    confidence = 2;  // CONF_HIGH
+                }
+
+                SignalResult result;
+                result.signal = signal;
+                result.confidence = confidence;
+                result.effective_min_adx = effective_min_adx;
+                return result;
+            }
         }
-        if (!macd_ok) { return neutral; }
-
-        // ── StochRSI filter ──
-        if (cfg.use_stoch_rsi_filter != 0u) {
-            if (signal == 1 && stoch_k > (double)cfg.stoch_rsi_block_long_gt) { return neutral; }
-            if (signal == 2 && stoch_k < (double)cfg.stoch_rsi_block_short_lt) { return neutral; }
-        }
-
-        // ── Volume-based confidence upgrade to High ──
-        if (vol_sma > 0.0 && volume > vol_sma * (double)cfg.high_conf_volume_mult) {
-            confidence = 2;  // CONF_HIGH
-        }
-
-        SignalResult result;
-        result.signal = signal;
-        result.confidence = confidence;
-        result.effective_min_adx = effective_min_adx;
-        return result;
     }
 
     // =================================================================
