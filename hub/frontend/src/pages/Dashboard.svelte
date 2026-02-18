@@ -12,28 +12,49 @@
   let mobileTab: 'symbols' | 'detail' | 'feed' = $state('symbols');
 
   let prevMids: Record<string, number> = {};
-  let flashTimer: any = null;
   type FlashState = 'up-a' | 'up-b' | 'down-a' | 'down-b';
   let flashMap: Record<string, FlashState> = $state({});
+  const flashTimeouts: Record<string, ReturnType<typeof setTimeout>> = {};
+  const midFlashMs = 1100;
+
+  function hasVisibleMidChange(prev: number, next: number, dp = 6): boolean {
+    const threshold = Math.pow(10, -dp) / 2;
+    return Math.abs(next - prev) >= threshold;
+  }
 
   function detectFlashes(newSyms: { symbol: string; mid: number | null }[]) {
-    const next: Record<string, FlashState> = {};
     for (const s of newSyms) {
-      if (s.mid != null) {
-        const prev = prevMids[s.symbol];
-        if (prev !== undefined && s.mid !== prev) {
-          const dir = s.mid > prev ? 'up' : 'down';
-          const prevState = flashMap[s.symbol];
-          const phase = prevState?.endsWith('-a') ? 'b' : 'a';
-          next[s.symbol] = `${dir}-${phase}` as FlashState;
+      if (s.mid == null) continue;
+      const prev = prevMids[s.symbol];
+      prevMids[s.symbol] = s.mid;
+
+      if (prev === undefined || !hasVisibleMidChange(prev, s.mid, 6)) continue;
+
+      const dir = s.mid > prev ? 'up' : 'down';
+      const prevState = flashMap[s.symbol];
+      const phase = prevState?.endsWith('-a') ? 'b' : 'a';
+      const nextState = `${dir}-${phase}` as FlashState;
+      flashMap = { ...flashMap, [s.symbol]: nextState };
+
+      const existingTimer = flashTimeouts[s.symbol];
+      if (existingTimer) clearTimeout(existingTimer);
+      flashTimeouts[s.symbol] = setTimeout(() => {
+        if (flashMap[s.symbol] === nextState) {
+          const next = { ...flashMap };
+          delete next[s.symbol];
+          flashMap = next;
         }
-        prevMids[s.symbol] = s.mid;
-      }
+        delete flashTimeouts[s.symbol];
+      }, midFlashMs);
     }
-    if (Object.keys(next).length > 0) {
-      clearTimeout(flashTimer);
-      flashMap = next;
-      flashTimer = setTimeout(() => { flashMap = {}; }, 1100);
+  }
+
+  function clearFlashTimers() {
+    for (const timer of Object.values(flashTimeouts)) {
+      clearTimeout(timer);
+    }
+    for (const key of Object.keys(flashTimeouts)) {
+      delete flashTimeouts[key];
     }
   }
 
@@ -122,6 +143,7 @@
     hubWs.connect();
     return () => {
       clearInterval(pollTimer);
+      clearFlashTimers();
     };
   });
 
