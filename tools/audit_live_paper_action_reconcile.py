@@ -12,6 +12,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from reason_codes import classify_reason_code
+
 SIDE_ACTIONS = {"OPEN", "ADD", "REDUCE", "CLOSE"}
 FUNDING_ACTION = "FUNDING"
 TRADE_ACTIONS = SIDE_ACTIONS | {FUNDING_ACTION}
@@ -103,37 +105,6 @@ def _normalise_confidence(value: Any) -> str:
     return conf
 
 
-def _classify_reason_code(action_code: str, reason: str) -> str:
-    action = str(action_code or "").strip().upper()
-    reason_text = str(reason or "")
-
-    if action == FUNDING_ACTION:
-        return "funding_payment"
-    if action.startswith("OPEN_"):
-        if "sub-bar" in reason_text:
-            return "entry_signal_sub_bar"
-        return "entry_signal"
-    if action.startswith("ADD_"):
-        return "entry_pyramid"
-    if action.startswith("CLOSE_") or action.startswith("REDUCE_"):
-        if "Stop Loss" in reason_text:
-            return "exit_stop_loss"
-        if "Trailing Stop" in reason_text:
-            return "exit_trailing_stop"
-        if "Take Profit" in reason_text:
-            return "exit_take_profit"
-        if "Signal Flip" in reason_text:
-            return "exit_signal_flip"
-        if "Funding" in reason_text:
-            return "exit_funding"
-        if "Force Close" in reason_text:
-            return "exit_force_close"
-        if "End of Backtest" in reason_text:
-            return "exit_end_of_backtest"
-        return "exit_filter"
-    return "unknown"
-
-
 def _almost_equal(left: float, right: float, tol: float) -> bool:
     return math.isclose(float(left), float(right), rel_tol=0.0, abs_tol=tol)
 
@@ -211,7 +182,7 @@ def _load_actions(
                 "balance": _parse_float(row["balance"]),
                 "confidence": _normalise_confidence(row["confidence"]),
                 "reason": str(row["reason"] or ""),
-                "reason_code": _classify_reason_code(action_code, str(row["reason"] or "")),
+                "reason_code": classify_reason_code(action_code, str(row["reason"] or "")),
             }
         )
 
