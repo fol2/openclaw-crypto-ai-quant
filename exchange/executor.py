@@ -464,6 +464,28 @@ class HyperliquidLiveExecutor:
                     _slip_exc,
                 )
                 limit_px = None
+            if limit_px is None:
+                logger.warning(
+                    "_slippage_price returned None for %s; attempting local slippage fallback",
+                    sym,
+                )
+                if px_f is None:
+                    info = getattr(self, "_info", None)
+                    if info is not None:
+                        try:
+                            mids = info.all_mids() or {}
+                        except Exception as _mids_exc:
+                            logger.warning("all_mids unavailable for %s: %s", sym, _mids_exc)
+                        else:
+                            if isinstance(mids, dict):
+                                mid_px = _safe_float(mids.get(sym), 0.0)
+                                if mid_px > 0 and math.isfinite(mid_px):
+                                    px_f = mid_px
+                                    logger.warning(
+                                        "market_close using all_mids reference px for %s: %.8f",
+                                        sym,
+                                        px_f,
+                                    )
             limit_px_f = _safe_float(_normalise_limit_px_for_wire(limit_px, is_buy=bool(is_buy)), 0.0)
             if limit_px_f <= 0 or not math.isfinite(limit_px_f):
                 if px_f is not None:
