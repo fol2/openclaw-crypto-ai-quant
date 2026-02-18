@@ -8,6 +8,15 @@
   const BAR_COUNTS = [50, 100, 200, 400] as const;
   const CHART_PREF_INTERVAL_COOKIE = 'aiq_dash_iv';
   const CHART_PREF_BARS_COOKIE = 'aiq_dash_bars';
+  const MODE_SERVICE_MAP: Record<string, string> = {
+    live: 'openclaw-ai-quant-live-v8',
+    paper1: 'openclaw-ai-quant-trader-v8-paper1',
+    paper2: 'openclaw-ai-quant-trader-v8-paper2',
+    paper3: 'openclaw-ai-quant-trader-v8-paper3',
+  };
+  const SERVICE_STATUS_REFRESH_MS = 30_000;
+
+  type ModeRuntimeState = 'on' | 'off' | 'error' | 'unknown';
 
   let snap: any = $state(null);
   let focusSym = $state('');
@@ -21,6 +30,12 @@
   let detailTab: 'detail' | 'trades' | 'oms' | 'audit' = $state('detail');
   let manualTradeEnabled = $state(false);
   let liveEngineActive = $state(false);
+  let modeRuntimeState = $state<Record<string, ModeRuntimeState>>({
+    live: 'unknown',
+    paper1: 'unknown',
+    paper2: 'unknown',
+    paper3: 'unknown',
+  });
   let detailExpanded = $state(false);
   let chartHeight = $state(240);
   let chartDragging = $state(false);
@@ -79,6 +94,50 @@
 
     const barsRaw = Number(readCookie(CHART_PREF_BARS_COOKIE));
     if (Number.isFinite(barsRaw) && isValidBars(barsRaw)) selectedBars = barsRaw;
+  }
+
+  function classifyModeRuntimeState(service: any): ModeRuntimeState {
+    const active = String(service?.active || '').toLowerCase();
+    const sub = String(service?.sub || '').toLowerCase();
+    const load = String(service?.load || '').toLowerCase();
+    if (active === 'active') return 'on';
+    if (active === 'failed' || sub === 'failed' || sub === 'auto-restart') return 'error';
+    if (load === 'not-found' || active === '' || active === 'unknown') return 'unknown';
+    return 'off';
+  }
+
+  function getModeRuntimeState(mode: string): ModeRuntimeState {
+    return modeRuntimeState[mode] ?? 'unknown';
+  }
+
+  function getModeRuntimeLabel(mode: string): string {
+    const state = getModeRuntimeState(mode);
+    if (state === 'on') return 'ON';
+    if (state === 'off') return 'OFF';
+    if (state === 'error') return 'ERR';
+    return 'N/A';
+  }
+
+  async function refreshModeRuntimeStates() {
+    try {
+      const svcs = await getSystemServices();
+      const byName = new Map((svcs || []).map((s: any) => [String(s?.name || ''), s]));
+      modeRuntimeState = {
+        live: classifyModeRuntimeState(byName.get(MODE_SERVICE_MAP.live)),
+        paper1: classifyModeRuntimeState(byName.get(MODE_SERVICE_MAP.paper1)),
+        paper2: classifyModeRuntimeState(byName.get(MODE_SERVICE_MAP.paper2)),
+        paper3: classifyModeRuntimeState(byName.get(MODE_SERVICE_MAP.paper3)),
+      };
+      liveEngineActive = modeRuntimeState.live === 'on';
+    } catch {
+      modeRuntimeState = {
+        live: 'unknown',
+        paper1: 'unknown',
+        paper2: 'unknown',
+        paper3: 'unknown',
+      };
+      liveEngineActive = false;
+    }
   }
 
   type FlashDebugEvent = {
@@ -489,13 +548,16 @@
     return () => hubWs.unsubscribe('mids', midsHandler);
   });
 
-  // ── Manual trade: one-time feature & service check ────────────────────────
+  // ── Manual trade feature check ─────────────────────────────────────────────
   $effect(() => {
     tradeEnabled().then(r => { manualTradeEnabled = r?.enabled ?? false; }).catch(() => {});
-    getSystemServices().then(svcs => {
-      const live = (svcs || []).find((s: any) => s.name?.includes('live-v8'));
-      liveEngineActive = live?.active === 'active';
-    }).catch(() => {});
+  });
+
+  // ── Runtime service states for Live + candidate family daemons ────────────
+  $effect(() => {
+    void refreshModeRuntimeStates();
+    const timer = setInterval(() => { void refreshModeRuntimeStates(); }, SERVICE_STATUS_REFRESH_MS);
+    return () => clearInterval(timer);
   });
 
   // ── Resizable columns ──────────────────────────────────────────────────────
@@ -602,28 +664,28 @@
 <div class="topbar">
   <div class="topbar-row">
     <div class="mode-tabs">
-      <div class="mode-cluster">
-        <span class="mode-cluster-label mode-cluster-label-live">Live Engine</span>
-        <button
-          class="mode-btn mode-btn-live"
-          class:active={appState.mode === LIVE_MODE}
-          onclick={() => setMode(LIVE_MODE)}
-        >{getModeLabel(LIVE_MODE)}</button>
-      </div>
+      <button
+        class="mode-btn mode-btn-live"
+        class:active={appState.mode === LIVE_MODE}
+        onclick={() => setMode(LIVE_MODE)}
+      >
+        <span>{getModeLabel(LIVE_MODE)}</span>
+        <span class={`mode-state state-${getModeRuntimeState(LIVE_MODE)}`}>{getModeRuntimeLabel(LIVE_MODE)}</span>
+      </button>
 
       <span class="mode-divider" aria-hidden="true"></span>
 
-      <div class="mode-cluster">
-        <span class="mode-cluster-label">Candidate Family</span>
-        <div class="family-tabs">
-          {#each CANDIDATE_FAMILY_ORDER as m}
-            <button
-              class="mode-btn"
-              class:active={appState.mode === m || (appState.mode === 'paper' && m === 'paper1')}
-              onclick={() => setMode(m)}
-            >{getModeLabel(m)}</button>
-          {/each}
-        </div>
+      <div class="family-tabs">
+        {#each CANDIDATE_FAMILY_ORDER as m}
+          <button
+            class="mode-btn"
+            class:active={appState.mode === m || (appState.mode === 'paper' && m === 'paper1')}
+            onclick={() => setMode(m)}
+          >
+            <span>{getModeLabel(m)}</span>
+            <span class={`mode-state state-${getModeRuntimeState(m)}`}>{getModeRuntimeLabel(m)}</span>
+          </button>
+        {/each}
       </div>
     </div>
 
@@ -985,29 +1047,12 @@
   }
   .mode-tabs {
     display: flex;
-    align-items: stretch;
-    gap: 8px;
+    align-items: center;
+    gap: 6px;
     background: var(--bg);
     border-radius: var(--radius-md);
-    padding: 4px 8px;
+    padding: 4px;
     border: 1px solid var(--border);
-  }
-  .mode-cluster {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-  }
-  .mode-cluster-label {
-    color: var(--text-dim);
-    font-size: 9px;
-    font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    padding-left: 2px;
-    font-family: 'IBM Plex Mono', monospace;
-  }
-  .mode-cluster-label-live {
-    color: rgba(255,107,107,0.9);
   }
   .family-tabs {
     display: flex;
@@ -1020,6 +1065,10 @@
     opacity: 0.9;
   }
   .mode-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
     background: transparent;
     border: none;
     color: var(--text-muted);
@@ -1031,6 +1080,40 @@
     letter-spacing: 0.04em;
     font-family: 'IBM Plex Mono', monospace;
     transition: all var(--t-fast);
+    white-space: nowrap;
+  }
+  .mode-state {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 28px;
+    padding: 1px 5px;
+    border-radius: 999px;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    font-size: 9px;
+    line-height: 1.1;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+  }
+  .mode-state.state-on {
+    color: var(--green);
+    border-color: rgba(81, 207, 102, 0.45);
+    background: rgba(81, 207, 102, 0.12);
+  }
+  .mode-state.state-off {
+    color: var(--yellow);
+    border-color: rgba(255, 212, 59, 0.45);
+    background: rgba(255, 212, 59, 0.12);
+  }
+  .mode-state.state-error {
+    color: var(--red);
+    border-color: rgba(255, 107, 107, 0.45);
+    background: rgba(255, 107, 107, 0.12);
+  }
+  .mode-state.state-unknown {
+    color: var(--text-dim);
+    border-color: rgba(148, 163, 184, 0.35);
+    background: rgba(148, 163, 184, 0.1);
   }
   .mode-btn:hover {
     color: var(--text);
@@ -1044,6 +1127,7 @@
   .mode-btn-live {
     color: rgba(255,107,107,0.95);
     border: 1px solid rgba(255,107,107,0.35);
+    flex-shrink: 0;
   }
   .mode-btn-live:hover {
     background: rgba(255,107,107,0.12);
@@ -1054,6 +1138,9 @@
     box-shadow: 0 1px 4px rgba(255,107,107,0.3);
     color: var(--bg);
     border-color: transparent;
+  }
+  .mode-btn.active .mode-state {
+    border-color: rgba(15, 23, 42, 0.35);
   }
 
   .status-chip {
@@ -1764,14 +1851,27 @@
     }
     .mode-tabs {
       width: 100%;
-      justify-content: space-between;
-    }
-    .mode-cluster {
-      min-width: 0;
-      flex: 1;
+      flex-wrap: wrap;
+      gap: 4px;
+      padding: 4px;
     }
     .family-tabs {
-      flex-wrap: wrap;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      width: 100%;
+      gap: 4px;
+    }
+    .mode-divider {
+      display: none;
+    }
+    .mode-btn-live {
+      width: 100%;
+      text-align: center;
+    }
+    .family-tabs .mode-btn {
+      width: 100%;
+      min-width: 0;
+      text-align: center;
     }
     .metrics-bar {
       gap: 4px;
@@ -1831,17 +1931,10 @@
 
   @media (max-width: 480px) {
     .mode-tabs {
-      gap: 6px;
-      padding: 4px 6px;
-    }
-    .mode-cluster-label {
-      font-size: 8px;
-    }
-    .mode-divider {
-      display: none;
+      padding: 3px;
     }
     .mode-btn {
-      padding: 4px 9px;
+      padding: 4px 8px;
       font-size: 10px;
     }
     .metric-pill {
