@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use crate::config::HubConfig;
 use crate::db::pool::{open_ro_pool, DbPool};
@@ -13,6 +14,10 @@ pub struct AppState {
     pub broadcast: BroadcastHub,
     pub sidecar: SidecarClient,
     pub jobs: Arc<JobStore>,
+
+    /// Symbols seen in the most recent snapshot query — updated by `api_snapshot`
+    /// so the background mids poller always broadcasts real prices.
+    pub tracked_symbols: Arc<RwLock<Vec<String>>>,
 
     // DB pools (optional — a DB might not exist yet).
     pub live_pool: Option<DbPool>,
@@ -37,6 +42,7 @@ impl AppState {
             broadcast,
             sidecar,
             jobs,
+            tracked_symbols: Arc::new(RwLock::new(Vec::new())),
             live_pool,
             paper1_pool,
             paper2_pool,
