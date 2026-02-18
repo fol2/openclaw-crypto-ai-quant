@@ -160,6 +160,25 @@
     }
   }
 
+  // Returns candle limit sized to give roughly 1-7 days of data per interval.
+  function candleLimit(iv: string): number {
+    switch (iv) {
+      case '1m':  return 400;   // ~6.7 h
+      case '3m':  return 300;   // ~15 h
+      case '5m':  return 288;   // ~24 h
+      case '15m': return 240;   // ~60 h
+      case '30m': return 200;   // ~4 days
+      case '1h':  return 168;   // ~7 days
+      case '4h':  return 180;   // ~30 days
+      case '1d':  return 200;   // ~200 days
+      default:    return 200;
+    }
+  }
+
+  // Track previous symbol so we can clear candles on symbol switch
+  // (plain let — not reactive, no effect re-run on change)
+  let _prevFocusSym = '';
+
   async function setFocus(sym: string) {
     focusSym = sym;
     appState.focus = sym;
@@ -172,17 +191,43 @@
     } catch { /* ignore */ }
   }
 
-  // Re-fetch candles whenever the focused symbol or interval changes.
+  // Re-fetch candles when symbol or interval changes.
+  // Only clears the chart when the symbol changes (not on interval switch)
+  // so old data stays visible during the brief network round-trip.
   $effect(() => {
     const sym = focusSym;
     const iv  = selectedInterval;
-    if (!sym) { candles = []; return; }
+    if (!sym) { candles = []; _prevFocusSym = ''; return; }
+    if (sym !== _prevFocusSym) { candles = []; _prevFocusSym = sym; }
     let cancelled = false;
-    candles = [];
-    getCandles(sym, iv, 200)
+    getCandles(sym, iv, candleLimit(iv))
       .then(r => { if (!cancelled) candles = r.candles || []; })
       .catch(() => {});
     return () => { cancelled = true; };
+  });
+
+  // Live last-candle update: mutate the newest candle's OHLC via WebSocket mids.
+  // Stops updating once t_close has passed (candle is sealed by exchange).
+  $effect(() => {
+    const sym = focusSym;
+    if (!sym) return;
+    const handler = (data: any) => {
+      const mid = data?.mids?.[sym];
+      if (mid == null || candles.length === 0) return;
+      // Find the newest candle by timestamp
+      let liveIdx = 0;
+      for (let i = 1; i < candles.length; i++) {
+        if (candles[i].t > candles[liveIdx].t) liveIdx = i;
+      }
+      const c = candles[liveIdx];
+      // Don't update a candle whose close time has already passed
+      if (c.t_close != null && Date.now() > c.t_close) return;
+      c.c = mid;
+      if (mid > c.h) c.h = mid;
+      if (mid < c.l) c.l = mid;
+    };
+    hubWs.subscribe('mids', handler);
+    return () => hubWs.unsubscribe('mids', handler);
   });
 
   function setMode(m: string) {
@@ -436,6 +481,7 @@
         <candle-chart
           candles={JSON.stringify(candles)}
           entries={JSON.stringify(marks?.entries || [])}
+          entryPrice={marks?.position?.entry_price ?? 0}
           symbol={focusSym}
           interval={selectedInterval}
         ></candle-chart>

@@ -32,6 +32,7 @@ const C = {
   lastLine:   'rgba(255,255,255,0.24)',
   lastBg:     '#1e293b',
   lastFg:     '#f8fafc',
+  entryAvg:   '#a78bfa',  // avg entry position — solid violet line
   entryLong:  '#3b82f6',
   entryShort: '#f59e0b',
   xhairV:     'rgba(255,255,255,0.20)',
@@ -94,8 +95,9 @@ function fmtTooltipTime(ts: number): string {
 // ─── Component ────────────────────────────────────────────────────────────────
 @customElement('candle-chart')
 export class CandleChart extends LitElement {
-  @property({ type: Array }) candles: CandleData[] = [];
-  @property({ type: Array }) entries: EntryMark[]  = [];
+  @property({ type: Array })  candles:    CandleData[] = [];
+  @property({ type: Array })  entries:    EntryMark[]  = [];
+  @property({ type: Number }) entryPrice: number       = 0;   // avg position entry (solid line)
   @property({ type: String }) symbol   = '';
   @property({ type: String }) interval = '';
 
@@ -103,6 +105,7 @@ export class CandleChart extends LitElement {
   private _hoverIdx: number | null = null;
   private _hoverY = 0;
   private _listening = false;
+  private _rafId: number | null = null;
 
   static styles = css`
     :host {
@@ -153,12 +156,15 @@ export class CandleChart extends LitElement {
     const idx  = Math.max(0, Math.min(n - 1, Math.floor((e.clientX - rect.left) / slot)));
     this._hoverIdx = idx;
     this._hoverY   = e.clientY - rect.top;
-    this._draw();
+    // RAF throttle: skip if a draw is already scheduled
+    if (this._rafId !== null) return;
+    this._rafId = requestAnimationFrame(() => { this._rafId = null; this._draw(); });
   };
 
   private _onLeave = () => {
     if (this._hoverIdx === null) return;
     this._hoverIdx = null;
+    if (this._rafId !== null) { cancelAnimationFrame(this._rafId); this._rafId = null; }
     this._draw();
   };
 
@@ -263,6 +269,14 @@ export class CandleChart extends LitElement {
       ctx.fillStyle = data[i].c >= data[i].o ? C.volUp : C.volDn;
       ctx.fillRect(xOf(i) - barW / 2, volY0 + VOL_H - vh, barW, Math.max(1, vh));
     }
+    // Volume scale max label (top-left of volume panel)
+    if (sorted.length > 0) {
+      ctx.fillStyle    = C.ttDim;
+      ctx.font         = FONT_XS;
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(fmtVol(volMax), 4, volY0 + 2);
+    }
 
     // ── Wicks ─────────────────────────────────────────────────────────────────
     ctx.lineWidth = 1;
@@ -281,13 +295,18 @@ export class CandleChart extends LitElement {
       const c   = data[i];
       const top = pToY(Math.max(c.o, c.c));
       const bot = pToY(Math.min(c.o, c.c));
-      ctx.fillStyle = c.c >= c.o ? C.upBody : C.dnBody;
+      ctx.fillStyle   = c.c >= c.o ? C.upBody : C.dnBody;
+      // Last candle is still forming — render semi-transparent
+      ctx.globalAlpha = i === n - 1 ? 0.55 : 1.0;
       ctx.fillRect(xOf(i) - barW / 2, top, barW, Math.max(1, bot - top));
     }
+    ctx.globalAlpha = 1.0;
 
     // ── Entry price overlay lines ─────────────────────────────────────────────
+    // Individual entries: dashed, max 5 (avoid cluttering chart with DCA stacks)
     ctx.lineWidth = 1;
-    for (const e of this.entries) {
+    const visEntries = this.entries.slice(0, 5);
+    for (const e of visEntries) {
       const y = pToY(e.price);
       if (y < TOP - 6 || y > TOP + PRICE_H + 6) continue;
       const col = /buy|long/i.test(e.action) ? C.entryLong : C.entryShort;
@@ -304,6 +323,24 @@ export class CandleChart extends LitElement {
       ctx.fillText(`${e.action} ${fmtPrice(e.price)}`, chartW + 4, y - 1);
     }
     ctx.setLineDash([]);
+
+    // Average entry: solid violet line — the position's true cost basis
+    if (this.entryPrice > 0) {
+      const y = pToY(this.entryPrice);
+      if (y >= TOP - 6 && y <= TOP + PRICE_H + 6) {
+        ctx.strokeStyle = C.entryAvg;
+        ctx.lineWidth   = 1.5;
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(0, y); ctx.lineTo(chartW, y);
+        ctx.stroke();
+        ctx.fillStyle    = C.entryAvg;
+        ctx.font         = FONT_XS;
+        ctx.textAlign    = 'left';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(`AVG ${fmtPrice(this.entryPrice)}`, chartW + 4, y - 1);
+      }
+    }
 
     // ── Last close line with label box ────────────────────────────────────────
     const last = data[n - 1];
