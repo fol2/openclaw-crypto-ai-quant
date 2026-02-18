@@ -54,7 +54,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 def _interval_to_ms(interval: str) -> int:
     s = str(interval or "").strip().lower()
     if not s:
-        return 0
+        return 60 * 60 * 1000
     try:
         if s.endswith("m"):
             return int(float(s[:-1]) * 60.0 * 1000.0)
@@ -65,7 +65,7 @@ def _interval_to_ms(interval: str) -> int:
         # Fallback: assume seconds.
         return int(float(s) * 1000.0)
     except (ValueError, TypeError, OverflowError):
-        return 0
+        return 60 * 60 * 1000
 
 
 def _finite_float_or_default(raw: Any, default: float) -> float:
