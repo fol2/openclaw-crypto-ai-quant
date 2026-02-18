@@ -115,6 +115,12 @@
     if (s < 3600) return `${Math.round(s / 60)}m`;
     return `${(s / 3600).toFixed(1)}h`;
   }
+  function sigAge(ts: string | null | undefined): string {
+    if (!ts) return '';
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return '';
+    return fmtAge((Date.now() - d.getTime()) / 1000);
+  }
   function pnlClass(v: number | null | undefined): string {
     if (v === null || v === undefined) return '';
     return v >= 0 ? 'green' : 'red';
@@ -348,6 +354,9 @@
                   <span class="sig-badge sell">SELL</span>
                 {:else}
                   <span class="sig-badge none">\u2014</span>
+                {/if}
+                {#if s.last_signal?.signal && s.last_signal?.timestamp}
+                  <span class="sig-age">{sigAge(s.last_signal.timestamp)}</span>
                 {/if}
               </td>
               <td>
@@ -844,12 +853,19 @@
     font-size: 11px;
   }
   .pos-pnl {
-    display: block;
+    display: inline;
     font-size: 11px;
     font-family: 'IBM Plex Mono', monospace;
     font-weight: 500;
-    margin-top: 2px;
+    margin-left: 4px;
     letter-spacing: 0.01em;
+  }
+  .sig-age {
+    display: block;
+    font-size: 9px;
+    color: var(--text-dim);
+    font-family: 'IBM Plex Mono', monospace;
+    margin-top: 1px;
   }
   .pos-pnl.green { color: var(--green); }
   .pos-pnl.red   { color: var(--red); }
@@ -1046,14 +1062,14 @@
       display: flex;
     }
 
-    /* Column widths for ~375px: SYM/MID/SIG/POS — MID trimmed, POS wider for PnL */
+    /* Column widths for ~375px: SYM 24 / MID 12 / SIG 22 / POS 42 */
     .sym-table {
       table-layout: fixed;
     }
-    .sym-table th:nth-child(1), .sym-table td:nth-child(1) { width: 28%; }
-    .sym-table th:nth-child(2), .sym-table td:nth-child(2) { width: 22%; }
-    .sym-table th:nth-child(3), .sym-table td:nth-child(3) { width: 14%; }
-    .sym-table th:nth-child(4), .sym-table td:nth-child(4) { width: 36%; }
+    .sym-table th:nth-child(1), .sym-table td:nth-child(1) { width: 24%; }
+    .sym-table th:nth-child(2), .sym-table td:nth-child(2) { width: 12%; }
+    .sym-table th:nth-child(3), .sym-table td:nth-child(3) { width: 22%; }
+    .sym-table th:nth-child(4), .sym-table td:nth-child(4) { width: 42%; }
 
     .col-mid {
       font-size: 10px;
