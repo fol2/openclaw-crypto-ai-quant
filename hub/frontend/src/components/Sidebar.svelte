@@ -1,8 +1,10 @@
 <script lang="ts">
-  let { currentPage, open = false, onNavigate }: {
+  let { currentPage, open = false, collapsed = false, onNavigate, onToggleCollapse }: {
     currentPage: string;
     open?: boolean;
+    collapsed?: boolean;
     onNavigate?: () => void;
+    onToggleCollapse?: () => void;
   } = $props();
 
   /* SVG icon paths (20x20 viewBox) — crisp, minimal line icons */
@@ -28,7 +30,7 @@
   }
 </script>
 
-<nav class="sidebar" class:open>
+<nav class="sidebar" class:open class:collapsed>
   <div class="logo">
     <div class="logo-mark">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
@@ -62,6 +64,16 @@
     {/each}
   </ul>
 
+  <button class="collapse-btn" onclick={onToggleCollapse} aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}>
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+      {#if collapsed}
+        <path d="M9 18l6-6-6-6"/>
+      {:else}
+        <path d="M15 18l-6-6 6-6"/>
+      {/if}
+    </svg>
+  </button>
+
   <div class="sidebar-footer">
     <div class="connection-status" id="ws-status">
       <span class="dot"></span>
@@ -81,7 +93,14 @@
     height: 100vh;
     height: 100dvh;
     z-index: var(--z-sidebar);
-    transition: transform var(--t-slow) var(--ease-out);
+    transition: width var(--t-slow) var(--ease-out),
+                min-width var(--t-slow) var(--ease-out),
+                transform var(--t-slow) var(--ease-out);
+    overflow: hidden;
+  }
+  .sidebar.collapsed {
+    width: 56px;
+    min-width: 56px;
   }
 
   .logo {
@@ -91,6 +110,11 @@
     align-items: center;
     gap: 10px;
   }
+  .collapsed .logo {
+    justify-content: center;
+    padding: 20px 0 16px;
+  }
+  .collapsed .logo-text { display: none; }
 
   .logo-mark {
     flex-shrink: 0;
@@ -128,6 +152,7 @@
     flex-direction: column;
     gap: 2px;
   }
+  .collapsed ul { padding: 12px 4px; }
 
   li a {
     display: flex;
@@ -163,6 +188,14 @@
 
   .nav-label {
     flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  .collapsed .nav-label { display: none; }
+  .collapsed .active-dot { display: none; }
+  .collapsed li a {
+    justify-content: center;
+    padding: 10px 0;
   }
 
   .active-dot {
@@ -199,6 +232,31 @@
   .conn-label {
     letter-spacing: 0.02em;
   }
+  .collapsed .conn-label { display: none; }
+  .collapsed .sidebar-footer { padding: 16px 0; justify-content: center; display: flex; }
+  .collapsed .connection-status { justify-content: center; }
+
+  .collapse-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 8px 8px;
+    padding: 6px;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all var(--t-fast);
+    flex-shrink: 0;
+  }
+  .collapse-btn:hover {
+    background: var(--bg-tertiary);
+    color: var(--text);
+  }
+  .collapsed .collapse-btn {
+    margin: 0 4px 8px;
+  }
 
   /* ─── Mobile ─── */
   @media (max-width: 768px) {
@@ -223,5 +281,6 @@
       width: 20px;
       height: 20px;
     }
+    .collapse-btn { display: none; }
   }
 </style>
