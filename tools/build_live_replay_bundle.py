@@ -293,10 +293,12 @@ def main() -> int:
         "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
         "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
         f"CANDLES_DB=\"${{CANDLES_DB:-{shlex.quote(str(candles_db))}}}\"\n"
+        f"{funding_env}"
         "python \"$REPO_ROOT/tools/run_bundle_gpu_parity.py\" "
         "--bundle-dir \"$BUNDLE_DIR\" "
         "--repo-root \"$REPO_ROOT\" "
         "--candles-db \"$CANDLES_DB\" "
+        f"{funding_arg} "
         f"--output \"$BUNDLE_DIR/{gpu_parity_report_path.name}\""
     )
 

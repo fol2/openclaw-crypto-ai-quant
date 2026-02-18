@@ -32,6 +32,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Replay bundle manifest filename/path",
     )
     parser.add_argument("--candles-db", help="Optional candles DB override path")
+    parser.add_argument("--funding-db", help="Optional funding DB override path")
     parser.add_argument("--interval", help="Optional interval override (default: bundle manifest)")
     parser.add_argument("--from-ts", type=int, help="Optional start timestamp override (ms)")
     parser.add_argument("--to-ts", type=int, help="Optional end timestamp override (ms)")
@@ -103,6 +104,7 @@ def main() -> int:
     from_ts = int(args.from_ts if args.from_ts is not None else int(inputs.get("from_ts") or 0))
     to_ts = int(args.to_ts if args.to_ts is not None else int(inputs.get("to_ts") or 0))
     candles_db_raw = str(args.candles_db or os.environ.get("CANDLES_DB") or inputs.get("candles_db") or "").strip()
+    funding_db_raw = str(args.funding_db or os.environ.get("FUNDING_DB") or inputs.get("funding_db") or "").strip()
 
     if not interval:
         parser.error("interval is missing (provide --interval or manifest inputs.interval)")
@@ -114,6 +116,11 @@ def main() -> int:
     candles_db = Path(candles_db_raw).expanduser().resolve()
     if not candles_db.exists():
         parser.error(f"candles DB not found: {candles_db}")
+    funding_db: Path | None = None
+    if funding_db_raw:
+        funding_db = Path(funding_db_raw).expanduser().resolve()
+        if not funding_db.exists():
+            parser.error(f"funding DB not found: {funding_db}")
 
     output_path = (
         Path(args.output).expanduser().resolve()
@@ -187,6 +194,8 @@ def main() -> int:
             "--end-ts",
             str(to_ts),
         ]
+        if funding_db is not None:
+            cmd.extend(["--funding-db", str(funding_db)])
         if entry_interval:
             cmd.extend(["--entry-interval", entry_interval])
         if exit_interval:
