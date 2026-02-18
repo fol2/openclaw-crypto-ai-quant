@@ -93,15 +93,18 @@ def _run_to_log(cmd: list[str], *, cwd: Path, env: dict[str, str], log_path: Pat
 def _db_has_table(db_path: Path, table_name: str) -> bool:
     if not db_path.exists():
         return False
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10)
     try:
-        row = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
-            (str(table_name),),
-        ).fetchone()
-        return bool(row is not None)
-    finally:
-        conn.close()
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+                (str(table_name),),
+            ).fetchone()
+            return bool(row is not None)
+        finally:
+            conn.close()
+    except Exception:
+        return False
 
 
 def _default_repo_root() -> Path:
@@ -191,56 +194,41 @@ def main() -> int:
     args = _build_parser().parse_args()
 
     repo_root = _resolve_path(str(args.repo_root), base=Path.cwd())
-    if not repo_root.exists():
-        raise SystemExit(f"repo root not found: {repo_root}")
-
-    live_db = _resolve_path(str(args.live_db), base=repo_root)
-    paper_db = _resolve_path(str(args.paper_db), base=repo_root)
+    resolve_base = repo_root if repo_root.exists() else Path.cwd()
+    live_db = _resolve_path(str(args.live_db), base=resolve_base)
+    paper_db = _resolve_path(str(args.paper_db), base=resolve_base)
     candles_db_raw = str(args.candles_db or "").strip()
-    if not candles_db_raw:
-        raise SystemExit("candles DB path is required (--candles-db or AI_QUANT_REPLAY_GATE_CANDLES_DB)")
-    candles_db = _resolve_path(candles_db_raw, base=repo_root)
+    candles_db = _resolve_path(candles_db_raw, base=resolve_base) if candles_db_raw else Path("")
     funding_db_raw = str(args.funding_db or "").strip()
-    funding_db = _resolve_path(funding_db_raw, base=repo_root) if funding_db_raw else None
-
-    if not live_db.exists():
-        raise SystemExit(f"live DB not found: {live_db}")
-    if not paper_db.exists():
-        raise SystemExit(f"paper DB not found: {paper_db}")
-    if not candles_db.exists():
-        raise SystemExit(f"candles DB not found: {candles_db}")
-    if funding_db is not None and not funding_db.exists():
-        raise SystemExit(f"funding DB not found: {funding_db}")
-    if int(args.window_minutes) <= 0:
-        raise SystemExit("window-minutes must be > 0")
-    if int(args.lag_minutes) < 0:
-        raise SystemExit("lag-minutes must be >= 0")
-    if int(args.min_live_trades) < 0:
-        raise SystemExit("min-live-trades must be >= 0")
+    funding_db = _resolve_path(funding_db_raw, base=resolve_base) if funding_db_raw else None
 
     interval = str(args.interval or "").strip()
-    if not interval:
-        raise SystemExit("interval must not be empty")
 
     now_ms = _now_ms()
-    to_ts = int(now_ms - int(args.lag_minutes) * 60_000)
-    from_ts = int(to_ts - int(args.window_minutes) * 60_000)
-    if from_ts > to_ts:
-        raise SystemExit("invalid replay window: from_ts > to_ts")
+    lag_minutes = int(args.lag_minutes)
+    window_minutes = int(args.window_minutes)
+    min_live_trades = int(args.min_live_trades)
+    to_ts = int(now_ms - lag_minutes * 60_000)
+    from_ts = int(to_ts - window_minutes * 60_000)
 
-    bundle_root = _resolve_path(str(args.bundle_root), base=repo_root)
-    bundle_root.mkdir(parents=True, exist_ok=True)
+    bundle_root = _resolve_path(str(args.bundle_root), base=resolve_base)
+    try:
+        bundle_root.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        bundle_root = Path("/tmp/openclaw-ai-quant/replay_gate").resolve()
+        bundle_root.mkdir(parents=True, exist_ok=True)
     run_tag = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    bundle_dir = (bundle_root / f"bundle_{interval}_{from_ts}_{to_ts}_{run_tag}").resolve()
+    interval_tag = interval if interval else "unknown_interval"
+    bundle_dir = (bundle_root / f"bundle_{interval_tag}_{from_ts}_{to_ts}_{run_tag}").resolve()
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
     report_path = (
-        _resolve_path(str(args.output), base=repo_root)
+        _resolve_path(str(args.output), base=resolve_base)
         if str(args.output or "").strip()
         else (bundle_dir / "scheduled_alignment_gate_run.json").resolve()
     )
     blocker_path = (
-        _resolve_path(str(args.release_blocker_file), base=repo_root)
+        _resolve_path(str(args.release_blocker_file), base=resolve_base)
         if str(args.release_blocker_file or "").strip()
         else (bundle_root / "release_blocker.json").resolve()
     )
@@ -252,6 +240,96 @@ def main() -> int:
 
     env = os.environ.copy()
     env["REPO_ROOT"] = str(repo_root)
+    failures: list[dict[str, Any]] = []
+
+    if not repo_root.exists():
+        failures.append(
+            {
+                "code": "repo_root_not_found",
+                "classification": "state_initialisation_gap",
+                "detail": str(repo_root),
+            }
+        )
+    if not candles_db_raw:
+        failures.append(
+            {
+                "code": "missing_candles_db",
+                "classification": "state_initialisation_gap",
+                "detail": "candles DB path is required (--candles-db or AI_QUANT_REPLAY_GATE_CANDLES_DB)",
+            }
+        )
+    if not live_db.exists():
+        failures.append(
+            {
+                "code": "live_db_not_found",
+                "classification": "state_initialisation_gap",
+                "detail": str(live_db),
+            }
+        )
+    if not paper_db.exists():
+        failures.append(
+            {
+                "code": "paper_db_not_found",
+                "classification": "state_initialisation_gap",
+                "detail": str(paper_db),
+            }
+        )
+    if candles_db_raw and not candles_db.exists():
+        failures.append(
+            {
+                "code": "candles_db_not_found",
+                "classification": "state_initialisation_gap",
+                "detail": str(candles_db),
+            }
+        )
+    if funding_db is not None and not funding_db.exists():
+        failures.append(
+            {
+                "code": "funding_db_not_found",
+                "classification": "state_initialisation_gap",
+                "detail": str(funding_db),
+            }
+        )
+    if window_minutes <= 0:
+        failures.append(
+            {
+                "code": "invalid_window_minutes",
+                "classification": "state_initialisation_gap",
+                "detail": f"window_minutes={window_minutes} must be > 0",
+            }
+        )
+    if lag_minutes < 0:
+        failures.append(
+            {
+                "code": "invalid_lag_minutes",
+                "classification": "state_initialisation_gap",
+                "detail": f"lag_minutes={lag_minutes} must be >= 0",
+            }
+        )
+    if min_live_trades < 0:
+        failures.append(
+            {
+                "code": "invalid_min_live_trades",
+                "classification": "state_initialisation_gap",
+                "detail": f"min_live_trades={min_live_trades} must be >= 0",
+            }
+        )
+    if not interval:
+        failures.append(
+            {
+                "code": "missing_interval",
+                "classification": "state_initialisation_gap",
+                "detail": "interval must not be empty",
+            }
+        )
+    if from_ts > to_ts:
+        failures.append(
+            {
+                "code": "invalid_replay_window",
+                "classification": "state_initialisation_gap",
+                "detail": f"from_ts={from_ts} > to_ts={to_ts}",
+            }
+        )
 
     build_cmd = [
         "python3",
@@ -274,10 +352,11 @@ def main() -> int:
     if funding_db is not None:
         build_cmd.extend(["--funding-db", str(funding_db)])
 
-    build_rc = _run_to_log(build_cmd, cwd=repo_root, env=env, log_path=build_log)
-    failures: list[dict[str, Any]] = []
+    build_rc: int | None = None
     live_baseline_trades = -1
-    if build_rc != 0:
+    if not failures:
+        build_rc = _run_to_log(build_cmd, cwd=repo_root, env=env, log_path=build_log)
+    if build_rc is not None and build_rc != 0:
         failures.append(
             {
                 "code": "bundle_build_failed",
@@ -285,7 +364,7 @@ def main() -> int:
                 "detail": f"build_live_replay_bundle.py exited with code {build_rc}",
             }
         )
-    elif not manifest_path.exists():
+    elif build_rc is not None and not manifest_path.exists():
         failures.append(
             {
                 "code": "bundle_manifest_missing",
@@ -293,16 +372,14 @@ def main() -> int:
                 "detail": str(manifest_path),
             }
         )
-    else:
+    elif build_rc is not None:
         live_baseline_trades = _read_live_baseline_count(manifest_path)
-        if live_baseline_trades < int(args.min_live_trades):
+        if live_baseline_trades < min_live_trades:
             failures.append(
                 {
                     "code": "insufficient_live_baseline_trades",
                     "classification": "state_initialisation_gap",
-                    "detail": (
-                        f"live_baseline_trades={live_baseline_trades} below min_live_trades={int(args.min_live_trades)}"
-                    ),
+                    "detail": f"live_baseline_trades={live_baseline_trades} below min_live_trades={min_live_trades}",
                 }
             )
 
@@ -343,25 +420,35 @@ def main() -> int:
             )
 
         if harness_report_path.exists():
-            loaded = _read_json(harness_report_path)
-            if isinstance(loaded, dict):
-                harness_report = loaded
-                if not bool(loaded.get("ok")):
-                    failures.append(
-                        {
-                            "code": "deterministic_replay_harness_report_failed",
-                            "classification": "deterministic_logic_divergence",
-                            "detail": f"failed_step={loaded.get('failed_step')}",
-                        }
-                    )
-            else:
+            try:
+                loaded = _read_json(harness_report_path)
+            except Exception as exc:
                 failures.append(
                     {
-                        "code": "invalid_harness_report",
+                        "code": "invalid_harness_report_json",
                         "classification": "deterministic_logic_divergence",
-                        "detail": "paper_deterministic_replay_run.json is not a JSON object",
+                        "detail": str(exc),
                     }
                 )
+            else:
+                if isinstance(loaded, dict):
+                    harness_report = loaded
+                    if not bool(loaded.get("ok")):
+                        failures.append(
+                            {
+                                "code": "deterministic_replay_harness_report_failed",
+                                "classification": "deterministic_logic_divergence",
+                                "detail": f"failed_step={loaded.get('failed_step')}",
+                            }
+                        )
+                else:
+                    failures.append(
+                        {
+                            "code": "invalid_harness_report",
+                            "classification": "deterministic_logic_divergence",
+                            "detail": "paper_deterministic_replay_run.json is not a JSON object",
+                        }
+                    )
         else:
             failures.append(
                 {
@@ -372,25 +459,35 @@ def main() -> int:
             )
 
         if gate_report_path.exists():
-            loaded = _read_json(gate_report_path)
-            if isinstance(loaded, dict):
-                gate_report = loaded
-                if not bool(loaded.get("ok")):
-                    failures.append(
-                        {
-                            "code": "alignment_gate_failed",
-                            "classification": "deterministic_logic_divergence",
-                            "detail": f"failures={len(loaded.get('failures') or [])}",
-                        }
-                    )
-            else:
+            try:
+                loaded = _read_json(gate_report_path)
+            except Exception as exc:
                 failures.append(
                     {
-                        "code": "invalid_alignment_gate_report",
+                        "code": "invalid_alignment_gate_report_json",
                         "classification": "deterministic_logic_divergence",
-                        "detail": "alignment_gate_report.json is not a JSON object",
+                        "detail": str(exc),
                     }
                 )
+            else:
+                if isinstance(loaded, dict):
+                    gate_report = loaded
+                    if not bool(loaded.get("ok")):
+                        failures.append(
+                            {
+                                "code": "alignment_gate_failed",
+                                "classification": "deterministic_logic_divergence",
+                                "detail": f"failures={len(loaded.get('failures') or [])}",
+                            }
+                        )
+                else:
+                    failures.append(
+                        {
+                            "code": "invalid_alignment_gate_report",
+                            "classification": "deterministic_logic_divergence",
+                            "detail": "alignment_gate_report.json is not a JSON object",
+                        }
+                    )
         else:
             failures.append(
                 {
@@ -429,10 +526,10 @@ def main() -> int:
             "harness_log": str(harness_log),
             "release_blocker_file": str(blocker_path),
         },
-        "min_live_trades": int(args.min_live_trades),
+        "min_live_trades": min_live_trades,
         "live_baseline_trades": int(live_baseline_trades),
         "strict_no_residuals": bool(args.strict_no_residuals),
-        "build_exit_code": int(build_rc),
+        "build_exit_code": None if build_rc is None else int(build_rc),
         "harness_exit_code": None if harness_rc is None else int(harness_rc),
         "failures": failures,
         "db_checks": {
@@ -440,7 +537,19 @@ def main() -> int:
             "paper_has_trades_table": _db_has_table(paper_db, "trades"),
         },
     }
-    _write_json(report_path, report)
+    try:
+        _write_json(report_path, report)
+    except Exception as exc:
+        ok = False
+        failures.append(
+            {
+                "code": "write_report_failed",
+                "classification": "state_initialisation_gap",
+                "detail": str(exc),
+            }
+        )
+        report["ok"] = False
+        report["failures"] = failures
 
     previous_last_passed_ms: int | None = None
     if blocker_path.exists():
@@ -471,11 +580,41 @@ def main() -> int:
     elif previous_last_passed_ms is not None:
         blocker_payload["last_passed_at_ms"] = previous_last_passed_ms
 
-    _write_json(blocker_path, blocker_payload)
+    try:
+        _write_json(blocker_path, blocker_payload)
+    except Exception:
+        fallback_blocker_path = Path("/tmp/openclaw-ai-quant/replay_gate/release_blocker.json").resolve()
+        fallback_blocker_path.parent.mkdir(parents=True, exist_ok=True)
+        blocker_payload["write_fallback_from"] = str(blocker_path)
+        _write_json(fallback_blocker_path, blocker_payload)
+        blocker_path = fallback_blocker_path
     print(str(report_path))
     print(str(blocker_path))
     return 0 if ok else 1
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except Exception as exc:  # pragma: no cover - emergency fail-closed path
+        fallback_blocker_path = Path(
+            str(
+                os.getenv("AI_QUANT_REPLAY_GATE_BLOCKER_FILE", "")
+                or (str(os.getenv("AI_QUANT_REPLAY_GATE_BUNDLE_ROOT", "") or "") + "/release_blocker.json")
+                or "/tmp/openclaw-ai-quant/replay_gate/release_blocker.json"
+            )
+        ).expanduser()
+        if not fallback_blocker_path.is_absolute():
+            fallback_blocker_path = (Path.cwd() / fallback_blocker_path).resolve()
+        fallback_payload = {
+            "schema_version": 1,
+            "generated_at_ms": _now_ms(),
+            "blocked": True,
+            "reason_codes": ["scheduler_unhandled_exception"],
+            "detail": str(exc),
+        }
+        try:
+            _write_json(fallback_blocker_path, fallback_payload)
+        except Exception:
+            pass
+        raise

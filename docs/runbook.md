@@ -27,7 +27,10 @@ Install (example):
 mkdir -p ~/.config/systemd/user
 cp systemd/openclaw-ai-quant-factory.* ~/.config/systemd/user/
 cp systemd/openclaw-ai-quant-prune-runtime-logs.* ~/.config/systemd/user/
-cp systemd/openclaw-ai-quant-replay-alignment-gate.* ~/.config/systemd/user/
+install -m 0644 systemd/openclaw-ai-quant-replay-alignment-gate.service.example \
+  ~/.config/systemd/user/openclaw-ai-quant-replay-alignment-gate.service
+install -m 0644 systemd/openclaw-ai-quant-replay-alignment-gate.timer.example \
+  ~/.config/systemd/user/openclaw-ai-quant-replay-alignment-gate.timer
 systemctl --user daemon-reload
 systemctl --user enable --now openclaw-ai-quant-factory.timer
 systemctl --user enable --now openclaw-ai-quant-prune-runtime-logs.timer
