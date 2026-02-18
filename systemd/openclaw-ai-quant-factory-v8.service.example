@@ -8,6 +8,7 @@ StartLimitIntervalSec=60
 
 [Service]
 Type=oneshot
+TimeoutStartSec=7200
 WorkingDirectory=$PROJECT_DIR
 EnvironmentFile=-%h/.config/openclaw/ai-quant-universe-v8.env
 EnvironmentFile=-%h/.config/openclaw/ai-quant-v8.env
