@@ -215,19 +215,20 @@ class StrategyManager:
             mode = os.stat(yaml_path).st_mode
             if mode & stat.S_IWOTH:
                 logger.warning(
-                    "Strategy YAML %s is world-writable (mode %s) — loading anyway",
+                    "Strategy YAML %s is world-writable (mode %s) — skipping reload for safety",
                     yaml_path,
                     oct(mode),
                 )
+                return False
         except OSError:
             pass  # best-effort; don't block on stat failures
         return True
 
-    def _load_yaml(self) -> dict[str, Any]:
+    def _load_yaml(self) -> dict[str, Any] | None:
         if not os.path.exists(self._yaml_path):
             return {}
         if not self._check_yaml_path(self._yaml_path):
-            return {}
+            return None
         with open(self._yaml_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         return data if isinstance(data, dict) else {}
@@ -260,13 +261,16 @@ class StrategyManager:
             if yaml_needs_reload:
                 try:
                     overrides = self._load_yaml()
-                    overrides_sha1 = sha1_json(overrides)
+                    overrides_sha1 = sha1_json(overrides) if overrides is not None else None
                 except (OSError, ValueError):
                     return
 
-                self._yaml_mtime = yaml_mtime
-                self._overrides = overrides
-                self._overrides_sha1 = overrides_sha1
+                if overrides is not None:
+                    self._yaml_mtime = yaml_mtime
+                    self._overrides = overrides
+                    self._overrides_sha1 = str(overrides_sha1)
+                elif not changelog_needs_reload:
+                    return
 
             if changelog_needs_reload:
                 self._changelog_mtime = changelog_mtime
