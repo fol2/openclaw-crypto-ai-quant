@@ -668,6 +668,48 @@ def test_rust_binding_provider_converts_kernel_intents_with_canonical_variants(
     assert [d.target_size for d in decisions] == expected_sizes
 
 
+def test_kernel_file_provider_rejects_oversized_payload(monkeypatch, tmp_path, caplog) -> None:
+    payload_path = tmp_path / "events.json"
+    payload_path.write_text(
+        json.dumps(
+            [
+                {
+                    "symbol": "ETH",
+                    "action": "OPEN",
+                    "signal": "BUY",
+                    "price": 100.0,
+                    "timestamp_ms": 1700000000000,
+                    "target_size": 1.0,
+                    "confidence": "medium",
+                    "pad": "x" * 5000,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AI_QUANT_KERNEL_DECISION_FILE_MAX_BYTES", "1024")
+    provider = KernelDecisionFileProvider(str(payload_path))
+
+    with caplog.at_level("WARNING", logger="engine.core"):
+        decisions = list(
+            provider.get_decisions(
+                symbols=["ETH"],
+                watchlist=["ETH"],
+                open_symbols=[],
+                market=None,
+                interval="1m",
+                lookback_bars=50,
+                mode="paper",
+                not_ready_symbols=set(),
+                strategy=None,
+                now_ms=1700000000000,
+            )
+        )
+
+    assert decisions == []
+    assert "decision file too large" in caplog.text
+
+
 def test_bt_runtime_binding_returns_schema_mismatch_error_code() -> None:
     try:
         bt_runtime = importlib.import_module("bt_runtime")
