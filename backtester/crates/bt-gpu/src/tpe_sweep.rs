@@ -585,9 +585,13 @@ pub fn run_tpe_sweep(
     let taker_fee_rate = bt_core::accounting::DEFAULT_TAKER_FEE_RATE as f32;
 
     // -- Layer 1: Fixed VRAM budget from total_vram (40%) -------------------------
-    let num_symbols_u32 = u32::try_from(num_symbols)
-        .map_err(|_| format!("num_symbols {} exceeds u32::MAX", num_symbols))
-        .expect("num_symbols exceeds u32::MAX");
+    let num_symbols_u32 = match u32::try_from(num_symbols) {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("[TPE] num_symbols {num_symbols} exceeds u32::MAX — returning empty results");
+            return Vec::new();
+        }
+    };
     let total_vram = device_state.total_vram_bytes();
     let snapshot_stride = (num_bars as usize) * (num_symbols as usize);
     let breadth_stride = num_bars as usize;
@@ -662,7 +666,7 @@ pub fn run_tpe_sweep(
     let tpe_batch_size = tpe_cfg.batch_size;
 
     // Spawn TPE thread — takes ownership of axis_opts + rng
-    let tpe_handle = std::thread::Builder::new()
+    let tpe_handle = match std::thread::Builder::new()
         .name("tpe-sampler".into())
         .spawn(move || {
             tpe_worker(
@@ -673,8 +677,13 @@ pub fn run_tpe_sweep(
                 result_rx,
                 request_tx,
             );
-        })
-        .expect("Failed to spawn TPE thread");
+        }) {
+        Ok(handle) => handle,
+        Err(e) => {
+            eprintln!("[TPE] Failed to spawn TPE thread: {e} — returning empty results");
+            return Vec::new();
+        }
+    };
 
     // GPU thread: receive batches, evaluate, send results
     // Bounded top-K heap: keeps only the best results by PnL to prevent OOM
@@ -857,20 +866,23 @@ fn evaluate_trade_only_batch(
         return Vec::new();
     }
 
-    let gpu_configs: Vec<buffers::GpuComboConfig> = trial_overrides
-        .iter()
-        .map(|overrides| {
-            let mut cfg = base_cfg.clone();
-            for (path, value) in overrides {
-                bt_core::sweep::apply_one_pub(&mut cfg, path, *value);
+    let mut gpu_configs: Vec<buffers::GpuComboConfig> = Vec::with_capacity(trial_overrides.len());
+    for overrides in trial_overrides {
+        let mut cfg = base_cfg.clone();
+        for (path, value) in overrides {
+            bt_core::sweep::apply_one_pub(&mut cfg, path, *value);
+        }
+        let mut gpu_cfg = match buffers::GpuComboConfig::from_strategy_config(&cfg) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[TPE] GpuComboConfig conversion failed: {e} — skipping batch");
+                return Vec::new();
             }
-            let mut gpu_cfg = buffers::GpuComboConfig::from_strategy_config(&cfg)
-                .expect("f64→f32 overflow in GpuComboConfig");
-            gpu_cfg.snapshot_offset = 0;
-            gpu_cfg.breadth_offset = 0;
-            gpu_cfg
-        })
-        .collect();
+        };
+        gpu_cfg.snapshot_offset = 0;
+        gpu_cfg.breadth_offset = 0;
+        gpu_configs.push(gpu_cfg);
+    }
 
     let mut trade_bufs = match gpu_host::BatchBuffers::from_indicator_buffers(
         ds,
@@ -1014,24 +1026,35 @@ fn evaluate_mixed_batch_arena(
             if unique_slot >= group_start && unique_slot < group_end {
                 let local_slot = unique_slot - group_start;
                 let mut gpu_cfg =
-                    buffers::GpuComboConfig::from_strategy_config(&trial_cfgs[trial_idx])
-                        .expect("f64→f32 overflow in GpuComboConfig");
-                gpu_cfg.snapshot_offset = u32::try_from(local_slot * snapshot_stride)
-                    .map_err(|_| {
-                        format!(
-                            "snapshot_offset {} exceeds u32::MAX",
+                    match buffers::GpuComboConfig::from_strategy_config(&trial_cfgs[trial_idx]) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!(
+                                "[TPE] GpuComboConfig conversion failed: {e} — skipping batch"
+                            );
+                            return Vec::new();
+                        }
+                    };
+                gpu_cfg.snapshot_offset = match u32::try_from(local_slot * snapshot_stride) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        eprintln!(
+                            "[TPE] snapshot_offset {} exceeds u32::MAX — skipping batch",
                             local_slot * snapshot_stride
-                        )
-                    })
-                    .expect("snapshot_offset exceeds u32::MAX");
-                gpu_cfg.breadth_offset = u32::try_from(local_slot * breadth_stride)
-                    .map_err(|_| {
-                        format!(
-                            "breadth_offset {} exceeds u32::MAX",
+                        );
+                        return Vec::new();
+                    }
+                };
+                gpu_cfg.breadth_offset = match u32::try_from(local_slot * breadth_stride) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        eprintln!(
+                            "[TPE] breadth_offset {} exceeds u32::MAX — skipping batch",
                             local_slot * breadth_stride
-                        )
-                    })
-                    .expect("breadth_offset exceeds u32::MAX");
+                        );
+                        return Vec::new();
+                    }
+                };
                 gpu_configs.push(gpu_cfg);
                 group_trial_indices.push(trial_idx);
             }
