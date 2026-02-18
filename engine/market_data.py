@@ -104,7 +104,14 @@ class MarketDataHub:
         db_timeout_s: float = 30.0,
     ):
         self._db_path = str(db_path)
-        self._db_timeout_s = min(float(db_timeout_s), 5.0)
+        raw_db_timeout_s = float(db_timeout_s)
+        self._db_timeout_s = min(raw_db_timeout_s, 5.0)
+        if self._db_timeout_s < raw_db_timeout_s:
+            logger.warning(
+                "MarketDataHub db_timeout_s clamped from %.2fs to %.2fs",
+                raw_db_timeout_s,
+                self._db_timeout_s,
+            )
 
         self._stale_mid_s = float(stale_mid_s)
         self._stale_bbo_s = float(stale_bbo_s)
