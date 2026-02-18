@@ -172,6 +172,10 @@ struct AxisLedgerRow {
 #[derive(Debug, Serialize)]
 struct LedgerEventParitySummary {
     status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    raw_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp_normalised: Option<bool>,
     aligned_len: usize,
     cpu_len: usize,
     gpu_len: usize,
@@ -203,7 +207,7 @@ struct TraceArtifact {
     event_parity: EventParitySummary,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct TraceEventRow {
     idx: usize,
     source_idx: usize,
@@ -251,6 +255,10 @@ struct CpuTraceWindow {
 #[derive(Debug, Serialize)]
 struct EventParitySummary {
     status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    raw_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp_normalised: Option<bool>,
     aligned_len: usize,
     cpu_len: usize,
     gpu_len: usize,
@@ -555,15 +563,29 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             args.cpu_trace_limit,
             args.cpu_trace_from_tail,
         )?;
-        let gpu_events = collect_trace_events(&trace_state, &trace_symbols);
-        let event_parity = compare_event_streams(
+        let gpu_events_raw = collect_trace_events(&trace_state, &trace_symbols);
+        let (gpu_events_for_parity, timestamp_normalised) =
+            normalise_trace_events_for_parity(&gpu_events_raw);
+        let mut event_parity = compare_event_streams(
             &cpu_trace.events,
-            &gpu_events,
+            &gpu_events_for_parity,
             args.trace_include_mismatch_fields,
             args.event_parity_max_offset_scan,
             args.event_parity_allow_absolute_scan,
             event_tol,
         );
+        if timestamp_normalised {
+            let raw_event_parity = compare_event_streams(
+                &cpu_trace.events,
+                &gpu_events_raw,
+                args.trace_include_mismatch_fields,
+                args.event_parity_max_offset_scan,
+                args.event_parity_allow_absolute_scan,
+                event_tol,
+            );
+            event_parity.raw_status = Some(raw_event_parity.status);
+            event_parity.timestamp_normalised = Some(true);
+        }
         if args.ledger_include_event_parity {
             baseline_event_parity = Some(summarise_event_parity(&event_parity));
         }
@@ -588,7 +610,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             },
             trace_count: trace_state.trace_count,
             trace_head: trace_state.trace_head,
-            events: gpu_events,
+            events: gpu_events_raw,
             cpu_event_total: cpu_trace.total,
             cpu_event_start: cpu_trace.start,
             cpu_event_end: cpu_trace.end,
@@ -741,15 +763,29 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     args.cpu_trace_limit,
                     args.cpu_trace_from_tail,
                 )?;
-                let gpu_events = collect_trace_events(&trace_state, &trace_symbols);
-                let event_parity = compare_event_streams(
+                let gpu_events_raw = collect_trace_events(&trace_state, &trace_symbols);
+                let (gpu_events_for_parity, timestamp_normalised) =
+                    normalise_trace_events_for_parity(&gpu_events_raw);
+                let mut event_parity = compare_event_streams(
                     &cpu_trace.events,
-                    &gpu_events,
+                    &gpu_events_for_parity,
                     args.trace_include_mismatch_fields,
                     args.event_parity_max_offset_scan,
                     args.event_parity_allow_absolute_scan,
                     event_tol,
                 );
+                if timestamp_normalised {
+                    let raw_event_parity = compare_event_streams(
+                        &cpu_trace.events,
+                        &gpu_events_raw,
+                        args.trace_include_mismatch_fields,
+                        args.event_parity_max_offset_scan,
+                        args.event_parity_allow_absolute_scan,
+                        event_tol,
+                    );
+                    event_parity.raw_status = Some(raw_event_parity.status);
+                    event_parity.timestamp_normalised = Some(true);
+                }
                 if args.ledger_include_event_parity {
                     event_parity_summary = Some(summarise_event_parity(&event_parity));
                 }
@@ -772,7 +808,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     },
                     trace_count: trace_state.trace_count,
                     trace_head: trace_state.trace_head,
-                    events: gpu_events,
+                    events: gpu_events_raw,
                     cpu_event_total: cpu_trace.total,
                     cpu_event_start: cpu_trace.start,
                     cpu_event_end: cpu_trace.end,
@@ -1128,11 +1164,20 @@ fn collect_trace_events(state: &GpuComboState, symbols: &[String]) -> Vec<TraceE
             pnl: ev.pnl,
         });
     }
+    out
+}
+
+fn normalise_trace_events_for_parity(events: &[TraceEventRow]) -> (Vec<TraceEventRow>, bool) {
+    let mut out = events.to_vec();
     out.sort_by_key(|ev| (ev.t_sec, ev.source_idx));
+    let mut timestamp_normalised = false;
     for (idx, ev) in out.iter_mut().enumerate() {
+        if ev.idx != idx {
+            timestamp_normalised = true;
+        }
         ev.idx = idx;
     }
-    out
+    (out, timestamp_normalised)
 }
 
 fn compare_event_streams(
@@ -1154,6 +1199,8 @@ fn compare_event_streams(
         if !canonical_events_equal(cpu_ev, gpu_ev, event_tol) {
             return EventParitySummary {
                 status: "MISMATCH".to_string(),
+                raw_status: None,
+                timestamp_normalised: None,
                 aligned_len,
                 cpu_len: cpu.len(),
                 gpu_len: gpu.len(),
@@ -1174,6 +1221,8 @@ fn compare_event_streams(
     if cpu.len() != gpu.len() || cpu_tail_offset != 0 || gpu_tail_offset != 0 {
         return EventParitySummary {
             status: "LENGTH_MISMATCH".to_string(),
+            raw_status: None,
+            timestamp_normalised: None,
             aligned_len,
             cpu_len: cpu.len(),
             gpu_len: gpu.len(),
@@ -1188,6 +1237,8 @@ fn compare_event_streams(
 
     EventParitySummary {
         status: "MATCH".to_string(),
+        raw_status: None,
+        timestamp_normalised: None,
         aligned_len,
         cpu_len: cpu.len(),
         gpu_len: gpu.len(),
@@ -1303,6 +1354,8 @@ fn matching_prefix_len(
 fn summarise_event_parity(summary: &EventParitySummary) -> LedgerEventParitySummary {
     LedgerEventParitySummary {
         status: summary.status.clone(),
+        raw_status: summary.raw_status.clone(),
+        timestamp_normalised: summary.timestamp_normalised,
         aligned_len: summary.aligned_len,
         cpu_len: summary.cpu_len,
         gpu_len: summary.gpu_len,
