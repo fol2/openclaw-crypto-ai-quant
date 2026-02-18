@@ -1029,6 +1029,7 @@ fn evaluate_mixed_batch_arena(
 
         let trade_results = match dispatch_trade_arena(
             ds,
+            candles_gpu,
             snap_arena,
             breadth_arena,
             btc_arena,
@@ -1154,6 +1155,7 @@ fn dispatch_indicator_arena(
 /// Dispatch trade sweep kernel using pre-allocated arena snapshot/breadth/btc buffers.
 fn dispatch_trade_arena(
     ds: &gpu_host::GpuDeviceState,
+    candles_gpu: &CudaSlice<buffers::GpuRawCandle>,
     snap_arena: &mut CudaSlice<buffers::GpuSnapshot>,
     breadth_arena: &mut CudaSlice<f32>,
     btc_arena: &mut CudaSlice<u32>,
@@ -1265,6 +1267,7 @@ fn dispatch_trade_arena(
                     &configs_gpu,
                     &mut states_gpu,
                     &mut results_gpu,
+                    candles_gpu,
                     sc_ref,
                     sn_ref,
                 ),
