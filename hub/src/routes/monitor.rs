@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::db::{candles, runtime, trading};
 use crate::db::pool::open_ro_pool;
+use crate::db::{candles, runtime, trading};
 use crate::error::HubError;
 use crate::state::AppState;
 
@@ -82,9 +82,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 
 // ── Handlers ─────────────────────────────────────────────────────────────
 
-async fn api_health(
-    State(state): State<Arc<AppState>>,
-) -> Json<Value> {
+async fn api_health(State(state): State<Arc<AppState>>) -> Json<Value> {
     let sidecar_ok = state.sidecar.health().await.is_ok();
     Json(json!({
         "ok": true,
@@ -93,9 +91,7 @@ async fn api_health(
     }))
 }
 
-async fn api_mids(
-    State(state): State<Arc<AppState>>,
-) -> Json<Value> {
+async fn api_mids(State(state): State<Arc<AppState>>) -> Json<Value> {
     match state.sidecar.get_mids(&["BTC".to_string()]).await {
         Ok(snap) => Json(json!({
             "ok": true,
@@ -123,13 +119,12 @@ async fn api_snapshot(
     let conn = pool.get()?;
 
     // Heartbeat
-    let heartbeat = runtime::fetch_heartbeat_from_db(&conn)?.unwrap_or_else(|| {
-        crate::heartbeat::Heartbeat {
+    let heartbeat =
+        runtime::fetch_heartbeat_from_db(&conn)?.unwrap_or_else(|| crate::heartbeat::Heartbeat {
             ok: false,
             error: Some("heartbeat_missing".to_string()),
             ..Default::default()
-        }
-    });
+        });
 
     // Open positions
     let positions = trading::compute_open_positions(&conn)?;
@@ -140,13 +135,7 @@ async fn api_snapshot(
     let candle_pool = open_ro_pool(&candle_db_path, 2);
     let candle_conn = candle_pool.as_ref().and_then(|p| p.get().ok());
 
-    let symbols = trading::list_recent_symbols(
-        &conn,
-        candle_conn.as_deref(),
-        interval,
-        ts,
-        200,
-    )?;
+    let symbols = trading::list_recent_symbols(&conn, candle_conn.as_deref(), interval, ts, 200)?;
 
     // Merge: open positions first, then other symbols
     let mut merged: Vec<String> = Vec::new();
@@ -296,7 +285,10 @@ async fn api_candles(
 ) -> Result<Json<Value>, HubError> {
     let mode = normalize_mode(&q.mode);
     let sym = q.symbol.to_uppercase();
-    let interval = q.interval.as_deref().unwrap_or(&state.config.trader_interval);
+    let interval = q
+        .interval
+        .as_deref()
+        .unwrap_or(&state.config.trader_interval);
     let limit = q.limit.clamp(2, 2000);
 
     let candle_path = state.candle_db_path(interval);
@@ -405,7 +397,11 @@ async fn api_metrics(
     }
 
     // Kill mode gauge
-    let kill_mode = heartbeat.kill_mode.as_deref().unwrap_or("off").to_lowercase();
+    let kill_mode = heartbeat
+        .kill_mode
+        .as_deref()
+        .unwrap_or("off")
+        .to_lowercase();
     let kill_val = match kill_mode.as_str() {
         "halt_all" => 2,
         "close_only" => 1,
@@ -485,7 +481,11 @@ async fn api_prometheus(
     let mut lines: Vec<String> = Vec::new();
 
     // Engine up
-    lines.push(prom_line("aiq_engine_up", if heartbeat.ok { 1.0 } else { 0.0 }, &mode));
+    lines.push(prom_line(
+        "aiq_engine_up",
+        if heartbeat.ok { 1.0 } else { 0.0 },
+        &mode,
+    ));
 
     if let Some(ts_hb) = heartbeat.ts_ms {
         let age = ((ts - ts_hb) as f64 / 1000.0).max(0.0);
@@ -496,7 +496,11 @@ async fn api_prometheus(
     }
 
     // Kill mode
-    let kill_mode = heartbeat.kill_mode.as_deref().unwrap_or("off").to_lowercase();
+    let kill_mode = heartbeat
+        .kill_mode
+        .as_deref()
+        .unwrap_or("off")
+        .to_lowercase();
     let kill_val = match kill_mode.as_str() {
         "halt_all" => 2.0,
         "close_only" => 1.0,
@@ -509,7 +513,11 @@ async fn api_prometheus(
         lines.push(prom_line("aiq_pnl_today_usd", daily.pnl_usd, &mode));
         lines.push(prom_line("aiq_fees_today_usd", daily.fees_usd, &mode));
         lines.push(prom_line("aiq_net_pnl_today_usd", daily.net_pnl_usd, &mode));
-        lines.push(prom_line("aiq_drawdown_today_pct", daily.drawdown_pct, &mode));
+        lines.push(prom_line(
+            "aiq_drawdown_today_pct",
+            daily.drawdown_pct,
+            &mode,
+        ));
     }
 
     // Counters
@@ -524,10 +532,7 @@ async fn api_prometheus(
     }
 
     let body = lines.join("") + "\n";
-    (
-        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        body,
-    )
+    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body)
 }
 
 fn prom_line(name: &str, value: f64, mode: &str) -> String {

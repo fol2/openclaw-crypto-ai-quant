@@ -1,8 +1,8 @@
+use super::trading::has_table;
+use crate::error::HubError;
 use rusqlite::{params, Connection};
 use serde::Serialize;
 use serde_json::Value;
-use crate::error::HubError;
-use super::trading::has_table;
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -94,7 +94,8 @@ pub fn list_decisions(
 
     // Count total
     let count_sql = format!("SELECT COUNT(*) FROM decision_events{where_sql}");
-    let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+        params_vec.iter().map(|p| p.as_ref()).collect();
     let total: i64 = conn.query_row(&count_sql, params_refs.as_slice(), |row| row.get(0))?;
 
     // Fetch rows
@@ -126,58 +127,60 @@ pub fn list_decisions(
     data_params.push(Box::new(limit));
     data_params.push(Box::new(offset));
 
-    let data_refs: Vec<&dyn rusqlite::types::ToSql> = data_params.iter().map(|p| p.as_ref()).collect();
+    let data_refs: Vec<&dyn rusqlite::types::ToSql> =
+        data_params.iter().map(|p| p.as_ref()).collect();
     let mut stmt = conn.prepare(&data_sql)?;
-    let rows = stmt.query_map(data_refs.as_slice(), |row| {
-        Ok(DecisionEvent {
-            id: row.get::<_, String>(0)?,
-            timestamp_ms: row.get(1)?,
-            symbol: row.get(2)?,
-            event_type: row.get(3)?,
-            status: row.get(4)?,
-            decision_phase: row.get(5)?,
-            parent_decision_id: row.get(6)?,
-            trade_id: row.get(7)?,
-            triggered_by: row.get(8)?,
-            action_taken: row.get(9)?,
-            rejection_reason: row.get(10)?,
-            context_json: row.get(11)?,
-        })
-    })?.collect::<Result<Vec<_>, _>>()?;
+    let rows = stmt
+        .query_map(data_refs.as_slice(), |row| {
+            Ok(DecisionEvent {
+                id: row.get::<_, String>(0)?,
+                timestamp_ms: row.get(1)?,
+                symbol: row.get(2)?,
+                event_type: row.get(3)?,
+                status: row.get(4)?,
+                decision_phase: row.get(5)?,
+                parent_decision_id: row.get(6)?,
+                trade_id: row.get(7)?,
+                triggered_by: row.get(8)?,
+                action_taken: row.get(9)?,
+                rejection_reason: row.get(10)?,
+                context_json: row.get(11)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok((rows, total))
 }
 
 /// Fetch a single decision event with context and gates.
-pub fn decision_detail(
-    conn: &Connection,
-    decision_id: &str,
-) -> Result<Option<Value>, HubError> {
+pub fn decision_detail(conn: &Connection, decision_id: &str) -> Result<Option<Value>, HubError> {
     if !has_table(conn, "decision_events") {
         return Ok(None);
     }
 
-    let decision = conn.prepare(
-        "SELECT id, timestamp_ms, symbol, event_type, status, decision_phase,
+    let decision = conn
+        .prepare(
+            "SELECT id, timestamp_ms, symbol, event_type, status, decision_phase,
                 parent_decision_id, trade_id, triggered_by, action_taken,
                 rejection_reason, context_json
-         FROM decision_events WHERE id = ?"
-    )?.query_row(params![decision_id], |row| {
-        Ok(DecisionEvent {
-            id: row.get(0)?,
-            timestamp_ms: row.get(1)?,
-            symbol: row.get(2)?,
-            event_type: row.get(3)?,
-            status: row.get(4)?,
-            decision_phase: row.get(5)?,
-            parent_decision_id: row.get(6)?,
-            trade_id: row.get(7)?,
-            triggered_by: row.get(8)?,
-            action_taken: row.get(9)?,
-            rejection_reason: row.get(10)?,
-            context_json: row.get(11)?,
-        })
-    });
+         FROM decision_events WHERE id = ?",
+        )?
+        .query_row(params![decision_id], |row| {
+            Ok(DecisionEvent {
+                id: row.get(0)?,
+                timestamp_ms: row.get(1)?,
+                symbol: row.get(2)?,
+                event_type: row.get(3)?,
+                status: row.get(4)?,
+                decision_phase: row.get(5)?,
+                parent_decision_id: row.get(6)?,
+                trade_id: row.get(7)?,
+                triggered_by: row.get(8)?,
+                action_taken: row.get(9)?,
+                rejection_reason: row.get(10)?,
+                context_json: row.get(11)?,
+            })
+        });
 
     let decision = match decision {
         Ok(d) => d,
@@ -189,15 +192,20 @@ pub fn decision_detail(
     let context: Vec<Value> = if has_table(conn, "decision_context") {
         let mut stmt = conn.prepare("SELECT * FROM decision_context WHERE decision_id = ?")?;
         let col_count = stmt.column_count();
-        let col_names: Vec<String> = (0..col_count).map(|i| stmt.column_name(i).unwrap_or("").to_string()).collect();
-        let result: Vec<Value> = stmt.query_map(params![decision_id], |row| {
-            let mut map = serde_json::Map::new();
-            for (i, name) in col_names.iter().enumerate() {
-                let val: rusqlite::types::Value = row.get(i)?;
-                map.insert(name.clone(), rusqlite_value_to_json(val));
-            }
-            Ok(Value::Object(map))
-        })?.filter_map(|r| r.ok()).collect();
+        let col_names: Vec<String> = (0..col_count)
+            .map(|i| stmt.column_name(i).unwrap_or("").to_string())
+            .collect();
+        let result: Vec<Value> = stmt
+            .query_map(params![decision_id], |row| {
+                let mut map = serde_json::Map::new();
+                for (i, name) in col_names.iter().enumerate() {
+                    let val: rusqlite::types::Value = row.get(i)?;
+                    map.insert(name.clone(), rusqlite_value_to_json(val));
+                }
+                Ok(Value::Object(map))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
         result
     } else {
         Vec::new()
@@ -209,20 +217,22 @@ pub fn decision_detail(
             "SELECT id, decision_id, gate_name, gate_passed, metric_value,
                     threshold_value, operator, explanation
              FROM gate_evaluations WHERE decision_id = ?
-             ORDER BY id ASC"
+             ORDER BY id ASC",
         )?;
-        let result = stmt.query_map(params![decision_id], |row| {
-            Ok(GateEvaluation {
-                id: row.get(0)?,
-                decision_id: row.get(1)?,
-                gate_name: row.get(2)?,
-                gate_passed: row.get(3)?,
-                metric_value: row.get(4)?,
-                threshold_value: row.get(5)?,
-                operator: row.get(6)?,
-                explanation: row.get(7)?,
-            })
-        })?.collect::<Result<Vec<_>, _>>()?;
+        let result = stmt
+            .query_map(params![decision_id], |row| {
+                Ok(GateEvaluation {
+                    id: row.get(0)?,
+                    decision_id: row.get(1)?,
+                    gate_name: row.get(2)?,
+                    gate_passed: row.get(3)?,
+                    metric_value: row.get(4)?,
+                    threshold_value: row.get(5)?,
+                    operator: row.get(6)?,
+                    explanation: row.get(7)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
         result
     } else {
         Vec::new()
@@ -245,7 +255,8 @@ pub fn decision_gates(
     }
 
     // Verify decision exists
-    let exists = conn.prepare("SELECT id FROM decision_events WHERE id = ?")?
+    let exists = conn
+        .prepare("SELECT id FROM decision_events WHERE id = ?")?
         .query_row(params![decision_id], |_| Ok(()));
     if exists.is_err() {
         return Ok(None);
@@ -256,20 +267,22 @@ pub fn decision_gates(
             "SELECT id, decision_id, gate_name, gate_passed, metric_value,
                     threshold_value, operator, explanation
              FROM gate_evaluations WHERE decision_id = ?
-             ORDER BY id ASC"
+             ORDER BY id ASC",
         )?;
-        let result = stmt.query_map(params![decision_id], |row| {
-            Ok(GateEvaluation {
-                id: row.get(0)?,
-                decision_id: row.get(1)?,
-                gate_name: row.get(2)?,
-                gate_passed: row.get(3)?,
-                metric_value: row.get(4)?,
-                threshold_value: row.get(5)?,
-                operator: row.get(6)?,
-                explanation: row.get(7)?,
-            })
-        })?.collect::<Result<Vec<_>, _>>()?;
+        let result = stmt
+            .query_map(params![decision_id], |row| {
+                Ok(GateEvaluation {
+                    id: row.get(0)?,
+                    decision_id: row.get(1)?,
+                    gate_name: row.get(2)?,
+                    gate_passed: row.get(3)?,
+                    metric_value: row.get(4)?,
+                    threshold_value: row.get(5)?,
+                    operator: row.get(6)?,
+                    explanation: row.get(7)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
         result
     } else {
         Vec::new()
@@ -279,10 +292,7 @@ pub fn decision_gates(
 }
 
 /// Build decision chain for a trade.
-pub fn trade_decision_trace(
-    conn: &Connection,
-    trade_id: i64,
-) -> Result<Value, HubError> {
+pub fn trade_decision_trace(conn: &Connection, trade_id: i64) -> Result<Value, HubError> {
     if !has_table(conn, "decision_lineage") || !has_table(conn, "decision_events") {
         return Ok(serde_json::json!({"chain": [], "lineage": null}));
     }
@@ -292,19 +302,21 @@ pub fn trade_decision_trace(
         "SELECT id, signal_decision_id, entry_trade_id, exit_decision_id,
                 exit_trade_id, exit_reason, duration_ms
          FROM decision_lineage
-         WHERE entry_trade_id = ? OR exit_trade_id = ?"
+         WHERE entry_trade_id = ? OR exit_trade_id = ?",
     )?;
-    let lineage_rows: Vec<DecisionLineage> = stmt.query_map(params![trade_id, trade_id], |row| {
-        Ok(DecisionLineage {
-            id: row.get(0)?,
-            signal_decision_id: row.get(1)?,
-            entry_trade_id: row.get(2)?,
-            exit_decision_id: row.get(3)?,
-            exit_trade_id: row.get(4)?,
-            exit_reason: row.get(5)?,
-            duration_ms: row.get(6)?,
-        })
-    })?.collect::<Result<Vec<_>, _>>()?;
+    let lineage_rows: Vec<DecisionLineage> = stmt
+        .query_map(params![trade_id, trade_id], |row| {
+            Ok(DecisionLineage {
+                id: row.get(0)?,
+                signal_decision_id: row.get(1)?,
+                entry_trade_id: row.get(2)?,
+                exit_decision_id: row.get(3)?,
+                exit_trade_id: row.get(4)?,
+                exit_reason: row.get(5)?,
+                duration_ms: row.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
 
     let lineage = lineage_rows.first().cloned();
 
@@ -332,7 +344,10 @@ pub fn trade_decision_trace(
         let placeholders = trade_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!("SELECT id FROM decision_events WHERE trade_id IN ({placeholders})");
         let mut stmt = conn.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::types::ToSql> = trade_ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+        let params: Vec<&dyn rusqlite::types::ToSql> = trade_ids
+            .iter()
+            .map(|id| id as &dyn rusqlite::types::ToSql)
+            .collect();
         let rows = stmt.query_map(params.as_slice(), |row| row.get::<_, String>(0))?;
         for row in rows.flatten() {
             decision_ids.insert(row);
@@ -344,7 +359,11 @@ pub fn trade_decision_trace(
     }
 
     // Fetch all matching decision events
-    let placeholders = decision_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let placeholders = decision_ids
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(",");
     let sql = format!(
         "SELECT id, timestamp_ms, symbol, event_type, status,
                 decision_phase, parent_decision_id, trade_id,
@@ -355,23 +374,28 @@ pub fn trade_decision_trace(
     );
     let mut stmt = conn.prepare(&sql)?;
     let ids_vec: Vec<String> = decision_ids.into_iter().collect();
-    let params: Vec<&dyn rusqlite::types::ToSql> = ids_vec.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
-    let chain: Vec<DecisionEvent> = stmt.query_map(params.as_slice(), |row| {
-        Ok(DecisionEvent {
-            id: row.get(0)?,
-            timestamp_ms: row.get(1)?,
-            symbol: row.get(2)?,
-            event_type: row.get(3)?,
-            status: row.get(4)?,
-            decision_phase: row.get(5)?,
-            parent_decision_id: row.get(6)?,
-            trade_id: row.get(7)?,
-            triggered_by: row.get(8)?,
-            action_taken: row.get(9)?,
-            rejection_reason: row.get(10)?,
-            context_json: row.get(11)?,
-        })
-    })?.collect::<Result<Vec<_>, _>>()?;
+    let params: Vec<&dyn rusqlite::types::ToSql> = ids_vec
+        .iter()
+        .map(|id| id as &dyn rusqlite::types::ToSql)
+        .collect();
+    let chain: Vec<DecisionEvent> = stmt
+        .query_map(params.as_slice(), |row| {
+            Ok(DecisionEvent {
+                id: row.get(0)?,
+                timestamp_ms: row.get(1)?,
+                symbol: row.get(2)?,
+                event_type: row.get(3)?,
+                status: row.get(4)?,
+                decision_phase: row.get(5)?,
+                parent_decision_id: row.get(6)?,
+                trade_id: row.get(7)?,
+                triggered_by: row.get(8)?,
+                action_taken: row.get(9)?,
+                rejection_reason: row.get(10)?,
+                context_json: row.get(11)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(serde_json::json!({"chain": chain, "lineage": lineage}))
 }

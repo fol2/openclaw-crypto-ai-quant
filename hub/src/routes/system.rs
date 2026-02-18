@@ -15,10 +15,7 @@ use crate::state::AppState;
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/system/services", get(list_services))
-        .route(
-            "/api/system/services/{name}/{action}",
-            post(service_action),
-        )
+        .route("/api/system/services/{name}/{action}", post(service_action))
         .route("/api/system/db-stats", get(db_stats))
         .route("/api/system/disk", get(disk_usage))
         .route("/api/system/logs", get(service_logs))
@@ -44,16 +41,12 @@ fn validate_service(name: &str) -> Result<(), HubError> {
     if ALLOWED_SERVICES.contains(&name) {
         Ok(())
     } else {
-        Err(HubError::BadRequest(format!(
-            "unknown service: {name}"
-        )))
+        Err(HubError::BadRequest(format!("unknown service: {name}")))
     }
 }
 
 /// GET /api/system/services — List systemd user services with status.
-async fn list_services(
-    State(_state): State<Arc<AppState>>,
-) -> Result<Json<Vec<Value>>, HubError> {
+async fn list_services(State(_state): State<Arc<AppState>>) -> Result<Json<Vec<Value>>, HubError> {
     let mut services = Vec::new();
 
     for svc_name in ALLOWED_SERVICES {
@@ -86,7 +79,12 @@ async fn list_services(
                 }
                 (active, sub, pid, load)
             }
-            Err(_) => ("unknown".to_string(), "unknown".to_string(), "0".to_string(), "unknown".to_string()),
+            Err(_) => (
+                "unknown".to_string(),
+                "unknown".to_string(),
+                "0".to_string(),
+                "unknown".to_string(),
+            ),
         };
 
         let status = if active == "active" {
@@ -142,9 +140,7 @@ async fn service_action(
 }
 
 /// GET /api/system/db-stats — Database file sizes and row counts.
-async fn db_stats(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<Value>>, HubError> {
+async fn db_stats(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Value>>, HubError> {
     let dbs = vec![
         ("live", &state.config.live_db),
         ("paper1", &state.config.paper1_db),
@@ -217,9 +213,7 @@ pub struct LogsQuery {
 }
 
 /// GET /api/system/logs — Recent journalctl logs for a service.
-async fn service_logs(
-    Query(q): Query<LogsQuery>,
-) -> Result<Json<Value>, HubError> {
+async fn service_logs(Query(q): Query<LogsQuery>) -> Result<Json<Value>, HubError> {
     validate_service(&q.service)?;
 
     let lines = q.lines.unwrap_or(50).min(500);
@@ -246,22 +240,27 @@ async fn service_logs(
 }
 
 /// GET /api/system/disk — Disk usage of key directories.
-async fn disk_usage(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<Value>>, HubError> {
+async fn disk_usage(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Value>>, HubError> {
     let dirs = vec![
         ("project_root", state.config.aiq_root.display().to_string()),
-        ("candle_dbs", state.config.candles_db_dir.display().to_string()),
-        ("artifacts", state.config.aiq_root.join("artifacts").display().to_string()),
+        (
+            "candle_dbs",
+            state.config.candles_db_dir.display().to_string(),
+        ),
+        (
+            "artifacts",
+            state
+                .config
+                .aiq_root
+                .join("artifacts")
+                .display()
+                .to_string(),
+        ),
     ];
 
     let mut result = Vec::new();
     for (label, path) in dirs {
-        let output = Command::new("du")
-            .arg("-sh")
-            .arg(&path)
-            .output()
-            .await;
+        let output = Command::new("du").arg("-sh").arg(&path).output().await;
         let size = output
             .ok()
             .map(|o| {

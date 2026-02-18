@@ -50,7 +50,10 @@ async fn run_sweep(
             "paper1" => "strategy_overrides.paper1.yaml",
             "paper2" => "strategy_overrides.paper2.yaml",
             "paper3" => "strategy_overrides.paper3.yaml",
-            _ => return Err(HubError::BadRequest(format!("unknown config: {config_variant}"))),
+            _ =>
+                return Err(HubError::BadRequest(format!(
+                    "unknown config: {config_variant}"
+                ))),
         }
     );
 
@@ -86,9 +89,7 @@ async fn run_sweep(
 }
 
 /// GET /api/sweep/jobs — list all sweep jobs.
-async fn list_jobs(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<Value>>, HubError> {
+async fn list_jobs(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Value>>, HubError> {
     let jobs = state.jobs.jobs.lock().await;
     let mut result: Vec<Value> = jobs
         .values()
@@ -117,7 +118,9 @@ async fn job_status(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HubError> {
     let jobs = state.jobs.jobs.lock().await;
-    let job = jobs.get(&id).ok_or_else(|| HubError::NotFound(format!("job {id} not found")))?;
+    let job = jobs
+        .get(&id)
+        .ok_or_else(|| HubError::NotFound(format!("job {id} not found")))?;
     Ok(Json(json!({
         "id": job.id,
         "status": job.status,
@@ -134,7 +137,9 @@ async fn job_results(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HubError> {
     let jobs = state.jobs.jobs.lock().await;
-    let job = jobs.get(&id).ok_or_else(|| HubError::NotFound(format!("job {id} not found")))?;
+    let job = jobs
+        .get(&id)
+        .ok_or_else(|| HubError::NotFound(format!("job {id} not found")))?;
     if job.status == JobStatus::Running {
         return Err(HubError::BadRequest("job still running".into()));
     }
@@ -150,7 +155,9 @@ async fn cancel_job(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HubError> {
     let mut jobs = state.jobs.jobs.lock().await;
-    let job = jobs.get_mut(&id).ok_or_else(|| HubError::NotFound(format!("job {id} not found")))?;
+    let job = jobs
+        .get_mut(&id)
+        .ok_or_else(|| HubError::NotFound(format!("job {id} not found")))?;
     if job.status != JobStatus::Running {
         return Err(HubError::BadRequest("job is not running".into()));
     }

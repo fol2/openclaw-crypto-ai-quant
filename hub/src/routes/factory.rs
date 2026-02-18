@@ -16,10 +16,7 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/factory/runs", get(list_runs))
         .route("/api/factory/runs/{date}/{run_id}", get(run_detail))
-        .route(
-            "/api/factory/runs/{date}/{run_id}/report",
-            get(run_report),
-        )
+        .route("/api/factory/runs/{date}/{run_id}/report", get(run_report))
         .route(
             "/api/factory/runs/{date}/{run_id}/candidates",
             get(run_candidates),
@@ -45,7 +42,11 @@ fn validate_date(date: &str) -> Result<(), HubError> {
 
 /// Validate a run_id (alphanumeric + underscores + dashes + T/Z).
 fn validate_run_id(id: &str) -> Result<(), HubError> {
-    if !id.is_empty() && id.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == 'T' || c == 'Z') {
+    if !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == 'T' || c == 'Z')
+    {
         Ok(())
     } else {
         Err(HubError::BadRequest(format!("invalid run_id: {id}")))
@@ -53,9 +54,7 @@ fn validate_run_id(id: &str) -> Result<(), HubError> {
 }
 
 /// GET /api/factory/runs — List all factory runs across all dates.
-async fn list_runs(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<Value>>, HubError> {
+async fn list_runs(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Value>>, HubError> {
     let base = artifacts_dir(&state);
     let mut runs = Vec::new();
 
@@ -125,7 +124,9 @@ async fn run_detail(
 
     let run_dir = artifacts_dir(&state).join(&date).join(&run_id);
     if !run_dir.is_dir() {
-        return Err(HubError::NotFound(format!("run not found: {date}/{run_id}")));
+        return Err(HubError::NotFound(format!(
+            "run not found: {date}/{run_id}"
+        )));
     }
 
     let meta_path = run_dir.join("run_metadata.json");
@@ -208,7 +209,10 @@ async fn run_candidates(
         }
     }
     candidates.sort_by(|a, b| {
-        a["filename"].as_str().unwrap_or("").cmp(b["filename"].as_str().unwrap_or(""))
+        a["filename"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["filename"].as_str().unwrap_or(""))
     });
 
     Ok(Json(candidates))

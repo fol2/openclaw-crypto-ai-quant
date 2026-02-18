@@ -7,10 +7,7 @@ use serde_json::json;
 /// Axum middleware: require `Authorization: Bearer <token>` when a token is configured.
 ///
 /// When `AIQ_MONITOR_TOKEN` is empty the middleware is a no-op (backwards compat).
-pub async fn require_auth(
-    request: Request,
-    next: Next,
-) -> Response {
+pub async fn require_auth(request: Request, next: Next) -> Response {
     let token = request
         .extensions()
         .get::<AuthToken>()
