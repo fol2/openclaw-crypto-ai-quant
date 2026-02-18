@@ -137,6 +137,19 @@ def _count_rows(con: sqlite3.Connection, *, symbol: str, start_ms: int, end_ms: 
         return 0
 
 
+def _journal_mode(con: sqlite3.Connection) -> str:
+    try:
+        row = con.execute("PRAGMA journal_mode").fetchone()
+    except Exception:
+        return ""
+    if row is None:
+        return ""
+    try:
+        return str(row[0] or "").strip().lower()
+    except Exception:
+        return ""
+
+
 def _hours(ms: int) -> float:
     return float(ms) / 3_600_000.0
 
@@ -197,6 +210,17 @@ def check_funding_rates_db(
             out["status"] = Status.FAIL
             out["errors"].append({"error": "table_missing", "message": f"funding_rates table not readable: {e}"})
             return out
+
+        journal_mode = _journal_mode(con)
+        if journal_mode and journal_mode != "wal":
+            out["status"] = _worst_status(str(out["status"]), Status.WARN)
+            out["issues"].append(
+                {
+                    "severity": Status.WARN,
+                    "type": "journal_mode",
+                    "message": f"SQLite journal_mode is '{journal_mode}', expected 'wal' for concurrent readers.",
+                }
+            )
 
         db_symbols = _get_db_symbols(con)
         target_symbols = symbols or db_symbols
@@ -481,6 +505,7 @@ def check_funding_rates_db(
             "issues_total": total_issues,
             "issues_warn": total_warn,
             "issues_fail": total_fail,
+            "journal_mode": journal_mode or "unknown",
         }
         return out
     finally:
