@@ -1,5 +1,6 @@
 use rusqlite::{params, Connection};
 use serde::Serialize;
+use serde_json::Value;
 use crate::error::HubError;
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -391,4 +392,323 @@ pub fn list_recent_symbols(
 
     symbols.truncate(200);
     Ok(symbols)
+}
+
+// ── Marks ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TradeEntry {
+    pub id: i64,
+    pub timestamp: Option<String>,
+    pub action: Option<String>,
+    #[serde(rename = "type")]
+    pub trade_type: Option<String>,
+    pub price: Option<f64>,
+    pub size: Option<f64>,
+    pub confidence: Option<String>,
+}
+
+/// Compute open position for a single symbol.
+pub fn open_position_for_symbol(conn: &Connection, symbol: &str) -> Result<Option<OpenPosition>, HubError> {
+    let positions = compute_open_positions(conn)?;
+    Ok(positions.into_iter().find(|p| p.symbol == symbol))
+}
+
+/// Fetch entry trades for a position (OPEN + ADD since open_trade_id).
+pub fn position_entries(conn: &Connection, symbol: &str, open_trade_id: i64) -> Result<Vec<TradeEntry>, HubError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, timestamp, action, type, price, size, confidence
+         FROM trades
+         WHERE symbol = ? AND id >= ? AND action IN ('OPEN', 'ADD')
+         ORDER BY id ASC"
+    )?;
+    let rows = stmt.query_map(params![symbol, open_trade_id], |row| {
+        Ok(TradeEntry {
+            id: row.get(0)?,
+            timestamp: row.get(1)?,
+            action: row.get(2)?,
+            trade_type: row.get(3)?,
+            price: row.get(4)?,
+            size: row.get(5)?,
+            confidence: row.get(6)?,
+        })
+    })?.collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+// ── Daily Metrics ────────────────────────────────────────────────────────
+
+/// Compute daily metrics for the current UTC day.
+pub fn daily_metrics(conn: &Connection, now_ms: i64) -> Result<DailyMetrics, HubError> {
+    let ts_secs = now_ms / 1000;
+    let day = chrono::DateTime::from_timestamp(ts_secs, 0)
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_default();
+
+    let mut daily = DailyMetrics {
+        utc_day: day.clone(),
+        trades: 0,
+        start_balance: None,
+        end_balance: None,
+        pnl_usd: 0.0,
+        fees_usd: 0.0,
+        net_pnl_usd: 0.0,
+        peak_realised_balance: None,
+        drawdown_pct: 0.0,
+    };
+
+    if day.is_empty() {
+        return Ok(daily);
+    }
+
+    let like = format!("{day}%");
+
+    // Start balance
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT balance FROM trades WHERE timestamp LIKE ? AND balance IS NOT NULL ORDER BY id ASC LIMIT 1"
+    ) {
+        if let Ok(b) = stmt.query_row(params![like], |row| row.get::<_, f64>(0)) {
+            daily.start_balance = Some(b);
+        }
+    }
+
+    // End balance
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT balance FROM trades WHERE timestamp LIKE ? AND balance IS NOT NULL ORDER BY id DESC LIMIT 1"
+    ) {
+        if let Ok(b) = stmt.query_row(params![like], |row| row.get::<_, f64>(0)) {
+            daily.end_balance = Some(b);
+        }
+    }
+
+    // Peak balance
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT MAX(balance) FROM trades WHERE timestamp LIKE ? AND balance IS NOT NULL"
+    ) {
+        if let Ok(b) = stmt.query_row(params![like], |row| row.get::<_, Option<f64>>(0)) {
+            daily.peak_realised_balance = b;
+        }
+    }
+
+    // Trade count
+    if let Ok(mut stmt) = conn.prepare("SELECT COUNT(*) FROM trades WHERE timestamp LIKE ?") {
+        if let Ok(n) = stmt.query_row(params![like], |row| row.get::<_, i64>(0)) {
+            daily.trades = n;
+        }
+    }
+
+    // Fees
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT SUM(COALESCE(fee_usd, 0)) FROM trades WHERE timestamp LIKE ?"
+    ) {
+        if let Ok(f) = stmt.query_row(params![like], |row| row.get::<_, Option<f64>>(0)) {
+            daily.fees_usd = f.unwrap_or(0.0);
+        }
+    }
+
+    // PnL
+    if let (Some(start), Some(end)) = (daily.start_balance, daily.end_balance) {
+        daily.pnl_usd = end - start;
+        daily.net_pnl_usd = daily.pnl_usd - daily.fees_usd;
+    }
+
+    Ok(daily)
+}
+
+// ── OMS Queries ──────────────────────────────────────────────────────────
+
+/// Fetch recent OMS intents.
+pub fn recent_oms_intents(conn: &Connection, limit: u32) -> Result<Vec<Value>, HubError> {
+    if !has_table(conn, "oms_intents") {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT created_ts_ms, symbol, action, side, status, confidence, reason,
+                dedupe_key, client_order_id, exchange_order_id, last_error
+         FROM oms_intents ORDER BY created_ts_ms DESC LIMIT ?"
+    )?;
+    let rows = stmt.query_map(params![limit], |row| {
+        Ok(serde_json::json!({
+            "created_ts_ms": row.get::<_, Option<i64>>(0)?,
+            "symbol": row.get::<_, Option<String>>(1)?,
+            "action": row.get::<_, Option<String>>(2)?,
+            "side": row.get::<_, Option<String>>(3)?,
+            "status": row.get::<_, Option<String>>(4)?,
+            "confidence": row.get::<_, Option<String>>(5)?,
+            "reason": row.get::<_, Option<String>>(6)?,
+            "dedupe_key": row.get::<_, Option<String>>(7)?,
+            "client_order_id": row.get::<_, Option<String>>(8)?,
+            "exchange_order_id": row.get::<_, Option<String>>(9)?,
+            "last_error": row.get::<_, Option<String>>(10)?,
+        }))
+    })?.filter_map(|r| r.ok()).collect();
+    Ok(rows)
+}
+
+/// Fetch recent OMS fills.
+pub fn recent_oms_fills(conn: &Connection, limit: u32) -> Result<Vec<Value>, HubError> {
+    if !has_table(conn, "oms_fills") {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT ts_ms, symbol, intent_id, action, side, price, size, notional, fee_usd, pnl_usd, matched_via
+         FROM oms_fills ORDER BY ts_ms DESC LIMIT ?"
+    )?;
+    let rows = stmt.query_map(params![limit], |row| {
+        Ok(serde_json::json!({
+            "ts_ms": row.get::<_, Option<i64>>(0)?,
+            "symbol": row.get::<_, Option<String>>(1)?,
+            "intent_id": row.get::<_, Option<String>>(2)?,
+            "action": row.get::<_, Option<String>>(3)?,
+            "side": row.get::<_, Option<String>>(4)?,
+            "price": row.get::<_, Option<f64>>(5)?,
+            "size": row.get::<_, Option<f64>>(6)?,
+            "notional": row.get::<_, Option<f64>>(7)?,
+            "fee_usd": row.get::<_, Option<f64>>(8)?,
+            "pnl_usd": row.get::<_, Option<f64>>(9)?,
+            "matched_via": row.get::<_, Option<String>>(10)?,
+        }))
+    })?.filter_map(|r| r.ok()).collect();
+    Ok(rows)
+}
+
+/// Fetch recent OMS open orders.
+pub fn recent_oms_open_orders(conn: &Connection, limit: u32) -> Result<Vec<Value>, HubError> {
+    if !has_table(conn, "oms_open_orders") {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT last_seen_ts_ms, symbol, side, price, remaining_size, reduce_only,
+                client_order_id, exchange_order_id, intent_id
+         FROM oms_open_orders ORDER BY last_seen_ts_ms DESC LIMIT ?"
+    )?;
+    let rows = stmt.query_map(params![limit], |row| {
+        Ok(serde_json::json!({
+            "last_seen_ts_ms": row.get::<_, Option<i64>>(0)?,
+            "symbol": row.get::<_, Option<String>>(1)?,
+            "side": row.get::<_, Option<String>>(2)?,
+            "price": row.get::<_, Option<f64>>(3)?,
+            "remaining_size": row.get::<_, Option<f64>>(4)?,
+            "reduce_only": row.get::<_, Option<bool>>(5)?,
+            "client_order_id": row.get::<_, Option<String>>(6)?,
+            "exchange_order_id": row.get::<_, Option<String>>(7)?,
+            "intent_id": row.get::<_, Option<String>>(8)?,
+        }))
+    })?.filter_map(|r| r.ok()).collect();
+    Ok(rows)
+}
+
+/// Fetch recent OMS reconcile events.
+pub fn recent_oms_reconcile(conn: &Connection, limit: u32) -> Result<Vec<Value>, HubError> {
+    if !has_table(conn, "oms_reconcile_events") {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT ts_ms, kind, symbol, result
+         FROM oms_reconcile_events ORDER BY ts_ms DESC LIMIT ?"
+    )?;
+    let rows = stmt.query_map(params![limit], |row| {
+        Ok(serde_json::json!({
+            "ts_ms": row.get::<_, Option<i64>>(0)?,
+            "kind": row.get::<_, Option<String>>(1)?,
+            "symbol": row.get::<_, Option<String>>(2)?,
+            "result": row.get::<_, Option<String>>(3)?,
+        }))
+    })?.filter_map(|r| r.ok()).collect();
+    Ok(rows)
+}
+
+/// Fetch recent audit events.
+pub fn recent_audit_events(conn: &Connection, limit: u32) -> Result<Vec<Value>, HubError> {
+    if !has_table(conn, "audit_events") {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT timestamp, symbol, event, level, data_json
+         FROM audit_events ORDER BY id DESC LIMIT ?"
+    )?;
+    let rows = stmt.query_map(params![limit], |row| {
+        Ok(serde_json::json!({
+            "timestamp": row.get::<_, Option<String>>(0)?,
+            "symbol": row.get::<_, Option<String>>(1)?,
+            "event": row.get::<_, Option<String>>(2)?,
+            "level": row.get::<_, Option<String>>(3)?,
+            "data_json": row.get::<_, Option<String>>(4)?,
+        }))
+    })?.filter_map(|r| r.ok()).collect();
+    Ok(rows)
+}
+
+/// Fetch last OMS intent per symbol.
+pub fn last_intents_by_symbol(
+    conn: &Connection,
+    symbols: &[String],
+) -> Result<std::collections::HashMap<String, Value>, HubError> {
+    if symbols.is_empty() || !has_table(conn, "oms_intents") {
+        return Ok(Default::default());
+    }
+    let placeholders = symbols.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT i.symbol, i.created_ts_ms, i.action, i.side, i.status, i.confidence,
+                i.reason, i.dedupe_key, i.client_order_id
+         FROM oms_intents i
+         JOIN (SELECT symbol, MAX(rowid) AS max_id FROM oms_intents WHERE symbol IN ({placeholders}) GROUP BY symbol) m
+           ON m.symbol = i.symbol AND m.max_id = i.rowid"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let params: Vec<&dyn rusqlite::types::ToSql> = symbols.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+    let rows = stmt.query_map(params.as_slice(), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            serde_json::json!({
+                "created_ts_ms": row.get::<_, Option<i64>>(1)?,
+                "action": row.get::<_, Option<String>>(2)?,
+                "side": row.get::<_, Option<String>>(3)?,
+                "status": row.get::<_, Option<String>>(4)?,
+                "confidence": row.get::<_, Option<String>>(5)?,
+                "reason": row.get::<_, Option<String>>(6)?,
+                "dedupe_key": row.get::<_, Option<String>>(7)?,
+                "client_order_id": row.get::<_, Option<String>>(8)?,
+            }),
+        ))
+    })?.filter_map(|r| r.ok()).collect::<Vec<_>>();
+
+    Ok(rows.into_iter().collect())
+}
+
+/// Compute metrics counters (orders, fills, kill events).
+pub fn metrics_counters(conn: &Connection) -> Result<Value, HubError> {
+    let has_oms = has_table(conn, "oms_intents");
+    let mut counters = serde_json::Map::new();
+
+    if has_oms {
+        if let Ok(mut stmt) = conn.prepare("SELECT COUNT(*) FROM oms_intents") {
+            if let Ok(n) = stmt.query_row([], |row| row.get::<_, i64>(0)) {
+                counters.insert("orders_total".into(), serde_json::json!(n));
+            }
+        }
+        if let Ok(mut stmt) = conn.prepare("SELECT COUNT(*) FROM oms_fills") {
+            if let Ok(n) = stmt.query_row([], |row| row.get::<_, i64>(0)) {
+                counters.insert("fills_total".into(), serde_json::json!(n));
+            }
+        }
+    } else {
+        if let Ok(mut stmt) = conn.prepare("SELECT COUNT(*) FROM trades") {
+            if let Ok(n) = stmt.query_row([], |row| row.get::<_, i64>(0)) {
+                counters.insert("orders_total".into(), serde_json::json!(n));
+                counters.insert("fills_total".into(), serde_json::json!(n));
+            }
+        }
+    }
+
+    // Kill events
+    if has_table(conn, "audit_events") {
+        if let Ok(mut stmt) = conn.prepare("SELECT COUNT(*) FROM audit_events WHERE event LIKE 'RISK_KILL_%'") {
+            if let Ok(n) = stmt.query_row([], |row| row.get::<_, i64>(0)) {
+                counters.insert("kill_events_total".into(), serde_json::json!(n));
+            }
+        }
+    }
+
+    Ok(Value::Object(counters))
 }

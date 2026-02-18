@@ -1,6 +1,7 @@
 <script lang="ts">
   import './app.css';
   import Sidebar from './components/Sidebar.svelte';
+  import Dashboard from './pages/Dashboard.svelte';
 
   // Simple hash-based routing for SPA.
   let currentPage = $state(window.location.hash.slice(1) || 'dashboard');
@@ -19,8 +20,7 @@
 
 <main class="main-content">
   {#if currentPage === 'dashboard'}
-    <h1>Dashboard</h1>
-    <p class="placeholder">Real-time monitor — coming in Phase 2</p>
+    <Dashboard />
   {:else if currentPage === 'config'}
     <h1>Config</h1>
     <p class="placeholder">YAML editor — coming in Phase 3</p>

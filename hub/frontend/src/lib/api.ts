@@ -52,3 +52,12 @@ export async function getHealth() {
 export async function getMetrics(mode = 'paper') {
   return apiFetch(`/api/metrics?mode=${encodeURIComponent(mode)}`);
 }
+
+export async function getMarks(symbol: string, mode = 'paper') {
+  return apiFetch(`/api/marks?symbol=${encodeURIComponent(symbol)}&mode=${encodeURIComponent(mode)}`);
+}
+
+export async function getDecisions(mode = 'paper', params: Record<string, string> = {}) {
+  const qs = new URLSearchParams({ mode, ...params });
+  return apiFetch(`/api/v2/decisions?${qs}`);
+}
