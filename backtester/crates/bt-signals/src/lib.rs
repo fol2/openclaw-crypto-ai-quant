@@ -30,12 +30,14 @@ pub enum Confidence {
 }
 
 impl Confidence {
-    pub fn from_str(s: &str) -> Self {
-        match s.to_ascii_lowercase().as_str() {
-            "low" => Confidence::Low,
-            "medium" => Confidence::Medium,
-            "high" => Confidence::High,
-            _ => Confidence::High,
+    pub fn from_str(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "low" => Ok(Confidence::Low),
+            "medium" => Ok(Confidence::Medium),
+            "high" => Ok(Confidence::High),
+            _ => Err(format!(
+                "invalid confidence {s:?}; expected low|medium|high"
+            )),
         }
     }
 }
@@ -56,7 +58,7 @@ impl<'de> Deserialize<'de> for Confidence {
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Ok(Confidence::from_str(&s))
+        Confidence::from_str(&s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -72,12 +74,12 @@ pub enum MacdMode {
 }
 
 impl MacdMode {
-    pub fn from_str(s: &str) -> Self {
-        match s.to_ascii_lowercase().as_str() {
-            "accel" => MacdMode::Accel,
-            "sign" => MacdMode::Sign,
-            "none" => MacdMode::None,
-            _ => MacdMode::Accel,
+    pub fn from_str(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "accel" => Ok(MacdMode::Accel),
+            "sign" => Ok(MacdMode::Sign),
+            "none" => Ok(MacdMode::None),
+            _ => Err(format!("invalid macd mode {s:?}; expected accel|sign|none")),
         }
     }
 }
@@ -98,6 +100,39 @@ impl<'de> Deserialize<'de> for MacdMode {
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Ok(MacdMode::from_str(&s))
+        MacdMode::from_str(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Confidence, MacdMode};
+
+    #[test]
+    fn confidence_from_str_rejects_unknown_values() {
+        assert_eq!(Confidence::from_str("low").unwrap(), Confidence::Low);
+        assert_eq!(Confidence::from_str("medium").unwrap(), Confidence::Medium);
+        assert_eq!(Confidence::from_str("high").unwrap(), Confidence::High);
+        assert!(Confidence::from_str("typo").is_err());
+    }
+
+    #[test]
+    fn macd_mode_from_str_rejects_unknown_values() {
+        assert_eq!(MacdMode::from_str("accel").unwrap(), MacdMode::Accel);
+        assert_eq!(MacdMode::from_str("sign").unwrap(), MacdMode::Sign);
+        assert_eq!(MacdMode::from_str("none").unwrap(), MacdMode::None);
+        assert!(MacdMode::from_str("typo").is_err());
+    }
+
+    #[test]
+    fn confidence_deserialize_fails_on_unknown_value() {
+        let parsed: Result<Confidence, _> = serde_yaml::from_str("typo");
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn macd_mode_deserialize_fails_on_unknown_value() {
+        let parsed: Result<MacdMode, _> = serde_yaml::from_str("typo");
+        assert!(parsed.is_err());
     }
 }
