@@ -3,10 +3,13 @@
   import { getSnapshot, getCandles, getMarks, postFlashDebug } from '../lib/api';
   import { hubWs } from '../lib/ws';
 
+  const INTERVALS = ['1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d'] as const;
+
   let snap: any = $state(null);
   let focusSym = $state('');
   let candles: any[] = $state([]);
   let marks: any = $state(null);
+  let selectedInterval = $state('1h');
   let pollTimer: any = null;
   let error = $state('');
   let mobileTab: 'symbols' | 'detail' | 'feed' = $state('symbols');
@@ -157,6 +160,27 @@
     }
   }
 
+  // Returns candle limit sized to give roughly 1-7 days of data per interval.
+  function candleLimit(iv: string): number {
+    switch (iv) {
+      case '1m':  return 400;   // ~6.7 h
+      case '3m':  return 300;   // ~15 h
+      case '5m':  return 288;   // ~24 h
+      case '15m': return 240;   // ~60 h
+      case '30m': return 200;   // ~4 days
+      case '1h':  return 168;   // ~7 days
+      case '4h':  return 180;   // ~30 days
+      case '1d':  return 200;   // ~200 days
+      default:    return 200;
+    }
+  }
+
+  // Track previous symbol so we can clear candles on symbol switch
+  // (plain let — not reactive, no effect re-run on change)
+  let _prevFocusSym = '';
+  // Timestamp of last live-candle paint; used to cap redraws at ~15fps
+  let _liveUpdateMs = 0;
+
   async function setFocus(sym: string) {
     focusSym = sym;
     appState.focus = sym;
@@ -165,14 +189,54 @@
     if (!sym) return;
     mobileTab = 'detail';
     try {
-      const [c, m] = await Promise.all([
-        getCandles(sym, undefined, 200),
-        getMarks(sym, appState.mode),
-      ]);
-      candles = c.candles || [];
-      marks = m;
+      marks = await getMarks(sym, appState.mode);
     } catch { /* ignore */ }
   }
+
+  // Re-fetch candles when symbol or interval changes.
+  // Only clears the chart when the symbol changes (not on interval switch)
+  // so old data stays visible during the brief network round-trip.
+  $effect(() => {
+    const sym = focusSym;
+    const iv  = selectedInterval;
+    if (!sym) { candles = []; _prevFocusSym = ''; return; }
+    if (sym !== _prevFocusSym) { candles = []; _prevFocusSym = sym; }
+    let cancelled = false;
+    getCandles(sym, iv, candleLimit(iv))
+      .then(r => { if (!cancelled) candles = r.candles || []; })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  });
+
+  // Live last-candle update: mutate the newest candle's OHLC via WebSocket mids.
+  // Rate-limited to ~15fps (66ms) to avoid triggering JSON.stringify + full
+  // canvas redraw at the raw WS cadence (~100ms / 10Hz).
+  // Stops updating once t_close has passed (candle is sealed by the exchange).
+  $effect(() => {
+    const sym = focusSym;
+    if (!sym) return;
+    const handler = (data: any) => {
+      const now = Date.now();
+      if (now - _liveUpdateMs < 66) return;          // ~15fps cap
+      const mid = data?.mids?.[sym];
+      if (mid == null || candles.length === 0) return;
+      // Find the newest candle by timestamp
+      let liveIdx = 0;
+      for (let i = 1; i < candles.length; i++) {
+        if (candles[i].t > candles[liveIdx].t) liveIdx = i;
+      }
+      const c = candles[liveIdx];
+      // Guard: t_close=0 means the DB row had no close-time — treat as open.
+      // Only skip if we have a valid future close time that has already elapsed.
+      if (c.t_close != null && c.t_close > 0 && now > c.t_close) return;
+      _liveUpdateMs = now;
+      c.c = mid;
+      if (mid > c.h) c.h = mid;
+      if (mid < c.l) c.l = mid;
+    };
+    hubWs.subscribe('mids', handler);
+    return () => hubWs.unsubscribe('mids', handler);
+  });
 
   function setMode(m: string) {
     appState.mode = m;
@@ -411,6 +475,26 @@
         </button>
       </div>
 
+      <!-- Interval selector + chart (always shown when symbol focused) -->
+      <div class="iv-bar">
+        {#each INTERVALS as iv}
+          <button
+            class="iv-tab"
+            class:is-on={selectedInterval === iv}
+            onclick={() => { selectedInterval = iv; }}
+          >{iv.toUpperCase()}</button>
+        {/each}
+      </div>
+      <div class="chart-wrap">
+        <candle-chart
+          candles={JSON.stringify(candles)}
+          entries={JSON.stringify(marks?.entries || [])}
+          entryPrice={marks?.position?.entry_price ?? 0}
+          symbol={focusSym}
+          interval={selectedInterval}
+        ></candle-chart>
+      </div>
+
       {#if marks?.position}
         {@const p = marks.position}
         <div class="kv-section">
@@ -436,15 +520,6 @@
         <div class="empty-state">
           <span class="empty-label">Flat</span>
           <span class="empty-sub">No open position</span>
-        </div>
-      {/if}
-
-      {#if candles.length > 0}
-        <div class="kv-section">
-          <h4>Candles ({candles.length})</h4>
-          <div class="kv"><span class="k">Last close</span><span class="v mono">{fmtNum(candles[candles.length - 1]?.c, 6)}</span></div>
-          <div class="kv"><span class="k">Last high</span><span class="v mono">{fmtNum(candles[candles.length - 1]?.h, 6)}</span></div>
-          <div class="kv"><span class="k">Last low</span><span class="v mono">{fmtNum(candles[candles.length - 1]?.l, 6)}</span></div>
         </div>
       {/if}
 
@@ -887,6 +962,42 @@
 
   /* ─── Detail panel ─── */
   .detail-panel { overflow-y: auto; }
+
+  /* ─── Interval selector ─── */
+  .iv-bar {
+    display: flex;
+    gap: 1px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border-subtle);
+    flex-shrink: 0;
+    background: var(--surface);
+  }
+  .iv-tab {
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    padding: 3px 7px;
+    cursor: pointer;
+    font-size: 10px;
+    font-weight: 600;
+    border-radius: 3px;
+    letter-spacing: 0.05em;
+    font-family: 'IBM Plex Mono', monospace;
+    transition: all var(--t-fast);
+  }
+  .iv-tab:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+  .iv-tab.is-on { color: var(--accent); background: var(--accent-bg); }
+
+  /* ─── Candle chart container ─── */
+  .chart-wrap {
+    height: 240px;
+    flex-shrink: 0;
+    border-bottom: 1px solid var(--border-subtle);
+    overflow: hidden;
+  }
+  @media (max-width: 768px) {
+    .chart-wrap { height: 200px; }
+  }
   .detail-header {
     gap: 8px;
   }
