@@ -89,7 +89,9 @@ struct Args {
     #[arg(long, default_value_t = 1e-6)]
     pnl_eps: f64,
 
-    /// Relative tolerance for total PnL (applied against max(|CPU|, |GPU|, 1.0)).
+    /// Relative tolerance for total PnL.
+    ///
+    /// Applied against max(|CPU total_pnl|, |GPU total_pnl|, initial_balance, 1.0).
     #[arg(long, default_value_t = 2e-7)]
     pnl_rel_eps: f64,
 
@@ -496,6 +498,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let baseline_balance_delta_abs =
         (baseline_gpu.final_balance - baseline_cpu.final_balance).abs();
     let baseline_pnl_delta_abs = (baseline_gpu.total_pnl - baseline_cpu.total_pnl).abs();
+    let pnl_scale_floor = spec.initial_balance.abs().max(1.0);
     let baseline_balance_ok = within_abs_or_rel(
         baseline_balance_delta_abs,
         baseline_gpu.final_balance,
@@ -505,8 +508,8 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     );
     let baseline_pnl_ok = within_abs_or_rel(
         baseline_pnl_delta_abs,
-        baseline_gpu.final_balance,
-        baseline_cpu.final_balance,
+        baseline_gpu.total_pnl.abs().max(pnl_scale_floor),
+        baseline_cpu.total_pnl.abs().max(pnl_scale_floor),
         args.pnl_eps,
         args.pnl_rel_eps,
     );
@@ -690,8 +693,8 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             );
             let pnl_ok = within_abs_or_rel(
                 pnl_delta_abs,
-                gpu.final_balance,
-                cpu.final_balance,
+                gpu.total_pnl.abs().max(pnl_scale_floor),
+                cpu.total_pnl.abs().max(pnl_scale_floor),
                 args.pnl_eps,
                 args.pnl_rel_eps,
             );
