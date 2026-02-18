@@ -84,6 +84,23 @@ def test_run_cmd_respects_env_default_timeout_disable(
     assert out_path.read_text(encoding="utf-8").strip() == "done"
 
 
+def test_run_cmd_missing_executable_returns_non_zero(tmp_path: Path) -> None:
+    out_path = tmp_path / "missing.stdout.txt"
+    err_path = tmp_path / "missing.stderr.txt"
+
+    res = factory_run._run_cmd(
+        ["__definitely_missing_binary_for_factory_run_tests__"],
+        cwd=tmp_path,
+        stdout_path=out_path,
+        stderr_path=err_path,
+        timeout_s=1.0,
+    )
+
+    assert res.exit_code == 127
+    assert res.timed_out is False
+    assert "failed to start command" in err_path.read_text(encoding="utf-8").lower()
+
+
 def test_ensure_cuda_env_returns_copy_without_global_mutation(monkeypatch) -> None:
     monkeypatch.setenv("LD_LIBRARY_PATH", "/base")
     monkeypatch.setattr(factory_run.Path, "is_dir", lambda p: p.as_posix() == "/usr/lib/wsl/lib")

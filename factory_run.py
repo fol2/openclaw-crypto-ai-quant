@@ -742,6 +742,7 @@ def _run_cmd(
 
     proc_env = _resolve_subprocess_env(cwd=cwd, env=env)
 
+    exit_code = -1
     try:
         proc = subprocess.Popen(
             argv,
@@ -756,7 +757,7 @@ def _run_cmd(
         if effective_timeout_s is not None and effective_timeout_s > 0:
             deadline = t0 + float(effective_timeout_s)
 
-        exit_code: int | None = None
+        exit_code = 1
         while True:
             polled = proc.poll()
             if polled is not None:
@@ -829,8 +830,14 @@ def _run_cmd(
 
             time.sleep(0.1)
 
-        if exit_code is None:
-            exit_code = 1
+    except OSError as exc:
+        exit_code = 127
+        if hasattr(stderr_f, "write"):
+            try:
+                stderr_f.write(f"Failed to start command {list(argv)}: {type(exc).__name__}: {exc}\n")
+                stderr_f.flush()
+            except Exception:
+                pass
     finally:
         _ACTIVE_CHILD_PROCESS = None
         if hasattr(stdout_f, "close"):
