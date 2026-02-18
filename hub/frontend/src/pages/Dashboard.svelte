@@ -294,8 +294,7 @@
 
   // ── Resizable columns ──────────────────────────────────────────────────────
   const SYM_MIN = 200;
-  // collapsed sidebar = 56px, splitter = 10px, detail panel min = 280px
-  let symWidth = $state(Math.max(SYM_MIN, Math.round((window.innerWidth - 56 - 10) * 0.40)));
+  let symWidth = $state(455);
   let dragging = $state(false);
 
   function onSplitterDown(e: PointerEvent) {
