@@ -463,17 +463,26 @@ class HyperliquidWS:
             od = self._candles.get(key)
             if od is None or len(od) < min_rows:
                 return None
-            rows = list(od.values())[-min_rows:]
+            rows = list(od.values())
 
         df = pd.DataFrame(rows)
         if df.empty:
             return None
 
         # Keep output compatible with the existing strategy code.
+        numeric_cols: list[str] = []
         for col in ["Open", "High", "Low", "Close", "Volume"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
-        return df
+                numeric_cols.append(col)
+
+        if numeric_cols:
+            df = df.dropna(subset=numeric_cols)
+
+        if df.empty or len(df) < int(min_rows):
+            return None
+
+        return df.tail(int(min_rows)).copy()
 
     def _drain_deque(self, q: deque[dict], *, max_items: int | None) -> list[dict]:
         items: list[dict] = []
