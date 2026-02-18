@@ -11,6 +11,7 @@ mod ws;
 
 use axum::middleware;
 use axum::Router;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
@@ -91,8 +92,10 @@ async fn shutdown_signal() {
 fn spawn_mids_poller(state: Arc<AppState>) {
     let poll_ms = state.config.mids_poll_ms.max(20);
     let wait_timeout_ms = state.config.mids_wait_timeout_ms.max(100);
+    let mids_debug_log = state.config.mids_debug_log;
     tokio::spawn(async move {
         let mut after_seq: Option<u64> = None;
+        let mut last_published_mids: HashMap<String, f64> = HashMap::new();
         loop {
             // Read the symbols last seen in a snapshot query.
             // Skips until the first REST snapshot has been fetched.
@@ -121,6 +124,31 @@ fn spawn_mids_poller(state: Arc<AppState>) {
                     if snap.seq_reset {
                         tracing::debug!("sidecar mids sequence reset detected; re-synchronised");
                     }
+                    if mids_debug_log {
+                        let mut changed_symbols: Vec<String> = Vec::new();
+                        for (sym, mid) in &snap.mids {
+                            let is_changed = match last_published_mids.get(sym) {
+                                Some(prev) => *prev != *mid,
+                                None => true,
+                            };
+                            if is_changed {
+                                changed_symbols.push(sym.clone());
+                            }
+                        }
+                        changed_symbols.sort_unstable();
+                        let sample: Vec<String> = changed_symbols.iter().take(20).cloned().collect();
+                        tracing::info!(
+                            mids_seq = ?snap.mids_seq,
+                            changed_symbols = changed_symbols.len(),
+                            tracked_symbols = snap.mids.len(),
+                            timed_out = snap.timed_out,
+                            seq_reset = snap.seq_reset,
+                            sample = ?sample,
+                            "mids publish"
+                        );
+                    }
+                    last_published_mids.clear();
+                    last_published_mids.extend(snap.mids.iter().map(|(sym, mid)| (sym.clone(), *mid)));
                     if let Ok(json) = serde_json::to_string(&serde_json::json!({
                         "type": "mids",
                         "data": snap,
@@ -136,6 +164,7 @@ fn spawn_mids_poller(state: Arc<AppState>) {
                     tracing::debug!("Mids poll failed: {e}");
                     // Recover cleanly after sidecar reconnects/restarts.
                     after_seq = None;
+                    last_published_mids.clear();
                     tokio::time::sleep(std::time::Duration::from_millis(poll_ms)).await;
                 }
             }
