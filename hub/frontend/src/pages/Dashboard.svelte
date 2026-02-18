@@ -169,6 +169,7 @@
     try {
       appState.loading = true;
       const data = await getSnapshot(appState.mode);
+      updateServerClockOffset(data?.now_ts_ms);
       // Preserve live WS mid prices — don't let stale REST prices overwrite them.
       // WS owns price; REST owns everything else (positions, signals, heartbeat, balances).
       if (snap?.symbols && data?.symbols) {
@@ -228,8 +229,20 @@
   // Track previous symbol so we can clear candles on symbol switch
   // (plain let — not reactive, no effect re-run on change)
   let _prevFocusSym = '';
+  // Client/server clock offset for candle-boundary alignment.
+  let _serverNowOffsetMs = 0;
   // Timestamp of last live-candle paint; used to cap redraws at ~15fps
   let _liveUpdateMs = 0;
+
+  function updateServerClockOffset(serverNowMs: unknown) {
+    const ts = Number(serverNowMs);
+    if (!Number.isFinite(ts) || ts <= 0) return;
+    _serverNowOffsetMs = ts - Date.now();
+  }
+
+  function serverNowMs(): number {
+    return Date.now() + _serverNowOffsetMs;
+  }
 
   async function setFocus(sym: string) {
     focusSym = sym;
@@ -268,11 +281,14 @@
     const sym = focusSym;
     if (!sym) return;
     const handler = (data: any) => {
-      const now = Date.now();
-      if (now - _liveUpdateMs < 66) return; // ~15fps cap
+      updateServerClockOffset(data?.server_ts_ms);
+      const localNow = Date.now();
+      if (localNow - _liveUpdateMs < 66) return; // ~15fps cap
       const mid = Number(data?.mids?.[sym]);
       if (!Number.isFinite(mid) || mid <= 0 || candles.length === 0) return;
 
+      const wsServerNow = Number(data?.server_ts_ms);
+      const now = Number.isFinite(wsServerNow) && wsServerNow > 0 ? wsServerNow : serverNowMs();
       const msPerBar = intervalToMs(selectedInterval);
       const barStart = Math.floor(now / msPerBar) * msPerBar;
       const barClose = barStart + msPerBar - 1;
@@ -298,7 +314,7 @@
         if (candles.length > selectedBars) {
           candles.splice(0, candles.length - selectedBars);
         }
-        _liveUpdateMs = now;
+        _liveUpdateMs = localNow;
         return;
       }
 
@@ -312,7 +328,7 @@
 
       const prevHigh = Number.isFinite(Number(c.h)) ? Number(c.h) : mid;
       const prevLow = Number.isFinite(Number(c.l)) ? Number(c.l) : mid;
-      _liveUpdateMs = now;
+      _liveUpdateMs = localNow;
       c.c = mid;
       c.h = Math.max(prevHigh, mid);
       c.l = Math.min(prevLow, mid);
