@@ -16,6 +16,33 @@
   let error = $state('');
   let mobileTab: 'symbols' | 'detail' | 'feed' = $state('symbols');
   let detailTab: 'detail' | 'trades' | 'oms' | 'audit' = $state('detail');
+  let detailExpanded = $state(false);
+  let chartHeight = $state(240);
+  let chartDragging = $state(false);
+  const CHART_MIN = 120;
+  const CHART_MAX = 600;
+
+  function onChartSplitterDown(e: PointerEvent) {
+    e.preventDefault();
+    chartDragging = true;
+    const startY = e.clientY;
+    const startH = chartHeight;
+    const target = e.currentTarget as HTMLElement;
+    target.setPointerCapture(e.pointerId);
+
+    function onMove(ev: PointerEvent) {
+      const h = startH + (ev.clientY - startY);
+      chartHeight = Math.max(CHART_MIN, Math.min(CHART_MAX, h));
+    }
+    function onUp() {
+      chartDragging = false;
+      target.removeEventListener('pointermove', onMove);
+      target.removeEventListener('pointerup', onUp);
+    }
+    target.addEventListener('pointermove', onMove);
+    target.addEventListener('pointerup', onUp);
+  }
+
   type FlashDebugEvent = {
     symbol: string;
     prev: number;
@@ -431,9 +458,9 @@
   </button>
 </div>
 
-<div class="dashboard-grid" class:is-dragging={dragging}>
+<div class="dashboard-grid" class:is-dragging={dragging || chartDragging} class:drag-col={dragging} class:drag-row={chartDragging}>
   <!-- Symbol table -->
-  <div class="panel symbols-panel" class:mobile-visible={mobileTab === 'symbols'} style="width:{symWidth}px;min-width:{symWidth}px">
+  <div class="panel symbols-panel" class:mobile-visible={mobileTab === 'symbols'} class:expanded-hidden={detailExpanded} style="width:{symWidth}px;min-width:{symWidth}px">
     <div class="panel-header">
       <div class="search-wrap">
         <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
@@ -511,7 +538,7 @@
   </div>
 
   <!-- Drag splitter -->
-  <div class="splitter" class:active={dragging} role="separator" aria-orientation="vertical" onpointerdown={onSplitterDown}></div>
+  <div class="splitter" class:active={dragging} class:expanded-hidden={detailExpanded} role="separator" aria-orientation="vertical" onpointerdown={onSplitterDown}></div>
 
   <!-- Detail + Feed panel (merged, tabbed) -->
   <div class="panel detail-panel" class:mobile-visible={mobileTab === 'detail' || mobileTab === 'feed'}>
@@ -536,6 +563,13 @@
         <button class="tab" class:is-on={detailTab === 'oms'} onclick={() => setFeed('oms')}>OMS</button>
         <button class="tab" class:is-on={detailTab === 'audit'} onclick={() => setFeed('audit')}>AUDIT</button>
       </div>
+      <button class="expand-btn" aria-label={detailExpanded ? 'Collapse' : 'Expand'} onclick={() => detailExpanded = !detailExpanded}>
+        {#if detailExpanded}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/></svg>
+        {:else}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+        {/if}
+      </button>
       {#if focusSym}
         <button class="close-focus" aria-label="Close" onclick={() => { focusSym = ''; mobileTab = 'symbols'; }}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg>
@@ -563,7 +597,7 @@
             >{bc}</button>
           {/each}
         </div>
-        <div class="chart-wrap">
+        <div class="chart-wrap" style="height:{chartHeight}px">
           <candle-chart
             candles={JSON.stringify(candles)}
             entries={JSON.stringify(marks?.entries || [])}
@@ -573,6 +607,7 @@
             interval={selectedInterval}
           ></candle-chart>
         </div>
+        <div class="chart-splitter" class:active={chartDragging} role="separator" aria-orientation="horizontal" onpointerdown={onChartSplitterDown}></div>
 
         {#if marks?.position}
           {@const p = marks.position}
@@ -887,7 +922,12 @@
   }
   .dashboard-grid.is-dragging {
     user-select: none;
+  }
+  .dashboard-grid.drag-col {
     cursor: col-resize;
+  }
+  .dashboard-grid.drag-row {
+    cursor: row-resize;
   }
 
   .splitter {
@@ -933,6 +973,11 @@
     margin: 0;
     font-size: 14px;
     font-weight: 600;
+  }
+
+  /* ─── Expanded detail (hide symbol panel + splitter) ─── */
+  .expanded-hidden {
+    display: none !important;
   }
 
   /* ─── Symbol table ─── */
@@ -1142,13 +1187,34 @@
 
   /* ─── Candle chart container ─── */
   .chart-wrap {
-    height: 240px;
     flex-shrink: 0;
-    border-bottom: 1px solid var(--border-subtle);
     overflow: hidden;
   }
+  .chart-splitter {
+    height: 8px;
+    cursor: row-resize;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .chart-splitter::after {
+    content: '';
+    width: 32px;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--border);
+    transition: background var(--t-fast);
+  }
+  .chart-splitter:hover::after,
+  .chart-splitter.active::after {
+    background: var(--accent);
+  }
   @media (max-width: 768px) {
-    .chart-wrap { height: 200px; }
+    .chart-wrap { height: 200px !important; }
+    .chart-splitter { display: none; }
   }
   .detail-header {
     gap: 8px;
@@ -1162,6 +1228,24 @@
   .focus-sym h3 {
     font-family: 'IBM Plex Mono', monospace;
     letter-spacing: -0.01em;
+  }
+  .expand-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .expand-btn:hover {
+    background: var(--surface-hover);
+    color: var(--text);
   }
   .close-focus {
     display: flex;
@@ -1325,6 +1409,7 @@
     }
 
     .splitter { display: none; }
+    .expand-btn { display: none; }
 
     .symbols-panel {
       width: auto !important;
