@@ -16,6 +16,8 @@ export interface EntryMark {
   price: number;
   action: string;
   size?: number;
+  type?: string;       // "LONG" | "SHORT" — position direction from backend
+  timestamp?: string;  // ISO string from backend trade record
 }
 
 // ─── Colour palette ───────────────────────────────────────────────────────────
@@ -35,6 +37,9 @@ const C = {
   entryAvg:   '#a78bfa',  // avg entry position — solid violet line
   entryLong:  '#3b82f6',
   entryShort: '#f59e0b',
+  entryLongLbl:  '#93c5fd',  // brighter blue for labels
+  entryShortLbl: '#fcd34d',  // brighter amber for labels
+  entryAvgLbl:   '#ddd6fe',  // brighter violet for labels
   xhairV:     'rgba(255,255,255,0.20)',
   xhairH:     'rgba(255,255,255,0.10)',
   ttBg:       'rgba(9,9,16,0.95)',
@@ -98,6 +103,7 @@ export class CandleChart extends LitElement {
   @property({ type: Array })  candles:    CandleData[] = [];
   @property({ type: Array })  entries:    EntryMark[]  = [];
   @property({ type: Number }) entryPrice: number       = 0;   // avg position entry (solid line)
+  @property({ type: String }) posType  = '';             // "LONG" | "SHORT" | ""
   @property({ type: String }) symbol   = '';
   @property({ type: String }) interval = '';
 
@@ -315,42 +321,104 @@ export class CandleChart extends LitElement {
     ctx.globalAlpha = 1.0;
 
     // ── Entry price overlay lines ─────────────────────────────────────────────
-    // Individual entries: dashed, max 5 (avoid cluttering chart with DCA stacks)
+    // Helper: map an ISO timestamp string to the nearest candle's x position.
+    // Returns 0 (left edge) if timestamp is absent or before all visible candles.
+    const tsToX = (ts: string | undefined): number => {
+      if (!ts) return 0;
+      const ms = Date.parse(ts.replace(' ', 'T'));
+      if (!isFinite(ms)) return 0;
+      let best = -1;
+      for (let i = 0; i < n; i++) {
+        if (data[i].t <= ms) best = i;
+        else break;
+      }
+      return best >= 0 ? xOf(best) : 0;
+    };
+
+    // Individual entries: dashed lines from entry candle → right edge, max 5
     ctx.lineWidth = 1;
     const visEntries = this.entries.slice(0, 5);
     for (const e of visEntries) {
+      if (!e.price) continue;
       const y = pToY(e.price);
       if (y < TOP - 6 || y > TOP + PRICE_H + 6) continue;
-      const col = /buy|long/i.test(e.action) ? C.entryLong : C.entryShort;
+      // Determine direction: prefer e.type ("LONG"/"SHORT"), fall back to e.action keyword
+      const isLong = /long/i.test(e.type ?? '') || /buy|long/i.test(e.action ?? '');
+      const col    = isLong ? C.entryLong : C.entryShort;
+      const startX = tsToX(e.timestamp);
+
       ctx.strokeStyle = col;
       ctx.setLineDash([4, 4]);
       ctx.beginPath();
-      ctx.moveTo(0, y); ctx.lineTo(chartW, y);
+      ctx.moveTo(startX, y); ctx.lineTo(chartW, y);
       ctx.stroke();
       ctx.setLineDash([]);
-      ctx.fillStyle    = col;
-      ctx.font         = FONT_XS;
+
+      // Vertical tick at the opening candle — marks "when" the entry happened
+      if (startX > 0) {
+        ctx.strokeStyle = col;
+        ctx.lineWidth   = 2;
+        ctx.beginPath();
+        ctx.moveTo(startX, y - 5); ctx.lineTo(startX, y + 5);
+        ctx.stroke();
+        ctx.lineWidth = 1;
+      }
+
+      // Solid-black label box: price in bright line colour, bold
+      const lblCol = isLong ? C.entryLongLbl : C.entryShortLbl;
+      const elbl   = fmtPrice(e.price);
+      ctx.font     = FONT_B;
+      const etw    = ctx.measureText(elbl).width;
+      const elx    = chartW + 2;
+      const ely    = Math.max(TOP + 1, Math.min(y - 8, TOP + PRICE_H - 16));
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(elx, ely, etw + 8, 16);
+      ctx.fillStyle    = lblCol;
       ctx.textAlign    = 'left';
-      ctx.textBaseline = 'bottom';
-      ctx.fillText(`${e.action} ${fmtPrice(e.price)}`, chartW + 4, y - 1);
+      ctx.textBaseline = 'top';
+      ctx.fillText(elbl, elx + 4, ely + 3);
     }
     ctx.setLineDash([]);
 
-    // Average entry: solid violet line — the position's true cost basis
+    // Average entry: solid line, colour and label show position direction
     if (this.entryPrice > 0) {
       const y = pToY(this.entryPrice);
       if (y >= TOP - 6 && y <= TOP + PRICE_H + 6) {
-        ctx.strokeStyle = C.entryAvg;
+        const isLong  = /long/i.test(this.posType);
+        const isShort = /short/i.test(this.posType);
+        const avgCol    = isLong ? C.entryLong   : isShort ? C.entryShort   : C.entryAvg;
+        const avgLblCol = isLong ? C.entryLongLbl : isShort ? C.entryShortLbl : C.entryAvgLbl;
+        // Start from first entry candle so the line doesn't span the whole chart
+        const startX  = this.entries.length > 0 ? tsToX(this.entries[0].timestamp) : 0;
+
+        ctx.strokeStyle = avgCol;
         ctx.lineWidth   = 1.5;
         ctx.setLineDash([]);
         ctx.beginPath();
-        ctx.moveTo(0, y); ctx.lineTo(chartW, y);
+        ctx.moveTo(startX, y); ctx.lineTo(chartW, y);
         ctx.stroke();
-        ctx.fillStyle    = C.entryAvg;
-        ctx.font         = FONT_XS;
+
+        // Vertical tick at open candle
+        if (startX > 0) {
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(startX, y - 6); ctx.lineTo(startX, y + 6);
+          ctx.stroke();
+          ctx.lineWidth = 1;
+        }
+
+        // Solid-black label box: price in bright line colour, bold
+        const albl   = fmtPrice(this.entryPrice);
+        ctx.font     = FONT_B;
+        const atw    = ctx.measureText(albl).width;
+        const alx    = chartW + 2;
+        const aly    = Math.max(TOP + 1, Math.min(y - 8, TOP + PRICE_H - 16));
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(alx, aly, atw + 8, 16);
+        ctx.fillStyle    = avgLblCol;
         ctx.textAlign    = 'left';
-        ctx.textBaseline = 'bottom';
-        ctx.fillText(`AVG ${fmtPrice(this.entryPrice)}`, chartW + 4, y - 1);
+        ctx.textBaseline = 'top';
+        ctx.fillText(albl, alx + 4, aly + 3);
       }
     }
 

@@ -331,6 +331,20 @@
   let daily = $derived(snap?.daily || {});
   let recent = $derived(snap?.recent || {});
   let openPositions = $derived(snap?.open_positions || []);
+
+  const gateReasonMap: Record<string, { label: string; desc: string }> = {
+    disabled:            { label: 'Disabled',        desc: 'Gate feature is off — new entries always allowed.' },
+    trend_ok:            { label: 'Trend OK',         desc: 'Market breadth is trending and BTC ADX + ATR% pass thresholds. Gate is open.' },
+    breadth_chop:        { label: 'Breadth chop',     desc: 'Market breadth is inside the chop zone. New entries are blocked.' },
+    btc_adx_low:         { label: 'BTC ADX weak',     desc: 'BTC ADX is below the minimum threshold (weak trend). New entries are blocked.' },
+    btc_atr_low:         { label: 'BTC ATR low',      desc: 'BTC ATR% is below the minimum threshold (low volatility). New entries are blocked.' },
+    breadth_missing:     { label: 'No breadth data',  desc: 'Market breadth data is unavailable. Gate state depends on fail-open setting.' },
+    btc_metrics_missing: { label: 'No BTC metrics',   desc: 'BTC ADX/ATR could not be computed. Gate state depends on fail-open setting.' },
+  };
+  let gateInfo = $derived(
+    gateReasonMap[(health.regime_reason ?? '').toLowerCase()] ??
+    { label: (health.regime_reason ?? '—'), desc: '' }
+  );
 </script>
 
 <!-- Mode selector + metrics -->
@@ -361,8 +375,17 @@
       </span>
     {/if}
     {#if health.regime_gate !== undefined && health.regime_gate !== null}
-      <span class="metric-pill" class:gate-on={health.regime_gate} class:gate-off={!health.regime_gate}>
+      <span class="metric-pill gate-pill" class:gate-on={health.regime_gate} class:gate-off={!health.regime_gate}>
         GATE {health.regime_gate ? 'ON' : 'OFF'}
+        <span class="gate-tooltip">
+          <span class="gt-title" class:gt-on={health.regime_gate} class:gt-off={!health.regime_gate}>
+            GATE {health.regime_gate ? 'ON' : 'OFF'} — {gateInfo.label}
+          </span>
+          {#if gateInfo.desc}
+            <span class="gt-desc">{gateInfo.desc}</span>
+          {/if}
+          <span class="gt-note">Gate OFF blocks new entries. Exits always continue.</span>
+        </span>
       </span>
     {/if}
     <span class="metric-pill">
@@ -545,6 +568,7 @@
             candles={JSON.stringify(candles)}
             entries={JSON.stringify(marks?.entries || [])}
             entryPrice={marks?.position?.entry_price ?? 0}
+            postype={marks?.position?.type ?? ''}
             symbol={focusSym}
             interval={selectedInterval}
           ></candle-chart>
@@ -756,6 +780,52 @@
   .metric-pill.gate-off {
     border-color: rgba(255,107,107,0.3);
     color: var(--red);
+  }
+  .gate-pill {
+    position: relative;
+    cursor: help;
+  }
+  .gate-tooltip {
+    display: none;
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    width: 250px;
+    background: #111118;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 8px 10px;
+    font-size: 11px;
+    font-family: 'IBM Plex Mono', monospace;
+    z-index: 200;
+    flex-direction: column;
+    gap: 4px;
+    white-space: normal;
+    pointer-events: none;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  }
+  .gate-pill:hover .gate-tooltip {
+    display: flex;
+  }
+  .gt-title {
+    font-weight: 600;
+    font-size: 11px;
+  }
+  .gt-title.gt-on  { color: var(--green); }
+  .gt-title.gt-off { color: var(--red); }
+  .gt-desc {
+    color: var(--text);
+    font-size: 10px;
+    margin-top: 2px;
+    line-height: 1.4;
+  }
+  .gt-note {
+    color: var(--text-muted);
+    font-size: 10px;
+    margin-top: 4px;
+    padding-top: 4px;
+    border-top: 1px solid var(--border);
+    line-height: 1.4;
   }
   .metric-label {
     color: var(--text-muted);
