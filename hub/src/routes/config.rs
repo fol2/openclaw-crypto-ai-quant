@@ -188,13 +188,7 @@ async fn post_config_reload(
     let file = fs::OpenOptions::new().write(true).open(&path)?;
     file.sync_all()?;
 
-    // Also update mtime explicitly.
-    let now = std::time::SystemTime::now();
-    // Use filetime crate if available, otherwise the sync_all above is sufficient
-    // for inotify-based watchers. For poll-based watchers, write + rename is better.
-    // For now, a no-content append does the job:
     drop(file);
-    let _ = fs::OpenOptions::new().append(true).open(&path);
 
     // Set mtime via libc utimensat for reliability.
     #[cfg(unix)]

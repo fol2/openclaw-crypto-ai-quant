@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
 
 const CHANNEL_CAPACITY: usize = 64;
@@ -7,14 +7,16 @@ const CHANNEL_CAPACITY: usize = 64;
 /// Central broadcast hub.  Each topic has a `broadcast::Sender`.
 ///
 /// Topics are created lazily on first subscribe or publish.
+/// Clone-able via internal Arc.
+#[derive(Clone)]
 pub struct BroadcastHub {
-    channels: RwLock<HashMap<String, broadcast::Sender<String>>>,
+    channels: Arc<RwLock<HashMap<String, broadcast::Sender<String>>>>,
 }
 
 impl BroadcastHub {
     pub fn new() -> Self {
         Self {
-            channels: RwLock::new(HashMap::new()),
+            channels: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 

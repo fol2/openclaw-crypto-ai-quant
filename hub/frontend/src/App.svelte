@@ -3,6 +3,8 @@
   import Sidebar from './components/Sidebar.svelte';
   import Dashboard from './pages/Dashboard.svelte';
   import Config from './pages/Config.svelte';
+  import Backtest from './pages/Backtest.svelte';
+  import Sweep from './pages/Sweep.svelte';
 
   // Simple hash-based routing for SPA.
   let currentPage = $state(window.location.hash.slice(1) || 'dashboard');
@@ -25,11 +27,9 @@
   {:else if currentPage === 'config'}
     <Config />
   {:else if currentPage === 'backtest'}
-    <h1>Backtest</h1>
-    <p class="placeholder">Backtest runner — coming in Phase 4</p>
+    <Backtest />
   {:else if currentPage === 'sweep'}
-    <h1>Sweep</h1>
-    <p class="placeholder">Sweep manager — coming in Phase 4</p>
+    <Sweep />
   {:else if currentPage === 'factory'}
     <h1>Factory</h1>
     <p class="placeholder">Candidate review — coming in Phase 5</p>

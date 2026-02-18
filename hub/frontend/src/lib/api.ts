@@ -99,3 +99,47 @@ export async function getConfigDiff(a: string, b: string, file = 'main') {
 export async function getConfigFiles() {
   return apiFetch('/api/config/files');
 }
+
+// ── Backtest API ────────────────────────────────────────────────────
+
+export async function runBacktest(opts: { config?: string; initial_balance?: number; symbol?: string }) {
+  return apiFetch('/api/backtest/run', { method: 'POST', body: JSON.stringify(opts) });
+}
+
+export async function getBacktestJobs() {
+  return apiFetch('/api/backtest/jobs');
+}
+
+export async function getBacktestStatus(id: string) {
+  return apiFetch(`/api/backtest/${encodeURIComponent(id)}/status`);
+}
+
+export async function getBacktestResult(id: string) {
+  return apiFetch(`/api/backtest/${encodeURIComponent(id)}/result`);
+}
+
+export async function cancelBacktest(id: string) {
+  return apiFetch(`/api/backtest/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+// ── Sweep API ───────────────────────────────────────────────────────
+
+export async function runSweep(opts: { config?: string; sweep_spec: string; initial_balance?: number }) {
+  return apiFetch('/api/sweep/run', { method: 'POST', body: JSON.stringify(opts) });
+}
+
+export async function getSweepJobs() {
+  return apiFetch('/api/sweep/jobs');
+}
+
+export async function getSweepStatus(id: string) {
+  return apiFetch(`/api/sweep/${encodeURIComponent(id)}/status`);
+}
+
+export async function getSweepResults(id: string) {
+  return apiFetch(`/api/sweep/${encodeURIComponent(id)}/results`);
+}
+
+export async function cancelSweep(id: string) {
+  return apiFetch(`/api/sweep/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}

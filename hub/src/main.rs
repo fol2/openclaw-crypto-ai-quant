@@ -6,6 +6,7 @@ mod heartbeat;
 mod routes;
 mod sidecar;
 mod state;
+mod subprocess;
 mod ws;
 
 use axum::middleware;
