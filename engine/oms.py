@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import math
 import os
 import sqlite3
 import threading
@@ -14,6 +15,8 @@ from typing import Any
 from .utils import json_dumps_safe, now_ms
 
 logger = logging.getLogger(__name__)
+
+_EPOCH_MS_MIN_ABS = 100_000_000_000  # ~= 1973-03 in milliseconds
 
 
 def _coerce_ts_ms(ts: Any) -> int | None:
@@ -27,12 +30,13 @@ def _coerce_ts_ms(ts: Any) -> int | None:
             v = float(ts)
         except Exception:
             return None
-        # Heuristic: > 1e12 is probably ms.
-        if v > 1e12:
+        if not math.isfinite(v):
+            return None
+        # Heuristic:
+        # - >= 1e11 absolute is interpreted as epoch milliseconds (covers pre-2001 ms values).
+        # - otherwise interpreted as epoch seconds.
+        if abs(v) >= _EPOCH_MS_MIN_ABS:
             return int(v)
-        # 1e9..1e12 likely seconds.
-        if v > 1e9:
-            return int(v * 1000.0)
         return int(v * 1000.0)
 
     # pandas.Timestamp
