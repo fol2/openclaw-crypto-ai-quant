@@ -11,53 +11,6 @@
   let error = $state('');
   let mobileTab: 'symbols' | 'detail' | 'feed' = $state('symbols');
 
-  let prevMids: Record<string, number> = {};
-  type FlashState = 'up-a' | 'up-b' | 'down-a' | 'down-b';
-  let flashMap: Record<string, FlashState> = $state({});
-  const flashTimeouts: Record<string, ReturnType<typeof setTimeout>> = {};
-  const midFlashMs = 1100;
-
-  function hasVisibleMidChange(prev: number, next: number, dp = 6): boolean {
-    const threshold = Math.pow(10, -dp) / 2;
-    return Math.abs(next - prev) >= threshold;
-  }
-
-  function detectFlashes(newSyms: { symbol: string; mid: number | null }[]) {
-    for (const s of newSyms) {
-      if (s.mid == null) continue;
-      const prev = prevMids[s.symbol];
-      prevMids[s.symbol] = s.mid;
-
-      if (prev === undefined || !hasVisibleMidChange(prev, s.mid, 6)) continue;
-
-      const dir = s.mid > prev ? 'up' : 'down';
-      const prevState = flashMap[s.symbol];
-      const phase = prevState?.endsWith('-a') ? 'b' : 'a';
-      const nextState = `${dir}-${phase}` as FlashState;
-      flashMap = { ...flashMap, [s.symbol]: nextState };
-
-      const existingTimer = flashTimeouts[s.symbol];
-      if (existingTimer) clearTimeout(existingTimer);
-      flashTimeouts[s.symbol] = setTimeout(() => {
-        if (flashMap[s.symbol] === nextState) {
-          const next = { ...flashMap };
-          delete next[s.symbol];
-          flashMap = next;
-        }
-        delete flashTimeouts[s.symbol];
-      }, midFlashMs);
-    }
-  }
-
-  function clearFlashTimers() {
-    for (const timer of Object.values(flashTimeouts)) {
-      clearTimeout(timer);
-    }
-    for (const key of Object.keys(flashTimeouts)) {
-      delete flashTimeouts[key];
-    }
-  }
-
   function pnlPct(pos: any): number | null {
     if (!pos || pos.entry_price == null || !pos.size || pos.unreal_pnl_est == null) return null;
     const notional = pos.entry_price * Math.abs(pos.size);
@@ -94,11 +47,6 @@
         for (const s of data.symbols) {
           if (liveMids[s.symbol] !== undefined) s.mid = liveMids[s.symbol];
         }
-      }
-      // Trigger the same flash logic for REST snapshots using the final mids
-      // that will be rendered (after WS mid preservation).
-      if (data?.symbols) {
-        detectFlashes(data.symbols.map((s: any) => ({ symbol: s.symbol, mid: s.mid ?? null })));
       }
       snap = data;
       appState.snapshot = data;
@@ -143,7 +91,6 @@
     hubWs.connect();
     return () => {
       clearInterval(pollTimer);
-      clearFlashTimers();
     };
   });
 
@@ -153,13 +100,6 @@
     const midsHandler = (data: any) => {
       if (!snap?.symbols || !data?.mids) return;
       const newMids = data.mids as Record<string, number>;
-
-      // Flash detection: compare incoming mids against previous WS values.
-      detectFlashes(
-        snap.symbols
-          .filter((s: any) => newMids[s.symbol] !== undefined)
-          .map((s: any) => ({ symbol: s.symbol, mid: newMids[s.symbol] }))
-      );
 
       // Mutate mid prices + recalculate unrealized PnL in-place.
       // Svelte 5 deep proxies track these writes automatically.
@@ -301,12 +241,12 @@
               onclick={() => setFocus(s.symbol)}
             >
               <td class="sym-name">{s.symbol}</td>
-              <td class="num col-mid"
-                class:flash-up-a={flashMap[s.symbol] === 'up-a'}
-                class:flash-up-b={flashMap[s.symbol] === 'up-b'}
-                class:flash-down-a={flashMap[s.symbol] === 'down-a'}
-                class:flash-down-b={flashMap[s.symbol] === 'down-b'}
-              >{s.mid != null ? fmtNum(s.mid, 6) : '\u2014'}</td>
+              <td class="num col-mid">
+                <mid-price
+                  value={s.mid != null ? String(s.mid) : ''}
+                  decimals={6}
+                ></mid-price>
+              </td>
               <td>
                 {#if s.last_signal?.signal === 'BUY'}
                   <span class="sig-badge buy">BUY</span>
@@ -345,13 +285,11 @@
         <div class="focus-sym">
           <h3>{focusSym}</h3>
           {#each symbols.filter((s: any) => s.symbol === focusSym).slice(0, 1) as sym}
-            <span
-              class="mid-price"
-              class:flash-up-a={flashMap[focusSym] === 'up-a'}
-              class:flash-up-b={flashMap[focusSym] === 'up-b'}
-              class:flash-down-a={flashMap[focusSym] === 'down-a'}
-              class:flash-down-b={flashMap[focusSym] === 'down-b'}
-            >{sym.mid != null ? fmtNum(sym.mid, 6) : '\u2014'}</span>
+            <mid-price
+              tone="accent"
+              value={sym.mid != null ? String(sym.mid) : ''}
+              decimals={6}
+            ></mid-price>
           {/each}
         </div>
         <button class="close-focus" aria-label="Close" onclick={() => { focusSym = ''; mobileTab = 'symbols'; }}>
@@ -752,33 +690,7 @@
     border-left: 2px solid var(--red);
   }
 
-  /* ─── Price flash ─── */
-  /* End color must match the resting color of .num (.col-mid) = var(--text) */
-  @keyframes flashUp {
-    0%   { color: var(--green); }
-    60%  { color: var(--green); }
-    100% { color: var(--text); }
-  }
-  @keyframes flashDown {
-    0%   { color: var(--red); }
-    60%  { color: var(--red); }
-    100% { color: var(--text); }
-  }
-  /* End color for detail panel mid-price = var(--accent) */
-  @keyframes flashUpAccent {
-    0%   { color: var(--green); }
-    60%  { color: var(--green); }
-    100% { color: var(--accent); }
-  }
-  @keyframes flashDownAccent {
-    0%   { color: var(--red); }
-    60%  { color: var(--red); }
-    100% { color: var(--accent); }
-  }
-  .flash-up-a, .flash-up-b { animation: flashUp 1s ease-out forwards; }
-  .flash-down-a, .flash-down-b { animation: flashDown 1s ease-out forwards; }
-  .mid-price.flash-up-a, .mid-price.flash-up-b { animation: flashUpAccent 1s ease-out forwards; }
-  .mid-price.flash-down-a, .mid-price.flash-down-b { animation: flashDownAccent 1s ease-out forwards; }
+  /* Price flash animation styles live in Lit web component: wc/mid-price.ts */
 
   .sym-name {
     font-weight: 600;
@@ -860,12 +772,6 @@
   .focus-sym h3 {
     font-family: 'IBM Plex Mono', monospace;
     letter-spacing: -0.01em;
-  }
-  .mid-price {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--accent);
-    font-family: 'IBM Plex Mono', monospace;
   }
   .close-focus {
     display: flex;
