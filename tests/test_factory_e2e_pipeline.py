@@ -7,15 +7,22 @@ and the weekly/deep alias equivalence — all without GPU or real candle data.
 from __future__ import annotations
 
 import json
+import signal
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import factory_run as factory_run_mod
 from factory_run import (
     PROFILE_DEFAULTS,
     _parse_cli_args,
     _promote_candidates,
+    _reproduce_run,
+    _request_shutdown,
+    _reset_shutdown_state,
+    _scan_lookup_run_dir,
+    _shutdown_stage_guard,
     _write_json,
 )
 
@@ -575,3 +582,114 @@ class TestWeeklyDeepAlias:
     def test_all_profiles_present(self) -> None:
         """All expected profiles exist in PROFILE_DEFAULTS."""
         assert set(PROFILE_DEFAULTS.keys()) == {"smoke", "daily", "deep", "weekly"}
+
+
+# ===========================================================================
+# (e) Failure scenarios
+# ===========================================================================
+
+
+class TestFailureScenarios:
+    def _build_source_run(self, *, artifacts_root: Path, run_id: str, cfg_name: str = "candidate.yaml") -> Path:
+        source_run = artifacts_root / "2026-02-18" / "run_source"
+        source_run.mkdir(parents=True, exist_ok=True)
+
+        cfg_path = artifacts_root / cfg_name
+        cfg_path.write_text("global:\n  engine:\n    interval: 1h\n", encoding="utf-8")
+        cfg_id = factory_run_mod.config_id_from_yaml_file(cfg_path)
+
+        run_meta = {
+            "run_id": run_id,
+            "args": {"interval": "1h"},
+            "candidate_configs": [
+                {
+                    "config_id": cfg_id,
+                    "path": str(cfg_path),
+                    "selected": True,
+                }
+            ],
+        }
+        (source_run / "run_metadata.json").write_text(json.dumps(run_meta), encoding="utf-8")
+        return source_run
+
+    def test_reproduce_run_returns_nonzero_when_replay_step_times_out(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        artifacts_root = tmp_path / "artifacts"
+        source_run = self._build_source_run(artifacts_root=artifacts_root, run_id="src-timeout")
+
+        monkeypatch.setattr(factory_run_mod, "_find_existing_run_dir", lambda **kwargs: source_run)
+        monkeypatch.setattr(factory_run_mod, "_capture_repro_metadata", lambda **kwargs: None)
+        monkeypatch.setattr(factory_run_mod, "_resolve_backtester_cmd", lambda: ["mei-backtester"])
+        monkeypatch.setattr(factory_run_mod, "_run_replay_equivalence_check", lambda **kwargs: True)
+
+        def _fake_run_cmd(*args, **kwargs):  # noqa: ANN001, ARG001
+            return factory_run_mod.CmdResult(
+                argv=[],
+                cwd=str(tmp_path),
+                exit_code=124,
+                elapsed_s=120.0,
+                stdout_path="stdout.txt",
+                stderr_path="stderr.txt",
+            )
+
+        monkeypatch.setattr(factory_run_mod, "_run_cmd", _fake_run_cmd)
+
+        rc = _reproduce_run(artifacts_root=artifacts_root, source_run_id="src-timeout")
+        assert rc == 124
+
+        repro_metas = [
+            p for p in artifacts_root.rglob("run_metadata.json") if "reproduce_of_run_id" in p.read_text(encoding="utf-8")
+        ]
+        assert len(repro_metas) == 1
+        meta = json.loads(repro_metas[0].read_text(encoding="utf-8"))
+        assert meta["reproduce_of_run_id"] == "src-timeout"
+        assert any(step.get("exit_code") == 124 for step in meta.get("steps", []))
+
+    def test_reproduce_run_raises_when_metadata_write_hits_disk_full(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        artifacts_root = tmp_path / "artifacts"
+        source_run = self._build_source_run(artifacts_root=artifacts_root, run_id="src-diskfull")
+
+        monkeypatch.setattr(factory_run_mod, "_find_existing_run_dir", lambda **kwargs: source_run)
+        monkeypatch.setattr(factory_run_mod, "_capture_repro_metadata", lambda **kwargs: None)
+        monkeypatch.setattr(factory_run_mod, "_resolve_backtester_cmd", lambda: ["mei-backtester"])
+
+        def _raise_disk_full(*args, **kwargs):  # noqa: ANN001, ARG001
+            raise OSError("No space left on device")
+
+        monkeypatch.setattr(factory_run_mod, "_write_json", _raise_disk_full)
+
+        with pytest.raises(OSError, match="No space left on device"):
+            _reproduce_run(artifacts_root=artifacts_root, source_run_id="src-diskfull")
+
+    def test_scan_lookup_run_dir_skips_corrupted_metadata(self, tmp_path: Path) -> None:
+        artifacts_root = tmp_path / "artifacts"
+        bad_run = artifacts_root / "2026-02-18" / "run_bad"
+        good_run = artifacts_root / "2026-02-18" / "run_good"
+        bad_run.mkdir(parents=True, exist_ok=True)
+        good_run.mkdir(parents=True, exist_ok=True)
+
+        (bad_run / "run_metadata.json").write_text("{bad-json", encoding="utf-8")
+        (good_run / "run_metadata.json").write_text(json.dumps({"run_id": "target-run"}), encoding="utf-8")
+
+        found = _scan_lookup_run_dir(artifacts_root=artifacts_root, run_id="target-run")
+        assert found == good_run.resolve()
+
+    def test_shutdown_stage_guard_marks_interrupted_state(self, tmp_path: Path) -> None:
+        _reset_shutdown_state()
+        try:
+            run_dir = tmp_path / "run"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            meta: dict[str, Any] = {"run_id": "x", "status": "running", "steps": []}
+
+            _request_shutdown(signal.SIGTERM, None)
+            interrupted = _shutdown_stage_guard(run_dir=run_dir, meta=meta, stage="candidate_scoring")
+            assert interrupted is True
+
+            written = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
+            assert written["status"] == "interrupted"
+            assert written["shutdown_requested_stage"] == "candidate_scoring"
+        finally:
+            _reset_shutdown_state()
