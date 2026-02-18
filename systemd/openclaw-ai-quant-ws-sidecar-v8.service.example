@@ -44,6 +44,10 @@ Environment=AI_QUANT_SIDECAR_INTERVALS=1m,3m,5m,15m,30m,1h
 
 # Optional: enable BBO subscriptions if you want bid/ask updates (and optional BBO snapshots).
 Environment=AI_QUANT_WS_ENABLE_BBO=0
+# Optional: drive mids/wait_mids from BBO mid ticks (UI-friendly low latency).
+Environment=AI_QUANT_MIDS_FROM_BBO=0
+# In BBO-driven mode, allMids is used as fallback when BBO becomes stale.
+Environment=AI_QUANT_MIDS_FROM_BBO_FALLBACK_AGE_S=5
 Environment=AI_QUANT_WS_ENABLE_CANDLE=0
 Environment=AI_QUANT_WS_ENABLE_META=0
 
