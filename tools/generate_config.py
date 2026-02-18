@@ -106,14 +106,43 @@ def _clamp_int(v: int, lo: int, hi: int) -> int:
     return int(min(int(hi), max(int(lo), int(v))))
 
 
+def _trunc_towards_zero(x: float) -> int:
+    return int(float(x))
+
+
+def _as_u8_from_float(raw_value, default: int = 0) -> int:
+    """Mirror Rust `value as u8` semantics for in-range sweep values.
+
+    For sweep domains we care about:
+    - truncate towards zero
+    - clamp to u8 bounds
+    - non-finite values fall back to default
+    """
+    try:
+        x = float(raw_value)
+    except Exception:
+        return int(default)
+    if not math.isfinite(x):
+        return int(default)
+    i = _trunc_towards_zero(x)
+    if i < 0:
+        return 0
+    if i > 255:
+        return 255
+    return i
+
+
 def coerce_value(param_name: str, raw_value):
     """Convert a raw sweep value to the correct Python type for YAML output."""
     if param_name in CATEGORICAL_FIELDS:
         mapping = CATEGORICAL_FIELDS[param_name]
         if isinstance(raw_value, str) and raw_value in mapping.values():
             return raw_value  # already a valid string
-        idx = max(0, min(len(mapping) - 1, round(float(raw_value))))
-        return mapping.get(idx, list(mapping.values())[0])
+        idx = _as_u8_from_float(raw_value, default=0)
+        if idx in mapping:
+            return mapping[idx]
+        # Rust match fallback (`_ => ...`) maps to the highest enum variant.
+        return mapping[max(mapping.keys())]
 
     if param_name in STRING_FIELDS:
         return str(raw_value)
@@ -124,11 +153,7 @@ def coerce_value(param_name: str, raw_value):
             if s in {"low", "medium", "high"}:
                 return s
             return raw_value
-        try:
-            idx = _round_half_away_from_zero(float(raw_value))
-        except Exception:
-            idx = 0
-        idx = _clamp_int(idx, 0, 2)
+        idx = _as_u8_from_float(raw_value, default=0)
         return CONFIDENCE_MAP.get(idx, "low")
 
     if param_name in BOOL_FIELDS:
@@ -141,13 +166,20 @@ def coerce_value(param_name: str, raw_value):
             if s in {"0", "false", "no", "n", "off"}:
                 return False
         try:
-            return float(raw_value) >= 0.5
+            # Must mirror bt-core sweep apply_one bool decode:
+            # bool = (value != 0.0)
+            return float(raw_value) != 0.0
         except Exception:
             return bool(raw_value)
 
     if param_name in INT_FIELDS:
         try:
-            return _round_half_away_from_zero(float(raw_value))
+            x = float(raw_value)
+            if not math.isfinite(x):
+                return 0
+            # Must mirror bt-core sweep apply_one integer decode:
+            # usize = value as usize (truncate toward zero, floor for positive).
+            return max(0, _trunc_towards_zero(x))
         except Exception:
             return int(raw_value)
 
