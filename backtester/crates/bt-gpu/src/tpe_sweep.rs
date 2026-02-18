@@ -40,9 +40,19 @@ use crate::BAR_CHUNK_SIZE;
 const MAX_TPE_OBSERVATIONS: usize = 1000;
 /// After pruning, keep only this many best observations.
 const PRUNED_OBSERVATIONS: usize = 500;
+const FAILED_TRIAL_TOTAL_PNL: f64 = -1.0e12;
 
 fn checked_num_bars_u32(num_bars: usize) -> Result<u32, String> {
     u32::try_from(num_bars).map_err(|_| format!("num_bars {num_bars} exceeds u32::MAX"))
+}
+
+fn failed_batch_results(n: usize, reason: &str) -> Vec<buffers::GpuResult> {
+    eprintln!("[TPE] {reason} — marking {n} trial(s) as failed");
+    let mut out = vec![buffers::GpuResult::zeroed(); n];
+    for r in &mut out {
+        r.total_pnl = FAILED_TRIAL_TOTAL_PNL;
+    }
+    out
 }
 
 /// Configuration for TPE-based sweep.
@@ -585,9 +595,13 @@ pub fn run_tpe_sweep(
     let taker_fee_rate = bt_core::accounting::DEFAULT_TAKER_FEE_RATE as f32;
 
     // -- Layer 1: Fixed VRAM budget from total_vram (40%) -------------------------
-    let num_symbols_u32 = u32::try_from(num_symbols)
-        .map_err(|_| format!("num_symbols {} exceeds u32::MAX", num_symbols))
-        .expect("num_symbols exceeds u32::MAX");
+    let num_symbols_u32 = match u32::try_from(num_symbols) {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("[TPE] num_symbols {num_symbols} exceeds u32::MAX — returning empty results");
+            return Vec::new();
+        }
+    };
     let total_vram = device_state.total_vram_bytes();
     let snapshot_stride = (num_bars as usize) * (num_symbols as usize);
     let breadth_stride = num_bars as usize;
@@ -662,7 +676,7 @@ pub fn run_tpe_sweep(
     let tpe_batch_size = tpe_cfg.batch_size;
 
     // Spawn TPE thread — takes ownership of axis_opts + rng
-    let tpe_handle = std::thread::Builder::new()
+    let tpe_handle = match std::thread::Builder::new()
         .name("tpe-sampler".into())
         .spawn(move || {
             tpe_worker(
@@ -673,8 +687,13 @@ pub fn run_tpe_sweep(
                 result_rx,
                 request_tx,
             );
-        })
-        .expect("Failed to spawn TPE thread");
+        }) {
+        Ok(handle) => handle,
+        Err(e) => {
+            eprintln!("[TPE] Failed to spawn TPE thread: {e} — returning empty results");
+            return Vec::new();
+        }
+    };
 
     // GPU thread: receive batches, evaluate, send results
     // Bounded top-K heap: keeps only the best results by PnL to prevent OOM
@@ -834,6 +853,7 @@ fn evaluate_trade_only_batch(
     trade_start: u32,
     trade_end: u32,
 ) -> Vec<buffers::GpuResult> {
+    let trial_n = trial_overrides.len();
     let ind_config = buffers::GpuIndicatorConfig::from_strategy_config(base_cfg, lookback);
 
     // H11: handle GPU memory allocation failure gracefully
@@ -848,29 +868,35 @@ fn evaluate_trade_only_batch(
     ) {
         Ok(bufs) => bufs,
         Err(e) => {
-            eprintln!("[TPE] Indicator buffer allocation failed: {e}");
-            return Vec::new();
+            return failed_batch_results(
+                trial_n,
+                &format!("Indicator buffer allocation failed: {e}"),
+            );
         }
     };
     if let Err(e) = gpu_host::dispatch_indicator_kernels(ds, &mut ind_bufs) {
-        eprintln!("[TPE] Indicator kernel dispatch failed: {e}");
-        return Vec::new();
+        return failed_batch_results(trial_n, &format!("Indicator kernel dispatch failed: {e}"));
     }
 
-    let gpu_configs: Vec<buffers::GpuComboConfig> = trial_overrides
-        .iter()
-        .map(|overrides| {
-            let mut cfg = base_cfg.clone();
-            for (path, value) in overrides {
-                bt_core::sweep::apply_one_pub(&mut cfg, path, *value);
+    let mut gpu_configs: Vec<buffers::GpuComboConfig> = Vec::with_capacity(trial_overrides.len());
+    for overrides in trial_overrides {
+        let mut cfg = base_cfg.clone();
+        for (path, value) in overrides {
+            bt_core::sweep::apply_one_pub(&mut cfg, path, *value);
+        }
+        let mut gpu_cfg = match buffers::GpuComboConfig::from_strategy_config(&cfg) {
+            Ok(v) => v,
+            Err(e) => {
+                return failed_batch_results(
+                    trial_n,
+                    &format!("GpuComboConfig conversion failed: {e}"),
+                );
             }
-            let mut gpu_cfg = buffers::GpuComboConfig::from_strategy_config(&cfg)
-                .expect("f64→f32 overflow in GpuComboConfig");
-            gpu_cfg.snapshot_offset = 0;
-            gpu_cfg.breadth_offset = 0;
-            gpu_cfg
-        })
-        .collect();
+        };
+        gpu_cfg.snapshot_offset = 0;
+        gpu_cfg.breadth_offset = 0;
+        gpu_configs.push(gpu_cfg);
+    }
 
     let mut trade_bufs = match gpu_host::BatchBuffers::from_indicator_buffers(
         ds,
@@ -883,8 +909,7 @@ fn evaluate_trade_only_batch(
     ) {
         Ok(bufs) => bufs,
         Err(e) => {
-            eprintln!("[TPE] Trade buffer allocation failed: {e}");
-            return Vec::new();
+            return failed_batch_results(trial_n, &format!("Trade buffer allocation failed: {e}"));
         }
     };
     trade_bufs.max_sub_per_bar = max_sub_per_bar;
@@ -901,10 +926,10 @@ fn evaluate_trade_only_batch(
         trade_end,
     ) {
         Ok(r) => r,
-        Err(e) => {
-            eprintln!("[TPE] Trade kernel dispatch/readback failed: {e}");
-            Vec::new()
-        }
+        Err(e) => failed_batch_results(
+            trial_n,
+            &format!("Trade kernel dispatch/readback failed: {e}"),
+        ),
     }
 }
 
@@ -1014,24 +1039,39 @@ fn evaluate_mixed_batch_arena(
             if unique_slot >= group_start && unique_slot < group_end {
                 let local_slot = unique_slot - group_start;
                 let mut gpu_cfg =
-                    buffers::GpuComboConfig::from_strategy_config(&trial_cfgs[trial_idx])
-                        .expect("f64→f32 overflow in GpuComboConfig");
-                gpu_cfg.snapshot_offset = u32::try_from(local_slot * snapshot_stride)
-                    .map_err(|_| {
-                        format!(
-                            "snapshot_offset {} exceeds u32::MAX",
-                            local_slot * snapshot_stride
-                        )
-                    })
-                    .expect("snapshot_offset exceeds u32::MAX");
-                gpu_cfg.breadth_offset = u32::try_from(local_slot * breadth_stride)
-                    .map_err(|_| {
-                        format!(
-                            "breadth_offset {} exceeds u32::MAX",
-                            local_slot * breadth_stride
-                        )
-                    })
-                    .expect("breadth_offset exceeds u32::MAX");
+                    match buffers::GpuComboConfig::from_strategy_config(&trial_cfgs[trial_idx]) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return failed_batch_results(
+                                n,
+                                &format!("GpuComboConfig conversion failed: {e}"),
+                            );
+                        }
+                    };
+                gpu_cfg.snapshot_offset = match u32::try_from(local_slot * snapshot_stride) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        return failed_batch_results(
+                            n,
+                            &format!(
+                                "snapshot_offset {} exceeds u32::MAX",
+                                local_slot * snapshot_stride
+                            ),
+                        );
+                    }
+                };
+                gpu_cfg.breadth_offset = match u32::try_from(local_slot * breadth_stride) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        return failed_batch_results(
+                            n,
+                            &format!(
+                                "breadth_offset {} exceeds u32::MAX",
+                                local_slot * breadth_stride
+                            ),
+                        );
+                    }
+                };
                 gpu_configs.push(gpu_cfg);
                 group_trial_indices.push(trial_idx);
             }
