@@ -476,7 +476,6 @@ def fetch_hl_balance() -> dict[str, Any] | None:
         out = {
             "ok": True,
             "source": "hyperliquid_rest",
-            "main_address": main_address,
             "account_value_usd": account_value,
             "withdrawable_usd": withdrawable,
             "total_margin_used_usd": total_margin_used,
@@ -486,7 +485,6 @@ def fetch_hl_balance() -> dict[str, Any] | None:
         out = {
             "ok": False,
             "source": "hyperliquid_rest",
-            "main_address": main_address,
             "error": str(e),
             "ts_ms": now_ms,
         }
