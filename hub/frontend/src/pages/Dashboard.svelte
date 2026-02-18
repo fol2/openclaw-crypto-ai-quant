@@ -294,8 +294,8 @@
 
   // ── Resizable columns ──────────────────────────────────────────────────────
   const SYM_MIN = 200;
-  const SYM_MAX = 600;
-  let symWidth = $state(300);
+  // collapsed sidebar = 56px, splitter = 10px, detail panel min = 280px
+  let symWidth = $state(Math.max(SYM_MIN, Math.round((window.innerWidth - 56 - 10) * 0.40)));
   let dragging = $state(false);
 
   function onSplitterDown(e: PointerEvent) {
@@ -303,12 +303,14 @@
     dragging = true;
     const startX = e.clientX;
     const startW = symWidth;
+    const gridEl = (e.currentTarget as HTMLElement).closest('.dashboard-grid') as HTMLElement | null;
+    const symMax = Math.max(SYM_MIN + 100, (gridEl ? gridEl.clientWidth : window.innerWidth - 66) - 280);
     const target = e.currentTarget as HTMLElement;
     target.setPointerCapture(e.pointerId);
 
     function onMove(ev: PointerEvent) {
       const w = startW + (ev.clientX - startX);
-      symWidth = Math.max(SYM_MIN, Math.min(SYM_MAX, w));
+      symWidth = Math.max(SYM_MIN, Math.min(symMax, w));
     }
     function onUp() {
       dragging = false;

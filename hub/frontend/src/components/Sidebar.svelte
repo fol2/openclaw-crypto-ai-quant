@@ -50,6 +50,7 @@
         <a
           href="#{link.id}"
           class:active={currentPage === link.id}
+          data-label={link.label}
           onclick={handleClick}
         >
           <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -101,6 +102,7 @@
   .sidebar.collapsed {
     width: 56px;
     min-width: 56px;
+    overflow: visible;
   }
 
   .logo {
@@ -196,6 +198,32 @@
   .collapsed li a {
     justify-content: center;
     padding: 10px 0;
+    overflow: visible;
+  }
+
+  /* ─── Tooltip (collapsed mode only) ─── */
+  .collapsed li a::after {
+    content: attr(data-label);
+    position: absolute;
+    left: calc(100% + 10px);
+    top: 50%;
+    transform: translateY(-50%);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text);
+    white-space: nowrap;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity var(--t-fast);
+    z-index: calc(var(--z-sidebar) + 10);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.45);
+  }
+  .collapsed li a:hover::after {
+    opacity: 1;
   }
 
   .active-dot {
