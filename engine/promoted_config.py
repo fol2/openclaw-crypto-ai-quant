@@ -31,6 +31,10 @@ from .utils import deep_merge
 
 
 VALID_ROLES = frozenset({"primary", "fallback", "conservative"})
+DEFAULT_PROMOTED_SCAN_DATE_DIRS = 90
+DEFAULT_PROMOTED_SCAN_RUN_DIRS_PER_DATE = 200
+MIN_PROMOTED_SCAN_LIMIT = 1
+MAX_PROMOTED_SCAN_LIMIT = 10000
 
 # Run directory naming convention produced by factory_run.py:
 #   run_<run_id>  e.g.  run_nightly_20260214T014625Z
@@ -41,6 +45,17 @@ def _default_artifacts_dir() -> Path:
     """Return the default artifacts root: <project_root>/artifacts."""
     here = Path(__file__).resolve().parent  # engine/
     return (here.parent / "artifacts").resolve()
+
+
+def _promoted_scan_limit(env_name: str, default: int) -> int:
+    raw = os.getenv(env_name)
+    if raw is None:
+        return int(default)
+    try:
+        value = int(float(str(raw).strip()))
+    except Exception:
+        return int(default)
+    return int(max(MIN_PROMOTED_SCAN_LIMIT, min(MAX_PROMOTED_SCAN_LIMIT, value)))
 
 
 def _find_latest_promoted_config(artifacts_dir: str | Path, role: str) -> Path | None:
@@ -71,13 +86,18 @@ def _find_latest_promoted_config(artifacts_dir: str | Path, role: str) -> Path |
         return None
 
     filename = f"{role}.yaml"
+    max_dates = _promoted_scan_limit("AI_QUANT_PROMOTED_SCAN_DATE_DIRS", DEFAULT_PROMOTED_SCAN_DATE_DIRS)
+    max_runs = _promoted_scan_limit(
+        "AI_QUANT_PROMOTED_SCAN_RUN_DIRS_PER_DATE",
+        DEFAULT_PROMOTED_SCAN_RUN_DIRS_PER_DATE,
+    )
 
     # Date directories are YYYY-MM-DD — sort descending to find newest first.
     date_dirs = sorted(
         [d for d in root.iterdir() if d.is_dir() and re.match(r"^\d{4}-\d{2}-\d{2}$", d.name)],
         key=lambda d: d.name,
         reverse=True,
-    )
+    )[:max_dates]
 
     for date_dir in date_dirs:
         # Run directories inside each date dir — sort descending by name.
@@ -85,7 +105,7 @@ def _find_latest_promoted_config(artifacts_dir: str | Path, role: str) -> Path |
             [d for d in date_dir.iterdir() if d.is_dir() and _RUN_DIR_RE.match(d.name)],
             key=lambda d: d.name,
             reverse=True,
-        )
+        )[:max_runs]
         for run_dir in run_dirs:
             candidate = run_dir / "promoted_configs" / filename
             if candidate.is_file():
