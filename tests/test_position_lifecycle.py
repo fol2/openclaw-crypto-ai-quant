@@ -278,6 +278,11 @@ class TestPositionConversion:
         py_pos = kernel_position_to_python("ETH", kernel_pos)
         assert py_pos["confidence"] == "medium"
 
+    def test_confidence_mapping_infinite_value_falls_back_to_medium(self):
+        kernel_pos = _make_kernel_position("ETH", "long", 1.0, 3000.0, confidence=float("inf"))
+        py_pos = kernel_position_to_python("ETH", kernel_pos)
+        assert py_pos["confidence"] == "medium"
+
 
 # ---------------------------------------------------------------------------
 # TestSyncPositionsFromKernel

@@ -1420,7 +1420,7 @@ def kernel_position_to_python(symbol: str, kernel_pos: dict) -> dict:
         conf_map = {0: "low", 1: "medium", 2: "high"}
         try:
             confidence = conf_map.get(int(confidence_raw), "medium")
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             confidence = "medium"
     else:
         confidence = ""
