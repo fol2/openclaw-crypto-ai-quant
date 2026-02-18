@@ -1,0 +1,61 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::config::HubConfig;
+use crate::db::pool::{open_ro_pool, DbPool};
+use crate::sidecar::SidecarClient;
+use crate::ws::broadcast::BroadcastHub;
+
+/// Shared application state, passed to all route handlers via `axum::extract::State`.
+pub struct AppState {
+    pub config: HubConfig,
+    pub broadcast: BroadcastHub,
+    pub sidecar: SidecarClient,
+
+    // DB pools (optional — a DB might not exist yet).
+    pub live_pool: Option<DbPool>,
+    pub paper1_pool: Option<DbPool>,
+    pub paper2_pool: Option<DbPool>,
+    pub paper3_pool: Option<DbPool>,
+}
+
+impl AppState {
+    pub fn new(config: HubConfig) -> Arc<Self> {
+        let sidecar = SidecarClient::new(config.sidecar_sock.clone());
+        let broadcast = BroadcastHub::new();
+
+        let live_pool = open_ro_pool(&config.live_db, 4);
+        let paper1_pool = open_ro_pool(&config.paper1_db, 4);
+        let paper2_pool = open_ro_pool(&config.paper2_db, 2);
+        let paper3_pool = open_ro_pool(&config.paper3_db, 2);
+
+        Arc::new(Self {
+            config,
+            broadcast,
+            sidecar,
+            live_pool,
+            paper1_pool,
+            paper2_pool,
+            paper3_pool,
+        })
+    }
+
+    /// Get the DB pool for a given mode.
+    pub fn db_pool(&self, mode: &str) -> Option<&DbPool> {
+        match mode {
+            "live" => self.live_pool.as_ref(),
+            "paper2" => self.paper2_pool.as_ref(),
+            "paper3" => self.paper3_pool.as_ref(),
+            _ => self.paper1_pool.as_ref(), // paper, paper1, unknown
+        }
+    }
+
+    /// Open a candle DB for a specific interval.
+    pub fn candle_db_path(&self, interval: &str) -> PathBuf {
+        let safe_iv: String = interval
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+            .collect();
+        self.config.candles_db_dir.join(format!("candles_{safe_iv}.db"))
+    }
+}
