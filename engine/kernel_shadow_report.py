@@ -127,14 +127,14 @@ class ShadowReport:
     def to_json(self, path: str) -> None:
         """Serialize the report to a JSON file."""
         data = [asdict(c) for c in self.comparisons]
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
         logger.debug("[shadow] saved %d comparisons to %s", len(data), path)
 
     @classmethod
     def from_json(cls, path: str) -> ShadowReport:
         """Load a report from a JSON file."""
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         report = cls()
         for entry in data:
