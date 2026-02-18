@@ -10,12 +10,14 @@ It is intended for emergency response and should be used with care.
 from __future__ import annotations
 
 import argparse
+from contextlib import suppress
 import getpass
 import hashlib
 import json
 import os
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -50,9 +52,25 @@ def _utc_compact() -> str:
 def _atomic_write_text(path: Path, text: str) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(str(tmp), str(path))
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.tmp.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp_file:
+            tmp_file.write(text)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+            tmp_path = Path(tmp_file.name)
+        os.replace(str(tmp_path), str(path))
+    finally:
+        if tmp_path is not None and tmp_path.exists():
+            with suppress(OSError):
+                tmp_path.unlink()
 
 
 def _read_text(path: Path) -> str:

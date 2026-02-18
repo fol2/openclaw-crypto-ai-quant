@@ -1,5 +1,6 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
@@ -171,6 +172,45 @@ def test_rollback_to_last_good_propagates_permission_error_on_yaml_write(tmp_pat
             service="does-not-matter",
             dry_run=False,
         )
+
+
+def test_atomic_write_text_uses_named_temporary_file(tmp_path, monkeypatch):
+    target = tmp_path / "atomic.yaml"
+    calls: dict[str, object] = {}
+
+    class _TempCtx:
+        def __init__(self, fp: Path) -> None:
+            self._path = fp
+            self._handle = None
+
+        def __enter__(self):
+            self._handle = self._path.open("w", encoding="utf-8")
+            return self._handle
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            assert self._handle is not None
+            self._handle.close()
+
+    def _fake_named_temporary_file(*, mode, encoding, dir, prefix, suffix, delete):  # noqa: A002
+        calls["mode"] = mode
+        calls["encoding"] = encoding
+        calls["dir"] = str(dir)
+        calls["prefix"] = prefix
+        calls["suffix"] = suffix
+        calls["delete"] = delete
+        return _TempCtx(tmp_path / "tmp-write-file")
+
+    monkeypatch.setattr(rollback_tool.tempfile, "NamedTemporaryFile", _fake_named_temporary_file)
+
+    rollback_tool._atomic_write_text(target, "hello-world\n")
+
+    assert target.read_text(encoding="utf-8") == "hello-world\n"
+    assert calls["mode"] == "w"
+    assert calls["encoding"] == "utf-8"
+    assert calls["dir"] == str(tmp_path)
+    assert calls["prefix"] == ".atomic.yaml.tmp."
+    assert calls["suffix"] == ".tmp"
+    assert calls["delete"] is False
 
 
 def test_rollback_to_last_good_allows_concurrent_calls_for_same_timestamp(tmp_path, monkeypatch):
