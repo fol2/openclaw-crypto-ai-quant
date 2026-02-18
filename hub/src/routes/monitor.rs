@@ -301,16 +301,23 @@ async fn api_snapshot(
     let daily = trading::daily_metrics(&conn, ts)?;
 
     // Range metrics: since-config and all-time
-    let config_variant = match mode.as_str() {
-        "live" => "strategy_overrides.live.yaml",
-        "paper1" => "strategy_overrides.paper1.yaml",
-        "paper2" => "strategy_overrides.paper2.yaml",
-        "paper3" => "strategy_overrides.paper3.yaml",
-        _ => "strategy_overrides.yaml",
+    let config_candidates: &[&str] = match mode.as_str() {
+        "live" => &[
+            "strategy_overrides.live.yaml",
+            "strategy_overrides._promoted_primary.yaml",
+            "strategy_overrides.yaml",
+        ],
+        "paper1" => &["strategy_overrides.paper1.yaml", "strategy_overrides.yaml"],
+        "paper2" => &["strategy_overrides.paper2.yaml", "strategy_overrides.yaml"],
+        "paper3" => &["strategy_overrides.paper3.yaml", "strategy_overrides.yaml"],
+        _ => &["strategy_overrides.yaml"],
     };
-    let config_mtime_iso = std::fs::metadata(state.config.config_dir.join(config_variant))
-        .and_then(|m| m.modified())
-        .ok()
+    let config_mtime_iso = config_candidates
+        .iter()
+        .find_map(|f| {
+            let path = state.config.config_dir.join(f);
+            std::fs::metadata(&path).and_then(|m| m.modified()).ok()
+        })
         .and_then(|t| {
             let secs = t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
             chrono::DateTime::from_timestamp(secs as i64, 0)
