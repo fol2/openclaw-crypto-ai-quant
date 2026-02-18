@@ -427,7 +427,9 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 try:
                     db_conn.close()
                 except sqlite3.Error as close_exc:
-                    logger.debug("sync_from_exchange: failed to close DB after setup error: %s", close_exc, exc_info=True)
+                    logger.debug(
+                        "sync_from_exchange: failed to close DB after setup error: %s", close_exc, exc_info=True
+                    )
                 finally:
                     db_conn = None
 
@@ -789,8 +791,15 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 ctx = q[0]
             except Exception:
                 break
-            created = _safe_float(ctx.get("_created_at_s"), None)
-            if created is not None and ttl_s > 0 and (now_s - float(created)) > ttl_s:
+            raw_created = ctx.get("_created_at_s")
+            created = _safe_float(raw_created, -1.0)
+            has_created = raw_created is not None
+            is_stale = False
+            if has_created and created < 0.0:
+                is_stale = True
+            elif created >= 0.0 and ttl_s > 0 and (now_s - float(created)) > ttl_s:
+                is_stale = True
+            if is_stale:
                 try:
                     q.pop(0)
                 except Exception:
