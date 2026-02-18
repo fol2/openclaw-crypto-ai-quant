@@ -740,13 +740,15 @@ def _run_cmd(
     else:
         stderr_f = subprocess.DEVNULL  # type: ignore[assignment]
 
+    proc_env = _resolve_subprocess_env(cwd=cwd, env=env)
+
     try:
         proc = subprocess.Popen(
             argv,
             cwd=str(cwd),
             stdout=stdout_f,
             stderr=stderr_f,
-            env=env,
+            env=proc_env,
             text=True,
         )
         _ACTIVE_CHILD_PROCESS = proc
@@ -2365,29 +2367,40 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
     return 0
 
 
-def _ensure_cuda_env() -> None:
-    """Ensure LD_LIBRARY_PATH includes CUDA/WSL driver paths for Rust backtester.
+def _ensure_cuda_env(env: dict[str, str] | None = None) -> dict[str, str]:
+    """Return an env dict with CUDA/WSL library paths added to LD_LIBRARY_PATH.
 
-    On WSL2, the CUDA driver lives in /usr/lib/wsl/lib which is often not in
-    LD_LIBRARY_PATH for systemd services or cron jobs.
+    The process-global ``os.environ`` is never mutated.
     """
+    out = dict(os.environ if env is None else env)
     cuda_paths = [
         "/usr/lib/wsl/lib",
         "/usr/lib/x86_64-linux-gnu",
     ]
-    current = os.environ.get("LD_LIBRARY_PATH", "")
+    current = str(out.get("LD_LIBRARY_PATH", "") or "")
     parts = [p for p in current.split(":") if p]
-    added = False
     for cp in cuda_paths:
         if Path(cp).is_dir() and cp not in parts:
             parts.append(cp)
-            added = True
-    if added:
-        os.environ["LD_LIBRARY_PATH"] = ":".join(parts)
+    out["LD_LIBRARY_PATH"] = ":".join(parts)
+    return out
+
+
+def _resolve_subprocess_env(*, cwd: Path, env: dict[str, str] | None) -> dict[str, str] | None:
+    """Resolve subprocess environment, injecting CUDA paths only for Rust backtester cwd."""
+    try:
+        is_backtester_cwd = cwd.resolve() == (AIQ_ROOT / "backtester").resolve()
+    except Exception:
+        is_backtester_cwd = False
+
+    if is_backtester_cwd:
+        return _ensure_cuda_env(env)
+    if env is None:
+        return None
+    return dict(env)
 
 
 def main(argv: list[str] | None = None) -> int:
-    _ensure_cuda_env()
     _reset_shutdown_state()
     prev_handlers = _install_shutdown_handlers()
     run_dir: Path | None = None

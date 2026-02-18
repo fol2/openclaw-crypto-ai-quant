@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -81,3 +82,29 @@ def test_run_cmd_respects_env_default_timeout_disable(
     assert res.exit_code == 0
     assert res.timeout_s is None
     assert out_path.read_text(encoding="utf-8").strip() == "done"
+
+
+def test_ensure_cuda_env_returns_copy_without_global_mutation(monkeypatch) -> None:
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/base")
+    monkeypatch.setattr(factory_run.Path, "is_dir", lambda p: p.as_posix() == "/usr/lib/wsl/lib")
+
+    src_env = {"LD_LIBRARY_PATH": "/base"}
+    out_env = factory_run._ensure_cuda_env(src_env)
+
+    assert src_env["LD_LIBRARY_PATH"] == "/base"
+    assert os.environ.get("LD_LIBRARY_PATH") == "/base"
+    assert "/usr/lib/wsl/lib" in str(out_env.get("LD_LIBRARY_PATH", ""))
+
+
+def test_resolve_subprocess_env_only_augments_backtester_cwd(monkeypatch) -> None:
+    monkeypatch.setattr(factory_run.Path, "is_dir", lambda p: p.as_posix() == "/usr/lib/wsl/lib")
+
+    env_in = {"LD_LIBRARY_PATH": "/base", "KEEP": "1"}
+    bt_env = factory_run._resolve_subprocess_env(cwd=factory_run.AIQ_ROOT / "backtester", env=env_in)
+    root_env = factory_run._resolve_subprocess_env(cwd=factory_run.AIQ_ROOT, env=env_in)
+    inherited_env = factory_run._resolve_subprocess_env(cwd=factory_run.AIQ_ROOT, env=None)
+
+    assert bt_env is not None
+    assert "/usr/lib/wsl/lib" in str(bt_env.get("LD_LIBRARY_PATH", ""))
+    assert root_env == env_in
+    assert inherited_env is None
