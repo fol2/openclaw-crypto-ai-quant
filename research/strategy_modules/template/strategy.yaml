@@ -15,9 +15,14 @@ global:
     slippage_bps: 10.0
     max_open_positions: 20
     max_entry_orders_per_loop: 6
+    max_adds_per_symbol: 2
     max_total_margin_pct: 0.60
     min_notional_usd: 10.0
     min_atr_pct: 0.003
+    tp_partial_pct: 0.50
+    trailing_start_atr: 1.0
+    trailing_distance_atr: 0.8
+    entry_min_confidence: high
     bump_to_min_notional: false
 
   indicators:

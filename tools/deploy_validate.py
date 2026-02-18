@@ -13,6 +13,7 @@ It does not attempt to validate strategy performance, only configuration structu
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,9 @@ import yaml
 
 MAX_SAFE_LEVERAGE = 20.0
 MAX_ENTRY_ORDERS_PER_LOOP = 20
+MAX_ADDS_PER_SYMBOL = 10
+VALID_CONFIDENCE_LEVELS = {"low", "medium", "high"}
+VALID_ENGINE_INTERVALS = {"1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"}
 
 
 def _is_number(v: Any) -> bool:
@@ -31,6 +35,18 @@ def _get_path(obj: dict[str, Any], path: str) -> Any:
     for part in path.split("."):
         if not isinstance(cur, dict) or part not in cur:
             return None
+        cur = cur[part]
+    return cur
+
+
+_MISSING = object()
+
+
+def _get_path_or_missing(obj: dict[str, Any], path: str) -> Any:
+    cur: Any = obj
+    for part in path.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return _MISSING
         cur = cur[part]
     return cur
 
@@ -57,6 +73,9 @@ def validate_config_obj(obj: Any) -> list[str]:
             errs.append(f"Missing/invalid number: {path}")
             return
         fv = float(v)
+        if not math.isfinite(fv):
+            errs.append(f"Missing/invalid number: {path}")
+            return
         if min_v is not None and fv < float(min_v):
             errs.append(f"Out of range (min {min_v}): {path}={fv}")
         if max_v is not None and fv > float(max_v):
@@ -78,6 +97,31 @@ def validate_config_obj(obj: Any) -> list[str]:
         v = _get_path(obj, path)
         if not isinstance(v, bool):
             errs.append(f"Missing/invalid bool: {path}")
+
+    def req_enum(path: str, *, allowed: set[str]) -> None:
+        v = _get_path(obj, path)
+        if not isinstance(v, str):
+            errs.append(f"Missing/invalid enum: {path}")
+            return
+        s = str(v).strip().lower()
+        if s not in allowed:
+            vals = ", ".join(sorted(allowed))
+            errs.append(f"Out of range (allowed: {vals}): {path}={v!r}")
+
+    def opt_number(path: str, *, min_v: float | None = None, max_v: float | None = None) -> None:
+        if _get_path_or_missing(obj, path) is _MISSING:
+            return
+        req_number(path, min_v=min_v, max_v=max_v)
+
+    def opt_int(path: str, *, min_v: int | None = None, max_v: int | None = None) -> None:
+        if _get_path_or_missing(obj, path) is _MISSING:
+            return
+        req_int(path, min_v=min_v, max_v=max_v)
+
+    def opt_enum(path: str, *, allowed: set[str]) -> None:
+        if _get_path_or_missing(obj, path) is _MISSING:
+            return
+        req_enum(path, allowed=allowed)
 
     # Required mappings
     req_map("global.trade")
@@ -103,6 +147,11 @@ def validate_config_obj(obj: Any) -> list[str]:
     req_number("global.trade.max_total_margin_pct", min_v=0.0, max_v=1.0)
     req_number("global.trade.min_notional_usd", min_v=0.0)
     req_number("global.trade.min_atr_pct", min_v=0.0, max_v=1.0)
+    opt_number("global.trade.tp_partial_pct", min_v=0.0, max_v=1.0)
+    opt_int("global.trade.max_adds_per_symbol", min_v=0, max_v=MAX_ADDS_PER_SYMBOL)
+    opt_number("global.trade.trailing_start_atr", min_v=0.000001)
+    opt_number("global.trade.trailing_distance_atr", min_v=0.000001)
+    opt_enum("global.trade.entry_min_confidence", allowed=VALID_CONFIDENCE_LEVELS)
     req_bool("global.trade.bump_to_min_notional")
 
     # Key indicator windows
@@ -114,6 +163,9 @@ def validate_config_obj(obj: Any) -> list[str]:
 
     # Entry threshold sanity
     req_number("global.thresholds.entry.min_adx", min_v=0.0)
+    opt_enum("global.engine.interval", allowed=VALID_ENGINE_INTERVALS)
+    opt_enum("global.engine.entry_interval", allowed=VALID_ENGINE_INTERVALS)
+    opt_enum("global.engine.exit_interval", allowed=VALID_ENGINE_INTERVALS)
 
     # Invariants
     fast = _get_path(obj, "global.indicators.ema_fast_window")
