@@ -1,19 +1,18 @@
 # v6.100 — Unified config: backtester + engine share this file
 # ALL params explicit. Both systems read identical values from this YAML.
 # v6.100: tp_partial_atr_mult sweep optimal (1h/3m, 13-day, $253 balance).
-# WARNING: This example contains sweep-optimised parameters from a specific period.
-# WARNING: It is NOT a conservative live-trading template.
-# WARNING: Validate in paper mode first and reduce risk before live deployment.
-# Typical first reductions: allocation_pct, leverage, max_open_positions, tp_atr_mult.
+# WARNING: Sweep-optimised values from historical runs are shown as comments only.
+# WARNING: This example ships conservative defaults for safer first-time paper/live trials.
+# WARNING: Validate in paper mode first before promoting to live.
 global:
   trade:
     # --- Core sizing ---
-    allocation_pct: 0.20              # SWEPT (default 0.03)
+    allocation_pct: 0.03              # conservative default (aggressive sweep example: 0.20)
     sl_atr_mult: 2.0                  # SWEPT (default 2.0, same)
     tp_atr_mult: 6.0                  # SWEPT (default 4.0)
-    leverage: 3.0                     # default
+    leverage: 2.0                     # conservative default (aggressive sweep example: 3.0)
     max_open_positions: 20            # default
-    max_total_margin_pct: 0.60        # default
+    max_total_margin_pct: 0.25        # conservative default (aggressive sweep example: 0.60)
     min_notional_usd: 10.0            # default
     min_atr_pct: 0.003                # SWEPT optimal (was 0)
     bump_to_min_notional: true        # bump <$10 orders to $10
