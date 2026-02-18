@@ -1551,6 +1551,32 @@ fn random_configs_survive_f32_roundtrip() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Margin-cap precision guard: prevent sub-entry regression on max_total_margin_pct
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn sub_entry_margin_cap_uses_full_precision_pct() {
+    let kernel_src = include_str!("../kernels/sweep_engine.cu");
+
+    let full_precision_stmt = "double max_margin_pct = (double)cfg.max_total_margin_pct;";
+    let rounded_expr = "(double)((int)((double)cfg.max_total_margin_pct * 1000000.0 + 0.5))";
+
+    let full_precision_count = kernel_src.matches(full_precision_stmt).count();
+    let rounded_count = kernel_src.matches(rounded_expr).count();
+
+    assert_eq!(
+        full_precision_count, 1,
+        "Expected exactly one full-precision max_total_margin_pct statement (sub-entry path), found {}",
+        full_precision_count
+    );
+    assert_eq!(
+        rounded_count, 2,
+        "Expected exactly two rounded max_total_margin_pct uses (main-entry/add paths), found {}",
+        rounded_count
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Cross-function consistency: SL vs trailing relationship
 // ═══════════════════════════════════════════════════════════════════════════════
 

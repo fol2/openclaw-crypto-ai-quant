@@ -1342,11 +1342,6 @@ extern "C" __global__ void sweep_engine_kernel(
                     hybrid.open = sc.open;
                     hybrid.t_sec = sc.t_sec;
                     double entry_close = (double)sc.close;
-                    const bool sub_exec_debug_target =
-                        (state.trace_enabled != 0u)
-                        && (state.trace_symbol == TRACE_SYMBOL_ALL || state.trace_symbol == cand.sym_idx)
-                        && (params->debug_t_sec != 0u && params->debug_t_sec == hybrid.t_sec);
-
                     // Margin cap
                     double total_margin = 0.0;
                     for (unsigned int s = 0u; s < ns; s++) {
@@ -1354,9 +1349,7 @@ extern "C" __global__ void sweep_engine_kernel(
                             total_margin += (double)state.positions[s].margin_used;
                         }
                     }
-                    double max_margin_pct =
-                        (double)((int)((double)cfg.max_total_margin_pct * 1000000.0 + 0.5))
-                        / 1000000.0;
+                    double max_margin_pct = (double)cfg.max_total_margin_pct;
                     double headroom = sub_entry_equity * max_margin_pct - total_margin;
                     if (headroom <= 0.0) { continue; }
 
@@ -1396,67 +1389,7 @@ extern "C" __global__ void sweep_engine_kernel(
                     double kernel_margin_req = quantize12(kernel_notional / kernel_lev);
                     double open_fee = quantize12(kernel_notional * (double)fee_rate);
                     if (kernel_margin_req + open_fee > state.kernel_cash) {
-                        if (sub_exec_debug_target) {
-                            printf(
-                                "[gpu-sub-open-debug] sym=%u ts=%u rejected=insufficient_cash notional=%.12f kernel_notional=%.12f lev_used=%.12f margin_used=%.12f kernel_lev=%.12f kernel_margin_req=%.12f kernel_cash=%.12f fee=%.12f\\n",
-                                cand.sym_idx,
-                                hybrid.t_sec,
-                                notional,
-                                kernel_notional,
-                                lev,
-                                margin,
-                                kernel_lev,
-                                kernel_margin_req,
-                                state.kernel_cash,
-                                open_fee
-                            );
-                            for (unsigned int ds = 0u; ds < ns; ds++) {
-                                const GpuPosition& dp = state.positions[ds];
-                                if (dp.active == POS_EMPTY) { continue; }
-                                double dp_notional = (double)dp.size * (double)dp.entry_price;
-                                printf(
-                                    "[gpu-kcash-debug] sym=%u side=%u qty=%.12f avg_entry=%.12f notional=%.12f margin=%.12f kernel_margin=%.12f\\n",
-                                    ds,
-                                    dp.active,
-                                    (double)dp.size,
-                                    (double)dp.entry_price,
-                                    dp_notional,
-                                    (double)dp.margin_used,
-                                    (double)dp.kernel_margin_used
-                                );
-                            }
-                        }
                         continue;
-                    }
-                    if (sub_exec_debug_target) {
-                        printf(
-                            "[gpu-sub-open-debug] sym=%u ts=%u pass_cash_gate notional=%.12f kernel_notional=%.12f lev_used=%.12f margin_used=%.12f kernel_lev=%.12f kernel_margin_req=%.12f kernel_cash=%.12f fee=%.12f\\n",
-                            cand.sym_idx,
-                            hybrid.t_sec,
-                            notional,
-                            kernel_notional,
-                            lev,
-                            margin,
-                            kernel_lev,
-                            kernel_margin_req,
-                            state.kernel_cash,
-                            open_fee
-                        );
-                        for (unsigned int ds = 0u; ds < ns; ds++) {
-                            const GpuPosition& dp = state.positions[ds];
-                            if (dp.active == POS_EMPTY) { continue; }
-                            double dp_notional = (double)dp.size * (double)dp.entry_price;
-                            printf(
-                                "[gpu-kcash-debug] sym=%u side=%u qty=%.12f avg_entry=%.12f notional=%.12f margin=%.12f kernel_margin=%.12f\\n",
-                                ds,
-                                dp.active,
-                                (double)dp.size,
-                                (double)dp.entry_price,
-                                dp_notional,
-                                (double)dp.margin_used,
-                                (double)dp.kernel_margin_used
-                            );
-                        }
                     }
 
                     float slip = (cand.signal == SIG_BUY) ? cfg.slippage_bps : -cfg.slippage_bps;
