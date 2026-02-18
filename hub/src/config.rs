@@ -31,6 +31,9 @@ pub struct HubConfig {
     // ── Project root (for relative paths) ──────────────────────────
     pub aiq_root: PathBuf,
 
+    // ── Config directory (for strategy_overrides YAML management) ──
+    pub config_dir: PathBuf,
+
     // ── Misc ───────────────────────────────────────────────────────
     pub trader_interval: String,
     pub monitor_interval: String,
@@ -132,6 +135,11 @@ impl HubConfig {
             aiq_root.join("paper3_daemon_log.txt").to_str().unwrap_or("paper3_daemon_log.txt"),
         );
 
+        let config_dir = env_path(
+            "AIQ_CONFIG_DIR",
+            aiq_root.join("config").to_str().unwrap_or("config"),
+        );
+
         let candles_db_dir_default = env_str(
             "AI_QUANT_CANDLES_DB_DIR",
             aiq_root.join("candles_dbs").to_str().unwrap_or("candles_dbs"),
@@ -187,6 +195,7 @@ impl HubConfig {
             candles_db_dir,
             sidecar_sock,
             aiq_root,
+            config_dir,
             trader_interval,
             monitor_interval,
             fee_rate,

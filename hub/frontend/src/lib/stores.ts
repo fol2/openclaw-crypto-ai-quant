@@ -11,4 +11,8 @@ export const appState = $state({
   mids: {} as Record<string, number>,
   snapshot: null as any,
   loading: false,
+  focus: '' as string,
+  feed: 'trades' as string,
+  search: '' as string,
+  paused: false,
 });

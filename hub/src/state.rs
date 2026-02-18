@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crate::config::HubConfig;
 use crate::db::pool::{open_ro_pool, DbPool};
 use crate::sidecar::SidecarClient;
+use crate::subprocess::JobStore;
 use crate::ws::broadcast::BroadcastHub;
 
 /// Shared application state, passed to all route handlers via `axum::extract::State`.
@@ -11,6 +12,7 @@ pub struct AppState {
     pub config: HubConfig,
     pub broadcast: BroadcastHub,
     pub sidecar: SidecarClient,
+    pub jobs: Arc<JobStore>,
 
     // DB pools (optional — a DB might not exist yet).
     pub live_pool: Option<DbPool>,
@@ -23,6 +25,7 @@ impl AppState {
     pub fn new(config: HubConfig) -> Arc<Self> {
         let sidecar = SidecarClient::new(config.sidecar_sock.clone());
         let broadcast = BroadcastHub::new();
+        let jobs = JobStore::new();
 
         let live_pool = open_ro_pool(&config.live_db, 4);
         let paper1_pool = open_ro_pool(&config.paper1_db, 4);
@@ -33,6 +36,7 @@ impl AppState {
             config,
             broadcast,
             sidecar,
+            jobs,
             live_pool,
             paper1_pool,
             paper2_pool,

@@ -52,3 +52,134 @@ export async function getHealth() {
 export async function getMetrics(mode = 'paper') {
   return apiFetch(`/api/metrics?mode=${encodeURIComponent(mode)}`);
 }
+
+export async function getMarks(symbol: string, mode = 'paper') {
+  return apiFetch(`/api/marks?symbol=${encodeURIComponent(symbol)}&mode=${encodeURIComponent(mode)}`);
+}
+
+export async function getDecisions(mode = 'paper', params: Record<string, string> = {}) {
+  const qs = new URLSearchParams({ mode, ...params });
+  return apiFetch(`/api/v2/decisions?${qs}`);
+}
+
+// ── Config API ──────────────────────────────────────────────────────
+
+export async function getConfig(file = 'main') {
+  return apiFetch(`/api/config?file=${encodeURIComponent(file)}`);
+}
+
+export async function getConfigRaw(file = 'main'): Promise<string> {
+  const headers: Record<string, string> = {};
+  if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+  const resp = await fetch(`/api/config/raw?file=${encodeURIComponent(file)}`, { headers });
+  if (!resp.ok) throw new Error(`API ${resp.status}`);
+  return resp.text();
+}
+
+export async function putConfig(yaml: string, file = 'main') {
+  return apiFetch(`/api/config?file=${encodeURIComponent(file)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ yaml }),
+  });
+}
+
+export async function reloadConfig(file = 'main') {
+  return apiFetch(`/api/config/reload?file=${encodeURIComponent(file)}`, { method: 'POST' });
+}
+
+export async function getConfigHistory(file = 'main') {
+  return apiFetch(`/api/config/history?file=${encodeURIComponent(file)}`);
+}
+
+export async function getConfigDiff(a: string, b: string, file = 'main') {
+  const qs = new URLSearchParams({ a, b, file });
+  return apiFetch(`/api/config/diff?${qs}`);
+}
+
+export async function getConfigFiles() {
+  return apiFetch('/api/config/files');
+}
+
+// ── Backtest API ────────────────────────────────────────────────────
+
+export async function runBacktest(opts: { config?: string; initial_balance?: number; symbol?: string }) {
+  return apiFetch('/api/backtest/run', { method: 'POST', body: JSON.stringify(opts) });
+}
+
+export async function getBacktestJobs() {
+  return apiFetch('/api/backtest/jobs');
+}
+
+export async function getBacktestStatus(id: string) {
+  return apiFetch(`/api/backtest/${encodeURIComponent(id)}/status`);
+}
+
+export async function getBacktestResult(id: string) {
+  return apiFetch(`/api/backtest/${encodeURIComponent(id)}/result`);
+}
+
+export async function cancelBacktest(id: string) {
+  return apiFetch(`/api/backtest/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+// ── Sweep API ───────────────────────────────────────────────────────
+
+export async function runSweep(opts: { config?: string; sweep_spec: string; initial_balance?: number }) {
+  return apiFetch('/api/sweep/run', { method: 'POST', body: JSON.stringify(opts) });
+}
+
+export async function getSweepJobs() {
+  return apiFetch('/api/sweep/jobs');
+}
+
+export async function getSweepStatus(id: string) {
+  return apiFetch(`/api/sweep/${encodeURIComponent(id)}/status`);
+}
+
+export async function getSweepResults(id: string) {
+  return apiFetch(`/api/sweep/${encodeURIComponent(id)}/results`);
+}
+
+export async function cancelSweep(id: string) {
+  return apiFetch(`/api/sweep/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+// ── Factory API ─────────────────────────────────────────────────────
+
+export async function getFactoryRuns() {
+  return apiFetch('/api/factory/runs');
+}
+
+export async function getFactoryRun(date: string, runId: string) {
+  return apiFetch(`/api/factory/runs/${encodeURIComponent(date)}/${encodeURIComponent(runId)}`);
+}
+
+export async function getFactoryReport(date: string, runId: string) {
+  return apiFetch(`/api/factory/runs/${encodeURIComponent(date)}/${encodeURIComponent(runId)}/report`);
+}
+
+export async function getFactoryCandidates(date: string, runId: string) {
+  return apiFetch(`/api/factory/runs/${encodeURIComponent(date)}/${encodeURIComponent(runId)}/candidates`);
+}
+
+// ── System API ──────────────────────────────────────────────────────
+
+export async function getSystemServices() {
+  return apiFetch('/api/system/services');
+}
+
+export async function serviceAction(name: string, action: string) {
+  return apiFetch(`/api/system/services/${encodeURIComponent(name)}/${encodeURIComponent(action)}`, { method: 'POST' });
+}
+
+export async function getDbStats() {
+  return apiFetch('/api/system/db-stats');
+}
+
+export async function getDiskUsage() {
+  return apiFetch('/api/system/disk');
+}
+
+export async function getServiceLogs(service: string, lines = 50) {
+  return apiFetch(`/api/system/logs?service=${encodeURIComponent(service)}&lines=${lines}`);
+}

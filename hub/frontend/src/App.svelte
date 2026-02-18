@@ -1,6 +1,13 @@
 <script lang="ts">
   import './app.css';
   import Sidebar from './components/Sidebar.svelte';
+  import Dashboard from './pages/Dashboard.svelte';
+  import Config from './pages/Config.svelte';
+  import Backtest from './pages/Backtest.svelte';
+  import Sweep from './pages/Sweep.svelte';
+  import Factory from './pages/Factory.svelte';
+  import GridView from './pages/GridView.svelte';
+  import System from './pages/System.svelte';
 
   // Simple hash-based routing for SPA.
   let currentPage = $state(window.location.hash.slice(1) || 'dashboard');
@@ -19,26 +26,19 @@
 
 <main class="main-content">
   {#if currentPage === 'dashboard'}
-    <h1>Dashboard</h1>
-    <p class="placeholder">Real-time monitor — coming in Phase 2</p>
+    <Dashboard />
   {:else if currentPage === 'config'}
-    <h1>Config</h1>
-    <p class="placeholder">YAML editor — coming in Phase 3</p>
+    <Config />
   {:else if currentPage === 'backtest'}
-    <h1>Backtest</h1>
-    <p class="placeholder">Backtest runner — coming in Phase 4</p>
+    <Backtest />
   {:else if currentPage === 'sweep'}
-    <h1>Sweep</h1>
-    <p class="placeholder">Sweep manager — coming in Phase 4</p>
+    <Sweep />
   {:else if currentPage === 'factory'}
-    <h1>Factory</h1>
-    <p class="placeholder">Candidate review — coming in Phase 5</p>
+    <Factory />
   {:else if currentPage === 'grid'}
-    <h1>Grid View</h1>
-    <p class="placeholder">Multi-symbol grid — coming in Phase 6</p>
+    <GridView />
   {:else if currentPage === 'system'}
-    <h1>System</h1>
-    <p class="placeholder">Housekeeping — coming in Phase 7</p>
+    <System />
   {:else}
     <h1>Not Found</h1>
     <p>Unknown page: {currentPage}</p>
@@ -56,10 +56,5 @@
     font-size: 20px;
     margin-bottom: 12px;
     font-weight: 600;
-  }
-
-  .placeholder {
-    color: var(--text-muted);
-    font-style: italic;
   }
 </style>
