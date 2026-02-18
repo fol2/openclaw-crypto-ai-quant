@@ -41,6 +41,11 @@ pub struct RawCandleResult {
     pub timestamps: Vec<i64>,
 }
 
+fn to_gpu_t_sec(ts_ms: i64) -> u32 {
+    let ts_sec = (ts_ms / 1000).max(0);
+    u32::try_from(ts_sec).unwrap_or(u32::MAX)
+}
+
 /// Find the bar index range `[start, end)` that falls within `[from_ts, to_ts]`.
 ///
 /// Uses `partition_point` (binary search on sorted timestamps).
@@ -106,7 +111,7 @@ pub fn prepare_raw_candles(candles: &CandleData, symbols: &[String]) -> RawCandl
                     low: bar.l,
                     close: bar.c,
                     volume: bar.v,
-                    t_sec: (ts / 1000) as u32,
+                    t_sec: to_gpu_t_sec(ts),
                     _pad: [0; 3],
                 };
             }
@@ -258,7 +263,7 @@ pub fn prepare_sub_bar_candles(
                         low: bar.l,
                         close: bar.c,
                         volume: bar.v,
-                        t_sec: (bar.t / 1000) as u32,
+                        t_sec: to_gpu_t_sec(bar.t),
                         _pad: [0; 3],
                     };
                     p += 1;
@@ -339,5 +344,15 @@ mod tests {
         assert_eq!(close_at(1, 0), 2_500);
         assert_eq!(close_at(1, 1), 3_000);
         assert_eq!(close_at(2, 0), 3_500);
+    }
+
+    #[test]
+    fn to_gpu_t_sec_clamps_negative_and_saturates_u32_max() {
+        assert_eq!(to_gpu_t_sec(-1), 0);
+        assert_eq!(to_gpu_t_sec(-9_999), 0);
+        assert_eq!(to_gpu_t_sec(1_234), 1);
+
+        let overflow_ms = (u32::MAX as i64 + 42) * 1000;
+        assert_eq!(to_gpu_t_sec(overflow_ms), u32::MAX);
     }
 }
