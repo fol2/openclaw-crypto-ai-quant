@@ -1315,7 +1315,24 @@ def main() -> None:
         )
     except Exception:
         pass
-    engine.run_forever()
+
+    watchdog = None
+    try:
+        from .systemd_watchdog import SystemdWatchdog
+
+        watchdog = SystemdWatchdog(service_name="ai-quant-daemon")
+        watchdog.start()
+    except Exception:
+        watchdog = None
+
+    try:
+        engine.run_forever()
+    finally:
+        try:
+            if watchdog is not None:
+                watchdog.stop()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

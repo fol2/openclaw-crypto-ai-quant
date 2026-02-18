@@ -13,6 +13,8 @@ ExecStart=%h/.local/bin/openclaw-ai-quant-ws-sidecar-v8
 Restart=always
 RestartSec=5
 KillMode=process
+NotifyAccess=main
+WatchdogSec=300
 
 # v8 instance must use a separate socket from production.
 Environment=AI_QUANT_WS_SIDECAR_SOCK=%t/openclaw-ai-quant-ws-v8.sock

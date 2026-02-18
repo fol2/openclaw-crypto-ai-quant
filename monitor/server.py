@@ -3006,11 +3006,26 @@ def main() -> None:
 
     srv = MonitorHTTPServer((bind, port), Handler)
     print(f"AI Quant Monitor listening on http://{bind}:{port}/")
+
+    watchdog = None
+    try:
+        from engine.systemd_watchdog import SystemdWatchdog
+
+        watchdog = SystemdWatchdog(service_name="ai-quant-monitor")
+        watchdog.start()
+    except Exception:
+        watchdog = None
+
     try:
         srv.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
         pass
     finally:
+        try:
+            if watchdog is not None:
+                watchdog.stop()
+        except Exception:
+            pass
         try:
             srv.server_close()
         except Exception:

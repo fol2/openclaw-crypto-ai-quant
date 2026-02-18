@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
+use std::os::unix::net::UnixDatagram;
 use std::path::Path;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -105,6 +106,53 @@ fn env_usize(key: &str, default: usize) -> usize {
     }
 }
 
+fn systemd_notify(state: &str) {
+    let notify_socket = match env::var("NOTIFY_SOCKET") {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let notify_socket = notify_socket.trim();
+    if notify_socket.is_empty() {
+        return;
+    }
+    if notify_socket.starts_with('@') {
+        // Abstract namespace sockets are uncommon in our user-unit setup and not
+        // directly supported by std::os::unix::net::UnixDatagram::connect.
+        return;
+    }
+
+    let sock = match UnixDatagram::unbound() {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    if sock.connect(notify_socket).is_err() {
+        return;
+    }
+    let _ = sock.send(state.as_bytes());
+}
+
+fn watchdog_interval_from_env() -> Option<Duration> {
+    let watchdog_pid = env::var("WATCHDOG_PID").ok();
+    if let Some(pid_raw) = watchdog_pid {
+        if let Ok(pid) = pid_raw.trim().parse::<u32>() {
+            if pid != std::process::id() {
+                return None;
+            }
+        } else {
+            return None;
+        }
+    }
+
+    let watchdog_usec = env::var("WATCHDOG_USEC").ok()?;
+    let usec = watchdog_usec.trim().parse::<u64>().ok()?;
+    if usec == 0 {
+        return None;
+    }
+
+    let micros = (usec / 2).max(1_000_000);
+    Some(Duration::from_micros(micros))
+}
+
 fn default_sock_path() -> String {
     if let Ok(xdg) = env::var("XDG_RUNTIME_DIR") {
         let xdg = xdg.trim();
@@ -112,7 +160,9 @@ fn default_sock_path() -> String {
             return format!("{}/openclaw-ai-quant-ws.sock", xdg.trim_end_matches('/'));
         }
     }
-    eprintln!("[WARN] XDG_RUNTIME_DIR not set — falling back to /tmp (world-writable, less secure)");
+    eprintln!(
+        "[WARN] XDG_RUNTIME_DIR not set — falling back to /tmp (world-writable, less secure)"
+    );
     "/tmp/openclaw-ai-quant-ws.sock".to_string()
 }
 
@@ -3262,6 +3312,20 @@ async fn main() -> Result<()> {
     }
 
     let listener = UnixListener::bind(&cfg.sock_path).context("bind unix socket")?;
+
+    if let Some(interval) = watchdog_interval_from_env() {
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(interval);
+            tick.tick().await; // arm
+            loop {
+                tick.tick().await;
+                systemd_notify("WATCHDOG=1");
+            }
+        });
+    }
+    systemd_notify("READY=1");
+    systemd_notify("STATUS=ws-sidecar ready");
+
     loop {
         let (stream, _addr) = listener.accept().await?;
         let cfg2 = cfg.clone();
