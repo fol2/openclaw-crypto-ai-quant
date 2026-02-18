@@ -682,13 +682,15 @@ fn compute_entry_size(equity: f32, price: f32, confidence: u32, atr: f32,
 
         let adx_mult = clamp(snap.adx / (*cfg).adx_sizing_full_adx, (*cfg).adx_sizing_min_mult, 1.0);
 
-        var vol_scalar = 1.0;
+        var vol_ratio = 1.0;
         if (*cfg).vol_baseline_pct > 0.0 && price > 0.0 {
-            let vol_ratio = (atr / price) / (*cfg).vol_baseline_pct;
-            if vol_ratio > 0.0 {
-                vol_scalar = clamp(1.0 / vol_ratio, (*cfg).vol_scalar_min, (*cfg).vol_scalar_max);
-            }
+            vol_ratio = (atr / price) / (*cfg).vol_baseline_pct;
         }
+        var vol_scalar_raw = 1.0;
+        if vol_ratio > 0.0 {
+            vol_scalar_raw = 1.0 / vol_ratio;
+        }
+        let vol_scalar = clamp(vol_scalar_raw, (*cfg).vol_scalar_min, (*cfg).vol_scalar_max);
 
         margin *= conf_mult * adx_mult * vol_scalar;
     }

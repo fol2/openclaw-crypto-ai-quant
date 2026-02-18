@@ -52,6 +52,10 @@
 #define BTC_BULL_BULLISH 1u
 #define BTC_BULL_UNKNOWN 2u
 
+// Decision-kernel cash model notional clamp (CPU SSOT defaults).
+#define KERNEL_MIN_NOTIONAL_USD 10.0
+#define KERNEL_MAX_NOTIONAL_USD 100000.0
+
 // PESC close reasons
 #define PESC_NONE        0u
 #define PESC_SIGNAL_FLIP 1u
@@ -99,6 +103,8 @@ struct GpuParams {
     unsigned int taker_fee_rate_bits;
     unsigned int max_sub_per_bar;
     unsigned int trade_end_bar;
+    unsigned int debug_t_sec;
+    unsigned int _debug_pad[3];
 };
 
 struct __align__(16) GpuSnapshot {
@@ -127,7 +133,7 @@ struct __align__(16) GpuPosition {
     double trailing_sl;  double leverage;                          // 64
     double margin_used;  unsigned int adds_count;  unsigned int tp1_taken; // 80
     unsigned int open_time_sec;  unsigned int last_add_time_sec;   // 88
-    unsigned int _pad[2];                                          // 96
+    double kernel_margin_used;                                     // 96
 };
 static_assert(sizeof(GpuPosition) == 96, "GpuPosition layout mismatch");
 
@@ -203,7 +209,7 @@ struct __align__(16) GpuComboConfig {
     float stoch_rsi_block_long_gt;  float stoch_rsi_block_short_lt;
     unsigned int ave_enabled;
     float tp_mult_strong;  float tp_mult_weak;
-    unsigned int entry_cooldown_s;
+    unsigned int entry_cooldown_s;  unsigned int exit_cooldown_s;
 };
 
 struct GpuComboState {
@@ -213,6 +219,7 @@ struct GpuComboState {
     unsigned int pesc_close_type[52];
     unsigned int pesc_close_reason[52];
     unsigned int last_entry_attempt_sec[52];
+    unsigned int last_exit_attempt_sec[52];
     unsigned int trace_enabled;
     unsigned int trace_symbol;
     unsigned int trace_count;
@@ -220,9 +227,9 @@ struct GpuComboState {
     GpuTraceEvent trace_events[1024];
     double total_pnl;  double total_fees;  unsigned int total_trades;  unsigned int total_wins;
     double gross_profit;  double gross_loss;  double max_drawdown;  double peak_equity;
-    unsigned int _acc_pad[2];
+    double kernel_cash;
 };
-static_assert(sizeof(GpuComboState) == 46880, "GpuComboState layout mismatch");
+static_assert(sizeof(GpuComboState) == 47088, "GpuComboState layout mismatch");
 
 struct __align__(16) GpuResult {
     double final_balance;  double total_pnl;  double total_fees;
@@ -303,6 +310,12 @@ __device__ double apply_atr_floor(double atr, double price, double min_atr_pct) 
 
 __device__ bool conf_meets_min(unsigned int conf, unsigned int min_conf) {
     return conf >= min_conf;
+}
+
+__device__ __forceinline__ double clamp_kernel_notional(double notional) {
+    if (notional < KERNEL_MIN_NOTIONAL_USD) { return KERNEL_MIN_NOTIONAL_USD; }
+    if (notional > KERNEL_MAX_NOTIONAL_USD) { return KERNEL_MAX_NOTIONAL_USD; }
+    return notional;
 }
 
 // -- Signal Reversal & Regime Filter ------------------------------------------
@@ -638,8 +651,7 @@ __device__ void clear_position(GpuPosition* pos) {
     pos->tp1_taken = 0u;
     pos->open_time_sec = 0u;
     pos->last_add_time_sec = 0u;
-    pos->_pad[0] = 0u;
-    pos->_pad[1] = 0u;
+    pos->kernel_margin_used = 0.0;
 }
 
 __device__ __forceinline__ void trace_record(
@@ -698,6 +710,7 @@ __device__ void apply_close(GpuComboState* state, unsigned int sym, const GpuSna
     double cash_delta = quantize12(pnl - fee);
 
     state->balance += cash_delta;
+    state->kernel_cash = quantize12(state->kernel_cash + pos.kernel_margin_used + cash_delta);
     state->total_pnl += pnl;
     state->total_fees += fee;
     state->total_trades += 1u;
@@ -729,6 +742,7 @@ __device__ void apply_close(GpuComboState* state, unsigned int sym, const GpuSna
     } else {
         state->pesc_close_reason[sym] = PESC_OTHER;
     }
+    state->last_exit_attempt_sec[sym] = snap.t_sec;
 
     // Clear position
     clear_position(&state->positions[sym]);
@@ -758,6 +772,9 @@ __device__ void apply_partial_close(GpuComboState* state, unsigned int sym, cons
     double cash_delta = quantize12(pnl - fee);
 
     state->balance += cash_delta;
+    double close_frac = (pos.size > 0.0) ? (exit_size / (double)pos.size) : 0.0;
+    double kernel_margin_released = quantize12(pos.kernel_margin_used * close_frac);
+    state->kernel_cash = quantize12(state->kernel_cash + kernel_margin_released + cash_delta);
     state->total_pnl += pnl;
     state->total_fees += fee;
     state->total_trades += 1u;
@@ -783,7 +800,10 @@ __device__ void apply_partial_close(GpuComboState* state, unsigned int sym, cons
     // Reduce position
     state->positions[sym].size -= exit_size;
     state->positions[sym].margin_used *= (1.0 - (double)pct);
+    state->positions[sym].kernel_margin_used =
+        quantize12(state->positions[sym].kernel_margin_used - kernel_margin_released);
     state->positions[sym].tp1_taken = 1u;
+    state->last_exit_attempt_sec[sym] = snap.t_sec;
     // CPU semantics: trailing SL is NOT modified on partial close.
     // compute_trailing() continues ratcheting on subsequent bars.
 }
@@ -816,6 +836,17 @@ __device__ __forceinline__ bool is_entry_cooldown_active(const GpuComboState* st
     if (last_sec == 0u) { return false; }
     if (ts_sec <= last_sec) { return true; }
     return (ts_sec - last_sec) < cfg->entry_cooldown_s;
+}
+
+__device__ __forceinline__ bool is_exit_cooldown_active(const GpuComboState* state,
+                                                         unsigned int sym,
+                                                         unsigned int ts_sec,
+                                                         const GpuComboConfig* cfg) {
+    if (cfg->exit_cooldown_s == 0u) { return false; }
+    unsigned int last_sec = state->last_exit_attempt_sec[sym];
+    if (last_sec == 0u) { return false; }
+    if (ts_sec <= last_sec) { return true; }
+    return (ts_sec - last_sec) < cfg->exit_cooldown_s;
 }
 
 // -- TP Multiplier (must mirror bt-core fixed tp_atr_mult semantics) ---------
@@ -898,7 +929,10 @@ extern "C" __global__ void sweep_engine_kernel(
 
                         if (block_exits) {
                             // CPU returns Hold immediately — skip trailing update too.
-                        } else {
+                        } else if (!is_exit_cooldown_active(&state, sym, ind_snap.t_sec, &cfg)) {
+                            // CPU parity: sync is performed inside each kernel-exit evaluation call.
+                            state.positions[sym].kernel_margin_used = state.positions[sym].margin_used;
+
                             // Stop loss
                             if (check_stop_loss(pos, ind_snap, &cfg)) {
                                 apply_close(&state, sym, ind_snap, ind_market_close, TRACE_REASON_EXIT_STOP, fee_rate, cfg.slippage_bps);
@@ -964,6 +998,12 @@ extern "C" __global__ void sweep_engine_kernel(
                     if (block_exits) {
                         continue;  // CPU returns Hold — skip trailing update too
                     }
+                    if (is_exit_cooldown_active(&state, sym, hybrid.t_sec, &cfg)) {
+                        continue;
+                    }
+
+                    // CPU parity: sync is performed inside each kernel-exit evaluation call.
+                    state.positions[sym].kernel_margin_used = state.positions[sym].margin_used;
 
                     // Stop loss
                     if (check_stop_loss(pos, hybrid, &cfg)) {
@@ -1006,13 +1046,6 @@ extern "C" __global__ void sweep_engine_kernel(
             }
 
             // ── Sub-bar entries (per-tick collection + ranking) ───────────────
-            // Find max sub-bar count across all symbols for this bar
-            unsigned int bar_max_sub = 0u;
-            for (unsigned int sym = 0u; sym < ns; sym++) {
-                unsigned int c = sub_counts[bar * ns + sym];
-                if (c > bar_max_sub) { bar_max_sub = c; }
-            }
-
             // CPU parity: sub-bar entry equity is computed once per main bar
             // (engine.rs sub_equity) and reused for all sub-ticks in the bar.
             double sub_entry_equity = state.balance;
@@ -1027,19 +1060,48 @@ extern "C" __global__ void sweep_engine_kernel(
             }
             if (sub_entry_equity < 0.0) { sub_entry_equity = 0.0; }
 
-            for (unsigned int sub_i = 0u; sub_i < bar_max_sub; sub_i++) {
+            // CPU parity: iterate merged unique sub-bar timestamps across symbols.
+            // Keep one cursor per symbol and process the smallest next timestamp.
+            unsigned int sub_cursor[MAX_SYMBOLS];
+            for (unsigned int sym = 0u; sym < ns; sym++) {
+                sub_cursor[sym] = 0u;
+            }
+
+            while (true) {
+                unsigned int tick_ts = 0xFFFFFFFFu;
+                bool has_tick = false;
+                for (unsigned int sym = 0u; sym < ns; sym++) {
+                    unsigned int count = sub_counts[bar * ns + sym];
+                    unsigned int cur = sub_cursor[sym];
+                    while (cur < count) {
+                        const GpuRawCandle& probe = sub_candles[(bar * max_sub + cur) * ns + sym];
+                        if (probe.close > 0.0f) { break; }
+                        cur += 1u;
+                    }
+                    sub_cursor[sym] = cur;
+                    if (cur >= count) { continue; }
+                    const GpuRawCandle& probe = sub_candles[(bar * max_sub + cur) * ns + sym];
+                    if (!has_tick || probe.t_sec < tick_ts) {
+                        tick_ts = probe.t_sec;
+                        has_tick = true;
+                    }
+                }
+                if (!has_tick) { break; }
+
                 EntryCandidate candidates[MAX_CANDIDATES];
+                unsigned int candidate_sub_slot[MAX_CANDIDATES];
                 unsigned int num_cands = 0u;
 
                 for (unsigned int sym = 0u; sym < ns; sym++) {
                     if (num_cands >= MAX_CANDIDATES) { break; }
                     if (state.entries_this_bar >= cfg.max_entry_orders_per_loop) { break; }
 
-                    // Check if this symbol has a sub-bar at this slot
-                    if (sub_i >= sub_counts[bar * ns + sym]) { continue; }
+                    unsigned int sub_slot = sub_cursor[sym];
+                    if (sub_slot >= sub_counts[bar * ns + sym]) { continue; }
 
-                    const GpuRawCandle& sc = sub_candles[(bar * max_sub + sub_i) * ns + sym];
+                    const GpuRawCandle& sc = sub_candles[(bar * max_sub + sub_slot) * ns + sym];
                     if (sc.close <= 0.0f) { continue; }
+                    if (sc.t_sec != tick_ts) { continue; }
 
                     const GpuSnapshot& ind_snap = snapshots[cfg.snapshot_offset + bar * ns + sym];
                     if (ind_snap.valid == 0u) { continue; }
@@ -1073,41 +1135,161 @@ extern "C" __global__ void sweep_engine_kernel(
                     unsigned int signal = sig_result.signal;
                     unsigned int confidence = sig_result.confidence;
                     double entry_adx_thresh = sig_result.entry_adx_threshold;
+                    const bool debug_target =
+                        (state.trace_enabled != 0u)
+                        && (state.trace_symbol == TRACE_SYMBOL_ALL || state.trace_symbol == sym)
+                        && (params->debug_t_sec != 0u && params->debug_t_sec == hybrid.t_sec);
 
-                    if (signal == SIG_NEUTRAL) { continue; }
+                    if (debug_target) {
+                        printf(
+                            "[gpu-sub-cand-debug] sym=%u ts=%u raw_signal=%u conf=%u breadth=%.6f btc=%u adx=%.6f adx_s=%.6f macd=%.10f rsi=%.6f\n",
+                            sym, hybrid.t_sec, signal, confidence, breadth_pct, btc_bull,
+                            hybrid.adx, hybrid.adx_slope, hybrid.macd_hist, hybrid.rsi
+                        );
+                    }
+
+                    if (signal == SIG_NEUTRAL) {
+                        if (debug_target) {
+                            printf(
+                                "[gpu-sub-cand-debug] sym=%u ts=%u rejected=neutral_raw breadth=%.6f\n",
+                                sym, hybrid.t_sec, breadth_pct
+                            );
+                        }
+                        continue;
+                    }
 
                     double atr = apply_atr_floor((double)hybrid.atr, (double)hybrid.close, (double)cfg.min_atr_pct);
 
                     signal = apply_reverse(signal, &cfg, breadth_pct);
-                    if (signal == SIG_NEUTRAL) { continue; }
+                    if (debug_target) {
+                        printf(
+                            "[gpu-sub-cand-debug] sym=%u ts=%u after_reverse=%u breadth=%.6f\n",
+                            sym, hybrid.t_sec, signal, breadth_pct
+                        );
+                    }
+                    if (signal == SIG_NEUTRAL) {
+                        if (debug_target) {
+                            printf(
+                                "[gpu-sub-cand-debug] sym=%u ts=%u rejected=neutral_after_reverse breadth=%.6f\n",
+                                sym, hybrid.t_sec, breadth_pct
+                            );
+                        }
+                        continue;
+                    }
                     signal = apply_regime_filter(signal, &cfg, breadth_pct);
-                    if (signal == SIG_NEUTRAL) { continue; }
+                    if (debug_target) {
+                        printf(
+                            "[gpu-sub-cand-debug] sym=%u ts=%u after_regime=%u breadth=%.6f\n",
+                            sym, hybrid.t_sec, signal, breadth_pct
+                        );
+                    }
+                    if (signal == SIG_NEUTRAL) {
+                        if (debug_target) {
+                            printf(
+                                "[gpu-sub-cand-debug] sym=%u ts=%u rejected=neutral_after_regime breadth=%.6f\n",
+                                sym, hybrid.t_sec, breadth_pct
+                            );
+                        }
+                        continue;
+                    }
 
-                    if (!conf_meets_min(confidence, cfg.entry_min_confidence)) { continue; }
+                    if (!conf_meets_min(confidence, cfg.entry_min_confidence)) {
+                        if (debug_target) {
+                            printf(
+                                "[gpu-sub-cand-debug] sym=%u ts=%u rejected=min_conf conf=%u min=%u\n",
+                                sym, hybrid.t_sec, confidence, cfg.entry_min_confidence
+                            );
+                        }
+                        continue;
+                    }
 
                     unsigned int desired_type = (signal == SIG_BUY) ? POS_LONG : POS_SHORT;
-                    if (is_pesc_blocked(&state, sym, desired_type, hybrid.t_sec, hybrid.adx, &cfg)) { continue; }
+                    bool pesc_blocked = is_pesc_blocked(&state, sym, desired_type, hybrid.t_sec, hybrid.adx, &cfg);
+                    if (pesc_blocked) {
+                        if (debug_target) {
+                            printf(
+                                "[gpu-sub-cand-debug] sym=%u ts=%u rejected=pesc desired=%u adx=%.6f\n",
+                                sym, hybrid.t_sec, desired_type, hybrid.adx
+                            );
+                        }
+                        continue;
+                    }
 
                     if (cfg.enable_ssf_filter != 0u) {
-                        if (signal == SIG_BUY && hybrid.macd_hist <= 0.0f) { continue; }
-                        if (signal == SIG_SELL && hybrid.macd_hist >= 0.0f) { continue; }
+                        if (signal == SIG_BUY && hybrid.macd_hist <= 0.0f) {
+                            if (debug_target) {
+                                printf(
+                                    "[gpu-sub-cand-debug] sym=%u ts=%u rejected=ssf_buy macd=%.10f\n",
+                                    sym, hybrid.t_sec, hybrid.macd_hist
+                                );
+                            }
+                            continue;
+                        }
+                        if (signal == SIG_SELL && hybrid.macd_hist >= 0.0f) {
+                            if (debug_target) {
+                                printf(
+                                    "[gpu-sub-cand-debug] sym=%u ts=%u rejected=ssf_sell macd=%.10f\n",
+                                    sym, hybrid.t_sec, hybrid.macd_hist
+                                );
+                            }
+                            continue;
+                        }
                     }
 
                     if (cfg.enable_reef_filter != 0u) {
                         if (signal == SIG_BUY) {
                             if (hybrid.adx < cfg.reef_adx_threshold) {
-                                if (hybrid.rsi > cfg.reef_long_rsi_block_gt) { continue; }
+                                if (hybrid.rsi > cfg.reef_long_rsi_block_gt) {
+                                    if (debug_target) {
+                                        printf(
+                                            "[gpu-sub-cand-debug] sym=%u ts=%u rejected=reef_buy adx=%.6f rsi=%.6f\n",
+                                            sym, hybrid.t_sec, hybrid.adx, hybrid.rsi
+                                        );
+                                    }
+                                    continue;
+                                }
                             } else {
-                                if (hybrid.rsi > cfg.reef_long_rsi_extreme_gt) { continue; }
+                                if (hybrid.rsi > cfg.reef_long_rsi_extreme_gt) {
+                                    if (debug_target) {
+                                        printf(
+                                            "[gpu-sub-cand-debug] sym=%u ts=%u rejected=reef_buy_extreme adx=%.6f rsi=%.6f\n",
+                                            sym, hybrid.t_sec, hybrid.adx, hybrid.rsi
+                                        );
+                                    }
+                                    continue;
+                                }
                             }
                         }
                         if (signal == SIG_SELL) {
                             if (hybrid.adx < cfg.reef_adx_threshold) {
-                                if (hybrid.rsi < cfg.reef_short_rsi_block_lt) { continue; }
+                                if (hybrid.rsi < cfg.reef_short_rsi_block_lt) {
+                                    if (debug_target) {
+                                        printf(
+                                            "[gpu-sub-cand-debug] sym=%u ts=%u rejected=reef_sell adx=%.6f rsi=%.6f\n",
+                                            sym, hybrid.t_sec, hybrid.adx, hybrid.rsi
+                                        );
+                                    }
+                                    continue;
+                                }
                             } else {
-                                if (hybrid.rsi < cfg.reef_short_rsi_extreme_lt) { continue; }
+                                if (hybrid.rsi < cfg.reef_short_rsi_extreme_lt) {
+                                    if (debug_target) {
+                                        printf(
+                                            "[gpu-sub-cand-debug] sym=%u ts=%u rejected=reef_sell_extreme adx=%.6f rsi=%.6f\n",
+                                            sym, hybrid.t_sec, hybrid.adx, hybrid.rsi
+                                        );
+                                    }
+                                    continue;
+                                }
                             }
                         }
+                    }
+                    if (debug_target) {
+                        printf(
+                            "[gpu-sub-cand-debug] sym=%u ts=%u accepted signal=%u conf=%u adx=%.6f atr=%.10f entry_adx=%.6f breadth=%.6f btc=%u\n",
+                            sym, hybrid.t_sec, signal, confidence, hybrid.adx, atr,
+                            entry_adx_thresh, breadth_pct, btc_bull
+                        );
                     }
 
                     int score = (int)(confidence) * 100 + (int)(hybrid.adx);
@@ -1121,23 +1303,26 @@ extern "C" __global__ void sweep_engine_kernel(
                     cand.atr = atr;
                     cand.entry_adx_threshold = entry_adx_thresh;
                     candidates[num_cands] = cand;
+                    candidate_sub_slot[num_cands] = sub_slot;
                     num_cands += 1u;
                 }
 
                 // Rank candidates for this sub-bar tick
                 for (unsigned int i = 1u; i < num_cands; i++) {
-                EntryCandidate key = candidates[i];
-                unsigned int j = i;
+                    EntryCandidate key = candidates[i];
+                    unsigned int key_sub_slot = candidate_sub_slot[i];
+                    unsigned int j = i;
                     while (j > 0u
                            && (candidates[j - 1u].score < key.score
                                || (candidates[j - 1u].score == key.score
                                    && candidates[j - 1u].sym_idx > key.sym_idx))) {
                         candidates[j] = candidates[j - 1u];
+                        candidate_sub_slot[j] = candidate_sub_slot[j - 1u];
                         j -= 1u;
                     }
                     candidates[j] = key;
+                    candidate_sub_slot[j] = key_sub_slot;
                 }
-
                 // Execute ranked entries for this sub-bar tick
                 for (unsigned int i = 0u; i < num_cands; i++) {
                     if (state.entries_this_bar >= cfg.max_entry_orders_per_loop) { break; }
@@ -1146,7 +1331,8 @@ extern "C" __global__ void sweep_engine_kernel(
                     const EntryCandidate& cand = candidates[i];
 
                     // Re-read sub-bar candle for fill price
-                    const GpuRawCandle& sc = sub_candles[(bar * max_sub + sub_i) * ns + cand.sym_idx];
+                    unsigned int cand_sub_slot = candidate_sub_slot[i];
+                    const GpuRawCandle& sc = sub_candles[(bar * max_sub + cand_sub_slot) * ns + cand.sym_idx];
                     const GpuSnapshot& ind_snap = snapshots[cfg.snapshot_offset + bar * ns + cand.sym_idx];
 
                     GpuSnapshot hybrid = ind_snap;
@@ -1156,6 +1342,10 @@ extern "C" __global__ void sweep_engine_kernel(
                     hybrid.open = sc.open;
                     hybrid.t_sec = sc.t_sec;
                     double entry_close = (double)sc.close;
+                    const bool sub_exec_debug_target =
+                        (state.trace_enabled != 0u)
+                        && (state.trace_symbol == TRACE_SYMBOL_ALL || state.trace_symbol == cand.sym_idx)
+                        && (params->debug_t_sec != 0u && params->debug_t_sec == hybrid.t_sec);
 
                     // Margin cap
                     double total_margin = 0.0;
@@ -1196,11 +1386,85 @@ extern "C" __global__ void sweep_engine_kernel(
                     }
                 }
 
+                    // CPU parity (decision kernel): require kernel cash >= margin + fee,
+                    // where margin is computed using base leverage (cfg.leverage), not
+                    // dynamic per-trade leverage selected by sizing.
+                    double kernel_lev = ((double)cfg.leverage > 1.0)
+                        ? (double)cfg.leverage
+                        : 1.0;
+                    double kernel_notional = clamp_kernel_notional(notional);
+                    double kernel_margin_req = quantize12(kernel_notional / kernel_lev);
+                    double open_fee = quantize12(kernel_notional * (double)fee_rate);
+                    if (kernel_margin_req + open_fee > state.kernel_cash) {
+                        if (sub_exec_debug_target) {
+                            printf(
+                                "[gpu-sub-open-debug] sym=%u ts=%u rejected=insufficient_cash notional=%.12f kernel_notional=%.12f lev_used=%.12f margin_used=%.12f kernel_lev=%.12f kernel_margin_req=%.12f kernel_cash=%.12f fee=%.12f\\n",
+                                cand.sym_idx,
+                                hybrid.t_sec,
+                                notional,
+                                kernel_notional,
+                                lev,
+                                margin,
+                                kernel_lev,
+                                kernel_margin_req,
+                                state.kernel_cash,
+                                open_fee
+                            );
+                            for (unsigned int ds = 0u; ds < ns; ds++) {
+                                const GpuPosition& dp = state.positions[ds];
+                                if (dp.active == POS_EMPTY) { continue; }
+                                double dp_notional = (double)dp.size * (double)dp.entry_price;
+                                printf(
+                                    "[gpu-kcash-debug] sym=%u side=%u qty=%.12f avg_entry=%.12f notional=%.12f margin=%.12f kernel_margin=%.12f\\n",
+                                    ds,
+                                    dp.active,
+                                    (double)dp.size,
+                                    (double)dp.entry_price,
+                                    dp_notional,
+                                    (double)dp.margin_used,
+                                    (double)dp.kernel_margin_used
+                                );
+                            }
+                        }
+                        continue;
+                    }
+                    if (sub_exec_debug_target) {
+                        printf(
+                            "[gpu-sub-open-debug] sym=%u ts=%u pass_cash_gate notional=%.12f kernel_notional=%.12f lev_used=%.12f margin_used=%.12f kernel_lev=%.12f kernel_margin_req=%.12f kernel_cash=%.12f fee=%.12f\\n",
+                            cand.sym_idx,
+                            hybrid.t_sec,
+                            notional,
+                            kernel_notional,
+                            lev,
+                            margin,
+                            kernel_lev,
+                            kernel_margin_req,
+                            state.kernel_cash,
+                            open_fee
+                        );
+                        for (unsigned int ds = 0u; ds < ns; ds++) {
+                            const GpuPosition& dp = state.positions[ds];
+                            if (dp.active == POS_EMPTY) { continue; }
+                            double dp_notional = (double)dp.size * (double)dp.entry_price;
+                            printf(
+                                "[gpu-kcash-debug] sym=%u side=%u qty=%.12f avg_entry=%.12f notional=%.12f margin=%.12f kernel_margin=%.12f\\n",
+                                ds,
+                                dp.active,
+                                (double)dp.size,
+                                (double)dp.entry_price,
+                                dp_notional,
+                                (double)dp.margin_used,
+                                (double)dp.kernel_margin_used
+                            );
+                        }
+                    }
+
                     float slip = (cand.signal == SIG_BUY) ? cfg.slippage_bps : -cfg.slippage_bps;
                     double fill_price = quantize12(
                         entry_close * (1.0 + (double)slip / 10000.0));
                     double fee = quantize12((double)notional * (double)fee_rate);
                     state.balance -= fee;
+                    state.kernel_cash = quantize12(state.kernel_cash - (kernel_margin_req + open_fee));
                     state.total_fees += fee;
 
                     GpuPosition new_pos;
@@ -1219,8 +1483,7 @@ extern "C" __global__ void sweep_engine_kernel(
                     new_pos.tp1_taken = 0u;
                     new_pos.open_time_sec = hybrid.t_sec;
                     new_pos.last_add_time_sec = hybrid.t_sec;
-                    new_pos._pad[0] = 0u;
-                    new_pos._pad[1] = 0u;
+                    new_pos.kernel_margin_used = kernel_margin_req;
                     state.positions[cand.sym_idx] = new_pos;
                     state.last_entry_attempt_sec[cand.sym_idx] = hybrid.t_sec;
 
@@ -1238,6 +1501,17 @@ extern "C" __global__ void sweep_engine_kernel(
                         0.0f
                     );
                 }
+
+                for (unsigned int sym = 0u; sym < ns; sym++) {
+                    unsigned int cur = sub_cursor[sym];
+                    unsigned int count = sub_counts[bar * ns + sym];
+                    if (cur >= count) { continue; }
+                    const GpuRawCandle& probe = sub_candles[(bar * max_sub + cur) * ns + sym];
+                    if (probe.t_sec == tick_ts) {
+                        sub_cursor[sym] = cur + 1u;
+                    }
+                }
+
             }
 
         } else {
@@ -1265,7 +1539,10 @@ extern "C" __global__ void sweep_engine_kernel(
                             && fabsf(snap.close - snap.prev_close) > snap.atr * cfg.glitch_atr_mult);
                 }
                 bool partial_tp_taken = false;
-                if (!block_exits) {
+                if (!block_exits && !is_exit_cooldown_active(&state, sym, snap.t_sec, &cfg)) {
+                    // CPU parity: sync is performed inside each kernel-exit evaluation call.
+                    state.positions[sym].kernel_margin_used = state.positions[sym].margin_used;
+
                     // Stop loss
                     if (check_stop_loss(pos, snap, &cfg)) {
                         apply_close(&state, sym, snap, main_market_close, TRACE_REASON_EXIT_STOP, fee_rate, cfg.slippage_bps);
@@ -1372,8 +1649,11 @@ extern "C" __global__ void sweep_engine_kernel(
                         }
                         double p_atr_pyr = profit_atr(pos_after_exit, (double)snap.close);
                         if (p_atr_pyr >= (double)cfg.add_min_profit_atr) {
-                            unsigned int elapsed_sec = snap.t_sec - pos_after_exit.last_add_time_sec;
-                            if (elapsed_sec >= cfg.add_cooldown_minutes * 60u) {
+                            long long elapsed_sec =
+                                (long long)snap.t_sec - (long long)pos_after_exit.last_add_time_sec;
+                            long long min_add_cooldown_sec =
+                                (long long)cfg.add_cooldown_minutes * 60ll;
+                            if (elapsed_sec >= min_add_cooldown_sec) {
                                 // CPU parity: try_pyramid uses balance-only equity approximation.
                                 double equity = state.balance;
                                 if (equity < 0.0) { equity = 0.0; }
@@ -1421,15 +1701,32 @@ extern "C" __global__ void sweep_engine_kernel(
                                         continue;
                                     }
                                 }
+                                double kernel_lev = ((double)cfg.leverage > 1.0)
+                                    ? (double)cfg.leverage
+                                    : 1.0;
+                                double kernel_add_notional = clamp_kernel_notional(add_notional);
+                                double kernel_margin_add = quantize12(kernel_add_notional / kernel_lev);
+                                double add_fee = quantize12(kernel_add_notional * (double)fee_rate);
+                                if (kernel_margin_add + add_fee > state.kernel_cash) {
+                                    if (pyr_debug_target) {
+                                        printf(
+                                            "[gpu-pyr-debug] sym=%u ts=%u rejected=insufficient_cash add_notional=%.12f kernel_add_notional=%.12f kernel_margin_add=%.12f kernel_cash=%.12f fee=%.12f\\n",
+                                            sym, snap.t_sec, add_notional, kernel_add_notional, kernel_margin_add, state.kernel_cash, add_fee
+                                        );
+                                    }
+                                    continue;
+                                }
                                 if (pyr_debug_target) {
                                     printf(
-                                        "[gpu-pyr-debug] sym=%u ts=%u accepted add_notional=%.12f add_size=%.12f add_margin=%.12f p_atr=%.12f elapsed_sec=%u\\n",
+                                        "[gpu-pyr-debug] sym=%u ts=%u accepted add_notional=%.12f add_size=%.12f add_margin=%.12f p_atr=%.12f elapsed_sec=%lld\\n",
                                         sym, snap.t_sec, add_notional, add_size, add_margin, p_atr_pyr, elapsed_sec
                                     );
                                 }
 
                                 double fee = quantize12((double)add_notional * (double)fee_rate);
                                 state.balance -= fee;
+                                state.kernel_cash =
+                                    quantize12(state.kernel_cash - (kernel_margin_add + add_fee));
                                 state.total_fees += fee;
 
                                 double old_size = pos_after_exit.size;
@@ -1444,6 +1741,8 @@ extern "C" __global__ void sweep_engine_kernel(
                                 state.positions[sym].size = new_size;
                                 state.positions[sym].margin_used =
                                     state.positions[sym].margin_used + add_margin;
+                                state.positions[sym].kernel_margin_used =
+                                    quantize12(state.positions[sym].kernel_margin_used + kernel_margin_add);
                                 state.positions[sym].adds_count += 1u;
                                 state.positions[sym].last_add_time_sec = snap.t_sec;
                                 state.last_entry_attempt_sec[sym] = snap.t_sec;
@@ -1461,8 +1760,8 @@ extern "C" __global__ void sweep_engine_kernel(
                             }
                             else if (pyr_debug_target) {
                                 printf(
-                                    "[gpu-pyr-debug] sym=%u ts=%u rejected=add_cooldown elapsed_sec=%u min_sec=%u\\n",
-                                    sym, snap.t_sec, elapsed_sec, cfg.add_cooldown_minutes * 60u
+                                    "[gpu-pyr-debug] sym=%u ts=%u rejected=add_cooldown elapsed_sec=%lld min_sec=%lld\\n",
+                                    sym, snap.t_sec, elapsed_sec, min_add_cooldown_sec
                                 );
                             }
                         }
@@ -1572,7 +1871,8 @@ extern "C" __global__ void sweep_engine_kernel(
                 }
 
                 unsigned int desired_type = (signal == SIG_BUY) ? POS_LONG : POS_SHORT;
-                if (is_pesc_blocked(&state, sym, desired_type, snap.t_sec, snap.adx, &cfg)) {
+                bool pesc_blocked = is_pesc_blocked(&state, sym, desired_type, snap.t_sec, snap.adx, &cfg);
+                if (pesc_blocked) {
                     if (debug_target) {
                         printf(
                             "[gpu-cand-debug] sym=%u ts=%u rejected=pesc desired=%u adx=%.6f\\n",
@@ -1775,11 +2075,25 @@ extern "C" __global__ void sweep_engine_kernel(
                     }
                 }
 
+                // CPU parity (decision kernel): require kernel cash >= margin + fee,
+                // where margin is computed using base leverage (cfg.leverage), not
+                // dynamic per-trade leverage selected by sizing.
+                double kernel_lev = ((double)cfg.leverage > 1.0)
+                    ? (double)cfg.leverage
+                    : 1.0;
+                double kernel_notional = clamp_kernel_notional(notional);
+                double kernel_margin_req = quantize12(kernel_notional / kernel_lev);
+                double open_fee = quantize12(kernel_notional * (double)fee_rate);
+                if (kernel_margin_req + open_fee > state.kernel_cash) {
+                    continue;
+                }
+
                 float slip = (cand.signal == SIG_BUY) ? cfg.slippage_bps : -cfg.slippage_bps;
                 double fill_price = quantize12(
                     entry_close * (1.0 + (double)slip / 10000.0));
                 double fee = quantize12((double)notional * (double)fee_rate);
                 state.balance -= fee;
+                state.kernel_cash = quantize12(state.kernel_cash - (kernel_margin_req + open_fee));
                 state.total_fees += fee;
 
                 GpuPosition new_pos;
@@ -1798,8 +2112,7 @@ extern "C" __global__ void sweep_engine_kernel(
                 new_pos.tp1_taken = 0u;
                 new_pos.open_time_sec = snap.t_sec;
                 new_pos.last_add_time_sec = snap.t_sec;
-                new_pos._pad[0] = 0u;
-                new_pos._pad[1] = 0u;
+                new_pos.kernel_margin_used = kernel_margin_req;
                 state.positions[cand.sym_idx] = new_pos;
                 state.last_entry_attempt_sec[cand.sym_idx] = snap.t_sec;
 

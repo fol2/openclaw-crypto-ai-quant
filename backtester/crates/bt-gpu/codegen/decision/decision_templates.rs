@@ -406,8 +406,15 @@ __device__ SignalResult generate_signal_codegen(
 
             // ── StochRSI filter ──
             if (mode1_ok && cfg.use_stoch_rsi_filter != 0u) {
-                if (signal == 1 && stoch_k > (double)cfg.stoch_rsi_block_long_gt) { mode1_ok = false; }
-                if (signal == 2 && stoch_k < (double)cfg.stoch_rsi_block_short_lt) { mode1_ok = false; }
+                // CUDA indicator snapshots are f32; apply a tiny tolerance to avoid
+                // boundary flips versus CPU f64 around StochRSI thresholds.
+                const double stoch_eps = 1e-6;
+                if (signal == 1 && stoch_k > ((double)cfg.stoch_rsi_block_long_gt + stoch_eps)) {
+                    mode1_ok = false;
+                }
+                if (signal == 2 && stoch_k < ((double)cfg.stoch_rsi_block_short_lt - stoch_eps)) {
+                    mode1_ok = false;
+                }
             }
 
             if (mode1_ok) {
@@ -1359,15 +1366,18 @@ __device__ SizingResultD compute_entry_size_codegen(
         double adx_ratio = adx / (double)cfg.adx_sizing_full_adx;
         double adx_mult = fmax(fmin(adx_ratio, 1.0), (double)cfg.adx_sizing_min_mult);
 
-        // Volatility scalar — inverse of vol_ratio, clamped to [min, max]
-        double vol_scalar = 1.0;
+        // Volatility scalar — SSOT parity with risk-core::compute_entry_sizing:
+        // vol_ratio fallback=1.0, vol_scalar_raw fallback=1.0, then clamp always.
+        double vol_ratio = 1.0;
         if ((double)cfg.vol_baseline_pct > 0.0 && price > 0.0) {
-            double vol_ratio = (atr / price) / (double)cfg.vol_baseline_pct;
-            if (vol_ratio > 0.0) {
-                vol_scalar = fmax(fmin(1.0 / vol_ratio, (double)cfg.vol_scalar_max),
-                                  (double)cfg.vol_scalar_min);
-            }
+            vol_ratio = (atr / price) / (double)cfg.vol_baseline_pct;
         }
+        double vol_scalar_raw = 1.0;
+        if (vol_ratio > 0.0) {
+            vol_scalar_raw = 1.0 / vol_ratio;
+        }
+        double vol_scalar = fmax(fmin(vol_scalar_raw, (double)cfg.vol_scalar_max),
+                                 (double)cfg.vol_scalar_min);
 
         margin *= conf_mult * adx_mult * vol_scalar;
     }
@@ -1404,7 +1414,7 @@ __device__ SizingResultD compute_entry_size_codegen(
 /// ADX-adaptive cooldown: ADX 25..40 linearly interpolates between
 /// max_cd (weak trend = longer cooldown) and min_cd (strong trend = shorter).
 /// All ADX arithmetic uses `double` to match the f64 Rust source.
-/// Time arithmetic uses `unsigned int` seconds (GPU convention).
+/// Time arithmetic mirrors CPU signed elapsed semantics for parity.
 pub fn is_pesc_blocked_codegen() -> String {
     r#"// Derived from bt-core/src/engine.rs PESC cooldown logic
 // Post-Exit Same-Direction Cooldown: prevents re-entry in the same direction
@@ -1456,9 +1466,12 @@ __device__ bool is_pesc_blocked_codegen(
         cooldown_mins = max_cd + t * (min_cd - max_cd);
     }
 
-    unsigned int cooldown_sec = (unsigned int)(cooldown_mins * 60.0);
-    unsigned int elapsed = current_sec - close_ts;
-    return elapsed < cooldown_sec;
+    // CPU parity: engine.rs compares millisecond timestamps against
+    // cooldown_ms = cooldown_mins * 60_000. Keep that precision here.
+    long long cooldown_ms = (long long)(cooldown_mins * 60000.0);
+    long long elapsed_ms =
+        ((long long)current_sec - (long long)close_ts) * 1000ll;
+    return elapsed_ms < cooldown_ms;
 }
 "#
     .to_string()

@@ -1240,6 +1240,7 @@ fn dispatch_trade_arena(
     let mut states_host = vec![buffers::GpuComboState::zeroed(); gpu_configs.len()];
     for s in &mut states_host {
         s.balance = initial_balance as f64;
+        s.kernel_cash = initial_balance as f64;
         s.peak_equity = initial_balance as f64;
     }
     let mut states_gpu = ds
@@ -1273,6 +1274,10 @@ fn dispatch_trade_arena(
     } else {
         BAR_CHUNK_SIZE
     };
+    let debug_t_sec = std::env::var("AQC_GPU_DEBUG_T_SEC")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
     let trade_range = trade_end - trade_start;
     let num_chunks = (trade_range + effective_chunk - 1) / effective_chunk;
 
@@ -1293,6 +1298,8 @@ fn dispatch_trade_arena(
             taker_fee_rate_bits: taker_fee_rate.to_bits(),
             max_sub_per_bar,
             trade_end_bar: trade_end,
+            debug_t_sec,
+            _debug_pad: [0; 3],
         };
         let params_gpu = ds
             .dev

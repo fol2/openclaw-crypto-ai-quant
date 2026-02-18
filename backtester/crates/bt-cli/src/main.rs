@@ -2141,12 +2141,17 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
             let mut f = std::fs::File::create(&args.output)?;
             let top_n = args.top_n.unwrap_or(results.len());
             for r in results.iter().take(top_n) {
+                let mut overrides = serde_json::Map::new();
+                for (k, v) in &r.overrides {
+                    overrides.insert(k.clone(), serde_json::Value::from(*v));
+                }
+                let overrides = serde_json::Value::Object(overrides);
                 let json = if args.output_mode.is_candidate() {
                     serde_json::json!({
                         "schema_version": 1,
                         "config_id": r.config_id,
                         "output_mode": args.output_mode.as_str(),
-                        "overrides": r.overrides,
+                        "overrides": overrides,
                         "total_pnl": r.total_pnl,
                         "total_trades": r.total_trades,
                         "profit_factor": r.profit_factor,
@@ -2164,7 +2169,7 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
                         "win_rate": r.win_rate,
                         "profit_factor": r.profit_factor,
                         "max_drawdown_pct": r.max_drawdown_pct,
-                        "overrides": r.overrides,
+                        "overrides": overrides,
                     })
                 };
                 writeln!(f, "{}", json)?;
@@ -2219,12 +2224,17 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
         {
             let mut f = std::fs::File::create(&args.output)?;
             for r in &results {
+                let mut overrides = serde_json::Map::new();
+                for (k, v) in &r.overrides {
+                    overrides.insert(k.clone(), serde_json::Value::from(*v));
+                }
+                let overrides = serde_json::Value::Object(overrides);
                 let json = if args.output_mode.is_candidate() {
                     serde_json::json!({
                         "schema_version": 1,
                         "config_id": r.config_id,
                         "output_mode": args.output_mode.as_str(),
-                        "overrides": r.overrides,
+                        "overrides": overrides,
                         "total_pnl": r.total_pnl,
                         "total_trades": r.total_trades,
                         "profit_factor": r.profit_factor,
@@ -2241,7 +2251,7 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
                         "win_rate": r.win_rate,
                         "profit_factor": r.profit_factor,
                         "max_drawdown_pct": r.max_drawdown_pct,
-                        "overrides": r.overrides,
+                        "overrides": overrides,
                     })
                 };
                 writeln!(f, "{}", json)?;

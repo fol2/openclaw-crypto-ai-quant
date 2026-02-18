@@ -236,7 +236,7 @@ const _: () = assert!(std::mem::size_of::<IndicatorParams>() == 32);
 /// Flattened trade parameters for one sweep combo.
 /// Only trade-affecting fields (not indicator windows).
 ///
-/// 560 bytes (140 × f32), aligned to 16.
+/// 564 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuComboConfig {
@@ -429,11 +429,12 @@ pub struct GpuComboConfig {
     pub tp_mult_strong: f32,
     pub tp_mult_weak: f32,
 
-    // Entry cooldown (seconds) [139]
+    // Entry/exit cooldown (seconds) [139-140]
     pub entry_cooldown_s: u32,
+    pub exit_cooldown_s: u32,
 }
 
-const _: () = assert!(std::mem::size_of::<GpuComboConfig>() == 560);
+const _: () = assert!(std::mem::size_of::<GpuComboConfig>() == 564);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GpuPosition — per-symbol position state
@@ -460,7 +461,7 @@ pub struct GpuPosition {
     pub tp1_taken: u32,
     pub open_time_sec: u32,
     pub last_add_time_sec: u32,
-    pub _pad: [u32; 2],
+    pub kernel_margin_used: f64,
 }
 
 const _: () = assert!(std::mem::size_of::<GpuPosition>() == 96);
@@ -500,10 +501,10 @@ const _: () = assert!(std::mem::size_of::<GpuTraceEvent>() == 40);
 /// Size:
 /// 16 (header)
 /// + 52*96 (positions)
-/// + 4*52*4 (PESC + entry cooldown map)
+/// + 5*52*4 (PESC + entry/exit cooldown maps)
 /// + 16 + 1024*40 (trace control + ring)
 /// + 56 (accumulators) + 8 (pad)
-/// = 46,880 bytes
+/// = 47,088 bytes
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct GpuComboState {
@@ -520,6 +521,7 @@ pub struct GpuComboState {
     pub pesc_close_type: [u32; 52],        // 0=none, 1=LONG, 2=SHORT
     pub pesc_close_reason: [u32; 52],      // 0=none, 1=signal_flip, 2=other
     pub last_entry_attempt_sec: [u32; 52], // per-symbol successful entry/add timestamp
+    pub last_exit_attempt_sec: [u32; 52],  // per-symbol successful exit/partial timestamp
 
     // Optional GPU event trace (single-combo/symbol diagnostics)
     pub trace_enabled: u32,                           // 0=off, 1=on
@@ -537,7 +539,7 @@ pub struct GpuComboState {
     pub gross_loss: f64,
     pub max_drawdown: f64,
     pub peak_equity: f64,
-    pub _acc_pad: [u32; 2],
+    pub kernel_cash: f64,
 }
 
 // Manual impls because bytemuck derive doesn't support [T; 52].
@@ -555,16 +557,16 @@ unsafe impl Zeroable for GpuComboState {}
 const GPU_COMBO_STATE_EXPECTED_LAYOUT_BYTES: usize = std::mem::size_of::<f64>()
     + std::mem::size_of::<u32>() * 2
     + std::mem::size_of::<[GpuPosition; 52]>()
-    + std::mem::size_of::<[u32; 52]>() * 4
+    + std::mem::size_of::<[u32; 52]>() * 5
     + std::mem::size_of::<u32>() * 4
     + std::mem::size_of::<[GpuTraceEvent; GPU_TRACE_CAP]>()
     + std::mem::size_of::<f64>() * 6
     + std::mem::size_of::<u32>() * 2
-    + std::mem::size_of::<[u32; 2]>();
+    + std::mem::size_of::<f64>();
 
 const _: () =
     assert!(std::mem::size_of::<GpuComboState>() == GPU_COMBO_STATE_EXPECTED_LAYOUT_BYTES);
-const _: () = assert!(std::mem::size_of::<GpuComboState>() == 46880);
+const _: () = assert!(std::mem::size_of::<GpuComboState>() == 47088);
 const _: () = assert!(std::mem::align_of::<GpuComboState>() == 8);
 const _: () = assert!(std::mem::size_of::<GpuComboState>() % 16 == 0);
 
@@ -598,7 +600,7 @@ const _: () = assert!(std::mem::size_of::<GpuResult>() == 64);
 
 /// Global parameters passed as uniform to the compute shader.
 ///
-/// 48 bytes.
+/// 64 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuParams {
@@ -614,9 +616,11 @@ pub struct GpuParams {
     pub taker_fee_rate_bits: u32,  // f32 bits (from config, default 3.5 bps)
     pub max_sub_per_bar: u32,      // 0 = no sub-bars (backwards compatible)
     pub trade_end_bar: u32,        // last bar index for result write-back (scoped trade range)
+    pub debug_t_sec: u32,          // 0 = disabled; otherwise enable debug logs at this timestamp
+    pub _debug_pad: [u32; 3],
 }
 
-const _: () = assert!(std::mem::size_of::<GpuParams>() == 48);
+const _: () = assert!(std::mem::size_of::<GpuParams>() == 64);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Conversion helpers
@@ -823,6 +827,7 @@ impl GpuComboConfig {
             tp_mult_strong: checked_f32_field!(tp.tp_mult_strong),
             tp_mult_weak: checked_f32_field!(tp.tp_mult_weak),
             entry_cooldown_s: tc.entry_cooldown_s as u32,
+            exit_cooldown_s: tc.exit_cooldown_s as u32,
         })
     }
 }
@@ -914,8 +919,9 @@ mod tests {
         // Default TP multipliers
         assert!((gpu.tp_mult_strong - 7.0).abs() < f32::EPSILON);
         assert!((gpu.tp_mult_weak - 3.0).abs() < f32::EPSILON);
-        // Entry cooldown is propagated
+        // Entry/exit cooldowns are propagated
         assert_eq!(gpu.entry_cooldown_s, cfg.trade.entry_cooldown_s as u32);
+        assert_eq!(gpu.exit_cooldown_s, cfg.trade.exit_cooldown_s as u32);
     }
 
     /// H11: verify that extreme f64 values that overflow f32 are caught.
@@ -965,7 +971,7 @@ mod tests {
             std::mem::size_of::<GpuComboState>(),
             GPU_COMBO_STATE_EXPECTED_LAYOUT_BYTES
         );
-        assert_eq!(std::mem::size_of::<GpuComboState>(), 46880);
+        assert_eq!(std::mem::size_of::<GpuComboState>(), 47088);
         assert_eq!(std::mem::align_of::<GpuComboState>(), 8);
     }
 
