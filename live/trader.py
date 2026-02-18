@@ -14,6 +14,7 @@ import queue
 import sqlite3
 import threading
 import time
+import atexit
 
 import exchange.meta as hyperliquid_meta
 import exchange.ws as hyperliquid_ws
@@ -142,11 +143,16 @@ _DISCORD_QUEUE_MAX = max(10, min(5000, int(_DISCORD_QUEUE_MAX)))
 # Multi-instance deployments should use separate processes to avoid queue contention.
 _DISCORD_QUEUE: queue.Queue[tuple[str, str]] = queue.Queue(maxsize=_DISCORD_QUEUE_MAX)
 _DISCORD_WORKER_STARTED = False
+_DISCORD_WORKER_THREAD: threading.Thread | None = None
+_DISCORD_WORKER_STOP = threading.Event()
 
 
 def _discord_worker() -> None:
-    while True:
-        target, message = _DISCORD_QUEUE.get()
+    while not _DISCORD_WORKER_STOP.is_set():
+        try:
+            target, message = _DISCORD_QUEUE.get(timeout=0.5)
+        except queue.Empty:
+            continue
         try:
             _send_discord_message_sync(target=target, message=message)
         except Exception as e:
@@ -157,15 +163,46 @@ def _discord_worker() -> None:
             except Exception as e:
                 logger.debug("failed to mark discord queue task done: %s", e, exc_info=True)
 
+    with _DISCORD_QUEUE_LOCK:
+        global _DISCORD_WORKER_STARTED, _DISCORD_WORKER_THREAD
+        _DISCORD_WORKER_STARTED = False
+        _DISCORD_WORKER_THREAD = None
+
 
 def _ensure_discord_worker_started() -> None:
-    global _DISCORD_WORKER_STARTED
+    global _DISCORD_WORKER_STARTED, _DISCORD_WORKER_THREAD
     with _DISCORD_QUEUE_LOCK:
-        if _DISCORD_WORKER_STARTED:
+        if _DISCORD_WORKER_THREAD is not None and _DISCORD_WORKER_THREAD.is_alive():
+            _DISCORD_WORKER_STARTED = True
             return
+        _DISCORD_WORKER_STOP.clear()
         t = threading.Thread(target=_discord_worker, name="aiq_discord_sender", daemon=True)
         t.start()
+        _DISCORD_WORKER_THREAD = t
         _DISCORD_WORKER_STARTED = True
+
+
+def _stop_discord_worker(*, timeout_s: float = 2.0) -> None:
+    global _DISCORD_WORKER_STARTED, _DISCORD_WORKER_THREAD
+    with _DISCORD_QUEUE_LOCK:
+        t = _DISCORD_WORKER_THREAD
+        if t is None:
+            _DISCORD_WORKER_STARTED = False
+            return
+        _DISCORD_WORKER_STOP.set()
+
+    try:
+        t.join(timeout=max(0.0, float(timeout_s)))
+    except Exception:
+        pass
+
+    with _DISCORD_QUEUE_LOCK:
+        if _DISCORD_WORKER_THREAD is t and not t.is_alive():
+            _DISCORD_WORKER_THREAD = None
+            _DISCORD_WORKER_STARTED = False
+
+
+atexit.register(_stop_discord_worker)
 
 
 def _send_discord_message(*, target: str, message: str) -> None:
