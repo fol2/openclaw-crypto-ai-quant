@@ -9,6 +9,7 @@ This tool reads:
 - live/paper action reconciliation report (optional/required)
 - live/paper decision trace reconciliation report (optional/required)
 - event-order parity report (optional/required)
+- GPU parity report (optional/required)
 
 and emits one deterministic gate result for CI/manual workflows, including
 market-data provenance checks for the replay candle window.
@@ -76,6 +77,17 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Fail when event-order parity report is missing",
     )
+    parser.add_argument(
+        "--gpu-parity-report",
+        default="gpu_smoke_parity_report.json",
+        help="Optional GPU smoke parity report filename/path",
+    )
+    parser.add_argument(
+        "--require-gpu-parity",
+        action="store_true",
+        default=False,
+        help="Fail when GPU parity report is missing",
+    )
     parser.add_argument("--output", help="Optional output path for gate report JSON")
     parser.add_argument(
         "--strict-no-residuals",
@@ -110,6 +122,23 @@ def _as_int(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+def _gpu_lane_pass_map(report: dict[str, Any]) -> dict[str, bool]:
+    lanes = report.get("lanes")
+    lane_map: dict[str, bool] = {}
+    if isinstance(lanes, dict):
+        for lane_name, lane_obj in lanes.items():
+            if isinstance(lane_obj, dict):
+                ranking = lane_obj.get("ranking") or {}
+                lane_map[str(lane_name)] = bool((ranking or {}).get("all_pass"))
+    elif isinstance(lanes, list):
+        for idx, lane_obj in enumerate(lanes, start=1):
+            if isinstance(lane_obj, dict):
+                lane_name = str(lane_obj.get("lane") or f"lane_{idx}")
+                ranking = lane_obj.get("ranking") or {}
+                lane_map[lane_name] = bool((ranking or {}).get("all_pass"))
+    return lane_map
+
+
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
@@ -125,6 +154,7 @@ def main() -> int:
     live_paper_path = _resolve_report_path(bundle_dir, args.live_paper_report)
     live_paper_decision_trace_path = _resolve_report_path(bundle_dir, args.live_paper_decision_trace_report)
     event_order_path = _resolve_report_path(bundle_dir, args.event_order_report)
+    gpu_parity_path = _resolve_report_path(bundle_dir, args.gpu_parity_report)
 
     failures: list[dict[str, Any]] = []
     candles_provenance_checked = not bool(args.skip_candles_provenance_check)
@@ -423,6 +453,48 @@ def main() -> int:
                 }
             )
 
+    gpu_parity_report: dict[str, Any] | None = None
+    gpu_lane_status: dict[str, bool] = {}
+    if not gpu_parity_path.exists():
+        if args.require_gpu_parity:
+            failures.append(
+                {
+                    "code": "missing_gpu_parity_report",
+                    "classification": "deterministic_logic_divergence",
+                    "detail": str(gpu_parity_path),
+                }
+            )
+    else:
+        loaded_gpu = _load_json(gpu_parity_path)
+        if not isinstance(loaded_gpu, dict):
+            failures.append(
+                {
+                    "code": "invalid_gpu_parity_report",
+                    "classification": "deterministic_logic_divergence",
+                    "detail": "GPU parity report is not a JSON object",
+                }
+            )
+        else:
+            gpu_parity_report = loaded_gpu
+            gpu_lane_status = _gpu_lane_pass_map(gpu_parity_report)
+            if not gpu_lane_status:
+                failures.append(
+                    {
+                        "code": "invalid_gpu_parity_report_lanes",
+                        "classification": "deterministic_logic_divergence",
+                        "detail": "GPU parity report does not contain lane ranking status",
+                    }
+                )
+            elif not all(gpu_lane_status.values()):
+                failures.append(
+                    {
+                        "code": "gpu_parity_failed",
+                        "classification": "deterministic_logic_divergence",
+                        "detail": "GPU parity lane ranking assertions failed",
+                        "lanes": gpu_lane_status,
+                    }
+                )
+
     ok = len(failures) == 0
 
     report = {
@@ -442,6 +514,8 @@ def main() -> int:
             "require_live_paper_decision_trace": bool(args.require_live_paper_decision_trace),
             "event_order_report": str(event_order_path),
             "require_event_order": bool(args.require_event_order),
+            "gpu_parity_report": str(gpu_parity_path),
+            "require_gpu_parity": bool(args.require_gpu_parity),
             "strict_no_residuals": bool(args.strict_no_residuals),
         },
         "checks": {
@@ -462,6 +536,8 @@ def main() -> int:
             "event_order_ok": bool((event_order_report.get("status") or {}).get("order_parity_pass"))
             if event_order_report
             else (not bool(args.require_event_order)),
+            "gpu_parity_ok": all(gpu_lane_status.values()) if gpu_lane_status else (not bool(args.require_gpu_parity)),
+            "gpu_parity_lane_status": gpu_lane_status,
             "trade_residual_count": len((trade_report or {}).get("accepted_residuals") or []),
             "action_residual_count": len((action_report or {}).get("accepted_residuals") or []),
             "live_paper_residual_count": len((live_paper_report or {}).get("accepted_residuals") or []),

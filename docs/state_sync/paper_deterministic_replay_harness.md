@@ -14,7 +14,8 @@ The harness executes:
 6. live/paper action reconcile
 7. live/paper decision-trace reconcile
 8. live-baseline vs paper event-order parity
-9. strict alignment gate
+9. bundle-scoped CPU/GPU parity
+10. strict alignment gate
 
 ## Command
 
@@ -65,3 +66,5 @@ python tools/audit_live_baseline_paper_order_parity.py \
 - per-step logs: `<bundle-dir>/harness_logs/*.stdout.log` and `*.stderr.log`
 
 `ok = true` means all steps (including event-order parity and final strict gate) passed.
+
+`gpu_parity` step requires CUDA because it executes GPU sweep lanes inside the bundle scope.

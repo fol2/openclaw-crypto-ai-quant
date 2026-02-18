@@ -163,6 +163,7 @@ def main() -> int:
     live_paper_action_reconcile_path = bundle_dir / "live_paper_action_reconcile_report.json"
     live_paper_decision_trace_reconcile_path = bundle_dir / "live_paper_decision_trace_reconcile_report.json"
     event_order_parity_path = bundle_dir / "event_order_parity_report.json"
+    gpu_parity_report_path = bundle_dir / "gpu_smoke_parity_report.json"
     alignment_gate_path = bundle_dir / "alignment_gate_report.json"
     paper_harness_report_path = bundle_dir / "paper_deterministic_replay_run.json"
     manifest_path = bundle_dir / "replay_bundle_manifest.json"
@@ -287,6 +288,18 @@ def main() -> int:
         f"--output \"$BUNDLE_DIR/{event_order_parity_path.name}\""
     )
 
+    cmd_gpu_parity = (
+        "set -euo pipefail\n"
+        "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
+        "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
+        f"CANDLES_DB=\"${{CANDLES_DB:-{shlex.quote(str(candles_db))}}}\"\n"
+        "python \"$REPO_ROOT/tools/run_bundle_gpu_parity.py\" "
+        "--bundle-dir \"$BUNDLE_DIR\" "
+        "--repo-root \"$REPO_ROOT\" "
+        "--candles-db \"$CANDLES_DB\" "
+        f"--output \"$BUNDLE_DIR/{gpu_parity_report_path.name}\""
+    )
+
     cmd_alignment_gate = (
         "set -euo pipefail\n"
         "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
@@ -301,6 +314,8 @@ def main() -> int:
         "--require-live-paper-decision-trace "
         f"--event-order-report \"$BUNDLE_DIR/{event_order_parity_path.name}\" "
         "--require-event-order "
+        f"--gpu-parity-report \"$BUNDLE_DIR/{gpu_parity_report_path.name}\" "
+        "--require-gpu-parity "
         f"--output \"$BUNDLE_DIR/{alignment_gate_path.name}\""
     )
 
@@ -328,6 +343,7 @@ def main() -> int:
         encoding="utf-8",
     )
     (bundle_dir / "run_07b_event_order_parity.sh").write_text(cmd_event_order_parity + "\n", encoding="utf-8")
+    (bundle_dir / "run_07c_gpu_parity.sh").write_text(cmd_gpu_parity + "\n", encoding="utf-8")
     (bundle_dir / "run_08_assert_alignment.sh").write_text(cmd_alignment_gate + "\n", encoding="utf-8")
     (bundle_dir / "run_09_paper_deterministic_replay.sh").write_text(cmd_paper_harness + "\n", encoding="utf-8")
 
@@ -340,6 +356,7 @@ def main() -> int:
         "run_06_live_paper_action_reconcile.sh",
         "run_07_live_paper_decision_trace_reconcile.sh",
         "run_07b_event_order_parity.sh",
+        "run_07c_gpu_parity.sh",
         "run_08_assert_alignment.sh",
         "run_09_paper_deterministic_replay.sh",
     ):
@@ -376,6 +393,7 @@ def main() -> int:
             "live_paper_action_reconcile_report_file": live_paper_action_reconcile_path.name,
             "live_paper_decision_trace_reconcile_report_file": live_paper_decision_trace_reconcile_path.name,
             "event_order_parity_report_file": event_order_parity_path.name,
+            "gpu_parity_report_file": gpu_parity_report_path.name,
             "alignment_gate_report_file": alignment_gate_path.name,
             "paper_deterministic_replay_run_report_file": paper_harness_report_path.name,
         },
@@ -393,6 +411,7 @@ def main() -> int:
             "live_paper_action_reconcile": cmd_live_paper_action_reconcile,
             "live_paper_decision_trace_reconcile": cmd_live_paper_decision_trace_reconcile,
             "event_order_parity": cmd_event_order_parity,
+            "gpu_parity": cmd_gpu_parity,
             "alignment_gate": cmd_alignment_gate,
             "paper_deterministic_replay_harness": cmd_paper_harness,
         },

@@ -26,6 +26,7 @@ python tools/build_live_replay_bundle.py \
 - `live_paper_action_reconcile_report.json`
 - `live_paper_decision_trace_reconcile_report.json`
 - `event_order_parity_report.json`
+- `gpu_smoke_parity_report.json`
 - `alignment_gate_report.json`
 - `paper_deterministic_replay_run.json`
 - `run_01_export_and_seed.sh`
@@ -36,6 +37,7 @@ python tools/build_live_replay_bundle.py \
 - `run_06_live_paper_action_reconcile.sh`
 - `run_07_live_paper_decision_trace_reconcile.sh`
 - `run_07b_event_order_parity.sh`
+- `run_07c_gpu_parity.sh`
 - `run_08_assert_alignment.sh`
 - `run_09_paper_deterministic_replay.sh`
 
@@ -49,8 +51,9 @@ python tools/build_live_replay_bundle.py \
 6. Run `run_06_live_paper_action_reconcile.sh`
 7. Run `run_07_live_paper_decision_trace_reconcile.sh`
 8. Run `run_07b_event_order_parity.sh`
-9. Run `run_08_assert_alignment.sh`
-10. Optional one-shot harness: `run_09_paper_deterministic_replay.sh`
+9. Run `run_07c_gpu_parity.sh`
+10. Run `run_08_assert_alignment.sh`
+11. Optional one-shot harness: `run_09_paper_deterministic_replay.sh`
 
 For strict shortcut mode:
 
@@ -58,7 +61,7 @@ For strict shortcut mode:
 STRICT_NO_RESIDUALS=1 /tmp/live_replay_bundle_1h/run_09_paper_deterministic_replay.sh
 ```
 
-This keeps snapshot seeding, replay execution, state alignment audit, backtester trade/action reconciliation, live/paper action reconciliation, live/paper decision-trace reconciliation, live-baseline/paper event-order parity, and final strict alignment gate tied to one immutable bundle manifest.
+This keeps snapshot seeding, replay execution, state alignment audit, backtester trade/action reconciliation, live/paper action reconciliation, live/paper decision-trace reconciliation, live-baseline/paper event-order parity, bundle-scoped CPU/GPU parity, and final strict alignment gate tied to one immutable bundle manifest.
 
 The manifest records both file-level and window-level market-data provenance:
 
@@ -68,6 +71,7 @@ The manifest records both file-level and window-level market-data provenance:
 
 `run_08_assert_alignment.sh` now validates this candle provenance by recomputing the same window hash/universe fingerprint from the candles DB and failing the gate on mismatch.
 It also requires `event_order_parity_report.json` to pass, so live-baseline vs paper event ordering drift fails the same gate.
+It also requires `gpu_smoke_parity_report.json` lane ranking assertions to pass, so bundle-scoped CPU/GPU drift fails the same gate.
 
 If the candles DB path differs across environments, pass an explicit override:
 
@@ -78,6 +82,10 @@ python tools/assert_replay_bundle_alignment.py \
 ```
 
 The generated `run_08_assert_alignment.sh` also honours `CANDLES_DB` for this override path.
+
+## GPU Requirement
+
+`run_07c_gpu_parity.sh` requires a CUDA-capable environment because it runs both CPU and GPU sweep lanes for parity comparison.
 
 ## Execution Context
 
