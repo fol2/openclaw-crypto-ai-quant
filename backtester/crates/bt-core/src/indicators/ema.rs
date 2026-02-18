@@ -20,6 +20,7 @@ pub struct Ema {
 
 impl Ema {
     pub fn new(window: usize) -> Self {
+        let window = window.max(1);
         Self {
             alpha: 2.0 / (window as f64 + 1.0),
             value: 0.0,
@@ -77,5 +78,18 @@ mod tests {
         // bar 3: 0.5*13 + 0.5*11.25 = 12.125
         let v = ema.update(13.0);
         assert!((v - 12.125).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_ema_zero_window_is_clamped_to_one() {
+        let mut ema = Ema::new(0);
+
+        // With window=1 clamp, alpha=1.0 and warmup completes after first sample.
+        let v = ema.update(10.0);
+        assert!((v - 10.0).abs() < 1e-10);
+        assert!(ema.is_warm());
+
+        let v = ema.update(12.5);
+        assert!((v - 12.5).abs() < 1e-10);
     }
 }
