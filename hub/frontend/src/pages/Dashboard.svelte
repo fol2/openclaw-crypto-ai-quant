@@ -178,6 +178,8 @@
   // Track previous symbol so we can clear candles on symbol switch
   // (plain let — not reactive, no effect re-run on change)
   let _prevFocusSym = '';
+  // Timestamp of last live-candle paint; used to cap redraws at ~15fps
+  let _liveUpdateMs = 0;
 
   async function setFocus(sym: string) {
     focusSym = sym;
@@ -207,11 +209,15 @@
   });
 
   // Live last-candle update: mutate the newest candle's OHLC via WebSocket mids.
-  // Stops updating once t_close has passed (candle is sealed by exchange).
+  // Rate-limited to ~15fps (66ms) to avoid triggering JSON.stringify + full
+  // canvas redraw at the raw WS cadence (~100ms / 10Hz).
+  // Stops updating once t_close has passed (candle is sealed by the exchange).
   $effect(() => {
     const sym = focusSym;
     if (!sym) return;
     const handler = (data: any) => {
+      const now = Date.now();
+      if (now - _liveUpdateMs < 66) return;          // ~15fps cap
       const mid = data?.mids?.[sym];
       if (mid == null || candles.length === 0) return;
       // Find the newest candle by timestamp
@@ -220,8 +226,10 @@
         if (candles[i].t > candles[liveIdx].t) liveIdx = i;
       }
       const c = candles[liveIdx];
-      // Don't update a candle whose close time has already passed
-      if (c.t_close != null && Date.now() > c.t_close) return;
+      // Guard: t_close=0 means the DB row had no close-time — treat as open.
+      // Only skip if we have a valid future close time that has already elapsed.
+      if (c.t_close != null && c.t_close > 0 && now > c.t_close) return;
+      _liveUpdateMs = now;
       c.c = mid;
       if (mid > c.h) c.h = mid;
       if (mid < c.l) c.l = mid;

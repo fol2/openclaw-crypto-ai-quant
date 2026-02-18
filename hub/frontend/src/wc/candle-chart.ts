@@ -131,6 +131,7 @@ export class CandleChart extends LitElement {
   disconnectedCallback() {
     super.disconnectedCallback();
     this._ro?.disconnect();
+    if (this._rafId !== null) { cancelAnimationFrame(this._rafId); this._rafId = null; }
   }
 
   updated() {
@@ -152,7 +153,8 @@ export class CandleChart extends LitElement {
     const rect = cv.getBoundingClientRect();
     const n    = this.candles.length;
     if (n === 0) return;
-    const slot = (this.offsetWidth - RIGHT) / n;
+    const W    = this.offsetWidth || 400;
+    const slot = (W - RIGHT) / n;
     const idx  = Math.max(0, Math.min(n - 1, Math.floor((e.clientX - rect.left) / slot)));
     this._hoverIdx = idx;
     this._hoverY   = e.clientY - rect.top;
@@ -177,7 +179,8 @@ export class CandleChart extends LitElement {
     const dpr = window.devicePixelRatio || 1;
     const W   = this.offsetWidth  || 400;
     const H   = this.offsetHeight || 280;
-    if (W < 20 || H < 60) return;
+    // H < 65: minimum to keep PRICE_H positive (layout uses 64px for non-price panels)
+    if (W < 20 || H < 65) return;
 
     cv.width  = W * dpr;
     cv.height = H * dpr;
