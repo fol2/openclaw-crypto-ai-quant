@@ -205,7 +205,7 @@ impl HubConfig {
                 .or_else(|| env::var("AIQ_MONITOR_MAIN_ADDRESS").ok())
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
-            mids_poll_ms: env_u64("AIQ_MONITOR_MIDS_POLL_MS", 1000),
+            mids_poll_ms: env_u64("AIQ_MONITOR_MIDS_POLL_MS", 100),
         }
     }
 

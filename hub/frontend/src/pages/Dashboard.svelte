@@ -14,18 +14,14 @@
   let prevMids: Record<string, number> = {};
   let flashTimer: any = null;
   let flashMap: Record<string, 'up' | 'down'> = $state({});
-  let flashDelays: Record<string, number> = {};
 
-  function detectFlashes(newSyms: any[]) {
+  function detectFlashes(newSyms: { symbol: string; mid: number | null }[]) {
     const next: Record<string, 'up' | 'down'> = {};
-    let idx = 0;
     for (const s of newSyms) {
       if (s.mid != null) {
         const prev = prevMids[s.symbol];
         if (prev !== undefined && s.mid !== prev) {
           next[s.symbol] = s.mid > prev ? 'up' : 'down';
-          flashDelays[s.symbol] = idx * 18; // stagger 18ms per changed symbol
-          idx++;
         }
         prevMids[s.symbol] = s.mid;
       }
@@ -33,7 +29,7 @@
     if (Object.keys(next).length > 0) {
       clearTimeout(flashTimer);
       flashMap = next;
-      flashTimer = setTimeout(() => { flashMap = {}; }, 1100); // 100ms after animation ends
+      flashTimer = setTimeout(() => { flashMap = {}; }, 1100);
     }
   }
 
@@ -63,7 +59,17 @@
     try {
       appState.loading = true;
       const data = await getSnapshot(appState.mode);
-      detectFlashes(data?.symbols || []);
+      // Preserve live WS mid prices — don't let stale REST prices overwrite them.
+      // WS owns price; REST owns everything else (positions, signals, heartbeat, balances).
+      if (snap?.symbols && data?.symbols) {
+        const liveMids: Record<string, number> = {};
+        for (const s of snap.symbols) {
+          if (s.mid != null) liveMids[s.symbol] = s.mid;
+        }
+        for (const s of data.symbols) {
+          if (liveMids[s.symbol] !== undefined) s.mid = liveMids[s.symbol];
+        }
+      }
       snap = data;
       appState.snapshot = data;
       error = '';
@@ -110,24 +116,32 @@
     };
   });
 
-  // Subscribe to real-time mid price updates over WebSocket.
-  // The backend broadcasts `{type:"mids", data:{mids:{SYM:price,...}, mids_age_s:n}}`
-  // every mids_poll_ms (default 1s). We update snap.symbols in-place so the
-  // rest of the snapshot (positions, signals, etc.) stays intact.
+  // Subscribe to real-time mid price updates over WebSocket (~100ms).
+  // WS owns all price data; REST owns positions/signals/heartbeat/balances.
   $effect(() => {
     const midsHandler = (data: any) => {
       if (!snap?.symbols || !data?.mids) return;
       const newMids = data.mids as Record<string, number>;
-      // Build a minimal {symbol, mid} array for flash detection
-      const symsForFlash = snap.symbols.map((s: any) => ({
-        symbol: s.symbol,
-        mid: newMids[s.symbol] ?? s.mid,
-      }));
-      detectFlashes(symsForFlash);
-      // Mutate in-place — Svelte 5 proxies track deep property writes
+
+      // Flash detection: compare incoming mids against previous WS values.
+      detectFlashes(
+        snap.symbols
+          .filter((s: any) => newMids[s.symbol] !== undefined)
+          .map((s: any) => ({ symbol: s.symbol, mid: newMids[s.symbol] }))
+      );
+
+      // Mutate mid prices + recalculate unrealized PnL in-place.
+      // Svelte 5 deep proxies track these writes automatically.
       for (const s of snap.symbols) {
         const p = newMids[s.symbol];
-        if (p !== undefined) s.mid = p;
+        if (p === undefined) continue;
+        s.mid = p;
+        if (s.position?.entry_price != null && s.position?.size != null) {
+          s.position.unreal_pnl_est =
+            s.position.type === 'LONG'
+              ? (p - s.position.entry_price) * s.position.size
+              : (s.position.entry_price - p) * s.position.size;
+        }
       }
     };
     hubWs.subscribe('mids', midsHandler);
@@ -259,7 +273,6 @@
               <td class="num col-mid"
                 class:flash-up={flashMap[s.symbol] === 'up'}
                 class:flash-down={flashMap[s.symbol] === 'down'}
-                style={flashMap[s.symbol] ? `animation-delay:${flashDelays[s.symbol] ?? 0}ms` : ''}
               >{s.mid != null ? fmtNum(s.mid, 6) : '\u2014'}</td>
               <td>
                 {#if s.last_signal?.signal === 'BUY'}
@@ -701,16 +714,16 @@
   }
 
   /* ─── Price flash ─── */
-  /* End color must match the resting color of .num (.col-mid) = var(--text-muted) */
+  /* End color must match the resting color of .num (.col-mid) = var(--text) */
   @keyframes flashUp {
     0%   { color: var(--green); }
     60%  { color: var(--green); }
-    100% { color: var(--text-muted); }
+    100% { color: var(--text); }
   }
   @keyframes flashDown {
     0%   { color: var(--red); }
     60%  { color: var(--red); }
-    100% { color: var(--text-muted); }
+    100% { color: var(--text); }
   }
   /* End color for detail panel mid-price = var(--accent) */
   @keyframes flashUpAccent {
@@ -740,7 +753,7 @@
     text-align: right;
     font-family: 'IBM Plex Mono', monospace;
     font-size: 11px;
-    color: var(--text-muted);
+    color: var(--text);
   }
 
   .sig-badge {
