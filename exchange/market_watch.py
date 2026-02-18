@@ -116,7 +116,15 @@ def _last_closed_t_close(cur: sqlite3.Cursor, *, symbol: str, interval: str, end
 
 
 def _pct_return(end: float, start: float) -> float:
-    return (float(end) / float(start) - 1.0) * 100.0
+    try:
+        end_f = float(end)
+        start_f = float(start)
+    except Exception:
+        return 0.0
+    if (not math.isfinite(end_f)) or (not math.isfinite(start_f)) or start_f <= 0.0:
+        return 0.0
+    out = (end_f / start_f - 1.0) * 100.0
+    return out if math.isfinite(out) else 0.0
 
 
 def _stdev_1m_returns_pct(
@@ -392,4 +400,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
