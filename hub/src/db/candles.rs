@@ -51,6 +51,87 @@ pub fn fetch_candles(
     Ok(candles)
 }
 
+/// Fetch OHLCV candles for a symbol/interval within an optional time range.
+pub fn fetch_candles_range(
+    conn: &Connection,
+    symbol: &str,
+    interval: &str,
+    from_ts: Option<i64>,
+    to_ts: Option<i64>,
+    limit: u32,
+) -> Result<Vec<Candle>, HubError> {
+    let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match (from_ts, to_ts) {
+        (Some(from), Some(to)) => (
+            "SELECT t, t_close, o, h, l, c, v, n
+             FROM candles
+             WHERE symbol = ? AND interval = ? AND COALESCE(t_close, t) >= ? AND t <= ?
+             ORDER BY COALESCE(t_close, t) ASC
+             LIMIT ?"
+                .to_string(),
+            vec![
+                Box::new(symbol.to_string()),
+                Box::new(interval.to_string()),
+                Box::new(from),
+                Box::new(to),
+                Box::new(limit),
+            ],
+        ),
+        (Some(from), None) => (
+            "SELECT t, t_close, o, h, l, c, v, n
+             FROM candles
+             WHERE symbol = ? AND interval = ? AND COALESCE(t_close, t) >= ?
+             ORDER BY COALESCE(t_close, t) ASC
+             LIMIT ?"
+                .to_string(),
+            vec![
+                Box::new(symbol.to_string()),
+                Box::new(interval.to_string()),
+                Box::new(from),
+                Box::new(limit),
+            ],
+        ),
+        (None, Some(to)) => (
+            "SELECT t, t_close, o, h, l, c, v, n
+             FROM candles
+             WHERE symbol = ? AND interval = ? AND t <= ?
+             ORDER BY COALESCE(t_close, t) DESC
+             LIMIT ?"
+                .to_string(),
+            vec![
+                Box::new(symbol.to_string()),
+                Box::new(interval.to_string()),
+                Box::new(to),
+                Box::new(limit),
+            ],
+        ),
+        (None, None) => {
+            return fetch_candles(conn, symbol, interval, limit);
+        }
+    };
+
+    let mut stmt = conn.prepare(&sql)?;
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
+
+    let mut candles: Vec<Candle> = stmt
+        .query_map(params_refs.as_slice(), |row| {
+            Ok(Candle {
+                t: row.get(0)?,
+                t_close: row.get::<_, i64>(1).unwrap_or(0),
+                o: row.get(2)?,
+                h: row.get(3)?,
+                l: row.get(4)?,
+                c: row.get(5)?,
+                v: row.get(6)?,
+                n: row.get::<_, i64>(7).unwrap_or(0),
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Ensure chronological order (some queries use DESC)
+    candles.sort_by_key(|c| c.t);
+    Ok(candles)
+}
+
 /// List available candle intervals by scanning DB files in the candles directory.
 pub fn list_available_intervals(candles_dir: &std::path::Path) -> Vec<String> {
     let mut intervals: Vec<String> = Vec::new();

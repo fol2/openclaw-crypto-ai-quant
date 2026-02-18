@@ -20,6 +20,15 @@ export interface EntryMark {
   timestamp?: string;  // ISO string from backend trade record
 }
 
+export interface JourneyMark {
+  price: number;
+  timestamp?: string;
+  action: string;       // OPEN / ADD / REDUCE / CLOSE
+  type?: string;        // LONG / SHORT
+  size?: number;
+  pnl?: number;
+}
+
 // ─── Colour palette ───────────────────────────────────────────────────────────
 const C = {
   bg:         '#0d0d14',
@@ -40,6 +49,11 @@ const C = {
   entryLongLbl:  '#93c5fd',  // brighter blue for labels
   entryShortLbl: '#fcd34d',  // brighter amber for labels
   entryAvgLbl:   '#ddd6fe',  // brighter violet for labels
+  jrnLong:    '#3b82f6',
+  jrnShort:   '#f59e0b',
+  jrnPath:    'rgba(255,255,255,0.35)',
+  jrnPnlPos:  'rgba(34,197,94,0.85)',
+  jrnPnlNeg:  'rgba(239,68,68,0.85)',
   xhairV:     'rgba(255,255,255,0.20)',
   xhairH:     'rgba(255,255,255,0.10)',
   ttBg:       'rgba(9,9,16,0.95)',
@@ -106,6 +120,8 @@ export class CandleChart extends LitElement {
   @property({ type: String }) posType  = '';             // "LONG" | "SHORT" | ""
   @property({ type: String }) symbol   = '';
   @property({ type: String }) interval = '';
+  @property({ type: Array })  journeyMarks: JourneyMark[] = [];
+  @property({ type: Boolean }) journeyOverlay: boolean = false;
 
   private _ro?: ResizeObserver;
   private _hoverIdx: number | null = null;
@@ -146,6 +162,9 @@ export class CandleChart extends LitElement {
     }
     if (changed.has('entries') && typeof this.entries === 'string') {
       try { this.entries = JSON.parse(this.entries as any); } catch { this.entries = []; }
+    }
+    if (changed.has('journeyMarks') && typeof this.journeyMarks === 'string') {
+      try { this.journeyMarks = JSON.parse(this.journeyMarks as any); } catch { this.journeyMarks = []; }
     }
   }
 
@@ -238,6 +257,12 @@ export class CandleChart extends LitElement {
         if (e.price > maxP) maxP = e.price;
       }
     }
+    for (const jm of this.journeyMarks) {
+      if (jm.price > 0) {
+        if (jm.price < minP) minP = jm.price;
+        if (jm.price > maxP) maxP = jm.price;
+      }
+    }
     const pad    = (maxP - minP) * 0.06 || maxP * 0.01 || 1;
     minP -= pad; maxP += pad;
     const pRange = maxP - minP;
@@ -320,7 +345,6 @@ export class CandleChart extends LitElement {
     }
     ctx.globalAlpha = 1.0;
 
-    // ── Entry price overlay lines ─────────────────────────────────────────────
     // Helper: map an ISO timestamp string to the nearest candle's x position.
     // Returns 0 (left edge) if timestamp is absent or before all visible candles.
     const tsToX = (ts: string | undefined): number => {
@@ -335,90 +359,205 @@ export class CandleChart extends LitElement {
       return best >= 0 ? xOf(best) : 0;
     };
 
-    // Individual entries: dashed lines from entry candle → right edge, max 5
-    ctx.lineWidth = 1;
-    const visEntries = this.entries.slice(0, 5);
-    for (const e of visEntries) {
-      if (!e.price) continue;
-      const y = pToY(e.price);
-      if (y < TOP - 6 || y > TOP + PRICE_H + 6) continue;
-      // Determine direction: prefer e.type ("LONG"/"SHORT"), fall back to e.action keyword
-      const isLong = /long/i.test(e.type ?? '') || /buy|long/i.test(e.action ?? '');
-      const col    = isLong ? C.entryLong : C.entryShort;
-      const startX = tsToX(e.timestamp);
+    // ── Journey overlay OR entry overlay (mutually exclusive) ─────────────────
+    if (this.journeyOverlay && this.journeyMarks.length > 0) {
+      const jm = this.journeyMarks;
+      const isLong = /long/i.test(jm[0]?.type ?? '');
+      const posCol = isLong ? C.jrnLong : C.jrnShort;
 
-      ctx.strokeStyle = col;
-      ctx.setLineDash([4, 4]);
-      ctx.beginPath();
-      ctx.moveTo(startX, y); ctx.lineTo(chartW, y);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      // Vertical tick at the opening candle — marks "when" the entry happened
-      if (startX > 0) {
-        ctx.strokeStyle = col;
-        ctx.lineWidth   = 2;
-        ctx.beginPath();
-        ctx.moveTo(startX, y - 5); ctx.lineTo(startX, y + 5);
-        ctx.stroke();
-        ctx.lineWidth = 1;
+      // Resolve each mark to canvas coordinates
+      const pts: Array<{ x: number; y: number; m: JourneyMark }> = [];
+      for (const m of jm) {
+        if (!m.price || m.price <= 0) continue;
+        const x = tsToX(m.timestamp);
+        const y = pToY(m.price);
+        pts.push({ x, y, m });
       }
 
-      // Solid-black label box: price in bright line colour, bold
-      const lblCol = isLong ? C.entryLongLbl : C.entryShortLbl;
-      const elbl   = fmtPrice(e.price);
-      ctx.font     = FONT_B;
-      const etw    = ctx.measureText(elbl).width;
-      const elx    = chartW + 2;
-      const ely    = Math.max(TOP + 1, Math.min(y - 8, TOP + PRICE_H - 16));
-      ctx.fillStyle = '#000000';
-      ctx.fillRect(elx, ely, etw + 8, 16);
-      ctx.fillStyle    = lblCol;
-      ctx.textAlign    = 'left';
-      ctx.textBaseline = 'top';
-      ctx.fillText(elbl, elx + 4, ely + 3);
-    }
-    ctx.setLineDash([]);
-
-    // Average entry: solid line, colour and label show position direction
-    if (this.entryPrice > 0) {
-      const y = pToY(this.entryPrice);
-      if (y >= TOP - 6 && y <= TOP + PRICE_H + 6) {
-        const isLong  = /long/i.test(this.posType);
-        const isShort = /short/i.test(this.posType);
-        const avgCol    = isLong ? C.entryLong   : isShort ? C.entryShort   : C.entryAvg;
-        const avgLblCol = isLong ? C.entryLongLbl : isShort ? C.entryShortLbl : C.entryAvgLbl;
-        // Start from first entry candle so the line doesn't span the whole chart
-        const startX  = this.entries.length > 0 ? tsToX(this.entries[0].timestamp) : 0;
-
-        ctx.strokeStyle = avgCol;
-        ctx.lineWidth   = 1.5;
+      // Connecting path between consecutive pins
+      if (pts.length > 1) {
+        ctx.strokeStyle = C.jrnPath;
+        ctx.lineWidth = 1.5;
         ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) {
+          ctx.lineTo(pts[i].x, pts[i].y);
+        }
+        ctx.stroke();
+      }
+
+      // Entry avg horizontal line (from first pin to last pin or right edge)
+      const firstOpen = pts.find(p => p.m.action === 'OPEN');
+      const lastClose = [...pts].reverse().find(p => p.m.action === 'CLOSE');
+      if (firstOpen) {
+        // Compute weighted avg entry from OPEN + ADD legs
+        let totalNotional = 0, totalSize = 0;
+        for (const p of pts) {
+          if (p.m.action === 'OPEN' || p.m.action === 'ADD') {
+            const sz = p.m.size ?? 0;
+            totalNotional += p.m.price * sz;
+            totalSize += sz;
+          }
+        }
+        const avgEntry = totalSize > 0 ? totalNotional / totalSize : firstOpen.m.price;
+        const entryY = pToY(avgEntry);
+        const endX = lastClose ? lastClose.x : chartW;
+
+        ctx.strokeStyle = posCol;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(firstOpen.x, entryY);
+        ctx.lineTo(endX, entryY);
+        ctx.stroke();
+
+        // Exit price dashed line
+        if (lastClose && lastClose.m.price > 0) {
+          const exitY = pToY(lastClose.m.price);
+          const totalPnl = jm.reduce((s, m) => s + (m.pnl ?? 0), 0);
+          ctx.strokeStyle = totalPnl >= 0 ? C.jrnPnlPos : C.jrnPnlNeg;
+          ctx.lineWidth = 1;
+          ctx.setLineDash([4, 3]);
+          ctx.beginPath();
+          ctx.moveTo(firstOpen.x, exitY);
+          ctx.lineTo(lastClose.x, exitY);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
+
+      // Pin markers
+      const ABBR: Record<string, string> = { OPEN: 'O', ADD: 'A', REDUCE: 'R', CLOSE: 'C' };
+      for (const { x, y, m } of pts) {
+        if (y < TOP - 10 || y > TOP + PRICE_H + 10) continue;
+        const isEntry = m.action === 'OPEN' || m.action === 'ADD';
+
+        // Filled circle
+        ctx.beginPath();
+        ctx.arc(x, y, 5, 0, Math.PI * 2);
+        ctx.fillStyle = posCol;
+        ctx.fill();
+
+        // White ring for reduce/close
+        if (!isEntry) {
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        }
+
+        // Label
+        ctx.fillStyle = '#e2e8f0';
+        ctx.font = FONT_XS;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(ABBR[m.action] ?? m.action[0], x + 7, y - 2);
+      }
+
+      // PnL badge near CLOSE pin
+      if (lastClose) {
+        const totalPnl = jm.reduce((s, m) => s + (m.pnl ?? 0), 0);
+        const sign = totalPnl >= 0 ? '+' : '';
+        const pnlText = `${sign}$${totalPnl.toFixed(2)}`;
+        ctx.font = FONT_B;
+        const tw = ctx.measureText(pnlText).width;
+        const bx = Math.min(lastClose.x + 10, chartW - tw - 12);
+        const by = lastClose.y - 20;
+        ctx.fillStyle = totalPnl >= 0 ? C.jrnPnlPos : C.jrnPnlNeg;
+        if (typeof (ctx as any).roundRect === 'function') {
+          ctx.beginPath();
+          (ctx as any).roundRect(bx, by, tw + 10, 16, 3);
+          ctx.fill();
+        } else {
+          ctx.fillRect(bx, by, tw + 10, 16);
+        }
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText(pnlText, bx + 5, by + 2);
+      }
+
+      ctx.setLineDash([]);
+    } else {
+      // ── Entry price overlay lines (original) ──────────────────────────────
+      ctx.lineWidth = 1;
+      const visEntries = this.entries.slice(0, 5);
+      for (const e of visEntries) {
+        if (!e.price) continue;
+        const y = pToY(e.price);
+        if (y < TOP - 6 || y > TOP + PRICE_H + 6) continue;
+        const isLong = /long/i.test(e.type ?? '') || /buy|long/i.test(e.action ?? '');
+        const col    = isLong ? C.entryLong : C.entryShort;
+        const startX = tsToX(e.timestamp);
+
+        ctx.strokeStyle = col;
+        ctx.setLineDash([4, 4]);
         ctx.beginPath();
         ctx.moveTo(startX, y); ctx.lineTo(chartW, y);
         ctx.stroke();
+        ctx.setLineDash([]);
 
-        // Vertical tick at open candle
         if (startX > 0) {
-          ctx.lineWidth = 2;
+          ctx.strokeStyle = col;
+          ctx.lineWidth   = 2;
           ctx.beginPath();
-          ctx.moveTo(startX, y - 6); ctx.lineTo(startX, y + 6);
+          ctx.moveTo(startX, y - 5); ctx.lineTo(startX, y + 5);
           ctx.stroke();
           ctx.lineWidth = 1;
         }
 
-        // Solid-black label box: price in bright line colour, bold
-        const albl   = fmtPrice(this.entryPrice);
+        const lblCol = isLong ? C.entryLongLbl : C.entryShortLbl;
+        const elbl   = fmtPrice(e.price);
         ctx.font     = FONT_B;
-        const atw    = ctx.measureText(albl).width;
-        const alx    = chartW + 2;
-        const aly    = Math.max(TOP + 1, Math.min(y - 8, TOP + PRICE_H - 16));
+        const etw    = ctx.measureText(elbl).width;
+        const elx    = chartW + 2;
+        const ely    = Math.max(TOP + 1, Math.min(y - 8, TOP + PRICE_H - 16));
         ctx.fillStyle = '#000000';
-        ctx.fillRect(alx, aly, atw + 8, 16);
-        ctx.fillStyle    = avgLblCol;
+        ctx.fillRect(elx, ely, etw + 8, 16);
+        ctx.fillStyle    = lblCol;
         ctx.textAlign    = 'left';
         ctx.textBaseline = 'top';
-        ctx.fillText(albl, alx + 4, aly + 3);
+        ctx.fillText(elbl, elx + 4, ely + 3);
+      }
+      ctx.setLineDash([]);
+
+      // Average entry: solid line
+      if (this.entryPrice > 0) {
+        const y = pToY(this.entryPrice);
+        if (y >= TOP - 6 && y <= TOP + PRICE_H + 6) {
+          const isLong  = /long/i.test(this.posType);
+          const isShort = /short/i.test(this.posType);
+          const avgCol    = isLong ? C.entryLong   : isShort ? C.entryShort   : C.entryAvg;
+          const avgLblCol = isLong ? C.entryLongLbl : isShort ? C.entryShortLbl : C.entryAvgLbl;
+          const startX  = this.entries.length > 0 ? tsToX(this.entries[0].timestamp) : 0;
+
+          ctx.strokeStyle = avgCol;
+          ctx.lineWidth   = 1.5;
+          ctx.setLineDash([]);
+          ctx.beginPath();
+          ctx.moveTo(startX, y); ctx.lineTo(chartW, y);
+          ctx.stroke();
+
+          if (startX > 0) {
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(startX, y - 6); ctx.lineTo(startX, y + 6);
+            ctx.stroke();
+            ctx.lineWidth = 1;
+          }
+
+          const albl   = fmtPrice(this.entryPrice);
+          ctx.font     = FONT_B;
+          const atw    = ctx.measureText(albl).width;
+          const alx    = chartW + 2;
+          const aly    = Math.max(TOP + 1, Math.min(y - 8, TOP + PRICE_H - 16));
+          ctx.fillStyle = '#000000';
+          ctx.fillRect(alx, aly, atw + 8, 16);
+          ctx.fillStyle    = avgLblCol;
+          ctx.textAlign    = 'left';
+          ctx.textBaseline = 'top';
+          ctx.fillText(albl, alx + 4, aly + 3);
+        }
       }
     }
 

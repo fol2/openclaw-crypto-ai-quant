@@ -89,6 +89,35 @@ pub struct DailyMetrics {
     pub drawdown_pct: f64,
 }
 
+// ── Journey types ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TradeJourney {
+    pub id: i64, // open_trade_id
+    pub symbol: String,
+    #[serde(rename = "type")]
+    pub pos_type: String, // LONG / SHORT
+    pub open_ts: String,
+    pub close_ts: Option<String>,
+    pub entry_price: f64,
+    pub exit_price: Option<f64>,
+    pub peak_size: f64,
+    pub total_pnl: f64,
+    pub total_fees: f64,
+    pub is_open: bool,
+    pub legs: Vec<JourneyLeg>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct JourneyLeg {
+    pub id: i64,
+    pub timestamp: String,
+    pub action: String,
+    pub price: f64,
+    pub size: f64,
+    pub pnl: f64,
+}
+
 // ── Queries ──────────────────────────────────────────────────────────────
 
 /// Compute all open positions from the trades table.
@@ -465,6 +494,182 @@ pub fn position_entries(
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+// ── Trade Journeys ──────────────────────────────────────────────────────
+
+/// Reconstruct trade journeys (OPEN→…→CLOSE lifecycles) from the trades table.
+/// Returns most-recent journeys first (open ones at the top, then closed by close_ts DESC).
+pub fn trade_journeys(
+    conn: &Connection,
+    limit: u32,
+    offset: u32,
+    symbol_filter: Option<&str>,
+) -> Result<Vec<TradeJourney>, HubError> {
+    let sql = if symbol_filter.is_some() {
+        "SELECT id, timestamp, symbol, type, action, price, size, pnl, fee_usd
+         FROM trades
+         WHERE action IN ('OPEN','ADD','REDUCE','CLOSE') AND symbol = ?
+         ORDER BY id ASC"
+    } else {
+        "SELECT id, timestamp, symbol, type, action, price, size, pnl, fee_usd
+         FROM trades
+         WHERE action IN ('OPEN','ADD','REDUCE','CLOSE')
+         ORDER BY id ASC"
+    };
+
+    let mut stmt = conn.prepare(sql)?;
+
+    let rows: Vec<(i64, String, String, String, String, f64, f64, f64, f64)> =
+        if let Some(sym) = symbol_filter {
+            stmt.query_map(params![sym], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                    row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    row.get::<_, f64>(5).unwrap_or(0.0),
+                    row.get::<_, f64>(6).unwrap_or(0.0),
+                    row.get::<_, f64>(7).unwrap_or(0.0),
+                    row.get::<_, f64>(8).unwrap_or(0.0),
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        } else {
+            stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                    row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    row.get::<_, f64>(5).unwrap_or(0.0),
+                    row.get::<_, f64>(6).unwrap_or(0.0),
+                    row.get::<_, f64>(7).unwrap_or(0.0),
+                    row.get::<_, f64>(8).unwrap_or(0.0),
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        };
+
+    // Walk chronologically, building journeys keyed by symbol.
+    let mut in_progress: std::collections::HashMap<String, TradeJourney> =
+        std::collections::HashMap::new();
+    let mut completed: Vec<TradeJourney> = Vec::new();
+
+    for (id, ts, symbol, pos_type, action, price, size, pnl, fee) in rows {
+        let action_upper = action.to_uppercase();
+        let sym_upper = symbol.to_uppercase();
+
+        match action_upper.as_str() {
+            "OPEN" => {
+                // Flush any orphaned previous journey for this symbol
+                if let Some(orphan) = in_progress.remove(&sym_upper) {
+                    completed.push(orphan);
+                }
+                in_progress.insert(
+                    sym_upper.clone(),
+                    TradeJourney {
+                        id,
+                        symbol: sym_upper,
+                        pos_type: pos_type.to_uppercase(),
+                        open_ts: ts.clone(),
+                        close_ts: None,
+                        entry_price: price,
+                        exit_price: None,
+                        peak_size: size,
+                        total_pnl: pnl,
+                        total_fees: fee.abs(),
+                        is_open: true,
+                        legs: vec![JourneyLeg {
+                            id,
+                            timestamp: ts,
+                            action: action_upper,
+                            price,
+                            size,
+                            pnl,
+                        }],
+                    },
+                );
+            }
+            "ADD" => {
+                if let Some(j) = in_progress.get_mut(&sym_upper) {
+                    // Recalculate weighted avg entry
+                    let prev_notional = j.entry_price * j.peak_size;
+                    let new_size = j.peak_size + size;
+                    if new_size > 0.0 {
+                        j.entry_price = (prev_notional + price * size) / new_size;
+                    }
+                    j.peak_size = new_size;
+                    j.total_pnl += pnl;
+                    j.total_fees += fee.abs();
+                    j.legs.push(JourneyLeg {
+                        id,
+                        timestamp: ts,
+                        action: action_upper,
+                        price,
+                        size,
+                        pnl,
+                    });
+                }
+                // Ignore ADD without a preceding OPEN
+            }
+            "REDUCE" => {
+                if let Some(j) = in_progress.get_mut(&sym_upper) {
+                    j.total_pnl += pnl;
+                    j.total_fees += fee.abs();
+                    j.legs.push(JourneyLeg {
+                        id,
+                        timestamp: ts,
+                        action: action_upper,
+                        price,
+                        size,
+                        pnl,
+                    });
+                }
+            }
+            "CLOSE" => {
+                if let Some(mut j) = in_progress.remove(&sym_upper) {
+                    j.close_ts = Some(ts.clone());
+                    j.exit_price = Some(price);
+                    j.is_open = false;
+                    j.total_pnl += pnl;
+                    j.total_fees += fee.abs();
+                    j.legs.push(JourneyLeg {
+                        id,
+                        timestamp: ts,
+                        action: action_upper,
+                        price,
+                        size,
+                        pnl,
+                    });
+                    completed.push(j);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Collect: open ones first, then closed by close_ts DESC
+    let mut result: Vec<TradeJourney> = Vec::new();
+
+    // Open journeys (still in progress)
+    let mut open_journeys: Vec<TradeJourney> = in_progress.into_values().collect();
+    open_journeys.sort_by(|a, b| b.open_ts.cmp(&a.open_ts));
+    result.extend(open_journeys);
+
+    // Closed journeys, most recent first
+    completed.reverse();
+    result.extend(completed);
+
+    // Apply offset + limit
+    let start = offset as usize;
+    if start >= result.len() {
+        return Ok(Vec::new());
+    }
+    let end = (start + limit as usize).min(result.len());
+    Ok(result[start..end].to_vec())
 }
 
 // ── Daily Metrics ────────────────────────────────────────────────────────
