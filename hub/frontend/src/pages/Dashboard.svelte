@@ -5,6 +5,8 @@
 
   const INTERVALS = ['1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d'] as const;
   const BAR_COUNTS = [50, 100, 200, 400] as const;
+  const CHART_PREF_INTERVAL_COOKIE = 'aiq_dash_iv';
+  const CHART_PREF_BARS_COOKIE = 'aiq_dash_bars';
 
   let snap: any = $state(null);
   let focusSym = $state('');
@@ -21,6 +23,7 @@
   let detailExpanded = $state(false);
   let chartHeight = $state(240);
   let chartDragging = $state(false);
+  let chartPrefsLoaded = $state(false);
   const CHART_MIN = 120;
   const CHART_MAX = 600;
 
@@ -43,6 +46,38 @@
     }
     target.addEventListener('pointermove', onMove);
     target.addEventListener('pointerup', onUp);
+  }
+
+  function readCookie(name: string): string | null {
+    if (typeof document === 'undefined') return null;
+    const needle = `${encodeURIComponent(name)}=`;
+    const parts = String(document.cookie || '').split(';');
+    for (const raw of parts) {
+      const p = raw.trim();
+      if (p.startsWith(needle)) return decodeURIComponent(p.slice(needle.length));
+    }
+    return null;
+  }
+
+  function writeCookie(name: string, value: string, maxAgeS = 31_536_000) {
+    if (typeof document === 'undefined') return;
+    document.cookie = `${encodeURIComponent(name)}=${encodeURIComponent(value)}; Max-Age=${maxAgeS}; Path=/; SameSite=Lax`;
+  }
+
+  function isValidInterval(iv: string): iv is (typeof INTERVALS)[number] {
+    return (INTERVALS as readonly string[]).includes(iv);
+  }
+
+  function isValidBars(n: number): n is (typeof BAR_COUNTS)[number] {
+    return (BAR_COUNTS as readonly number[]).includes(n);
+  }
+
+  function loadChartPrefsFromCookie() {
+    const ivRaw = String(readCookie(CHART_PREF_INTERVAL_COOKIE) || '').trim().toLowerCase();
+    if (ivRaw && isValidInterval(ivRaw)) selectedInterval = ivRaw;
+
+    const barsRaw = Number(readCookie(CHART_PREF_BARS_COOKIE));
+    if (Number.isFinite(barsRaw) && isValidBars(barsRaw)) selectedBars = barsRaw;
   }
 
   type FlashDebugEvent = {
@@ -235,6 +270,12 @@
   let _serverNowOffsetMs = 0;
   // Timestamp of last live-candle paint; used to cap redraws at ~15fps
   let _liveUpdateMs = 0;
+  // Candle reconciliation controls.
+  const CANDLE_ROLLOVER_RECONCILE_DELAY_MS = 1600;
+  const CANDLE_PERIODIC_RECONCILE_MS = 25_000;
+  let _candlesFetchInFlight = false;
+  let _candlesFetchQueued = false;
+  let _candlesRolloverReconcileTimer: ReturnType<typeof setTimeout> | null = null;
 
   function updateServerClockOffset(serverNowMs: unknown) {
     const ts = Number(serverNowMs);
@@ -246,11 +287,51 @@
     return Date.now() + _serverNowOffsetMs;
   }
 
+  function clearRolloverReconcileTimer() {
+    if (_candlesRolloverReconcileTimer == null) return;
+    clearTimeout(_candlesRolloverReconcileTimer);
+    _candlesRolloverReconcileTimer = null;
+  }
+
+  async function reconcileCandlesForCurrentView(sym = focusSym, iv = selectedInterval, bars = selectedBars): Promise<void> {
+    if (!sym) return;
+
+    if (_candlesFetchInFlight) {
+      _candlesFetchQueued = true;
+      return;
+    }
+    _candlesFetchInFlight = true;
+    try {
+      const res = await getCandles(sym, iv, bars);
+      // Ignore stale responses if focus context changed mid-flight.
+      if (focusSym !== sym || selectedInterval !== iv || selectedBars !== bars) return;
+      candles = res.candles || [];
+    } catch {
+      // Keep rendering the current candles on transient API failures.
+    } finally {
+      _candlesFetchInFlight = false;
+      if (_candlesFetchQueued) {
+        _candlesFetchQueued = false;
+        setTimeout(() => { void reconcileCandlesForCurrentView(); }, 0);
+      }
+    }
+  }
+
+  function scheduleRolloverReconcile() {
+    clearRolloverReconcileTimer();
+    _candlesRolloverReconcileTimer = setTimeout(() => {
+      _candlesRolloverReconcileTimer = null;
+      void reconcileCandlesForCurrentView();
+    }, CANDLE_ROLLOVER_RECONCILE_DELAY_MS);
+  }
+
   async function setFocus(sym: string) {
     focusSym = sym;
     appState.focus = sym;
     candles = [];
     marks = null;
+    _candlesFetchQueued = false;
+    clearRolloverReconcileTimer();
     if (!sym) return;
     detailTab = 'detail';
     mobileTab = 'detail';
@@ -264,15 +345,22 @@
   // so old data stays visible during the brief network round-trip.
   $effect(() => {
     const sym  = focusSym;
-    const iv   = selectedInterval;
+    const iv = selectedInterval;
     const bars = selectedBars;
     if (!sym) { candles = []; _prevFocusSym = ''; return; }
     if (sym !== _prevFocusSym) { candles = []; _prevFocusSym = sym; }
-    let cancelled = false;
-    getCandles(sym, iv, bars)
-      .then(r => { if (!cancelled) candles = r.candles || []; })
-      .catch(() => {});
-    return () => { cancelled = true; };
+    void reconcileCandlesForCurrentView(sym, iv, bars);
+  });
+
+  // Low-frequency official-candle reconcile while detail view is open.
+  $effect(() => {
+    const sym = focusSym;
+    const tab = detailTab;
+    const iv = selectedInterval;
+    const bars = selectedBars;
+    if (!sym || tab !== 'detail') return;
+    const id = setInterval(() => { void reconcileCandlesForCurrentView(sym, iv, bars); }, CANDLE_PERIODIC_RECONCILE_MS);
+    return () => clearInterval(id);
   });
 
   // Live candle update: mutate current developing candle, and roll over to a
@@ -316,6 +404,8 @@
         if (candles.length > selectedBars) {
           candles.splice(0, candles.length - selectedBars);
         }
+        // Replace synthetic rollover candle with exchange-written candles shortly after boundary.
+        scheduleRolloverReconcile();
         _liveUpdateMs = localNow;
         return;
       }
@@ -349,12 +439,22 @@
     detailTab = f;
   }
 
+  // Persist last chart controls for the next visit.
   $effect(() => {
+    if (!chartPrefsLoaded) return;
+    writeCookie(CHART_PREF_INTERVAL_COOKIE, selectedInterval);
+    writeCookie(CHART_PREF_BARS_COOKIE, String(selectedBars));
+  });
+
+  $effect(() => {
+    loadChartPrefsFromCookie();
+    chartPrefsLoaded = true;
     refresh();
     pollTimer = setInterval(refresh, 5000);
     hubWs.connect();
     return () => {
       clearInterval(pollTimer);
+      clearRolloverReconcileTimer();
       if (flashDebugTimer != null) {
         clearTimeout(flashDebugTimer);
         flashDebugTimer = null;
