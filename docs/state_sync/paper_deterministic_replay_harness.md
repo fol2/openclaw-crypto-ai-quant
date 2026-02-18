@@ -13,8 +13,8 @@ The harness executes:
 5. live/backtester action reconcile
 6. live/paper action reconcile
 7. live/paper decision-trace reconcile
-8. live-baseline vs paper event-order parity
-9. bundle-scoped CPU/GPU parity
+8. bundle-scoped CPU/GPU parity
+9. live-baseline vs paper event-order parity
 10. strict alignment gate
 
 ## Command

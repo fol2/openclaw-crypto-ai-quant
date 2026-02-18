@@ -110,8 +110,8 @@ def main() -> int:
         ("action_reconcile", bundle_dir / "run_05_action_reconcile.sh"),
         ("live_paper_action_reconcile", bundle_dir / "run_06_live_paper_action_reconcile.sh"),
         ("live_paper_decision_trace_reconcile", bundle_dir / "run_07_live_paper_decision_trace_reconcile.sh"),
-        ("event_order_parity", bundle_dir / "run_07b_event_order_parity.sh"),
         ("gpu_parity", bundle_dir / "run_07c_gpu_parity.sh"),
+        ("event_order_parity", bundle_dir / "run_07b_event_order_parity.sh"),
     ]
 
     steps: list[dict[str, Any]] = []
