@@ -166,8 +166,10 @@ class TestFindLatestPromotedConfig:
         assert result is not None
         assert "20260214T230000Z" in str(result)
 
-    def test_respects_date_scan_limit(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Date scan limit should bound lookup depth for large artifacts trees."""
+    def test_date_scan_limit_preserves_backwards_compatible_fallback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If bounded scan misses, fallback full scan should still find older configs."""
         artifacts = _make_artifacts_tree(tmp_path, runs=[
             ("2026-02-13", "nightly_20260213T010000Z", ["primary"]),
         ])
@@ -175,15 +177,14 @@ class TestFindLatestPromotedConfig:
         (artifacts / "2026-02-14" / "run_nightly_20260214T010000Z").mkdir(parents=True)
 
         monkeypatch.setenv("AI_QUANT_PROMOTED_SCAN_DATE_DIRS", "1")
-        assert _find_latest_promoted_config(artifacts, "primary") is None
-
-        monkeypatch.setenv("AI_QUANT_PROMOTED_SCAN_DATE_DIRS", "2")
         result = _find_latest_promoted_config(artifacts, "primary")
         assert result is not None
         assert "2026-02-13" in str(result)
 
-    def test_respects_run_scan_limit_per_date(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Run scan limit should bound per-date lookup depth."""
+    def test_run_scan_limit_preserves_backwards_compatible_fallback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If bounded per-date run scan misses, fallback full scan should still find config."""
         artifacts = _make_artifacts_tree(tmp_path, runs=[
             ("2026-02-14", "nightly_20260214T010000Z", ["primary"]),
         ])
@@ -191,9 +192,6 @@ class TestFindLatestPromotedConfig:
         (artifacts / "2026-02-14" / "run_nightly_20260214T230000Z").mkdir(parents=True)
 
         monkeypatch.setenv("AI_QUANT_PROMOTED_SCAN_RUN_DIRS_PER_DATE", "1")
-        assert _find_latest_promoted_config(artifacts, "primary") is None
-
-        monkeypatch.setenv("AI_QUANT_PROMOTED_SCAN_RUN_DIRS_PER_DATE", "2")
         result = _find_latest_promoted_config(artifacts, "primary")
         assert result is not None
         assert "20260214T010000Z" in str(result)

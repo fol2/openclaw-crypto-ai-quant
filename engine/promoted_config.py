@@ -97,21 +97,31 @@ def _find_latest_promoted_config(artifacts_dir: str | Path, role: str) -> Path |
         [d for d in root.iterdir() if d.is_dir() and re.match(r"^\d{4}-\d{2}-\d{2}$", d.name)],
         key=lambda d: d.name,
         reverse=True,
-    )[:max_dates]
+    )
 
-    for date_dir in date_dirs:
-        # Run directories inside each date dir — sort descending by name.
-        run_dirs = sorted(
-            [d for d in date_dir.iterdir() if d.is_dir() and _RUN_DIR_RE.match(d.name)],
-            key=lambda d: d.name,
-            reverse=True,
-        )[:max_runs]
-        for run_dir in run_dirs:
-            candidate = run_dir / "promoted_configs" / filename
-            if candidate.is_file():
-                return candidate.resolve()
+    def _scan(*, date_limit: int | None, run_limit: int | None) -> Path | None:
+        scan_dates = date_dirs if date_limit is None else date_dirs[:date_limit]
+        for date_dir in scan_dates:
+            run_dirs = sorted(
+                [d for d in date_dir.iterdir() if d.is_dir() and _RUN_DIR_RE.match(d.name)],
+                key=lambda d: d.name,
+                reverse=True,
+            )
+            if run_limit is not None:
+                run_dirs = run_dirs[:run_limit]
+            for run_dir in run_dirs:
+                candidate = run_dir / "promoted_configs" / filename
+                if candidate.is_file():
+                    return candidate.resolve()
+        return None
 
-    return None
+    # Fast path: bounded scan for very large artifacts trees.
+    found = _scan(date_limit=max_dates, run_limit=max_runs)
+    if found is not None:
+        return found
+
+    # Backwards-compatible fallback: if bounded scan misses, do a full scan.
+    return _scan(date_limit=None, run_limit=None)
 
 
 def _load_yaml(path: str | Path) -> dict[str, Any]:
