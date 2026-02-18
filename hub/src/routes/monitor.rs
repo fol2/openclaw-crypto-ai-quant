@@ -300,6 +300,29 @@ async fn api_snapshot(
     // Daily metrics
     let daily = trading::daily_metrics(&conn, ts)?;
 
+    // Range metrics: since-config and all-time
+    let config_variant = match mode.as_str() {
+        "live" => "strategy_overrides.live.yaml",
+        "paper1" => "strategy_overrides.paper1.yaml",
+        "paper2" => "strategy_overrides.paper2.yaml",
+        "paper3" => "strategy_overrides.paper3.yaml",
+        _ => "strategy_overrides.yaml",
+    };
+    let config_mtime_iso = std::fs::metadata(state.config.config_dir.join(config_variant))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| {
+            let secs = t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+            chrono::DateTime::from_timestamp(secs as i64, 0)
+                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())
+        });
+
+    let since_config = config_mtime_iso
+        .as_deref()
+        .map(|ts| trading::range_metrics(&conn, Some(ts)))
+        .transpose()?;
+    let all_time = trading::range_metrics(&conn, None)?;
+
     // Available candle intervals
     let intervals = candles::list_available_intervals(&state.config.candles_db_dir);
 
@@ -323,6 +346,31 @@ async fn api_snapshot(
             "fee_rate": fee_rate,
         },
         "daily": daily,
+        "since_config": since_config.as_ref().map(|m| json!({
+            "from_ts": m.from_ts,
+            "trades": m.trades,
+            "start_balance": m.start_balance,
+            "end_balance": m.end_balance,
+            "pnl_usd": m.pnl_usd,
+            "fees_usd": m.fees_usd,
+            "net_pnl_usd": m.net_pnl_usd,
+            "peak_balance": m.peak_balance,
+            "drawdown_pct": m.drawdown_pct,
+            "label": config_mtime_iso.as_ref().map(|ts| {
+                format!("Since {}", &ts[5..10])
+            }),
+        })),
+        "all_time": json!({
+            "from_ts": all_time.from_ts,
+            "trades": all_time.trades,
+            "start_balance": all_time.start_balance,
+            "end_balance": all_time.end_balance,
+            "pnl_usd": all_time.pnl_usd,
+            "fees_usd": all_time.fees_usd,
+            "net_pnl_usd": all_time.net_pnl_usd,
+            "peak_balance": all_time.peak_balance,
+            "drawdown_pct": all_time.drawdown_pct,
+        }),
         "symbols": symbols_out,
         "open_positions": positions,
         "recent": {

@@ -559,6 +559,127 @@ pub fn daily_metrics(conn: &Connection, now_ms: i64) -> Result<DailyMetrics, Hub
     Ok(daily)
 }
 
+// ── Range Metrics ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RangeMetrics {
+    pub from_ts: Option<String>,
+    pub trades: i64,
+    pub start_balance: Option<f64>,
+    pub end_balance: Option<f64>,
+    pub pnl_usd: f64,
+    pub fees_usd: f64,
+    pub net_pnl_usd: f64,
+    pub peak_balance: Option<f64>,
+    pub drawdown_pct: f64,
+}
+
+/// Compute metrics over an arbitrary time range.
+/// If `from_iso` is `Some(ts)`, only trades with `timestamp >= ts` are included.
+/// If `None`, all trades are included (all-time).
+pub fn range_metrics(conn: &Connection, from_iso: Option<&str>) -> Result<RangeMetrics, HubError> {
+    let mut metrics = RangeMetrics {
+        from_ts: from_iso.map(|s| s.to_string()),
+        trades: 0,
+        start_balance: None,
+        end_balance: None,
+        pnl_usd: 0.0,
+        fees_usd: 0.0,
+        net_pnl_usd: 0.0,
+        peak_balance: None,
+        drawdown_pct: 0.0,
+    };
+
+    if let Some(ts) = from_iso {
+        // Start balance
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT balance FROM trades WHERE timestamp >= ? AND balance IS NOT NULL ORDER BY id ASC LIMIT 1",
+        ) {
+            if let Ok(b) = stmt.query_row(params![ts], |row| row.get::<_, f64>(0)) {
+                metrics.start_balance = Some(b);
+            }
+        }
+        // End balance
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT balance FROM trades WHERE timestamp >= ? AND balance IS NOT NULL ORDER BY id DESC LIMIT 1",
+        ) {
+            if let Ok(b) = stmt.query_row(params![ts], |row| row.get::<_, f64>(0)) {
+                metrics.end_balance = Some(b);
+            }
+        }
+        // Peak balance
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT MAX(balance) FROM trades WHERE timestamp >= ? AND balance IS NOT NULL",
+        ) {
+            if let Ok(b) = stmt.query_row(params![ts], |row| row.get::<_, Option<f64>>(0)) {
+                metrics.peak_balance = b;
+            }
+        }
+        // Trade count
+        if let Ok(mut stmt) = conn.prepare("SELECT COUNT(*) FROM trades WHERE timestamp >= ?") {
+            if let Ok(n) = stmt.query_row(params![ts], |row| row.get::<_, i64>(0)) {
+                metrics.trades = n;
+            }
+        }
+        // Fees
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT SUM(COALESCE(fee_usd, 0)) FROM trades WHERE timestamp >= ?",
+        ) {
+            if let Ok(f) = stmt.query_row(params![ts], |row| row.get::<_, Option<f64>>(0)) {
+                metrics.fees_usd = f.unwrap_or(0.0);
+            }
+        }
+    } else {
+        // All-time: no lower bound
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT balance FROM trades WHERE balance IS NOT NULL ORDER BY id ASC LIMIT 1",
+        ) {
+            if let Ok(b) = stmt.query_row([], |row| row.get::<_, f64>(0)) {
+                metrics.start_balance = Some(b);
+            }
+        }
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT balance FROM trades WHERE balance IS NOT NULL ORDER BY id DESC LIMIT 1",
+        ) {
+            if let Ok(b) = stmt.query_row([], |row| row.get::<_, f64>(0)) {
+                metrics.end_balance = Some(b);
+            }
+        }
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT MAX(balance) FROM trades WHERE balance IS NOT NULL",
+        ) {
+            if let Ok(b) = stmt.query_row([], |row| row.get::<_, Option<f64>>(0)) {
+                metrics.peak_balance = b;
+            }
+        }
+        if let Ok(mut stmt) = conn.prepare("SELECT COUNT(*) FROM trades") {
+            if let Ok(n) = stmt.query_row([], |row| row.get::<_, i64>(0)) {
+                metrics.trades = n;
+            }
+        }
+        if let Ok(mut stmt) = conn.prepare("SELECT SUM(COALESCE(fee_usd, 0)) FROM trades") {
+            if let Ok(f) = stmt.query_row([], |row| row.get::<_, Option<f64>>(0)) {
+                metrics.fees_usd = f.unwrap_or(0.0);
+            }
+        }
+    }
+
+    // PnL
+    if let (Some(start), Some(end)) = (metrics.start_balance, metrics.end_balance) {
+        metrics.pnl_usd = end - start;
+        metrics.net_pnl_usd = metrics.pnl_usd - metrics.fees_usd;
+    }
+
+    // Drawdown
+    if let (Some(peak), Some(end)) = (metrics.peak_balance, metrics.end_balance) {
+        if peak > 0.0 {
+            metrics.drawdown_pct = ((peak - end) / peak) * 100.0;
+        }
+    }
+
+    Ok(metrics)
+}
+
 // ── OMS Queries ──────────────────────────────────────────────────────────
 
 /// Fetch recent OMS intents.
