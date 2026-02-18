@@ -11,7 +11,7 @@
 
   let currentPage = $state(window.location.hash.slice(1) || 'dashboard');
   let sidebarOpen = $state(false);
-  let sidebarCollapsed = $state(false);
+  let sidebarCollapsed = $state(true);
 
   function handleHashChange() {
     currentPage = window.location.hash.slice(1) || 'dashboard';
