@@ -121,17 +121,6 @@ def _print_db(name: str, db_path: Path, *, symbol: str, hours: float) -> None:
 
 def _print_candle_health(*, symbol: str) -> None:
     _print_section("Candles (Sidecar) Health")
-    # Run the check against the same Rust sidecar transport the daemons use.
-    # Do not override caller-provided env; only fill sensible defaults.
-    if not os.getenv("AI_QUANT_WS_SOURCE"):
-        os.environ["AI_QUANT_WS_SOURCE"] = "sidecar"
-    if not os.getenv("AI_QUANT_CANDLES_SOURCE"):
-        os.environ["AI_QUANT_CANDLES_SOURCE"] = "sidecar"
-    if not os.getenv("AI_QUANT_WS_SIDECAR_SOCK"):
-        runtime_dir = os.getenv("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
-        cand = os.path.join(runtime_dir, "openclaw-ai-quant-ws.sock")
-        if os.path.exists(cand):
-            os.environ["AI_QUANT_WS_SIDECAR_SOCK"] = cand
 
     interval = str(os.getenv("AI_QUANT_INTERVAL", "1m") or "1m").strip() or "1m"
     db_path = Path(str(os.getenv("AI_QUANT_MARKET_DB_PATH", str(AIQ_ROOT / "market_data.db"))))
@@ -168,6 +157,16 @@ def _print_candle_health(*, symbol: str) -> None:
         print(f"candles_health_failed: {e}")
 
 
+def _bootstrap_sidecar_env_defaults() -> None:
+    os.environ.setdefault("AI_QUANT_WS_SOURCE", "sidecar")
+    os.environ.setdefault("AI_QUANT_CANDLES_SOURCE", "sidecar")
+    if not os.getenv("AI_QUANT_WS_SIDECAR_SOCK"):
+        runtime_dir = os.getenv("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+        cand = os.path.join(runtime_dir, "openclaw-ai-quant-ws.sock")
+        if os.path.exists(cand):
+            os.environ["AI_QUANT_WS_SIDECAR_SOCK"] = cand
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbol", default="BTC")
@@ -183,6 +182,7 @@ def main() -> None:
 
     _print_db("Paper", paper_db, symbol=symbol, hours=float(args.hours))
     _print_db("Live", live_db, symbol=symbol, hours=float(args.hours))
+    _bootstrap_sidecar_env_defaults()
     _print_candle_health(symbol=symbol)
 
 
