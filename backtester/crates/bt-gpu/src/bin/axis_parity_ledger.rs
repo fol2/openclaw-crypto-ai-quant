@@ -206,6 +206,7 @@ struct TraceArtifact {
 #[derive(Debug, Serialize)]
 struct TraceEventRow {
     idx: usize,
+    source_idx: usize,
     t_sec: u32,
     sym_idx: u32,
     symbol: Option<String>,
@@ -1115,6 +1116,7 @@ fn collect_trace_events(state: &GpuComboState, symbols: &[String]) -> Vec<TraceE
         let ev = state.trace_events[ring_idx];
         out.push(TraceEventRow {
             idx,
+            source_idx: idx,
             t_sec: ev.t_sec,
             sym_idx: ev.sym,
             symbol: symbols.get(ev.sym as usize).cloned(),
@@ -1126,20 +1128,7 @@ fn collect_trace_events(state: &GpuComboState, symbols: &[String]) -> Vec<TraceE
             pnl: ev.pnl,
         });
     }
-    out.sort_by(|a, b| {
-        (
-            a.t_sec,
-            trace_kind_priority(&a.kind),
-            a.sym_idx,
-            a.idx,
-        )
-            .cmp(&(
-                b.t_sec,
-                trace_kind_priority(&b.kind),
-                b.sym_idx,
-                b.idx,
-            ))
-    });
+    out.sort_by_key(|ev| (ev.t_sec, ev.source_idx));
     for (idx, ev) in out.iter_mut().enumerate() {
         ev.idx = idx;
     }
@@ -1357,7 +1346,7 @@ fn canonicalise_gpu_event(ev: &TraceEventRow) -> CanonicalEventRow {
     let envelope = derive_decision_event_envelope(&decision.action_kind, &ev.reason);
     let reason_code = canonical_gpu_reason_code(&ev.reason);
     CanonicalEventRow {
-        source_idx: ev.idx,
+        source_idx: ev.source_idx,
         global_idx: None,
         t_sec: ev.t_sec,
         symbol: ev
@@ -1596,14 +1585,6 @@ fn trace_kind_name(kind: u32) -> &'static str {
         3 => "CLOSE",
         4 => "PARTIAL_CLOSE",
         _ => "UNKNOWN",
-    }
-}
-
-fn trace_kind_priority(kind: &str) -> u8 {
-    match kind {
-        "CLOSE" | "PARTIAL_CLOSE" => 0,
-        "OPEN" | "ADD" => 1,
-        _ => 2,
     }
 }
 
