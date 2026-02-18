@@ -164,6 +164,8 @@ def test_drawdown_peak_resets_at_utc_day_rollover(tmp_path, monkeypatch):
     trader = _FakeTrader([100.0, 96.0, 96.0, 94.0])
     day1 = datetime.datetime(2026, 2, 10, 23, 59, tzinfo=datetime.timezone.utc)
     day2 = datetime.datetime(2026, 2, 11, 0, 1, tzinfo=datetime.timezone.utc)
+    day_seq = iter(("2026-02-10", "2026-02-10", "2026-02-11", "2026-02-11"))
+    risk._current_utc_day = lambda: next(day_seq)  # type: ignore[method-assign]
 
     # Establish day-1 high-water mark.
     risk.refresh(trader=trader)
@@ -175,6 +177,21 @@ def test_drawdown_peak_resets_at_utc_day_rollover(tmp_path, monkeypatch):
     risk.note_fill(ts_ms=int(day2.timestamp() * 1000.0), symbol="BTC", action="CLOSE", pnl_usd=0.0, fee_usd=0.0)
 
     # With stale peak (100), 94 would breach 5% DD; with day-2 fresh peak (96), it stays below threshold.
+    risk.refresh(trader=trader)
+    risk.refresh(trader=trader)
+    assert risk.kill_mode == "off"
+
+
+def test_drawdown_peak_resets_without_daily_loss_fills(tmp_path, monkeypatch):
+    risk = _bootstrap_risk_manager(tmp_path=tmp_path, monkeypatch=monkeypatch, max_drawdown_pct=5.0)
+
+    today = datetime.datetime.now(tz=datetime.timezone.utc).date()
+    yesterday = today - datetime.timedelta(days=1)
+    risk._equity_peak = 100.0
+    risk._drawdown_peak_utc_day = yesterday.isoformat()
+
+    # No note_fill calls: rollover reset should still happen in refresh() path.
+    trader = _FakeTrader([94.0, 93.0])
     risk.refresh(trader=trader)
     risk.refresh(trader=trader)
     assert risk.kill_mode == "off"

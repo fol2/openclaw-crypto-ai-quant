@@ -181,6 +181,7 @@ class RiskManager:
         self._daily_utc_day: str | None = None
         self._daily_realised_pnl_usd: float = 0.0
         self._daily_fees_usd: float = 0.0
+        self._drawdown_peak_utc_day: str | None = None
 
         # Slippage anomaly guard (entry fills). Uses median of recent fills vs mid/BBO.
         self._slippage_guard_enabled = _env_bool("AI_QUANT_RISK_SLIPPAGE_GUARD_ENABLED", False)
@@ -246,6 +247,7 @@ class RiskManager:
         # Reset any cached state so we do not immediately re-trigger on stale peaks once the
         # operator explicitly resumes.
         self._equity_peak = None
+        self._drawdown_peak_utc_day = None
         self._daily_utc_day = None
         self._daily_realised_pnl_usd = 0.0
         self._daily_fees_usd = 0.0
@@ -871,7 +873,20 @@ class RiskManager:
             except Exception:
                 pass
 
+    def _current_utc_day(self) -> str:
+        return datetime.datetime.now(tz=datetime.timezone.utc).date().isoformat()
+
     def _refresh_drawdown(self, trader: Any | None) -> None:
+        # Reset drawdown high-water mark at UTC day rollover so stale historic peaks
+        # do not re-trigger kills after recovery.
+        try:
+            utc_day = self._current_utc_day()
+            if utc_day and self._drawdown_peak_utc_day != utc_day:
+                self._drawdown_peak_utc_day = utc_day
+                self._equity_peak = None
+        except Exception:
+            pass
+
         if self._max_drawdown_pct <= 0:
             return
 
@@ -938,8 +953,6 @@ class RiskManager:
             self._daily_utc_day = day
             self._daily_realised_pnl_usd = 0.0
             self._daily_fees_usd = 0.0
-            # Use a fresh peak after day rollover to avoid stale historic peaks re-triggering drawdown kills.
-            self._equity_peak = None
 
         try:
             self._daily_realised_pnl_usd += float(pnl_usd or 0.0)
