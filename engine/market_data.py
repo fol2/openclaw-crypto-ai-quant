@@ -291,9 +291,16 @@ class MarketDataHub:
             except Exception:
                 logger.debug("WS stop() failed during restart", exc_info=True)
 
-            # Recreate the module-global singleton so other imports pick it up too.
-            self._ws_mod.hl_ws = self._ws_mod.HyperliquidWS()
-            self._ws = self._ws_mod.hl_ws
+            # Recreate and publish the module-global singleton so all imports see the new client.
+            new_ws = self._ws_mod.HyperliquidWS()
+            set_singleton = getattr(self._ws_mod, "_set_default_ws_singleton", None)
+            if callable(set_singleton):
+                set_singleton(new_ws)
+                self._ws = new_ws
+            else:
+                # Backwards-compat fallback for modules that expose a plain object singleton.
+                self._ws_mod.hl_ws = new_ws
+                self._ws = self._ws_mod.hl_ws
 
         # Re-subscribe immediately.
         self.ensure(symbols=symbols, interval=interval, candle_limit=candle_limit, user=user)
