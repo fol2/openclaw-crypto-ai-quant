@@ -21,6 +21,11 @@
 // Bounds-checked array access macro (H10: prevent out-of-bounds GPU reads)
 #define SAFE_IDX(arr, idx, max_idx, fallback) \
     ((idx) < (max_idx) ? (arr)[(idx)] : (fallback))
+#define SUB_COUNT_INDEX(bar, sym, ns) \
+    (((unsigned long long)(bar) * (unsigned long long)(ns)) + (unsigned long long)(sym))
+#define SUB_CANDLE_INDEX(bar, sub_i, max_sub, ns, sym) \
+    ((((unsigned long long)(bar) * (unsigned long long)(max_sub) + (unsigned long long)(sub_i)) \
+      * (unsigned long long)(ns)) + (unsigned long long)(sym))
 
 #define MAX_SYMBOLS      52u
 // Candidate buffer must cover the full project symbol universe to keep
@@ -148,7 +153,7 @@ struct GpuTraceEvent {
     double pnl;
 };
 
-struct __align__(16) GpuComboConfig {
+struct GpuComboConfig {
     float allocation_pct;  float sl_atr_mult;  float tp_atr_mult;  float leverage;
     unsigned int enable_reef_filter;  float reef_long_rsi_block_gt;  float reef_short_rsi_block_lt;
     float reef_adx_threshold;  float reef_long_rsi_extreme_gt;  float reef_short_rsi_extreme_lt;
@@ -211,6 +216,7 @@ struct __align__(16) GpuComboConfig {
     float tp_mult_strong;  float tp_mult_weak;
     unsigned int entry_cooldown_s;  unsigned int exit_cooldown_s;
 };
+static_assert(sizeof(GpuComboConfig) == 564, "GpuComboConfig layout mismatch");
 
 struct GpuComboState {
     double balance;  unsigned int num_open;  unsigned int entries_this_bar;
@@ -884,6 +890,10 @@ extern "C" __global__ void sweep_engine_kernel(
     unsigned int ns = params->num_symbols;
 
     unsigned int max_sub = params->max_sub_per_bar;
+    unsigned long long sub_counts_cap =
+        (unsigned long long)params->num_bars * (unsigned long long)ns;
+    unsigned long long sub_candles_cap =
+        (unsigned long long)params->num_bars * (unsigned long long)max_sub * (unsigned long long)ns;
 
     // H10: precompute snapshot/breadth buffer bounds for safe indexing
     unsigned int snap_buf_size = cfg.snapshot_offset + params->num_bars * ns;
@@ -969,9 +979,13 @@ extern "C" __global__ void sweep_engine_kernel(
 
                 if (state.positions[sym].active == POS_EMPTY) { continue; }
 
-                unsigned int n_sub = sub_counts[bar * ns + sym];
+                unsigned long long count_idx = SUB_COUNT_INDEX(bar, sym, ns);
+                unsigned int n_sub = (count_idx < sub_counts_cap) ? sub_counts[count_idx] : 0u;
+                if (n_sub > max_sub) { n_sub = max_sub; }
                 for (unsigned int sub_i = 0u; sub_i < n_sub; sub_i++) {
-                    const GpuRawCandle& sc = sub_candles[(bar * max_sub + sub_i) * ns + sym];
+                    unsigned long long sc_idx = SUB_CANDLE_INDEX(bar, sub_i, max_sub, ns, sym);
+                    if (sc_idx >= sub_candles_cap) { continue; }
+                    const GpuRawCandle& sc = sub_candles[sc_idx];
                     if (sc.close <= 0.0f) { continue; }
                     double sub_market_close = (double)sc.close;
 
@@ -1071,16 +1085,25 @@ extern "C" __global__ void sweep_engine_kernel(
                 unsigned int tick_ts = 0xFFFFFFFFu;
                 bool has_tick = false;
                 for (unsigned int sym = 0u; sym < ns; sym++) {
-                    unsigned int count = sub_counts[bar * ns + sym];
+                    unsigned long long count_idx = SUB_COUNT_INDEX(bar, sym, ns);
+                    unsigned int count = (count_idx < sub_counts_cap) ? sub_counts[count_idx] : 0u;
+                    if (count > max_sub) { count = max_sub; }
                     unsigned int cur = sub_cursor[sym];
                     while (cur < count) {
-                        const GpuRawCandle& probe = sub_candles[(bar * max_sub + cur) * ns + sym];
+                        unsigned long long probe_idx = SUB_CANDLE_INDEX(bar, cur, max_sub, ns, sym);
+                        if (probe_idx >= sub_candles_cap) {
+                            cur = count;
+                            break;
+                        }
+                        const GpuRawCandle& probe = sub_candles[probe_idx];
                         if (probe.close > 0.0f) { break; }
                         cur += 1u;
                     }
                     sub_cursor[sym] = cur;
                     if (cur >= count) { continue; }
-                    const GpuRawCandle& probe = sub_candles[(bar * max_sub + cur) * ns + sym];
+                    unsigned long long probe_idx = SUB_CANDLE_INDEX(bar, cur, max_sub, ns, sym);
+                    if (probe_idx >= sub_candles_cap) { continue; }
+                    const GpuRawCandle& probe = sub_candles[probe_idx];
                     if (!has_tick || probe.t_sec < tick_ts) {
                         tick_ts = probe.t_sec;
                         has_tick = true;
@@ -1097,9 +1120,14 @@ extern "C" __global__ void sweep_engine_kernel(
                     if (state.entries_this_bar >= cfg.max_entry_orders_per_loop) { break; }
 
                     unsigned int sub_slot = sub_cursor[sym];
-                    if (sub_slot >= sub_counts[bar * ns + sym]) { continue; }
+                    unsigned long long count_idx = SUB_COUNT_INDEX(bar, sym, ns);
+                    unsigned int count = (count_idx < sub_counts_cap) ? sub_counts[count_idx] : 0u;
+                    if (count > max_sub) { count = max_sub; }
+                    if (sub_slot >= count) { continue; }
 
-                    const GpuRawCandle& sc = sub_candles[(bar * max_sub + sub_slot) * ns + sym];
+                    unsigned long long sc_idx = SUB_CANDLE_INDEX(bar, sub_slot, max_sub, ns, sym);
+                    if (sc_idx >= sub_candles_cap) { continue; }
+                    const GpuRawCandle& sc = sub_candles[sc_idx];
                     if (sc.close <= 0.0f) { continue; }
                     if (sc.t_sec != tick_ts) { continue; }
 
@@ -1437,9 +1465,13 @@ extern "C" __global__ void sweep_engine_kernel(
 
                 for (unsigned int sym = 0u; sym < ns; sym++) {
                     unsigned int cur = sub_cursor[sym];
-                    unsigned int count = sub_counts[bar * ns + sym];
+                    unsigned long long count_idx = SUB_COUNT_INDEX(bar, sym, ns);
+                    unsigned int count = (count_idx < sub_counts_cap) ? sub_counts[count_idx] : 0u;
+                    if (count > max_sub) { count = max_sub; }
                     if (cur >= count) { continue; }
-                    const GpuRawCandle& probe = sub_candles[(bar * max_sub + cur) * ns + sym];
+                    unsigned long long probe_idx = SUB_CANDLE_INDEX(bar, cur, max_sub, ns, sym);
+                    if (probe_idx >= sub_candles_cap) { continue; }
+                    const GpuRawCandle& probe = sub_candles[probe_idx];
                     if (probe.t_sec == tick_ts) {
                         sub_cursor[sym] = cur + 1u;
                     }

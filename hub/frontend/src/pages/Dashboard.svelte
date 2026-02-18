@@ -18,6 +18,33 @@
   let detailTab: 'detail' | 'trades' | 'oms' | 'audit' = $state('detail');
   let manualTradeEnabled = $state(false);
   let liveEngineActive = $state(false);
+  let detailExpanded = $state(false);
+  let chartHeight = $state(240);
+  let chartDragging = $state(false);
+  const CHART_MIN = 120;
+  const CHART_MAX = 600;
+
+  function onChartSplitterDown(e: PointerEvent) {
+    e.preventDefault();
+    chartDragging = true;
+    const startY = e.clientY;
+    const startH = chartHeight;
+    const target = e.currentTarget as HTMLElement;
+    target.setPointerCapture(e.pointerId);
+
+    function onMove(ev: PointerEvent) {
+      const h = startH + (ev.clientY - startY);
+      chartHeight = Math.max(CHART_MIN, Math.min(CHART_MAX, h));
+    }
+    function onUp() {
+      chartDragging = false;
+      target.removeEventListener('pointermove', onMove);
+      target.removeEventListener('pointerup', onUp);
+    }
+    target.addEventListener('pointermove', onMove);
+    target.addEventListener('pointerup', onUp);
+  }
+
   type FlashDebugEvent = {
     symbol: string;
     prev: number;
@@ -144,6 +171,7 @@
     try {
       appState.loading = true;
       const data = await getSnapshot(appState.mode);
+      updateServerClockOffset(data?.now_ts_ms);
       // Preserve live WS mid prices — don't let stale REST prices overwrite them.
       // WS owns price; REST owns everything else (positions, signals, heartbeat, balances).
       if (snap?.symbols && data?.symbols) {
@@ -180,11 +208,43 @@
     }
   }
 
+  function intervalToMs(iv: string): number {
+    const m = /^([0-9]+)([mhd])$/i.exec(String(iv || '').trim());
+    if (!m) return 60_000;
+    const n = Number(m[1]);
+    if (!Number.isFinite(n) || n <= 0) return 60_000;
+    const unit = String(m[2] || '').toLowerCase();
+    if (unit === 'm') return n * 60_000;
+    if (unit === 'h') return n * 60 * 60_000;
+    if (unit === 'd') return n * 24 * 60 * 60_000;
+    return 60_000;
+  }
+
+  function newestCandleIndex(rows: any[]): number {
+    let idx = 0;
+    for (let i = 1; i < rows.length; i++) {
+      if (Number(rows[i]?.t || 0) > Number(rows[idx]?.t || 0)) idx = i;
+    }
+    return idx;
+  }
+
   // Track previous symbol so we can clear candles on symbol switch
   // (plain let — not reactive, no effect re-run on change)
   let _prevFocusSym = '';
+  // Client/server clock offset for candle-boundary alignment.
+  let _serverNowOffsetMs = 0;
   // Timestamp of last live-candle paint; used to cap redraws at ~15fps
   let _liveUpdateMs = 0;
+
+  function updateServerClockOffset(serverNowMs: unknown) {
+    const ts = Number(serverNowMs);
+    if (!Number.isFinite(ts) || ts <= 0) return;
+    _serverNowOffsetMs = ts - Date.now();
+  }
+
+  function serverNowMs(): number {
+    return Date.now() + _serverNowOffsetMs;
+  }
 
   async function setFocus(sym: string) {
     focusSym = sym;
@@ -215,31 +275,65 @@
     return () => { cancelled = true; };
   });
 
-  // Live last-candle update: mutate the newest candle's OHLC via WebSocket mids.
+  // Live candle update: mutate current developing candle, and roll over to a
+  // new synthetic candle once the exchange interval boundary is crossed.
   // Rate-limited to ~15fps (66ms) to avoid triggering JSON.stringify + full
   // canvas redraw at the raw WS cadence (~100ms / 10Hz).
-  // Stops updating once t_close has passed (candle is sealed by the exchange).
   $effect(() => {
     const sym = focusSym;
     if (!sym) return;
     const handler = (data: any) => {
-      const now = Date.now();
-      if (now - _liveUpdateMs < 66) return;          // ~15fps cap
-      const mid = data?.mids?.[sym];
-      if (mid == null || candles.length === 0) return;
-      // Find the newest candle by timestamp
-      let liveIdx = 0;
-      for (let i = 1; i < candles.length; i++) {
-        if (candles[i].t > candles[liveIdx].t) liveIdx = i;
-      }
+      updateServerClockOffset(data?.server_ts_ms);
+      const localNow = Date.now();
+      if (localNow - _liveUpdateMs < 66) return; // ~15fps cap
+      const mid = Number(data?.mids?.[sym]);
+      if (!Number.isFinite(mid) || mid <= 0 || candles.length === 0) return;
+
+      const wsServerNow = Number(data?.server_ts_ms);
+      const now = Number.isFinite(wsServerNow) && wsServerNow > 0 ? wsServerNow : serverNowMs();
+      const msPerBar = intervalToMs(selectedInterval);
+      const barStart = Math.floor(now / msPerBar) * msPerBar;
+      const barClose = barStart + msPerBar - 1;
+
+      const liveIdx = newestCandleIndex(candles);
       const c = candles[liveIdx];
-      // Guard: t_close=0 means the DB row had no close-time — treat as open.
-      // Only skip if we have a valid future close time that has already elapsed.
-      if (c.t_close != null && c.t_close > 0 && now > c.t_close) return;
-      _liveUpdateMs = now;
+      const candleStart = Number(c?.t || 0);
+      if (!Number.isFinite(candleStart) || candleStart <= 0) return;
+
+      if (candleStart < barStart) {
+        const prevClose = Number.isFinite(Number(c.c)) ? Number(c.c) : mid;
+        const o = prevClose;
+        candles.push({
+          t: barStart,
+          t_close: barClose,
+          o,
+          h: Math.max(o, mid),
+          l: Math.min(o, mid),
+          c: mid,
+          v: 0,
+          n: 0,
+        });
+        if (candles.length > selectedBars) {
+          candles.splice(0, candles.length - selectedBars);
+        }
+        _liveUpdateMs = localNow;
+        return;
+      }
+
+      // Ignore out-of-order future candles caused by temporary clock skew.
+      if (candleStart > barStart) return;
+
+      const closeMs = Number(c.t_close || 0);
+      if (!Number.isFinite(closeMs) || closeMs <= 0 || closeMs < barClose) {
+        c.t_close = barClose;
+      }
+
+      const prevHigh = Number.isFinite(Number(c.h)) ? Number(c.h) : mid;
+      const prevLow = Number.isFinite(Number(c.l)) ? Number(c.l) : mid;
+      _liveUpdateMs = localNow;
       c.c = mid;
-      if (mid > c.h) c.h = mid;
-      if (mid < c.l) c.l = mid;
+      c.h = Math.max(prevHigh, mid);
+      c.l = Math.min(prevLow, mid);
     };
     hubWs.subscribe('mids', handler);
     return () => hubWs.unsubscribe('mids', handler);
@@ -343,6 +437,51 @@
   let recent = $derived(snap?.recent || {});
   let openPositions = $derived(snap?.open_positions || []);
 
+  // ── Range selector for PnL / DD ───────────────────────────────────────
+  let metricsRange = $state<'today' | 'since' | 'all'>('today');
+  let rangeMenuOpen = $state(false);
+
+  let activePnl = $derived(
+    metricsRange === 'today' ? daily.pnl_usd
+    : metricsRange === 'since' ? snap?.since_config?.pnl_usd
+    : snap?.all_time?.pnl_usd
+  );
+  let activeDd = $derived(
+    metricsRange === 'today' ? daily.drawdown_pct
+    : metricsRange === 'since' ? snap?.since_config?.drawdown_pct
+    : snap?.all_time?.drawdown_pct
+  );
+  let pnlLabel = $derived(
+    metricsRange === 'today' ? 'PnL'
+    : metricsRange === 'since' ? 'PnL\u2219cfg'
+    : 'PnL\u2219all'
+  );
+  let ddLabel = $derived(
+    metricsRange === 'today' ? 'DD'
+    : metricsRange === 'since' ? 'DD\u2219cfg'
+    : 'DD\u2219all'
+  );
+  let sinceLabel = $derived(snap?.since_config?.label ?? 'Since cfg');
+
+  function selectRange(r: 'today' | 'since' | 'all') {
+    metricsRange = r;
+    rangeMenuOpen = false;
+  }
+
+  function onRangeClickOutside(e: MouseEvent) {
+    const target = e.target as HTMLElement;
+    if (!target.closest('.range-dropdown-wrap')) {
+      rangeMenuOpen = false;
+    }
+  }
+
+  $effect(() => {
+    if (rangeMenuOpen) {
+      document.addEventListener('click', onRangeClickOutside, true);
+      return () => document.removeEventListener('click', onRangeClickOutside, true);
+    }
+  });
+
   const gateReasonMap: Record<string, { label: string; desc: string }> = {
     disabled:            { label: 'Disabled',        desc: 'Gate feature is off — new entries always allowed.' },
     trend_ok:            { label: 'Trend OK',         desc: 'Market breadth is trending and BTC ADX + ATR% pass thresholds. Gate is open.' },
@@ -407,13 +546,28 @@
       <span class="metric-label">EQ</span>
       <span class="metric-value">${fmtNum(balances.equity_est_usd)}</span>
     </span>
-    <span class="metric-pill {pnlClass(daily.pnl_usd)}">
-      <span class="metric-label">PnL</span>
-      <span class="metric-value">${fmtNum(daily.pnl_usd)}</span>
+    <span class="range-dropdown-wrap">
+      <button class="metric-pill range-pill {pnlClass(activePnl)}" onclick={() => rangeMenuOpen = !rangeMenuOpen}>
+        <span class="metric-label">{pnlLabel}<svg class="range-caret" class:open={rangeMenuOpen} width="8" height="8" viewBox="0 0 8 8"><path d="M1.5 3L4 5.5L6.5 3" fill="none" stroke="currentColor" stroke-width="1.2"/></svg></span>
+        <span class="metric-value">${fmtNum(activePnl)}</span>
+      </button>
+      {#if rangeMenuOpen}
+        <div class="range-menu">
+          <button class="range-opt" class:active={metricsRange === 'today'} onclick={() => selectRange('today')}>
+            <span class="range-dot"></span>Today
+          </button>
+          <button class="range-opt" class:active={metricsRange === 'since'} onclick={() => selectRange('since')}>
+            <span class="range-dot"></span>{sinceLabel}
+          </button>
+          <button class="range-opt" class:active={metricsRange === 'all'} onclick={() => selectRange('all')}>
+            <span class="range-dot"></span>All-time
+          </button>
+        </div>
+      {/if}
     </span>
     <span class="metric-pill">
-      <span class="metric-label">DD</span>
-      <span class="metric-value">{fmtNum(daily.drawdown_pct, 1)}%</span>
+      <span class="metric-label">{ddLabel}</span>
+      <span class="metric-value">{fmtNum(activeDd, 1)}%</span>
     </span>
     <span class="metric-pill">
       <span class="metric-label">POS</span>
@@ -442,9 +596,9 @@
   </button>
 </div>
 
-<div class="dashboard-grid" class:is-dragging={dragging}>
+<div class="dashboard-grid" class:is-dragging={dragging || chartDragging} class:drag-col={dragging} class:drag-row={chartDragging}>
   <!-- Symbol table -->
-  <div class="panel symbols-panel" class:mobile-visible={mobileTab === 'symbols'} style="width:{symWidth}px;min-width:{symWidth}px">
+  <div class="panel symbols-panel" class:mobile-visible={mobileTab === 'symbols'} class:expanded-hidden={detailExpanded} style="width:{symWidth}px;min-width:{symWidth}px">
     <div class="panel-header">
       <div class="search-wrap">
         <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
@@ -522,7 +676,7 @@
   </div>
 
   <!-- Drag splitter -->
-  <div class="splitter" class:active={dragging} role="separator" aria-orientation="vertical" onpointerdown={onSplitterDown}></div>
+  <div class="splitter" class:active={dragging} class:expanded-hidden={detailExpanded} role="separator" aria-orientation="vertical" onpointerdown={onSplitterDown}></div>
 
   <!-- Detail + Feed panel (merged, tabbed) -->
   <div class="panel detail-panel" class:mobile-visible={mobileTab === 'detail' || mobileTab === 'feed'}>
@@ -547,6 +701,13 @@
         <button class="tab" class:is-on={detailTab === 'oms'} onclick={() => setFeed('oms')}>OMS</button>
         <button class="tab" class:is-on={detailTab === 'audit'} onclick={() => setFeed('audit')}>AUDIT</button>
       </div>
+      <button class="expand-btn" aria-label={detailExpanded ? 'Collapse' : 'Expand'} onclick={() => detailExpanded = !detailExpanded}>
+        {#if detailExpanded}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/></svg>
+        {:else}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+        {/if}
+      </button>
       {#if focusSym}
         <button class="close-focus" aria-label="Close" onclick={() => { focusSym = ''; mobileTab = 'symbols'; }}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg>
@@ -574,7 +735,7 @@
             >{bc}</button>
           {/each}
         </div>
-        <div class="chart-wrap">
+        <div class="chart-wrap" style="height:{chartHeight}px">
           <candle-chart
             candles={JSON.stringify(candles)}
             entries={JSON.stringify(marks?.entries || [])}
@@ -584,15 +745,17 @@
             interval={selectedInterval}
           ></candle-chart>
         </div>
+        <div class="chart-splitter" class:active={chartDragging} role="separator" aria-orientation="horizontal" onpointerdown={onChartSplitterDown}></div>
 
         {#if marks?.position}
           {@const p = marks.position}
+          {@const livePos = snap?.symbols?.find((s: any) => s.symbol === focusSym)?.position}
           <div class="kv-section">
             <h4>Position</h4>
             <div class="kv"><span class="k">Type</span><span class="v">{p.pos_type || p.type}</span></div>
             <div class="kv"><span class="k">Size</span><span class="v mono">{fmtNum(p.size, 6)}</span></div>
             <div class="kv"><span class="k">Entry</span><span class="v mono">{fmtNum(p.entry_price, 6)}</span></div>
-            <div class="kv"><span class="k">uPnL</span><span class="v {pnlClass(p.unreal_pnl_est)}">{fmtNum(p.unreal_pnl_est)}</span></div>
+            <div class="kv"><span class="k">uPnL</span><span class="v {pnlClass(livePos?.unreal_pnl_est)}">{fmtNum(livePos?.unreal_pnl_est)}</span></div>
             <div class="kv"><span class="k">Leverage</span><span class="v">{fmtNum(p.leverage, 1)}x</span></div>
           </div>
           {#if marks?.entries?.length}
@@ -860,6 +1023,73 @@
   .metric-pill.green .metric-value { color: var(--green); }
   .metric-pill.red .metric-value { color: var(--red); }
 
+  /* ─── Range dropdown ─── */
+  .range-dropdown-wrap {
+    position: relative;
+    display: inline-flex;
+  }
+  .range-pill {
+    cursor: pointer;
+    user-select: none;
+  }
+  .range-caret {
+    display: inline-block;
+    margin-left: 2px;
+    vertical-align: middle;
+    transition: transform var(--t-fast);
+  }
+  .range-caret.open {
+    transform: rotate(180deg);
+  }
+  .range-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    min-width: 130px;
+    background: #111118;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 4px 0;
+    z-index: 200;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+    font-size: 11px;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .range-opt {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 5px 10px;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 11px;
+    font-family: inherit;
+    text-align: left;
+    transition: background var(--t-fast), color var(--t-fast);
+  }
+  .range-opt:hover {
+    background: rgba(255,255,255,0.04);
+    color: var(--text);
+  }
+  .range-opt.active {
+    color: var(--accent);
+  }
+  .range-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .range-opt.active .range-dot {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
   .error-banner {
     padding: 6px 12px;
     border-radius: var(--radius-md);
@@ -909,7 +1139,12 @@
   }
   .dashboard-grid.is-dragging {
     user-select: none;
+  }
+  .dashboard-grid.drag-col {
     cursor: col-resize;
+  }
+  .dashboard-grid.drag-row {
+    cursor: row-resize;
   }
 
   .splitter {
@@ -955,6 +1190,11 @@
     margin: 0;
     font-size: 14px;
     font-weight: 600;
+  }
+
+  /* ─── Expanded detail (hide symbol panel + splitter) ─── */
+  .expanded-hidden {
+    display: none !important;
   }
 
   /* ─── Symbol table ─── */
@@ -1164,13 +1404,34 @@
 
   /* ─── Candle chart container ─── */
   .chart-wrap {
-    height: 240px;
     flex-shrink: 0;
-    border-bottom: 1px solid var(--border-subtle);
     overflow: hidden;
   }
+  .chart-splitter {
+    height: 8px;
+    cursor: row-resize;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .chart-splitter::after {
+    content: '';
+    width: 32px;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--border);
+    transition: background var(--t-fast);
+  }
+  .chart-splitter:hover::after,
+  .chart-splitter.active::after {
+    background: var(--accent);
+  }
   @media (max-width: 768px) {
-    .chart-wrap { height: 200px; }
+    .chart-wrap { height: 200px !important; }
+    .chart-splitter { display: none; }
   }
   .detail-header {
     gap: 8px;
@@ -1184,6 +1445,24 @@
   .focus-sym h3 {
     font-family: 'IBM Plex Mono', monospace;
     letter-spacing: -0.01em;
+  }
+  .expand-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .expand-btn:hover {
+    background: var(--surface-hover);
+    color: var(--text);
   }
   .close-focus {
     display: flex;
@@ -1347,6 +1626,7 @@
     }
 
     .splitter { display: none; }
+    .expand-btn { display: none; }
 
     .symbols-panel {
       width: auto !important;

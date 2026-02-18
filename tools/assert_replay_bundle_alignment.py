@@ -461,6 +461,17 @@ def main() -> int:
                     "counts": event_order_report.get("counts") or {},
                 }
             )
+        if args.strict_no_residuals:
+            event_order_residuals = list(event_order_report.get("accepted_residuals") or [])
+            if event_order_residuals:
+                failures.append(
+                    {
+                        "code": "event_order_residuals_present",
+                        "classification": "state_initialisation_gap",
+                        "detail": "event-order reconciliation has accepted residuals",
+                        "count": len(event_order_residuals),
+                    }
+                )
 
     gpu_parity_report: dict[str, Any] | None = None
     gpu_lane_status: dict[str, bool] = {}
