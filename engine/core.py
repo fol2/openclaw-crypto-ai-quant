@@ -65,7 +65,7 @@ def _interval_to_ms(interval: str) -> int:
         # Fallback: assume seconds.
         return int(float(s) * 1000.0)
     except (ValueError, TypeError, OverflowError):
-        return 60 * 60 * 1000
+        return 0
 
 
 def _finite_float_or_default(raw: Any, default: float) -> float:
