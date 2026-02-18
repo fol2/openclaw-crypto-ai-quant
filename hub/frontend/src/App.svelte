@@ -11,6 +11,7 @@
 
   let currentPage = $state(window.location.hash.slice(1) || 'dashboard');
   let sidebarOpen = $state(false);
+  let sidebarCollapsed = $state(false);
 
   function handleHashChange() {
     currentPage = window.location.hash.slice(1) || 'dashboard';
@@ -39,7 +40,7 @@
   <button class="overlay" onclick={() => sidebarOpen = false} aria-label="Close menu"></button>
 {/if}
 
-<Sidebar {currentPage} open={sidebarOpen} onNavigate={() => sidebarOpen = false} />
+<Sidebar {currentPage} open={sidebarOpen} collapsed={sidebarCollapsed} onNavigate={() => sidebarOpen = false} onToggleCollapse={() => sidebarCollapsed = !sidebarCollapsed} />
 
 <main class="main-content">
   {#if currentPage === 'dashboard'}

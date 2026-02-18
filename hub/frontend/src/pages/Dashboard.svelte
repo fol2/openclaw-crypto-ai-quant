@@ -289,6 +289,33 @@
     return () => hubWs.unsubscribe('mids', midsHandler);
   });
 
+  // ── Resizable columns ──────────────────────────────────────────────────────
+  const SYM_MIN = 200;
+  const SYM_MAX = 600;
+  let symWidth = $state(300);
+  let dragging = $state(false);
+
+  function onSplitterDown(e: PointerEvent) {
+    e.preventDefault();
+    dragging = true;
+    const startX = e.clientX;
+    const startW = symWidth;
+    const target = e.currentTarget as HTMLElement;
+    target.setPointerCapture(e.pointerId);
+
+    function onMove(ev: PointerEvent) {
+      const w = startW + (ev.clientX - startX);
+      symWidth = Math.max(SYM_MIN, Math.min(SYM_MAX, w));
+    }
+    function onUp() {
+      dragging = false;
+      target.removeEventListener('pointermove', onMove);
+      target.removeEventListener('pointerup', onUp);
+    }
+    target.addEventListener('pointermove', onMove);
+    target.addEventListener('pointerup', onUp);
+  }
+
   let symbols = $derived(snap?.symbols || []);
   let filteredSymbols = $derived.by(() => {
     const q = appState.search.trim().toUpperCase();
@@ -377,9 +404,9 @@
   </button>
 </div>
 
-<div class="dashboard-grid">
+<div class="dashboard-grid" class:is-dragging={dragging}>
   <!-- Symbol table -->
-  <div class="panel symbols-panel" class:mobile-visible={mobileTab === 'symbols'}>
+  <div class="panel symbols-panel" class:mobile-visible={mobileTab === 'symbols'} style="width:{symWidth}px;min-width:{symWidth}px">
     <div class="panel-header">
       <div class="search-wrap">
         <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
@@ -455,6 +482,9 @@
       </table>
     </div>
   </div>
+
+  <!-- Drag splitter -->
+  <div class="splitter" class:active={dragging} role="separator" aria-orientation="vertical" onpointerdown={onSplitterDown}></div>
 
   <!-- Detail + Feed panel (merged, tabbed) -->
   <div class="panel detail-panel" class:mobile-visible={mobileTab === 'detail' || mobileTab === 'feed'}>
@@ -767,13 +797,37 @@
 
   /* ─── Grid layout ─── */
   .dashboard-grid {
-    display: grid;
-    grid-template-columns: 300px 1fr;
-    grid-template-rows: 1fr;
-    gap: 10px;
+    display: flex;
+    gap: 0;
     height: calc(100vh - 140px);
     height: calc(100dvh - 140px);
     min-height: 400px;
+  }
+  .dashboard-grid.is-dragging {
+    user-select: none;
+    cursor: col-resize;
+  }
+
+  .splitter {
+    width: 10px;
+    cursor: col-resize;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+  }
+  .splitter::after {
+    content: '';
+    width: 3px;
+    height: 32px;
+    border-radius: 2px;
+    background: var(--border);
+    transition: background var(--t-fast);
+  }
+  .splitter:hover::after,
+  .splitter.active::after {
+    background: var(--accent);
   }
 
   .panel {
@@ -800,7 +854,7 @@
   }
 
   /* ─── Symbol table ─── */
-  .symbols-panel { min-width: 0; }
+  .symbols-panel { flex-shrink: 0; }
 
   .search-wrap {
     position: relative;
@@ -961,7 +1015,7 @@
   }
 
   /* ─── Detail panel ─── */
-  .detail-panel { overflow-y: auto; }
+  .detail-panel { overflow-y: auto; flex: 1; min-width: 0; }
   .detail-tabs {
     display: flex;
     gap: 2px;
@@ -1158,13 +1212,6 @@
   .red { color: var(--red); }
   .yellow { color: var(--yellow); }
 
-  /* ─── Tablet ─── */
-  @media (max-width: 1200px) {
-    .dashboard-grid {
-      grid-template-columns: 260px 1fr;
-    }
-  }
-
   /* ─── Mobile ─── */
   @media (max-width: 768px) {
     .topbar-row {
@@ -1183,9 +1230,15 @@
     }
 
     .dashboard-grid {
-      grid-template-columns: 1fr;
-      grid-template-rows: 1fr;
+      flex-direction: column;
       height: calc(100dvh - 240px);
+    }
+
+    .splitter { display: none; }
+
+    .symbols-panel {
+      width: auto !important;
+      min-width: 0 !important;
     }
 
     .panel {
