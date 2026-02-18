@@ -1,4 +1,4 @@
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, type PropertyValues } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
 export interface CandleData {
@@ -132,6 +132,15 @@ export class CandleChart extends LitElement {
     super.disconnectedCallback();
     this._ro?.disconnect();
     if (this._rafId !== null) { cancelAnimationFrame(this._rafId); this._rafId = null; }
+  }
+
+  protected willUpdate(changed: PropertyValues<this>) {
+    if (changed.has('candles') && typeof this.candles === 'string') {
+      try { this.candles = JSON.parse(this.candles as any); } catch { this.candles = []; }
+    }
+    if (changed.has('entries') && typeof this.entries === 'string') {
+      try { this.entries = JSON.parse(this.entries as any); } catch { this.entries = []; }
+    }
   }
 
   updated() {

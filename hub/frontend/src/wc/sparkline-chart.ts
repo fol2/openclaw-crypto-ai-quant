@@ -1,4 +1,4 @@
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, type PropertyValues } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
 @customElement('sparkline-chart')
@@ -12,6 +12,12 @@ export class SparklineChart extends LitElement {
     :host { display: inline-block; }
     canvas { width: 100%; height: 100%; }
   `;
+
+  protected willUpdate(changed: PropertyValues<this>) {
+    if (changed.has('points') && typeof this.points === 'string') {
+      try { this.points = JSON.parse(this.points as any); } catch { this.points = []; }
+    }
+  }
 
   updated() {
     this.draw();
