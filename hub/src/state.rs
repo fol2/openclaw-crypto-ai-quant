@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::time::Instant;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::config::HubConfig;
 use crate::db::pool::{open_ro_pool, DbPool};
@@ -18,6 +20,12 @@ pub struct AppState {
     /// Symbols seen in the most recent snapshot query — updated by `api_snapshot`
     /// so the background mids poller always broadcasts real prices.
     pub tracked_symbols: Arc<RwLock<Vec<String>>>,
+
+    // ── Manual trade state ─────────────────────────────────────────
+    /// Per-symbol rate-limit timestamps (5-second cooldown).
+    pub trade_rate_limits: Mutex<HashMap<String, Instant>>,
+    /// Confirm tokens: token → (param_hash, created_at, preview_job_id).
+    pub trade_confirm_tokens: Mutex<HashMap<String, (String, Instant, String)>>,
 
     // DB pools (optional — a DB might not exist yet).
     pub live_pool: Option<DbPool>,
@@ -43,6 +51,8 @@ impl AppState {
             sidecar,
             jobs,
             tracked_symbols: Arc::new(RwLock::new(Vec::new())),
+            trade_rate_limits: Mutex::new(HashMap::new()),
+            trade_confirm_tokens: Mutex::new(HashMap::new()),
             live_pool,
             paper1_pool,
             paper2_pool,
