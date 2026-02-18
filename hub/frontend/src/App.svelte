@@ -6,6 +6,8 @@
   import Backtest from './pages/Backtest.svelte';
   import Sweep from './pages/Sweep.svelte';
   import Factory from './pages/Factory.svelte';
+  import GridView from './pages/GridView.svelte';
+  import System from './pages/System.svelte';
 
   // Simple hash-based routing for SPA.
   let currentPage = $state(window.location.hash.slice(1) || 'dashboard');
@@ -34,11 +36,9 @@
   {:else if currentPage === 'factory'}
     <Factory />
   {:else if currentPage === 'grid'}
-    <h1>Grid View</h1>
-    <p class="placeholder">Multi-symbol grid — coming in Phase 6</p>
+    <GridView />
   {:else if currentPage === 'system'}
-    <h1>System</h1>
-    <p class="placeholder">Housekeeping — coming in Phase 7</p>
+    <System />
   {:else}
     <h1>Not Found</h1>
     <p>Unknown page: {currentPage}</p>
@@ -56,10 +56,5 @@
     font-size: 20px;
     margin-bottom: 12px;
     font-weight: 600;
-  }
-
-  .placeholder {
-    color: var(--text-muted);
-    font-style: italic;
   }
 </style>

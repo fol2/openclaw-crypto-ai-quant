@@ -161,3 +161,25 @@ export async function getFactoryReport(date: string, runId: string) {
 export async function getFactoryCandidates(date: string, runId: string) {
   return apiFetch(`/api/factory/runs/${encodeURIComponent(date)}/${encodeURIComponent(runId)}/candidates`);
 }
+
+// ── System API ──────────────────────────────────────────────────────
+
+export async function getSystemServices() {
+  return apiFetch('/api/system/services');
+}
+
+export async function serviceAction(name: string, action: string) {
+  return apiFetch(`/api/system/services/${encodeURIComponent(name)}/${encodeURIComponent(action)}`, { method: 'POST' });
+}
+
+export async function getDbStats() {
+  return apiFetch('/api/system/db-stats');
+}
+
+export async function getDiskUsage() {
+  return apiFetch('/api/system/disk');
+}
+
+export async function getServiceLogs(service: string, lines = 50) {
+  return apiFetch(`/api/system/logs?service=${encodeURIComponent(service)}&lines=${lines}`);
+}

@@ -4,6 +4,7 @@ pub mod config;
 pub mod backtest;
 pub mod sweep;
 pub mod factory;
+pub mod system;
 
 use axum::Router;
 use std::sync::Arc;
@@ -19,4 +20,5 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .merge(backtest::routes())
         .merge(sweep::routes())
         .merge(factory::routes())
+        .merge(system::routes())
 }
