@@ -14,14 +14,18 @@
   let prevMids: Record<string, number> = {};
   let flashTimer: any = null;
   let flashMap: Record<string, 'up' | 'down'> = $state({});
+  let flashDelays: Record<string, number> = {};
 
   function detectFlashes(newSyms: any[]) {
     const next: Record<string, 'up' | 'down'> = {};
+    let idx = 0;
     for (const s of newSyms) {
       if (s.mid != null) {
         const prev = prevMids[s.symbol];
         if (prev !== undefined && s.mid !== prev) {
           next[s.symbol] = s.mid > prev ? 'up' : 'down';
+          flashDelays[s.symbol] = idx * 18; // stagger 18ms per changed symbol
+          idx++;
         }
         prevMids[s.symbol] = s.mid;
       }
@@ -29,8 +33,15 @@
     if (Object.keys(next).length > 0) {
       clearTimeout(flashTimer);
       flashMap = next;
-      flashTimer = setTimeout(() => { flashMap = {}; }, 700);
+      flashTimer = setTimeout(() => { flashMap = {}; }, 1100); // 100ms after animation ends
     }
+  }
+
+  function pnlPct(pos: any): number | null {
+    if (!pos || pos.entry_price == null || !pos.size || pos.unreal_pnl_est == null) return null;
+    const notional = pos.entry_price * Math.abs(pos.size);
+    if (notional === 0) return null;
+    return (pos.unreal_pnl_est / notional) * 100;
   }
 
   function fmtNum(v: number | null | undefined, dp = 2): string {
@@ -221,7 +232,11 @@
               onclick={() => setFocus(s.symbol)}
             >
               <td class="sym-name">{s.symbol}</td>
-              <td class="num col-mid" class:flash-up={flashMap[s.symbol] === 'up'} class:flash-down={flashMap[s.symbol] === 'down'}>{s.mid != null ? fmtNum(s.mid, 6) : '\u2014'}</td>
+              <td class="num col-mid"
+                class:flash-up={flashMap[s.symbol] === 'up'}
+                class:flash-down={flashMap[s.symbol] === 'down'}
+                style={flashMap[s.symbol] ? `animation-delay:${flashDelays[s.symbol] ?? 0}ms` : ''}
+              >{s.mid != null ? fmtNum(s.mid, 6) : '\u2014'}</td>
               <td>
                 {#if s.last_signal?.signal === 'BUY'}
                   <span class="sig-badge buy">BUY</span>
@@ -236,6 +251,12 @@
                   <span class="pos-badge" class:long={s.position.type === 'LONG'} class:short={s.position.type === 'SHORT'}>
                     {s.position.type}
                   </span>
+                  {#if s.position.unreal_pnl_est != null}
+                    {@const pct = pnlPct(s.position)}
+                    <span class="pos-pnl {pnlClass(s.position.unreal_pnl_est)}">
+                      {s.position.unreal_pnl_est >= 0 ? '+' : ''}{fmtNum(s.position.unreal_pnl_est)}{pct != null ? ` ${pct >= 0 ? '+' : ''}${fmtNum(pct, 1)}%` : ''}
+                    </span>
+                  {/if}
                 {:else}
                   <span class="flat-label">flat</span>
                 {/if}
@@ -656,20 +677,32 @@
   }
 
   /* ─── Price flash ─── */
+  /* End color must match the resting color of .num (.col-mid) = var(--text-muted) */
   @keyframes flashUp {
     0%   { color: var(--green); }
-    100% { color: inherit; }
+    60%  { color: var(--green); }
+    100% { color: var(--text-muted); }
   }
   @keyframes flashDown {
     0%   { color: var(--red); }
-    100% { color: inherit; }
+    60%  { color: var(--red); }
+    100% { color: var(--text-muted); }
   }
-  .flash-up   { animation: flashUp   0.7s ease-out forwards; }
-  .flash-down { animation: flashDown 0.7s ease-out forwards; }
-
-  /* flash on mid-price in detail header */
-  .mid-price.flash-up   { animation: flashUp   0.7s ease-out forwards; }
-  .mid-price.flash-down { animation: flashDown 0.7s ease-out forwards; }
+  /* End color for detail panel mid-price = var(--accent) */
+  @keyframes flashUpAccent {
+    0%   { color: var(--green); }
+    60%  { color: var(--green); }
+    100% { color: var(--accent); }
+  }
+  @keyframes flashDownAccent {
+    0%   { color: var(--red); }
+    60%  { color: var(--red); }
+    100% { color: var(--accent); }
+  }
+  .flash-up   { animation: flashUp   1s ease-out forwards; }
+  .flash-down { animation: flashDown 1s ease-out forwards; }
+  .mid-price.flash-up   { animation: flashUpAccent   1s ease-out forwards; }
+  .mid-price.flash-down { animation: flashDownAccent 1s ease-out forwards; }
 
   .sym-name {
     font-weight: 600;
@@ -726,6 +759,16 @@
     color: var(--text-dim);
     font-size: 11px;
   }
+  .pos-pnl {
+    display: block;
+    font-size: 9px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-weight: 500;
+    margin-top: 2px;
+    letter-spacing: 0.01em;
+  }
+  .pos-pnl.green { color: var(--green); }
+  .pos-pnl.red   { color: var(--red); }
 
   /* ─── Detail panel ─── */
   .detail-panel { overflow-y: auto; }
@@ -925,14 +968,14 @@
       display: flex;
     }
 
-    /* MID column always visible; compact column widths to fit ~375px */
+    /* Column widths for ~375px: SYM/MID/SIG/POS — POS wider for PnL sub-line */
     .sym-table {
       table-layout: fixed;
     }
-    .sym-table th:nth-child(1), .sym-table td:nth-child(1) { width: 36%; }
-    .sym-table th:nth-child(2), .sym-table td:nth-child(2) { width: 32%; }
-    .sym-table th:nth-child(3), .sym-table td:nth-child(3) { width: 16%; }
-    .sym-table th:nth-child(4), .sym-table td:nth-child(4) { width: 16%; }
+    .sym-table th:nth-child(1), .sym-table td:nth-child(1) { width: 28%; }
+    .sym-table th:nth-child(2), .sym-table td:nth-child(2) { width: 26%; }
+    .sym-table th:nth-child(3), .sym-table td:nth-child(3) { width: 14%; }
+    .sym-table th:nth-child(4), .sym-table td:nth-child(4) { width: 32%; }
 
     .col-mid {
       font-size: 10px;
