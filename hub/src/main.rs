@@ -11,6 +11,7 @@ mod ws;
 
 use axum::middleware;
 use axum::Router;
+use chrono::Utc;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -141,9 +142,17 @@ fn spawn_mids_poller(state: Arc<AppState>) {
                     last_published_mids
                         .extend(snap.mids.iter().map(|(sym, mid)| (sym.clone(), *mid)));
                     let mut ws_receivers = 0usize;
+                    let mut payload_data =
+                        serde_json::to_value(&snap).unwrap_or_else(|_| serde_json::json!({}));
+                    if let Some(obj) = payload_data.as_object_mut() {
+                        obj.insert(
+                            "server_ts_ms".to_string(),
+                            serde_json::json!(Utc::now().timestamp_millis()),
+                        );
+                    }
                     if let Ok(json) = serde_json::to_string(&serde_json::json!({
                         "type": "mids",
-                        "data": snap,
+                        "data": payload_data,
                     })) {
                         ws_receivers = state.broadcast.publish(ws::topics::TOPIC_MIDS, json);
                     }
