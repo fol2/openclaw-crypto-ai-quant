@@ -10,6 +10,7 @@ pub enum HubError {
     NotFound(String),
     BadRequest(String),
     Unauthorized,
+    Forbidden(String),
     Internal(String),
 }
 
@@ -21,6 +22,7 @@ impl std::fmt::Display for HubError {
             Self::NotFound(msg) => write!(f, "not_found: {msg}"),
             Self::BadRequest(msg) => write!(f, "bad_request: {msg}"),
             Self::Unauthorized => write!(f, "unauthorized"),
+            Self::Forbidden(msg) => write!(f, "forbidden: {msg}"),
             Self::Internal(msg) => write!(f, "internal_error: {msg}"),
         }
     }
@@ -36,6 +38,7 @@ impl IntoResponse for HubError {
             Self::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
+            Self::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             Self::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
         };
 

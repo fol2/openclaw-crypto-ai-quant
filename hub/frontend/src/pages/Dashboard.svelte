@@ -1,6 +1,6 @@
 <script lang="ts">
   import { appState } from '../lib/stores.svelte';
-  import { getSnapshot, getCandles, getMarks, postFlashDebug } from '../lib/api';
+  import { getSnapshot, getCandles, getMarks, postFlashDebug, tradeEnabled, getSystemServices } from '../lib/api';
   import { hubWs } from '../lib/ws';
 
   const INTERVALS = ['1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d'] as const;
@@ -16,6 +16,8 @@
   let error = $state('');
   let mobileTab: 'symbols' | 'detail' | 'feed' = $state('symbols');
   let detailTab: 'detail' | 'trades' | 'oms' | 'audit' = $state('detail');
+  let manualTradeEnabled = $state(false);
+  let liveEngineActive = $state(false);
   type FlashDebugEvent = {
     symbol: string;
     prev: number;
@@ -290,6 +292,15 @@
     };
     hubWs.subscribe('mids', midsHandler);
     return () => hubWs.unsubscribe('mids', midsHandler);
+  });
+
+  // ── Manual trade: one-time feature & service check ────────────────────────
+  $effect(() => {
+    tradeEnabled().then(r => { manualTradeEnabled = r?.enabled ?? false; }).catch(() => {});
+    getSystemServices().then(svcs => {
+      const live = (svcs || []).find((s: any) => s.name?.includes('live-v8'));
+      liveEngineActive = live?.active === 'active';
+    }).catch(() => {});
   });
 
   // ── Resizable columns ──────────────────────────────────────────────────────
@@ -600,6 +611,17 @@
             <span class="empty-label">Flat</span>
             <span class="empty-sub">No open position</span>
           </div>
+        {/if}
+
+        {#if appState.mode === 'live' && manualTradeEnabled}
+          <trade-panel
+            symbol={focusSym}
+            position={JSON.stringify(marks?.position || null)}
+            mid={String(symbols.find((s: any) => s.symbol === focusSym)?.mid ?? '')}
+            mode={appState.mode}
+            engine-running={liveEngineActive ? 'true' : 'false'}
+            ontradedone={async () => { await refresh(); try { marks = await getMarks(focusSym, appState.mode); } catch {} }}
+          ></trade-panel>
         {/if}
       {:else}
         <div class="empty-focus">

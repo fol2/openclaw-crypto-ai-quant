@@ -190,3 +190,33 @@ export async function getDiskUsage() {
 export async function getServiceLogs(service: string, lines = 50) {
   return apiFetch(`/api/system/logs?service=${encodeURIComponent(service)}&lines=${lines}`);
 }
+
+// ── Trade API ────────────────────────────────────────────────────────
+
+export async function tradePreview(body: Record<string, any>) {
+  return apiFetch('/api/trade/preview', { method: 'POST', body: JSON.stringify(body) });
+}
+
+export async function tradeExecute(body: Record<string, any>) {
+  return apiFetch('/api/trade/execute', { method: 'POST', body: JSON.stringify(body) });
+}
+
+export async function tradeClose(body: Record<string, any>) {
+  return apiFetch('/api/trade/close', { method: 'POST', body: JSON.stringify(body) });
+}
+
+export async function tradeCancel(body: Record<string, any>) {
+  return apiFetch('/api/trade/cancel', { method: 'POST', body: JSON.stringify(body) });
+}
+
+export async function tradeOpenOrders(symbol: string) {
+  return apiFetch(`/api/trade/open-orders/${encodeURIComponent(symbol)}`);
+}
+
+export async function tradeJobResult(jobId: string) {
+  return apiFetch(`/api/trade/${encodeURIComponent(jobId)}/result`);
+}
+
+export async function tradeEnabled() {
+  return apiFetch('/api/trade/enabled');
+}

@@ -48,6 +48,12 @@ pub struct HubConfig {
     pub mids_debug_log: bool,
     /// Accept and emit frontend flash-trigger debug logs from the monitor UI.
     pub flash_debug_log: bool,
+
+    // ── Manual trade ────────────────────────────────────────────────
+    /// Enable manual trading API endpoints.
+    pub manual_trade_enabled: bool,
+    /// Path to secrets file (for exchange credentials).
+    pub secrets_path: Option<String>,
 }
 
 fn env_str(name: &str, default: &str) -> String {
@@ -248,6 +254,11 @@ impl HubConfig {
             mids_wait_timeout_ms: env_u64("AIQ_MONITOR_MIDS_WAIT_TIMEOUT_MS", 25_000),
             mids_debug_log: env_bool("AIQ_MONITOR_MIDS_DEBUG_LOG", false),
             flash_debug_log: env_bool("AIQ_MONITOR_FLASH_DEBUG_LOG", false),
+            manual_trade_enabled: env_bool("AIQ_MANUAL_TRADE_ENABLE", false),
+            secrets_path: env::var("AI_QUANT_SECRETS_PATH")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
         }
     }
 
