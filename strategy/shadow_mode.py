@@ -652,12 +652,13 @@ def _generate_event_id() -> str:
     Mirrors ``_generate_event_id()`` from ``strategy.reconciler`` to avoid
     circular imports.
     """
-    import random
+    import secrets
 
     t = int(time.time() * 1000)
     time_part = ""
     for _ in range(10):
         time_part = _ULID_ALPHABET[t & 0x1F] + time_part
         t >>= 5
-    rand_part = "".join(random.choices(_ULID_ALPHABET, k=16))
+    alphabet_len = len(_ULID_ALPHABET)
+    rand_part = "".join(_ULID_ALPHABET[secrets.randbelow(alphabet_len)] for _ in range(16))
     return time_part + rand_part
