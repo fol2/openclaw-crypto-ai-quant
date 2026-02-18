@@ -159,7 +159,7 @@ def _reconstruct_positions(
         last_add_time_ms = 0
         entry_adx_threshold = 0.0
 
-        if _table_exists(conn, "position_state"):
+        if as_of_ts is None and _table_exists(conn, "position_state"):
             ps_row = conn.execute(
                 "SELECT open_trade_id, trailing_sl, adds_count, tp1_taken, last_add_time, entry_adx_threshold "
                 "FROM position_state WHERE symbol = ? LIMIT 1",
@@ -197,10 +197,24 @@ def _reconstruct_positions(
     return positions
 
 
-def _load_open_orders(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+def _load_open_orders(
+    conn: sqlite3.Connection,
+    *,
+    as_of_ts: int | None = None,
+) -> list[dict[str, Any]]:
     if not _table_exists(conn, "oms_open_orders"):
         return []
-    rows = conn.execute("SELECT * FROM oms_open_orders ORDER BY symbol ASC").fetchall()
+
+    if as_of_ts is not None:
+        rows = conn.execute(
+            "SELECT * FROM oms_open_orders "
+            "WHERE (first_seen_ts_ms IS NULL OR first_seen_ts_ms <= ?) "
+            "AND (last_seen_ts_ms IS NULL OR last_seen_ts_ms >= ?) "
+            "ORDER BY symbol ASC",
+            (int(as_of_ts), int(as_of_ts)),
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM oms_open_orders ORDER BY symbol ASC").fetchall()
     out: list[dict[str, Any]] = []
     for row in rows:
         out.append({k: row[k] for k in row.keys()})
@@ -425,7 +439,7 @@ def _build_state(db_path: Path, *, as_of_ts: int | None = None) -> dict[str, Any
             "as_of_ts": as_of_ts,
             "balance": _load_balance(conn, as_of_ts=as_of_ts),
             "positions": _reconstruct_positions(conn, as_of_ts=as_of_ts),
-            "open_orders": _load_open_orders(conn),
+            "open_orders": _load_open_orders(conn, as_of_ts=as_of_ts),
         }
     finally:
         conn.close()
