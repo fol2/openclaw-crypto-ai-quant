@@ -151,11 +151,6 @@ class _JsonlEventSink:
         backoff_s = 0.05
         pending: list[_EventItem] = []
         f = None
-        try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-        except Exception as exc:
-            logger.error("event logger failed to create parent directory %s: %s", self._path.parent, exc)
-            return
 
         while True:
             try:
@@ -176,7 +171,18 @@ class _JsonlEventSink:
                         break
 
                 if f is None:
-                    f = self._path.open("a", encoding="utf-8")
+                    try:
+                        self._path.parent.mkdir(parents=True, exist_ok=True)
+                        f = self._path.open("a", encoding="utf-8")
+                    except Exception as exc:
+                        logger.error(
+                            "event logger failed to create parent directory %s: %s",
+                            self._path.parent,
+                            exc,
+                        )
+                        time.sleep(backoff_s)
+                        backoff_s = min(2.0, backoff_s * 1.8)
+                        continue
 
                 for it in pending:
                     f.write(it.line + "\n")
