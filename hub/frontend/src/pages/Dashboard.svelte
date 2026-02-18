@@ -359,6 +359,51 @@
   let recent = $derived(snap?.recent || {});
   let openPositions = $derived(snap?.open_positions || []);
 
+  // ── Range selector for PnL / DD ───────────────────────────────────────
+  let metricsRange = $state<'today' | 'since' | 'all'>('today');
+  let rangeMenuOpen = $state(false);
+
+  let activePnl = $derived(
+    metricsRange === 'today' ? daily.pnl_usd
+    : metricsRange === 'since' ? snap?.since_config?.pnl_usd
+    : snap?.all_time?.pnl_usd
+  );
+  let activeDd = $derived(
+    metricsRange === 'today' ? daily.drawdown_pct
+    : metricsRange === 'since' ? snap?.since_config?.drawdown_pct
+    : snap?.all_time?.drawdown_pct
+  );
+  let pnlLabel = $derived(
+    metricsRange === 'today' ? 'PnL'
+    : metricsRange === 'since' ? 'PnL\u2219cfg'
+    : 'PnL\u2219all'
+  );
+  let ddLabel = $derived(
+    metricsRange === 'today' ? 'DD'
+    : metricsRange === 'since' ? 'DD\u2219cfg'
+    : 'DD\u2219all'
+  );
+  let sinceLabel = $derived(snap?.since_config?.label ?? 'Since cfg');
+
+  function selectRange(r: 'today' | 'since' | 'all') {
+    metricsRange = r;
+    rangeMenuOpen = false;
+  }
+
+  function onRangeClickOutside(e: MouseEvent) {
+    const target = e.target as HTMLElement;
+    if (!target.closest('.range-dropdown-wrap')) {
+      rangeMenuOpen = false;
+    }
+  }
+
+  $effect(() => {
+    if (rangeMenuOpen) {
+      document.addEventListener('click', onRangeClickOutside, true);
+      return () => document.removeEventListener('click', onRangeClickOutside, true);
+    }
+  });
+
   const gateReasonMap: Record<string, { label: string; desc: string }> = {
     disabled:            { label: 'Disabled',        desc: 'Gate feature is off — new entries always allowed.' },
     trend_ok:            { label: 'Trend OK',         desc: 'Market breadth is trending and BTC ADX + ATR% pass thresholds. Gate is open.' },
@@ -423,13 +468,28 @@
       <span class="metric-label">EQ</span>
       <span class="metric-value">${fmtNum(balances.equity_est_usd)}</span>
     </span>
-    <span class="metric-pill {pnlClass(daily.pnl_usd)}">
-      <span class="metric-label">PnL</span>
-      <span class="metric-value">${fmtNum(daily.pnl_usd)}</span>
+    <span class="range-dropdown-wrap">
+      <button class="metric-pill range-pill {pnlClass(activePnl)}" onclick={() => rangeMenuOpen = !rangeMenuOpen}>
+        <span class="metric-label">{pnlLabel}<svg class="range-caret" class:open={rangeMenuOpen} width="8" height="8" viewBox="0 0 8 8"><path d="M1.5 3L4 5.5L6.5 3" fill="none" stroke="currentColor" stroke-width="1.2"/></svg></span>
+        <span class="metric-value">${fmtNum(activePnl)}</span>
+      </button>
+      {#if rangeMenuOpen}
+        <div class="range-menu">
+          <button class="range-opt" class:active={metricsRange === 'today'} onclick={() => selectRange('today')}>
+            <span class="range-dot"></span>Today
+          </button>
+          <button class="range-opt" class:active={metricsRange === 'since'} onclick={() => selectRange('since')}>
+            <span class="range-dot"></span>{sinceLabel}
+          </button>
+          <button class="range-opt" class:active={metricsRange === 'all'} onclick={() => selectRange('all')}>
+            <span class="range-dot"></span>All-time
+          </button>
+        </div>
+      {/if}
     </span>
     <span class="metric-pill">
-      <span class="metric-label">DD</span>
-      <span class="metric-value">{fmtNum(daily.drawdown_pct, 1)}%</span>
+      <span class="metric-label">{ddLabel}</span>
+      <span class="metric-value">{fmtNum(activeDd, 1)}%</span>
     </span>
     <span class="metric-pill">
       <span class="metric-label">POS</span>
@@ -872,6 +932,73 @@
   }
   .metric-pill.green .metric-value { color: var(--green); }
   .metric-pill.red .metric-value { color: var(--red); }
+
+  /* ─── Range dropdown ─── */
+  .range-dropdown-wrap {
+    position: relative;
+    display: inline-flex;
+  }
+  .range-pill {
+    cursor: pointer;
+    user-select: none;
+  }
+  .range-caret {
+    display: inline-block;
+    margin-left: 2px;
+    vertical-align: middle;
+    transition: transform var(--t-fast);
+  }
+  .range-caret.open {
+    transform: rotate(180deg);
+  }
+  .range-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    min-width: 130px;
+    background: #111118;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 4px 0;
+    z-index: 200;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+    font-size: 11px;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .range-opt {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 5px 10px;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 11px;
+    font-family: inherit;
+    text-align: left;
+    transition: background var(--t-fast), color var(--t-fast);
+  }
+  .range-opt:hover {
+    background: rgba(255,255,255,0.04);
+    color: var(--text);
+  }
+  .range-opt.active {
+    color: var(--accent);
+  }
+  .range-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .range-opt.active .range-dot {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
 
   .error-banner {
     padding: 6px 12px;
