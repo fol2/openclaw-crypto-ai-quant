@@ -5,11 +5,14 @@ import json
 import os
 import random
 import time
+import logging
 from dataclasses import dataclass
 from typing import Any
 
+logger = logging.getLogger(__name__)
 
-def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+
+def deep_merge(base: dict[str, Any], override: Any) -> dict[str, Any]:
     """Recursively merges `override` into `base`.
 
     Rules:
@@ -20,7 +23,12 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
     - This mutates `base` and returns it.
     - Lists are replaced (not concatenated).
     """
-    if not isinstance(base, dict) or not isinstance(override, dict):
+    if not isinstance(base, dict):
+        return base
+    if override is None:
+        return base
+    if not isinstance(override, dict):
+        logger.warning("deep_merge override ignored: expected dict, got %s", type(override).__name__)
         return base
     for k, v in (override or {}).items():
         if isinstance(v, dict) and isinstance(base.get(k), dict):
@@ -30,7 +38,9 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
     return base
 
 
-def file_mtime(path: str) -> float | None:
+def file_mtime(path: str | os.PathLike[str] | None) -> float | None:
+    if path is None:
+        return None
     try:
         return os.path.getmtime(path)
     except Exception:
