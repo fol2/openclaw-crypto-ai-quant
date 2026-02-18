@@ -191,16 +191,33 @@
 </div>
 
 <style>
-  .sweep-page { max-width: 1400px; }
+  /* ─── Page entry ─── */
+  .sweep-page {
+    max-width: 1400px;
+    animation: slideUp 0.3s ease;
+  }
 
-  h1 { font-size: 20px; font-weight: 600; margin-bottom: 16px; }
-  h2 { font-size: 15px; font-weight: 600; margin-bottom: 8px; }
+  /* ─── Typography ─── */
+  h1 {
+    font-size: 20px;
+    font-weight: 600;
+    margin-bottom: var(--sp-md);
+    letter-spacing: -0.01em;
+  }
+  h2 {
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: var(--sp-sm);
+  }
 
-  .launcher { margin-bottom: 20px; }
+  /* ─── Launcher ─── */
+  .launcher {
+    margin-bottom: var(--sp-lg);
+  }
 
   .form-row {
     display: flex;
-    gap: 12px;
+    gap: var(--sp-md);
     align-items: end;
     flex-wrap: wrap;
   }
@@ -208,71 +225,287 @@
   .form-row label {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: var(--sp-xs);
     font-size: 12px;
+    color: var(--text-muted);
+    font-weight: 500;
+    letter-spacing: 0.02em;
+  }
+
+  .form-row label.wide {
+    flex: 1;
+    min-width: 200px;
+  }
+
+  .form-row input,
+  .form-row select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 12px;
+    border-radius: var(--radius-md);
+    font-size: 13px;
+    transition: border-color var(--t-fast), box-shadow var(--t-fast);
+  }
+
+  .form-row input:focus,
+  .form-row select:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-bg);
+  }
+
+  /* ─── Buttons ─── */
+  .btn {
+    padding: 8px 16px;
+    border: none;
+    border-radius: var(--radius-md);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background var(--t-fast) var(--ease-out),
+                transform var(--t-fast) var(--ease-out);
+    letter-spacing: 0.02em;
+  }
+  .btn:hover {
+    transform: translateY(-1px);
+  }
+  .btn:active {
+    transform: scale(0.97);
+  }
+  .btn:disabled {
+    opacity: 0.35;
+    cursor: default;
+    pointer-events: none;
+    transform: none;
+  }
+  .btn-primary {
+    background: var(--accent);
+    color: #fff;
+  }
+  .btn-secondary {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  .btn-secondary:hover {
+    background: var(--surface-hover);
+  }
+
+  /* ─── Alerts ─── */
+  .alert {
+    padding: 10px var(--sp-md);
+    border-radius: var(--radius-md);
+    font-size: 13px;
+    margin-top: var(--sp-sm);
+  }
+  .alert-error {
+    background: var(--red-bg);
+    color: var(--red);
+    border: 1px solid rgba(255, 107, 107, 0.25);
+  }
+
+  /* ─── Content grid ─── */
+  .content-grid {
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    gap: var(--sp-md);
+  }
+
+  /* ─── Jobs panel ─── */
+  .jobs-panel {
+    border-right: 1px solid var(--border);
+    padding-right: var(--sp-md);
+  }
+
+  .job-card {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 10px 12px;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    margin-bottom: var(--sp-xs);
+    color: var(--text);
+    transition: background var(--t-fast) var(--ease-out),
+                border-color var(--t-fast) var(--ease-out);
+  }
+  .job-card:hover {
+    background: var(--surface);
+  }
+  .job-card.active {
+    border-color: var(--accent);
+    background: var(--accent-bg);
+  }
+
+  .job-id {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    letter-spacing: -0.01em;
+  }
+  .job-meta {
+    display: flex;
+    gap: var(--sp-sm);
+    align-items: center;
+    margin-top: var(--sp-xs);
+  }
+  .job-time {
+    font-size: 11px;
     color: var(--text-muted);
   }
 
-  .form-row label.wide { flex: 1; min-width: 200px; }
-
-  .form-row input, .form-row select {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 6px 10px;
-    border-radius: 6px;
-    font-size: 13px;
+  /* ─── Status pills ─── */
+  .status-pill {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: var(--radius-sm, 4px);
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+  }
+  .status-pill.running {
+    background: var(--accent-bg);
+    color: var(--accent);
+  }
+  .status-pill.done {
+    background: var(--green-bg);
+    color: var(--green);
+  }
+  .status-pill.failed {
+    background: var(--red-bg);
+    color: var(--red);
+  }
+  .status-pill.cancelled {
+    background: var(--yellow-bg);
+    color: var(--yellow);
   }
 
-  .btn { padding: 6px 14px; border: none; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer; }
-  .btn:disabled { opacity: 0.4; cursor: default; }
-  .btn-primary { background: var(--accent, #3b82f6); color: #fff; }
-  .btn-secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
-
-  .alert { padding: 8px 12px; border-radius: 6px; font-size: 13px; margin-top: 8px; }
-  .alert-error { background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.3); }
-
-  .content-grid { display: grid; grid-template-columns: 240px 1fr; gap: 16px; }
-
-  .jobs-panel { border-right: 1px solid var(--border); padding-right: 16px; }
-
-  .job-card {
-    display: block; width: 100%; text-align: left;
-    padding: 8px 10px; background: none; border: 1px solid transparent;
-    border-radius: 6px; cursor: pointer; margin-bottom: 4px; color: var(--text);
+  /* ─── Progress ─── */
+  .progress-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: var(--sp-sm);
   }
-  .job-card:hover { background: var(--surface); }
-  .job-card.active { border-color: var(--accent, #3b82f6); background: var(--surface); }
-
-  .job-id { font-family: monospace; font-size: 12px; }
-  .job-meta { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
-  .job-time { font-size: 11px; color: var(--text-muted); }
-
-  .status-pill { font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 500; }
-  .status-pill.running { background: rgba(59,130,246,0.2); color: #60a5fa; }
-  .status-pill.done { background: rgba(34,197,94,0.2); color: #4ade80; }
-  .status-pill.failed { background: rgba(239,68,68,0.2); color: #f87171; }
-  .status-pill.cancelled { background: rgba(234,179,8,0.2); color: #eab308; }
-
-  .progress-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 
   .stderr-log {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 6px; padding: 10px; font-size: 11px; line-height: 1.5;
-    max-height: 400px; overflow-y: auto; white-space: pre-wrap; color: var(--text-muted);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: var(--sp-md);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    line-height: 1.6;
+    max-height: 400px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    color: var(--text-muted);
   }
 
-  .results-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  .results-table th { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); color: var(--text-muted); font-weight: 500; }
-  .results-table td { padding: 8px 10px; border-bottom: 1px solid var(--border-subtle, rgba(255,255,255,0.05)); }
+  /* ─── Results table ─── */
+  .results-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  .results-table th {
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .results-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border-subtle);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+  }
+  .results-table tbody tr {
+    transition: background var(--t-fast);
+  }
+  .results-table tbody tr:hover {
+    background: var(--surface);
+  }
 
-  .mono { font-family: monospace; font-size: 12px; }
+  .mono {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    letter-spacing: -0.01em;
+  }
 
+  /* ─── Result JSON fallback ─── */
   .result-json {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 6px; padding: 12px; font-size: 12px;
-    max-height: 600px; overflow: auto; white-space: pre-wrap;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: var(--sp-md);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    max-height: 600px;
+    overflow: auto;
+    white-space: pre-wrap;
   }
 
-  .empty { color: var(--text-muted); font-style: italic; padding: 20px 0; }
+  /* ─── Empty state ─── */
+  .empty {
+    color: var(--text-muted);
+    font-style: italic;
+    padding: var(--sp-lg) 0;
+  }
+
+  /* ─── Mobile ─── */
+  @media (max-width: 768px) {
+    .content-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .jobs-panel {
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+      padding-right: 0;
+      padding-bottom: var(--sp-md);
+    }
+
+    .form-row {
+      flex-direction: column;
+      gap: var(--sp-sm);
+    }
+
+    .form-row label,
+    .form-row label.wide {
+      width: 100%;
+      flex: unset;
+      min-width: unset;
+    }
+
+    .form-row input,
+    .form-row select {
+      width: 100%;
+    }
+
+    .btn {
+      padding: 12px 16px;
+      width: 100%;
+      text-align: center;
+    }
+
+    .results-table {
+      font-size: 12px;
+    }
+    .results-table th,
+    .results-table td {
+      padding: 6px 8px;
+    }
+
+    /* Horizontal scroll for wide tables */
+    .result-section {
+      overflow-x: auto;
+    }
+  }
 </style>

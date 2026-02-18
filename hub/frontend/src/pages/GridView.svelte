@@ -2,7 +2,7 @@
   import { getSnapshot, getMids } from '../lib/api';
 
   let mode = $state('paper1');
-  let gridSize = $state(3); // NxN grid
+  let gridSize = $state(3);
   let symbols: any[] = $state([]);
   let mids: Record<string, number> = $state({});
   let loading = $state(true);
@@ -41,8 +41,8 @@
   });
 </script>
 
-<div class="grid-page">
-  <div class="grid-header">
+<div class="page">
+  <div class="page-header">
     <h1>Grid View</h1>
     <div class="controls">
       <select bind:value={mode} onchange={refresh}>
@@ -50,7 +50,10 @@
           <option value={m}>{m}</option>
         {/each}
       </select>
-      <input type="text" bind:value={filter} placeholder="Filter symbols..." />
+      <div class="search-wrap">
+        <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        <input type="text" bind:value={filter} placeholder="Filter..." />
+      </div>
       <select bind:value={gridSize}>
         <option value={2}>2x2</option>
         <option value={3}>3x3</option>
@@ -61,15 +64,15 @@
   </div>
 
   {#if loading}
-    <div class="empty">Loading...</div>
+    <div class="empty-state">Loading...</div>
   {:else}
     <div class="symbol-grid" style="grid-template-columns: repeat({gridSize}, 1fr);">
       {#each filteredSymbols as s (s.symbol)}
-        <div class="grid-cell" class:has-position={s.position_side && s.position_side !== 'NONE'}>
+        <div class="grid-cell" class:has-long={s.position_side === 'LONG'} class:has-short={s.position_side === 'SHORT'}>
           <div class="cell-header">
             <span class="cell-symbol">{s.symbol}</span>
             {#if s.position_side && s.position_side !== 'NONE'}
-              <span class="pos-badge {s.position_side === 'LONG' ? 'long' : 'short'}">
+              <span class="pos-badge" class:long={s.position_side === 'LONG'} class:short={s.position_side === 'SHORT'}>
                 {s.position_side}
               </span>
             {/if}
@@ -85,7 +88,7 @@
               points={JSON.stringify(s.recent_mids || [])}
               width="160"
               height="40"
-              color={s.position_side === 'LONG' ? '#4ade80' : s.position_side === 'SHORT' ? '#f87171' : '#666'}
+              color={s.position_side === 'LONG' ? '#51cf66' : s.position_side === 'SHORT' ? '#ff6b6b' : '#3d4f63'}
             ></sparkline-chart>
           </div>
         </div>
@@ -95,71 +98,151 @@
 </div>
 
 <style>
-  .grid-page { max-width: 1600px; }
+  .page { max-width: 1600px; animation: slideUp 0.3s ease; }
 
-  .grid-header {
+  .page-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 16px;
+    margin-bottom: var(--sp-md);
+    gap: var(--sp-md);
+  }
+  .page-header h1 {
+    font-size: 20px; font-weight: 700; margin: 0; letter-spacing: -0.02em;
   }
 
-  .grid-header h1 { font-size: 20px; font-weight: 600; margin: 0; }
-
-  .controls { display: flex; gap: 8px; }
-  .controls select, .controls input {
+  .controls {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .controls select {
     background: var(--surface);
     border: 1px solid var(--border);
     color: var(--text);
-    padding: 6px 10px;
-    border-radius: 6px;
+    padding: 8px 12px;
+    border-radius: var(--radius-md);
     font-size: 13px;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .search-wrap {
+    position: relative;
+  }
+  .search-icon {
+    position: absolute;
+    left: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--text-dim);
+    pointer-events: none;
+  }
+  .controls input {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 12px 8px 28px;
+    border-radius: var(--radius-md);
+    font-size: 13px;
+    width: 140px;
+  }
+  .controls input:focus {
+    outline: none;
+    border-color: var(--accent);
   }
 
   .symbol-grid {
     display: grid;
-    gap: 8px;
+    gap: 10px;
   }
 
   .grid-cell {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 12px;
+    border-radius: var(--radius-lg);
+    padding: 14px;
     min-height: 100px;
+    transition: all var(--t-fast);
   }
-
-  .grid-cell.has-position { border-color: var(--accent, #3b82f6); }
+  .grid-cell:hover {
+    border-color: var(--text-dim);
+  }
+  .grid-cell.has-long {
+    border-color: rgba(81,207,102,0.3);
+    background: linear-gradient(180deg, rgba(81,207,102,0.03) 0%, var(--surface) 100%);
+  }
+  .grid-cell.has-short {
+    border-color: rgba(255,107,107,0.3);
+    background: linear-gradient(180deg, rgba(255,107,107,0.03) 0%, var(--surface) 100%);
+  }
 
   .cell-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 4px;
+    margin-bottom: 6px;
+  }
+  .cell-symbol {
+    font-weight: 700;
+    font-size: 12px;
+    font-family: 'IBM Plex Mono', monospace;
+    letter-spacing: 0.02em;
   }
 
-  .cell-symbol { font-weight: 600; font-size: 13px; }
-
-  .cell-price { font-size: 16px; font-weight: 500; margin-bottom: 4px; }
+  .cell-price {
+    font-size: 18px;
+    font-weight: 600;
+    font-family: 'IBM Plex Mono', monospace;
+    margin-bottom: 4px;
+    letter-spacing: -0.01em;
+  }
 
   .pos-badge {
-    font-size: 10px;
+    font-size: 9px;
     padding: 2px 6px;
-    border-radius: 4px;
-    font-weight: 500;
+    border-radius: var(--radius-sm);
+    font-weight: 700;
+    letter-spacing: 0.06em;
   }
-  .pos-badge.long { background: rgba(34,197,94,0.2); color: #4ade80; }
-  .pos-badge.short { background: rgba(239,68,68,0.2); color: #f87171; }
+  .pos-badge.long { background: var(--green-bg); color: var(--green); }
+  .pos-badge.short { background: var(--red-bg); color: var(--red); }
 
   .signal-badge {
     font-size: 10px;
     padding: 2px 6px;
-    border-radius: 4px;
-    background: rgba(234,179,8,0.2);
-    color: #eab308;
+    border-radius: var(--radius-sm);
+    background: var(--yellow-bg);
+    color: var(--yellow);
+    font-weight: 600;
   }
 
-  .cell-sparkline { margin-top: 4px; }
+  .cell-sparkline { margin-top: 6px; }
 
-  .empty { color: var(--text-muted); font-style: italic; padding: 20px 0; }
+  .empty-state {
+    color: var(--text-dim);
+    padding: 40px 0;
+    text-align: center;
+    font-size: 13px;
+  }
+
+  @media (max-width: 768px) {
+    .page-header {
+      flex-direction: column;
+      align-items: stretch;
+    }
+    .controls {
+      flex-wrap: wrap;
+    }
+    .symbol-grid {
+      grid-template-columns: repeat(2, 1fr) !important;
+      gap: 8px;
+    }
+    .cell-price { font-size: 15px; }
+    .grid-cell { padding: 10px; }
+  }
+
+  @media (max-width: 480px) {
+    .symbol-grid {
+      grid-template-columns: 1fr !important;
+    }
+  }
 </style>

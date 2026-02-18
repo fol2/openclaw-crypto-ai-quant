@@ -61,7 +61,7 @@
   $effect(() => { refresh(); });
 </script>
 
-<div class="system-page">
+<div class="page">
   <h1>System</h1>
 
   {#if actionError}
@@ -79,21 +79,24 @@
   </div>
 
   {#if loading}
-    <div class="empty">Loading...</div>
+    <div class="empty-state">Loading...</div>
   {:else if tab === 'services'}
     <div class="services-grid">
       {#each services as svc (svc.name)}
-        <div class="service-card">
+        <div class="service-card" class:svc-active={svc.active === 'active'} class:svc-failed={svc.active === 'failed'}>
           <div class="svc-header">
-            <status-badge status={svc.status} label={svc.active}></status-badge>
+            <div class="svc-status-dot" class:alive={svc.active === 'active'} class:dead={svc.active === 'failed'}></div>
             <span class="svc-name">{svc.name}</span>
           </div>
           <div class="svc-meta">
-            <span>PID: {svc.pid || '—'}</span>
-            <span>State: {svc.sub}</span>
+            <span>PID: <strong>{svc.pid || '—'}</strong></span>
+            <span>State: <strong>{svc.sub}</strong></span>
           </div>
           <div class="svc-actions">
-            <button class="btn-sm" onclick={() => doAction(svc.name, 'restart')}>Restart</button>
+            <button class="btn-sm" onclick={() => doAction(svc.name, 'restart')}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 4v6h6M23 20v-6h-6"/><path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/></svg>
+              Restart
+            </button>
             {#if svc.active !== 'active'}
               <button class="btn-sm btn-start" onclick={() => doAction(svc.name, 'start')}>Start</button>
             {:else}
@@ -105,34 +108,38 @@
     </div>
 
   {:else if tab === 'databases'}
-    <table class="db-table">
-      <thead>
-        <tr>
-          <th>Database</th>
-          <th>Size</th>
-          <th>Modified</th>
-          <th>Status</th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each dbStats as db}
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
           <tr>
-            <td class="mono">{db.label}</td>
-            <td>{db.size_mb} MB</td>
-            <td>{db.modified ? new Date(db.modified).toLocaleString() : '—'}</td>
-            <td>
-              <status-badge status={db.exists ? 'ok' : 'bad'} label={db.exists ? 'exists' : 'missing'}></status-badge>
-            </td>
+            <th>Database</th>
+            <th>Size</th>
+            <th>Modified</th>
+            <th>Status</th>
           </tr>
-        {/each}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {#each dbStats as db}
+            <tr>
+              <td class="mono">{db.label}</td>
+              <td class="mono">{db.size_mb} MB</td>
+              <td>{db.modified ? new Date(db.modified).toLocaleString() : '—'}</td>
+              <td>
+                <span class="status-chip" class:ok={db.exists} class:bad={!db.exists}>
+                  {db.exists ? 'exists' : 'missing'}
+                </span>
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
 
   {:else if tab === 'logs'}
     <div class="logs-section">
       <div class="logs-controls">
         <select bind:value={logService}>
-          <option value="">— select service —</option>
+          <option value="">select service</option>
           {#each services as svc}
             <option value={svc.name}>{svc.name}</option>
           {/each}
@@ -160,82 +167,158 @@
 </div>
 
 <style>
-  .system-page { max-width: 1200px; }
+  .page { max-width: 1200px; animation: slideUp 0.3s ease; }
 
-  h1 { font-size: 20px; font-weight: 600; margin-bottom: 16px; }
+  h1 { font-size: 20px; font-weight: 700; margin-bottom: var(--sp-md); letter-spacing: -0.02em; }
 
-  .alert { padding: 8px 12px; border-radius: 6px; font-size: 13px; margin-bottom: 12px; }
-  .alert-error { background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.3); }
-  .alert-success { background: rgba(34,197,94,0.15); color: #4ade80; border: 1px solid rgba(34,197,94,0.3); }
+  .alert {
+    padding: 10px 14px; border-radius: var(--radius-md);
+    font-size: 13px; margin-bottom: 12px; animation: slideUp 0.2s ease;
+  }
+  .alert-error { background: var(--red-bg); color: var(--red); border: 1px solid rgba(255,107,107,0.2); }
+  .alert-success { background: var(--green-bg); color: var(--green); border: 1px solid rgba(81,207,102,0.2); }
 
   .tabs {
-    display: flex; gap: 2px; margin-bottom: 16px;
-    border-bottom: 1px solid var(--border);
+    display: flex; gap: 2px; margin-bottom: var(--sp-md);
+    background: var(--bg); border-radius: var(--radius-md);
+    padding: 3px; border: 1px solid var(--border); width: fit-content;
   }
-
   .tab {
-    padding: 8px 16px; background: none; border: none;
-    color: var(--text-muted); font-size: 13px; cursor: pointer;
-    border-bottom: 2px solid transparent; margin-bottom: -1px;
+    padding: 8px 16px; background: transparent; border: none;
+    color: var(--text-muted); font-size: 13px; font-weight: 500;
+    cursor: pointer; border-radius: 5px; transition: all var(--t-fast);
   }
-  .tab.active { color: var(--accent, #60a5fa); border-bottom-color: var(--accent, #60a5fa); }
+  .tab.active { color: var(--accent); background: var(--accent-bg); }
 
   .services-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-    gap: 12px;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 10px;
   }
 
   .service-card {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 12px;
+    border-radius: var(--radius-lg);
+    padding: 14px;
+    transition: border-color var(--t-fast);
   }
+  .service-card.svc-active { border-color: rgba(81,207,102,0.2); }
+  .service-card.svc-failed { border-color: rgba(255,107,107,0.2); }
 
-  .svc-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-  .svc-name { font-size: 12px; font-weight: 500; }
-  .svc-meta { font-size: 11px; color: var(--text-muted); display: flex; gap: 12px; margin-bottom: 8px; }
+  .svc-header {
+    display: flex; align-items: center; gap: 10px;
+    margin-bottom: 8px;
+  }
+  .svc-status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--text-dim); flex-shrink: 0;
+  }
+  .svc-status-dot.alive {
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green);
+    animation: pulse 2s ease-in-out infinite;
+  }
+  .svc-status-dot.dead { background: var(--red); }
+
+  .svc-name {
+    font-size: 12px; font-weight: 600;
+    font-family: 'IBM Plex Mono', monospace;
+    word-break: break-all;
+  }
+  .svc-meta {
+    font-size: 11px; color: var(--text-muted);
+    display: flex; gap: 16px; margin-bottom: 10px;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .svc-meta strong { color: var(--text); font-weight: 500; }
   .svc-actions { display: flex; gap: 6px; }
 
   .btn-sm {
-    padding: 4px 10px; border: 1px solid var(--border); border-radius: 4px;
-    background: var(--surface); color: var(--text); font-size: 11px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 6px 12px; border: 1px solid var(--border); border-radius: var(--radius-md);
+    background: var(--surface); color: var(--text); font-size: 11px;
+    font-weight: 500; cursor: pointer; transition: all var(--t-fast);
   }
-  .btn-sm:hover { background: var(--border); }
-  .btn-start { color: #4ade80; border-color: rgba(34,197,94,0.3); }
-  .btn-stop { color: #f87171; border-color: rgba(239,68,68,0.3); }
+  .btn-sm:hover { background: var(--surface-hover); }
+  .btn-sm:active { transform: scale(0.97); }
+  .btn-start { color: var(--green); border-color: rgba(81,207,102,0.3); }
+  .btn-stop { color: var(--red); border-color: rgba(255,107,107,0.3); }
 
-  .db-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  .db-table th { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); color: var(--text-muted); font-weight: 500; }
-  .db-table td { padding: 8px 10px; border-bottom: 1px solid var(--border-subtle, rgba(255,255,255,0.05)); }
+  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 
-  .mono { font-family: monospace; font-size: 12px; }
+  .data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .data-table th {
+    text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border);
+    color: var(--text-dim); font-weight: 600; font-size: 10px;
+    text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .data-table td { padding: 10px 14px; border-bottom: 1px solid var(--border-subtle); }
 
-  .logs-controls { display: flex; gap: 12px; align-items: end; margin-bottom: 12px; }
+  .status-chip {
+    font-size: 10px; padding: 2px 8px; border-radius: var(--radius-sm);
+    font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+  }
+  .status-chip.ok { background: var(--green-bg); color: var(--green); }
+  .status-chip.bad { background: var(--red-bg); color: var(--red); }
+
+  .logs-controls {
+    display: flex; gap: 12px; align-items: end; margin-bottom: 12px;
+    flex-wrap: wrap;
+  }
   .logs-controls select {
     background: var(--surface); border: 1px solid var(--border);
-    color: var(--text); padding: 6px 10px; border-radius: 6px; font-size: 12px;
+    color: var(--text); padding: 8px 12px; border-radius: var(--radius-md);
+    font-size: 12px; font-family: 'IBM Plex Mono', monospace;
+    min-width: 240px;
   }
 
-  .btn { padding: 6px 14px; border: none; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer; }
-  .btn:disabled { opacity: 0.4; cursor: default; }
-  .btn-primary { background: var(--accent, #3b82f6); color: #fff; }
+  .btn {
+    padding: 8px 16px; border: none; border-radius: var(--radius-md);
+    font-size: 12px; font-weight: 600; cursor: pointer;
+    transition: all var(--t-fast);
+  }
+  .btn:disabled { opacity: 0.35; cursor: default; }
+  .btn:active:not(:disabled) { transform: scale(0.97); }
+  .btn-primary { background: var(--accent); color: var(--bg); }
 
   .log-output {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 6px; padding: 12px; font-size: 11px; line-height: 1.5;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: var(--radius-lg); padding: 16px;
+    font-family: 'IBM Plex Mono', monospace; font-size: 11px; line-height: 1.6;
     max-height: 600px; overflow-y: auto; white-space: pre-wrap;
   }
 
   .disk-section { display: flex; flex-direction: column; gap: 8px; }
   .disk-row {
-    display: flex; gap: 16px; align-items: center; padding: 8px 12px;
-    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    display: flex; gap: 16px; align-items: center; padding: 12px 16px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-lg); transition: border-color var(--t-fast);
   }
-  .disk-label { font-weight: 500; font-size: 13px; min-width: 120px; }
-  .disk-size { font-size: 16px; font-weight: 600; min-width: 80px; }
-  .disk-path { color: var(--text-muted); font-size: 12px; }
+  .disk-row:hover { border-color: var(--text-dim); }
+  .disk-label { font-weight: 600; font-size: 13px; min-width: 120px; }
+  .disk-size {
+    font-size: 18px; font-weight: 700; min-width: 80px;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .disk-path { color: var(--text-dim); font-size: 12px; }
 
-  .empty { color: var(--text-muted); font-style: italic; padding: 20px 0; }
+  .empty-state {
+    color: var(--text-dim); padding: 40px 0;
+    text-align: center; font-size: 13px;
+  }
+
+  @media (max-width: 768px) {
+    .tabs { width: 100%; }
+    .tab { flex: 1; text-align: center; padding: 10px 8px; }
+    .services-grid {
+      grid-template-columns: 1fr;
+    }
+    .logs-controls { flex-direction: column; }
+    .logs-controls select { min-width: 0; width: 100%; }
+    .btn { padding: 12px 16px; }
+    .disk-row { flex-wrap: wrap; gap: 8px; }
+    .disk-label { min-width: auto; }
+    .disk-path { width: 100%; }
+  }
 </style>

@@ -102,13 +102,13 @@ export class HubWS {
     if (el) {
       const dot = el.querySelector('.dot') as HTMLElement;
       if (dot) {
-        dot.style.background = ok
-          ? 'var(--green)'
-          : 'var(--yellow)';
+        dot.style.background = ok ? 'var(--green)' : 'var(--yellow)';
+        dot.style.boxShadow = ok ? '0 0 6px var(--green)' : '0 0 6px var(--yellow)';
+        dot.style.animation = ok ? 'none' : 'pulse 2s ease-in-out infinite';
       }
-      const textNode = el.childNodes[el.childNodes.length - 1];
-      if (textNode) {
-        textNode.textContent = ok ? ' Connected' : ' Reconnecting…';
+      const label = el.querySelector('.conn-label') as HTMLElement;
+      if (label) {
+        label.textContent = ok ? 'Connected' : 'Reconnecting';
       }
     }
   }

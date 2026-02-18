@@ -1,7 +1,6 @@
 <script lang="ts">
   import { getConfigRaw, putConfig, reloadConfig, getConfigHistory, getConfigDiff, getConfigFiles } from '../lib/api';
 
-  // State
   let files: any[] = $state([]);
   let selectedFile = $state('main');
   let yamlText = $state('');
@@ -13,20 +12,16 @@
   let success = $state('');
   let tab: 'editor' | 'history' | 'diff' = $state('editor');
 
-  // History state
   let history: any[] = $state([]);
   let loadingHistory = $state(false);
 
-  // Diff state
   let diffA = $state('');
   let diffB = $state('current');
   let diffResult: string[] = $state([]);
   let loadingDiff = $state(false);
 
   async function loadFiles() {
-    try {
-      files = await getConfigFiles();
-    } catch {}
+    try { files = await getConfigFiles(); } catch {}
   }
 
   async function loadConfig() {
@@ -44,9 +39,7 @@
   }
 
   async function save() {
-    saving = true;
-    error = '';
-    success = '';
+    saving = true; error = ''; success = '';
     try {
       const res = await putConfig(yamlText, selectedFile);
       originalText = yamlText;
@@ -74,9 +67,7 @@
 
   async function loadHistory() {
     loadingHistory = true;
-    try {
-      history = await getConfigHistory(selectedFile);
-    } catch {}
+    try { history = await getConfigHistory(selectedFile); } catch {}
     loadingHistory = false;
   }
 
@@ -99,10 +90,7 @@
     return `<span class="diff-ctx">${escaped}</span>`;
   }
 
-  $effect(() => {
-    loadFiles();
-    loadConfig();
-  });
+  $effect(() => { loadFiles(); loadConfig(); });
 
   function onFileChange(e: Event) {
     selectedFile = (e.target as HTMLSelectElement).value;
@@ -111,18 +99,16 @@
   }
 </script>
 
-<div class="config-page">
-  <div class="config-header">
-    <h1>Config Management</h1>
-    <div class="header-controls">
-      <select class="file-select" onchange={onFileChange} value={selectedFile}>
-        {#each files as f}
-          <option value={f.variant} disabled={!f.exists}>
-            {f.variant}{f.exists ? '' : ' (missing)'}
-          </option>
-        {/each}
-      </select>
-    </div>
+<div class="page">
+  <div class="page-header">
+    <h1>Config</h1>
+    <select class="file-select" onchange={onFileChange} value={selectedFile}>
+      {#each files as f}
+        <option value={f.variant} disabled={!f.exists}>
+          {f.variant}{f.exists ? '' : ' (missing)'}
+        </option>
+      {/each}
+    </select>
   </div>
 
   <div class="tabs">
@@ -143,22 +129,20 @@
       <div class="editor-toolbar">
         <span class="file-label">{selectedFile}.yaml</span>
         {#if dirty}
-          <span class="dirty-badge">unsaved changes</span>
+          <span class="dirty-badge">unsaved</span>
         {/if}
         <div class="toolbar-actions">
-          <button class="btn btn-secondary" onclick={() => { yamlText = originalText; }} disabled={!dirty}>
-            Revert
-          </button>
+          <button class="btn btn-ghost" onclick={() => { yamlText = originalText; }} disabled={!dirty}>Revert</button>
           <button class="btn btn-primary" onclick={save} disabled={!dirty || saving}>
             {saving ? 'Saving...' : 'Save'}
           </button>
-          <button class="btn btn-accent" onclick={saveAndReload} disabled={!dirty || saving}>
+          <button class="btn btn-green" onclick={saveAndReload} disabled={!dirty || saving}>
             Save & Reload
           </button>
         </div>
       </div>
       {#if loading}
-        <div class="loading">Loading config...</div>
+        <div class="loading-state">Loading config...</div>
       {:else}
         <textarea
           class="yaml-editor"
@@ -172,28 +156,26 @@
   {:else if tab === 'history'}
     <div class="history-section">
       {#if loadingHistory}
-        <div class="loading">Loading history...</div>
+        <div class="loading-state">Loading history...</div>
       {:else if history.length === 0}
-        <div class="empty">No backups yet for {selectedFile}</div>
+        <div class="empty-state">No backups yet for {selectedFile}</div>
       {:else}
-        <table class="history-table">
-          <thead>
-            <tr>
-              <th>Backup File</th>
-              <th>Modified</th>
-              <th>Size</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each history as h}
-              <tr>
-                <td class="mono">{h.filename}</td>
-                <td>{h.modified ? new Date(h.modified).toLocaleString() : '—'}</td>
-                <td>{(h.size / 1024).toFixed(1)} KB</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr><th>Backup File</th><th>Modified</th><th>Size</th></tr>
+            </thead>
+            <tbody>
+              {#each history as h}
+                <tr>
+                  <td class="mono">{h.filename}</td>
+                  <td>{h.modified ? new Date(h.modified).toLocaleString() : '—'}</td>
+                  <td>{(h.size / 1024).toFixed(1)} KB</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
       {/if}
     </div>
 
@@ -201,16 +183,16 @@
     <div class="diff-section">
       <div class="diff-controls">
         <label>
-          Version A:
+          <span class="label-text">Version A</span>
           <select bind:value={diffA}>
-            <option value="">— select backup —</option>
+            <option value="">select backup</option>
             {#each history as h}
               <option value={h.filename}>{h.filename}</option>
             {/each}
           </select>
         </label>
         <label>
-          Version B:
+          <span class="label-text">Version B</span>
           <select bind:value={diffB}>
             <option value="current">current</option>
             {#each history as h}
@@ -231,95 +213,99 @@
 </div>
 
 <style>
-  .config-page {
-    max-width: 1200px;
-  }
+  .page { max-width: 1200px; animation: slideUp 0.3s ease; }
 
-  .config-header {
+  .page-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 16px;
+    margin-bottom: var(--sp-md);
+    gap: var(--sp-md);
   }
-
-  .config-header h1 {
+  .page-header h1 {
     font-size: 20px;
-    font-weight: 600;
+    font-weight: 700;
     margin: 0;
+    letter-spacing: -0.02em;
   }
 
   .file-select {
     background: var(--surface);
     border: 1px solid var(--border);
     color: var(--text);
-    padding: 6px 12px;
-    border-radius: 6px;
+    padding: 8px 14px;
+    border-radius: var(--radius-md);
     font-size: 13px;
+    font-family: 'IBM Plex Mono', monospace;
   }
 
   .tabs {
     display: flex;
     gap: 2px;
-    margin-bottom: 16px;
-    border-bottom: 1px solid var(--border);
+    margin-bottom: var(--sp-md);
+    background: var(--bg);
+    border-radius: var(--radius-md);
+    padding: 3px;
+    border: 1px solid var(--border);
+    width: fit-content;
   }
-
   .tab {
     padding: 8px 16px;
-    background: none;
+    background: transparent;
     border: none;
     color: var(--text-muted);
     font-size: 13px;
+    font-weight: 500;
     cursor: pointer;
-    border-bottom: 2px solid transparent;
-    margin-bottom: -1px;
+    border-radius: 5px;
+    transition: all var(--t-fast);
   }
-
   .tab.active {
-    color: var(--accent, #60a5fa);
-    border-bottom-color: var(--accent, #60a5fa);
+    color: var(--accent);
+    background: var(--accent-bg);
   }
 
   .alert {
-    padding: 8px 12px;
-    border-radius: 6px;
+    padding: 10px 14px;
+    border-radius: var(--radius-md);
     font-size: 13px;
     margin-bottom: 12px;
+    animation: slideUp 0.2s ease;
   }
-
   .alert-error {
-    background: rgba(239, 68, 68, 0.15);
-    color: #f87171;
-    border: 1px solid rgba(239, 68, 68, 0.3);
+    background: var(--red-bg);
+    color: var(--red);
+    border: 1px solid rgba(255,107,107,0.2);
   }
-
   .alert-success {
-    background: rgba(34, 197, 94, 0.15);
-    color: #4ade80;
-    border: 1px solid rgba(34, 197, 94, 0.3);
+    background: var(--green-bg);
+    color: var(--green);
+    border: 1px solid rgba(81,207,102,0.2);
   }
 
   .editor-toolbar {
     display: flex;
     align-items: center;
     gap: 12px;
-    margin-bottom: 8px;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
   }
-
   .file-label {
     font-size: 13px;
     font-weight: 500;
     color: var(--text-muted);
+    font-family: 'IBM Plex Mono', monospace;
   }
-
   .dirty-badge {
-    font-size: 11px;
+    font-size: 10px;
     padding: 2px 8px;
-    border-radius: 4px;
-    background: rgba(234, 179, 8, 0.2);
-    color: #eab308;
+    border-radius: var(--radius-sm);
+    background: var(--yellow-bg);
+    color: var(--yellow);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
   }
-
   .toolbar-actions {
     margin-left: auto;
     display: flex;
@@ -327,78 +313,68 @@
   }
 
   .btn {
-    padding: 6px 14px;
+    padding: 8px 16px;
     border: none;
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     font-size: 12px;
-    font-weight: 500;
+    font-weight: 600;
     cursor: pointer;
+    transition: all var(--t-fast);
   }
-
-  .btn:disabled {
-    opacity: 0.4;
-    cursor: default;
-  }
-
-  .btn-primary {
-    background: var(--accent, #3b82f6);
-    color: #fff;
-  }
-
-  .btn-secondary {
-    background: var(--surface);
-    color: var(--text);
-    border: 1px solid var(--border);
-  }
-
-  .btn-accent {
-    background: #22c55e;
-    color: #fff;
-  }
+  .btn:disabled { opacity: 0.35; cursor: default; }
+  .btn:active:not(:disabled) { transform: scale(0.97); }
+  .btn-primary { background: var(--accent); color: var(--bg); }
+  .btn-ghost { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+  .btn-green { background: var(--green); color: var(--bg); }
 
   .yaml-editor {
     width: 100%;
     min-height: 600px;
-    background: var(--surface);
+    background: var(--bg);
     color: var(--text);
     border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 12px;
-    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    border-radius: var(--radius-lg);
+    padding: 16px;
+    font-family: 'IBM Plex Mono', 'Fira Code', monospace;
     font-size: 13px;
-    line-height: 1.5;
+    line-height: 1.6;
     resize: vertical;
     tab-size: 2;
+    transition: border-color var(--t-fast);
+  }
+  .yaml-editor:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-bg);
   }
 
-  .loading, .empty {
-    color: var(--text-muted);
-    font-style: italic;
-    padding: 20px 0;
+  .loading-state, .empty-state {
+    color: var(--text-dim);
+    padding: 40px 0;
+    text-align: center;
+    font-size: 13px;
   }
 
-  .history-table {
+  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+  .data-table {
     width: 100%;
     border-collapse: collapse;
     font-size: 13px;
   }
-
-  .history-table th {
+  .data-table th {
     text-align: left;
-    padding: 8px 12px;
+    padding: 10px 14px;
     border-bottom: 1px solid var(--border);
-    color: var(--text-muted);
-    font-weight: 500;
+    color: var(--text-dim);
+    font-weight: 600;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
   }
-
-  .history-table td {
-    padding: 8px 12px;
-    border-bottom: 1px solid var(--border-subtle, rgba(255,255,255,0.05));
-  }
-
-  .mono {
-    font-family: monospace;
-    font-size: 12px;
+  .data-table td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border-subtle);
   }
 
   .diff-controls {
@@ -406,37 +382,56 @@
     gap: 16px;
     align-items: end;
     margin-bottom: 12px;
+    flex-wrap: wrap;
   }
-
   .diff-controls label {
     display: flex;
     flex-direction: column;
     gap: 4px;
-    font-size: 12px;
-    color: var(--text-muted);
   }
-
+  .label-text {
+    font-size: 11px;
+    color: var(--text-dim);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
   .diff-controls select {
     background: var(--surface);
     border: 1px solid var(--border);
     color: var(--text);
-    padding: 6px 10px;
-    border-radius: 6px;
+    padding: 8px 12px;
+    border-radius: var(--radius-md);
     font-size: 12px;
+    font-family: 'IBM Plex Mono', monospace;
+    min-width: 200px;
   }
 
   .diff-view {
-    background: var(--surface);
+    background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 12px;
+    border-radius: var(--radius-lg);
+    padding: 16px;
+    font-family: 'IBM Plex Mono', monospace;
     font-size: 12px;
     line-height: 1.6;
     overflow-x: auto;
     white-space: pre;
   }
 
-  :global(.diff-add) { color: #4ade80; }
-  :global(.diff-del) { color: #f87171; }
-  :global(.diff-ctx) { color: var(--text-muted); }
+  :global(.diff-add) { color: var(--green); }
+  :global(.diff-del) { color: var(--red); }
+  :global(.diff-ctx) { color: var(--text-dim); }
+
+  @media (max-width: 768px) {
+    .page-header { flex-direction: column; align-items: stretch; }
+    .tabs { width: 100%; }
+    .tab { flex: 1; text-align: center; }
+    .editor-toolbar { flex-direction: column; align-items: stretch; }
+    .toolbar-actions { margin-left: 0; }
+    .yaml-editor { min-height: 400px; font-size: 12px; }
+    .diff-controls { flex-direction: column; }
+    .diff-controls select { min-width: 0; width: 100%; }
+    .btn { padding: 12px 16px; }
+  }
 </style>
