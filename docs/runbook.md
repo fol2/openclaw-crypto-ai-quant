@@ -75,6 +75,20 @@ Check blocker status:
 cat /tmp/openclaw-ai-quant/replay_gate/release_blocker.json
 ```
 
+Deployment tooling is fail-closed against this blocker by default:
+
+- `python tools/paper_deploy.py ...`
+- `python tools/deploy_sweep.py ...`
+- `python tools/promote_to_live.py --apply ...`
+
+These commands now abort when the blocker is red/missing/stale. Override only for emergency/manual workflows:
+
+```bash
+python tools/paper_deploy.py ... --ignore-replay-gate
+python tools/deploy_sweep.py ... --ignore-replay-gate
+python tools/promote_to_live.py --apply ... --ignore-replay-gate
+```
+
 ### Secrets management
 
 Do not store secrets in the repo. Recommended locations:

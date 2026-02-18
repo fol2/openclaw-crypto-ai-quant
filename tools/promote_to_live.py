@@ -44,6 +44,11 @@ try:
 except ImportError:  # pragma: no cover
     from registry_index import default_registry_db_path  # type: ignore[no-redef]
 
+try:
+    from tools.replay_gate_blocker import ReplayGateViolation, assert_replay_gate_green
+except ImportError:  # pragma: no cover
+    from replay_gate_blocker import ReplayGateViolation, assert_replay_gate_green  # type: ignore[no-redef]
+
 
 AIQ_ROOT = Path(__file__).resolve().parents[1]
 
@@ -352,6 +357,22 @@ def main(argv: list[str] | None = None) -> int:
 
     ap.add_argument("--apply", action="store_true", help="Apply the promotion (write YAML + emit artefact).")
     ap.add_argument("--dry-run", action="store_true", help="Run all checks but do not write any files.")
+    ap.add_argument(
+        "--replay-gate-blocker-file",
+        default="",
+        help="Optional replay-gate blocker JSON path override.",
+    )
+    ap.add_argument(
+        "--max-replay-gate-age-minutes",
+        type=float,
+        default=float(os.getenv("AI_QUANT_REPLAY_GATE_MAX_AGE_MINUTES", "360") or 360.0),
+        help="Maximum allowed blocker age in minutes (default: 360; <=0 disables staleness check).",
+    )
+    ap.add_argument(
+        "--ignore-replay-gate",
+        action="store_true",
+        help="Bypass replay-gate release-blocker checks when applying promotion (not recommended).",
+    )
     args = ap.parse_args(argv)
 
     artifacts_dir = Path(args.artifacts_dir).expanduser().resolve()
@@ -421,6 +442,25 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
         return 1
 
+    if bool(args.apply) and (not bool(args.dry_run)) and (not bool(args.ignore_replay_gate)):
+        blocker_override = (
+            Path(str(args.replay_gate_blocker_file)).expanduser().resolve()
+            if str(args.replay_gate_blocker_file or "").strip()
+            else None
+        )
+        try:
+            replay_gate_status = assert_replay_gate_green(
+                blocker_path=blocker_override,
+                max_age_minutes=float(args.max_replay_gate_age_minutes),
+            )
+            result["replay_gate"] = replay_gate_status
+        except ReplayGateViolation as exc:
+            result["ok"] = False
+            result["error"] = f"replay gate blocked promotion: {exc}"
+            result["replay_gate"] = dict(getattr(exc, "status", {}))
+            sys.stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+            return 1
+
     # Gate pass. Apply promotion if requested.
     if bool(args.apply) and (not bool(args.dry_run)):
         prev_text = live_yaml_path.read_text(encoding="utf-8") if live_yaml_path.exists() else ""
@@ -465,4 +505,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
-

@@ -31,6 +31,11 @@ try:
 except ImportError:  # pragma: no cover
     from deploy_validate import validate_yaml_text  # type: ignore[no-redef]
 
+try:
+    from tools.replay_gate_blocker import ReplayGateViolation, assert_replay_gate_green
+except ImportError:  # pragma: no cover
+    from replay_gate_blocker import ReplayGateViolation, assert_replay_gate_green  # type: ignore[no-redef]
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
 YAML_PATH = os.path.join(PROJECT_DIR, "config", "strategy_overrides.yaml")
@@ -405,6 +410,22 @@ def main(argv: list[str] | None = None):
     )
     parser.add_argument("--version", type=str, default=None,
                         help="Version tag for changelog (auto-incremented if omitted)")
+    parser.add_argument(
+        "--replay-gate-blocker-file",
+        default="",
+        help="Optional replay-gate blocker JSON path override.",
+    )
+    parser.add_argument(
+        "--max-replay-gate-age-minutes",
+        type=float,
+        default=float(os.getenv("AI_QUANT_REPLAY_GATE_MAX_AGE_MINUTES", "360") or 360.0),
+        help="Maximum allowed blocker age in minutes (default: 360; <=0 disables staleness check).",
+    )
+    parser.add_argument(
+        "--ignore-replay-gate",
+        action="store_true",
+        help="Bypass replay-gate release-blocker checks (not recommended).",
+    )
     args = parser.parse_args(argv)
 
     yaml_path = str(Path(args.yaml_path).expanduser().resolve())
@@ -417,6 +438,22 @@ def main(argv: list[str] | None = None):
     if guard_err:
         print(f"[deploy] {guard_err} Use --allow-live to override.", file=sys.stderr)
         sys.exit(2)
+
+    if (not bool(args.dry_run)) and (not bool(args.ignore_replay_gate)):
+        blocker_override = (
+            Path(str(args.replay_gate_blocker_file)).expanduser().resolve()
+            if str(args.replay_gate_blocker_file or "").strip()
+            else None
+        )
+        try:
+            assert_replay_gate_green(
+                blocker_path=blocker_override,
+                max_age_minutes=float(args.max_replay_gate_age_minutes),
+            )
+        except ReplayGateViolation as exc:
+            detail = "; ".join(list(getattr(exc, "reasons", []) or [])) or str(exc)
+            print(f"[deploy] Replay gate blocked deployment: {detail}", file=sys.stderr)
+            sys.exit(2)
 
     # Load sweep results
     results = load_sweep_results(args.sweep_results)
