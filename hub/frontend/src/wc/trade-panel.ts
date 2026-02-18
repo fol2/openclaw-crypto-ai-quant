@@ -135,7 +135,7 @@ export class TradePanel extends LitElement {
       color: var(--accent, #00d4ff);
       border-bottom-color: var(--accent, #00d4ff);
     }
-    .tab.disabled {
+    .tab:disabled {
       opacity: 0.3;
       cursor: not-allowed;
     }
@@ -402,6 +402,7 @@ export class TradePanel extends LitElement {
         const raw = this.position?.trim();
         this._pos = raw && raw !== 'null' ? JSON.parse(raw) : null;
       } catch { this._pos = null; }
+      if (!this._pos && this.tab === 'close') this.tab = 'open';
     }
     if (changed.has('symbol') && this.symbol !== this._prevSym) {
       this._prevSym = this.symbol;
@@ -644,8 +645,9 @@ export class TradePanel extends LitElement {
       <div class="tabs">
         <button class="tab ${this.tab === 'open' ? 'active' : ''}"
           @click=${() => { this.tab = 'open'; }}>Open</button>
-        <button class="tab ${this.tab === 'close' ? 'active' : ''} ${!hasPos ? 'disabled' : ''}"
-          @click=${() => { if (hasPos) this.tab = 'close'; }}>Close${hasPos ? '' : ' (no pos)'}</button>
+        <button class="tab ${this.tab === 'close' ? 'active' : ''}"
+          ?disabled=${!hasPos}
+          @click=${() => { this.tab = 'close'; }}>Close${hasPos ? '' : ' (no pos)'}</button>
       </div>
       <div class="body">
         ${this.tab === 'open' ? this._renderOpen() : nothing}
