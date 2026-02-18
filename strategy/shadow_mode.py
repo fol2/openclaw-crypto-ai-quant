@@ -52,6 +52,8 @@ import sqlite3
 import time
 from typing import Any
 
+from .event_id import generate_event_id as _generate_event_id
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -638,27 +640,3 @@ def is_shadow_mode(mode: DecisionMode) -> bool:
     """Return ``True`` only for ``DecisionMode.SHADOW``."""
     return mode is DecisionMode.SHADOW
 
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-_ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-
-
-def _generate_event_id() -> str:
-    """Generate a ULID for decision event IDs.
-
-    Mirrors ``_generate_event_id()`` from ``strategy.reconciler`` to avoid
-    circular imports.
-    """
-    import secrets
-
-    t = int(time.time() * 1000)
-    time_part = ""
-    for _ in range(10):
-        time_part = _ULID_ALPHABET[t & 0x1F] + time_part
-        t >>= 5
-    alphabet_len = len(_ULID_ALPHABET)
-    rand_part = "".join(_ULID_ALPHABET[secrets.randbelow(alphabet_len)] for _ in range(16))
-    return time_part + rand_part
