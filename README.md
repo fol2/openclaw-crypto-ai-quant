@@ -192,6 +192,7 @@ Copy the relevant templates to `/etc/systemd/system/`, customize paths and envir
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) - System design and component interactions
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) - Development setup and guidelines
 - [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) - Contribution guidelines
+- [docs/release_process.md](docs/release_process.md) - Version governance and tag-driven release flow
 - [backtester/README.md](backtester/README.md) - Backtester documentation
 - [monitor/README.md](monitor/README.md) - Dashboard documentation
 

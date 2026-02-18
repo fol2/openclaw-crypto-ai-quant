@@ -1,6 +1,6 @@
 [project]
 name = "openclaw-ai-quant"
-version = "0.0.0"
+version = "0.1.0"
 description = "OpenClaw AI Quant trading engine (local)"
 requires-python = ">=3.12"
 dependencies = [
