@@ -6,7 +6,8 @@ This compares canonical simulatable action events (`OPEN/ADD/REDUCE/CLOSE`) from
 - paper `trades` table
 
 Funding rows are treated as accepted non-simulatable residuals and excluded from
-strict event-order parity checks.
+strict event-order parity checks. Simulatable events are compared in original
+source order (live baseline line order vs paper trade-id order).
 """
 
 from __future__ import annotations
@@ -157,6 +158,7 @@ def _load_live_sequence(
             events.append(
                 {
                     "source": "live",
+                    "sequence_idx": len(events),
                     "source_id": int(row.get("id") or 0),
                     "line_no": line_no,
                     "symbol": symbol,
@@ -165,16 +167,6 @@ def _load_live_sequence(
                     "action_code": action_code,
                 }
             )
-
-    events.sort(
-        key=lambda r: (
-            int(r["bucket_ts_ms"]),
-            str(r["symbol"]),
-            str(r["action_code"]),
-            int(r["source_id"]),
-            int(r["line_no"]),
-        )
-    )
 
     return events, {
         "live_total_rows": int(total_rows),
@@ -233,6 +225,7 @@ def _load_paper_sequence(
         events.append(
             {
                 "source": "paper",
+                "sequence_idx": len(events),
                 "source_id": int(row["id"] or 0),
                 "symbol": symbol,
                 "timestamp_ms": ts_ms,
@@ -240,15 +233,6 @@ def _load_paper_sequence(
                 "action_code": action_code,
             }
         )
-
-    events.sort(
-        key=lambda r: (
-            int(r["bucket_ts_ms"]),
-            str(r["symbol"]),
-            str(r["action_code"]),
-            int(r["source_id"]),
-        )
-    )
 
     return events, {
         "paper_total_rows": int(total_rows),
