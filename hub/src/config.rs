@@ -46,6 +46,8 @@ pub struct HubConfig {
     pub mids_wait_timeout_ms: u64,
     /// Emit per-publish mids debug logs (seq + changed symbols) for monitor tracing.
     pub mids_debug_log: bool,
+    /// Accept and emit frontend flash-trigger debug logs from the monitor UI.
+    pub flash_debug_log: bool,
 }
 
 fn env_str(name: &str, default: &str) -> String {
@@ -245,6 +247,7 @@ impl HubConfig {
             mids_poll_ms: env_u64("AIQ_MONITOR_MIDS_POLL_MS", 100),
             mids_wait_timeout_ms: env_u64("AIQ_MONITOR_MIDS_WAIT_TIMEOUT_MS", 25_000),
             mids_debug_log: env_bool("AIQ_MONITOR_MIDS_DEBUG_LOG", false),
+            flash_debug_log: env_bool("AIQ_MONITOR_FLASH_DEBUG_LOG", false),
         }
     }
 

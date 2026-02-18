@@ -1,7 +1,7 @@
 use axum::extract::{Query, State};
 use axum::http::header;
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -66,6 +66,25 @@ pub struct MarksQuery {
     symbol: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct FlashDebugEvent {
+    symbol: String,
+    prev: f64,
+    mid: f64,
+    direction: String,
+    phase: String,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    tone: Option<String>,
+    at_ms: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FlashDebugBatch {
+    events: Vec<FlashDebugEvent>,
+}
+
 // ── Route definitions ────────────────────────────────────────────────────
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -75,6 +94,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/mids", get(api_mids))
         .route("/api/candles", get(api_candles))
         .route("/api/marks", get(api_marks))
+        .route("/api/flash-debug", post(api_flash_debug))
         .route("/api/sparkline", get(api_sparkline))
         .route("/api/metrics", get(api_metrics))
         .route("/metrics", get(api_prometheus))
@@ -103,6 +123,49 @@ async fn api_mids(State(state): State<Arc<AppState>>) -> Json<Value> {
             "error": e,
         })),
     }
+}
+
+async fn api_flash_debug(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<FlashDebugBatch>,
+) -> Json<Value> {
+    if !state.config.flash_debug_log {
+        return Json(json!({
+            "ok": false,
+            "disabled": true,
+            "reason": "AIQ_MONITOR_FLASH_DEBUG_LOG is disabled",
+        }));
+    }
+
+    // Keep log volume bounded even under very high tick throughput.
+    let max_logged = payload.events.len().min(400);
+    for ev in payload.events.iter().take(max_logged) {
+        tracing::info!(
+            symbol = %ev.symbol,
+            prev = ev.prev,
+            mid = ev.mid,
+            direction = %ev.direction,
+            phase = %ev.phase,
+            source = ?ev.source,
+            tone = ?ev.tone,
+            at_ms = ev.at_ms,
+            "mid flash trigger"
+        );
+    }
+    if payload.events.len() > max_logged {
+        tracing::info!(
+            total = payload.events.len(),
+            logged = max_logged,
+            dropped = payload.events.len() - max_logged,
+            "mid flash trigger batch truncated"
+        );
+    }
+
+    Json(json!({
+        "ok": true,
+        "received": payload.events.len(),
+        "logged": max_logged,
+    }))
 }
 
 async fn api_snapshot(
