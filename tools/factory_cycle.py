@@ -1279,7 +1279,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--skip-mirror",
         action="store_true",
-        help="Force skip state mirroring even if AI_QUANT_MIRROR_LIVE_ON_PROMOTE is true.",
+        help="Force skip state mirroring when deploying a changed config.",
     )
 
     ap.add_argument(
@@ -1568,6 +1568,7 @@ def main(argv: list[str] | None = None) -> int:
                 verify_sleep_s=float(args.verify_sleep_s),
                 mirror_source=str(args.mirror_source),
                 skip_mirror=bool(args.skip_mirror),
+                mirror_on_config_change=True,
             )
         except Exception as e:
             _send_discord(

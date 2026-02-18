@@ -201,6 +201,7 @@ def deploy_paper_config(
     verify_sleep_s: float = 2.0,
     mirror_source: str | None = None,
     skip_mirror: bool = False,
+    mirror_on_config_change: bool = False,
 ) -> Path:
     """Deploy config_id to yaml_path and return the deploy directory path."""
     config_id = str(config_id).strip()
@@ -270,6 +271,8 @@ def deploy_paper_config(
 
     event["what"]["prev_yaml_sha256"] = hashlib.sha256(prev_text.encode("utf-8")).hexdigest() if prev_text else ""
     event["what"]["next_yaml_sha256"] = hashlib.sha256(yaml_text.encode("utf-8")).hexdigest()
+    config_changed = event["what"]["prev_yaml_sha256"] != event["what"]["next_yaml_sha256"]
+    event["what"]["config_changed"] = bool(config_changed)
 
     # Always write the artefact, even in dry-run mode.
     (deploy_dir / "deployed_config.yaml").write_text(yaml_text, encoding="utf-8")
@@ -298,47 +301,55 @@ def deploy_paper_config(
                 raise RuntimeError(f"service restart failed: {service}")
             raise RuntimeError(f"service restart failed: {failed.service} (exit_code={failed.exit_code})")
 
-        # Optional state mirroring + PnL baseline reset (AQC-800)
-        mirror_enabled = os.getenv("AI_QUANT_MIRROR_LIVE_ON_PROMOTE", "false").lower() in ("true", "1", "yes")
-        if mirror_enabled and not bool(skip_mirror):
-            env = _service_environment(service)
-            target_db = env.get("AI_QUANT_DB_PATH")
-            source_db = mirror_source or "/home/fol2hk/.openclaw/workspace/dev/ai_quant/trading_engine_live.db"
+    # Mirror can be enabled either by the legacy env toggle or explicitly by
+    # the caller for config-change cutovers.
+    mirror_env_enabled = os.getenv("AI_QUANT_MIRROR_LIVE_ON_PROMOTE", "false").lower() in ("true", "1", "yes")
+    mirror_enabled = (
+        not bool(skip_mirror)
+        and (
+            bool(mirror_env_enabled)
+            or (bool(mirror_on_config_change) and bool(config_changed))
+        )
+    )
+    if mirror_enabled and not dry_run:
+        env = _service_environment(service)
+        target_db = env.get("AI_QUANT_DB_PATH")
+        source_db = mirror_source or "/home/fol2hk/.openclaw/workspace/dev/ai_quant/trading_engine_live.db"
 
-            if target_db and os.path.exists(source_db):
-                print(f"Mirroring state from {source_db} to {target_db}...")
-                mirror_script = AIQ_ROOT / "tools" / "mirror_live_state.py"
+        if target_db and os.path.exists(source_db):
+            print(f"Mirroring state from {source_db} to {target_db}...")
+            mirror_script = AIQ_ROOT / "tools" / "mirror_live_state.py"
+            try:
+                subprocess.run(
+                    [sys.executable, str(mirror_script), "--source", source_db, "--target", target_db],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+
+                # Read balance from target DB
+                con = sqlite3.connect(target_db)
                 try:
-                    subprocess.run(
-                        [sys.executable, str(mirror_script), "--source", source_db, "--target", target_db],
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                    )
+                    row = con.execute("SELECT balance FROM trades ORDER BY id DESC LIMIT 1").fetchone()
+                    if row:
+                        balance = row[0]
+                        print(f"Mirrored balance: {balance}. Resetting baseline PnL.")
+                        _update_service_env_file(service, "AI_QUANT_NOTIFY_BASELINE_USD", str(balance))
 
-                    # Read balance from target DB
-                    con = sqlite3.connect(target_db)
-                    try:
-                        row = con.execute("SELECT balance FROM trades ORDER BY id DESC LIMIT 1").fetchone()
-                        if row:
-                            balance = row[0]
-                            print(f"Mirrored balance: {balance}. Resetting baseline PnL.")
-                            _update_service_env_file(service, "AI_QUANT_NOTIFY_BASELINE_USD", str(balance))
-
-                            # Restart again to pick up new env
-                            print(f"Restarting {service} to pick up new baseline...")
-                            orchestrate_interval_restart(
-                                ws_service=str(ws_service),
-                                trader_service=str(service),
-                                pause_file=pause_file,
-                                pause_mode=str(pause_mode or "close_only"),
-                                resume_on_success=bool(resume_on_success),
-                                verify_sleep_s=float(verify_sleep_s),
-                            )
-                    finally:
-                        con.close()
-                except Exception as e:
-                    print(f"Mirroring/Baseline reset failed for {service}: {e}")
+                        # Restart to load mirrored state and refreshed baseline.
+                        print(f"Restarting {service} to load mirrored state...")
+                        orchestrate_interval_restart(
+                            ws_service=str(ws_service),
+                            trader_service=str(service),
+                            pause_file=pause_file,
+                            pause_mode=str(pause_mode or "close_only"),
+                            resume_on_success=bool(resume_on_success),
+                            verify_sleep_s=float(verify_sleep_s),
+                        )
+                finally:
+                    con.close()
+            except Exception as e:
+                print(f"Mirroring/Baseline reset failed for {service}: {e}")
 
     (deploy_dir / "deploy_event.json").write_text(json.dumps(event, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return deploy_dir
@@ -407,7 +418,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--skip-mirror",
         action="store_true",
-        help="Force skip state mirroring even if AI_QUANT_MIRROR_LIVE_ON_PROMOTE is true.",
+        help="Force skip state mirroring.",
+    )
+    ap.add_argument(
+        "--mirror-on-config-change",
+        action="store_true",
+        help="Mirror live state when the deployed config changed.",
     )
     ap.add_argument(
         "--replay-gate-blocker-file",
@@ -461,6 +477,7 @@ def main(argv: list[str] | None = None) -> int:
             verify_sleep_s=float(args.verify_sleep_s),
             mirror_source=str(args.mirror_source),
             skip_mirror=bool(args.skip_mirror),
+            mirror_on_config_change=bool(args.mirror_on_config_change),
         )
         return 0
     except KeyError as e:
