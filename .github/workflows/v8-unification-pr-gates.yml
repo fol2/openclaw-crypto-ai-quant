@@ -2,9 +2,9 @@ name: V8 Engine Unification Gates
 
 on:
   pull_request:
-    branches: [major-v8]
+    branches: [master, major-v8]
   push:
-    branches: [major-v8]
+    branches: [master, major-v8]
   workflow_dispatch:
 
 permissions:
