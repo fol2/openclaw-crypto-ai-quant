@@ -48,12 +48,20 @@ def file_mtime(path: str | os.PathLike[str] | None) -> float | None:
 
 
 def sha1_json(obj: Any) -> str:
-    """Deterministic hash for nested dict/list primitives."""
+    """Deterministic hash for nested dict/list primitives.
+
+    Legacy name retained for backwards compatibility; digest is SHA-256.
+    """
     try:
         b = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     except Exception:
         b = repr(obj).encode("utf-8")
-    return hashlib.sha1(b).hexdigest()
+    return hashlib.sha256(b).hexdigest()
+
+
+def sha256_json(obj: Any) -> str:
+    """Deterministic SHA-256 hash for nested dict/list primitives."""
+    return sha1_json(obj)
 
 
 def json_dumps_safe(obj: Any) -> str:
