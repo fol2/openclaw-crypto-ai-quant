@@ -3625,19 +3625,35 @@ class PaperTrader:
         """Save kernel state to disk."""
         if not self._kernel_available or self._kernel_state_json is None:
             return
+        state_path = self._instance_state_path("kernel_state.json")
+        legacy_state_path = self._instance_state_path("kernel_state.json", legacy_db_dir=True)
         try:
-            state_path = self._instance_state_path("kernel_state.json")
             os.makedirs(os.path.dirname(state_path), exist_ok=True)
             _bt_runtime.save_state(self._kernel_state_json, state_path)
         except Exception as e:
-            logger.warning("[kernel] persist failed: %s", e)
+            logger.warning("[kernel] persist failed at %s: %s", state_path, e)
+            if legacy_state_path != state_path:
+                try:
+                    os.makedirs(os.path.dirname(legacy_state_path), exist_ok=True)
+                    _bt_runtime.save_state(self._kernel_state_json, legacy_state_path)
+                    logger.info("[kernel] persisted runtime state via legacy fallback %s", legacy_state_path)
+                except Exception as e2:
+                    logger.warning("[kernel] legacy persist fallback failed: %s", e2)
         # Persist shadow report alongside kernel state (AQC-752)
+        report_path = self._instance_state_path("kernel_shadow_report.json")
+        legacy_report_path = self._instance_state_path("kernel_shadow_report.json", legacy_db_dir=True)
         try:
-            report_path = self._instance_state_path("kernel_shadow_report.json")
             os.makedirs(os.path.dirname(report_path), exist_ok=True)
             self._shadow_report.to_json(report_path)
         except Exception as e:
-            logger.warning("[shadow] persist failed: %s", e)
+            logger.warning("[shadow] persist failed at %s: %s", report_path, e)
+            if legacy_report_path != report_path:
+                try:
+                    os.makedirs(os.path.dirname(legacy_report_path), exist_ok=True)
+                    self._shadow_report.to_json(legacy_report_path)
+                    logger.info("[shadow] persisted report via legacy fallback %s", legacy_report_path)
+                except Exception as e2:
+                    logger.warning("[shadow] legacy persist fallback failed: %s", e2)
 
     def _kernel_restore(self) -> None:
         """Attempt to restore kernel state from disk; re-init with DB balance if missing."""
@@ -3646,25 +3662,32 @@ class PaperTrader:
         try:
             state_path = self._instance_state_path("kernel_state.json")
             legacy_state_path = self._instance_state_path("kernel_state.json", legacy_db_dir=True)
-            load_path = ""
+            load_candidates: list[str] = []
             if os.path.isfile(state_path):
-                load_path = state_path
-            elif legacy_state_path != state_path and os.path.isfile(legacy_state_path):
-                load_path = legacy_state_path
+                load_candidates.append(state_path)
+            if legacy_state_path != state_path and os.path.isfile(legacy_state_path):
+                load_candidates.append(legacy_state_path)
 
-            if load_path:
-                self._kernel_state_json = _bt_runtime.load_state(load_path)
-                self._kernel_available = True
-                kb = self.get_kernel_balance()
-                logger.info("[kernel] Restored kernel state from disk (cash_usd=%.2f)", kb or 0.0)
-                if load_path != state_path:
-                    try:
-                        os.makedirs(os.path.dirname(state_path), exist_ok=True)
-                        shutil.copy2(load_path, state_path)
-                        logger.info("[kernel] migrated legacy runtime state to %s", state_path)
-                    except Exception as e:
-                        logger.debug("[kernel] legacy state migration skipped: %s", e)
-            else:
+            restored = False
+            for load_path in load_candidates:
+                try:
+                    self._kernel_state_json = _bt_runtime.load_state(load_path)
+                    self._kernel_available = True
+                    kb = self.get_kernel_balance()
+                    logger.info("[kernel] Restored kernel state from disk (cash_usd=%.2f)", kb or 0.0)
+                    if load_path != state_path:
+                        try:
+                            os.makedirs(os.path.dirname(state_path), exist_ok=True)
+                            shutil.copy2(load_path, state_path)
+                            logger.info("[kernel] migrated legacy runtime state to %s", state_path)
+                        except Exception as e:
+                            logger.debug("[kernel] legacy state migration skipped: %s", e)
+                    restored = True
+                    break
+                except Exception as e:
+                    logger.warning("[kernel] state load failed from %s: %s", load_path, e)
+
+            if not restored:
                 # No persisted kernel state (e.g. first run after migration
                 # or after switching to per-instance state paths).
                 # Re-init with the authoritative balance (live-synced).
@@ -3705,28 +3728,32 @@ class PaperTrader:
             # Restore shadow report (AQC-752)
             report_path = self._instance_state_path("kernel_shadow_report.json")
             legacy_report_path = self._instance_state_path("kernel_shadow_report.json", legacy_db_dir=True)
-            report_load_path = ""
+            report_load_candidates: list[str] = []
             if os.path.isfile(report_path):
-                report_load_path = report_path
-            elif legacy_report_path != report_path and os.path.isfile(legacy_report_path):
-                report_load_path = legacy_report_path
+                report_load_candidates.append(report_path)
+            if legacy_report_path != report_path and os.path.isfile(legacy_report_path):
+                report_load_candidates.append(legacy_report_path)
 
-            if report_load_path:
-                self._shadow_report = ShadowReport.from_json(report_load_path)
-                s = self._shadow_report.summary()
-                logger.info(
-                    "[shadow] Restored report: %d checks, %d failures, converged=%s",
-                    s["total_checks"],
-                    s["failures"],
-                    self._shadow_report.is_converged(),
-                )
-                if report_load_path != report_path:
-                    try:
-                        os.makedirs(os.path.dirname(report_path), exist_ok=True)
-                        shutil.copy2(report_load_path, report_path)
-                        logger.info("[shadow] migrated legacy report to %s", report_path)
-                    except Exception as e:
-                        logger.debug("[shadow] legacy report migration skipped: %s", e)
+            for report_load_path in report_load_candidates:
+                try:
+                    self._shadow_report = ShadowReport.from_json(report_load_path)
+                    s = self._shadow_report.summary()
+                    logger.info(
+                        "[shadow] Restored report: %d checks, %d failures, converged=%s",
+                        s["total_checks"],
+                        s["failures"],
+                        self._shadow_report.is_converged(),
+                    )
+                    if report_load_path != report_path:
+                        try:
+                            os.makedirs(os.path.dirname(report_path), exist_ok=True)
+                            shutil.copy2(report_load_path, report_path)
+                            logger.info("[shadow] migrated legacy report to %s", report_path)
+                        except Exception as e:
+                            logger.debug("[shadow] legacy report migration skipped: %s", e)
+                    break
+                except Exception as e:
+                    logger.warning("[shadow] report load failed from %s: %s", report_load_path, e)
         except Exception as e:
             logger.warning("[kernel] restore failed, re-initializing: %s", e)
             self._init_kernel()
