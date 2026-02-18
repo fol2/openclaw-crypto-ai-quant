@@ -376,6 +376,9 @@
                       {s.position.unreal_pnl_est >= 0 ? '+' : ''}{fmtNum(s.position.unreal_pnl_est)}{pct != null ? ` ${pct >= 0 ? '+' : ''}${fmtNum(pct, 1)}%` : ''}
                     </span>
                   {/if}
+                  {#if s.position.open_timestamp}
+                    <span class="pos-age">{sigAge(s.position.open_timestamp)}</span>
+                  {/if}
                 {:else}
                   <span class="flat-label">flat</span>
                 {/if}
@@ -875,6 +878,12 @@
   }
   .pos-pnl.green { color: var(--green); }
   .pos-pnl.red   { color: var(--red); }
+  .pos-age {
+    display: inline;
+    font-size: 9px;
+    color: var(--text);
+    margin-left: 3px;
+  }
 
   /* ─── Detail panel ─── */
   .detail-panel { overflow-y: auto; }
@@ -1072,10 +1081,10 @@
     .sym-table {
       table-layout: fixed;
     }
-    .sym-table th:nth-child(1), .sym-table td:nth-child(1) { width: 24%; }
-    .sym-table th:nth-child(2), .sym-table td:nth-child(2) { width: 12%; }
-    .sym-table th:nth-child(3), .sym-table td:nth-child(3) { width: 22%; }
-    .sym-table th:nth-child(4), .sym-table td:nth-child(4) { width: 42%; }
+    .sym-table th:nth-child(1), .sym-table td:nth-child(1) { width: 15%; }
+    .sym-table th:nth-child(2), .sym-table td:nth-child(2) { width: 20%; }
+    .sym-table th:nth-child(3), .sym-table td:nth-child(3) { width: 25%; }
+    .sym-table th:nth-child(4), .sym-table td:nth-child(4) { width: 40%; }
 
     .col-mid {
       font-size: 10px;
