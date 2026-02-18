@@ -3,6 +3,7 @@ from __future__ import annotations
 import http.client
 import json
 import threading
+import time
 from typing import Any
 
 import pytest
@@ -12,6 +13,11 @@ import monitor.server as monitor_server
 
 class _StubMids:
     def snapshot(self) -> dict[str, Any]:
+        return {"BTC": 100_000.0}
+
+    def wait_snapshot_since(self, *, after_seq: int, timeout_s: float = 15.0) -> dict[str, Any]:
+        _ = after_seq
+        time.sleep(min(max(float(timeout_s), 0.0), 0.05))
         return {"BTC": 100_000.0}
 
 
@@ -100,3 +106,24 @@ def test_metrics_endpoint_serves_prometheus_text(monkeypatch, monitor_http_serve
     assert "# HELP aiq_integration_metric" in text
     assert '# TYPE aiq_integration_metric gauge' in text
     assert 'aiq_integration_metric{mode="paper"} 1' in text
+
+
+def test_mids_stream_emits_sse_frame(monitor_http_server) -> None:
+    conn = http.client.HTTPConnection("127.0.0.1", monitor_http_server, timeout=5.0)
+    try:
+        conn.request("GET", "/api/mids/stream", headers={"Authorization": "Bearer integration-token"})
+        resp = conn.getresponse()
+        assert resp.status == 200
+        headers = {k.lower(): v for k, v in resp.getheaders()}
+        assert headers["content-type"].startswith("text/event-stream")
+
+        retry_line = resp.fp.readline().decode("utf-8")
+        event_line = resp.fp.readline().decode("utf-8")
+        data_line = resp.fp.readline().decode("utf-8")
+        assert retry_line.startswith("retry:")
+        assert event_line.strip() == "event: mids"
+        assert data_line.startswith("data: ")
+        payload = json.loads(data_line[len("data: ") :])
+        assert payload == {"BTC": 100_000.0}
+    finally:
+        conn.close()

@@ -74,6 +74,10 @@
     modalOpen: false,
     lastConnOk: null,
     lastConnAt: 0,
+    midsStream: null,
+    midsStreamConnected: false,
+    midsStreamBackoffMs: 1000,
+    midsStreamRetryTimer: null,
   };
 
   /* ── Utilities ── */
@@ -1772,35 +1776,93 @@
     if (state.paused) return;
     try {
       const ws = await fetchJson(`/api/mids`, 2000);
-      state.mids = ws;
-      if (ws && ws.mids) {
-        const mids = ws.mids;
-        const focusSym = state.focus;
-        const focusPx = focusSym ? mids[focusSym] : undefined;
-        if (focusSym && focusPx !== undefined) {
-          const ageS = ws.updated_ts_ms ? (Date.now() - ws.updated_ts_ms) / 1000 : null;
-          $("#detailMid").textContent = ageS === null ? `MID ${fmt.num(focusPx, 6)}` : `MID ${fmt.num(focusPx, 6)} (${fmt.age(ageS)})`;
-          if (state.chartMode === "ticks") pushTick(focusSym, focusPx);
-          else if (state.chartMode === "candles") { if (syncLiveCandleFromMid(focusSym, focusPx)) redraw(); }
-        }
-        const rows = $$("#symBody tr");
-        for (const tr of rows) {
-          const sym = tr.dataset.sym;
-          const px = mids[sym];
-          if (px === undefined) continue;
-          const midCell = tr.children[1];
-          const pxN = Number(px);
-          if (!Number.isFinite(pxN)) continue;
-          const nextText = isMobile() ? fmtMidStable(sym, pxN) : fmt.num(pxN, 6);
-          if (nextText === midCell.textContent) continue;
-          const key = String(sym || "").trim().toUpperCase();
-          const prevPx = state.lastMidBySym?.[key];
-          midCell.textContent = nextText;
-          if (Number.isFinite(prevPx) && pxN !== prevPx) flashMidCell(key, midCell, pxN > prevPx ? "up" : "down");
-          state.lastMidBySym[key] = pxN;
-        }
-      }
+      applyMidsSnapshot(ws);
     } catch { /* ignore; snapshot will show WS health */ }
+  }
+
+  function applyMidsSnapshot(ws) {
+    if (state.paused) return;
+    if (!ws || !ws.mids) return;
+    state.mids = ws;
+    const mids = ws.mids;
+    const focusSym = state.focus;
+    const focusPx = focusSym ? mids[focusSym] : undefined;
+    if (focusSym && focusPx !== undefined) {
+      const ageS = ws.updated_ts_ms ? (Date.now() - ws.updated_ts_ms) / 1000 : null;
+      $("#detailMid").textContent = ageS === null ? `MID ${fmt.num(focusPx, 6)}` : `MID ${fmt.num(focusPx, 6)} (${fmt.age(ageS)})`;
+      if (state.chartMode === "ticks") pushTick(focusSym, focusPx);
+      else if (state.chartMode === "candles") { if (syncLiveCandleFromMid(focusSym, focusPx)) redraw(); }
+    }
+    const rows = $$("#symBody tr");
+    for (const tr of rows) {
+      const sym = tr.dataset.sym;
+      const px = mids[sym];
+      if (px === undefined) continue;
+      const midCell = tr.children[1];
+      const pxN = Number(px);
+      if (!Number.isFinite(pxN)) continue;
+      const nextText = isMobile() ? fmtMidStable(sym, pxN) : fmt.num(pxN, 6);
+      if (nextText === midCell.textContent) continue;
+      const key = String(sym || "").trim().toUpperCase();
+      const prevPx = state.lastMidBySym?.[key];
+      midCell.textContent = nextText;
+      if (Number.isFinite(prevPx) && pxN !== prevPx) flashMidCell(key, midCell, pxN > prevPx ? "up" : "down");
+      state.lastMidBySym[key] = pxN;
+    }
+  }
+
+  function stopMidsStream() {
+    const es = state.midsStream;
+    state.midsStream = null;
+    state.midsStreamConnected = false;
+    if (state.midsStreamRetryTimer) {
+      clearTimeout(state.midsStreamRetryTimer);
+      state.midsStreamRetryTimer = null;
+    }
+    if (es) {
+      try { es.close(); } catch { /* ignore */ }
+    }
+  }
+
+  function scheduleMidsStreamReconnect() {
+    if (state.midsStreamRetryTimer) return;
+    const delayMs = Math.max(500, Math.min(15000, Number(state.midsStreamBackoffMs) || 1000));
+    state.midsStreamRetryTimer = setTimeout(() => {
+      state.midsStreamRetryTimer = null;
+      startMidsStream();
+    }, delayMs);
+    state.midsStreamBackoffMs = Math.min(15000, Math.round(delayMs * 1.6));
+  }
+
+  function startMidsStream() {
+    if (state.midsStream) return;
+    if (typeof EventSource === "undefined") return;
+    let es;
+    try {
+      es = new EventSource("/api/mids/stream");
+    } catch {
+      scheduleMidsStreamReconnect();
+      return;
+    }
+
+    state.midsStream = es;
+    es.onopen = () => {
+      state.midsStreamConnected = true;
+      state.midsStreamBackoffMs = 1000;
+    };
+    es.addEventListener("mids", (ev) => {
+      if (!ev || !ev.data) return;
+      try { applyMidsSnapshot(JSON.parse(ev.data)); } catch { /* ignore malformed payload */ }
+    });
+    es.onmessage = (ev) => {
+      if (!ev || !ev.data) return;
+      try { applyMidsSnapshot(JSON.parse(ev.data)); } catch { /* ignore malformed payload */ }
+    };
+    es.onerror = () => {
+      state.midsStreamConnected = false;
+      stopMidsStream();
+      scheduleMidsStreamReconnect();
+    };
   }
 
   /* ── UI bindings ── */
@@ -1824,7 +1886,14 @@
     const cd = $("#candleInd");
     if (cd) cd.addEventListener("click", (e) => { const b = e.target.closest("button[data-ind]"); if (!b) return; setCandleInd(b.dataset.ind); });
     $("#search").addEventListener("input", (e) => { state.search = e.target.value || ""; if (state.lastSnapshot) renderTable(state.lastSnapshot.symbols || []); });
-    $("#pauseBtn").addEventListener("click", () => { state.paused = !state.paused; $("#pauseTxt").textContent = state.paused ? "RESUME" : "PAUSE"; if (!state.paused) pollSnapshot(); });
+    $("#pauseBtn").addEventListener("click", () => {
+      state.paused = !state.paused;
+      $("#pauseTxt").textContent = state.paused ? "RESUME" : "PAUSE";
+      if (!state.paused) {
+        pollSnapshot();
+        pollMids();
+      }
+    });
     $$(".tab").forEach((b) => b.addEventListener("click", () => setFeed(b.dataset.feed)));
     const feedAudit = $("#feedAudit");
     if (feedAudit) feedAudit.addEventListener("click", (e) => { const b = e.target.closest("button[data-audit-idx]"); if (!b) return; const idx = Number(b.dataset.auditIdx); const a = (Number.isFinite(idx) && idx >= 0) ? (state.auditEvents || [])[idx] : null; openAuditModal(a); });
@@ -1879,8 +1948,9 @@
   function tick() {
     pollSnapshot();
     pollMids();
+    startMidsStream();
     setInterval(pollSnapshot, 1200);
-    setInterval(pollMids, 550);
+    setInterval(() => { if (!state.midsStreamConnected) pollMids(); }, 1200);
   }
 
   /* ── Panel resizer (drag to resize left/right) ── */

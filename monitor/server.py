@@ -898,20 +898,25 @@ class MidPoint:
 class MidsFeed:
     def __init__(self, *, hist_window_s: int = 3600, hist_sample_ms: int = 1000):
         self._lock = threading.RLock()
+        self._cv = threading.Condition(self._lock)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
         self._tracked: set[str] = {"BTC"}
         self._mids: dict[str, MidPoint] = {}
         self._updated_ts_ms: int | None = None
+        self._seq: int = 0
+        self._sidecar_seq: int | None = None
 
         self._hist_sample_ms = int(hist_sample_ms)
         self._hist_window_s = int(hist_window_s)
         self._hist: dict[str, deque[tuple[int, float]]] = {}
         self._last_hist_ts: dict[str, int] = {}
 
-        # Polling cadence and OK threshold.
+        # Legacy poll cadence is used only when connected to an older sidecar that
+        # does not support blocking wait_mids RPC.
         self._poll_ms = max(100, _env_int("AIQ_MONITOR_MIDS_POLL_MS", int(self._hist_sample_ms)))
+        self._wait_timeout_s = max(1.0, _env_float("AIQ_MONITOR_MIDS_WAIT_TIMEOUT_S", 25.0))
         self._max_age_s_ok = max(0.0, _env_float("AIQ_MONITOR_MIDS_MAX_AGE_S", 60.0))
 
         self._ws_ok: bool = False
@@ -937,6 +942,8 @@ class MidsFeed:
 
     def stop(self) -> None:
         self._stop.set()
+        with self._cv:
+            self._cv.notify_all()
 
     def set_tracked_symbols(self, symbols: list[str]) -> None:
         with self._lock:
@@ -952,6 +959,27 @@ class MidsFeed:
                 "ok": self._ws_ok,
                 "last_error": self._ws_last_err,
                 "updated_ts_ms": updated_ts_ms,
+                "seq": int(self._seq),
+                "mids": mids,
+            }
+
+    def wait_snapshot_since(self, *, after_seq: int, timeout_s: float = 15.0) -> dict[str, Any]:
+        after = int(max(0, int(after_seq)))
+        timeout = max(0.0, float(timeout_s))
+        deadline = time.monotonic() + timeout
+        with self._cv:
+            while self._seq <= after and not self._stop.is_set():
+                remain = deadline - time.monotonic()
+                if remain <= 0:
+                    break
+                self._cv.wait(timeout=remain)
+            mids = {s: v.px for s, v in self._mids.items()}
+            updated_ts_ms = self._updated_ts_ms
+            return {
+                "ok": self._ws_ok,
+                "last_error": self._ws_last_err,
+                "updated_ts_ms": updated_ts_ms,
+                "seq": int(self._seq),
                 "mids": mids,
             }
 
@@ -1025,9 +1053,15 @@ class MidsFeed:
 
                 with self._lock:
                     tracked = set(self._tracked)
+                    after_seq = self._sidecar_seq
 
-                # Poll sidecar for mids (no direct outbound Hyperliquid connections from monitor).
-                mids, mids_age_s = sidecar.get_mids(symbols=sorted(tracked), max_age_s=None)
+                # Blocking wait on sidecar updates (falls back to legacy polling on older sidecars).
+                mids, mids_age_s, sidecar_seq, changed, timed_out = sidecar.wait_mids(
+                    symbols=sorted(tracked),
+                    after_seq=after_seq,
+                    max_age_s=None,
+                    timeout_s=self._wait_timeout_s,
+                )
 
                 now_ms = _utc_now_ms()
                 ts_ms = now_ms
@@ -1040,13 +1074,19 @@ class MidsFeed:
                 ok = mids_age_s is not None and float(mids_age_s) <= float(self._max_age_s_ok)
                 last_err = None if ok else (f"mids_stale age_s={mids_age_s}" if mids_age_s is not None else "mids_age_s=None")
 
-                with self._lock:
+                with self._cv:
+                    prev_ok = self._ws_ok
+                    prev_err = self._ws_last_err
+                    prev_updated_ts_ms = self._updated_ts_ms
                     self._ws_ok = bool(ok)
                     self._ws_last_err = last_err
                     self._updated_ts_ms = ts_ms
+                    if sidecar_seq is not None:
+                        self._sidecar_seq = int(sidecar_seq)
 
                     # Update tracked symbols only.
                     tracked_now = set(self._tracked)
+                    px_changed = False
                     for sym in tracked_now:
                         if sym not in mids:
                             continue
@@ -1054,6 +1094,9 @@ class MidsFeed:
                             px = float(mids[sym])
                         except Exception:
                             continue
+                        prev = self._mids.get(sym)
+                        if prev is None or float(prev.px) != px:
+                            px_changed = True
                         self._mids[sym] = MidPoint(px=px, ts_ms=ts_ms)
 
                         last_ts = self._last_hist_ts.get(sym) or 0
@@ -1064,17 +1107,33 @@ class MidsFeed:
                                 self._hist[sym] = dq
                             dq.append((ts_ms, px))
                             self._last_hist_ts[sym] = ts_ms
+
+                    health_changed = (
+                        prev_ok != self._ws_ok
+                        or prev_err != self._ws_last_err
+                        or prev_updated_ts_ms != self._updated_ts_ms
+                    )
+                    notify = bool(px_changed or health_changed or (changed and not timed_out))
+                    if notify:
+                        self._seq += 1
+                        self._cv.notify_all()
             except Exception as e:
-                with self._lock:
+                with self._cv:
+                    prev_ok = self._ws_ok
+                    prev_err = self._ws_last_err
                     self._ws_ok = False
                     self._ws_last_err = f"sidecar_poll_error: {e}"
+                    if prev_ok != self._ws_ok or prev_err != self._ws_last_err:
+                        self._seq += 1
+                        self._cv.notify_all()
                 if self._stop.wait(backoff_s):
                     break
                 backoff_s = min(60.0, backoff_s * 1.6)
                 continue
 
             backoff_s = 1.0
-            if self._stop.wait(float(self._poll_ms) / 1000.0):
+            # Older sidecar without wait_mids support: throttle fallback polling.
+            if sidecar_seq is None and self._stop.wait(float(self._poll_ms) / 1000.0):
                 break
 
 
@@ -2696,6 +2755,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(length))
         self.end_headers()
 
+    def _send_sse_headers(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
     def _send(self, status: int, body: bytes, content_type: str) -> None:
         self._send_headers(status, content_type, len(body))
         self.wfile.write(body)
@@ -2705,6 +2772,34 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_text(self, text: str, status: int = 200) -> None:
         self._send(status, text.encode("utf-8"), "text/plain; charset=utf-8")
+
+    def _stream_mids_events(self) -> None:
+        keepalive_s = max(5.0, _env_float("AIQ_MONITOR_MIDS_STREAM_KEEPALIVE_S", 15.0))
+        try:
+            self._send_sse_headers()
+            self.close_connection = False
+
+            snap = STATE.mids.snapshot()
+            seq = int(snap.get("seq") or 0)
+            self.wfile.write(b"retry: 1000\n")
+            self.wfile.write(b"event: mids\n")
+            self.wfile.write(b"data: " + _json(snap) + b"\n\n")
+            self.wfile.flush()
+
+            while True:
+                snap = STATE.mids.wait_snapshot_since(after_seq=seq, timeout_s=keepalive_s)
+                next_seq = int(snap.get("seq") or 0)
+                if next_seq > seq:
+                    seq = next_seq
+                    self.wfile.write(b"event: mids\n")
+                    self.wfile.write(b"data: " + _json(snap) + b"\n\n")
+                else:
+                    self.wfile.write(b": keepalive\n\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            return
+        except Exception:
+            return
 
     def _serve_static(self, rel_path: str) -> None:
         p = (STATIC_DIR / rel_path.lstrip("/")).resolve()
@@ -2803,6 +2898,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/mids":
             self._send_json(STATE.mids.snapshot())
+            return
+
+        if path == "/api/mids/stream":
+            self._stream_mids_events()
             return
 
         if path == "/api/sparkline":

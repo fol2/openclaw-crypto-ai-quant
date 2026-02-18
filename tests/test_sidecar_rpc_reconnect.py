@@ -114,3 +114,48 @@ def test_rpc_does_not_retry_non_idempotent_drain_methods():
 
     assert len(connects) == 1
     assert len(closes) == 1
+
+
+def test_wait_mids_parses_streaming_payload():
+    payload = {
+        "mids": {"btc": "100000.5", "ETH": 2500},
+        "mids_age_s": "0.12",
+        "mids_seq": 17,
+        "changed": True,
+        "timed_out": False,
+    }
+    client, _connects, _closes = _mk_client_with_connect_sequence([_SuccessFile(payload)])
+
+    mids, age_s, seq, changed, timed_out = client.wait_mids(symbols=["BTC", "ETH"], after_seq=16, timeout_s=2.0)
+
+    assert mids == {"BTC": 100000.5, "ETH": 2500.0}
+    assert age_s == pytest.approx(0.12)
+    assert seq == 17
+    assert changed is True
+    assert timed_out is False
+
+
+def test_wait_mids_falls_back_to_get_mids_on_unknown_method():
+    client = sidecar.SidecarWSClient(sock_path="/tmp/aiq-sidecar-test.sock")
+    calls: list[str] = []
+
+    def _fake_rpc(method: str, params, *, timeout_s: float):
+        _ = params
+        _ = timeout_s
+        calls.append(method)
+        if method == "wait_mids":
+            raise RuntimeError("unknown method: wait_mids")
+        if method == "get_mids":
+            return {"mids": {"BTC": 99999.0}, "mids_age_s": 0.4}
+        raise AssertionError(f"unexpected method: {method}")
+
+    client._rpc = _fake_rpc  # type: ignore[method-assign]
+
+    mids, age_s, seq, changed, timed_out = client.wait_mids(symbols=["BTC"], after_seq=10, timeout_s=1.0)
+
+    assert calls == ["wait_mids", "get_mids"]
+    assert mids == {"BTC": 99999.0}
+    assert age_s == pytest.approx(0.4)
+    assert seq is None
+    assert changed is True
+    assert timed_out is False
