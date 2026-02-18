@@ -597,13 +597,15 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:  # pragma: no cover - emergency fail-closed path
-        fallback_blocker_path = Path(
-            str(
-                os.getenv("AI_QUANT_REPLAY_GATE_BLOCKER_FILE", "")
-                or (str(os.getenv("AI_QUANT_REPLAY_GATE_BUNDLE_ROOT", "") or "") + "/release_blocker.json")
-                or "/tmp/openclaw-ai-quant/replay_gate/release_blocker.json"
-            )
-        ).expanduser()
+        fallback_blocker_raw = str(os.getenv("AI_QUANT_REPLAY_GATE_BLOCKER_FILE", "") or "").strip()
+        if not fallback_blocker_raw:
+            bundle_root_raw = str(os.getenv("AI_QUANT_REPLAY_GATE_BUNDLE_ROOT", "") or "").strip()
+            if bundle_root_raw:
+                fallback_blocker_raw = str((Path(bundle_root_raw).expanduser() / "release_blocker.json"))
+            else:
+                fallback_blocker_raw = "/tmp/openclaw-ai-quant/replay_gate/release_blocker.json"
+
+        fallback_blocker_path = Path(fallback_blocker_raw).expanduser()
         if not fallback_blocker_path.is_absolute():
             fallback_blocker_path = (Path.cwd() / fallback_blocker_path).resolve()
         fallback_payload = {

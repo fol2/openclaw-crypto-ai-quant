@@ -25,8 +25,14 @@ Install (example):
 
 ```bash
 mkdir -p ~/.config/systemd/user
-cp systemd/openclaw-ai-quant-factory.* ~/.config/systemd/user/
-cp systemd/openclaw-ai-quant-prune-runtime-logs.* ~/.config/systemd/user/
+install -m 0644 systemd/openclaw-ai-quant-factory.service.example \
+  ~/.config/systemd/user/openclaw-ai-quant-factory.service
+install -m 0644 systemd/openclaw-ai-quant-factory.timer.example \
+  ~/.config/systemd/user/openclaw-ai-quant-factory.timer
+install -m 0644 systemd/openclaw-ai-quant-prune-runtime-logs.service.example \
+  ~/.config/systemd/user/openclaw-ai-quant-prune-runtime-logs.service
+install -m 0644 systemd/openclaw-ai-quant-prune-runtime-logs.timer.example \
+  ~/.config/systemd/user/openclaw-ai-quant-prune-runtime-logs.timer
 install -m 0644 systemd/openclaw-ai-quant-replay-alignment-gate.service.example \
   ~/.config/systemd/user/openclaw-ai-quant-replay-alignment-gate.service
 install -m 0644 systemd/openclaw-ai-quant-replay-alignment-gate.timer.example \
