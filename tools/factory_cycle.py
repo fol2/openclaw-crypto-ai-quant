@@ -1279,7 +1279,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--skip-mirror",
         action="store_true",
-        help="Force skip state mirroring even if AI_QUANT_MIRROR_LIVE_ON_PROMOTE is true.",
+        help="Force skip state mirroring when deploying a changed config.",
     )
 
     ap.add_argument(
