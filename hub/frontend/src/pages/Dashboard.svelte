@@ -129,7 +129,15 @@
         paper3: classifyModeRuntimeState(byName.get(MODE_SERVICE_MAP.paper3)),
       };
       liveEngineActive = modeRuntimeState.live === 'on';
-    } catch {}
+    } catch {
+      modeRuntimeState = {
+        live: 'unknown',
+        paper1: 'unknown',
+        paper2: 'unknown',
+        paper3: 'unknown',
+      };
+      liveEngineActive = false;
+    }
   }
 
   type FlashDebugEvent = {
