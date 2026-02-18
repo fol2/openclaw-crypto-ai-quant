@@ -183,8 +183,10 @@ def _build_indicator_snapshot_python(
     bb_obj = ta.volatility.BollingerBands(close, window=bb_win)
     bb_upper = bb_obj.bollinger_hband()
     bb_lower = bb_obj.bollinger_lband()
-    safe_close = close.mask(close == 0.0)
-    bb_width = (bb_upper - bb_lower) / safe_close
+    # Keep parity with Rust fallback behaviour: non-positive close yields neutral bb_width=0.
+    safe_close = close.where(close > 0.0, 1.0)
+    bb_spread = (bb_upper - bb_lower).where(close > 0.0, 0.0)
+    bb_width = bb_spread / safe_close
     bb_width_avg = bb_width.rolling(window=bb_width_avg_win).mean()
 
     atr_series = ta.volatility.average_true_range(high, low, close, window=atr_win)

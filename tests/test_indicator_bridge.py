@@ -207,9 +207,9 @@ class TestPythonFallback:
         timestamps = df["Timestamp"].values
         snap = _build_indicator_snapshot_python(df, timestamps, config=None)
 
-        assert math.isfinite(float(snap["bb_width"]))
-        assert math.isfinite(float(snap["bb_width_avg"]))
-        assert math.isfinite(float(snap["bb_width_ratio"]))
+        assert snap["bb_width"] == pytest.approx(0.0)
+        assert snap["bb_width_avg"] > 0.0
+        assert snap["bb_width_ratio"] == pytest.approx(0.0)
 
     def test_python_fallback_custom_config(self):
         df = _make_btc_df(60)
