@@ -864,6 +864,12 @@ def _get_default_ws_singleton():
     return ws_obj
 
 
+def _set_default_ws_singleton(ws_obj) -> None:
+    global _default_ws_singleton
+    with _DEFAULT_WS_LOCK:
+        _default_ws_singleton = ws_obj
+
+
 class _LazyWSProxy:
     """Lazy proxy so importing this module does not construct WS clients."""
 
