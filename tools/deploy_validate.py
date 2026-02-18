@@ -13,6 +13,7 @@ It does not attempt to validate strategy performance, only configuration structu
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,9 @@ import yaml
 
 MAX_SAFE_LEVERAGE = 20.0
 MAX_ENTRY_ORDERS_PER_LOOP = 20
+MAX_ADDS_PER_SYMBOL = 10
+VALID_CONFIDENCE_LEVELS = {"low", "medium", "high"}
+VALID_ENGINE_INTERVALS = {"1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"}
 
 
 def _is_number(v: Any) -> bool:
@@ -57,6 +61,9 @@ def validate_config_obj(obj: Any) -> list[str]:
             errs.append(f"Missing/invalid number: {path}")
             return
         fv = float(v)
+        if not math.isfinite(fv):
+            errs.append(f"Missing/invalid number: {path}")
+            return
         if min_v is not None and fv < float(min_v):
             errs.append(f"Out of range (min {min_v}): {path}={fv}")
         if max_v is not None and fv > float(max_v):
@@ -79,10 +86,21 @@ def validate_config_obj(obj: Any) -> list[str]:
         if not isinstance(v, bool):
             errs.append(f"Missing/invalid bool: {path}")
 
+    def req_enum(path: str, *, allowed: set[str]) -> None:
+        v = _get_path(obj, path)
+        if not isinstance(v, str):
+            errs.append(f"Missing/invalid enum: {path}")
+            return
+        s = str(v).strip().lower()
+        if s not in allowed:
+            vals = ", ".join(sorted(allowed))
+            errs.append(f"Out of range (allowed: {vals}): {path}={v!r}")
+
     # Required mappings
     req_map("global.trade")
     req_map("global.indicators")
     req_map("global.thresholds.entry")
+    req_map("global.engine")
 
     # Core trade sizing/execution fields
     req_number("global.trade.allocation_pct", min_v=0.0, max_v=1.0)
@@ -103,6 +121,11 @@ def validate_config_obj(obj: Any) -> list[str]:
     req_number("global.trade.max_total_margin_pct", min_v=0.0, max_v=1.0)
     req_number("global.trade.min_notional_usd", min_v=0.0)
     req_number("global.trade.min_atr_pct", min_v=0.0, max_v=1.0)
+    req_number("global.trade.tp_partial_pct", min_v=0.0, max_v=1.0)
+    req_int("global.trade.max_adds_per_symbol", min_v=0, max_v=MAX_ADDS_PER_SYMBOL)
+    req_number("global.trade.trailing_start_atr", min_v=0.000001)
+    req_number("global.trade.trailing_distance_atr", min_v=0.000001)
+    req_enum("global.trade.entry_min_confidence", allowed=VALID_CONFIDENCE_LEVELS)
     req_bool("global.trade.bump_to_min_notional")
 
     # Key indicator windows
@@ -114,6 +137,9 @@ def validate_config_obj(obj: Any) -> list[str]:
 
     # Entry threshold sanity
     req_number("global.thresholds.entry.min_adx", min_v=0.0)
+    req_enum("global.engine.interval", allowed=VALID_ENGINE_INTERVALS)
+    req_enum("global.engine.entry_interval", allowed=VALID_ENGINE_INTERVALS)
+    req_enum("global.engine.exit_interval", allowed=VALID_ENGINE_INTERVALS)
 
     # Invariants
     fast = _get_path(obj, "global.indicators.ema_fast_window")
