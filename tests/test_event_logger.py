@@ -42,15 +42,21 @@ def test_event_logger_logs_error_when_parent_mkdir_fails(tmp_path, monkeypatch, 
     sink = event_logger_mod._JsonlEventSink(path=tmp_path / "events" / "events.jsonl")
     target_parent = sink._path.parent  # noqa: SLF001
     orig_mkdir = Path.mkdir
+    fail_once = {"left": 1}
 
     def _mkdir_maybe_fail(self, *args, **kwargs):  # noqa: ANN001
-        if self == target_parent:
+        if self == target_parent and fail_once["left"] > 0:
+            fail_once["left"] -= 1
             raise OSError("mkdir denied")
         return orig_mkdir(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "mkdir", _mkdir_maybe_fail)
 
     with caplog.at_level("ERROR"):
+        sink.emit({"kind": "unit", "ok": True})
+        sink._stop.set()  # noqa: SLF001
         sink._run()  # noqa: SLF001
 
     assert any("failed to create parent directory" in rec.message for rec in caplog.records)
+    lines = sink._path.read_text(encoding="utf-8").splitlines()  # noqa: SLF001
+    assert len(lines) == 1
