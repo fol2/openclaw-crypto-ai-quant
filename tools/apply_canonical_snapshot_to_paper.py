@@ -74,6 +74,11 @@ def _seed_trades_and_positions(
 
     now_iso = _iso_from_ms(exported_at_ms)
 
+    # Keep real history; remove only previous synthetic seed rows.
+    conn.execute(
+        "DELETE FROM trades WHERE reason IN ('state_sync_seed', 'state_sync_balance_seed', 'state_sync_seed_close')"
+    )
+
     open_rows = conn.execute(
         """
         SELECT t.symbol, t.type AS pos_type
@@ -95,11 +100,6 @@ def _seed_trades_and_positions(
         pos_type = str(row["pos_type"] or "").strip().upper()
         if symbol and pos_type in {"LONG", "SHORT"}:
             open_symbol_type[symbol] = pos_type
-
-    # Keep real history; remove only previous synthetic seed rows.
-    conn.execute(
-        "DELETE FROM trades WHERE reason IN ('state_sync_seed', 'state_sync_balance_seed', 'state_sync_seed_close')"
-    )
 
     # Ensure latest balance seed exists in trades so PaperTrader loads this balance.
     _insert_projection(
@@ -356,6 +356,7 @@ def main() -> int:
         return 0
 
     conn = sqlite3.connect(target_db_path, timeout=15)
+    conn.row_factory = sqlite3.Row
     try:
         conn.execute("BEGIN")
         seeded_trades, seeded_positions = _seed_trades_and_positions(
