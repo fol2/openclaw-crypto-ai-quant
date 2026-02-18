@@ -104,28 +104,19 @@ fn parse_timestamp_ms(input: &str) -> Result<i64, String> {
 }
 
 /// Read only the `balance` field from an export_state.py JSON file.
-/// Panics with a descriptive message on any I/O or parse error.
-fn read_balance_from_json(path: &str) -> f64 {
-    let data = std::fs::read_to_string(path).unwrap_or_else(|e| {
-        eprintln!("[error] Cannot read {:?}: {}", path, e);
-        std::process::exit(1);
-    });
-    let json: serde_json::Value = serde_json::from_str(&data).unwrap_or_else(|e| {
-        eprintln!("[error] Invalid JSON in {:?}: {}", path, e);
-        std::process::exit(1);
-    });
+fn read_balance_from_json(path: &str) -> Result<f64, Box<dyn std::error::Error>> {
+    let data = std::fs::read_to_string(path).map_err(|e| format!("Cannot read {:?}: {}", path, e))?;
+    let json: serde_json::Value =
+        serde_json::from_str(&data).map_err(|e| format!("Invalid JSON in {:?}: {}", path, e))?;
     let balance = json
         .get("balance")
         .and_then(|v| v.as_f64())
-        .unwrap_or_else(|| {
-            eprintln!("[error] {:?} has no numeric \"balance\" field", path);
-            std::process::exit(1);
-        });
+        .ok_or_else(|| format!("{:?} has no numeric \"balance\" field", path))?;
     eprintln!(
         "[balance-from] Read balance=${:.2} from {:?}",
         balance, path
     );
-    balance
+    Ok(balance)
 }
 
 // ---------------------------------------------------------------------------
@@ -1622,7 +1613,7 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // Resolve effective initial balance: --balance-from overrides --initial-balance
     let base_balance = if let Some(ref path) = args.balance_from {
-        read_balance_from_json(path)
+        read_balance_from_json(path)?
     } else {
         args.initial_balance
     };
@@ -1781,7 +1772,7 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // Resolve effective initial balance: --balance-from overrides --initial-balance
     let initial_balance = if let Some(ref path) = args.balance_from {
-        read_balance_from_json(path)
+        read_balance_from_json(path)?
     } else {
         args.initial_balance
     };
@@ -2759,6 +2750,32 @@ mod tests {
             v: 1.0,
             n: 1,
         }]
+    }
+
+    fn temp_json_path(prefix: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock before unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}_{}_{}.json", std::process::id(), nanos))
+    }
+
+    #[test]
+    fn read_balance_from_json_ok() {
+        let path = temp_json_path("bt_cli_balance_ok");
+        std::fs::write(&path, r#"{"balance": 1234.5}"#).expect("write json");
+        let got = read_balance_from_json(path.to_str().expect("utf8 path")).expect("balance parse");
+        assert!((got - 1234.5).abs() < f64::EPSILON);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn read_balance_from_json_missing_field_returns_error() {
+        let path = temp_json_path("bt_cli_balance_missing");
+        std::fs::write(&path, r#"{"foo": 1}"#).expect("write json");
+        let err = read_balance_from_json(path.to_str().expect("utf8 path")).unwrap_err();
+        assert!(err.to_string().contains("no numeric \"balance\" field"));
+        std::fs::remove_file(path).ok();
     }
 
     #[test]
