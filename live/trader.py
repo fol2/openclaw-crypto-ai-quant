@@ -791,8 +791,15 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 ctx = q[0]
             except Exception:
                 break
-            created = _safe_float(ctx.get("_created_at_s"), -1.0)
-            if created >= 0.0 and ttl_s > 0 and (now_s - float(created)) > ttl_s:
+            raw_created = ctx.get("_created_at_s")
+            created = _safe_float(raw_created, -1.0)
+            has_created = raw_created is not None
+            is_stale = False
+            if has_created and created < 0.0:
+                is_stale = True
+            elif created >= 0.0 and ttl_s > 0 and (now_s - float(created)) > ttl_s:
+                is_stale = True
+            if is_stale:
                 try:
                     q.pop(0)
                 except Exception:

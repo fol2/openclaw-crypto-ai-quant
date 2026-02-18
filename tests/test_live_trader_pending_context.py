@@ -20,13 +20,14 @@ def test_pop_pending_missing_created_timestamp_is_not_treated_as_epoch(monkeypat
     assert out == {"id": "first"}
 
 
-def test_pop_pending_drops_stale_entries_then_returns_first_non_stale(monkeypatch):
+def test_pop_pending_drops_negative_and_stale_entries_then_returns_first_non_stale(monkeypatch):
     monkeypatch.setenv("AI_QUANT_LIVE_PENDING_CTX_TTL_S", "10")
     monkeypatch.setattr(live_trader.time, "time", lambda: 1_000.0)
 
     trader = _build_trader_with_pending(
         "ETH",
         [
+            {"id": "negative", "_created_at_s": -1.0},
             {"id": "stale", "_created_at_s": 1.0},
             {"id": "fresh", "_created_at_s": 995.0},
         ],
