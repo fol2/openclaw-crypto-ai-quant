@@ -3716,7 +3716,11 @@ fn rust_compute_entry_sizing(
             Confidence::Low => confidence_mult_low,
         };
 
-        let adx_mult = (adx / adx_sizing_full_adx).clamp(adx_sizing_min_mult, 1.0);
+        let adx_mult = if adx_sizing_full_adx > 0.0 {
+            (adx / adx_sizing_full_adx).clamp(adx_sizing_min_mult, 1.0)
+        } else {
+            adx_sizing_min_mult
+        };
 
         let vol_ratio = if vol_baseline_pct > 0.0 && price > 0.0 {
             (atr / price) / vol_baseline_pct
@@ -4320,6 +4324,39 @@ fn make_sizing_fixtures() -> Vec<SizingFixture> {
             // margin = 10000*0.03 * 1.0 * 0.6 * 1.0 = 180
             // High -> lev 5.0
             // notional = 180*5 = 900, size = 9.0
+            expected_margin: 180.0,
+            expected_leverage: 5.0,
+            expected_notional: 900.0,
+            expected_size: 9.0,
+        },
+        // ── 15. Dynamic sizing, zero full ADX uses min multiplier fallback ──
+        SizingFixture {
+            label: "dynamic-zero-full-adx-fallback",
+            equity: 10_000.0,
+            price: 100.0,
+            atr: 1.0,
+            adx: 40.0,
+            confidence: Confidence::High,
+            allocation_pct: 0.03,
+            enable_dynamic_sizing: true,
+            confidence_mult_high: 1.0,
+            confidence_mult_medium: 0.8,
+            confidence_mult_low: 0.6,
+            adx_sizing_min_mult: 0.6,
+            adx_sizing_full_adx: 0.0,
+            vol_baseline_pct: 0.01,
+            vol_scalar_min: 0.6,
+            vol_scalar_max: 1.4,
+            enable_dynamic_leverage: true,
+            leverage: 3.0,
+            leverage_low: 1.0,
+            leverage_medium: 3.0,
+            leverage_high: 5.0,
+            leverage_max_cap: 0.0,
+            // full_adx <= 0 -> adx_mult fallback=min_mult=0.6
+            // vol_ratio=1.0, vol_scalar=1.0
+            // margin = 10000*0.03 * 1.0 * 0.6 * 1.0 = 180
+            // High -> lev 5.0, notional = 900, size = 9.0
             expected_margin: 180.0,
             expected_leverage: 5.0,
             expected_notional: 900.0,
@@ -6085,6 +6122,17 @@ fn test_sizing_dynamic_multiplier_chain() {
     assert!(
         (r.margin_used - 180.0).abs() < 1e-10,
         "Zero-ADX margin should be 180, got {}",
+        r.margin_used
+    );
+
+    // full_adx at zero (guard fallback to min_mult=0.6): margin = 300 * 1.0 * 0.6 = 180
+    let mut input = base;
+    input.adx = 40.0;
+    input.adx_sizing_full_adx = 0.0;
+    let r = compute_entry_sizing(input);
+    assert!(
+        (r.margin_used - 180.0).abs() < 1e-10,
+        "Zero-full-ADX margin should be 180, got {}",
         r.margin_used
     );
 
