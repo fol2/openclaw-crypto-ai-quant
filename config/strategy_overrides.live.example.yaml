@@ -4,14 +4,16 @@
 # Backtest: PnL $400.31 | 299 trades | WR 0.0% | PF 5.27 | DD 5.4%
 # Base: nightly_20260215T220905Z.yaml
 # Overrides applied: 142
+# NOTE: This example now ships conservative safety defaults for first deployment.
+# NOTE: Original aggressive sweep values are retained inline as comments.
 global:
   trade:
-    allocation_pct: 0.2850617272887577
+    allocation_pct: 0.03  # aggressive sweep example: 0.2850617272887577
     sl_atr_mult: 2.8144877302196116
     tp_atr_mult: 5.612215448330115
-    leverage: 3.3201238581372112
+    leverage: 2.0  # aggressive sweep example: 3.3201238581372112
     max_open_positions: 22
-    max_total_margin_pct: 0.7371172220694191
+    max_total_margin_pct: 0.25  # aggressive sweep example: 0.7371172220694191
     min_notional_usd: 8.263879828902162
     min_atr_pct: 0.0031129959159318737
     bump_to_min_notional: false
