@@ -10,6 +10,9 @@ on:
       - 'backtester/crates/bt-gpu/src/**'
       - 'backtester/crates/risk-core/src/**'
 
+permissions:
+  contents: read
+
 jobs:
   parity-gate:
     runs-on: ubuntu-latest
