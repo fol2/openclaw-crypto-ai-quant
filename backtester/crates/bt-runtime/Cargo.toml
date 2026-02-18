@@ -9,6 +9,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 bt-core = { path = "../bt-core" }
-pyo3 = { version = "0.22", features = ["extension-module"] }
+pyo3 = { version = "0.28", features = ["extension-module"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
