@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,14 @@ DEFAULT_PAPER_DB = PROJECT_DIR / "trading_engine.db"
 
 ENTRY_ATTEMPT_ACTIONS = ("OPEN", "ADD")
 EXIT_ATTEMPT_ACTIONS = ("CLOSE", "REDUCE")
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_identifier(value: str) -> str:
+    ident = str(value or "").strip()
+    if not _IDENTIFIER_RE.fullmatch(ident):
+        raise ValueError(f"Invalid SQL identifier: {value!r}")
+    return ident
 
 
 def _connect_ro(db_path: Path) -> sqlite3.Connection:
@@ -82,10 +91,11 @@ def _as_json_value(value: Any) -> Any:
 
 
 def _max_id(conn: sqlite3.Connection, table_name: str) -> int | None:
-    if not _table_exists(conn, table_name):
+    safe_table = _validate_identifier(table_name)
+    if not _table_exists(conn, safe_table):
         return None
     try:
-        row = conn.execute(f"SELECT MAX(id) AS max_id FROM {table_name}").fetchone()
+        row = conn.execute(f"SELECT MAX(id) AS max_id FROM {safe_table}").fetchone()
     except sqlite3.OperationalError:
         return None
     if not row:
