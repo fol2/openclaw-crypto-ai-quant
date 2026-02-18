@@ -37,6 +37,7 @@ pub fn is_degenerate_overrides(overrides: &[(String, f64)]) -> bool {
 use bt_core::candle::{CandleData, FundingRateData};
 use bt_core::config::StrategyConfig;
 use bt_core::sweep::SweepSpec;
+use std::sync::Arc;
 
 pub use buffers::GpuResult;
 pub use layout::GpuSweepResult;
@@ -275,13 +276,13 @@ fn run_gpu_sweep_internal(
     // Prepare sub-bar candles for GPU (if provided)
     let sub_bar_result =
         sub_candles.map(|sc| raw_candles::prepare_sub_bar_candles(&raw.timestamps, sc, &symbols));
-    let sub_candles_gpu: Option<cudarc::driver::CudaSlice<buffers::GpuRawCandle>> =
+    let sub_candles_gpu: Option<Arc<cudarc::driver::CudaSlice<buffers::GpuRawCandle>>> =
         sub_bar_result.as_ref().and_then(|sbr| {
             if sbr.max_sub_per_bar == 0 || sbr.candles.is_empty() {
                 None
             } else {
                 match device_state.dev.htod_sync_copy(&sbr.candles) {
-                    Ok(buf) => Some(buf),
+                    Ok(buf) => Some(Arc::new(buf)),
                     Err(e) => {
                         eprintln!("[GPU] Sub-candle upload failed: {e}");
                         None
@@ -289,13 +290,13 @@ fn run_gpu_sweep_internal(
                 }
             }
         });
-    let sub_counts_gpu: Option<cudarc::driver::CudaSlice<u32>> =
+    let sub_counts_gpu: Option<Arc<cudarc::driver::CudaSlice<u32>>> =
         sub_bar_result.as_ref().and_then(|sbr| {
             if sbr.max_sub_per_bar == 0 || sbr.sub_counts.is_empty() {
                 None
             } else {
                 match device_state.dev.htod_sync_copy(&sbr.sub_counts) {
-                    Ok(buf) => Some(buf),
+                    Ok(buf) => Some(Arc::new(buf)),
                     Err(e) => {
                         eprintln!("[GPU] Sub-counts upload failed: {e}");
                         None
@@ -557,6 +558,7 @@ fn run_gpu_sweep_internal(
             }
         };
         trade_bufs.max_sub_per_bar = max_sub_per_bar;
+        // Arc clone only bumps refcount; avoids cudarc CudaSlice device-to-device copy.
         trade_bufs.sub_candles = sub_candles_gpu.clone();
         trade_bufs.sub_counts = sub_counts_gpu.clone();
 

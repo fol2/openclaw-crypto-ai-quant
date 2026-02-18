@@ -13,6 +13,7 @@
 //! - Layer 4: Double-buffer pipeline — TPE ask() overlaps with GPU evaluation
 
 use std::collections::{BinaryHeap, HashMap};
+use std::sync::Arc;
 use std::time::Instant;
 
 use bt_core::candle::{CandleData, FundingRateData};
@@ -534,13 +535,13 @@ pub fn run_tpe_sweep(
 
     let sub_bar_result =
         sub_candles.map(|sc| raw_candles::prepare_sub_bar_candles(&raw.timestamps, sc, &symbols));
-    let sub_candles_gpu: Option<cudarc::driver::CudaSlice<buffers::GpuRawCandle>> =
+    let sub_candles_gpu: Option<Arc<cudarc::driver::CudaSlice<buffers::GpuRawCandle>>> =
         sub_bar_result.as_ref().and_then(|sbr| {
             if sbr.max_sub_per_bar == 0 || sbr.candles.is_empty() {
                 None
             } else {
                 match device_state.dev.htod_sync_copy(&sbr.candles) {
-                    Ok(buf) => Some(buf),
+                    Ok(buf) => Some(Arc::new(buf)),
                     Err(e) => {
                         eprintln!("[TPE] GPU sub-candle upload failed: {e}");
                         None
@@ -548,13 +549,13 @@ pub fn run_tpe_sweep(
                 }
             }
         });
-    let sub_counts_gpu: Option<cudarc::driver::CudaSlice<u32>> =
+    let sub_counts_gpu: Option<Arc<cudarc::driver::CudaSlice<u32>>> =
         sub_bar_result.as_ref().and_then(|sbr| {
             if sbr.max_sub_per_bar == 0 || sbr.sub_counts.is_empty() {
                 None
             } else {
                 match device_state.dev.htod_sync_copy(&sbr.sub_counts) {
-                    Ok(buf) => Some(buf),
+                    Ok(buf) => Some(Arc::new(buf)),
                     Err(e) => {
                         eprintln!("[TPE] GPU sub-counts upload failed: {e}");
                         None
@@ -711,8 +712,8 @@ pub fn run_tpe_sweep(
                 &mut breadth_arena,
                 &mut btc_arena,
                 max_sub_per_bar,
-                sub_candles_gpu.as_ref(),
-                sub_counts_gpu.as_ref(),
+                sub_candles_gpu.as_deref(),
+                sub_counts_gpu.as_deref(),
                 trade_start,
                 trade_end,
             )
@@ -816,8 +817,8 @@ fn evaluate_trade_only_batch(
     maker_fee_rate: f32,
     taker_fee_rate: f32,
     max_sub_per_bar: u32,
-    sub_candles_gpu: Option<&CudaSlice<buffers::GpuRawCandle>>,
-    sub_counts_gpu: Option<&CudaSlice<u32>>,
+    sub_candles_gpu: Option<&Arc<CudaSlice<buffers::GpuRawCandle>>>,
+    sub_counts_gpu: Option<&Arc<CudaSlice<u32>>>,
     trade_start: u32,
     trade_end: u32,
 ) -> Vec<buffers::GpuResult> {
@@ -875,6 +876,7 @@ fn evaluate_trade_only_batch(
         }
     };
     trade_bufs.max_sub_per_bar = max_sub_per_bar;
+    // Arc clone only bumps refcount; avoids cudarc CudaSlice device-to-device copy.
     trade_bufs.sub_candles = sub_candles_gpu.cloned();
     trade_bufs.sub_counts = sub_counts_gpu.cloned();
 

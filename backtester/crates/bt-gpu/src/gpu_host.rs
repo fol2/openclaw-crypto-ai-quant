@@ -318,8 +318,8 @@ pub struct BatchBuffers {
     pub maker_fee_rate: f32,
     pub taker_fee_rate: f32,
     pub max_sub_per_bar: u32,
-    pub sub_candles: Option<CudaSlice<GpuRawCandle>>,
-    pub sub_counts: Option<CudaSlice<u32>>,
+    pub sub_candles: Option<Arc<CudaSlice<GpuRawCandle>>>,
+    pub sub_counts: Option<Arc<CudaSlice<u32>>>,
 }
 
 impl BatchBuffers {
@@ -547,7 +547,7 @@ pub fn dispatch_and_readback(
     let sentinel_sub_candle: CudaSlice<GpuRawCandle>;
     let sentinel_counts: CudaSlice<u32>;
     let (sub_candles_ref, sub_counts_ref) = match (&buffers.sub_candles, &buffers.sub_counts) {
-        (Some(sc), Some(sn)) => (sc, sn),
+        (Some(sc), Some(sn)) => (sc.as_ref(), sn.as_ref()),
         _ => {
             sentinel_sub_candle = ds
                 .dev
