@@ -14,6 +14,13 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+_NO_RETRY_RPC_METHODS = {
+    "drain_user_fills",
+    "drain_order_updates",
+    "drain_user_fundings",
+    "drain_user_ledger_updates",
+}
+
 
 @dataclass(frozen=True)
 class WsHealth:
@@ -212,14 +219,18 @@ class SidecarWSClient:
                         exc_info=True,
                     )
                     self._close()
-                    if attempt == 1:
+                    if attempt == 1 and str(method) not in _NO_RETRY_RPC_METHODS:
                         logger.warning("sidecar RPC reconnect retry: method=%s reason=decode_error", method)
                         continue
                     raise
                 except Exception as e:
                     logger.error("sidecar RPC failed: method=%s error=%s", method, e)
                     self._close()
-                    if attempt == 1 and self._is_retryable_rpc_exception(e):
+                    if (
+                        attempt == 1
+                        and str(method) not in _NO_RETRY_RPC_METHODS
+                        and self._is_retryable_rpc_exception(e)
+                    ):
                         logger.warning("sidecar RPC reconnect retry: method=%s reason=%s", method, type(e).__name__)
                         continue
                     raise

@@ -104,3 +104,13 @@ def test_rpc_retries_only_once_then_raises_on_second_connection_failure():
 
     assert len(connects) == 2
     assert len(closes) == 2
+
+
+def test_rpc_does_not_retry_non_idempotent_drain_methods():
+    client, connects, closes = _mk_client_with_connect_sequence([_FailingReadFile(), _SuccessFile({"ok": 1})])
+
+    with pytest.raises(ConnectionError, match="sidecar closed"):
+        client._rpc("drain_user_fills", {"max_items": 1}, timeout_s=1.0)
+
+    assert len(connects) == 1
+    assert len(closes) == 1
