@@ -233,6 +233,7 @@ def test_paper_deploy_mirrors_state_on_config_change_without_interval_restart(tm
         dry_run=False,
         validate=True,
         mirror_source=str(mirror_source),
+        mirror_on_config_change=True,
     )
 
     assert deploy_dir.exists()
@@ -316,6 +317,7 @@ def test_paper_deploy_skips_mirror_when_config_unchanged(tmp_path, monkeypatch):
         dry_run=False,
         validate=True,
         mirror_source=str(mirror_source),
+        mirror_on_config_change=True,
     )
 
     assert deploy_dir.exists()

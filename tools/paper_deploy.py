@@ -201,6 +201,7 @@ def deploy_paper_config(
     verify_sleep_s: float = 2.0,
     mirror_source: str | None = None,
     skip_mirror: bool = False,
+    mirror_on_config_change: bool = False,
 ) -> Path:
     """Deploy config_id to yaml_path and return the deploy directory path."""
     config_id = str(config_id).strip()
@@ -300,8 +301,16 @@ def deploy_paper_config(
                 raise RuntimeError(f"service restart failed: {service}")
             raise RuntimeError(f"service restart failed: {failed.service} (exit_code={failed.exit_code})")
 
-    # Mirror live state only when the deployed config actually changed.
-    mirror_enabled = bool(config_changed) and (not bool(skip_mirror))
+    # Mirror can be enabled either by the legacy env toggle or explicitly by
+    # the caller for config-change cutovers.
+    mirror_env_enabled = os.getenv("AI_QUANT_MIRROR_LIVE_ON_PROMOTE", "false").lower() in ("true", "1", "yes")
+    mirror_enabled = (
+        not bool(skip_mirror)
+        and (
+            bool(mirror_env_enabled)
+            or (bool(mirror_on_config_change) and bool(config_changed))
+        )
+    )
     if mirror_enabled and not dry_run:
         env = _service_environment(service)
         target_db = env.get("AI_QUANT_DB_PATH")
@@ -409,7 +418,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--skip-mirror",
         action="store_true",
-        help="Force skip state mirroring when config changed.",
+        help="Force skip state mirroring.",
+    )
+    ap.add_argument(
+        "--mirror-on-config-change",
+        action="store_true",
+        help="Mirror live state when the deployed config changed.",
     )
     ap.add_argument(
         "--replay-gate-blocker-file",
@@ -463,6 +477,7 @@ def main(argv: list[str] | None = None) -> int:
             verify_sleep_s=float(args.verify_sleep_s),
             mirror_source=str(args.mirror_source),
             skip_mirror=bool(args.skip_mirror),
+            mirror_on_config_change=bool(args.mirror_on_config_change),
         )
         return 0
     except KeyError as e:

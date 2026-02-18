@@ -1568,6 +1568,7 @@ def main(argv: list[str] | None = None) -> int:
                 verify_sleep_s=float(args.verify_sleep_s),
                 mirror_source=str(args.mirror_source),
                 skip_mirror=bool(args.skip_mirror),
+                mirror_on_config_change=True,
             )
         except Exception as e:
             _send_discord(
