@@ -49,20 +49,19 @@ fn is_indicator_axis(path: &str) -> bool {
 
 /// Generate all combinations (cartesian product) from axes.
 pub fn generate_combinations(axes: &[SweepAxis]) -> Vec<Vec<(String, f64)>> {
-    if axes.is_empty() {
-        return vec![vec![]];
-    }
-
-    let mut result = Vec::new();
-    let sub = generate_combinations(&axes[1..]);
-    for val in &axes[0].values {
-        for combo in &sub {
-            let mut new_combo = vec![(axes[0].path.clone(), *val)];
-            new_combo.extend(combo.iter().cloned());
-            result.push(new_combo);
+    let mut combos: Vec<Vec<(String, f64)>> = vec![Vec::new()];
+    for axis in axes {
+        let mut next = Vec::with_capacity(combos.len().saturating_mul(axis.values.len()));
+        for combo in &combos {
+            for value in &axis.values {
+                let mut expanded = combo.clone();
+                expanded.push((axis.path.clone(), *value));
+                next.push(expanded);
+            }
         }
+        combos = next;
     }
-    result
+    combos
 }
 
 #[cfg(test)]
@@ -117,5 +116,21 @@ mod tests {
         let combos = generate_combinations(&[]);
         assert_eq!(combos.len(), 1);
         assert_eq!(combos[0].len(), 0);
+    }
+
+    #[test]
+    fn test_generate_combinations_many_axes_no_recursion() {
+        let axes: Vec<SweepAxis> = (0..256)
+            .map(|i| SweepAxis {
+                path: format!("axis{i}"),
+                values: vec![i as f64],
+                gate: None,
+            })
+            .collect();
+        let combos = generate_combinations(&axes);
+        assert_eq!(combos.len(), 1);
+        assert_eq!(combos[0].len(), 256);
+        assert_eq!(combos[0][0], ("axis0".to_string(), 0.0));
+        assert_eq!(combos[0][255], ("axis255".to_string(), 255.0));
     }
 }
