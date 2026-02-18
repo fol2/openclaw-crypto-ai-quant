@@ -18,6 +18,7 @@ import yaml
 from engine.promoted_config import (
     VALID_ROLES,
     _find_latest_promoted_config,
+    _write_text_atomic,
     load_promoted_config,
     maybe_apply_promoted_config,
 )
@@ -383,3 +384,30 @@ class TestRoleDaemonMapping:
         }
         for daemon, role in mapping.items():
             assert role in VALID_ROLES, f"{daemon} → {role} not in VALID_ROLES"
+
+
+class TestAtomicWrite:
+    def test_write_text_atomic_replaces_target(self, tmp_path: Path) -> None:
+        target = tmp_path / "out.yaml"
+        _write_text_atomic(target, "first: 1\n")
+        _write_text_atomic(target, "second: 2\n")
+
+        assert target.read_text(encoding="utf-8") == "second: 2\n"
+        leftovers = list(tmp_path.glob(".out.yaml.*.tmp"))
+        assert leftovers == []
+
+    def test_write_text_atomic_cleans_temp_on_replace_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target = tmp_path / "out.yaml"
+
+        def _boom_replace(_src, _dst):  # noqa: ANN001
+            raise OSError("replace failed")
+
+        monkeypatch.setattr("engine.promoted_config.os.replace", _boom_replace)
+
+        with pytest.raises(OSError, match="replace failed"):
+            _write_text_atomic(target, "broken: true\n")
+
+        leftovers = list(tmp_path.glob(".out.yaml.*.tmp"))
+        assert leftovers == []
