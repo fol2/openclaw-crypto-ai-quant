@@ -1126,6 +1126,23 @@ fn collect_trace_events(state: &GpuComboState, symbols: &[String]) -> Vec<TraceE
             pnl: ev.pnl,
         });
     }
+    out.sort_by(|a, b| {
+        (
+            a.t_sec,
+            trace_kind_priority(&a.kind),
+            a.sym_idx,
+            a.idx,
+        )
+            .cmp(&(
+                b.t_sec,
+                trace_kind_priority(&b.kind),
+                b.sym_idx,
+                b.idx,
+            ))
+    });
+    for (idx, ev) in out.iter_mut().enumerate() {
+        ev.idx = idx;
+    }
     out
 }
 
@@ -1579,6 +1596,14 @@ fn trace_kind_name(kind: u32) -> &'static str {
         3 => "CLOSE",
         4 => "PARTIAL_CLOSE",
         _ => "UNKNOWN",
+    }
+}
+
+fn trace_kind_priority(kind: &str) -> u8 {
+    match kind {
+        "CLOSE" | "PARTIAL_CLOSE" => 0,
+        "OPEN" | "ADD" => 1,
+        _ => 2,
     }
 }
 
