@@ -1,5 +1,8 @@
 <script lang="ts">
   import { runBacktest, getBacktestJobs, getBacktestStatus, getBacktestResult, cancelBacktest } from '../lib/api';
+  import { CANDIDATE_FAMILY_ORDER, getConfigLabel, LIVE_MODE } from '../lib/mode-labels';
+
+  const candidateConfigs = CANDIDATE_FAMILY_ORDER;
 
   let config = $state('main');
   let balance = $state(10000);
@@ -105,11 +108,15 @@
   <div class="launcher">
     <div class="form-row">
       <label>Config <select bind:value={config}>
-        <option value="main">main</option>
-        <option value="live">live</option>
-        <option value="paper1">paper1</option>
-        <option value="paper2">paper2</option>
-        <option value="paper3">paper3</option>
+        <option value="main">{getConfigLabel('main')}</option>
+        <optgroup label="Live Engine">
+          <option value={LIVE_MODE}>{getConfigLabel(LIVE_MODE)}</option>
+        </optgroup>
+        <optgroup label="Candidate Family">
+          {#each candidateConfigs as option}
+            <option value={option}>{getConfigLabel(option)}</option>
+          {/each}
+        </optgroup>
       </select></label>
       <label>Balance <input type="number" bind:value={balance} min="100" step="100" /></label>
       <label>Symbol <input type="text" bind:value={symbol} placeholder="All symbols" /></label>

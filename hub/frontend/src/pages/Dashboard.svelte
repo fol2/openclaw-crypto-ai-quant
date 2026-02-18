@@ -2,6 +2,7 @@
   import { appState } from '../lib/stores.svelte';
   import { getSnapshot, getCandles, getMarks, postFlashDebug, tradeEnabled, getSystemServices } from '../lib/api';
   import { hubWs } from '../lib/ws';
+  import { CANDIDATE_FAMILY_ORDER, getModeLabel, LIVE_MODE } from '../lib/mode-labels';
 
   const INTERVALS = ['1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d'] as const;
   const BAR_COUNTS = [50, 100, 200, 400] as const;
@@ -601,14 +602,29 @@
 <div class="topbar">
   <div class="topbar-row">
     <div class="mode-tabs">
-      {#each ['live', 'paper1', 'paper2', 'paper3'] as m}
+      <div class="mode-cluster">
+        <span class="mode-cluster-label mode-cluster-label-live">Live Engine</span>
         <button
-          class="mode-btn"
-          class:active={appState.mode === m || (appState.mode === 'paper' && m === 'paper1')}
-          class:is-live={m === 'live'}
-          onclick={() => setMode(m)}
-        >{m.toUpperCase()}</button>
-      {/each}
+          class="mode-btn mode-btn-live"
+          class:active={appState.mode === LIVE_MODE}
+          onclick={() => setMode(LIVE_MODE)}
+        >{getModeLabel(LIVE_MODE)}</button>
+      </div>
+
+      <span class="mode-divider" aria-hidden="true"></span>
+
+      <div class="mode-cluster">
+        <span class="mode-cluster-label">Candidate Family</span>
+        <div class="family-tabs">
+          {#each CANDIDATE_FAMILY_ORDER as m}
+            <button
+              class="mode-btn"
+              class:active={appState.mode === m || (appState.mode === 'paper' && m === 'paper1')}
+              onclick={() => setMode(m)}
+            >{getModeLabel(m)}</button>
+          {/each}
+        </div>
+      </div>
     </div>
 
     <div class="status-chip" class:ok={health.ok} class:bad={!health.ok}>
@@ -969,11 +985,39 @@
   }
   .mode-tabs {
     display: flex;
-    gap: 3px;
+    align-items: stretch;
+    gap: 8px;
     background: var(--bg);
     border-radius: var(--radius-md);
-    padding: 3px;
+    padding: 4px 8px;
     border: 1px solid var(--border);
+  }
+  .mode-cluster {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .mode-cluster-label {
+    color: var(--text-dim);
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding-left: 2px;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .mode-cluster-label-live {
+    color: rgba(255,107,107,0.9);
+  }
+  .family-tabs {
+    display: flex;
+    gap: 3px;
+  }
+  .mode-divider {
+    width: 1px;
+    background: var(--border);
+    align-self: stretch;
+    opacity: 0.9;
   }
   .mode-btn {
     background: transparent;
@@ -997,9 +1041,19 @@
     color: var(--bg);
     box-shadow: 0 1px 4px rgba(77,171,247,0.3);
   }
-  .mode-btn.active.is-live {
+  .mode-btn-live {
+    color: rgba(255,107,107,0.95);
+    border: 1px solid rgba(255,107,107,0.35);
+  }
+  .mode-btn-live:hover {
+    background: rgba(255,107,107,0.12);
+    color: #ffc9c9;
+  }
+  .mode-btn-live.active {
     background: var(--red);
     box-shadow: 0 1px 4px rgba(255,107,107,0.3);
+    color: var(--bg);
+    border-color: transparent;
   }
 
   .status-chip {
@@ -1708,6 +1762,17 @@
     .topbar-row {
       flex-wrap: wrap;
     }
+    .mode-tabs {
+      width: 100%;
+      justify-content: space-between;
+    }
+    .mode-cluster {
+      min-width: 0;
+      flex: 1;
+    }
+    .family-tabs {
+      flex-wrap: wrap;
+    }
     .metrics-bar {
       gap: 4px;
     }
@@ -1765,8 +1830,18 @@
   }
 
   @media (max-width: 480px) {
+    .mode-tabs {
+      gap: 6px;
+      padding: 4px 6px;
+    }
+    .mode-cluster-label {
+      font-size: 8px;
+    }
+    .mode-divider {
+      display: none;
+    }
     .mode-btn {
-      padding: 5px 10px;
+      padding: 4px 9px;
       font-size: 10px;
     }
     .metric-pill {
