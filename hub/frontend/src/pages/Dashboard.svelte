@@ -861,11 +861,11 @@
     letter-spacing: 0.01em;
   }
   .sig-age {
-    display: block;
+    display: inline;
     font-size: 9px;
-    color: var(--text-dim);
+    color: var(--text);
     font-family: 'IBM Plex Mono', monospace;
-    margin-top: 1px;
+    margin-left: 3px;
   }
   .pos-pnl.green { color: var(--green); }
   .pos-pnl.red   { color: var(--red); }
