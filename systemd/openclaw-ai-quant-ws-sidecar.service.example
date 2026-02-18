@@ -13,6 +13,8 @@ ExecStart=$HOME/.local/bin/openclaw-ai-quant-ws-sidecar
 Restart=always
 RestartSec=5
 KillMode=process
+NotifyAccess=main
+WatchdogSec=300
 Environment=AI_QUANT_WS_SIDECAR_SOCK=%t/openclaw-ai-quant-ws.sock
 Environment=AI_QUANT_MARKET_DB_PATH=$PROJECT_DIR/market_data.db
 Environment=AI_QUANT_CANDLES_ENABLE=1

@@ -14,6 +14,8 @@ ExecStart=$PROJECT_DIR/.venv/bin/python3 -u -m engine.daemon
 Restart=always
 RestartSec=5
 KillMode=process
+NotifyAccess=main
+WatchdogSec=300
 Environment=AI_QUANT_MODE=paper
 Environment=AI_QUANT_LOCK_PATH=$PROJECT_DIR/ai_quant_paper.lock
 Environment=AI_QUANT_INTERVAL=1h

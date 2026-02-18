@@ -15,6 +15,8 @@ ExecStart=$PROJECT_DIR/.venv/bin/python3 -u -m engine.daemon
 Restart=always
 RestartSec=5
 KillMode=process
+NotifyAccess=main
+WatchdogSec=300
 
 # Safety: paper only.
 Environment=AI_QUANT_MODE=paper
@@ -68,4 +70,3 @@ TimeoutStopSec=15
 
 [Install]
 WantedBy=default.target
-
