@@ -13,6 +13,7 @@
   let pollTimer: any = null;
   let error = $state('');
   let mobileTab: 'symbols' | 'detail' | 'feed' = $state('symbols');
+  let detailTab: 'detail' | 'trades' | 'oms' | 'audit' = $state('detail');
   type FlashDebugEvent = {
     symbol: string;
     prev: number;
@@ -187,6 +188,7 @@
     candles = [];
     marks = null;
     if (!sym) return;
+    detailTab = 'detail';
     mobileTab = 'detail';
     try {
       marks = await getMarks(sym, appState.mode);
@@ -244,8 +246,8 @@
     refresh();
   }
 
-  function setFeed(f: string) {
-    appState.feed = f;
+  function setFeed(f: 'trades' | 'oms' | 'audit') {
+    detailTab = f;
   }
 
   $effect(() => {
@@ -365,11 +367,11 @@
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 6h16M4 10h16M4 14h16M4 18h16"/></svg>
     Symbols
   </button>
-  <button class="m-tab" class:active={mobileTab === 'detail'} onclick={() => mobileTab = 'detail'}>
+  <button class="m-tab" class:active={mobileTab === 'detail'} onclick={() => { mobileTab = 'detail'; detailTab = 'detail'; }}>
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
     Detail
   </button>
-  <button class="m-tab" class:active={mobileTab === 'feed'} onclick={() => mobileTab = 'feed'}>
+  <button class="m-tab" class:active={mobileTab === 'feed'} onclick={() => { mobileTab = 'feed'; if (detailTab === 'detail') detailTab = 'trades'; }}>
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
     Feed
   </button>
@@ -454,10 +456,10 @@
     </div>
   </div>
 
-  <!-- Focus detail panel -->
-  <div class="panel detail-panel" class:mobile-visible={mobileTab === 'detail'}>
-    {#if focusSym}
-      <div class="panel-header detail-header">
+  <!-- Detail + Feed panel (merged, tabbed) -->
+  <div class="panel detail-panel" class:mobile-visible={mobileTab === 'detail' || mobileTab === 'feed'}>
+    <div class="panel-header detail-header">
+      {#if focusSym}
         <div class="focus-sym">
           <h3>{focusSym}</h3>
           {#each symbols.filter((s: any) => s.symbol === focusSym).slice(0, 1) as sym}
@@ -470,133 +472,131 @@
             ></mid-price>
           {/each}
         </div>
+      {/if}
+      <div class="detail-tabs">
+        <button class="tab" class:is-on={detailTab === 'detail'} onclick={() => detailTab = 'detail'}>DETAIL</button>
+        <button class="tab" class:is-on={detailTab === 'trades'} onclick={() => setFeed('trades')}>TRADES</button>
+        <button class="tab" class:is-on={detailTab === 'oms'} onclick={() => setFeed('oms')}>OMS</button>
+        <button class="tab" class:is-on={detailTab === 'audit'} onclick={() => setFeed('audit')}>AUDIT</button>
+      </div>
+      {#if focusSym}
         <button class="close-focus" aria-label="Close" onclick={() => { focusSym = ''; mobileTab = 'symbols'; }}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg>
         </button>
-      </div>
+      {/if}
+    </div>
 
-      <!-- Interval selector + chart (always shown when symbol focused) -->
-      <div class="iv-bar">
-        {#each INTERVALS as iv}
-          <button
-            class="iv-tab"
-            class:is-on={selectedInterval === iv}
-            onclick={() => { selectedInterval = iv; }}
-          >{iv.toUpperCase()}</button>
-        {/each}
-      </div>
-      <div class="chart-wrap">
-        <candle-chart
-          candles={JSON.stringify(candles)}
-          entries={JSON.stringify(marks?.entries || [])}
-          entryPrice={marks?.position?.entry_price ?? 0}
-          symbol={focusSym}
-          interval={selectedInterval}
-        ></candle-chart>
-      </div>
-
-      {#if marks?.position}
-        {@const p = marks.position}
-        <div class="kv-section">
-          <h4>Position</h4>
-          <div class="kv"><span class="k">Type</span><span class="v">{p.pos_type || p.type}</span></div>
-          <div class="kv"><span class="k">Size</span><span class="v mono">{fmtNum(p.size, 6)}</span></div>
-          <div class="kv"><span class="k">Entry</span><span class="v mono">{fmtNum(p.entry_price, 6)}</span></div>
-          <div class="kv"><span class="k">uPnL</span><span class="v {pnlClass(p.unreal_pnl_est)}">{fmtNum(p.unreal_pnl_est)}</span></div>
-          <div class="kv"><span class="k">Leverage</span><span class="v">{fmtNum(p.leverage, 1)}x</span></div>
+    {#if detailTab === 'detail'}
+      {#if focusSym}
+        <!-- Interval selector + chart -->
+        <div class="iv-bar">
+          {#each INTERVALS as iv}
+            <button
+              class="iv-tab"
+              class:is-on={selectedInterval === iv}
+              onclick={() => { selectedInterval = iv; }}
+            >{iv.toUpperCase()}</button>
+          {/each}
         </div>
-        {#if marks?.entries?.length}
+        <div class="chart-wrap">
+          <candle-chart
+            candles={JSON.stringify(candles)}
+            entries={JSON.stringify(marks?.entries || [])}
+            entryPrice={marks?.position?.entry_price ?? 0}
+            symbol={focusSym}
+            interval={selectedInterval}
+          ></candle-chart>
+        </div>
+
+        {#if marks?.position}
+          {@const p = marks.position}
           <div class="kv-section">
-            <h4>Entries</h4>
-            {#each marks.entries as e}
-              <div class="kv">
-                <span class="k">{e.action}</span>
-                <span class="v mono">@ {fmtNum(e.price, 6)} &times; {fmtNum(e.size, 4)}</span>
-              </div>
-            {/each}
+            <h4>Position</h4>
+            <div class="kv"><span class="k">Type</span><span class="v">{p.pos_type || p.type}</span></div>
+            <div class="kv"><span class="k">Size</span><span class="v mono">{fmtNum(p.size, 6)}</span></div>
+            <div class="kv"><span class="k">Entry</span><span class="v mono">{fmtNum(p.entry_price, 6)}</span></div>
+            <div class="kv"><span class="k">uPnL</span><span class="v {pnlClass(p.unreal_pnl_est)}">{fmtNum(p.unreal_pnl_est)}</span></div>
+            <div class="kv"><span class="k">Leverage</span><span class="v">{fmtNum(p.leverage, 1)}x</span></div>
+          </div>
+          {#if marks?.entries?.length}
+            <div class="kv-section">
+              <h4>Entries</h4>
+              {#each marks.entries as e}
+                <div class="kv">
+                  <span class="k">{e.action}</span>
+                  <span class="v mono">@ {fmtNum(e.price, 6)} &times; {fmtNum(e.size, 4)}</span>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        {:else}
+          <div class="empty-state">
+            <span class="empty-label">Flat</span>
+            <span class="empty-sub">No open position</span>
           </div>
         {/if}
       {:else}
-        <div class="empty-state">
-          <span class="empty-label">Flat</span>
-          <span class="empty-sub">No open position</span>
+        <div class="empty-focus">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" stroke-width="1"><path d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
+          <p>Select a symbol</p>
         </div>
       {/if}
-
     {:else}
-      <div class="empty-focus">
-        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" stroke-width="1"><path d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
-        <p>Select a symbol</p>
+      <!-- Feed content (trades / oms / audit) -->
+      <div class="feed-content">
+        {#if detailTab === 'trades'}
+          {#each (recent.trades || []).slice(0, 40) as t}
+            <div class="feed-item">
+              <div class="feed-row">
+                <span class="feed-l">
+                  <span class="feed-sym">{t.symbol}</span>
+                  <span class="feed-action">{t.action}</span>
+                  <span class="feed-type">{t.type}</span>
+                </span>
+                <span class="feed-r">{t.timestamp?.slice(11, 19) || ''}</span>
+              </div>
+              <div class="feed-sub">
+                px <span class="green mono">{fmtNum(t.price, 6)}</span> size {fmtNum(t.size, 6)}
+                pnl <span class="{pnlClass(t.pnl)} mono">{t.pnl != null ? fmtNum(t.pnl) : '\u2014'}</span>
+              </div>
+            </div>
+          {/each}
+        {:else if detailTab === 'oms'}
+          {#each (recent.oms_intents || []).slice(0, 25) as i}
+            <div class="feed-item">
+              <div class="feed-row">
+                <span class="feed-l">
+                  <span class="feed-sym">{i.symbol}</span>
+                  {i.action} {i.side}
+                  <span class:green={i.status === 'FILLED'} class:red={i.status === 'REJECTED'} class:yellow={i.status !== 'FILLED' && i.status !== 'REJECTED'}>{i.status}</span>
+                </span>
+                <span class="feed-r">{i.created_ts_ms ? new Date(i.created_ts_ms).toISOString().slice(11, 19) : ''}Z</span>
+              </div>
+              <div class="feed-sub">reason: {i.reason || '\u2014'} conf: {i.confidence || '\u2014'}</div>
+            </div>
+          {/each}
+          {#each (recent.oms_fills || []).slice(0, 15) as f}
+            <div class="feed-item">
+              <div class="feed-row">
+                <span class="feed-l">FILL {f.symbol} {f.side} {fmtNum(f.size, 6)}</span>
+                <span class="feed-r">{f.ts_ms ? new Date(f.ts_ms).toISOString().slice(11, 19) : ''}Z</span>
+              </div>
+              <div class="feed-sub">px {fmtNum(f.price, 6)} pnl <span class="{pnlClass(f.pnl_usd)}">{f.pnl_usd != null ? fmtNum(f.pnl_usd) : '\u2014'}</span></div>
+            </div>
+          {/each}
+        {:else if detailTab === 'audit'}
+          {#each (recent.audit_events || []).slice(0, 40) as a}
+            <div class="feed-item">
+              <div class="feed-row">
+                <span class="feed-l">{a.event || '\u2014'} {a.symbol || ''}</span>
+                <span class="feed-r">{a.timestamp?.slice(11, 19) || ''}</span>
+              </div>
+              <div class="feed-sub">{a.level || 'info'}</div>
+            </div>
+          {/each}
+        {/if}
       </div>
     {/if}
-  </div>
-
-  <!-- Activity feeds -->
-  <div class="panel feed-panel" class:mobile-visible={mobileTab === 'feed'}>
-    <div class="panel-header">
-      <div class="feed-tabs">
-        {#each ['trades', 'oms', 'audit'] as f}
-          <button
-            class="tab"
-            class:is-on={appState.feed === f}
-            onclick={() => setFeed(f)}
-          >{f.toUpperCase()}</button>
-        {/each}
-      </div>
-    </div>
-    <div class="feed-content">
-      {#if appState.feed === 'trades'}
-        {#each (recent.trades || []).slice(0, 40) as t}
-          <div class="feed-item">
-            <div class="feed-row">
-              <span class="feed-l">
-                <span class="feed-sym">{t.symbol}</span>
-                <span class="feed-action">{t.action}</span>
-                <span class="feed-type">{t.type}</span>
-              </span>
-              <span class="feed-r">{t.timestamp?.slice(11, 19) || ''}</span>
-            </div>
-            <div class="feed-sub">
-              px <span class="green mono">{fmtNum(t.price, 6)}</span> size {fmtNum(t.size, 6)}
-              pnl <span class="{pnlClass(t.pnl)} mono">{t.pnl != null ? fmtNum(t.pnl) : '\u2014'}</span>
-            </div>
-          </div>
-        {/each}
-      {:else if appState.feed === 'oms'}
-        {#each (recent.oms_intents || []).slice(0, 25) as i}
-          <div class="feed-item">
-            <div class="feed-row">
-              <span class="feed-l">
-                <span class="feed-sym">{i.symbol}</span>
-                {i.action} {i.side}
-                <span class:green={i.status === 'FILLED'} class:red={i.status === 'REJECTED'} class:yellow={i.status !== 'FILLED' && i.status !== 'REJECTED'}>{i.status}</span>
-              </span>
-              <span class="feed-r">{i.created_ts_ms ? new Date(i.created_ts_ms).toISOString().slice(11, 19) : ''}Z</span>
-            </div>
-            <div class="feed-sub">reason: {i.reason || '\u2014'} conf: {i.confidence || '\u2014'}</div>
-          </div>
-        {/each}
-        {#each (recent.oms_fills || []).slice(0, 15) as f}
-          <div class="feed-item">
-            <div class="feed-row">
-              <span class="feed-l">FILL {f.symbol} {f.side} {fmtNum(f.size, 6)}</span>
-              <span class="feed-r">{f.ts_ms ? new Date(f.ts_ms).toISOString().slice(11, 19) : ''}Z</span>
-            </div>
-            <div class="feed-sub">px {fmtNum(f.price, 6)} pnl <span class="{pnlClass(f.pnl_usd)}">{f.pnl_usd != null ? fmtNum(f.pnl_usd) : '\u2014'}</span></div>
-          </div>
-        {/each}
-      {:else if appState.feed === 'audit'}
-        {#each (recent.audit_events || []).slice(0, 40) as a}
-          <div class="feed-item">
-            <div class="feed-row">
-              <span class="feed-l">{a.event || '\u2014'} {a.symbol || ''}</span>
-              <span class="feed-r">{a.timestamp?.slice(11, 19) || ''}</span>
-            </div>
-            <div class="feed-sub">{a.level || 'info'}</div>
-          </div>
-        {/each}
-      {/if}
-    </div>
   </div>
 </div>
 
@@ -768,7 +768,7 @@
   /* ─── Grid layout ─── */
   .dashboard-grid {
     display: grid;
-    grid-template-columns: 300px 1fr 340px;
+    grid-template-columns: 300px 1fr;
     grid-template-rows: 1fr;
     gap: 10px;
     height: calc(100vh - 140px);
@@ -962,6 +962,14 @@
 
   /* ─── Detail panel ─── */
   .detail-panel { overflow-y: auto; }
+  .detail-tabs {
+    display: flex;
+    gap: 2px;
+    background: var(--bg);
+    border-radius: 5px;
+    padding: 2px;
+    flex-shrink: 0;
+  }
 
   /* ─── Interval selector ─── */
   .iv-bar {
@@ -1082,8 +1090,7 @@
     color: var(--text-dim);
   }
 
-  /* ─── Feed panel ─── */
-  .feed-panel { min-width: 0; }
+  /* ─── Feed content ─── */
   .feed-tabs {
     display: flex;
     gap: 2px;
@@ -1154,7 +1161,7 @@
   /* ─── Tablet ─── */
   @media (max-width: 1200px) {
     .dashboard-grid {
-      grid-template-columns: 260px 1fr 300px;
+      grid-template-columns: 260px 1fr;
     }
   }
 
