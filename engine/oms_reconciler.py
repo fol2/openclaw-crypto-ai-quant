@@ -632,10 +632,6 @@ class LiveOmsReconciler:
         candidates.append(("cancel_orders", ([oid],), {}))
         candidates.append(("cancel_orders", ([{"coin": symbol, "oid": oid}],), {}))
 
-        # cancel_all_orders
-        candidates.append(("cancel_all_orders", (), {"symbol": symbol}))
-        candidates.append(("cancel_all_orders", (), {"coin": symbol}))
-
         last_err = "no_method"
 
         for name, args, kwargs in candidates:
