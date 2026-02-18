@@ -22,6 +22,7 @@ export class TradePanel extends LitElement {
 
   /* ── Internal reactive state ──────────────────────────────────────────────── */
   @state() private expanded = false;
+  @state() private tab: 'open' | 'close' = 'open';
 
   // Open form
   @state() private ordType: OrdType = 'market';
@@ -81,21 +82,21 @@ export class TradePanel extends LitElement {
       padding: 8px 12px;
       cursor: pointer;
       user-select: none;
-      background: var(--bg, #1a1a2e);
-      border-bottom: 1px solid var(--border, rgba(255,255,255,0.08));
+      background: rgba(255, 170, 0, 0.15);
+      border-bottom: 1px solid rgba(255, 170, 0, 0.3);
     }
-    .header:hover { background: var(--surface-hover, rgba(255,255,255,0.03)); }
+    .header:hover { background: rgba(255, 170, 0, 0.22); }
 
     .header-label {
       font-size: 10px;
       font-weight: 700;
       letter-spacing: 0.1em;
-      color: var(--text-muted, #8892b0);
+      color: #ffaa00;
       font-family: 'IBM Plex Mono', monospace;
     }
     .toggle {
       font-size: 10px;
-      color: var(--text-dim, #5a6a8a);
+      color: #ffaa00;
     }
 
     .warning {
@@ -108,6 +109,35 @@ export class TradePanel extends LitElement {
       color: var(--yellow, #ffd740);
       font-size: 11px;
       font-weight: 500;
+    }
+
+    .tabs {
+      display: flex;
+      border-bottom: 1px solid var(--border, rgba(255,255,255,0.08));
+    }
+    .tab {
+      flex: 1;
+      background: transparent;
+      border: none;
+      color: var(--text-muted, #8892b0);
+      padding: 7px 0;
+      font-size: 10px;
+      font-weight: 700;
+      font-family: 'IBM Plex Mono', monospace;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: all 0.15s;
+      border-bottom: 2px solid transparent;
+    }
+    .tab:hover { color: var(--text, #e0e0e0); }
+    .tab.active {
+      color: var(--accent, #00d4ff);
+      border-bottom-color: var(--accent, #00d4ff);
+    }
+    .tab.disabled {
+      opacity: 0.3;
+      cursor: not-allowed;
     }
 
     .body { padding: 10px 12px; }
@@ -606,13 +636,20 @@ export class TradePanel extends LitElement {
   }
 
   private _renderBody() {
+    const hasPos = !!this._pos;
     return html`
       ${this._isEngine ? html`
         <div class="warning">\u26A0 Live engine is running \u2014 manual trades may conflict with automated strategy</div>
       ` : nothing}
+      <div class="tabs">
+        <button class="tab ${this.tab === 'open' ? 'active' : ''}"
+          @click=${() => { this.tab = 'open'; }}>Open</button>
+        <button class="tab ${this.tab === 'close' ? 'active' : ''} ${!hasPos ? 'disabled' : ''}"
+          @click=${() => { if (hasPos) this.tab = 'close'; }}>Close${hasPos ? '' : ' (no pos)'}</button>
+      </div>
       <div class="body">
-        ${this._renderOpen()}
-        ${this._pos ? this._renderClose() : nothing}
+        ${this.tab === 'open' ? this._renderOpen() : nothing}
+        ${this.tab === 'close' && hasPos ? this._renderClose() : nothing}
         ${this._renderOrders()}
       </div>
     `;
@@ -624,8 +661,6 @@ export class TradePanel extends LitElement {
     const levNum = Number(this.lev) || 1;
     return html`
       <div class="section">
-        <div class="section-title">Open Position</div>
-
         <div class="field">
           <label>Order Type</label>
           <div class="btn-group">
@@ -703,8 +738,6 @@ export class TradePanel extends LitElement {
   private _renderClose() {
     return html`
       <div class="section">
-        <div class="section-title">Close Position</div>
-
         <div class="field">
           <label>Close</label>
           <div class="close-pct">
