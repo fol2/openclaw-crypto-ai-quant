@@ -1045,9 +1045,12 @@ class UnifiedEngine:
         bbo_age = getattr(h, "bbo_age_s", None)
 
         if mids_age is None:
-            return True, "mids_age_s is None"
+            if bool(getattr(self.market, "_sidecar_only", False)):
+                logger.debug("mids_age_s is None in sidecar-only mode; skipping mids staleness check")
+            else:
+                return True, "mids_age_s is None"
         try:
-            if float(mids_age) > self._ws_stale_mids_s:
+            if mids_age is not None and float(mids_age) > self._ws_stale_mids_s:
                 return True, f"mids_age_s={float(mids_age):.1f}s"
         except (TypeError, ValueError):
             return True, "mids_age_s not numeric"
