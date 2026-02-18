@@ -847,4 +847,31 @@ def _make_default_ws():
     return HyperliquidWS()
 
 
-hl_ws = _make_default_ws()
+_DEFAULT_WS_LOCK = threading.Lock()
+_default_ws_singleton = None
+
+
+def _get_default_ws_singleton():
+    global _default_ws_singleton
+    ws_obj = _default_ws_singleton
+    if ws_obj is not None:
+        return ws_obj
+    with _DEFAULT_WS_LOCK:
+        ws_obj = _default_ws_singleton
+        if ws_obj is None:
+            ws_obj = _make_default_ws()
+            _default_ws_singleton = ws_obj
+    return ws_obj
+
+
+class _LazyWSProxy:
+    """Lazy proxy so importing this module does not construct WS clients."""
+
+    def __getattr__(self, item):
+        return getattr(_get_default_ws_singleton(), item)
+
+    def __repr__(self) -> str:
+        return repr(_get_default_ws_singleton())
+
+
+hl_ws = _LazyWSProxy()
