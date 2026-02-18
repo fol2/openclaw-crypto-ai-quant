@@ -305,11 +305,15 @@ class HyperliquidLiveExecutor:
         except Exception:
             lev_f = 1.0
         if not math.isfinite(lev_f) or lev_f <= 0:
-            print(f"[preflight] update_leverage blocked: invalid leverage={leverage!r}")
+            logger.warning("[preflight] update_leverage blocked: invalid leverage=%r", leverage)
             return False
         lev_i = max(1, int(round(lev_f)))
         if lev_i > self._MAX_LEVERAGE:
-            print(f"[preflight] update_leverage blocked: leverage {lev_i}x exceeds max {self._MAX_LEVERAGE}x")
+            logger.warning(
+                "[preflight] update_leverage blocked: leverage %dx exceeds max %dx",
+                lev_i,
+                self._MAX_LEVERAGE,
+            )
             return False
 
         sym = str(symbol or "").strip().upper()
@@ -319,11 +323,11 @@ class HyperliquidLiveExecutor:
         try:
             res = self._exchange.update_leverage(lev_i, sym, is_cross=is_cross)
             if not _is_ok_response(res):
-                print(f"⚠️ update_leverage rejected for {sym} -> {lev_i}x: {res}")
+                logger.warning("update_leverage rejected for %s -> %dx: %s", sym, lev_i, res)
                 return False
             return True
         except Exception as e:
-            print(f"⚠️ Failed to update leverage for {sym} -> {lev_i}x: {e}")
+            logger.warning("failed to update leverage for %s -> %dx: %s", sym, lev_i, e)
             return False
 
     def market_open(
@@ -344,7 +348,7 @@ class HyperliquidLiveExecutor:
         except Exception:
             return None
         if sz_f <= 0 or not math.isfinite(sz_f):
-            print(f"[preflight] market_open blocked: invalid sz={sz!r} for {sym}")
+            logger.warning("[preflight] market_open blocked: invalid sz=%r for %s", sz, sym)
             return None
 
         try:
@@ -360,7 +364,7 @@ class HyperliquidLiveExecutor:
             except Exception:
                 px_f = None
             if px_f is not None and (px_f <= 0 or not math.isfinite(px_f)):
-                print(f"[preflight] market_open: ignoring invalid px={px!r} for {sym}")
+                logger.warning("[preflight] market_open: ignoring invalid px=%r for %s", px, sym)
                 px_f = None
 
         cloid_obj = None
@@ -388,7 +392,7 @@ class HyperliquidLiveExecutor:
                     "sz": float(sz_f),
                     "response": res,
                 }
-                print(f"⚠️ market_open rejected ({sym}, is_buy={is_buy}, sz={sz_f}): {res}")
+                logger.warning("market_open rejected (%s, is_buy=%s, sz=%s): %s", sym, is_buy, sz_f, res)
                 return None
             self.last_order_error = None
             return res
@@ -403,7 +407,7 @@ class HyperliquidLiveExecutor:
                 "sz": float(sz_f),
                 "error": repr(e),
             }
-            print(f"⚠️ market_open failed ({sym}, is_buy={is_buy}, sz={sz_f}): {e}")
+            logger.warning("market_open failed (%s, is_buy=%s, sz=%s): %s", sym, is_buy, sz_f, e)
             return None
 
     def market_close(
@@ -425,7 +429,7 @@ class HyperliquidLiveExecutor:
         except Exception:
             return None
         if sz_f <= 0 or not math.isfinite(sz_f):
-            print(f"[preflight] market_close blocked: invalid sz={sz!r} for {sym}")
+            logger.warning("[preflight] market_close blocked: invalid sz=%r for %s", sz, sym)
             return None
 
         try:
@@ -441,7 +445,7 @@ class HyperliquidLiveExecutor:
             except Exception:
                 px_f = None
             if px_f is not None and (px_f <= 0 or not math.isfinite(px_f)):
-                print(f"[preflight] market_close: ignoring invalid px={px!r} for {sym}")
+                logger.warning("[preflight] market_close: ignoring invalid px=%r for %s", px, sym)
                 px_f = None
 
         cloid_obj = None
@@ -502,7 +506,7 @@ class HyperliquidLiveExecutor:
                     "sz": float(sz_f),
                     "error": "unable to derive limit price for market_close",
                 }
-                print(f"[preflight] market_close blocked: unable to derive limit price for {sym}")
+                logger.warning("[preflight] market_close blocked: unable to derive limit price for %s", sym)
                 return None
 
             res = self._exchange.order(
@@ -523,7 +527,7 @@ class HyperliquidLiveExecutor:
                     "sz": float(sz_f),
                     "response": res,
                 }
-                print(f"⚠️ market_close rejected ({sym}, sz={sz_f}): {res}")
+                logger.warning("market_close rejected (%s, sz=%s): %s", sym, sz_f, res)
                 return None
             self.last_order_error = None
             return res
@@ -538,7 +542,7 @@ class HyperliquidLiveExecutor:
                 "sz": float(sz_f),
                 "error": repr(e),
             }
-            print(f"⚠️ market_close failed ({sym}, sz={sz_f}): {e}")
+            logger.warning("market_close failed (%s, sz=%s): %s", sym, sz_f, e)
             return None
 
     def cancel_order(self, *args, **kwargs) -> dict | None:
@@ -582,11 +586,11 @@ class HyperliquidLiveExecutor:
                 try:
                     res = self._exchange.cancel_by_cloid(sym, cloid_obj)
                     if not _is_ok_response(res):
-                        print(f"⚠️ cancel_by_cloid rejected ({sym}, cloid={cloid}): {res}")
+                        logger.warning("cancel_by_cloid rejected (%s, cloid=%s): %s", sym, cloid, res)
                         return None
                     return res
                 except Exception as e:
-                    print(f"⚠️ cancel_by_cloid failed ({sym}, cloid={cloid}): {e}")
+                    logger.warning("cancel_by_cloid failed (%s, cloid=%s): %s", sym, cloid, e)
                     return None
 
         if oid is None:
@@ -601,11 +605,11 @@ class HyperliquidLiveExecutor:
         try:
             res = self._exchange.cancel(sym, oid_i)
             if not _is_ok_response(res):
-                print(f"⚠️ cancel rejected ({sym}, oid={oid_i}): {res}")
+                logger.warning("cancel rejected (%s, oid=%s): %s", sym, oid_i, res)
                 return None
             return res
         except Exception as e:
-            print(f"⚠️ cancel failed ({sym}, oid={oid_i}): {e}")
+            logger.warning("cancel failed (%s, oid=%s): %s", sym, oid_i, e)
             return None
 
     def cancel(self, *args, **kwargs) -> dict | None:

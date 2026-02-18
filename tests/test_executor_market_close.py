@@ -113,3 +113,14 @@ def test_market_close_local_fallback_normalises_limit_px_to_wire_precision():
     assert len(fake.order_calls) == 1
     _, kwargs = fake.order_calls[0]
     assert kwargs["limit_px"] == pytest.approx(0.00012469)
+
+
+def test_market_open_preflight_invalid_size_logs_warning(caplog: pytest.LogCaptureFixture):
+    fake = _FakeExchange(slippage_result=100.0)
+    ex = _build_executor(fake)
+
+    with caplog.at_level(logging.WARNING):
+        res = ex.market_open("ETH", is_buy=True, sz=0.0, px=100.0, slippage_pct=0.01)
+
+    assert res is None
+    assert any("market_open blocked: invalid sz" in rec.message for rec in caplog.records)
