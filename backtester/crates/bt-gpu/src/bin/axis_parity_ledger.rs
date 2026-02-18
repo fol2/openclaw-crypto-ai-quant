@@ -39,6 +39,14 @@ struct Args {
     #[arg(long, default_value = "1h")]
     interval: String,
 
+    /// Optional entry candle DB path for sub-bar entry parity.
+    #[arg(long)]
+    entry_candles_db: Option<String>,
+
+    /// Optional entry interval (for example 3m, 5m). Must be provided with --entry-candles-db.
+    #[arg(long)]
+    entry_interval: Option<String>,
+
     /// Optional start timestamp (epoch milliseconds).
     #[arg(long)]
     from_ts: Option<i64>,
@@ -371,6 +379,25 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     if candles.is_empty() {
         return Err(format!("no candles loaded from {}", args.candles_db).into());
     }
+    if args.entry_candles_db.is_some() ^ args.entry_interval.is_some() {
+        return Err(
+            "--entry-candles-db and --entry-interval must be provided together"
+                .to_string()
+                .into(),
+        );
+    }
+    let entry_candles: Option<CandleData> = match (&args.entry_candles_db, &args.entry_interval) {
+        (Some(db), Some(interval)) => {
+            let entry_paths = vec![db.clone()];
+            let loaded = bt_data::sqlite_loader::load_candles_multi(&entry_paths, interval)
+                .map_err(|e| format!("failed to load entry candles from {db}: {e}"))?;
+            if loaded.is_empty() {
+                return Err(format!("no entry candles loaded from {db}").into());
+            }
+            Some(loaded)
+        }
+        _ => None,
+    };
 
     if let Some(parent) = args.output.parent() {
         fs::create_dir_all(parent)?;
@@ -411,11 +438,32 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         lookback: spec.lookback,
     };
 
-    run_gpu_single(&base_cfg, &single_spec, &candles, args.from_ts, args.to_ts)
+    run_gpu_single(
+        &base_cfg,
+        &single_spec,
+        &candles,
+        entry_candles.as_ref(),
+        args.from_ts,
+        args.to_ts,
+    )
         .map_err(|e| format!("gpu preflight failed before axis loop: {e}"))?;
 
-    let baseline_cpu = run_cpu_single(&base_cfg, &single_spec, &candles, args.from_ts, args.to_ts)?;
-    let baseline_gpu = run_gpu_single(&base_cfg, &single_spec, &candles, args.from_ts, args.to_ts)?;
+    let baseline_cpu = run_cpu_single(
+        &base_cfg,
+        &single_spec,
+        &candles,
+        entry_candles.as_ref(),
+        args.from_ts,
+        args.to_ts,
+    )?;
+    let baseline_gpu = run_gpu_single(
+        &base_cfg,
+        &single_spec,
+        &candles,
+        entry_candles.as_ref(),
+        args.from_ts,
+        args.to_ts,
+    )?;
     let baseline_trade_delta = baseline_gpu.total_trades as i64 - baseline_cpu.total_trades as i64;
     let baseline_balance_delta_abs =
         (baseline_gpu.final_balance - baseline_cpu.final_balance).abs();
@@ -439,6 +487,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             &base_cfg,
             &single_spec,
             &candles,
+            entry_candles.as_ref(),
             args.from_ts,
             args.to_ts,
             trace_symbol_idx,
@@ -448,6 +497,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             &base_cfg,
             &single_spec,
             &candles,
+            entry_candles.as_ref(),
             args.from_ts,
             args.to_ts,
             trace_symbol_name.as_deref(),
@@ -569,8 +619,22 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             let mut cfg = base_cfg.clone();
             apply_one_pub(&mut cfg, &axis.path, sample_value);
 
-            let cpu = run_cpu_single(&cfg, &single_spec, &candles, args.from_ts, args.to_ts)?;
-            let gpu = run_gpu_single(&cfg, &single_spec, &candles, args.from_ts, args.to_ts)?;
+            let cpu = run_cpu_single(
+                &cfg,
+                &single_spec,
+                &candles,
+                entry_candles.as_ref(),
+                args.from_ts,
+                args.to_ts,
+            )?;
+            let gpu = run_gpu_single(
+                &cfg,
+                &single_spec,
+                &candles,
+                entry_candles.as_ref(),
+                args.from_ts,
+                args.to_ts,
+            )?;
 
             let trade_delta = gpu.total_trades as i64 - cpu.total_trades as i64;
             let balance_delta_abs = (gpu.final_balance - cpu.final_balance).abs();
@@ -595,6 +659,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     &cfg,
                     &single_spec,
                     &candles,
+                    entry_candles.as_ref(),
                     args.from_ts,
                     args.to_ts,
                     trace_symbol_idx,
@@ -604,6 +669,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     &cfg,
                     &single_spec,
                     &candles,
+                    entry_candles.as_ref(),
                     args.from_ts,
                     args.to_ts,
                     trace_symbol_name.as_deref(),
@@ -714,10 +780,20 @@ fn run_cpu_single(
     cfg: &StrategyConfig,
     spec: &SweepSpec,
     candles: &CandleData,
+    entry_candles: Option<&CandleData>,
     from_ts: Option<i64>,
     to_ts: Option<i64>,
 ) -> Result<CompactResult, Box<dyn std::error::Error>> {
-    let rows = bt_core::sweep::run_sweep(cfg, spec, candles, None, None, None, from_ts, to_ts);
+    let rows = bt_core::sweep::run_sweep(
+        cfg,
+        spec,
+        candles,
+        entry_candles,
+        entry_candles,
+        None,
+        from_ts,
+        to_ts,
+    );
     let first = rows
         .first()
         .ok_or("cpu sweep returned no rows for single config")?;
@@ -732,6 +808,7 @@ fn run_cpu_single_with_trade_events(
     cfg: &StrategyConfig,
     spec: &SweepSpec,
     candles: &CandleData,
+    entry_candles: Option<&CandleData>,
     from_ts: Option<i64>,
     to_ts: Option<i64>,
     symbol_filter: Option<&str>,
@@ -751,8 +828,8 @@ fn run_cpu_single_with_trade_events(
         cfg,
         initial_balance: spec.initial_balance,
         lookback: spec.lookback,
-        exit_candles: None,
-        entry_candles: None,
+        exit_candles: entry_candles,
+        entry_candles,
         funding_rates: None,
         init_state: None,
         from_ts,
@@ -831,10 +908,11 @@ fn run_gpu_single(
     cfg: &StrategyConfig,
     spec: &SweepSpec,
     candles: &CandleData,
+    entry_candles: Option<&CandleData>,
     from_ts: Option<i64>,
     to_ts: Option<i64>,
 ) -> Result<CompactResult, Box<dyn std::error::Error>> {
-    let rows = run_gpu_sweep(candles, cfg, spec, None, None, from_ts, to_ts);
+    let rows = run_gpu_sweep(candles, cfg, spec, None, entry_candles, from_ts, to_ts);
     let first = rows.first().ok_or(
         "gpu sweep returned no rows for single config. \
 likely no CUDA-capable device (or driver visibility failure) in this runtime; \
@@ -851,13 +929,14 @@ fn run_gpu_single_with_trace(
     cfg: &StrategyConfig,
     spec: &SweepSpec,
     candles: &CandleData,
+    entry_candles: Option<&CandleData>,
     from_ts: Option<i64>,
     to_ts: Option<i64>,
     trace_symbol_idx: u32,
 ) -> Result<(CompactResult, GpuComboState, Vec<String>), Box<dyn std::error::Error>> {
     with_trace_env(0, trace_symbol_idx, || {
         let (rows, states, symbols) =
-            run_gpu_sweep_with_states(candles, cfg, spec, None, None, from_ts, to_ts);
+            run_gpu_sweep_with_states(candles, cfg, spec, None, entry_candles, from_ts, to_ts);
         let first = rows.first().ok_or(
             "gpu trace sweep returned no rows for single config. \
 likely no CUDA-capable device (or driver visibility failure) in this runtime; \

@@ -1598,12 +1598,59 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                         score_b.cmp(&score_a).then_with(|| a.symbol.cmp(&b.symbol))
                     });
 
+                    let debug_filter = match (
+                        std::env::var("AQC_DEBUG_ENTRY_SYMBOL"),
+                        std::env::var("AQC_DEBUG_ENTRY_TS_MS"),
+                    ) {
+                        (Ok(sym_filter), Ok(ts_filter_raw)) => {
+                            Some((sym_filter, ts_filter_raw.parse::<i64>().unwrap_or(i64::MIN)))
+                        }
+                        _ => None,
+                    };
+                    if let Some((ref sym_filter, ts_filter)) = debug_filter {
+                        if *sub_ts == ts_filter {
+                            eprintln!(
+                                "[cpu-sub-rank-debug] ts_ms={} entries_this_bar_start={} max_entries={} candidates_at_ts:",
+                                ts_filter,
+                                entries_this_bar,
+                                cfg.trade.max_entry_orders_per_loop
+                            );
+                            for (idx, cand) in sub_candidates.iter().enumerate() {
+                                let score = (cand.confidence as i32) * 100 + cand.adx as i32;
+                                eprintln!(
+                                    "[cpu-sub-rank-debug] idx={} symbol={} score={} conf={:?} adx={:.6} signal={:?}",
+                                    idx, cand.symbol, score, cand.confidence, cand.adx, cand.signal
+                                );
+                            }
+                            let _ = sym_filter;
+                        }
+                    }
+
                     for cand in &sub_candidates {
                         if entries_this_bar >= cfg.trade.max_entry_orders_per_loop {
+                            if let Some((ref sym_filter, ts_filter)) = debug_filter {
+                                if cand.ts == ts_filter || cand.symbol == *sym_filter {
+                                    eprintln!(
+                                        "[cpu-sub-rank-debug] break_on_entry_limit symbol={} ts_ms={} entries_this_bar={} max_entries={}",
+                                        cand.symbol,
+                                        cand.ts,
+                                        entries_this_bar,
+                                        cfg.trade.max_entry_orders_per_loop
+                                    );
+                                }
+                            }
                             break;
                         }
                         // Re-check: position may have been opened for this symbol by a higher-ranked candidate
                         if state.positions.contains_key(&cand.symbol) {
+                            if let Some((ref sym_filter, ts_filter)) = debug_filter {
+                                if cand.symbol == *sym_filter && cand.ts == ts_filter {
+                                    eprintln!(
+                                        "[cpu-sub-rank-debug] sym={} ts_ms={} rejected=already_open",
+                                        cand.symbol, cand.ts
+                                    );
+                                }
+                            }
                             continue;
                         }
                         let total_margin: f64 =
@@ -1616,6 +1663,21 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                             max_total_margin_pct: cfg.trade.max_total_margin_pct,
                             allow_zero_margin_headroom: false,
                         });
+                        if let Some((ref sym_filter, ts_filter)) = debug_filter {
+                            if cand.symbol == *sym_filter && cand.ts == ts_filter {
+                                eprintln!(
+                                    "[cpu-sub-rank-debug] sym={} ts_ms={} exposure_allowed={} blocked_reason={:?} equity={:.12} total_margin={:.12} headroom={:.12} max_total_margin_pct={:.12}",
+                                    cand.symbol,
+                                    cand.ts,
+                                    exposure.allowed,
+                                    exposure.blocked_reason,
+                                    sub_equity,
+                                    total_margin,
+                                    exposure.margin_headroom,
+                                    cfg.trade.max_total_margin_pct
+                                );
+                            }
+                        }
                         if !exposure.allowed {
                             if matches!(
                                 exposure.blocked_reason,
@@ -1641,6 +1703,14 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                                 gate_eval: &cand.gate_eval,
                             },
                         );
+                        if let Some((ref sym_filter, ts_filter)) = debug_filter {
+                            if cand.symbol == *sym_filter && cand.ts == ts_filter {
+                                eprintln!(
+                                    "[cpu-sub-rank-debug] sym={} ts_ms={} opened={} entries_this_bar_before_inc={}",
+                                    cand.symbol, cand.ts, opened, entries_this_bar
+                                );
+                            }
+                        }
                         if opened {
                             entries_this_bar += 1;
                         }
@@ -2539,18 +2609,73 @@ fn evaluate_sub_bar_candidate(
     let gate_result = gates::check_gates(snap, cfg, sym, btc_bullish, ema_slow_slope_pct);
     let (mut signal, confidence, entry_adx_threshold) =
         entry::generate_signal(snap, &gate_result, cfg, ema_slow_slope_pct);
+    let debug_target = match (
+        std::env::var("AQC_DEBUG_ENTRY_SYMBOL"),
+        std::env::var("AQC_DEBUG_ENTRY_TS_MS"),
+    ) {
+        (Ok(sym_filter), Ok(ts_filter_raw)) => {
+            sym == sym_filter && ts == ts_filter_raw.parse::<i64>().unwrap_or(i64::MIN)
+        }
+        _ => false,
+    };
+
+    if debug_target {
+        eprintln!(
+            "[cpu-sub-cand-debug] sym={} ts_ms={} raw_signal={:?} conf={:?} breadth={:.6} btc_bull={:?} adx={:.6} adx_slope={:.6} macd={:.10} rsi={:.6}",
+            sym,
+            ts,
+            signal,
+            confidence,
+            breadth_pct,
+            btc_bullish,
+            snap.adx,
+            snap.adx_slope,
+            snap.macd_hist,
+            snap.rsi
+        );
+    }
 
     if signal == Signal::Neutral {
+        if debug_target {
+            eprintln!(
+                "[cpu-sub-cand-debug] sym={} ts_ms={} rejected=neutral_raw breadth={:.6}",
+                sym, ts, breadth_pct
+            );
+        }
         return None;
     }
 
     let atr = apply_atr_floor(snap.atr, snap.close, cfg.trade.min_atr_pct);
     signal = apply_reverse(signal, cfg, breadth_pct);
+    if debug_target {
+        eprintln!(
+            "[cpu-sub-cand-debug] sym={} ts_ms={} after_reverse={:?} breadth={:.6}",
+            sym, ts, signal, breadth_pct
+        );
+    }
     if signal == Signal::Neutral {
+        if debug_target {
+            eprintln!(
+                "[cpu-sub-cand-debug] sym={} ts_ms={} rejected=neutral_after_reverse breadth={:.6}",
+                sym, ts, breadth_pct
+            );
+        }
         return None;
     }
     signal = apply_regime_filter(signal, cfg, breadth_pct);
+    if debug_target {
+        eprintln!(
+            "[cpu-sub-cand-debug] sym={} ts_ms={} after_regime={:?} breadth={:.6}",
+            sym, ts, signal, breadth_pct
+        );
+    }
     if signal == Signal::Neutral {
+        if debug_target {
+            eprintln!(
+                "[cpu-sub-cand-debug] sym={} ts_ms={} rejected=neutral_after_regime breadth={:.6}",
+                sym, ts, breadth_pct
+            );
+        }
         return None;
     }
 
@@ -2561,9 +2686,21 @@ fn evaluate_sub_bar_candidate(
     };
 
     if !confidence.meets_min(cfg.trade.entry_min_confidence) {
+        if debug_target {
+            eprintln!(
+                "[cpu-sub-cand-debug] sym={} ts_ms={} rejected=min_conf conf={:?} min={:?}",
+                sym, ts, confidence, cfg.trade.entry_min_confidence
+            );
+        }
         return None;
     }
     if is_pesc_blocked(state, sym, desired_type, ts, snap.adx, cfg) {
+        if debug_target {
+            eprintln!(
+                "[cpu-sub-cand-debug] sym={} ts_ms={} rejected=pesc desired={:?} adx={:.6}",
+                sym, ts, desired_type, snap.adx
+            );
+        }
         return None;
     }
     if cfg.trade.enable_ssf_filter {
@@ -2573,6 +2710,12 @@ fn evaluate_sub_bar_candidate(
             Signal::Neutral => true,
         };
         if !ssf_ok {
+            if debug_target {
+                eprintln!(
+                    "[cpu-sub-cand-debug] sym={} ts_ms={} rejected=ssf signal={:?} macd={:.10}",
+                    sym, ts, signal, snap.macd_hist
+                );
+            }
             return None;
         }
     }
@@ -2595,8 +2738,21 @@ fn evaluate_sub_bar_candidate(
             Signal::Neutral => false,
         };
         if reef_blocked {
+            if debug_target {
+                eprintln!(
+                    "[cpu-sub-cand-debug] sym={} ts_ms={} rejected=reef signal={:?} adx={:.6} rsi={:.6}",
+                    sym, ts, signal, snap.adx, snap.rsi
+                );
+            }
             return None;
         }
+    }
+
+    if debug_target {
+        eprintln!(
+            "[cpu-sub-cand-debug] sym={} ts_ms={} accepted signal={:?} conf={:?} adx={:.6} atr={:.10} entry_adx_thresh={:.6} breadth={:.6} btc_bull={:?}",
+            sym, ts, signal, confidence, snap.adx, atr, entry_adx_threshold, breadth_pct, btc_bullish
+        );
     }
 
     let gate_eval = build_gate_evaluation(&gate_result, snap, signal, confidence, cfg);
@@ -2723,6 +2879,53 @@ fn execute_sub_bar_entry(state: &mut SimState, input: ExecuteSubBarEntryInput<'_
         )
     });
     if !has_open {
+        if let (Ok(sym_filter), Ok(ts_filter_raw)) = (
+            std::env::var("AQC_DEBUG_ENTRY_SYMBOL"),
+            std::env::var("AQC_DEBUG_ENTRY_TS_MS"),
+        ) {
+            let ts_filter = ts_filter_raw.parse::<i64>().unwrap_or(i64::MIN);
+            if sym == sym_filter && ts == ts_filter {
+                let intent_kinds: Vec<String> = decision
+                    .intents
+                    .iter()
+                    .map(|intent| format!("{:?}", intent.kind))
+                    .collect();
+                let kernel_lev = state.kernel_params.leverage.max(1.0);
+                let kernel_margin_req = if kernel_lev > 0.0 {
+                    notional / kernel_lev
+                } else {
+                    0.0
+                };
+                eprintln!(
+                    "[cpu-sub-open-debug] sym={} ts_ms={} rejected=no_open_intent intents={:?} gate_blocked={} gate_reasons={:?} cooldown_blocked={} pesc_blocked={} warnings={:?} notional={:.12} lev_used={:.12} margin_used={:.12} kernel_lev={:.12} kernel_margin_req={:.12} kernel_cash={:.12}",
+                    sym,
+                    ts,
+                    intent_kinds,
+                    decision.diagnostics.gate_blocked,
+                    decision.diagnostics.gate_block_reasons,
+                    decision.diagnostics.cooldown_blocked,
+                    decision.diagnostics.pesc_blocked,
+                    decision.diagnostics.warnings,
+                    notional,
+                    leverage,
+                    margin_used,
+                    kernel_lev,
+                    kernel_margin_req,
+                    state.kernel_state.cash_usd
+                );
+                for (ksym, kpos) in &state.kernel_state.positions {
+                    eprintln!(
+                        "[cpu-kcash-debug] sym={} side={:?} qty={:.12} avg_entry={:.12} notional={:.12} margin={:.12}",
+                        ksym,
+                        kpos.side,
+                        kpos.quantity,
+                        kpos.avg_entry_price,
+                        kpos.notional_usd,
+                        kpos.margin_usd
+                    );
+                }
+            }
+        }
         return false;
     }
 

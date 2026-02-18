@@ -79,6 +79,13 @@ fn trace_env_config(combo_base: usize, num_combos: usize) -> Option<(usize, u32)
     Some((combo_idx, sym_idx))
 }
 
+fn debug_t_sec_env() -> u32 {
+    env::var("AQC_GPU_DEBUG_T_SEC")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // GpuDeviceState — persistent CUDA device (reused across batches)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -346,6 +353,7 @@ impl BatchBuffers {
         let mut states_host = vec![GpuComboState::zeroed(); configs.len()];
         for s in &mut states_host {
             s.balance = initial_balance as f64;
+            s.kernel_cash = initial_balance as f64;
             s.peak_equity = initial_balance as f64;
         }
         if let Some((combo_idx, sym_idx)) = trace_env_config(combo_base, states_host.len()) {
@@ -374,6 +382,8 @@ impl BatchBuffers {
             taker_fee_rate_bits: taker_fee_rate.to_bits(),
             max_sub_per_bar: 0,
             trade_end_bar: num_bars,
+            debug_t_sec: debug_t_sec_env(),
+            _debug_pad: [0; 3],
         };
         let params = ds
             .dev
@@ -440,6 +450,7 @@ impl BatchBuffers {
         let mut states_host = vec![GpuComboState::zeroed(); configs.len()];
         for s in &mut states_host {
             s.balance = initial_balance as f64;
+            s.kernel_cash = initial_balance as f64;
             s.peak_equity = initial_balance as f64;
         }
         if let Some((combo_idx, sym_idx)) = trace_env_config(0, states_host.len()) {
@@ -468,6 +479,8 @@ impl BatchBuffers {
             taker_fee_rate_bits: taker_fee_rate.to_bits(),
             max_sub_per_bar: 0,
             trade_end_bar: num_bars,
+            debug_t_sec: debug_t_sec_env(),
+            _debug_pad: [0; 3],
         };
         let params = ds
             .dev
@@ -578,6 +591,8 @@ pub fn dispatch_and_readback(
             taker_fee_rate_bits: buffers.taker_fee_rate.to_bits(),
             max_sub_per_bar: buffers.max_sub_per_bar,
             trade_end_bar: trade_end,
+            debug_t_sec: debug_t_sec_env(),
+            _debug_pad: [0; 3],
         };
         ds.dev
             .htod_sync_copy_into(&[params_host], &mut buffers.params)
