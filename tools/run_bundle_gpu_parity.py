@@ -16,6 +16,11 @@ from pathlib import Path
 import shlex
 import subprocess
 
+try:
+    import yaml
+except Exception:  # pragma: no cover - optional runtime dependency
+    yaml = None
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run bundle-scoped CPU/GPU smoke parity.")
@@ -51,6 +56,26 @@ def _run(cmd: list[str], *, cwd: Path, env: dict[str, str], log_path: Path) -> i
     if stderr:
         print(stderr, end="")
     return int(proc.returncode)
+
+
+def _load_config_sub_intervals(config_path: Path) -> tuple[str, str]:
+    if yaml is None or not config_path.exists():
+        return "", ""
+    try:
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return "", ""
+    if not isinstance(raw, dict):
+        return "", ""
+    g = raw.get("global") or {}
+    if not isinstance(g, dict):
+        return "", ""
+    eng = g.get("engine") or {}
+    if not isinstance(eng, dict):
+        return "", ""
+    entry = str(eng.get("entry_interval") or "").strip()
+    exit_ = str(eng.get("exit_interval") or "").strip()
+    return entry, exit_
 
 
 def main() -> int:
@@ -109,10 +134,22 @@ def main() -> int:
     sweep_spec = str(
         Path(os.environ.get("AQC_PARITY_SWEEP_SPEC") or (repo_root / "backtester" / "sweeps" / "smoke.yaml")).resolve()
     )
-    entry_interval = str(os.environ.get("AQC_PARITY_ENTRY_INTERVAL") or "").strip()
-    exit_interval = str(os.environ.get("AQC_PARITY_EXIT_INTERVAL") or "").strip()
+    cfg_entry_interval, cfg_exit_interval = _load_config_sub_intervals(Path(config_path))
+    entry_interval = str(os.environ.get("AQC_PARITY_ENTRY_INTERVAL") or cfg_entry_interval or "").strip()
+    exit_interval = str(os.environ.get("AQC_PARITY_EXIT_INTERVAL") or cfg_exit_interval or "").strip()
     entry_candles_db = str(os.environ.get("AQC_PARITY_ENTRY_CANDLES_DB") or "").strip()
     exit_candles_db = str(os.environ.get("AQC_PARITY_EXIT_CANDLES_DB") or "").strip()
+
+    if entry_candles_db and not entry_interval:
+        parser.error(
+            "AQC_PARITY_ENTRY_CANDLES_DB is set but no entry interval is configured "
+            "(set AQC_PARITY_ENTRY_INTERVAL or config global.engine.entry_interval)"
+        )
+    if exit_candles_db and not exit_interval:
+        parser.error(
+            "AQC_PARITY_EXIT_CANDLES_DB is set but no exit interval is configured "
+            "(set AQC_PARITY_EXIT_INTERVAL or config global.engine.exit_interval)"
+        )
 
     bt_dir = (repo_root / "backtester").resolve()
     if not bt_dir.exists():
@@ -155,11 +192,11 @@ def main() -> int:
         if exit_interval:
             cmd.extend(["--exit-interval", exit_interval])
         if entry_interval:
-            entry_db = str(Path(entry_candles_db).expanduser().resolve()) if entry_candles_db else str(candles_db)
-            cmd.extend(["--entry-candles-db", entry_db])
+            if entry_candles_db:
+                cmd.extend(["--entry-candles-db", str(Path(entry_candles_db).expanduser().resolve())])
         if exit_interval:
-            exit_db = str(Path(exit_candles_db).expanduser().resolve()) if exit_candles_db else str(candles_db)
-            cmd.extend(["--exit-candles-db", exit_db])
+            if exit_candles_db:
+                cmd.extend(["--exit-candles-db", str(Path(exit_candles_db).expanduser().resolve())])
         if gpu:
             cmd.append("--gpu")
         return cmd
