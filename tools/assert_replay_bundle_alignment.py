@@ -122,21 +122,30 @@ def _as_int(value: Any, default: int = 0) -> int:
         return int(default)
 
 
-def _gpu_lane_pass_map(report: dict[str, Any]) -> dict[str, bool]:
+def _gpu_lane_pass_map(report: dict[str, Any]) -> tuple[dict[str, bool], list[str]]:
     lanes = report.get("lanes")
     lane_map: dict[str, bool] = {}
+    invalid_lanes: list[str] = []
     if isinstance(lanes, dict):
         for lane_name, lane_obj in lanes.items():
             if isinstance(lane_obj, dict):
                 ranking = lane_obj.get("ranking") or {}
-                lane_map[str(lane_name)] = bool((ranking or {}).get("all_pass"))
+                raw_all_pass = (ranking or {}).get("all_pass")
+                if isinstance(raw_all_pass, bool):
+                    lane_map[str(lane_name)] = raw_all_pass
+                else:
+                    invalid_lanes.append(str(lane_name))
     elif isinstance(lanes, list):
         for idx, lane_obj in enumerate(lanes, start=1):
             if isinstance(lane_obj, dict):
                 lane_name = str(lane_obj.get("lane") or f"lane_{idx}")
                 ranking = lane_obj.get("ranking") or {}
-                lane_map[lane_name] = bool((ranking or {}).get("all_pass"))
-    return lane_map
+                raw_all_pass = (ranking or {}).get("all_pass")
+                if isinstance(raw_all_pass, bool):
+                    lane_map[lane_name] = raw_all_pass
+                else:
+                    invalid_lanes.append(lane_name)
+    return lane_map, invalid_lanes
 
 
 def main() -> int:
@@ -476,7 +485,7 @@ def main() -> int:
             )
         else:
             gpu_parity_report = loaded_gpu
-            gpu_lane_status = _gpu_lane_pass_map(gpu_parity_report)
+            gpu_lane_status, invalid_gpu_lanes = _gpu_lane_pass_map(gpu_parity_report)
             if not gpu_lane_status:
                 failures.append(
                     {
@@ -485,15 +494,36 @@ def main() -> int:
                         "detail": "GPU parity report does not contain lane ranking status",
                     }
                 )
-            elif not all(gpu_lane_status.values()):
+            elif invalid_gpu_lanes:
                 failures.append(
                     {
-                        "code": "gpu_parity_failed",
+                        "code": "invalid_gpu_parity_lane_values",
                         "classification": "deterministic_logic_divergence",
-                        "detail": "GPU parity lane ranking assertions failed",
-                        "lanes": gpu_lane_status,
+                        "detail": "GPU parity report has non-boolean ranking.all_pass values",
+                        "lanes": invalid_gpu_lanes,
                     }
                 )
+            else:
+                has_lane_a = any("lane_a" in name.lower() for name in gpu_lane_status)
+                has_lane_b = any("lane_b" in name.lower() for name in gpu_lane_status)
+                if not (has_lane_a and has_lane_b):
+                    failures.append(
+                        {
+                            "code": "invalid_gpu_parity_lane_coverage",
+                            "classification": "deterministic_logic_divergence",
+                            "detail": "GPU parity report is missing required lane_a/lane_b coverage",
+                            "lanes": gpu_lane_status,
+                        }
+                    )
+                elif not all(gpu_lane_status.values()):
+                    failures.append(
+                        {
+                            "code": "gpu_parity_failed",
+                            "classification": "deterministic_logic_divergence",
+                            "detail": "GPU parity lane ranking assertions failed",
+                            "lanes": gpu_lane_status,
+                        }
+                    )
 
     ok = len(failures) == 0
 

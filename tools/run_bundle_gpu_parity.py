@@ -109,6 +109,10 @@ def main() -> int:
     sweep_spec = str(
         Path(os.environ.get("AQC_PARITY_SWEEP_SPEC") or (repo_root / "backtester" / "sweeps" / "smoke.yaml")).resolve()
     )
+    entry_interval = str(os.environ.get("AQC_PARITY_ENTRY_INTERVAL") or "3m").strip()
+    exit_interval = str(os.environ.get("AQC_PARITY_EXIT_INTERVAL") or "3m").strip()
+    entry_candles_db = str(os.environ.get("AQC_PARITY_ENTRY_CANDLES_DB") or "").strip()
+    exit_candles_db = str(os.environ.get("AQC_PARITY_EXIT_CANDLES_DB") or "").strip()
 
     bt_dir = (repo_root / "backtester").resolve()
     if not bt_dir.exists():
@@ -146,6 +150,14 @@ def main() -> int:
             "--end-ts",
             str(to_ts),
         ]
+        if entry_interval:
+            cmd.extend(["--entry-interval", entry_interval])
+        if exit_interval:
+            cmd.extend(["--exit-interval", exit_interval])
+        if entry_candles_db:
+            cmd.extend(["--entry-candles-db", str(Path(entry_candles_db).expanduser().resolve())])
+        if exit_candles_db:
+            cmd.extend(["--exit-candles-db", str(Path(exit_candles_db).expanduser().resolve())])
         if gpu:
             cmd.append("--gpu")
         return cmd
