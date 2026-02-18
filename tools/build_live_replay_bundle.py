@@ -215,7 +215,7 @@ def main() -> int:
         "if [ -x \"./target/release/mei-backtester\" ]; then\n"
         "  BACKTESTER_REPLAY_CMD='./target/release/mei-backtester replay'\n"
         "else\n"
-        "  BACKTESTER_REPLAY_CMD='cargo run -q --package bt-cli --features gpu -- replay'\n"
+        "  BACKTESTER_REPLAY_CMD='cargo run -q --release --package bt-cli -- replay'\n"
         "fi\n"
         f"$BACKTESTER_REPLAY_CMD --candles-db \"$CANDLES_DB\" "
         f"--interval {shlex.quote(str(args.interval))} --from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
