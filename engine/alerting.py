@@ -232,7 +232,11 @@ def _ensure_worker_started() -> None:
     global _ALERT_WORKER_STARTED, _ALERT_WORKER_THREAD, _ALERT_ATEXIT_REGISTERED
     with _ALERT_QUEUE_LOCK:
         if _ALERT_WORKER_STARTED:
-            return
+            if _ALERT_WORKER_THREAD is not None and _ALERT_WORKER_THREAD.is_alive():
+                return
+            # Recover from stale state where flags were left as started but the thread exited.
+            _ALERT_WORKER_STARTED = False
+            _ALERT_WORKER_THREAD = None
         if not _ALERT_ATEXIT_REGISTERED:
             try:
                 atexit.register(_shutdown_alert_worker)

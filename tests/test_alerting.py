@@ -93,3 +93,23 @@ def test_shutdown_alert_worker_keeps_started_state_when_stop_not_enqueued(monkey
 
     assert alerting._ALERT_WORKER_STARTED is True
     assert alerting._ALERT_WORKER_THREAD is fake_thread
+
+
+def test_ensure_worker_started_recovers_from_stale_dead_worker_state(monkeypatch):
+    class _DeadThread:
+        def is_alive(self) -> bool:
+            return False
+
+    monkeypatch.setattr(alerting, "_ALERT_QUEUE", queue.Queue(maxsize=10))
+    monkeypatch.setattr(alerting, "_ALERT_WORKER_STARTED", True)
+    monkeypatch.setattr(alerting, "_ALERT_WORKER_THREAD", _DeadThread())
+    monkeypatch.setattr(alerting, "_ALERT_ATEXIT_REGISTERED", False)
+    monkeypatch.setattr(alerting.atexit, "register", lambda fn: None)
+    monkeypatch.setattr(alerting, "_send_one_sync", lambda **_kwargs: None)
+
+    alerting._ensure_worker_started()
+    assert alerting._ALERT_WORKER_STARTED is True
+    assert alerting._ALERT_WORKER_THREAD is not None
+    assert alerting._ALERT_WORKER_THREAD.is_alive()
+
+    alerting._shutdown_alert_worker(drain_timeout_s=0.2)
