@@ -13,15 +13,19 @@
 
   let prevMids: Record<string, number> = {};
   let flashTimer: any = null;
-  let flashMap: Record<string, 'up' | 'down'> = $state({});
+  type FlashState = 'up-a' | 'up-b' | 'down-a' | 'down-b';
+  let flashMap: Record<string, FlashState> = $state({});
 
   function detectFlashes(newSyms: { symbol: string; mid: number | null }[]) {
-    const next: Record<string, 'up' | 'down'> = {};
+    const next: Record<string, FlashState> = {};
     for (const s of newSyms) {
       if (s.mid != null) {
         const prev = prevMids[s.symbol];
         if (prev !== undefined && s.mid !== prev) {
-          next[s.symbol] = s.mid > prev ? 'up' : 'down';
+          const dir = s.mid > prev ? 'up' : 'down';
+          const prevState = flashMap[s.symbol];
+          const phase = prevState?.endsWith('-a') ? 'b' : 'a';
+          next[s.symbol] = `${dir}-${phase}` as FlashState;
         }
         prevMids[s.symbol] = s.mid;
       }
@@ -276,8 +280,10 @@
             >
               <td class="sym-name">{s.symbol}</td>
               <td class="num col-mid"
-                class:flash-up={flashMap[s.symbol] === 'up'}
-                class:flash-down={flashMap[s.symbol] === 'down'}
+                class:flash-up-a={flashMap[s.symbol] === 'up-a'}
+                class:flash-up-b={flashMap[s.symbol] === 'up-b'}
+                class:flash-down-a={flashMap[s.symbol] === 'down-a'}
+                class:flash-down-b={flashMap[s.symbol] === 'down-b'}
               >{s.mid != null ? fmtNum(s.mid, 6) : '\u2014'}</td>
               <td>
                 {#if s.last_signal?.signal === 'BUY'}
@@ -317,7 +323,13 @@
         <div class="focus-sym">
           <h3>{focusSym}</h3>
           {#each symbols.filter((s: any) => s.symbol === focusSym).slice(0, 1) as sym}
-            <span class="mid-price" class:flash-up={flashMap[focusSym] === 'up'} class:flash-down={flashMap[focusSym] === 'down'}>{sym.mid != null ? fmtNum(sym.mid, 6) : '\u2014'}</span>
+            <span
+              class="mid-price"
+              class:flash-up-a={flashMap[focusSym] === 'up-a'}
+              class:flash-up-b={flashMap[focusSym] === 'up-b'}
+              class:flash-down-a={flashMap[focusSym] === 'down-a'}
+              class:flash-down-b={flashMap[focusSym] === 'down-b'}
+            >{sym.mid != null ? fmtNum(sym.mid, 6) : '\u2014'}</span>
           {/each}
         </div>
         <button class="close-focus" aria-label="Close" onclick={() => { focusSym = ''; mobileTab = 'symbols'; }}>
@@ -741,10 +753,10 @@
     60%  { color: var(--red); }
     100% { color: var(--accent); }
   }
-  .flash-up   { animation: flashUp   1s ease-out forwards; }
-  .flash-down { animation: flashDown 1s ease-out forwards; }
-  .mid-price.flash-up   { animation: flashUpAccent   1s ease-out forwards; }
-  .mid-price.flash-down { animation: flashDownAccent 1s ease-out forwards; }
+  .flash-up-a, .flash-up-b { animation: flashUp 1s ease-out forwards; }
+  .flash-down-a, .flash-down-b { animation: flashDown 1s ease-out forwards; }
+  .mid-price.flash-up-a, .mid-price.flash-up-b { animation: flashUpAccent 1s ease-out forwards; }
+  .mid-price.flash-down-a, .mid-price.flash-down-b { animation: flashDownAccent 1s ease-out forwards; }
 
   .sym-name {
     font-weight: 600;
