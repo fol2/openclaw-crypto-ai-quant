@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { appState } from '../lib/stores';
+  import { appState } from '../lib/stores.svelte';
   import { getSnapshot, getCandles, getMarks } from '../lib/api';
   import { hubWs } from '../lib/ws';
 
