@@ -11,6 +11,28 @@
   let error = $state('');
   let mobileTab: 'symbols' | 'detail' | 'feed' = $state('symbols');
 
+  let prevMids: Record<string, number> = {};
+  let flashTimer: any = null;
+  let flashMap: Record<string, 'up' | 'down'> = $state({});
+
+  function detectFlashes(newSyms: any[]) {
+    const next: Record<string, 'up' | 'down'> = {};
+    for (const s of newSyms) {
+      if (s.mid != null) {
+        const prev = prevMids[s.symbol];
+        if (prev !== undefined && s.mid !== prev) {
+          next[s.symbol] = s.mid > prev ? 'up' : 'down';
+        }
+        prevMids[s.symbol] = s.mid;
+      }
+    }
+    if (Object.keys(next).length > 0) {
+      clearTimeout(flashTimer);
+      flashMap = next;
+      flashTimer = setTimeout(() => { flashMap = {}; }, 700);
+    }
+  }
+
   function fmtNum(v: number | null | undefined, dp = 2): string {
     if (v === null || v === undefined || !Number.isFinite(v)) return '\u2014';
     return v.toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp });
@@ -30,6 +52,7 @@
     try {
       appState.loading = true;
       const data = await getSnapshot(appState.mode);
+      detectFlashes(data?.symbols || []);
       snap = data;
       appState.snapshot = data;
       error = '';
@@ -197,8 +220,13 @@
               class:row-short={s.position?.type === 'SHORT'}
               onclick={() => setFocus(s.symbol)}
             >
-              <td class="sym-name">{s.symbol}</td>
-              <td class="num hide-xs">{s.mid != null ? fmtNum(s.mid, 6) : '\u2014'}</td>
+              <td class="sym-name">
+                {s.symbol}
+                <span class="sym-price" class:flash-up={flashMap[s.symbol] === 'up'} class:flash-down={flashMap[s.symbol] === 'down'}>
+                  {s.mid != null ? fmtNum(s.mid, 6) : '\u2014'}
+                </span>
+              </td>
+              <td class="num hide-xs" class:flash-up={flashMap[s.symbol] === 'up'} class:flash-down={flashMap[s.symbol] === 'down'}>{s.mid != null ? fmtNum(s.mid, 6) : '\u2014'}</td>
               <td>
                 {#if s.last_signal?.signal === 'BUY'}
                   <span class="sig-badge buy">BUY</span>
@@ -231,7 +259,7 @@
         <div class="focus-sym">
           <h3>{focusSym}</h3>
           {#each symbols.filter((s: any) => s.symbol === focusSym).slice(0, 1) as sym}
-            <span class="mid-price">{sym.mid != null ? fmtNum(sym.mid, 6) : '\u2014'}</span>
+            <span class="mid-price" class:flash-up={flashMap[focusSym] === 'up'} class:flash-down={flashMap[focusSym] === 'down'}>{sym.mid != null ? fmtNum(sym.mid, 6) : '\u2014'}</span>
           {/each}
         </div>
         <button class="close-focus" aria-label="Close" onclick={() => { focusSym = ''; mobileTab = 'symbols'; }}>
@@ -632,11 +660,32 @@
     border-left: 2px solid var(--red);
   }
 
+  /* ─── Price flash ─── */
+  @keyframes flashUp {
+    0%   { color: var(--green); }
+    100% { color: inherit; }
+  }
+  @keyframes flashDown {
+    0%   { color: var(--red); }
+    100% { color: inherit; }
+  }
+  .flash-up   { animation: flashUp   0.7s ease-out forwards; }
+  .flash-down { animation: flashDown 0.7s ease-out forwards; }
+
+  /* flash on mid-price in detail header */
+  .mid-price.flash-up   { animation: flashUp   0.7s ease-out forwards; }
+  .mid-price.flash-down { animation: flashDown 0.7s ease-out forwards; }
+
   .sym-name {
     font-weight: 600;
     font-family: 'IBM Plex Mono', monospace;
     font-size: 11px;
     letter-spacing: 0.02em;
+  }
+
+  /* mobile price shown under symbol name */
+  .sym-price {
+    display: none;
   }
   .num {
     font-variant-numeric: tabular-nums;
@@ -887,6 +936,15 @@
 
     .hide-xs {
       display: none;
+    }
+
+    .sym-price {
+      display: block;
+      font-size: 10px;
+      font-family: 'IBM Plex Mono', monospace;
+      color: var(--text-muted);
+      font-weight: 400;
+      margin-top: 1px;
     }
 
     .sym-table td {
