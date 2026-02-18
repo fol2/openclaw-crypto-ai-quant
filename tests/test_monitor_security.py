@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import sys
+import types
 
 import pytest
 
@@ -136,3 +138,69 @@ def test_log_message_forwards_5xx_status(monkeypatch) -> None:
     handler.log_message('"%s" %s %s', "POST /api/v2/decisions/replay HTTP/1.1", "503", "57")
     assert len(calls) == 1
     assert calls[0][1][1] == "503"
+
+
+def test_fetch_hl_balance_success_payload_does_not_expose_main_address(monkeypatch) -> None:
+    monkeypatch.setenv("AIQ_MONITOR_HL_BALANCE_ENABLE", "1")
+    monkeypatch.setattr(monitor_server, "_HL_BAL_CACHE", None)
+    monkeypatch.setattr(monitor_server, "_HL_ADDR_CACHE", None)
+    monkeypatch.setattr(monitor_server, "_infer_hl_main_address", lambda: "0x" + ("1" * 40))
+
+    info_mod = types.ModuleType("hyperliquid.info")
+    constants_mod = types.ModuleType("hyperliquid.utils.constants")
+    utils_mod = types.ModuleType("hyperliquid.utils")
+    constants_mod.MAINNET_API_URL = "https://example.invalid"
+    utils_mod.constants = constants_mod
+
+    class _FakeInfo:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003, ARG002
+            pass
+
+        def user_state(self, main_address: str) -> dict[str, object]:
+            assert main_address.startswith("0x")
+            return {
+                "marginSummary": {"accountValue": 100.0, "totalMarginUsed": 40.0},
+                "withdrawable": 60.0,
+            }
+
+    info_mod.Info = _FakeInfo
+    monkeypatch.setitem(sys.modules, "hyperliquid.info", info_mod)
+    monkeypatch.setitem(sys.modules, "hyperliquid.utils.constants", constants_mod)
+    monkeypatch.setitem(sys.modules, "hyperliquid.utils", utils_mod)
+
+    out = monitor_server.fetch_hl_balance()
+
+    assert out is not None
+    assert out["ok"] is True
+    assert "main_address" not in out
+
+
+def test_fetch_hl_balance_error_payload_does_not_expose_main_address(monkeypatch) -> None:
+    monkeypatch.setenv("AIQ_MONITOR_HL_BALANCE_ENABLE", "1")
+    monkeypatch.setattr(monitor_server, "_HL_BAL_CACHE", None)
+    monkeypatch.setattr(monitor_server, "_HL_ADDR_CACHE", None)
+    monkeypatch.setattr(monitor_server, "_infer_hl_main_address", lambda: "0x" + ("2" * 40))
+
+    info_mod = types.ModuleType("hyperliquid.info")
+    constants_mod = types.ModuleType("hyperliquid.utils.constants")
+    utils_mod = types.ModuleType("hyperliquid.utils")
+    constants_mod.MAINNET_API_URL = "https://example.invalid"
+    utils_mod.constants = constants_mod
+
+    class _BoomInfo:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003, ARG002
+            pass
+
+        def user_state(self, main_address: str) -> dict[str, object]:  # noqa: ARG002
+            raise RuntimeError("boom")
+
+    info_mod.Info = _BoomInfo
+    monkeypatch.setitem(sys.modules, "hyperliquid.info", info_mod)
+    monkeypatch.setitem(sys.modules, "hyperliquid.utils.constants", constants_mod)
+    monkeypatch.setitem(sys.modules, "hyperliquid.utils", utils_mod)
+
+    out = monitor_server.fetch_hl_balance()
+
+    assert out is not None
+    assert out["ok"] is False
+    assert "main_address" not in out
