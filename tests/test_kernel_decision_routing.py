@@ -566,7 +566,7 @@ def test_rust_binding_provider_converts_kernel_intents(monkeypatch, tmp_path) ->
     assert decisions[0].action == "OPEN"
     assert decisions[0].symbol == "ETH"
     assert decisions[0].target_size == 0.25
-    assert decisions[0].confidence == "N/A"
+    assert decisions[0].confidence == "medium"
 
 
 @pytest.mark.parametrize(
