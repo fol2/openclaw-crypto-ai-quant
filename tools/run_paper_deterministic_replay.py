@@ -166,6 +166,9 @@ def main() -> int:
         ]
         if args.strict_no_residuals:
             gate_cmd.append("--strict-no-residuals")
+        candles_db_for_gate = str(env.get("CANDLES_DB") or "").strip()
+        if candles_db_for_gate:
+            gate_cmd.extend(["--candles-db", candles_db_for_gate])
 
         gate_result = _run_step(
             step_name="alignment_gate",
