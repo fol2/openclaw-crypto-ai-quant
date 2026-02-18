@@ -46,6 +46,11 @@ try:
 except ImportError:  # pragma: no cover
     from interval_orchestrator import orchestrate_interval_restart  # type: ignore[no-redef]
 
+try:
+    from tools.replay_gate_blocker import ReplayGateViolation, assert_replay_gate_green
+except ImportError:  # pragma: no cover
+    from replay_gate_blocker import ReplayGateViolation, assert_replay_gate_green  # type: ignore[no-redef]
+
 
 AIQ_ROOT = Path(__file__).resolve().parent.parent
 
@@ -404,10 +409,40 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Force skip state mirroring even if AI_QUANT_MIRROR_LIVE_ON_PROMOTE is true.",
     )
+    ap.add_argument(
+        "--replay-gate-blocker-file",
+        default="",
+        help="Optional replay-gate blocker JSON path override.",
+    )
+    ap.add_argument(
+        "--max-replay-gate-age-minutes",
+        type=float,
+        default=float(os.getenv("AI_QUANT_REPLAY_GATE_MAX_AGE_MINUTES", "360") or 360.0),
+        help="Maximum allowed blocker age in minutes (default: 360; <=0 disables staleness check).",
+    )
+    ap.add_argument(
+        "--ignore-replay-gate",
+        action="store_true",
+        help="Bypass replay-gate release-blocker checks (not recommended).",
+    )
     args = ap.parse_args(argv)
 
     out_dir = Path(args.out_dir).expanduser().resolve() if str(args.out_dir).strip() else None
     pause_file = Path(args.pause_file).expanduser().resolve() if str(args.pause_file).strip() else None
+    if (not bool(args.dry_run)) and (not bool(args.ignore_replay_gate)):
+        blocker_override = (
+            Path(str(args.replay_gate_blocker_file)).expanduser().resolve()
+            if str(args.replay_gate_blocker_file or "").strip()
+            else None
+        )
+        try:
+            assert_replay_gate_green(
+                blocker_path=blocker_override,
+                max_age_minutes=float(args.max_replay_gate_age_minutes),
+            )
+        except ReplayGateViolation as exc:
+            detail = "; ".join(list(getattr(exc, "reasons", []) or [])) or str(exc)
+            raise SystemExit(f"Replay gate blocked paper deployment: {detail}")
     try:
         deploy_paper_config(
             config_id=str(args.config_id),
