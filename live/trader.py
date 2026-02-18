@@ -369,6 +369,11 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         """Override PaperTrader's kernel-backed balance with exchange withdrawable USD."""
         return self._live_balance_usd
 
+    @balance.setter
+    def balance(self, value: float) -> None:
+        # Keep PaperTrader-facing balance assignment compatible for tests/tools.
+        self._live_balance_usd = _safe_float(value, default=self._live_balance_usd)
+
     def _pending_open_ttl_s(self) -> float:
         try:
             return float(os.getenv("AI_QUANT_LIVE_PENDING_OPEN_TTL_S", "120"))
