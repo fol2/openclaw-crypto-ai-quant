@@ -30,6 +30,10 @@ struct Config {
     enable_meta: bool,
     enable_candle_ws: bool,
     enable_bbo: bool,
+    // Optional: drive mids sequence and values from BBO mid ticks for lower latency UI updates.
+    mids_from_bbo: bool,
+    // In BBO-driven mode, fall back to allMids for a symbol when BBO is older than this threshold.
+    mids_from_bbo_fallback_age_s: f64,
     // Optional BBO snapshot storage for slippage modelling.
     bbo_snapshots_enable: bool,
     bbo_snapshots_db_path: String,
@@ -100,6 +104,16 @@ fn env_usize(key: &str, default: usize) -> usize {
     match env::var(key)
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
+    {
+        Some(v) => v,
+        None => default,
+    }
+}
+
+fn env_f64(key: &str, default: f64) -> f64 {
+    match env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
     {
         Some(v) => v,
         None => default,
@@ -207,6 +221,9 @@ fn load_config() -> Config {
     let enable_meta = env_bool("AI_QUANT_WS_ENABLE_META", true);
     let enable_candle_ws = env_bool("AI_QUANT_WS_ENABLE_CANDLE", true);
     let enable_bbo = env_bool("AI_QUANT_WS_ENABLE_BBO", true);
+    let mids_from_bbo = env_bool("AI_QUANT_MIDS_FROM_BBO", false);
+    let mids_from_bbo_fallback_age_s =
+        env_f64("AI_QUANT_MIDS_FROM_BBO_FALLBACK_AGE_S", 5.0).max(0.1);
 
     let bbo_snapshots_enable = env_bool("AI_QUANT_BBO_SNAPSHOTS_ENABLE", false);
     let default_bbo_snapshots_db_path =
@@ -291,6 +308,8 @@ fn load_config() -> Config {
         enable_meta,
         enable_candle_ws,
         enable_bbo,
+        mids_from_bbo,
+        mids_from_bbo_fallback_age_s,
         bbo_snapshots_enable,
         bbo_snapshots_db_path,
         bbo_snapshots_sample_ms,
@@ -887,6 +906,78 @@ mod tests {
     }
 
     #[test]
+    fn apply_all_mids_snapshot_bumps_seq_only_on_value_change() {
+        let now = Instant::now();
+        let mut st = State::default();
+        let mut mids = serde_json::Map::new();
+        mids.insert("BTC".to_string(), json!("100.0"));
+
+        assert!(apply_all_mids_snapshot(&mut st, &mids, now, false, 5.0));
+        assert_eq!(st.mids.get("BTC").copied(), Some(100.0));
+        assert_eq!(st.mids_seq, 1);
+
+        assert!(!apply_all_mids_snapshot(
+            &mut st,
+            &mids,
+            now + Duration::from_secs(1),
+            false,
+            5.0
+        ));
+        assert_eq!(st.mids_seq, 1);
+    }
+
+    #[test]
+    fn apply_all_mids_snapshot_prefers_fresh_bbo_when_bbo_mode_enabled() {
+        let now = Instant::now();
+        let mut st = State::default();
+        st.bbo.insert("BTC".to_string(), (99.0, 101.0));
+        st.bbo_updated_at.insert("BTC".to_string(), now);
+
+        let mut mids = serde_json::Map::new();
+        mids.insert("BTC".to_string(), json!("123.0"));
+
+        assert!(!apply_all_mids_snapshot(&mut st, &mids, now, true, 5.0));
+        assert_eq!(st.mids.get("BTC"), None);
+        assert_eq!(st.mids_seq, 0);
+
+        let later = now + Duration::from_secs(6);
+        assert!(apply_all_mids_snapshot(&mut st, &mids, later, true, 5.0));
+        assert_eq!(st.mids.get("BTC").copied(), Some(123.0));
+        assert_eq!(st.mids_seq, 1);
+    }
+
+    #[test]
+    fn apply_bbo_mid_tick_updates_seq_when_enabled_and_mid_changes() {
+        let now = Instant::now();
+        let mut st = State::default();
+        st.mids.insert("BTC".to_string(), 100.0);
+
+        assert!(!apply_bbo_mid_tick(&mut st, "BTC", 99.0, 101.0, now, true));
+        assert_eq!(st.mids_seq, 0);
+
+        assert!(apply_bbo_mid_tick(
+            &mut st,
+            "BTC",
+            100.0,
+            102.0,
+            now + Duration::from_millis(10),
+            true
+        ));
+        assert_eq!(st.mids.get("BTC").copied(), Some(101.0));
+        assert_eq!(st.mids_seq, 1);
+
+        assert!(!apply_bbo_mid_tick(
+            &mut st,
+            "BTC",
+            100.0,
+            102.0,
+            now + Duration::from_millis(20),
+            false
+        ));
+        assert_eq!(st.mids_seq, 1);
+    }
+
+    #[test]
     fn sweep_bbo_snapshots_db_deletes_old_rows() {
         let conn = Connection::open_in_memory().unwrap();
         ensure_bbo_snapshots_db(&conn).unwrap();
@@ -1255,6 +1346,72 @@ fn parse_i64(v: &Value) -> Option<i64> {
         return s.parse::<i64>().ok();
     }
     None
+}
+
+fn valid_price(px: f64) -> bool {
+    px.is_finite() && px > 0.0
+}
+
+fn apply_all_mids_snapshot(
+    st: &mut State,
+    mids: &serde_json::Map<String, Value>,
+    now: Instant,
+    mids_from_bbo: bool,
+    mids_from_bbo_fallback_age_s: f64,
+) -> bool {
+    let mut changed = false;
+    for (sym, mid_val) in mids.iter() {
+        let sym_u = sym.to_ascii_uppercase();
+        if mids_from_bbo {
+            if let Some(ts) = st.bbo_updated_at.get(&sym_u) {
+                let bbo_age_s = now.duration_since(*ts).as_secs_f64();
+                if bbo_age_s <= mids_from_bbo_fallback_age_s {
+                    // Fresh BBO takes precedence in BBO-driven mode.
+                    continue;
+                }
+            }
+        }
+        let Some(px) = parse_f64(mid_val) else {
+            continue;
+        };
+        if !valid_price(px) {
+            continue;
+        }
+        if st.mids.get(&sym_u).copied() != Some(px) {
+            st.mids.insert(sym_u, px);
+            changed = true;
+        }
+    }
+    if changed {
+        st.mids_updated_at = Some(now);
+        st.mids_seq = st.mids_seq.wrapping_add(1);
+    }
+    changed
+}
+
+fn apply_bbo_mid_tick(
+    st: &mut State,
+    symbol: &str,
+    bid: f64,
+    ask: f64,
+    now: Instant,
+    mids_from_bbo: bool,
+) -> bool {
+    if !mids_from_bbo || !valid_price(bid) || !valid_price(ask) {
+        return false;
+    }
+    let mid = (bid + ask) / 2.0;
+    if !valid_price(mid) {
+        return false;
+    }
+    let sym_u = symbol.to_ascii_uppercase();
+    if st.mids.get(&sym_u).copied() == Some(mid) {
+        return false;
+    }
+    st.mids.insert(sym_u, mid);
+    st.mids_updated_at = Some(now);
+    st.mids_seq = st.mids_seq.wrapping_add(1);
+    true
 }
 
 fn horizon_ms_for_interval(cfg: &Config, interval: &str) -> i64 {
@@ -2141,14 +2298,16 @@ async fn handle_ws_message(
                 .and_then(|m| m.as_object())
                 .ok_or_else(|| anyhow!("bad allMids"))?;
             let mut st = state.write().await;
-            for (sym, mid_val) in mids.iter() {
-                if let Some(px) = parse_f64(mid_val) {
-                    st.mids.insert(sym.to_ascii_uppercase(), px);
-                }
+            let changed = apply_all_mids_snapshot(
+                &mut st,
+                mids,
+                now,
+                cfg.mids_from_bbo,
+                cfg.mids_from_bbo_fallback_age_s,
+            );
+            if changed {
+                mids_notify.notify_waiters();
             }
-            st.mids_updated_at = Some(now);
-            st.mids_seq = st.mids_seq.wrapping_add(1);
-            mids_notify.notify_waiters();
         }
         "bbo" => {
             if !cfg.enable_bbo {
@@ -2180,7 +2339,12 @@ async fn handle_ws_message(
                 }
                 let mut st = state.write().await;
                 st.bbo.insert(sym.clone(), (bid, ask));
-                st.bbo_updated_at.insert(sym, now);
+                st.bbo_updated_at.insert(sym.clone(), now);
+                let mids_changed =
+                    apply_bbo_mid_tick(&mut st, &sym, bid, ask, now, cfg.mids_from_bbo);
+                if mids_changed {
+                    mids_notify.notify_waiters();
+                }
             }
         }
         "candle" => {
@@ -3317,6 +3481,16 @@ async fn main() -> Result<()> {
             intervals.join(",")
         );
     }
+
+    println!(
+        "ws-sidecar mids source: mode={} bbo_fallback_age_s={:.1}",
+        if cfg.mids_from_bbo {
+            "bbo_mid"
+        } else {
+            "allMids"
+        },
+        cfg.mids_from_bbo_fallback_age_s
+    );
 
     if cfg.bbo_snapshots_enable {
         println!(
