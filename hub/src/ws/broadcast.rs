@@ -36,11 +36,14 @@ impl BroadcastHub {
         entry.subscribe()
     }
 
-    /// Publish a message to a topic.  No-op if no one is subscribed.
-    pub fn publish(&self, topic: &str, message: String) {
+    /// Publish a message to a topic and return receiver count.
+    /// Returns 0 when no client is subscribed to that topic.
+    pub fn publish(&self, topic: &str, message: String) -> usize {
         let channels = self.channels.read().unwrap();
         if let Some(tx) = channels.get(topic) {
-            let _ = tx.send(message);
+            tx.send(message).unwrap_or(0)
+        } else {
+            0
         }
     }
 }

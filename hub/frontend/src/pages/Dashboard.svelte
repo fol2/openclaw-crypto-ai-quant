@@ -1,6 +1,6 @@
 <script lang="ts">
   import { appState } from '../lib/stores.svelte';
-  import { getSnapshot, getCandles, getMarks } from '../lib/api';
+  import { getSnapshot, getCandles, getMarks, postFlashDebug } from '../lib/api';
   import { hubWs } from '../lib/ws';
 
   let snap: any = $state(null);
@@ -10,6 +10,93 @@
   let pollTimer: any = null;
   let error = $state('');
   let mobileTab: 'symbols' | 'detail' | 'feed' = $state('symbols');
+  type FlashDebugEvent = {
+    symbol: string;
+    prev: number;
+    mid: number;
+    direction: 'up' | 'down';
+    phase: 'a' | 'b';
+    source: 'table' | 'detail';
+    tone: 'table' | 'accent';
+    at_ms: number;
+  };
+
+  const flashDebugEnabled = resolveFlashDebugEnabled();
+  let flashDebugQueue: FlashDebugEvent[] = [];
+  let flashDebugTimer: any = null;
+  const flashDebugFlushMs = 250;
+  const flashDebugBatchMax = 300;
+
+  function resolveFlashDebugEnabled(): boolean {
+    if (typeof window === 'undefined') return false;
+    try {
+      const query = new URLSearchParams(window.location.search).get('flash_debug')?.toLowerCase();
+      if (query === '1' || query === 'true') {
+        window.localStorage.setItem('aiq_flash_debug', '1');
+        return true;
+      }
+      if (query === '0' || query === 'false') {
+        window.localStorage.removeItem('aiq_flash_debug');
+        return false;
+      }
+      return window.localStorage.getItem('aiq_flash_debug') === '1';
+    } catch {
+      return false;
+    }
+  }
+
+  function scheduleFlashDebugFlush() {
+    if (flashDebugTimer != null) return;
+    flashDebugTimer = setTimeout(() => {
+      flashDebugTimer = null;
+      void flushFlashDebug();
+    }, flashDebugFlushMs);
+  }
+
+  function onMidFlashTrigger(event: CustomEvent<any>, source: 'table' | 'detail') {
+    if (!flashDebugEnabled) return;
+    const detail = event?.detail;
+    if (!detail || typeof detail.symbol !== 'string' || detail.symbol.length === 0) return;
+    if (!Number.isFinite(detail.prev) || !Number.isFinite(detail.mid)) return;
+    if (detail.direction !== 'up' && detail.direction !== 'down') return;
+    if (detail.phase !== 'a' && detail.phase !== 'b') return;
+    if (detail.tone !== 'table' && detail.tone !== 'accent') return;
+
+    flashDebugQueue.push({
+      symbol: detail.symbol,
+      prev: detail.prev,
+      mid: detail.mid,
+      direction: detail.direction,
+      phase: detail.phase,
+      source,
+      tone: detail.tone,
+      at_ms: Number.isFinite(detail.at_ms) ? detail.at_ms : Date.now(),
+    });
+
+    if (flashDebugQueue.length >= flashDebugBatchMax) {
+      if (flashDebugTimer != null) {
+        clearTimeout(flashDebugTimer);
+        flashDebugTimer = null;
+      }
+      void flushFlashDebug();
+      return;
+    }
+    scheduleFlashDebugFlush();
+  }
+
+  async function flushFlashDebug() {
+    if (!flashDebugEnabled || flashDebugQueue.length === 0) return;
+    const batch = flashDebugQueue.splice(0, flashDebugBatchMax);
+    try {
+      await postFlashDebug(batch);
+    } catch {
+      // Keep the debug pipeline best-effort and avoid affecting UI flow.
+      flashDebugQueue = batch.concat(flashDebugQueue).slice(0, 2000);
+    }
+    if (flashDebugQueue.length > 0) {
+      scheduleFlashDebugFlush();
+    }
+  }
 
   function pnlPct(pos: any): number | null {
     if (!pos || pos.entry_price == null || !pos.size || pos.unreal_pnl_est == null) return null;
@@ -91,6 +178,11 @@
     hubWs.connect();
     return () => {
       clearInterval(pollTimer);
+      if (flashDebugTimer != null) {
+        clearTimeout(flashDebugTimer);
+        flashDebugTimer = null;
+      }
+      void flushFlashDebug();
     };
   });
 
@@ -243,8 +335,10 @@
               <td class="sym-name">{s.symbol}</td>
               <td class="num col-mid">
                 <mid-price
+                  symbol={s.symbol}
                   value={s.mid != null ? String(s.mid) : ''}
                   decimals={6}
+                  onmid-flash-trigger={(e) => onMidFlashTrigger(e as CustomEvent, 'table')}
                 ></mid-price>
               </td>
               <td>
@@ -286,9 +380,11 @@
           <h3>{focusSym}</h3>
           {#each symbols.filter((s: any) => s.symbol === focusSym).slice(0, 1) as sym}
             <mid-price
+              symbol={sym.symbol}
               tone="accent"
               value={sym.mid != null ? String(sym.mid) : ''}
               decimals={6}
+              onmid-flash-trigger={(e) => onMidFlashTrigger(e as CustomEvent, 'detail')}
             ></mid-price>
           {/each}
         </div>

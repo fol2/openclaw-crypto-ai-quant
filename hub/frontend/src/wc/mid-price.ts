@@ -3,9 +3,22 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 type FlashState = '' | 'up-a' | 'up-b' | 'down-a' | 'down-b';
 type Tone = 'table' | 'accent';
+type FlashDirection = 'up' | 'down';
+type FlashPhase = 'a' | 'b';
+
+type MidFlashTriggerDetail = {
+  symbol: string;
+  prev: number;
+  mid: number;
+  direction: FlashDirection;
+  phase: FlashPhase;
+  tone: Tone;
+  at_ms: number;
+};
 
 @customElement('mid-price')
 export class MidPrice extends LitElement {
+  @property({ type: String }) symbol = '';
   @property({ type: String }) value = '';
   @property({ type: Number }) decimals = 6;
   @property({ type: String }) tone: Tone = 'table';
@@ -130,10 +143,23 @@ export class MidPrice extends LitElement {
     this.previousValue = next;
     if (prev == null || next === prev) return;
 
-    const dir = next > prev ? 'up' : 'down';
+    const dir: FlashDirection = next > prev ? 'up' : 'down';
     this.phase = this.phase === 'a' ? 'b' : 'a';
     const nextState = `${dir}-${this.phase}` as FlashState;
     this.flash = nextState;
+    this.dispatchEvent(new CustomEvent<MidFlashTriggerDetail>('mid-flash-trigger', {
+      detail: {
+        symbol: this.symbol,
+        prev,
+        mid: next,
+        direction: dir,
+        phase: this.phase,
+        tone: this.tone,
+        at_ms: Date.now(),
+      },
+      bubbles: true,
+      composed: true,
+    }));
 
     if (this.clearTimer) clearTimeout(this.clearTimer);
     this.clearTimer = setTimeout(() => {

@@ -1,7 +1,7 @@
 use axum::extract::{Query, State};
 use axum::http::header;
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::db::{candles, runtime, trading};
 use crate::db::pool::open_ro_pool;
+use crate::db::{candles, runtime, trading};
 use crate::error::HubError;
 use crate::state::AppState;
 
@@ -66,6 +66,25 @@ pub struct MarksQuery {
     symbol: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct FlashDebugEvent {
+    symbol: String,
+    prev: f64,
+    mid: f64,
+    direction: String,
+    phase: String,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    tone: Option<String>,
+    at_ms: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FlashDebugBatch {
+    events: Vec<FlashDebugEvent>,
+}
+
 // ── Route definitions ────────────────────────────────────────────────────
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -75,6 +94,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/mids", get(api_mids))
         .route("/api/candles", get(api_candles))
         .route("/api/marks", get(api_marks))
+        .route("/api/flash-debug", post(api_flash_debug))
         .route("/api/sparkline", get(api_sparkline))
         .route("/api/metrics", get(api_metrics))
         .route("/metrics", get(api_prometheus))
@@ -82,9 +102,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 
 // ── Handlers ─────────────────────────────────────────────────────────────
 
-async fn api_health(
-    State(state): State<Arc<AppState>>,
-) -> Json<Value> {
+async fn api_health(State(state): State<Arc<AppState>>) -> Json<Value> {
     let sidecar_ok = state.sidecar.health().await.is_ok();
     Json(json!({
         "ok": true,
@@ -93,9 +111,7 @@ async fn api_health(
     }))
 }
 
-async fn api_mids(
-    State(state): State<Arc<AppState>>,
-) -> Json<Value> {
+async fn api_mids(State(state): State<Arc<AppState>>) -> Json<Value> {
     match state.sidecar.get_mids(&["BTC".to_string()]).await {
         Ok(snap) => Json(json!({
             "ok": true,
@@ -107,6 +123,49 @@ async fn api_mids(
             "error": e,
         })),
     }
+}
+
+async fn api_flash_debug(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<FlashDebugBatch>,
+) -> Json<Value> {
+    if !state.config.flash_debug_log {
+        return Json(json!({
+            "ok": false,
+            "disabled": true,
+            "reason": "AIQ_MONITOR_FLASH_DEBUG_LOG is disabled",
+        }));
+    }
+
+    // Keep log volume bounded even under very high tick throughput.
+    let max_logged = payload.events.len().min(400);
+    for ev in payload.events.iter().take(max_logged) {
+        tracing::info!(
+            symbol = %ev.symbol,
+            prev = ev.prev,
+            mid = ev.mid,
+            direction = %ev.direction,
+            phase = %ev.phase,
+            source = ?ev.source,
+            tone = ?ev.tone,
+            at_ms = ev.at_ms,
+            "mid flash trigger"
+        );
+    }
+    if payload.events.len() > max_logged {
+        tracing::info!(
+            total = payload.events.len(),
+            logged = max_logged,
+            dropped = payload.events.len() - max_logged,
+            "mid flash trigger batch truncated"
+        );
+    }
+
+    Json(json!({
+        "ok": true,
+        "received": payload.events.len(),
+        "logged": max_logged,
+    }))
 }
 
 async fn api_snapshot(
@@ -123,13 +182,12 @@ async fn api_snapshot(
     let conn = pool.get()?;
 
     // Heartbeat
-    let heartbeat = runtime::fetch_heartbeat_from_db(&conn)?.unwrap_or_else(|| {
-        crate::heartbeat::Heartbeat {
+    let heartbeat =
+        runtime::fetch_heartbeat_from_db(&conn)?.unwrap_or_else(|| crate::heartbeat::Heartbeat {
             ok: false,
             error: Some("heartbeat_missing".to_string()),
             ..Default::default()
-        }
-    });
+        });
 
     // Open positions
     let positions = trading::compute_open_positions(&conn)?;
@@ -140,13 +198,7 @@ async fn api_snapshot(
     let candle_pool = open_ro_pool(&candle_db_path, 2);
     let candle_conn = candle_pool.as_ref().and_then(|p| p.get().ok());
 
-    let symbols = trading::list_recent_symbols(
-        &conn,
-        candle_conn.as_deref(),
-        interval,
-        ts,
-        200,
-    )?;
+    let symbols = trading::list_recent_symbols(&conn, candle_conn.as_deref(), interval, ts, 200)?;
 
     // Merge: open positions first, then other symbols
     let mut merged: Vec<String> = Vec::new();
@@ -296,7 +348,10 @@ async fn api_candles(
 ) -> Result<Json<Value>, HubError> {
     let mode = normalize_mode(&q.mode);
     let sym = q.symbol.to_uppercase();
-    let interval = q.interval.as_deref().unwrap_or(&state.config.trader_interval);
+    let interval = q
+        .interval
+        .as_deref()
+        .unwrap_or(&state.config.trader_interval);
     let limit = q.limit.clamp(2, 2000);
 
     let candle_path = state.candle_db_path(interval);
@@ -405,7 +460,11 @@ async fn api_metrics(
     }
 
     // Kill mode gauge
-    let kill_mode = heartbeat.kill_mode.as_deref().unwrap_or("off").to_lowercase();
+    let kill_mode = heartbeat
+        .kill_mode
+        .as_deref()
+        .unwrap_or("off")
+        .to_lowercase();
     let kill_val = match kill_mode.as_str() {
         "halt_all" => 2,
         "close_only" => 1,
@@ -485,7 +544,11 @@ async fn api_prometheus(
     let mut lines: Vec<String> = Vec::new();
 
     // Engine up
-    lines.push(prom_line("aiq_engine_up", if heartbeat.ok { 1.0 } else { 0.0 }, &mode));
+    lines.push(prom_line(
+        "aiq_engine_up",
+        if heartbeat.ok { 1.0 } else { 0.0 },
+        &mode,
+    ));
 
     if let Some(ts_hb) = heartbeat.ts_ms {
         let age = ((ts - ts_hb) as f64 / 1000.0).max(0.0);
@@ -496,7 +559,11 @@ async fn api_prometheus(
     }
 
     // Kill mode
-    let kill_mode = heartbeat.kill_mode.as_deref().unwrap_or("off").to_lowercase();
+    let kill_mode = heartbeat
+        .kill_mode
+        .as_deref()
+        .unwrap_or("off")
+        .to_lowercase();
     let kill_val = match kill_mode.as_str() {
         "halt_all" => 2.0,
         "close_only" => 1.0,
@@ -509,7 +576,11 @@ async fn api_prometheus(
         lines.push(prom_line("aiq_pnl_today_usd", daily.pnl_usd, &mode));
         lines.push(prom_line("aiq_fees_today_usd", daily.fees_usd, &mode));
         lines.push(prom_line("aiq_net_pnl_today_usd", daily.net_pnl_usd, &mode));
-        lines.push(prom_line("aiq_drawdown_today_pct", daily.drawdown_pct, &mode));
+        lines.push(prom_line(
+            "aiq_drawdown_today_pct",
+            daily.drawdown_pct,
+            &mode,
+        ));
     }
 
     // Counters
@@ -524,10 +595,7 @@ async fn api_prometheus(
     }
 
     let body = lines.join("") + "\n";
-    (
-        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        body,
-    )
+    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body)
 }
 
 fn prom_line(name: &str, value: f64, mode: &str) -> String {

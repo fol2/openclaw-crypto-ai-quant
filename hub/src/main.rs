@@ -124,8 +124,8 @@ fn spawn_mids_poller(state: Arc<AppState>) {
                     if snap.seq_reset {
                         tracing::debug!("sidecar mids sequence reset detected; re-synchronised");
                     }
+                    let mut changed_symbols: Vec<String> = Vec::new();
                     if mids_debug_log {
-                        let mut changed_symbols: Vec<String> = Vec::new();
                         for (sym, mid) in &snap.mids {
                             let is_changed = match last_published_mids.get(sym) {
                                 Some(prev) => *prev != *mid,
@@ -136,24 +136,30 @@ fn spawn_mids_poller(state: Arc<AppState>) {
                             }
                         }
                         changed_symbols.sort_unstable();
-                        let sample: Vec<String> = changed_symbols.iter().take(20).cloned().collect();
+                    }
+                    last_published_mids.clear();
+                    last_published_mids
+                        .extend(snap.mids.iter().map(|(sym, mid)| (sym.clone(), *mid)));
+                    let mut ws_receivers = 0usize;
+                    if let Ok(json) = serde_json::to_string(&serde_json::json!({
+                        "type": "mids",
+                        "data": snap,
+                    })) {
+                        ws_receivers = state.broadcast.publish(ws::topics::TOPIC_MIDS, json);
+                    }
+                    if mids_debug_log {
+                        let sample: Vec<String> =
+                            changed_symbols.iter().take(20).cloned().collect();
                         tracing::info!(
                             mids_seq = ?snap.mids_seq,
                             changed_symbols = changed_symbols.len(),
                             tracked_symbols = snap.mids.len(),
+                            ws_receivers,
                             timed_out = snap.timed_out,
                             seq_reset = snap.seq_reset,
                             sample = ?sample,
                             "mids publish"
                         );
-                    }
-                    last_published_mids.clear();
-                    last_published_mids.extend(snap.mids.iter().map(|(sym, mid)| (sym.clone(), *mid)));
-                    if let Ok(json) = serde_json::to_string(&serde_json::json!({
-                        "type": "mids",
-                        "data": snap,
-                    })) {
-                        state.broadcast.publish(ws::topics::TOPIC_MIDS, json);
                     }
                     // Old sidecar fallback path has no mids sequence; throttle to poll cadence.
                     if after_seq.is_none() {

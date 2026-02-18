@@ -39,6 +39,13 @@ export async function getMids() {
   return apiFetch('/api/mids');
 }
 
+export async function postFlashDebug(events: Array<Record<string, any>>) {
+  return apiFetch('/api/flash-debug', {
+    method: 'POST',
+    body: JSON.stringify({ events }),
+  });
+}
+
 export async function getCandles(symbol: string, interval?: string, limit = 200) {
   const params = new URLSearchParams({ symbol, limit: String(limit) });
   if (interval) params.set('interval', interval);
