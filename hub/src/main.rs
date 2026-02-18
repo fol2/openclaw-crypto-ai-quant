@@ -83,35 +83,60 @@ async fn shutdown_signal() {
     tracing::info!("Shutdown signal received, gracefully stopping…");
 }
 
-/// Background task: poll sidecar for mid prices and broadcast to WS clients.
+/// Background task: bridge sidecar mids to frontend WS topic.
+///
+/// Preferred mode uses sidecar `wait_mids` so updates are push-driven instead of
+/// fixed-cycle polling. If connected to an older sidecar build, it gracefully
+/// falls back to `get_mids` with `mids_poll_ms` cadence.
 fn spawn_mids_poller(state: Arc<AppState>) {
-    let poll_ms = state.config.mids_poll_ms;
+    let poll_ms = state.config.mids_poll_ms.max(20);
+    let wait_timeout_ms = state.config.mids_wait_timeout_ms.max(100);
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(poll_ms));
+        let mut after_seq: Option<u64> = None;
         loop {
-            interval.tick().await;
-
             // Read the symbols last seen in a snapshot query.
             // Skips until the first REST snapshot has been fetched.
             let symbols: Vec<String> = {
                 let tracked = state.tracked_symbols.read().await;
                 if tracked.is_empty() {
+                    tokio::time::sleep(std::time::Duration::from_millis(poll_ms)).await;
                     continue;
                 }
                 tracked.clone()
             };
 
-            match state.sidecar.get_mids(&symbols).await {
+            match state
+                .sidecar
+                .wait_mids(&symbols, after_seq, wait_timeout_ms)
+                .await
+            {
                 Ok(snap) => {
+                    if let Some(seq) = snap.mids_seq {
+                        after_seq = Some(seq);
+                    }
+                    // Timeout heartbeats do not carry new price data.
+                    if !snap.changed {
+                        continue;
+                    }
+                    if snap.seq_reset {
+                        tracing::debug!("sidecar mids sequence reset detected; re-synchronised");
+                    }
                     if let Ok(json) = serde_json::to_string(&serde_json::json!({
                         "type": "mids",
                         "data": snap,
                     })) {
                         state.broadcast.publish(ws::topics::TOPIC_MIDS, json);
                     }
+                    // Old sidecar fallback path has no mids sequence; throttle to poll cadence.
+                    if after_seq.is_none() {
+                        tokio::time::sleep(std::time::Duration::from_millis(poll_ms)).await;
+                    }
                 }
                 Err(e) => {
                     tracing::debug!("Mids poll failed: {e}");
+                    // Recover cleanly after sidecar reconnects/restarts.
+                    after_seq = None;
+                    tokio::time::sleep(std::time::Duration::from_millis(poll_ms)).await;
                 }
             }
         }
