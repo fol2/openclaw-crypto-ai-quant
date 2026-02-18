@@ -4,12 +4,14 @@
   import { hubWs } from '../lib/ws';
 
   const INTERVALS = ['1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d'] as const;
+  const BAR_COUNTS = [50, 100, 200, 400] as const;
 
   let snap: any = $state(null);
   let focusSym = $state('');
   let candles: any[] = $state([]);
   let marks: any = $state(null);
   let selectedInterval = $state('1h');
+  let selectedBars: number = $state(200);
   let pollTimer: any = null;
   let error = $state('');
   let mobileTab: 'symbols' | 'detail' | 'feed' = $state('symbols');
@@ -199,12 +201,13 @@
   // Only clears the chart when the symbol changes (not on interval switch)
   // so old data stays visible during the brief network round-trip.
   $effect(() => {
-    const sym = focusSym;
-    const iv  = selectedInterval;
+    const sym  = focusSym;
+    const iv   = selectedInterval;
+    const bars = selectedBars;
     if (!sym) { candles = []; _prevFocusSym = ''; return; }
     if (sym !== _prevFocusSym) { candles = []; _prevFocusSym = sym; }
     let cancelled = false;
-    getCandles(sym, iv, candleLimit(iv))
+    getCandles(sym, iv, bars)
       .then(r => { if (!cancelled) candles = r.candles || []; })
       .catch(() => {});
     return () => { cancelled = true; };
@@ -518,7 +521,7 @@
 
     {#if detailTab === 'detail'}
       {#if focusSym}
-        <!-- Interval selector + chart -->
+        <!-- Interval + bar count selector -->
         <div class="iv-bar">
           {#each INTERVALS as iv}
             <button
@@ -526,6 +529,14 @@
               class:is-on={selectedInterval === iv}
               onclick={() => { selectedInterval = iv; }}
             >{iv.toUpperCase()}</button>
+          {/each}
+          <span class="iv-sep"></span>
+          {#each BAR_COUNTS as bc}
+            <button
+              class="iv-tab"
+              class:is-on={selectedBars === bc}
+              onclick={() => { selectedBars = bc; }}
+            >{bc}</button>
           {/each}
         </div>
         <div class="chart-wrap">
@@ -1049,6 +1060,14 @@
   }
   .iv-tab:hover { color: var(--text); background: rgba(255,255,255,0.04); }
   .iv-tab.is-on { color: var(--accent); background: var(--accent-bg); }
+  .iv-sep {
+    width: 1px;
+    height: 14px;
+    background: var(--border);
+    margin: 0 4px;
+    align-self: center;
+    flex-shrink: 0;
+  }
 
   /* ─── Candle chart container ─── */
   .chart-wrap {
