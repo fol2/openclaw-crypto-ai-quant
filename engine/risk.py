@@ -337,7 +337,7 @@ class RiskManager:
         try:
             self._refresh_daily_loss(ts_ms=ts_ms, symbol=symbol, action=action, pnl_usd=pnl_usd, fee_usd=fee_usd)
         except Exception:
-            return
+            pass
         try:
             self._refresh_slippage_guard(
                 ts_ms=ts_ms,
@@ -350,11 +350,11 @@ class RiskManager:
                 ref_ask=ref_ask,
             )
         except Exception:
-            return
+            pass
         try:
             self._refresh_perf_stop(ts_ms=ts_ms, symbol=symbol, action=action, pnl_usd=pnl_usd, fee_usd=fee_usd)
         except Exception:
-            return
+            pass
 
     def allow_order(
         self,
