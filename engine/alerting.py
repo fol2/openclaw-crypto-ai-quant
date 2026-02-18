@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import queue
 import threading
+import time
 from typing import Any
 
 from .openclaw_cli import send_openclaw_message as _send_openclaw_message_cli
@@ -156,16 +158,24 @@ _alert_logger = logging.getLogger(__name__)
 
 _ALERT_QUEUE_LOCK = threading.RLock()
 _ALERT_QUEUE_MAX = max(10, min(5000, _env_int("AI_QUANT_ALERT_QUEUE_MAX", 200)))
-_ALERT_QUEUE: queue.Queue[tuple[str, str, str]] = queue.Queue(maxsize=_ALERT_QUEUE_MAX)
+_ALERT_STOP_SENTINEL = object()
+_ALERT_QUEUE: queue.Queue[tuple[str, str, str] | object] = queue.Queue(maxsize=_ALERT_QUEUE_MAX)
 _ALERT_WORKER_STARTED = False
+_ALERT_WORKER_THREAD: threading.Thread | None = None
+_ALERT_ATEXIT_REGISTERED = False
 _ALERT_DROPPED_COUNT = 0
 _ALERT_DROPPED_COUNT_LOCK = threading.Lock()
 
 
 def _alert_worker() -> None:
     while True:
-        channel, target, message = _ALERT_QUEUE.get()
+        item = _ALERT_QUEUE.get()
+        channel = ""
+        target = ""
         try:
+            if item is _ALERT_STOP_SENTINEL:
+                return
+            channel, target, message = item
             _send_one_sync(channel=channel, target=target, message=message)
         except Exception as e:
             try:
@@ -179,14 +189,48 @@ def _alert_worker() -> None:
                 pass
 
 
+def _shutdown_alert_worker(*, drain_timeout_s: float = 2.0) -> None:
+    global _ALERT_WORKER_STARTED, _ALERT_WORKER_THREAD
+    with _ALERT_QUEUE_LOCK:
+        if not _ALERT_WORKER_STARTED:
+            return
+        thread = _ALERT_WORKER_THREAD
+
+    deadline = time.time() + max(0.0, float(drain_timeout_s))
+    while (not _ALERT_QUEUE.empty()) and time.time() < deadline:
+        time.sleep(0.01)
+
+    try:
+        _ALERT_QUEUE.put_nowait(_ALERT_STOP_SENTINEL)
+    except Exception:
+        pass
+
+    if thread is not None and thread.is_alive():
+        try:
+            thread.join(timeout=max(0.0, deadline - time.time()) + 0.5)
+        except Exception:
+            pass
+
+    with _ALERT_QUEUE_LOCK:
+        _ALERT_WORKER_STARTED = False
+        _ALERT_WORKER_THREAD = None
+
+
 def _ensure_worker_started() -> None:
-    global _ALERT_WORKER_STARTED
+    global _ALERT_WORKER_STARTED, _ALERT_WORKER_THREAD, _ALERT_ATEXIT_REGISTERED
     with _ALERT_QUEUE_LOCK:
         if _ALERT_WORKER_STARTED:
             return
+        if not _ALERT_ATEXIT_REGISTERED:
+            try:
+                atexit.register(_shutdown_alert_worker)
+                _ALERT_ATEXIT_REGISTERED = True
+            except Exception:
+                pass
         t = threading.Thread(target=_alert_worker, name="aiq_alert_sender", daemon=True)
         t.start()
         _ALERT_WORKER_STARTED = True
+        _ALERT_WORKER_THREAD = t
 
 
 def _note_alert_drop() -> None:
