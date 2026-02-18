@@ -107,6 +107,28 @@ def _db_has_table(db_path: Path, table_name: str) -> bool:
         return False
 
 
+def _candles_interval_coverage_ms(candles_db: Path, interval: str) -> tuple[int | None, int | None]:
+    if not candles_db.exists():
+        return None, None
+    try:
+        conn = sqlite3.connect(f"file:{candles_db}?mode=ro", uri=True, timeout=10)
+        try:
+            row = conn.execute(
+                "SELECT MIN(t), MAX(t) FROM candles WHERE interval = ?",
+                (str(interval),),
+            ).fetchone()
+            if not row:
+                return None, None
+            lo_raw, hi_raw = row[0], row[1]
+            if lo_raw is None or hi_raw is None:
+                return None, None
+            return int(lo_raw), int(hi_raw)
+        finally:
+            conn.close()
+    except Exception:
+        return None, None
+
+
 def _default_repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -208,8 +230,12 @@ def main() -> int:
     lag_minutes = int(args.lag_minutes)
     window_minutes = int(args.window_minutes)
     min_live_trades = int(args.min_live_trades)
-    to_ts = int(now_ms - lag_minutes * 60_000)
-    from_ts = int(to_ts - window_minutes * 60_000)
+    requested_to_ts = int(now_ms - lag_minutes * 60_000)
+    requested_from_ts = int(requested_to_ts - window_minutes * 60_000)
+    to_ts = int(requested_to_ts)
+    from_ts = int(requested_from_ts)
+    coverage_from_ts: int | None = None
+    coverage_to_ts: int | None = None
 
     bundle_root = _resolve_path(str(args.bundle_root), base=resolve_base)
     try:
@@ -322,14 +348,41 @@ def main() -> int:
                 "detail": "interval must not be empty",
             }
         )
-    if from_ts > to_ts:
+    if requested_from_ts > requested_to_ts:
         failures.append(
             {
                 "code": "invalid_replay_window",
                 "classification": "state_initialisation_gap",
-                "detail": f"from_ts={from_ts} > to_ts={to_ts}",
+                "detail": f"from_ts={requested_from_ts} > to_ts={requested_to_ts}",
             }
         )
+    if not failures:
+        coverage_from_ts, coverage_to_ts = _candles_interval_coverage_ms(candles_db, interval)
+        if coverage_from_ts is None or coverage_to_ts is None:
+            failures.append(
+                {
+                    "code": "missing_interval_coverage",
+                    "classification": "market_data_alignment_gap",
+                    "detail": f"no candles coverage found for interval={interval} in {candles_db}",
+                }
+            )
+        else:
+            if to_ts > coverage_to_ts:
+                to_ts = int(coverage_to_ts)
+                from_ts = int(to_ts - window_minutes * 60_000)
+            if from_ts < coverage_from_ts:
+                from_ts = int(coverage_from_ts)
+            if from_ts > to_ts:
+                failures.append(
+                    {
+                        "code": "invalid_clamped_replay_window",
+                        "classification": "market_data_alignment_gap",
+                        "detail": (
+                            f"effective window outside coverage: from_ts={from_ts}, to_ts={to_ts}, "
+                            f"coverage={coverage_from_ts}..{coverage_to_ts}"
+                        ),
+                    }
+                )
 
     build_cmd = [
         "python3",
@@ -507,8 +560,12 @@ def main() -> int:
         "repo_root": str(repo_root),
         "window": {
             "interval": interval,
+            "requested_from_ts": requested_from_ts,
+            "requested_to_ts": requested_to_ts,
             "from_ts": from_ts,
             "to_ts": to_ts,
+            "coverage_from_ts": coverage_from_ts,
+            "coverage_to_ts": coverage_to_ts,
             "window_minutes": int(args.window_minutes),
             "lag_minutes": int(args.lag_minutes),
         },
@@ -571,6 +628,8 @@ def main() -> int:
         "bundle_dir": str(bundle_dir),
         "window": {
             "interval": interval,
+            "requested_from_ts": requested_from_ts,
+            "requested_to_ts": requested_to_ts,
             "from_ts": from_ts,
             "to_ts": to_ts,
         },
