@@ -1418,7 +1418,10 @@ def kernel_position_to_python(symbol: str, kernel_pos: dict) -> dict:
     if confidence_raw is not None:
         # Kernel stores 0=Low, 1=Medium, 2=High
         conf_map = {0: "low", 1: "medium", 2: "high"}
-        confidence = conf_map.get(int(confidence_raw), "medium")
+        try:
+            confidence = conf_map.get(int(confidence_raw), "medium")
+        except (TypeError, ValueError):
+            confidence = "medium"
     else:
         confidence = ""
 
