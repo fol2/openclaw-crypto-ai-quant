@@ -2918,6 +2918,21 @@ async fn handle_client(
                             let mut out = collect_mids_result(&st, &symbols, max_age);
                             out.insert("changed".to_string(), Value::Bool(true));
                             out.insert("timed_out".to_string(), Value::Bool(false));
+                            out.insert("seq_reset".to_string(), Value::Bool(false));
+                            break RpcResponse {
+                                id: req.id,
+                                ok: true,
+                                result: Some(Value::Object(out)),
+                                error: None,
+                            };
+                        }
+                        // Sidecar restart can rewind mids_seq to a smaller value. Return
+                        // immediately so clients can resynchronise without waiting for timeout.
+                        if st.mids_seq < after_seq {
+                            let mut out = collect_mids_result(&st, &symbols, max_age);
+                            out.insert("changed".to_string(), Value::Bool(true));
+                            out.insert("timed_out".to_string(), Value::Bool(false));
+                            out.insert("seq_reset".to_string(), Value::Bool(true));
                             break RpcResponse {
                                 id: req.id,
                                 ok: true,
@@ -2933,6 +2948,7 @@ async fn handle_client(
                         let mut out = collect_mids_result(&st, &symbols, max_age);
                         out.insert("changed".to_string(), Value::Bool(false));
                         out.insert("timed_out".to_string(), Value::Bool(true));
+                        out.insert("seq_reset".to_string(), Value::Bool(false));
                         break RpcResponse {
                             id: req.id,
                             ok: true,
@@ -2947,6 +2963,7 @@ async fn handle_client(
                         let mut out = collect_mids_result(&st, &symbols, max_age);
                         out.insert("changed".to_string(), Value::Bool(false));
                         out.insert("timed_out".to_string(), Value::Bool(true));
+                        out.insert("seq_reset".to_string(), Value::Bool(false));
                         break RpcResponse {
                             id: req.id,
                             ok: true,
