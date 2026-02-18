@@ -439,7 +439,7 @@ struct SweepArgs {
     /// Override GPU sweep guardrails (unsafe).
     ///
     /// By default, GPU sweeps are restricted to "safe" interval combos
-    /// (30m/5m, 1h/5m, 30m/3m, 1h/3m) and a <=19-day scoped window.
+    /// (30m/5m, 1h/5m, 30m/3m, 1h/3m).
     #[arg(long, default_value_t = false)]
     allow_unsafe_gpu_sweep: bool,
 
@@ -1243,8 +1243,6 @@ fn write_trade_export_csv(
 // GPU sweep guardrails
 // ---------------------------------------------------------------------------
 
-const GPU_SAFE_MAX_SCOPE_DAYS: f64 = 19.0;
-
 fn parse_interval_minutes(iv: &str) -> Option<u32> {
     let s = iv.trim();
     if s.len() < 2 {
@@ -1312,16 +1310,11 @@ fn check_gpu_sweep_guardrails(
         ));
     }
 
-    let days = compute_scope_days(from_ts, to_ts).ok_or_else(|| {
-        "GPU sweep requires a bounded scoped window (auto-scope or explicit --from-ts/--to-ts)."
-            .to_string()
-    })?;
-
-    if days > GPU_SAFE_MAX_SCOPE_DAYS {
-        return Err(format!(
-            "GPU sweep scoped window is {:.1} days (> {:.0} days). from_ts={:?}, to_ts={:?}.",
-            days, GPU_SAFE_MAX_SCOPE_DAYS, from_ts, to_ts,
-        ));
+    if compute_scope_days(from_ts, to_ts).is_none() {
+        return Err(
+            "GPU sweep requires a bounded scoped window (auto-scope or explicit --from-ts/--to-ts)."
+                .to_string(),
+        );
     }
 
     Ok(())
@@ -2609,11 +2602,24 @@ mod guardrails_tests {
     }
 
     #[test]
-    fn test_gpu_guardrails_safe_combo_and_days() {
+    fn test_gpu_guardrails_safe_combo() {
         let from_ts = Some(0);
         let to_ts = Some((10.0 * 86_400_000.0) as i64);
         assert!(check_gpu_sweep_guardrails("1h", Some("3m"), Some("3m"), from_ts, to_ts).is_ok());
         assert!(check_gpu_sweep_guardrails("30m", Some("5m"), None, from_ts, to_ts).is_ok());
+    }
+
+    #[test]
+    fn test_gpu_guardrails_allows_long_window() {
+        let from_ts = Some(0);
+        let to_ts = Some((365.0 * 86_400_000.0) as i64);
+        assert!(check_gpu_sweep_guardrails("1h", Some("3m"), Some("3m"), from_ts, to_ts).is_ok());
+    }
+
+    #[test]
+    fn test_gpu_guardrails_rejects_unbounded_window() {
+        let err = check_gpu_sweep_guardrails("1h", Some("3m"), Some("3m"), None, None).unwrap_err();
+        assert!(err.contains("bounded scoped window"));
     }
 
     #[test]
@@ -2622,15 +2628,6 @@ mod guardrails_tests {
         let to_ts = Some((10.0 * 86_400_000.0) as i64);
         let err = check_gpu_sweep_guardrails("15m", Some("5m"), None, from_ts, to_ts).unwrap_err();
         assert!(err.contains("outside the default safe set"));
-    }
-
-    #[test]
-    fn test_gpu_guardrails_rejects_long_window() {
-        let from_ts = Some(0);
-        let to_ts = Some((25.0 * 86_400_000.0) as i64);
-        let err =
-            check_gpu_sweep_guardrails("1h", Some("3m"), Some("3m"), from_ts, to_ts).unwrap_err();
-        assert!(err.contains("scoped window"));
     }
 
     #[test]
