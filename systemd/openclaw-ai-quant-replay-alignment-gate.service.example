@@ -26,7 +26,7 @@ RestrictRealtime=true
 RestrictSUIDSGID=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 SystemCallFilter=@system-service
-ReadWritePaths=$PROJECT_DIR /tmp/openclaw-ai-quant
+ReadWritePaths=%h/openclaw-plugins/ai_quant /tmp/openclaw-ai-quant
 
 # Resource limits
 MemoryMax=3G
