@@ -205,6 +205,26 @@
     }
   }
 
+  function intervalToMs(iv: string): number {
+    const m = /^([0-9]+)([mhd])$/i.exec(String(iv || '').trim());
+    if (!m) return 60_000;
+    const n = Number(m[1]);
+    if (!Number.isFinite(n) || n <= 0) return 60_000;
+    const unit = String(m[2] || '').toLowerCase();
+    if (unit === 'm') return n * 60_000;
+    if (unit === 'h') return n * 60 * 60_000;
+    if (unit === 'd') return n * 24 * 60 * 60_000;
+    return 60_000;
+  }
+
+  function newestCandleIndex(rows: any[]): number {
+    let idx = 0;
+    for (let i = 1; i < rows.length; i++) {
+      if (Number(rows[i]?.t || 0) > Number(rows[idx]?.t || 0)) idx = i;
+    }
+    return idx;
+  }
+
   // Track previous symbol so we can clear candles on symbol switch
   // (plain let — not reactive, no effect re-run on change)
   let _prevFocusSym = '';
@@ -240,31 +260,62 @@
     return () => { cancelled = true; };
   });
 
-  // Live last-candle update: mutate the newest candle's OHLC via WebSocket mids.
+  // Live candle update: mutate current developing candle, and roll over to a
+  // new synthetic candle once the exchange interval boundary is crossed.
   // Rate-limited to ~15fps (66ms) to avoid triggering JSON.stringify + full
   // canvas redraw at the raw WS cadence (~100ms / 10Hz).
-  // Stops updating once t_close has passed (candle is sealed by the exchange).
   $effect(() => {
     const sym = focusSym;
     if (!sym) return;
     const handler = (data: any) => {
       const now = Date.now();
-      if (now - _liveUpdateMs < 66) return;          // ~15fps cap
-      const mid = data?.mids?.[sym];
-      if (mid == null || candles.length === 0) return;
-      // Find the newest candle by timestamp
-      let liveIdx = 0;
-      for (let i = 1; i < candles.length; i++) {
-        if (candles[i].t > candles[liveIdx].t) liveIdx = i;
-      }
+      if (now - _liveUpdateMs < 66) return; // ~15fps cap
+      const mid = Number(data?.mids?.[sym]);
+      if (!Number.isFinite(mid) || mid <= 0 || candles.length === 0) return;
+
+      const msPerBar = intervalToMs(selectedInterval);
+      const barStart = Math.floor(now / msPerBar) * msPerBar;
+      const barClose = barStart + msPerBar - 1;
+
+      const liveIdx = newestCandleIndex(candles);
       const c = candles[liveIdx];
-      // Guard: t_close=0 means the DB row had no close-time — treat as open.
-      // Only skip if we have a valid future close time that has already elapsed.
-      if (c.t_close != null && c.t_close > 0 && now > c.t_close) return;
+      const candleStart = Number(c?.t || 0);
+      if (!Number.isFinite(candleStart) || candleStart <= 0) return;
+
+      if (candleStart < barStart) {
+        const prevClose = Number.isFinite(Number(c.c)) ? Number(c.c) : mid;
+        const o = prevClose;
+        candles.push({
+          t: barStart,
+          t_close: barClose,
+          o,
+          h: Math.max(o, mid),
+          l: Math.min(o, mid),
+          c: mid,
+          v: 0,
+          n: 0,
+        });
+        if (candles.length > selectedBars) {
+          candles.splice(0, candles.length - selectedBars);
+        }
+        _liveUpdateMs = now;
+        return;
+      }
+
+      // Ignore out-of-order future candles caused by temporary clock skew.
+      if (candleStart > barStart) return;
+
+      const closeMs = Number(c.t_close || 0);
+      if (!Number.isFinite(closeMs) || closeMs <= 0 || closeMs < barClose) {
+        c.t_close = barClose;
+      }
+
+      const prevHigh = Number.isFinite(Number(c.h)) ? Number(c.h) : mid;
+      const prevLow = Number.isFinite(Number(c.l)) ? Number(c.l) : mid;
       _liveUpdateMs = now;
       c.c = mid;
-      if (mid > c.h) c.h = mid;
-      if (mid < c.l) c.l = mid;
+      c.h = Math.max(prevHigh, mid);
+      c.l = Math.min(prevLow, mid);
     };
     hubWs.subscribe('mids', handler);
     return () => hubWs.unsubscribe('mids', handler);
