@@ -1,0 +1,481 @@
+#!/usr/bin/env python3
+"""Run scheduled replay-bundle alignment checks and maintain a release blocker.
+
+This orchestrator builds a deterministic replay bundle for a recent live window,
+runs the full paper deterministic replay harness, and writes:
+
+- a per-run report JSON
+- a release-blocker JSON (blocked when the gate fails)
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+from pathlib import Path
+import shlex
+import sqlite3
+import subprocess
+from typing import Any
+
+
+def _now_ms() -> int:
+    return int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if not raw:
+        return bool(default)
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = str(os.getenv(name, "") or "").strip()
+    if not raw:
+        return int(default)
+    try:
+        return int(raw)
+    except Exception:
+        return int(default)
+
+
+def _resolve_path(raw: str, *, base: Path) -> Path:
+    p = Path(str(raw)).expanduser()
+    if p.is_absolute():
+        return p.resolve()
+    return (base / p).resolve()
+
+
+def _read_live_baseline_count(manifest_path: Path) -> int:
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return -1
+    if not isinstance(payload, dict):
+        return -1
+    counts = payload.get("counts") or {}
+    if not isinstance(counts, dict):
+        return -1
+    try:
+        return int(counts.get("live_baseline_trades") or 0)
+    except Exception:
+        return -1
+
+
+def _read_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _run_to_log(cmd: list[str], *, cwd: Path, env: dict[str, str], log_path: Path) -> int:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", encoding="utf-8") as fp:
+        fp.write(f"$ {' '.join(shlex.quote(x) for x in cmd)}\n")
+        fp.flush()
+        proc = subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            env=env,
+            stdout=fp,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    return int(proc.returncode)
+
+
+def _db_has_table(db_path: Path, table_name: str) -> bool:
+    if not db_path.exists():
+        return False
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10)
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (str(table_name),),
+        ).fetchone()
+        return bool(row is not None)
+    finally:
+        conn.close()
+
+
+def _default_repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    repo_root = _default_repo_root()
+    ap = argparse.ArgumentParser(description="Run scheduled replay alignment gate checks.")
+    ap.add_argument("--repo-root", default=str(repo_root), help="Repo root path.")
+    ap.add_argument(
+        "--live-db",
+        default=str(os.getenv("AI_QUANT_REPLAY_GATE_LIVE_DB", "./trading_engine_live.db") or "./trading_engine_live.db"),
+        help="Live SQLite DB path.",
+    )
+    ap.add_argument(
+        "--paper-db",
+        default=str(os.getenv("AI_QUANT_REPLAY_GATE_PAPER_DB", "./trading_engine.db") or "./trading_engine.db"),
+        help="Paper SQLite DB path.",
+    )
+    ap.add_argument(
+        "--candles-db",
+        default=str(os.getenv("AI_QUANT_REPLAY_GATE_CANDLES_DB", "") or ""),
+        help="Candles SQLite DB path (required unless set via AI_QUANT_REPLAY_GATE_CANDLES_DB).",
+    )
+    ap.add_argument(
+        "--funding-db",
+        default=str(os.getenv("AI_QUANT_REPLAY_GATE_FUNDING_DB", "") or ""),
+        help="Optional funding SQLite DB path.",
+    )
+    ap.add_argument(
+        "--interval",
+        default=str(os.getenv("AI_QUANT_REPLAY_GATE_INTERVAL", "1h") or "1h"),
+        help="Replay interval.",
+    )
+    ap.add_argument(
+        "--window-minutes",
+        type=int,
+        default=_env_int("AI_QUANT_REPLAY_GATE_WINDOW_MINUTES", 240),
+        help="Replay window size in minutes (default: 240).",
+    )
+    ap.add_argument(
+        "--lag-minutes",
+        type=int,
+        default=_env_int("AI_QUANT_REPLAY_GATE_LAG_MINUTES", 2),
+        help="Tail lag in minutes before now for replay end timestamp (default: 2).",
+    )
+    ap.add_argument(
+        "--bundle-root",
+        default=str(os.getenv("AI_QUANT_REPLAY_GATE_BUNDLE_ROOT", "/tmp/openclaw-ai-quant/replay_gate") or "/tmp/openclaw-ai-quant/replay_gate"),
+        help="Root directory for scheduled replay bundles.",
+    )
+    strict_group = ap.add_mutually_exclusive_group()
+    strict_group.add_argument(
+        "--strict-no-residuals",
+        dest="strict_no_residuals",
+        action="store_true",
+        help="Fail when accepted residuals are present in alignment reports.",
+    )
+    strict_group.add_argument(
+        "--allow-residuals",
+        dest="strict_no_residuals",
+        action="store_false",
+        help="Allow accepted residuals from alignment reports.",
+    )
+    ap.set_defaults(strict_no_residuals=_env_bool("AI_QUANT_REPLAY_GATE_STRICT_NO_RESIDUALS", True))
+    ap.add_argument(
+        "--min-live-trades",
+        type=int,
+        default=_env_int("AI_QUANT_REPLAY_GATE_MIN_LIVE_TRADES", 1),
+        help="Minimum live baseline trade count required for a valid scheduled check (default: 1).",
+    )
+    ap.add_argument(
+        "--release-blocker-file",
+        default=str(os.getenv("AI_QUANT_REPLAY_GATE_BLOCKER_FILE", "") or ""),
+        help="Optional release-blocker status path (default: <bundle-root>/release_blocker.json).",
+    )
+    ap.add_argument(
+        "--output",
+        default="",
+        help="Optional run report JSON path (default: <bundle-dir>/scheduled_alignment_gate_run.json).",
+    )
+    return ap
+
+
+def main() -> int:
+    args = _build_parser().parse_args()
+
+    repo_root = _resolve_path(str(args.repo_root), base=Path.cwd())
+    if not repo_root.exists():
+        raise SystemExit(f"repo root not found: {repo_root}")
+
+    live_db = _resolve_path(str(args.live_db), base=repo_root)
+    paper_db = _resolve_path(str(args.paper_db), base=repo_root)
+    candles_db_raw = str(args.candles_db or "").strip()
+    if not candles_db_raw:
+        raise SystemExit("candles DB path is required (--candles-db or AI_QUANT_REPLAY_GATE_CANDLES_DB)")
+    candles_db = _resolve_path(candles_db_raw, base=repo_root)
+    funding_db_raw = str(args.funding_db or "").strip()
+    funding_db = _resolve_path(funding_db_raw, base=repo_root) if funding_db_raw else None
+
+    if not live_db.exists():
+        raise SystemExit(f"live DB not found: {live_db}")
+    if not paper_db.exists():
+        raise SystemExit(f"paper DB not found: {paper_db}")
+    if not candles_db.exists():
+        raise SystemExit(f"candles DB not found: {candles_db}")
+    if funding_db is not None and not funding_db.exists():
+        raise SystemExit(f"funding DB not found: {funding_db}")
+    if int(args.window_minutes) <= 0:
+        raise SystemExit("window-minutes must be > 0")
+    if int(args.lag_minutes) < 0:
+        raise SystemExit("lag-minutes must be >= 0")
+    if int(args.min_live_trades) < 0:
+        raise SystemExit("min-live-trades must be >= 0")
+
+    interval = str(args.interval or "").strip()
+    if not interval:
+        raise SystemExit("interval must not be empty")
+
+    now_ms = _now_ms()
+    to_ts = int(now_ms - int(args.lag_minutes) * 60_000)
+    from_ts = int(to_ts - int(args.window_minutes) * 60_000)
+    if from_ts > to_ts:
+        raise SystemExit("invalid replay window: from_ts > to_ts")
+
+    bundle_root = _resolve_path(str(args.bundle_root), base=repo_root)
+    bundle_root.mkdir(parents=True, exist_ok=True)
+    run_tag = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    bundle_dir = (bundle_root / f"bundle_{interval}_{from_ts}_{to_ts}_{run_tag}").resolve()
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+
+    report_path = (
+        _resolve_path(str(args.output), base=repo_root)
+        if str(args.output or "").strip()
+        else (bundle_dir / "scheduled_alignment_gate_run.json").resolve()
+    )
+    blocker_path = (
+        _resolve_path(str(args.release_blocker_file), base=repo_root)
+        if str(args.release_blocker_file or "").strip()
+        else (bundle_root / "release_blocker.json").resolve()
+    )
+    build_log = (bundle_dir / "scheduled_build_bundle.log").resolve()
+    harness_log = (bundle_dir / "scheduled_harness.log").resolve()
+    manifest_path = (bundle_dir / "replay_bundle_manifest.json").resolve()
+    harness_report_path = (bundle_dir / "paper_deterministic_replay_run.json").resolve()
+    gate_report_path = (bundle_dir / "alignment_gate_report.json").resolve()
+
+    env = os.environ.copy()
+    env["REPO_ROOT"] = str(repo_root)
+
+    build_cmd = [
+        "python3",
+        str((repo_root / "tools" / "build_live_replay_bundle.py").resolve()),
+        "--live-db",
+        str(live_db),
+        "--paper-db",
+        str(paper_db),
+        "--candles-db",
+        str(candles_db),
+        "--interval",
+        interval,
+        "--from-ts",
+        str(from_ts),
+        "--to-ts",
+        str(to_ts),
+        "--bundle-dir",
+        str(bundle_dir),
+    ]
+    if funding_db is not None:
+        build_cmd.extend(["--funding-db", str(funding_db)])
+
+    build_rc = _run_to_log(build_cmd, cwd=repo_root, env=env, log_path=build_log)
+    failures: list[dict[str, Any]] = []
+    live_baseline_trades = -1
+    if build_rc != 0:
+        failures.append(
+            {
+                "code": "bundle_build_failed",
+                "classification": "state_initialisation_gap",
+                "detail": f"build_live_replay_bundle.py exited with code {build_rc}",
+            }
+        )
+    elif not manifest_path.exists():
+        failures.append(
+            {
+                "code": "bundle_manifest_missing",
+                "classification": "state_initialisation_gap",
+                "detail": str(manifest_path),
+            }
+        )
+    else:
+        live_baseline_trades = _read_live_baseline_count(manifest_path)
+        if live_baseline_trades < int(args.min_live_trades):
+            failures.append(
+                {
+                    "code": "insufficient_live_baseline_trades",
+                    "classification": "state_initialisation_gap",
+                    "detail": (
+                        f"live_baseline_trades={live_baseline_trades} below min_live_trades={int(args.min_live_trades)}"
+                    ),
+                }
+            )
+
+    harness_rc: int | None = None
+    harness_report: dict[str, Any] | None = None
+    gate_report: dict[str, Any] | None = None
+
+    if not failures:
+        harness_cmd = [
+            "python3",
+            str((repo_root / "tools" / "run_paper_deterministic_replay.py").resolve()),
+            "--bundle-dir",
+            str(bundle_dir),
+            "--repo-root",
+            str(repo_root),
+            "--live-db",
+            str(live_db),
+            "--paper-db",
+            str(paper_db),
+            "--candles-db",
+            str(candles_db),
+            "--output",
+            str(harness_report_path),
+        ]
+        if funding_db is not None:
+            harness_cmd.extend(["--funding-db", str(funding_db)])
+        if bool(args.strict_no_residuals):
+            harness_cmd.append("--strict-no-residuals")
+
+        harness_rc = _run_to_log(harness_cmd, cwd=repo_root, env=env, log_path=harness_log)
+        if harness_rc != 0:
+            failures.append(
+                {
+                    "code": "deterministic_replay_harness_failed",
+                    "classification": "deterministic_logic_divergence",
+                    "detail": f"run_paper_deterministic_replay.py exited with code {harness_rc}",
+                }
+            )
+
+        if harness_report_path.exists():
+            loaded = _read_json(harness_report_path)
+            if isinstance(loaded, dict):
+                harness_report = loaded
+                if not bool(loaded.get("ok")):
+                    failures.append(
+                        {
+                            "code": "deterministic_replay_harness_report_failed",
+                            "classification": "deterministic_logic_divergence",
+                            "detail": f"failed_step={loaded.get('failed_step')}",
+                        }
+                    )
+            else:
+                failures.append(
+                    {
+                        "code": "invalid_harness_report",
+                        "classification": "deterministic_logic_divergence",
+                        "detail": "paper_deterministic_replay_run.json is not a JSON object",
+                    }
+                )
+        else:
+            failures.append(
+                {
+                    "code": "missing_harness_report",
+                    "classification": "deterministic_logic_divergence",
+                    "detail": str(harness_report_path),
+                }
+            )
+
+        if gate_report_path.exists():
+            loaded = _read_json(gate_report_path)
+            if isinstance(loaded, dict):
+                gate_report = loaded
+                if not bool(loaded.get("ok")):
+                    failures.append(
+                        {
+                            "code": "alignment_gate_failed",
+                            "classification": "deterministic_logic_divergence",
+                            "detail": f"failures={len(loaded.get('failures') or [])}",
+                        }
+                    )
+            else:
+                failures.append(
+                    {
+                        "code": "invalid_alignment_gate_report",
+                        "classification": "deterministic_logic_divergence",
+                        "detail": "alignment_gate_report.json is not a JSON object",
+                    }
+                )
+        else:
+            failures.append(
+                {
+                    "code": "missing_alignment_gate_report",
+                    "classification": "deterministic_logic_divergence",
+                    "detail": str(gate_report_path),
+                }
+            )
+
+    ok = len(failures) == 0
+    generated_at_ms = _now_ms()
+
+    report: dict[str, Any] = {
+        "schema_version": 1,
+        "generated_at_ms": generated_at_ms,
+        "ok": ok,
+        "repo_root": str(repo_root),
+        "window": {
+            "interval": interval,
+            "from_ts": from_ts,
+            "to_ts": to_ts,
+            "window_minutes": int(args.window_minutes),
+            "lag_minutes": int(args.lag_minutes),
+        },
+        "paths": {
+            "bundle_root": str(bundle_root),
+            "bundle_dir": str(bundle_dir),
+            "live_db": str(live_db),
+            "paper_db": str(paper_db),
+            "candles_db": str(candles_db),
+            "funding_db": str(funding_db) if funding_db is not None else None,
+            "manifest": str(manifest_path),
+            "harness_report": str(harness_report_path),
+            "alignment_gate_report": str(gate_report_path),
+            "build_log": str(build_log),
+            "harness_log": str(harness_log),
+            "release_blocker_file": str(blocker_path),
+        },
+        "min_live_trades": int(args.min_live_trades),
+        "live_baseline_trades": int(live_baseline_trades),
+        "strict_no_residuals": bool(args.strict_no_residuals),
+        "build_exit_code": int(build_rc),
+        "harness_exit_code": None if harness_rc is None else int(harness_rc),
+        "failures": failures,
+        "db_checks": {
+            "live_has_trades_table": _db_has_table(live_db, "trades"),
+            "paper_has_trades_table": _db_has_table(paper_db, "trades"),
+        },
+    }
+    _write_json(report_path, report)
+
+    previous_last_passed_ms: int | None = None
+    if blocker_path.exists():
+        try:
+            previous = _read_json(blocker_path)
+            if isinstance(previous, dict):
+                prev_last_pass = previous.get("last_passed_at_ms")
+                if isinstance(prev_last_pass, int):
+                    previous_last_passed_ms = prev_last_pass
+        except Exception:
+            previous_last_passed_ms = None
+
+    blocker_payload: dict[str, Any] = {
+        "schema_version": 1,
+        "generated_at_ms": generated_at_ms,
+        "blocked": (not ok),
+        "reason_codes": [str(f.get("code") or "") for f in failures],
+        "report_path": str(report_path),
+        "bundle_dir": str(bundle_dir),
+        "window": {
+            "interval": interval,
+            "from_ts": from_ts,
+            "to_ts": to_ts,
+        },
+    }
+    if ok:
+        blocker_payload["last_passed_at_ms"] = generated_at_ms
+    elif previous_last_passed_ms is not None:
+        blocker_payload["last_passed_at_ms"] = previous_last_passed_ms
+
+    _write_json(blocker_path, blocker_payload)
+    print(str(report_path))
+    print(str(blocker_path))
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
