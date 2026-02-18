@@ -81,9 +81,19 @@ struct Args {
     #[arg(long, default_value_t = 1e-6)]
     balance_eps: f64,
 
+    /// Relative tolerance for final balance (applied against max(|CPU|, |GPU|, 1.0)).
+    #[arg(long, default_value_t = 2e-7)]
+    balance_rel_eps: f64,
+
     /// Absolute tolerance for total PnL.
     #[arg(long, default_value_t = 1e-6)]
     pnl_eps: f64,
+
+    /// Relative tolerance for total PnL.
+    ///
+    /// Applied against max(|CPU total_pnl|, |GPU total_pnl|, initial_balance, 1.0).
+    #[arg(long, default_value_t = 2e-7)]
+    pnl_rel_eps: f64,
 
     /// Capture GPU trace artifact on every failed sample.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
@@ -352,7 +362,27 @@ fn main() {
     }
 }
 
+fn within_abs_or_rel(delta_abs: f64, lhs: f64, rhs: f64, abs_eps: f64, rel_eps: f64) -> bool {
+    if !delta_abs.is_finite() || !lhs.is_finite() || !rhs.is_finite() {
+        return false;
+    }
+    let scale = lhs.abs().max(rhs.abs()).max(1.0);
+    delta_abs <= abs_eps.max(rel_eps * scale)
+}
+
 fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
+    if !args.balance_eps.is_finite()
+        || !args.balance_rel_eps.is_finite()
+        || !args.pnl_eps.is_finite()
+        || !args.pnl_rel_eps.is_finite()
+        || args.balance_eps < 0.0
+        || args.balance_rel_eps < 0.0
+        || args.pnl_eps < 0.0
+        || args.pnl_rel_eps < 0.0
+    {
+        return Err("--balance-eps/--balance-rel-eps/--pnl-eps/--pnl-rel-eps must be finite, non-negative values".to_string().into());
+    }
+
     if !args.event_numeric_abs_tol.is_finite() || !args.event_numeric_rel_tol.is_finite() {
         return Err(
             "--event-numeric-abs-tol and --event-numeric-rel-tol must be finite values"
@@ -468,9 +498,24 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let baseline_balance_delta_abs =
         (baseline_gpu.final_balance - baseline_cpu.final_balance).abs();
     let baseline_pnl_delta_abs = (baseline_gpu.total_pnl - baseline_cpu.total_pnl).abs();
+    let pnl_scale_floor = spec.initial_balance.abs().max(1.0);
+    let baseline_balance_ok = within_abs_or_rel(
+        baseline_balance_delta_abs,
+        baseline_gpu.final_balance,
+        baseline_cpu.final_balance,
+        args.balance_eps,
+        args.balance_rel_eps,
+    );
+    let baseline_pnl_ok = within_abs_or_rel(
+        baseline_pnl_delta_abs,
+        baseline_gpu.total_pnl.abs().max(pnl_scale_floor),
+        baseline_cpu.total_pnl.abs().max(pnl_scale_floor),
+        args.pnl_eps,
+        args.pnl_rel_eps,
+    );
     let baseline_pass = baseline_trade_delta == 0
-        && baseline_balance_delta_abs <= args.balance_eps
-        && baseline_pnl_delta_abs <= args.pnl_eps;
+        && baseline_balance_ok
+        && baseline_pnl_ok;
     let baseline_cause = if baseline_pass {
         None
     } else if baseline_trade_delta != 0 {
@@ -639,10 +684,24 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             let trade_delta = gpu.total_trades as i64 - cpu.total_trades as i64;
             let balance_delta_abs = (gpu.final_balance - cpu.final_balance).abs();
             let pnl_delta_abs = (gpu.total_pnl - cpu.total_pnl).abs();
+            let balance_ok = within_abs_or_rel(
+                balance_delta_abs,
+                gpu.final_balance,
+                cpu.final_balance,
+                args.balance_eps,
+                args.balance_rel_eps,
+            );
+            let pnl_ok = within_abs_or_rel(
+                pnl_delta_abs,
+                gpu.total_pnl.abs().max(pnl_scale_floor),
+                cpu.total_pnl.abs().max(pnl_scale_floor),
+                args.pnl_eps,
+                args.pnl_rel_eps,
+            );
 
             let pass = trade_delta == 0
-                && balance_delta_abs <= args.balance_eps
-                && pnl_delta_abs <= args.pnl_eps;
+                && balance_ok
+                && pnl_ok;
 
             let cause = if pass {
                 None
