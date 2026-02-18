@@ -153,7 +153,7 @@ def main() -> int:
     if overall_ok:
         gate_report = bundle_dir / "alignment_gate_report.json"
         gate_cmd = [
-            "python",
+            "python3",
             str((repo_root / "tools" / "assert_replay_bundle_alignment.py").resolve()),
             "--bundle-dir",
             str(bundle_dir),
