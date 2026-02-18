@@ -136,9 +136,8 @@ async fn put_config(
     Json(body): Json<ConfigWriteBody>,
 ) -> Result<Json<Value>, HubError> {
     // Validate YAML parses.
-    let _: Value = serde_yaml::from_str(&body.yaml).map_err(|e| {
-        HubError::BadRequest(format!("invalid YAML: {e}"))
-    })?;
+    let _: Value = serde_yaml::from_str(&body.yaml)
+        .map_err(|e| HubError::BadRequest(format!("invalid YAML: {e}")))?;
 
     let file_variant = variant(&q);
     let path = resolve_config_path(&state.config.config_dir, file_variant)?;
@@ -206,7 +205,9 @@ async fn post_config_reload(
         }
     }
 
-    Ok(Json(serde_json::json!({ "ok": true, "reloaded": variant(&q) })))
+    Ok(Json(
+        serde_json::json!({ "ok": true, "reloaded": variant(&q) }),
+    ))
 }
 
 /// GET /api/config/history — List backup files for a config variant.

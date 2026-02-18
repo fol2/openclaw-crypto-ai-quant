@@ -143,14 +143,17 @@ pub fn parse_heartbeat_line(line: &str, ts_ms: Option<i64>, source: &str) -> Hea
         .map(|m| m.as_str().eq_ignore_ascii_case("on"));
     hb.regime_reason = extract_str(&RE_REGIME_REASON, line);
 
-    hb.config_id = RE_CONFIG_ID.captures(line).and_then(|c| c.get(1)).and_then(|m| {
-        let s = m.as_str().to_lowercase();
-        if s == "none" {
-            None
-        } else {
-            Some(s)
-        }
-    });
+    hb.config_id = RE_CONFIG_ID
+        .captures(line)
+        .and_then(|c| c.get(1))
+        .and_then(|m| {
+            let s = m.as_str().to_lowercase();
+            if s == "none" {
+                None
+            } else {
+                Some(s)
+            }
+        });
 
     hb.slip_enabled = RE_SLIP_ENABLED
         .captures(line)

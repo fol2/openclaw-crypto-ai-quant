@@ -1,9 +1,9 @@
-pub mod monitor;
-pub mod decisions;
-pub mod config;
 pub mod backtest;
-pub mod sweep;
+pub mod config;
+pub mod decisions;
 pub mod factory;
+pub mod monitor;
+pub mod sweep;
 pub mod system;
 
 use axum::Router;

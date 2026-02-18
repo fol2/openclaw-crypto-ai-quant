@@ -80,7 +80,12 @@ fn env_f64(name: &str, default: f64) -> f64 {
 fn env_bool(name: &str, default: bool) -> bool {
     env::var(name)
         .ok()
-        .map(|s| matches!(s.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "y" | "on"))
+        .map(|s| {
+            matches!(
+                s.trim().to_lowercase().as_str(),
+                "1" | "true" | "yes" | "y" | "on"
+            )
+        })
         .unwrap_or(default)
 }
 
@@ -104,40 +109,64 @@ impl HubConfig {
 
         let live_db = env_path(
             "AIQ_MONITOR_LIVE_DB",
-            aiq_root.join("trading_engine_live.db").to_str().unwrap_or("trading_engine_live.db"),
+            aiq_root
+                .join("trading_engine_live.db")
+                .to_str()
+                .unwrap_or("trading_engine_live.db"),
         );
         let live_log = env_path(
             "AIQ_MONITOR_LIVE_LOG",
-            aiq_root.join("live_daemon_log.txt").to_str().unwrap_or("live_daemon_log.txt"),
+            aiq_root
+                .join("live_daemon_log.txt")
+                .to_str()
+                .unwrap_or("live_daemon_log.txt"),
         );
 
         let paper1_db_default = aiq_root.join("trading_engine.db");
         let paper1_db = env_path(
             "AIQ_MONITOR_PAPER1_DB",
-            &env_str("AIQ_MONITOR_PAPER_DB", paper1_db_default.to_str().unwrap_or("trading_engine.db")),
+            &env_str(
+                "AIQ_MONITOR_PAPER_DB",
+                paper1_db_default.to_str().unwrap_or("trading_engine.db"),
+            ),
         );
         let paper1_log_default = aiq_root.join("daemon_log.txt");
         let paper1_log = env_path(
             "AIQ_MONITOR_PAPER1_LOG",
-            &env_str("AIQ_MONITOR_PAPER_LOG", paper1_log_default.to_str().unwrap_or("daemon_log.txt")),
+            &env_str(
+                "AIQ_MONITOR_PAPER_LOG",
+                paper1_log_default.to_str().unwrap_or("daemon_log.txt"),
+            ),
         );
 
         let paper2_db = env_path(
             "AIQ_MONITOR_PAPER2_DB",
-            aiq_root.join("trading_engine_paper2.db").to_str().unwrap_or("trading_engine_paper2.db"),
+            aiq_root
+                .join("trading_engine_paper2.db")
+                .to_str()
+                .unwrap_or("trading_engine_paper2.db"),
         );
         let paper2_log = env_path(
             "AIQ_MONITOR_PAPER2_LOG",
-            aiq_root.join("paper2_daemon_log.txt").to_str().unwrap_or("paper2_daemon_log.txt"),
+            aiq_root
+                .join("paper2_daemon_log.txt")
+                .to_str()
+                .unwrap_or("paper2_daemon_log.txt"),
         );
 
         let paper3_db = env_path(
             "AIQ_MONITOR_PAPER3_DB",
-            aiq_root.join("trading_engine_paper3.db").to_str().unwrap_or("trading_engine_paper3.db"),
+            aiq_root
+                .join("trading_engine_paper3.db")
+                .to_str()
+                .unwrap_or("trading_engine_paper3.db"),
         );
         let paper3_log = env_path(
             "AIQ_MONITOR_PAPER3_LOG",
-            aiq_root.join("paper3_daemon_log.txt").to_str().unwrap_or("paper3_daemon_log.txt"),
+            aiq_root
+                .join("paper3_daemon_log.txt")
+                .to_str()
+                .unwrap_or("paper3_daemon_log.txt"),
         );
 
         let config_dir = env_path(
@@ -147,7 +176,10 @@ impl HubConfig {
 
         let candles_db_dir_default = env_str(
             "AI_QUANT_CANDLES_DB_DIR",
-            aiq_root.join("candles_dbs").to_str().unwrap_or("candles_dbs"),
+            aiq_root
+                .join("candles_dbs")
+                .to_str()
+                .unwrap_or("candles_dbs"),
         );
         let candles_db_dir = PathBuf::from(candles_db_dir_default);
 

@@ -45,7 +45,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/v2/decisions", get(api_decisions_list))
         .route("/api/v2/decisions/{id}", get(api_decision_detail))
         .route("/api/v2/decisions/{id}/gates", get(api_decision_gates))
-        .route("/api/v2/trades/{id}/decision-trace", get(api_trade_decision_trace))
+        .route(
+            "/api/v2/trades/{id}/decision-trace",
+            get(api_trade_decision_trace),
+        )
 }
 
 async fn api_decisions_list(

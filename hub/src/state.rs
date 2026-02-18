@@ -64,8 +64,16 @@ impl AppState {
     pub fn candle_db_path(&self, interval: &str) -> PathBuf {
         let safe_iv: String = interval
             .chars()
-            .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
             .collect();
-        self.config.candles_db_dir.join(format!("candles_{safe_iv}.db"))
+        self.config
+            .candles_db_dir
+            .join(format!("candles_{safe_iv}.db"))
     }
 }
