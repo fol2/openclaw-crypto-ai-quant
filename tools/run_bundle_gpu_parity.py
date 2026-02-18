@@ -109,8 +109,8 @@ def main() -> int:
     sweep_spec = str(
         Path(os.environ.get("AQC_PARITY_SWEEP_SPEC") or (repo_root / "backtester" / "sweeps" / "smoke.yaml")).resolve()
     )
-    entry_interval = str(os.environ.get("AQC_PARITY_ENTRY_INTERVAL") or "3m").strip()
-    exit_interval = str(os.environ.get("AQC_PARITY_EXIT_INTERVAL") or "3m").strip()
+    entry_interval = str(os.environ.get("AQC_PARITY_ENTRY_INTERVAL") or "").strip()
+    exit_interval = str(os.environ.get("AQC_PARITY_EXIT_INTERVAL") or "").strip()
     entry_candles_db = str(os.environ.get("AQC_PARITY_ENTRY_CANDLES_DB") or "").strip()
     exit_candles_db = str(os.environ.get("AQC_PARITY_EXIT_CANDLES_DB") or "").strip()
 
@@ -154,10 +154,12 @@ def main() -> int:
             cmd.extend(["--entry-interval", entry_interval])
         if exit_interval:
             cmd.extend(["--exit-interval", exit_interval])
-        if entry_candles_db:
-            cmd.extend(["--entry-candles-db", str(Path(entry_candles_db).expanduser().resolve())])
-        if exit_candles_db:
-            cmd.extend(["--exit-candles-db", str(Path(exit_candles_db).expanduser().resolve())])
+        if entry_interval:
+            entry_db = str(Path(entry_candles_db).expanduser().resolve()) if entry_candles_db else str(candles_db)
+            cmd.extend(["--entry-candles-db", entry_db])
+        if exit_interval:
+            exit_db = str(Path(exit_candles_db).expanduser().resolve()) if exit_candles_db else str(candles_db)
+            cmd.extend(["--exit-candles-db", exit_db])
         if gpu:
             cmd.append("--gpu")
         return cmd
