@@ -79,6 +79,41 @@ def _load_config_sub_intervals(config_path: Path) -> tuple[str, str]:
     return entry, exit_
 
 
+def _resolve_parity_config_path(repo_root: Path) -> Path:
+    env_raw = str(os.environ.get("AQC_PARITY_CONFIG_PATH") or "").strip()
+    if env_raw:
+        p = Path(env_raw).expanduser().resolve()
+        if not p.exists():
+            raise FileNotFoundError(f"AQC_PARITY_CONFIG_PATH does not exist: {p}")
+        return p
+
+    primary = (repo_root / "config" / "strategy_overrides.yaml").resolve()
+    if primary.exists():
+        return primary
+
+    fallback = (repo_root / "config" / "strategy_overrides.yaml.example").resolve()
+    if fallback.exists():
+        print(
+            f"[bundle-gpu-parity] config not found at {primary}; using fallback {fallback}",
+        )
+        return fallback
+
+    return primary
+
+
+def _derive_interval_db(base_candles_db: Path, interval: str) -> Path | None:
+    iv = str(interval or "").strip()
+    if not iv:
+        return None
+    name = base_candles_db.name
+    if not (name.startswith("candles_") and name.endswith(".db")):
+        return None
+    candidate = (base_candles_db.parent / f"candles_{iv}.db").resolve()
+    if candidate.exists():
+        return candidate
+    return None
+
+
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
@@ -135,27 +170,45 @@ def main() -> int:
     logs_dir.mkdir(parents=True, exist_ok=True)
 
     python_bin = str(os.environ.get("AQC_PARITY_PYTHON") or "python3")
-    config_path = str(
-        Path(os.environ.get("AQC_PARITY_CONFIG_PATH") or (repo_root / "config" / "strategy_overrides.yaml")).resolve()
-    )
+    config_path_obj = _resolve_parity_config_path(repo_root)
+    config_path = str(config_path_obj)
     sweep_spec = str(
         Path(os.environ.get("AQC_PARITY_SWEEP_SPEC") or (repo_root / "backtester" / "sweeps" / "smoke.yaml")).resolve()
     )
-    cfg_entry_interval, cfg_exit_interval = _load_config_sub_intervals(Path(config_path))
+    cfg_entry_interval, cfg_exit_interval = _load_config_sub_intervals(config_path_obj)
     entry_interval = str(os.environ.get("AQC_PARITY_ENTRY_INTERVAL") or cfg_entry_interval or "").strip()
     exit_interval = str(os.environ.get("AQC_PARITY_EXIT_INTERVAL") or cfg_exit_interval or "").strip()
     entry_candles_db = str(os.environ.get("AQC_PARITY_ENTRY_CANDLES_DB") or "").strip()
     exit_candles_db = str(os.environ.get("AQC_PARITY_EXIT_CANDLES_DB") or "").strip()
+
+    if not entry_candles_db and entry_interval:
+        derived = _derive_interval_db(candles_db, entry_interval)
+        if derived is not None:
+            entry_candles_db = str(derived)
+    if not exit_candles_db and exit_interval:
+        derived = _derive_interval_db(candles_db, exit_interval)
+        if derived is not None:
+            exit_candles_db = str(derived)
 
     if entry_candles_db and not entry_interval:
         parser.error(
             "AQC_PARITY_ENTRY_CANDLES_DB is set but no entry interval is configured "
             "(set AQC_PARITY_ENTRY_INTERVAL or config global.engine.entry_interval)"
         )
+    if entry_interval and not entry_candles_db and entry_interval != interval:
+        parser.error(
+            f"entry interval '{entry_interval}' requires entry candles DB "
+            "(set AQC_PARITY_ENTRY_CANDLES_DB or provide candles_{entry_interval}.db beside {candles_db})"
+        )
     if exit_candles_db and not exit_interval:
         parser.error(
             "AQC_PARITY_EXIT_CANDLES_DB is set but no exit interval is configured "
             "(set AQC_PARITY_EXIT_INTERVAL or config global.engine.exit_interval)"
+        )
+    if exit_interval and not exit_candles_db and exit_interval != interval:
+        parser.error(
+            f"exit interval '{exit_interval}' requires exit candles DB "
+            "(set AQC_PARITY_EXIT_CANDLES_DB or provide candles_{exit_interval}.db beside {candles_db})"
         )
 
     bt_dir = (repo_root / "backtester").resolve()

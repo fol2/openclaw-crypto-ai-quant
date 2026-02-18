@@ -58,9 +58,30 @@ def _parse_timestamp_ms(value: Any) -> int:
         return 0
 
 
-def _reconstruct_positions(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+def _sqlite_ts_ms_expr(column_name: str = "timestamp") -> str:
+    # Use integer epoch arithmetic to avoid float rounding drift on boundary cut-offs.
+    return (
+        f"(CAST(strftime('%s', {column_name}) AS INTEGER) * 1000 + "
+        f"CAST(substr(strftime('%f', {column_name}), 4, 3) AS INTEGER))"
+    )
+
+
+def _reconstruct_positions(
+    conn: sqlite3.Connection,
+    *,
+    as_of_ts: int | None = None,
+) -> list[dict[str, Any]]:
     if not _table_exists(conn, "trades"):
         return []
+
+    open_where = "action = 'OPEN'"
+    close_where = "action = 'CLOSE'"
+    open_close_params: list[Any] = []
+    if as_of_ts is not None:
+        cutoff_expr = _sqlite_ts_ms_expr("timestamp")
+        open_where += f" AND {cutoff_expr} <= ?"
+        close_where += f" AND {cutoff_expr} <= ?"
+        open_close_params.extend([int(as_of_ts), int(as_of_ts)])
 
     sql_open = """
     SELECT t.id AS open_id, t.timestamp AS open_ts, t.symbol, t.type AS pos_type,
@@ -69,17 +90,17 @@ def _reconstruct_positions(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     FROM trades t
     INNER JOIN (
         SELECT symbol, MAX(id) AS open_id
-        FROM trades WHERE action = 'OPEN' GROUP BY symbol
+        FROM trades WHERE {open_where} GROUP BY symbol
     ) lo ON t.id = lo.open_id
     LEFT JOIN (
         SELECT symbol, MAX(id) AS close_id
-        FROM trades WHERE action = 'CLOSE' GROUP BY symbol
+        FROM trades WHERE {close_where} GROUP BY symbol
     ) lc ON t.symbol = lc.symbol
     WHERE lc.close_id IS NULL OR t.id > lc.close_id
-    """
+    """.format(open_where=open_where, close_where=close_where)
 
     positions: list[dict[str, Any]] = []
-    for row in conn.execute(sql_open).fetchall():
+    for row in conn.execute(sql_open, tuple(open_close_params)).fetchall():
         symbol = str(row["symbol"] or "").strip().upper()
         pos_type = str(row["pos_type"] or "").strip().upper()
         if not symbol or pos_type not in {"LONG", "SHORT"}:
@@ -97,11 +118,16 @@ def _reconstruct_positions(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             leverage = 1.0
         margin_used = float(row["margin_used"] or (abs(net_size) * avg_entry / leverage))
 
-        fills = conn.execute(
+        fills_q = (
             "SELECT action, price, size, entry_atr FROM trades "
-            "WHERE symbol = ? AND id > ? AND action IN ('ADD', 'REDUCE') ORDER BY id ASC",
-            (symbol, open_id),
-        ).fetchall()
+            "WHERE symbol = ? AND id > ? AND action IN ('ADD', 'REDUCE')"
+        )
+        fills_params: list[Any] = [symbol, open_id]
+        if as_of_ts is not None:
+            fills_q += f" AND {_sqlite_ts_ms_expr('timestamp')} <= ?"
+            fills_params.append(int(as_of_ts))
+        fills_q += " ORDER BY id ASC"
+        fills = conn.execute(fills_q, tuple(fills_params)).fetchall()
         for fill in fills:
             action = str(fill["action"] or "").strip().upper()
             px = float(fill["price"] or 0.0)
@@ -133,7 +159,7 @@ def _reconstruct_positions(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         last_add_time_ms = 0
         entry_adx_threshold = 0.0
 
-        if _table_exists(conn, "position_state"):
+        if as_of_ts is None and _table_exists(conn, "position_state"):
             ps_row = conn.execute(
                 "SELECT open_trade_id, trailing_sl, adds_count, tp1_taken, last_add_time, entry_adx_threshold "
                 "FROM position_state WHERE symbol = ? LIMIT 1",
@@ -171,17 +197,24 @@ def _reconstruct_positions(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return positions
 
 
-def _load_balance(conn: sqlite3.Connection) -> float:
-    if not _table_exists(conn, "trades"):
-        return 0.0
-    row = conn.execute("SELECT balance FROM trades ORDER BY id DESC LIMIT 1").fetchone()
-    return float(row["balance"] or 0.0) if row else 0.0
-
-
-def _load_open_orders(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+def _load_open_orders(
+    conn: sqlite3.Connection,
+    *,
+    as_of_ts: int | None = None,
+) -> list[dict[str, Any]]:
     if not _table_exists(conn, "oms_open_orders"):
         return []
-    rows = conn.execute("SELECT * FROM oms_open_orders ORDER BY symbol ASC").fetchall()
+
+    if as_of_ts is not None:
+        rows = conn.execute(
+            "SELECT * FROM oms_open_orders "
+            "WHERE (first_seen_ts_ms IS NULL OR first_seen_ts_ms <= ?) "
+            "AND (last_seen_ts_ms IS NULL OR last_seen_ts_ms >= ?) "
+            "ORDER BY symbol ASC",
+            (int(as_of_ts), int(as_of_ts)),
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM oms_open_orders ORDER BY symbol ASC").fetchall()
     out: list[dict[str, Any]] = []
     for row in rows:
         out.append({k: row[k] for k in row.keys()})
@@ -385,14 +418,28 @@ def _compare_open_orders(
     return diffs
 
 
-def _build_state(db_path: Path) -> dict[str, Any]:
+def _load_balance(conn: sqlite3.Connection, *, as_of_ts: int | None = None) -> float:
+    if not _table_exists(conn, "trades"):
+        return 0.0
+    balance_q = "SELECT balance FROM trades"
+    balance_params: list[Any] = []
+    if as_of_ts is not None:
+        balance_q += f" WHERE {_sqlite_ts_ms_expr('timestamp')} <= ?"
+        balance_params.append(int(as_of_ts))
+    balance_q += " ORDER BY id DESC LIMIT 1"
+    row = conn.execute(balance_q, tuple(balance_params)).fetchone()
+    return float(row["balance"] or 0.0) if row else 0.0
+
+
+def _build_state(db_path: Path, *, as_of_ts: int | None = None) -> dict[str, Any]:
     conn = _connect_ro(db_path)
     try:
         return {
             "db_path": str(db_path),
-            "balance": _load_balance(conn),
-            "positions": _reconstruct_positions(conn),
-            "open_orders": _load_open_orders(conn),
+            "as_of_ts": as_of_ts,
+            "balance": _load_balance(conn, as_of_ts=as_of_ts),
+            "positions": _reconstruct_positions(conn, as_of_ts=as_of_ts),
+            "open_orders": _load_open_orders(conn, as_of_ts=as_of_ts),
         }
     finally:
         conn.close()
@@ -403,6 +450,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--live-db", required=True, help="Path to live SQLite DB")
     parser.add_argument("--paper-db", required=True, help="Path to paper SQLite DB")
     parser.add_argument("--snapshot", help="Optional canonical snapshot JSON path")
+    parser.add_argument("--as-of-ts", type=int, default=None, help="Optional state cutoff timestamp (ms, inclusive)")
     parser.add_argument("--tolerance", type=float, default=DEFAULT_TOL, help="Absolute numeric tolerance")
     parser.add_argument("--output", help="Optional output JSON path")
     return parser
@@ -419,21 +467,32 @@ def main() -> int:
     if not paper_db.exists():
         parser.error(f"paper DB not found: {paper_db}")
 
-    live_state = _build_state(live_db)
-    paper_state = _build_state(paper_db)
-
     snapshot_state: dict[str, Any] | None = None
+    snapshot_as_of_ts: int | None = None
     if args.snapshot:
         snapshot_path = Path(args.snapshot).expanduser().resolve()
         if not snapshot_path.exists():
             parser.error(f"snapshot not found: {snapshot_path}")
         payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        raw_snapshot_as_of = (payload.get("canonical") or {}).get("as_of_ts")
+        if raw_snapshot_as_of is not None:
+            try:
+                snapshot_as_of_ts = int(raw_snapshot_as_of)
+            except Exception:
+                snapshot_as_of_ts = None
         snapshot_state = {
             "snapshot_path": str(snapshot_path),
             "balance": float(payload.get("balance") or 0.0),
             "positions": payload.get("positions") or [],
             "open_orders": (payload.get("canonical") or {}).get("open_orders") or [],
         }
+
+    effective_as_of_ts: int | None = int(args.as_of_ts) if args.as_of_ts is not None else snapshot_as_of_ts
+    if effective_as_of_ts is not None and effective_as_of_ts <= 0:
+        parser.error("--as-of-ts must be a positive epoch millisecond value")
+
+    live_state = _build_state(live_db, as_of_ts=effective_as_of_ts)
+    paper_state = _build_state(paper_db, as_of_ts=effective_as_of_ts)
 
     diffs: list[dict[str, Any]] = []
 
@@ -504,6 +563,7 @@ def main() -> int:
         "ok": len(diffs) == 0,
         "generated_at_ms": int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000),
         "tolerance": float(args.tolerance),
+        "as_of_ts": effective_as_of_ts,
         "summary": {
             "live_balance": float(live_state["balance"]),
             "paper_balance": float(paper_state["balance"]),

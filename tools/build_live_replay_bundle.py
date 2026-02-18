@@ -186,6 +186,8 @@ def main() -> int:
         for row in baseline_trades:
             fp.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False) + "\n")
 
+    seed_as_of_ts = max(1, int(args.from_ts) - 1)
+
     cmd_export_seed = (
         "set -euo pipefail\n"
         "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
@@ -193,7 +195,7 @@ def main() -> int:
         f"LIVE_DB=\"${{LIVE_DB:-{shlex.quote(str(live_db))}}}\"\n"
         f"PAPER_DB=\"${{PAPER_DB:-{shlex.quote(str(paper_db))}}}\"\n"
         f"SNAPSHOT_PATH=\"$BUNDLE_DIR/{snapshot_name}\"\n"
-        "python3 \"$REPO_ROOT/tools/export_live_canonical_snapshot.py\" --source live --db-path \"$LIVE_DB\" --output \"$SNAPSHOT_PATH\"\n"
+        f"python3 \"$REPO_ROOT/tools/export_live_canonical_snapshot.py\" --source live --db-path \"$LIVE_DB\" --as-of-ts {seed_as_of_ts} --output \"$SNAPSHOT_PATH\"\n"
         "python3 \"$REPO_ROOT/tools/apply_canonical_snapshot_to_paper.py\" --snapshot \"$SNAPSHOT_PATH\" --target-db \"$PAPER_DB\""
     )
 
@@ -231,7 +233,8 @@ def main() -> int:
         f"PAPER_DB=\"${{PAPER_DB:-{shlex.quote(str(paper_db))}}}\"\n"
         f"SNAPSHOT_PATH=\"$BUNDLE_DIR/{snapshot_name}\"\n"
         "python3 \"$REPO_ROOT/tools/audit_state_sync_alignment.py\" --live-db \"$LIVE_DB\" "
-        f"--paper-db \"$PAPER_DB\" --snapshot \"$SNAPSHOT_PATH\" --output \"$BUNDLE_DIR/{audit_report_path.name}\""
+        f"--paper-db \"$PAPER_DB\" --snapshot \"$SNAPSHOT_PATH\" --as-of-ts {seed_as_of_ts} "
+        f"--output \"$BUNDLE_DIR/{audit_report_path.name}\""
     )
 
     cmd_trade_reconcile = (

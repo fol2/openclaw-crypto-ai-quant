@@ -419,7 +419,12 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let entry_candles: Option<CandleData> = match (&args.entry_candles_db, &args.entry_interval) {
         (Some(db), Some(interval)) => {
             let entry_paths = vec![db.clone()];
-            let loaded = bt_data::sqlite_loader::load_candles_multi(&entry_paths, interval)
+            let loaded = bt_data::sqlite_loader::load_candles_filtered_multi(
+                &entry_paths,
+                interval,
+                args.from_ts,
+                args.to_ts,
+            )
                 .map_err(|e| format!("failed to load entry candles from {db}: {e}"))?;
             if loaded.is_empty() {
                 return Err(format!("no entry candles loaded from {db}").into());
