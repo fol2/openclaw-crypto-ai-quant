@@ -22,6 +22,7 @@ def _mk_db(tmp_path: Path) -> Path:
     db = tmp_path / "funding_rates.db"
     con = sqlite3.connect(str(db))
     try:
+        con.execute("PRAGMA journal_mode=WAL")
         con.executescript(DB_SCHEMA)
         con.commit()
     finally:
@@ -74,7 +75,34 @@ def test_check_pass(tmp_path):
     res = chk.check_funding_rates_db(db, symbols=None, now_ms=now_ms, thresholds=_thresholds(lookback_hours=12.0))
     assert res["status"] == chk.Status.PASS
     assert res["summary"]["issues_total"] == 0
+    assert res["summary"]["journal_mode"] == "wal"
     assert res["symbols"]["BTC"]["status"] == chk.Status.PASS
+
+
+def test_check_warns_when_journal_mode_is_not_wal(tmp_path):
+    db = tmp_path / "funding_rates.db"
+    con = sqlite3.connect(str(db))
+    try:
+        con.executescript(DB_SCHEMA)
+        con.commit()
+    finally:
+        con.close()
+
+    now_ms = 1_700_000_000_000
+    h = 3_600_000
+    rows = [("BTC", now_ms - 2 * h, 0.001), ("BTC", now_ms - h, 0.001), ("BTC", now_ms, 0.001)]
+    _insert_rows(db, rows)
+
+    res = chk.check_funding_rates_db(
+        db,
+        symbols=["BTC"],
+        now_ms=now_ms,
+        thresholds=_thresholds(lookback_hours=4.0, max_gap_fail_hours=10.0),
+    )
+
+    assert res["status"] == chk.Status.WARN
+    assert any(i["type"] == "journal_mode" and i["severity"] == chk.Status.WARN for i in res["issues"])
+    assert res["summary"]["journal_mode"] == "delete"
 
 
 def test_check_gap_fail(tmp_path):
