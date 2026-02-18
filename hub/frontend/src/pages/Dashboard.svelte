@@ -121,6 +121,12 @@
     if (isNaN(d.getTime())) return '';
     return fmtAge((Date.now() - d.getTime()) / 1000);
   }
+  function isFreshSig(ts: string | null | undefined): boolean {
+    if (!ts) return false;
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return false;
+    return (Date.now() - d.getTime()) < 3_600_000; // 1 hour
+  }
   function pnlClass(v: number | null | undefined): string {
     if (v === null || v === undefined) return '';
     return v >= 0 ? 'green' : 'red';
@@ -348,15 +354,15 @@
                 ></mid-price>
               </td>
               <td>
-                {#if s.last_signal?.signal === 'BUY'}
-                  <span class="sig-badge buy">BUY</span>
-                {:else if s.last_signal?.signal === 'SELL'}
-                  <span class="sig-badge sell">SELL</span>
+                {#if isFreshSig(s.last_signal?.timestamp)}
+                  {#if s.last_signal?.signal === 'BUY'}
+                    <span class="sig-badge buy">BUY</span>
+                  {:else if s.last_signal?.signal === 'SELL'}
+                    <span class="sig-badge sell">SELL</span>
+                  {/if}
+                  <span class="sig-age">{sigAge(s.last_signal.timestamp)}</span>
                 {:else}
                   <span class="sig-badge none">\u2014</span>
-                {/if}
-                {#if s.last_signal?.signal && s.last_signal?.timestamp}
-                  <span class="sig-age">{sigAge(s.last_signal.timestamp)}</span>
                 {/if}
               </td>
               <td>
