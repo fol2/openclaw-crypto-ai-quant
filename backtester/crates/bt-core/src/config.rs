@@ -663,6 +663,15 @@ fn defaults_as_value() -> serde_yaml::Value {
     serde_yaml::from_str(&json_str).expect("JSON round-trip to YAML Value")
 }
 
+fn validate_loaded_config(cfg: &mut StrategyConfig) {
+    if cfg.indicators.bb_width_avg_window == 0 {
+        eprintln!(
+            "[config] Invalid indicators.bb_width_avg_window=0; clamping to 1 to avoid RingBuf panic."
+        );
+        cfg.indicators.bb_width_avg_window = 1;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Serializable mirror (for defaults -> Value round-trip)
 // ---------------------------------------------------------------------------
@@ -958,7 +967,10 @@ pub fn load_config(yaml_path: &str, symbol: Option<&str>, is_live: bool) -> Stra
 
     // Deserialize the merged Value into the typed config.
     match serde_yaml::from_value(merged) {
-        Ok(cfg) => cfg,
+        Ok(mut cfg) => {
+            validate_loaded_config(&mut cfg);
+            cfg
+        }
         Err(e) => {
             eprintln!("[config] Failed to deserialize merged config: {e}");
             StrategyConfig::default()
@@ -1178,6 +1190,20 @@ live:
         let cfg = load_config(tmp.to_str().unwrap(), Some("ETH"), true);
         assert!((cfg.trade.leverage - 4.0).abs() < f64::EPSILON);
         assert!((cfg.trade.allocation_pct - 0.02).abs() < f64::EPSILON);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn test_load_yaml_clamps_zero_bb_width_avg_window() {
+        let yaml = r#"
+global:
+  indicators:
+    bb_width_avg_window: 0
+"#;
+        let tmp = std::env::temp_dir().join("bt_config_test_bb_width_avg_window_zero.yaml");
+        std::fs::write(&tmp, yaml).unwrap();
+        let cfg = load_config(tmp.to_str().unwrap(), None, false);
+        assert_eq!(cfg.indicators.bb_width_avg_window, 1);
         std::fs::remove_file(&tmp).ok();
     }
 }
