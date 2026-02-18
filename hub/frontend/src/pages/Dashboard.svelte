@@ -458,7 +458,7 @@
   </button>
 </div>
 
-<div class="dashboard-grid" class:is-dragging={dragging || chartDragging}>
+<div class="dashboard-grid" class:is-dragging={dragging || chartDragging} class:drag-col={dragging} class:drag-row={chartDragging}>
   <!-- Symbol table -->
   <div class="panel symbols-panel" class:mobile-visible={mobileTab === 'symbols'} class:expanded-hidden={detailExpanded} style="width:{symWidth}px;min-width:{symWidth}px">
     <div class="panel-header">
@@ -922,6 +922,12 @@
   }
   .dashboard-grid.is-dragging {
     user-select: none;
+  }
+  .dashboard-grid.drag-col {
+    cursor: col-resize;
+  }
+  .dashboard-grid.drag-row {
+    cursor: row-resize;
   }
 
   .splitter {
@@ -1403,6 +1409,7 @@
     }
 
     .splitter { display: none; }
+    .expand-btn { display: none; }
 
     .symbols-panel {
       width: auto !important;
