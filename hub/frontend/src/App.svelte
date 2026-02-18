@@ -9,11 +9,12 @@
   import GridView from './pages/GridView.svelte';
   import System from './pages/System.svelte';
 
-  // Simple hash-based routing for SPA.
   let currentPage = $state(window.location.hash.slice(1) || 'dashboard');
+  let sidebarOpen = $state(false);
 
   function handleHashChange() {
     currentPage = window.location.hash.slice(1) || 'dashboard';
+    sidebarOpen = false;
   }
 
   $effect(() => {
@@ -22,7 +23,23 @@
   });
 </script>
 
-<Sidebar {currentPage} />
+<!-- Mobile hamburger -->
+<button class="hamburger" onclick={() => sidebarOpen = !sidebarOpen} aria-label="Toggle menu">
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+    {#if sidebarOpen}
+      <path d="M5 5L15 15M15 5L5 15" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    {:else}
+      <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    {/if}
+  </svg>
+</button>
+
+<!-- Overlay backdrop for mobile -->
+{#if sidebarOpen}
+  <button class="overlay" onclick={() => sidebarOpen = false} aria-label="Close menu"></button>
+{/if}
+
+<Sidebar {currentPage} open={sidebarOpen} onNavigate={() => sidebarOpen = false} />
 
 <main class="main-content">
   {#if currentPage === 'dashboard'}
@@ -40,21 +57,83 @@
   {:else if currentPage === 'system'}
     <System />
   {:else}
-    <h1>Not Found</h1>
-    <p>Unknown page: {currentPage}</p>
+    <div class="not-found">
+      <h1>404</h1>
+      <p>Unknown page: <code>{currentPage}</code></p>
+    </div>
   {/if}
 </main>
 
 <style>
   .main-content {
     flex: 1;
-    padding: 24px;
+    padding: var(--sp-lg);
+    padding-bottom: calc(var(--sp-lg) + var(--safe-bottom));
     overflow-y: auto;
+    overflow-x: hidden;
+    animation: fadeIn 0.25s ease;
   }
 
-  h1 {
-    font-size: 20px;
-    margin-bottom: 12px;
-    font-weight: 600;
+  .hamburger {
+    display: none;
+    position: fixed;
+    top: var(--sp-sm);
+    left: var(--sp-sm);
+    z-index: calc(var(--z-sidebar) + 1);
+    width: 40px;
+    height: 40px;
+    border-radius: var(--radius-md);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 0;
+    align-items: center;
+    justify-content: center;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-overlay);
+    background: rgba(0,0,0,0.6);
+    backdrop-filter: blur(2px);
+    border: none;
+    padding: 0;
+    cursor: default;
+  }
+
+  .not-found {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 60vh;
+    color: var(--text-muted);
+  }
+  .not-found h1 {
+    font-size: 48px;
+    font-weight: 700;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+  }
+  .not-found code {
+    font-family: 'IBM Plex Mono', monospace;
+    color: var(--accent);
+  }
+
+  @media (max-width: 768px) {
+    .hamburger {
+      display: flex;
+    }
+    .overlay {
+      display: block;
+      animation: fadeIn 0.2s ease;
+    }
+    .main-content {
+      padding: var(--sp-md);
+      padding-top: 56px;
+    }
   }
 </style>
