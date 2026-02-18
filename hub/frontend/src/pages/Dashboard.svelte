@@ -207,7 +207,7 @@
         <thead>
           <tr>
             <th>SYM</th>
-            <th class="hide-xs">MID</th>
+            <th class="col-mid">MID</th>
             <th>SIG</th>
             <th>POS</th>
           </tr>
@@ -220,13 +220,8 @@
               class:row-short={s.position?.type === 'SHORT'}
               onclick={() => setFocus(s.symbol)}
             >
-              <td class="sym-name">
-                {s.symbol}
-                <span class="sym-price" class:flash-up={flashMap[s.symbol] === 'up'} class:flash-down={flashMap[s.symbol] === 'down'}>
-                  {s.mid != null ? fmtNum(s.mid, 6) : '\u2014'}
-                </span>
-              </td>
-              <td class="num hide-xs" class:flash-up={flashMap[s.symbol] === 'up'} class:flash-down={flashMap[s.symbol] === 'down'}>{s.mid != null ? fmtNum(s.mid, 6) : '\u2014'}</td>
+              <td class="sym-name">{s.symbol}</td>
+              <td class="num col-mid" class:flash-up={flashMap[s.symbol] === 'up'} class:flash-down={flashMap[s.symbol] === 'down'}>{s.mid != null ? fmtNum(s.mid, 6) : '\u2014'}</td>
               <td>
                 {#if s.last_signal?.signal === 'BUY'}
                   <span class="sig-badge buy">BUY</span>
@@ -683,10 +678,6 @@
     letter-spacing: 0.02em;
   }
 
-  /* mobile price shown under symbol name */
-  .sym-price {
-    display: none;
-  }
   .num {
     font-variant-numeric: tabular-nums;
     text-align: right;
@@ -934,21 +925,24 @@
       display: flex;
     }
 
-    .hide-xs {
-      display: none;
+    /* MID column always visible; compact column widths to fit ~375px */
+    .sym-table {
+      table-layout: fixed;
     }
+    .sym-table th:nth-child(1), .sym-table td:nth-child(1) { width: 36%; }
+    .sym-table th:nth-child(2), .sym-table td:nth-child(2) { width: 32%; }
+    .sym-table th:nth-child(3), .sym-table td:nth-child(3) { width: 16%; }
+    .sym-table th:nth-child(4), .sym-table td:nth-child(4) { width: 16%; }
 
-    .sym-price {
-      display: block;
+    .col-mid {
       font-size: 10px;
-      font-family: 'IBM Plex Mono', monospace;
-      color: var(--text-muted);
-      font-weight: 400;
-      margin-top: 1px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .sym-table td {
-      padding: 10px 10px;
+      padding: 10px 6px;
     }
     .sym-table tr {
       min-height: 44px;
