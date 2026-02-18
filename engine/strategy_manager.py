@@ -215,10 +215,11 @@ class StrategyManager:
             mode = os.stat(yaml_path).st_mode
             if mode & stat.S_IWOTH:
                 logger.warning(
-                    "Strategy YAML %s is world-writable (mode %s) — loading anyway",
+                    "Strategy YAML %s is world-writable (mode %s) — skipping reload for safety",
                     yaml_path,
                     oct(mode),
                 )
+                return False
         except OSError:
             pass  # best-effort; don't block on stat failures
         return True
