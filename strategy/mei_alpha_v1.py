@@ -183,7 +183,8 @@ def _build_indicator_snapshot_python(
     bb_obj = ta.volatility.BollingerBands(close, window=bb_win)
     bb_upper = bb_obj.bollinger_hband()
     bb_lower = bb_obj.bollinger_lband()
-    bb_width = (bb_upper - bb_lower) / close
+    safe_close = close.mask(close == 0.0)
+    bb_width = (bb_upper - bb_lower) / safe_close
     bb_width_avg = bb_width.rolling(window=bb_width_avg_win).mean()
 
     atr_series = ta.volatility.average_true_range(high, low, close, window=atr_win)

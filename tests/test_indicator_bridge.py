@@ -201,6 +201,16 @@ class TestPythonFallback:
             if expected_type is float:
                 assert not math.isnan(float(val)), f"Python fallback {name} is NaN"
 
+    def test_python_fallback_zero_close_keeps_bb_width_finite(self):
+        df = _make_btc_df(60)
+        df.loc[df.index[-1], "Close"] = 0.0
+        timestamps = df["Timestamp"].values
+        snap = _build_indicator_snapshot_python(df, timestamps, config=None)
+
+        assert math.isfinite(float(snap["bb_width"]))
+        assert math.isfinite(float(snap["bb_width_avg"]))
+        assert math.isfinite(float(snap["bb_width_ratio"]))
+
     def test_python_fallback_custom_config(self):
         df = _make_btc_df(60)
         timestamps = df["Timestamp"].values
@@ -292,5 +302,6 @@ class TestCrossValidation:
         # Indicator fields should be close after warmup
         # (EMA uses incremental vs rolling, so not exact)
         for field in ["ema_slow", "ema_fast", "rsi", "atr", "adx", "macd_hist", "bb_width", "vol_sma"]:
-            assert rust_snap[field] == pytest.approx(py_snap[field], rel=0.05), \
+            assert rust_snap[field] == pytest.approx(py_snap[field], rel=0.05), (
                 f"{field}: rust={rust_snap[field]}, python={py_snap[field]}"
+            )
