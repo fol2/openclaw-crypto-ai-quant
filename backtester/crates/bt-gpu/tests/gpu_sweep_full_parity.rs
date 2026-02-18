@@ -549,8 +549,11 @@ fn rust_compute_entry_sizing(
             Confidence::Low => cfg.confidence_mult_low as f64,
         };
 
-        let adx_mult =
-            (adx / cfg.adx_sizing_full_adx as f64).clamp(cfg.adx_sizing_min_mult as f64, 1.0);
+        let adx_mult = if cfg.adx_sizing_full_adx > 0.0 {
+            (adx / cfg.adx_sizing_full_adx as f64).clamp(cfg.adx_sizing_min_mult as f64, 1.0)
+        } else {
+            cfg.adx_sizing_min_mult as f64
+        };
 
         let vol_ratio = if cfg.vol_baseline_pct > 0.0 && price > 0.0 {
             (atr / price) / cfg.vol_baseline_pct as f64
