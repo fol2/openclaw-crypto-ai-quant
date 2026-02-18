@@ -8,6 +8,15 @@
   const BAR_COUNTS = [50, 100, 200, 400] as const;
   const CHART_PREF_INTERVAL_COOKIE = 'aiq_dash_iv';
   const CHART_PREF_BARS_COOKIE = 'aiq_dash_bars';
+  const MODE_SERVICE_MAP: Record<string, string> = {
+    live: 'openclaw-ai-quant-live-v8',
+    paper1: 'openclaw-ai-quant-trader-v8-paper1',
+    paper2: 'openclaw-ai-quant-trader-v8-paper2',
+    paper3: 'openclaw-ai-quant-trader-v8-paper3',
+  };
+  const SERVICE_STATUS_REFRESH_MS = 30_000;
+
+  type ModeRuntimeState = 'on' | 'off' | 'error' | 'unknown';
 
   let snap: any = $state(null);
   let focusSym = $state('');
@@ -21,6 +30,12 @@
   let detailTab: 'detail' | 'trades' | 'oms' | 'audit' = $state('detail');
   let manualTradeEnabled = $state(false);
   let liveEngineActive = $state(false);
+  let modeRuntimeState = $state<Record<string, ModeRuntimeState>>({
+    live: 'unknown',
+    paper1: 'unknown',
+    paper2: 'unknown',
+    paper3: 'unknown',
+  });
   let detailExpanded = $state(false);
   let chartHeight = $state(240);
   let chartDragging = $state(false);
@@ -79,6 +94,42 @@
 
     const barsRaw = Number(readCookie(CHART_PREF_BARS_COOKIE));
     if (Number.isFinite(barsRaw) && isValidBars(barsRaw)) selectedBars = barsRaw;
+  }
+
+  function classifyModeRuntimeState(service: any): ModeRuntimeState {
+    const active = String(service?.active || '').toLowerCase();
+    const sub = String(service?.sub || '').toLowerCase();
+    const load = String(service?.load || '').toLowerCase();
+    if (active === 'active') return 'on';
+    if (active === 'failed' || sub === 'failed' || sub === 'auto-restart') return 'error';
+    if (load === 'not-found' || active === '' || active === 'unknown') return 'unknown';
+    return 'off';
+  }
+
+  function getModeRuntimeState(mode: string): ModeRuntimeState {
+    return modeRuntimeState[mode] ?? 'unknown';
+  }
+
+  function getModeRuntimeLabel(mode: string): string {
+    const state = getModeRuntimeState(mode);
+    if (state === 'on') return 'ON';
+    if (state === 'off') return 'OFF';
+    if (state === 'error') return 'ERR';
+    return 'N/A';
+  }
+
+  async function refreshModeRuntimeStates() {
+    try {
+      const svcs = await getSystemServices();
+      const byName = new Map((svcs || []).map((s: any) => [String(s?.name || ''), s]));
+      modeRuntimeState = {
+        live: classifyModeRuntimeState(byName.get(MODE_SERVICE_MAP.live)),
+        paper1: classifyModeRuntimeState(byName.get(MODE_SERVICE_MAP.paper1)),
+        paper2: classifyModeRuntimeState(byName.get(MODE_SERVICE_MAP.paper2)),
+        paper3: classifyModeRuntimeState(byName.get(MODE_SERVICE_MAP.paper3)),
+      };
+      liveEngineActive = modeRuntimeState.live === 'on';
+    } catch {}
   }
 
   type FlashDebugEvent = {
@@ -489,13 +540,16 @@
     return () => hubWs.unsubscribe('mids', midsHandler);
   });
 
-  // ── Manual trade: one-time feature & service check ────────────────────────
+  // ── Manual trade feature check ─────────────────────────────────────────────
   $effect(() => {
     tradeEnabled().then(r => { manualTradeEnabled = r?.enabled ?? false; }).catch(() => {});
-    getSystemServices().then(svcs => {
-      const live = (svcs || []).find((s: any) => s.name?.includes('live-v8'));
-      liveEngineActive = live?.active === 'active';
-    }).catch(() => {});
+  });
+
+  // ── Runtime service states for Live + candidate family daemons ────────────
+  $effect(() => {
+    void refreshModeRuntimeStates();
+    const timer = setInterval(() => { void refreshModeRuntimeStates(); }, SERVICE_STATUS_REFRESH_MS);
+    return () => clearInterval(timer);
   });
 
   // ── Resizable columns ──────────────────────────────────────────────────────
@@ -606,7 +660,10 @@
         class="mode-btn mode-btn-live"
         class:active={appState.mode === LIVE_MODE}
         onclick={() => setMode(LIVE_MODE)}
-      >{getModeLabel(LIVE_MODE)}</button>
+      >
+        <span>{getModeLabel(LIVE_MODE)}</span>
+        <span class={`mode-state state-${getModeRuntimeState(LIVE_MODE)}`}>{getModeRuntimeLabel(LIVE_MODE)}</span>
+      </button>
 
       <span class="mode-divider" aria-hidden="true"></span>
 
@@ -616,7 +673,10 @@
             class="mode-btn"
             class:active={appState.mode === m || (appState.mode === 'paper' && m === 'paper1')}
             onclick={() => setMode(m)}
-          >{getModeLabel(m)}</button>
+          >
+            <span>{getModeLabel(m)}</span>
+            <span class={`mode-state state-${getModeRuntimeState(m)}`}>{getModeRuntimeLabel(m)}</span>
+          </button>
         {/each}
       </div>
     </div>
@@ -997,6 +1057,10 @@
     opacity: 0.9;
   }
   .mode-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
     background: transparent;
     border: none;
     color: var(--text-muted);
@@ -1009,6 +1073,39 @@
     font-family: 'IBM Plex Mono', monospace;
     transition: all var(--t-fast);
     white-space: nowrap;
+  }
+  .mode-state {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 28px;
+    padding: 1px 5px;
+    border-radius: 999px;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    font-size: 9px;
+    line-height: 1.1;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+  }
+  .mode-state.state-on {
+    color: var(--green);
+    border-color: rgba(81, 207, 102, 0.45);
+    background: rgba(81, 207, 102, 0.12);
+  }
+  .mode-state.state-off {
+    color: var(--yellow);
+    border-color: rgba(255, 212, 59, 0.45);
+    background: rgba(255, 212, 59, 0.12);
+  }
+  .mode-state.state-error {
+    color: var(--red);
+    border-color: rgba(255, 107, 107, 0.45);
+    background: rgba(255, 107, 107, 0.12);
+  }
+  .mode-state.state-unknown {
+    color: var(--text-dim);
+    border-color: rgba(148, 163, 184, 0.35);
+    background: rgba(148, 163, 184, 0.1);
   }
   .mode-btn:hover {
     color: var(--text);
@@ -1033,6 +1130,9 @@
     box-shadow: 0 1px 4px rgba(255,107,107,0.3);
     color: var(--bg);
     border-color: transparent;
+  }
+  .mode-btn.active .mode-state {
+    border-color: rgba(15, 23, 42, 0.35);
   }
 
   .status-chip {
