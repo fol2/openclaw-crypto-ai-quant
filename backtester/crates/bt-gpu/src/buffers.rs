@@ -152,27 +152,58 @@ pub struct GpuIndicatorConfig {
 
 const _: () = assert!(std::mem::size_of::<GpuIndicatorConfig>() == 80);
 
+fn checked_u32_from_usize(name: &str, val: usize) -> u32 {
+    u32::try_from(val).unwrap_or_else(|_| {
+        eprintln!(
+            "[gpu-config] {name} value {val} exceeds u32::MAX; clamping to {}",
+            u32::MAX
+        );
+        u32::MAX
+    })
+}
+
 impl GpuIndicatorConfig {
     /// Build from StrategyConfig using canonical runtime indicator windows.
     pub fn from_strategy_config(cfg: &bt_core::config::StrategyConfig, lookback: usize) -> Self {
         let ic = &cfg.indicators;
         Self {
-            ema_fast_window: ic.ema_fast_window as u32,
-            ema_slow_window: ic.ema_slow_window as u32,
-            ema_macro_window: ic.ema_macro_window as u32,
-            adx_window: ic.adx_window as u32,
-            bb_window: ic.bb_window as u32,
-            bb_width_avg_window: ic.bb_width_avg_window as u32,
-            atr_window: ic.atr_window as u32,
-            rsi_window: ic.rsi_window as u32,
-            vol_sma_window: ic.vol_sma_window as u32,
-            vol_trend_window: ic.vol_trend_window as u32,
-            stoch_rsi_window: ic.stoch_rsi_window as u32,
-            stoch_rsi_smooth1: ic.stoch_rsi_smooth1 as u32,
-            stoch_rsi_smooth2: ic.stoch_rsi_smooth2 as u32,
-            avg_atr_window: cfg.effective_ave_avg_atr_window() as u32,
-            slow_drift_slope_window: cfg.thresholds.entry.slow_drift_slope_window as u32,
-            lookback: lookback as u32,
+            ema_fast_window: checked_u32_from_usize("indicators.ema_fast_window", ic.ema_fast_window),
+            ema_slow_window: checked_u32_from_usize("indicators.ema_slow_window", ic.ema_slow_window),
+            ema_macro_window: checked_u32_from_usize("indicators.ema_macro_window", ic.ema_macro_window),
+            adx_window: checked_u32_from_usize("indicators.adx_window", ic.adx_window),
+            bb_window: checked_u32_from_usize("indicators.bb_window", ic.bb_window),
+            bb_width_avg_window: checked_u32_from_usize(
+                "indicators.bb_width_avg_window",
+                ic.bb_width_avg_window,
+            ),
+            atr_window: checked_u32_from_usize("indicators.atr_window", ic.atr_window),
+            rsi_window: checked_u32_from_usize("indicators.rsi_window", ic.rsi_window),
+            vol_sma_window: checked_u32_from_usize("indicators.vol_sma_window", ic.vol_sma_window),
+            vol_trend_window: checked_u32_from_usize(
+                "indicators.vol_trend_window",
+                ic.vol_trend_window,
+            ),
+            stoch_rsi_window: checked_u32_from_usize(
+                "indicators.stoch_rsi_window",
+                ic.stoch_rsi_window,
+            ),
+            stoch_rsi_smooth1: checked_u32_from_usize(
+                "indicators.stoch_rsi_smooth1",
+                ic.stoch_rsi_smooth1,
+            ),
+            stoch_rsi_smooth2: checked_u32_from_usize(
+                "indicators.stoch_rsi_smooth2",
+                ic.stoch_rsi_smooth2,
+            ),
+            avg_atr_window: checked_u32_from_usize(
+                "thresholds.entry.ave_avg_atr_window",
+                cfg.effective_ave_avg_atr_window(),
+            ),
+            slow_drift_slope_window: checked_u32_from_usize(
+                "thresholds.entry.slow_drift_slope_window",
+                cfg.thresholds.entry.slow_drift_slope_window,
+            ),
+            lookback: checked_u32_from_usize("lookback", lookback),
             use_stoch_rsi: cfg.filters.use_stoch_rsi_filter as u32,
             _pad: [0; 3],
         }
@@ -613,6 +644,11 @@ impl GpuComboConfig {
         let rt = &cfg.thresholds.ranging;
         let at = &cfg.thresholds.anomaly;
         let tp = &cfg.thresholds.tp_and_momentum;
+        macro_rules! checked_f32_field {
+            ($expr:expr) => {
+                checked_f32(stringify!($expr), $expr)?
+            };
+        }
 
         Ok(Self {
             allocation_pct: checked_f32("allocation_pct", tc.allocation_pct)?,
@@ -621,11 +657,11 @@ impl GpuComboConfig {
             leverage: checked_f32("leverage", tc.leverage)?,
 
             enable_reef_filter: tc.enable_reef_filter as u32,
-            reef_long_rsi_block_gt: tc.reef_long_rsi_block_gt as f32,
-            reef_short_rsi_block_lt: tc.reef_short_rsi_block_lt as f32,
-            reef_adx_threshold: tc.reef_adx_threshold as f32,
-            reef_long_rsi_extreme_gt: tc.reef_long_rsi_extreme_gt as f32,
-            reef_short_rsi_extreme_lt: tc.reef_short_rsi_extreme_lt as f32,
+            reef_long_rsi_block_gt: checked_f32_field!(tc.reef_long_rsi_block_gt),
+            reef_short_rsi_block_lt: checked_f32_field!(tc.reef_short_rsi_block_lt),
+            reef_adx_threshold: checked_f32_field!(tc.reef_adx_threshold),
+            reef_long_rsi_extreme_gt: checked_f32_field!(tc.reef_long_rsi_extreme_gt),
+            reef_short_rsi_extreme_lt: checked_f32_field!(tc.reef_short_rsi_extreme_lt),
 
             enable_dynamic_leverage: tc.enable_dynamic_leverage as u32,
             leverage_low: checked_f32("leverage_low", tc.leverage_low)?,
@@ -648,12 +684,11 @@ impl GpuComboConfig {
                 tc.confidence_mult_medium,
             )?,
             confidence_mult_low: checked_f32("confidence_mult_low", tc.confidence_mult_low)?,
-            adx_sizing_min_mult: tc.adx_sizing_min_mult as f32,
-            adx_sizing_full_adx: tc.adx_sizing_full_adx as f32,
-            vol_baseline_pct: tc.vol_baseline_pct as f32,
-            vol_scalar_min: tc.vol_scalar_min as f32,
-
-            vol_scalar_max: tc.vol_scalar_max as f32,
+            adx_sizing_min_mult: checked_f32_field!(tc.adx_sizing_min_mult),
+            adx_sizing_full_adx: checked_f32_field!(tc.adx_sizing_full_adx),
+            vol_baseline_pct: checked_f32_field!(tc.vol_baseline_pct),
+            vol_scalar_min: checked_f32_field!(tc.vol_scalar_min),
+            vol_scalar_max: checked_f32_field!(tc.vol_scalar_max),
             trailing_vbts_mult: 1.25,
 
             enable_pyramiding: tc.enable_pyramiding as u32,
@@ -663,7 +698,7 @@ impl GpuComboConfig {
                 tc.add_fraction_of_base_margin,
             )?,
             add_cooldown_minutes: tc.add_cooldown_minutes as u32,
-            add_min_profit_atr: tc.add_min_profit_atr as f32,
+            add_min_profit_atr: checked_f32_field!(tc.add_min_profit_atr),
             add_min_confidence: tc.add_min_confidence as u32,
             entry_min_confidence: tc.entry_min_confidence as u32,
             trailing_high_profit_atr: 2.0,
@@ -674,30 +709,31 @@ impl GpuComboConfig {
                 "tp_partial_min_notional_usd",
                 tc.tp_partial_min_notional_usd,
             )?,
-            trailing_start_atr: tc.trailing_start_atr as f32,
-            trailing_distance_atr: tc.trailing_distance_atr as f32,
-            tp_partial_atr_mult: tc.tp_partial_atr_mult as f32,
+            trailing_start_atr: checked_f32_field!(tc.trailing_start_atr),
+            trailing_distance_atr: checked_f32_field!(tc.trailing_distance_atr),
+            tp_partial_atr_mult: checked_f32_field!(tc.tp_partial_atr_mult),
 
             enable_ssf_filter: tc.enable_ssf_filter as u32,
             enable_breakeven_stop: tc.enable_breakeven_stop as u32,
-            breakeven_start_atr: tc.breakeven_start_atr as f32,
-            breakeven_buffer_atr: tc.breakeven_buffer_atr as f32,
-
-            trailing_start_atr_low_conf: tc.trailing_start_atr_low_conf as f32,
-            trailing_distance_atr_low_conf: tc.trailing_distance_atr_low_conf as f32,
-            smart_exit_adx_exhaustion_lt: tc.smart_exit_adx_exhaustion_lt as f32,
-            smart_exit_adx_exhaustion_lt_low_conf: tc.smart_exit_adx_exhaustion_lt_low_conf as f32,
+            breakeven_start_atr: checked_f32_field!(tc.breakeven_start_atr),
+            breakeven_buffer_atr: checked_f32_field!(tc.breakeven_buffer_atr),
+            trailing_start_atr_low_conf: checked_f32_field!(tc.trailing_start_atr_low_conf),
+            trailing_distance_atr_low_conf: checked_f32_field!(tc.trailing_distance_atr_low_conf),
+            smart_exit_adx_exhaustion_lt: checked_f32_field!(tc.smart_exit_adx_exhaustion_lt),
+            smart_exit_adx_exhaustion_lt_low_conf: checked_f32_field!(
+                tc.smart_exit_adx_exhaustion_lt_low_conf
+            ),
 
             enable_rsi_overextension_exit: tc.enable_rsi_overextension_exit as u32,
-            rsi_exit_profit_atr_switch: tc.rsi_exit_profit_atr_switch as f32,
-            rsi_exit_ub_lo_profit: tc.rsi_exit_ub_lo_profit as f32,
-            rsi_exit_ub_hi_profit: tc.rsi_exit_ub_hi_profit as f32,
-            rsi_exit_lb_lo_profit: tc.rsi_exit_lb_lo_profit as f32,
-            rsi_exit_lb_hi_profit: tc.rsi_exit_lb_hi_profit as f32,
-            rsi_exit_ub_lo_profit_low_conf: tc.rsi_exit_ub_lo_profit_low_conf as f32,
-            rsi_exit_ub_hi_profit_low_conf: tc.rsi_exit_ub_hi_profit_low_conf as f32,
-            rsi_exit_lb_lo_profit_low_conf: tc.rsi_exit_lb_lo_profit_low_conf as f32,
-            rsi_exit_lb_hi_profit_low_conf: tc.rsi_exit_lb_hi_profit_low_conf as f32,
+            rsi_exit_profit_atr_switch: checked_f32_field!(tc.rsi_exit_profit_atr_switch),
+            rsi_exit_ub_lo_profit: checked_f32_field!(tc.rsi_exit_ub_lo_profit),
+            rsi_exit_ub_hi_profit: checked_f32_field!(tc.rsi_exit_ub_hi_profit),
+            rsi_exit_lb_lo_profit: checked_f32_field!(tc.rsi_exit_lb_lo_profit),
+            rsi_exit_lb_hi_profit: checked_f32_field!(tc.rsi_exit_lb_hi_profit),
+            rsi_exit_ub_lo_profit_low_conf: checked_f32_field!(tc.rsi_exit_ub_lo_profit_low_conf),
+            rsi_exit_ub_hi_profit_low_conf: checked_f32_field!(tc.rsi_exit_ub_hi_profit_low_conf),
+            rsi_exit_lb_lo_profit_low_conf: checked_f32_field!(tc.rsi_exit_lb_lo_profit_low_conf),
+            rsi_exit_lb_hi_profit_low_conf: checked_f32_field!(tc.rsi_exit_lb_hi_profit_low_conf),
 
             reentry_cooldown_minutes: tc.reentry_cooldown_minutes as u32,
             reentry_cooldown_min_mins: tc.reentry_cooldown_min_mins as u32,
@@ -705,15 +741,15 @@ impl GpuComboConfig {
             trailing_tighten_default: 0.5,
 
             enable_vol_buffered_trailing: tc.enable_vol_buffered_trailing as u32,
-            tsme_min_profit_atr: tc.tsme_min_profit_atr as f32,
+            tsme_min_profit_atr: checked_f32_field!(tc.tsme_min_profit_atr),
             tsme_require_adx_slope_negative: tc.tsme_require_adx_slope_negative as u32,
             trailing_tighten_tspv: 0.75,
 
-            min_atr_pct: tc.min_atr_pct as f32,
+            min_atr_pct: checked_f32_field!(tc.min_atr_pct),
             reverse_entry_signal: tc.reverse_entry_signal as u32,
             block_exits_on_extreme_dev: tc.block_exits_on_extreme_dev as u32,
-            glitch_price_dev_pct: tc.glitch_price_dev_pct as f32,
-            glitch_atr_mult: tc.glitch_atr_mult as f32,
+            glitch_price_dev_pct: checked_f32_field!(tc.glitch_price_dev_pct),
+            glitch_atr_mult: checked_f32_field!(tc.glitch_atr_mult),
             trailing_weak_trend_mult: 0.7,
 
             max_open_positions: tc.max_open_positions as u32,
@@ -725,7 +761,7 @@ impl GpuComboConfig {
             enable_anomaly_filter: fc.enable_anomaly_filter as u32,
             enable_extension_filter: fc.enable_extension_filter as u32,
             require_adx_rising: fc.require_adx_rising as u32,
-            adx_rising_saturation: fc.adx_rising_saturation as f32,
+            adx_rising_saturation: checked_f32_field!(fc.adx_rising_saturation),
             require_volume_confirmation: fc.require_volume_confirmation as u32,
             vol_confirm_include_prev: fc.vol_confirm_include_prev as u32,
             use_stoch_rsi_filter: fc.use_stoch_rsi_filter as u32,
@@ -734,60 +770,58 @@ impl GpuComboConfig {
 
             enable_regime_filter: mc.enable_regime_filter as u32,
             enable_auto_reverse: mc.enable_auto_reverse as u32,
-            auto_reverse_breadth_low: mc.auto_reverse_breadth_low as f32,
-            auto_reverse_breadth_high: mc.auto_reverse_breadth_high as f32,
-            breadth_block_short_above: mc.breadth_block_short_above as f32,
-            breadth_block_long_below: mc.breadth_block_long_below as f32,
-
-            min_adx: et.min_adx as f32,
-            high_conf_volume_mult: et.high_conf_volume_mult as f32,
-            btc_adx_override: et.btc_adx_override as f32,
-            max_dist_ema_fast: et.max_dist_ema_fast as f32,
-            ave_atr_ratio_gt: et.ave_atr_ratio_gt as f32,
-            ave_adx_mult: et.ave_adx_mult as f32,
-            dre_min_adx: et.min_adx as f32,
-            dre_max_adx: tp.adx_strong_gt as f32,
-            dre_long_rsi_limit_low: tp.rsi_long_weak as f32,
-            dre_long_rsi_limit_high: tp.rsi_long_strong as f32,
-            dre_short_rsi_limit_low: tp.rsi_short_weak as f32,
-            dre_short_rsi_limit_high: tp.rsi_short_strong as f32,
+            auto_reverse_breadth_low: checked_f32_field!(mc.auto_reverse_breadth_low),
+            auto_reverse_breadth_high: checked_f32_field!(mc.auto_reverse_breadth_high),
+            breadth_block_short_above: checked_f32_field!(mc.breadth_block_short_above),
+            breadth_block_long_below: checked_f32_field!(mc.breadth_block_long_below),
+            min_adx: checked_f32_field!(et.min_adx),
+            high_conf_volume_mult: checked_f32_field!(et.high_conf_volume_mult),
+            btc_adx_override: checked_f32_field!(et.btc_adx_override),
+            max_dist_ema_fast: checked_f32_field!(et.max_dist_ema_fast),
+            ave_atr_ratio_gt: checked_f32_field!(et.ave_atr_ratio_gt),
+            ave_adx_mult: checked_f32_field!(et.ave_adx_mult),
+            dre_min_adx: checked_f32_field!(et.min_adx),
+            dre_max_adx: checked_f32_field!(tp.adx_strong_gt),
+            dre_long_rsi_limit_low: checked_f32_field!(tp.rsi_long_weak),
+            dre_long_rsi_limit_high: checked_f32_field!(tp.rsi_long_strong),
+            dre_short_rsi_limit_low: checked_f32_field!(tp.rsi_short_weak),
+            dre_short_rsi_limit_high: checked_f32_field!(tp.rsi_short_strong),
             macd_mode: match et.macd_hist_entry_mode {
                 bt_core::config::MacdMode::Accel => 0,
                 bt_core::config::MacdMode::Sign => 1,
                 bt_core::config::MacdMode::None => 2,
             },
-            pullback_min_adx: et.pullback_min_adx as f32,
-            pullback_rsi_long_min: et.pullback_rsi_long_min as f32,
-            pullback_rsi_short_max: et.pullback_rsi_short_max as f32,
+            pullback_min_adx: checked_f32_field!(et.pullback_min_adx),
+            pullback_rsi_long_min: checked_f32_field!(et.pullback_rsi_long_min),
+            pullback_rsi_short_max: checked_f32_field!(et.pullback_rsi_short_max),
             pullback_require_macd_sign: et.pullback_require_macd_sign as u32,
             pullback_confidence: et.pullback_confidence as u32,
-            slow_drift_min_slope_pct: et.slow_drift_min_slope_pct as f32,
-            slow_drift_min_adx: et.slow_drift_min_adx as f32,
-            slow_drift_rsi_long_min: et.slow_drift_rsi_long_min as f32,
-            slow_drift_rsi_short_max: et.slow_drift_rsi_short_max as f32,
-
-            ranging_adx_lt: rt.adx_below as f32,
-            ranging_bb_width_ratio_lt: rt.bb_width_ratio_below as f32,
+            slow_drift_min_slope_pct: checked_f32_field!(et.slow_drift_min_slope_pct),
+            slow_drift_min_adx: checked_f32_field!(et.slow_drift_min_adx),
+            slow_drift_rsi_long_min: checked_f32_field!(et.slow_drift_rsi_long_min),
+            slow_drift_rsi_short_max: checked_f32_field!(et.slow_drift_rsi_short_max),
+            ranging_adx_lt: checked_f32_field!(rt.adx_below),
+            ranging_bb_width_ratio_lt: checked_f32_field!(rt.bb_width_ratio_below),
             anomaly_bb_width_ratio_gt: DEFAULT_ANOMALY_BB_WIDTH_RATIO_GT,
-            slow_drift_ranging_slope_override: et.slow_drift_min_slope_pct as f32,
+            slow_drift_ranging_slope_override: checked_f32_field!(et.slow_drift_min_slope_pct),
             snapshot_offset: 0,
             breadth_offset: 0,
 
-            tp_strong_adx_gt: tp.adx_strong_gt as f32,
-            tp_weak_adx_lt: tp.adx_weak_lt as f32,
+            tp_strong_adx_gt: checked_f32_field!(tp.adx_strong_gt),
+            tp_weak_adx_lt: checked_f32_field!(tp.adx_weak_lt),
 
             // Decision codegen fields (AQC-1250)
             enable_pullback_entries: et.enable_pullback_entries as u32,
-            anomaly_price_change_pct: at.price_change_pct_gt as f32,
-            anomaly_ema_dev_pct: at.ema_fast_dev_pct_gt as f32,
-            ranging_rsi_low: rt.rsi_low as f32,
-            ranging_rsi_high: rt.rsi_high as f32,
+            anomaly_price_change_pct: checked_f32_field!(at.price_change_pct_gt),
+            anomaly_ema_dev_pct: checked_f32_field!(at.ema_fast_dev_pct_gt),
+            ranging_rsi_low: checked_f32_field!(rt.rsi_low),
+            ranging_rsi_high: checked_f32_field!(rt.rsi_high),
             ranging_min_signals: rt.min_signals as u32,
-            stoch_rsi_block_long_gt: cfg.thresholds.stoch_rsi.block_long_if_k_gt as f32,
-            stoch_rsi_block_short_lt: cfg.thresholds.stoch_rsi.block_short_if_k_lt as f32,
+            stoch_rsi_block_long_gt: checked_f32_field!(cfg.thresholds.stoch_rsi.block_long_if_k_gt),
+            stoch_rsi_block_short_lt: checked_f32_field!(cfg.thresholds.stoch_rsi.block_short_if_k_lt),
             ave_enabled: et.ave_enabled as u32,
-            tp_mult_strong: tp.tp_mult_strong as f32,
-            tp_mult_weak: tp.tp_mult_weak as f32,
+            tp_mult_strong: checked_f32_field!(tp.tp_mult_strong),
+            tp_mult_weak: checked_f32_field!(tp.tp_mult_weak),
             entry_cooldown_s: tc.entry_cooldown_s as u32,
         })
     }
@@ -809,6 +843,18 @@ mod tests {
 
         let out = GpuIndicatorConfig::from_strategy_config(&cfg, 200);
         assert_eq!(out.avg_atr_window, 17);
+    }
+
+    #[test]
+    fn test_gpu_indicator_config_clamps_large_usize_windows() {
+        let mut cfg = StrategyConfig::default();
+        cfg.indicators.ema_fast_window = usize::MAX;
+        cfg.thresholds.entry.ave_avg_atr_window = usize::MAX;
+
+        let out = GpuIndicatorConfig::from_strategy_config(&cfg, usize::MAX);
+        assert_eq!(out.ema_fast_window, u32::MAX);
+        assert_eq!(out.avg_atr_window, u32::MAX);
+        assert_eq!(out.lookback, u32::MAX);
     }
 
     /// AQC-1250: round-trip test — StrategyConfig → GpuComboConfig for the 11 new
@@ -885,6 +931,21 @@ mod tests {
         assert!(
             err.unwrap_err().contains("leverage"),
             "error should mention the field name"
+        );
+    }
+
+    #[test]
+    fn test_checked_f32_overflow_detected_for_previously_unchecked_field() {
+        let mut cfg = StrategyConfig::default();
+        cfg.trade.trailing_start_atr = f64::MAX;
+        let err = GpuComboConfig::from_strategy_config(&cfg);
+        assert!(
+            err.is_err(),
+            "expected overflow error for trailing_start_atr"
+        );
+        assert!(
+            err.unwrap_err().contains("tc.trailing_start_atr"),
+            "error should mention the overflowing field path"
         );
     }
 
