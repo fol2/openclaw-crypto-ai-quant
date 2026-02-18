@@ -143,3 +143,21 @@ export async function getSweepResults(id: string) {
 export async function cancelSweep(id: string) {
   return apiFetch(`/api/sweep/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
+
+// ── Factory API ─────────────────────────────────────────────────────
+
+export async function getFactoryRuns() {
+  return apiFetch('/api/factory/runs');
+}
+
+export async function getFactoryRun(date: string, runId: string) {
+  return apiFetch(`/api/factory/runs/${encodeURIComponent(date)}/${encodeURIComponent(runId)}`);
+}
+
+export async function getFactoryReport(date: string, runId: string) {
+  return apiFetch(`/api/factory/runs/${encodeURIComponent(date)}/${encodeURIComponent(runId)}/report`);
+}
+
+export async function getFactoryCandidates(date: string, runId: string) {
+  return apiFetch(`/api/factory/runs/${encodeURIComponent(date)}/${encodeURIComponent(runId)}/candidates`);
+}
