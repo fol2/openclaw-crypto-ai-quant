@@ -68,6 +68,16 @@ def _interval_to_ms(interval: str) -> int:
         return 0
 
 
+def _finite_float_or_default(raw: Any, default: float) -> float:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return float(default)
+    if not math.isfinite(value):
+        return float(default)
+    return float(value)
+
+
 def _resolve_entry_max_delay_ms(*, raw_ms: str | None, raw_s: str | None) -> tuple[int, bool]:
     """Resolve entry delay env values to milliseconds.
 
@@ -924,9 +934,9 @@ class UnifiedEngine:
         def _cfg_float(ecfg: dict, yaml_key: str, env_key: str, default: float) -> float:
             v = ecfg.get(yaml_key)
             if v is not None:
-                return float(v)
+                return _finite_float_or_default(v, default)
             e = os.getenv(f"AI_QUANT_{env_key}", "")
-            return float(e) if e.strip() else default
+            return _finite_float_or_default(e, default) if e.strip() else float(default)
 
         def _cfg_int(ecfg: dict, yaml_key: str, env_key: str, default: int) -> int:
             return int(_cfg_float(ecfg, yaml_key, env_key, float(default)))
