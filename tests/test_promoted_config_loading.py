@@ -166,6 +166,36 @@ class TestFindLatestPromotedConfig:
         assert result is not None
         assert "20260214T230000Z" in str(result)
 
+    def test_date_scan_limit_preserves_backwards_compatible_fallback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If bounded scan misses, fallback full scan should still find older configs."""
+        artifacts = _make_artifacts_tree(tmp_path, runs=[
+            ("2026-02-13", "nightly_20260213T010000Z", ["primary"]),
+        ])
+        # Newest date has no promoted_configs payload.
+        (artifacts / "2026-02-14" / "run_nightly_20260214T010000Z").mkdir(parents=True)
+
+        monkeypatch.setenv("AI_QUANT_PROMOTED_SCAN_DATE_DIRS", "1")
+        result = _find_latest_promoted_config(artifacts, "primary")
+        assert result is not None
+        assert "2026-02-13" in str(result)
+
+    def test_run_scan_limit_preserves_backwards_compatible_fallback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If bounded per-date run scan misses, fallback full scan should still find config."""
+        artifacts = _make_artifacts_tree(tmp_path, runs=[
+            ("2026-02-14", "nightly_20260214T010000Z", ["primary"]),
+        ])
+        # Create a lexicographically newer run without promoted configs.
+        (artifacts / "2026-02-14" / "run_nightly_20260214T230000Z").mkdir(parents=True)
+
+        monkeypatch.setenv("AI_QUANT_PROMOTED_SCAN_RUN_DIRS_PER_DATE", "1")
+        result = _find_latest_promoted_config(artifacts, "primary")
+        assert result is not None
+        assert "20260214T010000Z" in str(result)
+
     def test_ignores_non_date_directories(self, tmp_path: Path) -> None:
         """Should ignore directories that don't match YYYY-MM-DD pattern."""
         artifacts = _make_artifacts_tree(tmp_path, runs=[
