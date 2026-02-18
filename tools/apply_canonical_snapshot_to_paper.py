@@ -132,7 +132,7 @@ def _seed_trades_and_positions(
     if _table_exists(conn, "position_state"):
         conn.execute("DELETE FROM position_state")
 
-    for pos in positions:
+    for idx, pos in enumerate(positions):
         symbol = str(pos.get("symbol") or "").strip().upper()
         side = str(pos.get("side") or "").strip().lower()
         if not symbol or side not in {"long", "short"}:

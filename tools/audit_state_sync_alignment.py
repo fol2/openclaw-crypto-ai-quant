@@ -59,7 +59,11 @@ def _parse_timestamp_ms(value: Any) -> int:
 
 
 def _sqlite_ts_ms_expr(column_name: str = "timestamp") -> str:
-    return f"CAST((julianday({column_name}) - 2440587.5) * 86400000.0 AS INTEGER)"
+    # Use integer epoch arithmetic to avoid float rounding drift on boundary cut-offs.
+    return (
+        f"(CAST(strftime('%s', {column_name}) AS INTEGER) * 1000 + "
+        f"CAST(substr(strftime('%f', {column_name}), 4, 3) AS INTEGER))"
+    )
 
 
 def _reconstruct_positions(

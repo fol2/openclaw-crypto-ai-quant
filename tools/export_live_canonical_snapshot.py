@@ -110,7 +110,11 @@ def _max_id(conn: sqlite3.Connection, table_name: str) -> int | None:
 
 
 def _sqlite_ts_ms_expr(column_name: str = "timestamp") -> str:
-    return f"CAST((julianday({column_name}) - 2440587.5) * 86400000.0 AS INTEGER)"
+    # Use integer epoch arithmetic to avoid float rounding drift on boundary cut-offs.
+    return (
+        f"(CAST(strftime('%s', {column_name}) AS INTEGER) * 1000 + "
+        f"CAST(substr(strftime('%f', {column_name}), 4, 3) AS INTEGER))"
+    )
 
 
 def _reconstruct_positions_and_balance(

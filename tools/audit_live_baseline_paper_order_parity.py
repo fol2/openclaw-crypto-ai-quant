@@ -345,6 +345,9 @@ def main() -> int:
     )
 
     accepted_residuals: list[dict[str, Any]] = []
+    unknown_actions_present = (
+        live_counts["live_unknown_actions"] > 0 or paper_counts["paper_unknown_actions"] > 0
+    )
     if live_counts["live_funding_events"] > 0 or paper_counts["paper_funding_events"] > 0:
         accepted_residuals.append(
             {
@@ -367,6 +370,7 @@ def main() -> int:
         and compare_counts["order_mismatch"] == 0
         and compare_counts["unmatched_live_events"] == live_counts["live_simulatable_events"]
         and compare_counts["unmatched_paper_events"] == 0
+        and not unknown_actions_present
     )
     if paper_window_not_replayed:
         accepted_residuals.append(
@@ -388,6 +392,7 @@ def main() -> int:
         and compare_counts["order_mismatch"] == 0
         and compare_counts["unmatched_live_events"] == 0
         and compare_counts["unmatched_paper_events"] == paper_counts["paper_simulatable_events"]
+        and not unknown_actions_present
         and all(
             str(ev.get("reason") or "").strip().lower() == "state_sync_seed_close"
             for ev in paper_events

@@ -333,7 +333,11 @@ fn run_gpu_sweep_internal(
     // ticks exactly at `from_ts` via the preceding indicator bar window.
     // Shift GPU trade start back by one indicator bar when sub-bars are active so
     // boundary sub-ticks are visible to the kernel path.
-    let trade_start_for_kernel = if max_sub_per_bar > 0 && from_ts.is_some() && trade_start > 0 {
+    let trade_start_for_kernel = if max_sub_per_bar > 0
+        && from_ts.is_some()
+        && trade_start > 0
+        && trade_start < trade_end
+    {
         trade_start - 1
     } else {
         trade_start
