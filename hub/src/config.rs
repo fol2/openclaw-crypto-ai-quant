@@ -40,7 +40,10 @@ pub struct HubConfig {
     pub fee_rate: f64,
     pub hl_balance_enable: bool,
     pub hl_main_address: Option<String>,
+    /// Fallback cadence used when sidecar does not support blocking `wait_mids`.
     pub mids_poll_ms: u64,
+    /// Blocking wait timeout for sidecar `wait_mids` calls.
+    pub mids_wait_timeout_ms: u64,
 }
 
 fn env_str(name: &str, default: &str) -> String {
@@ -206,6 +209,7 @@ impl HubConfig {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
             mids_poll_ms: env_u64("AIQ_MONITOR_MIDS_POLL_MS", 100),
+            mids_wait_timeout_ms: env_u64("AIQ_MONITOR_MIDS_WAIT_TIMEOUT_MS", 25_000),
         }
     }
 

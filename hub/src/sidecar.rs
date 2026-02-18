@@ -41,6 +41,23 @@ struct RpcResponse {
 pub struct MidsSnapshot {
     pub mids: HashMap<String, f64>,
     pub mids_age_s: Option<f64>,
+    pub mids_seq: Option<u64>,
+    pub changed: bool,
+    pub timed_out: bool,
+    pub seq_reset: bool,
+}
+
+fn parse_f64_value(v: &Value) -> Option<f64> {
+    v.as_f64()
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+}
+
+fn parse_u64_value(v: &Value) -> Option<u64> {
+    if let Some(u) = v.as_u64() {
+        return Some(u);
+    }
+    v.as_i64()
+        .and_then(|i| if i >= 0 { Some(i as u64) } else { None })
 }
 
 impl SidecarClient {
@@ -142,13 +159,78 @@ impl SidecarClient {
         let mut mids = HashMap::new();
         if let Some(m) = mids_raw {
             for (k, v) in m {
-                if let Some(f) = v.as_f64() {
+                if let Some(f) = parse_f64_value(v) {
                     mids.insert(k.to_uppercase(), f);
                 }
             }
         }
-        let mids_age_s = result.get("mids_age_s").and_then(|v| v.as_f64());
-        Ok(MidsSnapshot { mids, mids_age_s })
+        let mids_age_s = result.get("mids_age_s").and_then(parse_f64_value);
+        Ok(MidsSnapshot {
+            mids,
+            mids_age_s,
+            mids_seq: result.get("mids_seq").and_then(parse_u64_value),
+            changed: true,
+            timed_out: false,
+            seq_reset: false,
+        })
+    }
+
+    /// Wait for a sidecar mids change and return the latest snapshot.
+    pub async fn wait_mids(
+        &self,
+        symbols: &[String],
+        after_seq: Option<u64>,
+        timeout_ms: u64,
+    ) -> Result<MidsSnapshot, String> {
+        let timeout_ms = timeout_ms.clamp(50, 120_000);
+        let result = match self
+            .rpc(
+                "wait_mids",
+                serde_json::json!({
+                    "symbols": symbols,
+                    "after_seq": after_seq.unwrap_or(0),
+                    "max_age_s": null,
+                    "timeout_ms": timeout_ms
+                }),
+            )
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                // Backward-compatible fallback for sidecars that do not expose wait_mids yet.
+                if e.to_ascii_lowercase().contains("unknown method") {
+                    return self.get_mids(symbols).await;
+                }
+                return Err(e);
+            }
+        };
+
+        let mids_raw = result.get("mids").and_then(|v| v.as_object());
+        let mut mids = HashMap::new();
+        if let Some(m) = mids_raw {
+            for (k, v) in m {
+                if let Some(f) = parse_f64_value(v) {
+                    mids.insert(k.to_uppercase(), f);
+                }
+            }
+        }
+        Ok(MidsSnapshot {
+            mids,
+            mids_age_s: result.get("mids_age_s").and_then(parse_f64_value),
+            mids_seq: result.get("mids_seq").and_then(parse_u64_value),
+            changed: result
+                .get("changed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            timed_out: result
+                .get("timed_out")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            seq_reset: result
+                .get("seq_reset")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        })
     }
 
     /// Get a single mid price.
