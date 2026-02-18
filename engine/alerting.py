@@ -196,14 +196,21 @@ def _shutdown_alert_worker(*, drain_timeout_s: float = 2.0) -> None:
             return
         thread = _ALERT_WORKER_THREAD
 
-    deadline = time.time() + max(0.0, float(drain_timeout_s))
+    timeout_s = max(0.0, float(drain_timeout_s))
+    deadline = time.time() + timeout_s
     while (not _ALERT_QUEUE.empty()) and time.time() < deadline:
         time.sleep(0.01)
 
-    try:
-        _ALERT_QUEUE.put_nowait(_ALERT_STOP_SENTINEL)
-    except Exception:
-        pass
+    stop_enqueued = False
+    enqueue_deadline = time.time() + max(0.1, min(1.0, timeout_s))
+    while (not stop_enqueued) and time.time() < enqueue_deadline:
+        try:
+            _ALERT_QUEUE.put_nowait(_ALERT_STOP_SENTINEL)
+            stop_enqueued = True
+        except queue.Full:
+            time.sleep(0.01)
+        except Exception:
+            break
 
     if thread is not None and thread.is_alive():
         try:
@@ -211,9 +218,14 @@ def _shutdown_alert_worker(*, drain_timeout_s: float = 2.0) -> None:
         except Exception:
             pass
 
+    thread_alive = bool(thread is not None and thread.is_alive())
     with _ALERT_QUEUE_LOCK:
-        _ALERT_WORKER_STARTED = False
-        _ALERT_WORKER_THREAD = None
+        if thread_alive:
+            _ALERT_WORKER_STARTED = True
+            _ALERT_WORKER_THREAD = thread
+        else:
+            _ALERT_WORKER_STARTED = False
+            _ALERT_WORKER_THREAD = None
 
 
 def _ensure_worker_started() -> None:

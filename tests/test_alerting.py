@@ -49,6 +49,8 @@ def test_shutdown_alert_worker_drains_queue_and_stops_worker(monkeypatch):
     assert ("discord", "#ops", "alpha") in sent
     assert ("discord", "#ops", "beta") in sent
     assert alerting._ALERT_WORKER_STARTED is False
+    worker = alerting._ALERT_WORKER_THREAD
+    assert worker is None or not worker.is_alive()
 
 
 def test_ensure_worker_started_registers_atexit_once(monkeypatch):
@@ -66,3 +68,28 @@ def test_ensure_worker_started_registers_atexit_once(monkeypatch):
     alerting._shutdown_alert_worker(drain_timeout_s=0.2)
 
     assert len(registrations) == 1
+
+
+def test_shutdown_alert_worker_keeps_started_state_when_stop_not_enqueued(monkeypatch):
+    class _FakeThread:
+        def __init__(self) -> None:
+            self._alive = True
+
+        def is_alive(self) -> bool:
+            return self._alive
+
+        def join(self, timeout=None) -> None:  # noqa: ANN001,ARG002
+            return
+
+    full_q: queue.Queue[object] = queue.Queue(maxsize=1)
+    full_q.put("busy-item")
+    fake_thread = _FakeThread()
+
+    monkeypatch.setattr(alerting, "_ALERT_QUEUE", full_q)
+    monkeypatch.setattr(alerting, "_ALERT_WORKER_STARTED", True)
+    monkeypatch.setattr(alerting, "_ALERT_WORKER_THREAD", fake_thread)
+
+    alerting._shutdown_alert_worker(drain_timeout_s=0.0)
+
+    assert alerting._ALERT_WORKER_STARTED is True
+    assert alerting._ALERT_WORKER_THREAD is fake_thread
