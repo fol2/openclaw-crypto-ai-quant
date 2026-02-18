@@ -1,0 +1,74 @@
+:root {
+  --bg: #0d1117;
+  --bg-secondary: #161b22;
+  --bg-tertiary: #21262d;
+  --text: #c9d1d9;
+  --text-muted: #8b949e;
+  --border: #30363d;
+  --accent: #58a6ff;
+  --green: #3fb950;
+  --red: #f85149;
+  --yellow: #d29922;
+  --sidebar-width: 220px;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+}
+
+#app {
+  display: flex;
+  height: 100vh;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+button {
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+button:hover {
+  background: var(--bg-tertiary);
+}
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.badge-green {
+  background: rgba(63, 185, 80, 0.2);
+  color: var(--green);
+}
+
+.badge-red {
+  background: rgba(248, 81, 73, 0.2);
+  color: var(--red);
+}
+
+.badge-yellow {
+  background: rgba(210, 153, 34, 0.2);
+  color: var(--yellow);
+}
