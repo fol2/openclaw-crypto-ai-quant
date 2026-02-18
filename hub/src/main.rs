@@ -91,8 +91,15 @@ fn spawn_mids_poller(state: Arc<AppState>) {
         loop {
             interval.tick().await;
 
-            // Gather tracked symbols from recent DB queries (simplified: just use BTC for now).
-            let symbols = vec!["BTC".to_string(), "ETH".to_string(), "SOL".to_string()];
+            // Read the symbols last seen in a snapshot query.
+            // Skips until the first REST snapshot has been fetched.
+            let symbols: Vec<String> = {
+                let tracked = state.tracked_symbols.read().await;
+                if tracked.is_empty() {
+                    continue;
+                }
+                tracked.clone()
+            };
 
             match state.sidecar.get_mids(&symbols).await {
                 Ok(snap) => {

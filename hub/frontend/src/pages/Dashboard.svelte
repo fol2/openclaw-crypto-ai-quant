@@ -110,6 +110,30 @@
     };
   });
 
+  // Subscribe to real-time mid price updates over WebSocket.
+  // The backend broadcasts `{type:"mids", data:{mids:{SYM:price,...}, mids_age_s:n}}`
+  // every mids_poll_ms (default 1s). We update snap.symbols in-place so the
+  // rest of the snapshot (positions, signals, etc.) stays intact.
+  $effect(() => {
+    const midsHandler = (data: any) => {
+      if (!snap?.symbols || !data?.mids) return;
+      const newMids = data.mids as Record<string, number>;
+      // Build a minimal {symbol, mid} array for flash detection
+      const symsForFlash = snap.symbols.map((s: any) => ({
+        symbol: s.symbol,
+        mid: newMids[s.symbol] ?? s.mid,
+      }));
+      detectFlashes(symsForFlash);
+      // Mutate in-place — Svelte 5 proxies track deep property writes
+      for (const s of snap.symbols) {
+        const p = newMids[s.symbol];
+        if (p !== undefined) s.mid = p;
+      }
+    };
+    hubWs.subscribe('mids', midsHandler);
+    return () => hubWs.unsubscribe('mids', midsHandler);
+  });
+
   let symbols = $derived(snap?.symbols || []);
   let filteredSymbols = $derived.by(() => {
     const q = appState.search.trim().toUpperCase();

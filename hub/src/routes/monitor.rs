@@ -163,6 +163,12 @@ async fn api_snapshot(
     }
     merged.truncate(200);
 
+    // Update the shared symbol list so the background mids poller broadcasts real prices.
+    {
+        let mut tracked = state.tracked_symbols.write().await;
+        *tracked = merged.clone();
+    }
+
     // Last signals, trades, and intents per symbol
     let last_signals = trading::last_signals_by_symbol(&conn, &merged)?;
     let last_trades = trading::last_trades_by_symbol(&conn, &merged)?;
