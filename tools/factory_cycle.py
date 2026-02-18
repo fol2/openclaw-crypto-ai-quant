@@ -579,6 +579,14 @@ def _service_active_state(service: str) -> str:
         return "unknown"
 
 
+_SENSITIVE_ENV_SUFFIXES = ("_KEY", "_SECRET", "_TOKEN", "_PASSWORD")
+
+
+def _is_sensitive_env_key(key: str) -> bool:
+    key_u = str(key or "").strip().upper()
+    return bool(key_u) and key_u.endswith(_SENSITIVE_ENV_SUFFIXES)
+
+
 def _pid_environ(pid: int) -> dict[str, str]:
     if pid <= 0:
         return {}
@@ -596,6 +604,8 @@ def _pid_environ(pid: int) -> dict[str, str]:
         k, v = chunk.split(b"=", 1)
         key = k.decode("utf-8", errors="ignore").strip()
         if not key:
+            continue
+        if _is_sensitive_env_key(key):
             continue
         out[key] = v.decode("utf-8", errors="ignore")
     return out
@@ -835,7 +845,7 @@ def _service_environment(service: str) -> dict[str, str]:
             continue
         k, v = part.split("=", 1)
         key = str(k or "").strip()
-        if key:
+        if key and not _is_sensitive_env_key(key):
             out[key] = str(v or "")
     return out
 

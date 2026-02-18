@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+import tools.factory_cycle as factory_cycle
 from tools.factory_cycle import _apply_strategy_mode_overlay, _parse_candidate, _select_deployable_candidates, _stable_promotion_since_s
 
 
@@ -306,3 +307,62 @@ def test_require_ssot_evidence_can_be_disabled_for_selection() -> None:
     selected = _select_deployable_candidates([parsed], limit=1, require_ssot_evidence=False)
     assert len(selected) == 1
     assert selected[0].config_id == "legacy_proofless"
+
+
+def test_pid_environ_filters_secret_like_keys(monkeypatch) -> None:
+    proc_env_path = "/proc/4242/environ"
+    raw_env = (
+        b"AI_QUANT_DISCORD_CHANNEL=12345\x00"
+        b"AI_QUANT_DISCORD_LABEL=paper\x00"
+        b"SAFE_FLAG=1\x00"
+        b"API_KEY=super-secret\x00"
+        b"DB_SECRET=hidden\x00"
+        b"MONITOR_TOKEN=hidden\x00"
+        b"ADMIN_PASSWORD=hidden\x00"
+    )
+
+    real_exists = factory_cycle.Path.exists
+    real_read_bytes = factory_cycle.Path.read_bytes
+
+    def _fake_exists(self) -> bool:  # noqa: ANN001
+        if self.as_posix() == proc_env_path:
+            return True
+        return bool(real_exists(self))
+
+    def _fake_read_bytes(self) -> bytes:  # noqa: ANN001
+        if self.as_posix() == proc_env_path:
+            return raw_env
+        return bytes(real_read_bytes(self))
+
+    monkeypatch.setattr(factory_cycle.Path, "exists", _fake_exists)
+    monkeypatch.setattr(factory_cycle.Path, "read_bytes", _fake_read_bytes)
+
+    env = factory_cycle._pid_environ(4242)
+
+    assert env["AI_QUANT_DISCORD_CHANNEL"] == "12345"
+    assert env["AI_QUANT_DISCORD_LABEL"] == "paper"
+    assert env["SAFE_FLAG"] == "1"
+    assert "API_KEY" not in env
+    assert "DB_SECRET" not in env
+    assert "MONITOR_TOKEN" not in env
+    assert "ADMIN_PASSWORD" not in env
+
+
+def test_service_environment_filters_secret_like_keys(monkeypatch) -> None:
+    monkeypatch.setattr(
+        factory_cycle,
+        "_systemctl_show_value",
+        lambda *, service, prop: (  # noqa: ARG005
+            "SAFE_ENV=ok AI_QUANT_DISCORD_CHANNEL=12345 API_KEY=secret "
+            "DB_SECRET=secret MONITOR_TOKEN=secret ADMIN_PASSWORD=secret"
+        ),
+    )
+
+    env = factory_cycle._service_environment("openclaw-ai-quant-trader")
+
+    assert env["SAFE_ENV"] == "ok"
+    assert env["AI_QUANT_DISCORD_CHANNEL"] == "12345"
+    assert "API_KEY" not in env
+    assert "DB_SECRET" not in env
+    assert "MONITOR_TOKEN" not in env
+    assert "ADMIN_PASSWORD" not in env
