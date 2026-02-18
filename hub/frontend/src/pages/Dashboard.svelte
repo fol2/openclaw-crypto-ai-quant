@@ -78,7 +78,7 @@
 
   // Derived values
   let symbols = $derived(snap?.symbols || []);
-  let filteredSymbols = $derived(() => {
+  let filteredSymbols = $derived.by(() => {
     const q = appState.search.trim().toUpperCase();
     if (!q) return symbols;
     return symbols.filter((s: any) => String(s.symbol).includes(q));
@@ -137,7 +137,7 @@
         placeholder="Search symbols..."
         bind:value={appState.search}
       />
-      <span class="sym-count">{filteredSymbols().length} symbols</span>
+      <span class="sym-count">{filteredSymbols.length} symbols</span>
     </div>
     <div class="sym-table-wrap">
       <table class="sym-table">
@@ -150,7 +150,7 @@
           </tr>
         </thead>
         <tbody>
-          {#each filteredSymbols() as s (s.symbol)}
+          {#each filteredSymbols as s (s.symbol)}
             <tr
               class:is-focus={focusSym === s.symbol}
               class:row-long={s.position?.type === 'LONG'}

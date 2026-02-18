@@ -106,13 +106,6 @@ pub fn list_decisions(
          ORDER BY timestamp_ms DESC, id DESC
          LIMIT ? OFFSET ?"
     );
-    let mut all_params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-    for p in &params_vec {
-        // We need to re-create the params since we consumed them for count
-        // Actually let's rebuild
-    }
-    drop(all_params);
-
     // Rebuild params for data query
     let mut data_params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     if let Some(sym) = symbol {

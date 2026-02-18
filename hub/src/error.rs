@@ -61,3 +61,15 @@ impl From<serde_json::Error> for HubError {
         Self::Internal(e.to_string())
     }
 }
+
+impl From<std::io::Error> for HubError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Internal(e.to_string())
+    }
+}
+
+impl From<serde_yaml::Error> for HubError {
+    fn from(e: serde_yaml::Error) -> Self {
+        Self::BadRequest(format!("invalid YAML: {e}"))
+    }
+}

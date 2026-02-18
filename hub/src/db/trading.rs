@@ -461,47 +461,49 @@ pub fn daily_metrics(conn: &Connection, now_ms: i64) -> Result<DailyMetrics, Hub
         return Ok(daily);
     }
 
-    let like = format!("{day}%");
+    // Use range query (index-friendly) instead of LIKE.
+    let day_start = format!("{day}T00:00:00");
+    let day_end = format!("{day}T23:59:59.999");
 
     // Start balance
     if let Ok(mut stmt) = conn.prepare(
-        "SELECT balance FROM trades WHERE timestamp LIKE ? AND balance IS NOT NULL ORDER BY id ASC LIMIT 1"
+        "SELECT balance FROM trades WHERE timestamp >= ? AND timestamp <= ? AND balance IS NOT NULL ORDER BY id ASC LIMIT 1"
     ) {
-        if let Ok(b) = stmt.query_row(params![like], |row| row.get::<_, f64>(0)) {
+        if let Ok(b) = stmt.query_row(params![day_start, day_end], |row| row.get::<_, f64>(0)) {
             daily.start_balance = Some(b);
         }
     }
 
     // End balance
     if let Ok(mut stmt) = conn.prepare(
-        "SELECT balance FROM trades WHERE timestamp LIKE ? AND balance IS NOT NULL ORDER BY id DESC LIMIT 1"
+        "SELECT balance FROM trades WHERE timestamp >= ? AND timestamp <= ? AND balance IS NOT NULL ORDER BY id DESC LIMIT 1"
     ) {
-        if let Ok(b) = stmt.query_row(params![like], |row| row.get::<_, f64>(0)) {
+        if let Ok(b) = stmt.query_row(params![day_start, day_end], |row| row.get::<_, f64>(0)) {
             daily.end_balance = Some(b);
         }
     }
 
     // Peak balance
     if let Ok(mut stmt) = conn.prepare(
-        "SELECT MAX(balance) FROM trades WHERE timestamp LIKE ? AND balance IS NOT NULL"
+        "SELECT MAX(balance) FROM trades WHERE timestamp >= ? AND timestamp <= ? AND balance IS NOT NULL"
     ) {
-        if let Ok(b) = stmt.query_row(params![like], |row| row.get::<_, Option<f64>>(0)) {
+        if let Ok(b) = stmt.query_row(params![day_start, day_end], |row| row.get::<_, Option<f64>>(0)) {
             daily.peak_realised_balance = b;
         }
     }
 
     // Trade count
-    if let Ok(mut stmt) = conn.prepare("SELECT COUNT(*) FROM trades WHERE timestamp LIKE ?") {
-        if let Ok(n) = stmt.query_row(params![like], |row| row.get::<_, i64>(0)) {
+    if let Ok(mut stmt) = conn.prepare("SELECT COUNT(*) FROM trades WHERE timestamp >= ? AND timestamp <= ?") {
+        if let Ok(n) = stmt.query_row(params![day_start, day_end], |row| row.get::<_, i64>(0)) {
             daily.trades = n;
         }
     }
 
     // Fees
     if let Ok(mut stmt) = conn.prepare(
-        "SELECT SUM(COALESCE(fee_usd, 0)) FROM trades WHERE timestamp LIKE ?"
+        "SELECT SUM(COALESCE(fee_usd, 0)) FROM trades WHERE timestamp >= ? AND timestamp <= ?"
     ) {
-        if let Ok(f) = stmt.query_row(params![like], |row| row.get::<_, Option<f64>>(0)) {
+        if let Ok(f) = stmt.query_row(params![day_start, day_end], |row| row.get::<_, Option<f64>>(0)) {
             daily.fees_usd = f.unwrap_or(0.0);
         }
     }
@@ -510,6 +512,13 @@ pub fn daily_metrics(conn: &Connection, now_ms: i64) -> Result<DailyMetrics, Hub
     if let (Some(start), Some(end)) = (daily.start_balance, daily.end_balance) {
         daily.pnl_usd = end - start;
         daily.net_pnl_usd = daily.pnl_usd - daily.fees_usd;
+    }
+
+    // Drawdown
+    if let (Some(peak), Some(end)) = (daily.peak_realised_balance, daily.end_balance) {
+        if peak > 0.0 {
+            daily.drawdown_pct = ((peak - end) / peak) * 100.0;
+        }
     }
 
     Ok(daily)

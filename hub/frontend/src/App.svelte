@@ -2,6 +2,7 @@
   import './app.css';
   import Sidebar from './components/Sidebar.svelte';
   import Dashboard from './pages/Dashboard.svelte';
+  import Config from './pages/Config.svelte';
 
   // Simple hash-based routing for SPA.
   let currentPage = $state(window.location.hash.slice(1) || 'dashboard');
@@ -22,8 +23,7 @@
   {#if currentPage === 'dashboard'}
     <Dashboard />
   {:else if currentPage === 'config'}
-    <h1>Config</h1>
-    <p class="placeholder">YAML editor — coming in Phase 3</p>
+    <Config />
   {:else if currentPage === 'backtest'}
     <h1>Backtest</h1>
     <p class="placeholder">Backtest runner — coming in Phase 4</p>

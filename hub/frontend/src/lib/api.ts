@@ -61,3 +61,41 @@ export async function getDecisions(mode = 'paper', params: Record<string, string
   const qs = new URLSearchParams({ mode, ...params });
   return apiFetch(`/api/v2/decisions?${qs}`);
 }
+
+// ── Config API ──────────────────────────────────────────────────────
+
+export async function getConfig(file = 'main') {
+  return apiFetch(`/api/config?file=${encodeURIComponent(file)}`);
+}
+
+export async function getConfigRaw(file = 'main'): Promise<string> {
+  const headers: Record<string, string> = {};
+  if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+  const resp = await fetch(`/api/config/raw?file=${encodeURIComponent(file)}`, { headers });
+  if (!resp.ok) throw new Error(`API ${resp.status}`);
+  return resp.text();
+}
+
+export async function putConfig(yaml: string, file = 'main') {
+  return apiFetch(`/api/config?file=${encodeURIComponent(file)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ yaml }),
+  });
+}
+
+export async function reloadConfig(file = 'main') {
+  return apiFetch(`/api/config/reload?file=${encodeURIComponent(file)}`, { method: 'POST' });
+}
+
+export async function getConfigHistory(file = 'main') {
+  return apiFetch(`/api/config/history?file=${encodeURIComponent(file)}`);
+}
+
+export async function getConfigDiff(a: string, b: string, file = 'main') {
+  const qs = new URLSearchParams({ a, b, file });
+  return apiFetch(`/api/config/diff?${qs}`);
+}
+
+export async function getConfigFiles() {
+  return apiFetch('/api/config/files');
+}
