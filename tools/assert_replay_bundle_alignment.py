@@ -180,44 +180,66 @@ def main() -> int:
                         from_ts=from_ts,
                         to_ts=to_ts,
                     )
-                    expected_hash = str(manifest_provenance.get("window_hash_sha256") or "")
-                    expected_universe_hash = str(manifest_provenance.get("universe_hash_sha256") or "")
-                    expected_symbols = [str(s) for s in (manifest_provenance.get("symbols") or [])]
-                    expected_row_count = manifest_provenance.get("row_count")
-
-                    hash_mismatch = bool(expected_hash) and expected_hash != actual_provenance["window_hash_sha256"]
-                    universe_hash_mismatch = bool(expected_universe_hash) and (
-                        expected_universe_hash != actual_provenance["universe_hash_sha256"]
+                    expected_hash = str(manifest_provenance.get("window_hash_sha256") or "").strip().lower()
+                    expected_universe_hash = str(manifest_provenance.get("universe_hash_sha256") or "").strip().lower()
+                    raw_expected_symbols = manifest_provenance.get("symbols")
+                    expected_symbols = (
+                        [str(s or "").strip().upper() for s in raw_expected_symbols]
+                        if isinstance(raw_expected_symbols, list)
+                        else []
                     )
-                    symbol_mismatch = bool(expected_symbols) and expected_symbols != actual_provenance["symbols"]
-                    row_count_mismatch = (
-                        expected_row_count is not None and _as_int(expected_row_count) != _as_int(actual_provenance["row_count"])
-                    )
+                    expected_row_count_raw = manifest_provenance.get("row_count")
 
-                    if hash_mismatch or universe_hash_mismatch or symbol_mismatch or row_count_mismatch:
+                    missing_manifest_fields: list[str] = []
+                    if not expected_hash:
+                        missing_manifest_fields.append("candles_provenance.window_hash_sha256")
+                    if not expected_universe_hash:
+                        missing_manifest_fields.append("candles_provenance.universe_hash_sha256")
+                    if not isinstance(raw_expected_symbols, list):
+                        missing_manifest_fields.append("candles_provenance.symbols")
+                    if expected_row_count_raw is None:
+                        missing_manifest_fields.append("candles_provenance.row_count")
+
+                    if missing_manifest_fields:
                         failures.append(
                             {
-                                "code": "candles_provenance_mismatch",
+                                "code": "invalid_manifest_candles_provenance_fields",
                                 "classification": "market_data_alignment_gap",
-                                "detail": "recomputed candle window provenance does not match manifest",
-                                "expected": {
-                                    "window_hash_sha256": expected_hash,
-                                    "universe_hash_sha256": expected_universe_hash,
-                                    "symbol_count": len(expected_symbols),
-                                    "symbols": expected_symbols,
-                                    "row_count": _as_int(expected_row_count, -1),
-                                },
-                                "actual": {
-                                    "window_hash_sha256": actual_provenance["window_hash_sha256"],
-                                    "universe_hash_sha256": actual_provenance["universe_hash_sha256"],
-                                    "symbol_count": _as_int(actual_provenance["symbol_count"]),
-                                    "symbols": actual_provenance["symbols"],
-                                    "row_count": _as_int(actual_provenance["row_count"]),
-                                },
+                                "detail": "manifest candles provenance is missing required lock fields",
+                                "missing_fields": missing_manifest_fields,
                             }
                         )
                     else:
-                        candles_provenance_ok = True
+                        expected_row_count = _as_int(expected_row_count_raw, -1)
+                        hash_mismatch = expected_hash != actual_provenance["window_hash_sha256"]
+                        universe_hash_mismatch = expected_universe_hash != actual_provenance["universe_hash_sha256"]
+                        symbol_mismatch = expected_symbols != actual_provenance["symbols"]
+                        row_count_mismatch = expected_row_count != _as_int(actual_provenance["row_count"], -1)
+
+                        if hash_mismatch or universe_hash_mismatch or symbol_mismatch or row_count_mismatch:
+                            failures.append(
+                                {
+                                    "code": "candles_provenance_mismatch",
+                                    "classification": "market_data_alignment_gap",
+                                    "detail": "recomputed candle window provenance does not match manifest",
+                                    "expected": {
+                                        "window_hash_sha256": expected_hash,
+                                        "universe_hash_sha256": expected_universe_hash,
+                                        "symbol_count": len(expected_symbols),
+                                        "symbols": expected_symbols,
+                                        "row_count": expected_row_count,
+                                    },
+                                    "actual": {
+                                        "window_hash_sha256": actual_provenance["window_hash_sha256"],
+                                        "universe_hash_sha256": actual_provenance["universe_hash_sha256"],
+                                        "symbol_count": _as_int(actual_provenance["symbol_count"]),
+                                        "symbols": actual_provenance["symbols"],
+                                        "row_count": _as_int(actual_provenance["row_count"]),
+                                    },
+                                }
+                            )
+                        else:
+                            candles_provenance_ok = True
 
     state_report: dict[str, Any] | None = None
     if not state_path.exists():

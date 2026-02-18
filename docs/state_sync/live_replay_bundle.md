@@ -73,6 +73,8 @@ python tools/assert_replay_bundle_alignment.py \
   --candles-db /path/to/candles_1h.db
 ```
 
+The generated `run_08_assert_alignment.sh` also honours `CANDLES_DB` for this override path.
+
 ## Execution Context
 
 The generated scripts auto-detect bundle-local artefact paths via `BUNDLE_DIR` and use `REPO_ROOT` for tool/binary paths.
