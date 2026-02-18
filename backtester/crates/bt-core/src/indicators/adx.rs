@@ -93,7 +93,7 @@ impl AdxIndicator {
                 }
             }
             Phase::Accumulate => {
-                let (plus_dm, minus_dm, tr) = self.compute_dm_tr(high, low, close);
+                let (plus_dm, minus_dm, tr) = self.compute_dm_tr(high, low);
                 self.smoothed_plus_dm += plus_dm;
                 self.smoothed_minus_dm += minus_dm;
                 self.smoothed_tr += tr;
@@ -123,7 +123,7 @@ impl AdxIndicator {
                 }
             }
             Phase::DxAccumulate => {
-                self.wilder_step(high, low, close);
+                self.wilder_step(high, low);
                 let (di_p, di_n, dx) = self.compute_di_dx();
                 self.adx_sum += dx;
                 self.dx_count += 1;
@@ -149,7 +149,7 @@ impl AdxIndicator {
                 }
             }
             Phase::Warm => {
-                self.wilder_step(high, low, close);
+                self.wilder_step(high, low);
                 let (di_p, di_n, dx) = self.compute_di_dx();
                 // Wilder smooth the ADX itself
                 self.adx_value =
@@ -168,7 +168,7 @@ impl AdxIndicator {
         }
     }
 
-    fn compute_dm_tr(&self, high: f64, low: f64, _close: f64) -> (f64, f64, f64) {
+    fn compute_dm_tr(&self, high: f64, low: f64) -> (f64, f64, f64) {
         let up_move = high - self.prev_high;
         let down_move = self.prev_low - low;
 
@@ -190,8 +190,8 @@ impl AdxIndicator {
         (plus_dm, minus_dm, tr)
     }
 
-    fn wilder_step(&mut self, high: f64, low: f64, close: f64) {
-        let (plus_dm, minus_dm, tr) = self.compute_dm_tr(high, low, close);
+    fn wilder_step(&mut self, high: f64, low: f64) {
+        let (plus_dm, minus_dm, tr) = self.compute_dm_tr(high, low);
         let w = self.window as f64;
         // Wilder smoothing: new = prev - prev/N + current
         self.smoothed_plus_dm = self.smoothed_plus_dm - self.smoothed_plus_dm / w + plus_dm;
