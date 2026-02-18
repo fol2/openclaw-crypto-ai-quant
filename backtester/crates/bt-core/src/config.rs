@@ -1014,21 +1014,21 @@ mod tests {
     fn test_confidence_ordering() {
         assert!(Confidence::Low < Confidence::Medium);
         assert!(Confidence::Medium < Confidence::High);
-        assert_eq!(Confidence::from_str("low"), Confidence::Low);
-        assert_eq!(Confidence::from_str("MEDIUM"), Confidence::Medium);
-        assert_eq!(Confidence::from_str("High"), Confidence::High);
-        // Unknown -> High (conservative default).
-        assert_eq!(Confidence::from_str("unknown"), Confidence::High);
+        assert_eq!(Confidence::from_str("low").unwrap(), Confidence::Low);
+        assert_eq!(Confidence::from_str("MEDIUM").unwrap(), Confidence::Medium);
+        assert_eq!(Confidence::from_str("High").unwrap(), Confidence::High);
+        // Unknown values must fail fast.
+        assert!(Confidence::from_str("unknown").is_err());
     }
 
     #[test]
     fn test_macd_mode_from_str() {
-        assert_eq!(MacdMode::from_str("accel"), MacdMode::Accel);
-        assert_eq!(MacdMode::from_str("sign"), MacdMode::Sign);
-        assert_eq!(MacdMode::from_str("none"), MacdMode::None);
-        assert_eq!(MacdMode::from_str("ACCEL"), MacdMode::Accel);
-        // Unknown -> Accel (legacy default).
-        assert_eq!(MacdMode::from_str("bogus"), MacdMode::Accel);
+        assert_eq!(MacdMode::from_str("accel").unwrap(), MacdMode::Accel);
+        assert_eq!(MacdMode::from_str("sign").unwrap(), MacdMode::Sign);
+        assert_eq!(MacdMode::from_str("none").unwrap(), MacdMode::None);
+        assert_eq!(MacdMode::from_str("ACCEL").unwrap(), MacdMode::Accel);
+        // Unknown values must fail fast.
+        assert!(MacdMode::from_str("bogus").is_err());
     }
 
     #[test]
