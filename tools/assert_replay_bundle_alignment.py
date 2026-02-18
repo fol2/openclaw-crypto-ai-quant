@@ -8,6 +8,7 @@ This tool reads:
 - action reconciliation report
 - live/paper action reconciliation report (optional/required)
 - live/paper decision trace reconciliation report (optional/required)
+- event-order parity report (optional/required)
 
 and emits one deterministic gate result for CI/manual workflows, including
 market-data provenance checks for the replay candle window.
@@ -64,6 +65,17 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Fail when live/paper decision trace report is missing",
     )
+    parser.add_argument(
+        "--event-order-report",
+        default="event_order_parity_report.json",
+        help="Optional event-order parity report filename/path",
+    )
+    parser.add_argument(
+        "--require-event-order",
+        action="store_true",
+        default=False,
+        help="Fail when event-order parity report is missing",
+    )
     parser.add_argument("--output", help="Optional output path for gate report JSON")
     parser.add_argument(
         "--strict-no-residuals",
@@ -112,6 +124,7 @@ def main() -> int:
     action_path = _resolve_report_path(bundle_dir, args.action_report)
     live_paper_path = _resolve_report_path(bundle_dir, args.live_paper_report)
     live_paper_decision_trace_path = _resolve_report_path(bundle_dir, args.live_paper_decision_trace_report)
+    event_order_path = _resolve_report_path(bundle_dir, args.event_order_report)
 
     failures: list[dict[str, Any]] = []
     candles_provenance_checked = not bool(args.skip_candles_provenance_check)
@@ -387,6 +400,29 @@ def main() -> int:
                 }
             )
 
+    event_order_report: dict[str, Any] | None = None
+    if not event_order_path.exists():
+        if args.require_event_order:
+            failures.append(
+                {
+                    "code": "missing_event_order_report",
+                    "classification": "deterministic_logic_divergence",
+                    "detail": str(event_order_path),
+                }
+            )
+    else:
+        event_order_report = _load_json(event_order_path)
+        event_order_ok = bool((event_order_report.get("status") or {}).get("order_parity_pass"))
+        if not event_order_ok:
+            failures.append(
+                {
+                    "code": "event_order_parity_failed",
+                    "classification": "deterministic_logic_divergence",
+                    "detail": "event order parity check failed",
+                    "counts": event_order_report.get("counts") or {},
+                }
+            )
+
     ok = len(failures) == 0
 
     report = {
@@ -404,6 +440,8 @@ def main() -> int:
             "require_live_paper": bool(args.require_live_paper),
             "live_paper_decision_trace_report": str(live_paper_decision_trace_path),
             "require_live_paper_decision_trace": bool(args.require_live_paper_decision_trace),
+            "event_order_report": str(event_order_path),
+            "require_event_order": bool(args.require_event_order),
             "strict_no_residuals": bool(args.strict_no_residuals),
         },
         "checks": {
@@ -421,6 +459,9 @@ def main() -> int:
             )
             if live_paper_decision_trace_report
             else (not bool(args.require_live_paper_decision_trace)),
+            "event_order_ok": bool((event_order_report.get("status") or {}).get("order_parity_pass"))
+            if event_order_report
+            else (not bool(args.require_event_order)),
             "trade_residual_count": len((trade_report or {}).get("accepted_residuals") or []),
             "action_residual_count": len((action_report or {}).get("accepted_residuals") or []),
             "live_paper_residual_count": len((live_paper_report or {}).get("accepted_residuals") or []),

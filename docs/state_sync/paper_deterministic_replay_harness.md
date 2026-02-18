@@ -13,7 +13,8 @@ The harness executes:
 5. live/backtester action reconcile
 6. live/paper action reconcile
 7. live/paper decision-trace reconcile
-8. strict alignment gate
+8. live-baseline vs paper event-order parity
+9. strict alignment gate
 
 ## Command
 
@@ -46,9 +47,21 @@ Strict shortcut:
 STRICT_NO_RESIDUALS=1 /tmp/live_replay_bundle_1h/run_09_paper_deterministic_replay.sh
 ```
 
+## Standalone Event-Order Audit
+
+```bash
+python tools/audit_live_baseline_paper_order_parity.py \
+  --live-baseline /tmp/live_replay_bundle_1h/live_baseline_trades.jsonl \
+  --paper-db ./trading_engine.db \
+  --from-ts 1770700000000 \
+  --to-ts 1771200000000 \
+  --fail-on-mismatch \
+  --output /tmp/live_replay_bundle_1h/event_order_parity_report.json
+```
+
 ## Output
 
 - report JSON: `paper_deterministic_replay_run.json`
 - per-step logs: `<bundle-dir>/harness_logs/*.stdout.log` and `*.stderr.log`
 
-`ok = true` means all steps (including final strict gate) passed.
+`ok = true` means all steps (including event-order parity and final strict gate) passed.

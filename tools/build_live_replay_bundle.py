@@ -162,6 +162,7 @@ def main() -> int:
     action_reconcile_path = bundle_dir / "action_reconcile_report.json"
     live_paper_action_reconcile_path = bundle_dir / "live_paper_action_reconcile_report.json"
     live_paper_decision_trace_reconcile_path = bundle_dir / "live_paper_decision_trace_reconcile_report.json"
+    event_order_parity_path = bundle_dir / "event_order_parity_report.json"
     alignment_gate_path = bundle_dir / "alignment_gate_report.json"
     paper_harness_report_path = bundle_dir / "paper_deterministic_replay_run.json"
     manifest_path = bundle_dir / "replay_bundle_manifest.json"
@@ -273,6 +274,19 @@ def main() -> int:
         f"--output \"$BUNDLE_DIR/{live_paper_decision_trace_reconcile_path.name}\""
     )
 
+    cmd_event_order_parity = (
+        "set -euo pipefail\n"
+        "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
+        "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
+        f"PAPER_DB=\"${{PAPER_DB:-{shlex.quote(str(paper_db))}}}\"\n"
+        "python \"$REPO_ROOT/tools/audit_live_baseline_paper_order_parity.py\" "
+        f"--live-baseline \"$BUNDLE_DIR/{live_trades_path.name}\" "
+        "--paper-db \"$PAPER_DB\" "
+        f"--from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
+        "--fail-on-mismatch "
+        f"--output \"$BUNDLE_DIR/{event_order_parity_path.name}\""
+    )
+
     cmd_alignment_gate = (
         "set -euo pipefail\n"
         "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
@@ -285,6 +299,8 @@ def main() -> int:
         "--require-live-paper "
         f"--live-paper-decision-trace-report \"$BUNDLE_DIR/{live_paper_decision_trace_reconcile_path.name}\" "
         "--require-live-paper-decision-trace "
+        f"--event-order-report \"$BUNDLE_DIR/{event_order_parity_path.name}\" "
+        "--require-event-order "
         f"--output \"$BUNDLE_DIR/{alignment_gate_path.name}\""
     )
 
@@ -311,6 +327,7 @@ def main() -> int:
         cmd_live_paper_decision_trace_reconcile + "\n",
         encoding="utf-8",
     )
+    (bundle_dir / "run_07b_event_order_parity.sh").write_text(cmd_event_order_parity + "\n", encoding="utf-8")
     (bundle_dir / "run_08_assert_alignment.sh").write_text(cmd_alignment_gate + "\n", encoding="utf-8")
     (bundle_dir / "run_09_paper_deterministic_replay.sh").write_text(cmd_paper_harness + "\n", encoding="utf-8")
 
@@ -322,6 +339,7 @@ def main() -> int:
         "run_05_action_reconcile.sh",
         "run_06_live_paper_action_reconcile.sh",
         "run_07_live_paper_decision_trace_reconcile.sh",
+        "run_07b_event_order_parity.sh",
         "run_08_assert_alignment.sh",
         "run_09_paper_deterministic_replay.sh",
     ):
@@ -357,6 +375,7 @@ def main() -> int:
             "action_reconcile_report_file": action_reconcile_path.name,
             "live_paper_action_reconcile_report_file": live_paper_action_reconcile_path.name,
             "live_paper_decision_trace_reconcile_report_file": live_paper_decision_trace_reconcile_path.name,
+            "event_order_parity_report_file": event_order_parity_path.name,
             "alignment_gate_report_file": alignment_gate_path.name,
             "paper_deterministic_replay_run_report_file": paper_harness_report_path.name,
         },
@@ -373,6 +392,7 @@ def main() -> int:
             "action_reconcile": cmd_action_reconcile,
             "live_paper_action_reconcile": cmd_live_paper_action_reconcile,
             "live_paper_decision_trace_reconcile": cmd_live_paper_decision_trace_reconcile,
+            "event_order_parity": cmd_event_order_parity,
             "alignment_gate": cmd_alignment_gate,
             "paper_deterministic_replay_harness": cmd_paper_harness,
         },
