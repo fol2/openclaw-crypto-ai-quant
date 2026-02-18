@@ -738,12 +738,13 @@
 
         {#if marks?.position}
           {@const p = marks.position}
+          {@const livePos = snap?.symbols?.find((s: any) => s.symbol === focusSym)?.position}
           <div class="kv-section">
             <h4>Position</h4>
             <div class="kv"><span class="k">Type</span><span class="v">{p.pos_type || p.type}</span></div>
             <div class="kv"><span class="k">Size</span><span class="v mono">{fmtNum(p.size, 6)}</span></div>
             <div class="kv"><span class="k">Entry</span><span class="v mono">{fmtNum(p.entry_price, 6)}</span></div>
-            <div class="kv"><span class="k">uPnL</span><span class="v {pnlClass(p.unreal_pnl_est)}">{fmtNum(p.unreal_pnl_est)}</span></div>
+            <div class="kv"><span class="k">uPnL</span><span class="v {pnlClass(livePos?.unreal_pnl_est)}">{fmtNum(livePos?.unreal_pnl_est)}</span></div>
             <div class="kv"><span class="k">Leverage</span><span class="v">{fmtNum(p.leverage, 1)}x</span></div>
           </div>
           {#if marks?.entries?.length}
