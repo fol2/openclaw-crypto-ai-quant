@@ -109,9 +109,32 @@ def _max_id(conn: sqlite3.Connection, table_name: str) -> int | None:
         return None
 
 
-def _reconstruct_positions_and_balance(conn: sqlite3.Connection) -> tuple[float, list[dict[str, Any]]]:
-    row = conn.execute("SELECT balance FROM trades ORDER BY id DESC LIMIT 1").fetchone()
+def _sqlite_ts_ms_expr(column_name: str = "timestamp") -> str:
+    return f"CAST((julianday({column_name}) - 2440587.5) * 86400000.0 AS INTEGER)"
+
+
+def _reconstruct_positions_and_balance(
+    conn: sqlite3.Connection,
+    *,
+    as_of_ts: int | None = None,
+) -> tuple[float, list[dict[str, Any]]]:
+    balance_q = "SELECT balance FROM trades"
+    balance_params: list[Any] = []
+    if as_of_ts is not None:
+        balance_q += f" WHERE {_sqlite_ts_ms_expr('timestamp')} <= ?"
+        balance_params.append(int(as_of_ts))
+    balance_q += " ORDER BY id DESC LIMIT 1"
+    row = conn.execute(balance_q, tuple(balance_params)).fetchone()
     balance = float(row["balance"] or 0.0) if row else 0.0
+
+    open_where = "action = 'OPEN'"
+    close_where = "action = 'CLOSE'"
+    open_close_params: list[Any] = []
+    if as_of_ts is not None:
+        cutoff_expr = _sqlite_ts_ms_expr("timestamp")
+        open_where += f" AND {cutoff_expr} <= ?"
+        close_where += f" AND {cutoff_expr} <= ?"
+        open_close_params.extend([int(as_of_ts), int(as_of_ts)])
 
     sql_open = """
     SELECT t.id AS open_id, t.timestamp AS open_ts, t.symbol, t.type AS pos_type,
@@ -120,17 +143,17 @@ def _reconstruct_positions_and_balance(conn: sqlite3.Connection) -> tuple[float,
     FROM trades t
     INNER JOIN (
         SELECT symbol, MAX(id) AS open_id
-        FROM trades WHERE action = 'OPEN' GROUP BY symbol
+        FROM trades WHERE {open_where} GROUP BY symbol
     ) lo ON t.id = lo.open_id
     LEFT JOIN (
         SELECT symbol, MAX(id) AS close_id
-        FROM trades WHERE action = 'CLOSE' GROUP BY symbol
+        FROM trades WHERE {close_where} GROUP BY symbol
     ) lc ON t.symbol = lc.symbol
     WHERE lc.close_id IS NULL OR t.id > lc.close_id
-    """
+    """.format(open_where=open_where, close_where=close_where)
 
     positions: list[dict[str, Any]] = []
-    for row in conn.execute(sql_open).fetchall():
+    for row in conn.execute(sql_open, tuple(open_close_params)).fetchall():
         symbol = str(row["symbol"] or "").strip().upper()
         if not symbol:
             continue
@@ -155,11 +178,16 @@ def _reconstruct_positions_and_balance(conn: sqlite3.Connection) -> tuple[float,
         if margin_used <= 0.0:
             margin_used = abs(net_size) * avg_entry / leverage
 
-        fills = conn.execute(
+        fills_q = (
             "SELECT action, price, size, entry_atr FROM trades "
-            "WHERE symbol = ? AND id > ? AND action IN ('ADD', 'REDUCE') ORDER BY id ASC",
-            (symbol, open_id),
-        ).fetchall()
+            "WHERE symbol = ? AND id > ? AND action IN ('ADD', 'REDUCE')"
+        )
+        fills_params: list[Any] = [symbol, open_id]
+        if as_of_ts is not None:
+            fills_q += f" AND {_sqlite_ts_ms_expr('timestamp')} <= ?"
+            fills_params.append(int(as_of_ts))
+        fills_q += " ORDER BY id ASC"
+        fills = conn.execute(fills_q, tuple(fills_params)).fetchall()
 
         for fill in fills:
             action = str(fill["action"] or "").strip().upper()
@@ -232,20 +260,24 @@ def _reconstruct_positions_and_balance(conn: sqlite3.Connection) -> tuple[float,
     return balance, positions
 
 
-def _load_attempt_markers(conn: sqlite3.Connection) -> tuple[dict[str, int], dict[str, int]]:
+def _load_attempt_markers(
+    conn: sqlite3.Connection,
+    *,
+    as_of_ts: int | None = None,
+) -> tuple[dict[str, int], dict[str, int]]:
     entry_attempt_ms: dict[str, int] = {}
     exit_attempt_ms: dict[str, int] = {}
 
     if not _table_exists(conn, "trades"):
         return entry_attempt_ms, exit_attempt_ms
 
-    entry_q = (
-        "SELECT symbol, MAX(timestamp) AS ts FROM trades "
-        "WHERE action IN ({}) GROUP BY symbol".format(
-            ",".join("?" for _ in ENTRY_ATTEMPT_ACTIONS)
-        )
-    )
-    for row in conn.execute(entry_q, ENTRY_ATTEMPT_ACTIONS).fetchall():
+    entry_where = "action IN ({})".format(",".join("?" for _ in ENTRY_ATTEMPT_ACTIONS))
+    entry_params: list[Any] = list(ENTRY_ATTEMPT_ACTIONS)
+    if as_of_ts is not None:
+        entry_where += f" AND {_sqlite_ts_ms_expr('timestamp')} <= ?"
+        entry_params.append(int(as_of_ts))
+    entry_q = f"SELECT symbol, MAX(timestamp) AS ts FROM trades WHERE {entry_where} GROUP BY symbol"
+    for row in conn.execute(entry_q, tuple(entry_params)).fetchall():
         symbol = str(row["symbol"] or "").strip().upper()
         if not symbol:
             continue
@@ -253,13 +285,13 @@ def _load_attempt_markers(conn: sqlite3.Connection) -> tuple[dict[str, int], dic
         if ts_ms > 0:
             entry_attempt_ms[symbol] = ts_ms
 
-    exit_q = (
-        "SELECT symbol, MAX(timestamp) AS ts FROM trades "
-        "WHERE action IN ({}) GROUP BY symbol".format(
-            ",".join("?" for _ in EXIT_ATTEMPT_ACTIONS)
-        )
-    )
-    for row in conn.execute(exit_q, EXIT_ATTEMPT_ACTIONS).fetchall():
+    exit_where = "action IN ({})".format(",".join("?" for _ in EXIT_ATTEMPT_ACTIONS))
+    exit_params: list[Any] = list(EXIT_ATTEMPT_ACTIONS)
+    if as_of_ts is not None:
+        exit_where += f" AND {_sqlite_ts_ms_expr('timestamp')} <= ?"
+        exit_params.append(int(as_of_ts))
+    exit_q = f"SELECT symbol, MAX(timestamp) AS ts FROM trades WHERE {exit_where} GROUP BY symbol"
+    for row in conn.execute(exit_q, tuple(exit_params)).fetchall():
         symbol = str(row["symbol"] or "").strip().upper()
         if not symbol:
             continue
@@ -304,6 +336,12 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Output JSON file path.",
     )
+    parser.add_argument(
+        "--as-of-ts",
+        type=int,
+        default=None,
+        help="Optional snapshot cutoff timestamp in milliseconds (inclusive).",
+    )
     return parser
 
 
@@ -321,11 +359,14 @@ def main() -> int:
 
     now_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
     warnings: list[str] = []
+    as_of_ts = int(args.as_of_ts) if args.as_of_ts is not None else None
+    if as_of_ts is not None and as_of_ts <= 0:
+        parser.error("--as-of-ts must be a positive epoch millisecond value")
 
     conn = _connect_ro(db_path)
     try:
-        balance, positions = _reconstruct_positions_and_balance(conn)
-        entry_attempt_ms, exit_attempt_ms = _load_attempt_markers(conn)
+        balance, positions = _reconstruct_positions_and_balance(conn, as_of_ts=as_of_ts)
+        entry_attempt_ms, exit_attempt_ms = _load_attempt_markers(conn, as_of_ts=as_of_ts)
         open_orders = _load_open_orders(conn)
 
         cursors = {
@@ -352,6 +393,7 @@ def main() -> int:
             },
             "canonical": {
                 "db_path": str(db_path),
+                "as_of_ts": as_of_ts,
                 "open_orders": open_orders,
                 "cursors": cursors,
                 "warnings": warnings,

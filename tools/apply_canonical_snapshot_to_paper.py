@@ -66,13 +66,13 @@ def _seed_trades_and_positions(
     conn: sqlite3.Connection,
     *,
     balance: float,
-    exported_at_ms: int,
+    seed_ts_ms: int,
     positions: list[dict[str, Any]],
 ) -> tuple[int, int]:
     if not _table_exists(conn, "trades"):
         return 0, 0
 
-    now_iso = _iso_from_ms(exported_at_ms)
+    seed_iso = _iso_from_ms(seed_ts_ms)
 
     # Keep real history; remove only previous synthetic seed rows.
     conn.execute(
@@ -106,7 +106,7 @@ def _seed_trades_and_positions(
         conn,
         "trades",
         {
-            "timestamp": now_iso,
+            "timestamp": seed_iso,
             "action": "SYSTEM",
             "type": "SYSTEM",
             "symbol": "SYSTEM",
@@ -132,13 +132,13 @@ def _seed_trades_and_positions(
     if _table_exists(conn, "position_state"):
         conn.execute("DELETE FROM position_state")
 
-    for idx, pos in enumerate(positions):
+    for pos in positions:
         symbol = str(pos.get("symbol") or "").strip().upper()
         side = str(pos.get("side") or "").strip().lower()
         if not symbol or side not in {"long", "short"}:
             continue
 
-        ts_ms = int(pos.get("open_time_ms") or (exported_at_ms + idx))
+        ts_ms = int(pos.get("open_time_ms") or seed_ts_ms)
         ts_iso = _iso_from_ms(ts_ms)
         pos_type = "LONG" if side == "long" else "SHORT"
         size = float(pos.get("size") or 0.0)
@@ -191,7 +191,7 @@ def _seed_trades_and_positions(
                     "tp1_taken": 1 if bool(pos.get("tp1_taken")) else 0,
                     "last_add_time": int(pos.get("last_add_time_ms") or 0),
                     "entry_adx_threshold": float(pos.get("entry_adx_threshold") or 0.0),
-                    "updated_at": now_iso,
+                    "updated_at": seed_iso,
                 },
             )
             seeded_positions += 1
@@ -203,7 +203,7 @@ def _seed_trades_and_positions(
             conn,
             "trades",
             {
-                "timestamp": now_iso,
+                "timestamp": seed_iso,
                 "symbol": symbol,
                 "action": "CLOSE",
                 "type": pos_type,
@@ -244,7 +244,7 @@ def _seed_runtime_cooldowns(
     conn: sqlite3.Connection,
     *,
     runtime: dict[str, Any],
-    exported_at_ms: int,
+    seed_ts_ms: int,
 ) -> int:
     conn.execute(
         """
@@ -270,7 +270,7 @@ def _seed_runtime_cooldowns(
     symbols.update(str(k or "").strip().upper() for k in exit_map.keys())
     symbols.discard("")
 
-    now_iso = _iso_from_ms(exported_at_ms)
+    seed_iso = _iso_from_ms(seed_ts_ms)
     inserted = 0
 
     for symbol in sorted(symbols):
@@ -296,7 +296,7 @@ def _seed_runtime_cooldowns(
                 "symbol": symbol,
                 "last_entry_attempt_s": entry_s,
                 "last_exit_attempt_s": exit_s,
-                "updated_at": now_iso,
+                "updated_at": seed_iso,
             },
         )
         inserted += 1
@@ -329,11 +329,18 @@ def main() -> int:
     snapshot = _load_snapshot(snapshot_path)
     balance = float(snapshot.get("balance") or 0.0)
     exported_at_ms = int(snapshot.get("exported_at_ms") or int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000))
+    canonical = snapshot.get("canonical") or {}
+    snapshot_as_of_ts = canonical.get("as_of_ts")
+    seed_ts_ms = exported_at_ms
+    try:
+        if snapshot_as_of_ts is not None and int(snapshot_as_of_ts) > 0:
+            seed_ts_ms = int(snapshot_as_of_ts)
+    except Exception:
+        seed_ts_ms = exported_at_ms
     positions = snapshot.get("positions") or []
     if not isinstance(positions, list):
         raise ValueError("snapshot.positions must be a list")
 
-    canonical = snapshot.get("canonical") or {}
     open_orders = canonical.get("open_orders") or []
     if not isinstance(open_orders, list):
         open_orders = []
@@ -362,14 +369,14 @@ def main() -> int:
         seeded_trades, seeded_positions = _seed_trades_and_positions(
             conn,
             balance=balance,
-            exported_at_ms=exported_at_ms,
+            seed_ts_ms=seed_ts_ms,
             positions=positions,
         )
         seeded_open_orders = _replace_open_orders(conn, open_orders)
         seeded_runtime_cooldowns = _seed_runtime_cooldowns(
             conn,
             runtime=runtime,
-            exported_at_ms=exported_at_ms,
+            seed_ts_ms=seed_ts_ms,
         )
         conn.commit()
     except Exception:
@@ -387,6 +394,7 @@ def main() -> int:
             "seeded_positions": int(seeded_positions),
             "seeded_open_orders": int(seeded_open_orders),
             "seeded_runtime_cooldowns": int(seeded_runtime_cooldowns),
+            "seed_timestamp_ms": int(seed_ts_ms),
         },
         indent=2,
         sort_keys=True,

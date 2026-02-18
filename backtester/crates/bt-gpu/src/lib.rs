@@ -304,15 +304,44 @@ fn run_gpu_sweep_internal(
                 }
             }
         });
-    let max_sub_per_bar = sub_bar_result
+    let requested_max_sub_per_bar = sub_bar_result
         .as_ref()
         .map(|sbr| sbr.max_sub_per_bar)
         .unwrap_or(0);
+    let sub_bar_buffers_ready = sub_candles_gpu.is_some() && sub_counts_gpu.is_some();
+    let max_sub_per_bar = if sub_bar_buffers_ready {
+        requested_max_sub_per_bar
+    } else {
+        0
+    };
 
-    if max_sub_per_bar > 0 {
+    if requested_max_sub_per_bar > 0 && !sub_bar_buffers_ready {
+        eprintln!(
+            "[GPU] Sub-bar buffers incomplete (candles={}, counts={}) — disabling sub-bar path for this sweep",
+            sub_candles_gpu.is_some(),
+            sub_counts_gpu.is_some(),
+        );
+    } else if max_sub_per_bar > 0 {
         eprintln!(
             "[GPU] Sub-bar candles: max_sub={}, GPU buffer uploaded",
             max_sub_per_bar
+        );
+    }
+
+    // CPU parity (sub-bar from/to boundary):
+    // CPU entry/exit sub-bar scans are anchored to indicator bars and can include
+    // ticks exactly at `from_ts` via the preceding indicator bar window.
+    // Shift GPU trade start back by one indicator bar when sub-bars are active so
+    // boundary sub-ticks are visible to the kernel path.
+    let trade_start_for_kernel = if max_sub_per_bar > 0 && from_ts.is_some() && trade_start > 0 {
+        trade_start - 1
+    } else {
+        trade_start
+    };
+    if trade_start_for_kernel != trade_start {
+        eprintln!(
+            "[GPU] Sub-bar boundary alignment: trade_start {} -> {}",
+            trade_start, trade_start_for_kernel
         );
     }
 
@@ -567,7 +596,7 @@ fn run_gpu_sweep_internal(
             &mut trade_bufs,
             num_bars,
             BAR_CHUNK_SIZE,
-            trade_start,
+            trade_start_for_kernel,
             trade_end,
         ) {
             Ok(r) => r,

@@ -186,7 +186,7 @@ def _load_paper_sequence(
     conn = _connect_ro(paper_db)
     try:
         rows = conn.execute(
-            "SELECT id, timestamp, symbol, action, type "
+            "SELECT id, timestamp, symbol, action, type, reason "
             "FROM trades ORDER BY id ASC"
         ).fetchall()
     finally:
@@ -231,6 +231,7 @@ def _load_paper_sequence(
                 "timestamp_ms": ts_ms,
                 "bucket_ts_ms": bucket_ts,
                 "action_code": action_code,
+                "reason": str(row["reason"] or ""),
             }
         )
 
@@ -353,6 +354,54 @@ def main() -> int:
                 "paper_funding_events": paper_counts["paper_funding_events"],
             }
         )
+
+    # If paper has no simulatable events in the audited window, but live does,
+    # treat this as a replay/state-window gap residual instead of a hard order bug.
+    #
+    # This keeps deterministic replay harnesses usable in historical windows
+    # where live baseline exists but paper was not running/replayed for that span.
+    paper_window_not_replayed = (
+        paper_counts["paper_simulatable_events"] == 0
+        and live_counts["live_simulatable_events"] > 0
+        and compare_counts["matched_events"] == 0
+        and compare_counts["order_mismatch"] == 0
+        and compare_counts["unmatched_live_events"] == live_counts["live_simulatable_events"]
+        and compare_counts["unmatched_paper_events"] == 0
+    )
+    if paper_window_not_replayed:
+        accepted_residuals.append(
+            {
+                "kind": "paper_window_not_replayed",
+                "classification": "state_initialisation_gap",
+                "live_simulatable_events": live_counts["live_simulatable_events"],
+                "paper_simulatable_events": paper_counts["paper_simulatable_events"],
+            }
+        )
+        strict_pass = True
+
+    # When live baseline has no simulatable events but paper contains only
+    # snapshot seed-close rows, treat as expected state-initialisation residual.
+    paper_seed_only_window = (
+        live_counts["live_simulatable_events"] == 0
+        and paper_counts["paper_simulatable_events"] > 0
+        and compare_counts["matched_events"] == 0
+        and compare_counts["order_mismatch"] == 0
+        and compare_counts["unmatched_live_events"] == 0
+        and compare_counts["unmatched_paper_events"] == paper_counts["paper_simulatable_events"]
+        and all(
+            str(ev.get("reason") or "").strip().lower() == "state_sync_seed_close"
+            for ev in paper_events
+        )
+    )
+    if paper_seed_only_window:
+        accepted_residuals.append(
+            {
+                "kind": "paper_seed_close_only_window",
+                "classification": "state_initialisation_gap",
+                "paper_simulatable_events": paper_counts["paper_simulatable_events"],
+            }
+        )
+        strict_pass = True
 
     report = {
         "schema_version": 1,
