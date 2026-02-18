@@ -42,6 +42,9 @@ def _get_decision_event_fn() -> Callable[..., dict[str, Any]] | None:
 logger = logging.getLogger(__name__)
 
 ENTRY_MAX_DELAY_MS_HARD_MAX = 2 * 60 * 60 * 1000
+KERNEL_DECISION_FILE_MAX_BYTES_DEFAULT = 4 * 1024 * 1024
+KERNEL_DECISION_FILE_MAX_BYTES_MIN = 1024
+KERNEL_DECISION_FILE_MAX_BYTES_MAX = 128 * 1024 * 1024
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -49,6 +52,21 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if raw is None:
         return bool(default)
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _kernel_decision_file_max_bytes() -> int:
+    raw = os.getenv("AI_QUANT_KERNEL_DECISION_FILE_MAX_BYTES")
+    if raw is None:
+        return int(KERNEL_DECISION_FILE_MAX_BYTES_DEFAULT)
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError, OverflowError):
+        return int(KERNEL_DECISION_FILE_MAX_BYTES_DEFAULT)
+    if parsed < KERNEL_DECISION_FILE_MAX_BYTES_MIN:
+        return int(KERNEL_DECISION_FILE_MAX_BYTES_MIN)
+    if parsed > KERNEL_DECISION_FILE_MAX_BYTES_MAX:
+        return int(KERNEL_DECISION_FILE_MAX_BYTES_MAX)
+    return int(parsed)
 
 
 def _interval_to_ms(interval: str) -> int:
@@ -223,11 +241,27 @@ class KernelDecisionFileProvider:
         if not path:
             return []
 
+        max_bytes = _kernel_decision_file_max_bytes()
         try:
-            with open(path, "r", encoding="utf-8") as fh:
-                raw = json.load(fh)
+            with open(path, "rb") as fh:
+                payload = fh.read(max_bytes + 1)
         except FileNotFoundError:
             return []
+        except Exception:
+            logger.warning("decision file unreadable: %s", path, exc_info=True)
+            return []
+
+        if len(payload) > max_bytes:
+            logger.warning(
+                "decision file too large: %s (read=%dB, limit=%dB); skipping",
+                path,
+                int(len(payload)),
+                int(max_bytes),
+            )
+            return []
+
+        try:
+            raw = json.loads(payload.decode("utf-8"))
         except Exception:
             logger.warning("decision file unreadable: %s", path, exc_info=True)
             return []
