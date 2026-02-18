@@ -153,7 +153,8 @@ class _JsonlEventSink:
         f = None
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-        except Exception:
+        except Exception as exc:
+            logger.error("event logger failed to create parent directory %s: %s", self._path.parent, exc)
             return
 
         while True:

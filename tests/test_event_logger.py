@@ -1,4 +1,6 @@
 import json
+import threading
+from pathlib import Path
 
 from tools.config_id import config_id_from_yaml_text
 
@@ -31,3 +33,24 @@ def test_event_logger_writes_jsonl_and_includes_config_id(tmp_path, monkeypatch)
     assert evt["run_id"] == "run_123"
     assert evt["config_id"] == config_id_from_yaml_text(yaml_text)
 
+
+def test_event_logger_logs_error_when_parent_mkdir_fails(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(threading.Thread, "start", lambda self: None)
+
+    from engine import event_logger as event_logger_mod
+
+    sink = event_logger_mod._JsonlEventSink(path=tmp_path / "events" / "events.jsonl")
+    target_parent = sink._path.parent  # noqa: SLF001
+    orig_mkdir = Path.mkdir
+
+    def _mkdir_maybe_fail(self, *args, **kwargs):  # noqa: ANN001
+        if self == target_parent:
+            raise OSError("mkdir denied")
+        return orig_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", _mkdir_maybe_fail)
+
+    with caplog.at_level("ERROR"):
+        sink._run()  # noqa: SLF001
+
+    assert any("failed to create parent directory" in rec.message for rec in caplog.records)
