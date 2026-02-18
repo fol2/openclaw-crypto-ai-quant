@@ -845,7 +845,7 @@
   }
   .pos-pnl {
     display: block;
-    font-size: 9px;
+    font-size: 11px;
     font-family: 'IBM Plex Mono', monospace;
     font-weight: 500;
     margin-top: 2px;
@@ -1046,14 +1046,14 @@
       display: flex;
     }
 
-    /* Column widths for ~375px: SYM/MID/SIG/POS — POS wider for PnL sub-line */
+    /* Column widths for ~375px: SYM/MID/SIG/POS — MID trimmed, POS wider for PnL */
     .sym-table {
       table-layout: fixed;
     }
     .sym-table th:nth-child(1), .sym-table td:nth-child(1) { width: 28%; }
-    .sym-table th:nth-child(2), .sym-table td:nth-child(2) { width: 26%; }
+    .sym-table th:nth-child(2), .sym-table td:nth-child(2) { width: 22%; }
     .sym-table th:nth-child(3), .sym-table td:nth-child(3) { width: 14%; }
-    .sym-table th:nth-child(4), .sym-table td:nth-child(4) { width: 32%; }
+    .sym-table th:nth-child(4), .sym-table td:nth-child(4) { width: 36%; }
 
     .col-mid {
       font-size: 10px;
