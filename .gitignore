@@ -83,6 +83,8 @@ sweep_full/results_*/
 
 # Runtime state
 strategy_changelog.json
+kernel_state*.json
+kernel_shadow_report*.json
 
 # Timestamped sweep configs (generated, not canonical)
 strategy_tpe_*.yaml

@@ -7,6 +7,7 @@ import copy
 import json
 import os
 import random
+import shutil
 import sqlite3
 import tomllib
 import yaml
@@ -3600,30 +3601,40 @@ class PaperTrader:
             return None
 
     @staticmethod
-    def _instance_state_path(basename: str) -> str:
-        """Derive per-instance state file path using AI_QUANT_INSTANCE_TAG.
+    def _instance_state_path(basename: str, *, legacy_db_dir: bool = False) -> str:
+        """Derive per-instance runtime state path using AI_QUANT_INSTANCE_TAG.
 
         Without a tag the path falls back to the original shared name
         (backward-compatible for single-instance deployments).
         """
+        if legacy_db_dir:
+            base_dir = os.path.dirname(DB_PATH)
+        else:
+            # Keep runtime state outside the repo/worktree by default.
+            base_dir = str(os.getenv("AI_QUANT_KERNEL_STATE_DIR", "~/.mei") or "~/.mei").strip() or "~/.mei"
+            base_dir = os.path.expanduser(base_dir)
+            if not os.path.isabs(base_dir):
+                base_dir = os.path.abspath(os.path.join(os.path.dirname(DB_PATH), base_dir))
         tag = os.getenv("AI_QUANT_INSTANCE_TAG", "").strip()
         if tag:
             stem, ext = os.path.splitext(basename)
             basename = f"{stem}_{tag}{ext}"
-        return os.path.join(os.path.dirname(DB_PATH), basename)
+        return os.path.join(base_dir, basename)
 
     def _kernel_persist(self) -> None:
-        """Save kernel state to disk alongside the SQLite database."""
+        """Save kernel state to disk."""
         if not self._kernel_available or self._kernel_state_json is None:
             return
         try:
             state_path = self._instance_state_path("kernel_state.json")
+            os.makedirs(os.path.dirname(state_path), exist_ok=True)
             _bt_runtime.save_state(self._kernel_state_json, state_path)
         except Exception as e:
             logger.warning("[kernel] persist failed: %s", e)
         # Persist shadow report alongside kernel state (AQC-752)
         try:
             report_path = self._instance_state_path("kernel_shadow_report.json")
+            os.makedirs(os.path.dirname(report_path), exist_ok=True)
             self._shadow_report.to_json(report_path)
         except Exception as e:
             logger.warning("[shadow] persist failed: %s", e)
@@ -3634,11 +3645,25 @@ class PaperTrader:
             return
         try:
             state_path = self._instance_state_path("kernel_state.json")
+            legacy_state_path = self._instance_state_path("kernel_state.json", legacy_db_dir=True)
+            load_path = ""
             if os.path.isfile(state_path):
-                self._kernel_state_json = _bt_runtime.load_state(state_path)
+                load_path = state_path
+            elif legacy_state_path != state_path and os.path.isfile(legacy_state_path):
+                load_path = legacy_state_path
+
+            if load_path:
+                self._kernel_state_json = _bt_runtime.load_state(load_path)
                 self._kernel_available = True
                 kb = self.get_kernel_balance()
                 logger.info("[kernel] Restored kernel state from disk (cash_usd=%.2f)", kb or 0.0)
+                if load_path != state_path:
+                    try:
+                        os.makedirs(os.path.dirname(state_path), exist_ok=True)
+                        shutil.copy2(load_path, state_path)
+                        logger.info("[kernel] migrated legacy runtime state to %s", state_path)
+                    except Exception as e:
+                        logger.debug("[kernel] legacy state migration skipped: %s", e)
             else:
                 # No persisted kernel state (e.g. first run after migration
                 # or after switching to per-instance state paths).
@@ -3679,8 +3704,15 @@ class PaperTrader:
 
             # Restore shadow report (AQC-752)
             report_path = self._instance_state_path("kernel_shadow_report.json")
+            legacy_report_path = self._instance_state_path("kernel_shadow_report.json", legacy_db_dir=True)
+            report_load_path = ""
             if os.path.isfile(report_path):
-                self._shadow_report = ShadowReport.from_json(report_path)
+                report_load_path = report_path
+            elif legacy_report_path != report_path and os.path.isfile(legacy_report_path):
+                report_load_path = legacy_report_path
+
+            if report_load_path:
+                self._shadow_report = ShadowReport.from_json(report_load_path)
                 s = self._shadow_report.summary()
                 logger.info(
                     "[shadow] Restored report: %d checks, %d failures, converged=%s",
@@ -3688,6 +3720,13 @@ class PaperTrader:
                     s["failures"],
                     self._shadow_report.is_converged(),
                 )
+                if report_load_path != report_path:
+                    try:
+                        os.makedirs(os.path.dirname(report_path), exist_ok=True)
+                        shutil.copy2(report_load_path, report_path)
+                        logger.info("[shadow] migrated legacy report to %s", report_path)
+                    except Exception as e:
+                        logger.debug("[shadow] legacy report migration skipped: %s", e)
         except Exception as e:
             logger.warning("[kernel] restore failed, re-initializing: %s", e)
             self._init_kernel()
