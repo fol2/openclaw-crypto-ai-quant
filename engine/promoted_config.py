@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -102,6 +103,30 @@ def _load_yaml(path: str | Path) -> dict[str, Any]:
     except (OSError, yaml.YAMLError) as exc:
         print(f"⚠️ promoted_config: failed to load YAML {path}: {exc}")
         return {}
+
+
+def _write_text_atomic(path: Path, content: str) -> None:
+    """Atomically write text content to ``path`` using ``os.replace``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+        text=True,
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
 
 
 def load_promoted_config(
@@ -198,8 +223,6 @@ def maybe_apply_promoted_config() -> str | None:
     # Write merged config to a well-known location.
     here = Path(__file__).resolve().parent
     active_path = here.parent / "config" / f"strategy_overrides._promoted_{role}.yaml"
-    active_path.parent.mkdir(parents=True, exist_ok=True)
-
     try:
         # Add a comment header for traceability.
         header = (
@@ -209,7 +232,7 @@ def maybe_apply_promoted_config() -> str | None:
             f"# Do not edit — this file is overwritten on daemon startup.\n"
         )
         content = header + yaml.dump(merged, default_flow_style=False, sort_keys=False, allow_unicode=True)
-        active_path.write_text(content, encoding="utf-8")
+        _write_text_atomic(active_path, content)
     except Exception as exc:
         print(f"⚠️ promoted_config: failed to write merged config: {exc}")
         return None
