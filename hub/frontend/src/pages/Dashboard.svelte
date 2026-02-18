@@ -880,7 +880,7 @@
   .pos-pnl.red   { color: var(--red); }
   .pos-age {
     display: inline;
-    font-size: 11px;
+    font-size: 9px;
     color: var(--text);
     margin-left: 3px;
   }
