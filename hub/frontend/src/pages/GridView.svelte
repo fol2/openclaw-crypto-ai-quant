@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getSnapshot, getMids } from '../lib/api';
+  import { CANDIDATE_FAMILY_ORDER, getModeLabel, LIVE_MODE } from '../lib/mode-labels';
 
   let mode = $state('paper1');
   let gridSize = $state(3);
@@ -46,9 +47,14 @@
     <h1>Grid View</h1>
     <div class="controls">
       <select bind:value={mode} onchange={refresh}>
-        {#each ['live', 'paper1', 'paper2', 'paper3'] as m}
-          <option value={m}>{m}</option>
-        {/each}
+        <optgroup label="Live Engine">
+          <option value={LIVE_MODE}>{getModeLabel(LIVE_MODE)}</option>
+        </optgroup>
+        <optgroup label="Candidate Family">
+          {#each CANDIDATE_FAMILY_ORDER as m}
+            <option value={m}>{getModeLabel(m)}</option>
+          {/each}
+        </optgroup>
       </select>
       <div class="search-wrap">
         <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>

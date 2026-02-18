@@ -1,5 +1,8 @@
 <script lang="ts">
   import { runSweep, getSweepJobs, getSweepStatus, getSweepResults, cancelSweep } from '../lib/api';
+  import { getConfigLabel, LIVE_MODE } from '../lib/mode-labels';
+
+  const candidateConfigs = ['paper1'] as const;
 
   let config = $state('main');
   let sweepSpec = $state('');
@@ -102,9 +105,15 @@
   <div class="launcher">
     <div class="form-row">
       <label>Config <select bind:value={config}>
-        <option value="main">main</option>
-        <option value="live">live</option>
-        <option value="paper1">paper1</option>
+        <option value="main">{getConfigLabel('main')}</option>
+        <optgroup label="Live Engine">
+          <option value={LIVE_MODE}>{getConfigLabel(LIVE_MODE)}</option>
+        </optgroup>
+        <optgroup label="Candidate Family">
+          {#each candidateConfigs as option}
+            <option value={option}>{getConfigLabel(option)}</option>
+          {/each}
+        </optgroup>
       </select></label>
       <label>Balance <input type="number" bind:value={balance} min="100" step="100" /></label>
       <label class="wide">Sweep Spec <input type="text" bind:value={sweepSpec} placeholder="config/sweep_spec.yaml" /></label>
