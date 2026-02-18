@@ -70,6 +70,11 @@
           if (liveMids[s.symbol] !== undefined) s.mid = liveMids[s.symbol];
         }
       }
+      // Trigger the same flash logic for REST snapshots using the final mids
+      // that will be rendered (after WS mid preservation).
+      if (data?.symbols) {
+        detectFlashes(data.symbols.map((s: any) => ({ symbol: s.symbol, mid: s.mid ?? null })));
+      }
       snap = data;
       appState.snapshot = data;
       error = '';
