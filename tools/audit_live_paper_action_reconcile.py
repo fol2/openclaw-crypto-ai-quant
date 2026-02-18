@@ -12,7 +12,10 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from reason_codes import classify_reason_code
+try:
+    from reason_codes import classify_reason_code
+except ModuleNotFoundError:  # pragma: no cover - module execution path
+    from tools.reason_codes import classify_reason_code
 
 SIDE_ACTIONS = {"OPEN", "ADD", "REDUCE", "CLOSE"}
 FUNDING_ACTION = "FUNDING"
