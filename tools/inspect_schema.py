@@ -3,12 +3,22 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import os
 from pathlib import Path
 
 
-DB_PAPER = Path("/home/fol2hk/.openclaw/workspace/dev/ai_quant/trading_engine.db")
-DB_LIVE = Path("/home/fol2hk/.openclaw/workspace/dev/ai_quant/trading_engine_live.db")
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _resolve_db_path(env_var: str, default_name: str) -> Path:
+    raw = os.getenv(env_var, "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return Path(default_name)
+
+
+DB_PAPER = _resolve_db_path("AI_QUANT_INSPECT_SCHEMA_DB_PAPER", "trading_engine.db")
+DB_LIVE = _resolve_db_path("AI_QUANT_INSPECT_SCHEMA_DB_LIVE", "trading_engine_live.db")
 
 
 def _validate_identifier(value: str) -> str:
