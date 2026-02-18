@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{RwLock, Semaphore, mpsc as tokio_mpsc};
+use tokio::sync::{Notify, RwLock, Semaphore, mpsc as tokio_mpsc};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
@@ -377,6 +377,7 @@ struct State {
 
     mids: HashMap<String, f64>,
     mids_updated_at: Option<Instant>,
+    mids_seq: u64,
 
     bbo: HashMap<String, (f64, f64)>,
     bbo_updated_at: HashMap<String, Instant>,
@@ -1859,6 +1860,7 @@ async fn ws_loop(
     db: DbWorkers,
     bbo_snapshots: Option<BboSnapshotStore>,
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<WsCommand>,
+    mids_notify: Arc<Notify>,
 ) -> Result<()> {
     // Validate URL early (connect_async takes &str; this is just a sanity check).
     let _ = Url::parse(&cfg.ws_url).context("bad HL_WS_URL")?;
@@ -1917,13 +1919,20 @@ async fn ws_loop(
         let state_proc = state.clone();
         let db_proc = db.clone();
         let bbo_tx = bbo_snapshots.as_ref().map(|s| s.tx.clone());
+        let mids_notify_proc = mids_notify.clone();
         let processor = tokio::spawn(async move {
             let mut bbo_sampler =
                 bbo_tx.map(|tx| BboSnapshotSampler::new(cfg_proc.bbo_snapshots_sample_ms, tx));
             while let Some(txt) = msg_rx.recv().await {
-                let _ =
-                    handle_ws_message(&cfg_proc, &state_proc, &db_proc, bbo_sampler.as_mut(), &txt)
-                        .await;
+                let _ = handle_ws_message(
+                    &cfg_proc,
+                    &state_proc,
+                    &db_proc,
+                    bbo_sampler.as_mut(),
+                    &txt,
+                    &mids_notify_proc,
+                )
+                .await;
             }
         });
 
@@ -2114,6 +2123,7 @@ async fn handle_ws_message(
     db: &DbWorkers,
     bbo_sampler: Option<&mut BboSnapshotSampler>,
     txt: &str,
+    mids_notify: &Arc<Notify>,
 ) -> Result<()> {
     let v: Value = serde_json::from_str(txt).context("ws json parse")?;
     let channel = v.get("channel").and_then(|c| c.as_str()).unwrap_or("");
@@ -2137,6 +2147,8 @@ async fn handle_ws_message(
                 }
             }
             st.mids_updated_at = Some(now);
+            st.mids_seq = st.mids_seq.wrapping_add(1);
+            mids_notify.notify_waiters();
         }
         "bbo" => {
             if !cfg.enable_bbo {
@@ -2368,11 +2380,51 @@ fn get_param_usize(params: &Value, key: &str) -> Option<usize> {
     params.get(key).and_then(|v| v.as_u64()).map(|u| u as usize)
 }
 
+fn get_param_u64(params: &Value, key: &str) -> Option<u64> {
+    params.get(key).and_then(|v| {
+        if let Some(u) = v.as_u64() {
+            Some(u)
+        } else {
+            v.as_i64()
+                .and_then(|i| if i >= 0 { Some(i as u64) } else { None })
+        }
+    })
+}
+
+fn collect_mids_result(
+    st: &State,
+    symbols: &[String],
+    max_age: Option<f64>,
+) -> serde_json::Map<String, Value> {
+    let age = st.mids_updated_at.map(|t| t.elapsed().as_secs_f64());
+    let age_for_cmp = age.unwrap_or(f64::INFINITY);
+    let allow = max_age.map(|limit| age_for_cmp <= limit).unwrap_or(true);
+
+    let mut mids_out = serde_json::Map::new();
+    if allow {
+        for sym in symbols.iter() {
+            if let Some(px) = st.mids.get(sym) {
+                mids_out.insert(sym.clone(), json!(px));
+            }
+        }
+    }
+
+    let mut out = serde_json::Map::new();
+    out.insert("mids".to_string(), Value::Object(mids_out));
+    out.insert(
+        "mids_age_s".to_string(),
+        age.map(Value::from).unwrap_or(Value::Null),
+    );
+    out.insert("mids_seq".to_string(), json!(st.mids_seq));
+    out
+}
+
 async fn handle_client(
     stream: UnixStream,
     cfg: Config,
     state: Arc<RwLock<State>>,
     cmd_tx: tokio_mpsc::UnboundedSender<WsCommand>,
+    mids_notify: Arc<Notify>,
 ) -> Result<()> {
     let (r, mut w) = stream.into_split();
     let mut lines = BufReader::new(r).lines();
@@ -2830,49 +2882,94 @@ async fn handle_client(
                 let max_age = get_param_f64(&params, "max_age_s");
 
                 let st = state.read().await;
-                let age = st.mids_updated_at.map(|t| t.elapsed().as_secs_f64());
-                let age_for_cmp = age.unwrap_or(f64::INFINITY);
-                if symbols.is_empty() {
-                    RpcResponse {
-                        id: req.id,
-                        ok: true,
-                        result: Some(json!({"mids": {}, "mids_age_s": age})),
-                        error: None,
+                let out = collect_mids_result(&st, &symbols, max_age);
+                RpcResponse {
+                    id: req.id,
+                    ok: true,
+                    result: Some(Value::Object(out)),
+                    error: None,
+                }
+            }
+            "wait_mids" => {
+                let symbols = params
+                    .get("symbols")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|x| x.as_str())
+                            .map(|s| s.trim().to_ascii_uppercase())
+                            .filter(|s| !s.is_empty())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_else(Vec::new);
+                let max_age = get_param_f64(&params, "max_age_s");
+                let after_seq = get_param_u64(&params, "after_seq").unwrap_or(0);
+                let timeout_ms = get_param_u64(&params, "timeout_ms")
+                    .unwrap_or(25_000)
+                    .clamp(50, 120_000);
+                let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+
+                loop {
+                    let notified = mids_notify.notified();
+
+                    {
+                        let st = state.read().await;
+                        if st.mids_seq > after_seq {
+                            let mut out = collect_mids_result(&st, &symbols, max_age);
+                            out.insert("changed".to_string(), Value::Bool(true));
+                            out.insert("timed_out".to_string(), Value::Bool(false));
+                            out.insert("seq_reset".to_string(), Value::Bool(false));
+                            break RpcResponse {
+                                id: req.id,
+                                ok: true,
+                                result: Some(Value::Object(out)),
+                                error: None,
+                            };
+                        }
+                        // Sidecar restart can rewind mids_seq to a smaller value. Return
+                        // immediately so clients can resynchronise without waiting for timeout.
+                        if st.mids_seq < after_seq {
+                            let mut out = collect_mids_result(&st, &symbols, max_age);
+                            out.insert("changed".to_string(), Value::Bool(true));
+                            out.insert("timed_out".to_string(), Value::Bool(false));
+                            out.insert("seq_reset".to_string(), Value::Bool(true));
+                            break RpcResponse {
+                                id: req.id,
+                                ok: true,
+                                result: Some(Value::Object(out)),
+                                error: None,
+                            };
+                        }
                     }
-                } else if let Some(max_age) = max_age {
-                    if age_for_cmp > max_age {
-                        RpcResponse {
+
+                    let now = Instant::now();
+                    if now >= deadline {
+                        let st = state.read().await;
+                        let mut out = collect_mids_result(&st, &symbols, max_age);
+                        out.insert("changed".to_string(), Value::Bool(false));
+                        out.insert("timed_out".to_string(), Value::Bool(true));
+                        out.insert("seq_reset".to_string(), Value::Bool(false));
+                        break RpcResponse {
                             id: req.id,
                             ok: true,
-                            result: Some(json!({"mids": {}, "mids_age_s": age})),
+                            result: Some(Value::Object(out)),
                             error: None,
-                        }
-                    } else {
-                        let mut out = serde_json::Map::new();
-                        for sym in symbols.iter() {
-                            if let Some(px) = st.mids.get(sym) {
-                                out.insert(sym.clone(), json!(px));
-                            }
-                        }
-                        RpcResponse {
+                        };
+                    }
+
+                    let remaining = deadline.saturating_duration_since(now);
+                    if tokio::time::timeout(remaining, notified).await.is_err() {
+                        let st = state.read().await;
+                        let mut out = collect_mids_result(&st, &symbols, max_age);
+                        out.insert("changed".to_string(), Value::Bool(false));
+                        out.insert("timed_out".to_string(), Value::Bool(true));
+                        out.insert("seq_reset".to_string(), Value::Bool(false));
+                        break RpcResponse {
                             id: req.id,
                             ok: true,
-                            result: Some(json!({"mids": out, "mids_age_s": age})),
+                            result: Some(Value::Object(out)),
                             error: None,
-                        }
-                    }
-                } else {
-                    let mut out = serde_json::Map::new();
-                    for sym in symbols.iter() {
-                        if let Some(px) = st.mids.get(sym) {
-                            out.insert(sym.clone(), json!(px));
-                        }
-                    }
-                    RpcResponse {
-                        id: req.id,
-                        ok: true,
-                        result: Some(json!({"mids": out, "mids_age_s": age})),
-                        error: None,
+                        };
                     }
                 }
             }
@@ -3270,6 +3367,7 @@ async fn main() -> Result<()> {
     };
 
     let state: Arc<RwLock<State>> = Arc::new(RwLock::new(State::default()));
+    let mids_notify = Arc::new(Notify::new());
     let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel::<WsCommand>();
 
     // Seed warm universe desired sets so candles start backfilling even before any clients connect.
@@ -3306,8 +3404,9 @@ async fn main() -> Result<()> {
         let state2 = state.clone();
         let db2 = db.clone();
         let bbo_snapshots2 = bbo_snapshots.clone();
+        let mids_notify2 = mids_notify.clone();
         tokio::spawn(async move {
-            let _ = ws_loop(cfg2, state2, db2, bbo_snapshots2, cmd_rx).await;
+            let _ = ws_loop(cfg2, state2, db2, bbo_snapshots2, cmd_rx, mids_notify2).await;
         });
     }
 
@@ -3331,8 +3430,9 @@ async fn main() -> Result<()> {
         let cfg2 = cfg.clone();
         let state2 = state.clone();
         let cmd_tx2 = cmd_tx.clone();
+        let mids_notify2 = mids_notify.clone();
         tokio::spawn(async move {
-            let _ = handle_client(stream, cfg2, state2, cmd_tx2).await;
+            let _ = handle_client(stream, cfg2, state2, cmd_tx2, mids_notify2).await;
         });
     }
 }

@@ -342,6 +342,62 @@ class SidecarWSClient:
             age_s = None
         return out, age_s
 
+    def wait_mids(
+        self,
+        *,
+        symbols: list[str],
+        after_seq: int | None = None,
+        max_age_s: float | None = None,
+        timeout_s: float = 25.0,
+    ) -> tuple[dict[str, float], float | None, int | None, bool, bool]:
+        timeout_v = float(timeout_s)
+        timeout_ms = int(max(50, min(120_000, round(timeout_v * 1000.0))))
+        try:
+            res = self._rpc(
+                "wait_mids",
+                {
+                    "symbols": [str(s).upper() for s in (symbols or [])],
+                    "after_seq": (int(after_seq) if after_seq is not None else 0),
+                    "max_age_s": (float(max_age_s) if max_age_s is not None else None),
+                    "timeout_ms": timeout_ms,
+                },
+                timeout_s=max(1.0, timeout_v + 2.0),
+            )
+        except RuntimeError as e:
+            # Backwards-compatibility: older sidecar versions may not expose wait_mids yet.
+            if "unknown method" in str(e).strip().lower():
+                mids, age_s = self.get_mids(symbols=symbols, max_age_s=max_age_s)
+                return mids, age_s, None, True, False
+            raise
+
+        if not isinstance(res, dict):
+            return {}, None, None, False, True
+
+        raw_mids = res.get("mids") or {}
+        out: dict[str, float] = {}
+        if isinstance(raw_mids, dict):
+            for k, v in raw_mids.items():
+                try:
+                    out[str(k).upper()] = float(v)
+                except Exception:
+                    continue
+
+        age = res.get("mids_age_s")
+        try:
+            age_s = float(age) if age is not None else None
+        except Exception:
+            age_s = None
+
+        seq_raw = res.get("mids_seq")
+        try:
+            seq = int(seq_raw) if seq_raw is not None else None
+        except Exception:
+            seq = None
+
+        changed = bool(res.get("changed", True))
+        timed_out = bool(res.get("timed_out", False))
+        return out, age_s, seq, changed, timed_out
+
     def get_bbo(self, symbol: str, *, max_age_s: float | None = None) -> tuple[float, float] | None:
         res = self._rpc(
             "get_bbo",

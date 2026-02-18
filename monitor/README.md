@@ -22,6 +22,12 @@ Open:
 http://127.0.0.1:61010/
 ```
 
+Real-time mids stream endpoint (SSE):
+
+```text
+GET /api/mids/stream
+```
+
 ## Run (systemd user service)
 
 Install:
@@ -43,8 +49,10 @@ journalctl --user -u openclaw-ai-quant-monitor.service -f
 - `AIQ_MONITOR_BIND` (default `127.0.0.1`)
 - `AIQ_MONITOR_PORT` (default `61010`)
 - `AI_QUANT_WS_SIDECAR_SOCK` (optional; defaults to `%t/openclaw-ai-quant-ws.sock`)
-- `AIQ_MONITOR_MIDS_POLL_MS` (default `1000`)
+- `AIQ_MONITOR_MIDS_POLL_MS` (default `1000`; legacy fallback when sidecar lacks `wait_mids`)
+- `AIQ_MONITOR_MIDS_WAIT_TIMEOUT_S` (default `25`; blocking wait timeout for sidecar push updates)
 - `AIQ_MONITOR_MIDS_MAX_AGE_S` (default `60`)
+- `AIQ_MONITOR_MIDS_STREAM_KEEPALIVE_S` (default `15`; SSE keepalive for `/api/mids/stream`)
 - `AIQ_MONITOR_INTERVAL` (default `AI_QUANT_INTERVAL` else `1m`)
 
 Optional overrides:
