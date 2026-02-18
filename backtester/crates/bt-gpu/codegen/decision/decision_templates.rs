@@ -1362,9 +1362,13 @@ __device__ SizingResultD compute_entry_size_codegen(
         if (confidence == CONF_HIGH) { conf_mult = (double)cfg.confidence_mult_high; }
         if (confidence == CONF_LOW)  { conf_mult = (double)cfg.confidence_mult_low; }
 
-        // ADX multiplier — linearly scales [min_mult, 1.0] over [0, full_adx]
-        double adx_ratio = adx / (double)cfg.adx_sizing_full_adx;
-        double adx_mult = fmax(fmin(adx_ratio, 1.0), (double)cfg.adx_sizing_min_mult);
+        // ADX multiplier — linearly scales [min_mult, 1.0] over [0, full_adx].
+        // SSOT parity (risk-core): when full_adx <= 0, fall back to min_mult.
+        double adx_mult = (double)cfg.adx_sizing_min_mult;
+        if ((double)cfg.adx_sizing_full_adx > 0.0) {
+            double adx_ratio = adx / (double)cfg.adx_sizing_full_adx;
+            adx_mult = fmax(fmin(adx_ratio, 1.0), (double)cfg.adx_sizing_min_mult);
+        }
 
         // Volatility scalar — SSOT parity with risk-core::compute_entry_sizing:
         // vol_ratio fallback=1.0, vol_scalar_raw fallback=1.0, then clamp always.
@@ -3951,6 +3955,14 @@ mod tests {
             "must use adx_sizing_min_mult from config"
         );
         assert!(src.contains("adx_mult"), "must compute adx_mult");
+        assert!(
+            src.contains("if ((double)cfg.adx_sizing_full_adx > 0.0)"),
+            "must guard adx division when full_adx <= 0"
+        );
+        assert!(
+            src.contains("double adx_mult = (double)cfg.adx_sizing_min_mult;"),
+            "must default adx multiplier to min_mult when full_adx <= 0"
+        );
     }
 
     #[test]
