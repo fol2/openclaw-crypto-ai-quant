@@ -69,6 +69,16 @@ impl AdxIndicator {
             };
         }
 
+        // R-M5: reject non-finite inputs to avoid poisoning Wilder accumulators.
+        if !high.is_finite() || !low.is_finite() || !close.is_finite() {
+            let (di_pos, di_neg, _) = self.compute_di_dx();
+            return AdxOutput {
+                adx: self.adx_value,
+                adx_pos: di_pos,
+                adx_neg: di_neg,
+            };
+        }
+
         match self.phase {
             Phase::Init => {
                 self.prev_high = high;
@@ -231,5 +241,31 @@ mod tests {
             assert!(out.adx_pos.is_finite());
             assert!(out.adx_neg.is_finite());
         }
+    }
+
+    #[test]
+    fn non_finite_inputs_are_skipped_without_poisoning_state() {
+        let mut adx = AdxIndicator::new(3);
+        let _ = adx.update(100.0, 99.0, 99.5);
+        let _ = adx.update(101.0, 99.5, 100.5);
+        let _ = adx.update(102.0, 100.0, 101.0);
+        let prev = adx.update(103.0, 100.5, 102.0);
+
+        let after_nan = adx.update(f64::NAN, 101.0, 102.0);
+        assert_eq!(after_nan.adx, prev.adx);
+        assert!(after_nan.adx.is_finite());
+        assert!(after_nan.adx_pos.is_finite());
+        assert!(after_nan.adx_neg.is_finite());
+
+        let after_inf = adx.update(104.0, f64::INFINITY, 103.0);
+        assert_eq!(after_inf.adx, prev.adx);
+        assert!(after_inf.adx.is_finite());
+        assert!(after_inf.adx_pos.is_finite());
+        assert!(after_inf.adx_neg.is_finite());
+
+        let after_valid = adx.update(104.0, 102.0, 103.5);
+        assert!(after_valid.adx.is_finite());
+        assert!(after_valid.adx_pos.is_finite());
+        assert!(after_valid.adx_neg.is_finite());
     }
 }

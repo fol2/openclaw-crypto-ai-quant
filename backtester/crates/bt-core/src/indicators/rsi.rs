@@ -40,6 +40,11 @@ impl RsiIndicator {
             return 50.0;
         }
 
+        // R-M6: reject non-finite closes to keep RSI accumulators stable.
+        if !close.is_finite() {
+            return self.value;
+        }
+
         if !self.has_prev {
             self.prev_close = close;
             self.has_prev = true;
@@ -144,5 +149,24 @@ mod tests {
         }
         assert!(!rsi.warm);
         assert_eq!(rsi.count, 0);
+    }
+
+    #[test]
+    fn non_finite_close_is_skipped_without_poisoning_state() {
+        let mut rsi = RsiIndicator::new(2);
+        let _ = rsi.update(100.0);
+        let prev = rsi.update(101.0);
+
+        let after_nan = rsi.update(f64::NAN);
+        assert_eq!(after_nan, prev);
+        assert!(after_nan.is_finite());
+
+        let after_inf = rsi.update(f64::INFINITY);
+        assert_eq!(after_inf, prev);
+        assert!(after_inf.is_finite());
+
+        let after_valid = rsi.update(102.0);
+        assert!(after_valid.is_finite());
+        assert!(after_valid > prev);
     }
 }
