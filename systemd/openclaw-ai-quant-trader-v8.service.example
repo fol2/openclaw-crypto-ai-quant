@@ -58,6 +58,7 @@ RestrictNamespaces=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
 ReadWritePaths=$PROJECT_DIR
 
 # Resource limits
