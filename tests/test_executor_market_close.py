@@ -28,9 +28,22 @@ class _FakeExchange:
         return {"status": "ok", "response": {"data": {"statuses": [{"filled": {}}]}}}
 
 
-def _build_executor(fake_exchange: _FakeExchange) -> HyperliquidLiveExecutor:
+class _FakeInfo:
+    def __init__(self, mids: dict[str, str] | None = None):
+        self._mids = mids or {}
+
+    def all_mids(self):
+        return dict(self._mids)
+
+
+def _build_executor(
+    fake_exchange: _FakeExchange,
+    *,
+    info: _FakeInfo | None = None,
+) -> HyperliquidLiveExecutor:
     ex = HyperliquidLiveExecutor.__new__(HyperliquidLiveExecutor)
     ex._exchange = fake_exchange
+    ex._info = info
     ex.last_order_error = None
     return ex
 
@@ -71,6 +84,23 @@ def test_market_close_blocks_when_no_price_for_local_fallback():
     assert fake.order_calls == []
     assert ex.last_order_error is not None
     assert ex.last_order_error.get("kind") == "preflight"
+
+
+def test_market_close_uses_all_mids_when_sdk_returns_none_and_px_missing(
+    caplog: pytest.LogCaptureFixture,
+):
+    fake = _FakeExchange(slippage_result=None)
+    ex = _build_executor(fake, info=_FakeInfo({"ETH": "200.0"}))
+
+    with caplog.at_level(logging.WARNING):
+        res = ex.market_close("ETH", is_buy=True, sz=1.0, px=None, slippage_pct=0.01)
+
+    assert res is not None
+    assert len(fake.order_calls) == 1
+    _, kwargs = fake.order_calls[0]
+    assert kwargs["limit_px"] == pytest.approx(202.0)
+    assert any("_slippage_price returned None" in rec.message for rec in caplog.records)
+    assert any("all_mids reference px" in rec.message for rec in caplog.records)
 
 
 def test_market_close_local_fallback_normalises_limit_px_to_wire_precision():
