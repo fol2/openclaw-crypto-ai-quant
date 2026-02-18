@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 import sqlite3
+import sys
+import types
 from datetime import datetime, timedelta, timezone
 
 import tools.reality_check as reality_check
@@ -124,3 +127,48 @@ def test_print_db_reports_open_failure(tmp_path, capsys, monkeypatch) -> None:
     reality_check._print_db("Paper", db_path, symbol="BTC", hours=2.0)
     out = capsys.readouterr().out
     assert "db_open_failed: boom" in out
+
+
+def test_print_candle_health_does_not_mutate_global_env(monkeypatch, capsys) -> None:
+    for key in ("AI_QUANT_WS_SOURCE", "AI_QUANT_CANDLES_SOURCE", "AI_QUANT_WS_SIDECAR_SOCK"):
+        monkeypatch.delenv(key, raising=False)
+
+    class _FakeHub:
+        def __init__(self, db_path: str) -> None:  # noqa: ARG002
+            pass
+
+        def candles_ready(self, *, symbols, interval):  # noqa: ANN001
+            return True, []
+
+        def health(self, *, symbols, interval):  # noqa: ANN001
+            return {"ok": True}
+
+        def candles_health(self, *, symbols, interval):  # noqa: ANN001
+            return {"ok": True}
+
+    fake_market_data = types.ModuleType("engine.market_data")
+    fake_market_data.MarketDataHub = _FakeHub
+    monkeypatch.setitem(sys.modules, "engine.market_data", fake_market_data)
+
+    reality_check._print_candle_health(symbol="BTC")
+    out = capsys.readouterr().out
+    assert "Candles (Sidecar) Health" in out
+
+    assert os.getenv("AI_QUANT_WS_SOURCE") is None
+    assert os.getenv("AI_QUANT_CANDLES_SOURCE") is None
+    assert os.getenv("AI_QUANT_WS_SIDECAR_SOCK") is None
+
+
+def test_bootstrap_sidecar_env_defaults_sets_missing_values(monkeypatch) -> None:
+    for key in ("AI_QUANT_WS_SOURCE", "AI_QUANT_CANDLES_SOURCE", "AI_QUANT_WS_SIDECAR_SOCK"):
+        monkeypatch.delenv(key, raising=False)
+    runtime_dir = "/tmp/aqc-runtime-test"
+    sock_path = f"{runtime_dir}/openclaw-ai-quant-ws.sock"
+    monkeypatch.setenv("XDG_RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(reality_check.os.path, "exists", lambda p: p == sock_path)
+
+    reality_check._bootstrap_sidecar_env_defaults()
+
+    assert os.getenv("AI_QUANT_WS_SOURCE") == "sidecar"
+    assert os.getenv("AI_QUANT_CANDLES_SOURCE") == "sidecar"
+    assert os.getenv("AI_QUANT_WS_SIDECAR_SOCK") == sock_path
