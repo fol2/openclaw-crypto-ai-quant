@@ -13,28 +13,66 @@ Procedures for common operational scenarios. When the bot misbehaves, follow the
 
 All services are systemd user units. Manage with `systemctl --user <action> <unit>`.
 
-### Optional timers (nightly factory + log pruning)
+### Optional timers (nightly factory + log pruning + replay alignment gate)
 
 Example service/timer templates live under `systemd/`:
 
 - `openclaw-ai-quant-factory.{service,timer}.example` runs `factory_run.py` nightly.
 - `openclaw-ai-quant-prune-runtime-logs.{service,timer}.example` prunes SQLite `runtime_logs` daily.
+- `openclaw-ai-quant-replay-alignment-gate.{service,timer}.example` runs deterministic replay alignment checks and writes a release-blocker status file.
 
 Install (example):
 
 ```bash
 mkdir -p ~/.config/systemd/user
-cp systemd/openclaw-ai-quant-factory.* ~/.config/systemd/user/
-cp systemd/openclaw-ai-quant-prune-runtime-logs.* ~/.config/systemd/user/
+install -m 0644 systemd/openclaw-ai-quant-factory.service.example \
+  ~/.config/systemd/user/openclaw-ai-quant-factory.service
+install -m 0644 systemd/openclaw-ai-quant-factory.timer.example \
+  ~/.config/systemd/user/openclaw-ai-quant-factory.timer
+install -m 0644 systemd/openclaw-ai-quant-prune-runtime-logs.service.example \
+  ~/.config/systemd/user/openclaw-ai-quant-prune-runtime-logs.service
+install -m 0644 systemd/openclaw-ai-quant-prune-runtime-logs.timer.example \
+  ~/.config/systemd/user/openclaw-ai-quant-prune-runtime-logs.timer
+install -m 0644 systemd/openclaw-ai-quant-replay-alignment-gate.service.example \
+  ~/.config/systemd/user/openclaw-ai-quant-replay-alignment-gate.service
+install -m 0644 systemd/openclaw-ai-quant-replay-alignment-gate.timer.example \
+  ~/.config/systemd/user/openclaw-ai-quant-replay-alignment-gate.timer
 systemctl --user daemon-reload
 systemctl --user enable --now openclaw-ai-quant-factory.timer
 systemctl --user enable --now openclaw-ai-quant-prune-runtime-logs.timer
+systemctl --user enable --now openclaw-ai-quant-replay-alignment-gate.timer
 ```
 
 Configure runtime log retention via:
 
 ```
 AI_QUANT_RUNTIME_LOG_KEEP_DAYS=14
+```
+
+Example replay alignment gate environment (`~/.config/openclaw/ai-quant-replay-gate.env`):
+
+```bash
+AI_QUANT_REPLAY_GATE_CANDLES_DB=/home/<user>/openclaw-plugins/ai_quant/candles_dbs/candles_1h.db
+AI_QUANT_REPLAY_GATE_FUNDING_DB=/home/<user>/openclaw-plugins/ai_quant/backtester/data/funding_rates_1h.db
+AI_QUANT_REPLAY_GATE_INTERVAL=1h
+AI_QUANT_REPLAY_GATE_WINDOW_MINUTES=240
+AI_QUANT_REPLAY_GATE_LAG_MINUTES=2
+AI_QUANT_REPLAY_GATE_MIN_LIVE_TRADES=1
+AI_QUANT_REPLAY_GATE_STRICT_NO_RESIDUALS=1
+AI_QUANT_REPLAY_GATE_BUNDLE_ROOT=/tmp/openclaw-ai-quant/replay_gate
+AI_QUANT_REPLAY_GATE_BLOCKER_FILE=/tmp/openclaw-ai-quant/replay_gate/release_blocker.json
+```
+
+Manual trigger:
+
+```bash
+systemctl --user start openclaw-ai-quant-replay-alignment-gate.service
+```
+
+Check blocker status:
+
+```bash
+cat /tmp/openclaw-ai-quant/replay_gate/release_blocker.json
 ```
 
 ### Secrets management
