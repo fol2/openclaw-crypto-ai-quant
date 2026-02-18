@@ -1,18 +1,20 @@
 //! GPU buffer structs with bytemuck Pod/Zeroable for direct GPU upload.
 //!
 //! All structs are `#[repr(C)]` and 16-byte aligned for CUDA compatibility.
-//! f64 values from the CPU side are cast to f32 for GPU computation.
+//! The runtime uses mixed precision:
+//! - raw OHLCV candles are preserved as f64 for indicator parity
+//! - snapshots/trade config remain f32 for throughput
 //!
-//! **M12 — Known f32 precision gap:** GPU kernels use f32 for indicators and
-//! trade logic while the CPU reference engine uses f64. See [`crate::precision`]
-//! for formal tolerance tiers (T0–T4) used by the parity test suite.
+//! **M12 — Precision budget:** decision kernels still consume f32 snapshots
+//! while the CPU reference engine is f64. See [`crate::precision`] for formal
+//! tolerance tiers (T0–T4) used by the parity test suite.
 
 use bytemuck::{Pod, Zeroable};
 
 /// Hard symbol ceiling imposed by GPU kernel state layout.
 pub const GPU_MAX_SYMBOLS: usize = 52;
 /// Fixed-size ring buffer capacity for per-combo GPU execution trace events.
-pub const GPU_TRACE_CAP: usize = 128;
+pub const GPU_TRACE_CAP: usize = 1024;
 /// Trace symbol selector sentinel: capture events for all symbols.
 pub const GPU_TRACE_SYMBOL_ALL: u32 = u32::MAX;
 /// Default anomaly Bollinger-Band width-ratio threshold (not part of sweep axes).
@@ -102,20 +104,20 @@ const _: () = assert!(std::mem::size_of::<GpuSnapshot>() == 160);
 /// Raw OHLCV candle for GPU upload. Missing bars have close=0.
 /// Layout: `candles[bar_idx * num_symbols + sym_idx]`
 ///
-/// 32 bytes.
+/// 56 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuRawCandle {
-    pub open: f32,
-    pub high: f32,
-    pub low: f32,
-    pub close: f32,
-    pub volume: f32,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: f64,
     pub t_sec: u32,
-    pub _pad: [u32; 2],
+    pub _pad: [u32; 3],
 }
 
-const _: () = assert!(std::mem::size_of::<GpuRawCandle>() == 32);
+const _: () = assert!(std::mem::size_of::<GpuRawCandle>() == 56);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GpuIndicatorConfig — indicator window parameters per indicator combo
@@ -408,27 +410,29 @@ const _: () = assert!(std::mem::size_of::<GpuComboConfig>() == 560);
 
 /// Per-symbol position (embedded in GpuComboState).
 ///
-/// 64 bytes.
+/// 96 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuPosition {
     pub active: u32, // 0=empty, 1=LONG, 2=SHORT
-    pub entry_price: f32,
-    pub size: f32,
+    pub _pad0: u32,
+    pub entry_price: f64,
+    pub size: f64,
     pub confidence: u32, // 0=Low, 1=Medium, 2=High
-    pub entry_atr: f32,
-    pub entry_adx_threshold: f32,
-    pub trailing_sl: f32, // 0.0 = not set
-    pub leverage: f32,
-    pub margin_used: f32,
+    pub _pad1: u32,
+    pub entry_atr: f64,
+    pub entry_adx_threshold: f64,
+    pub trailing_sl: f64, // 0.0 = not set
+    pub leverage: f64,
+    pub margin_used: f64,
     pub adds_count: u32,
     pub tp1_taken: u32,
     pub open_time_sec: u32,
     pub last_add_time_sec: u32,
-    pub _pad: [u32; 3],
+    pub _pad: [u32; 2],
 }
 
-const _: () = assert!(std::mem::size_of::<GpuPosition>() == 64);
+const _: () = assert!(std::mem::size_of::<GpuPosition>() == 96);
 
 /// Compact trace event emitted by the GPU sweep kernel.
 ///
@@ -445,6 +449,7 @@ pub struct GpuTraceEvent {
     pub reason: u32,
     pub price: f32,
     pub size: f32,
+    pub _pad0: u32,
     pub pnl: f64,
 }
 
@@ -463,11 +468,11 @@ const _: () = assert!(std::mem::size_of::<GpuTraceEvent>() == 40);
 ///
 /// Size:
 /// 16 (header)
-/// + 52*64 (positions)
+/// + 52*96 (positions)
 /// + 4*52*4 (PESC + entry cooldown map)
-/// + 16 + 128*40 (trace control + ring)
+/// + 16 + 1024*40 (trace control + ring)
 /// + 56 (accumulators) + 8 (pad)
-/// = 9,376 bytes
+/// = 46,880 bytes
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct GpuComboState {
@@ -528,7 +533,7 @@ const GPU_COMBO_STATE_EXPECTED_LAYOUT_BYTES: usize = std::mem::size_of::<f64>()
 
 const _: () =
     assert!(std::mem::size_of::<GpuComboState>() == GPU_COMBO_STATE_EXPECTED_LAYOUT_BYTES);
-const _: () = assert!(std::mem::size_of::<GpuComboState>() == 9376);
+const _: () = assert!(std::mem::size_of::<GpuComboState>() == 46880);
 const _: () = assert!(std::mem::align_of::<GpuComboState>() == 8);
 const _: () = assert!(std::mem::size_of::<GpuComboState>() % 16 == 0);
 
@@ -538,23 +543,23 @@ const _: () = assert!(std::mem::size_of::<GpuComboState>() % 16 == 0);
 
 /// Compact result struct read back from GPU after sweep completes.
 ///
-/// 48 bytes.
+/// 64 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuResult {
-    pub final_balance: f32,
-    pub total_pnl: f32,
-    pub total_fees: f32,
+    pub final_balance: f64,
+    pub total_pnl: f64,
+    pub total_fees: f64,
     pub total_trades: u32,
     pub total_wins: u32,
     pub total_losses: u32,
-    pub gross_profit: f32,
-    pub gross_loss: f32,
-    pub max_drawdown_pct: f32,
-    pub _pad: [u32; 3],
+    pub _pad0: u32,
+    pub gross_profit: f64,
+    pub gross_loss: f64,
+    pub max_drawdown_pct: f64,
 }
 
-const _: () = assert!(std::mem::size_of::<GpuResult>() == 48);
+const _: () = assert!(std::mem::size_of::<GpuResult>() == 64);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GpuParams — uniform parameters for the compute shader
@@ -562,7 +567,7 @@ const _: () = assert!(std::mem::size_of::<GpuResult>() == 48);
 
 /// Global parameters passed as uniform to the compute shader.
 ///
-/// 44 bytes.
+/// 48 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuParams {
@@ -570,6 +575,7 @@ pub struct GpuParams {
     pub num_symbols: u32,
     pub num_bars: u32,
     pub btc_sym_idx: u32, // u32::MAX when unavailable
+    pub paxg_sym_idx: u32, // u32::MAX when unavailable
     pub chunk_start: u32,
     pub chunk_end: u32,
     pub initial_balance_bits: u32, // f32 bits
@@ -579,7 +585,7 @@ pub struct GpuParams {
     pub trade_end_bar: u32,        // last bar index for result write-back (scoped trade range)
 }
 
-const _: () = assert!(std::mem::size_of::<GpuParams>() == 44);
+const _: () = assert!(std::mem::size_of::<GpuParams>() == 48);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Conversion helpers
@@ -898,7 +904,7 @@ mod tests {
             std::mem::size_of::<GpuComboState>(),
             GPU_COMBO_STATE_EXPECTED_LAYOUT_BYTES
         );
-        assert_eq!(std::mem::size_of::<GpuComboState>(), 9376);
+        assert_eq!(std::mem::size_of::<GpuComboState>(), 46880);
         assert_eq!(std::mem::align_of::<GpuComboState>(), 8);
     }
 

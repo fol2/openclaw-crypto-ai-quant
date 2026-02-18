@@ -2,7 +2,7 @@
 //!
 //! Builds a flat `Vec<GpuRawCandle>` in [bar_idx × num_symbols + sym_idx] layout
 //! from the CandleData HashMap. This is pure data layout — no indicator computation.
-//! The resulting buffer is ~6 MB for 5000 bars × 51 symbols and is uploaded to GPU once.
+//! The resulting buffer is ~14 MB for 5000 bars × 51 symbols and is uploaded to GPU once.
 
 use bt_core::candle::CandleData;
 use bytemuck::Zeroable;
@@ -101,13 +101,13 @@ pub fn prepare_raw_candles(candles: &CandleData, symbols: &[String]) -> RawCandl
 
             if let Some(bar) = bar {
                 raw[bar_idx * num_symbols + sym_idx] = GpuRawCandle {
-                    open: bar.o as f32,
-                    high: bar.h as f32,
-                    low: bar.l as f32,
-                    close: bar.c as f32,
-                    volume: bar.v as f32,
+                    open: bar.o,
+                    high: bar.h,
+                    low: bar.l,
+                    close: bar.c,
+                    volume: bar.v,
                     t_sec: (ts / 1000) as u32,
-                    _pad: [0; 2],
+                    _pad: [0; 3],
                 };
             }
             // else: stays zeroed (close=0 → indicator kernel skips)
@@ -253,13 +253,13 @@ pub fn prepare_sub_bar_candles(
                     let bar = subs[p];
                     let flat_idx = (bar_idx * max_sub + sub_idx) * num_symbols + sym_idx;
                     flat[flat_idx] = GpuRawCandle {
-                        open: bar.o as f32,
-                        high: bar.h as f32,
-                        low: bar.l as f32,
-                        close: bar.c as f32,
-                        volume: bar.v as f32,
+                        open: bar.o,
+                        high: bar.h,
+                        low: bar.l,
+                        close: bar.c,
+                        volume: bar.v,
                         t_sec: (bar.t / 1000) as u32,
-                        _pad: [0; 2],
+                        _pad: [0; 3],
                     };
                     p += 1;
                 }

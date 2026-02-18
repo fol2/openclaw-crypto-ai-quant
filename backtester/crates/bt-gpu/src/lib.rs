@@ -187,6 +187,12 @@ fn run_gpu_sweep_internal(
         .or_else(|| symbols.iter().position(|s| s == "BTCUSDT"))
         .and_then(|idx| u32::try_from(idx).ok())
         .unwrap_or(u32::MAX);
+    let paxg_sym_idx = symbols
+        .iter()
+        .position(|s| s == "PAXG")
+        .or_else(|| symbols.iter().position(|s| s == "PAXGUSDT"))
+        .and_then(|idx| u32::try_from(idx).ok())
+        .unwrap_or(u32::MAX);
 
     // ── 1. Prepare raw candles (CPU, layout only, ~10ms) ─────────────────
     let raw = raw_candles::prepare_raw_candles(candles, &symbols);
@@ -451,6 +457,7 @@ fn run_gpu_sweep_internal(
             num_bars,
             num_symbols_u32,
             btc_sym_idx,
+            paxg_sym_idx,
         ) {
             Ok(bufs) => bufs,
             Err(e) => {

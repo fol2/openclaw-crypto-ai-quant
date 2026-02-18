@@ -404,14 +404,6 @@ __device__ SignalResult generate_signal_codegen(
             if (signal == 2 && stoch_k < (double)cfg.stoch_rsi_block_short_lt) { return neutral; }
         }
 
-        // ── AVE (Adaptive Volatility Entry): upgrade confidence ──
-        if (cfg.ave_enabled != 0u && avg_atr > 0.0) {
-            double atr_ratio = atr / avg_atr;
-            if (atr_ratio > (double)cfg.ave_atr_ratio_gt) {
-                confidence = 2;  // CONF_HIGH
-            }
-        }
-
         // ── Volume-based confidence upgrade to High ──
         if (vol_sma > 0.0 && volume > vol_sma * (double)cfg.high_conf_volume_mult) {
             confidence = 2;  // CONF_HIGH

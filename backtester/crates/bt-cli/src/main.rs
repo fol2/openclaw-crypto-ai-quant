@@ -2432,7 +2432,7 @@ fn cmd_dump_indicators(args: DumpArgs) -> Result<(), Box<dyn std::error::Error>>
     // CSV header
     writeln!(
         writer,
-        "t,close,ema_slow,ema_fast,ema_macro,adx,adx_pos,adx_neg,\
+        "t,close,ema_slow,ema_fast,ema_macro,adx,adx_slope,adx_pos,adx_neg,\
          bb_upper,bb_lower,bb_width,atr,rsi,macd_hist,\
          stoch_rsi_k,stoch_rsi_d,vol_sma,vol_trend"
     )?;
@@ -2444,7 +2444,7 @@ fn cmd_dump_indicators(args: DumpArgs) -> Result<(), Box<dyn std::error::Error>>
 
         writeln!(
             writer,
-            "{},{:.8},{:.8},{:.8},{:.8},{:.4},{:.4},{:.4},\
+            "{},{:.8},{:.8},{:.8},{:.8},{:.4},{:.4},{:.4},{:.4},\
              {:.8},{:.8},{:.6},{:.8},{:.4},{:.8},\
              {:.4},{:.4},{:.4},{}",
             snap.t,
@@ -2453,6 +2453,7 @@ fn cmd_dump_indicators(args: DumpArgs) -> Result<(), Box<dyn std::error::Error>>
             snap.ema_fast,
             snap.ema_macro,
             snap.adx,
+            snap.adx_slope,
             snap.adx_pos,
             snap.adx_neg,
             snap.bb_upper,

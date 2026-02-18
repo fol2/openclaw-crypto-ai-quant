@@ -1314,10 +1314,12 @@ fn canonical_cpu_reason_code(action_kind: &str, raw_reason: &str) -> String {
 fn canonical_gpu_reason_code(raw_reason: &str) -> String {
     let reason = raw_reason.trim().to_uppercase();
     if reason.is_empty() {
-        "UNKNOWN".to_string()
-    } else {
-        reason
+        return "UNKNOWN".to_string();
     }
+    if reason.starts_with("EXIT") {
+        return "EXIT".to_string();
+    }
+    reason
 }
 
 fn canonical_gpu_action(kind: &str, side: &str) -> String {
@@ -1428,9 +1430,13 @@ fn trace_reason_name(reason: u32) -> &'static str {
     match reason {
         1 => "ENTRY",
         2 => "PYRAMID",
-        3 => "EXIT",
-        4 => "SIGNAL_FLIP",
-        5 => "PARTIAL",
+        3 => "EXIT_STOP",
+        4 => "EXIT_TRAILING",
+        5 => "EXIT_TP",
+        6 => "EXIT_SMART",
+        7 => "SIGNAL_FLIP",
+        8 => "PARTIAL",
+        9 => "EXIT_EOB",
         _ => "UNKNOWN",
     }
 }

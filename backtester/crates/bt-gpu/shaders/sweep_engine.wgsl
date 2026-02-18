@@ -177,7 +177,7 @@ struct EntryCandidate {
     sym_idx: u32,
     signal: u32,
     confidence: u32,
-    score: f32,
+    score: i32,
     adx: f32,
     atr: f32,
     entry_adx_threshold: f32,
@@ -370,14 +370,6 @@ fn generate_signal(snap: GpuSnapshot, cfg: ptr<function, GpuComboConfig>,
         if (*cfg).use_stoch_rsi_filter != 0u {
             if signal == SIG_BUY && snap.stoch_k > 0.85 { return vec3<u32>(SIG_NEUTRAL, 0u, 0u); }
             if signal == SIG_SELL && snap.stoch_k < 0.15 { return vec3<u32>(SIG_NEUTRAL, 0u, 0u); }
-        }
-
-        // AVE (Adaptive Volatility Entry): upgrade confidence
-        if snap.avg_atr > 0.0 {
-            let atr_ratio = snap.atr / snap.avg_atr;
-            if atr_ratio > (*cfg).ave_atr_ratio_gt {
-                confidence = CONF_HIGH;
-            }
         }
 
         // Volume-based confidence upgrade
@@ -921,9 +913,28 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
             let pos = state.positions[sym];
 
             // Pyramiding (same-direction add) — not ranked, immediate
+            // Keep add eligibility aligned with CPU semantics:
+            // - current signal must exist and match position direction
+            // - current confidence must meet add_min_confidence
             if pos.pos_type != POS_EMPTY && cfg.enable_pyramiding != 0u {
-                // Simplified pyramid check
-                if pos.adds_count < cfg.max_adds_per_symbol {
+                let gates_ok_add = check_gates(snap, &cfg, btc_bull, snap.ema_slow_slope_pct);
+                let add_sig_result = generate_signal(snap, &cfg, gates_ok_add, snap.ema_slow_slope_pct);
+                var add_signal = add_sig_result.x;
+                let add_confidence = add_sig_result.y;
+
+                if add_signal != SIG_NEUTRAL {
+                    add_signal = apply_reverse(add_signal, &cfg, breadth_pct);
+                }
+                if add_signal != SIG_NEUTRAL {
+                    add_signal = apply_regime_filter(add_signal, &cfg, breadth_pct);
+                }
+
+                let same_direction =
+                    (pos.pos_type == POS_LONG && add_signal == SIG_BUY) ||
+                    (pos.pos_type == POS_SHORT && add_signal == SIG_SELL);
+                let add_conf_ok = conf_meets_min(add_confidence, cfg.add_min_confidence);
+
+                if same_direction && add_conf_ok && pos.adds_count < cfg.max_adds_per_symbol {
                     let p_atr = profit_atr(pos, snap.close);
                     if p_atr >= cfg.add_min_profit_atr {
                         let elapsed_sec = snap.t_sec - pos.last_add_time_sec;
@@ -1027,8 +1038,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
             }
 
             // Collect candidate
-            let conf_rank = f32(confidence);
-            let score = conf_rank * 100.0 + snap.adx;
+            let score = i32(confidence) * 100 + i32(snap.adx);
 
             candidates[num_cands] = EntryCandidate(
                 sym, signal, confidence, score, snap.adx, atr, entry_adx_thresh
@@ -1040,7 +1050,10 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
         for (var i = 1u; i < num_cands; i++) {
             let key = candidates[i];
             var j = i;
-            while j > 0u && candidates[j - 1u].score < key.score {
+            while j > 0u
+                && (candidates[j - 1u].score < key.score
+                    || (candidates[j - 1u].score == key.score
+                        && candidates[j - 1u].sym_idx > key.sym_idx)) {
                 candidates[j] = candidates[j - 1u];
                 j -= 1u;
             }

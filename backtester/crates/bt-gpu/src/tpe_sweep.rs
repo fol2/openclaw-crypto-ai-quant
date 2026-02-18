@@ -490,6 +490,12 @@ pub fn run_tpe_sweep(
         .or_else(|| symbols.iter().position(|s| s == "BTCUSDT"))
         .and_then(|idx| u32::try_from(idx).ok())
         .unwrap_or(u32::MAX);
+    let paxg_sym_idx = symbols
+        .iter()
+        .position(|s| s == "PAXG")
+        .or_else(|| symbols.iter().position(|s| s == "PAXGUSDT"))
+        .and_then(|idx| u32::try_from(idx).ok())
+        .unwrap_or(u32::MAX);
 
     let raw = raw_candles::prepare_raw_candles(candles, &symbols);
     let num_bars = match checked_num_bars_u32(raw.num_bars) {
@@ -693,6 +699,7 @@ pub fn run_tpe_sweep(
                 num_bars,
                 num_symbols_u32,
                 btc_sym_idx,
+                paxg_sym_idx,
                 spec.lookback,
                 spec.initial_balance as f32,
                 maker_fee_rate,
@@ -718,6 +725,7 @@ pub fn run_tpe_sweep(
                 num_bars,
                 num_symbols_u32,
                 btc_sym_idx,
+                paxg_sym_idx,
                 spec.lookback,
                 spec.initial_balance as f32,
                 maker_fee_rate,
@@ -802,6 +810,7 @@ fn evaluate_trade_only_batch(
     num_bars: u32,
     num_symbols: u32,
     btc_sym_idx: u32,
+    paxg_sym_idx: u32,
     lookback: usize,
     initial_balance: f32,
     maker_fee_rate: f32,
@@ -822,6 +831,7 @@ fn evaluate_trade_only_batch(
         num_bars,
         num_symbols,
         btc_sym_idx,
+        paxg_sym_idx,
     ) {
         Ok(bufs) => bufs,
         Err(e) => {
@@ -894,6 +904,7 @@ fn evaluate_mixed_batch_arena(
     num_bars: u32,
     num_symbols: u32,
     btc_sym_idx: u32,
+    paxg_sym_idx: u32,
     lookback: usize,
     initial_balance: f32,
     maker_fee_rate: f32,
@@ -1018,6 +1029,7 @@ fn evaluate_mixed_batch_arena(
 
         let trade_results = match dispatch_trade_arena(
             ds,
+            candles_gpu,
             snap_arena,
             breadth_arena,
             btc_arena,
@@ -1025,6 +1037,7 @@ fn evaluate_mixed_batch_arena(
             initial_balance,
             num_symbols,
             btc_sym_idx,
+            paxg_sym_idx,
             num_bars,
             maker_fee_rate,
             taker_fee_rate,
@@ -1142,6 +1155,7 @@ fn dispatch_indicator_arena(
 /// Dispatch trade sweep kernel using pre-allocated arena snapshot/breadth/btc buffers.
 fn dispatch_trade_arena(
     ds: &gpu_host::GpuDeviceState,
+    candles_gpu: &CudaSlice<buffers::GpuRawCandle>,
     snap_arena: &mut CudaSlice<buffers::GpuSnapshot>,
     breadth_arena: &mut CudaSlice<f32>,
     btc_arena: &mut CudaSlice<u32>,
@@ -1149,6 +1163,7 @@ fn dispatch_trade_arena(
     initial_balance: f32,
     num_symbols: u32,
     btc_sym_idx: u32,
+    paxg_sym_idx: u32,
     num_bars: u32,
     maker_fee_rate: f32,
     taker_fee_rate: f32,
@@ -1216,6 +1231,7 @@ fn dispatch_trade_arena(
             num_symbols,
             num_bars,
             btc_sym_idx,
+            paxg_sym_idx,
             chunk_start,
             chunk_end,
             initial_balance_bits: initial_balance.to_bits(),
@@ -1251,6 +1267,7 @@ fn dispatch_trade_arena(
                     &configs_gpu,
                     &mut states_gpu,
                     &mut results_gpu,
+                    candles_gpu,
                     sc_ref,
                     sn_ref,
                 ),

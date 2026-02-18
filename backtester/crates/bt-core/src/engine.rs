@@ -287,10 +287,26 @@ fn signal_name(signal: Signal) -> &'static str {
     }
 }
 
-/// Sync engine position metadata into the corresponding kernel position so that
-/// kernel exit evaluation sees the correct entry_atr, confidence, and
-/// entry_adx_threshold values (these are set by the engine at entry time).
+/// Sync the authoritative engine position into the corresponding kernel position.
+///
+/// The engine is execution SSOT for realised fills (entry/add prices, size, margin).
+/// Exit evaluation reads from kernel positions, so we must mirror all state that
+/// affects exit thresholds and triggers before calling `kernel_exits::evaluate_exits`.
 fn sync_engine_to_kernel_pos(engine_pos: &Position, kernel_pos: &mut decision_kernel::Position) {
+    kernel_pos.side = match engine_pos.pos_type {
+        PositionType::Long => decision_kernel::PositionSide::Long,
+        PositionType::Short => decision_kernel::PositionSide::Short,
+    };
+    kernel_pos.quantity = accounting::quantize(engine_pos.size);
+    kernel_pos.avg_entry_price = accounting::quantize(engine_pos.entry_price);
+    kernel_pos.opened_at_ms = engine_pos.open_time_ms;
+    kernel_pos.updated_at_ms = engine_pos.last_add_time_ms.max(engine_pos.open_time_ms);
+    kernel_pos.notional_usd = accounting::quantize(engine_pos.entry_price * engine_pos.size);
+    kernel_pos.margin_usd = accounting::quantize(engine_pos.margin_used);
+    kernel_pos.adds_count = engine_pos.adds_count;
+    kernel_pos.mae_usd = engine_pos.mae_usd;
+    kernel_pos.mfe_usd = engine_pos.mfe_usd;
+
     kernel_pos.entry_atr = Some(engine_pos.entry_atr);
     kernel_pos.confidence = Some(engine_pos.confidence.rank());
     kernel_pos.entry_adx_threshold = if engine_pos.entry_adx_threshold > 0.0 {
@@ -1022,6 +1038,15 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
             // When entry_candles is provided, entry signals are deferred to the
             // entry sub-bar block below for higher-resolution timing.
             if entry_candles.is_none() {
+                let debug_target = match (
+                    std::env::var("AQC_DEBUG_ENTRY_SYMBOL"),
+                    std::env::var("AQC_DEBUG_ENTRY_TS_MS"),
+                ) {
+                    (Ok(sym_filter), Ok(ts_filter_raw)) => {
+                        sym_str == sym_filter && ts == ts_filter_raw.parse::<i64>().unwrap_or(i64::MIN)
+                    }
+                    _ => false,
+                };
                 // Engine-level transforms
                 let atr = apply_atr_floor(snap.atr, snap.close, cfg.trade.min_atr_pct);
 
@@ -1033,6 +1058,12 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                 }
 
                 if signal == Signal::Neutral {
+                    if debug_target {
+                        eprintln!(
+                            "[cpu-cand-debug] sym={} ts_ms={} rejected=neutral_after_reverse_regime breadth={:.6} adx={:.6} adx_slope={:.6} macd={:.8} rsi={:.6}",
+                            sym_str, ts, breadth_pct, snap.adx, snap.adx_slope, snap.macd_hist, snap.rsi
+                        );
+                    }
                     continue;
                 }
 
@@ -1075,8 +1106,20 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
 
                 // Handle same-direction pyramiding (immediate, not ranked)
                 if let Some(pos) = state.positions.get(sym_str) {
-                    if pos.pos_type == desired_type && cfg.trade.enable_pyramiding {
+                    let pos_type = pos.pos_type;
+                    if pos_type == desired_type && cfg.trade.enable_pyramiding {
                         try_pyramid(&mut state, sym_str, &snap, cfg, confidence, atr, ts);
+                        if debug_target {
+                            eprintln!(
+                                "[cpu-cand-debug] sym={} ts_ms={} rejected=already_open_pyramid pos_type={:?} desired={:?}",
+                                sym_str, ts, pos_type, desired_type
+                            );
+                        }
+                    } else if debug_target {
+                        eprintln!(
+                            "[cpu-cand-debug] sym={} ts_ms={} rejected=already_open_no_pyramid pos_type={:?} desired={:?}",
+                            sym_str, ts, pos_type, desired_type
+                        );
                     }
                     continue;
                 }
@@ -1084,10 +1127,22 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                 // Pre-filter gates that don't depend on cross-symbol state
                 if !confidence.meets_min(cfg.trade.entry_min_confidence) {
                     state.gate_stats.blocked_by_confidence += 1;
+                    if debug_target {
+                        eprintln!(
+                            "[cpu-cand-debug] sym={} ts_ms={} rejected=min_conf confidence={:?} min={:?}",
+                            sym_str, ts, confidence, cfg.trade.entry_min_confidence
+                        );
+                    }
                     continue;
                 }
                 if is_pesc_blocked(&state, sym_str, desired_type, ts, snap.adx, cfg) {
                     state.gate_stats.blocked_by_pesc += 1;
+                    if debug_target {
+                        eprintln!(
+                            "[cpu-cand-debug] sym={} ts_ms={} rejected=pesc desired={:?} adx={:.6}",
+                            sym_str, ts, desired_type, snap.adx
+                        );
+                    }
                     continue;
                 }
                 if cfg.trade.enable_ssf_filter {
@@ -1098,6 +1153,12 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                     };
                     if !ssf_ok {
                         state.gate_stats.blocked_by_ssf += 1;
+                        if debug_target {
+                            eprintln!(
+                                "[cpu-cand-debug] sym={} ts_ms={} rejected=ssf signal={:?} macd={:.10}",
+                                sym_str, ts, signal, snap.macd_hist
+                            );
+                        }
                         continue;
                     }
                 }
@@ -1121,6 +1182,12 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                     };
                     if reef_blocked {
                         state.gate_stats.blocked_by_reef += 1;
+                        if debug_target {
+                            eprintln!(
+                                "[cpu-cand-debug] sym={} ts_ms={} rejected=reef signal={:?} adx={:.6} rsi={:.6}",
+                                sym_str, ts, signal, snap.adx, snap.rsi
+                            );
+                        }
                         continue;
                     }
                 }
@@ -1140,6 +1207,20 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                     ts,
                     gate_eval,
                 });
+                if debug_target {
+                    eprintln!(
+                        "[cpu-cand-debug] sym={} ts_ms={} accepted signal={:?} confidence={:?} adx={:.6} atr={:.10} entry_adx_thresh={:.6} breadth={:.6} btc_bull={:?}",
+                        sym_str,
+                        ts,
+                        signal,
+                        confidence,
+                        snap.adx,
+                        atr,
+                        entry_adx_threshold,
+                        breadth_pct,
+                        btc_bullish
+                    );
+                }
             }
         }
 
@@ -1152,11 +1233,55 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                 score_b.cmp(&score_a).then_with(|| a.symbol.cmp(&b.symbol))
             });
 
+            if let (Ok(sym_filter), Ok(ts_filter_raw)) = (
+                std::env::var("AQC_DEBUG_ENTRY_SYMBOL"),
+                std::env::var("AQC_DEBUG_ENTRY_TS_MS"),
+            ) {
+                let ts_filter = ts_filter_raw.parse::<i64>().unwrap_or(i64::MIN);
+                let mut printed_header = false;
+                for (idx, cand) in indicator_bar_candidates.iter().enumerate() {
+                    if cand.ts == ts_filter {
+                        if !printed_header {
+                            eprintln!(
+                                "[cpu-rank-debug] ts_ms={} entries_this_bar_start={} max_entries={} candidates_at_ts:",
+                                ts_filter,
+                                entries_this_bar,
+                                cfg.trade.max_entry_orders_per_loop
+                            );
+                            printed_header = true;
+                        }
+                        let score = (cand.confidence as i32) * 100 + cand.adx as i32;
+                        eprintln!(
+                            "[cpu-rank-debug] idx={} symbol={} score={} conf={:?} adx={:.6} signal={:?}",
+                            idx, cand.symbol, score, cand.confidence, cand.adx, cand.signal
+                        );
+                    }
+                }
+                if !printed_header {
+                    let _ = sym_filter;
+                }
+            }
+
             let equity = state.balance
                 + unrealized_pnl(&state.positions, &state.indicators, ts, candles, &bar_index);
 
             for cand in &indicator_bar_candidates {
                 if entries_this_bar >= cfg.trade.max_entry_orders_per_loop {
+                    if let (Ok(sym_filter), Ok(ts_filter_raw)) = (
+                        std::env::var("AQC_DEBUG_ENTRY_SYMBOL"),
+                        std::env::var("AQC_DEBUG_ENTRY_TS_MS"),
+                    ) {
+                        let ts_filter = ts_filter_raw.parse::<i64>().unwrap_or(i64::MIN);
+                        if cand.ts == ts_filter || cand.symbol == sym_filter {
+                            eprintln!(
+                                "[cpu-rank-debug] break_on_entry_limit at symbol={} ts_ms={} entries_this_bar={} max_entries={}",
+                                cand.symbol,
+                                cand.ts,
+                                entries_this_bar,
+                                cfg.trade.max_entry_orders_per_loop
+                            );
+                        }
+                    }
                     break;
                 }
                 let total_margin: f64 = state.positions.values().map(|p| p.margin_used).sum();
@@ -1168,6 +1293,25 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                     max_total_margin_pct: cfg.trade.max_total_margin_pct,
                     allow_zero_margin_headroom: false,
                 });
+                if let (Ok(sym_filter), Ok(ts_filter_raw)) = (
+                    std::env::var("AQC_DEBUG_ENTRY_SYMBOL"),
+                    std::env::var("AQC_DEBUG_ENTRY_TS_MS"),
+                ) {
+                    let ts_filter = ts_filter_raw.parse::<i64>().unwrap_or(i64::MIN);
+                    if cand.symbol == sym_filter && cand.ts == ts_filter {
+                        eprintln!(
+                            "[cpu-rank-debug] sym={} ts_ms={} exposure_allowed={} blocked_reason={:?} equity={:.12} total_margin={:.12} headroom={:.12} max_total_margin_pct={:.12}",
+                            cand.symbol,
+                            cand.ts,
+                            exposure.allowed,
+                            exposure.blocked_reason,
+                            equity,
+                            total_margin,
+                            exposure.margin_headroom,
+                            cfg.trade.max_total_margin_pct
+                        );
+                    }
+                }
                 if matches!(
                     exposure.blocked_reason,
                     Some(ExposureBlockReason::MaxOpenPositions)
@@ -1206,6 +1350,30 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                     &cand.snap,
                     cfg,
                 );
+                if let (Ok(sym_filter), Ok(ts_filter_raw)) = (
+                    std::env::var("AQC_DEBUG_ENTRY_SYMBOL"),
+                    std::env::var("AQC_DEBUG_ENTRY_TS_MS"),
+                ) {
+                    if cand.symbol == sym_filter
+                        && cand.ts == ts_filter_raw.parse::<i64>().unwrap_or(i64::MIN)
+                    {
+                        eprintln!(
+                            "[cpu-entry-debug] sym={} ts_ms={} equity={:.12} total_margin={:.12} headroom={:.12} price={:.12} atr={:.12} adx={:.12} conf={:?} size_pre={:.12} margin_pre={:.12} lev={:.12}",
+                            cand.symbol,
+                            cand.ts,
+                            equity,
+                            total_margin,
+                            margin_headroom,
+                            cand.snap.close,
+                            cand.atr,
+                            cand.snap.adx,
+                            cand.confidence,
+                            size,
+                            margin_used,
+                            leverage
+                        );
+                    }
+                }
                 let (mut size, mut margin_used) = if margin_used > margin_headroom {
                     // M13: zero-guard on margin_used division
                     let ratio = if margin_used > 1e-12 {
@@ -1224,6 +1392,9 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                         size = cfg.trade.min_notional_usd / cand.snap.close;
                         margin_used = size * cand.snap.close / leverage;
                         notional = size * cand.snap.close;
+                        if margin_used > margin_headroom {
+                            continue;
+                        }
                     } else {
                         continue;
                     }
@@ -1544,19 +1715,39 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
         state.equity_curve.push((ts, state.balance + unrealized));
     }
 
-    // -- Force-close all remaining positions at last known price --
+    // -- Force-close remaining positions at scoped terminal bar --
+    // Use the last timeline timestamp within `to_ts` when scope is set.
+    // This avoids leaking future prices outside the requested replay window.
+    let terminal_ts = if let Some(to) = to_ts {
+        match timestamps.binary_search(&to) {
+            Ok(i) => timestamps[i],
+            Err(0) => to,
+            Err(i) => timestamps[i - 1],
+        }
+    } else {
+        *timestamps.last().unwrap_or(&0)
+    };
+
     let remaining: Vec<String> = state.positions.keys().cloned().collect();
     for sym in remaining {
         if state.positions.contains_key(&sym) {
-            let last_price = last_price_for_symbol(candles, &sym);
-            let exit = ExitResult::exit("End of Backtest", last_price);
-            let snap = make_minimal_snap(last_price, *timestamps.last().unwrap_or(&0));
+            let terminal_price = lookup_bar(&bar_index, &sym, terminal_ts, candles)
+                .map(|bar| bar.c)
+                .or_else(|| last_price_at_or_before(candles, &sym, terminal_ts));
+            let Some(terminal_price) = terminal_price else {
+                continue;
+            };
+            if terminal_price <= 0.0 {
+                continue;
+            }
+            let exit = ExitResult::exit("End of Backtest", terminal_price);
+            let snap = make_minimal_snap(terminal_price, terminal_ts);
             apply_exit(
                 &mut state,
                 &sym,
                 &exit,
                 &snap,
-                *timestamps.last().unwrap_or(&0),
+                terminal_ts,
                 cfg,
             );
         }
@@ -2087,6 +2278,15 @@ fn try_pyramid(
     ts: i64,
 ) {
     let tc = &cfg.trade;
+    let debug_target = match (
+        std::env::var("AQC_DEBUG_ENTRY_SYMBOL"),
+        std::env::var("AQC_DEBUG_ENTRY_TS_MS"),
+    ) {
+        (Ok(sym_filter), Ok(ts_filter_raw)) => {
+            symbol == sym_filter && ts == ts_filter_raw.parse::<i64>().unwrap_or(i64::MIN)
+        }
+        _ => false,
+    };
     let pos = match state.positions.get(symbol) {
         Some(p) => p,
         None => return,
@@ -2094,26 +2294,56 @@ fn try_pyramid(
 
     // Check add limits
     if pos.adds_count >= tc.max_adds_per_symbol as u32 {
+        if debug_target {
+            eprintln!(
+                "[cpu-pyr-debug] sym={} ts_ms={} rejected=max_adds adds={} max={}",
+                symbol, ts, pos.adds_count, tc.max_adds_per_symbol
+            );
+        }
         return;
     }
 
     // Confidence gate for adds
     if !confidence.meets_min(tc.add_min_confidence) {
+        if debug_target {
+            eprintln!(
+                "[cpu-pyr-debug] sym={} ts_ms={} rejected=min_conf conf={:?} min={:?}",
+                symbol, ts, confidence, tc.add_min_confidence
+            );
+        }
         return;
     }
 
     // Cooldown since last add
     let elapsed_mins = (ts - pos.last_add_time_ms) as f64 / 60_000.0;
     if elapsed_mins < tc.add_cooldown_minutes as f64 {
+        if debug_target {
+            eprintln!(
+                "[cpu-pyr-debug] sym={} ts_ms={} rejected=cooldown elapsed_mins={:.6} min={}",
+                symbol, ts, elapsed_mins, tc.add_cooldown_minutes
+            );
+        }
         return;
     }
 
     // Must be in profit by min ATR
     let profit_atr = pos.profit_atr(snap.close);
     if profit_atr < tc.add_min_profit_atr {
+        if debug_target {
+            eprintln!(
+                "[cpu-pyr-debug] sym={} ts_ms={} rejected=min_profit_atr profit_atr={:.12} min={:.12}",
+                symbol, ts, profit_atr, tc.add_min_profit_atr
+            );
+        }
         return;
     }
     if is_entry_cooldown_active(state, symbol, ts, cfg) {
+        if debug_target {
+            eprintln!(
+                "[cpu-pyr-debug] sym={} ts_ms={} rejected=entry_cooldown",
+                symbol, ts
+            );
+        }
         return;
     }
 
@@ -2130,7 +2360,15 @@ fn try_pyramid(
         bump_to_min_notional: tc.bump_to_min_notional,
     }) {
         Some(v) => v,
-        None => return,
+        None => {
+            if debug_target {
+                eprintln!(
+                    "[cpu-pyr-debug] sym={} ts_ms={} rejected=sizing_none equity={:.12} price={:.12} lev={:.12}",
+                    symbol, ts, equity, snap.close, leverage
+                );
+            }
+            return;
+        }
     };
     let add_margin = add_sizing.add_margin;
     let add_notional = add_sizing.add_notional;
@@ -2147,6 +2385,19 @@ fn try_pyramid(
         allow_zero_margin_headroom: true,
     });
     if !exposure.allowed {
+        if debug_target {
+            eprintln!(
+                "[cpu-pyr-debug] sym={} ts_ms={} rejected=exposure block={:?} total_margin={:.12} add_margin={:.12} equity={:.12} max_margin_pct={:.12} headroom={:.12}",
+                symbol,
+                ts,
+                exposure.blocked_reason,
+                total_margin,
+                add_margin,
+                equity,
+                tc.max_total_margin_pct,
+                exposure.margin_headroom
+            );
+        }
         return;
     }
 
@@ -2174,7 +2425,19 @@ fn try_pyramid(
         .iter()
         .any(|intent| matches!(intent.kind, decision_kernel::OrderIntentKind::Add));
     if !has_add {
+        if debug_target {
+            eprintln!(
+                "[cpu-pyr-debug] sym={} ts_ms={} rejected=no_add_intent add_notional={:.12} add_size={:.12} add_margin={:.12}",
+                symbol, ts, add_notional, add_size, add_margin
+            );
+        }
         return;
+    }
+    if debug_target {
+        eprintln!(
+            "[cpu-pyr-debug] sym={} ts_ms={} accepted add_notional={:.12} add_size={:.12} add_margin={:.12} equity={:.12}",
+            symbol, ts, add_notional, add_size, add_margin, equity
+        );
     }
     let _ = apply_kernel_add_from_plan(
         state,
@@ -2248,12 +2511,13 @@ fn unrealized_pnl_for_positions(
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn last_price_for_symbol(candles: &CandleData, symbol: &str) -> f64 {
-    candles
-        .get(symbol)
-        .and_then(|bars| bars.last())
-        .map(|b| b.c)
-        .unwrap_or(0.0)
+fn last_price_at_or_before(candles: &CandleData, symbol: &str, ts: i64) -> Option<f64> {
+    let bars = candles.get(symbol)?;
+    match bars.binary_search_by_key(&ts, |b| b.t) {
+        Ok(i) => bars.get(i).map(|b| b.c),
+        Err(0) => None,
+        Err(i) => bars.get(i - 1).map(|b| b.c),
+    }
 }
 
 /// Evaluate whether a sub-bar entry candidate should be collected for ranking.
@@ -2427,6 +2691,9 @@ fn execute_sub_bar_entry(state: &mut SimState, input: ExecuteSubBarEntryInput<'_
             size = cfg.trade.min_notional_usd / snap.close;
             margin_used = size * snap.close / leverage;
             notional = size * snap.close;
+            if margin_used > margin_headroom {
+                return false;
+            }
         } else {
             return false;
         }
