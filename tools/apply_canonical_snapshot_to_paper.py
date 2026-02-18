@@ -74,9 +74,31 @@ def _seed_trades_and_positions(
 
     now_iso = _iso_from_ms(exported_at_ms)
 
+    open_rows = conn.execute(
+        """
+        SELECT t.symbol, t.type AS pos_type
+        FROM trades t
+        INNER JOIN (
+            SELECT symbol, MAX(id) AS open_id
+            FROM trades WHERE action = 'OPEN' GROUP BY symbol
+        ) lo ON t.id = lo.open_id
+        LEFT JOIN (
+            SELECT symbol, MAX(id) AS close_id
+            FROM trades WHERE action = 'CLOSE' GROUP BY symbol
+        ) lc ON t.symbol = lc.symbol
+        WHERE lc.close_id IS NULL OR lo.open_id > lc.close_id
+        """
+    ).fetchall()
+    open_symbol_type: dict[str, str] = {}
+    for row in open_rows:
+        symbol = str(row["symbol"] or "").strip().upper()
+        pos_type = str(row["pos_type"] or "").strip().upper()
+        if symbol and pos_type in {"LONG", "SHORT"}:
+            open_symbol_type[symbol] = pos_type
+
     # Keep real history; remove only previous synthetic seed rows.
     conn.execute(
-        "DELETE FROM trades WHERE reason IN ('state_sync_seed', 'state_sync_balance_seed')"
+        "DELETE FROM trades WHERE reason IN ('state_sync_seed', 'state_sync_balance_seed', 'state_sync_seed_close')"
     )
 
     # Ensure latest balance seed exists in trades so PaperTrader loads this balance.
@@ -105,6 +127,7 @@ def _seed_trades_and_positions(
 
     seeded_trades = 0
     seeded_positions = 0
+    seeded_symbols: set[str] = set()
 
     if _table_exists(conn, "position_state"):
         conn.execute("DELETE FROM position_state")
@@ -153,6 +176,7 @@ def _seed_trades_and_positions(
             },
         )
         seeded_trades += 1
+        seeded_symbols.add(symbol)
 
         if _table_exists(conn, "position_state"):
             _insert_projection(
@@ -171,6 +195,33 @@ def _seed_trades_and_positions(
                 },
             )
             seeded_positions += 1
+
+    for symbol, pos_type in sorted(open_symbol_type.items()):
+        if symbol in seeded_symbols:
+            continue
+        _insert_projection(
+            conn,
+            "trades",
+            {
+                "timestamp": now_iso,
+                "symbol": symbol,
+                "action": "CLOSE",
+                "type": pos_type,
+                "price": 0.0,
+                "size": 0.0,
+                "reason": "state_sync_seed_close",
+                "confidence": "medium",
+                "balance": float(balance),
+                "pnl": 0.0,
+                "entry_atr": 0.0,
+                "fee_usd": 0.0,
+                "fee_rate": 0.0,
+                "leverage": 1.0,
+                "margin_used": 0.0,
+                "meta_json": json.dumps({"source": "canonical_snapshot", "seed_close": True}, separators=(",", ":")),
+            },
+        )
+        seeded_trades += 1
 
     return seeded_trades, seeded_positions
 
