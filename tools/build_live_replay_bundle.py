@@ -18,6 +18,11 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+try:
+    from candles_provenance import build_candles_window_provenance
+except ModuleNotFoundError:  # pragma: no cover - module execution path
+    from tools.candles_provenance import build_candles_window_provenance
+
 TRADE_ACTIONS = {"OPEN", "ADD", "REDUCE", "CLOSE", "FUNDING"}
 
 
@@ -168,6 +173,12 @@ def main() -> int:
     )
     baseline_trade_exit_count = sum(1 for row in baseline_trades if row.get("action") in {"CLOSE", "REDUCE"})
     baseline_trade_funding_count = sum(1 for row in baseline_trades if row.get("action") == "FUNDING")
+    candles_provenance = build_candles_window_provenance(
+        candles_db,
+        interval=str(args.interval),
+        from_ts=int(args.from_ts),
+        to_ts=int(args.to_ts),
+    )
 
     with live_trades_path.open("w", encoding="utf-8") as fp:
         for row in baseline_trades:
@@ -266,8 +277,10 @@ def main() -> int:
         "set -euo pipefail\n"
         "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
         "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
+        f"CANDLES_DB=\"${{CANDLES_DB:-{shlex.quote(str(candles_db))}}}\"\n"
         "python \"$REPO_ROOT/tools/assert_replay_bundle_alignment.py\" "
         "--bundle-dir \"$BUNDLE_DIR\" "
+        "--candles-db \"$CANDLES_DB\" "
         f"--live-paper-report \"$BUNDLE_DIR/{live_paper_action_reconcile_path.name}\" "
         "--require-live-paper "
         f"--live-paper-decision-trace-report \"$BUNDLE_DIR/{live_paper_decision_trace_reconcile_path.name}\" "
@@ -332,6 +345,7 @@ def main() -> int:
             "candles_db_sha256": _hash_file(candles_db),
             "funding_db_sha256": _hash_file(funding_db) if funding_db is not None else None,
         },
+        "candles_provenance": candles_provenance,
         "artefacts": {
             "snapshot_file": snapshot_path.name,
             "live_baseline_trades": live_trades_path.name,
