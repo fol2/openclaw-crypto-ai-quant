@@ -362,6 +362,13 @@ def _load_kernel_runtime_module(module_name: str = "bt_runtime") -> object:
         raise
 
 
+def _load_kernel_candle_provider_class():
+    """Lazily import KernelCandleDecisionProvider to avoid heavy import cost."""
+    from strategy.kernel_orchestrator import KernelCandleDecisionProvider
+
+    return KernelCandleDecisionProvider
+
+
 def _normalise_kernel_signal(raw_signal: Any) -> str:
     sig = str(raw_signal or "").strip().upper()
     if sig == "LONG":
@@ -839,6 +846,8 @@ def _build_default_decision_provider(db_path: str | None = None) -> DecisionProv
 
     Accepted values for ``AI_QUANT_KERNEL_DECISION_PROVIDER``:
 
+    * ``candle`` -- Rust kernel via ``KernelCandleDecisionProvider`` fed
+      directly from runtime candle data (no external event file required)
     * ``rust`` / ``kernel_only`` (default) -- Rust kernel via ``bt_runtime``
       with ``AI_QUANT_KERNEL_DECISION_FILE`` as event input
     * ``none`` / ``noop`` -- no-op (explicit non-trading/testing only)
@@ -864,7 +873,24 @@ def _build_default_decision_provider(db_path: str | None = None) -> DecisionProv
         )
         raise SystemExit(1)
 
-    if provider_mode in {"file", "candle"}:
+    if provider_mode == "candle":
+        try:
+            kernel_candle_state_path = str(
+                os.getenv("AI_QUANT_KERNEL_CANDLE_STATE_PATH", "") or ""
+            ).strip() or None
+            provider_cls = _load_kernel_candle_provider_class()
+            return provider_cls(
+                state_path=kernel_candle_state_path,
+                decision_factory=KernelDecision.from_raw,
+            )
+        except Exception as exc:
+            logger.fatal(
+                "FATAL: failed to initialise Rust candle decision provider. Error: %s",
+                exc,
+            )
+            raise SystemExit(1) from exc
+
+    if provider_mode == "file":
         logger.fatal(
             "FATAL: AI_QUANT_KERNEL_DECISION_PROVIDER=%s is disabled for runtime SSOT hardening. "
             "Use 'rust'/'kernel_only' for trading modes.",
@@ -893,7 +919,7 @@ def _build_default_decision_provider(db_path: str | None = None) -> DecisionProv
     # Unrecognised provider mode — hard error.
     logger.fatal(
         "FATAL: Unrecognised AI_QUANT_KERNEL_DECISION_PROVIDER=%r. "
-        "Accepted values: rust, kernel_only, none, noop.",
+        "Accepted values: rust, kernel_only, candle, none, noop.",
         provider_mode,
     )
     raise SystemExit(1)
@@ -951,7 +977,10 @@ class UnifiedEngine:
         self.decision_provider = decision_provider or _build_default_decision_provider()
         if self.mode in {"paper", "live", "dry_live"}:
             provider_name = type(self.decision_provider).__name__
-            rust_ssot_providers = {"KernelDecisionRustBindingProvider"}
+            rust_ssot_providers = {
+                "KernelDecisionRustBindingProvider",
+                "KernelCandleDecisionProvider",
+            }
             if provider_name not in rust_ssot_providers:
                 logger.fatal(
                     "FATAL: mode=%s requires a Rust decision provider for SSOT. "
