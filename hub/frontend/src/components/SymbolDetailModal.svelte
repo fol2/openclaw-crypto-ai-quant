@@ -284,7 +284,7 @@
     journeyLoading = true;
     try {
       const off = reset ? 0 : journeyOffset;
-      const res = await getJourneys(mode, 50, off);
+      const res = await getJourneys(mode, 50, off, symbol);
       const batch = res.journeys || [];
       if (reset) { journeys = batch; journeyOffset = batch.length; }
       else { journeys = [...journeys, ...batch]; journeyOffset += batch.length; }
