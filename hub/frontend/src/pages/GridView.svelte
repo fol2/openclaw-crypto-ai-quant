@@ -733,9 +733,11 @@
     .grid-cell { padding: 10px; }
   }
 
-  @media (max-width: 480px) {
+  @media (max-width: 768px) and (orientation: landscape) {
     .symbol-grid {
-      grid-template-columns: 1fr !important;
+      grid-template-columns: repeat(3, 1fr) !important;
     }
+    .grid-cell { padding: 8px; }
+    .cell-price { font-size: 13px; }
   }
 </style>
