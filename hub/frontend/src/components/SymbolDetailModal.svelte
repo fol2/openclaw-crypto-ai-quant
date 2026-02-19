@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getCandles, getMarks, getCandlesRange, getJourneys, tradeEnabled, getSystemServices } from '../lib/api';
+  import { getCandles, getMarks, getCandlesRange, getJourneys, getTunnel, tradeEnabled, getSystemServices } from '../lib/api';
   import { hubWs } from '../lib/ws';
 
   const INTERVALS = ['1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d'] as const;
@@ -47,6 +47,10 @@
   let journeyFromTs = 0;
   let journeyToTs = 0;
   let journeyExtending = false;
+
+  // Tunnel state (exit bounds visualization)
+  let tunnelPoints: any[] = $state([]);
+  let journeyTunnelPoints: any[] = $state([]);
 
   // Trade panel gating
   let manualTradeEnabled = $state(false);
@@ -253,10 +257,29 @@
       const developingCurrent = keepDeveloping ? snapshotDevelopingCandle(candles, iv) : null;
       candles = mergeOfficialCandlesWithDeveloping(officialRows, developingCurrent ?? developingBeforeFetch, bars);
       setCandlesSeriesContext(sym, iv);
+      void fetchTunnelForLive();
     } catch {} finally {
       _candlesFetchInFlight = false;
       if (_candlesFetchQueued) { _candlesFetchQueued = false; setTimeout(() => { void reconcileCandlesForCurrentView(); }, 0); }
     }
+  }
+
+  // ── Tunnel data fetch (live position) ─────────────────────────────
+  async function fetchTunnelForLive() {
+    if (!position || !symbol) { tunnelPoints = []; return; }
+    try {
+      const res = await getTunnel(symbol, mode);
+      tunnelPoints = Array.isArray(res?.tunnel) ? res.tunnel : [];
+    } catch { tunnelPoints = []; }
+  }
+
+  // ── Tunnel data fetch (journey review) ────────────────────────────
+  async function fetchTunnelForJourney(j: any, fromTs: number, toTs: number) {
+    if (!j) { journeyTunnelPoints = []; return; }
+    try {
+      const res = await getTunnel(j.symbol, mode, fromTs, toTs);
+      journeyTunnelPoints = Array.isArray(res?.tunnel) ? res.tunnel : [];
+    } catch { journeyTunnelPoints = []; }
   }
 
   function scheduleRolloverReconcile() {
@@ -313,6 +336,7 @@
       type: j.type || j.pos_type, size: leg.size, pnl: leg.pnl,
       reason: leg.reason, confidence: leg.confidence,
     }));
+    void fetchTunnelForJourney(j, tr.fromTs, tr.toTs);
   }
 
   async function changeJourneyInterval(newIv: string) {
@@ -596,6 +620,7 @@
           postype={marks?.position?.type ?? ''}
           symbol={symbol}
           interval={selectedInterval}
+          tunnelpoints={JSON.stringify(tunnelPoints)}
           onneed-candles={onMainNeedCandles}
         ></candle-chart>
       </div>
@@ -671,6 +696,7 @@
                   interval={journeyInterval}
                   journeymarks={JSON.stringify(journeyMarks)}
                   journeyoverlay={true}
+                  tunnelpoints={JSON.stringify(journeyTunnelPoints)}
                   onneed-candles={onJourneyNeedCandles}
                 ></candle-chart>
               </div>

@@ -382,6 +382,9 @@ pub struct Diagnostics {
     /// Confidence determination factors: (factor_name, value).
     #[serde(default)]
     pub confidence_factors: Vec<(String, f64)>,
+    /// Exit tunnel boundaries (diagnostic — no effect on decision logic).
+    #[serde(default)]
+    pub exit_bounds: Option<crate::kernel_exits::ExitBounds>,
 }
 
 impl Diagnostics {
@@ -906,6 +909,7 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
             if let Some(eval) = exit_eval {
                 diagnostics.applied_thresholds = eval.threshold_records;
                 diagnostics.exit_context = eval.exit_context;
+                diagnostics.exit_bounds = eval.exit_bounds;
                 let result = eval.result;
                 let fee_model = accounting::FeeModel {
                     maker_fee_bps: params.maker_fee_bps,

@@ -321,7 +321,7 @@ mod tests {
         }"#;
 
         let tmpdir = tempfile::tempdir().expect("tempdir should exist");
-        let path = tmpdir.join("test_init_state_v99.json");
+        let path = tmpdir.path().join("test_init_state_v99.json");
         std::fs::write(&path, json).expect("write should succeed");
 
         let result = load(path.to_str().expect("path should be utf-8"));

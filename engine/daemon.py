@@ -1387,7 +1387,7 @@ def main() -> None:
     except Exception:
         logger.warning("failed to build run fingerprint", exc_info=True)
 
-    decision_provider = _build_default_decision_provider()
+    decision_provider = _build_default_decision_provider(db_path=_db_path())
 
     # Wire kernel provider to OMS for fill reconciliation (AQC-743).
     if hasattr(plugin, "oms") and plugin.oms is not None:

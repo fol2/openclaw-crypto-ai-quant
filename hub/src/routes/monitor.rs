@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::db::pool::open_ro_pool;
-use crate::db::{candles, runtime, trading};
+use crate::db::{candles, runtime, trading, tunnel};
 use crate::error::HubError;
 use crate::state::AppState;
 
@@ -126,6 +126,18 @@ pub struct TrendClosesQuery {
 fn default_trend_interval() -> String { "5m".to_string() }
 fn default_trend_limit() -> u32 { 60 }
 
+#[derive(Debug, Deserialize)]
+pub struct TunnelQuery {
+    #[serde(default = "default_mode")]
+    mode: String,
+    symbol: String,
+    from_ts: Option<i64>,
+    to_ts: Option<i64>,
+    #[serde(default = "default_tunnel_limit")]
+    limit: u32,
+}
+fn default_tunnel_limit() -> u32 { 2000 }
+
 // ── Route definitions ────────────────────────────────────────────────────
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -143,6 +155,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/trend-candles", get(api_trend_candles))
         .route("/api/volumes", get(api_volumes))
         .route("/api/metrics", get(api_metrics))
+        .route("/api/tunnel", get(api_tunnel))
         .route("/metrics", get(api_prometheus))
 }
 
@@ -863,6 +876,22 @@ async fn api_prometheus(
 
 fn prom_line(name: &str, value: f64, mode: &str) -> String {
     format!("{name}{{mode=\"{mode}\"}} {value}\n")
+}
+
+async fn api_tunnel(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<TunnelQuery>,
+) -> Result<Json<Value>, HubError> {
+    let mode = normalize_mode(&q.mode);
+    let pool = match state.db_pool(&mode) {
+        Some(p) => p,
+        None => return Ok(Json(json!({ "tunnel": [] }))),
+    };
+    let conn = pool.get()?;
+    let symbol = q.symbol.trim().to_uppercase();
+    let limit = q.limit.min(10_000);
+    let points = tunnel::fetch_tunnel(&conn, &symbol, q.from_ts, q.to_ts, limit)?;
+    Ok(Json(json!({ "tunnel": points })))
 }
 
 pub fn normalize_mode(mode: &str) -> String {

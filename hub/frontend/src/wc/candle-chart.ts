@@ -31,6 +31,15 @@ export interface JourneyMark {
   confidence?: string;
 }
 
+export interface TunnelPoint {
+  ts_ms: number;
+  upper_full: number;
+  upper_partial?: number | null;
+  lower_full: number;
+  entry_price: number;
+  pos_type: string;     // "LONG" | "SHORT"
+}
+
 // ─── Colour palette ───────────────────────────────────────────────────────────
 const C = {
   bg:         '#0d0d14',
@@ -63,6 +72,12 @@ const C = {
   ttText:     '#e2e8f0',
   ttDim:      'rgba(255,255,255,0.42)',
   noData:     'rgba(255,255,255,0.22)',
+  // Exit tunnel
+  tnlGreen:   'rgba(34,197,94,0.12)',    // profit zone fill
+  tnlRed:     'rgba(239,68,68,0.12)',    // risk zone fill
+  tnlTP:      'rgba(34,197,94,0.40)',    // TP boundary line
+  tnlSL:      'rgba(239,68,68,0.40)',    // SL boundary line
+  tnlPartial: 'rgba(34,197,94,0.25)',    // TP1 partial boundary
 } as const;
 
 // ─── Layout constants (logical px) ────────────────────────────────────────────
@@ -125,6 +140,7 @@ export class CandleChart extends LitElement {
   @property({ type: String }) interval = '';
   @property({ type: Array })  journeyMarks: JourneyMark[] = [];
   @property({ type: Boolean }) journeyOverlay: boolean = false;
+  @property({ type: Array })  tunnelPoints: TunnelPoint[] = [];
 
   private _ro?: ResizeObserver;
   private _hoverIdx: number | null = null;
@@ -215,6 +231,9 @@ export class CandleChart extends LitElement {
       }
       this._pinnedMark = null;
       this._hoverMark = null;
+    }
+    if (changed.has('tunnelPoints') && typeof this.tunnelPoints === 'string') {
+      try { this.tunnelPoints = JSON.parse(this.tunnelPoints as any); } catch { this.tunnelPoints = []; }
     }
   }
 
@@ -645,6 +664,14 @@ export class CandleChart extends LitElement {
         if (jm.price > maxP) maxP = jm.price;
       }
     }
+    for (const tp of this.tunnelPoints) {
+      if (tp.upper_full > 0) {
+        if (tp.upper_full > maxP) maxP = tp.upper_full;
+      }
+      if (tp.lower_full > 0) {
+        if (tp.lower_full < minP) minP = tp.lower_full;
+      }
+    }
     const pad    = (maxP - minP) * 0.06 || maxP * 0.01 || 1;
     minP -= pad; maxP += pad;
     const pRange = maxP - minP;
@@ -701,6 +728,100 @@ export class CandleChart extends LitElement {
       ctx.textAlign    = 'left';
       ctx.textBaseline = 'top';
       ctx.fillText(fmtVol(volMax), 4, volY0 + 2);
+    }
+
+    // ── Exit tunnel overlay (background bands) ────────────────────────────────
+    if (this.tunnelPoints.length > 0) {
+      // Map tunnel points to candle indices by matching ts_ms to nearest candle
+      const tnl = this.tunnelPoints;
+      // Build a lookup: for each tunnel point, find matching candle index
+      type TnlMapped = { i: number; tp: TunnelPoint };
+      const mapped: TnlMapped[] = [];
+      for (const tp of tnl) {
+        let bestIdx = -1;
+        for (let i = 0; i < n; i++) {
+          if (data[i].t <= tp.ts_ms) bestIdx = i;
+          else break;
+        }
+        if (bestIdx >= 0) mapped.push({ i: bestIdx, tp });
+      }
+
+      if (mapped.length > 0) {
+        const isLong = /long/i.test(mapped[0].tp.pos_type);
+
+        // Draw filled bands between consecutive tunnel points
+        for (let k = 0; k < mapped.length - 1; k++) {
+          const cur = mapped[k];
+          const nxt = mapped[k + 1];
+          const x0 = xOf(cur.i);
+          const x1 = xOf(nxt.i);
+          if (x1 <= x0) continue;
+
+          const entry = cur.tp.entry_price;
+          const upper = cur.tp.upper_full;  // TP price (above entry for LONG, below for SHORT)
+          const lower = cur.tp.lower_full;  // SL price (below entry for LONG, above for SHORT)
+
+          // Profit zone: between entry and TP (upper_full)
+          // Uses Math.max/min so it works for both LONG and SHORT
+          const pHigh = Math.max(entry, upper);
+          const pLow  = Math.min(entry, upper);
+          ctx.fillStyle = C.tnlGreen;
+          ctx.fillRect(x0, pToY(pHigh), x1 - x0, pToY(pLow) - pToY(pHigh));
+
+          // Risk zone: between entry and SL (lower_full)
+          // Skip if locked profit (SL crossed past entry due to trailing)
+          const hasRisk = isLong ? lower < entry : lower > entry;
+          if (hasRisk) {
+            const rHigh = Math.max(entry, lower);
+            const rLow  = Math.min(entry, lower);
+            ctx.fillStyle = C.tnlRed;
+            ctx.fillRect(x0, pToY(rHigh), x1 - x0, pToY(rLow) - pToY(rHigh));
+          }
+        }
+
+        // Draw dashed boundary lines for TP and SL
+        ctx.lineWidth = 1;
+        // TP line (upper_full)
+        ctx.strokeStyle = C.tnlTP;
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        for (let k = 0; k < mapped.length; k++) {
+          const x = xOf(mapped[k].i);
+          const y = pToY(mapped[k].tp.upper_full);
+          if (k === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+
+        // SL line (lower_full)
+        ctx.strokeStyle = C.tnlSL;
+        ctx.beginPath();
+        for (let k = 0; k < mapped.length; k++) {
+          const x = xOf(mapped[k].i);
+          const y = pToY(mapped[k].tp.lower_full);
+          if (k === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+
+        // Optional: TP1 partial line
+        const hasPartial = mapped.some(m => m.tp.upper_partial != null);
+        if (hasPartial) {
+          ctx.strokeStyle = C.tnlPartial;
+          ctx.setLineDash([2, 4]);
+          ctx.beginPath();
+          let started = false;
+          for (let k = 0; k < mapped.length; k++) {
+            const pp = mapped[k].tp.upper_partial;
+            if (pp == null) continue;
+            const x = xOf(mapped[k].i);
+            const y = pToY(pp);
+            if (!started) { ctx.moveTo(x, y); started = true; }
+            else ctx.lineTo(x, y);
+          }
+          ctx.stroke();
+        }
+
+        ctx.setLineDash([]);
+      }
     }
 
     // ── Wicks ─────────────────────────────────────────────────────────────────

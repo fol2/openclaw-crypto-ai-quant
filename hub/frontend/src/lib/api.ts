@@ -105,6 +105,15 @@ export async function getDecisions(mode = 'paper', params: Record<string, string
   return apiFetch(`/api/v2/decisions?${qs}`);
 }
 
+// ── Tunnel API ──────────────────────────────────────────
+
+export async function getTunnel(symbol: string, mode = 'paper', fromTs?: number, toTs?: number, limit = 2000) {
+  const params = new URLSearchParams({ symbol, mode, limit: String(limit) });
+  if (fromTs != null) params.set('from_ts', String(fromTs));
+  if (toTs != null) params.set('to_ts', String(toTs));
+  return apiFetch(`/api/tunnel?${params}`);
+}
+
 // ── Config API ──────────────────────────────────────────────────────
 
 export async function getConfig(file = 'main') {
