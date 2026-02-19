@@ -5186,28 +5186,35 @@ class PaperTrader:
         # Python entry-gate decision filters (confidence/PESC/SSF/REEF).
         python_entry_gates_enabled = False
 
-        # action kwarg: "OPEN", "CLOSE", "ADD" — match LiveTrader dispatch semantics.
-        if action is not None:
-            action_upper = str(action).upper()
-            if action_upper == "CLOSE":
-                if symbol in self.positions:
-                    self.close_position(symbol, price, timestamp, reason=reason or "Action CLOSE")
-                return
-            if action_upper == "ADD":
-                if symbol in self.positions:
-                    self.add_to_position(symbol, price, timestamp, confidence, atr=atr, indicators=indicators)
-                return
-            if action_upper == "REDUCE":
-                if symbol in self.positions:
-                    pos = self.positions[symbol]
-                    reduce_sz = float(target_size) if target_size is not None else float(pos.get("size", 0))
-                    self.reduce_position(
-                        symbol, reduce_sz, price, timestamp, reason=reason or "Action REDUCE", confidence=confidence
-                    )
-                return
-            if action_upper == "OPEN":
-                if symbol in self.positions:
-                    return  # already open — skip (match LiveTrader)
+        action_upper = str(action or "").strip().upper()
+        if action_upper not in {"OPEN", "ADD", "CLOSE", "REDUCE"}:
+            logger.debug(
+                "execute_trade: skip legacy signal-only path for %s (action=%r)",
+                symbol,
+                action,
+            )
+            return
+
+        # action kwarg: "OPEN", "CLOSE", "ADD", "REDUCE" — Rust-kernel SSOT dispatch.
+        if action_upper == "CLOSE":
+            if symbol in self.positions:
+                self.close_position(symbol, price, timestamp, reason=reason or "Action CLOSE")
+            return
+        if action_upper == "ADD":
+            if symbol in self.positions:
+                self.add_to_position(symbol, price, timestamp, confidence, atr=atr, indicators=indicators)
+            return
+        if action_upper == "REDUCE":
+            if symbol in self.positions:
+                pos = self.positions[symbol]
+                reduce_sz = float(target_size) if target_size is not None else float(pos.get("size", 0))
+                self.reduce_position(
+                    symbol, reduce_sz, price, timestamp, reason=reason or "Action REDUCE", confidence=confidence
+                )
+            return
+        if action_upper == "OPEN":
+            if symbol in self.positions:
+                return  # already open — skip (match LiveTrader)
 
         # Normalise indicators: pandas Series → dict (avoids truth-value crash)
         if indicators is not None and not isinstance(indicators, dict):
@@ -5247,68 +5254,9 @@ class PaperTrader:
             conn.commit()
             conn.close()
 
-        pos = self.positions.get(symbol)
-        if pos:
-            is_flip = (pos["type"] == "LONG" and signal == "SELL") or (pos["type"] == "SHORT" and signal == "BUY")
-
-            if is_flip:
-                # AQC-804: capture entry info before close deletes the position.
-                _flip_open_trade_id = pos.get("open_trade_id")
-                _flip_open_timestamp = pos.get("open_timestamp")
-                audit = None
-                if indicators is not None:
-                    try:
-                        audit = indicators.get("audit")
-                    except Exception:
-                        audit = None
-                _flip_reason = f"Signal Flip ({confidence})" + (
-                    " [REVERSED]" if (indicators or {}).get("_reversed_entry") is True else ""
-                )
-                self.close_position(
-                    symbol,
-                    price,
-                    timestamp,
-                    reason=_flip_reason,
-                    meta={
-                        "audit": audit if isinstance(audit, dict) else None,
-                        "exit": {"kind": "SIGNAL_FLIP", "confidence": str(confidence or "")},
-                    },
-                )
-                # AQC-804: exit decision + lineage for signal flip
-                try:
-                    _flip_close_tid = getattr(self, "_last_close_trade_id", None)
-                    _flip_exit_did = create_decision_event(
-                        symbol=symbol,
-                        event_type="exit_check",
-                        status="executed",
-                        phase="execution",
-                        triggered_by="signal_flip",
-                        action_taken="close",
-                        trade_id=_flip_close_tid,
-                        context={
-                            "exit_reason": _flip_reason,
-                            "exit_price": float(price),
-                            "entry_trade_id": _flip_open_trade_id,
-                        },
-                    )
-                    if _flip_open_trade_id is not None and _flip_close_tid is not None:
-                        complete_lineage(
-                            entry_trade_id=int(_flip_open_trade_id),
-                            exit_decision_id=_flip_exit_did,
-                            exit_trade_id=int(_flip_close_tid),
-                            exit_reason=_flip_reason,
-                            duration_ms=_compute_duration_ms(_flip_open_timestamp),
-                        )
-                except Exception as _dle:
-                    logger.debug("AQC-804: signal-flip exit lineage failed: %s", _dle)
-            else:
-                # Same-direction signal: optionally pyramid (scale in) rather than opening another position.
-                is_same_dir = (pos["type"] == "LONG" and signal == "BUY") or (
-                    pos["type"] == "SHORT" and signal == "SELL"
-                )
-                if is_same_dir:
-                    self.add_to_position(symbol, price, timestamp, confidence, atr=atr, indicators=indicators)
-                    return
+        # OPEN path is kernel-action driven; do not run legacy signal flip/add logic.
+        if symbol in self.positions:
+            return
 
         if signal == "NEUTRAL":
             return

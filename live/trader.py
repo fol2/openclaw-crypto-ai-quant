@@ -2081,85 +2081,63 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         )
 
         act = str(action or "").strip().upper()
-        if act in {"OPEN", "ADD", "CLOSE", "REDUCE"}:
-            if act == "OPEN":
-                if sym in (self.positions or {}):
-                    # OPEN action only maps to new-entry flow when no position exists.
-                    return
-            elif act == "ADD":
-                return self.add_to_position(
-                    sym,
-                    price,
-                    timestamp,
-                    confidence,
-                    atr=atr,
-                    indicators=indicators,
-                    target_size=target_size,
-                    reason=reason,
-                )
-            elif act == "CLOSE":
-                return self.close_position(
-                    sym,
-                    price,
-                    timestamp,
-                    reason=str(reason or "Kernel CLOSE"),
-                )
-            elif act == "REDUCE":
-                if sym not in (self.positions or {}):
-                    return
-                if target_size is not None:
-                    try:
-                        reduce_size = float(target_size)
-                    except Exception:
-                        reduce_size = None
-                else:
+        if act not in {"OPEN", "ADD", "CLOSE", "REDUCE"}:
+            logger.debug(
+                "execute_trade: skip legacy signal-only path for %s (action=%r)",
+                sym,
+                action,
+            )
+            return
+
+        if act == "OPEN":
+            if sym in (self.positions or {}):
+                # OPEN action only maps to new-entry flow when no position exists.
+                return
+        elif act == "ADD":
+            return self.add_to_position(
+                sym,
+                price,
+                timestamp,
+                confidence,
+                atr=atr,
+                indicators=indicators,
+                target_size=target_size,
+                reason=reason,
+            )
+        elif act == "CLOSE":
+            return self.close_position(
+                sym,
+                price,
+                timestamp,
+                reason=str(reason or "Kernel CLOSE"),
+            )
+        elif act == "REDUCE":
+            if sym not in (self.positions or {}):
+                return
+            if target_size is not None:
+                try:
+                    reduce_size = float(target_size)
+                except Exception:
                     reduce_size = None
-                if reduce_size is None:
-                    try:
-                        reduce_size = float((self.positions or {}).get(sym, {}).get("size") or 0.0)
-                    except Exception:
-                        reduce_size = 0.0
-                return self.reduce_position(
-                    sym,
-                    reduce_size,
-                    price,
-                    timestamp,
-                    reason=str(reason or "Kernel REDUCE"),
-                    confidence=confidence,
-                )
-
-        pos = (self.positions or {}).get(sym)
-        if pos:
-            is_flip = (pos.get("type") == "LONG" and signal == "SELL") or (
-                pos.get("type") == "SHORT" and signal == "BUY"
+            else:
+                reduce_size = None
+            if reduce_size is None:
+                try:
+                    reduce_size = float((self.positions or {}).get(sym, {}).get("size") or 0.0)
+                except Exception:
+                    reduce_size = 0.0
+            return self.reduce_position(
+                sym,
+                reduce_size,
+                price,
+                timestamp,
+                reason=str(reason or "Kernel REDUCE"),
+                confidence=confidence,
             )
-            if is_flip:
-                self.close_position(
-                    sym,
-                    price,
-                    timestamp,
-                    reason=f"Signal Flip ({confidence})"
-                    + (
-                        " [REVERSED]"
-                        if (indicators if indicators is not None else {}).get("_reversed_entry") is True
-                        else ""
-                    ),
-                    meta={
-                        "audit": audit if isinstance(audit, dict) else None,
-                        "breadth_pct": float((indicators if indicators is not None else {}).get("_market_breadth_pct"))
-                        if (indicators if indicators is not None else {}).get("_market_breadth_pct") is not None
-                        else None,
-                        "exit": {"kind": "SIGNAL_FLIP", "confidence": str(confidence or "")},
-                    },
-                )
-                return
 
-            is_same_dir = (pos.get("type") == "LONG" and signal == "BUY") or (
-                pos.get("type") == "SHORT" and signal == "SELL"
-            )
-            if is_same_dir:
-                self.add_to_position(sym, price, timestamp, confidence, atr=atr, indicators=indicators)
-                return
+        # OPEN path is kernel-action driven; do not run legacy signal flip/add logic.
+        if sym in (self.positions or {}):
+            return
 
         if signal == "NEUTRAL":
             return
