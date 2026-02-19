@@ -1660,7 +1660,11 @@ extern "C" __global__ void sweep_engine_kernel(
                             }
                         }
 
-                        double current_atr = (double)snap.atr;
+                        double current_atr = apply_atr_floor(
+                            (double)snap.atr,
+                            (double)snap.close,
+                            (double)cfg.min_atr_pct
+                        );
                         if (!(current_atr > 0.0)) {
                             current_atr = (pos_after_exit.entry_atr > 0.0f)
                                 ? (double)pos_after_exit.entry_atr

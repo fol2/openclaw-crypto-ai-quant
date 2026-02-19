@@ -947,7 +947,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
                         }
                     }
 
-                    var current_atr = snap.atr;
+                    var current_atr = apply_atr_floor(snap.atr, snap.close, cfg.min_atr_pct);
                     if !(current_atr > 0.0) {
                         current_atr = select(pos.entry_price * 0.005, pos.entry_atr, pos.entry_atr > 0.0);
                     }
