@@ -1,6 +1,6 @@
 <script lang="ts">
   import { appState } from '../lib/stores.svelte';
-  import { getSnapshot, getCandles, getMarks, postFlashDebug, tradeEnabled, getSystemServices, getJourneys, getCandlesRange } from '../lib/api';
+  import { getSnapshot, getCandles, getMarks, postFlashDebug, tradeEnabled, getSystemServices, getJourneys, getCandlesRange, getVolumes } from '../lib/api';
   import { hubWs } from '../lib/ws';
   import { CANDIDATE_FAMILY_ORDER, getModeLabel, LIVE_MODE } from '../lib/mode-labels';
 
@@ -19,6 +19,7 @@
   type ModeRuntimeState = 'on' | 'off' | 'error' | 'unknown';
 
   let snap: any = $state(null);
+  let volumes: Record<string, number> = $state({});
   let focusSym = $state('');
   let candles: any[] = $state([]);
   let marks: any = $state(null);
@@ -473,8 +474,12 @@
   async function refresh() {
     try {
       appState.loading = true;
-      const data = await getSnapshot(appState.mode);
+      const [data, vol] = await Promise.all([
+        getSnapshot(appState.mode),
+        getVolumes().catch(() => ({ volumes: {} })),
+      ]);
       updateServerClockOffset(data?.now_ts_ms);
+      volumes = vol.volumes || {};
       // Preserve live WS mid prices — don't let stale REST prices overwrite them.
       // WS owns price; REST owns everything else (positions, signals, heartbeat, balances).
       if (snap?.symbols && data?.symbols) {
@@ -1013,8 +1018,9 @@
   let symbols = $derived(snap?.symbols || []);
   let filteredSymbols = $derived.by(() => {
     const q = appState.search.trim().toUpperCase();
-    if (!q) return symbols;
-    return symbols.filter((s: any) => String(s.symbol).includes(q));
+    let syms = symbols;
+    if (q) syms = syms.filter((s: any) => String(s.symbol).includes(q));
+    return [...syms].sort((a: any, b: any) => (volumes[b.symbol] || 0) - (volumes[a.symbol] || 0));
   });
   let health = $derived(snap?.health || {});
   let balances = $derived(snap?.balances || {});
