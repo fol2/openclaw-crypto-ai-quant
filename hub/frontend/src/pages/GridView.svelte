@@ -596,7 +596,7 @@
     font-size: 18px;
     font-weight: 600;
     font-family: 'IBM Plex Mono', monospace;
-    margin-bottom: 4px;
+    margin-bottom: 1px;
     letter-spacing: -0.01em;
   }
 
@@ -607,9 +607,10 @@
     gap: 5px;
   }
   .lev-box {
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 700;
-    padding: 2px 6px;
+    padding: 0 4px;
+    line-height: 1.4;
     background: var(--text-muted);
     border-radius: var(--radius-sm);
     color: var(--bg);
@@ -635,17 +636,20 @@
   /* ── Candle area + position overlay ───────────────── */
   .cell-candle-area {
     position: relative;
-    margin-top: 6px;
+    margin-top: 2px;
   }
   .cell-candles { }
   .pos-overlay {
-    position: relative;
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
     z-index: 1;
     display: flex;
     align-items: baseline;
     gap: 6px;
-    margin-bottom: -4px;
     font-family: 'IBM Plex Mono', monospace;
+    pointer-events: none;
   }
   .entry-at {
     font-size: 12px;
