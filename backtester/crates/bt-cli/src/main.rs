@@ -1359,7 +1359,14 @@ fn check_gpu_sweep_guardrails(
 
 fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
     let symbol_norm = args.symbol.as_ref().map(|s| s.trim().to_uppercase());
-    let mut cfg = bt_core::config::load_config(&args.config, symbol_norm.as_deref(), args.live);
+    let mut cfg = bt_core::config::load_config_checked(
+        &args.config,
+        symbol_norm.as_deref(),
+        args.live,
+    )
+    .map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, format!("[replay] {e}"))
+    })?;
 
     if let Some(bps) = args.slippage_bps {
         cfg.trade.slippage_bps = bps.max(0.0);
@@ -1750,7 +1757,9 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
 
 fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
     // Load base config
-    let base_cfg = bt_core::config::load_config(&args.config, None, args.live);
+    let base_cfg = bt_core::config::load_config_checked(&args.config, None, args.live).map_err(
+        |e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("[sweep] {e}")),
+    )?;
 
     // Resolve intervals: CLI arg > YAML engine section > default "1h"
     let interval = args.interval.unwrap_or_else(|| {
@@ -2419,7 +2428,13 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_dump_indicators(args: DumpArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let cfg = bt_core::config::load_config(&args.config, Some(&args.symbol), false);
+    let cfg = bt_core::config::load_config_checked(&args.config, Some(&args.symbol), false)
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("[dump-indicators] {e}"),
+            )
+        })?;
 
     // Resolve interval: CLI arg > YAML engine section > default "1h"
     let interval = args.interval.unwrap_or_else(|| {

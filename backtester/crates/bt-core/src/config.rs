@@ -897,12 +897,19 @@ fn engine_to_json(e: &EngineConfig) -> serde_json::Value {
 // Public loader
 // ---------------------------------------------------------------------------
 
-/// Load strategy config from YAML with merge hierarchy:
+/// Strict config loader.
+///
+/// Merge hierarchy:
 ///
 ///   defaults <- global <- symbols.<symbol> <- live (if `is_live`)
 ///
-/// If `yaml_path` does not exist, prints a warning to stderr and returns `StrategyConfig::default()`.
-pub fn load_config(yaml_path: &str, symbol: Option<&str>, is_live: bool) -> StrategyConfig {
+/// Returns a descriptive error when the file is missing, unreadable, invalid YAML,
+/// or fails typed deserialization after merge.
+pub fn load_config_checked(
+    yaml_path: &str,
+    symbol: Option<&str>,
+    is_live: bool,
+) -> Result<StrategyConfig, String> {
     let path = Path::new(yaml_path);
     match std::fs::metadata(path) {
         Ok(_) => {}
@@ -910,30 +917,26 @@ pub fn load_config(yaml_path: &str, symbol: Option<&str>, is_live: bool) -> Stra
             let cwd = std::env::current_dir()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| "<unknown>".to_string());
-            eprintln!(
-                "[config] Warning: YAML config file does not exist: {yaml_path} (cwd: {cwd}). Using defaults."
-            );
-            return StrategyConfig::default();
+            return Err(format!(
+                "YAML config file does not exist: {yaml_path} (cwd: {cwd})"
+            ));
         }
-        Err(_) => {
-            // Preserve the previous behaviour: treat other metadata errors as "missing" and fall back silently.
-            return StrategyConfig::default();
+        Err(e) => {
+            return Err(format!("failed to stat config path {yaml_path}: {e}"));
         }
     }
 
     let raw = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[config] Failed to read {yaml_path}: {e}");
-            return StrategyConfig::default();
+            return Err(format!("failed to read {yaml_path}: {e}"));
         }
     };
 
     let root: YamlRoot = match serde_yaml::from_str(&raw) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[config] Failed to parse YAML {yaml_path}: {e}");
-            return StrategyConfig::default();
+            return Err(format!("failed to parse YAML {yaml_path}: {e}"));
         }
     };
 
@@ -969,10 +972,21 @@ pub fn load_config(yaml_path: &str, symbol: Option<&str>, is_live: bool) -> Stra
     match serde_yaml::from_value(merged) {
         Ok(mut cfg) => {
             validate_loaded_config(&mut cfg);
-            cfg
+            Ok(cfg)
         }
-        Err(e) => {
-            eprintln!("[config] Failed to deserialize merged config: {e}");
+        Err(e) => Err(format!("failed to deserialize merged config: {e}")),
+    }
+}
+
+/// Backwards-compatible permissive loader.
+///
+/// This keeps historical behaviour for callers that expect fallback defaults.
+/// New parity-critical paths should prefer `load_config_checked`.
+pub fn load_config(yaml_path: &str, symbol: Option<&str>, is_live: bool) -> StrategyConfig {
+    match load_config_checked(yaml_path, symbol, is_live) {
+        Ok(cfg) => cfg,
+        Err(msg) => {
+            eprintln!("[config] {msg}. Using defaults.");
             StrategyConfig::default()
         }
     }
