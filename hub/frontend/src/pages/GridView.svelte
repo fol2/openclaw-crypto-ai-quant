@@ -605,11 +605,11 @@
     letter-spacing: -0.01em;
   }
   .entry-at {
-    font-size: 18px;
-    font-weight: 600;
+    font-size: 12px;
+    font-weight: 500;
     font-family: 'IBM Plex Mono', monospace;
     letter-spacing: -0.01em;
-    color: var(--text);
+    color: var(--text-muted);
   }
   .pnl-badge {
     font-size: 10px;
