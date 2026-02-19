@@ -58,6 +58,10 @@ export async function getTrendCandles(interval = '30m', limit = 30): Promise<{ c
   return apiFetch(`/api/trend-candles?interval=${interval}&limit=${limit}`);
 }
 
+export async function getVolumes(): Promise<{ volumes: Record<string, number> }> {
+  return apiFetch('/api/volumes');
+}
+
 export async function postFlashDebug(events: Array<Record<string, any>>) {
   return apiFetch('/api/flash-debug', {
     method: 'POST',
