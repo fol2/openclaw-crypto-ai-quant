@@ -266,6 +266,10 @@ export class CandleChart extends LitElement {
         prepended++;
       }
       this._vStart += prepended;
+      // Keep active pan/pinch gesture anchors in sync so ongoing touch/drag
+      // doesn't overwrite the shifted viewport on the next move frame.
+      this._dragStartVStart += prepended;
+      this._touchStartVStart += prepended;
     } else if (firstTs === this._prevFirstTs && total > this._prevDataLen) {
       // Append detected — keep viewport as-is (no jump)
     } else if (Math.abs(total - this._prevDataLen) > Math.max(2, this._prevDataLen * 0.1)) {
