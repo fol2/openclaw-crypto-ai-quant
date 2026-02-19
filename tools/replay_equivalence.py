@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 DecisionTrace = list[dict[str, Any]]
+OPTIONAL_TRACE_FIELDS = frozenset({"config_fingerprint"})
 
 
 def _load_json(path: Path) -> Any:
@@ -67,6 +68,8 @@ def _compare_payload(
         for key in sorted(left_keys | right_keys):
             if len(diffs) >= max_diffs:
                 return
+            if key in OPTIONAL_TRACE_FIELDS and (key not in left or key not in right):
+                continue
             if key not in left:
                 _record(diffs, path + [str(key)], None, right[key], max_diffs=max_diffs)
                 continue
