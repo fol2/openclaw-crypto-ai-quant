@@ -68,6 +68,7 @@ const RIGHT   = 68;  // right margin: price-axis labels
 const TOP     = 6;   // top padding
 const XAXIS_H = 20;  // x-axis row
 const SEP_H   = 1;   // separator bar height
+const MIN_BARS = 10;
 
 const FONT    = '10px "SF Mono","Fira Code",Consolas,monospace';
 const FONT_XS = '9px "SF Mono","Fira Code",Consolas,monospace';
@@ -129,6 +130,25 @@ export class CandleChart extends LitElement {
   private _listening = false;
   private _rafId: number | null = null;
 
+  // ── Viewport state ──────────────────────────────────────────────────────────
+  // _vStart = first visible index in sorted data, _vCount = number of visible bars
+  private _vStart = 0;
+  private _vCount = 0;
+  private _prevDataLen = 0;  // detect data changes to auto-reset viewport
+
+  // ── Pan state (desktop mouse drag) ──────────────────────────────────────────
+  private _dragging = false;
+  private _dragStartX = 0;
+  private _dragStartVStart = 0;
+
+  // ── Touch state ─────────────────────────────────────────────────────────────
+  private _touchPanId: number | null = null;
+  private _touchStartX = 0;
+  private _touchStartVStart = 0;
+  private _pinchDist0 = 0;
+  private _pinchCount0 = 0;
+  private _pinchMidX = 0;
+
   static styles = css`
     :host {
       display: block;
@@ -141,6 +161,7 @@ export class CandleChart extends LitElement {
       width: 100%;
       height: 100%;
       cursor: crosshair;
+      touch-action: none;
     }
   `;
 
@@ -173,28 +194,65 @@ export class CandleChart extends LitElement {
     this._draw();
   }
 
+  // ── Viewport helpers ────────────────────────────────────────────────────────
+
+  /** Get sorted candle data (oldest → newest). */
+  private _sortedData(): CandleData[] {
+    return [...this.candles].sort((a, b) => a.t - b.t);
+  }
+
+  /** Ensure viewport is within bounds for the given data length. */
+  private _clampViewport(total: number) {
+    if (this._vCount < MIN_BARS) this._vCount = MIN_BARS;
+    if (this._vCount > total)    this._vCount = total;
+    if (this._vStart < 0)        this._vStart = 0;
+    if (this._vStart + this._vCount > total) this._vStart = total - this._vCount;
+    if (this._vStart < 0)        this._vStart = 0;
+  }
+
+  /** Reset viewport to show all data when data changes. */
+  private _autoResetViewport(total: number) {
+    if (total !== this._prevDataLen) {
+      this._vStart = 0;
+      this._vCount = total;
+      this._prevDataLen = total;
+    }
+  }
+
+  // ── Event listeners ─────────────────────────────────────────────────────────
+
   private _ensureListeners() {
     if (this._listening) return;
     const cv = this.shadowRoot?.querySelector('canvas');
     if (!cv) return;
     cv.addEventListener('mousemove', this._onMove);
     cv.addEventListener('mouseleave', this._onLeave);
+    cv.addEventListener('mousedown', this._onMouseDown);
+    cv.addEventListener('wheel', this._onWheel, { passive: false });
+    cv.addEventListener('touchstart', this._onTouchStart, { passive: false });
+    cv.addEventListener('touchmove', this._onTouchMove, { passive: false });
+    cv.addEventListener('touchend', this._onTouchEnd);
+    cv.addEventListener('touchcancel', this._onTouchEnd);
     this._listening = true;
   }
 
+  // ── Mouse: crosshair ───────────────────────────────────────────────────────
+
   private _onMove = (e: MouseEvent) => {
+    if (this._dragging) {
+      this._onDragMove(e);
+      return;
+    }
     const cv   = e.target as HTMLCanvasElement;
     const rect = cv.getBoundingClientRect();
-    const n    = this.candles.length;
-    if (n === 0) return;
     const W    = this.offsetWidth || 400;
-    const slot = (W - RIGHT) / n;
-    const idx  = Math.max(0, Math.min(n - 1, Math.floor((e.clientX - rect.left) / slot)));
+    const vn   = this._vCount || this.candles.length;
+    if (vn === 0) return;
+    const slot = (W - RIGHT) / vn;
+    const idx  = Math.max(0, Math.min(vn - 1, Math.floor((e.clientX - rect.left) / slot)));
     this._hoverIdx = idx;
     this._hoverY   = e.clientY - rect.top;
-    // RAF throttle: skip if a draw is already scheduled
-    if (this._rafId !== null) return;
-    this._rafId = requestAnimationFrame(() => { this._rafId = null; this._draw(); });
+    this._scheduleRedraw();
   };
 
   private _onLeave = () => {
@@ -203,6 +261,145 @@ export class CandleChart extends LitElement {
     if (this._rafId !== null) { cancelAnimationFrame(this._rafId); this._rafId = null; }
     this._draw();
   };
+
+  // ── Mouse: drag to pan ─────────────────────────────────────────────────────
+
+  private _onMouseDown = (e: MouseEvent) => {
+    if (e.button !== 0) return;
+    this._dragging = true;
+    this._dragStartX = e.clientX;
+    this._dragStartVStart = this._vStart;
+    this._hoverIdx = null;
+    const cv = e.target as HTMLCanvasElement;
+    cv.style.cursor = 'grabbing';
+    window.addEventListener('mousemove', this._onDragMove);
+    window.addEventListener('mouseup', this._onMouseUp);
+  };
+
+  private _onDragMove = (e: MouseEvent) => {
+    if (!this._dragging) return;
+    const W    = this.offsetWidth || 400;
+    const vn   = this._vCount || this.candles.length;
+    if (vn === 0) return;
+    const slot = (W - RIGHT) / vn;
+    const dx   = e.clientX - this._dragStartX;
+    const shift = Math.round(-dx / slot);
+    const sorted = this._sortedData();
+    this._vStart = this._dragStartVStart + shift;
+    this._clampViewport(sorted.length);
+    this._scheduleRedraw();
+  };
+
+  private _onMouseUp = () => {
+    this._dragging = false;
+    const cv = this.shadowRoot?.querySelector('canvas');
+    if (cv) cv.style.cursor = 'crosshair';
+    window.removeEventListener('mousemove', this._onDragMove);
+    window.removeEventListener('mouseup', this._onMouseUp);
+    this._scheduleRedraw();
+  };
+
+  // ── Mouse: wheel to zoom ───────────────────────────────────────────────────
+
+  private _onWheel = (e: WheelEvent) => {
+    e.preventDefault();
+    const sorted = this._sortedData();
+    const total  = sorted.length;
+    if (total < 2) return;
+
+    const rect = (e.target as HTMLCanvasElement).getBoundingClientRect();
+    const W    = this.offsetWidth || 400;
+    const chartW = W - RIGHT;
+    const mouseX = e.clientX - rect.left;
+    // Fraction of viewport where the mouse is (0=left, 1=right)
+    const frac = Math.max(0, Math.min(1, mouseX / chartW));
+
+    const delta = Math.sign(e.deltaY);
+    const step  = Math.max(1, Math.round(this._vCount * 0.15));
+    const newCount = this._vCount + delta * step;
+
+    if (newCount < MIN_BARS || newCount > total) return;
+
+    // Adjust vStart so the candle under the cursor stays in place
+    const removed = newCount - this._vCount;
+    this._vStart = Math.round(this._vStart - removed * frac);
+    this._vCount = newCount;
+    this._clampViewport(total);
+    this._scheduleRedraw();
+  };
+
+  // ── Touch: single-finger pan, two-finger pinch zoom ────────────────────────
+
+  private _onTouchStart = (e: TouchEvent) => {
+    if (e.touches.length === 1) {
+      e.preventDefault();
+      const t = e.touches[0];
+      this._touchPanId = t.identifier;
+      this._touchStartX = t.clientX;
+      this._touchStartVStart = this._vStart;
+      this._hoverIdx = null;
+    } else if (e.touches.length === 2) {
+      e.preventDefault();
+      this._touchPanId = null;
+      const [a, b] = [e.touches[0], e.touches[1]];
+      this._pinchDist0 = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+      this._pinchCount0 = this._vCount;
+      this._pinchMidX = (a.clientX + b.clientX) / 2;
+    }
+  };
+
+  private _onTouchMove = (e: TouchEvent) => {
+    if (e.touches.length === 1 && this._touchPanId !== null) {
+      e.preventDefault();
+      const t = e.touches[0];
+      if (t.identifier !== this._touchPanId) return;
+      const W    = this.offsetWidth || 400;
+      const vn   = this._vCount || this.candles.length;
+      if (vn === 0) return;
+      const slot = (W - RIGHT) / vn;
+      const dx   = t.clientX - this._touchStartX;
+      const shift = Math.round(-dx / slot);
+      const sorted = this._sortedData();
+      this._vStart = this._touchStartVStart + shift;
+      this._clampViewport(sorted.length);
+      this._scheduleRedraw();
+    } else if (e.touches.length === 2 && this._pinchDist0 > 0) {
+      e.preventDefault();
+      const [a, b] = [e.touches[0], e.touches[1]];
+      const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+      if (dist < 1) return;
+      // pinch out = zoom in = fewer bars; pinch in = zoom out = more bars
+      const ratio = this._pinchDist0 / dist;
+      const newCount = Math.round(this._pinchCount0 * ratio);
+      const sorted = this._sortedData();
+      const total = sorted.length;
+      if (newCount < MIN_BARS || newCount > total) return;
+
+      const rect = this.getBoundingClientRect();
+      const W = this.offsetWidth || 400;
+      const chartW = W - RIGHT;
+      const frac = Math.max(0, Math.min(1, (this._pinchMidX - rect.left) / chartW));
+      const removed = newCount - this._vCount;
+      this._vStart = Math.round(this._vStart - removed * frac);
+      this._vCount = newCount;
+      this._clampViewport(total);
+      this._scheduleRedraw();
+    }
+  };
+
+  private _onTouchEnd = () => {
+    this._touchPanId = null;
+    this._pinchDist0 = 0;
+  };
+
+  // ── Redraw scheduling ──────────────────────────────────────────────────────
+
+  private _scheduleRedraw() {
+    if (this._rafId !== null) return;
+    this._rafId = requestAnimationFrame(() => { this._rafId = null; this._draw(); });
+  }
+
+  // ── Main draw ──────────────────────────────────────────────────────────────
 
   private _draw() {
     const cv = this.shadowRoot?.querySelector('canvas');
@@ -227,17 +424,24 @@ export class CandleChart extends LitElement {
     ctx.fillRect(0, 0, W, H);
 
     // Sort oldest → newest (API returns newest-first)
-    const data: CandleData[] = [...this.candles].sort((a, b) => a.t - b.t);
-    const n = data.length;
+    const allData: CandleData[] = this._sortedData();
+    const total = allData.length;
 
-    if (n < 2) {
+    if (total < 2) {
       ctx.fillStyle    = C.noData;
       ctx.font         = FONT;
       ctx.textAlign    = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(n === 0 ? 'No data' : 'Loading…', (W - RIGHT) / 2, H / 2);
+      ctx.fillText(total === 0 ? 'No data' : 'Loading…', (W - RIGHT) / 2, H / 2);
       return;
     }
+
+    // ── Viewport ────────────────────────────────────────────────────────────
+    this._autoResetViewport(total);
+    this._clampViewport(total);
+    const data = allData.slice(this._vStart, this._vStart + this._vCount);
+    const n = data.length;
+    if (n < 2) return;
 
     // ── Layout ────────────────────────────────────────────────────────────────
     const VOL_H   = Math.min(Math.max(Math.floor(H * 0.18), 36), 68);
@@ -339,24 +543,24 @@ export class CandleChart extends LitElement {
       const top = pToY(Math.max(c.o, c.c));
       const bot = pToY(Math.min(c.o, c.c));
       ctx.fillStyle   = c.c >= c.o ? C.upBody : C.dnBody;
-      // Last candle is still forming — render semi-transparent
-      ctx.globalAlpha = i === n - 1 ? 0.55 : 1.0;
+      // Last candle of full dataset is still forming — render semi-transparent
+      ctx.globalAlpha = (this._vStart + i === total - 1) ? 0.55 : 1.0;
       ctx.fillRect(xOf(i) - barW / 2, top, barW, Math.max(1, bot - top));
     }
     ctx.globalAlpha = 1.0;
 
-    // Helper: map an ISO timestamp string to the nearest candle's x position.
-    // Returns 0 (left edge) if timestamp is absent or before all visible candles.
+    // Helper: map an ISO timestamp string to the nearest visible candle's x position.
+    // Returns -1 if not in viewport.
     const tsToX = (ts: string | undefined): number => {
-      if (!ts) return 0;
+      if (!ts) return -1;
       const ms = Date.parse(ts.replace(' ', 'T'));
-      if (!isFinite(ms)) return 0;
+      if (!isFinite(ms)) return -1;
       let best = -1;
       for (let i = 0; i < n; i++) {
         if (data[i].t <= ms) best = i;
         else break;
       }
-      return best >= 0 ? xOf(best) : 0;
+      return best >= 0 ? xOf(best) : -1;
     };
 
     // ── Journey overlay OR entry overlay (mutually exclusive) ─────────────────
@@ -370,6 +574,7 @@ export class CandleChart extends LitElement {
       for (const m of jm) {
         if (!m.price || m.price <= 0) continue;
         const x = tsToX(m.timestamp);
+        if (x < 0) continue;
         const y = pToY(m.price);
         pts.push({ x, y, m });
       }
@@ -494,7 +699,7 @@ export class CandleChart extends LitElement {
         ctx.strokeStyle = col;
         ctx.setLineDash([4, 4]);
         ctx.beginPath();
-        ctx.moveTo(startX, y); ctx.lineTo(chartW, y);
+        ctx.moveTo(startX >= 0 ? startX : 0, y); ctx.lineTo(chartW, y);
         ctx.stroke();
         ctx.setLineDash([]);
 
@@ -530,13 +735,13 @@ export class CandleChart extends LitElement {
           const isShort = /short/i.test(this.posType);
           const avgCol    = isLong ? C.entryLong   : isShort ? C.entryShort   : C.entryAvg;
           const avgLblCol = isLong ? C.entryLongLbl : isShort ? C.entryShortLbl : C.entryAvgLbl;
-          const startX  = this.entries.length > 0 ? tsToX(this.entries[0].timestamp) : 0;
+          const startX  = this.entries.length > 0 ? tsToX(this.entries[0].timestamp) : -1;
 
           ctx.strokeStyle = avgCol;
           ctx.lineWidth   = 1.5;
           ctx.setLineDash([]);
           ctx.beginPath();
-          ctx.moveTo(startX, y); ctx.lineTo(chartW, y);
+          ctx.moveTo(startX >= 0 ? startX : 0, y); ctx.lineTo(chartW, y);
           ctx.stroke();
 
           if (startX > 0) {
@@ -600,43 +805,45 @@ export class CandleChart extends LitElement {
     }
 
     // ── Crosshair + Tooltip ───────────────────────────────────────────────────
-    const hi = this._hoverIdx;
-    if (hi !== null && hi >= 0 && hi < n) {
-      const hc = data[hi];
-      const hx = xOf(hi);
-      const hy = this._hoverY;
+    if (!this._dragging) {
+      const hi = this._hoverIdx;
+      if (hi !== null && hi >= 0 && hi < n) {
+        const hc = data[hi];
+        const hx = xOf(hi);
+        const hy = this._hoverY;
 
-      // Vertical crosshair spans price + volume areas
-      ctx.strokeStyle = C.xhairV;
-      ctx.lineWidth   = 1;
-      ctx.setLineDash([3, 3]);
-      ctx.beginPath();
-      ctx.moveTo(hx, TOP); ctx.lineTo(hx, volY0 + VOL_H);
-      ctx.stroke();
-
-      // Horizontal crosshair (price area only)
-      if (hy >= TOP && hy <= TOP + PRICE_H) {
-        ctx.strokeStyle = C.xhairH;
+        // Vertical crosshair spans price + volume areas
+        ctx.strokeStyle = C.xhairV;
+        ctx.lineWidth   = 1;
+        ctx.setLineDash([3, 3]);
         ctx.beginPath();
-        ctx.moveTo(0, hy); ctx.lineTo(chartW, hy);
+        ctx.moveTo(hx, TOP); ctx.lineTo(hx, volY0 + VOL_H);
         ctx.stroke();
-        // Price label on right axis
-        ctx.setLineDash([]);
-        const hp   = minP + ((TOP + PRICE_H - hy) / PRICE_H) * pRange;
-        const hlbl = fmtPrice(hp);
-        ctx.font   = FONT;
-        const htw  = ctx.measureText(hlbl).width;
-        const hly  = Math.max(TOP + 1, Math.min(hy - 8, TOP + PRICE_H - 16));
-        ctx.fillStyle = 'rgba(40,50,68,0.94)';
-        ctx.fillRect(chartW + 2, hly, htw + 10, 16);
-        ctx.fillStyle    = C.ttText;
-        ctx.textAlign    = 'left';
-        ctx.textBaseline = 'top';
-        ctx.fillText(hlbl, chartW + 7, hly + 3);
-      }
 
-      ctx.setLineDash([]);
-      this._drawTooltip(ctx, hc, hx, hy, W, TOP + PRICE_H);
+        // Horizontal crosshair (price area only)
+        if (hy >= TOP && hy <= TOP + PRICE_H) {
+          ctx.strokeStyle = C.xhairH;
+          ctx.beginPath();
+          ctx.moveTo(0, hy); ctx.lineTo(chartW, hy);
+          ctx.stroke();
+          // Price label on right axis
+          ctx.setLineDash([]);
+          const hp   = minP + ((TOP + PRICE_H - hy) / PRICE_H) * pRange;
+          const hlbl = fmtPrice(hp);
+          ctx.font   = FONT;
+          const htw  = ctx.measureText(hlbl).width;
+          const hly  = Math.max(TOP + 1, Math.min(hy - 8, TOP + PRICE_H - 16));
+          ctx.fillStyle = 'rgba(40,50,68,0.94)';
+          ctx.fillRect(chartW + 2, hly, htw + 10, 16);
+          ctx.fillStyle    = C.ttText;
+          ctx.textAlign    = 'left';
+          ctx.textBaseline = 'top';
+          ctx.fillText(hlbl, chartW + 7, hly + 3);
+        }
+
+        ctx.setLineDash([]);
+        this._drawTooltip(ctx, hc, hx, hy, W, TOP + PRICE_H);
+      }
     }
   }
 
