@@ -1701,6 +1701,7 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
         to_ts,
     });
     let elapsed = start.elapsed();
+    let config_fingerprint = bt_core::config::strategy_config_fingerprint_sha256(&cfg);
 
     let mut report = bt_core::report::build_report(bt_core::report::BuildReportInput {
         trades: &sim.trades,
@@ -1713,8 +1714,13 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
         include_trades: args.trades,
         include_equity_curve: args.equity_curve,
     });
+    report.config_fingerprint = Some(config_fingerprint.clone());
 
-    report.decision_diagnostics = Some(sim.decision_diagnostics);
+    let mut decision_diagnostics = sim.decision_diagnostics;
+    for trace in &mut decision_diagnostics {
+        trace.set_config_fingerprint(config_fingerprint.clone());
+    }
+    report.decision_diagnostics = Some(decision_diagnostics);
 
     // Print summary to stderr
     print_summary(&report, effective_balance);

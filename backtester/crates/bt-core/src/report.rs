@@ -21,6 +21,8 @@ use crate::reason_codes::{classify_reason_code, ReasonCode};
 #[derive(Debug, Clone, Serialize)]
 pub struct SimReport {
     pub config_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_fingerprint: Option<String>,
 
     // Summary
     pub initial_balance: f64,
@@ -312,6 +314,7 @@ pub fn build_report(input: BuildReportInput<'_>) -> SimReport {
 
     SimReport {
         config_id: config_id.to_string(),
+        config_fingerprint: None,
         initial_balance,
         final_balance,
         total_pnl,
