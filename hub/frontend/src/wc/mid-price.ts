@@ -2,7 +2,7 @@ import { LitElement, type PropertyValues, css, html } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 type FlashState = '' | 'up-a' | 'up-b' | 'down-a' | 'down-b';
-type Tone = 'table' | 'accent';
+type Tone = 'table' | 'accent' | 'grid';
 type FlashDirection = 'up' | 'down';
 type FlashPhase = 'a' | 'b';
 
@@ -48,6 +48,11 @@ export class MidPrice extends LitElement {
       color: var(--accent);
       font-size: 13px;
       font-weight: 600;
+    }
+
+    .value.grid {
+      font-size: inherit;
+      font-weight: inherit;
     }
 
     @keyframes flashUpA {
@@ -196,6 +201,7 @@ export class MidPrice extends LitElement {
   render() {
     const classes = ['value'];
     if (this.tone === 'accent') classes.push('accent');
+    if (this.tone === 'grid') classes.push('grid');
     if (this.flash) classes.push(`flash-${this.flash}`);
     return html`<span class="${classes.join(' ')}">${this.formatValue()}</span>`;
   }
