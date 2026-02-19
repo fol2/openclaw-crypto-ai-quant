@@ -382,26 +382,9 @@ fn run_gpu_sweep_internal(
         );
     }
 
-    // CPU parity (sub-bar from/to boundary):
-    // CPU entry/exit sub-bar scans are anchored to indicator bars and can include
-    // ticks exactly at `from_ts` via the preceding indicator bar window.
-    // Shift GPU trade start back by one indicator bar when sub-bars are active so
-    // boundary sub-ticks are visible to the kernel path.
-    let trade_start_for_kernel = if max_sub_per_bar > 0
-        && from_ts.is_some()
-        && trade_start > 0
-        && trade_start < trade_end
-    {
-        trade_start - 1
-    } else {
-        trade_start
-    };
-    if trade_start_for_kernel != trade_start {
-        eprintln!(
-            "[GPU] Sub-bar boundary alignment: trade_start {} -> {}",
-            trade_start, trade_start_for_kernel
-        );
-    }
+    // CPU parity: keep GPU trading scope identical to CPU scope guard [from_ts, to_ts].
+    // Do not shift start index back by one bar when sub-bars are active.
+    let trade_start_for_kernel = trade_start;
 
     // ── 3. Calculate VRAM budget ─────────────────────────────────────────
     let total_vram = device_state.total_vram_bytes();
