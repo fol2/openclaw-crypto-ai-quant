@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getSnapshot, getMids, getTrendCloses } from '../lib/api';
+  import { getSnapshot, getMids, getTrendCloses, getTrendCandles, type CandleData } from '../lib/api';
   import { hubWs } from '../lib/ws';
   import { CANDIDATE_FAMILY_ORDER, getModeLabel, LIVE_MODE } from '../lib/mode-labels';
 
@@ -8,16 +8,25 @@
   let symbols: any[] = $state([]);
   let mids: Record<string, number> = $state({});
   let trendCloses: Record<string, number[]> = $state({});
+  let trendCandles: Record<string, CandleData[]> = $state({});
   let loading = $state(true);
   let filter = $state('');
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let trendTimer: ReturnType<typeof setInterval> | null = null;
+  let candleTimer: ReturnType<typeof setInterval> | null = null;
   let midsSeeded = false;
 
   async function refreshTrend() {
     try {
       const res = await getTrendCloses(trendInterval, trendBars);
       trendCloses = res.closes || {};
+    } catch {}
+  }
+
+  async function refreshCandles() {
+    try {
+      const res = await getTrendCandles(candleInterval, candleBars);
+      trendCandles = res.candles || {};
     } catch {}
   }
 
@@ -30,9 +39,23 @@
         mids = m.mids || {};
         midsSeeded = true;
       }
-      await refreshTrend();
+      await Promise.all([refreshTrend(), refreshCandles()]);
     } catch {}
     loading = false;
+  }
+
+  function liveCandles(symbol: string): CandleData[] {
+    const base = trendCandles[symbol];
+    if (!base?.length) return [];
+    const mid = mids[symbol];
+    if (mid == null || !isFinite(mid) || mid <= 0) return base;
+    const arr = [...base];
+    const last = { ...arr[arr.length - 1] };
+    last.c = mid;
+    if (mid > last.h) last.h = mid;
+    if (mid < last.l) last.l = mid;
+    arr[arr.length - 1] = last;
+    return arr;
   }
 
   let filteredSymbols = $derived.by(() => {
@@ -68,6 +91,8 @@
   let trendBars        = $state(getNumCookie('trendBars', 60));
   let trendStrengthMul = $state(getNumCookie('trendStrengthMul', 1.0));
   let showOverlay      = $state(getCookie('showOverlay', '0') === '1');
+  let candleInterval   = $state(getCookie('candleInterval', '30m'));
+  let candleBars       = $state(getNumCookie('candleBars', 30));
 
   $effect(() => {
     setCookie('showTrendBar', showTrendBar ? '1' : '0');
@@ -78,6 +103,8 @@
     setCookie('trendBars', String(trendBars));
     setCookie('trendStrengthMul', String(trendStrengthMul));
     setCookie('showOverlay', showOverlay ? '1' : '0');
+    setCookie('candleInterval', candleInterval);
+    setCookie('candleBars', String(candleBars));
     setCookie('gridMode', mode);
     setCookie('gridSize', String(gridSize));
   });
@@ -133,10 +160,12 @@
     refresh();
     pollTimer = setInterval(refresh, 10000);
     trendTimer = setInterval(refreshTrend, 30000);
+    candleTimer = setInterval(refreshCandles, 30000);
     hubWs.connect();
     return () => {
       if (pollTimer) clearInterval(pollTimer);
       if (trendTimer) clearInterval(trendTimer);
+      if (candleTimer) clearInterval(candleTimer);
     };
   });
 
@@ -261,6 +290,27 @@
       <input title="Show per-card trend overlay text (regression data, strength value)" type="checkbox" bind:checked={showOverlay} />
       <span class="tb-label" title="Show per-card trend overlay text (regression data, strength value)">Overlay</span>
     </label>
+    <div class="tb-divider"></div>
+    <span class="trend-bar-title">CANDLES</span>
+    <label>
+      <span class="tb-label" title="Candle interval for mini charts">Interval</span>
+      <select title="Candle interval for mini charts" bind:value={candleInterval} onchange={refreshCandles}>
+        <option value="1m">1m</option>
+        <option value="3m">3m</option>
+        <option value="5m">5m</option>
+        <option value="15m">15m</option>
+        <option value="30m">30m</option>
+        <option value="1h">1h</option>
+      </select>
+    </label>
+    <label>
+      <span class="tb-label" title="Number of candle bars to display">Bars</span>
+      <select title="Number of candle bars to display" bind:value={candleBars} onchange={refreshCandles}>
+        <option value={30}>30</option>
+        <option value={50}>50</option>
+        <option value={80}>80</option>
+      </select>
+    </label>
   </div>
   {/if}
 
@@ -296,13 +346,13 @@
               <span class="signal-badge">{s.signal}</span>
             </div>
           {/if}
-          <div class="cell-sparkline">
-            <sparkline-chart
-              points={JSON.stringify(s.recent_mids || [])}
-              width="160"
-              height="40"
-              color={s.position_side === 'LONG' ? '#51cf66' : s.position_side === 'SHORT' ? '#ff6b6b' : '#3d4f63'}
-            ></sparkline-chart>
+          <div class="cell-candles">
+            <mini-candles
+              candles={JSON.stringify(liveCandles(s.symbol))}
+              width={200}
+              height={56}
+              live
+            ></mini-candles>
           </div>
         </div>
       {/each}
@@ -515,7 +565,7 @@
     font-weight: 600;
   }
 
-  .cell-sparkline { margin-top: 6px; }
+  .cell-candles { margin-top: 6px; }
 
   .trend-overlay {
     position: absolute;

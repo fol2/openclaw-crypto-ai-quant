@@ -43,6 +43,21 @@ export async function getTrendCloses(interval = '5m', limit = 60): Promise<{ clo
   return apiFetch(`/api/trend-closes?interval=${interval}&limit=${limit}`);
 }
 
+export interface CandleData {
+  t: number;
+  t_close: number;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+  n: number;
+}
+
+export async function getTrendCandles(interval = '30m', limit = 30): Promise<{ candles: Record<string, CandleData[]> }> {
+  return apiFetch(`/api/trend-candles?interval=${interval}&limit=${limit}`);
+}
+
 export async function postFlashDebug(events: Array<Record<string, any>>) {
   return apiFetch('/api/flash-debug', {
     method: 'POST',

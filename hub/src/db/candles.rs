@@ -150,6 +150,23 @@ pub fn fetch_recent_closes_batch(
     Ok(out)
 }
 
+/// Fetch last N candles for multiple symbols in one go.
+pub fn fetch_recent_candles_batch(
+    conn: &Connection,
+    symbols: &[String],
+    interval: &str,
+    limit: u32,
+) -> Result<std::collections::HashMap<String, Vec<Candle>>, HubError> {
+    let mut out = std::collections::HashMap::new();
+    for sym in symbols {
+        let candles = fetch_candles(conn, sym, interval, limit)?;
+        if !candles.is_empty() {
+            out.insert(sym.clone(), candles);
+        }
+    }
+    Ok(out)
+}
+
 /// List available candle intervals by scanning DB files in the candles directory.
 pub fn list_available_intervals(candles_dir: &std::path::Path) -> Vec<String> {
     let mut intervals: Vec<String> = Vec::new();
