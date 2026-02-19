@@ -4,6 +4,7 @@
 //! YAML merge hierarchy: defaults <- global <- per-symbol <- live.
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -661,6 +662,18 @@ fn defaults_as_value() -> serde_yaml::Value {
     let json_str = serde_json::to_string(&SerializableConfig::from(StrategyConfig::default()))
         .expect("default config serialises to JSON");
     serde_yaml::from_str(&json_str).expect("JSON round-trip to YAML Value")
+}
+
+/// Deterministic config fingerprint for audit/reporting.
+///
+/// The hash is computed from the canonical serialisable mirror used by config
+/// merge/loading code (`SerializableConfig`), encoded as compact JSON, then
+/// SHA-256 hex.
+pub fn strategy_config_fingerprint_sha256(cfg: &StrategyConfig) -> String {
+    let payload = serde_json::to_vec(&SerializableConfig::from(cfg.clone())).unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(payload);
+    format!("{:x}", hasher.finalize())
 }
 
 fn validate_loaded_config(cfg: &mut StrategyConfig) {

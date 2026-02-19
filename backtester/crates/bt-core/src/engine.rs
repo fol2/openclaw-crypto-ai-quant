@@ -125,6 +125,14 @@ pub struct DecisionKernelTrace {
     gate_result: Option<GateEvaluation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     indicator_snapshot: Option<IndicatorSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    config_fingerprint: Option<String>,
+}
+
+impl DecisionKernelTrace {
+    pub fn set_config_fingerprint(&mut self, config_fingerprint: String) {
+        self.config_fingerprint = Some(config_fingerprint);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -732,6 +740,7 @@ fn step_decision(
         active_params: build_active_params(source, cfg, &state.kernel_params),
         gate_result: None,
         indicator_snapshot: None,
+        config_fingerprint: None,
     };
     state.decision_diagnostics.push(trace);
     decision
