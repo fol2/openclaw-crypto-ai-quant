@@ -24,6 +24,7 @@ MAX_ENTRY_ORDERS_PER_LOOP = 20
 MAX_ADDS_PER_SYMBOL = 10
 VALID_CONFIDENCE_LEVELS = {"low", "medium", "high"}
 VALID_ENGINE_INTERVALS = {"1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"}
+VALID_MACD_HIST_ENTRY_MODES = {"accel", "sign", "none"}
 
 
 def _is_number(v: Any) -> bool:
@@ -163,6 +164,7 @@ def validate_config_obj(obj: Any) -> list[str]:
 
     # Entry threshold sanity
     req_number("global.thresholds.entry.min_adx", min_v=0.0)
+    opt_enum("global.thresholds.entry.macd_hist_entry_mode", allowed=VALID_MACD_HIST_ENTRY_MODES)
     opt_enum("global.engine.interval", allowed=VALID_ENGINE_INTERVALS)
     opt_enum("global.engine.entry_interval", allowed=VALID_ENGINE_INTERVALS)
     opt_enum("global.engine.exit_interval", allowed=VALID_ENGINE_INTERVALS)
