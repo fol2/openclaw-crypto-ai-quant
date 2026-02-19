@@ -1,6 +1,6 @@
-# AI Quant Monitor (read-only)
+# Monitor Dashboard (read-only)
 
-Local dashboard for monitoring **Live** + **Paper** daemons:
+Local Python dashboard for monitoring **Live** + **Paper** daemons. For the Rust + Svelte alternative, see the [hub/](../hub/) dashboard.
 
 - Reads SQLite DBs + daemon runtime logs (no secrets).
 - Reads mid ticks from the local Rust **WS sidecar** (no direct Hyperliquid WS calls).
