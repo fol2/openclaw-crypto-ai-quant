@@ -734,6 +734,7 @@
     .grid-cell {
       padding: 10px;
       border-radius: 0;
+      border: none;
     }
     .grid-cell.has-position::before {
       border-radius: 0;
@@ -746,7 +747,7 @@
       grid-template-columns: repeat(3, 1fr) !important;
       gap: 0;
     }
-    .grid-cell { padding: 8px; }
+    .grid-cell { padding: 8px; border: none; }
     .cell-price { font-size: 13px; }
   }
 </style>
