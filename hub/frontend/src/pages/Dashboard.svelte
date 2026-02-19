@@ -200,7 +200,7 @@
     if (state === 'on') return 'ON';
     if (state === 'off') return 'OFF';
     if (state === 'error') return 'ERR';
-    return 'N/A';
+    return 'NA';
   }
 
   async function refreshModeRuntimeStates() {
@@ -692,7 +692,6 @@
   );
   let selectedModeRuntimeState = $derived(getModeRuntimeState(selectedModeKey));
   let selectedModeRuntimeLabel = $derived(getModeRuntimeLabel(selectedModeKey));
-  let selectedModeLabelUpper = $derived(getModeLabel(selectedModeKey).toUpperCase());
 
   // ── Range selector for PnL / DD ───────────────────────────────────────
   let metricsRange = $state<'today' | 'since' | 'all'>('today');
@@ -796,7 +795,7 @@
         class:bad-dot={selectedModeRuntimeState === 'error'}
         class:unknown-dot={selectedModeRuntimeState === 'unknown'}
       ></span>
-      {selectedModeLabelUpper} {selectedModeRuntimeLabel}
+      {selectedModeRuntimeLabel}
     </div>
   </div>
 
@@ -2107,27 +2106,31 @@
     }
     .mode-tabs {
       width: 100%;
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
       gap: 4px;
       padding: 4px;
     }
     .family-tabs {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      width: 100%;
+      display: flex;
+      width: auto;
       gap: 4px;
+      flex-shrink: 0;
     }
     .mode-divider {
-      display: none;
+      display: block;
     }
     .mode-btn-live {
-      width: 100%;
+      width: auto;
       text-align: center;
+      flex-shrink: 0;
     }
     .family-tabs .mode-btn {
-      width: 100%;
+      width: auto;
       min-width: 0;
       text-align: center;
+      flex-shrink: 0;
     }
     .metrics-bar {
       gap: 4px;
