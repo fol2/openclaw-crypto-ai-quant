@@ -32,6 +32,7 @@ Set `--timestamp-bucket-ms` above `1` only when your live timestamp serialisatio
   - `fee_usd`
 - Out of scope (tracked as accepted residual only):
   - `FUNDING` actions (`non-simulatable_exchange_oms_effect`)
+  - replay-only forced exits with reason code `exit_end_of_backtest` (`state_initialisation_gap`)
 - Informational only:
   - live `OPEN` and `ADD` actions
 
@@ -43,6 +44,8 @@ Set `--timestamp-bucket-ms` above `1` only when your live timestamp serialisatio
   - matched exit key exists, but `exit_size` / `pnl_usd` / `fee_usd` exceeds tolerance
 - `non-simulatable_exchange_oms_effect`:
   - funding events counted as accepted residuals
+- `state_initialisation_gap`:
+  - replay-only exits with reason code `exit_end_of_backtest` (window-boundary force-close)
 
 ## Pass Criteria
 
@@ -51,4 +54,4 @@ Set `--timestamp-bucket-ms` above `1` only when your live timestamp serialisatio
 - no unmatched exits on either side
 - no numeric mismatches beyond configured tolerances
 
-Funding-only residuals do not fail strict replay parity and are reported under `accepted_residuals`.
+Accepted residuals (`FUNDING` plus `exit_end_of_backtest` boundary closes) do not fail strict replay parity and are reported under `accepted_residuals`.
