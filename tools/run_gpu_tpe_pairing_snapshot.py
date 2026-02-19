@@ -326,6 +326,8 @@ def main() -> int:
     sweeps_dir = out_dir / "sweeps"
     pairing_root = out_dir / "pairing"
     out_dir.mkdir(parents=True, exist_ok=True)
+    sweeps_dir.mkdir(parents=True, exist_ok=True)
+    pairing_root.mkdir(parents=True, exist_ok=True)
 
     ts = datetime.now(timezone.utc).isoformat()
 
