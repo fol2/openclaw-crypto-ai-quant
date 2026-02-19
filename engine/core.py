@@ -1864,6 +1864,9 @@ class UnifiedEngine:
 
                 # Phase 1: Keep exit logic for open positions.
                 for sym_u in sorted((self.trader.positions or {}).keys()):
+                    if self.mode != "paper":
+                        # Rust kernel remains the live SSOT for exit decisions.
+                        break
                     try:
                         cached = self._analysis_cache.get(str(sym_u).upper()) or {}
                         if not isinstance(cached, dict):
