@@ -1016,11 +1016,22 @@
   }
 
   let symbols = $derived(snap?.symbols || []);
+  function posEquity(s: any): number {
+    const p = s.position;
+    if (!p || !p.size) return 0;
+    return Math.abs(p.size) * (s.mid || 0);
+  }
   let filteredSymbols = $derived.by(() => {
     const q = appState.search.trim().toUpperCase();
     let syms = symbols;
     if (q) syms = syms.filter((s: any) => String(s.symbol).includes(q));
-    return [...syms].sort((a: any, b: any) => (volumes[b.symbol] || 0) - (volumes[a.symbol] || 0));
+    return [...syms].sort((a: any, b: any) => {
+      const aPos = a.position ? 1 : 0;
+      const bPos = b.position ? 1 : 0;
+      if (aPos !== bPos) return bPos - aPos;
+      if (aPos && bPos) return posEquity(b) - posEquity(a);
+      return (volumes[b.symbol] || 0) - (volumes[a.symbol] || 0);
+    });
   });
   let health = $derived(snap?.health || {});
   let balances = $derived(snap?.balances || {});

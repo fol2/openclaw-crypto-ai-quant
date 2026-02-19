@@ -43,11 +43,24 @@
     loading = false;
   }
 
+  function posEquity(s: any): number {
+    const p = s.position;
+    if (!p || !p.size) return 0;
+    const mid = mids[s.symbol] ?? s.mid ?? 0;
+    return Math.abs(p.size) * mid;
+  }
+
   let filteredSymbols = $derived.by(() => {
     const q = filter.trim().toUpperCase();
     let syms = symbols;
     if (q) syms = syms.filter((s: any) => String(s.symbol).includes(q));
-    return [...syms].sort((a, b) => (volumes[b.symbol] || 0) - (volumes[a.symbol] || 0));
+    return [...syms].sort((a, b) => {
+      const aPos = a.position ? 1 : 0;
+      const bPos = b.position ? 1 : 0;
+      if (aPos !== bPos) return bPos - aPos;
+      if (aPos && bPos) return posEquity(b) - posEquity(a);
+      return (volumes[b.symbol] || 0) - (volumes[a.symbol] || 0);
+    });
   });
 
   // ── Cookie helpers ───────────────────────────────────────────────
