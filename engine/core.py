@@ -133,6 +133,7 @@ class KernelDecision:
     target_size: float | None = None
     entry_key: int | None = None
     reason: str | None = None
+    reason_code: str | None = None
     open_pos_count: int = 0
 
     @classmethod
@@ -196,6 +197,12 @@ class KernelDecision:
         else:
             reason = None
 
+        reason_code = raw.get("reason_code")
+        if isinstance(reason_code, str):
+            reason_code = reason_code.strip().lower() or None
+        else:
+            reason_code = None
+
         try:
             open_pos_count = int(raw.get("open_pos_count", 0) or 0)
         except (TypeError, ValueError):
@@ -211,6 +218,7 @@ class KernelDecision:
             target_size=target_size,
             entry_key=entry_key,
             reason=reason,
+            reason_code=reason_code,
             open_pos_count=open_pos_count,
         )
 
@@ -2002,6 +2010,8 @@ class UnifiedEngine:
                             now_series = {}
                         if not now_series:
                             now_series = {"Close": None, "is_anomaly": False}
+                        if dec.reason_code:
+                            now_series["_kernel_reason_code"] = str(dec.reason_code).strip().lower()
                         self._attach_strategy_snapshot(symbol=sym_u, now_series=now_series)
 
                         if self._rest_enabled and hyperliquid_meta is not None:

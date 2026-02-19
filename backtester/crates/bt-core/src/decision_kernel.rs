@@ -202,6 +202,10 @@ pub struct OrderIntent {
     pub price: f64,
     pub notional_usd: f64,
     pub fee_rate: f64,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub reason_code: String,
 }
 
 /// Canonical fill event produced from intent execution simulation.
@@ -583,6 +587,8 @@ struct ApplyOpenInput<'a> {
     timestamp_ms: i64,
     intent_id: u64,
     kind: OrderIntentKind,
+    reason: &'a str,
+    reason_code: &'a str,
 }
 
 fn apply_open(
@@ -600,6 +606,8 @@ fn apply_open(
         timestamp_ms,
         intent_id,
         kind,
+        reason,
+        reason_code,
     } = input;
     if notional <= 0.0 {
         diagnostics
@@ -695,6 +703,8 @@ fn apply_open(
         price: quantise(price),
         notional_usd: notional,
         fee_rate,
+        reason: reason.to_string(),
+        reason_code: reason_code.to_string(),
     };
     let fill = FillEvent {
         schema_version: KERNEL_SCHEMA_VERSION,
@@ -719,6 +729,8 @@ fn apply_close(
     fee_rate: f64,
     close_fraction: Option<f64>,
     intent_id: u64,
+    reason: &str,
+    reason_code: &str,
     diagnostics: &mut Diagnostics,
 ) -> Option<(OrderIntent, FillEvent)> {
     let position = match state.positions.get(symbol) {
@@ -791,6 +803,8 @@ fn apply_close(
         price: quantise(price),
         notional_usd: close.notional,
         fee_rate,
+        reason: reason.to_string(),
+        reason_code: reason_code.to_string(),
     };
     let fill = FillEvent {
         schema_version: KERNEL_SCHEMA_VERSION,
@@ -1496,6 +1510,8 @@ fn execute_entry(
                     timestamp_ms: event.timestamp_ms,
                     intent_id: open_id,
                     kind: OrderIntentKind::Open,
+                    reason: "Signal Trigger",
+                    reason_code: "entry_signal",
                 },
                 diagnostics,
             ) {
@@ -1517,6 +1533,8 @@ fn execute_entry(
                         timestamp_ms: event.timestamp_ms,
                         intent_id: open_id,
                         kind: OrderIntentKind::Add,
+                        reason: "Pyramid Add",
+                        reason_code: "entry_pyramid",
                     },
                     diagnostics,
                 ) {
@@ -1540,6 +1558,8 @@ fn execute_entry(
                 fee_rate,
                 event.close_fraction,
                 close_id,
+                "Signal Flip",
+                "exit_signal_flip",
                 diagnostics,
             ) {
                 intents.push(OrderIntent {
@@ -1583,6 +1603,8 @@ fn execute_entry(
                         timestamp_ms: event.timestamp_ms,
                         intent_id: reverse_id,
                         kind: OrderIntentKind::Open,
+                        reason: "Signal Trigger",
+                        reason_code: "entry_signal",
                     },
                     diagnostics,
                 ) {
