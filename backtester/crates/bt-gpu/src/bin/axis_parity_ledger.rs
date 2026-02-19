@@ -1241,8 +1241,10 @@ fn compare_event_streams(
     allow_absolute_scan: bool,
     event_tol: EventNumericTolerance,
 ) -> EventParitySummary {
-    let cpu: Vec<CanonicalEventRow> = cpu_events.iter().map(canonicalise_cpu_event).collect();
-    let gpu: Vec<CanonicalEventRow> = gpu_events.iter().map(canonicalise_gpu_event).collect();
+    let mut cpu: Vec<CanonicalEventRow> = cpu_events.iter().map(canonicalise_cpu_event).collect();
+    let mut gpu: Vec<CanonicalEventRow> = gpu_events.iter().map(canonicalise_gpu_event).collect();
+    sort_canonical_events(&mut cpu);
+    sort_canonical_events(&mut gpu);
     let (cpu_tail_offset, gpu_tail_offset, aligned_len) =
         choose_alignment_offsets(&cpu, &gpu, max_offset_scan, allow_absolute_scan, event_tol);
 
@@ -1302,6 +1304,21 @@ fn compare_event_streams(
         cpu_event: None,
         gpu_event: None,
     }
+}
+
+fn sort_canonical_events(events: &mut [CanonicalEventRow]) {
+    events.sort_by(|a, b| {
+        a.t_sec
+            .cmp(&b.t_sec)
+            .then_with(|| a.symbol.cmp(&b.symbol))
+            .then_with(|| a.action_kind.cmp(&b.action_kind))
+            .then_with(|| a.action_side.cmp(&b.action_side))
+            .then_with(|| a.event_type.cmp(&b.event_type))
+            .then_with(|| a.reason_code.cmp(&b.reason_code))
+            .then_with(|| a.intent_signal.cmp(&b.intent_signal))
+            .then_with(|| a.action_taken.cmp(&b.action_taken))
+            .then_with(|| a.source_idx.cmp(&b.source_idx))
+    });
 }
 
 fn choose_alignment_offsets(
