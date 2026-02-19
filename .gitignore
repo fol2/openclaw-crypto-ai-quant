@@ -37,6 +37,8 @@ secrets.json
 
 # Generated artifacts
 *.png
+# Keep README screenshots
+!docs/screenshots/*.png
 
 # Generated analysis outputs (reproducible)
 backtest_results.json
