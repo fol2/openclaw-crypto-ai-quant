@@ -437,6 +437,7 @@ def main() -> int:
     gpu_parity_report_path = bundle_dir / "gpu_smoke_parity_report.json"
     alignment_gate_path = bundle_dir / "alignment_gate_report.json"
     paper_harness_report_path = bundle_dir / "paper_deterministic_replay_run.json"
+    paper_seed_watermark_path = bundle_dir / "paper_seed_watermark.json"
     manifest_path = bundle_dir / "replay_bundle_manifest.json"
 
     baseline_trades = _load_live_baseline_trades(
@@ -519,6 +520,32 @@ def main() -> int:
         "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
         f"LIVE_DB=\"${{LIVE_DB:-{shlex.quote(str(live_db))}}}\"\n"
         f"PAPER_DB=\"${{PAPER_DB:-{shlex.quote(str(paper_db))}}}\"\n"
+        f"PAPER_WATERMARK_PATH=\"$BUNDLE_DIR/{paper_seed_watermark_path.name}\"\n"
+        "python3 - \"$PAPER_DB\" \"$PAPER_WATERMARK_PATH\" <<'PY'\n"
+        "import datetime as dt\n"
+        "import json\n"
+        "import sqlite3\n"
+        "import sys\n"
+        "\n"
+        "paper_db = sys.argv[1]\n"
+        "output_path = sys.argv[2]\n"
+        "conn = sqlite3.connect(f\"file:{paper_db}?mode=ro\", uri=True, timeout=10)\n"
+        "try:\n"
+        "    row = conn.execute(\"SELECT COALESCE(MAX(id), 0) AS max_id FROM trades\").fetchone()\n"
+        "finally:\n"
+        "    conn.close()\n"
+        "max_id = int((row[0] if row else 0) or 0)\n"
+        "payload = {\n"
+        "    \"schema_version\": 1,\n"
+        "    \"generated_at_ms\": int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000),\n"
+        "    \"paper_db\": paper_db,\n"
+        "    \"pre_seed_max_trade_id\": max_id,\n"
+        "}\n"
+        "with open(output_path, \"w\", encoding=\"utf-8\") as fp:\n"
+        "    fp.write(json.dumps(payload, indent=2, sort_keys=True))\n"
+        "    fp.write(\"\\n\")\n"
+        "print(output_path)\n"
+        "PY\n"
         f"SNAPSHOT_PATH=\"$BUNDLE_DIR/{snapshot_name}\"\n"
         f"python3 \"$REPO_ROOT/tools/export_live_canonical_snapshot.py\" --source live --db-path \"$LIVE_DB\" --as-of-ts {seed_as_of_ts} --output \"$SNAPSHOT_PATH\"\n"
         "python3 \"$REPO_ROOT/tools/apply_canonical_snapshot_to_paper.py\" --snapshot \"$SNAPSHOT_PATH\" --target-db \"$PAPER_DB\""
@@ -622,6 +649,7 @@ def main() -> int:
         "python3 \"$REPO_ROOT/tools/audit_live_baseline_paper_order_parity.py\" "
         f"--live-baseline \"$BUNDLE_DIR/{live_trades_path.name}\" "
         "--paper-db \"$PAPER_DB\" "
+        f"--paper-seed-watermark \"$BUNDLE_DIR/{paper_seed_watermark_path.name}\" "
         f"--from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
         f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
         "--fail-on-mismatch "
@@ -762,6 +790,7 @@ def main() -> int:
             "gpu_parity_report_file": gpu_parity_report_path.name,
             "alignment_gate_report_file": alignment_gate_path.name,
             "paper_deterministic_replay_run_report_file": paper_harness_report_path.name,
+            "paper_seed_watermark_file": paper_seed_watermark_path.name,
         },
         "counts": {
             "live_baseline_trades": len(baseline_trades),

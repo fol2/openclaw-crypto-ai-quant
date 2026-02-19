@@ -30,6 +30,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--live-baseline", required=True, help="Path to live_baseline_trades.jsonl")
     parser.add_argument("--paper-db", required=True, help="Path to paper SQLite DB")
+    parser.add_argument(
+        "--paper-min-id-exclusive",
+        type=int,
+        help="Optional lower-bound filter: include only paper trades with id > this value.",
+    )
+    parser.add_argument(
+        "--paper-seed-watermark",
+        help=(
+            "Optional JSON watermark file generated during seed step "
+            "(expects key pre_seed_max_trade_id)."
+        ),
+    )
     parser.add_argument("--output", required=True, help="Path to output JSON report")
     parser.add_argument("--from-ts", type=int, help="Filter start timestamp (ms, inclusive)")
     parser.add_argument("--to-ts", type=int, help="Filter end timestamp (ms, inclusive)")
@@ -179,6 +191,7 @@ def _load_live_sequence(
 def _load_paper_sequence(
     paper_db: Path,
     *,
+    paper_min_id_exclusive: int | None,
     from_ts: int | None,
     to_ts: int | None,
     timestamp_bucket_ms: int,
@@ -196,9 +209,14 @@ def _load_paper_sequence(
     unknown_actions = 0
     funding_events = 0
     total_rows = 0
+    filtered_by_id = 0
 
     for row in rows:
         total_rows += 1
+        source_id = int(row["id"] or 0)
+        if paper_min_id_exclusive is not None and source_id <= paper_min_id_exclusive:
+            filtered_by_id += 1
+            continue
         action = str(row["action"] or "").strip().upper()
         if action not in TRADE_ACTIONS:
             continue
@@ -226,7 +244,7 @@ def _load_paper_sequence(
             {
                 "source": "paper",
                 "sequence_idx": len(events),
-                "source_id": int(row["id"] or 0),
+                "source_id": source_id,
                 "symbol": symbol,
                 "timestamp_ms": ts_ms,
                 "bucket_ts_ms": bucket_ts,
@@ -237,10 +255,48 @@ def _load_paper_sequence(
 
     return events, {
         "paper_total_rows": int(total_rows),
+        "paper_filtered_by_id": int(filtered_by_id),
         "paper_simulatable_events": len(events),
         "paper_unknown_actions": int(unknown_actions),
         "paper_funding_events": int(funding_events),
     }
+
+
+def _resolve_paper_min_id_exclusive(
+    *,
+    raw_min_id: int | None,
+    watermark_path_raw: str | None,
+) -> int | None:
+    resolved: int | None = int(raw_min_id) if raw_min_id is not None else None
+    if not watermark_path_raw:
+        return resolved
+
+    watermark_path = Path(str(watermark_path_raw)).expanduser().resolve()
+    if not watermark_path.exists():
+        raise ValueError(f"paper seed watermark file not found: {watermark_path}")
+
+    try:
+        payload = json.loads(watermark_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"invalid paper seed watermark JSON: {watermark_path}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"invalid paper seed watermark payload: {watermark_path}")
+
+    raw_watermark = payload.get("pre_seed_max_trade_id")
+    if raw_watermark is None:
+        raise ValueError(
+            f"paper seed watermark missing pre_seed_max_trade_id: {watermark_path}"
+        )
+    try:
+        watermark_value = int(raw_watermark)
+    except Exception as exc:
+        raise ValueError(
+            f"invalid pre_seed_max_trade_id in paper seed watermark: {watermark_path}"
+        ) from exc
+
+    if resolved is None:
+        return int(watermark_value)
+    return max(int(resolved), int(watermark_value))
 
 
 def _compare_event_order(
@@ -316,6 +372,17 @@ def main() -> int:
     from_ts = int(args.from_ts) if args.from_ts is not None else None
     to_ts = int(args.to_ts) if args.to_ts is not None else None
     timestamp_bucket_ms = max(1, int(args.timestamp_bucket_ms))
+    try:
+        paper_min_id_exclusive = _resolve_paper_min_id_exclusive(
+            raw_min_id=int(args.paper_min_id_exclusive)
+            if args.paper_min_id_exclusive is not None
+            else None,
+            watermark_path_raw=str(args.paper_seed_watermark).strip()
+            if args.paper_seed_watermark
+            else None,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     if not live_baseline.exists():
         parser.error(f"live baseline not found: {live_baseline}")
@@ -332,6 +399,7 @@ def main() -> int:
     )
     paper_events, paper_counts = _load_paper_sequence(
         paper_db,
+        paper_min_id_exclusive=paper_min_id_exclusive,
         from_ts=from_ts,
         to_ts=to_ts,
         timestamp_bucket_ms=timestamp_bucket_ms,
@@ -414,6 +482,9 @@ def main() -> int:
         "inputs": {
             "live_baseline": str(live_baseline),
             "paper_db": str(paper_db),
+            "paper_min_id_exclusive": int(paper_min_id_exclusive)
+            if paper_min_id_exclusive is not None
+            else None,
             "from_ts": from_ts,
             "to_ts": to_ts,
             "timestamp_bucket_ms": timestamp_bucket_ms,
