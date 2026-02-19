@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getSnapshot, getMids, getTrendCloses, getTrendCandles, type CandleData } from '../lib/api';
+  import { getSnapshot, getMids, getTrendCloses, getTrendCandles, getVolumes, type CandleData } from '../lib/api';
   import { hubWs } from '../lib/ws';
   import { CANDIDATE_FAMILY_ORDER, getModeLabel, LIVE_MODE } from '../lib/mode-labels';
 
@@ -9,6 +9,7 @@
   let mids: Record<string, number> = $state({});
   let trendCloses: Record<string, number[]> = $state({});
   let trendCandles: Record<string, CandleData[]> = $state({});
+  let volumes: Record<string, number> = $state({});
   let loading = $state(true);
   let filter = $state('');
   let pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -30,6 +31,13 @@
     } catch {}
   }
 
+  async function refreshVolumes() {
+    try {
+      const res = await getVolumes();
+      volumes = res.volumes || {};
+    } catch {}
+  }
+
   async function refresh() {
     try {
       const snap = await getSnapshot(mode);
@@ -39,7 +47,7 @@
         mids = m.mids || {};
         midsSeeded = true;
       }
-      await Promise.all([refreshTrend(), refreshCandles()]);
+      await Promise.all([refreshTrend(), refreshCandles(), refreshVolumes()]);
     } catch {}
     loading = false;
   }
@@ -58,11 +66,24 @@
     return arr;
   }
 
+  function posEquity(s: any): number {
+    const p = s.position;
+    if (!p || !p.size) return 0;
+    const mid = mids[s.symbol] ?? s.mid ?? 0;
+    return Math.abs(p.size) * mid;
+  }
+
   let filteredSymbols = $derived.by(() => {
     const q = filter.trim().toUpperCase();
     let syms = symbols;
     if (q) syms = syms.filter((s: any) => String(s.symbol).includes(q));
-    return syms;
+    return [...syms].sort((a, b) => {
+      const aPos = a.position ? 1 : 0;
+      const bPos = b.position ? 1 : 0;
+      if (aPos !== bPos) return bPos - aPos;
+      if (aPos && bPos) return posEquity(b) - posEquity(a);
+      return (volumes[b.symbol] || 0) - (volumes[a.symbol] || 0);
+    });
   });
 
   // ── Cookie helpers ───────────────────────────────────────────────

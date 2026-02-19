@@ -141,6 +141,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/candles/range", get(api_candles_range))
         .route("/api/trend-closes", get(api_trend_closes))
         .route("/api/trend-candles", get(api_trend_candles))
+        .route("/api/volumes", get(api_volumes))
         .route("/api/metrics", get(api_metrics))
         .route("/metrics", get(api_prometheus))
 }
@@ -664,6 +665,21 @@ async fn api_trend_candles(
 
     let data = candles::fetch_recent_candles_batch(&conn, &symbols, &interval, limit)?;
     Ok(Json(json!({ "interval": interval, "limit": limit, "candles": data })))
+}
+
+async fn api_volumes(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, HubError> {
+    let interval = "1h";
+    let cutoff_ms = now_ms() - 24 * 60 * 60 * 1000;
+
+    let candle_path = state.candle_db_path(interval);
+    let pool = open_ro_pool(&candle_path, 2)
+        .ok_or_else(|| HubError::Db(format!("candle db not available for {interval}")))?;
+    let conn = pool.get()?;
+
+    let volumes = candles::fetch_24h_volumes(&conn, interval, cutoff_ms)?;
+    Ok(Json(json!({ "volumes": volumes })))
 }
 
 async fn api_sparkline(
