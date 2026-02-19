@@ -1713,8 +1713,8 @@ class UnifiedEngine:
                     logger.warning(f"⚠️ WS health check failed\n{traceback.format_exc()}")
 
                 # Candle readiness gate (sidecar only):
-                # - Exits still run (using cached indicators + fresh price).
                 # - Entries/adds are paused until candles are fully backfilled for the selected interval.
+                # - Exit coverage remains enabled for open positions.
                 not_ready_set: set[str] = set()
                 try:
                     _ready, not_ready = self.market.candles_ready(symbols=active_symbols, interval=self.interval)
@@ -2009,16 +2009,28 @@ class UnifiedEngine:
                 # Phase 2: Execute explicit kernel decisions (OPEN/ADD/CLOSE/REDUCE) ordered by score.
                 decision_exec: list[KernelDecision] = []
                 try:
-                    logger.debug(f"DEBUG: calling decision_provider.get_decisions for {len(watchlist)} symbols")
+                    open_sym_set = {str(s).upper() for s in open_syms}
+                    decision_symbols = sorted(
+                        {
+                            str(s).upper()
+                            for s in list(watchlist) + list(open_syms)
+                            if str(s).strip()
+                        }
+                    )
+                    # Keep candle-readiness guard for entry paths, but never suppress
+                    # decision coverage for already-open symbols (exit safety).
+                    provider_not_ready = {str(s).upper() for s in not_ready_set if str(s).upper() not in open_sym_set}
+
+                    logger.debug(f"DEBUG: calling decision_provider.get_decisions for {len(decision_symbols)} symbols")
                     for dec in self.decision_provider.get_decisions(
-                        symbols=watchlist,
+                        symbols=decision_symbols,
                         watchlist=watchlist,
                         open_symbols=open_syms,
                         market=self.market,
                         interval=self.interval,
                         lookback_bars=self.lookback_bars,
                         mode=self.mode,
-                        not_ready_symbols=not_ready_set,
+                        not_ready_symbols=provider_not_ready,
                         strategy=self.strategy,
                         now_ms=now_ms(),
                     ):
