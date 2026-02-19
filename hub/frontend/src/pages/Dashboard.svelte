@@ -140,6 +140,8 @@
       type: j.type || j.pos_type,
       size: leg.size,
       pnl: leg.pnl,
+      reason: leg.reason,
+      confidence: leg.confidence,
     }));
   }
 

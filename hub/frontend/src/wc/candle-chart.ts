@@ -27,6 +27,8 @@ export interface JourneyMark {
   type?: string;        // LONG / SHORT
   size?: number;
   pnl?: number;
+  reason?: string;
+  confidence?: string;
 }
 
 // ─── Colour palette ───────────────────────────────────────────────────────────
@@ -158,6 +160,14 @@ export class CandleChart extends LitElement {
   private _pinchDist0 = 0;
   private _pinchCount0 = 0;
   private _pinchMidX = 0;
+
+  // ── Journey pin tooltip state ──────────────────────────────────────────────
+  private _journeyPins: Array<{ x: number; y: number; m: JourneyMark }> = [];
+  private _hoverMark: { x: number; y: number; m: JourneyMark } | null = null;
+  private _pinnedMark: { x: number; y: number; m: JourneyMark } | null = null;
+  private _tapStartX = 0;
+  private _tapStartY = 0;
+  private _tapStartTime = 0;
 
   static styles = css`
     :host {
@@ -344,12 +354,14 @@ export class CandleChart extends LitElement {
     const idx  = Math.max(0, Math.min(vn - 1, Math.floor((e.clientX - rect.left) / slot)));
     this._hoverIdx = idx;
     this._hoverY   = e.clientY - rect.top;
+    this._hoverMark = this._hitTestPin(e.clientX - rect.left, e.clientY - rect.top);
     this._scheduleRedraw();
   };
 
   private _onLeave = () => {
-    if (this._hoverIdx === null) return;
+    if (this._hoverIdx === null && !this._hoverMark) return;
     this._hoverIdx = null;
+    this._hoverMark = null;
     if (this._rafId !== null) { cancelAnimationFrame(this._rafId); this._rafId = null; }
     this._draw();
   };
@@ -434,10 +446,16 @@ export class CandleChart extends LitElement {
       this._touchStartX = t.clientX;
       this._touchStartVStart = this._vStart;
       this._hoverIdx = null;
+      // Record tap start for tap detection
+      const rect = (e.target as HTMLCanvasElement).getBoundingClientRect();
+      this._tapStartX = t.clientX - rect.left;
+      this._tapStartY = t.clientY - rect.top;
+      this._tapStartTime = performance.now();
     } else if (e.touches.length === 2) {
       e.preventDefault();
       e.stopPropagation();
       this._touchPanId = null;
+      this._pinnedMark = null;
       const [a, b] = [e.touches[0], e.touches[1]];
       this._pinchDist0 = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
       this._pinchCount0 = this._vCount;
@@ -498,11 +516,45 @@ export class CandleChart extends LitElement {
       this._touchStartX = t.clientX;
       this._touchStartVStart = this._vStart;
       this._pinchDist0 = 0;
+      this._pinnedMark = null;
       return;
+    }
+    // Tap detection: short distance + short duration → toggle pin tooltip
+    if (e.touches.length === 0 && e.changedTouches.length > 0) {
+      const ct = e.changedTouches[0];
+      const rect = (e.target as HTMLCanvasElement).getBoundingClientRect();
+      const tapX = ct.clientX - rect.left;
+      const tapY = ct.clientY - rect.top;
+      const dist = Math.hypot(tapX - this._tapStartX, tapY - this._tapStartY);
+      const dur = performance.now() - this._tapStartTime;
+      if (dist < 10 && dur < 300) {
+        const hit = this._hitTestPin(tapX, tapY);
+        if (hit) {
+          this._pinnedMark = hit;
+          this._scheduleRedraw();
+        } else {
+          if (this._pinnedMark) {
+            this._pinnedMark = null;
+            this._scheduleRedraw();
+          }
+        }
+      }
     }
     this._touchPanId = null;
     this._pinchDist0 = 0;
   };
+
+  // ── Journey pin hit testing ─────────────────────────────────────────────────
+
+  private _hitTestPin(px: number, py: number, radius = 18): { x: number; y: number; m: JourneyMark } | null {
+    let best: { x: number; y: number; m: JourneyMark } | null = null;
+    let bestDist = radius;
+    for (const p of this._journeyPins) {
+      const d = Math.hypot(p.x - px, p.y - py);
+      if (d < bestDist) { bestDist = d; best = p; }
+    }
+    return best;
+  }
 
   // ── Redraw scheduling ──────────────────────────────────────────────────────
 
@@ -690,6 +742,7 @@ export class CandleChart extends LitElement {
         const y = pToY(m.price);
         pts.push({ x, y, m });
       }
+      this._journeyPins = pts;
 
       // Connecting path between consecutive pins
       if (pts.length > 1) {
@@ -797,6 +850,7 @@ export class CandleChart extends LitElement {
 
       ctx.setLineDash([]);
     } else {
+      this._journeyPins = [];
       // ── Entry price overlay lines (original) ──────────────────────────────
       ctx.lineWidth = 1;
       const visEntries = this.entries.slice(0, 5);
@@ -954,8 +1008,17 @@ export class CandleChart extends LitElement {
         }
 
         ctx.setLineDash([]);
-        this._drawTooltip(ctx, hc, hx, hy, W, TOP + PRICE_H);
+        if (this._hoverMark) {
+          this._drawMarkTooltip(ctx, this._hoverMark, W, TOP + PRICE_H, chartW);
+        } else {
+          this._drawTooltip(ctx, hc, hx, hy, W, TOP + PRICE_H);
+        }
       }
+    }
+
+    // ── Pinned mark tooltip (touch tap) ────────────────────────────────────
+    if (this._pinnedMark && !this._dragging) {
+      this._drawMarkTooltip(ctx, this._pinnedMark, W, TOP + PRICE_H, chartW);
     }
   }
 
@@ -1012,6 +1075,90 @@ export class CandleChart extends LitElement {
     for (let i = 0; i < lines.length; i++) {
       ctx.fillStyle = lines[i].color ?? C.ttText;
       ctx.fillText(lines[i].text, tx + PAD, ty + PAD + i * LH);
+    }
+  }
+
+  private _drawMarkTooltip(
+    ctx: CanvasRenderingContext2D,
+    pin: { x: number; y: number; m: JourneyMark },
+    W: number, maxY: number, chartW: number,
+  ) {
+    const m = pin.m;
+    const isLong = /long/i.test(m.type ?? '');
+    const actionCol = isLong ? '#93c5fd' : '#fcd34d';
+
+    // Header line: ACTION · reason
+    const reason = m.reason || '';
+    const header = reason ? `${m.action} · ${reason}` : m.action;
+
+    const lines: Array<{ text: string; color?: string }> = [
+      { text: header, color: actionCol },
+    ];
+    lines.push({ text: `Price    ${fmtPrice(m.price)}` });
+    if (m.size != null && m.size > 0) {
+      lines.push({ text: `Size     ${m.size}` });
+    }
+    if ((m.action === 'CLOSE' || m.action === 'REDUCE') && m.pnl != null && m.pnl !== 0) {
+      const sign = m.pnl >= 0 ? '+' : '';
+      lines.push({ text: `PnL      ${sign}$${m.pnl.toFixed(2)}`, color: m.pnl >= 0 ? '#22c55e' : '#ef4444' });
+    }
+    if (m.confidence) {
+      lines.push({ text: `Conf     ${m.confidence}`, color: C.ttDim });
+    }
+    if (m.timestamp) {
+      const d = new Date(m.timestamp.replace(' ', 'T'));
+      if (!isNaN(d.getTime())) {
+        const p = (n: number) => n.toString().padStart(2, '0');
+        lines.push({ text: `Time     ${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`, color: C.ttDim });
+      }
+    }
+
+    const PAD = 8;
+    const LH  = 16;
+    const SEP_LH = 8;  // separator line height
+    const TW  = 196;
+    const TH  = PAD * 2 + SEP_LH + lines.length * LH;
+
+    let tx = pin.x + 14;
+    let ty = pin.y - TH / 2;
+    if (tx + TW > chartW - 2) tx = pin.x - TW - 14;
+    if (tx < 2)               tx = 2;
+    if (ty < TOP + 2)         ty = TOP + 2;
+    if (ty + TH > maxY - 2)   ty = maxY - TH - 2;
+
+    // Background box
+    ctx.fillStyle   = C.ttBg;
+    ctx.strokeStyle = C.ttBorder;
+    ctx.lineWidth   = 1;
+    if (typeof (ctx as any).roundRect === 'function') {
+      ctx.beginPath();
+      (ctx as any).roundRect(tx, ty, TW, TH, 4);
+      ctx.fill(); ctx.stroke();
+    } else {
+      ctx.fillRect(tx, ty, TW, TH);
+      ctx.strokeRect(tx, ty, TW, TH);
+    }
+
+    // Header
+    ctx.font         = FONT_TT;
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = lines[0].color ?? C.ttText;
+    ctx.fillText(lines[0].text, tx + PAD, ty + PAD);
+
+    // Separator line
+    const sepY = ty + PAD + LH + 2;
+    ctx.strokeStyle = C.ttBorder;
+    ctx.lineWidth   = 0.5;
+    ctx.beginPath();
+    ctx.moveTo(tx + PAD, sepY); ctx.lineTo(tx + TW - PAD, sepY);
+    ctx.stroke();
+
+    // Remaining lines
+    const startY = ty + PAD + LH + SEP_LH;
+    for (let i = 1; i < lines.length; i++) {
+      ctx.fillStyle = lines[i].color ?? C.ttText;
+      ctx.fillText(lines[i].text, tx + PAD, startY + (i - 1) * LH);
     }
   }
 

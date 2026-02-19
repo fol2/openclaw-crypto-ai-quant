@@ -116,6 +116,8 @@ pub struct JourneyLeg {
     pub price: f64,
     pub size: f64,
     pub pnl: f64,
+    pub reason: String,
+    pub confidence: String,
 }
 
 // ── Queries ──────────────────────────────────────────────────────────────
@@ -511,12 +513,12 @@ pub fn trade_journeys(
     symbol_filter: Option<&str>,
 ) -> Result<Vec<TradeJourney>, HubError> {
     let sql = if symbol_filter.is_some() {
-        "SELECT id, timestamp, symbol, type, action, price, size, pnl, fee_usd
+        "SELECT id, timestamp, symbol, type, action, price, size, pnl, fee_usd, reason, confidence
          FROM trades
          WHERE action IN ('OPEN','ADD','REDUCE','CLOSE') AND symbol = ?
          ORDER BY id ASC"
     } else {
-        "SELECT id, timestamp, symbol, type, action, price, size, pnl, fee_usd
+        "SELECT id, timestamp, symbol, type, action, price, size, pnl, fee_usd, reason, confidence
          FROM trades
          WHERE action IN ('OPEN','ADD','REDUCE','CLOSE')
          ORDER BY id ASC"
@@ -524,7 +526,7 @@ pub fn trade_journeys(
 
     let mut stmt = conn.prepare(sql)?;
 
-    let rows: Vec<(i64, String, String, String, String, f64, f64, f64, f64)> =
+    let rows: Vec<(i64, String, String, String, String, f64, f64, f64, f64, String, String)> =
         if let Some(sym) = symbol_filter {
             stmt.query_map(params![sym], |row| {
                 Ok((
@@ -537,6 +539,8 @@ pub fn trade_journeys(
                     row.get::<_, f64>(6).unwrap_or(0.0),
                     row.get::<_, f64>(7).unwrap_or(0.0),
                     row.get::<_, f64>(8).unwrap_or(0.0),
+                    row.get::<_, Option<String>>(9)?.unwrap_or_default(),
+                    row.get::<_, Option<String>>(10)?.unwrap_or_default(),
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?
@@ -552,6 +556,8 @@ pub fn trade_journeys(
                     row.get::<_, f64>(6).unwrap_or(0.0),
                     row.get::<_, f64>(7).unwrap_or(0.0),
                     row.get::<_, f64>(8).unwrap_or(0.0),
+                    row.get::<_, Option<String>>(9)?.unwrap_or_default(),
+                    row.get::<_, Option<String>>(10)?.unwrap_or_default(),
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?
@@ -569,7 +575,7 @@ pub fn trade_journeys(
         std::collections::HashMap::new();
     let mut completed: Vec<TradeJourney> = Vec::new();
 
-    for (id, ts, symbol, pos_type, action, price, size, pnl, fee) in rows {
+    for (id, ts, symbol, pos_type, action, price, size, pnl, fee, reason, confidence) in rows {
         let action_upper = action.to_uppercase();
         let sym_upper = symbol.to_uppercase();
 
@@ -601,6 +607,8 @@ pub fn trade_journeys(
                                 price,
                                 size,
                                 pnl,
+                                reason: reason.clone(),
+                                confidence: confidence.clone(),
                             }],
                         },
                         current_size: size,
@@ -628,6 +636,8 @@ pub fn trade_journeys(
                         price,
                         size,
                         pnl,
+                        reason: reason.clone(),
+                        confidence: confidence.clone(),
                     });
                 }
                 // Ignore ADD without a preceding OPEN
@@ -644,6 +654,8 @@ pub fn trade_journeys(
                         price,
                         size,
                         pnl,
+                        reason: reason.clone(),
+                        confidence: confidence.clone(),
                     });
                 }
             }
@@ -662,6 +674,8 @@ pub fn trade_journeys(
                         price,
                         size,
                         pnl,
+                        reason,
+                        confidence,
                     });
                     completed.push(j);
                 }
