@@ -11,6 +11,7 @@ Compared canonical actions:
 - `REDUCE_LONG`, `REDUCE_SHORT`
 - `CLOSE_LONG`, `CLOSE_SHORT`
 - `FUNDING` (classified as accepted residual when one side is missing)
+- replay-only actions with reason code `exit_end_of_backtest` (classified as accepted residual)
 
 ## Inputs
 
@@ -46,6 +47,8 @@ Use `--timestamp-bucket-ms > 1` only when your live timestamp serialisation is i
   - matched key exists but numeric deltas exceed tolerance
 - `non-simulatable_exchange_oms_effect`
   - `FUNDING` action exists on one side only (accepted residual)
+- `state_initialisation_gap`
+  - replay-only action with reason code `exit_end_of_backtest` (window-boundary force-close)
 
 ## Pass Criteria
 
@@ -54,4 +57,4 @@ Use `--timestamp-bucket-ms > 1` only when your live timestamp serialisation is i
 - deterministic logic divergences
 - numeric policy divergences
 
-Funding-only residuals are retained in `accepted_residuals` for traceability.
+Accepted residuals (`FUNDING` and `exit_end_of_backtest` boundary closes) are retained in `accepted_residuals` for traceability.

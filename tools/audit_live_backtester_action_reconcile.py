@@ -26,6 +26,7 @@ except ModuleNotFoundError:  # pragma: no cover - module execution path
 
 SIDE_ACTIONS = {"OPEN", "ADD", "REDUCE", "CLOSE"}
 FUNDING_ACTION = "FUNDING"
+END_OF_BACKTEST_REASON_CODES = {"exit_end_of_backtest"}
 DEFAULT_TOL = 1e-9
 
 
@@ -300,6 +301,7 @@ def _compare_actions(
     unmatched_live = 0
     unmatched_backtester = 0
     non_simulatable_residuals = 0
+    state_scope_residuals = 0
 
     per_symbol: dict[str, dict[str, Any]] = defaultdict(
         lambda: {
@@ -505,6 +507,32 @@ def _compare_actions(
                         }
                     )
                 else:
+                    reason_code = str(brow.get("reason_code") or "").strip().lower()
+                    if reason_code in END_OF_BACKTEST_REASON_CODES:
+                        state_scope_residuals += 1
+                        mismatches.append(
+                            {
+                                "classification": "state_initialisation_gap",
+                                "kind": "missing_live_action_end_of_backtest",
+                                "symbol": symbol,
+                                "action_code": action_code,
+                                "match_key_timestamp_ms": ts_ms,
+                                "backtester_timestamp_ms": brow["timestamp_ms"],
+                                "backtester_ref": {"row_no": brow["row_no"]},
+                                "backtester": {
+                                    "price": brow["price"],
+                                    "size": brow["size"],
+                                    "pnl_usd": brow["pnl_usd"],
+                                    "fee_usd": brow["fee_usd"],
+                                    "balance": brow["balance"],
+                                    "confidence": brow["confidence"],
+                                    "reason_code": brow["reason_code"],
+                                    "reason": brow["reason"],
+                                },
+                            }
+                        )
+                        continue
+
                     unmatched_backtester += 1
                     mismatches.append(
                         {
@@ -548,6 +576,7 @@ def _compare_actions(
         "unmatched_live": unmatched_live,
         "unmatched_backtester": unmatched_backtester,
         "non_simulatable_residuals": non_simulatable_residuals,
+        "state_scope_residuals": state_scope_residuals,
     }
     return mismatches, summary, per_symbol_rows
 
@@ -587,7 +616,8 @@ def main() -> int:
     for item in mismatches:
         mismatch_counts[str(item.get("classification") or "unknown")] += 1
 
-    accepted_residuals = [m for m in mismatches if m.get("classification") == "non-simulatable_exchange_oms_effect"]
+    accepted_classes = {"non-simulatable_exchange_oms_effect", "state_initialisation_gap"}
+    accepted_residuals = [m for m in mismatches if str(m.get("classification") or "") in accepted_classes]
 
     strict_alignment_pass = (
         compare_summary["numeric_mismatch"] == 0

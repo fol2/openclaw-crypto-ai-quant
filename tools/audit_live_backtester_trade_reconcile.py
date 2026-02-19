@@ -18,6 +18,7 @@ from typing import Any
 
 SIMULATABLE_EXIT_ACTIONS = {"CLOSE", "REDUCE"}
 NON_SIMULATABLE_ACTIONS = {"FUNDING"}
+END_OF_BACKTEST_REASON_CODES = {"exit_end_of_backtest"}
 DEFAULT_TOL = 1e-9
 
 
@@ -283,6 +284,7 @@ def _compare_exits(
     unmatched_live = 0
     unmatched_backtester = 0
     numeric_mismatch = 0
+    state_scope_residuals = 0
 
     for key in all_keys:
         symbol, side, ts_ms = key
@@ -362,6 +364,28 @@ def _compare_exits(
 
         if len(bt_rows) > pair_count:
             for brow in bt_rows[pair_count:]:
+                reason_code = str(brow.get("reason_code") or "").strip().lower()
+                if reason_code in END_OF_BACKTEST_REASON_CODES:
+                    state_scope_residuals += 1
+                    mismatches.append(
+                        {
+                            "classification": "state_initialisation_gap",
+                            "kind": "missing_live_exit_end_of_backtest",
+                            "symbol": symbol,
+                            "side": side,
+                            "match_key_exit_ts_ms": ts_ms,
+                            "backtester_exit_ts_ms": brow["exit_ts_ms"],
+                            "backtester_ref": {"trade_id": brow["source_id"], "row_no": brow["row_no"]},
+                            "backtester": {
+                                "exit_size": brow["exit_size"],
+                                "pnl_usd": brow["pnl_usd"],
+                                "fee_usd": brow["fee_usd"],
+                                "reason_code": brow["reason_code"],
+                            },
+                        }
+                    )
+                    continue
+
                 unmatched_backtester += 1
                 mismatches.append(
                     {
@@ -398,6 +422,7 @@ def _compare_exits(
         "numeric_mismatch": numeric_mismatch,
         "unmatched_live": unmatched_live,
         "unmatched_backtester": unmatched_backtester,
+        "state_scope_residuals": state_scope_residuals,
     }
     return mismatches, summary, per_symbol_rows
 
@@ -442,6 +467,10 @@ def main() -> int:
                 "pnl_usd": float(live_counts["live_non_simulatable_pnl_usd"]),
             }
         )
+    accepted_residuals = list(non_simulatable_residuals)
+    accepted_residuals.extend(
+        [m for m in mismatches if str(m.get("classification") or "") == "state_initialisation_gap"]
+    )
 
     strict_alignment_pass = (
         compare_summary["numeric_mismatch"] == 0
@@ -469,10 +498,10 @@ def main() -> int:
         },
         "status": {
             "strict_alignment_pass": strict_alignment_pass,
-            "accepted_residuals_only": strict_alignment_pass and bool(non_simulatable_residuals),
+            "accepted_residuals_only": strict_alignment_pass and bool(accepted_residuals),
         },
         "mismatch_counts_by_classification": dict(sorted(mismatch_counts.items(), key=lambda x: x[0])),
-        "accepted_residuals": non_simulatable_residuals,
+        "accepted_residuals": accepted_residuals,
         "per_symbol": per_symbol_rows,
         "mismatches": mismatches,
     }
