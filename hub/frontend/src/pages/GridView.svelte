@@ -10,13 +10,18 @@
   let loading = $state(true);
   let filter = $state('');
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let midsSeeded = false;
 
   async function refresh() {
     try {
       const snap = await getSnapshot(mode);
       symbols = snap.symbols || [];
-      const m = await getMids();
-      mids = m.mids || {};
+      // Seed mids from REST only on first load; WS takes over after that.
+      if (!midsSeeded) {
+        const m = await getMids();
+        mids = m.mids || {};
+        midsSeeded = true;
+      }
     } catch {}
     loading = false;
   }
