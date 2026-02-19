@@ -44,6 +44,14 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     return row is not None
 
 
+def _column_exists(conn: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    for row in rows:
+        if str(row["name"] if isinstance(row, sqlite3.Row) else row[1]).strip() == column_name:
+            return True
+    return False
+
+
 def _bucket_timestamp_ms(ts_ms: int, bucket_ms: int) -> int:
     if bucket_ms <= 1:
         return int(ts_ms)
@@ -75,6 +83,11 @@ def _load_decision_rows(
                     "db_path": str(db_path),
                 }
             ]
+        config_col = (
+            "config_fingerprint"
+            if _column_exists(conn, "decision_events", "config_fingerprint")
+            else "NULL AS config_fingerprint"
+        )
 
         clauses: list[str] = []
         params: list[Any] = []
@@ -88,7 +101,7 @@ def _load_decision_rows(
 
         sql = (
             "SELECT id, timestamp_ms, symbol, event_type, status, decision_phase, "
-            "triggered_by, action_taken, rejection_reason, trade_id "
+            f"triggered_by, action_taken, rejection_reason, {config_col}, trade_id "
             f"FROM decision_events {where_sql} ORDER BY timestamp_ms ASC, id ASC"
         )
         rows = conn.execute(sql, tuple(params)).fetchall()
@@ -114,6 +127,7 @@ def _load_decision_rows(
                 "triggered_by": _norm_text(row["triggered_by"]),
                 "action_taken": _norm_text(row["action_taken"]),
                 "rejection_reason": _norm_text(row["rejection_reason"], lower=False),
+                "config_fingerprint": _norm_text(row["config_fingerprint"]),
                 "trade_linked": row["trade_id"] is not None,
             }
         )
@@ -157,6 +171,7 @@ def _compare_rows(
     mismatches: list[dict[str, Any]] = []
     matched_pairs = 0
     rejection_reason_mismatch = 0
+    config_fingerprint_mismatch = 0
     trade_linkage_mismatch = 0
     unmatched_live = 0
     unmatched_paper = 0
@@ -244,6 +259,30 @@ def _compare_rows(
                     }
                 )
 
+            cfg_l = _norm_text(lrow.get("config_fingerprint"))
+            cfg_p = _norm_text(prow.get("config_fingerprint"))
+            if cfg_l != cfg_p:
+                config_fingerprint_mismatch += 1
+                mismatches.append(
+                    {
+                        "classification": "state_initialisation_gap",
+                        "kind": "decision_config_fingerprint_mismatch",
+                        "symbol": symbol,
+                        "event_type": event_type,
+                        "status": status,
+                        "decision_phase": phase,
+                        "action_taken": action_taken,
+                        "triggered_by": triggered_by,
+                        "match_key_timestamp_ms": match_ts,
+                        "live_timestamp_ms": lrow["timestamp_ms"],
+                        "paper_timestamp_ms": prow["timestamp_ms"],
+                        "live_ref": {"id": lrow["source_id"]},
+                        "paper_ref": {"id": prow["source_id"]},
+                        "live_config_fingerprint": cfg_l,
+                        "paper_config_fingerprint": cfg_p,
+                    }
+                )
+
         if len(lrows) > pair_count:
             for lrow in lrows[pair_count:]:
                 unmatched_live += 1
@@ -285,6 +324,7 @@ def _compare_rows(
     summary = {
         "matched_pairs": matched_pairs,
         "rejection_reason_mismatch": rejection_reason_mismatch,
+        "config_fingerprint_mismatch": config_fingerprint_mismatch,
         "trade_linkage_mismatch": trade_linkage_mismatch,
         "unmatched_live": unmatched_live,
         "unmatched_paper": unmatched_paper,
@@ -331,6 +371,7 @@ def main() -> int:
     compare_summary = {
         "matched_pairs": 0,
         "rejection_reason_mismatch": 0,
+        "config_fingerprint_mismatch": 0,
         "trade_linkage_mismatch": 0,
         "unmatched_live": 0,
         "unmatched_paper": 0,
@@ -351,6 +392,7 @@ def main() -> int:
 
     strict_alignment_pass = (
         compare_summary["rejection_reason_mismatch"] == 0
+        and compare_summary["config_fingerprint_mismatch"] == 0
         and compare_summary["trade_linkage_mismatch"] == 0
         and compare_summary["unmatched_live"] == 0
         and compare_summary["unmatched_paper"] == 0
@@ -359,7 +401,7 @@ def main() -> int:
     )
 
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at_ms": int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000),
         "inputs": {
             "live_db": str(live_db),

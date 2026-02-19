@@ -2049,6 +2049,18 @@ def _has_table(con: sqlite3.Connection, table: str) -> bool:
     return bool(row)
 
 
+def _has_column(con: sqlite3.Connection, table: str, column: str) -> bool:
+    """Check if a SQLite table has a specific column."""
+    try:
+        rows = _fetchall(con, f"PRAGMA table_info({table})")
+    except Exception:
+        return False
+    for row in rows:
+        if str(row.get("name") or "").strip() == column:
+            return True
+    return False
+
+
 def _parse_int(val: str | None, default: int) -> int:
     """Parse an integer query-string value, returning *default* on failure."""
     raw = str(val or "").strip()
@@ -2092,6 +2104,7 @@ def build_decisions_list(
     try:
         if not _has_table(con, "decision_events"):
             return {"data": [], "total": 0, "limit": limit, "offset": offset}
+        cfg_col = "config_fingerprint" if _has_column(con, "decision_events", "config_fingerprint") else "NULL AS config_fingerprint"
 
         where_clauses: list[str] = []
         params: list[Any] = []
@@ -2122,7 +2135,7 @@ def build_decisions_list(
             f"""
             SELECT id, timestamp_ms, symbol, event_type, status, decision_phase,
                    parent_decision_id, trade_id, triggered_by, action_taken,
-                   rejection_reason, context_json
+                   rejection_reason, {cfg_col}, context_json
             FROM decision_events
             {where_sql}
             ORDER BY timestamp_ms DESC, id DESC
@@ -2155,13 +2168,14 @@ def build_decision_detail(mode: str, decision_id: str) -> dict[str, Any] | None:
     try:
         if not _has_table(con, "decision_events"):
             return None
+        cfg_col = "config_fingerprint" if _has_column(con, "decision_events", "config_fingerprint") else "NULL AS config_fingerprint"
 
         decision = _fetchone(
             con,
-            """
+            f"""
             SELECT id, timestamp_ms, symbol, event_type, status, decision_phase,
                    parent_decision_id, trade_id, triggered_by, action_taken,
-                   rejection_reason, context_json
+                   rejection_reason, {cfg_col}, context_json
             FROM decision_events WHERE id = ?
             """,
             (decision_id,),
@@ -2214,6 +2228,7 @@ def build_trade_decision_trace(mode: str, trade_id: int) -> dict[str, Any]:
     try:
         if not _has_table(con, "decision_lineage") or not _has_table(con, "decision_events"):
             return {"chain": [], "lineage": None}
+        cfg_col = "config_fingerprint" if _has_column(con, "decision_events", "config_fingerprint") else "NULL AS config_fingerprint"
 
         # Find lineage rows that reference this trade (as entry or exit).
         lineage_rows = _fetchall(
@@ -2264,7 +2279,7 @@ def build_trade_decision_trace(mode: str, trade_id: int) -> dict[str, Any]:
             f"""
             SELECT id, timestamp_ms, symbol, event_type, status,
                    decision_phase, parent_decision_id, trade_id,
-                   triggered_by, action_taken, rejection_reason, context_json
+                   triggered_by, action_taken, rejection_reason, {cfg_col}, context_json
             FROM decision_events
             WHERE id IN ({ph})
             ORDER BY timestamp_ms ASC, id ASC
