@@ -623,6 +623,17 @@ pub fn run_tpe_sweep(
         );
     }
 
+    // CPU parity for sub-bars: include the previous main bar when scope starts
+    // exactly on a boundary timestamp so boundary ticks map identically to CPU.
+    let mut trade_start_for_kernel = trade_start;
+    if max_sub_per_bar > 0 && trade_start_for_kernel > 0 {
+        trade_start_for_kernel -= 1;
+        eprintln!(
+            "[TPE] Sub-bar boundary alignment: trade_start {} -> {}",
+            trade_start, trade_start_for_kernel
+        );
+    }
+
     eprintln!(
         "[TPE] {} bars x {} symbols, CUDA device ready",
         num_bars, num_symbols,
@@ -773,7 +784,7 @@ pub fn run_tpe_sweep(
                 sub_counts_gpu.as_deref(),
                 funding_spans_gpu.as_deref(),
                 funding_rates_gpu.as_deref(),
-                trade_start,
+                trade_start_for_kernel,
                 trade_end,
             )
         } else {
@@ -795,7 +806,7 @@ pub fn run_tpe_sweep(
                 sub_counts_gpu.as_ref(),
                 funding_spans_gpu.as_ref(),
                 funding_rates_gpu.as_ref(),
-                trade_start,
+                trade_start_for_kernel,
                 trade_end,
             )
         };
