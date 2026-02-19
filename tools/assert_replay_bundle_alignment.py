@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,11 @@ try:
     from candles_provenance import build_candles_window_provenance
 except ModuleNotFoundError:  # pragma: no cover - module execution path
     from tools.candles_provenance import build_candles_window_provenance
+
+try:
+    import yaml
+except Exception:  # pragma: no cover - optional runtime dependency
+    yaml = None
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -150,6 +156,33 @@ def _as_int(value: Any, default: int = 0) -> int:
         return int(value)
     except Exception:
         return int(default)
+
+
+def _hash_json_canonical(obj: Any) -> str:
+    try:
+        payload = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    except Exception:
+        payload = repr(obj).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _compute_locked_strategy_sha1(bundle_dir: Path, manifest: dict[str, Any]) -> tuple[str, Path]:
+    artefacts = manifest.get("artefacts") or {}
+    snapshot_raw = str((artefacts.get("strategy_config_snapshot_file") or "strategy_overrides.locked.yaml")).strip()
+    snapshot_path = Path(snapshot_raw).expanduser()
+    if not snapshot_path.is_absolute():
+        snapshot_path = (bundle_dir / snapshot_path).resolve()
+    else:
+        snapshot_path = snapshot_path.resolve()
+
+    if yaml is None or not snapshot_path.exists():
+        return "", snapshot_path
+    try:
+        raw = yaml.safe_load(snapshot_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return "", snapshot_path
+    obj = raw if isinstance(raw, dict) else {}
+    return _hash_json_canonical(obj), snapshot_path
 
 
 def _gpu_lane_pass_map(report: dict[str, Any]) -> tuple[dict[str, bool], list[str]]:
@@ -348,6 +381,31 @@ def main() -> int:
                         }
                     )
                 else:
+                    computed_locked_sha, snapshot_path = _compute_locked_strategy_sha1(bundle_dir, manifest)
+                    if len(computed_locked_sha) < 8:
+                        locked_strategy_match_ok = False
+                        failures.append(
+                            {
+                                "code": "locked_strategy_snapshot_hash_unavailable",
+                                "classification": "state_initialisation_gap",
+                                "detail": (
+                                    f"unable to compute locked strategy hash from snapshot file: {snapshot_path}"
+                                ),
+                            }
+                        )
+                    elif computed_locked_sha != locked_sha:
+                        locked_strategy_match_ok = False
+                        failures.append(
+                            {
+                                "code": "locked_strategy_manifest_snapshot_hash_mismatch",
+                                "classification": "state_initialisation_gap",
+                                "detail": "manifest locked strategy hash does not match snapshot YAML canonical hash",
+                                "manifest_locked_sha1_prefix8": locked_sha[:8],
+                                "snapshot_locked_sha1_prefix8": computed_locked_sha[:8],
+                                "snapshot_path": str(snapshot_path),
+                            }
+                        )
+
                     runtime_timeline = (
                         runtime_strategy.get("strategy_sha1_timeline")
                         if isinstance(runtime_strategy, dict)
