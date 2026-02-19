@@ -235,7 +235,10 @@ fn make_kernel_state(
     positions: &FxHashMap<String, Position>,
 ) -> decision_kernel::StrategyState {
     let mut kernel_state = decision_kernel::StrategyState::new(init_balance, timestamp_ms);
-    for pos in positions.values() {
+    for sym in sorted_position_symbols(positions) {
+        let Some(pos) = positions.get(sym) else {
+            continue;
+        };
         let side = match pos.pos_type {
             PositionType::Long => decision_kernel::PositionSide::Long,
             PositionType::Short => decision_kernel::PositionSide::Short,
@@ -1284,7 +1287,7 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                     }
                     break;
                 }
-                let total_margin: f64 = state.positions.values().map(|p| p.margin_used).sum();
+                let total_margin = total_margin_used(&state.positions);
                 let exposure = evaluate_exposure_guard(ExposureGuardInput {
                     open_positions: state.positions.len(),
                     max_open_positions: Some(cfg.trade.max_open_positions),
@@ -1455,7 +1458,8 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
         // Uses kernel exit evaluation instead of direct exits::check_all_exits.
         if let (Some(ec), Some(ref ec_idx)) = (exit_candles, &exit_bar_index) {
             if !state.positions.is_empty() {
-                let exit_syms: Vec<String> = state.positions.keys().cloned().collect();
+                let mut exit_syms: Vec<String> = state.positions.keys().cloned().collect();
+                exit_syms.sort();
 
                 for sym in &exit_syms {
                     if let Some(sym_exit_idx) = ec_idx.get(sym.as_str()) {
@@ -1653,8 +1657,7 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                             }
                             continue;
                         }
-                        let total_margin: f64 =
-                            state.positions.values().map(|p| p.margin_used).sum();
+                        let total_margin = total_margin_used(&state.positions);
                         let exposure = evaluate_exposure_guard(ExposureGuardInput {
                             open_positions: state.positions.len(),
                             max_open_positions: Some(cfg.trade.max_open_positions),
@@ -1734,7 +1737,8 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
 
                 let mut boundary = first_boundary;
                 while boundary <= ts {
-                    let open_syms: Vec<String> = state.positions.keys().cloned().collect();
+                    let mut open_syms: Vec<String> = state.positions.keys().cloned().collect();
+                    open_syms.sort();
                     for sym in open_syms {
                         if let Some(pos) = state.positions.get(&sym) {
                             if let Some(rates) = fr.get(&sym) {
@@ -1798,7 +1802,8 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
         *timestamps.last().unwrap_or(&0)
     };
 
-    let remaining: Vec<String> = state.positions.keys().cloned().collect();
+    let mut remaining: Vec<String> = state.positions.keys().cloned().collect();
+    remaining.sort();
     for sym in remaining {
         if state.positions.contains_key(&sym) {
             let terminal_price = lookup_bar(&bar_index, &sym, terminal_ts, candles)
@@ -2445,7 +2450,7 @@ fn try_pyramid(
     let add_size = add_sizing.add_size;
 
     // Margin cap check
-    let total_margin: f64 = state.positions.values().map(|p| p.margin_used).sum();
+    let total_margin = total_margin_used(&state.positions);
     let exposure = evaluate_exposure_guard(ExposureGuardInput {
         open_positions: state.positions.len(),
         max_open_positions: None,
@@ -2527,6 +2532,20 @@ fn try_pyramid(
 // Unrealized PnL helpers
 // ---------------------------------------------------------------------------
 
+fn sorted_position_symbols(positions: &FxHashMap<String, Position>) -> Vec<&str> {
+    let mut syms: Vec<&str> = positions.keys().map(|s| s.as_str()).collect();
+    syms.sort_unstable();
+    syms
+}
+
+fn total_margin_used(positions: &FxHashMap<String, Position>) -> f64 {
+    sorted_position_symbols(positions)
+        .into_iter()
+        .filter_map(|sym| positions.get(sym))
+        .map(|p| p.margin_used)
+        .sum()
+}
+
 /// Compute total unrealized PnL using last known price from indicator banks.
 fn unrealized_pnl(
     positions: &FxHashMap<String, Position>,
@@ -2535,8 +2554,9 @@ fn unrealized_pnl(
     _candles: &CandleData,
     _bar_index: &FxHashMap<String, FxHashMap<i64, usize>>,
 ) -> f64 {
-    positions
-        .values()
+    sorted_position_symbols(positions)
+        .into_iter()
+        .filter_map(|sym| positions.get(sym))
         .map(|pos| {
             let price = indicators
                 .get(&pos.symbol)
@@ -2555,8 +2575,9 @@ fn unrealized_pnl_simple(
     _candles: &CandleData,
     _bar_index: &FxHashMap<String, FxHashMap<i64, usize>>,
 ) -> f64 {
-    positions
-        .values()
+    sorted_position_symbols(positions)
+        .into_iter()
+        .filter_map(|sym| positions.get(sym))
         .map(|pos| {
             // Use entry price as fallback (will be updated by indicator banks)
             pos.profit_usd(pos.entry_price) // This is 0 for just-opened positions
@@ -2571,8 +2592,9 @@ fn unrealized_pnl_for_positions(
 ) -> f64 {
     // Approximate: each position at its entry (gives 0 unrealized)
     // In practice during pyramid check we just use balance as equity
-    positions
-        .values()
+    sorted_position_symbols(positions)
+        .into_iter()
+        .filter_map(|sym| positions.get(sym))
         .map(|pos| pos.profit_usd(pos.entry_price))
         .sum()
 }
@@ -2812,7 +2834,7 @@ fn execute_sub_bar_entry(state: &mut SimState, input: ExecuteSubBarEntryInput<'_
     };
 
     // Margin cap check
-    let total_margin: f64 = state.positions.values().map(|p| p.margin_used).sum();
+    let total_margin = total_margin_used(&state.positions);
     let exposure = evaluate_exposure_guard(ExposureGuardInput {
         open_positions: state.positions.len(),
         max_open_positions: Some(cfg.trade.max_open_positions),
