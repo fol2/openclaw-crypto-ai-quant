@@ -232,6 +232,10 @@ def _reconstruct_positions_and_balance(
         if net_size <= 0.0:
             continue
 
+        reconstructed_margin = abs(net_size) * avg_entry / leverage if leverage > 0.0 else 0.0
+        if reconstructed_margin > 0.0:
+            margin_used = reconstructed_margin
+
         if as_of_ts is None and _table_exists(conn, "position_state"):
             ps_row = conn.execute(
                 "SELECT open_trade_id, trailing_sl, adds_count, tp1_taken, last_add_time, entry_adx_threshold "
