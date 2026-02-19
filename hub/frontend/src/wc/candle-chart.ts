@@ -758,26 +758,24 @@ export class CandleChart extends LitElement {
           if (x1 <= x0) continue;
 
           const entry = cur.tp.entry_price;
-          const upper = cur.tp.upper_full;
-          const lower = cur.tp.lower_full;
+          const upper = cur.tp.upper_full;  // TP price (above entry for LONG, below for SHORT)
+          const lower = cur.tp.lower_full;  // SL price (below entry for LONG, above for SHORT)
 
-          // Profit zone: entry→upper for LONG, entry→lower for SHORT
-          const profitTop = isLong ? upper : entry;
-          const profitBot = isLong ? entry : lower;
+          // Profit zone: between entry and TP (upper_full)
+          // Uses Math.max/min so it works for both LONG and SHORT
+          const pHigh = Math.max(entry, upper);
+          const pLow  = Math.min(entry, upper);
           ctx.fillStyle = C.tnlGreen;
-          const ptY = pToY(profitTop);
-          const pbY = pToY(profitBot);
-          ctx.fillRect(x0, ptY, x1 - x0, pbY - ptY);
+          ctx.fillRect(x0, pToY(pHigh), x1 - x0, pToY(pLow) - pToY(pHigh));
 
-          // Risk zone: lower→entry for LONG, entry→upper for SHORT
-          const riskTop = isLong ? entry : upper;
-          const riskBot = isLong ? lower : entry;
-          // If lower > entry for LONG (locked profit), skip risk zone
-          if (isLong ? lower < entry : upper > entry) {
+          // Risk zone: between entry and SL (lower_full)
+          // Skip if locked profit (SL crossed past entry due to trailing)
+          const hasRisk = isLong ? lower < entry : lower > entry;
+          if (hasRisk) {
+            const rHigh = Math.max(entry, lower);
+            const rLow  = Math.min(entry, lower);
             ctx.fillStyle = C.tnlRed;
-            const rtY = pToY(riskTop);
-            const rbY = pToY(riskBot);
-            ctx.fillRect(x0, rtY, x1 - x0, rbY - rtY);
+            ctx.fillRect(x0, pToY(rHigh), x1 - x0, pToY(rLow) - pToY(rHigh));
           }
         }
 

@@ -1,5 +1,5 @@
 use crate::error::HubError;
-use rusqlite::{params, Connection};
+use rusqlite::Connection;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]

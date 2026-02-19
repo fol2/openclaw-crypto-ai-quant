@@ -569,36 +569,38 @@ class KernelDecisionRustBindingProvider:
 
         try:
             con = sqlite3.connect(db_path, timeout=5)
-            if db_path not in KernelDecisionRustBindingProvider._tunnel_table_ready:
-                con.execute(
-                    "CREATE TABLE IF NOT EXISTS exit_tunnel ("
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                    "ts_ms INTEGER NOT NULL, symbol TEXT NOT NULL,"
-                    "upper_full REAL NOT NULL, upper_partial REAL,"
-                    "lower_full REAL NOT NULL,"
-                    "entry_price REAL NOT NULL, pos_type TEXT NOT NULL)"
-                )
-                con.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_exit_tunnel_sym_ts ON exit_tunnel(symbol, ts_ms)"
-                )
-                KernelDecisionRustBindingProvider._tunnel_table_ready.add(db_path)
+            try:
+                if db_path not in KernelDecisionRustBindingProvider._tunnel_table_ready:
+                    con.execute(
+                        "CREATE TABLE IF NOT EXISTS exit_tunnel ("
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                        "ts_ms INTEGER NOT NULL, symbol TEXT NOT NULL,"
+                        "upper_full REAL NOT NULL, upper_partial REAL,"
+                        "lower_full REAL NOT NULL,"
+                        "entry_price REAL NOT NULL, pos_type TEXT NOT NULL)"
+                    )
+                    con.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_exit_tunnel_sym_ts ON exit_tunnel(symbol, ts_ms)"
+                    )
+                    KernelDecisionRustBindingProvider._tunnel_table_ready.add(db_path)
 
-            up = exit_bounds.get("upper_partial")
-            con.execute(
-                "INSERT INTO exit_tunnel (ts_ms,symbol,upper_full,upper_partial,lower_full,entry_price,pos_type)"
-                " VALUES (?,?,?,?,?,?,?)",
-                (
-                    ts_ms,
-                    symbol,
-                    float(exit_bounds["upper_full"]),
-                    float(up) if up is not None else None,
-                    float(exit_bounds["lower_full"]),
-                    entry_price,
-                    pos_type,
-                ),
-            )
-            con.commit()
-            con.close()
+                up = exit_bounds.get("upper_partial")
+                con.execute(
+                    "INSERT INTO exit_tunnel (ts_ms,symbol,upper_full,upper_partial,lower_full,entry_price,pos_type)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (
+                        ts_ms,
+                        symbol,
+                        float(exit_bounds["upper_full"]),
+                        float(up) if up is not None else None,
+                        float(exit_bounds["lower_full"]),
+                        entry_price,
+                        pos_type,
+                    ),
+                )
+                con.commit()
+            finally:
+                con.close()
         except Exception:
             logger.debug("exit_tunnel persist failed: %s", traceback.format_exc())
 
