@@ -13,7 +13,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use bt_core::candle::CandleData;
+use bt_core::candle::{CandleData, FundingRateData};
 use bt_core::config::StrategyConfig;
 use bt_core::sweep::{apply_one_pub, SweepSpec};
 use bt_gpu::buffers::{GpuComboState, GPU_MAX_SYMBOLS, GPU_TRACE_CAP, GPU_TRACE_SYMBOL_ALL};
@@ -54,6 +54,10 @@ struct Args {
     /// Optional end timestamp (epoch milliseconds).
     #[arg(long)]
     to_ts: Option<i64>,
+
+    /// Optional funding rate SQLite DB for funding-settlement parity checks.
+    #[arg(long)]
+    funding_db: Option<String>,
 
     /// Output JSONL parity ledger.
     #[arg(long, default_value = "artifacts/axis_parity_smoke_current.jsonl")]
@@ -449,6 +453,18 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => None,
     };
+    let funding_rates: Option<FundingRateData> = match args.funding_db.as_ref() {
+        Some(fdb) => {
+            let loaded = bt_data::sqlite_loader::load_funding_rates_filtered(
+                fdb,
+                args.from_ts,
+                args.to_ts,
+            )
+            .map_err(|e| format!("failed to load funding rates from {fdb}: {e}"))?;
+            Some(loaded)
+        }
+        None => None,
+    };
 
     if let Some(parent) = args.output.parent() {
         fs::create_dir_all(parent)?;
@@ -494,6 +510,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         &single_spec,
         &candles,
         entry_candles.as_ref(),
+        funding_rates.as_ref(),
         args.from_ts,
         args.to_ts,
     )
@@ -504,6 +521,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         &single_spec,
         &candles,
         entry_candles.as_ref(),
+        funding_rates.as_ref(),
         args.from_ts,
         args.to_ts,
     )?;
@@ -512,6 +530,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         &single_spec,
         &candles,
         entry_candles.as_ref(),
+        funding_rates.as_ref(),
         args.from_ts,
         args.to_ts,
     )?;
@@ -554,6 +573,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             &single_spec,
             &candles,
             entry_candles.as_ref(),
+            funding_rates.as_ref(),
             args.from_ts,
             args.to_ts,
             trace_symbol_idx,
@@ -564,6 +584,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             &single_spec,
             &candles,
             entry_candles.as_ref(),
+            funding_rates.as_ref(),
             args.from_ts,
             args.to_ts,
             trace_symbol_name.as_deref(),
@@ -681,10 +702,11 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut failures_by_cause: BTreeMap<String, usize> = BTreeMap::new();
 
     eprintln!(
-        "[axis-parity] axes={} (selected), interval={}, candles_db={}",
+        "[axis-parity] axes={} (selected), interval={}, candles_db={}, funding_db={}",
         axes.len(),
         args.interval,
-        args.candles_db
+        args.candles_db,
+        args.funding_db.as_deref().unwrap_or("none")
     );
 
     for (axis_index, axis) in axes.iter().enumerate() {
@@ -704,6 +726,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 &single_spec,
                 &candles,
                 entry_candles.as_ref(),
+                funding_rates.as_ref(),
                 args.from_ts,
                 args.to_ts,
             )?;
@@ -712,6 +735,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 &single_spec,
                 &candles,
                 entry_candles.as_ref(),
+                funding_rates.as_ref(),
                 args.from_ts,
                 args.to_ts,
             )?;
@@ -754,6 +778,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     &single_spec,
                     &candles,
                     entry_candles.as_ref(),
+                    funding_rates.as_ref(),
                     args.from_ts,
                     args.to_ts,
                     trace_symbol_idx,
@@ -764,6 +789,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     &single_spec,
                     &candles,
                     entry_candles.as_ref(),
+                    funding_rates.as_ref(),
                     args.from_ts,
                     args.to_ts,
                     trace_symbol_name.as_deref(),
@@ -889,6 +915,7 @@ fn run_cpu_single(
     spec: &SweepSpec,
     candles: &CandleData,
     entry_candles: Option<&CandleData>,
+    funding_rates: Option<&FundingRateData>,
     from_ts: Option<i64>,
     to_ts: Option<i64>,
 ) -> Result<CompactResult, Box<dyn std::error::Error>> {
@@ -898,7 +925,7 @@ fn run_cpu_single(
         candles,
         entry_candles,
         entry_candles,
-        None,
+        funding_rates,
         from_ts,
         to_ts,
     );
@@ -917,6 +944,7 @@ fn run_cpu_single_with_trade_events(
     spec: &SweepSpec,
     candles: &CandleData,
     entry_candles: Option<&CandleData>,
+    funding_rates: Option<&FundingRateData>,
     from_ts: Option<i64>,
     to_ts: Option<i64>,
     symbol_filter: Option<&str>,
@@ -938,7 +966,7 @@ fn run_cpu_single_with_trade_events(
         lookback: spec.lookback,
         exit_candles: entry_candles,
         entry_candles,
-        funding_rates: None,
+        funding_rates,
         init_state: None,
         from_ts,
         to_ts,
@@ -1017,10 +1045,19 @@ fn run_gpu_single(
     spec: &SweepSpec,
     candles: &CandleData,
     entry_candles: Option<&CandleData>,
+    funding_rates: Option<&FundingRateData>,
     from_ts: Option<i64>,
     to_ts: Option<i64>,
 ) -> Result<CompactResult, Box<dyn std::error::Error>> {
-    let rows = run_gpu_sweep(candles, cfg, spec, None, entry_candles, from_ts, to_ts);
+    let rows = run_gpu_sweep(
+        candles,
+        cfg,
+        spec,
+        funding_rates,
+        entry_candles,
+        from_ts,
+        to_ts,
+    );
     let first = rows.first().ok_or(
         "gpu sweep returned no rows for single config. \
 likely no CUDA-capable device (or driver visibility failure) in this runtime; \
@@ -1038,13 +1075,22 @@ fn run_gpu_single_with_trace(
     spec: &SweepSpec,
     candles: &CandleData,
     entry_candles: Option<&CandleData>,
+    funding_rates: Option<&FundingRateData>,
     from_ts: Option<i64>,
     to_ts: Option<i64>,
     trace_symbol_idx: u32,
 ) -> Result<(CompactResult, GpuComboState, Vec<String>), Box<dyn std::error::Error>> {
     with_trace_env(0, trace_symbol_idx, || {
         let (rows, states, symbols) =
-            run_gpu_sweep_with_states(candles, cfg, spec, None, entry_candles, from_ts, to_ts);
+            run_gpu_sweep_with_states(
+                candles,
+                cfg,
+                spec,
+                funding_rates,
+                entry_candles,
+                from_ts,
+                to_ts,
+            );
         let first = rows.first().ok_or(
             "gpu trace sweep returned no rows for single config. \
 likely no CUDA-capable device (or driver visibility failure) in this runtime; \
@@ -1644,6 +1690,7 @@ fn trace_kind_name(kind: u32) -> &'static str {
         2 => "ADD",
         3 => "CLOSE",
         4 => "PARTIAL_CLOSE",
+        5 => "FUNDING",
         _ => "UNKNOWN",
     }
 }
@@ -1667,6 +1714,7 @@ fn trace_reason_name(reason: u32) -> &'static str {
         7 => "SIGNAL_FLIP",
         8 => "PARTIAL",
         9 => "EXIT_EOB",
+        10 => "FUNDING",
         _ => "UNKNOWN",
     }
 }

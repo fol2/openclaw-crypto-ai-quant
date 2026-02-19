@@ -94,7 +94,7 @@ pub fn run_gpu_sweep(
     candles: &CandleData,
     base_cfg: &StrategyConfig,
     spec: &SweepSpec,
-    _funding: Option<&FundingRateData>,
+    funding: Option<&FundingRateData>,
     sub_candles: Option<&CandleData>,
     from_ts: Option<i64>,
     to_ts: Option<i64>,
@@ -103,7 +103,7 @@ pub fn run_gpu_sweep(
         candles,
         base_cfg,
         spec,
-        _funding,
+        funding,
         sub_candles,
         from_ts,
         to_ts,
@@ -120,7 +120,7 @@ pub fn run_gpu_sweep_with_states(
     candles: &CandleData,
     base_cfg: &StrategyConfig,
     spec: &SweepSpec,
-    _funding: Option<&FundingRateData>,
+    funding: Option<&FundingRateData>,
     sub_candles: Option<&CandleData>,
     from_ts: Option<i64>,
     to_ts: Option<i64>,
@@ -133,7 +133,7 @@ pub fn run_gpu_sweep_with_states(
         candles,
         base_cfg,
         spec,
-        _funding,
+        funding,
         sub_candles,
         from_ts,
         to_ts,
@@ -146,7 +146,7 @@ fn run_gpu_sweep_internal(
     candles: &CandleData,
     base_cfg: &StrategyConfig,
     spec: &SweepSpec,
-    _funding: Option<&FundingRateData>,
+    funding: Option<&FundingRateData>,
     sub_candles: Option<&CandleData>,
     from_ts: Option<i64>,
     to_ts: Option<i64>,
@@ -219,6 +219,9 @@ fn run_gpu_sweep_internal(
     // Compute trade bar range from time scope
     let (trade_start, trade_end) =
         raw_candles::find_trade_bar_range(&raw.timestamps, from_ts, to_ts);
+    let funding_events_host = funding.map(|fr| {
+        raw_candles::prepare_funding_event_buffers(fr, &raw.timestamps, &symbols)
+    });
 
     eprintln!(
         "[GPU] {} ind × {} trade = {} total combos, {} bars × {} symbols",
@@ -272,6 +275,57 @@ fn run_gpu_sweep_internal(
         "[GPU] Raw candles uploaded: {:.1} MB (one-time)",
         candle_upload_mb
     );
+    let (funding_spans_gpu, funding_rates_gpu): (
+        Option<Arc<cudarc::driver::CudaSlice<buffers::GpuFundingSpan>>>,
+        Option<Arc<cudarc::driver::CudaSlice<f64>>>,
+    ) = if let Some(funding_events) = funding_events_host.as_ref() {
+        let active_slots = funding_events.spans.iter().filter(|span| span.len > 0).count();
+        if funding_events.rates.is_empty() || active_slots == 0 {
+            eprintln!(
+                "[GPU] Funding DB provided but no hourly settlements in scoped range; funding kernel path disabled"
+            );
+            (None, None)
+        } else {
+            let spans_gpu = match device_state.dev.htod_sync_copy(&funding_events.spans) {
+                Ok(buf) => buf,
+                Err(e) => {
+                    eprintln!("[GPU] Funding span upload failed: {e} — skipping GPU sweep");
+                    return (
+                        Vec::new(),
+                        if capture_states {
+                            Some(Vec::new())
+                        } else {
+                            None
+                        },
+                        symbols,
+                    );
+                }
+            };
+            let rates_gpu = match device_state.dev.htod_sync_copy(&funding_events.rates) {
+                Ok(buf) => buf,
+                Err(e) => {
+                    eprintln!("[GPU] Funding rate upload failed: {e} — skipping GPU sweep");
+                    return (
+                        Vec::new(),
+                        if capture_states {
+                            Some(Vec::new())
+                        } else {
+                            None
+                        },
+                        symbols,
+                    );
+                }
+            };
+            eprintln!(
+                "[GPU] Funding settlements prepared: {} events across {} active bar-symbol slots",
+                funding_events.rates.len(),
+                active_slots
+            );
+            (Some(Arc::new(spans_gpu)), Some(Arc::new(rates_gpu)))
+        }
+    } else {
+        (None, None)
+    };
 
     // Prepare sub-bar candles for GPU (if provided)
     let sub_bar_result =
@@ -594,6 +648,8 @@ fn run_gpu_sweep_internal(
         // Arc clone only bumps refcount; avoids cudarc CudaSlice device-to-device copy.
         trade_bufs.sub_candles = sub_candles_gpu.clone();
         trade_bufs.sub_counts = sub_counts_gpu.clone();
+        trade_bufs.funding_spans = funding_spans_gpu.clone();
+        trade_bufs.funding_rates = funding_rates_gpu.clone();
 
         let gpu_results = match gpu_host::dispatch_and_readback(
             &device_state,

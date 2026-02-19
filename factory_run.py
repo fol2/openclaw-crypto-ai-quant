@@ -636,17 +636,21 @@ PROFILE_DEFAULTS: dict[str, dict[str, int | str]] = {
         "shortlist_max_rank": 20,
         "sweep_spec": "backtester/sweeps/full_144v.yaml",
     },
-    # Default weekday run profile (~1hr GPU, 7K samples/axis for 142 axes).
+    # Default weekday run profile.
+    # Intentionally reduced for consumer-grade GPU stability after funding-enabled parity hardening.
+    # Increase via CLI/ENV overrides when running on higher-capacity hardware.
     "daily": {
-        "tpe_trials": 2000000,
+        "tpe_trials": 1000000,
         "num_candidates": 5,
         "shortlist_per_mode": 20,
         "shortlist_max_rank": 200,
         "sweep_spec": "backtester/sweeps/full_144v.yaml",
     },
-    # Deep/weekly profile (~4-5hr GPU, 35K samples/axis for 142 axes).
+    # Deep/weekly profile.
+    # Intentionally reduced from earlier factory defaults to lower crash risk and keep nightly
+    # completion deterministic on constrained hosts. Override in explicit deep runs as needed.
     "deep": {
-        "tpe_trials": 10000000,
+        "tpe_trials": 2000000,
         "num_candidates": 10,
         "shortlist_per_mode": 40,
         "shortlist_max_rank": 500,
@@ -654,7 +658,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, int | str]] = {
     },
     # Weekly profile — identical to deep; weekly is the canonical name going forward.
     "weekly": {
-        "tpe_trials": 10000000,
+        "tpe_trials": 2000000,
         "num_candidates": 10,
         "shortlist_per_mode": 40,
         "shortlist_max_rank": 500,
@@ -2197,6 +2201,8 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
     funding_db = source_args.get("funding_db")
     candles_db_bt = _normalise_candles_db_arg_for_backtester(str(candles_db)) if candles_db else None
     funding_db_bt = _resolve_path_for_backtester(str(funding_db)) if funding_db else None
+    source_gpu_requested = bool(source_args.get("gpu")) or bool(source_args.get("tpe"))
+    replay_uses_funding = bool(funding_db_bt)
 
     generated_at_ms = int(time.time() * 1000)
     new_run_id = f"repro_{source_run_id}_{_utc_compact(generated_at_ms)}"
@@ -2216,6 +2222,13 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
         "reproduce_source_run_dir": str(source_run_dir),
         "reproduce_source_git_head": str(source_meta.get("git_head", "")).strip(),
     }
+    if funding_db_bt:
+        meta["funding_model"] = {
+            "funding_db_path": str(funding_db_bt),
+            "source_gpu_path_requested": bool(source_gpu_requested),
+            "applied_to_replay": bool(replay_uses_funding),
+            "reason": "enabled_cpu_and_gpu_settlement_model",
+        }
 
     bt_cmd = _resolve_backtester_cmd()
     _capture_repro_metadata(run_dir=run_dir, artifacts_root=artifacts_root, bt_cmd=bt_cmd, meta=meta)
@@ -2315,7 +2328,7 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
                 "--entry-candles-db",
                 str(candles_db_bt),
             ]
-        if funding_db_bt:
+        if replay_uses_funding:
             replay_argv += ["--funding-db", str(funding_db_bt)]
 
         replay_res = _run_cmd(
@@ -2535,6 +2548,16 @@ def main(argv: list[str] | None = None) -> int:
         bt_sweep_spec = _resolve_path_for_backtester(str(args.sweep_spec)) or str(args.sweep_spec)
         bt_candles_db = _normalise_candles_db_arg_for_backtester(str(args.candles_db)) if args.candles_db else None
         bt_funding_db = _resolve_path_for_backtester(str(args.funding_db)) if args.funding_db else None
+        gpu_path_requested = bool(args.gpu) or bool(getattr(args, "tpe", False))
+        funding_for_pairing = bool(bt_funding_db)
+        if bt_funding_db:
+            meta["funding_model"] = {
+                "funding_db_path": str(bt_funding_db),
+                "gpu_path_requested": bool(gpu_path_requested),
+                "applied_to_sweep": bool(funding_for_pairing),
+                "applied_to_cpu_replay": bool(funding_for_pairing),
+                "reason": "enabled_cpu_and_gpu_settlement_model",
+            }
         candles_db_for_checks = _resolve_path_for_backtester(str(args.candles_db)) if args.candles_db else None
         bt_wf_splits_json = (
             _resolve_path_for_backtester(str(getattr(args, "walk_forward_splits_json", "")))
@@ -2910,7 +2933,7 @@ def main(argv: list[str] | None = None) -> int:
                     "--entry-candles-db",
                     str(bt_candles_db),
                 ]
-            if bt_funding_db:
+            if funding_for_pairing:
                 sweep_argv += ["--funding-db", str(bt_funding_db)]
             if bool(args.gpu):
                 sweep_argv += ["--gpu"]
@@ -3304,7 +3327,7 @@ def main(argv: list[str] | None = None) -> int:
                     "--entry-candles-db",
                     str(bt_candles_db),
                 ]
-            if bt_funding_db:
+            if funding_for_pairing:
                 replay_argv += ["--funding-db", str(bt_funding_db)]
             if trades_csv is not None:
                 replay_argv += ["--export-trades", str(trades_csv)]

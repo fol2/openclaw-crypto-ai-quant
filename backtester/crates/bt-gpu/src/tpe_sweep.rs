@@ -422,7 +422,7 @@ pub fn run_tpe_sweep(
     candles: &CandleData,
     base_cfg: &StrategyConfig,
     spec: &SweepSpec,
-    _funding: Option<&FundingRateData>,
+    funding: Option<&FundingRateData>,
     tpe_cfg: &TpeConfig,
     sub_candles: Option<&CandleData>,
     from_ts: Option<i64>,
@@ -519,6 +519,9 @@ pub fn run_tpe_sweep(
 
     let (trade_start, trade_end) =
         raw_candles::find_trade_bar_range(&raw.timestamps, from_ts, to_ts);
+    let funding_events_host = funding.map(|fr| {
+        raw_candles::prepare_funding_event_buffers(fr, &raw.timestamps, &symbols)
+    });
     eprintln!(
         "[TPE] Trade bar range: {}..{} ({} of {} bars)",
         trade_start,
@@ -541,6 +544,41 @@ pub fn run_tpe_sweep(
             eprintln!("[TPE] GPU candle upload failed: {e} — returning empty results");
             return Vec::new();
         }
+    };
+    let (funding_spans_gpu, funding_rates_gpu): (
+        Option<Arc<cudarc::driver::CudaSlice<buffers::GpuFundingSpan>>>,
+        Option<Arc<cudarc::driver::CudaSlice<f64>>>,
+    ) = if let Some(funding_events) = funding_events_host.as_ref() {
+        let active_slots = funding_events.spans.iter().filter(|span| span.len > 0).count();
+        if funding_events.rates.is_empty() || active_slots == 0 {
+            eprintln!(
+                "[TPE] Funding DB provided but no hourly settlements in scoped range; funding kernel path disabled"
+            );
+            (None, None)
+        } else {
+            let spans_gpu = match device_state.dev.htod_sync_copy(&funding_events.spans) {
+                Ok(buf) => buf,
+                Err(e) => {
+                    eprintln!("[TPE] Funding span upload failed: {e} — returning empty results");
+                    return Vec::new();
+                }
+            };
+            let rates_gpu = match device_state.dev.htod_sync_copy(&funding_events.rates) {
+                Ok(buf) => buf,
+                Err(e) => {
+                    eprintln!("[TPE] Funding rate upload failed: {e} — returning empty results");
+                    return Vec::new();
+                }
+            };
+            eprintln!(
+                "[TPE] Funding settlements prepared: {} events across {} active bar-symbol slots",
+                funding_events.rates.len(),
+                active_slots
+            );
+            (Some(Arc::new(spans_gpu)), Some(Arc::new(rates_gpu)))
+        }
+    } else {
+        (None, None)
     };
 
     let sub_bar_result =
@@ -733,6 +771,8 @@ pub fn run_tpe_sweep(
                 max_sub_per_bar,
                 sub_candles_gpu.as_deref(),
                 sub_counts_gpu.as_deref(),
+                funding_spans_gpu.as_deref(),
+                funding_rates_gpu.as_deref(),
                 trade_start,
                 trade_end,
             )
@@ -753,6 +793,8 @@ pub fn run_tpe_sweep(
                 max_sub_per_bar,
                 sub_candles_gpu.as_ref(),
                 sub_counts_gpu.as_ref(),
+                funding_spans_gpu.as_ref(),
+                funding_rates_gpu.as_ref(),
                 trade_start,
                 trade_end,
             )
@@ -850,6 +892,8 @@ fn evaluate_trade_only_batch(
     max_sub_per_bar: u32,
     sub_candles_gpu: Option<&Arc<CudaSlice<buffers::GpuRawCandle>>>,
     sub_counts_gpu: Option<&Arc<CudaSlice<u32>>>,
+    funding_spans_gpu: Option<&Arc<CudaSlice<buffers::GpuFundingSpan>>>,
+    funding_rates_gpu: Option<&Arc<CudaSlice<f64>>>,
     trade_start: u32,
     trade_end: u32,
 ) -> Vec<buffers::GpuResult> {
@@ -916,6 +960,8 @@ fn evaluate_trade_only_batch(
     // Arc clone only bumps refcount; avoids cudarc CudaSlice device-to-device copy.
     trade_bufs.sub_candles = sub_candles_gpu.cloned();
     trade_bufs.sub_counts = sub_counts_gpu.cloned();
+    trade_bufs.funding_spans = funding_spans_gpu.cloned();
+    trade_bufs.funding_rates = funding_rates_gpu.cloned();
 
     match gpu_host::dispatch_and_readback(
         ds,
@@ -957,6 +1003,8 @@ fn evaluate_mixed_batch_arena(
     max_sub_per_bar: u32,
     sub_candles_gpu: Option<&CudaSlice<buffers::GpuRawCandle>>,
     sub_counts_gpu: Option<&CudaSlice<u32>>,
+    funding_spans_gpu: Option<&CudaSlice<buffers::GpuFundingSpan>>,
+    funding_rates_gpu: Option<&CudaSlice<f64>>,
     trade_start: u32,
     trade_end: u32,
 ) -> Vec<buffers::GpuResult> {
@@ -1098,6 +1146,8 @@ fn evaluate_mixed_batch_arena(
             max_sub_per_bar,
             sub_candles_gpu,
             sub_counts_gpu,
+            funding_spans_gpu,
+            funding_rates_gpu,
             trade_start,
             trade_end,
         ) {
@@ -1224,6 +1274,8 @@ fn dispatch_trade_arena(
     max_sub_per_bar: u32,
     sub_candles_gpu: Option<&CudaSlice<buffers::GpuRawCandle>>,
     sub_counts_gpu: Option<&CudaSlice<u32>>,
+    funding_spans_gpu: Option<&CudaSlice<buffers::GpuFundingSpan>>,
+    funding_rates_gpu: Option<&CudaSlice<f64>>,
     trade_start: u32,
     trade_end: u32,
 ) -> Result<Vec<buffers::GpuResult>, String> {
@@ -1268,6 +1320,23 @@ fn dispatch_trade_arena(
             (&sentinel_candle, &sentinel_counts)
         }
     };
+    let sentinel_funding_spans: CudaSlice<buffers::GpuFundingSpan>;
+    let sentinel_funding_rates: CudaSlice<f64>;
+    let funding_enabled = funding_spans_gpu.is_some() && funding_rates_gpu.is_some();
+    let (fr_spans_ref, fr_rates_ref) = match (funding_spans_gpu, funding_rates_gpu) {
+        (Some(spans), Some(rates)) => (spans, rates),
+        _ => {
+            sentinel_funding_spans = ds
+                .dev
+                .alloc_zeros::<buffers::GpuFundingSpan>(1)
+                .map_err(|e| format!("GPU alloc failed: {e}"))?;
+            sentinel_funding_rates = ds
+                .dev
+                .alloc_zeros::<f64>(1)
+                .map_err(|e| format!("GPU alloc failed: {e}"))?;
+            (&sentinel_funding_spans, &sentinel_funding_rates)
+        }
+    };
 
     let effective_chunk = if max_sub_per_bar > 0 {
         BAR_CHUNK_SIZE.min(50)
@@ -1299,7 +1368,8 @@ fn dispatch_trade_arena(
             max_sub_per_bar,
             trade_end_bar: trade_end,
             debug_t_sec,
-            _debug_pad: [0; 3],
+            funding_enabled: if funding_enabled { 1 } else { 0 },
+            _debug_pad: [0; 2],
         };
         let params_gpu = ds
             .dev
@@ -1331,6 +1401,8 @@ fn dispatch_trade_arena(
                     candles_gpu,
                     sc_ref,
                     sn_ref,
+                    fr_spans_ref,
+                    fr_rates_ref,
                 ),
             )
         }
