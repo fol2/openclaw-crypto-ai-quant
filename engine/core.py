@@ -766,6 +766,7 @@ def _build_default_decision_provider() -> DecisionProvider:
     Accepted values for ``AI_QUANT_KERNEL_DECISION_PROVIDER``:
 
     * ``rust`` / ``kernel_only`` (default) -- Rust kernel via ``bt_runtime``
+      with ``AI_QUANT_KERNEL_DECISION_FILE`` as event input
     * ``none`` / ``noop`` -- no-op (explicit non-trading/testing only)
 
     Raises
@@ -798,8 +799,14 @@ def _build_default_decision_provider() -> DecisionProvider:
         raise SystemExit(1)
 
     if provider_mode in {"rust", "kernel_only", ""}:
+        if not path:
+            logger.fatal(
+                "FATAL: AI_QUANT_KERNEL_DECISION_FILE is required for Rust decision input. "
+                "Runtime SSOT mode does not allow implicit/empty event sources."
+            )
+            raise SystemExit(1)
         try:
-            return KernelDecisionRustBindingProvider(path=path or None)
+            return KernelDecisionRustBindingProvider(path=path)
         except Exception as exc:
             logger.fatal(
                 "FATAL: bt_runtime extension unavailable — cannot initialise "
@@ -1577,18 +1584,11 @@ class UnifiedEngine:
                 )
             return
 
-        # Legacy "OPEN" fallback: if the trader does not support action-aware execute_trade.
-        kwargs = {"atr": atr, "indicators": indicators}
-        if self._trader_accepts_mode:
-            kwargs["mode"] = self.mode
-        return self.trader.execute_trade(
+        logger.warning(
+            "Skipping decision for %s: trader.execute_trade does not support action-aware dispatch in SSOT mode",
             sym,
-            signal,
-            price,
-            timestamp,
-            confidence,
-            **kwargs,
         )
+        return
 
     def run_forever(self) -> None:
         import signal
@@ -1946,32 +1946,6 @@ class UnifiedEngine:
                                 now_series["funding_rate"] = 0.0
                         else:
                             now_series["funding_rate"] = 0.0
-
-                        # ── Regime gate enforcement (B1 fix) ──
-                        # When the gate is OFF, block new OPEN and ADD entries.
-                        # Exits (CLOSE / REDUCE) are never blocked.
-                        # _regime_gate_on is already True when enable_regime_gate is
-                        # False, so this single check covers the disabled case too.
-                        if act in {"OPEN", "ADD"} and not self._regime_gate_on:
-                            logger.info(f"🚫 regime gate blocked {act} for {sym_u} reason={self._regime_gate_reason}")
-                            _cde = _get_decision_event_fn()
-                            if _cde:
-                                try:
-                                    _cde(
-                                        sym_u,
-                                        "gate_block",
-                                        "blocked",
-                                        "gate_evaluation",
-                                        action_taken="blocked",
-                                        context={
-                                            "reason": "regime_gate_off",
-                                            "gate_on": self._regime_gate_on,
-                                            "breadth_pct": self._market_breadth_pct,
-                                        },
-                                    )
-                                except Exception:
-                                    logger.debug("decision event (regime_gate) failed for %s", sym_u, exc_info=True)
-                            continue
 
                         quote = None
                         if act in {"OPEN", "ADD"}:
