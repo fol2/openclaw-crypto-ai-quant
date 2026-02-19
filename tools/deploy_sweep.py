@@ -10,6 +10,7 @@ Usage:
 import argparse
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sqlite3
@@ -47,6 +48,109 @@ DEFAULT_SECRETS_PATH = os.path.expanduser("~/.config/openclaw/ai-quant-secrets.j
 SECRETS_PATH = os.path.expanduser(
     str(os.getenv("AI_QUANT_SECRETS_PATH") or DEFAULT_SECRETS_PATH)
 )
+
+# Keep deploy-time override coercion aligned with sweep output semantics.
+INT_FIELDS = {
+    "max_open_positions", "max_adds_per_symbol", "add_cooldown_minutes",
+    "reentry_cooldown_minutes", "reentry_cooldown_min_mins", "reentry_cooldown_max_mins",
+    "max_entry_orders_per_loop", "adx_window", "ema_fast_window", "ema_slow_window",
+    "bb_window", "ema_macro_window", "atr_window", "rsi_window", "bb_width_avg_window",
+    "vol_sma_window", "vol_trend_window", "stoch_rsi_window", "stoch_rsi_smooth1",
+    "stoch_rsi_smooth2", "slow_drift_slope_window", "min_signals",
+}
+BOOL_FIELDS = {
+    "enable_dynamic_leverage", "enable_dynamic_sizing", "enable_pyramiding",
+    "enable_partial_tp", "enable_vol_buffered_trailing", "enable_reef_filter",
+    "enable_ssf_filter", "enable_breakeven_stop", "enable_rsi_overextension_exit",
+    "reverse_entry_signal", "block_exits_on_extreme_dev", "bump_to_min_notional",
+    "use_bbo_for_fills", "tsme_require_adx_slope_negative",
+    "enable_extension_filter", "enable_ranging_filter", "enable_anomaly_filter",
+    "require_btc_alignment", "require_volume_confirmation", "require_macro_alignment",
+    "require_adx_rising", "vol_confirm_include_prev", "use_stoch_rsi_filter",
+    "enable_regime_filter", "enable_auto_reverse",
+    "ave_enabled", "enable_pullback_entries", "pullback_require_macd_sign",
+    "enable_slow_drift_entries", "slow_drift_require_macd_sign",
+    "signal_on_candle_close",
+}
+CONFIDENCE_FIELDS = {
+    "entry_min_confidence", "add_min_confidence", "pullback_confidence",
+}
+CONFIDENCE_MAP = {0: "low", 1: "medium", 2: "high"}
+CATEGORICAL_FIELDS = {
+    "macd_hist_entry_mode": {0: "accel", 1: "sign", 2: "none"},
+}
+STRING_FIELDS = {"interval", "entry_interval", "exit_interval"}
+
+
+def _trunc_towards_zero(x: float) -> int:
+    return int(float(x))
+
+
+def _as_u8_from_float(raw_value: Any, default: int = 0) -> int:
+    try:
+        x = float(raw_value)
+    except Exception:
+        return int(default)
+    if not math.isfinite(x):
+        return int(default)
+    i = _trunc_towards_zero(x)
+    if i < 0:
+        return 0
+    if i > 255:
+        return 255
+    return i
+
+
+def _coerce_override_value(param_name: str, raw_value: Any) -> Any:
+    if param_name in CATEGORICAL_FIELDS:
+        mapping = CATEGORICAL_FIELDS[param_name]
+        if isinstance(raw_value, str):
+            s = raw_value.strip().lower()
+            if s in mapping.values():
+                return s
+        idx = _as_u8_from_float(raw_value, default=0)
+        if idx in mapping:
+            return mapping[idx]
+        return mapping[max(mapping.keys())]
+
+    if param_name in STRING_FIELDS:
+        return str(raw_value)
+
+    if param_name in CONFIDENCE_FIELDS:
+        if isinstance(raw_value, str):
+            s = str(raw_value).strip().lower()
+            if s in {"low", "medium", "high"}:
+                return s
+        idx = _as_u8_from_float(raw_value, default=0)
+        return CONFIDENCE_MAP.get(idx, "low")
+
+    if param_name in BOOL_FIELDS:
+        if isinstance(raw_value, bool):
+            return raw_value
+        if isinstance(raw_value, str):
+            s = str(raw_value).strip().lower()
+            if s in {"1", "true", "yes", "y", "on"}:
+                return True
+            if s in {"0", "false", "no", "n", "off"}:
+                return False
+        try:
+            return float(raw_value) != 0.0
+        except Exception:
+            return bool(raw_value)
+
+    if param_name in INT_FIELDS:
+        try:
+            x = float(raw_value)
+            if not math.isfinite(x):
+                return 0
+            return max(0, _trunc_towards_zero(x))
+        except Exception:
+            return int(raw_value)
+
+    try:
+        return float(raw_value)
+    except Exception:
+        return raw_value
 
 
 def _is_live_target_yaml(path: str) -> bool:
@@ -195,7 +299,7 @@ def _get_nested(data: dict, dotpath: str, default=None):
 # Show diff
 # ---------------------------------------------------------------------------
 
-def show_diff(current_yaml: dict, overrides: dict[str, float]):
+def show_diff(current_yaml: dict, overrides: dict[str, Any]):
     """Display what would change."""
     print("\n--- Config Changes ---\n", file=sys.stderr)
     for path, new_val in sorted(overrides.items()):
@@ -325,7 +429,7 @@ def close_paper_positions():
 # Changelog
 # ---------------------------------------------------------------------------
 
-def update_changelog(overrides: dict[str, float], metrics: dict, version: str):
+def update_changelog(overrides: dict[str, Any], metrics: dict, version: str):
     """Append entry to strategy_changelog.json."""
     changelog = {"current_version": version, "history": []}
     if os.path.exists(CHANGELOG_PATH):
@@ -472,8 +576,12 @@ def main(argv: list[str] | None = None):
         print("[deploy] Selected result has no overrides.", file=sys.stderr)
         sys.exit(1)
 
-    # Ensure override values are numeric
-    overrides = {k: float(v) for k, v in overrides.items()}
+    # Coerce override values into deploy-safe runtime types.
+    coerced_overrides: dict[str, Any] = {}
+    for path, raw_value in overrides.items():
+        param_name = str(path).split(".")[-1]
+        coerced_overrides[str(path)] = _coerce_override_value(param_name, raw_value)
+    overrides = coerced_overrides
 
     # Load current YAML
     current_data = _load_yaml(yaml_path)
@@ -484,18 +592,7 @@ def main(argv: list[str] | None = None):
 
     # Build candidate config text and run deployment-time validation before
     # any side effects (closing positions / writing files / restarting services).
-    int_params = {
-        "max_open_positions", "max_adds_per_symbol", "add_cooldown_minutes",
-        "reentry_cooldown_minutes", "reentry_cooldown_min_mins", "reentry_cooldown_max_mins",
-        "max_entry_orders_per_loop", "adx_window", "ema_fast_window", "ema_slow_window",
-        "bb_window", "ema_macro_window", "atr_window", "rsi_window", "bb_width_avg_window",
-        "vol_sma_window", "vol_trend_window", "stoch_rsi_window", "stoch_rsi_smooth1",
-        "stoch_rsi_smooth2", "slow_drift_slope_window", "min_signals",
-    }
     for path, value in overrides.items():
-        param_name = path.split(".")[-1]
-        if param_name in int_params and value == int(value):
-            value = int(value)
         _set_nested(current_data, path, value)
 
     next_yaml_text = yaml.safe_dump(current_data, sort_keys=False)
