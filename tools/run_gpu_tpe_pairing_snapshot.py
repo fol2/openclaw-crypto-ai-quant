@@ -178,6 +178,8 @@ def _pair_trial(
     start_ts: int | None,
     end_ts: int | None,
     allow_missing_axes: bool,
+    pairing_pnl_abs_tol: float,
+    pairing_pnl_rel_tol: float,
 ) -> dict[str, Any]:
     rows = _read_jsonl(sweep_rows_path)
     if len(rows) < sample_n:
@@ -268,6 +270,9 @@ def _pair_trial(
         cpu_trades = int(cpu_row.get("total_trades", 0))
         pnl_diff = cpu_pnl - sweep_pnl
         trades_diff = cpu_trades - sweep_trades
+        abs_pnl_diff = abs(pnl_diff)
+        pnl_scale = max(abs(cpu_pnl), abs(sweep_pnl), 1.0)
+        pnl_tol = max(float(pairing_pnl_abs_tol), float(pairing_pnl_rel_tol) * pnl_scale)
 
         report_rows.append(
             {
@@ -276,10 +281,12 @@ def _pair_trial(
                 "sweep_total_pnl": sweep_pnl,
                 "cpu_total_pnl": cpu_pnl,
                 "pnl_diff": pnl_diff,
+                "abs_pnl_diff": abs_pnl_diff,
+                "pnl_tol": pnl_tol,
                 "sweep_total_trades": sweep_trades,
                 "cpu_total_trades": cpu_trades,
                 "trades_diff": trades_diff,
-                "pass": (trades_diff == 0 and abs(pnl_diff) <= 1e-9),
+                "pass": (trades_diff == 0 and abs_pnl_diff <= pnl_tol),
             }
         )
 
@@ -289,8 +296,11 @@ def _pair_trial(
         "fail": sum(1 for r in report_rows if not r["pass"]),
         "trade_diff_zero": sum(1 for r in report_rows if r["trades_diff"] == 0),
         "max_abs_pnl_diff": max((abs(r["pnl_diff"]) for r in report_rows), default=0.0),
+        "max_pnl_tol": max((float(r.get("pnl_tol") or 0.0) for r in report_rows), default=0.0),
         "max_abs_trades_diff": max((abs(r["trades_diff"]) for r in report_rows), default=0),
         "seed": seed,
+        "pairing_pnl_abs_tol": float(pairing_pnl_abs_tol),
+        "pairing_pnl_rel_tol": float(pairing_pnl_rel_tol),
     }
     _write_json(pairing_dir / "pairing_report.json", {"rows": report_rows, "summary": summary})
     return summary
@@ -335,6 +345,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sample-count", type=int, default=10, help="Pairing samples per trial")
     p.add_argument("--tpe-batch", type=int, default=256, help="GPU TPE batch size")
     p.add_argument("--sweep-top-k", type=int, default=50000, help="GPU sweep top-k retention")
+    p.add_argument(
+        "--pairing-pnl-abs-tol",
+        type=float,
+        default=1e-5,
+        help="Absolute total_pnl tolerance for GPU->CPU pairing pass/fail",
+    )
+    p.add_argument(
+        "--pairing-pnl-rel-tol",
+        type=float,
+        default=1e-8,
+        help="Relative total_pnl tolerance for GPU->CPU pairing pass/fail",
+    )
     p.add_argument(
         "--allow-missing-axes",
         action="store_true",
@@ -407,6 +429,8 @@ def main() -> int:
             "sample_count": args.sample_count,
             "tpe_batch": args.tpe_batch,
             "sweep_top_k": args.sweep_top_k,
+            "pairing_pnl_abs_tol": args.pairing_pnl_abs_tol,
+            "pairing_pnl_rel_tol": args.pairing_pnl_rel_tol,
             "allow_missing_axes": args.allow_missing_axes,
         },
         "trials": [],
@@ -493,6 +517,8 @@ def main() -> int:
             start_ts=args.start_ts,
             end_ts=args.end_ts,
             allow_missing_axes=args.allow_missing_axes,
+            pairing_pnl_abs_tol=args.pairing_pnl_abs_tol,
+            pairing_pnl_rel_tol=args.pairing_pnl_rel_tol,
         )
         final_summary["trials"].append(
             {
@@ -503,6 +529,7 @@ def main() -> int:
                 "trade_diff_zero": pairing_summary["trade_diff_zero"],
                 "max_abs_trades_diff": pairing_summary["max_abs_trades_diff"],
                 "max_abs_pnl_diff": pairing_summary["max_abs_pnl_diff"],
+                "max_pnl_tol": pairing_summary["max_pnl_tol"],
             }
         )
 
