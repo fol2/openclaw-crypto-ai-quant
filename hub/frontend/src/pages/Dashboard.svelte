@@ -469,6 +469,20 @@
     return idx;
   }
 
+  function newestCandleAtOrBefore(rows: any[], ts: number): number {
+    let idx = -1;
+    let bestT = -Infinity;
+    for (let i = 0; i < rows.length; i++) {
+      const t = Number(rows[i]?.t || 0);
+      if (!Number.isFinite(t) || t <= 0) continue;
+      if (t <= ts && t > bestT) {
+        bestT = t;
+        idx = i;
+      }
+    }
+    return idx;
+  }
+
   function finitePositive(v: unknown): number | null {
     const n = Number(v);
     return Number.isFinite(n) && n > 0 ? n : null;
@@ -559,6 +573,9 @@
   // Track previous symbol so we can clear candles on symbol switch
   // (plain let — not reactive, no effect re-run on change)
   let _prevFocusSym = '';
+  let _prevSelectedInterval = '';
+  let _candlesSeriesSym = '';
+  let _candlesSeriesInterval = '';
   // Client/server clock offset for candle-boundary alignment.
   let _serverNowOffsetMs = 0;
   // Timestamp of last live-candle paint; used to cap redraws at ~15fps
@@ -569,6 +586,15 @@
   let _candlesFetchInFlight = false;
   let _candlesFetchQueued = false;
   let _candlesRolloverReconcileTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function setCandlesSeriesContext(sym: string, iv: string) {
+    _candlesSeriesSym = sym;
+    _candlesSeriesInterval = iv;
+  }
+
+  function hasCandlesSeriesContext(sym: string, iv: string): boolean {
+    return _candlesSeriesSym === sym && _candlesSeriesInterval === iv;
+  }
 
   function updateServerClockOffset(serverNowMs: unknown) {
     const ts = Number(serverNowMs);
@@ -588,7 +614,8 @@
 
   async function reconcileCandlesForCurrentView(sym = focusSym, iv = selectedInterval, bars = selectedBars): Promise<void> {
     if (!sym) return;
-    const developingBeforeFetch = snapshotDevelopingCandle(candles, iv);
+    const keepDeveloping = hasCandlesSeriesContext(sym, iv);
+    const developingBeforeFetch = keepDeveloping ? snapshotDevelopingCandle(candles, iv) : null;
 
     if (_candlesFetchInFlight) {
       _candlesFetchQueued = true;
@@ -600,12 +627,13 @@
       // Ignore stale responses if focus context changed mid-flight.
       if (focusSym !== sym || selectedInterval !== iv || selectedBars !== bars) return;
       const officialRows = Array.isArray(res?.candles) ? res.candles : [];
-      const developingCurrent = snapshotDevelopingCandle(candles, iv);
+      const developingCurrent = keepDeveloping ? snapshotDevelopingCandle(candles, iv) : null;
       candles = mergeOfficialCandlesWithDeveloping(
         officialRows,
         developingCurrent ?? developingBeforeFetch,
         bars,
       );
+      setCandlesSeriesContext(sym, iv);
     } catch {
       // Keep rendering the current candles on transient API failures.
     } finally {
@@ -629,6 +657,7 @@
     focusSym = sym;
     appState.focus = sym;
     candles = [];
+    setCandlesSeriesContext('', '');
     marks = null;
     _candlesFetchQueued = false;
     clearRolloverReconcileTimer();
@@ -647,8 +676,24 @@
     const sym  = focusSym;
     const iv = selectedInterval;
     const bars = selectedBars;
-    if (!sym) { candles = []; _prevFocusSym = ''; return; }
-    if (sym !== _prevFocusSym) { candles = []; _prevFocusSym = sym; }
+    if (!sym) {
+      candles = [];
+      _prevFocusSym = '';
+      _prevSelectedInterval = '';
+      setCandlesSeriesContext('', '');
+      return;
+    }
+    if (sym !== _prevFocusSym) {
+      candles = [];
+      _prevFocusSym = sym;
+      _prevSelectedInterval = iv;
+      setCandlesSeriesContext('', '');
+    } else if (iv !== _prevSelectedInterval) {
+      // Keep previous candles visible while reloading, but prevent mixing
+      // old-interval developing candles into the new interval series.
+      _prevSelectedInterval = iv;
+      setCandlesSeriesContext('', '');
+    }
     void reconcileCandlesForCurrentView(sym, iv, bars);
   });
 
@@ -682,11 +727,29 @@
       const msPerBar = intervalToMs(selectedInterval);
       const barStart = Math.floor(now / msPerBar) * msPerBar;
       const barClose = barStart + msPerBar - 1;
+      if (!hasCandlesSeriesContext(sym, selectedInterval)) return;
 
-      const liveIdx = newestCandleIndex(candles);
-      const c = candles[liveIdx];
-      const candleStart = Number(c?.t || 0);
+      let liveIdx = newestCandleIndex(candles);
+      let c = candles[liveIdx];
+      let candleStart = Number(c?.t || 0);
       if (!Number.isFinite(candleStart) || candleStart <= 0) return;
+
+      // During rapid interval switches, stale future candles can briefly remain.
+      // Drop them so live updates resume on the correct active interval series.
+      if (candleStart > barStart) {
+        for (let i = candles.length - 1; i >= 0; i--) {
+          const t = Number(candles[i]?.t || 0);
+          if (Number.isFinite(t) && t > barStart) {
+            candles.splice(i, 1);
+          }
+        }
+        if (candles.length === 0) return;
+        liveIdx = newestCandleAtOrBefore(candles, barStart);
+        if (liveIdx < 0) return;
+        c = candles[liveIdx];
+        candleStart = Number(c?.t || 0);
+        if (!Number.isFinite(candleStart) || candleStart <= 0) return;
+      }
 
       if (candleStart < barStart) {
         const prevClose = Number.isFinite(Number(c.c)) ? Number(c.c) : mid;
@@ -709,9 +772,6 @@
         _liveUpdateMs = localNow;
         return;
       }
-
-      // Ignore out-of-order future candles caused by temporary clock skew.
-      if (candleStart > barStart) return;
 
       const closeMs = Number(c.t_close || 0);
       if (!Number.isFinite(closeMs) || closeMs <= 0 || closeMs < barClose) {
