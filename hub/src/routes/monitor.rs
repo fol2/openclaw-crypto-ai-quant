@@ -497,12 +497,44 @@ async fn api_marks(
         Vec::new()
     };
 
+    // Fetch mid price and compute unrealised PnL
+    let mid = state
+        .sidecar
+        .get_mids(&[sym.clone()])
+        .await
+        .ok()
+        .and_then(|s| s.mids.get(&sym).copied());
+
+    let position_json = pos.as_ref().map(|p| {
+        let unreal_pnl = mid.map(|m| {
+            if p.pos_type == "LONG" {
+                (m - p.entry_price) * p.size
+            } else {
+                (p.entry_price - m) * p.size
+            }
+        });
+        json!({
+            "symbol": p.symbol,
+            "type": p.pos_type,
+            "entry_price": p.entry_price,
+            "size": p.size,
+            "leverage": p.leverage,
+            "margin_used": p.margin_used,
+            "open_trade_id": p.open_trade_id,
+            "open_timestamp": p.open_timestamp,
+            "confidence": p.confidence,
+            "entry_atr": p.entry_atr,
+            "unreal_pnl_est": unreal_pnl,
+        })
+    });
+
     Ok(Json(json!({
         "ok": true,
         "now_ts_ms": now_ms(),
         "mode": mode,
         "symbol": sym,
-        "position": pos,
+        "mid": mid,
+        "position": position_json,
         "entries": entries,
     })))
 }
