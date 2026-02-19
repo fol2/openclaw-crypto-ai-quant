@@ -640,6 +640,42 @@ class KernelOrchestrator:
             "fills_count": len(decision.fills),
             "diagnostics": decision.diagnostics,
         }
+        diagnostics = decision.diagnostics if isinstance(decision.diagnostics, dict) else {}
+        rejection_reason = str(
+            diagnostics.get("rejection_reason")
+            or diagnostics.get("reason")
+            or ""
+        ).strip() or None
+        action_text = str(decision.action or "").strip().lower()
+
+        reason_code: str | None = None
+        if action_text in {"open", "open_long", "open_short"}:
+            reason_code = "entry_signal"
+        elif action_text in {"add"}:
+            reason_code = "entry_pyramid"
+        elif action_text in {"close", "close_long", "close_short", "reduce"}:
+            reason_lower = str(rejection_reason or "").strip().lower()
+            if "stop loss" in reason_lower and "trail" not in reason_lower:
+                reason_code = "exit_stop_loss"
+            elif "trailing stop" in reason_lower or "trailing" in reason_lower:
+                reason_code = "exit_trailing_stop"
+            elif "take profit" in reason_lower or reason_lower == "tp":
+                reason_code = "exit_take_profit"
+            elif "signal flip" in reason_lower:
+                reason_code = "exit_signal_flip"
+            elif "funding" in reason_lower:
+                reason_code = "exit_funding"
+            else:
+                reason_code = "exit_filter"
+        elif action_text in {"apply_funding", "funding"}:
+            reason_code = "funding_payment"
+        elif action_text == "blocked":
+            reason_code = "exit_filter" if rejection_reason else "hold"
+        elif action_text == "hold":
+            reason_code = "hold"
+        if not reason_code:
+            reason_code = "unknown"
+
         config_fingerprint: str | None = None
         run_fingerprint = str(os.getenv("AI_QUANT_RUN_FINGERPRINT", "") or "").strip() or "unknown"
         try:
@@ -661,94 +697,49 @@ class KernelOrchestrator:
             col_rows = conn.execute("PRAGMA table_info(decision_events)").fetchall()
             has_config_fingerprint = any(str(row[1]) == "config_fingerprint" for row in col_rows)
             has_run_fingerprint = any(str(row[1]) == "run_fingerprint" for row in col_rows)
-            if has_config_fingerprint and has_run_fingerprint:
-                conn.execute(
-                    """
-                    INSERT INTO decision_events
-                        (id, timestamp_ms, symbol, event_type, status,
-                         decision_phase, triggered_by, action_taken,
-                         config_fingerprint, run_fingerprint, context_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        event_id,
-                        ts,
-                        str(symbol).upper(),
-                        "kernel_decision",
-                        "executed" if decision.ok else "error",
-                        "kernel_evaluation",
-                        "kernel_orchestrator",
-                        decision.action,
-                        config_fingerprint,
-                        run_fingerprint,
-                        json.dumps(context, separators=(",", ":")),
-                    ),
-                )
-            elif has_config_fingerprint:
-                conn.execute(
-                    """
-                    INSERT INTO decision_events
-                        (id, timestamp_ms, symbol, event_type, status,
-                         decision_phase, triggered_by, action_taken,
-                         config_fingerprint, context_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        event_id,
-                        ts,
-                        str(symbol).upper(),
-                        "kernel_decision",
-                        "executed" if decision.ok else "error",
-                        "kernel_evaluation",
-                        "kernel_orchestrator",
-                        decision.action,
-                        config_fingerprint,
-                        json.dumps(context, separators=(",", ":")),
-                    ),
-                )
-            elif has_run_fingerprint:
-                conn.execute(
-                    """
-                    INSERT INTO decision_events
-                        (id, timestamp_ms, symbol, event_type, status,
-                         decision_phase, triggered_by, action_taken,
-                         run_fingerprint, context_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        event_id,
-                        ts,
-                        str(symbol).upper(),
-                        "kernel_decision",
-                        "executed" if decision.ok else "error",
-                        "kernel_evaluation",
-                        "kernel_orchestrator",
-                        decision.action,
-                        run_fingerprint,
-                        json.dumps(context, separators=(",", ":")),
-                    ),
-                )
-            else:
-                conn.execute(
-                    """
-                    INSERT INTO decision_events
-                        (id, timestamp_ms, symbol, event_type, status,
-                         decision_phase, triggered_by, action_taken,
-                         context_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        event_id,
-                        ts,
-                        str(symbol).upper(),
-                        "kernel_decision",
-                        "executed" if decision.ok else "error",
-                        "kernel_evaluation",
-                        "kernel_orchestrator",
-                        decision.action,
-                        json.dumps(context, separators=(",", ":")),
-                    ),
-                )
+            has_reason_code = any(str(row[1]) == "reason_code" for row in col_rows)
+            has_rejection_reason = any(str(row[1]) == "rejection_reason" for row in col_rows)
+
+            columns = [
+                "id",
+                "timestamp_ms",
+                "symbol",
+                "event_type",
+                "status",
+                "decision_phase",
+                "triggered_by",
+                "action_taken",
+            ]
+            values: list[object] = [
+                event_id,
+                ts,
+                str(symbol).upper(),
+                "kernel_decision",
+                "executed" if decision.ok else "error",
+                "kernel_evaluation",
+                "kernel_orchestrator",
+                decision.action,
+            ]
+            if has_rejection_reason:
+                columns.append("rejection_reason")
+                values.append(rejection_reason)
+            if has_reason_code:
+                columns.append("reason_code")
+                values.append(reason_code)
+            if has_config_fingerprint:
+                columns.append("config_fingerprint")
+                values.append(config_fingerprint)
+            if has_run_fingerprint:
+                columns.append("run_fingerprint")
+                values.append(run_fingerprint)
+            columns.append("context_json")
+            values.append(json.dumps(context, separators=(",", ":")))
+
+            sql = (
+                f"INSERT INTO decision_events ({', '.join(columns)}) "
+                f"VALUES ({', '.join(['?'] * len(columns))})"
+            )
+            conn.execute(sql, tuple(values))
             conn.commit()
             return event_id
         except Exception:

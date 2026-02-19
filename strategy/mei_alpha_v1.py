@@ -3020,6 +3020,37 @@ def create_decision_event(
     raw_reason = str(rejection_reason or "").strip()
     ctx_dict = context if isinstance(context, dict) else {}
 
+    def _extract_reason_hint(ctx: dict) -> str:
+        candidates: list[object] = [
+            ctx.get("rejection_reason"),
+            ctx.get("reason"),
+            ctx.get("gate_reason"),
+            ctx.get("exit_reason"),
+        ]
+        meta = ctx.get("meta")
+        if isinstance(meta, dict):
+            candidates.extend(
+                [
+                    meta.get("rejection_reason"),
+                    meta.get("reason"),
+                    meta.get("gate_reason"),
+                    meta.get("exit_reason"),
+                ]
+            )
+            order = meta.get("order")
+            if isinstance(order, dict):
+                candidates.extend(
+                    [
+                        order.get("rejection_reason"),
+                        order.get("reason"),
+                    ]
+                )
+        for item in candidates:
+            text = str(item or "").strip()
+            if text:
+                return text
+        return ""
+
     def _extract_exit_kind_hint(ctx: dict) -> str:
         candidates: list[object] = [
             ctx.get("_exit_kind"),
@@ -3052,6 +3083,9 @@ def create_decision_event(
                 return text
         return ""
 
+    if not raw_reason:
+        raw_reason = _extract_reason_hint(ctx_dict)
+
     rc_text = str(reason_code or "").strip().lower()
     if not rc_text:
         if raw_action.startswith("open"):
@@ -3070,8 +3104,12 @@ def create_decision_event(
                 elif "flip" in kind or "signal" in kind:
                     raw_reason = "Signal Flip"
             rc_text = canonical_reason_code_for_trade(raw_action, None, raw_reason)
-        elif raw_action in {"blocked", "hold"}:
-            rc_text = "exit_filter" if raw_reason else "hold"
+        elif raw_action == "blocked":
+            rc_text = "exit_filter" if raw_reason else "unknown"
+        elif raw_action == "hold":
+            rc_text = "hold"
+        elif raw_action in {"apply_funding", "funding"}:
+            rc_text = "funding_payment"
         else:
             rc_text = "unknown"
     conn = None
