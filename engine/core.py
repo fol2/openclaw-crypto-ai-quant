@@ -639,6 +639,73 @@ class KernelDecisionRustBindingProvider:
         if not symbol:
             return None
 
+        timestamp_ms = raw.get("timestamp_ms")
+        try:
+            timestamp_ms = int(timestamp_ms)
+            if timestamp_ms <= 0:
+                timestamp_ms = now_ms_value
+        except (TypeError, ValueError):
+            timestamp_ms = now_ms_value
+
+        event_id = _normalise_kernel_event_id(raw.get("event_id"), self._event_id)
+        self._event_id = max(self._event_id, event_id + 1)
+
+        raw_signal = str(raw.get("signal", "")).strip().lower()
+        if raw_signal in {"evaluate", "price_update", "funding", "buy", "sell", "neutral"}:
+            # Pass-through for canonical MarketEvent payloads (evaluate/price_update/funding)
+            # while still accepting legacy buy/sell/neutral forms.
+            price = _normalise_kernel_price(raw.get("price"), default=0.0)
+            if price <= 0.0:
+                return None
+
+            signal_text = raw_signal
+            if signal_text in {"buy", "sell", "neutral"}:
+                signal_text = signal_text
+
+            payload: dict[str, Any] = {
+                "schema_version": 1,
+                "event_id": event_id,
+                "timestamp_ms": timestamp_ms,
+                "symbol": symbol,
+                "signal": signal_text,
+                "price": price,
+            }
+
+            notional_hint = _normalise_kernel_notional(
+                raw.get("notional_hint_usd"),
+                raw.get("target_size"),
+                price,
+            )
+            if notional_hint > 0.0:
+                payload["notional_hint_usd"] = notional_hint
+
+            close_fraction_raw = raw.get("close_fraction")
+            if close_fraction_raw is not None:
+                try:
+                    payload["close_fraction"] = float(close_fraction_raw)
+                except (TypeError, ValueError):
+                    pass
+
+            fee_role_raw = str(raw.get("fee_role", "") or "").strip().lower()
+            if fee_role_raw in {"maker", "taker"}:
+                payload["fee_role"] = fee_role_raw
+
+            if signal_text == "funding":
+                funding_rate_raw = raw.get("funding_rate")
+                if funding_rate_raw is not None:
+                    payload["funding_rate"] = _finite_float_or_default(funding_rate_raw, 0.0)
+
+            if signal_text == "evaluate":
+                indicators = raw.get("indicators")
+                gate_result = raw.get("gate_result")
+                if not isinstance(indicators, Mapping) or not isinstance(gate_result, Mapping):
+                    return None
+                payload["indicators"] = dict(indicators)
+                payload["gate_result"] = dict(gate_result)
+                payload["ema_slow_slope_pct"] = _finite_float_or_default(raw.get("ema_slow_slope_pct"), 0.0)
+
+            return json.dumps(payload, ensure_ascii=False)
+
         signal = _normalise_kernel_intent_signal(
             raw.get("signal"),
             raw_action=raw.get("action"),
@@ -661,17 +728,6 @@ class KernelDecisionRustBindingProvider:
             price,
         )
 
-        timestamp_ms = raw.get("timestamp_ms")
-        try:
-            timestamp_ms = int(timestamp_ms)
-            if timestamp_ms <= 0:
-                timestamp_ms = now_ms_value
-        except (TypeError, ValueError):
-            timestamp_ms = now_ms_value
-
-        event_id = _normalise_kernel_event_id(raw.get("event_id"), self._event_id)
-        self._event_id = max(self._event_id, event_id + 1)
-
         payload = {
             "schema_version": 1,
             "event_id": event_id,
@@ -692,9 +748,14 @@ class KernelDecisionRustBindingProvider:
         if not symbol:
             return None
 
+        event_now_series = event_raw.get("now_series")
+        if not isinstance(event_now_series, Mapping):
+            event_now_series = event_raw.get("indicators")
+
         result = KernelDecision.from_raw(
             {
                 "symbol": symbol,
+                "action": decision.get("action"),
                 "kind": decision.get("kind"),
                 "side": decision.get("side"),
                 "quantity": decision.get("quantity"),
@@ -704,14 +765,24 @@ class KernelDecisionRustBindingProvider:
                 "intent_id": decision.get("intent_id"),
                 "signal": event_raw.get("signal"),
                 "confidence": event_raw.get("confidence", "N/A"),
-                "now_series": event_raw.get("now_series"),
-                "entry_key": event_raw.get("entry_key"),
+                "now_series": event_now_series,
+                "entry_key": event_raw.get("entry_key", event_raw.get("event_id")),
+                "reason": decision.get("reason"),
+                "reason_code": decision.get("reason_code"),
             }
         )
         if result is None:
             return None
 
-        result.reason = f"kernel:{str(decision.get('kind', 'unknown')).strip().lower()}"
+        decision_reason = str(decision.get("reason") or "").strip()
+        if decision_reason:
+            result.reason = decision_reason
+        elif not result.reason:
+            result.reason = f"kernel:{str(decision.get('kind', 'unknown')).strip().lower()}"
+
+        decision_reason_code = str(decision.get("reason_code") or "").strip().lower()
+        if decision_reason_code:
+            result.reason_code = decision_reason_code
         return result
 
     def get_decisions(
@@ -1351,6 +1422,136 @@ class UnifiedEngine:
             logger.debug("failed to attach strategy snapshot for %s", symbol, exc_info=True)
             return
 
+    def _build_runtime_kernel_events(
+        self,
+        *,
+        mei_alpha_v1: Any,
+        symbols: list[str],
+        open_symbols: set[str],
+        not_ready_symbols: set[str],
+        now_ts_ms: int,
+    ) -> list[dict[str, Any]]:
+        """Materialise canonical Rust MarketEvent payloads for kernel-only mode.
+
+        Events are generated from runtime candles and include full evaluate payloads
+        (indicator snapshot + gate result + EMA-slow slope). For open positions where
+        candles are temporarily unavailable, a price_update fallback is emitted so
+        exit checks can still advance on price movement.
+        """
+        events: list[dict[str, Any]] = []
+        btc_bullish = self._btc_ctx.get("btc_bullish")
+        event_id_seed = int(max(1, int(now_ts_ms))) * 1000
+
+        for idx, sym in enumerate(symbols):
+            sym_u = str(sym or "").strip().upper()
+            if not sym_u:
+                continue
+            if sym_u in not_ready_symbols and sym_u not in open_symbols:
+                continue
+
+            df = self.market.get_candles_df(sym_u, interval=self.interval, min_rows=self.lookback_bars)
+            if df is None or df.empty or len(df) < 20:
+                # Fallback path for open symbols: emit a price_update so exits can keep evaluating.
+                if sym_u in open_symbols:
+                    quote = self.market.get_mid_price(sym_u, max_age_s=10.0, interval=self.interval)
+                    px = _finite_float_or_default(getattr(quote, "price", 0.0) if quote is not None else 0.0, 0.0)
+                    if px > 0.0:
+                        events.append(
+                            {
+                                "schema_version": 1,
+                                "event_id": event_id_seed + idx + 1,
+                                "timestamp_ms": int(now_ts_ms),
+                                "symbol": sym_u,
+                                "signal": "price_update",
+                                "price": px,
+                            }
+                        )
+                continue
+
+            try:
+                cfg = self.strategy.get_config(sym_u) or self.strategy.get_config("__GLOBAL__") or {}
+            except Exception:
+                cfg = {}
+
+            snap = mei_alpha_v1.build_indicator_snapshot(df, symbol=sym_u, config=cfg)
+            if not isinstance(snap, dict):
+                continue
+
+            ts_ms = int(_finite_float_or_default(snap.get("t"), float(now_ts_ms)))
+            if ts_ms <= 0:
+                ts_ms = int(now_ts_ms)
+
+            close_px = _finite_float_or_default(
+                snap.get("close"),
+                _finite_float_or_default(df["Close"].iloc[-1], 0.0),
+            )
+            if close_px <= 0.0:
+                continue
+
+            ema_slow_slope_pct = _finite_float_or_default(
+                mei_alpha_v1.compute_ema_slow_slope(df, cfg=cfg),
+                0.0,
+            )
+            gate_result = mei_alpha_v1.build_gate_result(
+                snap,
+                sym_u,
+                cfg=cfg,
+                btc_bullish=btc_bullish,
+                ema_slow_slope_pct=float(ema_slow_slope_pct),
+            )
+            if not isinstance(gate_result, dict):
+                continue
+
+            events.append(
+                {
+                    "schema_version": 1,
+                    "event_id": event_id_seed + idx + 1,
+                    "timestamp_ms": ts_ms,
+                    "symbol": sym_u,
+                    "signal": "evaluate",
+                    "price": float(close_px),
+                    "indicators": snap,
+                    "gate_result": gate_result,
+                    "ema_slow_slope_pct": float(ema_slow_slope_pct),
+                }
+            )
+
+        return events
+
+    def _write_runtime_kernel_events_file(self, *, path: str, events: list[dict[str, Any]]) -> None:
+        """Atomically write runtime kernel events for KernelDecisionRustBindingProvider."""
+        out_path = str(path or "").strip()
+        if not out_path:
+            return
+        p = Path(out_path).expanduser()
+        p.parent.mkdir(parents=True, exist_ok=True)
+
+        payload: dict[str, Any] = {"events": events}
+        blob = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+        max_bytes = _kernel_decision_file_max_bytes()
+        if len(blob) > max_bytes:
+            logger.warning(
+                "runtime kernel events exceed max payload (%d > %d bytes); writing empty batch",
+                int(len(blob)),
+                int(max_bytes),
+            )
+            payload = {"events": []}
+            blob = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+
+        tmp = p.with_name(f".{p.name}.tmp.{os.getpid()}")
+        try:
+            with open(tmp, "wb") as fh:
+                fh.write(blob)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, p)
+        finally:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+
     def _update_regime_gate(
         self,
         *,
@@ -1922,6 +2123,22 @@ class UnifiedEngine:
                     # Keep candle-readiness guard for entry paths, but never suppress
                     # decision coverage for already-open symbols (exit safety).
                     provider_not_ready = {str(s).upper() for s in not_ready_set if str(s).upper() not in open_sym_set}
+                    decision_now_ms = now_ms()
+
+                    # Kernel-only runtime event writer:
+                    # materialise evaluate/price_update MarketEvents into the configured
+                    # kernel decision file before the Rust provider reads it.
+                    if type(self.decision_provider).__name__ == "KernelDecisionRustBindingProvider":
+                        decision_path = str(os.getenv("AI_QUANT_KERNEL_DECISION_FILE", "") or "").strip()
+                        if decision_path:
+                            runtime_events = self._build_runtime_kernel_events(
+                                mei_alpha_v1=mei_alpha_v1,
+                                symbols=decision_symbols,
+                                open_symbols=open_sym_set,
+                                not_ready_symbols=provider_not_ready,
+                                now_ts_ms=int(decision_now_ms),
+                            )
+                            self._write_runtime_kernel_events_file(path=decision_path, events=runtime_events)
 
                     logger.debug(f"DEBUG: calling decision_provider.get_decisions for {len(decision_symbols)} symbols")
                     for dec in self.decision_provider.get_decisions(
@@ -1934,7 +2151,7 @@ class UnifiedEngine:
                         mode=self.mode,
                         not_ready_symbols=provider_not_ready,
                         strategy=self.strategy,
-                        now_ms=now_ms(),
+                        now_ms=int(decision_now_ms),
                     ):
                         if dec is None:
                             continue
