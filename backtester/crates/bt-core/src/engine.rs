@@ -2493,13 +2493,46 @@ fn try_pyramid(
         return;
     }
 
-    // Must be in profit by min ATR
-    let profit_atr = pos.profit_atr(snap.close);
-    if profit_atr < tc.add_min_profit_atr {
+    // Must be in profit by min ATR (with DPS parity to Python live path).
+    let mut min_profit_atr = tc.add_min_profit_atr;
+    if snap.adx_slope > 0.75 && snap.atr_slope <= 0.0 {
+        let is_rsi_extreme = match pos.pos_type {
+            PositionType::Long => snap.rsi > 65.0,
+            PositionType::Short => snap.rsi < 35.0,
+        };
+        if !is_rsi_extreme {
+            min_profit_atr *= 0.5;
+        }
+    }
+
+    let current_atr = if atr > 0.0 {
+        atr
+    } else if pos.entry_atr > 0.0 {
+        pos.entry_atr
+    } else if pos.entry_price > 0.0 {
+        pos.entry_price * 0.005
+    } else {
+        0.0
+    };
+    if current_atr <= 0.0 {
         if debug_target {
             eprintln!(
-                "[cpu-pyr-debug] sym={} ts_ms={} rejected=min_profit_atr profit_atr={:.12} min={:.12}",
-                symbol, ts, profit_atr, tc.add_min_profit_atr
+                "[cpu-pyr-debug] sym={} ts_ms={} rejected=invalid_atr atr={:.12} entry_atr={:.12} entry_price={:.12}",
+                symbol, ts, atr, pos.entry_atr, pos.entry_price
+            );
+        }
+        return;
+    }
+
+    let profit_atr = match pos.pos_type {
+        PositionType::Long => (snap.close - pos.entry_price) / current_atr,
+        PositionType::Short => (pos.entry_price - snap.close) / current_atr,
+    };
+    if profit_atr < min_profit_atr {
+        if debug_target {
+            eprintln!(
+                "[cpu-pyr-debug] sym={} ts_ms={} rejected=min_profit_atr profit_atr={:.12} min={:.12} atr={:.12} adx_slope={:.12} atr_slope={:.12} rsi={:.12}",
+                symbol, ts, profit_atr, min_profit_atr, current_atr, snap.adx_slope, snap.atr_slope, snap.rsi
             );
         }
         return;

@@ -937,8 +937,30 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
                 let add_conf_ok = conf_meets_min(add_confidence, cfg.add_min_confidence);
 
                 if same_direction && add_conf_ok && pos.adds_count < cfg.max_adds_per_symbol {
-                    let p_atr = profit_atr(pos, snap.close);
-                    if p_atr >= cfg.add_min_profit_atr {
+                    var min_profit_atr = cfg.add_min_profit_atr;
+                    if snap.adx_slope > 0.75 && snap.atr_slope <= 0.0 {
+                        let is_rsi_extreme =
+                            (pos.pos_type == POS_LONG && snap.rsi > 65.0) ||
+                            (pos.pos_type == POS_SHORT && snap.rsi < 35.0);
+                        if !is_rsi_extreme {
+                            min_profit_atr *= 0.5;
+                        }
+                    }
+
+                    var current_atr = snap.atr;
+                    if !(current_atr > 0.0) {
+                        current_atr = select(pos.entry_price * 0.005, pos.entry_atr, pos.entry_atr > 0.0);
+                    }
+                    if !(current_atr > 0.0) {
+                        continue;
+                    }
+
+                    let p_atr = select(
+                        (pos.entry_price - snap.close) / current_atr,
+                        (snap.close - pos.entry_price) / current_atr,
+                        pos.pos_type == POS_LONG
+                    );
+                    if p_atr >= min_profit_atr {
                         let elapsed_sec = snap.t_sec - pos.last_add_time_sec;
                         if elapsed_sec >= cfg.add_cooldown_minutes * 60u {
                             // Execute pyramid add (use equity = balance + unrealized PnL)
