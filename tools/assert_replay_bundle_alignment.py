@@ -171,7 +171,7 @@ def _is_sha256_hex(value: str) -> bool:
     return len(text) == 64 and all(ch in "0123456789abcdef" for ch in text)
 
 
-def _compute_locked_strategy_sha1(bundle_dir: Path, manifest: dict[str, Any]) -> tuple[str, Path]:
+def _compute_locked_strategy_hashes(bundle_dir: Path, manifest: dict[str, Any]) -> tuple[str, str, Path]:
     artefacts = manifest.get("artefacts") or {}
     snapshot_raw = str((artefacts.get("strategy_config_snapshot_file") or "strategy_overrides.locked.yaml")).strip()
     snapshot_path = Path(snapshot_raw).expanduser()
@@ -181,13 +181,19 @@ def _compute_locked_strategy_sha1(bundle_dir: Path, manifest: dict[str, Any]) ->
         snapshot_path = snapshot_path.resolve()
 
     if yaml is None or not snapshot_path.exists():
-        return "", snapshot_path
+        return "", "", snapshot_path
     try:
         raw = yaml.safe_load(snapshot_path.read_text(encoding="utf-8")) or {}
     except Exception:
-        return "", snapshot_path
+        return "", "", snapshot_path
     obj = raw if isinstance(raw, dict) else {}
-    return _hash_json_canonical(obj), snapshot_path
+    sha256 = _hash_json_canonical(obj)
+    try:
+        payload = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    except Exception:
+        payload = repr(obj).encode("utf-8")
+    sha1_legacy = hashlib.sha1(payload).hexdigest()
+    return sha256, sha1_legacy, snapshot_path
 
 
 def _gpu_lane_pass_map(report: dict[str, Any]) -> tuple[dict[str, bool], list[str]]:
@@ -440,19 +446,22 @@ def main() -> int:
                     }
                 )
             else:
-                locked_sha = str(locked_strategy.get("strategy_overrides_sha1") or "").strip().lower()
-                if len(locked_sha) < 8:
+                locked_sha256 = str(locked_strategy.get("strategy_overrides_sha1") or "").strip().lower()
+                locked_sha1_legacy = str(locked_strategy.get("strategy_overrides_sha1_legacy") or "").strip().lower()
+                if len(locked_sha256) < 8 and len(locked_sha1_legacy) < 8:
                     locked_strategy_match_ok = False
                     failures.append(
                         {
                             "code": "invalid_locked_strategy_sha1",
                             "classification": "state_initialisation_gap",
-                            "detail": "locked strategy hash is missing or too short",
+                            "detail": "locked strategy hashes are missing or too short",
                         }
                     )
                 else:
-                    computed_locked_sha, snapshot_path = _compute_locked_strategy_sha1(bundle_dir, manifest)
-                    if len(computed_locked_sha) < 8:
+                    computed_locked_sha256, computed_locked_sha1_legacy, snapshot_path = _compute_locked_strategy_hashes(
+                        bundle_dir, manifest
+                    )
+                    if len(computed_locked_sha256) < 8 and len(computed_locked_sha1_legacy) < 8:
                         locked_strategy_match_ok = False
                         failures.append(
                             {
@@ -463,18 +472,38 @@ def main() -> int:
                                 ),
                             }
                         )
-                    elif computed_locked_sha != locked_sha:
+                    elif len(locked_sha256) >= 8 and computed_locked_sha256 != locked_sha256:
                         locked_strategy_match_ok = False
                         failures.append(
                             {
                                 "code": "locked_strategy_manifest_snapshot_hash_mismatch",
                                 "classification": "state_initialisation_gap",
                                 "detail": "manifest locked strategy hash does not match snapshot YAML canonical hash",
-                                "manifest_locked_sha1_prefix8": locked_sha[:8],
-                                "snapshot_locked_sha1_prefix8": computed_locked_sha[:8],
+                                "manifest_locked_sha256_prefix8": locked_sha256[:8],
+                                "snapshot_locked_sha256_prefix8": computed_locked_sha256[:8],
                                 "snapshot_path": str(snapshot_path),
                             }
                         )
+                    elif len(locked_sha1_legacy) >= 8 and computed_locked_sha1_legacy != locked_sha1_legacy:
+                        locked_strategy_match_ok = False
+                        failures.append(
+                            {
+                                "code": "locked_strategy_manifest_snapshot_hash_mismatch_legacy",
+                                "classification": "state_initialisation_gap",
+                                "detail": (
+                                    "manifest locked legacy strategy hash does not match snapshot YAML canonical hash"
+                                ),
+                                "manifest_locked_sha1_prefix8": locked_sha1_legacy[:8],
+                                "snapshot_locked_sha1_prefix8": computed_locked_sha1_legacy[:8],
+                                "snapshot_path": str(snapshot_path),
+                            }
+                        )
+
+                    effective_locked_hashes = {
+                        str(locked_sha256 or computed_locked_sha256).strip().lower(),
+                        str(locked_sha1_legacy or computed_locked_sha1_legacy).strip().lower(),
+                    }
+                    effective_locked_hashes.discard("")
 
                     runtime_timeline = (
                         runtime_strategy.get("strategy_sha1_timeline")
@@ -483,7 +512,10 @@ def main() -> int:
                     )
                     runtime_rows = runtime_timeline if isinstance(runtime_timeline, list) else []
                     runtime_prefix_match = any(
-                        locked_sha.startswith(str(row.get("strategy_sha1") or "").strip().lower())
+                        any(
+                            candidate.startswith(str(row.get("strategy_sha1") or "").strip().lower())
+                            for candidate in effective_locked_hashes
+                        )
                         for row in runtime_rows
                         if str(row.get("strategy_sha1") or "").strip()
                     )
@@ -494,7 +526,10 @@ def main() -> int:
                                 "code": "locked_strategy_runtime_prefix_mismatch",
                                 "classification": "state_initialisation_gap",
                                 "detail": "locked strategy hash does not match any runtime strategy_sha1 prefix",
-                                "locked_strategy_sha1_prefix8": locked_sha[:8],
+                                "locked_strategy_sha256_prefix8": (locked_sha256 or computed_locked_sha256)[:8],
+                                "locked_strategy_sha1_legacy_prefix8": (
+                                    locked_sha1_legacy or computed_locked_sha1_legacy
+                                )[:8],
                             }
                         )
 
@@ -505,7 +540,7 @@ def main() -> int:
                     )
                     oms_rows = oms_timeline if isinstance(oms_timeline, list) else []
                     oms_exact_match = any(
-                        str(row.get("strategy_sha1") or "").strip().lower() == locked_sha
+                        str(row.get("strategy_sha1") or "").strip().lower() in effective_locked_hashes
                         for row in oms_rows
                     )
                     if not oms_exact_match:
@@ -515,7 +550,10 @@ def main() -> int:
                                 "code": "locked_strategy_oms_sha1_mismatch",
                                 "classification": "state_initialisation_gap",
                                 "detail": "locked strategy hash does not match any OMS strategy_sha1 in window",
-                                "locked_strategy_sha1_prefix8": locked_sha[:8],
+                                "locked_strategy_sha256_prefix8": (locked_sha256 or computed_locked_sha256)[:8],
+                                "locked_strategy_sha1_legacy_prefix8": (
+                                    locked_sha1_legacy or computed_locked_sha1_legacy
+                                )[:8],
                             }
                         )
 
