@@ -3018,6 +3018,40 @@ def create_decision_event(
     run_fp = str(run_fingerprint or "").strip() or get_run_fingerprint()
     raw_action = str(action_taken or "").strip().lower()
     raw_reason = str(rejection_reason or "").strip()
+    ctx_dict = context if isinstance(context, dict) else {}
+
+    def _extract_exit_kind_hint(ctx: dict) -> str:
+        candidates: list[object] = [
+            ctx.get("_exit_kind"),
+            ctx.get("exit_kind"),
+            ctx.get("exit_reason"),
+            ctx.get("reason"),
+        ]
+        meta = ctx.get("meta")
+        if isinstance(meta, dict):
+            candidates.extend(
+                [
+                    meta.get("_exit_kind"),
+                    meta.get("exit_kind"),
+                    meta.get("exit_reason"),
+                    meta.get("reason"),
+                ]
+            )
+            order = meta.get("order")
+            if isinstance(order, dict):
+                candidates.extend(
+                    [
+                        order.get("_exit_kind"),
+                        order.get("exit_kind"),
+                        order.get("reason"),
+                    ]
+                )
+        for item in candidates:
+            text = str(item or "").strip().lower()
+            if text:
+                return text
+        return ""
+
     rc_text = str(reason_code or "").strip().lower()
     if not rc_text:
         if raw_action.startswith("open"):
@@ -3025,6 +3059,16 @@ def create_decision_event(
         elif raw_action.startswith("add"):
             rc_text = "entry_pyramid"
         elif raw_action.startswith("close") or raw_action.startswith("reduce"):
+            if not raw_reason:
+                kind = _extract_exit_kind_hint(ctx_dict)
+                if "stop" in kind and "trail" not in kind:
+                    raw_reason = "Stop Loss"
+                elif "trail" in kind:
+                    raw_reason = "Trailing Stop"
+                elif "take" in kind or "profit" in kind or "tp" == kind:
+                    raw_reason = "Take Profit"
+                elif "flip" in kind or "signal" in kind:
+                    raw_reason = "Signal Flip"
             rc_text = canonical_reason_code_for_trade(raw_action, None, raw_reason)
         elif raw_action in {"blocked", "hold"}:
             rc_text = "exit_filter" if raw_reason else "hold"
