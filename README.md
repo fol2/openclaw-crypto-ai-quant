@@ -4,25 +4,26 @@ AI-powered crypto perpetual futures trading engine for [Hyperliquid DEX](https:/
 
 ## Screenshots
 
-### Trading Dashboard
-Real-time candlestick charts with live mid-prices, position tracking, and multi-mode support (paper / live).
+### Trade Dashboard
+Candlestick charts with trade overlays, live mid-prices, and full trade journal with PnL.
 
-![Trading Dashboard](docs/screenshots/dashboard.png)
-
-### Trade History
-Full trade journal with entry/exit details, durations, PnL, and leg breakdowns.
-
-![Trade History](docs/screenshots/dashboard-trades.png)
-
-### Strategy Config Editor
-Hot-reloadable YAML configuration with syntax highlighting, version history, and inline diff viewer.
-
-![Config Editor](docs/screenshots/config-editor.png)
+![Trade Dashboard](docs/screenshots/dashboard-trades.png)
 
 ### Service Management
 One-click start/stop/restart for all systemd services with live status indicators.
 
 ![System Management](docs/screenshots/system-management.png)
+
+### Mobile
+Fully responsive — monitor trades, prices, and services from your phone.
+
+<p align="center">
+  <img src="docs/screenshots/mobile-dashboard.png" alt="Mobile Dashboard" width="270" />
+  &nbsp;&nbsp;
+  <img src="docs/screenshots/mobile-trades.png" alt="Mobile Trades" width="270" />
+  &nbsp;&nbsp;
+  <img src="docs/screenshots/mobile-grid.png" alt="Mobile Grid" width="270" />
+</p>
 
 ## Architecture
 
