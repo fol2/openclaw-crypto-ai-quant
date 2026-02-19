@@ -96,6 +96,13 @@
     return `${sign}${pct.toFixed(2)}%`;
   }
 
+  function levColor(lev: number): string {
+    if (lev <= 2)  return 'var(--text-muted)';
+    if (lev <= 4)  return 'var(--accent)';
+    if (lev <= 7)  return 'var(--yellow)';
+    return 'var(--red)';
+  }
+
   let filteredSymbols = $derived.by(() => {
     const q = filter.trim().toUpperCase();
     let syms = symbols;
@@ -374,7 +381,7 @@
             {#if s.position}
               <span class="header-right">
                 <span class="meta-notional">{fmtNotional(posEquity(s))}</span>
-                <span class="lev-box">{Math.round(s.position.leverage ?? 1)}&times;</span>
+                <span class="lev-box" style="background:{levColor(s.position.leverage ?? 1)}">{Math.round(s.position.leverage ?? 1)}&times;</span>
               </span>
             {/if}
           </div>
