@@ -1,22 +1,6 @@
 # openclaw-crypto-ai-quant
 
-AI-powered crypto perpetual futures trading engine for Hyperliquid DEX, with GPU-accelerated backtesting.
-
-## Features
-
-- Unified paper/live trading via single daemon
-- Mei Alpha v1 strategy: multi-indicator, confidence-ranked entries
-- Signal ranking: score = confidence_rank * 100 + ADX
-- Market breadth filter, auto-reverse, ATR floor
-- Rust backtester: 149K bars x 51 symbols in ~0.075s
-- CUDA GPU sweep: 60K param combos in ~3s
-- TPE Bayesian optimization for parameter search
-- Multi-interval backtesting (entry on 1h, exit on 1m/3m/5m)
-- Strategy hot-reload via YAML
-- Config deploy pipeline: sweep → deploy → export state → replay
-- Funding rate simulation
-- Real-time monitor dashboard
-- WS sidecar for Hyperliquid market data
+AI-powered crypto perpetual futures trading engine for [Hyperliquid DEX](https://hyperliquid.xyz), with a high-performance Rust backtester featuring CPU and CUDA GPU acceleration.
 
 ## Architecture
 
@@ -27,174 +11,170 @@ AI-powered crypto perpetual futures trading engine for Hyperliquid DEX, with GPU
                     └──────┬───────┘
                            │ WS + REST
                     ┌──────▼───────┐
-                    │  WS Sidecar  │ (Rust)
-                    │  (market data)│
+                    │  WS Sidecar  │  (Rust)
+                    │ (market data) │
                     └──────┬───────┘
                            │ Unix socket
               ┌────────────▼────────────┐
-              │    Unified Engine       │
-              │      (engine/)          │
-              ├─────────┬───────────────┤
+              │     Unified Engine      │
+              │       (engine/)         │
+              ├──────────┬──────────────┤
               │  Paper   │    Live      │
               │ Trader   │   Trader     │
-              └─────────┴───────────────┘
+              ├──────────┴──────────────┤
+              │   Kernel Orchestrator   │
+              │  (Rust bt-runtime/PyO3) │
+              ├─────────────────────────┤
+              │     Risk Manager        │
+              ├─────────────────────────┤
+              │   Order Mgmt System     │
+              └────────────┬────────────┘
                            │
-              ┌────────────▼────────────┐
-              │   Monitor Dashboard     │
-              └─────────────────────────┘
+         ┌─────────────────┼─────────────────┐
+         │                 │                 │
+   ┌─────▼─────┐   ┌──────▼──────┐   ┌──────▼──────┐
+   │  Monitor   │   │  Hub (Rust  │   │  Alerting   │
+   │ Dashboard  │   │  + Svelte)  │   │  (Discord/  │
+   │ (Python)   │   │             │   │  Telegram)  │
+   └────────────┘   └─────────────┘   └─────────────┘
 
-   Standalone:
-              ┌─────────────────────────┐
-              │   Rust Backtester       │
-              │  (CPU / CUDA GPU)       │
-              └─────────────────────────┘
+Standalone:
+   ┌──────────────────────────────────────────────┐
+   │          Rust Backtester (CPU / CUDA GPU)     │
+   │  bt-core · bt-signals · bt-gpu · risk-core   │
+   └──────────────────────────────────────────────┘
+
+Nightly pipeline:
+   ┌──────────────────────────────────────────────┐
+   │  Strategy Factory (factory_run.py / cycle)    │
+   │  sweep → validate → deploy → paper → promote  │
+   └──────────────────────────────────────────────┘
 ```
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed component descriptions, data flow, and project structure.
+
+## Highlights
+
+| | |
+|---|---|
+| **Trading** | Unified paper / dry_live / live daemon with hot-reloadable YAML config |
+| **Strategy** | Mei Alpha v1 — multi-indicator, confidence-ranked entries, ATR-based risk |
+| **Decision Kernel** | Shared Rust signal logic (`bt-signals`) across backtester, GPU sweep, and live trading via PyO3 bridge |
+| **Backtester** | CPU replay + CUDA GPU sweeps (60K param combos in ~3 s) + TPE Bayesian optimisation |
+| **Factory** | Nightly pipeline: sweep → validate → deploy → paper → promote → live ramp (25% → 50% → 100%) |
+| **Risk** | Daily loss limits, drawdown kill-switch, rate limiting, exposure caps, slippage guard |
+| **Monitoring** | Python dashboard, Rust + Svelte hub, Discord / Telegram alerting |
+| **Data** | Rust WS sidecar streams Hyperliquid market data over Unix socket; maintains candle DBs |
 
 ## Quick Start
 
 ```bash
-# Clone
 git clone https://github.com/fol2/openclaw-crypto-ai-quant.git
 cd openclaw-crypto-ai-quant
 
-# Python setup (recommended: uv)
+# Python >=3.12 + uv required
 uv sync --dev
 source .venv/bin/activate
 
-# Configure
+# Configure (paper mode needs no secrets)
 cp .env.example .env
-# Paper mode does NOT require secrets.
-# For dry_live/live, keep secrets OUTSIDE the repo:
-mkdir -p ~/.config/openclaw
-cp config/secrets.json.example ~/.config/openclaw/ai-quant-secrets.json
-chmod 600 ~/.config/openclaw/ai-quant-secrets.json
-# Edit .env and ~/.config/openclaw/ai-quant-secrets.json with your values
 
 # Run paper trader
 AI_QUANT_MODE=paper python -m engine.daemon
 ```
 
-## Backtester
+For live trading, copy secrets outside the repo and set safety flags:
 
-The Rust backtester provides high-performance simulation with CPU and GPU acceleration.
+```bash
+mkdir -p ~/.config/openclaw
+cp config/secrets.json.example ~/.config/openclaw/ai-quant-secrets.json
+chmod 600 ~/.config/openclaw/ai-quant-secrets.json
+# Edit .env: AI_QUANT_MODE=live, AI_QUANT_LIVE_ENABLE=1, AI_QUANT_LIVE_CONFIRM=...
+```
+
+## Backtester
 
 ```bash
 # Build (CPU)
-cd backtester && cargo build --release
+python3 tools/build_mei_backtester.py
+
+# Build (GPU, requires CUDA)
+python3 tools/build_mei_backtester.py --gpu
 
 # Single replay
-./target/release/mei-backtester replay --candles-db ../candles_dbs/candles_1h.db
+mei-backtester replay --candles-db candles_dbs/candles_1h.db
 
 # Parameter sweep
-./target/release/mei-backtester sweep --sweep-config sweeps/smoke.yaml
+mei-backtester sweep --sweep-config sweeps/smoke.yaml
 
-# GPU sweep (requires CUDA)
-cargo build --release -p bt-cli --features gpu
-./target/release/mei-backtester sweep --gpu --sweep-spec sweeps/allgpu_60k.yaml
-
-# TPE Bayesian optimization
-./target/release/mei-backtester sweep --gpu --tpe --tpe-trials 5000 --sweep-spec sweep.yaml
+# GPU sweep + TPE
+mei-backtester sweep --gpu --tpe --tpe-trials 5000 --sweep-spec sweep.yaml
 ```
 
-See [backtester/README.md](backtester/README.md) for detailed documentation.
-
-## Strategy Factory Artifacts
-
-`factory_run.py` writes all outputs under the artifacts root directory (default: `artifacts/`) using a date-scoped layout:
-
-```
-artifacts/
-  YYYY-MM-DD/
-    run_<run_id>/
-      data_checks/
-      sweeps/
-      configs/
-      replays/
-      reports/
-      logs/
-      run_metadata.json
-```
-
-This layout is designed for reproducibility. A run directory should be self-contained: you can inspect the inputs, commands, and outputs without guessing what was executed.
+See [backtester/README.md](backtester/README.md) for candle DB partitioning, universe filtering, GPU parity lanes, and the full config deploy pipeline.
 
 ## Configuration
 
-Strategy configuration is managed through `config/strategy_overrides.yaml`, which supports hot-reload at runtime. The unified daemon watches this file and applies changes without restart.
+Strategy parameters live in `config/strategy_overrides.yaml` and **hot-reload at runtime** (no restart needed). Merge order:
 
-Key configuration sections:
+```
+code defaults ← global YAML ← per-symbol YAML ← live YAML
+```
 
-- **trade**: Position sizing, leverage, stop-loss/take-profit multipliers, pyramiding rules
-- **market_regime**: Volatility and trend classification thresholds
-- **filters**: Market breadth, volume, correlation filters
-- **indicators**: ADX, RSI, MACD, Bollinger Bands, and other technical indicator parameters
+Key sections: `trade` (sizing, SL/TP, pyramiding), `market_regime` (breadth, auto-reverse), `filters` (entry gates), `indicators` (EMA, ADX, BB windows), `engine` (intervals).
 
-Both the backtester and live engine read from the same YAML file, ensuring consistent parameter values across simulation and production.
-
-For live/dry_live operation, review `.env.example` and `systemd/ai-quant-live.env.example`. Notable safety controls:
-
-- `AI_QUANT_LIVE_ENABLE` + `AI_QUANT_LIVE_CONFIRM`: required to send real orders
-- `AI_QUANT_OMS_REQUIRE_INTENT_FOR_ENTRY`: when enabled (default), entry orders fail-closed if an OMS intent cannot be created (prevents untracked duplicates)
+See `.env.example` for all environment variables and safety controls.
 
 ## Deployment
 
-Systemd service templates are provided in the `systemd/` directory for production deployment:
+Systemd user service templates in `systemd/`:
 
-- `openclaw-ai-quant-paper.service` - Paper trading daemon
-- `openclaw-ai-quant-live.service` - Live trading daemon
-- `openclaw-ai-quant-ws-sidecar.service` - WebSocket sidecar for market data
-- `openclaw-ai-quant-monitor.service` - Real-time monitoring dashboard
+| Service | Purpose |
+|---------|---------|
+| `openclaw-ai-quant-trader` | Paper trading daemon |
+| `openclaw-ai-quant-live` | Live trading daemon |
+| `openclaw-ai-quant-ws-sidecar` | Market data WebSocket sidecar |
+| `openclaw-ai-quant-monitor` | Real-time monitoring dashboard |
+| `openclaw-ai-quant-factory` | Nightly strategy sweep (timer) |
 
-Copy the relevant templates to `/etc/systemd/system/`, customize paths and environment variables, then enable and start the services.
-
-## Project Structure
-
+```bash
+cp systemd/<template>.example ~/.config/systemd/user/<unit-name>
+systemctl --user daemon-reload
+systemctl --user enable --now <unit-name>
 ```
-.
-├── engine/                 # Unified trading engine (Python)
-│   ├── core.py             # Main trading loop (UnifiedEngine)
-│   ├── daemon.py           # Entrypoint daemon
-│   ├── market_data.py      # Candle/mid data hub
-│   ├── strategy_manager.py # YAML hot-reload
-│   ├── oms.py              # Order Management System
-│   ├── rest_client.py      # Hyperliquid REST client
-│   └── ...
-├── strategy/               # Strategy implementations
-│   └── mei_alpha_v1.py     # Signals, confidence, PaperTrader
-├── exchange/               # Exchange adapters
-│   ├── ws.py               # WebSocket client
-│   ├── sidecar.py          # WS sidecar client
-│   ├── meta.py             # Hyperliquid metadata
-│   ├── executor.py         # HyperliquidLiveExecutor
-│   └── market_watch.py     # Market watch
-├── live/                   # Live trading
-│   └── trader.py           # LiveTrader
-├── config/                 # Runtime configuration
-│   └── strategy_overrides.yaml
-├── tools/                  # Operational tools
-│   ├── deploy_sweep.py     # Deploy sweep results to YAML
-│   ├── export_state.py     # Export paper/live state to JSON
-│   └── ...
-├── backtester/             # Rust backtester (Cargo workspace)
-│   ├── crates/bt-core/     # Simulation engine + indicators
-│   ├── crates/bt-data/     # SQLite candle loader
-│   ├── crates/bt-cli/      # CLI (replay, sweep, dump-indicators)
-│   ├── crates/bt-gpu/      # CUDA GPU sweep + TPE
-│   └── sweeps/             # Sweep configs + runner scripts
-├── ws_sidecar/             # Rust WS sidecar
-├── monitor/                # Real-time dashboard
-├── scripts/                # Shell scripts (run_paper.sh, run_live.sh)
-├── systemd/                # Service templates
-└── docs/                   # Documentation
+
+See [docs/runbook.md](docs/runbook.md) for emergency stop, rollback, and diagnostics procedures.
+
+## Development
+
+```bash
+# Python
+uv sync --dev
+uv run pytest
+uv run ruff check engine strategy exchange live tools tests monitor
+uv run ruff format engine strategy exchange live tools tests monitor
+
+# Rust (backtester / ws_sidecar / hub)
+cargo build --release
+cargo test && cargo fmt --check && cargo clippy -- -D warnings
 ```
+
+Version is governed by `VERSION` (single source of truth). See [docs/release_process.md](docs/release_process.md).
 
 ## Documentation
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) - System design and component interactions
-- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) - Development setup and guidelines
-- [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) - Contribution guidelines
-- [docs/release_process.md](docs/release_process.md) - Version governance and tag-driven release flow
-- [backtester/README.md](backtester/README.md) - Backtester documentation
-- [monitor/README.md](monitor/README.md) - Dashboard documentation
+| Document | Description |
+|----------|-------------|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design, components, and project structure |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Development setup and guidelines |
+| [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Contribution guidelines |
+| [docs/runbook.md](docs/runbook.md) | Operations runbook (emergency stop, rollback, diagnostics) |
+| [docs/strategy_lifecycle.md](docs/strategy_lifecycle.md) | Config state machine (candidate → live) |
+| [docs/success_metrics.md](docs/success_metrics.md) | Risk limits and promotion criteria |
+| [docs/release_process.md](docs/release_process.md) | Version governance and tag-driven releases |
+| [backtester/README.md](backtester/README.md) | Backtester documentation |
+| [monitor/README.md](monitor/README.md) | Dashboard documentation |
+| [engine/README.md](engine/README.md) | Engine internals |
 
 ## License
 
