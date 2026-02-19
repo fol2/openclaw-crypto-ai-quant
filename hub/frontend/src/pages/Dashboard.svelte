@@ -469,6 +469,93 @@
     return idx;
   }
 
+  function finitePositive(v: unknown): number | null {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+
+  function quoteMid(quote: any): number | null {
+    const explicit = finitePositive(quote?.mid);
+    if (explicit != null) return explicit;
+    const bid = finitePositive(quote?.bid);
+    const ask = finitePositive(quote?.ask);
+    if (bid == null || ask == null) return null;
+    return (bid + ask) / 2;
+  }
+
+  function extractLiveMid(data: any, sym: string): number | null {
+    const key = String(sym || '').toUpperCase();
+    const fromBbo = quoteMid(data?.bbo?.[key] ?? data?.bbo?.[sym]);
+    if (fromBbo != null) return fromBbo;
+    return finitePositive(data?.mids?.[key] ?? data?.mids?.[sym]);
+  }
+
+  function collectLiveMidMap(data: any): Record<string, number> {
+    const out: Record<string, number> = {};
+    const midsRaw = data?.mids;
+    if (midsRaw && typeof midsRaw === 'object') {
+      for (const [sym, raw] of Object.entries(midsRaw)) {
+        const px = finitePositive(raw);
+        if (px != null) out[String(sym).toUpperCase()] = px;
+      }
+    }
+    const bboRaw = data?.bbo;
+    if (bboRaw && typeof bboRaw === 'object') {
+      for (const [sym, raw] of Object.entries(bboRaw)) {
+        const px = quoteMid(raw);
+        if (px != null) out[String(sym).toUpperCase()] = px;
+      }
+    }
+    return out;
+  }
+
+  function snapshotDevelopingCandle(rows: any[], iv: string): any | null {
+    if (!rows.length) return null;
+    const idx = newestCandleIndex(rows);
+    const src = rows[idx];
+    const t = Number(src?.t || 0);
+    if (!Number.isFinite(t) || t <= 0) return null;
+
+    const close = finitePositive(src?.c);
+    if (close == null) return null;
+    const open = finitePositive(src?.o) ?? close;
+    const high = finitePositive(src?.h) ?? Math.max(open, close);
+    const low = finitePositive(src?.l) ?? Math.min(open, close);
+    const tCloseRaw = Number(src?.t_close);
+    const tClose = Number.isFinite(tCloseRaw) && tCloseRaw > 0
+      ? tCloseRaw
+      : (t + intervalToMs(iv) - 1);
+    const volRaw = Number(src?.v);
+    const nRaw = Number(src?.n);
+
+    return {
+      t,
+      t_close: tClose,
+      o: open,
+      h: Math.max(high, open, close),
+      l: Math.min(low, open, close),
+      c: close,
+      v: Number.isFinite(volRaw) ? volRaw : 0,
+      n: Number.isFinite(nRaw) ? nRaw : 0,
+    };
+  }
+
+  function mergeOfficialCandlesWithDeveloping(officialRows: any[], developing: any | null, maxBars: number): any[] {
+    const merged = Array.isArray(officialRows) ? [...officialRows] : [];
+    if (developing) {
+      const latestTs = merged.length > 0
+        ? Number(merged[newestCandleIndex(merged)]?.t || 0)
+        : 0;
+      if (!Number.isFinite(latestTs) || latestTs < Number(developing.t || 0)) {
+        merged.push(developing);
+      }
+    }
+    if (merged.length > maxBars) {
+      return merged.slice(merged.length - maxBars);
+    }
+    return merged;
+  }
+
   // Track previous symbol so we can clear candles on symbol switch
   // (plain let — not reactive, no effect re-run on change)
   let _prevFocusSym = '';
@@ -501,6 +588,7 @@
 
   async function reconcileCandlesForCurrentView(sym = focusSym, iv = selectedInterval, bars = selectedBars): Promise<void> {
     if (!sym) return;
+    const developingBeforeFetch = snapshotDevelopingCandle(candles, iv);
 
     if (_candlesFetchInFlight) {
       _candlesFetchQueued = true;
@@ -511,7 +599,13 @@
       const res = await getCandles(sym, iv, bars);
       // Ignore stale responses if focus context changed mid-flight.
       if (focusSym !== sym || selectedInterval !== iv || selectedBars !== bars) return;
-      candles = res.candles || [];
+      const officialRows = Array.isArray(res?.candles) ? res.candles : [];
+      const developingCurrent = snapshotDevelopingCandle(candles, iv);
+      candles = mergeOfficialCandlesWithDeveloping(
+        officialRows,
+        developingCurrent ?? developingBeforeFetch,
+        bars,
+      );
     } catch {
       // Keep rendering the current candles on transient API failures.
     } finally {
@@ -580,8 +674,8 @@
       updateServerClockOffset(data?.server_ts_ms);
       const localNow = Date.now();
       if (localNow - _liveUpdateMs < 66) return; // ~15fps cap
-      const mid = Number(data?.mids?.[sym]);
-      if (!Number.isFinite(mid) || mid <= 0 || candles.length === 0) return;
+      const mid = extractLiveMid(data, sym);
+      if (mid == null || candles.length === 0) return;
 
       const wsServerNow = Number(data?.server_ts_ms);
       const now = Number.isFinite(wsServerNow) && wsServerNow > 0 ? wsServerNow : serverNowMs();
@@ -632,7 +726,11 @@
       c.l = Math.min(prevLow, mid);
     };
     hubWs.subscribe('mids', handler);
-    return () => hubWs.unsubscribe('mids', handler);
+    hubWs.subscribe('bbo', handler);
+    return () => {
+      hubWs.unsubscribe('mids', handler);
+      hubWs.unsubscribe('bbo', handler);
+    };
   });
 
   function setMode(m: string) {
@@ -686,13 +784,14 @@
   // WS owns all price data; REST owns positions/signals/heartbeat/balances.
   $effect(() => {
     const midsHandler = (data: any) => {
-      if (!snap?.symbols || !data?.mids) return;
-      const newMids = data.mids as Record<string, number>;
+      if (!snap?.symbols) return;
+      const newMids = collectLiveMidMap(data);
+      if (Object.keys(newMids).length === 0) return;
 
       // Mutate mid prices + recalculate unrealized PnL in-place.
       // Svelte 5 deep proxies track these writes automatically.
       for (const s of snap.symbols) {
-        const p = newMids[s.symbol];
+        const p = newMids[String(s.symbol).toUpperCase()];
         if (p === undefined) continue;
         s.mid = p;
         if (s.position?.entry_price != null && s.position?.size != null) {
@@ -704,7 +803,11 @@
       }
     };
     hubWs.subscribe('mids', midsHandler);
-    return () => hubWs.unsubscribe('mids', midsHandler);
+    hubWs.subscribe('bbo', midsHandler);
+    return () => {
+      hubWs.unsubscribe('mids', midsHandler);
+      hubWs.unsubscribe('bbo', midsHandler);
+    };
   });
 
   // ── Manual trade feature check ─────────────────────────────────────────────
