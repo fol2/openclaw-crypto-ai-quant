@@ -1609,10 +1609,6 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                 let mut sub_candidates: Vec<EntryCandidate> = Vec::new();
 
                 for sym in &symbols {
-                    // Skip if position already open
-                    if state.positions.contains_key(sym.as_str()) {
-                        continue;
-                    }
                     // Skip warmup
                     let bc = state.bar_counts.get(sym.as_str()).copied().unwrap_or(0);
                     if bc < lookback {
@@ -1657,6 +1653,31 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                                         slope,
                                         eval_ts,
                                     ) {
+                                        // Sub-bar path parity with indicator-bar path:
+                                        // if the symbol already has a same-direction position,
+                                        // route accepted signal into pyramiding checks instead
+                                        // of ranking as a fresh OPEN candidate.
+                                        let existing_pos_type =
+                                            state.positions.get(sym.as_str()).map(|pos| pos.pos_type);
+                                        if let Some(pos_type) = existing_pos_type {
+                                            let desired_type = match cand.signal {
+                                                Signal::Buy => PositionType::Long,
+                                                Signal::Sell => PositionType::Short,
+                                                Signal::Neutral => continue,
+                                            };
+                                            if pos_type == desired_type && cfg.trade.enable_pyramiding {
+                                                try_pyramid(
+                                                    &mut state,
+                                                    sym.as_str(),
+                                                    &cand.snap,
+                                                    cfg,
+                                                    cand.confidence,
+                                                    cand.atr,
+                                                    cand.ts,
+                                                );
+                                            }
+                                            continue;
+                                        }
                                         sub_candidates.push(cand);
                                     }
                                 }
@@ -2695,10 +2716,6 @@ fn evaluate_sub_bar_candidate(
     ema_slow_slope_pct: f64,
     ts: i64,
 ) -> Option<EntryCandidate> {
-    if state.positions.contains_key(sym) {
-        return None;
-    }
-
     let gate_result = gates::check_gates(snap, cfg, sym, btc_bullish, ema_slow_slope_pct);
     let (mut signal, confidence, entry_adx_threshold) =
         entry::generate_signal(snap, &gate_result, cfg, ema_slow_slope_pct);
