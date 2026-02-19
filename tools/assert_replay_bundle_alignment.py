@@ -218,6 +218,23 @@ def main() -> int:
                 )
         else:
             distinct_sha = _as_int(runtime_strategy.get("strategy_sha1_distinct"), 0)
+            strategy_rows_sampled = _as_int(runtime_strategy.get("strategy_rows_sampled"), 0)
+            timeline = runtime_strategy.get("strategy_sha1_timeline")
+            timeline_count = len(timeline) if isinstance(timeline, list) else 0
+            if args.require_runtime_strategy_provenance and (strategy_rows_sampled <= 0 or timeline_count <= 0):
+                strategy_runtime_stability_ok = False
+                failures.append(
+                    {
+                        "code": "empty_runtime_strategy_provenance",
+                        "classification": "state_initialisation_gap",
+                        "detail": "runtime strategy provenance is present but contains no sampled strategy_sha1 rows",
+                        "counts": {
+                            "strategy_rows_sampled": strategy_rows_sampled,
+                            "strategy_sha1_timeline_count": timeline_count,
+                            "runtime_rows_in_window": _as_int(runtime_strategy.get("runtime_rows_in_window"), 0),
+                        },
+                    }
+                )
             max_distinct = args.max_strategy_sha1_distinct
             if max_distinct is not None and distinct_sha > int(max_distinct):
                 strategy_runtime_stability_ok = False
@@ -232,7 +249,7 @@ def main() -> int:
                         "counts": {
                             "strategy_sha1_distinct": distinct_sha,
                             "strategy_version_distinct": _as_int(runtime_strategy.get("strategy_version_distinct"), 0),
-                            "strategy_rows_sampled": _as_int(runtime_strategy.get("strategy_rows_sampled"), 0),
+                            "strategy_rows_sampled": strategy_rows_sampled,
                             "runtime_rows_in_window": _as_int(runtime_strategy.get("runtime_rows_in_window"), 0),
                         },
                     }
