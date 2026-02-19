@@ -727,18 +727,27 @@
     }
     .symbol-grid {
       grid-template-columns: repeat(2, 1fr) !important;
-      gap: 8px;
+      gap: 0;
+      margin-left: calc(-1 * var(--sp-md));
+      margin-right: calc(-1 * var(--sp-md));
+    }
+    .grid-cell {
+      padding: 10px;
+      border-radius: 0;
+      border: none;
+    }
+    .grid-cell.has-position::before {
+      border-radius: 0;
     }
     .cell-price { font-size: 15px; }
-    .grid-cell { padding: 10px; }
   }
 
   @media (orientation: landscape) and (max-height: 500px) {
     .symbol-grid {
       grid-template-columns: repeat(3, 1fr) !important;
-      gap: 8px;
+      gap: 0;
     }
-    .grid-cell { padding: 8px; }
+    .grid-cell { padding: 8px; border: none; }
     .cell-price { font-size: 13px; }
   }
 </style>
