@@ -2135,38 +2135,9 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 confidence=confidence,
             )
 
-        pos = (self.positions or {}).get(sym)
-        if pos:
-            is_flip = (pos.get("type") == "LONG" and signal == "SELL") or (
-                pos.get("type") == "SHORT" and signal == "BUY"
-            )
-            if is_flip:
-                self.close_position(
-                    sym,
-                    price,
-                    timestamp,
-                    reason=f"Signal Flip ({confidence})"
-                    + (
-                        " [REVERSED]"
-                        if (indicators if indicators is not None else {}).get("_reversed_entry") is True
-                        else ""
-                    ),
-                    meta={
-                        "audit": audit if isinstance(audit, dict) else None,
-                        "breadth_pct": float((indicators if indicators is not None else {}).get("_market_breadth_pct"))
-                        if (indicators if indicators is not None else {}).get("_market_breadth_pct") is not None
-                        else None,
-                        "exit": {"kind": "SIGNAL_FLIP", "confidence": str(confidence or "")},
-                    },
-                )
-                return
-
-            is_same_dir = (pos.get("type") == "LONG" and signal == "BUY") or (
-                pos.get("type") == "SHORT" and signal == "SELL"
-            )
-            if is_same_dir:
-                self.add_to_position(sym, price, timestamp, confidence, atr=atr, indicators=indicators)
-                return
+        # OPEN path is kernel-action driven; do not run legacy signal flip/add logic.
+        if sym in (self.positions or {}):
+            return
 
         if signal == "NEUTRAL":
             return
