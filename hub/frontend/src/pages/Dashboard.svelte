@@ -638,12 +638,22 @@
   function setMode(m: string) {
     appState.mode = m;
     focusSym = '';
+    // Reset journey state for the new mode
+    journeys = [];
+    selectedJourney = null;
+    journeyCandles = [];
+    journeyMarks = [];
+    journeyOffset = 0;
+    journeyHasMore = true;
     refresh();
+    if (detailTab === 'trades') {
+      void fetchJourneys(true);
+    }
   }
 
   function setFeed(f: 'trades' | 'oms' | 'audit') {
     detailTab = f;
-    if (f === 'trades' && journeys.length === 0) {
+    if (f === 'trades') {
       void fetchJourneys(true);
     }
   }
