@@ -378,35 +378,33 @@
               </span>
             {/if}
           </div>
-          <div class="cell-price">
-            <mid-price
-              symbol={s.symbol}
-              value={(mids[s.symbol] ?? s.mid) != null ? String(mids[s.symbol] ?? s.mid) : ''}
-              decimals={adaptiveDecimals(mids[s.symbol] ?? s.mid)}
-              tone="grid"
-            ></mid-price>
+          <div class="cell-price-row">
+            <span class="cell-price">
+              <mid-price
+                symbol={s.symbol}
+                value={(mids[s.symbol] ?? s.mid) != null ? String(mids[s.symbol] ?? s.mid) : ''}
+                decimals={adaptiveDecimals(mids[s.symbol] ?? s.mid)}
+                tone="grid"
+              ></mid-price>
+            </span>
+            {#if s.position}
+              {@const pnl = livePnlPct(s)}
+              <span class="entry-at">@{s.position.entry_price.toFixed(adaptiveDecimals(s.position.entry_price))}</span>
+              <span class="pnl-badge" class:up={pnl >= 0} class:down={pnl < 0}>{fmtPnl(pnl)}</span>
+            {/if}
           </div>
           {#if s.signal}
             <div class="cell-signal">
               <span class="signal-badge">{s.signal}</span>
             </div>
           {/if}
-          <div class="cell-candle-area">
-            {#if s.position}
-              {@const pnl = livePnlPct(s)}
-              <div class="pos-overlay">
-                <span class="entry-at">@{s.position.entry_price.toFixed(adaptiveDecimals(s.position.entry_price))}</span>
-                <span class="pnl-badge" class:up={pnl >= 0} class:down={pnl < 0}>{fmtPnl(pnl)}</span>
-              </div>
-            {/if}
-            <div class="cell-candles">
-              <mini-candles
-                candles={JSON.stringify(liveCandles(s.symbol))}
-                width={200}
-                height={56}
-                live
-              ></mini-candles>
-            </div>
+          <div class="cell-candles">
+            <mini-candles
+              candles={JSON.stringify(liveCandles(s.symbol))}
+              width={200}
+              height={56}
+              live
+            ></mini-candles>
           </div>
         </div>
       {/each}
@@ -592,11 +590,16 @@
     letter-spacing: 0.02em;
   }
 
+  .cell-price-row {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    margin-bottom: 4px;
+  }
   .cell-price {
     font-size: 18px;
     font-weight: 600;
     font-family: 'IBM Plex Mono', monospace;
-    margin-bottom: 1px;
     letter-spacing: -0.01em;
   }
 
@@ -633,24 +636,7 @@
     font-weight: 600;
   }
 
-  /* ── Candle area + position overlay ───────────────── */
-  .cell-candle-area {
-    position: relative;
-    margin-top: 2px;
-  }
-  .cell-candles { }
-  .pos-overlay {
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    z-index: 1;
-    display: flex;
-    align-items: baseline;
-    gap: 6px;
-    font-family: 'IBM Plex Mono', monospace;
-    pointer-events: none;
-  }
+  .cell-candles { margin-top: 6px; }
   .entry-at {
     font-size: 12px;
     font-weight: 500;
