@@ -116,6 +116,16 @@ pub struct FlashDebugBatch {
     events: Vec<FlashDebugEvent>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct TrendClosesQuery {
+    #[serde(default = "default_trend_interval")]
+    interval: String,
+    #[serde(default = "default_trend_limit")]
+    limit: u32,
+}
+fn default_trend_interval() -> String { "5m".to_string() }
+fn default_trend_limit() -> u32 { 60 }
+
 // ── Route definitions ────────────────────────────────────────────────────
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -129,6 +139,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/sparkline", get(api_sparkline))
         .route("/api/journeys", get(api_journeys))
         .route("/api/candles/range", get(api_candles_range))
+        .route("/api/trend-closes", get(api_trend_closes))
         .route("/api/metrics", get(api_metrics))
         .route("/metrics", get(api_prometheus))
 }
@@ -612,6 +623,26 @@ async fn api_candles_range(
         "count": data.len(),
         "candles": data,
     })))
+}
+
+async fn api_trend_closes(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<TrendClosesQuery>,
+) -> Result<Json<Value>, HubError> {
+    let interval = q.interval;
+    let limit = q.limit.clamp(2, 200);
+
+    let tracked = state.tracked_symbols.read().await;
+    let symbols: Vec<String> = tracked.clone();
+    drop(tracked);
+
+    let candle_path = state.candle_db_path(&interval);
+    let pool = open_ro_pool(&candle_path, 2)
+        .ok_or_else(|| HubError::Db(format!("candle db not available for {interval}")))?;
+    let conn = pool.get()?;
+
+    let data = candles::fetch_recent_closes_batch(&conn, &symbols, &interval, limit)?;
+    Ok(Json(json!({ "interval": interval, "limit": limit, "closes": data })))
 }
 
 async fn api_sparkline(

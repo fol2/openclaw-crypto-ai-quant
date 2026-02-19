@@ -132,6 +132,24 @@ pub fn fetch_candles_range(
     Ok(candles)
 }
 
+/// Fetch last N close prices for multiple symbols in one go.
+pub fn fetch_recent_closes_batch(
+    conn: &Connection,
+    symbols: &[String],
+    interval: &str,
+    limit: u32,
+) -> Result<std::collections::HashMap<String, Vec<f64>>, HubError> {
+    let mut out = std::collections::HashMap::new();
+    for sym in symbols {
+        let candles = fetch_candles(conn, sym, interval, limit)?;
+        let closes: Vec<f64> = candles.iter().map(|c| c.c).collect();
+        if !closes.is_empty() {
+            out.insert(sym.clone(), closes);
+        }
+    }
+    Ok(out)
+}
+
 /// List available candle intervals by scanning DB files in the candles directory.
 pub fn list_available_intervals(candles_dir: &std::path::Path) -> Vec<String> {
     let mut intervals: Vec<String> = Vec::new();
