@@ -117,9 +117,13 @@ def _reconstruct_positions(
         if leverage <= 0.0:
             leverage = 1.0
         margin_used = float(row["margin_used"] or (abs(net_size) * avg_entry / leverage))
+        adds_count = 0
+        tp1_taken = False
+        last_add_time_ms = 0
+        entry_adx_threshold = 0.0
 
         fills_q = (
-            "SELECT action, price, size, entry_atr FROM trades "
+            "SELECT action, price, size, entry_atr, timestamp FROM trades "
             "WHERE symbol = ? AND id > ? AND action IN ('ADD', 'REDUCE')"
         )
         fills_params: list[Any] = [symbol, open_id]
@@ -144,6 +148,10 @@ def _reconstruct_positions(
                     elif fill_atr > 0:
                         entry_atr = fill_atr
                     net_size = new_total
+                    adds_count += 1
+                    fill_ts = _parse_timestamp_ms(fill["timestamp"])
+                    if fill_ts > 0:
+                        last_add_time_ms = max(last_add_time_ms, int(fill_ts))
             elif action == "REDUCE":
                 net_size -= sz
                 if net_size <= 0.0:
@@ -153,26 +161,30 @@ def _reconstruct_positions(
         if net_size <= 0.0:
             continue
 
+        margin_used = abs(net_size) * avg_entry / leverage if leverage > 0 else 0.0
         trailing_sl = None
-        adds_count = 0
-        tp1_taken = False
-        last_add_time_ms = 0
-        entry_adx_threshold = 0.0
 
-        if as_of_ts is None and _table_exists(conn, "position_state"):
+        if _table_exists(conn, "position_state"):
             ps_row = conn.execute(
-                "SELECT open_trade_id, trailing_sl, adds_count, tp1_taken, last_add_time, entry_adx_threshold "
+                "SELECT open_trade_id, trailing_sl, adds_count, tp1_taken, last_add_time, entry_adx_threshold, updated_at "
                 "FROM position_state WHERE symbol = ? LIMIT 1",
                 (symbol,),
             ).fetchone()
             if ps_row:
                 open_trade_id = ps_row["open_trade_id"]
                 if open_trade_id is None or int(open_trade_id) == open_id:
-                    trailing_sl = float(ps_row["trailing_sl"]) if ps_row["trailing_sl"] is not None else None
-                    adds_count = int(ps_row["adds_count"] or 0)
-                    tp1_taken = bool(ps_row["tp1_taken"] or 0)
-                    last_add_time_ms = int(ps_row["last_add_time"] or 0)
-                    entry_adx_threshold = float(ps_row["entry_adx_threshold"] or 0.0)
+                    if as_of_ts is not None:
+                        updated_at_ms = _parse_timestamp_ms(ps_row["updated_at"])
+                        if updated_at_ms > 0 and updated_at_ms > int(as_of_ts):
+                            ps_row = None
+                    if ps_row is not None:
+                        trailing_sl = float(ps_row["trailing_sl"]) if ps_row["trailing_sl"] is not None else None
+                        adds_count = int(ps_row["adds_count"] or 0)
+                        tp1_taken = bool(ps_row["tp1_taken"] or 0)
+                        last_add_time_ms = int(ps_row["last_add_time"] or 0)
+                        if as_of_ts is not None and last_add_time_ms > int(as_of_ts):
+                            last_add_time_ms = 0
+                        entry_adx_threshold = float(ps_row["entry_adx_threshold"] or 0.0)
 
         positions.append(
             {
