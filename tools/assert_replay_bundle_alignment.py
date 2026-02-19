@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,11 @@ try:
     from candles_provenance import build_candles_window_provenance
 except ModuleNotFoundError:  # pragma: no cover - module execution path
     from tools.candles_provenance import build_candles_window_provenance
+
+try:
+    import yaml
+except Exception:  # pragma: no cover - optional runtime dependency
+    yaml = None
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -113,6 +119,24 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Maximum allowed distinct runtime strategy_sha1 within the replay window",
     )
+    parser.add_argument(
+        "--require-oms-strategy-provenance",
+        action="store_true",
+        default=False,
+        help="Fail when manifest OMS strategy provenance is missing",
+    )
+    parser.add_argument(
+        "--max-oms-strategy-sha1-distinct",
+        type=int,
+        default=None,
+        help="Maximum allowed distinct OMS strategy_sha1 within the replay window",
+    )
+    parser.add_argument(
+        "--require-locked-strategy-match",
+        action="store_true",
+        default=False,
+        help="Fail when locked strategy hash cannot be matched against runtime/OMS provenance",
+    )
     return parser
 
 
@@ -132,6 +156,33 @@ def _as_int(value: Any, default: int = 0) -> int:
         return int(value)
     except Exception:
         return int(default)
+
+
+def _hash_json_canonical(obj: Any) -> str:
+    try:
+        payload = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    except Exception:
+        payload = repr(obj).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _compute_locked_strategy_sha1(bundle_dir: Path, manifest: dict[str, Any]) -> tuple[str, Path]:
+    artefacts = manifest.get("artefacts") or {}
+    snapshot_raw = str((artefacts.get("strategy_config_snapshot_file") or "strategy_overrides.locked.yaml")).strip()
+    snapshot_path = Path(snapshot_raw).expanduser()
+    if not snapshot_path.is_absolute():
+        snapshot_path = (bundle_dir / snapshot_path).resolve()
+    else:
+        snapshot_path = snapshot_path.resolve()
+
+    if yaml is None or not snapshot_path.exists():
+        return "", snapshot_path
+    try:
+        raw = yaml.safe_load(snapshot_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return "", snapshot_path
+    obj = raw if isinstance(raw, dict) else {}
+    return _hash_json_canonical(obj), snapshot_path
 
 
 def _gpu_lane_pass_map(report: dict[str, Any]) -> tuple[dict[str, bool], list[str]]:
@@ -204,8 +255,12 @@ def main() -> int:
             )
 
     strategy_runtime_stability_ok = True
+    strategy_oms_stability_ok = True
+    locked_strategy_match_ok = True
     if manifest is not None:
         runtime_strategy = manifest.get("runtime_strategy_provenance")
+        oms_strategy = manifest.get("oms_strategy_provenance")
+        locked_strategy = manifest.get("locked_strategy_provenance")
         if not isinstance(runtime_strategy, dict):
             strategy_runtime_stability_ok = False
             if args.require_runtime_strategy_provenance:
@@ -254,6 +309,145 @@ def main() -> int:
                         },
                     }
                 )
+
+        if not isinstance(oms_strategy, dict):
+            strategy_oms_stability_ok = False
+            if args.require_oms_strategy_provenance or args.require_locked_strategy_match:
+                failures.append(
+                    {
+                        "code": "missing_oms_strategy_provenance",
+                        "classification": "state_initialisation_gap",
+                        "detail": "manifest.oms_strategy_provenance is missing",
+                    }
+                )
+        else:
+            oms_distinct_sha = _as_int(oms_strategy.get("strategy_sha1_distinct"), 0)
+            oms_rows_sampled = _as_int(oms_strategy.get("oms_rows_sampled"), 0)
+            oms_timeline = oms_strategy.get("strategy_sha1_timeline")
+            oms_timeline_count = len(oms_timeline) if isinstance(oms_timeline, list) else 0
+            if (args.require_oms_strategy_provenance or args.require_locked_strategy_match) and (
+                oms_rows_sampled <= 0 or oms_timeline_count <= 0
+            ):
+                strategy_oms_stability_ok = False
+                failures.append(
+                    {
+                        "code": "empty_oms_strategy_provenance",
+                        "classification": "state_initialisation_gap",
+                        "detail": "OMS strategy provenance is present but contains no sampled strategy_sha1 rows",
+                        "counts": {
+                            "oms_rows_sampled": oms_rows_sampled,
+                            "strategy_sha1_timeline_count": oms_timeline_count,
+                        },
+                    }
+                )
+            max_oms_distinct = args.max_oms_strategy_sha1_distinct
+            if max_oms_distinct is not None and oms_distinct_sha > int(max_oms_distinct):
+                strategy_oms_stability_ok = False
+                failures.append(
+                    {
+                        "code": "strategy_config_drift_within_oms_window",
+                        "classification": "state_initialisation_gap",
+                        "detail": (
+                            f"OMS strategy_sha1 drift exceeded limit: "
+                            f"distinct={oms_distinct_sha} > max={int(max_oms_distinct)}"
+                        ),
+                        "counts": {
+                            "strategy_sha1_distinct": oms_distinct_sha,
+                            "strategy_version_distinct": _as_int(oms_strategy.get("strategy_version_distinct"), 0),
+                            "oms_rows_sampled": oms_rows_sampled,
+                        },
+                    }
+                )
+
+        if args.require_locked_strategy_match:
+            if not isinstance(locked_strategy, dict):
+                locked_strategy_match_ok = False
+                failures.append(
+                    {
+                        "code": "missing_locked_strategy_provenance",
+                        "classification": "state_initialisation_gap",
+                        "detail": "manifest.locked_strategy_provenance is missing",
+                    }
+                )
+            else:
+                locked_sha = str(locked_strategy.get("strategy_overrides_sha1") or "").strip().lower()
+                if len(locked_sha) < 8:
+                    locked_strategy_match_ok = False
+                    failures.append(
+                        {
+                            "code": "invalid_locked_strategy_sha1",
+                            "classification": "state_initialisation_gap",
+                            "detail": "locked strategy hash is missing or too short",
+                        }
+                    )
+                else:
+                    computed_locked_sha, snapshot_path = _compute_locked_strategy_sha1(bundle_dir, manifest)
+                    if len(computed_locked_sha) < 8:
+                        locked_strategy_match_ok = False
+                        failures.append(
+                            {
+                                "code": "locked_strategy_snapshot_hash_unavailable",
+                                "classification": "state_initialisation_gap",
+                                "detail": (
+                                    f"unable to compute locked strategy hash from snapshot file: {snapshot_path}"
+                                ),
+                            }
+                        )
+                    elif computed_locked_sha != locked_sha:
+                        locked_strategy_match_ok = False
+                        failures.append(
+                            {
+                                "code": "locked_strategy_manifest_snapshot_hash_mismatch",
+                                "classification": "state_initialisation_gap",
+                                "detail": "manifest locked strategy hash does not match snapshot YAML canonical hash",
+                                "manifest_locked_sha1_prefix8": locked_sha[:8],
+                                "snapshot_locked_sha1_prefix8": computed_locked_sha[:8],
+                                "snapshot_path": str(snapshot_path),
+                            }
+                        )
+
+                    runtime_timeline = (
+                        runtime_strategy.get("strategy_sha1_timeline")
+                        if isinstance(runtime_strategy, dict)
+                        else []
+                    )
+                    runtime_rows = runtime_timeline if isinstance(runtime_timeline, list) else []
+                    runtime_prefix_match = any(
+                        locked_sha.startswith(str(row.get("strategy_sha1") or "").strip().lower())
+                        for row in runtime_rows
+                        if str(row.get("strategy_sha1") or "").strip()
+                    )
+                    if not runtime_prefix_match:
+                        locked_strategy_match_ok = False
+                        failures.append(
+                            {
+                                "code": "locked_strategy_runtime_prefix_mismatch",
+                                "classification": "state_initialisation_gap",
+                                "detail": "locked strategy hash does not match any runtime strategy_sha1 prefix",
+                                "locked_strategy_sha1_prefix8": locked_sha[:8],
+                            }
+                        )
+
+                    oms_timeline = (
+                        oms_strategy.get("strategy_sha1_timeline")
+                        if isinstance(oms_strategy, dict)
+                        else []
+                    )
+                    oms_rows = oms_timeline if isinstance(oms_timeline, list) else []
+                    oms_exact_match = any(
+                        str(row.get("strategy_sha1") or "").strip().lower() == locked_sha
+                        for row in oms_rows
+                    )
+                    if not oms_exact_match:
+                        locked_strategy_match_ok = False
+                        failures.append(
+                            {
+                                "code": "locked_strategy_oms_sha1_mismatch",
+                                "classification": "state_initialisation_gap",
+                                "detail": "locked strategy hash does not match any OMS strategy_sha1 in window",
+                                "locked_strategy_sha1_prefix8": locked_sha[:8],
+                            }
+                        )
 
     if candles_provenance_checked and manifest is not None:
         manifest_inputs = manifest.get("inputs") or {}
@@ -614,6 +808,11 @@ def main() -> int:
             "max_strategy_sha1_distinct": int(args.max_strategy_sha1_distinct)
             if args.max_strategy_sha1_distinct is not None
             else None,
+            "require_oms_strategy_provenance": bool(args.require_oms_strategy_provenance),
+            "max_oms_strategy_sha1_distinct": int(args.max_oms_strategy_sha1_distinct)
+            if args.max_oms_strategy_sha1_distinct is not None
+            else None,
+            "require_locked_strategy_match": bool(args.require_locked_strategy_match),
             "state_report": str(state_path),
             "trade_report": str(trade_path),
             "action_report": str(action_path),
@@ -630,6 +829,8 @@ def main() -> int:
         "checks": {
             "manifest_present": manifest is not None,
             "strategy_runtime_stability_ok": strategy_runtime_stability_ok,
+            "strategy_oms_stability_ok": strategy_oms_stability_ok,
+            "locked_strategy_match_ok": locked_strategy_match_ok,
             "candles_provenance_checked": candles_provenance_checked,
             "candles_provenance_ok": candles_provenance_ok,
             "state_ok": bool(state_report.get("ok")) if state_report is not None else False,

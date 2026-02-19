@@ -77,6 +77,32 @@ def _hash_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _hash_json_canonical(obj: Any) -> str:
+    try:
+        payload = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    except Exception:
+        payload = repr(obj).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _load_yaml_mapping(path: Path) -> dict[str, Any] | None:
+    if yaml is None or not path.exists():
+        return None
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return None
+    return raw if isinstance(raw, dict) else {}
+
+
+def _strategy_overrides_sha1(path: Path) -> str:
+    """Return StrategyManager-compatible overrides hash (legacy name; SHA-256 digest)."""
+    loaded = _load_yaml_mapping(path)
+    if loaded is None:
+        return ""
+    return _hash_json_canonical(loaded)
+
+
 def _interval_to_bucket_ms(interval: str) -> int:
     raw = str(interval or "").strip().lower()
     if not raw:
@@ -279,6 +305,82 @@ def _load_runtime_strategy_provenance(
     }
 
 
+def _load_oms_strategy_provenance(
+    live_db: Path,
+    *,
+    from_ts: int,
+    to_ts: int,
+) -> dict[str, Any]:
+    conn = _connect_ro(live_db)
+    try:
+        rows = conn.execute(
+            "SELECT COALESCE(decision_ts_ms, created_ts_ms) AS ts_ms, strategy_sha1, strategy_version "
+            "FROM oms_intents "
+            "WHERE COALESCE(decision_ts_ms, created_ts_ms) >= ? AND COALESCE(decision_ts_ms, created_ts_ms) <= ? "
+            "  AND strategy_sha1 IS NOT NULL AND TRIM(strategy_sha1) <> '' "
+            "ORDER BY ts_ms ASC, created_ts_ms ASC, intent_id ASC",
+            (int(from_ts), int(to_ts)),
+        ).fetchall()
+    except Exception:
+        rows = []
+    finally:
+        conn.close()
+
+    per_sha: dict[str, dict[str, Any]] = {}
+    distinct_versions: set[str] = set()
+    sampled_rows = 0
+
+    for row in rows:
+        ts_ms = int(row["ts_ms"] or 0)
+        sha = str(row["strategy_sha1"] or "").strip().lower()
+        version = str(row["strategy_version"] or "").strip()
+        if ts_ms <= 0 or not sha:
+            continue
+
+        sampled_rows += 1
+        bucket = per_sha.get(sha)
+        if bucket is None:
+            bucket = {
+                "strategy_sha1": sha,
+                "sample_count": 0,
+                "first_ts_ms": ts_ms,
+                "last_ts_ms": ts_ms,
+                "versions": set(),
+            }
+            per_sha[sha] = bucket
+
+        bucket["sample_count"] = int(bucket["sample_count"]) + 1
+        bucket["first_ts_ms"] = min(int(bucket["first_ts_ms"]), ts_ms)
+        bucket["last_ts_ms"] = max(int(bucket["last_ts_ms"]), ts_ms)
+        if version:
+            cast_versions = bucket["versions"]
+            if isinstance(cast_versions, set):
+                cast_versions.add(version)
+            distinct_versions.add(version)
+
+    strategy_rows: list[dict[str, Any]] = []
+    for _, item in sorted(per_sha.items(), key=lambda kv: int(kv[1]["first_ts_ms"])):
+        versions = item.get("versions")
+        strategy_rows.append(
+            {
+                "strategy_sha1": str(item["strategy_sha1"]),
+                "sample_count": int(item["sample_count"]),
+                "first_ts_ms": int(item["first_ts_ms"]),
+                "last_ts_ms": int(item["last_ts_ms"]),
+                "versions": sorted(str(v) for v in versions) if isinstance(versions, set) else [],
+            }
+        )
+
+    return {
+        "window_from_ts": int(from_ts),
+        "window_to_ts": int(to_ts),
+        "oms_rows_sampled": int(sampled_rows),
+        "strategy_sha1_distinct": len(strategy_rows),
+        "strategy_version_distinct": len(distinct_versions),
+        "strategy_sha1_timeline": strategy_rows,
+    }
+
+
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
@@ -355,12 +457,35 @@ def main() -> int:
         from_ts=int(args.from_ts),
         to_ts=int(args.to_ts),
     )
+    oms_strategy_provenance = _load_oms_strategy_provenance(
+        live_db,
+        from_ts=int(args.from_ts),
+        to_ts=int(args.to_ts),
+    )
 
     with live_trades_path.open("w", encoding="utf-8") as fp:
         for row in baseline_trades:
             fp.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False) + "\n")
 
     shutil.copy2(strategy_config_source, strategy_config_snapshot_path)
+    locked_strategy_sha1 = _strategy_overrides_sha1(strategy_config_snapshot_path)
+    runtime_timeline = runtime_strategy_provenance.get("strategy_sha1_timeline")
+    runtime_rows = runtime_timeline if isinstance(runtime_timeline, list) else []
+    matching_runtime_prefixes = sorted(
+        {
+            str(row.get("strategy_sha1") or "").strip().lower()
+            for row in runtime_rows
+            if str(row.get("strategy_sha1") or "").strip()
+            and str(locked_strategy_sha1).startswith(str(row.get("strategy_sha1") or "").strip().lower())
+        }
+    )
+    oms_timeline = oms_strategy_provenance.get("strategy_sha1_timeline")
+    oms_rows = oms_timeline if isinstance(oms_timeline, list) else []
+    matches_oms_sha1 = any(
+        str(row.get("strategy_sha1") or "").strip().lower() == str(locked_strategy_sha1).strip().lower()
+        for row in oms_rows
+    )
+
     cfg_entry_interval, cfg_exit_interval = _load_config_sub_intervals(strategy_config_snapshot_path)
     replay_entry_candles_db = _derive_interval_db(candles_db, cfg_entry_interval)
     replay_exit_candles_db = _derive_interval_db(candles_db, cfg_exit_interval)
@@ -536,6 +661,9 @@ def main() -> int:
         "--require-gpu-parity "
         "--require-runtime-strategy-provenance "
         "--max-strategy-sha1-distinct 1 "
+        "--require-oms-strategy-provenance "
+        "--max-oms-strategy-sha1-distinct 1 "
+        "--require-locked-strategy-match "
         f"--output \"$BUNDLE_DIR/{alignment_gate_path.name}\""
     )
 
@@ -610,6 +738,14 @@ def main() -> int:
         },
         "candles_provenance": candles_provenance,
         "runtime_strategy_provenance": runtime_strategy_provenance,
+        "oms_strategy_provenance": oms_strategy_provenance,
+        "locked_strategy_provenance": {
+            "strategy_overrides_sha1": str(locked_strategy_sha1),
+            "strategy_overrides_sha1_prefix8": str(locked_strategy_sha1)[:8],
+            "matching_runtime_sha1_prefixes": matching_runtime_prefixes,
+            "matches_runtime_strategy_prefix": bool(matching_runtime_prefixes),
+            "matches_oms_strategy_sha1": bool(matches_oms_sha1),
+        },
         "artefacts": {
             "snapshot_file": snapshot_path.name,
             "strategy_config_snapshot_file": strategy_config_snapshot_path.name,
