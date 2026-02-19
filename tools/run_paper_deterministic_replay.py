@@ -157,6 +157,13 @@ def main() -> int:
             max_strategy_sha1_distinct = max(1, int(max_strategy_sha1_distinct_raw))
         except Exception:
             max_strategy_sha1_distinct = 1
+        max_oms_strategy_sha1_distinct_raw = str(
+            env.get("AQC_MAX_OMS_STRATEGY_SHA1_DISTINCT") or str(max_strategy_sha1_distinct)
+        ).strip()
+        try:
+            max_oms_strategy_sha1_distinct = max(1, int(max_oms_strategy_sha1_distinct_raw))
+        except Exception:
+            max_oms_strategy_sha1_distinct = max_strategy_sha1_distinct
         gate_cmd = [
             "python3",
             str((repo_root / "tools" / "assert_replay_bundle_alignment.py").resolve()),
@@ -177,6 +184,10 @@ def main() -> int:
             "--require-runtime-strategy-provenance",
             "--max-strategy-sha1-distinct",
             str(max_strategy_sha1_distinct),
+            "--require-oms-strategy-provenance",
+            "--max-oms-strategy-sha1-distinct",
+            str(max_oms_strategy_sha1_distinct),
+            "--require-locked-strategy-match",
             "--output",
             str(gate_report),
         ]
