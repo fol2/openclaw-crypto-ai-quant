@@ -130,6 +130,10 @@ export class CandleChart extends LitElement {
   private _listening = false;
   private _rafId: number | null = null;
 
+  // ── Sorted data cache ───────────────────────────────────────────────────────
+  private _cachedSorted: CandleData[] = [];
+  private _cachedCandlesRef: CandleData[] | null = null;
+
   // ── Viewport state ──────────────────────────────────────────────────────────
   // _vStart = first visible index in sorted data, _vCount = number of visible bars
   private _vStart = 0;
@@ -175,6 +179,9 @@ export class CandleChart extends LitElement {
     super.disconnectedCallback();
     this._ro?.disconnect();
     if (this._rafId !== null) { cancelAnimationFrame(this._rafId); this._rafId = null; }
+    // Clean up window listeners that may still be attached during an active drag
+    window.removeEventListener('mousemove', this._onDragMove);
+    window.removeEventListener('mouseup', this._onMouseUp);
   }
 
   protected willUpdate(changed: PropertyValues<this>) {
@@ -196,9 +203,12 @@ export class CandleChart extends LitElement {
 
   // ── Viewport helpers ────────────────────────────────────────────────────────
 
-  /** Get sorted candle data (oldest → newest). */
+  /** Get sorted candle data (oldest → newest), cached until candles reference changes. */
   private _sortedData(): CandleData[] {
-    return [...this.candles].sort((a, b) => a.t - b.t);
+    if (this.candles === this._cachedCandlesRef) return this._cachedSorted;
+    this._cachedCandlesRef = this.candles;
+    this._cachedSorted = [...this.candles].sort((a, b) => a.t - b.t);
+    return this._cachedSorted;
   }
 
   /** Ensure viewport is within bounds for the given data length. */
@@ -210,13 +220,15 @@ export class CandleChart extends LitElement {
     if (this._vStart < 0)        this._vStart = 0;
   }
 
-  /** Reset viewport to show all data when data changes. */
+  /** Reset viewport to show all data on significant data changes (symbol/interval switch).
+   *  Incremental +1 candle from live feed should NOT reset user's zoom/pan. */
   private _autoResetViewport(total: number) {
-    if (total !== this._prevDataLen) {
+    const diff = Math.abs(total - this._prevDataLen);
+    if (diff > 1 || this._prevDataLen === 0) {
       this._vStart = 0;
       this._vCount = total;
-      this._prevDataLen = total;
     }
+    this._prevDataLen = total;
   }
 
   // ── Event listeners ─────────────────────────────────────────────────────────
@@ -387,7 +399,16 @@ export class CandleChart extends LitElement {
     }
   };
 
-  private _onTouchEnd = () => {
+  private _onTouchEnd = (e: TouchEvent) => {
+    // Pinch→pan transition: if one finger remains after lifting the other, start panning
+    if (e.touches.length === 1 && this._pinchDist0 > 0) {
+      const t = e.touches[0];
+      this._touchPanId = t.identifier;
+      this._touchStartX = t.clientX;
+      this._touchStartVStart = this._vStart;
+      this._pinchDist0 = 0;
+      return;
+    }
     this._touchPanId = null;
     this._pinchDist0 = 0;
   };
