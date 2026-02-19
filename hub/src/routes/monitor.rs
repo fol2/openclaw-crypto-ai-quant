@@ -67,6 +67,37 @@ pub struct MarksQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct JourneyQuery {
+    #[serde(default = "default_mode")]
+    mode: String,
+    #[serde(default = "default_journey_limit")]
+    limit: u32,
+    #[serde(default)]
+    offset: u32,
+    #[serde(default)]
+    symbol: Option<String>,
+}
+
+fn default_journey_limit() -> u32 {
+    50
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CandleRangeQuery {
+    #[serde(default = "default_mode")]
+    mode: String,
+    symbol: String,
+    #[serde(default)]
+    interval: Option<String>,
+    #[serde(default)]
+    from_ts: Option<i64>,
+    #[serde(default)]
+    to_ts: Option<i64>,
+    #[serde(default = "default_limit")]
+    limit: u32,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct FlashDebugEvent {
     symbol: String,
     prev: f64,
@@ -96,6 +127,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/marks", get(api_marks))
         .route("/api/flash-debug", post(api_flash_debug))
         .route("/api/sparkline", get(api_sparkline))
+        .route("/api/journeys", get(api_journeys))
+        .route("/api/candles/range", get(api_candles_range))
         .route("/api/metrics", get(api_metrics))
         .route("/metrics", get(api_prometheus))
 }
@@ -471,6 +504,81 @@ async fn api_marks(
         "symbol": sym,
         "position": pos,
         "entries": entries,
+    })))
+}
+
+async fn api_journeys(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<JourneyQuery>,
+) -> Result<Json<Value>, HubError> {
+    let mode = normalize_mode(&q.mode);
+    let limit = q.limit.clamp(1, 200);
+    let offset = q.offset;
+
+    let pool = state
+        .db_pool(&mode)
+        .ok_or_else(|| HubError::Db("db not available".to_string()))?;
+    let conn = pool.get()?;
+
+    let sym_filter = q.symbol.as_deref().map(|s| s.to_uppercase());
+    let journeys =
+        trading::trade_journeys(&conn, limit, offset, sym_filter.as_deref())?;
+
+    Ok(Json(json!({
+        "ok": true,
+        "mode": mode,
+        "count": journeys.len(),
+        "offset": offset,
+        "journeys": journeys,
+    })))
+}
+
+async fn api_candles_range(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<CandleRangeQuery>,
+) -> Result<Json<Value>, HubError> {
+    let mode = normalize_mode(&q.mode);
+    let sym = q.symbol.to_uppercase();
+    let interval = q
+        .interval
+        .as_deref()
+        .unwrap_or(&state.config.trader_interval);
+    let limit = q.limit.clamp(2, 2000);
+
+    let candle_path = state.candle_db_path(interval);
+    let candle_pool = open_ro_pool(&candle_path, 2);
+
+    if let Some(pool) = &candle_pool {
+        if let Ok(conn) = pool.get() {
+            let data = candles::fetch_candles_range(
+                &conn, &sym, interval, q.from_ts, q.to_ts, limit,
+            )?;
+            if !data.is_empty() {
+                return Ok(Json(json!({
+                    "ok": true,
+                    "symbol": sym,
+                    "interval": interval,
+                    "count": data.len(),
+                    "candles": data,
+                })));
+            }
+        }
+    }
+
+    // Fallback to trading DB
+    let pool = state
+        .db_pool(&mode)
+        .ok_or_else(|| HubError::Db("db not available".to_string()))?;
+    let conn = pool.get()?;
+    let data = candles::fetch_candles_range(
+        &conn, &sym, interval, q.from_ts, q.to_ts, limit,
+    )?;
+    Ok(Json(json!({
+        "ok": true,
+        "symbol": sym,
+        "interval": interval,
+        "count": data.len(),
+        "candles": data,
     })))
 }
 

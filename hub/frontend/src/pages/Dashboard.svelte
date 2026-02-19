@@ -1,6 +1,6 @@
 <script lang="ts">
   import { appState } from '../lib/stores.svelte';
-  import { getSnapshot, getCandles, getMarks, postFlashDebug, tradeEnabled, getSystemServices } from '../lib/api';
+  import { getSnapshot, getCandles, getMarks, postFlashDebug, tradeEnabled, getSystemServices, getJourneys, getCandlesRange } from '../lib/api';
   import { hubWs } from '../lib/ws';
   import { CANDIDATE_FAMILY_ORDER, getModeLabel, LIVE_MODE } from '../lib/mode-labels';
 
@@ -42,6 +42,91 @@
   let chartPrefsLoaded = $state(false);
   const CHART_MIN = 120;
   const CHART_MAX = 600;
+
+  // ── Journey state ──────────────────────────────────────────────────
+  let journeys: any[] = $state([]);
+  let selectedJourney: any = $state(null);
+  let journeyCandles: any[] = $state([]);
+  let journeyMarks: any[] = $state([]);
+  let journeyOffset = $state(0);
+  let journeyLoading = $state(false);
+  let journeyInterval = $state('15m');
+  let journeyHasMore = $state(true);
+
+  function pickJourneyInterval(durationMs: number): string {
+    if (durationMs < 30 * 60_000)       return '1m';
+    if (durationMs < 2 * 60 * 60_000)   return '3m';
+    if (durationMs < 6 * 60 * 60_000)   return '5m';
+    if (durationMs < 24 * 60 * 60_000)  return '15m';
+    if (durationMs < 3 * 24 * 60 * 60_000)  return '1h';
+    if (durationMs < 7 * 24 * 60 * 60_000)  return '4h';
+    return '1d';
+  }
+
+  function fmtDuration(ms: number): string {
+    if (ms < 0) ms = 0;
+    const mins = Math.floor(ms / 60_000);
+    if (mins < 60) return `${mins}m`;
+    const hrs = Math.floor(mins / 60);
+    const rm = mins % 60;
+    if (hrs < 24) return rm > 0 ? `${hrs}h ${rm}m` : `${hrs}h`;
+    const days = Math.floor(hrs / 24);
+    const rh = hrs % 24;
+    return rh > 0 ? `${days}d ${rh}h` : `${days}d`;
+  }
+
+  async function fetchJourneys(reset = false) {
+    if (journeyLoading) return;
+    journeyLoading = true;
+    try {
+      const off = reset ? 0 : journeyOffset;
+      const res = await getJourneys(appState.mode, 50, off);
+      const batch = res.journeys || [];
+      if (reset) {
+        journeys = batch;
+        journeyOffset = batch.length;
+      } else {
+        journeys = [...journeys, ...batch];
+        journeyOffset += batch.length;
+      }
+      journeyHasMore = batch.length >= 50;
+    } catch { /* ignore */ }
+    journeyLoading = false;
+  }
+
+  async function selectJourney(j: any) {
+    selectedJourney = j;
+    journeyCandles = [];
+    journeyMarks = [];
+
+    const openTs = Date.parse((j.open_ts || '').replace(' ', 'T'));
+    const closeTs = j.close_ts ? Date.parse((j.close_ts || '').replace(' ', 'T')) : Date.now();
+    if (!isFinite(openTs)) return;
+
+    const dur = closeTs - openTs;
+    const iv = pickJourneyInterval(dur);
+    journeyInterval = iv;
+
+    // Fetch candles with 10% padding
+    const pad = Math.max(dur * 0.1, 60_000);
+    const fromTs = openTs - pad;
+    const toTs = closeTs + pad;
+
+    try {
+      const res = await getCandlesRange(j.symbol, iv, fromTs, toTs, 500);
+      journeyCandles = res.candles || [];
+    } catch { /* ignore */ }
+
+    // Build journey marks from legs
+    journeyMarks = (j.legs || []).map((leg: any) => ({
+      price: leg.price,
+      timestamp: leg.timestamp,
+      action: leg.action,
+      type: j.type || j.pos_type,
+      size: leg.size,
+      pnl: leg.pnl,
+    }));
+  }
 
   function onChartSplitterDown(e: PointerEvent) {
     e.preventDefault();
@@ -497,6 +582,9 @@
 
   function setFeed(f: 'trades' | 'oms' | 'audit') {
     detailTab = f;
+    if (f === 'trades' && journeys.length === 0) {
+      void fetchJourneys(true);
+    }
   }
 
   // Persist last chart controls for the next visit.
@@ -991,22 +1079,73 @@
       <!-- Feed content (trades / oms / audit) -->
       <div class="feed-content">
         {#if detailTab === 'trades'}
-          {#each (recent.trades || []).slice(0, 40) as t}
-            <div class="feed-item">
-              <div class="feed-row">
-                <span class="feed-l">
-                  <span class="feed-sym">{t.symbol}</span>
-                  <span class="feed-action">{t.action}</span>
-                  <span class="feed-type">{t.type}</span>
+          <!-- Journey chart -->
+          <div class="journey-chart-area" style="height:{selectedJourney ? chartHeight : 48}px">
+            {#if selectedJourney}
+              <div class="journey-chart-header">
+                <span class="journey-chart-label">
+                  {selectedJourney.symbol}
+                  <span class="badge" class:badge-long={selectedJourney.type === 'LONG'} class:badge-short={selectedJourney.type !== 'LONG'}>{selectedJourney.type}</span>
+                  <span class="mono dim">{journeyInterval.toUpperCase()}</span>
                 </span>
-                <span class="feed-r">{t.timestamp?.slice(11, 19) || ''}</span>
+                <button class="journey-close-btn" onclick={() => { selectedJourney = null; journeyCandles = []; journeyMarks = []; }}>
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
               </div>
-              <div class="feed-sub">
-                px <span class="green mono">{fmtNum(t.price, 6)}</span> size {fmtNum(t.size, 6)}
-                pnl <span class="{pnlClass(t.pnl)} mono">{t.pnl != null ? fmtNum(t.pnl) : '\u2014'}</span>
+              <div class="journey-chart-wrap" style="height:{chartHeight - 28}px">
+                <candle-chart
+                  candles={JSON.stringify(journeyCandles)}
+                  entries="[]"
+                  entryPrice={0}
+                  postype=""
+                  symbol={selectedJourney.symbol}
+                  interval={journeyInterval}
+                  journeymarks={JSON.stringify(journeyMarks)}
+                  journeyoverlay={true}
+                ></candle-chart>
               </div>
-            </div>
-          {/each}
+            {:else}
+              <div class="journey-hint">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" stroke-width="1.5"><path d="M3 3v18h18"/><path d="M7 16l4-8 4 4 6-10"/></svg>
+                <span>Select a journey below to view on chart</span>
+              </div>
+            {/if}
+          </div>
+          <!-- Journey list -->
+          <div class="journey-list">
+            {#each journeys as j (j.id)}
+              {@const openMs = Date.parse((j.open_ts || '').replace(' ', 'T'))}
+              {@const closeMs = j.close_ts ? Date.parse((j.close_ts || '').replace(' ', 'T')) : Date.now()}
+              {@const dur = isFinite(openMs) && isFinite(closeMs) ? closeMs - openMs : 0}
+              <button
+                class="journey-card"
+                class:selected={selectedJourney?.id === j.id}
+                onclick={() => selectJourney(j)}
+              >
+                <div class="jc-top">
+                  <span class="jc-sym">{j.symbol}</span>
+                  <span class="badge" class:badge-long={j.type === 'LONG'} class:badge-short={j.type !== 'LONG'}>{j.type}</span>
+                  {#if j.is_open}<span class="jc-open-dot" title="Still open"></span>{/if}
+                  <span class="jc-dur dim">{fmtDuration(dur)}</span>
+                  <span class="jc-pnl mono {j.total_pnl >= 0 ? 'green' : 'red'}">{j.total_pnl >= 0 ? '+' : ''}{fmtNum(j.total_pnl)}</span>
+                </div>
+                <div class="jc-sub dim">
+                  {j.open_ts?.slice(5, 16) || ''}
+                  &rarr; {j.close_ts ? j.close_ts.slice(5, 16) : 'now'}
+                  <span class="mono">{fmtNum(j.entry_price, 6)}</span>
+                  {#if j.exit_price != null}<span class="mono">&rarr; {fmtNum(j.exit_price, 6)}</span>{/if}
+                  <span class="dim">({j.legs?.length || 0} legs)</span>
+                </div>
+              </button>
+            {/each}
+            {#if journeyLoading}
+              <div class="journey-loading">Loading...</div>
+            {:else if journeyHasMore && journeys.length > 0}
+              <button class="journey-load-more" onclick={() => fetchJourneys()}>Load more</button>
+            {:else if journeys.length === 0}
+              <div class="journey-empty">No trade journeys found</div>
+            {/if}
+          </div>
         {:else if detailTab === 'oms'}
           {#each (recent.oms_intents || []).slice(0, 25) as i}
             <div class="feed-item">
@@ -1838,6 +1977,128 @@
   .green { color: var(--green); }
   .red { color: var(--red); }
   .yellow { color: var(--yellow); }
+
+  /* ─── Journey ─── */
+  .journey-chart-area {
+    border-bottom: 1px solid var(--border);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .journey-chart-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 10px;
+    font-size: 11px;
+    gap: 6px;
+  }
+  .journey-chart-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 600;
+  }
+  .journey-close-btn {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 2px;
+  }
+  .journey-close-btn:hover { color: var(--text); }
+  .journey-chart-wrap {
+    flex: 1;
+    min-height: 0;
+  }
+  .journey-hint {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    height: 100%;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .journey-list {
+    overflow-y: auto;
+    flex: 1;
+  }
+  .journey-card {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 8px 14px;
+    border: none;
+    border-bottom: 1px solid var(--border-subtle);
+    background: none;
+    color: var(--text);
+    cursor: pointer;
+    font-size: 12px;
+    transition: background var(--t-fast);
+  }
+  .journey-card:hover { background: rgba(255,255,255,0.02); }
+  .journey-card.selected {
+    background: rgba(59,130,246,0.08);
+    border-left: 2px solid var(--accent, #3b82f6);
+  }
+  .jc-top {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .jc-sym {
+    font-family: 'IBM Plex Mono', monospace;
+    font-weight: 600;
+    font-size: 11px;
+  }
+  .badge {
+    font-size: 9px;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: 3px;
+    text-transform: uppercase;
+  }
+  .badge-long { background: rgba(59,130,246,0.2); color: #93c5fd; }
+  .badge-short { background: rgba(245,158,11,0.2); color: #fcd34d; }
+  .jc-open-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--green);
+    display: inline-block;
+  }
+  .jc-dur { font-size: 10px; }
+  .jc-pnl {
+    margin-left: auto;
+    font-weight: 600;
+    font-size: 11px;
+  }
+  .jc-sub {
+    font-size: 10px;
+    margin-top: 2px;
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+  .journey-loading, .journey-empty {
+    padding: 16px;
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .journey-load-more {
+    display: block;
+    width: 100%;
+    padding: 10px;
+    border: none;
+    background: none;
+    color: var(--accent, #3b82f6);
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .journey-load-more:hover { background: rgba(59,130,246,0.06); }
 
   /* ─── Mobile ─── */
   @media (max-width: 768px) {

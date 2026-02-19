@@ -60,6 +60,19 @@ export async function getMetrics(mode = 'paper') {
   return apiFetch(`/api/metrics?mode=${encodeURIComponent(mode)}`);
 }
 
+export async function getJourneys(mode = 'paper', limit = 50, offset = 0, symbol?: string) {
+  const params = new URLSearchParams({ mode, limit: String(limit), offset: String(offset) });
+  if (symbol) params.set('symbol', symbol);
+  return apiFetch(`/api/journeys?${params}`);
+}
+
+export async function getCandlesRange(symbol: string, interval: string, fromTs?: number, toTs?: number, limit = 500) {
+  const params = new URLSearchParams({ symbol, interval, limit: String(limit) });
+  if (fromTs != null) params.set('from_ts', String(fromTs));
+  if (toTs != null) params.set('to_ts', String(toTs));
+  return apiFetch(`/api/candles/range?${params}`);
+}
+
 export async function getMarks(symbol: string, mode = 'paper') {
   return apiFetch(`/api/marks?symbol=${encodeURIComponent(symbol)}&mode=${encodeURIComponent(mode)}`);
 }
