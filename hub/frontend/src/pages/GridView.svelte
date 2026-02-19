@@ -73,6 +73,29 @@
     return Math.abs(p.size) * mid;
   }
 
+  function livePnlPct(s: any): number {
+    const p = s.position;
+    if (!p || !p.entry_price || !p.size) return 0;
+    const mid = mids[s.symbol] ?? s.mid ?? p.entry_price;
+    const cost = p.entry_price * Math.abs(p.size);
+    if (cost <= 0) return 0;
+    const pnl = p.type === 'LONG'
+      ? (mid - p.entry_price) * Math.abs(p.size)
+      : (p.entry_price - mid) * Math.abs(p.size);
+    return (pnl / cost) * 100;
+  }
+
+  function fmtNotional(val: number): string {
+    if (val >= 1_000_000) return `$${(val / 1_000_000).toFixed(1)}M`;
+    if (val >= 1_000) return `$${(val / 1_000).toFixed(1)}K`;
+    return `$${val.toFixed(0)}`;
+  }
+
+  function fmtPnl(pct: number): string {
+    const sign = pct >= 0 ? '+' : '';
+    return `${sign}${pct.toFixed(2)}%`;
+  }
+
   let filteredSymbols = $derived.by(() => {
     const q = filter.trim().toUpperCase();
     let syms = symbols;
@@ -342,7 +365,7 @@
       {#each filteredSymbols as s (s.symbol)}
         {@const hist = trendCloses[s.symbol] || []}
         {@const trend = trendStrength(hist)}
-        <div class="grid-cell" class:has-trend={Math.abs(trend) >= 0.05} style={trendVars(trend)}>
+        <div class="grid-cell" class:has-trend={Math.abs(trend) >= 0.05} class:has-position={!!s.position} class:pos-long={s.position?.type === 'LONG'} class:pos-short={s.position?.type === 'SHORT'} style={trendVars(trend)}>
           {#if showOverlay}
             <span class="trend-overlay">{hist.length}pt {(linregTrend(hist, trendWindow) * 100).toFixed(3)}% &rarr; {trend.toFixed(2)}</span>
           {/if}
@@ -362,6 +385,19 @@
               tone="grid"
             ></mid-price>
           </div>
+          {#if s.position}
+            {@const pnl = livePnlPct(s)}
+            <div class="cell-entry">
+              <span class="entry-label">@</span>
+              <span class="entry-price">{s.position.entry_price.toFixed(adaptiveDecimals(s.position.entry_price))}</span>
+              <span class="pnl-badge" class:up={pnl >= 0} class:down={pnl < 0}>{fmtPnl(pnl)}</span>
+            </div>
+            <div class="cell-pos-strip">
+              <span>{s.position.leverage?.toFixed(1) ?? '1.0'}&times;</span>
+              <span class="strip-dot">&middot;</span>
+              <span>{fmtNotional(posEquity(s))}</span>
+            </div>
+          {/if}
           {#if s.signal}
             <div class="cell-signal">
               <span class="signal-badge">{s.signal}</span>
@@ -604,6 +640,66 @@
     padding: 40px 0;
     text-align: center;
     font-size: 13px;
+  }
+
+  /* ── Position accent bar ──────────────────────────── */
+  .grid-cell.has-position {
+    border-left: 3px solid transparent;
+    padding-left: 11px;
+  }
+  .grid-cell.pos-long {
+    border-left-color: var(--green);
+  }
+  .grid-cell.pos-short {
+    border-left-color: var(--red);
+  }
+
+  /* ── Entry price + PnL row ────────────────────────── */
+  .cell-entry {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    margin-bottom: 2px;
+  }
+  .entry-label {
+    color: var(--text-dim);
+    opacity: 0.5;
+  }
+  .entry-price {
+    color: var(--text-dim);
+  }
+  .pnl-badge {
+    margin-left: auto;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: var(--radius-sm);
+    letter-spacing: 0.02em;
+  }
+  .pnl-badge.up {
+    background: var(--green-bg);
+    color: var(--green);
+  }
+  .pnl-badge.down {
+    background: var(--red-bg);
+    color: var(--red);
+  }
+
+  /* ── Position strip (leverage + notional) ─────────── */
+  .cell-pos-strip {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 9px;
+    color: var(--text-dim);
+    opacity: 0.6;
+    margin-bottom: 4px;
+  }
+  .strip-dot {
+    opacity: 0.4;
   }
 
   @media (max-width: 768px) {
