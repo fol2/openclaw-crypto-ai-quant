@@ -6,6 +6,7 @@ This project uses a tag-driven release model with a single source of truth for v
 
 - `VERSION` is authoritative.
 - `pyproject.toml` and all `backtester/crates/*/Cargo.toml` versions must match `VERSION`.
+- `ws_sidecar/Cargo.toml` and `hub/Cargo.toml` should also be kept in sync (not currently enforced by CI).
 - Release tags must match the same version in `vX.Y.Z` format.
 
 Enforcement:

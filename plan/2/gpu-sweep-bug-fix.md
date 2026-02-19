@@ -1,3 +1,5 @@
+> **Status**: Fixed. All GPU parity bugs described here have been resolved.
+
 Yep — there are a few very concrete “this will definitely break parity” issues in the GPU path, and they line up perfectly with the symptoms you described:
 
 1. “0 trades with sub-bars” wasn’t really a kernel bug — it was a silent config fallback (wrong default path → YAML not found → defaults used → `entry_min_confidence=High` blocks basically everything in a 13‑day window).

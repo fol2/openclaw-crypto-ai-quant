@@ -1,4 +1,4 @@
-# Decision Semantics Contract (Backtester v1)
+# Decision Semantics Contract
 
 This contract defines deterministic expectations for decision timing, missing data handling, and execution assumptions.
 

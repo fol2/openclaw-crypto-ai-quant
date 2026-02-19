@@ -1,8 +1,8 @@
 # Plan: 142-Axis SSOT Validation & Profile Upgrade
 
-**Date:** 2026-02-14  
-**Author:** Mei (AI) + WJEN  
-**Status:** DRAFT  
+**Date:** 2026-02-14
+**Author:** Mei (AI) + WJEN
+**Status:** Complete — validation results in `docs/validation/`
 
 ---
 

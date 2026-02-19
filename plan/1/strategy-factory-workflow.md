@@ -1,3 +1,5 @@
+> **Status**: Implemented. The strategy factory is operational (`factory_run.py`, `tools/factory_cycle.py`). See [strategy_lifecycle.md](../../docs/strategy_lifecycle.md) and [success_metrics.md](../../docs/success_metrics.md) for the current state machine and gate thresholds.
+
 What your report is really saying is: you already have the "alpha engine" you need, but the thing that will make (or break) your ability to earn money isn't finding *the* best config. It's building a repeatable "strategy factory" loop that (1) generates candidates fast, (2) rejects the ones that only look good in-sample, (3) deploys small with strict risk limits, and (4) rotates/pauses quickly when the edge decays.
 
 Below is a high-level strategy and a concrete workflow you can automate using the exact components you already have (GPU TPE sweep → config generation → CPU replay → deploy).

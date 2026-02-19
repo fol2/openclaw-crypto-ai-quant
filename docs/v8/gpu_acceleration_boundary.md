@@ -1,4 +1,4 @@
-# V8 Engine Unification Boundary and Proof Protocol
+# Engine Unification Boundary and Proof Protocol
 
 ## Goal
 
@@ -78,7 +78,7 @@ Candidate output compatibility is validated by reading/rejecting rows that do no
   - `replay_equivalence_report_path`
   - `replay_equivalence_status = pass`
   - `replay_equivalence_count`
-- `tools/validate_factory_selection_gate.py` is the machine-readable gate used by
+- `scripts/validate_factory_selection_gate.py` is the machine-readable gate used by
   `scripts/run_factory_stage_gate.sh`; every dry/smoke/real execution must pass it.
 
 ## CPU / GPU / TPE / grid confidence level
@@ -87,3 +87,4 @@ Candidate output compatibility is validated by reading/rejecting rows that do no
   1. sweep output is emitted in shared schema (candidate/replay structure), and
   2. selected candidates are replayed through the same canonical replay path and pass comparator checks.
 - This does not remove hardware-level numeric differences in non-canonical paths; it isolates all promotion decisions to the canonical path.
+- GPU decision logic is generated from Rust kernel source via template-based codegen (see [gpu-codegen-guide.md](../../backtester/docs/gpu-codegen-guide.md)), ensuring SSOT alignment.

@@ -336,14 +336,11 @@ Use when: suspecting data corruption, missing candles, or stale market data.
 ### Candle database freshness
 
 ```bash
-# Check all candle DBs — look for gaps or stale data (basic)
+# Check all candle DBs — row counts and time range
 for db in candles_dbs/candles_*.db; do
     echo "=== $db ==="
     sqlite3 "$db" "SELECT COUNT(*) AS rows, datetime(MIN(t)/1000, 'unixepoch') AS earliest, datetime(MAX(t)/1000, 'unixepoch') AS latest, datetime(MAX(t_close)/1000, 'unixepoch') AS latest_close FROM candles;"
 done
-
-# Automated freshness + gap checks (JSON on stdout; summary on stderr)
-uv run python tools/check_candle_dbs.py --lookback-hours 24
 ```
 
 ### Candle retention beyond 5,000 bars (AQC-203)
@@ -794,4 +791,5 @@ Retain this manifest with the promotion ticket.
 
 - [Success Metrics & Guardrails](success_metrics.md) — risk thresholds and kill-switch triggers
 - [Strategy Lifecycle](strategy_lifecycle.md) — config state machine and rotation rules
-- [AGENTS.md](../AGENTS.md) — full architecture and configuration reference
+- [Architecture](ARCHITECTURE.md) — system design, components, and data flow
+- [Release Process](release_process.md) — version governance and tag-driven releases

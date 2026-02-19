@@ -1,3 +1,5 @@
+> **Status**: Fixed. All addendum items have been resolved.
+
 You’re not far off with your diagnosis — in the code you uploaded there are a few *concrete*, deterministic mismatches that will make GPU sweeps diverge badly from the CPU backtester (and also make “1h main + 3m entry/exit” behave wrong).
 
 Below are the fixes I’d apply. I’m including unified diffs you can paste straight into your repo (paths match what you referenced in your report).
