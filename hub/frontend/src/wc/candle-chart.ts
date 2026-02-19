@@ -141,6 +141,10 @@ export class CandleChart extends LitElement {
   private _prevSymbol = '';
   private _prevInterval = '';
   private _prevDataLen = 0;
+  private _prevFirstTs = 0;
+
+  // ── Boundary detection (dynamic loading) ──────────────────────────────────
+  private _lastRequestMs = 0;
 
   // ── Pan state (desktop mouse drag) ──────────────────────────────────────────
   private _dragging = false;
@@ -240,18 +244,67 @@ export class CandleChart extends LitElement {
 
   /** Reset viewport to show all data when the data source changes.
    *  Tracks symbol + interval to distinguish a real data-source switch from
-   *  incremental live-feed updates which should preserve the user's zoom/pan. */
+   *  incremental live-feed updates which should preserve the user's zoom/pan.
+   *  When data is prepended (older candles loaded), shifts viewport to keep
+   *  the same candles visible. */
   private _autoResetViewport(total: number) {
+    const sorted = this._sortedData();
+    const firstTs = sorted.length > 0 ? sorted[0].t : 0;
     const srcChanged = this.symbol !== this._prevSymbol
                     || this.interval !== this._prevInterval;
-    const dataReplaced = Math.abs(total - this._prevDataLen) > Math.max(2, this._prevDataLen * 0.1);
-    if (srcChanged || dataReplaced || this._prevDataLen === 0) {
+
+    if (srcChanged || this._prevDataLen === 0) {
+      // Source changed or first load → full reset
+      this._vStart = 0;
+      this._vCount = total;
+    } else if (firstTs < this._prevFirstTs && this._prevFirstTs > 0) {
+      // Prepend detected — count only candles before the old first timestamp
+      // (handles simultaneous prepend+append correctly)
+      let prepended = 0;
+      for (let i = 0; i < sorted.length; i++) {
+        if (sorted[i].t >= this._prevFirstTs) break;
+        prepended++;
+      }
+      this._vStart += prepended;
+    } else if (firstTs === this._prevFirstTs && total > this._prevDataLen) {
+      // Append detected — keep viewport as-is (no jump)
+    } else if (Math.abs(total - this._prevDataLen) > Math.max(2, this._prevDataLen * 0.1)) {
+      // Large data replacement → full reset
       this._vStart = 0;
       this._vCount = total;
     }
+
     this._prevSymbol   = this.symbol;
     this._prevInterval = this.interval;
     this._prevDataLen  = total;
+    this._prevFirstTs  = firstTs;
+  }
+
+  /** Emit a `need-candles` event when the viewport is at data boundaries. */
+  private _checkBoundary() {
+    const now = performance.now();
+    if (now - this._lastRequestMs < 500) return;
+
+    const sorted = this._sortedData();
+    const total = sorted.length;
+    if (total < 2) return;
+
+    const detail: { before?: number; after?: number } = {};
+    if (this._vStart <= 0) {
+      detail.before = sorted[0].t;
+    }
+    if (this._vStart + this._vCount >= total) {
+      detail.after = sorted[total - 1].t;
+    }
+
+    if (detail.before != null || detail.after != null) {
+      this._lastRequestMs = now;
+      this.dispatchEvent(new CustomEvent('need-candles', {
+        detail,
+        bubbles: true,
+        composed: true,
+      }));
+    }
   }
 
   // ── Event listeners ─────────────────────────────────────────────────────────
@@ -323,6 +376,7 @@ export class CandleChart extends LitElement {
     this._vStart = this._dragStartVStart + shift;
     this._clampViewport(sorted.length);
     this._scheduleRedraw();
+    this._checkBoundary();
   };
 
   private _onMouseUp = () => {
@@ -362,6 +416,7 @@ export class CandleChart extends LitElement {
     this._vCount = newCount;
     this._clampViewport(total);
     this._scheduleRedraw();
+    this._checkBoundary();
   };
 
   // ── Touch: single-finger pan, two-finger pinch zoom ────────────────────────
@@ -402,6 +457,7 @@ export class CandleChart extends LitElement {
       this._vStart = this._touchStartVStart + shift;
       this._clampViewport(sorted.length);
       this._scheduleRedraw();
+      this._checkBoundary();
     } else if (e.touches.length === 2 && this._pinchDist0 > 0) {
       e.preventDefault();
       e.stopPropagation();
@@ -426,6 +482,7 @@ export class CandleChart extends LitElement {
       this._vCount = newCount;
       this._clampViewport(total);
       this._scheduleRedraw();
+      this._checkBoundary();
     }
   };
 
