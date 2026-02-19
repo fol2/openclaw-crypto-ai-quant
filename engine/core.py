@@ -479,9 +479,12 @@ class KernelDecisionRustBindingProvider:
 
     _KERNEL_STATE_PATH = str(Path("~/.mei/kernel_state.json").expanduser())
 
-    def __init__(self, module_name: str = "bt_runtime", path: str | None = None) -> None:
+    _tunnel_table_ready: set[str] = set()
+
+    def __init__(self, module_name: str = "bt_runtime", path: str | None = None, db_path: str | None = None) -> None:
         self._runtime = _load_kernel_runtime_module(module_name)
         self._path = str(path).strip() if path else None
+        self._db_path = str(db_path).strip() if db_path else None
         self._state_json = self._load_or_create_state()
         self._params_json = self._runtime.default_kernel_params_json()
         self._event_id = 1
@@ -546,6 +549,58 @@ class KernelDecisionRustBindingProvider:
                 "Failed to persist kernel state: %s",
                 traceback.format_exc(),
             )
+
+    def _persist_exit_bounds(self, ts_ms: int, symbol: str, exit_bounds: dict, state_positions: dict) -> None:
+        """Write exit tunnel row. Creates table lazily on first call. Best-effort."""
+        import sqlite3
+
+        pos = state_positions.get(symbol)
+        if not isinstance(pos, dict):
+            return
+        entry_price = float(pos.get("avg_entry_price", 0))
+        side = str(pos.get("side", ""))
+        pos_type = "LONG" if side == "long" else ("SHORT" if side == "short" else "")
+        if not pos_type or entry_price <= 0:
+            return
+
+        db_path = self._db_path
+        if not db_path:
+            return
+
+        try:
+            con = sqlite3.connect(db_path, timeout=5)
+            if db_path not in KernelDecisionRustBindingProvider._tunnel_table_ready:
+                con.execute(
+                    "CREATE TABLE IF NOT EXISTS exit_tunnel ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                    "ts_ms INTEGER NOT NULL, symbol TEXT NOT NULL,"
+                    "upper_full REAL NOT NULL, upper_partial REAL,"
+                    "lower_full REAL NOT NULL,"
+                    "entry_price REAL NOT NULL, pos_type TEXT NOT NULL)"
+                )
+                con.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_exit_tunnel_sym_ts ON exit_tunnel(symbol, ts_ms)"
+                )
+                KernelDecisionRustBindingProvider._tunnel_table_ready.add(db_path)
+
+            up = exit_bounds.get("upper_partial")
+            con.execute(
+                "INSERT INTO exit_tunnel (ts_ms,symbol,upper_full,upper_partial,lower_full,entry_price,pos_type)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (
+                    ts_ms,
+                    symbol,
+                    float(exit_bounds["upper_full"]),
+                    float(up) if up is not None else None,
+                    float(exit_bounds["lower_full"]),
+                    entry_price,
+                    pos_type,
+                ),
+            )
+            con.commit()
+            con.close()
+        except Exception:
+            logger.debug("exit_tunnel persist failed: %s", traceback.format_exc())
 
     def _load_raw_events(self) -> list[dict[str, Any]]:
         if not self._path:
@@ -718,6 +773,15 @@ class KernelDecisionRustBindingProvider:
             state_json = json.dumps(state_value, ensure_ascii=False)
             self._state_json = state_json
             self._persist_state(state_json)
+
+            # Persist exit tunnel bounds (diagnostic visualization data).
+            diag = decision_payload.get("diagnostics")
+            eb = diag.get("exit_bounds") if isinstance(diag, dict) else None
+            if isinstance(eb, dict) and eb.get("upper_full") is not None:
+                self._persist_exit_bounds(
+                    int(now_ms or 0), raw_symbol, eb, state_value.get("positions", {})
+                )
+
             intents = decision_payload.get("intents", [])
             if not isinstance(intents, list):
                 logger.warning(
@@ -754,7 +818,7 @@ class NoopDecisionProvider:
         return []
 
 
-def _build_default_decision_provider() -> DecisionProvider:
+def _build_default_decision_provider(db_path: str | None = None) -> DecisionProvider:
     """Build the decision provider based on environment configuration.
 
     After AQC-825, the Python ``mei_alpha_v1.analyze()`` decision path has been
@@ -806,7 +870,7 @@ def _build_default_decision_provider() -> DecisionProvider:
             )
             raise SystemExit(1)
         try:
-            return KernelDecisionRustBindingProvider(path=path)
+            return KernelDecisionRustBindingProvider(path=path, db_path=db_path)
         except Exception as exc:
             logger.fatal(
                 "FATAL: bt_runtime extension unavailable — cannot initialise "

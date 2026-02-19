@@ -111,6 +111,18 @@ pub enum KernelExitResult {
     },
 }
 
+/// Diagnostic exit-tunnel boundaries: the price levels at which the engine
+/// would exit if breached.  Purely informational — no effect on decision logic.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ExitBounds {
+    /// Composite take-profit level (full TP).
+    pub upper_full: f64,
+    /// TP1 partial level (None if partial TP disabled or already taken).
+    pub upper_partial: Option<f64>,
+    /// Composite stop-loss / trailing / breakeven level.
+    pub lower_full: f64,
+}
+
 /// Bundled exit evaluation result with diagnostic threshold records and context.
 #[derive(Debug, Clone)]
 pub struct ExitEvaluation {
@@ -119,11 +131,34 @@ pub struct ExitEvaluation {
     pub threshold_records: Vec<crate::decision_kernel::ThresholdRecord>,
     /// Exit context (populated when an exit fires).
     pub exit_context: Option<crate::decision_kernel::ExitContext>,
+    /// Exit tunnel boundaries (always Some when a position exists).
+    pub exit_bounds: Option<ExitBounds>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Internal helpers
 // ═══════════════════════════════════════════════════════════════════════════
+
+/// Compute TP1 partial price (None if disabled or already taken).
+fn compute_partial_tp_price(
+    pos: &Position,
+    entry: f64,
+    atr: f64,
+    params: &ExitParams,
+) -> Option<f64> {
+    if !params.enable_partial_tp || pos.tp1_taken {
+        return None;
+    }
+    let mult = if params.tp_partial_atr_mult > 0.0 {
+        params.tp_partial_atr_mult
+    } else {
+        params.tp_atr_mult
+    };
+    Some(match pos.side {
+        PositionSide::Long => entry + (atr * mult),
+        PositionSide::Short => entry - (atr * mult),
+    })
+}
 
 fn effective_atr(entry: f64, entry_atr: Option<f64>) -> f64 {
     match entry_atr {
@@ -877,10 +912,34 @@ pub fn evaluate_exits_with_diagnostics(
             passed: atr_dev <= params.glitch_atr_mult,
         });
         if is_glitch {
+            // Compute bounds even on glitch hold so the tunnel is visible.
+            let entry = pos.avg_entry_price;
+            let atr = effective_atr(entry, pos.entry_atr);
+            let sl_price = compute_sl_price(pos.side, entry, atr, snap, params);
+            let tp_price_val = match pos.side {
+                PositionSide::Long => entry + (atr * params.tp_atr_mult),
+                PositionSide::Short => entry - (atr * params.tp_atr_mult),
+            };
+            let lower = match pos.side {
+                PositionSide::Long => match pos.trailing_sl {
+                    Some(tsl) => sl_price.max(tsl),
+                    None => sl_price,
+                },
+                PositionSide::Short => match pos.trailing_sl {
+                    Some(tsl) => sl_price.min(tsl),
+                    None => sl_price,
+                },
+            };
+            let partial = compute_partial_tp_price(pos, entry, atr, params);
             return ExitEvaluation {
                 result: KernelExitResult::Hold,
                 threshold_records: thresholds,
                 exit_context: None,
+                exit_bounds: Some(ExitBounds {
+                    upper_full: tp_price_val,
+                    upper_partial: partial,
+                    lower_full: lower,
+                }),
             };
         }
     }
@@ -920,6 +979,17 @@ pub fn evaluate_exits_with_diagnostics(
             PositionSide::Long => entry + (atr * params.tp_atr_mult),
             PositionSide::Short => entry - (atr * params.tp_atr_mult),
         };
+        let lower = match pos.side {
+            PositionSide::Long => match pos.trailing_sl {
+                Some(tsl) => sl_price.max(tsl),
+                None => sl_price,
+            },
+            PositionSide::Short => match pos.trailing_sl {
+                Some(tsl) => sl_price.min(tsl),
+                None => sl_price,
+            },
+        };
+        let partial = compute_partial_tp_price(pos, entry, atr, params);
         return ExitEvaluation {
             result: KernelExitResult::FullClose {
                 reason: "Stop Loss".to_string(),
@@ -936,6 +1006,11 @@ pub fn evaluate_exits_with_diagnostics(
                 trailing_sl: pos.trailing_sl,
                 profit_atr: pa,
                 duration_bars,
+            }),
+            exit_bounds: Some(ExitBounds {
+                upper_full: tp_price_val,
+                upper_partial: partial,
+                lower_full: lower,
             }),
         };
     }
@@ -973,6 +1048,11 @@ pub fn evaluate_exits_with_diagnostics(
                 PositionSide::Long => entry + (atr * params.tp_atr_mult),
                 PositionSide::Short => entry - (atr * params.tp_atr_mult),
             };
+            let lower = match pos.side {
+                PositionSide::Long => sl_price.max(tsl_price),
+                PositionSide::Short => sl_price.min(tsl_price),
+            };
+            let partial = compute_partial_tp_price(pos, entry, atr, params);
             return ExitEvaluation {
                 result: KernelExitResult::FullClose {
                     reason: "Trailing Stop".to_string(),
@@ -990,15 +1070,39 @@ pub fn evaluate_exits_with_diagnostics(
                     profit_atr: pa,
                     duration_bars,
                 }),
+                exit_bounds: Some(ExitBounds {
+                    upper_full: tp_price_val,
+                    upper_partial: partial,
+                    lower_full: lower,
+                }),
             };
         }
     }
 
-    // ── 3. Take Profit ──────────────────────────────────────────────────
+    // ── Compute exit bounds (used by remaining return paths) ─────────
     let tp_price_val = match pos.side {
         PositionSide::Long => entry + (atr * params.tp_atr_mult),
         PositionSide::Short => entry - (atr * params.tp_atr_mult),
     };
+    let bounds_lower = match pos.side {
+        PositionSide::Long => match new_tsl {
+            Some(tsl) => sl_price.max(tsl),
+            None => sl_price,
+        },
+        PositionSide::Short => match new_tsl {
+            Some(tsl) => sl_price.min(tsl),
+            None => sl_price,
+        },
+    };
+    let bounds_partial = compute_partial_tp_price(pos, entry, atr, params);
+    let exit_bounds = Some(ExitBounds {
+        upper_full: tp_price_val,
+        upper_partial: bounds_partial,
+        lower_full: bounds_lower,
+    });
+
+    // ── 3. Take Profit ──────────────────────────────────────────────────
+    // (tp_price_val already computed above for bounds)
     let tp_distance = match pos.side {
         PositionSide::Long => tp_price_val - snap.close,
         PositionSide::Short => snap.close - tp_price_val,
@@ -1042,6 +1146,7 @@ pub fn evaluate_exits_with_diagnostics(
                 profit_atr: pa,
                 duration_bars,
             }),
+            exit_bounds: exit_bounds.clone(),
         };
     }
 
@@ -1071,6 +1176,7 @@ pub fn evaluate_exits_with_diagnostics(
                 profit_atr: pa,
                 duration_bars,
             }),
+            exit_bounds: exit_bounds.clone(),
         };
     }
 
@@ -1078,6 +1184,7 @@ pub fn evaluate_exits_with_diagnostics(
         result: KernelExitResult::Hold,
         threshold_records: thresholds,
         exit_context: None,
+        exit_bounds,
     }
 }
 
@@ -1781,5 +1888,101 @@ mod tests {
         let params = smart_exit_params();
         let result = evaluate_exits(&mut pos, &snap, &params, 0);
         assert_eq!(result, KernelExitResult::Hold);
+    }
+
+    // ── ExitBounds tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_exit_bounds_long_basic() {
+        // entry=100, atr=1.0, sl_mult=2.0, tp_mult=4.0
+        // Use close=100.3 (profit_atr=0.3, below trailing/breakeven thresholds)
+        let mut pos = long_pos(100.0);
+        let snap = default_snap(100.3);
+        let params = default_params();
+        let eval = evaluate_exits_with_diagnostics(&mut pos, &snap, &params, 1000);
+        assert_eq!(eval.result, KernelExitResult::Hold);
+        let bounds = eval.exit_bounds.expect("bounds should be Some");
+        // TP = entry + atr * tp_atr_mult = 100 + 1.0*4.0 = 104
+        assert!((bounds.upper_full - 104.0).abs() < 0.01);
+        // SL ~98 (no trailing at this profit level), must be below entry
+        assert!(bounds.lower_full < 100.0, "lower_full={}", bounds.lower_full);
+        // Partial TP: tp_partial_atr_mult=0 → falls back to tp_atr_mult=4.0 → 104
+        assert!(bounds.upper_partial.is_some());
+    }
+
+    #[test]
+    fn test_exit_bounds_short_basic() {
+        // SHORT: entry=100, atr=1.0, TP below entry, SL above entry
+        // Use close=99.7 (profit_atr=0.3, below trailing/breakeven thresholds)
+        let mut pos = short_pos(100.0);
+        let snap = default_snap(99.7);
+        let params = default_params();
+        let eval = evaluate_exits_with_diagnostics(&mut pos, &snap, &params, 1000);
+        assert_eq!(eval.result, KernelExitResult::Hold);
+        let bounds = eval.exit_bounds.expect("bounds should be Some");
+        // TP = entry - atr * tp_atr_mult = 100 - 4.0 = 96
+        assert!((bounds.upper_full - 96.0).abs() < 0.01);
+        // SL = entry + atr * sl_atr_mult = 100 + 2.0 = 102 (no trailing)
+        assert!(bounds.lower_full > 100.0, "lower_full={}", bounds.lower_full);
+    }
+
+    #[test]
+    fn test_exit_bounds_trailing_active() {
+        // LONG with trailing_sl set → lower_full picks max(sl, trailing)
+        let mut pos = long_pos(100.0);
+        pos.trailing_sl = Some(99.5); // trailing above SL (98.0)
+        let snap = default_snap(102.0);
+        let params = default_params();
+        let eval = evaluate_exits_with_diagnostics(&mut pos, &snap, &params, 1000);
+        let bounds = eval.exit_bounds.expect("bounds should be Some");
+        // lower_full = max(sl_price, 99.5); sl_price ~98.0 → lower_full ~99.5
+        assert!(bounds.lower_full >= 99.0, "trailing should raise lower_full, got {}", bounds.lower_full);
+    }
+
+    #[test]
+    fn test_exit_bounds_tp1_taken() {
+        // When tp1_taken, upper_partial should be None
+        let mut pos = long_pos(100.0);
+        pos.tp1_taken = true;
+        let snap = default_snap(101.0);
+        let params = default_params();
+        let eval = evaluate_exits_with_diagnostics(&mut pos, &snap, &params, 1000);
+        let bounds = eval.exit_bounds.expect("bounds should be Some");
+        assert!(bounds.upper_partial.is_none(), "tp1_taken → upper_partial should be None");
+    }
+
+    #[test]
+    fn test_exit_bounds_on_sl_hit() {
+        // Even when SL fires, bounds should be populated
+        let mut pos = long_pos(100.0);
+        let snap = default_snap(97.5); // below SL ~98
+        let params = default_params();
+        let eval = evaluate_exits_with_diagnostics(&mut pos, &snap, &params, 1000);
+        assert!(matches!(eval.result, KernelExitResult::FullClose { .. }));
+        let bounds = eval.exit_bounds.expect("bounds should be present even on SL hit");
+        assert!(bounds.upper_full > 100.0);
+        assert!(bounds.lower_full < 100.0);
+    }
+
+    #[test]
+    fn test_exit_bounds_on_hold() {
+        // Price in middle, nothing fires → Hold with bounds
+        let mut pos = long_pos(100.0);
+        let snap = default_snap(100.5);
+        let params = default_params();
+        let eval = evaluate_exits_with_diagnostics(&mut pos, &snap, &params, 1000);
+        assert_eq!(eval.result, KernelExitResult::Hold);
+        assert!(eval.exit_bounds.is_some());
+    }
+
+    #[test]
+    fn test_exit_bounds_partial_tp_disabled() {
+        let mut pos = long_pos(100.0);
+        let snap = default_snap(101.0);
+        let mut params = default_params();
+        params.enable_partial_tp = false;
+        let eval = evaluate_exits_with_diagnostics(&mut pos, &snap, &params, 1000);
+        let bounds = eval.exit_bounds.expect("bounds should be Some");
+        assert!(bounds.upper_partial.is_none(), "partial TP disabled → upper_partial None");
     }
 }

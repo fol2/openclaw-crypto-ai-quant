@@ -84,6 +84,21 @@ def prune_runtime_logs(*, db_path: Path, keep_days: float, dry_run: bool, vacuum
             con.commit()
             print(f"[prune_runtime_logs] deleted={n} cutoff_ts_ms={cutoff_ts_ms} db={db_path}")
 
+            # Also prune exit_tunnel table (30-day retention).
+            if _table_exists(con, "exit_tunnel"):
+                tunnel_cutoff = int((time.time() - 30.0 * 86400.0) * 1000.0)
+                row_t = con.execute(
+                    "SELECT COUNT(*) FROM exit_tunnel WHERE ts_ms < ?", (tunnel_cutoff,)
+                ).fetchone()
+                n_t = int(row_t[0] if row_t else 0)
+                if n_t > 0:
+                    if dry_run:
+                        print(f"[prune_runtime_logs] exit_tunnel would_delete={n_t}")
+                    else:
+                        con.execute("DELETE FROM exit_tunnel WHERE ts_ms < ?", (tunnel_cutoff,))
+                        con.commit()
+                        print(f"[prune_runtime_logs] exit_tunnel deleted={n_t}")
+
             if vacuum:
                 # VACUUM can be expensive; keep it opt-in.
                 con.execute("VACUUM")
