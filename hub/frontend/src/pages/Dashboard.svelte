@@ -203,6 +203,23 @@
     return 'NA';
   }
 
+  function resolveStrategyMode(rawHealth: any): string {
+    const direct = String(rawHealth?.strategy_mode || '').trim().toLowerCase();
+    if (direct) return direct;
+    const line = String(rawHealth?.line || '');
+    const m = line.match(/\bstrategy_mode=([a-z_]+)/i);
+    return m?.[1]?.toLowerCase() || '';
+  }
+
+  function promotedFamilyLabel(strategyMode: string): string {
+    const role = String(strategyMode || '').trim().toLowerCase();
+    if (role === 'primary') return 'EFFICIENT';
+    if (role === 'fallback') return 'GROWTH';
+    if (role === 'conservative') return 'CONSERVATIVE';
+    if (role === 'flat') return 'FLAT';
+    return 'NA';
+  }
+
   async function refreshModeRuntimeStates() {
     try {
       const svcs = await getSystemServices();
@@ -692,6 +709,12 @@
   );
   let selectedModeRuntimeState = $derived(getModeRuntimeState(selectedModeKey));
   let selectedModeRuntimeLabel = $derived(getModeRuntimeLabel(selectedModeKey));
+  let selectedLiveStrategyMode = $derived(
+    selectedModeKey === 'live' ? resolveStrategyMode(health) : ''
+  );
+  let selectedLivePromotedFamily = $derived(
+    promotedFamilyLabel(selectedLiveStrategyMode)
+  );
 
   // ── Range selector for PnL / DD ───────────────────────────────────────
   let metricsRange = $state<'today' | 'since' | 'all'>('today');
@@ -797,6 +820,16 @@
       ></span>
       {selectedModeRuntimeLabel}
     </div>
+
+    {#if selectedModeKey === 'live'}
+      <div class="status-chip live-promoted-chip" class:unknown={selectedLivePromotedFamily === 'NA'}>
+        <span
+          class="status-dot live-source-dot"
+          class:unknown-dot={selectedLivePromotedFamily === 'NA'}
+        ></span>
+        {selectedLivePromotedFamily}
+      </div>
+    {/if}
   </div>
 
   <div class="metrics-bar">
@@ -1297,6 +1330,18 @@
   .mode-runtime-chip.unknown {
     border-color: rgba(148,163,184,0.35);
     color: var(--text-dim);
+  }
+  .live-promoted-chip {
+    border-color: rgba(77,171,247,0.35);
+    color: #a5d8ff;
+  }
+  .live-promoted-chip.unknown {
+    border-color: rgba(148,163,184,0.35);
+    color: var(--text-dim);
+  }
+  .status-dot.live-source-dot {
+    background: var(--accent);
+    box-shadow: 0 0 6px rgba(77,171,247,0.45);
   }
   .status-dot.warn-dot {
     background: var(--yellow);
