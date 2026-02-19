@@ -2175,18 +2175,10 @@ extern "C" __global__ void sweep_engine_kernel(
             }
         }
 
-        // == Equity tracking (double precision) ==================================
+        // == Drawdown tracking (double precision) ==================================
+        // CPU report parity: max drawdown is computed from realised equity curve
+        // (`state.balance`) rather than mark-to-market open-position valuation.
         double equity = state.balance;
-        for (unsigned int s = 0u; s < ns; s++) {
-            const GpuPosition& p = state.positions[s];
-            if (p.active != POS_EMPTY) {
-                const GpuSnapshot& snap = snapshots[cfg.snapshot_offset + bar * ns + s];
-                if (snap.valid != 0u) {
-                    double eq_close = resolve_main_close(main_candles, bar, ns, s, snap);
-                    equity += profit_usd(p, eq_close);
-                }
-            }
-        }
         if (equity > state.peak_equity) { state.peak_equity = equity; }
         if (state.peak_equity > 0.0) {
             double dd = (state.peak_equity - equity) / state.peak_equity;
