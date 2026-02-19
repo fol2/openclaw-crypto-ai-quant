@@ -89,7 +89,13 @@ def _normalise_overrides(raw: Any) -> dict[str, Any]:
     return {}
 
 
-def _build_single_spec(*, full_spec: Path, sample_row: dict[str, Any], output_spec: Path) -> None:
+def _build_single_spec(
+    *,
+    full_spec: Path,
+    sample_row: dict[str, Any],
+    output_spec: Path,
+    allow_missing_axes: bool,
+) -> None:
     src = yaml.safe_load(full_spec.read_text(encoding="utf-8"))
     if not isinstance(src, dict):
         raise RuntimeError(f"invalid sweep spec root: {full_spec}")
@@ -101,21 +107,39 @@ def _build_single_spec(*, full_spec: Path, sample_row: dict[str, Any], output_sp
     if not overrides:
         raise RuntimeError("sample row has no overrides")
 
-    out = dict(src)
-    out_axes: list[dict[str, Any]] = []
+    axis_paths: list[str] = []
     for axis in axes:
         if not isinstance(axis, dict) or "path" not in axis:
             raise RuntimeError("invalid axis entry in sweep spec")
+        axis_paths.append(str(axis["path"]))
+
+    axis_paths_set = set(axis_paths)
+    missing_paths = sorted(path for path in axis_paths if path not in overrides)
+    extra_paths = sorted(path for path in overrides if path not in axis_paths_set)
+    if (missing_paths or extra_paths) and not allow_missing_axes:
+        missing_preview = missing_paths[:5]
+        extra_preview = extra_paths[:5]
+        raise RuntimeError(
+            "sample row override coverage mismatch: "
+            f"missing={len(missing_paths)} {missing_preview}, "
+            f"extra={len(extra_paths)} {extra_preview}"
+        )
+
+    out = dict(src)
+    out_axes: list[dict[str, Any]] = []
+    for axis in axes:
         path = str(axis["path"])
         axis_out = dict(axis)
         if path in overrides:
             axis_out["values"] = [overrides[path]]
-        else:
+        elif allow_missing_axes:
             old_values = axis_out.get("values")
             if isinstance(old_values, list) and old_values:
                 axis_out["values"] = [old_values[0]]
             else:
                 axis_out["values"] = [0.0]
+        else:
+            raise RuntimeError(f"missing axis override for path={path}")
         out_axes.append(axis_out)
     out["axes"] = out_axes
 
@@ -153,6 +177,7 @@ def _pair_trial(
     balance_from: Path | None,
     start_ts: int | None,
     end_ts: int | None,
+    allow_missing_axes: bool,
 ) -> dict[str, Any]:
     rows = _read_jsonl(sweep_rows_path)
     if len(rows) < sample_n:
@@ -218,6 +243,7 @@ def _pair_trial(
             full_spec=sweep_spec_full,
             sample_row=sample_row,
             output_spec=spec_path,
+            allow_missing_axes=allow_missing_axes,
         )
 
         cpu_row_path = pairing_dir / "cpu_rows" / f"{name}.jsonl"
@@ -309,6 +335,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sample-count", type=int, default=10, help="Pairing samples per trial")
     p.add_argument("--tpe-batch", type=int, default=256, help="GPU TPE batch size")
     p.add_argument("--sweep-top-k", type=int, default=50000, help="GPU sweep top-k retention")
+    p.add_argument(
+        "--allow-missing-axes",
+        action="store_true",
+        help=(
+            "Allow sample rows with incomplete axis coverage; missing axes fall back "
+            "to the first configured axis value."
+        ),
+    )
     return p
 
 
@@ -373,6 +407,7 @@ def main() -> int:
             "sample_count": args.sample_count,
             "tpe_batch": args.tpe_batch,
             "sweep_top_k": args.sweep_top_k,
+            "allow_missing_axes": args.allow_missing_axes,
         },
         "trials": [],
     }
@@ -457,6 +492,7 @@ def main() -> int:
             balance_from=snapped_balance.snapped if snapped_balance else None,
             start_ts=args.start_ts,
             end_ts=args.end_ts,
+            allow_missing_axes=args.allow_missing_axes,
         )
         final_summary["trials"].append(
             {
