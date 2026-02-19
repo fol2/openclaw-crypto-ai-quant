@@ -55,3 +55,8 @@ Trigger rotation if **any** condition is met:
 | Max config age | 14 days since deployment | Re-validate; retire if no longer passing |
 
 When a config is rotated out, record: config hash, start/stop timestamps, reason for rotation, and final performance summary.
+
+## References
+
+- [Strategy Lifecycle](strategy_lifecycle.md) — state machine and transition triggers
+- [Operations Runbook](runbook.md) — emergency stop and kill-switch procedures

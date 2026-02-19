@@ -794,4 +794,5 @@ Retain this manifest with the promotion ticket.
 
 - [Success Metrics & Guardrails](success_metrics.md) — risk thresholds and kill-switch triggers
 - [Strategy Lifecycle](strategy_lifecycle.md) — config state machine and rotation rules
-- [AGENTS.md](../AGENTS.md) — full architecture and configuration reference
+- [Architecture](ARCHITECTURE.md) — system design, components, and data flow
+- [Release Process](release_process.md) — version governance and tag-driven releases

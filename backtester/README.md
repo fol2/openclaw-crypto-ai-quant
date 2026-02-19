@@ -270,12 +270,21 @@ mei-backtester replay --init-state /tmp/paper_state.json --trades
 | File | Description |
 |------|-------------|
 | `crates/bt-core/src/engine.rs` | Simulation engine — `run_simulation()` |
+| `crates/bt-core/src/decision_kernel.rs` | SSOT decision kernel (shared across all paths) |
 | `crates/bt-core/src/init_state.rs` | JSON state loader for `--init-state` |
 | `crates/bt-core/src/sweep.rs` | Parallel parameter sweep runner |
+| `crates/bt-signals/` | Signal generation — entry logic, gates, confidence |
 | `crates/bt-data/` | Candle DB reader (SQLite) |
+| `crates/bt-gpu/` | CUDA GPU sweep + TPE Bayesian optimisation |
+| `crates/bt-runtime/` | PyO3 bridge to Python |
+| `crates/risk-core/` | Shared risk primitives (entry sizing, confidence) |
 | `crates/bt-cli/src/main.rs` | CLI entry point (clap) |
 | `../tools/export_state.py` | Export live/paper state to JSON |
 | `../tools/deploy_sweep.py` | Deploy sweep results to YAML config |
+
+## GPU Decision Codegen
+
+GPU sweep decision logic is generated from Rust kernel source via template-based codegen. See [docs/gpu-codegen-guide.md](docs/gpu-codegen-guide.md) for the developer workflow.
 
 ## Key Implementation Details
 

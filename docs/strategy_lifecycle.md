@@ -182,4 +182,5 @@ Every state transition writes a record with:
 ## References
 
 - [Success Metrics & Guardrails](success_metrics.md) — thresholds referenced by transitions
-- [Strategy Factory Workflow](../plan/1/strategy-factory-workflow.md) — operational pipeline context
+- [Operations Runbook](runbook.md) — emergency stop, rollback, and diagnostics
+- [Architecture](ARCHITECTURE.md) — factory pipeline and system design

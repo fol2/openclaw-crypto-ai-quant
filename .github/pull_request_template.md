@@ -5,11 +5,13 @@
 
 > Complete this section for **every** PR. If any box is checked, `@fol2` review is required before merge.
 
-- [ ] This PR modifies **kill-switch or risk-limit** logic (`engine/kill_switch*`, `engine/risk*`, `docs/success_metrics.md`)
-- [ ] This PR modifies **order sizing, leverage, or margin** logic (`engine/oms.py`, `engine/oms_reconciler.py`)
+- [ ] This PR modifies **kill-switch or risk-limit** logic (`engine/risk.py`, `docs/success_metrics.md`)
+- [ ] This PR modifies **order sizing, leverage, or margin** logic (`engine/oms.py`, `engine/oms_reconciler.py`, `risk-core/`)
 - [ ] This PR modifies **live order execution** code (`live/`, `exchange/`)
 - [ ] This PR modifies **production config** (`config/strategy_overrides.yaml`)
-- [ ] This PR modifies the **strategy lifecycle or promotion gates** (`docs/strategy_lifecycle.md`)
+- [ ] This PR modifies the **strategy lifecycle or promotion gates** (`docs/strategy_lifecycle.md`, `tools/promote_to_live.py`)
+- [ ] This PR modifies **decision kernel logic** (`bt-signals/`, `bt-core/src/decision_kernel.rs`, `bt-core/src/exits/`)
+- [ ] This PR modifies **GPU codegen** (`bt-gpu/codegen/`, `bt-gpu/kernels/`)
 
 ### If any box above is checked:
 
