@@ -37,7 +37,7 @@ struct RpcResponse {
     error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BboQuote {
     pub bid: f64,
     pub ask: f64,

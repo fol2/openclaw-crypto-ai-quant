@@ -98,7 +98,7 @@ fn spawn_mids_poller(state: Arc<AppState>) {
         let mut after_seq: Option<u64> = None;
         let mut after_bbo_seq: Option<u64> = None;
         let mut last_published_mids: HashMap<String, f64> = HashMap::new();
-        let mut last_published_bbo_mids: HashMap<String, f64> = HashMap::new();
+        let mut last_published_bbo: HashMap<String, sidecar::BboQuote> = HashMap::new();
         loop {
             // Read the symbols last seen in a snapshot query.
             // Skips until the first REST snapshot has been fetched.
@@ -130,13 +130,8 @@ fn spawn_mids_poller(state: Arc<AppState>) {
                     if snap.seq_reset {
                         tracing::debug!("sidecar mids sequence reset detected; re-synchronised");
                     }
-                    let bbo_mids: HashMap<String, f64> = snap
-                        .bbo
-                        .iter()
-                        .map(|(sym, quote)| (sym.clone(), quote.mid))
-                        .collect();
                     let mids_changed = snap.seq_reset || snap.mids != last_published_mids;
-                    let bbo_changed = snap.seq_reset || bbo_mids != last_published_bbo_mids;
+                    let bbo_changed = snap.seq_reset || snap.bbo != last_published_bbo;
                     let mut changed_symbols: Vec<String> = Vec::new();
                     let mut changed_bbo_symbols: Vec<String> = Vec::new();
                     if mids_debug_log {
@@ -149,9 +144,9 @@ fn spawn_mids_poller(state: Arc<AppState>) {
                                 changed_symbols.push(sym.clone());
                             }
                         }
-                        for (sym, mid) in &bbo_mids {
-                            let is_changed = match last_published_bbo_mids.get(sym) {
-                                Some(prev) => *prev != *mid,
+                        for (sym, quote) in &snap.bbo {
+                            let is_changed = match last_published_bbo.get(sym) {
+                                Some(prev) => *prev != *quote,
                                 None => true,
                             };
                             if is_changed {
@@ -162,7 +157,7 @@ fn spawn_mids_poller(state: Arc<AppState>) {
                         changed_bbo_symbols.sort_unstable();
                     }
                     last_published_mids = snap.mids.clone();
-                    last_published_bbo_mids = bbo_mids;
+                    last_published_bbo = snap.bbo.clone();
                     let mut ws_mids_receivers = 0usize;
                     let mut ws_bbo_receivers = 0usize;
                     let mut payload_data =
@@ -222,7 +217,7 @@ fn spawn_mids_poller(state: Arc<AppState>) {
                     after_seq = None;
                     after_bbo_seq = None;
                     last_published_mids.clear();
-                    last_published_bbo_mids.clear();
+                    last_published_bbo.clear();
                     tokio::time::sleep(std::time::Duration::from_millis(poll_ms)).await;
                 }
             }
