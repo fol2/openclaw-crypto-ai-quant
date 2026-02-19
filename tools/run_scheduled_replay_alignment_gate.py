@@ -15,10 +15,13 @@ import datetime as dt
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import sqlite3
 import subprocess
 from typing import Any
+
+_STRATEGY_SHA1_RE = re.compile(r"strategy_sha1=([0-9a-fA-F]{7,40})")
 
 
 def _now_ms() -> int:
@@ -129,6 +132,103 @@ def _candles_interval_coverage_ms(candles_db: Path, interval: str) -> tuple[int 
         return None, None
 
 
+def _runtime_strategy_window_stats(live_db: Path, *, from_ts: int, to_ts: int) -> dict[str, Any]:
+    if not live_db.exists():
+        return {
+            "sampled_rows": 0,
+            "strategy_sha1_distinct": 0,
+            "last_segment_from_ts": None,
+            "last_segment_to_ts": None,
+            "last_segment_sha1": None,
+            "timeline": [],
+        }
+    try:
+        conn = sqlite3.connect(f"file:{live_db}?mode=ro", uri=True, timeout=10)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT ts_ms, message FROM runtime_logs WHERE ts_ms >= ? AND ts_ms <= ? ORDER BY ts_ms ASC, id ASC",
+                (int(from_ts), int(to_ts)),
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return {
+            "sampled_rows": 0,
+            "strategy_sha1_distinct": 0,
+            "last_segment_from_ts": None,
+            "last_segment_to_ts": None,
+            "last_segment_sha1": None,
+            "timeline": [],
+        }
+
+    timeline: list[dict[str, Any]] = []
+    sampled_rows = 0
+    distinct_sha: set[str] = set()
+
+    for row in rows:
+        ts_ms = int(row["ts_ms"] or 0)
+        message = str(row["message"] or "")
+        if ts_ms <= 0 or not message:
+            continue
+        m = _STRATEGY_SHA1_RE.search(message)
+        if m is None:
+            continue
+        sha = str(m.group(1) or "").strip().lower()
+        if not sha:
+            continue
+        sampled_rows += 1
+        distinct_sha.add(sha)
+
+        if timeline and str(timeline[-1]["strategy_sha1"]) == sha:
+            timeline[-1]["last_ts_ms"] = ts_ms
+            timeline[-1]["sample_count"] = int(timeline[-1]["sample_count"]) + 1
+        else:
+            timeline.append(
+                {
+                    "strategy_sha1": sha,
+                    "first_ts_ms": ts_ms,
+                    "last_ts_ms": ts_ms,
+                    "sample_count": 1,
+                }
+            )
+
+    last_segment = timeline[-1] if timeline else None
+    return {
+        "sampled_rows": int(sampled_rows),
+        "strategy_sha1_distinct": len(distinct_sha),
+        "last_segment_from_ts": int(last_segment["first_ts_ms"]) if last_segment else None,
+        "last_segment_to_ts": int(last_segment["last_ts_ms"]) if last_segment else None,
+        "last_segment_sha1": str(last_segment["strategy_sha1"]) if last_segment else None,
+        "timeline": timeline,
+    }
+
+
+def _ts_ms_to_iso_utc(ts_ms: int) -> str:
+    return dt.datetime.fromtimestamp(float(ts_ms) / 1000.0, tz=dt.timezone.utc).isoformat()
+
+
+def _count_live_trades_in_window(live_db: Path, *, from_ts: int, to_ts: int) -> int:
+    if not live_db.exists() or from_ts > to_ts:
+        return 0
+    from_iso = _ts_ms_to_iso_utc(int(from_ts))
+    to_iso = _ts_ms_to_iso_utc(int(to_ts))
+    try:
+        conn = sqlite3.connect(f"file:{live_db}?mode=ro", uri=True, timeout=10)
+        try:
+            row = conn.execute(
+                "SELECT COUNT(1) FROM trades WHERE timestamp >= ? AND timestamp <= ?",
+                (from_iso, to_iso),
+            ).fetchone()
+            if not row:
+                return 0
+            return int(row[0] or 0)
+        finally:
+            conn.close()
+    except Exception:
+        return 0
+
+
 def _default_repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -209,6 +309,21 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help="Optional run report JSON path (default: <bundle-dir>/scheduled_alignment_gate_run.json).",
     )
+    auto_clamp_default = _env_bool("AI_QUANT_REPLAY_GATE_AUTO_STRATEGY_WINDOW_CLAMP", True)
+    clamp_group = ap.add_mutually_exclusive_group()
+    clamp_group.add_argument(
+        "--auto-strategy-window-clamp",
+        dest="auto_strategy_window_clamp",
+        action="store_true",
+        help="When strategy SHA drifts in the requested window, clamp to the latest contiguous stable SHA segment.",
+    )
+    clamp_group.add_argument(
+        "--disable-auto-strategy-window-clamp",
+        dest="auto_strategy_window_clamp",
+        action="store_false",
+        help="Disable auto-clamping to the latest stable strategy SHA segment.",
+    )
+    ap.set_defaults(auto_strategy_window_clamp=auto_clamp_default)
     return ap
 
 
@@ -236,6 +351,8 @@ def main() -> int:
     from_ts = int(requested_from_ts)
     coverage_from_ts: int | None = None
     coverage_to_ts: int | None = None
+    strategy_window_stats: dict[str, Any] | None = None
+    strategy_window_adjustment: dict[str, Any] | None = None
 
     bundle_root = _resolve_path(str(args.bundle_root), base=resolve_base)
     try:
@@ -357,6 +474,91 @@ def main() -> int:
             }
         )
     if not failures:
+        strategy_window_stats = _runtime_strategy_window_stats(
+            live_db,
+            from_ts=int(from_ts),
+            to_ts=int(to_ts),
+        )
+        if bool(args.auto_strategy_window_clamp):
+            distinct_sha = int(strategy_window_stats.get("strategy_sha1_distinct") or 0)
+            timeline = strategy_window_stats.get("timeline")
+            timeline_rows = timeline if isinstance(timeline, list) else []
+            if distinct_sha > 1 and timeline_rows:
+                selected_segment: dict[str, Any] | None = None
+                selected_from_ts: int | None = None
+                selected_to_ts: int | None = None
+                selected_trade_rows = 0
+                selection_mode = "latest_segment_fallback"
+
+                for segment in reversed(timeline_rows):
+                    seg_from_raw = segment.get("first_ts_ms")
+                    seg_to_raw = segment.get("last_ts_ms")
+                    if not isinstance(seg_from_raw, int) or not isinstance(seg_to_raw, int):
+                        continue
+                    seg_from_ts = max(int(from_ts), int(seg_from_raw))
+                    seg_to_ts = min(int(to_ts), int(seg_to_raw))
+                    if seg_from_ts >= seg_to_ts:
+                        continue
+                    trade_rows = _count_live_trades_in_window(
+                        live_db,
+                        from_ts=int(seg_from_ts),
+                        to_ts=int(seg_to_ts),
+                    )
+                    if trade_rows >= int(min_live_trades):
+                        selected_segment = segment
+                        selected_from_ts = int(seg_from_ts)
+                        selected_to_ts = int(seg_to_ts)
+                        selected_trade_rows = int(trade_rows)
+                        selection_mode = "latest_segment_with_min_live_trades"
+                        break
+
+                if selected_segment is None:
+                    fallback = timeline_rows[-1]
+                    seg_from_raw = fallback.get("first_ts_ms")
+                    seg_to_raw = fallback.get("last_ts_ms")
+                    if isinstance(seg_from_raw, int) and isinstance(seg_to_raw, int):
+                        seg_from_ts = max(int(from_ts), int(seg_from_raw))
+                        seg_to_ts = min(int(to_ts), int(seg_to_raw))
+                        if seg_from_ts < seg_to_ts:
+                            selected_segment = fallback
+                            selected_from_ts = int(seg_from_ts)
+                            selected_to_ts = int(seg_to_ts)
+                            selected_trade_rows = _count_live_trades_in_window(
+                                live_db,
+                                from_ts=int(seg_from_ts),
+                                to_ts=int(seg_to_ts),
+                            )
+
+                if selected_segment is not None and selected_from_ts is not None and selected_to_ts is not None:
+                    if selected_from_ts >= selected_to_ts:
+                        failures.append(
+                            {
+                                "code": "invalid_strategy_window_clamp",
+                                "classification": "state_initialisation_gap",
+                                "detail": (
+                                    f"clamped window is empty: from_ts={selected_from_ts} >= to_ts={selected_to_ts} "
+                                    f"(strategy_sha1={selected_segment.get('strategy_sha1')})"
+                                ),
+                            }
+                        )
+                    else:
+                        strategy_window_adjustment = {
+                            "applied": True,
+                            "reason": "strategy_sha1_drift_detected",
+                            "strategy_sha1_distinct": distinct_sha,
+                            "selection_mode": selection_mode,
+                            "selected_segment_sha1": str(selected_segment.get("strategy_sha1") or "").strip().lower(),
+                            "selected_segment_first_ts_ms": int(selected_segment.get("first_ts_ms") or selected_from_ts),
+                            "selected_segment_last_ts_ms": int(selected_segment.get("last_ts_ms") or selected_to_ts),
+                            "selected_live_trade_rows": int(selected_trade_rows),
+                            "original_from_ts": int(from_ts),
+                            "original_to_ts": int(to_ts),
+                            "clamped_from_ts": int(selected_from_ts),
+                            "clamped_to_ts": int(selected_to_ts),
+                        }
+                        from_ts = int(selected_from_ts)
+                        to_ts = int(selected_to_ts)
+
         coverage_from_ts, coverage_to_ts = _candles_interval_coverage_ms(candles_db, interval)
         if coverage_from_ts is None or coverage_to_ts is None:
             failures.append(
@@ -568,6 +770,9 @@ def main() -> int:
             "coverage_to_ts": coverage_to_ts,
             "window_minutes": int(args.window_minutes),
             "lag_minutes": int(args.lag_minutes),
+            "auto_strategy_window_clamp": bool(args.auto_strategy_window_clamp),
+            "strategy_window_stats": strategy_window_stats,
+            "strategy_window_adjustment": strategy_window_adjustment,
         },
         "paths": {
             "bundle_root": str(bundle_root),
