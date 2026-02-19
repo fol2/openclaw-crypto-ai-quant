@@ -490,6 +490,38 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 .into(),
         );
     }
+    if args.exit_candles_db.is_some() ^ args.exit_interval.is_some() {
+        return Err(
+            "--exit-candles-db and --exit-interval must be provided together"
+                .to_string()
+                .into(),
+        );
+    }
+    let has_entry_sub = args.entry_candles_db.is_some();
+    let has_exit_sub = args.exit_candles_db.is_some();
+    if has_entry_sub ^ has_exit_sub {
+        return Err(
+            "axis_parity_ledger requires both entry and exit sub-candle inputs together for GPU/CPU parity; provide both --entry-* and --exit-*, or neither"
+                .to_string()
+                .into(),
+        );
+    }
+    if has_entry_sub {
+        if args.entry_interval.as_deref() != args.exit_interval.as_deref() {
+            return Err(
+                "axis_parity_ledger currently requires identical --entry-interval and --exit-interval for GPU/CPU parity"
+                    .to_string()
+                    .into(),
+            );
+        }
+        if args.entry_candles_db.as_deref() != args.exit_candles_db.as_deref() {
+            return Err(
+                "axis_parity_ledger currently requires identical --entry-candles-db and --exit-candles-db for GPU/CPU parity (single GPU sub-candle stream)"
+                    .to_string()
+                    .into(),
+            );
+        }
+    }
     let entry_candles: Option<CandleData> = match (&args.entry_candles_db, &args.entry_interval) {
         (Some(db), Some(interval)) => {
             let entry_paths = vec![db.clone()];
@@ -507,13 +539,6 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => None,
     };
-    if args.exit_candles_db.is_some() ^ args.exit_interval.is_some() {
-        return Err(
-            "--exit-candles-db and --exit-interval must be provided together"
-                .to_string()
-                .into(),
-        );
-    }
     let exit_candles: Option<CandleData> = match (&args.exit_candles_db, &args.exit_interval) {
         (Some(db), Some(interval)) => {
             let exit_paths = vec![db.clone()];
