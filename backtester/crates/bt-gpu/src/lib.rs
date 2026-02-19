@@ -382,9 +382,17 @@ fn run_gpu_sweep_internal(
         );
     }
 
-    // CPU parity: keep GPU trading scope identical to CPU scope guard [from_ts, to_ts].
-    // Do not shift start index back by one bar when sub-bars are active.
-    let trade_start_for_kernel = trade_start;
+    // CPU parity for sub-bars: the first scoped timestamp belongs to the previous
+    // main bar window ((ts[i-1], ts[i]]). Shift the kernel start back by one bar
+    // so the first boundary tick is evaluated like CPU.
+    let mut trade_start_for_kernel = trade_start;
+    if max_sub_per_bar > 0 && trade_start_for_kernel > 0 {
+        trade_start_for_kernel -= 1;
+        eprintln!(
+            "[GPU] Sub-bar boundary alignment: trade_start {} -> {}",
+            trade_start, trade_start_for_kernel
+        );
+    }
 
     // ── 3. Calculate VRAM budget ─────────────────────────────────────────
     let total_vram = device_state.total_vram_bytes();
