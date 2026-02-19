@@ -1649,8 +1649,46 @@ extern "C" __global__ void sweep_engine_kernel(
                             }
                             continue;
                         }
-                        double p_atr_pyr = profit_atr(pos_after_exit, (double)snap.close);
-                        if (p_atr_pyr >= (double)cfg.add_min_profit_atr) {
+                        double min_profit_atr = (double)cfg.add_min_profit_atr;
+                        if ((double)snap.adx_slope > 0.75 && (double)snap.atr_slope <= 0.0) {
+                            bool is_rsi_extreme =
+                                (pos_after_exit.active == POS_LONG)
+                                    ? ((double)snap.rsi > 65.0)
+                                    : ((double)snap.rsi < 35.0);
+                            if (!is_rsi_extreme) {
+                                min_profit_atr *= 0.5;
+                            }
+                        }
+
+                        double current_atr = apply_atr_floor(
+                            (double)snap.atr,
+                            (double)snap.close,
+                            (double)cfg.min_atr_pct
+                        );
+                        if (!(current_atr > 0.0)) {
+                            current_atr = (pos_after_exit.entry_atr > 0.0f)
+                                ? (double)pos_after_exit.entry_atr
+                                : ((double)pos_after_exit.entry_price * 0.005);
+                        }
+                        if (!(current_atr > 0.0)) {
+                            if (pyr_debug_target) {
+                                printf(
+                                    "[gpu-pyr-debug] sym=%u ts=%u rejected=invalid_atr atr=%.12f entry_atr=%.12f entry_price=%.12f\\n",
+                                    sym, snap.t_sec, (double)snap.atr,
+                                    (double)pos_after_exit.entry_atr, (double)pos_after_exit.entry_price
+                                );
+                            }
+                            continue;
+                        }
+
+                        double p_atr_pyr =
+                            (pos_after_exit.active == POS_LONG)
+                                ? (((double)snap.close - (double)pos_after_exit.entry_price) / current_atr)
+                                : (((double)pos_after_exit.entry_price - (double)snap.close) / current_atr);
+                        if (!isfinite(p_atr_pyr)) {
+                            p_atr_pyr = 0.0;
+                        }
+                        if (p_atr_pyr >= min_profit_atr) {
                             long long elapsed_sec =
                                 (long long)snap.t_sec - (long long)pos_after_exit.last_add_time_sec;
                             long long min_add_cooldown_sec =
@@ -1769,8 +1807,9 @@ extern "C" __global__ void sweep_engine_kernel(
                         }
                         else if (pyr_debug_target) {
                             printf(
-                                "[gpu-pyr-debug] sym=%u ts=%u rejected=min_profit_atr profit_atr=%.12f min=%.12f\\n",
-                                sym, snap.t_sec, p_atr_pyr, (double)cfg.add_min_profit_atr
+                                "[gpu-pyr-debug] sym=%u ts=%u rejected=min_profit_atr profit_atr=%.12f min=%.12f atr=%.12f adx_slope=%.12f atr_slope=%.12f rsi=%.12f\\n",
+                                sym, snap.t_sec, p_atr_pyr, min_profit_atr, current_atr,
+                                (double)snap.adx_slope, (double)snap.atr_slope, (double)snap.rsi
                             );
                         }
                     }
