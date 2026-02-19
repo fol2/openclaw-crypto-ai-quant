@@ -599,6 +599,12 @@
   let daily = $derived(snap?.daily || {});
   let recent = $derived(snap?.recent || {});
   let openPositions = $derived(snap?.open_positions || []);
+  let selectedModeKey = $derived(
+    (appState.mode === 'paper' || !appState.mode) ? 'paper1' : appState.mode
+  );
+  let selectedModeRuntimeState = $derived(getModeRuntimeState(selectedModeKey));
+  let selectedModeRuntimeLabel = $derived(getModeRuntimeLabel(selectedModeKey));
+  let selectedModeLabelUpper = $derived(getModeLabel(selectedModeKey).toUpperCase());
 
   // ── Range selector for PnL / DD ───────────────────────────────────────
   let metricsRange = $state<'today' | 'since' | 'all'>('today');
@@ -668,10 +674,7 @@
         class="mode-btn mode-btn-live"
         class:active={appState.mode === LIVE_MODE}
         onclick={() => setMode(LIVE_MODE)}
-      >
-        <span>{getModeLabel(LIVE_MODE)}</span>
-        <span class={`mode-state state-${getModeRuntimeState(LIVE_MODE)}`}>{getModeRuntimeLabel(LIVE_MODE)}</span>
-      </button>
+      >{getModeLabel(LIVE_MODE)}</button>
 
       <span class="mode-divider" aria-hidden="true"></span>
 
@@ -681,10 +684,7 @@
             class="mode-btn"
             class:active={appState.mode === m || (appState.mode === 'paper' && m === 'paper1')}
             onclick={() => setMode(m)}
-          >
-            <span>{getModeLabel(m)}</span>
-            <span class={`mode-state state-${getModeRuntimeState(m)}`}>{getModeRuntimeLabel(m)}</span>
-          </button>
+          >{getModeLabel(m)}</button>
         {/each}
       </div>
     </div>
@@ -692,6 +692,23 @@
     <div class="status-chip" class:ok={health.ok} class:bad={!health.ok}>
       <span class="status-dot" class:alive={health.ok}></span>
       {health.ok ? 'ENGINE' : 'NO HB'}
+    </div>
+
+    <div
+      class="status-chip mode-runtime-chip"
+      class:ok={selectedModeRuntimeState === 'on'}
+      class:warn={selectedModeRuntimeState === 'off'}
+      class:bad={selectedModeRuntimeState === 'error'}
+      class:unknown={selectedModeRuntimeState === 'unknown'}
+    >
+      <span
+        class="status-dot"
+        class:alive={selectedModeRuntimeState === 'on'}
+        class:warn-dot={selectedModeRuntimeState === 'off'}
+        class:bad-dot={selectedModeRuntimeState === 'error'}
+        class:unknown-dot={selectedModeRuntimeState === 'unknown'}
+      ></span>
+      {selectedModeLabelUpper} {selectedModeRuntimeLabel}
     </div>
   </div>
 
@@ -1065,10 +1082,6 @@
     opacity: 0.9;
   }
   .mode-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
     background: transparent;
     border: none;
     color: var(--text-muted);
@@ -1081,39 +1094,6 @@
     font-family: 'IBM Plex Mono', monospace;
     transition: all var(--t-fast);
     white-space: nowrap;
-  }
-  .mode-state {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 28px;
-    padding: 1px 5px;
-    border-radius: 999px;
-    border: 1px solid rgba(148, 163, 184, 0.35);
-    font-size: 9px;
-    line-height: 1.1;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-  }
-  .mode-state.state-on {
-    color: var(--green);
-    border-color: rgba(81, 207, 102, 0.45);
-    background: rgba(81, 207, 102, 0.12);
-  }
-  .mode-state.state-off {
-    color: var(--yellow);
-    border-color: rgba(255, 212, 59, 0.45);
-    background: rgba(255, 212, 59, 0.12);
-  }
-  .mode-state.state-error {
-    color: var(--red);
-    border-color: rgba(255, 107, 107, 0.45);
-    background: rgba(255, 107, 107, 0.12);
-  }
-  .mode-state.state-unknown {
-    color: var(--text-dim);
-    border-color: rgba(148, 163, 184, 0.35);
-    background: rgba(148, 163, 184, 0.1);
   }
   .mode-btn:hover {
     color: var(--text);
@@ -1139,9 +1119,6 @@
     color: var(--bg);
     border-color: transparent;
   }
-  .mode-btn.active .mode-state {
-    border-color: rgba(15, 23, 42, 0.35);
-  }
 
   .status-chip {
     display: inline-flex;
@@ -1154,6 +1131,7 @@
     padding: 4px 10px;
     border-radius: var(--radius-pill);
     border: 1px solid var(--border);
+    white-space: nowrap;
   }
   .status-chip.ok {
     border-color: rgba(81,207,102,0.3);
@@ -1173,6 +1151,23 @@
     background: var(--green);
     box-shadow: 0 0 6px var(--green);
     animation: pulse 2s ease-in-out infinite;
+  }
+  .mode-runtime-chip.warn {
+    border-color: rgba(255,212,59,0.35);
+    color: var(--yellow);
+  }
+  .mode-runtime-chip.unknown {
+    border-color: rgba(148,163,184,0.35);
+    color: var(--text-dim);
+  }
+  .status-dot.warn-dot {
+    background: var(--yellow);
+  }
+  .status-dot.bad-dot {
+    background: var(--red);
+  }
+  .status-dot.unknown-dot {
+    background: var(--text-dim);
   }
 
   .metrics-bar {
@@ -1931,7 +1926,29 @@
 
   @media (max-width: 480px) {
     .mode-tabs {
+      width: 100%;
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      gap: 3px;
       padding: 3px;
+    }
+    .family-tabs {
+      display: flex;
+      width: auto;
+      gap: 3px;
+      flex-shrink: 0;
+    }
+    .mode-divider {
+      display: block;
+    }
+    .mode-btn-live {
+      width: auto;
+      flex-shrink: 0;
+    }
+    .family-tabs .mode-btn {
+      width: auto;
+      flex-shrink: 0;
     }
     .mode-btn {
       padding: 4px 8px;
