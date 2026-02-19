@@ -78,7 +78,7 @@ Candidate output compatibility is validated by reading/rejecting rows that do no
   - `replay_equivalence_report_path`
   - `replay_equivalence_status = pass`
   - `replay_equivalence_count`
-- `tools/validate_factory_selection_gate.py` is the machine-readable gate used by
+- `scripts/validate_factory_selection_gate.py` is the machine-readable gate used by
   `scripts/run_factory_stage_gate.sh`; every dry/smoke/real execution must pass it.
 
 ## CPU / GPU / TPE / grid confidence level
