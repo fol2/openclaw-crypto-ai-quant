@@ -37,11 +37,21 @@ struct RpcResponse {
     error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BboQuote {
+    pub bid: f64,
+    pub ask: f64,
+    pub mid: f64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct MidsSnapshot {
     pub mids: HashMap<String, f64>,
     pub mids_age_s: Option<f64>,
     pub mids_seq: Option<u64>,
+    pub bbo: HashMap<String, BboQuote>,
+    pub bbo_age_s: Option<f64>,
+    pub bbo_seq: Option<u64>,
     pub changed: bool,
     pub timed_out: bool,
     pub seq_reset: bool,
@@ -58,6 +68,25 @@ fn parse_u64_value(v: &Value) -> Option<u64> {
     }
     v.as_i64()
         .and_then(|i| if i >= 0 { Some(i as u64) } else { None })
+}
+
+fn parse_bbo_quotes(result: &Value) -> HashMap<String, BboQuote> {
+    let mut out = HashMap::new();
+    let bbo_raw = result.get("bbo").and_then(|v| v.as_object());
+    if let Some(map) = bbo_raw {
+        for (sym, raw) in map {
+            let Some(obj) = raw.as_object() else {
+                continue;
+            };
+            let bid = obj.get("bid").and_then(parse_f64_value);
+            let ask = obj.get("ask").and_then(parse_f64_value);
+            let mid = obj.get("mid").and_then(parse_f64_value);
+            if let (Some(bid), Some(ask), Some(mid)) = (bid, ask, mid) {
+                out.insert(sym.to_uppercase(), BboQuote { bid, ask, mid });
+            }
+        }
+    }
+    out
 }
 
 impl SidecarClient {
@@ -165,10 +194,14 @@ impl SidecarClient {
             }
         }
         let mids_age_s = result.get("mids_age_s").and_then(parse_f64_value);
+        let bbo = parse_bbo_quotes(&result);
         Ok(MidsSnapshot {
             mids,
             mids_age_s,
             mids_seq: result.get("mids_seq").and_then(parse_u64_value),
+            bbo,
+            bbo_age_s: result.get("bbo_age_s").and_then(parse_f64_value),
+            bbo_seq: result.get("bbo_seq").and_then(parse_u64_value),
             changed: true,
             timed_out: false,
             seq_reset: false,
@@ -180,6 +213,7 @@ impl SidecarClient {
         &self,
         symbols: &[String],
         after_seq: Option<u64>,
+        after_bbo_seq: Option<u64>,
         timeout_ms: u64,
     ) -> Result<MidsSnapshot, String> {
         let timeout_ms = timeout_ms.clamp(50, 120_000);
@@ -189,6 +223,7 @@ impl SidecarClient {
                 serde_json::json!({
                     "symbols": symbols,
                     "after_seq": after_seq.unwrap_or(0),
+                    "after_bbo_seq": after_bbo_seq.unwrap_or(0),
                     "max_age_s": null,
                     "timeout_ms": timeout_ms
                 }),
@@ -214,10 +249,14 @@ impl SidecarClient {
                 }
             }
         }
+        let bbo = parse_bbo_quotes(&result);
         Ok(MidsSnapshot {
             mids,
             mids_age_s: result.get("mids_age_s").and_then(parse_f64_value),
             mids_seq: result.get("mids_seq").and_then(parse_u64_value),
+            bbo,
+            bbo_age_s: result.get("bbo_age_s").and_then(parse_f64_value),
+            bbo_seq: result.get("bbo_seq").and_then(parse_u64_value),
             changed: result
                 .get("changed")
                 .and_then(|v| v.as_bool())

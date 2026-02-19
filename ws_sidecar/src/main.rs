@@ -400,6 +400,7 @@ struct State {
 
     bbo: HashMap<String, (f64, f64)>,
     bbo_updated_at: HashMap<String, Instant>,
+    bbo_seq: u64,
 
     candles: HashMap<(String, String), VecDeque<Candle>>,
     candle_updated_at: HashMap<(String, String), Instant>,
@@ -2338,11 +2339,19 @@ async fn handle_ws_message(
                     }
                 }
                 let mut st = state.write().await;
+                let bbo_changed = st
+                    .bbo
+                    .get(&sym)
+                    .map(|(pbid, pask)| *pbid != bid || *pask != ask)
+                    .unwrap_or(true);
                 st.bbo.insert(sym.clone(), (bid, ask));
                 st.bbo_updated_at.insert(sym.clone(), now);
+                if bbo_changed {
+                    st.bbo_seq = st.bbo_seq.wrapping_add(1);
+                }
                 let mids_changed =
                     apply_bbo_mid_tick(&mut st, &sym, bid, ask, now, cfg.mids_from_bbo);
-                if mids_changed {
+                if mids_changed || bbo_changed {
                     mids_notify.notify_waiters();
                 }
             }
@@ -2573,6 +2582,30 @@ fn collect_mids_result(
         }
     }
 
+    let mut bbo_out = serde_json::Map::new();
+    let mut bbo_age_s: Option<f64> = None;
+    for sym in symbols.iter() {
+        let Some((bid, ask)) = st.bbo.get(sym).copied() else {
+            continue;
+        };
+        let age_s = st
+            .bbo_updated_at
+            .get(sym)
+            .map(|t| t.elapsed().as_secs_f64())
+            .unwrap_or(f64::INFINITY);
+        if max_age.map(|limit| age_s <= limit).unwrap_or(true) {
+            bbo_out.insert(
+                sym.clone(),
+                json!({
+                    "bid": bid,
+                    "ask": ask,
+                    "mid": (bid + ask) / 2.0,
+                }),
+            );
+            bbo_age_s = Some(bbo_age_s.map(|x| x.max(age_s)).unwrap_or(age_s));
+        }
+    }
+
     let mut out = serde_json::Map::new();
     out.insert("mids".to_string(), Value::Object(mids_out));
     out.insert(
@@ -2580,6 +2613,12 @@ fn collect_mids_result(
         age.map(Value::from).unwrap_or(Value::Null),
     );
     out.insert("mids_seq".to_string(), json!(st.mids_seq));
+    out.insert("bbo".to_string(), Value::Object(bbo_out));
+    out.insert(
+        "bbo_age_s".to_string(),
+        bbo_age_s.map(Value::from).unwrap_or(Value::Null),
+    );
+    out.insert("bbo_seq".to_string(), json!(st.bbo_seq));
     out
 }
 
@@ -3068,6 +3107,7 @@ async fn handle_client(
                     .unwrap_or_else(Vec::new);
                 let max_age = get_param_f64(&params, "max_age_s");
                 let after_seq = get_param_u64(&params, "after_seq").unwrap_or(0);
+                let after_bbo_seq = get_param_u64(&params, "after_bbo_seq").unwrap_or(0);
                 let timeout_ms = get_param_u64(&params, "timeout_ms")
                     .unwrap_or(25_000)
                     .clamp(50, 120_000);
@@ -3078,7 +3118,7 @@ async fn handle_client(
 
                     {
                         let st = state.read().await;
-                        if st.mids_seq > after_seq {
+                        if st.mids_seq > after_seq || st.bbo_seq > after_bbo_seq {
                             let mut out = collect_mids_result(&st, &symbols, max_age);
                             out.insert("changed".to_string(), Value::Bool(true));
                             out.insert("timed_out".to_string(), Value::Bool(false));
@@ -3092,7 +3132,7 @@ async fn handle_client(
                         }
                         // Sidecar restart can rewind mids_seq to a smaller value. Return
                         // immediately so clients can resynchronise without waiting for timeout.
-                        if st.mids_seq < after_seq {
+                        if st.mids_seq < after_seq || st.bbo_seq < after_bbo_seq {
                             let mut out = collect_mids_result(&st, &symbols, max_age);
                             out.insert("changed".to_string(), Value::Bool(true));
                             out.insert("timed_out".to_string(), Value::Bool(false));

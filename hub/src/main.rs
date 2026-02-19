@@ -96,7 +96,9 @@ fn spawn_mids_poller(state: Arc<AppState>) {
     let mids_debug_log = state.config.mids_debug_log;
     tokio::spawn(async move {
         let mut after_seq: Option<u64> = None;
+        let mut after_bbo_seq: Option<u64> = None;
         let mut last_published_mids: HashMap<String, f64> = HashMap::new();
+        let mut last_published_bbo: HashMap<String, sidecar::BboQuote> = HashMap::new();
         loop {
             // Read the symbols last seen in a snapshot query.
             // Skips until the first REST snapshot has been fetched.
@@ -111,12 +113,15 @@ fn spawn_mids_poller(state: Arc<AppState>) {
 
             match state
                 .sidecar
-                .wait_mids(&symbols, after_seq, wait_timeout_ms)
+                .wait_mids(&symbols, after_seq, after_bbo_seq, wait_timeout_ms)
                 .await
             {
                 Ok(snap) => {
                     if let Some(seq) = snap.mids_seq {
                         after_seq = Some(seq);
+                    }
+                    if let Some(seq) = snap.bbo_seq {
+                        after_bbo_seq = Some(seq);
                     }
                     // Timeout heartbeats do not carry new price data.
                     if !snap.changed {
@@ -125,7 +130,10 @@ fn spawn_mids_poller(state: Arc<AppState>) {
                     if snap.seq_reset {
                         tracing::debug!("sidecar mids sequence reset detected; re-synchronised");
                     }
+                    let mids_changed = snap.seq_reset || snap.mids != last_published_mids;
+                    let bbo_changed = snap.seq_reset || snap.bbo != last_published_bbo;
                     let mut changed_symbols: Vec<String> = Vec::new();
+                    let mut changed_bbo_symbols: Vec<String> = Vec::new();
                     if mids_debug_log {
                         for (sym, mid) in &snap.mids {
                             let is_changed = match last_published_mids.get(sym) {
@@ -136,12 +144,22 @@ fn spawn_mids_poller(state: Arc<AppState>) {
                                 changed_symbols.push(sym.clone());
                             }
                         }
+                        for (sym, quote) in &snap.bbo {
+                            let is_changed = match last_published_bbo.get(sym) {
+                                Some(prev) => *prev != *quote,
+                                None => true,
+                            };
+                            if is_changed {
+                                changed_bbo_symbols.push(sym.clone());
+                            }
+                        }
                         changed_symbols.sort_unstable();
+                        changed_bbo_symbols.sort_unstable();
                     }
-                    last_published_mids.clear();
-                    last_published_mids
-                        .extend(snap.mids.iter().map(|(sym, mid)| (sym.clone(), *mid)));
-                    let mut ws_receivers = 0usize;
+                    last_published_mids = snap.mids.clone();
+                    last_published_bbo = snap.bbo.clone();
+                    let mut ws_mids_receivers = 0usize;
+                    let mut ws_bbo_receivers = 0usize;
                     let mut payload_data =
                         serde_json::to_value(&snap).unwrap_or_else(|_| serde_json::json!({}));
                     if let Some(obj) = payload_data.as_object_mut() {
@@ -150,28 +168,46 @@ fn spawn_mids_poller(state: Arc<AppState>) {
                             serde_json::json!(Utc::now().timestamp_millis()),
                         );
                     }
-                    if let Ok(json) = serde_json::to_string(&serde_json::json!({
-                        "type": "mids",
-                        "data": payload_data,
-                    })) {
-                        ws_receivers = state.broadcast.publish(ws::topics::TOPIC_MIDS, json);
+                    if mids_changed {
+                        if let Ok(json) = serde_json::to_string(&serde_json::json!({
+                            "type": "mids",
+                            "data": payload_data.clone(),
+                        })) {
+                            ws_mids_receivers =
+                                state.broadcast.publish(ws::topics::TOPIC_MIDS, json);
+                        }
+                    }
+                    if bbo_changed {
+                        if let Ok(json) = serde_json::to_string(&serde_json::json!({
+                            "type": "bbo",
+                            "data": payload_data,
+                        })) {
+                            ws_bbo_receivers = state.broadcast.publish(ws::topics::TOPIC_BBO, json);
+                        }
                     }
                     if mids_debug_log {
                         let sample: Vec<String> =
                             changed_symbols.iter().take(20).cloned().collect();
+                        let bbo_sample: Vec<String> =
+                            changed_bbo_symbols.iter().take(20).cloned().collect();
                         tracing::info!(
                             mids_seq = ?snap.mids_seq,
+                            bbo_seq = ?snap.bbo_seq,
                             changed_symbols = changed_symbols.len(),
+                            changed_bbo_symbols = changed_bbo_symbols.len(),
                             tracked_symbols = snap.mids.len(),
-                            ws_receivers,
+                            tracked_bbo_symbols = snap.bbo.len(),
+                            ws_mids_receivers,
+                            ws_bbo_receivers,
                             timed_out = snap.timed_out,
                             seq_reset = snap.seq_reset,
                             sample = ?sample,
+                            bbo_sample = ?bbo_sample,
                             "mids publish"
                         );
                     }
-                    // Old sidecar fallback path has no mids sequence; throttle to poll cadence.
-                    if after_seq.is_none() {
+                    // Old sidecar fallback path has no sequence support; throttle to poll cadence.
+                    if after_seq.is_none() && after_bbo_seq.is_none() {
                         tokio::time::sleep(std::time::Duration::from_millis(poll_ms)).await;
                     }
                 }
@@ -179,7 +215,9 @@ fn spawn_mids_poller(state: Arc<AppState>) {
                     tracing::debug!("Mids poll failed: {e}");
                     // Recover cleanly after sidecar reconnects/restarts.
                     after_seq = None;
+                    after_bbo_seq = None;
                     last_published_mids.clear();
+                    last_published_bbo.clear();
                     tokio::time::sleep(std::time::Duration::from_millis(poll_ms)).await;
                 }
             }
