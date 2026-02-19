@@ -18,6 +18,7 @@ The test scope is:
 
 - `artifacts/gpu_tpe_30m3m_funding_snapshot_harness_post705_rebuild_10k20k_20260219T1130Z/pairing/trials_10000/pairing_report.json`
 - `artifacts/gpu_tpe_30m3m_funding_snapshot_harness_post705_rebuild_10k20k_20260219T1130Z/pairing/trials_20000/pairing_report.json`
+- `plan/evidence/axis_parity_revalidation_20260219_trials20000.json`
 
 ## Results
 
@@ -33,11 +34,29 @@ The test scope is:
 - `max_abs_trades_diff`: `0`
 - `max_abs_pnl_diff`: `0.10703584229497665`
 
-## Interpretation
+## Initial interpretation (before revalidation)
 
 - Trade-count parity is now deterministic on sampled rows (`10/10` for both seeds).
 - Remaining work is PnL residual tightening, with the current worst sampled residual at `0.10703584229497665`.
 - Next investigation target is the row with the largest residual in seed 20k (`sample_10`).
+
+## Revalidation Update (19 February 2026, later run)
+
+After runtime SSOT hardening, the same `trials_20000` sample set was rechecked using
+`axis_parity_ledger` (single-row baseline per sample, with funding + balance-from enabled).
+
+### Revalidation outcome (seed 20k sample set)
+
+- `sample_01` to `sample_10`: `PASS`
+- per-sample summary: `completed=1 passed=1 failed=0 event_parity_mismatches=0`
+- aggregate pass count: `10/10`
+
+### Updated interpretation
+
+- The previously observed `seed 20k` sampled PnL residual is not reproducible under
+  direct `axis_parity_ledger` revalidation for the same sample specs and snapshot inputs.
+- Current evidence indicates deterministic GPU/CPU parity for the rechecked 10-sample set
+  under this revalidation method and run scope.
 
 ## Notes
 
