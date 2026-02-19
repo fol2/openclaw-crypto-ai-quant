@@ -17,8 +17,8 @@ use cudarc::driver::{
 use cudarc::nvrtc::Ptx;
 
 use crate::buffers::{
-    GpuComboConfig, GpuComboState, GpuIndicatorConfig, GpuParams, GpuRawCandle, GpuResult,
-    GpuSnapshot, IndicatorParams, GPU_TRACE_SYMBOL_ALL,
+    GpuComboConfig, GpuComboState, GpuFundingSpan, GpuIndicatorConfig, GpuParams, GpuRawCandle,
+    GpuResult, GpuSnapshot, IndicatorParams, GPU_TRACE_SYMBOL_ALL,
 };
 use bytemuck::Zeroable;
 
@@ -34,6 +34,7 @@ unsafe impl DeviceRepr for GpuParams {}
 unsafe impl DeviceRepr for GpuRawCandle {}
 unsafe impl DeviceRepr for GpuIndicatorConfig {}
 unsafe impl DeviceRepr for IndicatorParams {}
+unsafe impl DeviceRepr for GpuFundingSpan {}
 
 unsafe impl ValidAsZeroBits for GpuSnapshot {}
 unsafe impl ValidAsZeroBits for GpuComboConfig {}
@@ -43,6 +44,7 @@ unsafe impl ValidAsZeroBits for GpuParams {}
 unsafe impl ValidAsZeroBits for GpuRawCandle {}
 unsafe impl ValidAsZeroBits for GpuIndicatorConfig {}
 unsafe impl ValidAsZeroBits for IndicatorParams {}
+unsafe impl ValidAsZeroBits for GpuFundingSpan {}
 
 fn env_truthy(name: &str) -> bool {
     env::var(name)
@@ -327,6 +329,8 @@ pub struct BatchBuffers {
     pub max_sub_per_bar: u32,
     pub sub_candles: Option<Arc<CudaSlice<GpuRawCandle>>>,
     pub sub_counts: Option<Arc<CudaSlice<u32>>>,
+    pub funding_spans: Option<Arc<CudaSlice<GpuFundingSpan>>>,
+    pub funding_rates: Option<Arc<CudaSlice<f64>>>,
 }
 
 impl BatchBuffers {
@@ -383,7 +387,8 @@ impl BatchBuffers {
             max_sub_per_bar: 0,
             trade_end_bar: num_bars,
             debug_t_sec: debug_t_sec_env(),
-            _debug_pad: [0; 3],
+            funding_enabled: 0,
+            _debug_pad: [0; 2],
         };
         let params = ds
             .dev
@@ -409,6 +414,8 @@ impl BatchBuffers {
             max_sub_per_bar: 0,
             sub_candles: None,
             sub_counts: None,
+            funding_spans: None,
+            funding_rates: None,
         })
     }
 
@@ -480,7 +487,8 @@ impl BatchBuffers {
             max_sub_per_bar: 0,
             trade_end_bar: num_bars,
             debug_t_sec: debug_t_sec_env(),
-            _debug_pad: [0; 3],
+            funding_enabled: 0,
+            _debug_pad: [0; 2],
         };
         let params = ds
             .dev
@@ -506,6 +514,8 @@ impl BatchBuffers {
             max_sub_per_bar: 0,
             sub_candles: None,
             sub_counts: None,
+            funding_spans: None,
+            funding_rates: None,
         })
     }
 }
@@ -573,6 +583,23 @@ pub fn dispatch_and_readback(
             (&sentinel_sub_candle, &sentinel_counts)
         }
     };
+    let sentinel_funding_spans: CudaSlice<GpuFundingSpan>;
+    let sentinel_funding_rates: CudaSlice<f64>;
+    let funding_enabled = buffers.funding_spans.is_some() && buffers.funding_rates.is_some();
+    let (funding_spans_ref, funding_rates_ref) = match (&buffers.funding_spans, &buffers.funding_rates) {
+        (Some(spans), Some(rates)) => (spans.as_ref(), rates.as_ref()),
+        _ => {
+            sentinel_funding_spans = ds
+                .dev
+                .alloc_zeros::<GpuFundingSpan>(1)
+                .map_err(|e| format!("GPU alloc failed: {e}"))?;
+            sentinel_funding_rates = ds
+                .dev
+                .alloc_zeros::<f64>(1)
+                .map_err(|e| format!("GPU alloc failed: {e}"))?;
+            (&sentinel_funding_spans, &sentinel_funding_rates)
+        }
+    };
 
     for chunk_idx in 0..num_chunks {
         let chunk_start = trade_start + chunk_idx * effective_chunk;
@@ -592,7 +619,8 @@ pub fn dispatch_and_readback(
             max_sub_per_bar: buffers.max_sub_per_bar,
             trade_end_bar: trade_end,
             debug_t_sec: debug_t_sec_env(),
-            _debug_pad: [0; 3],
+            funding_enabled: if funding_enabled { 1 } else { 0 },
+            _debug_pad: [0; 2],
         };
         ds.dev
             .htod_sync_copy_into(&[params_host], &mut buffers.params)
@@ -623,6 +651,8 @@ pub fn dispatch_and_readback(
                     main_candles_ref,
                     sub_candles_ref,
                     sub_counts_ref,
+                    funding_spans_ref,
+                    funding_rates_ref,
                 ),
             )
         }

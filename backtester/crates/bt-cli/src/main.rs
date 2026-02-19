@@ -2125,6 +2125,14 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
+    #[cfg(feature = "gpu")]
+    {
+        let gpu_path_requested = args.gpu || args.tpe;
+        if gpu_path_requested && funding_rates.is_some() {
+            eprintln!("[sweep] Funding DB enabled; GPU funding settlements active");
+        }
+    }
+
     // Configure rayon thread pool
     if let Some(n) = args.threads {
         rayon::ThreadPoolBuilder::new()

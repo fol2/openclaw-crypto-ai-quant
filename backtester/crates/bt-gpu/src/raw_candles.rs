@@ -4,11 +4,11 @@
 //! from the CandleData HashMap. This is pure data layout — no indicator computation.
 //! The resulting buffer is ~14 MB for 5000 bars × 51 symbols and is uploaded to GPU once.
 
-use bt_core::candle::CandleData;
+use bt_core::candle::{CandleData, FundingRateData};
 use bytemuck::Zeroable;
 use rustc_hash::FxHashMap;
 
-use crate::buffers::GpuRawCandle;
+use crate::buffers::{GpuFundingSpan, GpuRawCandle};
 
 /// Result of sub-bar candle preparation for GPU upload.
 pub struct SubBarResult {
@@ -41,9 +41,112 @@ pub struct RawCandleResult {
     pub timestamps: Vec<i64>,
 }
 
+/// Flat funding-event representation aligned to `(bar, symbol)` slots.
+///
+/// For each `(bar_idx, sym_idx)` pair, `spans[bar_idx * num_symbols + sym_idx]`
+/// points into `rates`, which stores the funding rates for all hourly boundaries
+/// crossed in that bar interval.
+pub struct FundingEventBuffers {
+    pub spans: Vec<GpuFundingSpan>,
+    pub rates: Vec<f64>,
+}
+
 fn to_gpu_t_sec(ts_ms: i64) -> u32 {
     let ts_sec = (ts_ms / 1000).max(0);
     u32::try_from(ts_sec).unwrap_or(u32::MAX)
+}
+
+fn lookup_funding_rate(rates: &[(i64, f64)], target_ts: i64) -> Option<f64> {
+    match rates.binary_search_by_key(&target_ts, |(t, _)| *t) {
+        Ok(i) => Some(rates[i].1),
+        Err(i) => {
+            if i > 0 {
+                Some(rates[i - 1].1)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn saturating_u32(value: usize, label: &str) -> u32 {
+    match u32::try_from(value) {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!(
+                "[funding] {label}={value} exceeds u32::MAX; clamping to {}",
+                u32::MAX
+            );
+            u32::MAX
+        }
+    }
+}
+
+/// Precompute funding settlements for GPU trade kernel parity with CPU engine.
+///
+/// CPU engine logic settles funding at every hourly boundary crossed between
+/// `prev_ts` (exclusive) and `ts` (inclusive). This helper encodes those per-bar
+/// boundary rates into flat spans for GPU consumption.
+pub fn prepare_funding_event_buffers(
+    funding_rates: &FundingRateData,
+    timestamps: &[i64],
+    symbols: &[String],
+) -> FundingEventBuffers {
+    let num_bars = timestamps.len();
+    let num_symbols = symbols.len();
+    let mut spans = vec![
+        GpuFundingSpan {
+            offset: 0,
+            len: 0,
+        };
+        num_bars * num_symbols
+    ];
+    let mut flat_rates: Vec<f64> = Vec::new();
+
+    if num_bars == 0 || num_symbols == 0 || funding_rates.is_empty() {
+        return FundingEventBuffers {
+            spans,
+            rates: flat_rates,
+        };
+    }
+
+    const HOUR_MS: i64 = 3_600_000;
+
+    for (bar_idx, &ts) in timestamps.iter().enumerate() {
+        let prev_ts = if bar_idx > 0 { timestamps[bar_idx - 1] } else { ts };
+        let first_boundary = ((prev_ts / HOUR_MS) + 1) * HOUR_MS;
+        if first_boundary > ts {
+            continue;
+        }
+
+        for (sym_idx, sym) in symbols.iter().enumerate() {
+            let Some(series) = funding_rates.get(sym.as_str()) else {
+                continue;
+            };
+            let slot = bar_idx * num_symbols + sym_idx;
+            let offset = flat_rates.len();
+            let mut event_count: usize = 0;
+            let mut boundary = first_boundary;
+            while boundary <= ts {
+                if let Some(rate) = lookup_funding_rate(series, boundary) {
+                    flat_rates.push(rate);
+                    event_count += 1;
+                }
+                boundary += HOUR_MS;
+            }
+            if event_count > 0 {
+                spans[slot] = GpuFundingSpan {
+                    offset: saturating_u32(offset, "funding_offset"),
+                    len: saturating_u32(event_count, "funding_len"),
+                };
+            }
+        }
+    }
+
+    FundingEventBuffers {
+        spans,
+        rates: flat_rates,
+    }
 }
 
 /// Find the bar index range `[start, end)` that falls within `[from_ts, to_ts]`.

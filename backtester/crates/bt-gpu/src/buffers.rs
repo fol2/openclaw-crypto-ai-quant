@@ -617,10 +617,29 @@ pub struct GpuParams {
     pub max_sub_per_bar: u32,      // 0 = no sub-bars (backwards compatible)
     pub trade_end_bar: u32,        // last bar index for result write-back (scoped trade range)
     pub debug_t_sec: u32,          // 0 = disabled; otherwise enable debug logs at this timestamp
-    pub _debug_pad: [u32; 3],
+    pub funding_enabled: u32,      // 1 = apply funding settlements in trade kernel
+    pub _debug_pad: [u32; 2],
 }
 
 const _: () = assert!(std::mem::size_of::<GpuParams>() == 64);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Funding buffers (precomputed CPU hourly settlements, uploaded once)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Span into the flat funding-rate buffer for one `(bar, symbol)` slot.
+///
+/// Layout key:
+/// - index array shape: `[num_bars * num_symbols]`
+/// - slot index: `bar_idx * num_symbols + sym_idx`
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct GpuFundingSpan {
+    pub offset: u32,
+    pub len: u32,
+}
+
+const _: () = assert!(std::mem::size_of::<GpuFundingSpan>() == 8);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Conversion helpers

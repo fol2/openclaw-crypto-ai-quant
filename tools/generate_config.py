@@ -377,6 +377,15 @@ def main():
                         help="Minimum trade count to include (default: 20)")
     parser.add_argument("--show-diff", action="store_true",
                         help="Show diff of overrides vs base config")
+    parser.add_argument(
+        "--strict-replay",
+        action="store_true",
+        help=(
+            "Preserve sweep values for deterministic replay pairing. "
+            "Disables deployment safety clamps (leverage rounding, "
+            "min-notional floor, leverage_max_cap override)."
+        ),
+    )
     args = parser.parse_args()
 
     # Load & sort results
@@ -433,30 +442,35 @@ def main():
         applied += 1
 
     # --- Post-override validation & clamping ---
+    if args.strict_replay:
+        print(
+            "[generate] strict replay mode enabled: deployment safety clamps disabled.",
+            file=sys.stderr,
+        )
+    else:
+        # Force leverage_max_cap to 0 (disabled) — individual leverage tiers should
+        # be respected without an artificial hard cap overriding them.
+        _set_nested(base_data, "global.trade.leverage_max_cap", 0.0)
 
-    # Force leverage_max_cap to 0 (disabled) — individual leverage tiers should
-    # be respected without an artificial hard cap overriding them.
-    _set_nested(base_data, "global.trade.leverage_max_cap", 0.0)
-
-    # Clamp min_notional_usd to Hyperliquid's $10 hard minimum.
-    _HL_MIN_NOTIONAL = 10.0
-    for npath in ("global.trade.min_notional_usd", "global.trade.tp_partial_min_notional_usd"):
-        val = _get_nested(base_data, npath, _HL_MIN_NOTIONAL)
-        if isinstance(val, (int, float)) and val < _HL_MIN_NOTIONAL:
-            print(f"⚠️  {npath}={val} below exchange minimum — clamped to ${_HL_MIN_NOTIONAL:.0f}",
-                  file=sys.stderr)
-            _set_nested(base_data, npath, _HL_MIN_NOTIONAL)
-
-    # Clamp leverage values to integers in [1, 10].
-    for lpath in ("global.trade.leverage", "global.trade.leverage_low",
-                   "global.trade.leverage_medium", "global.trade.leverage_high"):
-        val = _get_nested(base_data, lpath, None)
-        if isinstance(val, (int, float)):
-            clamped = _clamp_int(_round_half_away_from_zero(val), 1, 10)
-            if clamped != val:
-                print(f"⚠️  {lpath}={val} clamped to integer {clamped}",
+        # Clamp min_notional_usd to Hyperliquid's $10 hard minimum.
+        _HL_MIN_NOTIONAL = 10.0
+        for npath in ("global.trade.min_notional_usd", "global.trade.tp_partial_min_notional_usd"):
+            val = _get_nested(base_data, npath, _HL_MIN_NOTIONAL)
+            if isinstance(val, (int, float)) and val < _HL_MIN_NOTIONAL:
+                print(f"⚠️  {npath}={val} below exchange minimum — clamped to ${_HL_MIN_NOTIONAL:.0f}",
                       file=sys.stderr)
-            _set_nested(base_data, lpath, clamped)
+                _set_nested(base_data, npath, _HL_MIN_NOTIONAL)
+
+        # Clamp leverage values to integers in [1, 10].
+        for lpath in ("global.trade.leverage", "global.trade.leverage_low",
+                       "global.trade.leverage_medium", "global.trade.leverage_high"):
+            val = _get_nested(base_data, lpath, None)
+            if isinstance(val, (int, float)):
+                clamped = _clamp_int(_round_half_away_from_zero(val), 1, 10)
+                if clamped != val:
+                    print(f"⚠️  {lpath}={val} clamped to integer {clamped}",
+                          file=sys.stderr)
+                _set_nested(base_data, lpath, clamped)
 
     # Update header comment
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

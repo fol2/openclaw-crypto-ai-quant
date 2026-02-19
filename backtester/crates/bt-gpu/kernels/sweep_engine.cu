@@ -73,6 +73,7 @@
 #define TRACE_KIND_ADD          2u
 #define TRACE_KIND_CLOSE        3u
 #define TRACE_KIND_PARTIAL      4u
+#define TRACE_KIND_FUNDING      5u
 #define TRACE_REASON_ENTRY      1u
 #define TRACE_REASON_PYRAMID    2u
 #define TRACE_REASON_EXIT_STOP  3u
@@ -82,6 +83,7 @@
 #define TRACE_REASON_SIGNAL_FLIP 7u
 #define TRACE_REASON_PARTIAL    8u
 #define TRACE_REASON_EXIT_EOB   9u
+#define TRACE_REASON_FUNDING    10u
 
 // -- Structs (match Rust #[repr(C)] exactly) ----------------------------------
 
@@ -109,7 +111,8 @@ struct GpuParams {
     unsigned int max_sub_per_bar;
     unsigned int trade_end_bar;
     unsigned int debug_t_sec;
-    unsigned int _debug_pad[3];
+    unsigned int funding_enabled;
+    unsigned int _debug_pad[2];
 };
 
 struct __align__(16) GpuSnapshot {
@@ -245,6 +248,12 @@ struct __align__(16) GpuResult {
 };
 static_assert(sizeof(GpuResult) == 64, "GpuResult layout mismatch");
 
+struct GpuFundingSpan {
+    unsigned int offset;
+    unsigned int len;
+};
+static_assert(sizeof(GpuFundingSpan) == 8, "GpuFundingSpan layout mismatch");
+
 struct EntryCandidate {
     unsigned int sym_idx;
     unsigned int signal;
@@ -286,6 +295,26 @@ __device__ __forceinline__ double resolve_main_close(
     return (double)snap.close;
 }
 
+__device__ __forceinline__ double resolve_prev_close_for_funding(
+    const GpuSnapshot* snapshots,
+    const GpuComboConfig* cfg,
+    unsigned int bar,
+    unsigned int ns,
+    unsigned int sym,
+    double fallback_price
+) {
+    unsigned int probe = bar;
+    while (true) {
+        const GpuSnapshot& s = snapshots[cfg->snapshot_offset + probe * ns + sym];
+        if (s.valid != 0u && s.prev_close > 0.0f) {
+            return (double)s.prev_close;
+        }
+        if (probe == 0u) { break; }
+        probe -= 1u;
+    }
+    return fallback_price;
+}
+
 __device__ double profit_atr(const GpuPosition& pos, double price) {
     double atr = (pos.entry_atr > 0.0f) ? (double)pos.entry_atr : ((double)pos.entry_price * 0.005);
     if (atr <= 0.0) { return 0.0; }
@@ -304,6 +333,11 @@ __device__ double profit_usd(const GpuPosition& pos, double price) {
     } else {
         return ((double)pos.entry_price - price) * (double)pos.size;
     }
+}
+
+__device__ __forceinline__ double funding_delta(double size, bool is_long, double mark_price, double rate) {
+    double signed_size = is_long ? size : -size;
+    return quantize12(-signed_size * mark_price * rate);
 }
 
 __device__ double apply_atr_floor(double atr, double price, double min_atr_pct) {
@@ -878,7 +912,9 @@ extern "C" __global__ void sweep_engine_kernel(
     GpuResult*                         results,
     const GpuRawCandle*   __restrict__ main_candles,
     const GpuRawCandle*   __restrict__ sub_candles,
-    const unsigned int*   __restrict__ sub_counts
+    const unsigned int*   __restrict__ sub_counts,
+    const GpuFundingSpan* __restrict__ funding_spans,
+    const double*         __restrict__ funding_rates
 ) {
     unsigned int combo_id = blockIdx.x * blockDim.x + threadIdx.x;
     if (combo_id >= params->num_combos) return;
@@ -2097,6 +2133,48 @@ extern "C" __global__ void sweep_engine_kernel(
             }
         } // end if/else max_sub
 
+        // == Funding settlements at hourly boundaries (CPU parity) ===============
+        if (params->funding_enabled != 0u) {
+            unsigned long long funding_base = (unsigned long long)bar * (unsigned long long)ns;
+            for (unsigned int sym = 0u; sym < ns; sym++) {
+                GpuPosition& pos = state.positions[sym];
+                if (pos.active == POS_EMPTY) { continue; }
+
+                unsigned long long slot = funding_base + (unsigned long long)sym;
+                GpuFundingSpan span = funding_spans[slot];
+                if (span.len == 0u) { continue; }
+
+                const GpuSnapshot& funding_snap = snapshots[cfg.snapshot_offset + bar * ns + sym];
+                double mark_price = resolve_prev_close_for_funding(
+                    snapshots,
+                    &cfg,
+                    bar,
+                    ns,
+                    sym,
+                    (double)pos.entry_price
+                );
+
+                bool is_long = (pos.active == POS_LONG);
+                unsigned int funding_t_sec = snapshots[cfg.snapshot_offset + bar * ns + sym].t_sec;
+                for (unsigned int k = 0u; k < span.len; k++) {
+                    double rate = funding_rates[span.offset + k];
+                    double delta = funding_delta((double)pos.size, is_long, mark_price, rate);
+                    state.balance += delta;
+                    trace_record(
+                        &state,
+                        sym,
+                        funding_t_sec,
+                        TRACE_KIND_FUNDING,
+                        0u,
+                        TRACE_REASON_FUNDING,
+                        (float)mark_price,
+                        (float)pos.size,
+                        delta
+                    );
+                }
+            }
+        }
+
         // == Equity tracking (double precision) ==================================
         double equity = state.balance;
         for (unsigned int s = 0u; s < ns; s++) {
@@ -2162,8 +2240,9 @@ extern "C" __global__ void sweep_engine_kernel(
                                     : 0u;
         GpuResult res;
         res.final_balance = state.balance;
-        // CPU report semantics: total_pnl is net of fees.
-        res.total_pnl = state.total_pnl - state.total_fees;
+        // CPU report semantics: total_pnl = final_balance - initial_balance
+        // (includes realised PnL, fees, and funding settlements).
+        res.total_pnl = state.balance - (double)__uint_as_float(params->initial_balance_bits);
         res.total_fees = state.total_fees;
         res.total_trades = state.total_trades;
         res.total_wins = state.total_wins;
