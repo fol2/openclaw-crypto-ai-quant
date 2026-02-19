@@ -1209,8 +1209,8 @@
         </div>
         <div class="chart-wrap" style="height:{chartHeight}px">
           <candle-chart
-            candles={JSON.stringify(candles)}
-            entries={JSON.stringify(marks?.entries || [])}
+            candles={candles}
+            entries={marks?.entries || []}
             entryPrice={marks?.position?.entry_price ?? 0}
             postype={marks?.position?.type ?? ''}
             symbol={focusSym}
