@@ -408,7 +408,14 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let mut base_cfg = bt_core::config::load_config(&args.config, None, false);
+    let mut base_cfg = bt_core::config::load_config_checked(&args.config, None, false).map_err(
+        |e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("[axis-parity] {e}"),
+            )
+        },
+    )?;
     let spec = bt_core::sweep::load_sweep_spec(&args.sweep_spec)
         .map_err(|e| format!("failed to load sweep spec {}: {e}", args.sweep_spec))?;
 
