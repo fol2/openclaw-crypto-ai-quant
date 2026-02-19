@@ -3105,7 +3105,7 @@ def create_decision_event(
                     raw_reason = "Signal Flip"
             rc_text = canonical_reason_code_for_trade(raw_action, None, raw_reason)
         elif raw_action == "blocked":
-            rc_text = "exit_filter" if raw_reason else "unknown"
+            rc_text = "exit_filter" if raw_reason else "hold"
         elif raw_action == "hold":
             rc_text = "hold"
         elif raw_action in {"apply_funding", "funding"}:

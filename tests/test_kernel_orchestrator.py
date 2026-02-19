@@ -894,6 +894,119 @@ class TestLogDecision:
         finally:
             os.unlink(db_path)
 
+    def test_log_decision_persists_reason_columns_for_buy(self):
+        """log_decision persists reason fields when schema supports them."""
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = f.name
+
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.execute("""
+                CREATE TABLE decision_events (
+                    id TEXT PRIMARY KEY,
+                    timestamp_ms INTEGER,
+                    symbol TEXT,
+                    event_type TEXT,
+                    status TEXT,
+                    decision_phase TEXT,
+                    triggered_by TEXT,
+                    action_taken TEXT,
+                    rejection_reason TEXT,
+                    reason_code TEXT,
+                    config_fingerprint TEXT,
+                    run_fingerprint TEXT,
+                    context_json TEXT
+                )
+            """)
+            conn.commit()
+            conn.close()
+
+            with mock.patch.dict(os.environ, {"AI_QUANT_RUN_FINGERPRINT": "test-run-fp"}, clear=False):
+                decision = KernelDecision(
+                    ok=True,
+                    state_json="{}",
+                    intents=[],
+                    fills=[],
+                    diagnostics={"reason": "sub-bar entry"},
+                    action="BUY",
+                    raw_json="{}",
+                )
+                orch = KernelOrchestrator(db_path=db_path)
+                event_id = orch.log_decision(decision, symbol="ETH")
+
+            assert event_id is not None
+
+            conn = sqlite3.connect(db_path)
+            row = conn.execute(
+                """
+                SELECT action_taken, rejection_reason, reason_code, run_fingerprint
+                FROM decision_events
+                WHERE id = ?
+                """,
+                (event_id,),
+            ).fetchone()
+            conn.close()
+
+            assert row is not None
+            assert row[0] == "BUY"
+            assert row[1] == "sub-bar entry"
+            assert row[2] == "entry_signal"
+            assert row[3] == "test-run-fp"
+        finally:
+            os.unlink(db_path)
+
+    def test_log_decision_blocked_without_reason_defaults_to_hold(self):
+        """Blocked decisions without reason persist as hold reason_code."""
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = f.name
+
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.execute("""
+                CREATE TABLE decision_events (
+                    id TEXT PRIMARY KEY,
+                    timestamp_ms INTEGER,
+                    symbol TEXT,
+                    event_type TEXT,
+                    status TEXT,
+                    decision_phase TEXT,
+                    triggered_by TEXT,
+                    action_taken TEXT,
+                    rejection_reason TEXT,
+                    reason_code TEXT,
+                    context_json TEXT
+                )
+            """)
+            conn.commit()
+            conn.close()
+
+            decision = KernelDecision(
+                ok=True,
+                state_json="{}",
+                intents=[],
+                fills=[],
+                diagnostics={},
+                action="BLOCKED",
+                raw_json="{}",
+            )
+            orch = KernelOrchestrator(db_path=db_path)
+            event_id = orch.log_decision(decision, symbol="ETH")
+
+            assert event_id is not None
+
+            conn = sqlite3.connect(db_path)
+            row = conn.execute(
+                "SELECT reason_code, rejection_reason FROM decision_events WHERE id = ?",
+                (event_id,),
+            ).fetchone()
+            conn.close()
+
+            assert row is not None
+            assert row[0] == "hold"
+            assert row[1] is None
+        finally:
+            os.unlink(db_path)
+
     def test_log_decision_no_db_path(self):
         """log_decision returns None when no DB path and import fails."""
         with mock.patch.dict("sys.modules", {"strategy.mei_alpha_v1": None}):

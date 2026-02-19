@@ -649,7 +649,7 @@ class KernelOrchestrator:
         action_text = str(decision.action or "").strip().lower()
 
         reason_code: str | None = None
-        if action_text in {"open", "open_long", "open_short"}:
+        if action_text in {"open", "open_long", "open_short", "buy", "sell"}:
             reason_code = "entry_signal"
         elif action_text in {"add"}:
             reason_code = "entry_pyramid"
