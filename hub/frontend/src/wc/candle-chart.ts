@@ -206,9 +206,24 @@ export class CandleChart extends LitElement {
 
   /** Get sorted candle data (oldest → newest), cached until candles reference changes. */
   private _sortedData(): CandleData[] {
-    if (this.candles === this._cachedCandlesRef) return this._cachedSorted;
-    this._cachedCandlesRef = this.candles;
-    this._cachedSorted = [...this.candles].sort((a, b) => a.t - b.t);
+    let src: CandleData[] | null = null;
+    if (Array.isArray(this.candles)) {
+      src = this.candles;
+    } else if (typeof this.candles === 'string') {
+      // Guard against transient attribute-string writes from host frameworks.
+      // Never treat a JSON string as an iterable of characters.
+      try {
+        const parsed = JSON.parse(this.candles as any);
+        src = Array.isArray(parsed) ? parsed : [];
+      } catch {
+        src = [];
+      }
+    } else {
+      src = [];
+    }
+    if (src === this._cachedCandlesRef) return this._cachedSorted;
+    this._cachedCandlesRef = src;
+    this._cachedSorted = [...src].sort((a, b) => a.t - b.t);
     return this._cachedSorted;
   }
 
