@@ -166,6 +166,11 @@ def _hash_json_canonical(obj: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _is_sha256_hex(value: str) -> bool:
+    text = str(value or "").strip().lower()
+    return len(text) == 64 and all(ch in "0123456789abcdef" for ch in text)
+
+
 def _compute_locked_strategy_sha1(bundle_dir: Path, manifest: dict[str, Any]) -> tuple[str, Path]:
     artefacts = manifest.get("artefacts") or {}
     snapshot_raw = str((artefacts.get("strategy_config_snapshot_file") or "strategy_overrides.locked.yaml")).strip()
@@ -233,6 +238,9 @@ def main() -> int:
     candles_provenance_ok = not candles_provenance_checked
     manifest_candles_provenance: dict[str, Any] | None = None
     recomputed_candles_provenance: dict[str, Any] | None = None
+    backtester_replay_report_path: Path | None = None
+    backtester_replay_report: dict[str, Any] | None = None
+    replay_config_fingerprint = ""
 
     manifest: dict[str, Any] | None = None
     if not manifest_path.exists():
@@ -250,6 +258,23 @@ def main() -> int:
             raw_candles_provenance = manifest.get("candles_provenance")
             if isinstance(raw_candles_provenance, dict):
                 manifest_candles_provenance = raw_candles_provenance
+            artefacts = manifest.get("artefacts") or {}
+            replay_report_raw = str((artefacts.get("backtester_replay_report_json") or "").strip())
+            if replay_report_raw:
+                replay_path = Path(replay_report_raw).expanduser()
+                if not replay_path.is_absolute():
+                    replay_path = (bundle_dir / replay_path).resolve()
+                else:
+                    replay_path = replay_path.resolve()
+                backtester_replay_report_path = replay_path
+            else:
+                failures.append(
+                    {
+                        "code": "missing_backtester_replay_report_path_in_manifest",
+                        "classification": "state_initialisation_gap",
+                        "detail": "manifest.artefacts.backtester_replay_report_json is missing",
+                    }
+                )
         else:
             failures.append(
                 {
@@ -258,6 +283,46 @@ def main() -> int:
                     "detail": "bundle manifest is not a JSON object",
                 }
             )
+
+    if backtester_replay_report_path is not None:
+        if not backtester_replay_report_path.exists():
+            failures.append(
+                {
+                    "code": "missing_backtester_replay_report",
+                    "classification": "state_initialisation_gap",
+                    "detail": str(backtester_replay_report_path),
+                }
+            )
+        else:
+            loaded_replay = _load_json(backtester_replay_report_path)
+            if not isinstance(loaded_replay, dict):
+                failures.append(
+                    {
+                        "code": "invalid_backtester_replay_report",
+                        "classification": "state_initialisation_gap",
+                        "detail": "backtester replay report is not a JSON object",
+                    }
+                )
+            else:
+                backtester_replay_report = loaded_replay
+                replay_config_fingerprint = str(loaded_replay.get("config_fingerprint") or "").strip().lower()
+                if not replay_config_fingerprint:
+                    failures.append(
+                        {
+                            "code": "missing_backtester_replay_config_fingerprint",
+                            "classification": "state_initialisation_gap",
+                            "detail": "backtester replay report config_fingerprint is missing",
+                        }
+                    )
+                elif not _is_sha256_hex(replay_config_fingerprint):
+                    failures.append(
+                        {
+                            "code": "invalid_backtester_replay_config_fingerprint",
+                            "classification": "state_initialisation_gap",
+                            "detail": "backtester replay report config_fingerprint is not a valid sha256 hex",
+                            "config_fingerprint_prefix8": replay_config_fingerprint[:8],
+                        }
+                    )
 
     strategy_runtime_stability_ok = True
     strategy_oms_stability_ok = True
@@ -819,6 +884,7 @@ def main() -> int:
             if args.max_oms_strategy_sha1_distinct is not None
             else None,
             "require_locked_strategy_match": bool(args.require_locked_strategy_match),
+            "backtester_replay_report": str(backtester_replay_report_path) if backtester_replay_report_path else None,
             "state_report": str(state_path),
             "trade_report": str(trade_path),
             "action_report": str(action_path),
@@ -837,6 +903,12 @@ def main() -> int:
             "strategy_runtime_stability_ok": strategy_runtime_stability_ok,
             "strategy_oms_stability_ok": strategy_oms_stability_ok,
             "locked_strategy_match_ok": locked_strategy_match_ok,
+            "backtester_replay_report_present": backtester_replay_report is not None,
+            "backtester_replay_config_fingerprint_present": bool(replay_config_fingerprint),
+            "backtester_replay_config_fingerprint_valid_sha256": _is_sha256_hex(replay_config_fingerprint),
+            "backtester_replay_config_fingerprint_prefix8": replay_config_fingerprint[:8]
+            if replay_config_fingerprint
+            else None,
             "candles_provenance_checked": candles_provenance_checked,
             "candles_provenance_ok": candles_provenance_ok,
             "state_ok": bool(state_report.get("ok")) if state_report is not None else False,
