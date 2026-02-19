@@ -1569,18 +1569,33 @@ class UnifiedEngine:
                 self._trader_accepts_action = False
 
         if self._trader_accepts_action:
-            return self.trader.execute_trade(
-                symbol,
-                signal,
-                price,
-                timestamp,
-                confidence,
-                atr=atr,
-                indicators=indicators,
-                action=act,
-                target_size=target_size_f,
-                reason=reason,
-            )
+            try:
+                return self.trader.execute_trade(
+                    symbol,
+                    signal,
+                    price,
+                    timestamp,
+                    confidence,
+                    atr=atr,
+                    indicators=indicators,
+                    action=act,
+                    target_size=target_size_f,
+                    reason=reason,
+                    mode=self.mode,
+                )
+            except TypeError:
+                return self.trader.execute_trade(
+                    symbol,
+                    signal,
+                    price,
+                    timestamp,
+                    confidence,
+                    atr=atr,
+                    indicators=indicators,
+                    action=act,
+                    target_size=target_size_f,
+                    reason=reason,
+                )
 
         if act == "ADD":
             fn = getattr(self.trader, "add_to_position", None)
@@ -1638,15 +1653,27 @@ class UnifiedEngine:
             return
 
         # Legacy "OPEN" fallback: if the trader does not support action-aware execute_trade.
-        return self.trader.execute_trade(
-            sym,
-            signal,
-            price,
-            timestamp,
-            confidence,
-            atr=atr,
-            indicators=indicators,
-        )
+        try:
+            return self.trader.execute_trade(
+                sym,
+                signal,
+                price,
+                timestamp,
+                confidence,
+                atr=atr,
+                indicators=indicators,
+                mode=self.mode,
+            )
+        except TypeError:
+            return self.trader.execute_trade(
+                sym,
+                signal,
+                price,
+                timestamp,
+                confidence,
+                atr=atr,
+                indicators=indicators,
+            )
 
     def run_forever(self) -> None:
         import signal
