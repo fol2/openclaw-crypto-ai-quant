@@ -371,40 +371,42 @@
           {/if}
           <div class="cell-header">
             <span class="cell-symbol">{s.symbol}</span>
-          </div>
-          <div class="cell-price-row">
-            <span class="cell-price">
-              <mid-price
-                symbol={s.symbol}
-                value={(mids[s.symbol] ?? s.mid) != null ? String(mids[s.symbol] ?? s.mid) : ''}
-                decimals={adaptiveDecimals(mids[s.symbol] ?? s.mid)}
-                tone="grid"
-              ></mid-price>
-            </span>
             {#if s.position}
-              {@const pnl = livePnlPct(s)}
-              <span class="entry-at">@{s.position.entry_price.toFixed(adaptiveDecimals(s.position.entry_price))}</span>
-              <span class="pnl-badge" class:up={pnl >= 0} class:down={pnl < 0}>{fmtPnl(pnl)}</span>
+              <span class="header-right">
+                <span class="meta-notional">{fmtNotional(posEquity(s))}</span>
+                <span class="lev-box">{Math.round(s.position.leverage ?? 1)}&times;</span>
+              </span>
             {/if}
           </div>
-          {#if s.position}
-            <div class="cell-pos-meta">
-              <span class="lev-box">{Math.round(s.position.leverage ?? 1)}&times;</span>
-              <span class="meta-notional">{fmtNotional(posEquity(s))}</span>
-            </div>
-          {/if}
+          <div class="cell-price">
+            <mid-price
+              symbol={s.symbol}
+              value={(mids[s.symbol] ?? s.mid) != null ? String(mids[s.symbol] ?? s.mid) : ''}
+              decimals={adaptiveDecimals(mids[s.symbol] ?? s.mid)}
+              tone="grid"
+            ></mid-price>
+          </div>
           {#if s.signal}
             <div class="cell-signal">
               <span class="signal-badge">{s.signal}</span>
             </div>
           {/if}
-          <div class="cell-candles">
-            <mini-candles
-              candles={JSON.stringify(liveCandles(s.symbol))}
-              width={200}
-              height={56}
-              live
-            ></mini-candles>
+          <div class="cell-candle-area">
+            {#if s.position}
+              {@const pnl = livePnlPct(s)}
+              <div class="pos-overlay">
+                <span class="entry-at">@{s.position.entry_price.toFixed(adaptiveDecimals(s.position.entry_price))}</span>
+                <span class="pnl-badge" class:up={pnl >= 0} class:down={pnl < 0}>{fmtPnl(pnl)}</span>
+              </div>
+            {/if}
+            <div class="cell-candles">
+              <mini-candles
+                candles={JSON.stringify(liveCandles(s.symbol))}
+                width={200}
+                height={56}
+                live
+              ></mini-candles>
+            </div>
           </div>
         </div>
       {/each}
@@ -590,64 +592,35 @@
     letter-spacing: 0.02em;
   }
 
-  /* ── Price row (mid + entry + PnL inline) ───────── */
-  .cell-price-row {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-    margin-bottom: 2px;
-    flex-wrap: wrap;
-  }
   .cell-price {
     font-size: 18px;
     font-weight: 600;
     font-family: 'IBM Plex Mono', monospace;
+    margin-bottom: 4px;
     letter-spacing: -0.01em;
-  }
-  .entry-at {
-    font-size: 12px;
-    font-weight: 500;
-    font-family: 'IBM Plex Mono', monospace;
-    letter-spacing: -0.01em;
-    color: var(--text-muted);
-  }
-  .pnl-badge {
-    font-size: 10px;
-    font-weight: 700;
-    padding: 1px 5px;
-    border-radius: var(--radius-sm);
-    letter-spacing: 0.02em;
-    margin-left: auto;
-  }
-  .pnl-badge.up {
-    background: var(--green-bg);
-    color: var(--green);
-  }
-  .pnl-badge.down {
-    background: var(--red-bg);
-    color: var(--red);
   }
 
-  /* ── Position meta (leverage box + notional) ──────── */
-  .cell-pos-meta {
+  /* ── Header right (notional + leverage) ────────────── */
+  .header-right {
     display: flex;
     align-items: center;
-    gap: 6px;
-    margin-bottom: 2px;
-    font-family: 'IBM Plex Mono', monospace;
+    gap: 5px;
   }
   .lev-box {
-    font-size: 9px;
+    font-size: 11px;
     font-weight: 700;
-    padding: 1px 5px;
-    border: 1px solid var(--text-muted);
+    padding: 2px 6px;
+    background: var(--text-muted);
     border-radius: var(--radius-sm);
-    color: var(--text-muted);
+    color: var(--bg);
     letter-spacing: 0.03em;
+    font-family: 'IBM Plex Mono', monospace;
   }
   .meta-notional {
-    font-size: 9px;
+    font-size: 11px;
+    font-weight: 600;
     color: var(--text-muted);
+    font-family: 'IBM Plex Mono', monospace;
   }
 
   .signal-badge {
@@ -659,7 +632,42 @@
     font-weight: 600;
   }
 
-  .cell-candles { margin-top: 6px; }
+  /* ── Candle area + position overlay ───────────────── */
+  .cell-candle-area {
+    position: relative;
+    margin-top: 6px;
+  }
+  .cell-candles { }
+  .pos-overlay {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    margin-bottom: -4px;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .entry-at {
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    color: var(--text-muted);
+  }
+  .pnl-badge {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: var(--radius-sm);
+    letter-spacing: 0.02em;
+  }
+  .pnl-badge.up {
+    background: var(--green-bg);
+    color: var(--green);
+  }
+  .pnl-badge.down {
+    background: var(--red-bg);
+    color: var(--red);
+  }
 
   .trend-overlay {
     position: absolute;
