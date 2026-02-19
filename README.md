@@ -2,6 +2,29 @@
 
 AI-powered crypto perpetual futures trading engine for [Hyperliquid DEX](https://hyperliquid.xyz), with a high-performance Rust backtester featuring CPU and CUDA GPU acceleration.
 
+## Screenshots
+
+### Trade Dashboard
+Candlestick charts with trade overlays, live mid-prices, and full trade journal with PnL.
+
+![Trade Dashboard](docs/screenshots/dashboard-trades.png)
+
+### Service Management
+One-click start/stop/restart for all systemd services with live status indicators.
+
+![System Management](docs/screenshots/system-management.png)
+
+### Mobile
+Fully responsive — monitor trades, prices, and services from your phone.
+
+<p align="center">
+  <img src="docs/screenshots/mobile-dashboard.png" alt="Mobile Dashboard" width="270" />
+  &nbsp;&nbsp;
+  <img src="docs/screenshots/mobile-trades.png" alt="Mobile Trades" width="270" />
+  &nbsp;&nbsp;
+  <img src="docs/screenshots/mobile-grid.png" alt="Mobile Grid" width="270" />
+</p>
+
 ## Architecture
 
 ```
