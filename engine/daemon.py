@@ -1334,13 +1334,23 @@ def main() -> None:
     lookback_bars = int(max(50, min(10_000, lookback_bars)))
 
     try:
-        run_fingerprint, run_fp_payload = _build_run_fingerprint(
-            strategy=strategy,
-            mode=mode,
-            interval=interval,
-            lookback_bars=lookback_bars,
-        )
-        os.environ["AI_QUANT_RUN_FINGERPRINT"] = str(run_fingerprint)
+        preset_run_fingerprint = str(os.getenv("AI_QUANT_RUN_FINGERPRINT", "") or "").strip()
+        if preset_run_fingerprint:
+            run_fingerprint = preset_run_fingerprint
+            run_fp_payload = {
+                "code_version": _read_code_version(),
+                "strategy_overrides_sha1": str(getattr(strategy.snapshot, "overrides_sha1", "") or ""),
+                "watchlist": [],
+                "source": "env",
+            }
+        else:
+            run_fingerprint, run_fp_payload = _build_run_fingerprint(
+                strategy=strategy,
+                mode=mode,
+                interval=interval,
+                lookback_bars=lookback_bars,
+            )
+            os.environ["AI_QUANT_RUN_FINGERPRINT"] = str(run_fingerprint)
         try:
             mei_alpha_v1.set_run_fingerprint(str(run_fingerprint))
         except Exception:
@@ -1354,6 +1364,26 @@ def main() -> None:
             interval,
             lookback_bars,
         )
+
+        # Backfill early seed rows written before fingerprint initialisation.
+        try:
+            import sqlite3 as _sql
+
+            _con = _sql.connect(_db_path(), timeout=5)
+            _con.execute(
+                """
+                UPDATE trades
+                SET run_fingerprint = ?
+                WHERE symbol = '__SEED__'
+                  AND action = 'SYSTEM'
+                  AND (run_fingerprint IS NULL OR run_fingerprint = '' OR run_fingerprint = 'startup' OR run_fingerprint = 'unknown')
+                """,
+                (str(run_fingerprint),),
+            )
+            _con.commit()
+            _con.close()
+        except Exception:
+            pass
     except Exception:
         logger.warning("failed to build run fingerprint", exc_info=True)
 
