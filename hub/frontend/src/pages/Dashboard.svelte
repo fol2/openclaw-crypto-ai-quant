@@ -658,6 +658,14 @@
     return _candlesSeriesSym === sym && _candlesSeriesInterval === iv;
   }
 
+  function activeSeriesInterval(sym: string, requestedIv: string): string {
+    // While a new interval is fetching, keep updating the currently rendered series.
+    if (_candlesSeriesSym === sym && _candlesSeriesInterval) {
+      return _candlesSeriesInterval;
+    }
+    return requestedIv;
+  }
+
   function publishCandlesMutation() {
     // Lit custom elements trigger `updated()` on reference changes.
     // Live ticks mutate candle objects in-place, so publish a new array reference.
@@ -757,10 +765,9 @@
       _prevSelectedInterval = iv;
       setCandlesSeriesContext('', '');
     } else if (iv !== _prevSelectedInterval) {
-      // Keep previous candles visible while reloading, but prevent mixing
-      // old-interval developing candles into the new interval series.
+      // Keep the current series context until the new interval candles arrive.
+      // This avoids a temporary live-update hang during slow interval fetches.
       _prevSelectedInterval = iv;
-      setCandlesSeriesContext('', '');
     }
     void reconcileCandlesForCurrentView(sym, iv, bars);
   });
@@ -789,13 +796,14 @@
       const mid = extractLiveMid(data, sym);
       if (mid == null || candles.length === 0) return;
 
+      if (_candlesSeriesSym && _candlesSeriesSym !== sym) return;
+      const liveIv = activeSeriesInterval(sym, selectedInterval);
       const wsServerNow = Number(data?.server_ts_ms);
       const now = Number.isFinite(wsServerNow) && wsServerNow > 0 ? wsServerNow : serverNowMs();
-      const msPerBar = intervalToMs(selectedInterval);
+      const msPerBar = intervalToMs(liveIv);
       const barStart = Math.floor(now / msPerBar) * msPerBar;
       const barClose = barStart + msPerBar - 1;
-      if (!hasCandlesSeriesContext(sym, selectedInterval)) return;
-      const tickKey = `${barStart}:${mid}`;
+      const tickKey = `${liveIv}:${barStart}:${mid}`;
       if (tickKey === _lastLiveTickKey) return;
       _lastLiveTickKey = tickKey;
       let mutated = false;
