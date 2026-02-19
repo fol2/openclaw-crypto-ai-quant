@@ -1007,6 +1007,57 @@ class TestLogDecision:
         finally:
             os.unlink(db_path)
 
+    def test_log_decision_buy_add_intent_maps_to_entry_pyramid(self):
+        """BUY decisions with add intent preserve pyramid semantics."""
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = f.name
+
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.execute("""
+                CREATE TABLE decision_events (
+                    id TEXT PRIMARY KEY,
+                    timestamp_ms INTEGER,
+                    symbol TEXT,
+                    event_type TEXT,
+                    status TEXT,
+                    decision_phase TEXT,
+                    triggered_by TEXT,
+                    action_taken TEXT,
+                    rejection_reason TEXT,
+                    reason_code TEXT,
+                    context_json TEXT
+                )
+            """)
+            conn.commit()
+            conn.close()
+
+            decision = KernelDecision(
+                ok=True,
+                state_json="{}",
+                intents=[{"kind": "add", "action": "add"}],
+                fills=[],
+                diagnostics={},
+                action="BUY",
+                raw_json="{}",
+            )
+            orch = KernelOrchestrator(db_path=db_path)
+            event_id = orch.log_decision(decision, symbol="ETH")
+
+            assert event_id is not None
+
+            conn = sqlite3.connect(db_path)
+            row = conn.execute(
+                "SELECT reason_code FROM decision_events WHERE id = ?",
+                (event_id,),
+            ).fetchone()
+            conn.close()
+
+            assert row is not None
+            assert row[0] == "entry_pyramid"
+        finally:
+            os.unlink(db_path)
+
     def test_log_decision_no_db_path(self):
         """log_decision returns None when no DB path and import fails."""
         with mock.patch.dict("sys.modules", {"strategy.mei_alpha_v1": None}):

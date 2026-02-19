@@ -647,10 +647,17 @@ class KernelOrchestrator:
             or ""
         ).strip() or None
         action_text = str(decision.action or "").strip().lower()
+        intent_kinds = {
+            str(intent.get("kind") or "").strip().lower()
+            for intent in decision.intents
+            if isinstance(intent, dict)
+        }
 
         reason_code: str | None = None
-        if action_text in {"open", "open_long", "open_short", "buy", "sell"}:
+        if action_text in {"open", "open_long", "open_short"}:
             reason_code = "entry_signal"
+        elif action_text in {"buy", "sell"}:
+            reason_code = "entry_pyramid" if "add" in intent_kinds else "entry_signal"
         elif action_text in {"add"}:
             reason_code = "entry_pyramid"
         elif action_text in {"close", "close_long", "close_short", "reduce"}:
