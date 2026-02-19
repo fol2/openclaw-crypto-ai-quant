@@ -908,6 +908,9 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
         // Sub-bar entry evaluation must use this previous snapshot to avoid
         // peeking at the current indicator bar before it has closed.
         let mut prev_indicator_snaps: FxHashMap<String, IndicatorSnapshot> = FxHashMap::default();
+        // Current indicator snapshot per symbol after processing this indicator bar.
+        // Used for signal-on-candle-close entry evaluation at the bar boundary.
+        let mut current_indicator_snaps: FxHashMap<String, IndicatorSnapshot> = FxHashMap::default();
 
         // Per-bar entry counter (limits entries to max_entry_orders_per_loop)
         let mut entries_this_bar: usize = 0;
@@ -938,6 +941,7 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
             let prev_snap = bank.latest_snap();
             prev_indicator_snaps.insert(sym.to_string(), prev_snap);
             let snap = bank.update(bar);
+            current_indicator_snaps.insert(sym.to_string(), snap.clone());
 
             // Store EMA slow for slope computation (borrow ends immediately)
             state
@@ -1474,6 +1478,16 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
         } else {
             i64::MAX
         };
+        if let Some(ft) = from_ts {
+            if ts < ft {
+                continue;
+            }
+        }
+        if let Some(tt) = to_ts {
+            if ts > tt {
+                continue;
+            }
+        }
 
         // ── Exit sub-bar block (kernel-delegated) ──────────────────────
         // Scan exit candles (e.g. 1m) within this indicator bar's time range
@@ -1542,19 +1556,42 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
         if let (Some(enc), Some(ref enc_idx)) = (entry_candles, &entry_bar_index) {
             let sub_equity = state.balance
                 + unrealized_pnl(&state.positions, &state.indicators, ts, candles, &bar_index);
+            let entry_bar_ms = if cfg.engine.signal_on_candle_close {
+                interval_to_ms(&cfg.engine.entry_interval)
+            } else {
+                0
+            };
 
-            // Build a merged timeline of unique sub-bar timestamps across all symbols
-            // within this indicator bar's range (ts+1 .. next_ts].
+            // Build a merged timeline of unique sub-bar timestamps across all symbols.
+            // Default range is (ts+1 .. next_ts], but when signal-on-candle-close
+            // is enabled we evaluate the sub-bar whose close aligns to next_ts.
+            let sub_tick_from = if cfg.engine.signal_on_candle_close && entry_bar_ms > 0 {
+                next_ts.saturating_sub(entry_bar_ms)
+            } else if cfg.engine.signal_on_candle_close {
+                next_ts
+            } else {
+                ts + 1
+            };
+            let sub_tick_to = next_ts;
             let mut sub_bar_ticks: Vec<i64> = Vec::new();
             for sym in &symbols {
                 if let Some(sym_entry_idx) = enc_idx.get(sym.as_str()) {
-                    let start = match sym_entry_idx.binary_search_by_key(&(ts + 1), |(t, _)| *t) {
+                    let start = match sym_entry_idx.binary_search_by_key(&sub_tick_from, |(t, _)| *t) {
                         Ok(i) => i,
                         Err(i) => i,
                     };
                     for &(sub_ts, _) in &sym_entry_idx[start..] {
-                        if sub_ts > next_ts {
+                        if sub_ts > sub_tick_to {
                             break;
+                        }
+                        if cfg.engine.signal_on_candle_close && entry_bar_ms > 0 {
+                            let sub_close_ts = sub_ts.saturating_add(entry_bar_ms);
+                            if sub_close_ts < next_ts {
+                                continue;
+                            }
+                            if sub_close_ts > next_ts {
+                                break;
+                            }
                         }
                         sub_bar_ticks.push(sub_ts);
                     }
@@ -1589,10 +1626,22 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                             let (_, bar_i) = sym_entry_idx[idx];
                             if let Some(entry_bars) = enc.get(sym.as_str()) {
                                 if let Some(sub_bar) = entry_bars.get(bar_i) {
-                                    let base_snap = prev_indicator_snaps
-                                        .get(sym.as_str())
-                                        .cloned()
-                                        .unwrap_or_else(|| make_minimal_snap(0.0, *sub_ts));
+                                    let eval_ts = if cfg.engine.signal_on_candle_close {
+                                        next_ts
+                                    } else {
+                                        *sub_ts
+                                    };
+                                    let base_snap = if cfg.engine.signal_on_candle_close {
+                                        current_indicator_snaps
+                                            .get(sym.as_str())
+                                            .cloned()
+                                            .unwrap_or_else(|| make_minimal_snap(0.0, eval_ts))
+                                    } else {
+                                        prev_indicator_snaps
+                                            .get(sym.as_str())
+                                            .cloned()
+                                            .unwrap_or_else(|| make_minimal_snap(0.0, eval_ts))
+                                    };
                                     let sub_snap = make_exit_snap(&base_snap, sub_bar);
                                     let slope =
                                         sub_bar_slopes.get(sym.as_str()).copied().unwrap_or(0.0);
@@ -1606,7 +1655,7 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                                         btc_bullish,
                                         breadth_pct,
                                         slope,
-                                        *sub_ts,
+                                        eval_ts,
                                     ) {
                                         sub_candidates.push(cand);
                                     }
