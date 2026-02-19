@@ -2,10 +2,13 @@
   import { getSnapshot, getMids, getTrendCloses, getTrendCandles, getVolumes, type CandleData } from '../lib/api';
   import { hubWs } from '../lib/ws';
   import { CANDIDATE_FAMILY_ORDER, getModeLabel, LIVE_MODE } from '../lib/mode-labels';
+  import SymbolDetailModal from '../components/SymbolDetailModal.svelte';
 
   let mode = $state('_pending_');
   let gridSize = $state(3);
+  let snap: any = $state(null);
   let symbols: any[] = $state([]);
+  let selectedSymbol = $state('');
   let mids: Record<string, number> = $state({});
   let trendCloses: Record<string, number[]> = $state({});
   let trendCandles: Record<string, CandleData[]> = $state({});
@@ -40,8 +43,9 @@
 
   async function refresh() {
     try {
-      const snap = await getSnapshot(mode);
-      symbols = snap.symbols || [];
+      const rawSnap = await getSnapshot(mode);
+      snap = rawSnap;
+      symbols = rawSnap.symbols || [];
       if (!midsSeeded) {
         const m = await getMids();
         mids = m.mids || {};
@@ -372,7 +376,8 @@
       {#each filteredSymbols as s (s.symbol)}
         {@const hist = trendCloses[s.symbol] || []}
         {@const trend = trendStrength(hist)}
-        <div class="grid-cell" class:has-trend={Math.abs(trend) >= 0.05} class:has-position={!!s.position} class:pos-long={s.position?.type === 'LONG'} class:pos-short={s.position?.type === 'SHORT'} style={trendVars(trend)}>
+        <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+        <div class="grid-cell" class:has-trend={Math.abs(trend) >= 0.05} class:has-position={!!s.position} class:pos-long={s.position?.type === 'LONG'} class:pos-short={s.position?.type === 'SHORT'} style={trendVars(trend)} onclick={() => selectedSymbol = s.symbol} onkeydown={(e) => { if (e.key === 'Enter') selectedSymbol = s.symbol; }} role="button" tabindex="0">
           {#if showOverlay}
             <span class="trend-overlay">{hist.length}pt {(linregTrend(hist, trendWindow) * 100).toFixed(3)}% &rarr; {trend.toFixed(2)}</span>
           {/if}
@@ -418,6 +423,16 @@
     </div>
   {/if}
 </div>
+
+{#if selectedSymbol}
+  <SymbolDetailModal
+    symbol={selectedSymbol}
+    {mode}
+    {snap}
+    {mids}
+    onclose={() => selectedSymbol = ''}
+  />
+{/if}
 
 <style>
   .page { max-width: 1600px; animation: slideUp 0.3s ease; }
@@ -571,6 +586,7 @@
     padding: 14px;
     min-height: 100px;
     transition: background-color 1.5s ease, border-color 1.5s ease;
+    cursor: pointer;
   }
   .grid-cell:hover {
     border-color: var(--text-dim);
