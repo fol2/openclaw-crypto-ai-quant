@@ -2095,6 +2095,32 @@ def get_run_fingerprint() -> str:
     return "unknown"
 
 
+def _canonical_action_code_for_reason(action: str, pos_type: str | None) -> str:
+    act = str(action or "").strip().upper()
+    side = str(pos_type or "").strip().upper()
+    if act in {"OPEN", "ADD", "CLOSE", "REDUCE"} and side in {"LONG", "SHORT"}:
+        return f"{act}_{side}"
+    if act == "FUNDING":
+        return "FUNDING"
+    return act
+
+
+def canonical_reason_code_for_trade(action: str, pos_type: str | None, reason: str | None) -> str:
+    """Return canonical machine-readable reason code for a trade event."""
+    try:
+        from tools.reason_codes import classify_reason_code
+    except Exception:
+        return "unknown"
+    action_code = _canonical_action_code_for_reason(action, pos_type)
+    if not action_code:
+        return "unknown"
+    try:
+        code = str(classify_reason_code(action_code, str(reason or "")) or "").strip().lower()
+    except Exception:
+        code = ""
+    return code or "unknown"
+
+
 def _deep_merge(base: dict, override: dict) -> dict:
     for k, v in (override or {}).items():
         if isinstance(v, dict) and isinstance(base.get(k), dict):
@@ -2549,6 +2575,7 @@ def ensure_db():
             size REAL,
             notional REAL,
             reason TEXT,
+            reason_code TEXT,
             confidence TEXT,
             pnl REAL,
             fee_usd REAL,
@@ -2636,10 +2663,13 @@ def ensure_db():
         cursor.execute("ALTER TABLE trades ADD COLUMN meta_json TEXT")
     if "run_fingerprint" not in cols:
         cursor.execute("ALTER TABLE trades ADD COLUMN run_fingerprint TEXT")
+    if "reason_code" not in cols:
+        cursor.execute("ALTER TABLE trades ADD COLUMN reason_code TEXT")
 
     # Dedup live fills (userFills snapshots / reconnects) when available.
     cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_fill_hash_tid ON trades(fill_hash, fill_tid)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_run_fingerprint ON trades(run_fingerprint)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_reason_code ON trades(reason_code)")
 
     # Live WS event capture (no-op for paper if unused).
     cursor.execute(
@@ -2755,6 +2785,7 @@ def ensure_db():
             triggered_by TEXT,                      -- 'schedule', 'price_update', 'signal_flip', 'stop_loss'
             action_taken TEXT,                      -- 'open_long', 'close_short', 'hold', 'blocked'
             rejection_reason TEXT,                  -- if blocked/rejected
+            reason_code TEXT,                       -- canonical machine-readable reason code
             config_fingerprint TEXT,                -- strategy config fingerprint at decision time
             run_fingerprint TEXT,                   -- process/run fingerprint at decision time
             context_json TEXT                       -- full indicator + threshold snapshot
@@ -2767,6 +2798,8 @@ def ensure_db():
         cursor.execute("ALTER TABLE decision_events ADD COLUMN config_fingerprint TEXT")
     if "run_fingerprint" not in decision_event_cols:
         cursor.execute("ALTER TABLE decision_events ADD COLUMN run_fingerprint TEXT")
+    if "reason_code" not in decision_event_cols:
+        cursor.execute("ALTER TABLE decision_events ADD COLUMN reason_code TEXT")
 
     # Normalized indicator values at decision time (queryable without JSON parsing)
     cursor.execute(
@@ -2833,6 +2866,7 @@ def ensure_db():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_de_trade_id ON decision_events(trade_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_de_config_fingerprint ON decision_events(config_fingerprint)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_de_run_fingerprint ON decision_events(run_fingerprint)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_de_reason_code ON decision_events(reason_code)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_ge_decision ON gate_evaluations(decision_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_dl_entry ON decision_lineage(entry_trade_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_dl_exit ON decision_lineage(exit_trade_id)")
@@ -2879,6 +2913,7 @@ def create_decision_event(
     triggered_by: str | None = None,
     action_taken: str | None = None,
     rejection_reason: str | None = None,
+    reason_code: str | None = None,
     config_fingerprint: str | None = None,
     run_fingerprint: str | None = None,
     context: dict | None = None,
@@ -2981,6 +3016,20 @@ def create_decision_event(
     ts = timestamp_ms if timestamp_ms is not None else int(time.time() * 1000)
     cfg_fp = str(config_fingerprint or "").strip() or _extract_config_fingerprint(context, symbol)
     run_fp = str(run_fingerprint or "").strip() or get_run_fingerprint()
+    raw_action = str(action_taken or "").strip().lower()
+    raw_reason = str(rejection_reason or "").strip()
+    rc_text = str(reason_code or "").strip().lower()
+    if not rc_text:
+        if raw_action.startswith("open"):
+            rc_text = "entry_signal"
+        elif raw_action.startswith("add"):
+            rc_text = "entry_pyramid"
+        elif raw_action.startswith("close") or raw_action.startswith("reduce"):
+            rc_text = canonical_reason_code_for_trade(raw_action, None, raw_reason)
+        elif raw_action in {"blocked", "hold"}:
+            rc_text = "exit_filter" if raw_reason else "hold"
+        else:
+            rc_text = "unknown"
     conn = None
     try:
         conn = sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT_S)
@@ -2989,8 +3038,8 @@ def create_decision_event(
             INSERT INTO decision_events
                 (id, timestamp_ms, symbol, event_type, status, decision_phase,
                  parent_decision_id, trade_id, triggered_by, action_taken,
-                 rejection_reason, config_fingerprint, run_fingerprint, context_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 rejection_reason, reason_code, config_fingerprint, run_fingerprint, context_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 decision_id,
@@ -3004,6 +3053,7 @@ def create_decision_event(
                 triggered_by,
                 action_taken,
                 rejection_reason,
+                rc_text,
                 cfg_fp,
                 run_fp,
                 _json_dumps_safe(context) if context else None,
@@ -4254,11 +4304,12 @@ class PaperTrader:
         timestamp = timestamp_override or datetime.datetime.now(datetime.timezone.utc).isoformat()
         notional = price * size
         meta_json = _json_dumps_safe(meta) if meta else None
+        reason_code = canonical_reason_code_for_trade(str(action), str(type), str(reason))
 
         cursor.execute(
             """
-            INSERT INTO trades (timestamp, symbol, type, action, price, size, notional, reason, confidence, pnl, fee_usd, fee_rate, balance, entry_atr, leverage, margin_used, meta_json, run_fingerprint)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO trades (timestamp, symbol, type, action, price, size, notional, reason, reason_code, confidence, pnl, fee_usd, fee_rate, balance, entry_atr, leverage, margin_used, meta_json, run_fingerprint)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
                 timestamp,
@@ -4269,6 +4320,7 @@ class PaperTrader:
                 size,
                 notional,
                 reason,
+                reason_code,
                 confidence,
                 pnl,
                 fee_usd,

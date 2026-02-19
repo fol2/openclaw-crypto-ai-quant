@@ -31,6 +31,24 @@ def _current_run_fingerprint() -> str:
         return "unknown"
 
 
+def _canonical_reason_code(action: str, pos_type: str | None, reason: str | None) -> str:
+    action_code = str(action or "").strip().upper()
+    side = str(pos_type or "").strip().upper()
+    if action_code in {"OPEN", "ADD", "CLOSE", "REDUCE"} and side in {"LONG", "SHORT"}:
+        action_code = f"{action_code}_{side}"
+    elif action_code == "FUNDING":
+        action_code = "FUNDING"
+    if not action_code:
+        return "unknown"
+    try:
+        from tools.reason_codes import classify_reason_code
+
+        code = str(classify_reason_code(action_code, str(reason or "")) or "").strip().lower()
+    except Exception:
+        code = ""
+    return code or "unknown"
+
+
 def _coerce_ts_ms(ts: Any) -> int | None:
     """Best-effort convert an arbitrary timestamp-like value to epoch milliseconds."""
     if ts is None:
@@ -2170,6 +2188,7 @@ class LiveOms:
 
                 ts_iso = datetime.datetime.fromtimestamp(int(t_ms) / 1000.0, tz=datetime.timezone.utc).isoformat()
                 reason = str(ctx.get("reason") or f"LIVE_FILL {dir_s}").strip()
+                reason_code = _canonical_reason_code(action, pos_type, reason)
 
                 # Enrich meta_json. Always include the raw fill and OMS correlation.
                 meta: dict[str, Any] = {}
@@ -2253,10 +2272,10 @@ class LiveOms:
                             """
                             INSERT OR IGNORE INTO trades (
                                 timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                                pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
+                                reason_code, pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
                                 meta_json, run_fingerprint, fill_hash, fill_tid
                             )
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 ts_iso,
@@ -2268,6 +2287,7 @@ class LiveOms:
                                 float(notional),
                                 reason,
                                 conf,
+                                reason_code,
                                 float(pnl),
                                 float(fee),
                                 fee_token,
@@ -2287,10 +2307,10 @@ class LiveOms:
                             """
                             INSERT OR IGNORE INTO trades (
                                 timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                                pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
+                                reason_code, pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
                                 run_fingerprint, fill_hash, fill_tid
                             )
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 ts_iso,
@@ -2302,6 +2322,7 @@ class LiveOms:
                                 float(notional),
                                 reason,
                                 conf,
+                                reason_code,
                                 float(pnl),
                                 float(fee),
                                 fee_token,
@@ -2321,9 +2342,9 @@ class LiveOms:
                             """
                             INSERT INTO trades (
                                 timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                                pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used, meta_json, run_fingerprint
+                                reason_code, pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used, meta_json, run_fingerprint
                             )
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 ts_iso,
@@ -2335,6 +2356,7 @@ class LiveOms:
                                 float(notional),
                                 reason,
                                 conf,
+                                reason_code,
                                 float(pnl),
                                 float(fee),
                                 fee_token,
@@ -2352,9 +2374,9 @@ class LiveOms:
                             """
                             INSERT INTO trades (
                                 timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                                pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used, run_fingerprint
+                                reason_code, pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used, run_fingerprint
                             )
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 ts_iso,
@@ -2366,6 +2388,7 @@ class LiveOms:
                                 float(notional),
                                 reason,
                                 conf,
+                                reason_code,
                                 float(pnl),
                                 float(fee),
                                 fee_token,

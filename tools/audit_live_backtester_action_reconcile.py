@@ -214,7 +214,10 @@ def _load_live_actions(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]
                     "balance": _parse_float(row.get("balance")),
                     "confidence": _normalise_confidence(row.get("confidence")),
                     "reason": str(row.get("reason") or ""),
-                    "reason_code": classify_reason_code(action_code, str(row.get("reason") or "")),
+                    "reason_code": (
+                        str(row.get("reason_code") or "").strip().lower()
+                        or classify_reason_code(action_code, str(row.get("reason") or ""))
+                    ),
                 }
             )
 

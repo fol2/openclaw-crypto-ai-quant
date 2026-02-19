@@ -63,6 +63,24 @@ def _current_run_fingerprint() -> str:
         return raw or "unknown"
 
 
+def _canonical_reason_code(action: str, pos_type: str | None, reason: str | None) -> str:
+    action_code = str(action or "").strip().upper()
+    side = str(pos_type or "").strip().upper()
+    if action_code in {"OPEN", "ADD", "CLOSE", "REDUCE"} and side in {"LONG", "SHORT"}:
+        action_code = f"{action_code}_{side}"
+    elif action_code == "FUNDING":
+        action_code = "FUNDING"
+    if not action_code:
+        return "unknown"
+    try:
+        from tools.reason_codes import classify_reason_code
+
+        code = str(classify_reason_code(action_code, str(reason or "")) or "").strip().lower()
+    except Exception:
+        code = ""
+    return code or "unknown"
+
+
 def _configure_live_db_connection(conn: sqlite3.Connection) -> None:
     """Apply SQLite pragmas for low-latency live-path reads/writes."""
     try:
@@ -3070,6 +3088,7 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
 
             ts_iso = datetime.datetime.fromtimestamp(t_ms / 1000.0, tz=datetime.timezone.utc).isoformat()
             reason = str(ctx.get("reason") or f"LIVE_FILL {dir_s}").strip()
+            reason_code = _canonical_reason_code(action, pos_type, reason)
             meta = ctx.get("meta")
             meta_json = mei_alpha_v1._json_dumps_safe(meta) if meta else None
 
@@ -3110,10 +3129,10 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                         """
                         INSERT OR IGNORE INTO trades (
                             timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
+                            reason_code, pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
                             meta_json, run_fingerprint, fill_hash, fill_tid
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             ts_iso,
@@ -3125,6 +3144,7 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                             notional,
                             reason,
                             conf,
+                            reason_code,
                             pnl,
                             fee,
                             fee_token,
@@ -3144,10 +3164,10 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                         """
                         INSERT OR IGNORE INTO trades (
                             timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
+                            reason_code, pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
                             run_fingerprint, fill_hash, fill_tid
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             ts_iso,
@@ -3159,6 +3179,7 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                             notional,
                             reason,
                             conf,
+                            reason_code,
                             pnl,
                             fee,
                             fee_token,
@@ -3259,9 +3280,9 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                         """
                         INSERT INTO trades (
                             timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used, meta_json, run_fingerprint
+                            reason_code, pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used, meta_json, run_fingerprint
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             ts_iso,
@@ -3273,6 +3294,7 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                             notional,
                             reason,
                             conf,
+                            reason_code,
                             pnl,
                             fee,
                             fee_token,
@@ -3290,9 +3312,9 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                         """
                         INSERT INTO trades (
                             timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used, run_fingerprint
+                            reason_code, pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used, run_fingerprint
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             ts_iso,
@@ -3304,6 +3326,7 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                             notional,
                             reason,
                             conf,
+                            reason_code,
                             pnl,
                             fee,
                             fee_token,
@@ -3539,6 +3562,7 @@ def process_user_fundings(trader: LiveTrader, events: list[dict]) -> int:
             rate = _safe_float(f.get("fundingRate"), None)
             rate_s = "NA" if rate is None else f"{rate:+.10f}"
             reason = f"Live Funding (rate={rate_s})"
+            reason_code = _canonical_reason_code("FUNDING", pos_type, reason)
 
             # Best-effort price/notional (optional). This does NOT affect pnl because pnl is the realized USDC delta.
             mid = hyperliquid_ws.hl_ws.get_mid(sym, max_age_s=60.0)
@@ -3565,10 +3589,10 @@ def process_user_fundings(trader: LiveTrader, events: list[dict]) -> int:
                         """
                         INSERT OR IGNORE INTO trades (
                             timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
+                            reason_code, pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
                             meta_json, run_fingerprint, fill_hash, fill_tid
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             ts_iso,
@@ -3580,6 +3604,7 @@ def process_user_fundings(trader: LiveTrader, events: list[dict]) -> int:
                             notional,
                             reason,
                             "N/A",
+                            reason_code,
                             usdc_delta,
                             0.0,
                             "USDC",
@@ -3599,10 +3624,10 @@ def process_user_fundings(trader: LiveTrader, events: list[dict]) -> int:
                         """
                         INSERT OR IGNORE INTO trades (
                             timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
+                            reason_code, pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
                             run_fingerprint, fill_hash, fill_tid
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             ts_iso,
@@ -3614,6 +3639,7 @@ def process_user_fundings(trader: LiveTrader, events: list[dict]) -> int:
                             notional,
                             reason,
                             "N/A",
+                            reason_code,
                             usdc_delta,
                             0.0,
                             "USDC",
@@ -3635,9 +3661,9 @@ def process_user_fundings(trader: LiveTrader, events: list[dict]) -> int:
                         """
                         INSERT INTO trades (
                             timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used, meta_json, run_fingerprint
+                            reason_code, pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used, meta_json, run_fingerprint
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             ts_iso,
@@ -3649,6 +3675,7 @@ def process_user_fundings(trader: LiveTrader, events: list[dict]) -> int:
                             notional,
                             reason,
                             "N/A",
+                            reason_code,
                             usdc_delta,
                             0.0,
                             "USDC",
@@ -3666,9 +3693,9 @@ def process_user_fundings(trader: LiveTrader, events: list[dict]) -> int:
                         """
                         INSERT INTO trades (
                             timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used, run_fingerprint
+                            reason_code, pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used, run_fingerprint
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             ts_iso,
@@ -3680,6 +3707,7 @@ def process_user_fundings(trader: LiveTrader, events: list[dict]) -> int:
                             notional,
                             reason,
                             "N/A",
+                            reason_code,
                             usdc_delta,
                             0.0,
                             "USDC",
