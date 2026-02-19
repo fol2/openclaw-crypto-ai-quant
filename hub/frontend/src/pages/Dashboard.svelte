@@ -54,6 +54,7 @@
   let journeyHasMore = $state(true);
   let journeyChartHeight = $state(280);
   let journeyChartDragging = $state(false);
+  let journeyFetchSeq = 0;
   const JOURNEY_CHART_MIN = 120;
   const JOURNEY_CHART_MAX = 600;
 
@@ -98,26 +99,30 @@
     journeyLoading = false;
   }
 
+  function journeyTimeRange(j: any) {
+    const openTs = Date.parse((j.open_ts || '').replace(' ', 'T'));
+    const closeTs = j.close_ts ? Date.parse((j.close_ts || '').replace(' ', 'T')) : Date.now();
+    if (!isFinite(openTs)) return null;
+    const dur = closeTs - openTs;
+    const pad = Math.max(dur * 0.1, 60_000);
+    return { openTs, closeTs, dur, fromTs: Math.floor(openTs - pad), toTs: Math.ceil(closeTs + pad) };
+  }
+
   async function selectJourney(j: any) {
     selectedJourney = j;
     journeyCandles = [];
     journeyMarks = [];
 
-    const openTs = Date.parse(j.open_ts || '');
-    const closeTs = j.close_ts ? Date.parse(j.close_ts) : Date.now();
-    if (!isFinite(openTs)) return;
+    const tr = journeyTimeRange(j);
+    if (!tr) return;
 
-    const dur = closeTs - openTs;
-    const iv = pickJourneyInterval(dur);
+    const iv = pickJourneyInterval(tr.dur);
     journeyInterval = iv;
 
-    // Fetch candles with 10% padding
-    const pad = Math.max(dur * 0.1, 60_000);
-    const fromTs = Math.floor(openTs - pad);
-    const toTs = Math.ceil(closeTs + pad);
-
+    const seq = ++journeyFetchSeq;
     try {
-      const res = await getCandlesRange(j.symbol, iv, fromTs, toTs, 500);
+      const res = await getCandlesRange(j.symbol, iv, tr.fromTs, tr.toTs, 500);
+      if (seq !== journeyFetchSeq) return;
       journeyCandles = res.candles || [];
     } catch (e) { console.error('getCandlesRange failed:', e); }
 
@@ -157,15 +162,12 @@
     if (!selectedJourney) return;
     journeyInterval = newIv;
     const j = selectedJourney;
-    const openTs = Date.parse(j.open_ts || '');
-    const closeTs = j.close_ts ? Date.parse(j.close_ts) : Date.now();
-    if (!isFinite(openTs)) return;
-    const dur = closeTs - openTs;
-    const pad = Math.max(dur * 0.1, 60_000);
-    const fromTs = Math.floor(openTs - pad);
-    const toTs = Math.ceil(closeTs + pad);
+    const tr = journeyTimeRange(j);
+    if (!tr) return;
+    const seq = ++journeyFetchSeq;
     try {
-      const res = await getCandlesRange(j.symbol, newIv, fromTs, toTs, 500);
+      const res = await getCandlesRange(j.symbol, newIv, tr.fromTs, tr.toTs, 500);
+      if (seq !== journeyFetchSeq) return;
       journeyCandles = res.candles || [];
     } catch (e) { console.error('getCandlesRange failed:', e); }
   }
@@ -920,7 +922,7 @@
   </button>
 </div>
 
-<div class="dashboard-grid" class:is-dragging={dragging || chartDragging || journeyChartDragging} class:drag-col={dragging} class:drag-row={chartDragging}>
+<div class="dashboard-grid" class:is-dragging={dragging || chartDragging || journeyChartDragging} class:drag-col={dragging} class:drag-row={chartDragging || journeyChartDragging}>
   <!-- Symbol table -->
   <div class="panel symbols-panel" class:mobile-visible={mobileTab === 'symbols'} class:expanded-hidden={detailExpanded} style="width:{symWidth}px;min-width:{symWidth}px">
     <div class="panel-header">
@@ -1166,8 +1168,8 @@
           <!-- Journey list -->
           <div class="journey-list">
             {#each journeys as j (j.id)}
-              {@const openMs = Date.parse(j.open_ts || '')}
-              {@const closeMs = j.close_ts ? Date.parse(j.close_ts) : Date.now()}
+              {@const openMs = Date.parse((j.open_ts || '').replace(' ', 'T'))}
+              {@const closeMs = j.close_ts ? Date.parse(j.close_ts.replace(' ', 'T')) : Date.now()}
               {@const dur = isFinite(openMs) && isFinite(closeMs) ? closeMs - openMs : 0}
               <button
                 class="journey-card"
