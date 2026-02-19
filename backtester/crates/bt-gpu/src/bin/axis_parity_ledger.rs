@@ -15,7 +15,7 @@ use std::process::Command;
 
 use bt_core::candle::{CandleData, FundingRateData};
 use bt_core::config::StrategyConfig;
-use bt_core::sweep::{apply_one_pub, SweepSpec};
+use bt_core::sweep::{apply_one_pub, SweepAxis, SweepSpec};
 use bt_gpu::buffers::{GpuComboState, GPU_MAX_SYMBOLS, GPU_TRACE_CAP, GPU_TRACE_SYMBOL_ALL};
 use bt_gpu::{run_gpu_sweep, run_gpu_sweep_with_states};
 use clap::Parser;
@@ -47,6 +47,14 @@ struct Args {
     #[arg(long)]
     entry_interval: Option<String>,
 
+    /// Optional exit candle DB path for sub-bar exit parity.
+    #[arg(long)]
+    exit_candles_db: Option<String>,
+
+    /// Optional exit interval (for example 3m, 5m). Must be provided with --exit-candles-db.
+    #[arg(long)]
+    exit_interval: Option<String>,
+
     /// Optional start timestamp (epoch milliseconds).
     #[arg(long)]
     from_ts: Option<i64>,
@@ -58,6 +66,10 @@ struct Args {
     /// Optional funding rate SQLite DB for funding-settlement parity checks.
     #[arg(long)]
     funding_db: Option<String>,
+
+    /// Read initial balance from an export_state.py JSON file.
+    #[arg(long)]
+    balance_from: Option<String>,
 
     /// Output JSONL parity ledger.
     #[arg(long, default_value = "artifacts/axis_parity_smoke_current.jsonl")]
@@ -383,6 +395,48 @@ fn within_abs_or_rel(delta_abs: f64, lhs: f64, rhs: f64, abs_eps: f64, rel_eps: 
     delta_abs <= abs_eps.max(rel_eps * scale)
 }
 
+/// Read only the `balance` field from an export_state.py JSON file.
+fn read_balance_from_json(path: &str) -> Result<f64, Box<dyn std::error::Error>> {
+    let data = std::fs::read_to_string(path).map_err(|e| format!("Cannot read {:?}: {}", path, e))?;
+    let json: serde_json::Value =
+        serde_json::from_str(&data).map_err(|e| format!("Invalid JSON in {:?}: {}", path, e))?;
+    let balance = json
+        .get("balance")
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| format!("{:?} has no numeric \"balance\" field", path))?;
+    eprintln!(
+        "[balance-from] Read balance=${:.2} from {:?}",
+        balance, path
+    );
+    Ok(balance)
+}
+
+fn materialise_single_value_spec(
+    source: &SweepSpec,
+    override_axis: Option<(&str, f64)>,
+    initial_balance: f64,
+) -> SweepSpec {
+    let axes: Vec<SweepAxis> = source
+        .axes
+        .iter()
+        .filter_map(|axis| {
+            let first = axis.values.first().copied()?;
+            let value = match override_axis {
+                Some((path, v)) if axis.path == path => v,
+                _ => first,
+            };
+            let mut one = axis.clone();
+            one.values = vec![value];
+            Some(one)
+        })
+        .collect();
+    SweepSpec {
+        axes,
+        initial_balance,
+        lookback: source.lookback,
+    }
+}
+
 fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     if !args.balance_eps.is_finite()
         || !args.balance_rel_eps.is_finite()
@@ -453,6 +507,30 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => None,
     };
+    if args.exit_candles_db.is_some() ^ args.exit_interval.is_some() {
+        return Err(
+            "--exit-candles-db and --exit-interval must be provided together"
+                .to_string()
+                .into(),
+        );
+    }
+    let exit_candles: Option<CandleData> = match (&args.exit_candles_db, &args.exit_interval) {
+        (Some(db), Some(interval)) => {
+            let exit_paths = vec![db.clone()];
+            let loaded = bt_data::sqlite_loader::load_candles_filtered_multi(
+                &exit_paths,
+                interval,
+                args.from_ts,
+                args.to_ts,
+            )
+            .map_err(|e| format!("failed to load exit candles from {db}: {e}"))?;
+            if loaded.is_empty() {
+                return Err(format!("no exit candles loaded from {db}").into());
+            }
+            Some(loaded)
+        }
+        _ => None,
+    };
     let funding_rates: Option<FundingRateData> = match args.funding_db.as_ref() {
         Some(fdb) => {
             let loaded = bt_data::sqlite_loader::load_funding_rates_filtered(
@@ -465,6 +543,16 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         }
         None => None,
     };
+    let base_balance = match args.balance_from.as_ref() {
+        Some(path) => read_balance_from_json(path)?,
+        None => spec.initial_balance,
+    };
+    if !base_balance.is_finite() || base_balance <= 0.0 {
+        return Err(
+            format!("invalid effective initial balance {base_balance}; must be finite and > 0")
+                .into(),
+        );
+    }
 
     if let Some(parent) = args.output.parent() {
         fs::create_dir_all(parent)?;
@@ -499,17 +587,23 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let single_spec = SweepSpec {
+    let empty_single_spec = SweepSpec {
         axes: vec![],
-        initial_balance: spec.initial_balance,
+        initial_balance: base_balance,
         lookback: spec.lookback,
     };
+    let baseline_run_spec = if args.apply_all_axes_as_base {
+        materialise_single_value_spec(&spec, None, base_balance)
+    } else {
+        empty_single_spec.clone()
+    };
+    let gpu_sub_candles = exit_candles.as_ref().or(entry_candles.as_ref());
 
     run_gpu_single(
         &base_cfg,
-        &single_spec,
+        &baseline_run_spec,
         &candles,
-        entry_candles.as_ref(),
+        gpu_sub_candles,
         funding_rates.as_ref(),
         args.from_ts,
         args.to_ts,
@@ -518,8 +612,9 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     let baseline_cpu = run_cpu_single(
         &base_cfg,
-        &single_spec,
+        &baseline_run_spec,
         &candles,
+        exit_candles.as_ref(),
         entry_candles.as_ref(),
         funding_rates.as_ref(),
         args.from_ts,
@@ -527,9 +622,9 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let baseline_gpu = run_gpu_single(
         &base_cfg,
-        &single_spec,
+        &baseline_run_spec,
         &candles,
-        entry_candles.as_ref(),
+        gpu_sub_candles,
         funding_rates.as_ref(),
         args.from_ts,
         args.to_ts,
@@ -538,7 +633,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let baseline_balance_delta_abs =
         (baseline_gpu.final_balance - baseline_cpu.final_balance).abs();
     let baseline_pnl_delta_abs = (baseline_gpu.total_pnl - baseline_cpu.total_pnl).abs();
-    let pnl_scale_floor = spec.initial_balance.abs().max(1.0);
+    let pnl_scale_floor = base_balance.abs().max(1.0);
     let baseline_balance_ok = within_abs_or_rel(
         baseline_balance_delta_abs,
         baseline_gpu.final_balance,
@@ -570,9 +665,9 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     if !baseline_pass && args.trace_on_failure {
         let (trace_gpu, trace_state, trace_symbols) = run_gpu_single_with_trace(
             &base_cfg,
-            &single_spec,
+            &baseline_run_spec,
             &candles,
-            entry_candles.as_ref(),
+            gpu_sub_candles,
             funding_rates.as_ref(),
             args.from_ts,
             args.to_ts,
@@ -581,8 +676,9 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         let trace_symbol_name = symbol_name(trace_symbol_idx, &trace_symbols);
         let cpu_trace = run_cpu_single_with_trade_events(
             &base_cfg,
-            &single_spec,
+            &baseline_run_spec,
             &candles,
+            exit_candles.as_ref(),
             entry_candles.as_ref(),
             funding_rates.as_ref(),
             args.from_ts,
@@ -702,11 +798,13 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut failures_by_cause: BTreeMap<String, usize> = BTreeMap::new();
 
     eprintln!(
-        "[axis-parity] axes={} (selected), interval={}, candles_db={}, funding_db={}",
+        "[axis-parity] axes={} (selected), interval={}, candles_db={}, exit_db={}, funding_db={}, initial_balance={:.6}",
         axes.len(),
         args.interval,
         args.candles_db,
-        args.funding_db.as_deref().unwrap_or("none")
+        args.exit_candles_db.as_deref().unwrap_or("none"),
+        args.funding_db.as_deref().unwrap_or("none"),
+        base_balance
     );
 
     for (axis_index, axis) in axes.iter().enumerate() {
@@ -717,14 +815,20 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         for sample_index in sample_indices {
             total += 1;
             let sample_value = axis.values[sample_index];
+            let run_spec = if args.apply_all_axes_as_base {
+                materialise_single_value_spec(&spec, Some((&axis.path, sample_value)), base_balance)
+            } else {
+                empty_single_spec.clone()
+            };
 
             let mut cfg = base_cfg.clone();
             apply_one_pub(&mut cfg, &axis.path, sample_value);
 
             let cpu = run_cpu_single(
                 &cfg,
-                &single_spec,
+                &run_spec,
                 &candles,
+                exit_candles.as_ref(),
                 entry_candles.as_ref(),
                 funding_rates.as_ref(),
                 args.from_ts,
@@ -732,9 +836,9 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             )?;
             let gpu = run_gpu_single(
                 &cfg,
-                &single_spec,
+                &run_spec,
                 &candles,
-                entry_candles.as_ref(),
+                gpu_sub_candles,
                 funding_rates.as_ref(),
                 args.from_ts,
                 args.to_ts,
@@ -775,9 +879,9 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             if !pass && args.trace_on_failure {
                 let (trace_gpu, trace_state, trace_symbols) = run_gpu_single_with_trace(
                     &cfg,
-                    &single_spec,
+                    &run_spec,
                     &candles,
-                    entry_candles.as_ref(),
+                    gpu_sub_candles,
                     funding_rates.as_ref(),
                     args.from_ts,
                     args.to_ts,
@@ -786,8 +890,9 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 let trace_symbol_name = symbol_name(trace_symbol_idx, &trace_symbols);
                 let cpu_trace = run_cpu_single_with_trade_events(
                     &cfg,
-                    &single_spec,
+                    &run_spec,
                     &candles,
+                    exit_candles.as_ref(),
                     entry_candles.as_ref(),
                     funding_rates.as_ref(),
                     args.from_ts,
@@ -914,6 +1019,7 @@ fn run_cpu_single(
     cfg: &StrategyConfig,
     spec: &SweepSpec,
     candles: &CandleData,
+    exit_candles: Option<&CandleData>,
     entry_candles: Option<&CandleData>,
     funding_rates: Option<&FundingRateData>,
     from_ts: Option<i64>,
@@ -923,7 +1029,7 @@ fn run_cpu_single(
         cfg,
         spec,
         candles,
-        entry_candles,
+        exit_candles,
         entry_candles,
         funding_rates,
         from_ts,
@@ -943,6 +1049,7 @@ fn run_cpu_single_with_trade_events(
     cfg: &StrategyConfig,
     spec: &SweepSpec,
     candles: &CandleData,
+    exit_candles: Option<&CandleData>,
     entry_candles: Option<&CandleData>,
     funding_rates: Option<&FundingRateData>,
     from_ts: Option<i64>,
@@ -964,7 +1071,7 @@ fn run_cpu_single_with_trade_events(
         cfg,
         initial_balance: spec.initial_balance,
         lookback: spec.lookback,
-        exit_candles: entry_candles,
+        exit_candles,
         entry_candles,
         funding_rates,
         init_state: None,
@@ -1044,7 +1151,7 @@ fn run_gpu_single(
     cfg: &StrategyConfig,
     spec: &SweepSpec,
     candles: &CandleData,
-    entry_candles: Option<&CandleData>,
+    sub_candles: Option<&CandleData>,
     funding_rates: Option<&FundingRateData>,
     from_ts: Option<i64>,
     to_ts: Option<i64>,
@@ -1054,7 +1161,7 @@ fn run_gpu_single(
         cfg,
         spec,
         funding_rates,
-        entry_candles,
+        sub_candles,
         from_ts,
         to_ts,
     );
@@ -1074,7 +1181,7 @@ fn run_gpu_single_with_trace(
     cfg: &StrategyConfig,
     spec: &SweepSpec,
     candles: &CandleData,
-    entry_candles: Option<&CandleData>,
+    sub_candles: Option<&CandleData>,
     funding_rates: Option<&FundingRateData>,
     from_ts: Option<i64>,
     to_ts: Option<i64>,
@@ -1087,7 +1194,7 @@ fn run_gpu_single_with_trace(
                 cfg,
                 spec,
                 funding_rates,
-                entry_candles,
+                sub_candles,
                 from_ts,
                 to_ts,
             );

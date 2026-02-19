@@ -623,16 +623,9 @@ pub fn run_tpe_sweep(
         );
     }
 
-    // CPU parity for sub-bars: include the previous main bar when scope starts
-    // exactly on a boundary timestamp so boundary ticks map identically to CPU.
-    let mut trade_start_for_kernel = trade_start;
-    if max_sub_per_bar > 0 && trade_start_for_kernel > 0 {
-        trade_start_for_kernel -= 1;
-        eprintln!(
-            "[TPE] Sub-bar boundary alignment: trade_start {} -> {}",
-            trade_start, trade_start_for_kernel
-        );
-    }
+    // CPU scope guard skips bars with ts < from_ts before sub-bar processing.
+    // Keep kernel start aligned to scoped trade_start; do not step back one bar.
+    let trade_start_for_kernel = trade_start;
 
     eprintln!(
         "[TPE] {} bars x {} symbols, CUDA device ready",
