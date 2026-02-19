@@ -14,65 +14,21 @@ One-click start/stop/restart for all systemd services with live status indicator
 
 ![System Management](docs/screenshots/system-management.png)
 
-### Mobile
-Fully responsive — monitor trades, prices, and services from your phone.
+### Trades
+Trade journal with candlestick chart overlays, entry/exit markers, and per-trade PnL.
 
-<p align="center">
-  <img src="docs/screenshots/mobile-dashboard.png" alt="Mobile Dashboard" width="270" />
-  &nbsp;&nbsp;
-  <img src="docs/screenshots/mobile-trades.png" alt="Mobile Trades" width="270" />
-  &nbsp;&nbsp;
-  <img src="docs/screenshots/mobile-grid.png" alt="Mobile Grid" width="270" />
-</p>
+![Trades](docs/screenshots/trades-view.png)
+
+### Grid View
+Live prices, candlestick sparklines, positions, and PnL across your entire watchlist.
+
+![Grid View](docs/screenshots/grid-view.gif)
 
 ## Architecture
 
-```
-                    ┌─────────────┐
-                    │  Hyperliquid │
-                    │     DEX      │
-                    └──────┬───────┘
-                           │ WS + REST
-                    ┌──────▼───────┐
-                    │  WS Sidecar  │  (Rust)
-                    │ (market data) │
-                    └──────┬───────┘
-                           │ Unix socket
-              ┌────────────▼────────────┐
-              │     Unified Engine      │
-              │       (engine/)         │
-              ├──────────┬──────────────┤
-              │  Paper   │    Live      │
-              │ Trader   │   Trader     │
-              ├──────────┴──────────────┤
-              │   Kernel Orchestrator   │
-              │  (Rust bt-runtime/PyO3) │
-              ├─────────────────────────┤
-              │     Risk Manager        │
-              ├─────────────────────────┤
-              │   Order Mgmt System     │
-              └────────────┬────────────┘
-                           │
-         ┌─────────────────┼─────────────────┐
-         │                 │                 │
-   ┌─────▼─────┐   ┌──────▼──────┐   ┌──────▼──────┐
-   │  Monitor   │   │  Hub (Rust  │   │  Alerting   │
-   │ Dashboard  │   │  + Svelte)  │   │  (Discord/  │
-   │ (Python)   │   │             │   │  Telegram)  │
-   └────────────┘   └─────────────┘   └─────────────┘
-
-Standalone:
-   ┌──────────────────────────────────────────────┐
-   │          Rust Backtester (CPU / CUDA GPU)     │
-   │  bt-core · bt-signals · bt-gpu · risk-core   │
-   └──────────────────────────────────────────────┘
-
-Nightly pipeline:
-   ┌──────────────────────────────────────────────┐
-   │  Strategy Factory (factory_run.py / cycle)    │
-   │  sweep → validate → deploy → paper → promote  │
-   └──────────────────────────────────────────────┘
-```
+<p align="center">
+  <img src="docs/diagrams/architecture.svg" alt="System Architecture" />
+</p>
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed component descriptions, data flow, and project structure.
 

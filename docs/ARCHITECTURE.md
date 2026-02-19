@@ -2,52 +2,7 @@
 
 ## Overview
 
-```
-                    ┌─────────────┐
-                    │  Hyperliquid │
-                    │     DEX      │
-                    └──────┬───────┘
-                           │ WS + REST
-                    ┌──────▼───────┐
-                    │  WS Sidecar  │  (Rust)
-                    │ (market data) │
-                    └──────┬───────┘
-                           │ Unix socket
-              ┌────────────▼────────────┐
-              │     Unified Engine      │
-              │       (engine/)         │
-              ├──────────┬──────────────┤
-              │  Paper   │    Live      │
-              │ Trader   │   Trader     │
-              ├──────────┴──────────────┤
-              │   Kernel Orchestrator   │
-              │  (Rust bt-runtime/PyO3) │
-              ├─────────────────────────┤
-              │     Risk Manager        │
-              ├─────────────────────────┤
-              │   Order Mgmt System     │
-              └────────────┬────────────┘
-                           │
-         ┌─────────────────┼─────────────────┐
-         │                 │                 │
-   ┌─────▼─────┐   ┌──────▼──────┐   ┌──────▼──────┐
-   │  Monitor   │   │  Hub (Rust  │   │  Alerting   │
-   │ Dashboard  │   │  + Svelte)  │   │  (Discord/  │
-   │ (Python)   │   │             │   │  Telegram)  │
-   └────────────┘   └─────────────┘   └─────────────┘
-
-Standalone:
-   ┌──────────────────────────────────────────────┐
-   │          Rust Backtester (CPU / CUDA GPU)     │
-   │  bt-core · bt-signals · bt-gpu · risk-core   │
-   └──────────────────────────────────────────────┘
-
-Nightly pipeline:
-   ┌──────────────────────────────────────────────┐
-   │  Strategy Factory (factory_run.py / cycle)    │
-   │  sweep → validate → deploy → paper → promote  │
-   └──────────────────────────────────────────────┘
-```
+![System Architecture](diagrams/architecture.svg)
 
 ## Components
 
@@ -275,12 +230,16 @@ The `engine.interval` parameter is NOT hot-reloadable — changing it requires a
 
 ### Market Data Path
 
+![Market Data Path](diagrams/market-data-path.svg)
+
 1. **Hyperliquid** → WS streams (`allMids`, `bbo`, `candle`)
 2. **WS Sidecar** receives, persists candles to SQLite DBs, serves via Unix socket
 3. **MarketDataHub** reads from sidecar (preferred), falls back to SQLite → REST
 4. **UnifiedEngine** polls per-symbol candle keys; only fetches full DataFrame when data changes
 
 ### Signal Path
+
+![Signal Path](diagrams/signal-path.svg)
 
 1. `mei_alpha_v1.analyze(df, sym, btc_bullish)` → `(signal, confidence, now_series)`
 2. Kernel orchestrator (optional): Rust decision kernel via `bt-runtime` PyO3 bridge
@@ -291,6 +250,8 @@ The `engine.interval` parameter is NOT hot-reloadable — changing it requires a
 7. Phase 2: Rank entries by score, execute in order
 
 ### Order Execution Path (Live)
+
+![Order Execution Path](diagrams/order-execution-path.svg)
 
 1. Entry/exit decision → `OrderIntent`
 2. OMS creates intent row (dedupe guard)
