@@ -19,6 +19,7 @@ YAML config hot-reload is handled by StrategyManager, without reloading mei_alph
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import logging
 import os
@@ -73,6 +74,43 @@ def _strategy_mode_file() -> Path:
         return Path(p).expanduser().resolve()
     root = Path(__file__).resolve().parents[1]
     return (root / "artifacts" / "state" / "strategy_mode.txt").resolve()
+
+
+def _read_code_version() -> str:
+    try:
+        version_path = Path(__file__).resolve().parents[1] / "VERSION"
+        return str(version_path.read_text(encoding="utf-8").strip() or "unknown")
+    except Exception:
+        return "unknown"
+
+
+def _build_run_fingerprint(
+    *,
+    strategy: StrategyManager,
+    mode: str,
+    interval: str,
+    lookback_bars: int,
+) -> tuple[str, dict[str, object]]:
+    snap = strategy.snapshot
+    try:
+        watchlist = sorted({str(s).upper() for s in strategy.get_watchlist() if str(s).strip()})
+    except Exception:
+        watchlist = []
+
+    payload: dict[str, object] = {
+        "mode": str(mode),
+        "interval": str(interval),
+        "lookback_bars": int(lookback_bars),
+        "code_version": _read_code_version(),
+        "strategy_yaml_path": str(getattr(snap, "yaml_path", "") or ""),
+        "strategy_yaml_mtime": getattr(snap, "yaml_mtime", None),
+        "strategy_overrides_sha1": str(getattr(snap, "overrides_sha1", "") or ""),
+        "strategy_version": str(getattr(snap, "version", "") or ""),
+        "watchlist": watchlist,
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str, ensure_ascii=False)
+    fingerprint = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return fingerprint, payload
 
 
 def _ws_fills_overflow_path() -> Path:
@@ -1177,11 +1215,20 @@ def main() -> None:
                         _con = _sql.connect(_db_path(), timeout=5)
                         _cur = _con.execute("SELECT COUNT(*) FROM trades")
                         if _cur.fetchone()[0] == 0:
-                            _con.execute(
-                                "INSERT INTO trades (timestamp, symbol, type, action, price, size, notional, balance)"
-                                " VALUES (datetime('now'), '__SEED__', 'SYSTEM', 'SYSTEM', 0, 0, 0, ?)",
-                                (_snap.withdrawable_usd,),
-                            )
+                            _cols = {row[1] for row in _con.execute("PRAGMA table_info(trades)").fetchall()}
+                            _seed_run_fp = str(os.getenv("AI_QUANT_RUN_FINGERPRINT", "") or "").strip() or "startup"
+                            if "run_fingerprint" in _cols:
+                                _con.execute(
+                                    "INSERT INTO trades (timestamp, symbol, type, action, price, size, notional, balance, run_fingerprint)"
+                                    " VALUES (datetime('now'), '__SEED__', 'SYSTEM', 'SYSTEM', 0, 0, 0, ?, ?)",
+                                    (_snap.withdrawable_usd, _seed_run_fp),
+                                )
+                            else:
+                                _con.execute(
+                                    "INSERT INTO trades (timestamp, symbol, type, action, price, size, notional, balance)"
+                                    " VALUES (datetime('now'), '__SEED__', 'SYSTEM', 'SYSTEM', 0, 0, 0, ?)",
+                                    (_snap.withdrawable_usd,),
+                                )
                             _con.commit()
                         _con.close()
                     except Exception:
@@ -1285,6 +1332,60 @@ def main() -> None:
     except Exception:
         lookback_bars = int(mei_alpha_v1.LOOKBACK_HOURS)
     lookback_bars = int(max(50, min(10_000, lookback_bars)))
+
+    try:
+        preset_run_fingerprint = str(os.getenv("AI_QUANT_RUN_FINGERPRINT", "") or "").strip()
+        if preset_run_fingerprint:
+            run_fingerprint = preset_run_fingerprint
+            run_fp_payload = {
+                "code_version": _read_code_version(),
+                "strategy_overrides_sha1": str(getattr(strategy.snapshot, "overrides_sha1", "") or ""),
+                "watchlist": [],
+                "source": "env",
+            }
+        else:
+            run_fingerprint, run_fp_payload = _build_run_fingerprint(
+                strategy=strategy,
+                mode=mode,
+                interval=interval,
+                lookback_bars=lookback_bars,
+            )
+            os.environ["AI_QUANT_RUN_FINGERPRINT"] = str(run_fingerprint)
+        try:
+            mei_alpha_v1.set_run_fingerprint(str(run_fingerprint))
+        except Exception:
+            pass
+        logger.info(
+            "run_fingerprint=%s code=%s strategy_sha=%s watchlist_n=%d interval=%s lookback=%d",
+            str(run_fingerprint),
+            str(run_fp_payload.get("code_version", "")),
+            str(run_fp_payload.get("strategy_overrides_sha1", "")),
+            len(run_fp_payload.get("watchlist", []) if isinstance(run_fp_payload.get("watchlist"), list) else []),
+            interval,
+            lookback_bars,
+        )
+
+        # Backfill early seed rows written before fingerprint initialisation.
+        try:
+            import sqlite3 as _sql
+
+            _con = _sql.connect(_db_path(), timeout=5)
+            _con.execute(
+                """
+                UPDATE trades
+                SET run_fingerprint = ?
+                WHERE symbol = '__SEED__'
+                  AND action = 'SYSTEM'
+                  AND (run_fingerprint IS NULL OR run_fingerprint = '' OR run_fingerprint = 'startup' OR run_fingerprint = 'unknown')
+                """,
+                (str(run_fingerprint),),
+            )
+            _con.commit()
+            _con.close()
+        except Exception:
+            pass
+    except Exception:
+        logger.warning("failed to build run fingerprint", exc_info=True)
 
     decision_provider = _build_default_decision_provider()
 

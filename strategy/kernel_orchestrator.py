@@ -641,19 +641,50 @@ class KernelOrchestrator:
             "diagnostics": decision.diagnostics,
         }
         config_fingerprint: str | None = None
+        run_fingerprint = str(os.getenv("AI_QUANT_RUN_FINGERPRINT", "") or "").strip() or "unknown"
         try:
             cfg_json = json.dumps(self._config, sort_keys=True, separators=(",", ":"), default=str)
             if cfg_json:
                 config_fingerprint = hashlib.sha1(cfg_json.encode("utf-8")).hexdigest()
         except Exception:
             config_fingerprint = None
+        try:
+            from strategy.mei_alpha_v1 import get_run_fingerprint as _get_run_fingerprint
+
+            run_fingerprint = str(_get_run_fingerprint() or run_fingerprint)
+        except Exception:
+            pass
 
         conn: sqlite3.Connection | None = None
         try:
             conn = sqlite3.connect(db_path, timeout=5.0)
             col_rows = conn.execute("PRAGMA table_info(decision_events)").fetchall()
             has_config_fingerprint = any(str(row[1]) == "config_fingerprint" for row in col_rows)
-            if has_config_fingerprint:
+            has_run_fingerprint = any(str(row[1]) == "run_fingerprint" for row in col_rows)
+            if has_config_fingerprint and has_run_fingerprint:
+                conn.execute(
+                    """
+                    INSERT INTO decision_events
+                        (id, timestamp_ms, symbol, event_type, status,
+                         decision_phase, triggered_by, action_taken,
+                         config_fingerprint, run_fingerprint, context_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event_id,
+                        ts,
+                        str(symbol).upper(),
+                        "kernel_decision",
+                        "executed" if decision.ok else "error",
+                        "kernel_evaluation",
+                        "kernel_orchestrator",
+                        decision.action,
+                        config_fingerprint,
+                        run_fingerprint,
+                        json.dumps(context, separators=(",", ":")),
+                    ),
+                )
+            elif has_config_fingerprint:
                 conn.execute(
                     """
                     INSERT INTO decision_events
@@ -672,6 +703,28 @@ class KernelOrchestrator:
                         "kernel_orchestrator",
                         decision.action,
                         config_fingerprint,
+                        json.dumps(context, separators=(",", ":")),
+                    ),
+                )
+            elif has_run_fingerprint:
+                conn.execute(
+                    """
+                    INSERT INTO decision_events
+                        (id, timestamp_ms, symbol, event_type, status,
+                         decision_phase, triggered_by, action_taken,
+                         run_fingerprint, context_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event_id,
+                        ts,
+                        str(symbol).upper(),
+                        "kernel_decision",
+                        "executed" if decision.ok else "error",
+                        "kernel_evaluation",
+                        "kernel_orchestrator",
+                        decision.action,
+                        run_fingerprint,
                         json.dumps(context, separators=(",", ":")),
                     ),
                 )
