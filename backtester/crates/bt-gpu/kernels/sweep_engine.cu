@@ -295,7 +295,8 @@ __device__ __forceinline__ double resolve_main_close(
     return (double)snap.close;
 }
 
-__device__ __forceinline__ double resolve_prev_close_for_funding(
+__device__ __forceinline__ double resolve_mark_price_for_funding(
+    const GpuRawCandle* main_candles,
     const GpuSnapshot* snapshots,
     const GpuComboConfig* cfg,
     unsigned int bar,
@@ -306,8 +307,8 @@ __device__ __forceinline__ double resolve_prev_close_for_funding(
     unsigned int probe = bar;
     while (true) {
         const GpuSnapshot& s = snapshots[cfg->snapshot_offset + probe * ns + sym];
-        if (s.valid != 0u && s.prev_close > 0.0f) {
-            return (double)s.prev_close;
+        if (s.valid != 0u) {
+            return resolve_main_close(main_candles, probe, ns, sym, s);
         }
         if (probe == 0u) { break; }
         probe -= 1u;
@@ -2144,8 +2145,8 @@ extern "C" __global__ void sweep_engine_kernel(
                 GpuFundingSpan span = funding_spans[slot];
                 if (span.len == 0u) { continue; }
 
-                const GpuSnapshot& funding_snap = snapshots[cfg.snapshot_offset + bar * ns + sym];
-                double mark_price = resolve_prev_close_for_funding(
+                double mark_price = resolve_mark_price_for_funding(
+                    main_candles,
                     snapshots,
                     &cfg,
                     bar,
