@@ -44,6 +44,14 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     return row is not None
 
 
+def _column_exists(conn: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    for row in rows:
+        if str(row["name"] if isinstance(row, sqlite3.Row) else row[1]).strip() == column_name:
+            return True
+    return False
+
+
 def _bucket_timestamp_ms(ts_ms: int, bucket_ms: int) -> int:
     if bucket_ms <= 1:
         return int(ts_ms)
@@ -75,6 +83,11 @@ def _load_decision_rows(
                     "db_path": str(db_path),
                 }
             ]
+        config_col = (
+            "config_fingerprint"
+            if _column_exists(conn, "decision_events", "config_fingerprint")
+            else "NULL AS config_fingerprint"
+        )
 
         clauses: list[str] = []
         params: list[Any] = []
@@ -88,7 +101,7 @@ def _load_decision_rows(
 
         sql = (
             "SELECT id, timestamp_ms, symbol, event_type, status, decision_phase, "
-            "triggered_by, action_taken, rejection_reason, config_fingerprint, trade_id "
+            f"triggered_by, action_taken, rejection_reason, {config_col}, trade_id "
             f"FROM decision_events {where_sql} ORDER BY timestamp_ms ASC, id ASC"
         )
         rows = conn.execute(sql, tuple(params)).fetchall()

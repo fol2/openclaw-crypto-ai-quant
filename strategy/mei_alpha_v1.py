@@ -4,6 +4,7 @@ import ta
 import time
 import datetime
 import copy
+import hashlib
 import json
 import os
 import random
@@ -2869,9 +2870,9 @@ def create_decision_event(
     str
         The ULID of the created decision event.
     """
-    def _extract_config_fingerprint(ctx: dict | None) -> str | None:
+    def _extract_config_fingerprint(ctx: dict | None, sym: str) -> str | None:
         if not isinstance(ctx, dict):
-            return None
+            ctx = {}
 
         def _as_dict(value: object) -> dict:
             return value if isinstance(value, dict) else {}
@@ -2902,11 +2903,37 @@ def create_decision_event(
             text = str(candidate or "").strip()
             if text:
                 return f"version:{text}"
-        return None
+
+        try:
+            snap = _strategy_mgr.snapshot if _strategy_mgr is not None else None
+            if snap is not None:
+                text = str(getattr(snap, "overrides_sha1", "") or "").strip()
+                if text:
+                    return text
+                version_text = str(getattr(snap, "version", "") or "").strip()
+                if version_text:
+                    return f"version:{version_text}"
+        except Exception:
+            pass
+
+        try:
+            cfg = get_strategy_config(sym)
+            payload = json.dumps(cfg, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            if payload:
+                return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+        except Exception:
+            pass
+        try:
+            payload = json.dumps(_DEFAULT_STRATEGY_CONFIG, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            if payload:
+                return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+        except Exception:
+            pass
+        return "unknown"
 
     decision_id = generate_ulid()
     ts = timestamp_ms if timestamp_ms is not None else int(time.time() * 1000)
-    cfg_fp = str(config_fingerprint or "").strip() or _extract_config_fingerprint(context)
+    cfg_fp = str(config_fingerprint or "").strip() or _extract_config_fingerprint(context, symbol)
     conn = None
     try:
         conn = sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT_S)

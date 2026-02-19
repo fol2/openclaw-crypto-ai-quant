@@ -643,7 +643,7 @@ class KernelOrchestrator:
         config_fingerprint: str | None = None
         try:
             cfg_json = json.dumps(self._config, sort_keys=True, separators=(",", ":"), default=str)
-            if cfg_json and cfg_json != "{}":
+            if cfg_json:
                 config_fingerprint = hashlib.sha1(cfg_json.encode("utf-8")).hexdigest()
         except Exception:
             config_fingerprint = None
