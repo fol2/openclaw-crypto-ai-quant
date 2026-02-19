@@ -18,6 +18,7 @@ The output includes:
 
 - `balance`
 - `positions`
+  - for `--as-of-ts` snapshots, position runtime fields (`adds_count`, `tp1_taken`, `last_add_time_ms`) are reconstructed from historical `ADD`/`REDUCE` fills
 - `runtime.entry_attempt_ms_by_symbol`
 - `runtime.exit_attempt_ms_by_symbol`
 - canonical metadata (`open_orders`, `cursors`, warnings)
