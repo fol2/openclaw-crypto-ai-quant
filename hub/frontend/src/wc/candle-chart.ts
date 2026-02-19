@@ -138,7 +138,9 @@ export class CandleChart extends LitElement {
   // _vStart = first visible index in sorted data, _vCount = number of visible bars
   private _vStart = 0;
   private _vCount = 0;
-  private _prevDataLen = 0;  // detect data changes to auto-reset viewport
+  private _prevSymbol = '';
+  private _prevInterval = '';
+  private _prevDataLen = 0;
 
   // ── Pan state (desktop mouse drag) ──────────────────────────────────────────
   private _dragging = false;
@@ -236,15 +238,20 @@ export class CandleChart extends LitElement {
     if (this._vStart < 0)        this._vStart = 0;
   }
 
-  /** Reset viewport to show all data on significant data changes (symbol/interval switch).
-   *  Incremental +1 candle from live feed should NOT reset user's zoom/pan. */
+  /** Reset viewport to show all data when the data source changes.
+   *  Tracks symbol + interval to distinguish a real data-source switch from
+   *  incremental live-feed updates which should preserve the user's zoom/pan. */
   private _autoResetViewport(total: number) {
-    const diff = Math.abs(total - this._prevDataLen);
-    if (diff > 1 || this._prevDataLen === 0) {
+    const srcChanged = this.symbol !== this._prevSymbol
+                    || this.interval !== this._prevInterval;
+    const dataReplaced = Math.abs(total - this._prevDataLen) > Math.max(2, this._prevDataLen * 0.1);
+    if (srcChanged || dataReplaced || this._prevDataLen === 0) {
       this._vStart = 0;
       this._vCount = total;
     }
-    this._prevDataLen = total;
+    this._prevSymbol   = this.symbol;
+    this._prevInterval = this.interval;
+    this._prevDataLen  = total;
   }
 
   // ── Event listeners ─────────────────────────────────────────────────────────
@@ -344,9 +351,10 @@ export class CandleChart extends LitElement {
 
     const delta = Math.sign(e.deltaY);
     const step  = Math.max(1, Math.round(this._vCount * 0.15));
-    const newCount = this._vCount + delta * step;
-
-    if (newCount < MIN_BARS || newCount > total) return;
+    // Clamp to [MIN_BARS, total] instead of returning early — allows smooth
+    // zoom-out up to the data boundary rather than blocking the gesture entirely.
+    const newCount = Math.max(MIN_BARS, Math.min(total, this._vCount + delta * step));
+    if (newCount === this._vCount) return;
 
     // Adjust vStart so the candle under the cursor stays in place
     const removed = newCount - this._vCount;
@@ -402,10 +410,12 @@ export class CandleChart extends LitElement {
       if (dist < 1) return;
       // pinch out = zoom in = fewer bars; pinch in = zoom out = more bars
       const ratio = this._pinchDist0 / dist;
-      const newCount = Math.round(this._pinchCount0 * ratio);
       const sorted = this._sortedData();
       const total = sorted.length;
-      if (newCount < MIN_BARS || newCount > total) return;
+      // Clamp to [MIN_BARS, total] — on iPhone pinch ratios swing aggressively
+      // and the old early-return blocked zoom-out when newCount overshot total.
+      const newCount = Math.max(MIN_BARS, Math.min(total, Math.round(this._pinchCount0 * ratio)));
+      if (newCount === this._vCount) return;
 
       const rect = this.getBoundingClientRect();
       const W = this.offsetWidth || 400;
