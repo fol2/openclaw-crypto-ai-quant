@@ -1267,6 +1267,13 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 audit_for_oms = indicators.get("audit")
             except Exception:
                 audit_for_oms = None
+        kernel_reason_code = ""
+        try:
+            kernel_reason_code = str(
+                (indicators if indicators is not None else {}).get("_kernel_reason_code") or ""
+            ).strip().lower()
+        except Exception:
+            kernel_reason_code = ""
 
         _add_reason = str(reason or "Pyramid Add")
         oms = getattr(self, "oms", None)
@@ -1289,6 +1296,12 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         }
         if oms is not None:
             try:
+                add_meta = {
+                    "audit": audit_for_oms if isinstance(audit_for_oms, dict) else None,
+                    "order": order_meta,
+                }
+                if kernel_reason_code:
+                    add_meta["reason_code"] = kernel_reason_code
                 oms_intent = oms.create_intent(
                     symbol=sym,
                     action="ADD",
@@ -1300,10 +1313,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     reason=_add_reason,
                     confidence=str(confidence or ""),
                     entry_atr=float(current_atr or 0.0),
-                    meta={
-                        "audit": audit_for_oms if isinstance(audit_for_oms, dict) else None,
-                        "order": order_meta,
-                    },
+                    meta=add_meta,
                     dedupe_open=False,
                 )
             except Exception as _oms_exc:
@@ -1619,10 +1629,12 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 "entry_atr": current_atr,
                 "leverage": leverage,
                 "reason": _add_reason,
+                "reason_code": kernel_reason_code or None,
                 "breadth_pct": _breadth_pct_add,
                 "meta": {
                     "audit": audit if isinstance(audit, dict) else None,
                     "breadth_pct": _breadth_pct_add,
+                    "reason_code": kernel_reason_code or None,
                     "oms": (
                         {
                             "intent_id": getattr(oms_intent, "intent_id", None),
@@ -1749,6 +1761,9 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                         reduce_size_f = boosted
 
         action_kind = "CLOSE" if is_full_close else "REDUCE"
+        reason_code = ""
+        if isinstance(meta, dict):
+            reason_code = str(meta.get("reason_code") or "").strip().lower()
         lev = float(pos.get("leverage") or 1.0)
         lev = max(1.0, lev)
         notional_est2 = abs(reduce_size_f) * float(fill_price_est)
@@ -1775,6 +1790,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     meta_for_oms["order"] = {**meta_for_oms["order"], **order_meta}
                 else:
                     meta_for_oms["order"] = order_meta
+                if reason_code:
+                    meta_for_oms["reason_code"] = reason_code
                 oms_intent = oms.create_intent(
                     symbol=sym,
                     action=action_kind,
@@ -2046,6 +2063,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 "action": "CLOSE" if is_full_close else "REDUCE",
                 "confidence": confidence,
                 "reason": reason,
+                "reason_code": reason_code or None,
                 "leverage": float(pos.get("leverage") or 1.0),
                 "meta": meta_final or None,
             },
@@ -2095,6 +2113,13 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 audit = indicators.get("audit")
             except Exception:
                 audit = None
+        kernel_reason_code = ""
+        try:
+            kernel_reason_code = str(
+                (indicators if indicators is not None else {}).get("_kernel_reason_code") or ""
+            ).strip().lower()
+        except Exception:
+            kernel_reason_code = ""
 
         # Persist the strategy decision for live monitoring (signals are not orders).
         # This keeps the monitor UI "SIGNAL" column populated for live mode.
@@ -2131,11 +2156,13 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 reason=reason,
             )
         elif act == "CLOSE":
+            close_meta = {"reason_code": kernel_reason_code} if kernel_reason_code else None
             return self.close_position(
                 sym,
                 price,
                 timestamp,
                 reason=str(reason or "Kernel CLOSE"),
+                meta=close_meta,
             )
         elif act == "REDUCE":
             if sym not in (self.positions or {}):
@@ -2152,6 +2179,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     reduce_size = float((self.positions or {}).get(sym, {}).get("size") or 0.0)
                 except Exception:
                     reduce_size = 0.0
+            reduce_meta = {"reason_code": kernel_reason_code} if kernel_reason_code else None
             return self.reduce_position(
                 sym,
                 reduce_size,
@@ -2159,6 +2187,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 timestamp,
                 reason=str(reason or "Kernel REDUCE"),
                 confidence=confidence,
+                meta=reduce_meta,
             )
 
         # OPEN path is kernel-action driven; do not run legacy signal flip/add logic.
@@ -2501,6 +2530,12 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             return
 
         entry_side = "BUY" if signal == "BUY" else "SELL"
+        default_open_reason = (
+            "Signal Trigger [REVERSED]"
+            if (indicators if indicators is not None else {}).get("_reversed_entry") is True
+            else "Signal Trigger"
+        )
+        open_reason = str(reason or default_open_reason).strip() or default_open_reason
         oms = getattr(self, "oms", None)
         oms_intent = None
         if oms is not None:
@@ -2515,6 +2550,12 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     "leverage": float(leverage),
                     "margin_est": float(margin_need),
                 }
+                open_meta = {
+                    "audit": audit if isinstance(audit, dict) else None,
+                    "order": order_meta,
+                }
+                if kernel_reason_code:
+                    open_meta["reason_code"] = kernel_reason_code
                 oms_intent = oms.create_intent(
                     symbol=sym,
                     action="OPEN",
@@ -2523,15 +2564,10 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     requested_notional=float(notional),
                     leverage=float(leverage),
                     decision_ts=timestamp,
-                    reason="Signal Trigger [REVERSED]"
-                    if (indicators if indicators is not None else {}).get("_reversed_entry") is True
-                    else "Signal Trigger",
+                    reason=open_reason,
                     confidence=str(confidence or ""),
                     entry_atr=float(atr or 0.0),
-                    meta={
-                        "audit": audit if isinstance(audit, dict) else None,
-                        "order": order_meta,
-                    },
+                    meta=open_meta,
                     dedupe_open=True,
                 )
             except Exception:
@@ -2875,13 +2911,13 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 "confidence": confidence,
                 "entry_atr": float(atr or 0.0),
                 "leverage": leverage,
-                "reason": "Signal Trigger [REVERSED]"
-                if (indicators if indicators is not None else {}).get("_reversed_entry") is True
-                else "Signal Trigger",
+                "reason": open_reason,
+                "reason_code": kernel_reason_code or None,
                 "breadth_pct": _breadth_pct,
                 "meta": {
                     "audit": audit if isinstance(audit, dict) else None,
                     "breadth_pct": _breadth_pct,
+                    "reason_code": kernel_reason_code or None,
                     "oms": (
                         {
                             "intent_id": getattr(oms_intent, "intent_id", None),
@@ -3088,8 +3124,12 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
 
             ts_iso = datetime.datetime.fromtimestamp(t_ms / 1000.0, tz=datetime.timezone.utc).isoformat()
             reason = str(ctx.get("reason") or f"LIVE_FILL {dir_s}").strip()
-            reason_code = _canonical_reason_code(action, pos_type, reason)
             meta = ctx.get("meta")
+            reason_code = str(ctx.get("reason_code") or "").strip().lower()
+            if not reason_code and isinstance(meta, dict):
+                reason_code = str(meta.get("reason_code") or "").strip().lower()
+            if not reason_code:
+                reason_code = _canonical_reason_code(action, pos_type, reason)
             meta_json = mei_alpha_v1._json_dumps_safe(meta) if meta else None
 
             # Insert into trades if schema supports fill_hash/tid; otherwise best-effort insert (may duplicate).

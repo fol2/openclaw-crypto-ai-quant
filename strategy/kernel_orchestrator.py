@@ -1143,7 +1143,8 @@ class KernelCandleDecisionProvider:
                             "entry_key",
                             intent.get("candle_key"),
                         ),
-                        "reason": f"kernel_candle:{kd.action.lower()}",
+                        "reason": str(intent.get("reason") or f"kernel_candle:{kd.action.lower()}").strip(),
+                        "reason_code": str(intent.get("reason_code") or "").strip().lower() or None,
                     }
 
                     if self._decision_factory is not None:

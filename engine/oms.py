@@ -2143,17 +2143,20 @@ class LiveOms:
                             ctx_meta = json.loads(mj)
                             if isinstance(ctx_meta, dict):
                                 ctx["meta"] = ctx_meta
+                                rc = str(ctx_meta.get("reason_code") or "").strip().lower()
+                                if rc:
+                                    ctx["reason_code"] = rc
                     except (json.JSONDecodeError, TypeError):
                         logger.debug("failed to parse intent meta_json for fill context", exc_info=True)
 
                 # Fallback to the in-memory pending ctx (best for immediate fills).
-                if (not ctx.get("confidence")) or (not ctx.get("reason")):
+                if (not ctx.get("confidence")) or (not ctx.get("reason")) or (not ctx.get("reason_code")):
                     try:
                         pop = getattr(trader, "pop_pending", None)
                         if callable(pop):
                             ctx2 = pop(sym) or {}
                             if isinstance(ctx2, dict):
-                                for k in ("confidence", "reason", "entry_atr", "leverage", "meta"):
+                                for k in ("confidence", "reason", "reason_code", "entry_atr", "leverage", "meta"):
                                     if ctx.get(k) is None and ctx2.get(k) is not None:
                                         ctx[k] = ctx2.get(k)
                     except Exception:
@@ -2188,7 +2191,16 @@ class LiveOms:
 
                 ts_iso = datetime.datetime.fromtimestamp(int(t_ms) / 1000.0, tz=datetime.timezone.utc).isoformat()
                 reason = str(ctx.get("reason") or f"LIVE_FILL {dir_s}").strip()
-                reason_code = _canonical_reason_code(action, pos_type, reason)
+                reason_code = str(ctx.get("reason_code") or "").strip().lower()
+                if not reason_code:
+                    try:
+                        ctx_meta = ctx.get("meta")
+                        if isinstance(ctx_meta, dict):
+                            reason_code = str(ctx_meta.get("reason_code") or "").strip().lower()
+                    except Exception:
+                        reason_code = ""
+                if not reason_code:
+                    reason_code = _canonical_reason_code(action, pos_type, reason)
 
                 # Enrich meta_json. Always include the raw fill and OMS correlation.
                 meta: dict[str, Any] = {}
@@ -2197,6 +2209,8 @@ class LiveOms:
                         meta.update(ctx.get("meta") or {})
                 except Exception:
                     logger.debug("failed to merge pending ctx meta for %s", sym, exc_info=True)
+                if reason_code and not str(meta.get("reason_code") or "").strip():
+                    meta["reason_code"] = reason_code
 
                 meta.setdefault("fill", f)
                 meta.setdefault("oms", {})
