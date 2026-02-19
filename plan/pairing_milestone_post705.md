@@ -39,6 +39,23 @@ The test scope is:
 - Remaining work is PnL residual tightening, with the current worst sampled residual at `0.10703584229497665`.
 - Next investigation target is the row with the largest residual in seed 20k (`sample_10`).
 
+## Revalidation Update (19 February 2026, later run)
+
+After runtime SSOT hardening, the same `trials_20000` sample set was rechecked using
+`axis_parity_ledger` (single-row baseline per sample, with funding + balance-from enabled).
+
+### Revalidation outcome (seed 20k sample set)
+
+- `sample_01` to `sample_10`: `PASS`
+- per-sample summary: `completed=1 passed=1 failed=0 event_parity_mismatches=0`
+- aggregate pass count: `10/10`
+
+### Updated interpretation
+
+- The previously observed `seed 20k` sampled PnL residual is not reproducible under
+  direct `axis_parity_ledger` revalidation for the same sample specs and snapshot inputs.
+- Current evidence indicates deterministic GPU/CPU parity on the rechecked 10-sample set.
+
 ## Notes
 
 - This document records milestone evidence only; it does not claim full live/paper/backtester canonical alignment completion.
