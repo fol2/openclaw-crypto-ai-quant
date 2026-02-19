@@ -159,7 +159,14 @@ pub fn find_trade_bar_range(
     to_ts: Option<i64>,
 ) -> (u32, u32) {
     let start = match from_ts {
-        Some(ft) => timestamps.partition_point(|&t| t < ft) as u32,
+        Some(ft) => {
+            let p = timestamps.partition_point(|&t| t < ft);
+            if p > 0 && p < timestamps.len() && timestamps[p] > ft {
+                (p - 1) as u32
+            } else {
+                p as u32
+            }
+        }
         None => 0,
     };
     let end = match to_ts {
@@ -507,5 +514,27 @@ mod tests {
         assert_eq!(b1.offset, 0);
         assert_eq!(b1.len, 2);
         assert_eq!(out.rates, vec![0.11, 0.11]);
+    }
+
+    #[test]
+    fn find_trade_bar_range_includes_leading_partial_bar_for_from_inside_bar() {
+        let ts = vec![1_000_i64, 2_000, 3_000];
+        // from=1_500 falls inside bar [1_000,2_000] -> include bar 1_000.
+        let (start, end) = find_trade_bar_range(&ts, Some(1_500), Some(2_500));
+        assert_eq!((start, end), (0, 2));
+    }
+
+    #[test]
+    fn find_trade_bar_range_keeps_exact_from_alignment() {
+        let ts = vec![1_000_i64, 2_000, 3_000];
+        let (start, end) = find_trade_bar_range(&ts, Some(2_000), Some(2_500));
+        assert_eq!((start, end), (1, 2));
+    }
+
+    #[test]
+    fn find_trade_bar_range_keeps_empty_when_from_is_past_tail() {
+        let ts = vec![1_000_i64, 2_000, 3_000];
+        let (start, end) = find_trade_bar_range(&ts, Some(4_000), Some(5_000));
+        assert_eq!((start, end), (3, 3));
     }
 }
