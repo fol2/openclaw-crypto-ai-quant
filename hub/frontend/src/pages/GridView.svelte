@@ -3,8 +3,8 @@
   import { hubWs } from '../lib/ws';
   import { CANDIDATE_FAMILY_ORDER, getModeLabel, LIVE_MODE } from '../lib/mode-labels';
 
-  let mode = $state('_pending_');     // set after cookie helpers
-  let gridSize = $state(3);          // set after cookie helpers
+  let mode = $state('_pending_');
+  let gridSize = $state(3);
   let symbols: any[] = $state([]);
   let mids: Record<string, number> = $state({});
   let trendCloses: Record<string, number[]> = $state({});
@@ -25,7 +25,6 @@
     try {
       const snap = await getSnapshot(mode);
       symbols = snap.symbols || [];
-      // Seed mids from REST only on first load; WS takes over after that.
       if (!midsSeeded) {
         const m = await getMids();
         mids = m.mids || {};
@@ -60,26 +59,25 @@
   mode = getCookie('gridMode', 'paper1');
   gridSize = getNumCookie('gridSize', 3);
 
-  // ── Trend debug controls (persisted via cookies) ───────────────
-  let debugTrend = $state(getCookie('trendDebug', '') === '1' || new URLSearchParams(window.location.search).has('trend_debug'));
-  let trendFullPct = $state(getNumCookie('trendFullPct', 1.0));
-  let trendCurve   = $state(getNumCookie('trendCurve', 1.0));
-  let trendWindow  = $state(getNumCookie('trendWindow', 0));
-  let trendInterval = $state(getCookie('trendInterval', '5m'));
-  let trendBars    = $state(getNumCookie('trendBars', 60));
+  // ── Trend controls (persisted via cookies) ─────────────────────
+  let showTrendBar     = $state(getCookie('showTrendBar', '1') === '1');
+  let trendFullPct     = $state(getNumCookie('trendFullPct', 1.0));
+  let trendCurve       = $state(getNumCookie('trendCurve', 1.0));
+  let trendWindow      = $state(getNumCookie('trendWindow', 0));
+  let trendInterval    = $state(getCookie('trendInterval', '5m'));
+  let trendBars        = $state(getNumCookie('trendBars', 60));
   let trendStrengthMul = $state(getNumCookie('trendStrengthMul', 1.0));
-  let showCardDbg = $state(getCookie('showCardDbg', '1') === '1');
+  let showOverlay      = $state(getCookie('showOverlay', '0') === '1');
 
-  // Persist debug settings to cookies on change
   $effect(() => {
-    setCookie('trendDebug', debugTrend ? '1' : '0');
+    setCookie('showTrendBar', showTrendBar ? '1' : '0');
     setCookie('trendFullPct', String(trendFullPct));
     setCookie('trendCurve', String(trendCurve));
     setCookie('trendWindow', String(trendWindow));
     setCookie('trendInterval', trendInterval);
     setCookie('trendBars', String(trendBars));
     setCookie('trendStrengthMul', String(trendStrengthMul));
-    setCookie('showCardDbg', showCardDbg ? '1' : '0');
+    setCookie('showOverlay', showOverlay ? '1' : '0');
     setCookie('gridMode', mode);
     setCookie('gridSize', String(gridSize));
   });
@@ -97,7 +95,7 @@
     const meanY = sy / n;
     if (meanY <= 0) return 0;
     const slope = (n * sxy - sx * sy) / (n * sx2 - sx * sx);
-    return (slope * (n - 1)) / meanY;   // fractional change over window
+    return (slope * (n - 1)) / meanY;
   }
 
   function trendStrength(pts: number[]): number {
@@ -109,18 +107,17 @@
     return clamped >= 0 ? curved : -curved;
   }
 
-  // Build inline CSS custom properties for OKLCH trend color.
   function trendVars(strength: number): string {
     const abs = Math.abs(strength);
     if (abs < 0.05) return '';
     const mul = trendStrengthMul;
     const h = strength > 0 ? 145 : 25;
-    const l  = 13 + abs * 8 * mul;          // 13→21%  (surface ≈ 13%)
-    const c  = abs * 0.045 * mul;           // 0→0.045
-    const gl = l + 8 * mul;                 // glow is brighter
+    const l  = 13 + abs * 8 * mul;
+    const c  = abs * 0.045 * mul;
+    const gl = l + 8 * mul;
     const gc = abs * 0.08 * mul;
     const ga = abs * 0.12 * mul;
-    const ba = 0.15 + abs * 0.25 * mul;     // border alpha
+    const ba = 0.15 + abs * 0.25 * mul;
     return `--trend-bg:oklch(${l.toFixed(1)}% ${c.toFixed(3)} ${h});--trend-glow:oklch(${gl.toFixed(1)}% ${gc.toFixed(3)} ${h} / ${ga.toFixed(2)});--trend-border:oklch(50% ${(abs * 0.06 * mul).toFixed(3)} ${h} / ${ba.toFixed(2)})`;
   }
 
@@ -135,7 +132,6 @@
   $effect(() => {
     refresh();
     pollTimer = setInterval(refresh, 10000);
-    // Refresh trend data every 30s (candle DB updates less frequently than WS)
     trendTimer = setInterval(refreshTrend, 30000);
     hubWs.connect();
     return () => {
@@ -144,7 +140,6 @@
     };
   });
 
-  // Real-time mid-price updates via WS (mids + bbo)
   $effect(() => {
     function finitePositive(v: unknown): number | null {
       const n = Number(v);
@@ -209,72 +204,76 @@
         <option value={4}>4x4</option>
         <option value={5}>5x5</option>
       </select>
-      <button class="debug-toggle" class:active={debugTrend} onclick={() => debugTrend = !debugTrend} title="Trend debug">
+      <button class="trend-toggle" class:active={showTrendBar} onclick={() => showTrendBar = !showTrendBar} title="Trend settings">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>
       </button>
     </div>
   </div>
 
-  {#if debugTrend}
-    <div class="debug-bar">
-      <label>
-        <span class="db-label" title="Candle interval for trend calculation (e.g. 5m = 5-minute candles)">Interval</span>
-        <select title="Candle interval for trend calculation (e.g. 5m = 5-minute candles)" bind:value={trendInterval} onchange={refreshTrend}>
-          <option value="1m">1m</option>
-          <option value="3m">3m</option>
-          <option value="5m">5m</option>
-          <option value="15m">15m</option>
-          <option value="30m">30m</option>
-          <option value="1h">1h</option>
-        </select>
-      </label>
-      <label>
-        <span class="db-label" title="Number of candle bars in the trend regression. More bars = longer lookback">Bars</span>
-        <input title="Number of candle bars in the trend regression. More bars = longer lookback" type="range" min="10" max="200" step="10" bind:value={trendBars} onchange={refreshTrend} />
-        <span class="db-val">{trendBars}</span>
-      </label>
-      <label>
-        <span class="db-label" title="Price change (%) that maps to full intensity. Lower = more sensitive">Full&nbsp;%</span>
-        <input title="Price change (%) that maps to full intensity. Lower = more sensitive" type="range" min="0.1" max="5" step="0.1" bind:value={trendFullPct} />
-        <span class="db-val">{trendFullPct.toFixed(1)}</span>
-      </label>
-      <label>
-        <span class="db-label" title="Exponent curve. <1 = compress (subtle diffs visible), >1 = amplify (only strong trends)">Curve</span>
-        <input title="Exponent curve. <1 = compress (subtle diffs visible), >1 = amplify (only strong trends)" type="range" min="0.2" max="3" step="0.1" bind:value={trendCurve} />
-        <span class="db-val">{trendCurve.toFixed(1)}</span>
-      </label>
-      <label>
-        <span class="db-label" title="Use only the last N bars for regression. 0 = use all bars">Window</span>
-        <select title="Use only the last N bars for regression. 0 = use all bars" bind:value={trendWindow}>
-          <option value={0}>All</option>
-          <option value={10}>10</option>
-          <option value={20}>20</option>
-          <option value={50}>50</option>
-          <option value={100}>100</option>
-        </select>
-      </label>
-      <label>
-        <span class="db-label" title="OKLCH color intensity multiplier. Higher = more vivid background">Strength</span>
-        <input title="OKLCH color intensity multiplier. Higher = more vivid background" type="range" min="0.5" max="5" step="0.1" bind:value={trendStrengthMul} />
-        <span class="db-val">{trendStrengthMul.toFixed(1)}x</span>
-      </label>
-      <label class="db-checkbox">
-        <input title="Show per-card debug text (data points, raw %, trend strength)" type="checkbox" bind:checked={showCardDbg} />
-        <span class="db-label" title="Show per-card debug text (data points, raw %, trend strength)">Card text</span>
-      </label>
-    </div>
+  {#if showTrendBar}
+  <div class="trend-bar">
+    <span class="trend-bar-title">TREND</span>
+    <div class="tb-divider"></div>
+    <label>
+      <span class="tb-label" title="Candle interval for trend calculation">Interval</span>
+      <select title="Candle interval for trend calculation" bind:value={trendInterval} onchange={refreshTrend}>
+        <option value="1m">1m</option>
+        <option value="3m">3m</option>
+        <option value="5m">5m</option>
+        <option value="15m">15m</option>
+        <option value="30m">30m</option>
+        <option value="1h">1h</option>
+      </select>
+    </label>
+    <label>
+      <span class="tb-label" title="Number of candle bars for regression. More = longer lookback period">Lookback</span>
+      <input title="Number of candle bars for regression. More = longer lookback period" type="range" min="10" max="200" step="10" bind:value={trendBars} onchange={refreshTrend} />
+      <span class="tb-val">{trendBars}</span>
+    </label>
+    <div class="tb-divider"></div>
+    <label>
+      <span class="tb-label" title="Price change (%) that maps to full color intensity. Lower = more sensitive to small moves">Sensitivity</span>
+      <input title="Price change (%) that maps to full color intensity. Lower = more sensitive to small moves" type="range" min="0.1" max="5" step="0.1" bind:value={trendFullPct} />
+      <span class="tb-val">{trendFullPct.toFixed(1)}</span>
+    </label>
+    <label>
+      <span class="tb-label" title="Response exponent. Below 1 compresses differences, above 1 amplifies strong trends">Curve</span>
+      <input title="Response exponent. Below 1 compresses differences, above 1 amplifies strong trends" type="range" min="0.2" max="3" step="0.1" bind:value={trendCurve} />
+      <span class="tb-val">{trendCurve.toFixed(1)}</span>
+    </label>
+    <label>
+      <span class="tb-label" title="Use only the last N bars for regression. All = use entire lookback range">Window</span>
+      <select title="Use only the last N bars for regression. All = use entire lookback range" bind:value={trendWindow}>
+        <option value={0}>All</option>
+        <option value={10}>10</option>
+        <option value={20}>20</option>
+        <option value={50}>50</option>
+        <option value={100}>100</option>
+      </select>
+    </label>
+    <div class="tb-divider"></div>
+    <label>
+      <span class="tb-label" title="OKLCH color intensity multiplier. Higher = more vivid trend background">Intensity</span>
+      <input title="OKLCH color intensity multiplier. Higher = more vivid trend background" type="range" min="0.5" max="5" step="0.1" bind:value={trendStrengthMul} />
+      <span class="tb-val">{trendStrengthMul.toFixed(1)}x</span>
+    </label>
+    <label class="tb-toggle">
+      <input title="Show per-card trend overlay text (regression data, strength value)" type="checkbox" bind:checked={showOverlay} />
+      <span class="tb-label" title="Show per-card trend overlay text (regression data, strength value)">Overlay</span>
+    </label>
+  </div>
   {/if}
 
   {#if loading}
     <div class="empty-state">Loading...</div>
   {:else}
-    <div class="symbol-grid" class:debug-active={debugTrend} style="grid-template-columns: repeat({gridSize}, 1fr);">
+    <div class="symbol-grid" style="grid-template-columns: repeat({gridSize}, 1fr);">
       {#each filteredSymbols as s (s.symbol)}
         {@const hist = trendCloses[s.symbol] || []}
         {@const trend = trendStrength(hist)}
         <div class="grid-cell" class:has-trend={Math.abs(trend) >= 0.05} style={trendVars(trend)}>
-          {#if debugTrend && showCardDbg}
-            <span class="trend-dbg">{hist.length}pt {(linregTrend(hist, trendWindow) * 100).toFixed(3)}%→{trend.toFixed(2)}</span>
+          {#if showOverlay}
+            <span class="trend-overlay">{hist.length}pt {(linregTrend(hist, trendWindow) * 100).toFixed(3)}% &rarr; {trend.toFixed(2)}</span>
           {/if}
           <div class="cell-header">
             <span class="cell-symbol">{s.symbol}</span>
@@ -364,12 +363,99 @@
     border-color: var(--accent);
   }
 
+  .trend-toggle {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 6px 8px;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    line-height: 0;
+  }
+  .trend-toggle.active {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  /* ── Trend settings strip ───────────────────────────────────────── */
+  .trend-bar {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    padding: 6px 14px;
+    margin-bottom: var(--sp-sm);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    font-size: 11px;
+    font-family: 'IBM Plex Mono', monospace;
+    color: var(--text-dim);
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .trend-bar::-webkit-scrollbar { display: none; }
+
+  .trend-bar-title {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    color: var(--accent);
+    opacity: 0.7;
+    flex-shrink: 0;
+  }
+
+  .tb-divider {
+    width: 1px;
+    height: 18px;
+    background: var(--border);
+    flex-shrink: 0;
+  }
+
+  .trend-bar label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+    cursor: default;
+  }
+  .tb-label {
+    color: var(--text-dim);
+  }
+  .tb-val {
+    color: var(--accent);
+    min-width: 24px;
+    text-align: right;
+  }
+  .tb-toggle input[type="checkbox"] {
+    accent-color: var(--accent);
+    margin: 0;
+    cursor: pointer;
+  }
+  .trend-bar input[type="range"] {
+    width: 80px;
+    accent-color: var(--accent);
+    height: 4px;
+    cursor: pointer;
+  }
+  .trend-bar select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    font-size: 11px;
+    font-family: inherit;
+    cursor: pointer;
+  }
+
+  /* ── Grid ────────────────────────────────────────────────────────── */
   .symbol-grid {
     display: grid;
     gap: 10px;
   }
 
   .grid-cell {
+    position: relative;
     background-color: var(--trend-bg, var(--surface));
     border: 1px solid var(--trend-border, var(--border));
     border-radius: var(--radius-lg);
@@ -431,83 +517,15 @@
 
   .cell-sparkline { margin-top: 6px; }
 
-  /* ── Debug toolbar ─────────────────────────────────────────────── */
-  .debug-toggle {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    color: var(--text-dim);
-    padding: 6px 8px;
-    border-radius: var(--radius-md);
-    cursor: pointer;
-    line-height: 0;
-  }
-  .debug-toggle.active {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-
-  .debug-bar {
-    display: flex;
-    gap: 16px;
-    align-items: center;
-    padding: 8px 14px;
-    margin-bottom: var(--sp-sm);
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md);
-    font-size: 11px;
-    font-family: 'IBM Plex Mono', monospace;
-    color: var(--text-dim);
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-  .debug-bar::-webkit-scrollbar { display: none; }
-  .debug-bar label {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    white-space: nowrap;
-  }
-  .db-label {
-    color: var(--text-dim);
-    min-width: 42px;
-  }
-  .db-val {
-    color: var(--accent);
-    min-width: 28px;
-    text-align: right;
-  }
-  .db-checkbox input[type="checkbox"] {
-    accent-color: var(--accent);
-    margin: 0;
-  }
-  .debug-bar input[type="range"] {
-    width: 100px;
-    accent-color: var(--accent);
-    height: 4px;
-  }
-  .debug-bar select {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 2px 6px;
-    border-radius: var(--radius-sm);
-    font-size: 11px;
-    font-family: inherit;
-  }
-
-  .trend-dbg {
+  .trend-overlay {
     position: absolute;
     top: 3px;
     right: 5px;
     font-size: 8px;
     font-family: 'IBM Plex Mono', monospace;
     color: #fff;
-  }
-
-  .debug-active .grid-cell {
-    position: relative;
-    transition-duration: 0.15s;
+    opacity: 0.8;
+    pointer-events: none;
   }
 
   .empty-state {
