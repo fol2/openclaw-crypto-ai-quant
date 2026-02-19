@@ -4348,7 +4348,11 @@ class PaperTrader:
         timestamp = timestamp_override or datetime.datetime.now(datetime.timezone.utc).isoformat()
         notional = price * size
         meta_json = _json_dumps_safe(meta) if meta else None
-        reason_code = canonical_reason_code_for_trade(str(action), str(type), str(reason))
+        reason_code = ""
+        if isinstance(meta, dict):
+            reason_code = str(meta.get("reason_code") or "").strip().lower()
+        if not reason_code:
+            reason_code = canonical_reason_code_for_trade(str(action), str(type), str(reason))
 
         cursor.execute(
             """
@@ -5115,6 +5119,13 @@ class PaperTrader:
                 audit = indicators.get("audit")
             except Exception:
                 audit = None
+        kernel_reason_code = ""
+        try:
+            kernel_reason_code = str(
+                (indicators if indicators is not None else {}).get("_kernel_reason_code") or ""
+            ).strip().lower()
+        except Exception:
+            kernel_reason_code = ""
 
         meta = {
             "audit": audit if isinstance(audit, dict) else None,
@@ -5141,6 +5152,8 @@ class PaperTrader:
                 "ppeb_tp1_taken": int(pos.get("tp1_taken") or 0),
             },
         }
+        if kernel_reason_code:
+            meta["reason_code"] = kernel_reason_code
 
         # AQC-755: sync kernel BEFORE log so self.balance reads post-trade value.
         add_signal = "BUY" if pos_type == "LONG" else "SELL"
@@ -5327,6 +5340,13 @@ class PaperTrader:
         mode=None,
     ):
         del mode
+        kernel_reason_code = ""
+        try:
+            kernel_reason_code = str(
+                (indicators if indicators is not None else {}).get("_kernel_reason_code") or ""
+            ).strip().lower()
+        except Exception:
+            kernel_reason_code = ""
         # Runtime SSOT hardening: entry decisions come from Rust kernel intents.
         # Keep Python execution/risk rails and audit logging, but disable legacy
         # Python entry-gate decision filters (confidence/PESC/SSF/REEF).
@@ -5344,7 +5364,8 @@ class PaperTrader:
         # action kwarg: "OPEN", "CLOSE", "ADD", "REDUCE" — Rust-kernel SSOT dispatch.
         if action_upper == "CLOSE":
             if symbol in self.positions:
-                self.close_position(symbol, price, timestamp, reason=reason or "Action CLOSE")
+                close_meta = {"reason_code": kernel_reason_code} if kernel_reason_code else None
+                self.close_position(symbol, price, timestamp, reason=reason or "Action CLOSE", meta=close_meta)
             return
         if action_upper == "ADD":
             if symbol in self.positions:
@@ -5354,8 +5375,15 @@ class PaperTrader:
             if symbol in self.positions:
                 pos = self.positions[symbol]
                 reduce_sz = float(target_size) if target_size is not None else float(pos.get("size", 0))
+                reduce_meta = {"reason_code": kernel_reason_code} if kernel_reason_code else None
                 self.reduce_position(
-                    symbol, reduce_sz, price, timestamp, reason=reason or "Action REDUCE", confidence=confidence
+                    symbol,
+                    reduce_sz,
+                    price,
+                    timestamp,
+                    reason=reason or "Action REDUCE",
+                    confidence=confidence,
+                    meta=reduce_meta,
                 )
             return
         if action_upper == "OPEN":
@@ -6009,13 +6037,20 @@ class PaperTrader:
                     audit = indicators.get("audit")
                 except Exception:
                     audit = None
+            default_open_reason = (
+                "Signal Trigger [REVERSED]" if (indicators or {}).get("_reversed_entry") is True else "Signal Trigger"
+            )
+            open_reason = str(reason or default_open_reason).strip() or default_open_reason
+            trade_meta = dict(audit) if isinstance(audit, dict) else {}
+            if kernel_reason_code:
+                trade_meta["reason_code"] = kernel_reason_code
             trade_id = self.log_trade(
                 symbol,
                 "OPEN",
                 "LONG" if signal == "BUY" else "SHORT",
                 fill_price,
                 size,
-                "Signal Trigger [REVERSED]" if (indicators or {}).get("_reversed_entry") is True else "Signal Trigger",
+                open_reason,
                 confidence,
                 entry_atr=atr,
                 fee_usd=fee_usd,
@@ -6023,7 +6058,7 @@ class PaperTrader:
                 leverage=leverage,
                 margin_used=margin_used,
                 timestamp_override=opened_at,
-                meta=audit if isinstance(audit, dict) else None,
+                meta=trade_meta or None,
             )
             self.positions[symbol]["open_trade_id"] = trade_id
             self.upsert_position_state(symbol)
