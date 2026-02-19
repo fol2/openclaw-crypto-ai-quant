@@ -641,6 +641,10 @@ def main() -> int:
     harness_rc: int | None = None
     harness_report: dict[str, Any] | None = None
     gate_report: dict[str, Any] | None = None
+    market_data_provenance: dict[str, Any] = {
+        "manifest_candles_provenance": None,
+        "alignment_gate_market_data_provenance": None,
+    }
 
     if not failures:
         harness_cmd = [
@@ -727,6 +731,9 @@ def main() -> int:
             else:
                 if isinstance(loaded, dict):
                     gate_report = loaded
+                    gate_market_data_provenance = loaded.get("market_data_provenance")
+                    if isinstance(gate_market_data_provenance, dict):
+                        market_data_provenance["alignment_gate_market_data_provenance"] = gate_market_data_provenance
                     if not bool(loaded.get("ok")):
                         failures.append(
                             {
@@ -752,11 +759,21 @@ def main() -> int:
                 }
             )
 
+    if manifest_path.exists():
+        try:
+            loaded_manifest = _read_json(manifest_path)
+        except Exception:
+            loaded_manifest = None
+        if isinstance(loaded_manifest, dict):
+            manifest_candles_provenance = loaded_manifest.get("candles_provenance")
+            if isinstance(manifest_candles_provenance, dict):
+                market_data_provenance["manifest_candles_provenance"] = manifest_candles_provenance
+
     ok = len(failures) == 0
     generated_at_ms = _now_ms()
 
     report: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at_ms": generated_at_ms,
         "ok": ok,
         "repo_root": str(repo_root),
@@ -793,6 +810,7 @@ def main() -> int:
         "strict_no_residuals": bool(args.strict_no_residuals),
         "build_exit_code": None if build_rc is None else int(build_rc),
         "harness_exit_code": None if harness_rc is None else int(harness_rc),
+        "market_data_provenance": market_data_provenance,
         "failures": failures,
         "db_checks": {
             "live_has_trades_table": _db_has_table(live_db, "trades"),
@@ -825,7 +843,7 @@ def main() -> int:
             previous_last_passed_ms = None
 
     blocker_payload: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at_ms": generated_at_ms,
         "blocked": (not ok),
         "reason_codes": [str(f.get("code") or "") for f in failures],
@@ -838,6 +856,7 @@ def main() -> int:
             "from_ts": from_ts,
             "to_ts": to_ts,
         },
+        "market_data_provenance": market_data_provenance,
     }
     if ok:
         blocker_payload["last_passed_at_ms"] = generated_at_ms

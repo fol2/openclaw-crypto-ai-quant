@@ -231,6 +231,8 @@ def main() -> int:
     failures: list[dict[str, Any]] = []
     candles_provenance_checked = not bool(args.skip_candles_provenance_check)
     candles_provenance_ok = not candles_provenance_checked
+    manifest_candles_provenance: dict[str, Any] | None = None
+    recomputed_candles_provenance: dict[str, Any] | None = None
 
     manifest: dict[str, Any] | None = None
     if not manifest_path.exists():
@@ -245,6 +247,9 @@ def main() -> int:
         loaded = _load_json(manifest_path)
         if isinstance(loaded, dict):
             manifest = loaded
+            raw_candles_provenance = manifest.get("candles_provenance")
+            if isinstance(raw_candles_provenance, dict):
+                manifest_candles_provenance = raw_candles_provenance
         else:
             failures.append(
                 {
@@ -490,6 +495,7 @@ def main() -> int:
                         from_ts=from_ts,
                         to_ts=to_ts,
                     )
+                    recomputed_candles_provenance = actual_provenance
                     expected_hash = str(manifest_provenance.get("window_hash_sha256") or "").strip().lower()
                     expected_universe_hash = str(manifest_provenance.get("universe_hash_sha256") or "").strip().lower()
                     raw_expected_symbols = manifest_provenance.get("symbols")
@@ -852,6 +858,12 @@ def main() -> int:
             "trade_residual_count": len((trade_report or {}).get("accepted_residuals") or []),
             "action_residual_count": len((action_report or {}).get("accepted_residuals") or []),
             "live_paper_residual_count": len((live_paper_report or {}).get("accepted_residuals") or []),
+        },
+        "market_data_provenance": {
+            "candles_provenance_checked": candles_provenance_checked,
+            "candles_provenance_ok": candles_provenance_ok,
+            "manifest": manifest_candles_provenance,
+            "recomputed": recomputed_candles_provenance,
         },
         "failure_count": len(failures),
         "failures": failures,
