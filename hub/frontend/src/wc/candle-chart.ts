@@ -159,6 +159,7 @@ export class CandleChart extends LitElement {
       width: 100%;
       height: 100%;
       min-height: 160px;
+      touch-action: none;
     }
     canvas {
       display: block;
@@ -345,6 +346,7 @@ export class CandleChart extends LitElement {
   private _onTouchStart = (e: TouchEvent) => {
     if (e.touches.length === 1) {
       e.preventDefault();
+      e.stopPropagation();
       const t = e.touches[0];
       this._touchPanId = t.identifier;
       this._touchStartX = t.clientX;
@@ -352,6 +354,7 @@ export class CandleChart extends LitElement {
       this._hoverIdx = null;
     } else if (e.touches.length === 2) {
       e.preventDefault();
+      e.stopPropagation();
       this._touchPanId = null;
       const [a, b] = [e.touches[0], e.touches[1]];
       this._pinchDist0 = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
@@ -363,6 +366,7 @@ export class CandleChart extends LitElement {
   private _onTouchMove = (e: TouchEvent) => {
     if (e.touches.length === 1 && this._touchPanId !== null) {
       e.preventDefault();
+      e.stopPropagation();
       const t = e.touches[0];
       if (t.identifier !== this._touchPanId) return;
       const W    = this.offsetWidth || 400;
@@ -377,6 +381,7 @@ export class CandleChart extends LitElement {
       this._scheduleRedraw();
     } else if (e.touches.length === 2 && this._pinchDist0 > 0) {
       e.preventDefault();
+      e.stopPropagation();
       const [a, b] = [e.touches[0], e.touches[1]];
       const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
       if (dist < 1) return;
