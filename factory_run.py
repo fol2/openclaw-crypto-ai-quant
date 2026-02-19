@@ -637,6 +637,8 @@ PROFILE_DEFAULTS: dict[str, dict[str, int | str]] = {
         "sweep_spec": "backtester/sweeps/full_144v.yaml",
     },
     # Default weekday run profile.
+    # Intentionally reduced for consumer-grade GPU stability after funding-enabled parity hardening.
+    # Increase via CLI/ENV overrides when running on higher-capacity hardware.
     "daily": {
         "tpe_trials": 1000000,
         "num_candidates": 5,
@@ -645,6 +647,8 @@ PROFILE_DEFAULTS: dict[str, dict[str, int | str]] = {
         "sweep_spec": "backtester/sweeps/full_144v.yaml",
     },
     # Deep/weekly profile.
+    # Intentionally reduced from earlier factory defaults to lower crash risk and keep nightly
+    # completion deterministic on constrained hosts. Override in explicit deep runs as needed.
     "deep": {
         "tpe_trials": 2000000,
         "num_candidates": 10,

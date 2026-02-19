@@ -386,7 +386,22 @@ def main():
             "min-notional floor, leverage_max_cap override)."
         ),
     )
+    parser.add_argument(
+        "--allow-unsafe-strict-replay",
+        action="store_true",
+        help=(
+            "Required with --strict-replay. Acknowledges unsafe output mode "
+            "for replay-only parity workflows."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.strict_replay and not args.allow_unsafe_strict_replay:
+        print(
+            "[generate] Error: --strict-replay requires --allow-unsafe-strict-replay.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     # Load & sort results
     results = load_sweep_results(args.sweep_results, sort_by=args.sort_by,

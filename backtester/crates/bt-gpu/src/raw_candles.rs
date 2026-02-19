@@ -396,7 +396,7 @@ pub fn prepare_sub_bar_candles(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bt_core::candle::OhlcvBar;
+    use bt_core::candle::{FundingRateData, OhlcvBar};
 
     #[test]
     fn prepare_sub_bars_matches_cpu_exit_windows() {
@@ -457,5 +457,55 @@ mod tests {
 
         let overflow_ms = (u32::MAX as i64 + 42) * 1000;
         assert_eq!(to_gpu_t_sec(overflow_ms), u32::MAX);
+    }
+
+    #[test]
+    fn prepare_funding_event_buffers_tracks_per_bar_per_symbol_spans() {
+        let timestamps = vec![1_000_i64, 3_600_000, 10_800_000];
+        let symbols = vec!["ETH".to_string(), "BTC".to_string()];
+
+        let mut funding: FundingRateData = FundingRateData::default();
+        funding.insert(
+            "ETH".to_string(),
+            vec![(3_600_000, 0.01), (7_200_000, 0.02), (10_800_000, 0.03)],
+        );
+
+        let out = prepare_funding_event_buffers(&funding, &timestamps, &symbols);
+        assert_eq!(out.spans.len(), timestamps.len() * symbols.len());
+
+        // bar0 has no crossed hour boundary.
+        assert_eq!(out.spans[0].len, 0);
+        assert_eq!(out.spans[1].len, 0);
+
+        // bar1 crosses 3_600_000 exactly -> one ETH funding event.
+        let b1_eth = out.spans[2];
+        assert_eq!(b1_eth.offset, 0);
+        assert_eq!(b1_eth.len, 1);
+        assert_eq!(out.spans[3].len, 0); // BTC has no funding series.
+
+        // bar2 crosses 7_200_000 and 10_800_000 -> two ETH funding events.
+        let b2_eth = out.spans[4];
+        assert_eq!(b2_eth.offset, 1);
+        assert_eq!(b2_eth.len, 2);
+        assert_eq!(out.spans[5].len, 0);
+
+        assert_eq!(out.rates, vec![0.01, 0.02, 0.03]);
+    }
+
+    #[test]
+    fn prepare_funding_event_buffers_uses_latest_prior_rate_when_boundary_missing() {
+        let timestamps = vec![1_000_i64, 7_200_000];
+        let symbols = vec!["ETH".to_string()];
+
+        let mut funding: FundingRateData = FundingRateData::default();
+        // Missing 7_200_000 exact record: second boundary should fallback to the latest prior rate.
+        funding.insert("ETH".to_string(), vec![(3_600_000, 0.11)]);
+
+        let out = prepare_funding_event_buffers(&funding, &timestamps, &symbols);
+        assert_eq!(out.spans.len(), 2);
+        let b1 = out.spans[1];
+        assert_eq!(b1.offset, 0);
+        assert_eq!(b1.len, 2);
+        assert_eq!(out.rates, vec![0.11, 0.11]);
     }
 }
