@@ -1035,6 +1035,16 @@
     .cell-price { font-size: 15px; }
   }
 
+  @media (max-width: 480px) {
+    .metric-pill {
+      font-size: 9px;
+      padding: 2px 5px;
+    }
+    .metric-label {
+      display: none;
+    }
+  }
+
   @media (orientation: landscape) and (max-height: 500px) {
     .symbol-grid {
       grid-template-columns: repeat(3, 1fr) !important;
