@@ -7,6 +7,8 @@
   let gridSize = $state(3);
   let symbols: any[] = $state([]);
   let mids: Record<string, number> = $state({});
+  let midHistory: Record<string, number[]> = $state({});
+  const MID_HISTORY_MAX = 120;   // keep last ~120 WS ticks per symbol
   let loading = $state(true);
   let filter = $state('');
   let pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -32,6 +34,51 @@
     if (q) syms = syms.filter((s: any) => String(s.symbol).includes(q));
     return syms;
   });
+
+  // ── Trend debug controls ──────────────────────────────────────────
+  let debugTrend = $state(new URLSearchParams(window.location.search).has('trend_debug'));
+  let trendFullPct = $state(1.0);   // ±X% maps to full intensity
+  let trendCurve   = $state(1.0);   // exponent: <1 compress, >1 amplify
+  let trendWindow  = $state(0);     // 0 = all points
+
+  // ── Trend computation (OLS linear regression) ───────────────────
+  function linregTrend(pts: number[], win: number): number {
+    if (!pts || pts.length < 2) return 0;
+    const src = win > 0 && pts.length > win ? pts.slice(-win) : pts;
+    const n = src.length;
+    if (n < 2) return 0;
+    let sx = 0, sy = 0, sxy = 0, sx2 = 0;
+    for (let i = 0; i < n; i++) {
+      sx += i; sy += src[i]; sxy += i * src[i]; sx2 += i * i;
+    }
+    const meanY = sy / n;
+    if (meanY <= 0) return 0;
+    const slope = (n * sxy - sx * sy) / (n * sx2 - sx * sx);
+    return (slope * (n - 1)) / meanY;   // fractional change over window
+  }
+
+  function trendStrength(pts: number[]): number {
+    const raw = linregTrend(pts, trendWindow);
+    const scaled = raw / (trendFullPct / 100);
+    const clamped = Math.max(-1, Math.min(1, scaled));
+    const abs = Math.abs(clamped);
+    const curved = Math.pow(abs, trendCurve);
+    return clamped >= 0 ? curved : -curved;
+  }
+
+  // Build inline CSS custom properties for OKLCH trend color.
+  function trendVars(strength: number): string {
+    const abs = Math.abs(strength);
+    if (abs < 0.05) return '';
+    const h = strength > 0 ? 145 : 25;
+    const l  = 13 + abs * 8;          // 13→21%  (surface ≈ 13%)
+    const c  = abs * 0.045;           // 0→0.045
+    const gl = l + 8;                 // glow is brighter
+    const gc = abs * 0.08;
+    const ga = abs * 0.12;
+    const ba = 0.15 + abs * 0.25;     // border alpha
+    return `--trend-bg:oklch(${l.toFixed(1)}% ${c.toFixed(3)} ${h});--trend-glow:oklch(${gl.toFixed(1)}% ${gc.toFixed(3)} ${h} / ${ga.toFixed(2)});--trend-border:oklch(50% ${(abs * 0.06).toFixed(3)} ${h} / ${ba.toFixed(2)})`;
+  }
 
   function adaptiveDecimals(n: any): number {
     const v = Number(n);
@@ -63,19 +110,28 @@
       return (bid + ask) / 2;
     }
 
+    function pushMid(sym: string, px: number) {
+      const key = String(sym).toUpperCase();
+      mids[key] = px;
+      if (!midHistory[key]) midHistory[key] = [];
+      const arr = midHistory[key];
+      arr.push(px);
+      if (arr.length > MID_HISTORY_MAX) arr.splice(0, arr.length - MID_HISTORY_MAX);
+    }
+
     const handler = (data: any) => {
       const midsRaw = data?.mids;
       if (midsRaw && typeof midsRaw === 'object') {
         for (const [sym, raw] of Object.entries(midsRaw)) {
           const px = finitePositive(raw);
-          if (px != null) mids[String(sym).toUpperCase()] = px;
+          if (px != null) pushMid(sym, px);
         }
       }
       const bboRaw = data?.bbo;
       if (bboRaw && typeof bboRaw === 'object') {
         for (const [sym, raw] of Object.entries(bboRaw)) {
           const px = quoteMid(raw);
-          if (px != null) mids[String(sym).toUpperCase()] = px;
+          if (px != null) pushMid(sym, px);
         }
       }
     };
@@ -113,15 +169,48 @@
         <option value={4}>4x4</option>
         <option value={5}>5x5</option>
       </select>
+      <button class="debug-toggle" class:active={debugTrend} onclick={() => debugTrend = !debugTrend} title="Trend debug">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>
+      </button>
     </div>
   </div>
+
+  {#if debugTrend}
+    <div class="debug-bar">
+      <label>
+        <span class="db-label">Full&nbsp;%</span>
+        <input type="range" min="0.1" max="5" step="0.1" bind:value={trendFullPct} />
+        <span class="db-val">{trendFullPct.toFixed(1)}</span>
+      </label>
+      <label>
+        <span class="db-label">Curve</span>
+        <input type="range" min="0.2" max="3" step="0.1" bind:value={trendCurve} />
+        <span class="db-val">{trendCurve.toFixed(1)}</span>
+      </label>
+      <label>
+        <span class="db-label">Window</span>
+        <select bind:value={trendWindow}>
+          <option value={0}>All</option>
+          <option value={10}>10</option>
+          <option value={20}>20</option>
+          <option value={50}>50</option>
+          <option value={100}>100</option>
+        </select>
+      </label>
+    </div>
+  {/if}
 
   {#if loading}
     <div class="empty-state">Loading...</div>
   {:else}
-    <div class="symbol-grid" style="grid-template-columns: repeat({gridSize}, 1fr);">
+    <div class="symbol-grid" class:debug-active={debugTrend} style="grid-template-columns: repeat({gridSize}, 1fr);">
       {#each filteredSymbols as s (s.symbol)}
-        <div class="grid-cell" class:has-long={s.position_side === 'LONG'} class:has-short={s.position_side === 'SHORT'}>
+        {@const hist = midHistory[s.symbol] || []}
+        {@const trend = trendStrength(hist)}
+        <div class="grid-cell" class:has-trend={Math.abs(trend) >= 0.05} style={trendVars(trend)}>
+          {#if debugTrend}
+            <span class="trend-dbg">{hist.length}pt {(linregTrend(hist, trendWindow) * 100).toFixed(3)}%→{trend.toFixed(2)}</span>
+          {/if}
           <div class="cell-header">
             <span class="cell-symbol">{s.symbol}</span>
             {#if s.position_side && s.position_side !== 'NONE'}
@@ -145,10 +234,10 @@
           {/if}
           <div class="cell-sparkline">
             <sparkline-chart
-              points={JSON.stringify(s.recent_mids || [])}
+              points={JSON.stringify(hist)}
               width="160"
               height="40"
-              color={s.position_side === 'LONG' ? '#51cf66' : s.position_side === 'SHORT' ? '#ff6b6b' : '#3d4f63'}
+              color={trend > 0.1 ? '#51cf66' : trend < -0.1 ? '#ff6b6b' : '#3d4f63'}
             ></sparkline-chart>
           </div>
         </div>
@@ -216,23 +305,23 @@
   }
 
   .grid-cell {
-    background: var(--surface);
-    border: 1px solid var(--border);
+    background-color: var(--trend-bg, var(--surface));
+    border: 1px solid var(--trend-border, var(--border));
     border-radius: var(--radius-lg);
     padding: 14px;
     min-height: 100px;
-    transition: all var(--t-fast);
+    transition: background-color 1.5s ease, border-color 1.5s ease;
   }
   .grid-cell:hover {
     border-color: var(--text-dim);
+    transition: border-color 0.15s ease;
   }
-  .grid-cell.has-long {
-    border-color: rgba(81,207,102,0.3);
-    background: linear-gradient(180deg, rgba(81,207,102,0.03) 0%, var(--surface) 100%);
+  .grid-cell.has-trend {
+    animation: trendBreath 4s ease-in-out infinite;
   }
-  .grid-cell.has-short {
-    border-color: rgba(255,107,107,0.3);
-    background: linear-gradient(180deg, rgba(255,107,107,0.03) 0%, var(--surface) 100%);
+  @keyframes trendBreath {
+    0%, 100% { box-shadow: inset 0 0 20px var(--trend-glow, transparent); }
+    50%      { box-shadow: inset 0 0 40px var(--trend-glow, transparent); }
   }
 
   .cell-header {
@@ -276,6 +365,79 @@
   }
 
   .cell-sparkline { margin-top: 6px; }
+
+  /* ── Debug toolbar ─────────────────────────────────────────────── */
+  .debug-toggle {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 6px 8px;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    line-height: 0;
+  }
+  .debug-toggle.active {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  .debug-bar {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    padding: 8px 14px;
+    margin-bottom: var(--sp-sm);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    font-size: 11px;
+    font-family: 'IBM Plex Mono', monospace;
+    color: var(--text-dim);
+  }
+  .debug-bar label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+  }
+  .db-label {
+    color: var(--text-dim);
+    min-width: 42px;
+  }
+  .db-val {
+    color: var(--accent);
+    min-width: 28px;
+    text-align: right;
+  }
+  .debug-bar input[type="range"] {
+    width: 100px;
+    accent-color: var(--accent);
+    height: 4px;
+  }
+  .debug-bar select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    font-size: 11px;
+    font-family: inherit;
+  }
+
+  .trend-dbg {
+    position: absolute;
+    top: 3px;
+    right: 5px;
+    font-size: 8px;
+    font-family: 'IBM Plex Mono', monospace;
+    color: var(--text-dim);
+    opacity: 0.7;
+  }
+
+  .debug-active .grid-cell {
+    position: relative;
+    transition-duration: 0.15s;
+  }
 
   .empty-state {
     color: var(--text-dim);
