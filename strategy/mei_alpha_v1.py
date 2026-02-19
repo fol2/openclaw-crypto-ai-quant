@@ -5180,8 +5180,11 @@ class PaperTrader:
         reason=None,
         mode=None,
     ):
-        run_mode = str(mode or os.getenv("AI_QUANT_MODE", "paper") or "paper").strip().lower()
-        python_entry_gates_enabled = run_mode == "paper"
+        del mode
+        # Runtime SSOT hardening: entry decisions come from Rust kernel intents.
+        # Keep Python execution/risk rails and audit logging, but disable legacy
+        # Python entry-gate decision filters (confidence/PESC/SSF/REEF).
+        python_entry_gates_enabled = False
 
         # action kwarg: "OPEN", "CLOSE", "ADD" — match LiveTrader dispatch semantics.
         if action is not None:
