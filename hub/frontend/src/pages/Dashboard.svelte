@@ -55,6 +55,10 @@
   let journeyChartHeight = $state(280);
   let journeyChartDragging = $state(false);
   let journeyFetchSeq = 0;
+  let journeyFromTs = 0;
+  let journeyToTs = 0;
+  let journeyExtending = false;
+  let mainExtending = false;
   const JOURNEY_CHART_MIN = 120;
   const JOURNEY_CHART_MAX = 600;
 
@@ -118,6 +122,8 @@
 
     const iv = pickJourneyInterval(tr.dur);
     journeyInterval = iv;
+    journeyFromTs = tr.fromTs;
+    journeyToTs = tr.toTs;
 
     const seq = ++journeyFetchSeq;
     try {
@@ -164,12 +170,62 @@
     const j = selectedJourney;
     const tr = journeyTimeRange(j);
     if (!tr) return;
+    journeyFromTs = tr.fromTs;
+    journeyToTs = tr.toTs;
     const seq = ++journeyFetchSeq;
     try {
       const res = await getCandlesRange(j.symbol, newIv, tr.fromTs, tr.toTs, 500);
       if (seq !== journeyFetchSeq) return;
       journeyCandles = res.candles || [];
     } catch (e) { console.error('getCandlesRange failed:', e); }
+  }
+
+  // ── Dynamic candle loading ──────────────────────────────────────────
+
+  function mergeCandles(existing: any[], incoming: any[]): any[] {
+    const map = new Map<number, any>();
+    for (const c of existing) map.set(c.t, c);
+    for (const c of incoming) if (!map.has(c.t)) map.set(c.t, c);
+    return [...map.values()].sort((a, b) => a.t - b.t);
+  }
+
+  async function onJourneyNeedCandles(e: CustomEvent) {
+    const { before, after } = e.detail || {};
+    if (journeyExtending || !selectedJourney) return;
+    const j = selectedJourney;
+    const tr = journeyTimeRange(j);
+    if (!tr) return;
+    const extension = Math.max(tr.dur, intervalToMs(journeyInterval) * 100);
+
+    let newFrom = journeyFromTs;
+    let newTo = journeyToTs;
+    if (before != null) newFrom = journeyFromTs - extension;
+    if (after != null) newTo = journeyToTs + extension;
+    if (newFrom === journeyFromTs && newTo === journeyToTs) return;
+
+    journeyExtending = true;
+    const seq = ++journeyFetchSeq;
+    try {
+      const res = await getCandlesRange(j.symbol, journeyInterval, newFrom, newTo, 2000);
+      if (seq !== journeyFetchSeq) return;
+      journeyCandles = mergeCandles(journeyCandles, res.candles || []);
+      journeyFromTs = newFrom;
+      journeyToTs = newTo;
+    } catch (e) { console.error('onJourneyNeedCandles failed:', e); }
+    journeyExtending = false;
+  }
+
+  async function onMainNeedCandles(e: CustomEvent) {
+    const { before } = e.detail || {};
+    if (before == null || mainExtending || !focusSym) return;
+    mainExtending = true;
+    try {
+      const res = await getCandlesRange(focusSym, selectedInterval, undefined, before, 500);
+      if (res.candles?.length) {
+        candles = mergeCandles(res.candles, candles);
+      }
+    } catch (e) { console.error('onMainNeedCandles failed:', e); }
+    mainExtending = false;
   }
 
   function onChartSplitterDown(e: PointerEvent) {
@@ -1275,6 +1331,7 @@
             postype={marks?.position?.type ?? ''}
             symbol={focusSym}
             interval={selectedInterval}
+            onneed-candles={onMainNeedCandles}
           ></candle-chart>
         </div>
         <div class="chart-splitter" class:active={chartDragging} role="separator" aria-orientation="horizontal" onpointerdown={onChartSplitterDown}></div>
@@ -1359,6 +1416,7 @@
                   interval={journeyInterval}
                   journeymarks={JSON.stringify(journeyMarks)}
                   journeyoverlay={true}
+                  onneed-candles={onJourneyNeedCandles}
                 ></candle-chart>
               </div>
             {:else}
