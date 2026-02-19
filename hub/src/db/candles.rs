@@ -150,6 +150,28 @@ pub fn fetch_recent_closes_batch(
     Ok(out)
 }
 
+/// Fetch 24h rolling USD volume per symbol: SUM(v * c) for candles in the last 24 h.
+pub fn fetch_24h_volumes(
+    conn: &Connection,
+    interval: &str,
+    cutoff_ms: i64,
+) -> Result<std::collections::HashMap<String, f64>, HubError> {
+    let mut stmt = conn.prepare(
+        "SELECT symbol, SUM(v * c) AS vol_usd
+         FROM candles
+         WHERE interval = ? AND COALESCE(t_close, t) >= ?
+         GROUP BY symbol",
+    )?;
+    let rows = stmt.query_map(params![interval, cutoff_ms], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+    })?;
+    let mut out = std::collections::HashMap::new();
+    for r in rows.flatten() {
+        out.insert(r.0, r.1);
+    }
+    Ok(out)
+}
+
 /// List available candle intervals by scanning DB files in the candles directory.
 pub fn list_available_intervals(candles_dir: &std::path::Path) -> Vec<String> {
     let mut intervals: Vec<String> = Vec::new();
