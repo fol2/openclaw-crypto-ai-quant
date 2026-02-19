@@ -208,8 +208,12 @@ export class CandleChart extends LitElement {
     if (changed.has('entries') && typeof this.entries === 'string') {
       try { this.entries = JSON.parse(this.entries as any); } catch { this.entries = []; }
     }
-    if (changed.has('journeyMarks') && typeof this.journeyMarks === 'string') {
-      try { this.journeyMarks = JSON.parse(this.journeyMarks as any); } catch { this.journeyMarks = []; }
+    if (changed.has('journeyMarks')) {
+      if (typeof this.journeyMarks === 'string') {
+        try { this.journeyMarks = JSON.parse(this.journeyMarks as any); } catch { this.journeyMarks = []; }
+      }
+      this._pinnedMark = null;
+      this._hoverMark = null;
     }
   }
 
@@ -467,6 +471,7 @@ export class CandleChart extends LitElement {
     if (e.touches.length === 1 && this._touchPanId !== null) {
       e.preventDefault();
       e.stopPropagation();
+      this._pinnedMark = null;
       const t = e.touches[0];
       if (t.identifier !== this._touchPanId) return;
       const W    = this.offsetWidth || 400;
