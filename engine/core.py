@@ -663,7 +663,16 @@ class KernelDecisionRustBindingProvider:
         strategy: Any,
         now_ms: int,
     ) -> Iterable[KernelDecision]:
-        del symbols, watchlist, open_symbols, market, interval, lookback_bars, mode, not_ready_symbols, strategy
+        del watchlist, market, interval, lookback_bars, mode, strategy
+
+        scope_symbols = {str(sym).strip().upper() for sym in (symbols or []) if str(sym).strip()}
+        open_symbol_set = {str(sym).strip().upper() for sym in (open_symbols or []) if str(sym).strip()}
+        ready_block_symbols = {
+            str(sym).strip().upper()
+            for sym in (not_ready_symbols or set())
+            if str(sym).strip() and str(sym).strip().upper() not in open_symbol_set
+        }
+
         raw_events = self._load_raw_events()
         if not raw_events:
             return []
@@ -672,6 +681,12 @@ class KernelDecisionRustBindingProvider:
         state_json = self._state_json
 
         for raw in raw_events:
+            raw_symbol = str(raw.get("symbol", "")).strip().upper()
+            if raw_symbol and scope_symbols and raw_symbol not in scope_symbols:
+                continue
+            if raw_symbol and raw_symbol in ready_block_symbols:
+                continue
+
             event_json = self._build_market_event(raw, now_ms_value=int(now_ms or 0))
             if event_json is None:
                 continue
