@@ -2713,10 +2713,15 @@ def ensure_db():
             triggered_by TEXT,                      -- 'schedule', 'price_update', 'signal_flip', 'stop_loss'
             action_taken TEXT,                      -- 'open_long', 'close_short', 'hold', 'blocked'
             rejection_reason TEXT,                  -- if blocked/rejected
+            config_fingerprint TEXT,                -- strategy config fingerprint at decision time
             context_json TEXT                       -- full indicator + threshold snapshot
         )
         """
     )
+    cursor.execute("PRAGMA table_info(decision_events)")
+    decision_event_cols = {str(row[1]) for row in cursor.fetchall()}
+    if "config_fingerprint" not in decision_event_cols:
+        cursor.execute("ALTER TABLE decision_events ADD COLUMN config_fingerprint TEXT")
 
     # Normalized indicator values at decision time (queryable without JSON parsing)
     cursor.execute(
@@ -2781,6 +2786,7 @@ def ensure_db():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_de_symbol_ts ON decision_events(symbol, timestamp_ms)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_de_event_type ON decision_events(event_type)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_de_trade_id ON decision_events(trade_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_de_config_fingerprint ON decision_events(config_fingerprint)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_ge_decision ON gate_evaluations(decision_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_dl_entry ON decision_lineage(entry_trade_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_dl_exit ON decision_lineage(exit_trade_id)")
@@ -2827,6 +2833,7 @@ def create_decision_event(
     triggered_by: str | None = None,
     action_taken: str | None = None,
     rejection_reason: str | None = None,
+    config_fingerprint: str | None = None,
     context: dict | None = None,
     timestamp_ms: int | None = None,
 ) -> str:
@@ -2862,8 +2869,44 @@ def create_decision_event(
     str
         The ULID of the created decision event.
     """
+    def _extract_config_fingerprint(ctx: dict | None) -> str | None:
+        if not isinstance(ctx, dict):
+            return None
+
+        def _as_dict(value: object) -> dict:
+            return value if isinstance(value, dict) else {}
+
+        audit = _as_dict(ctx.get("audit"))
+        audit_strategy = _as_dict(audit.get("strategy"))
+        direct_strategy = _as_dict(ctx.get("strategy"))
+        meta_strategy = _as_dict(_as_dict(ctx.get("meta")).get("strategy"))
+
+        sha_candidates = [
+            audit_strategy.get("overrides_sha1"),
+            direct_strategy.get("overrides_sha1"),
+            meta_strategy.get("overrides_sha1"),
+            ctx.get("strategy_overrides_sha1"),
+        ]
+        for candidate in sha_candidates:
+            text = str(candidate or "").strip()
+            if text:
+                return text
+
+        version_candidates = [
+            audit_strategy.get("version"),
+            direct_strategy.get("version"),
+            meta_strategy.get("version"),
+            ctx.get("strategy_version"),
+        ]
+        for candidate in version_candidates:
+            text = str(candidate or "").strip()
+            if text:
+                return f"version:{text}"
+        return None
+
     decision_id = generate_ulid()
     ts = timestamp_ms if timestamp_ms is not None else int(time.time() * 1000)
+    cfg_fp = str(config_fingerprint or "").strip() or _extract_config_fingerprint(context)
     conn = None
     try:
         conn = sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT_S)
@@ -2872,8 +2915,8 @@ def create_decision_event(
             INSERT INTO decision_events
                 (id, timestamp_ms, symbol, event_type, status, decision_phase,
                  parent_decision_id, trade_id, triggered_by, action_taken,
-                 rejection_reason, context_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 rejection_reason, config_fingerprint, context_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 decision_id,
@@ -2887,6 +2930,7 @@ def create_decision_event(
                 triggered_by,
                 action_taken,
                 rejection_reason,
+                cfg_fp,
                 _json_dumps_safe(context) if context else None,
             ),
         )

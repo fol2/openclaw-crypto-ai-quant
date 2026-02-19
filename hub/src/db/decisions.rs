@@ -19,6 +19,7 @@ pub struct DecisionEvent {
     pub triggered_by: Option<String>,
     pub action_taken: Option<String>,
     pub rejection_reason: Option<String>,
+    pub config_fingerprint: Option<String>,
     pub context_json: Option<String>,
 }
 
@@ -102,7 +103,7 @@ pub fn list_decisions(
     let data_sql = format!(
         "SELECT id, timestamp_ms, symbol, event_type, status, decision_phase,
                 parent_decision_id, trade_id, triggered_by, action_taken,
-                rejection_reason, context_json
+                rejection_reason, config_fingerprint, context_json
          FROM decision_events{where_sql}
          ORDER BY timestamp_ms DESC, id DESC
          LIMIT ? OFFSET ?"
@@ -144,7 +145,8 @@ pub fn list_decisions(
                 triggered_by: row.get(8)?,
                 action_taken: row.get(9)?,
                 rejection_reason: row.get(10)?,
-                context_json: row.get(11)?,
+                config_fingerprint: row.get(11)?,
+                context_json: row.get(12)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -162,7 +164,7 @@ pub fn decision_detail(conn: &Connection, decision_id: &str) -> Result<Option<Va
         .prepare(
             "SELECT id, timestamp_ms, symbol, event_type, status, decision_phase,
                 parent_decision_id, trade_id, triggered_by, action_taken,
-                rejection_reason, context_json
+                rejection_reason, config_fingerprint, context_json
          FROM decision_events WHERE id = ?",
         )?
         .query_row(params![decision_id], |row| {
@@ -178,7 +180,8 @@ pub fn decision_detail(conn: &Connection, decision_id: &str) -> Result<Option<Va
                 triggered_by: row.get(8)?,
                 action_taken: row.get(9)?,
                 rejection_reason: row.get(10)?,
-                context_json: row.get(11)?,
+                config_fingerprint: row.get(11)?,
+                context_json: row.get(12)?,
             })
         });
 
@@ -367,7 +370,7 @@ pub fn trade_decision_trace(conn: &Connection, trade_id: i64) -> Result<Value, H
     let sql = format!(
         "SELECT id, timestamp_ms, symbol, event_type, status,
                 decision_phase, parent_decision_id, trade_id,
-                triggered_by, action_taken, rejection_reason, context_json
+                triggered_by, action_taken, rejection_reason, config_fingerprint, context_json
          FROM decision_events
          WHERE id IN ({placeholders})
          ORDER BY timestamp_ms ASC, id ASC"
@@ -392,7 +395,8 @@ pub fn trade_decision_trace(conn: &Connection, trade_id: i64) -> Result<Value, H
                 triggered_by: row.get(8)?,
                 action_taken: row.get(9)?,
                 rejection_reason: row.get(10)?,
-                context_json: row.get(11)?,
+                config_fingerprint: row.get(11)?,
+                context_json: row.get(12)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;

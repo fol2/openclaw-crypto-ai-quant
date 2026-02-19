@@ -2122,7 +2122,7 @@ def build_decisions_list(
             f"""
             SELECT id, timestamp_ms, symbol, event_type, status, decision_phase,
                    parent_decision_id, trade_id, triggered_by, action_taken,
-                   rejection_reason, context_json
+                   rejection_reason, config_fingerprint, context_json
             FROM decision_events
             {where_sql}
             ORDER BY timestamp_ms DESC, id DESC
@@ -2161,7 +2161,7 @@ def build_decision_detail(mode: str, decision_id: str) -> dict[str, Any] | None:
             """
             SELECT id, timestamp_ms, symbol, event_type, status, decision_phase,
                    parent_decision_id, trade_id, triggered_by, action_taken,
-                   rejection_reason, context_json
+                   rejection_reason, config_fingerprint, context_json
             FROM decision_events WHERE id = ?
             """,
             (decision_id,),
@@ -2264,7 +2264,7 @@ def build_trade_decision_trace(mode: str, trade_id: int) -> dict[str, Any]:
             f"""
             SELECT id, timestamp_ms, symbol, event_type, status,
                    decision_phase, parent_decision_id, trade_id,
-                   triggered_by, action_taken, rejection_reason, context_json
+                   triggered_by, action_taken, rejection_reason, config_fingerprint, context_json
             FROM decision_events
             WHERE id IN ({ph})
             ORDER BY timestamp_ms ASC, id ASC
