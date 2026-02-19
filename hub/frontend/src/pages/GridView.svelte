@@ -234,10 +234,10 @@
           {/if}
           <div class="cell-sparkline">
             <sparkline-chart
-              points={JSON.stringify(hist)}
+              points={JSON.stringify(s.recent_mids || [])}
               width="160"
               height="40"
-              color={trend > 0.1 ? '#51cf66' : trend < -0.1 ? '#ff6b6b' : '#3d4f63'}
+              color={s.position_side === 'LONG' ? '#51cf66' : s.position_side === 'SHORT' ? '#ff6b6b' : '#3d4f63'}
             ></sparkline-chart>
           </div>
         </div>
