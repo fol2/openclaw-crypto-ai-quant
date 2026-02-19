@@ -664,11 +664,11 @@
     margin-bottom: 2px;
   }
   .entry-label {
-    color: var(--text-dim);
-    opacity: 0.5;
+    color: var(--text-muted);
+    opacity: 0.7;
   }
   .entry-price {
-    color: var(--text-dim);
+    color: var(--text-muted);
   }
   .pnl-badge {
     margin-left: auto;
@@ -694,12 +694,12 @@
     gap: 5px;
     font-family: 'IBM Plex Mono', monospace;
     font-size: 9px;
-    color: var(--text-dim);
-    opacity: 0.6;
+    color: var(--text-muted);
+    opacity: 0.8;
     margin-bottom: 4px;
   }
   .strip-dot {
-    opacity: 0.4;
+    opacity: 0.5;
   }
 
   @media (max-width: 768px) {
