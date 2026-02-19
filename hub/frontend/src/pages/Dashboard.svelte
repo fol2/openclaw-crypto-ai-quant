@@ -658,6 +658,12 @@
     return _candlesSeriesSym === sym && _candlesSeriesInterval === iv;
   }
 
+  function publishCandlesMutation() {
+    // Lit custom elements trigger `updated()` on reference changes.
+    // Live ticks mutate candle objects in-place, so publish a new array reference.
+    candles = [...candles];
+  }
+
   function updateServerClockOffset(serverNowMs: unknown) {
     const ts = Number(serverNowMs);
     if (!Number.isFinite(ts) || ts <= 0) return;
@@ -792,6 +798,7 @@
       const tickKey = `${barStart}:${mid}`;
       if (tickKey === _lastLiveTickKey) return;
       _lastLiveTickKey = tickKey;
+      let mutated = false;
 
       let liveIdx = newestCandleIndex(candles);
       let c = candles[liveIdx];
@@ -805,14 +812,24 @@
           const t = Number(candles[i]?.t || 0);
           if (Number.isFinite(t) && t > barStart) {
             candles.splice(i, 1);
+            mutated = true;
           }
         }
-        if (candles.length === 0) return;
+        if (candles.length === 0) {
+          if (mutated) publishCandlesMutation();
+          return;
+        }
         liveIdx = newestCandleAtOrBefore(candles, barStart);
-        if (liveIdx < 0) return;
+        if (liveIdx < 0) {
+          if (mutated) publishCandlesMutation();
+          return;
+        }
         c = candles[liveIdx];
         candleStart = Number(c?.t || 0);
-        if (!Number.isFinite(candleStart) || candleStart <= 0) return;
+        if (!Number.isFinite(candleStart) || candleStart <= 0) {
+          if (mutated) publishCandlesMutation();
+          return;
+        }
       }
 
       if (candleStart < barStart) {
@@ -828,28 +845,35 @@
           v: 0,
           n: 0,
         });
+        mutated = true;
         if (candles.length > selectedBars) {
           candles.splice(0, candles.length - selectedBars);
         }
         // Replace synthetic rollover candle with exchange-written candles shortly after boundary.
         scheduleRolloverReconcile();
         _lastLiveFrameMs = localNow;
+        publishCandlesMutation();
         return;
       }
 
       const closeMs = Number(c.t_close || 0);
       if (!Number.isFinite(closeMs) || closeMs <= 0 || closeMs < barClose) {
         c.t_close = barClose;
+        mutated = true;
       }
 
       const prevClose = Number.isFinite(Number(c.c)) ? Number(c.c) : mid;
       const prevHigh = Number.isFinite(Number(c.h)) ? Number(c.h) : mid;
       const prevLow = Number.isFinite(Number(c.l)) ? Number(c.l) : mid;
-      if (prevClose === mid && prevHigh >= mid && prevLow <= mid) return;
+      if (prevClose === mid && prevHigh >= mid && prevLow <= mid) {
+        if (mutated) publishCandlesMutation();
+        return;
+      }
       c.c = mid;
       c.h = Math.max(prevHigh, mid);
       c.l = Math.min(prevLow, mid);
       _lastLiveFrameMs = localNow;
+      publishCandlesMutation();
     };
     hubWs.subscribe('mids', handler);
     hubWs.subscribe('bbo', handler);
