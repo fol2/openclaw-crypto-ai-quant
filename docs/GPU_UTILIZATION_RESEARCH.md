@@ -1,5 +1,7 @@
 # GPU Utilization Research: Eliminating TPE Ask Idle Time
 
+> **Status**: Phase 1 quick wins implemented. Phase 2 (double-buffer pipeline) planned — see [PLAN_DOUBLE_BUFFER_TPE.md](PLAN_DOUBLE_BUFFER_TPE.md).
+
 ## Current Architecture
 
 ```

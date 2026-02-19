@@ -1,5 +1,7 @@
 # Phase 2: Double-Buffer TPE Pipeline
 
+> **Status**: Planned. See [GPU_UTILIZATION_RESEARCH.md](GPU_UTILIZATION_RESEARCH.md) for context.
+
 ## Goal
 Overlap CPU-side TPE `ask()` with GPU kernel execution to reach ~92-95% GPU utilization.
 

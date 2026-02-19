@@ -1,5 +1,7 @@
 # Live-Canonical Alignment Master Plan
 
+> **Status**: Implemented. See `docs/state_sync/` for individual component specs.
+
 ## 1. Ultimate Objective
 
 Build financial-grade deterministic alignment across `live`, `paper`, and `backtester`, with `live` as the canonical behaviour.

@@ -1,3 +1,5 @@
+> **Status**: Historical. All epics in this backlog have been implemented. Retained for reference.
+
 Below is a Scrum-ready backlog with epics and detailed tickets that implement the full "strategy factory" workflow you described (GPU generates candidates → CPU validates under stress/out‑of‑sample → controlled deployment → live monitoring + kill switches → rotation). I've written this in a way you can paste into Jira/Linear with minimal editing.
 
 I'm assuming your repo structure and tooling from the report: Rust `mei-backtester` (GPU sweep + CPU replay), SQLite candle DBs + funding DB, `generate_config.py`, `deploy_sweep.py`, sidecar ingestion, hot-reloadable `strategy_overrides.yaml`, and you're trading Hyperliquid perps.

@@ -1,7 +1,7 @@
 # V8 SSOT Migration Plan — Unified Engine Architecture
 
 > **Date**: 2026-02-15
-> **Branch**: `major-v8`
+> **Status**: Complete — merged to `master`. See [backtester/MIGRATION.md](../../backtester/MIGRATION.md).
 > **Goal**: Make the V8 Rust decision kernel the **Single Source of Truth** (SSOT) for ALL execution paths: live, paper, backtest (CPU), and sweep (GPU grid/TPE).
 
 ---
