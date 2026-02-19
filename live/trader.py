@@ -2057,8 +2057,11 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         sym = str(symbol or "").strip().upper()
         if not sym:
             return
-        run_mode = str(mode or os.getenv("AI_QUANT_MODE", "paper") or "paper").strip().lower()
-        python_entry_gates_enabled = run_mode == "paper"
+        del mode
+        # Runtime SSOT hardening: entry decisions come from Rust kernel intents.
+        # Keep execution/risk rails and audit logging, but disable legacy
+        # Python entry-gate decision filters (confidence/PESC/SSF/REEF).
+        python_entry_gates_enabled = False
 
         audit = None
         if indicators is not None:

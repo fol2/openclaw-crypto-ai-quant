@@ -759,20 +759,19 @@ def _build_default_decision_provider() -> DecisionProvider:
 
     After AQC-825, the Python ``mei_alpha_v1.analyze()`` decision path has been
     removed.  The Rust kernel (``bt_runtime``) is the **only** decision source
-    for live/paper trading.  If it cannot be loaded the engine will fail-fast
-    with a clear error rather than silently falling back to Python.
+    for live/paper/dry_live trading.  If it cannot be loaded the engine will
+    fail-fast with a clear error rather than silently falling back to
+    non-SSOT providers.
 
     Accepted values for ``AI_QUANT_KERNEL_DECISION_PROVIDER``:
 
     * ``rust`` / ``kernel_only`` (default) -- Rust kernel via ``bt_runtime``
-    * ``candle`` -- KernelCandleDecisionProvider (candle-driven orchestrator)
-    * ``file``  -- read decisions from a JSON file
-    * ``none`` / ``noop`` -- no-op (dry-run / testing)
+    * ``none`` / ``noop`` -- no-op (explicit non-trading/testing only)
 
     Raises
     ------
     SystemExit
-        If ``bt_runtime`` cannot be imported and no fallback is appropriate.
+        If ``bt_runtime`` cannot be imported or provider mode is unsupported.
     RuntimeError
         If configuration is invalid.
     """
@@ -786,92 +785,26 @@ def _build_default_decision_provider() -> DecisionProvider:
         logger.fatal(
             "FATAL: AI_QUANT_KERNEL_DECISION_PROVIDER=python is no longer supported. "
             "The PythonAnalyzeDecisionProvider has been removed (AQC-825). "
-            "Use 'rust', 'kernel_only', 'candle', 'file', or 'none'."
+            "Use 'rust', 'kernel_only', or 'none'."
         )
         raise SystemExit(1)
 
-    if provider_mode == "file":
-        if not path:
-            raise RuntimeError(
-                "AI_QUANT_KERNEL_DECISION_PROVIDER=file requires AI_QUANT_KERNEL_DECISION_FILE to be set."
-            )
-        return KernelDecisionFileProvider(path)
+    if provider_mode in {"file", "candle"}:
+        logger.fatal(
+            "FATAL: AI_QUANT_KERNEL_DECISION_PROVIDER=%s is disabled for runtime SSOT hardening. "
+            "Use 'rust'/'kernel_only' for trading modes.",
+            provider_mode,
+        )
+        raise SystemExit(1)
 
-    if provider_mode in {"rust", "kernel_only"}:
-        # Explicit rust/kernel_only mode: fail-fast if bt_runtime unavailable.
-        if path:
-            try:
-                return KernelDecisionRustBindingProvider(path=path)
-            except Exception as exc:
-                logger.fatal(
-                    "FATAL: bt_runtime extension unavailable — cannot initialise "
-                    "Rust kernel decision provider.  Ensure the bt_runtime shared "
-                    "library is built and accessible.  Error: %s",
-                    exc,
-                )
-                raise SystemExit(1) from exc
-
+    if provider_mode in {"rust", "kernel_only", ""}:
         try:
-            return KernelDecisionRustBindingProvider(path=None)
+            return KernelDecisionRustBindingProvider(path=path or None)
         except Exception as exc:
             logger.fatal(
-                "FATAL: bt_runtime extension unavailable and "
-                "AI_QUANT_KERNEL_DECISION_FILE not configured. "
-                "The Rust kernel is REQUIRED for live/paper trading (AQC-825). "
-                "Build bt_runtime or set AI_QUANT_KERNEL_DECISION_PROVIDER=none "
-                "for dry-run mode.  Error: %s",
-                exc,
-            )
-            raise SystemExit(1) from exc
-
-    if provider_mode == "candle":
-        try:
-            from strategy.kernel_orchestrator import KernelCandleDecisionProvider
-
-            return KernelCandleDecisionProvider(
-                decision_factory=KernelDecision.from_raw,
-            )
-        except Exception as exc:
-            logger.fatal("FATAL: Cannot init KernelCandleDecisionProvider: %s", exc)
-            raise SystemExit(1) from exc
-
-    if provider_mode == "":
-        # Auto mode: try Rust binding first; fall back to file provider if
-        # a decision file is configured, otherwise fail-fast.
-        if path:
-            try:
-                return KernelDecisionRustBindingProvider(path=path)
-            except Exception:
-                logger.warning(
-                    "bt_runtime extension unavailable; falling back to "
-                    "KernelDecisionFileProvider (AI_QUANT_KERNEL_DECISION_FILE=%s).",
-                    path,
-                )
-                return KernelDecisionFileProvider(path)
-
-        # Auto mode with no event file: prefer KernelCandleDecisionProvider
-        # when bt_runtime is available.
-        try:
-            _load_kernel_runtime_module()
-            # bt_runtime is available — try candle provider first
-            try:
-                from strategy.kernel_orchestrator import KernelCandleDecisionProvider
-
-                return KernelCandleDecisionProvider(decision_factory=KernelDecision.from_raw)
-            except Exception:
-                logger.debug("KernelCandleDecisionProvider init failed, falling through", exc_info=True)
-        except Exception:
-            logger.debug("bt_runtime module unavailable for auto-mode candle provider", exc_info=True)
-
-        try:
-            return KernelDecisionRustBindingProvider(path=None)
-        except Exception as exc:
-            logger.fatal(
-                "FATAL: bt_runtime extension unavailable and "
-                "AI_QUANT_KERNEL_DECISION_FILE not configured. "
-                "The Rust kernel is REQUIRED for live/paper trading (AQC-825). "
-                "Build bt_runtime or set AI_QUANT_KERNEL_DECISION_PROVIDER=none "
-                "for dry-run mode.  Error: %s",
+                "FATAL: bt_runtime extension unavailable — cannot initialise "
+                "Rust kernel decision provider. The Rust kernel is REQUIRED "
+                "for paper/live/dry_live SSOT. Error: %s",
                 exc,
             )
             raise SystemExit(1) from exc
@@ -879,7 +812,7 @@ def _build_default_decision_provider() -> DecisionProvider:
     # Unrecognised provider mode — hard error.
     logger.fatal(
         "FATAL: Unrecognised AI_QUANT_KERNEL_DECISION_PROVIDER=%r. "
-        "Accepted values: rust, kernel_only, candle, file, none, noop.",
+        "Accepted values: rust, kernel_only, none, noop.",
         provider_mode,
     )
     raise SystemExit(1)
@@ -935,9 +868,9 @@ class UnifiedEngine:
         self.mode = str(mode or os.getenv("AI_QUANT_MODE", "paper") or "paper").strip().lower()
         self.mode_plugin = mode_plugin
         self.decision_provider = decision_provider or _build_default_decision_provider()
-        if self.mode in {"live", "dry_live"}:
+        if self.mode in {"paper", "live", "dry_live"}:
             provider_name = type(self.decision_provider).__name__
-            rust_ssot_providers = {"KernelDecisionRustBindingProvider", "KernelCandleDecisionProvider"}
+            rust_ssot_providers = {"KernelDecisionRustBindingProvider"}
             if provider_name not in rust_ssot_providers:
                 logger.fatal(
                     "FATAL: mode=%s requires a Rust decision provider for SSOT. "
@@ -1898,149 +1831,8 @@ class UnifiedEngine:
                 except Exception:
                     logger.warning("regime gate update failed", exc_info=True)
 
-                # Phase 1: Keep exit logic for open positions.
-                for sym_u in sorted((self.trader.positions or {}).keys()):
-                    if self.mode != "paper":
-                        # Rust kernel remains the live SSOT for exit decisions.
-                        break
-                    try:
-                        cached = self._analysis_cache.get(str(sym_u).upper()) or {}
-                        if not isinstance(cached, dict):
-                            cached = {}
-
-                        now_series = cached.get("now") if isinstance(cached.get("now"), dict) else {}
-                        if not isinstance(now_series, dict):
-                            now_series = {}
-
-                        # WARN-K3: When analysis cache is empty (e.g. after restart),
-                        # compute basic indicators from candle DB so exit logic has context.
-                        if not now_series or not any(now_series.get(k) for k in ("ADX", "ATR", "RSI_14", "EMA_fast")):
-                            try:
-                                _edf = self.market.get_candles_df(
-                                    sym_u,
-                                    interval=self.interval,
-                                    min_rows=self.lookback_bars,
-                                )
-                                if _edf is not None and len(_edf) >= 50:
-                                    _gcfg = self.strategy.get_config("__GLOBAL__") or {}
-                                    _ind = _gcfg.get("indicators") or {}
-                                    _fw = int(_ind.get("ema_fast_window", 20))
-                                    _sw = int(_ind.get("ema_slow_window", 50))
-                                    _ema_f = mei_alpha_v1.ta.trend.ema_indicator(_edf["Close"], window=_fw)
-                                    if _ema_f is not None and not _ema_f.empty:
-                                        now_series["EMA_fast"] = float(_ema_f.iloc[-1])
-                                    _ema_s = mei_alpha_v1.ta.trend.ema_indicator(_edf["Close"], window=_sw)
-                                    if _ema_s is not None and not _ema_s.empty:
-                                        now_series["EMA_slow"] = float(_ema_s.iloc[-1])
-                                    _adx = mei_alpha_v1.ta.trend.ADXIndicator(
-                                        _edf["High"],
-                                        _edf["Low"],
-                                        _edf["Close"],
-                                        window=14,
-                                    )
-                                    _adx_s = _adx.adx()
-                                    if _adx_s is not None and not _adx_s.empty:
-                                        now_series["ADX"] = float(_adx_s.iloc[-1])
-                                    _atr_s = mei_alpha_v1.ta.volatility.average_true_range(
-                                        _edf["High"],
-                                        _edf["Low"],
-                                        _edf["Close"],
-                                        window=14,
-                                    )
-                                    if _atr_s is not None and not _atr_s.empty:
-                                        now_series["ATR"] = float(_atr_s.iloc[-1])
-                                    _rsi_s = mei_alpha_v1.ta.momentum.rsi(_edf["Close"], window=14)
-                                    if _rsi_s is not None and not _rsi_s.empty:
-                                        now_series["RSI_14"] = float(_rsi_s.iloc[-1])
-                                    now_series["Close"] = float(_edf["Close"].iloc[-1])
-                                    # Populate cache to avoid recomputing on every tick.
-                                    self._analysis_cache[sym_u] = {
-                                        "key": None,
-                                        "sig": cached.get("sig", "NEUTRAL"),
-                                        "conf": cached.get("conf", "high"),
-                                        "now": dict(now_series),
-                                        "computed_at_s": time.time(),
-                                        "action": cached.get("action", ""),
-                                    }
-                            except Exception:
-                                logger.debug("exit indicator backfill failed for %s", sym_u, exc_info=True)
-
-                        is_exit_boundary = self._exit_reanalyze_due(sym_u)
-                        if not is_exit_boundary:
-                            continue
-
-                        if self._rest_enabled and hyperliquid_meta is not None:
-                            try:
-                                now_series["funding_rate"] = float(hyperliquid_meta.get_funding_rate(sym_u) or 0.0)
-                            except Exception:
-                                logger.debug("funding_rate fetch failed for %s (exit)", sym_u, exc_info=True)
-                                now_series["funding_rate"] = 0.0
-                        else:
-                            now_series["funding_rate"] = 0.0
-
-                        self._attach_strategy_snapshot(symbol=sym_u, now_series=now_series)
-
-                        quote = None
-                        _exit_iv = self._exit_interval
-                        if _exit_iv and _exit_iv != "mid":
-                            try:
-                                df_exit = self.market.get_candles_df(sym_u, interval=_exit_iv, min_rows=1)
-                                if df_exit is not None and not df_exit.empty:
-                                    current_price = float(df_exit["Close"].iloc[-1])
-                                else:
-                                    quote = self.market.get_mid_price(sym_u, max_age_s=10.0, interval=self.interval)
-                                    current_price = (
-                                        float(quote.price)
-                                        if quote is not None
-                                        else float(now_series.get("Close") or 0.0)
-                                    )
-                            except Exception:
-                                logger.debug(
-                                    "exit candle price fetch failed for %s, falling back to mid", sym_u, exc_info=True
-                                )
-                                quote = self.market.get_mid_price(sym_u, max_age_s=10.0, interval=self.interval)
-                                current_price = (
-                                    float(quote.price) if quote is not None else float(now_series.get("Close") or 0.0)
-                                )
-                        else:
-                            quote = self.market.get_mid_price(sym_u, max_age_s=10.0, interval=self.interval)
-                            current_price = (
-                                float(quote.price) if quote is not None else float(now_series.get("Close") or 0.0)
-                            )
-
-                        try:
-                            if isinstance(now_series, dict):
-                                if quote is not None:
-                                    try:
-                                        now_series["quote"] = {
-                                            "source": str(getattr(quote, "source", "")),
-                                            "age_s": float(getattr(quote, "age_s", 0.0) or 0.0),
-                                        }
-                                    except Exception:
-                                        logger.debug("failed to attach quote metadata for %s", sym_u, exc_info=True)
-                            self.trader.check_exit_conditions(
-                                sym_u,
-                                current_price,
-                                now_ms(),
-                                is_anomaly=bool(now_series.get("is_anomaly", False)),
-                                dynamic_tp_mult=now_series.get("tp_mult"),
-                                indicators=now_series,
-                            )
-                        except AttributeError:
-                            mei_alpha_v1.PaperTrader.check_exit_conditions(
-                                self.trader,
-                                sym_u,
-                                current_price,
-                                now_ms(),
-                                is_anomaly=bool(now_series.get("is_anomaly", False)),
-                                dynamic_tp_mult=now_series.get("tp_mult"),
-                                indicators=now_series,
-                            )
-                    except SystemExit:
-                        raise
-                    except Exception:
-                        logger.warning(f"⚠️ Engine exit logic error: {sym_u}\n{traceback.format_exc()}")
-                        continue
+                # Phase 1: Python exit checks removed.
+                # Runtime exit decisions are Rust-kernel SSOT across paper/live/dry_live.
 
                 # Phase 2: Execute explicit kernel decisions (OPEN/ADD/CLOSE/REDUCE) ordered by score.
                 decision_exec: list[KernelDecision] = []
