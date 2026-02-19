@@ -19,6 +19,7 @@ export class HubWS {
   }
 
   connect() {
+    if (this.ws && this.ws.readyState <= WebSocket.OPEN) return;
     try {
       this.ws = new WebSocket(this.url);
     } catch {

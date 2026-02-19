@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getSnapshot, getMids } from '../lib/api';
+  import { hubWs } from '../lib/ws';
   import { CANDIDATE_FAMILY_ORDER, getModeLabel, LIVE_MODE } from '../lib/mode-labels';
 
   let mode = $state('paper1');
@@ -9,13 +10,18 @@
   let loading = $state(true);
   let filter = $state('');
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let midsSeeded = false;
 
   async function refresh() {
     try {
       const snap = await getSnapshot(mode);
       symbols = snap.symbols || [];
-      const m = await getMids();
-      mids = m.mids || {};
+      // Seed mids from REST only on first load; WS takes over after that.
+      if (!midsSeeded) {
+        const m = await getMids();
+        mids = m.mids || {};
+        midsSeeded = true;
+      }
     } catch {}
     loading = false;
   }
@@ -27,18 +33,59 @@
     return syms;
   });
 
-  function fmtPrice(n: any): string {
-    if (n == null) return '—';
+  function adaptiveDecimals(n: any): number {
     const v = Number(n);
-    if (v >= 1000) return v.toFixed(2);
-    if (v >= 1) return v.toFixed(4);
-    return v.toFixed(6);
+    if (!Number.isFinite(v) || v <= 0) return 6;
+    if (v >= 1000) return 2;
+    if (v >= 1) return 4;
+    return 6;
   }
 
   $effect(() => {
     refresh();
     pollTimer = setInterval(refresh, 10000);
+    hubWs.connect();
     return () => { if (pollTimer) clearInterval(pollTimer); };
+  });
+
+  // Real-time mid-price updates via WS (mids + bbo)
+  $effect(() => {
+    function finitePositive(v: unknown): number | null {
+      const n = Number(v);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    }
+    function quoteMid(quote: any): number | null {
+      const explicit = finitePositive(quote?.mid);
+      if (explicit != null) return explicit;
+      const bid = finitePositive(quote?.bid);
+      const ask = finitePositive(quote?.ask);
+      if (bid == null || ask == null) return null;
+      return (bid + ask) / 2;
+    }
+
+    const handler = (data: any) => {
+      const midsRaw = data?.mids;
+      if (midsRaw && typeof midsRaw === 'object') {
+        for (const [sym, raw] of Object.entries(midsRaw)) {
+          const px = finitePositive(raw);
+          if (px != null) mids[String(sym).toUpperCase()] = px;
+        }
+      }
+      const bboRaw = data?.bbo;
+      if (bboRaw && typeof bboRaw === 'object') {
+        for (const [sym, raw] of Object.entries(bboRaw)) {
+          const px = quoteMid(raw);
+          if (px != null) mids[String(sym).toUpperCase()] = px;
+        }
+      }
+    };
+
+    hubWs.subscribe('mids', handler);
+    hubWs.subscribe('bbo', handler);
+    return () => {
+      hubWs.unsubscribe('mids', handler);
+      hubWs.unsubscribe('bbo', handler);
+    };
   });
 </script>
 
@@ -83,7 +130,14 @@
               </span>
             {/if}
           </div>
-          <div class="cell-price">{fmtPrice(mids[s.symbol] ?? s.mid)}</div>
+          <div class="cell-price">
+            <mid-price
+              symbol={s.symbol}
+              value={(mids[s.symbol] ?? s.mid) != null ? String(mids[s.symbol] ?? s.mid) : ''}
+              decimals={adaptiveDecimals(mids[s.symbol] ?? s.mid)}
+              tone="grid"
+            ></mid-price>
+          </div>
           {#if s.signal}
             <div class="cell-signal">
               <span class="signal-badge">{s.signal}</span>
