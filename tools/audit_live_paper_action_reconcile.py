@@ -191,10 +191,18 @@ def _load_actions(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     conn = _connect_ro(db_path)
     try:
-        rows = conn.execute(
-            "SELECT id, timestamp, symbol, action, type, price, size, pnl, balance, reason, confidence, fee_usd "
-            "FROM trades ORDER BY id ASC"
-        ).fetchall()
+        cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(trades)").fetchall()}
+        has_reason_code = "reason_code" in cols
+        if has_reason_code:
+            rows = conn.execute(
+                "SELECT id, timestamp, symbol, action, type, price, size, pnl, balance, reason, reason_code, confidence, fee_usd "
+                "FROM trades ORDER BY id ASC"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, timestamp, symbol, action, type, price, size, pnl, balance, reason, confidence, fee_usd "
+                "FROM trades ORDER BY id ASC"
+            ).fetchall()
     finally:
         conn.close()
 
@@ -240,7 +248,12 @@ def _load_actions(
                 "balance": _parse_float(row["balance"]),
                 "confidence": _normalise_confidence(row["confidence"]),
                 "reason": str(row["reason"] or ""),
-                "reason_code": classify_reason_code(action_code, str(row["reason"] or "")),
+                "reason_code": (
+                    str(row["reason_code"] or "").strip().lower()
+                    if "reason_code" in row.keys()
+                    else classify_reason_code(action_code, str(row["reason"] or ""))
+                )
+                or classify_reason_code(action_code, str(row["reason"] or "")),
             }
         )
 
