@@ -2052,10 +2052,13 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         target_size: float | None = None,
         reason: str | None = None,
         _from_kernel_open: bool = False,
+        mode: str | None = None,
     ):
         sym = str(symbol or "").strip().upper()
         if not sym:
             return
+        run_mode = str(mode or os.getenv("AI_QUANT_MODE", "paper") or "paper").strip().lower()
+        python_entry_gates_enabled = run_mode == "paper"
 
         audit = None
         if indicators is not None:
@@ -2206,7 +2209,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
 
         # v5.035: Entry confidence gate.
         min_entry_conf = str(trade_cfg.get("entry_min_confidence", "high"))
-        if not mei_alpha_v1._conf_ok(confidence, min_confidence=min_entry_conf):
+        if python_entry_gates_enabled and not mei_alpha_v1._conf_ok(confidence, min_confidence=min_entry_conf):
             print(f"🟡 LIVE SKIP {sym} entry: confidence '{confidence}' < '{min_entry_conf}'")
             mei_alpha_v1.log_audit_event(
                 sym,
@@ -2227,7 +2230,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         # v5.015: ADX 自適應冷卻 (ADX-Adaptive PESC)
         # 根據趨勢強度動態調整冷卻時間：強趨勢 (ADX >= 40) 縮短至 min_cd，弱趨勢 (ADX <= 25) 延長至 max_cd。
         base_cooldown = float(trade_cfg.get("reentry_cooldown_minutes", 30))
-        if base_cooldown > 0:
+        if python_entry_gates_enabled and base_cooldown > 0:
             adx_val = indicators.get("ADX", 30) if indicators is not None else 30
             min_cd = float(trade_cfg.get("reentry_cooldown_min_mins", 45))
             max_cd = float(trade_cfg.get("reentry_cooldown_max_mins", 180))
@@ -2321,7 +2324,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         # Align with PaperTrader: block entries if MACD momentum sign contradicts the direction.
         # v5.037: Make SSF configurable via YAML (`trade.enable_ssf_filter`).
         enable_ssf = bool(trade_cfg.get("enable_ssf_filter", True))
-        if enable_ssf and indicators is not None:
+        if python_entry_gates_enabled and enable_ssf and indicators is not None:
             try:
                 macd_h = float(indicators.get("MACD_hist", 0) or 0.0)
             except Exception:
@@ -2354,7 +2357,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 return
 
         # v5.018: RSI 進場極端過濾 (REEF) — entry-only.
-        if bool(trade_cfg.get("enable_reef_filter", True)) and indicators is not None:
+        if python_entry_gates_enabled and bool(trade_cfg.get("enable_reef_filter", True)) and indicators is not None:
             rsi_v = _safe_float(indicators.get("RSI"), None)
             if rsi_v is not None:
                 long_block = _safe_float(trade_cfg.get("reef_long_rsi_block_gt"), 70.0) or 70.0

@@ -1558,28 +1558,35 @@ class UnifiedEngine:
         except (TypeError, ValueError):
             target_size_f = None
 
-        # Detect whether trader.execute_trade supports the action-aware API (cached).
-        if not hasattr(self, "_trader_accepts_action"):
+        # Detect execute_trade capability surface (cached).
+        if not hasattr(self, "_trader_accepts_action") or not hasattr(self, "_trader_accepts_mode"):
             import inspect
 
             try:
                 _sig = inspect.signature(self.trader.execute_trade)
                 self._trader_accepts_action = "action" in _sig.parameters
+                self._trader_accepts_mode = "mode" in _sig.parameters
             except (ValueError, TypeError):
                 self._trader_accepts_action = False
+                self._trader_accepts_mode = False
 
         if self._trader_accepts_action:
+            kwargs = {
+                "atr": atr,
+                "indicators": indicators,
+                "action": act,
+                "target_size": target_size_f,
+                "reason": reason,
+            }
+            if self._trader_accepts_mode:
+                kwargs["mode"] = self.mode
             return self.trader.execute_trade(
                 symbol,
                 signal,
                 price,
                 timestamp,
                 confidence,
-                atr=atr,
-                indicators=indicators,
-                action=act,
-                target_size=target_size_f,
-                reason=reason,
+                **kwargs,
             )
 
         if act == "ADD":
@@ -1638,14 +1645,16 @@ class UnifiedEngine:
             return
 
         # Legacy "OPEN" fallback: if the trader does not support action-aware execute_trade.
+        kwargs = {"atr": atr, "indicators": indicators}
+        if self._trader_accepts_mode:
+            kwargs["mode"] = self.mode
         return self.trader.execute_trade(
             sym,
             signal,
             price,
             timestamp,
             confidence,
-            atr=atr,
-            indicators=indicators,
+            **kwargs,
         )
 
     def run_forever(self) -> None:

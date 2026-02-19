@@ -5178,7 +5178,11 @@ class PaperTrader:
         action=None,
         target_size=None,
         reason=None,
+        mode=None,
     ):
+        run_mode = str(mode or os.getenv("AI_QUANT_MODE", "paper") or "paper").strip().lower()
+        python_entry_gates_enabled = run_mode == "paper"
+
         # action kwarg: "OPEN", "CLOSE", "ADD" — match LiveTrader dispatch semantics.
         if action is not None:
             action_upper = str(action).upper()
@@ -5348,7 +5352,7 @@ class PaperTrader:
 
             # v5.035: Entry confidence gate.
             min_entry_conf = str(trade_cfg.get("entry_min_confidence", "high"))
-            if not _conf_ok(confidence, min_confidence=min_entry_conf):
+            if python_entry_gates_enabled and not _conf_ok(confidence, min_confidence=min_entry_conf):
                 logger.warning(f"🟡 Skipping {symbol} entry: confidence '{confidence}' < '{min_entry_conf}'")
                 log_audit_event(
                     symbol,
@@ -5440,7 +5444,7 @@ class PaperTrader:
             # v5.015: ADX 自適應冷卻 (ADX-Adaptive PESC)
             # v5.018: 弱趨勢 PESC 加強 (ADX < 25 時延長至 max_cd；強趨勢 ADX >= 40 縮短至 min_cd)。
             base_cooldown = float(trade_cfg.get("reentry_cooldown_minutes", 30))
-            if base_cooldown > 0:
+            if python_entry_gates_enabled and base_cooldown > 0:
                 adx_val = indicators.get("ADX", 30) if indicators is not None else 30
                 min_cd = float(trade_cfg.get("reentry_cooldown_min_mins", 45))
                 max_cd = float(trade_cfg.get("reentry_cooldown_max_mins", 180))
@@ -5552,7 +5556,7 @@ class PaperTrader:
             # 進場前檢查 MACD Histogram 嘅動量方向。
             # v5.037: Make SSF configurable via YAML (`trade.enable_ssf_filter`).
             enable_ssf = bool(trade_cfg.get("enable_ssf_filter", True))
-            if enable_ssf and indicators is not None:
+            if python_entry_gates_enabled and enable_ssf and indicators is not None:
                 macd_h = indicators.get("MACD_hist", 0)
                 if signal == "BUY" and macd_h < 0:
                     # 做多但 MACD 仲係負數，代表動量仲未轉正。
@@ -5637,7 +5641,7 @@ class PaperTrader:
 
             # v5.018: RSI 進場極端過濾 (REEF)
             # 做多時 RSI 太高 (overbought) 或做空時 RSI 太低 (oversold) 禁止進場。
-            if bool(trade_cfg.get("enable_reef_filter", True)) and indicators is not None:
+            if python_entry_gates_enabled and bool(trade_cfg.get("enable_reef_filter", True)) and indicators is not None:
                 rsi_v = _safe_float(indicators.get("RSI"), None)
                 if rsi_v is not None:
                     long_block = _safe_float(trade_cfg.get("reef_long_rsi_block_gt"), 70.0) or 70.0
