@@ -101,6 +101,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Skip manifest candle-window provenance validation",
     )
+    parser.add_argument(
+        "--require-runtime-strategy-provenance",
+        action="store_true",
+        default=False,
+        help="Fail when manifest runtime strategy provenance is missing",
+    )
+    parser.add_argument(
+        "--max-strategy-sha1-distinct",
+        type=int,
+        default=None,
+        help="Maximum allowed distinct runtime strategy_sha1 within the replay window",
+    )
     return parser
 
 
@@ -190,6 +202,58 @@ def main() -> int:
                     "detail": "bundle manifest is not a JSON object",
                 }
             )
+
+    strategy_runtime_stability_ok = True
+    if manifest is not None:
+        runtime_strategy = manifest.get("runtime_strategy_provenance")
+        if not isinstance(runtime_strategy, dict):
+            strategy_runtime_stability_ok = False
+            if args.require_runtime_strategy_provenance:
+                failures.append(
+                    {
+                        "code": "missing_runtime_strategy_provenance",
+                        "classification": "state_initialisation_gap",
+                        "detail": "manifest.runtime_strategy_provenance is missing",
+                    }
+                )
+        else:
+            distinct_sha = _as_int(runtime_strategy.get("strategy_sha1_distinct"), 0)
+            strategy_rows_sampled = _as_int(runtime_strategy.get("strategy_rows_sampled"), 0)
+            timeline = runtime_strategy.get("strategy_sha1_timeline")
+            timeline_count = len(timeline) if isinstance(timeline, list) else 0
+            if args.require_runtime_strategy_provenance and (strategy_rows_sampled <= 0 or timeline_count <= 0):
+                strategy_runtime_stability_ok = False
+                failures.append(
+                    {
+                        "code": "empty_runtime_strategy_provenance",
+                        "classification": "state_initialisation_gap",
+                        "detail": "runtime strategy provenance is present but contains no sampled strategy_sha1 rows",
+                        "counts": {
+                            "strategy_rows_sampled": strategy_rows_sampled,
+                            "strategy_sha1_timeline_count": timeline_count,
+                            "runtime_rows_in_window": _as_int(runtime_strategy.get("runtime_rows_in_window"), 0),
+                        },
+                    }
+                )
+            max_distinct = args.max_strategy_sha1_distinct
+            if max_distinct is not None and distinct_sha > int(max_distinct):
+                strategy_runtime_stability_ok = False
+                failures.append(
+                    {
+                        "code": "strategy_config_drift_within_window",
+                        "classification": "state_initialisation_gap",
+                        "detail": (
+                            f"runtime strategy_sha1 drift exceeded limit: "
+                            f"distinct={distinct_sha} > max={int(max_distinct)}"
+                        ),
+                        "counts": {
+                            "strategy_sha1_distinct": distinct_sha,
+                            "strategy_version_distinct": _as_int(runtime_strategy.get("strategy_version_distinct"), 0),
+                            "strategy_rows_sampled": strategy_rows_sampled,
+                            "runtime_rows_in_window": _as_int(runtime_strategy.get("runtime_rows_in_window"), 0),
+                        },
+                    }
+                )
 
     if candles_provenance_checked and manifest is not None:
         manifest_inputs = manifest.get("inputs") or {}
@@ -546,6 +610,10 @@ def main() -> int:
             "bundle_manifest": str(manifest_path),
             "candles_db_override": str(Path(args.candles_db).expanduser().resolve()) if args.candles_db else None,
             "skip_candles_provenance_check": bool(args.skip_candles_provenance_check),
+            "require_runtime_strategy_provenance": bool(args.require_runtime_strategy_provenance),
+            "max_strategy_sha1_distinct": int(args.max_strategy_sha1_distinct)
+            if args.max_strategy_sha1_distinct is not None
+            else None,
             "state_report": str(state_path),
             "trade_report": str(trade_path),
             "action_report": str(action_path),
@@ -561,6 +629,7 @@ def main() -> int:
         },
         "checks": {
             "manifest_present": manifest is not None,
+            "strategy_runtime_stability_ok": strategy_runtime_stability_ok,
             "candles_provenance_checked": candles_provenance_checked,
             "candles_provenance_ok": candles_provenance_ok,
             "state_ok": bool(state_report.get("ok")) if state_report is not None else False,

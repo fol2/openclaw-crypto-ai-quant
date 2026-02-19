@@ -152,6 +152,11 @@ def main() -> int:
 
     if overall_ok:
         gate_report = bundle_dir / "alignment_gate_report.json"
+        max_strategy_sha1_distinct_raw = str(env.get("AQC_MAX_STRATEGY_SHA1_DISTINCT") or "1").strip()
+        try:
+            max_strategy_sha1_distinct = max(1, int(max_strategy_sha1_distinct_raw))
+        except Exception:
+            max_strategy_sha1_distinct = 1
         gate_cmd = [
             "python3",
             str((repo_root / "tools" / "assert_replay_bundle_alignment.py").resolve()),
@@ -169,6 +174,9 @@ def main() -> int:
             "--gpu-parity-report",
             str((bundle_dir / "gpu_smoke_parity_report.json").resolve()),
             "--require-gpu-parity",
+            "--require-runtime-strategy-provenance",
+            "--max-strategy-sha1-distinct",
+            str(max_strategy_sha1_distinct),
             "--output",
             str(gate_report),
         ]
