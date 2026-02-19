@@ -356,6 +356,7 @@ def main() -> int:
         f"--live-baseline \"$BUNDLE_DIR/{live_trades_path.name}\" "
         f"--backtester-trades \"$BUNDLE_DIR/{replay_trades_csv.name}\" "
         f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
+        "--timestamp-bucket-anchor ceil "
         f"--output \"$BUNDLE_DIR/{trade_reconcile_path.name}\""
     )
 
@@ -367,6 +368,7 @@ def main() -> int:
         f"--live-baseline \"$BUNDLE_DIR/{live_trades_path.name}\" "
         f"--backtester-replay-report \"$BUNDLE_DIR/{replay_report_path.name}\" "
         f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
+        "--timestamp-bucket-anchor ceil "
         f"--output \"$BUNDLE_DIR/{action_reconcile_path.name}\""
     )
 

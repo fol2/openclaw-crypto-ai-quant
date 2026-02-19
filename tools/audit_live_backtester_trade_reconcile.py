@@ -32,6 +32,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=1,
         help="Match timestamp bucket in milliseconds (1 = exact millisecond match)",
     )
+    parser.add_argument(
+        "--timestamp-bucket-anchor",
+        choices=("floor", "ceil"),
+        default="floor",
+        help="Timestamp bucket anchor for match key generation",
+    )
     parser.add_argument("--size-tol", type=float, default=DEFAULT_TOL, help="Absolute tolerance for exit_size comparison")
     parser.add_argument("--pnl-tol", type=float, default=DEFAULT_TOL, help="Absolute tolerance for pnl comparison")
     parser.add_argument("--fee-tol", type=float, default=DEFAULT_TOL, help="Absolute tolerance for fee comparison")
@@ -91,9 +97,13 @@ def _almost_equal(left: float, right: float, tol: float) -> bool:
     return math.isclose(float(left), float(right), rel_tol=0.0, abs_tol=tol)
 
 
-def _bucket_timestamp_ms(ts_ms: int, bucket_ms: int) -> int:
+def _bucket_timestamp_ms(ts_ms: int, bucket_ms: int, anchor: str) -> int:
     if bucket_ms <= 1:
         return int(ts_ms)
+    if str(anchor).strip().lower() == "ceil":
+        if ts_ms >= 0:
+            return int(((ts_ms + bucket_ms - 1) // bucket_ms) * bucket_ms)
+        return int(-(((-ts_ms) // bucket_ms) * bucket_ms))
     if ts_ms >= 0:
         return int((ts_ms // bucket_ms) * bucket_ms)
     return int(-(((-ts_ms) // bucket_ms) * bucket_ms))
@@ -194,10 +204,15 @@ def _build_event_groups(
     rows: list[dict[str, Any]],
     *,
     timestamp_bucket_ms: int,
+    timestamp_bucket_anchor: str,
 ) -> dict[tuple[str, str, int], list[dict[str, Any]]]:
     grouped: dict[tuple[str, str, int], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        key = (row["symbol"], row["side"], _bucket_timestamp_ms(int(row["exit_ts_ms"]), timestamp_bucket_ms))
+        key = (
+            row["symbol"],
+            row["side"],
+            _bucket_timestamp_ms(int(row["exit_ts_ms"]), timestamp_bucket_ms, timestamp_bucket_anchor),
+        )
         grouped[key].append(row)
 
     for values in grouped.values():
@@ -218,6 +233,7 @@ def _compare_exits(
     backtester_exits: list[dict[str, Any]],
     *,
     timestamp_bucket_ms: int,
+    timestamp_bucket_anchor: str,
     size_tol: float,
     pnl_tol: float,
     fee_tol: float,
@@ -252,8 +268,16 @@ def _compare_exits(
         stats["backtester_pnl_usd"] += float(row["pnl_usd"])
         stats["backtester_fee_usd"] += float(row["fee_usd"])
 
-    live_groups = _build_event_groups(live_exits, timestamp_bucket_ms=timestamp_bucket_ms)
-    bt_groups = _build_event_groups(backtester_exits, timestamp_bucket_ms=timestamp_bucket_ms)
+    live_groups = _build_event_groups(
+        live_exits,
+        timestamp_bucket_ms=timestamp_bucket_ms,
+        timestamp_bucket_anchor=timestamp_bucket_anchor,
+    )
+    bt_groups = _build_event_groups(
+        backtester_exits,
+        timestamp_bucket_ms=timestamp_bucket_ms,
+        timestamp_bucket_anchor=timestamp_bucket_anchor,
+    )
     all_keys = sorted(set(live_groups.keys()) | set(bt_groups.keys()))
 
     unmatched_live = 0
@@ -398,6 +422,7 @@ def main() -> int:
         live_exits,
         backtester_exits,
         timestamp_bucket_ms=max(1, int(args.timestamp_bucket_ms)),
+        timestamp_bucket_anchor=str(args.timestamp_bucket_anchor or "floor"),
         size_tol=float(args.size_tol),
         pnl_tol=float(args.pnl_tol),
         fee_tol=float(args.fee_tol),
@@ -431,6 +456,7 @@ def main() -> int:
             "live_baseline": str(live_baseline),
             "backtester_trades": str(backtester_trades),
             "timestamp_bucket_ms": max(1, int(args.timestamp_bucket_ms)),
+            "timestamp_bucket_anchor": str(args.timestamp_bucket_anchor or "floor"),
             "size_tol": float(args.size_tol),
             "pnl_tol": float(args.pnl_tol),
             "fee_tol": float(args.fee_tol),
