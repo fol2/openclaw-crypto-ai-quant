@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getSnapshot, getMids } from '../lib/api';
+  import { getSnapshot, getMids, getTrendCloses } from '../lib/api';
   import { hubWs } from '../lib/ws';
   import { CANDIDATE_FAMILY_ORDER, getModeLabel, LIVE_MODE } from '../lib/mode-labels';
 
@@ -7,12 +7,19 @@
   let gridSize = $state(3);
   let symbols: any[] = $state([]);
   let mids: Record<string, number> = $state({});
-  let midHistory: Record<string, number[]> = $state({});
-  const MID_HISTORY_MAX = 120;   // keep last ~120 WS ticks per symbol
+  let trendCloses: Record<string, number[]> = $state({});
   let loading = $state(true);
   let filter = $state('');
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let trendTimer: ReturnType<typeof setInterval> | null = null;
   let midsSeeded = false;
+
+  async function refreshTrend() {
+    try {
+      const res = await getTrendCloses(trendInterval, trendBars);
+      trendCloses = res.closes || {};
+    } catch {}
+  }
 
   async function refresh() {
     try {
@@ -24,6 +31,7 @@
         mids = m.mids || {};
         midsSeeded = true;
       }
+      await refreshTrend();
     } catch {}
     loading = false;
   }
@@ -40,6 +48,9 @@
   let trendFullPct = $state(1.0);   // ±X% maps to full intensity
   let trendCurve   = $state(1.0);   // exponent: <1 compress, >1 amplify
   let trendWindow  = $state(0);     // 0 = all points
+  let trendInterval = $state('5m'); // candle interval for trend data
+  let trendBars    = $state(60);    // number of candle bars
+  let trendStrengthMul = $state(1.0); // OKLCH intensity multiplier
 
   // ── Trend computation (OLS linear regression) ───────────────────
   function linregTrend(pts: number[], win: number): number {
@@ -70,14 +81,15 @@
   function trendVars(strength: number): string {
     const abs = Math.abs(strength);
     if (abs < 0.05) return '';
+    const mul = trendStrengthMul;
     const h = strength > 0 ? 145 : 25;
-    const l  = 13 + abs * 8;          // 13→21%  (surface ≈ 13%)
-    const c  = abs * 0.045;           // 0→0.045
-    const gl = l + 8;                 // glow is brighter
-    const gc = abs * 0.08;
-    const ga = abs * 0.12;
-    const ba = 0.15 + abs * 0.25;     // border alpha
-    return `--trend-bg:oklch(${l.toFixed(1)}% ${c.toFixed(3)} ${h});--trend-glow:oklch(${gl.toFixed(1)}% ${gc.toFixed(3)} ${h} / ${ga.toFixed(2)});--trend-border:oklch(50% ${(abs * 0.06).toFixed(3)} ${h} / ${ba.toFixed(2)})`;
+    const l  = 13 + abs * 8 * mul;          // 13→21%  (surface ≈ 13%)
+    const c  = abs * 0.045 * mul;           // 0→0.045
+    const gl = l + 8 * mul;                 // glow is brighter
+    const gc = abs * 0.08 * mul;
+    const ga = abs * 0.12 * mul;
+    const ba = 0.15 + abs * 0.25 * mul;     // border alpha
+    return `--trend-bg:oklch(${l.toFixed(1)}% ${c.toFixed(3)} ${h});--trend-glow:oklch(${gl.toFixed(1)}% ${gc.toFixed(3)} ${h} / ${ga.toFixed(2)});--trend-border:oklch(50% ${(abs * 0.06 * mul).toFixed(3)} ${h} / ${ba.toFixed(2)})`;
   }
 
   function adaptiveDecimals(n: any): number {
@@ -91,8 +103,13 @@
   $effect(() => {
     refresh();
     pollTimer = setInterval(refresh, 10000);
+    // Refresh trend data every 30s (candle DB updates less frequently than WS)
+    trendTimer = setInterval(refreshTrend, 30000);
     hubWs.connect();
-    return () => { if (pollTimer) clearInterval(pollTimer); };
+    return () => {
+      if (pollTimer) clearInterval(pollTimer);
+      if (trendTimer) clearInterval(trendTimer);
+    };
   });
 
   // Real-time mid-price updates via WS (mids + bbo)
@@ -110,28 +127,19 @@
       return (bid + ask) / 2;
     }
 
-    function pushMid(sym: string, px: number) {
-      const key = String(sym).toUpperCase();
-      mids[key] = px;
-      if (!midHistory[key]) midHistory[key] = [];
-      const arr = midHistory[key];
-      arr.push(px);
-      if (arr.length > MID_HISTORY_MAX) arr.splice(0, arr.length - MID_HISTORY_MAX);
-    }
-
     const handler = (data: any) => {
       const midsRaw = data?.mids;
       if (midsRaw && typeof midsRaw === 'object') {
         for (const [sym, raw] of Object.entries(midsRaw)) {
           const px = finitePositive(raw);
-          if (px != null) pushMid(sym, px);
+          if (px != null) mids[String(sym).toUpperCase()] = px;
         }
       }
       const bboRaw = data?.bbo;
       if (bboRaw && typeof bboRaw === 'object') {
         for (const [sym, raw] of Object.entries(bboRaw)) {
           const px = quoteMid(raw);
-          if (px != null) pushMid(sym, px);
+          if (px != null) mids[String(sym).toUpperCase()] = px;
         }
       }
     };
@@ -178,6 +186,20 @@
   {#if debugTrend}
     <div class="debug-bar">
       <label>
+        <span class="db-label">Interval</span>
+        <select bind:value={trendInterval} onchange={refreshTrend}>
+          <option value="1m">1m</option>
+          <option value="5m">5m</option>
+          <option value="15m">15m</option>
+          <option value="1h">1h</option>
+        </select>
+      </label>
+      <label>
+        <span class="db-label">Bars</span>
+        <input type="range" min="10" max="200" step="10" bind:value={trendBars} onchange={refreshTrend} />
+        <span class="db-val">{trendBars}</span>
+      </label>
+      <label>
         <span class="db-label">Full&nbsp;%</span>
         <input type="range" min="0.1" max="5" step="0.1" bind:value={trendFullPct} />
         <span class="db-val">{trendFullPct.toFixed(1)}</span>
@@ -197,6 +219,11 @@
           <option value={100}>100</option>
         </select>
       </label>
+      <label>
+        <span class="db-label">Strength</span>
+        <input type="range" min="0.5" max="5" step="0.1" bind:value={trendStrengthMul} />
+        <span class="db-val">{trendStrengthMul.toFixed(1)}x</span>
+      </label>
     </div>
   {/if}
 
@@ -205,7 +232,7 @@
   {:else}
     <div class="symbol-grid" class:debug-active={debugTrend} style="grid-template-columns: repeat({gridSize}, 1fr);">
       {#each filteredSymbols as s (s.symbol)}
-        {@const hist = midHistory[s.symbol] || []}
+        {@const hist = trendCloses[s.symbol] || []}
         {@const trend = trendStrength(hist)}
         <div class="grid-cell" class:has-trend={Math.abs(trend) >= 0.05} style={trendVars(trend)}>
           {#if debugTrend}
@@ -430,8 +457,7 @@
     right: 5px;
     font-size: 8px;
     font-family: 'IBM Plex Mono', monospace;
-    color: var(--text-dim);
-    opacity: 0.7;
+    color: #fff;
   }
 
   .debug-active .grid-cell {

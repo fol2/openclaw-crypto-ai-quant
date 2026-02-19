@@ -39,6 +39,10 @@ export async function getMids() {
   return apiFetch('/api/mids');
 }
 
+export async function getTrendCloses(interval = '5m', limit = 60): Promise<{ closes: Record<string, number[]> }> {
+  return apiFetch(`/api/trend-closes?interval=${interval}&limit=${limit}`);
+}
+
 export async function postFlashDebug(events: Array<Record<string, any>>) {
   return apiFetch('/api/flash-debug', {
     method: 'POST',
