@@ -138,24 +138,25 @@ def _interval_to_bucket_ms(interval: str) -> int:
     return int(qty * unit_ms)
 
 
-def _load_config_sub_intervals(config_path: Path) -> tuple[str, str]:
+def _load_config_engine_intervals(config_path: Path) -> tuple[str, str, str]:
     if yaml is None or not config_path.exists():
-        return "", ""
+        return "", "", ""
     try:
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     except Exception:
-        return "", ""
+        return "", "", ""
     if not isinstance(raw, dict):
-        return "", ""
+        return "", "", ""
     global_cfg = raw.get("global") or {}
     if not isinstance(global_cfg, dict):
-        return "", ""
+        return "", "", ""
     engine_cfg = global_cfg.get("engine") or {}
     if not isinstance(engine_cfg, dict):
-        return "", ""
+        return "", "", ""
+    interval = str(engine_cfg.get("interval") or "").strip()
     entry_iv = str(engine_cfg.get("entry_interval") or "").strip()
     exit_iv = str(engine_cfg.get("exit_interval") or "").strip()
-    return entry_iv, exit_iv
+    return interval, entry_iv, exit_iv
 
 
 def _derive_interval_db(base_candles_db: Path, interval: str) -> Path | None:
@@ -178,6 +179,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--candles-db", required=True, help="Path to candles SQLite DB used for replay")
     parser.add_argument("--funding-db", default=None, help="Optional funding SQLite DB used for replay funding events")
     parser.add_argument("--interval", default="1h", help="Replay interval (for command template)")
+    parser.add_argument(
+        "--allow-interval-override",
+        action="store_true",
+        help=(
+            "Allow replay interval override when it differs from locked strategy "
+            "global.engine.interval."
+        ),
+    )
     parser.add_argument(
         "--strategy-config",
         help=(
@@ -511,10 +520,27 @@ def main() -> int:
         for row in oms_rows
     )
 
-    cfg_entry_interval, cfg_exit_interval = _load_config_sub_intervals(strategy_config_snapshot_path)
+    cfg_interval, cfg_entry_interval, cfg_exit_interval = _load_config_engine_intervals(
+        strategy_config_snapshot_path
+    )
     replay_entry_candles_db = _derive_interval_db(candles_db, cfg_entry_interval)
     replay_exit_candles_db = _derive_interval_db(candles_db, cfg_exit_interval)
-    base_interval = str(args.interval or "").strip()
+    requested_interval = str(args.interval or "").strip()
+    if (
+        cfg_interval
+        and requested_interval
+        and cfg_interval != requested_interval
+        and not bool(args.allow_interval_override)
+    ):
+        parser.error(
+            f"replay interval '{requested_interval}' conflicts with locked strategy "
+            f"engine.interval '{cfg_interval}'. "
+            "Use --allow-interval-override only when this divergence is intentional."
+        )
+    if cfg_interval and not bool(args.allow_interval_override):
+        base_interval = cfg_interval
+    else:
+        base_interval = requested_interval or cfg_interval or "1h"
     if cfg_entry_interval and cfg_entry_interval != base_interval and replay_entry_candles_db is None:
         parser.error(
             f"entry interval '{cfg_entry_interval}' requires candles DB beside {candles_db} "
@@ -596,8 +622,8 @@ def main() -> int:
         "if [ \"${AQC_REPLAY_PREFER_RELEASE_BIN:-1}\" = \"1\" ] && [ -x \"./target/release/mei-backtester\" ]; then\n"
         "  BACKTESTER_REPLAY_CMD=\"$BACKTESTER_REPLAY_BIN\"\n"
         "fi\n"
-        f"$BACKTESTER_REPLAY_CMD --config \"$BUNDLE_DIR/{strategy_config_snapshot_path.name}\" --candles-db \"$CANDLES_DB\" "
-        f"--interval {shlex.quote(str(args.interval))} --from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
+        f"$BACKTESTER_REPLAY_CMD --live --config \"$BUNDLE_DIR/{strategy_config_snapshot_path.name}\" --candles-db \"$CANDLES_DB\" "
+        f"--interval {shlex.quote(base_interval)} --from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
         f"--init-state \"$SNAPSHOT_PATH\" --export-trades \"$BUNDLE_DIR/{replay_trades_csv.name}\" "
         f"--output \"$BUNDLE_DIR/{replay_report_path.name}\" --trades{funding_arg}{replay_sub_bar_args}\n"
         f"if ! python3 - \"$BUNDLE_DIR/{replay_report_path.name}\" <<'PY'\n"
@@ -614,8 +640,8 @@ def main() -> int:
         "then\n"
         "  if [ \"$BACKTESTER_REPLAY_CMD\" = \"$BACKTESTER_REPLAY_BIN\" ]; then\n"
         "    echo \"[replay] release binary missing config_fingerprint; retry with cargo\" >&2\n"
-        f"    $BACKTESTER_REPLAY_CARGO --config \"$BUNDLE_DIR/{strategy_config_snapshot_path.name}\" --candles-db \"$CANDLES_DB\" "
-        f"--interval {shlex.quote(str(args.interval))} --from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
+        f"    $BACKTESTER_REPLAY_CARGO --live --config \"$BUNDLE_DIR/{strategy_config_snapshot_path.name}\" --candles-db \"$CANDLES_DB\" "
+        f"--interval {shlex.quote(base_interval)} --from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
         f"--init-state \"$SNAPSHOT_PATH\" --export-trades \"$BUNDLE_DIR/{replay_trades_csv.name}\" "
         f"--output \"$BUNDLE_DIR/{replay_report_path.name}\" --trades{funding_arg}{replay_sub_bar_args}\n"
         f"    python3 - \"$BUNDLE_DIR/{replay_report_path.name}\" <<'PY'\n"
@@ -809,7 +835,10 @@ def main() -> int:
             "candles_db": str(candles_db),
             "funding_db": str(funding_db) if funding_db is not None else None,
             "strategy_config_source": str(strategy_config_source),
-            "interval": str(args.interval),
+            "interval": base_interval,
+            "interval_requested": requested_interval,
+            "interval_from_locked_strategy": cfg_interval or None,
+            "allow_interval_override": bool(args.allow_interval_override),
             "timestamp_bucket_ms": int(timestamp_bucket_ms),
             "entry_interval": cfg_entry_interval or None,
             "exit_interval": cfg_exit_interval or None,
