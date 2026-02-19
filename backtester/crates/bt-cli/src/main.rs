@@ -1031,15 +1031,36 @@ fn update_extremes(active: &mut ActiveTrade, bar: &bt_core::candle::OhlcvBar) {
 fn build_trade_export_rows(
     candles: &bt_core::candle::CandleData,
     trades: &[bt_core::position::TradeRecord],
+    init_positions: Option<&[bt_core::position::Position]>,
 ) -> Vec<TradeExportRow> {
-    // Assign a stable position_id per OPEN event in the trade log order.
+    // Assign a stable position_id per synthetic-init OPEN and per OPEN event in trade-log order.
     let mut next_position_id: u64 = 1;
     let mut open_counts: BTreeMap<String, u32> = BTreeMap::new();
     let mut position_ids: BTreeMap<(String, u32), u64> = BTreeMap::new();
-    for tr in trades {
+    let mut init_position_by_symbol: BTreeMap<String, bt_core::position::Position> =
+        BTreeMap::new();
+
+    if let Some(init_positions) = init_positions {
+        let mut sorted_init: Vec<&bt_core::position::Position> = init_positions.iter().collect();
+        sorted_init.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        for pos in sorted_init {
+            if pos.size <= 0.0 {
+                continue;
+            }
+            let c = open_counts.entry(pos.symbol.clone()).or_insert(0);
+            *c += 1;
+            position_ids.insert((pos.symbol.clone(), *c), next_position_id);
+            init_position_by_symbol.insert(pos.symbol.clone(), pos.clone());
+            next_position_id += 1;
+        }
+    }
+
+    let mut open_seq_by_trade_index: Vec<Option<u32>> = vec![None; trades.len()];
+    for (idx, tr) in trades.iter().enumerate() {
         if tr.action.starts_with("OPEN_") {
             let c = open_counts.entry(tr.symbol.clone()).or_insert(0);
             *c += 1;
+            open_seq_by_trade_index[idx] = Some(*c);
             position_ids.insert((tr.symbol.clone(), *c), next_position_id);
             next_position_id += 1;
         }
@@ -1073,7 +1094,23 @@ fn build_trade_export_rows(
         };
 
         let mut candle_i: usize = 0;
-        let mut active: Option<ActiveTrade> = None;
+        let mut active: Option<ActiveTrade> = init_position_by_symbol.get(&symbol).map(|pos| {
+            let position_id = position_ids.get(&(symbol.clone(), 1)).copied().unwrap_or(0);
+            let side = match pos.pos_type {
+                bt_core::position::PositionType::Long => Side::Long,
+                bt_core::position::PositionType::Short => Side::Short,
+            };
+            ActiveTrade {
+                position_id,
+                entry_ts_ms: pos.open_time_ms,
+                entry_price: pos.entry_price,
+                side,
+                max_high: pos.entry_price,
+                min_low: pos.entry_price,
+                exit_seq: 0,
+                open_count_for_symbol: 1,
+            }
+        });
 
         for (ts, idx) in events {
             let tr = &trades[idx];
@@ -1088,11 +1125,7 @@ fn build_trade_export_rows(
 
             // OPEN must start the trade before we include the candle at ts.
             if tr.action.starts_with("OPEN_") {
-                let open_count_for_symbol = active
-                    .as_ref()
-                    .map(|a| a.open_count_for_symbol)
-                    .unwrap_or(0)
-                    + 1;
+                let open_count_for_symbol = open_seq_by_trade_index[idx].unwrap_or(1);
 
                 let position_id = position_ids
                     .get(&(symbol.clone(), open_count_for_symbol))
@@ -1618,7 +1651,7 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Load init-state if provided (overrides both --initial-balance and --balance-from)
-    let (effective_balance, init_state) = if let Some(ref path) = args.init_state {
+    let (effective_balance, init_state, init_positions_for_export) = if let Some(ref path) = args.init_state {
         eprintln!("[replay] Loading init-state from {:?}", path);
         let state_file = bt_core::init_state::load(path).unwrap_or_else(|e| {
             eprintln!("[error] {e}");
@@ -1629,6 +1662,8 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
         let sym_strs: Vec<&str> = candles.keys().map(|s| s.as_str()).collect();
         let (balance, positions, entry_attempt_ms, exit_attempt_ms) =
             bt_core::init_state::into_sim_state_with_runtime(state_file, Some(&sym_strs));
+        let init_positions_for_export: Vec<bt_core::position::Position> =
+            positions.values().cloned().collect();
         eprintln!(
             "[replay] Init-state: balance=${:.2}, {} position(s), {} entry cooldown marker(s), {} exit cooldown marker(s)",
             balance,
@@ -1639,9 +1674,10 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
         (
             balance,
             Some((balance, positions, entry_attempt_ms, exit_attempt_ms)),
+            Some(init_positions_for_export),
         )
     } else {
-        (base_balance, None)
+        (base_balance, None, None)
     };
 
     let start = Instant::now();
@@ -1679,7 +1715,11 @@ fn cmd_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // Optional trade-level CSV export (one row per exit event).
     if let Some(ref path) = args.export_trades {
-        let rows = build_trade_export_rows(&candles, &sim.trades);
+        let rows = build_trade_export_rows(
+            &candles,
+            &sim.trades,
+            init_positions_for_export.as_deref(),
+        );
         write_trade_export_csv(path, &rows)?;
         eprintln!("[replay] Trade CSV written to {}", path.display());
     }
@@ -2984,8 +3024,8 @@ mod tests {
             ),
         ];
 
-        let rows1 = build_trade_export_rows(&candles, &trades);
-        let rows2 = build_trade_export_rows(&candles, &trades);
+        let rows1 = build_trade_export_rows(&candles, &trades, None);
+        let rows2 = build_trade_export_rows(&candles, &trades, None);
         assert_eq!(rows1, rows2);
 
         assert_eq!(rows1.len(), 1);

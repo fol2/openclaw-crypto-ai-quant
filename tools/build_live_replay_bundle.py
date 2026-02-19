@@ -13,7 +13,9 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import re
 import shlex
+import shutil
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,11 @@ try:
     from candles_provenance import build_candles_window_provenance
 except ModuleNotFoundError:  # pragma: no cover - module execution path
     from tools.candles_provenance import build_candles_window_provenance
+
+try:
+    import yaml
+except Exception:  # pragma: no cover - optional runtime dependency
+    yaml = None
 
 TRADE_ACTIONS = {"OPEN", "ADD", "REDUCE", "CLOSE", "FUNDING"}
 
@@ -68,6 +75,58 @@ def _hash_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _interval_to_bucket_ms(interval: str) -> int:
+    raw = str(interval or "").strip().lower()
+    if not raw:
+        return 1
+    m = re.fullmatch(r"(\d+)([mhd])", raw)
+    if m is None:
+        return 1
+    qty = int(m.group(1))
+    unit = m.group(2)
+    unit_ms = {
+        "m": 60_000,
+        "h": 3_600_000,
+        "d": 86_400_000,
+    }[unit]
+    if qty <= 0:
+        return 1
+    return int(qty * unit_ms)
+
+
+def _load_config_sub_intervals(config_path: Path) -> tuple[str, str]:
+    if yaml is None or not config_path.exists():
+        return "", ""
+    try:
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return "", ""
+    if not isinstance(raw, dict):
+        return "", ""
+    global_cfg = raw.get("global") or {}
+    if not isinstance(global_cfg, dict):
+        return "", ""
+    engine_cfg = global_cfg.get("engine") or {}
+    if not isinstance(engine_cfg, dict):
+        return "", ""
+    entry_iv = str(engine_cfg.get("entry_interval") or "").strip()
+    exit_iv = str(engine_cfg.get("exit_interval") or "").strip()
+    return entry_iv, exit_iv
+
+
+def _derive_interval_db(base_candles_db: Path, interval: str) -> Path | None:
+    iv = str(interval or "").strip()
+    if not iv:
+        return None
+    name = base_candles_db.name
+    if not (name.startswith("candles_") and name.endswith(".db")):
+        return None
+    candidate = (base_candles_db.parent / f"candles_{iv}.db").resolve()
+    if candidate.exists():
+        return candidate
+    return None
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build a live replay bundle with deterministic artefacts.")
     parser.add_argument("--live-db", default="./trading_engine_live.db", help="Path to live SQLite DB")
@@ -75,6 +134,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--candles-db", required=True, help="Path to candles SQLite DB used for replay")
     parser.add_argument("--funding-db", default=None, help="Optional funding SQLite DB used for replay funding events")
     parser.add_argument("--interval", default="1h", help="Replay interval (for command template)")
+    parser.add_argument(
+        "--strategy-config",
+        help=(
+            "Path to strategy YAML used for deterministic replay. "
+            "Default: <live-db-dir>/config/strategy_overrides.yaml"
+        ),
+    )
     parser.add_argument("--from-ts", type=int, required=True, help="Replay start timestamp (ms, inclusive)")
     parser.add_argument("--to-ts", type=int, required=True, help="Replay end timestamp (ms, inclusive)")
     parser.add_argument("--bundle-dir", required=True, help="Output bundle directory")
@@ -151,9 +217,28 @@ def main() -> int:
     if args.from_ts > args.to_ts:
         parser.error("from-ts must be <= to-ts")
 
+    strategy_config_source = (
+        Path(args.strategy_config).expanduser().resolve()
+        if args.strategy_config
+        else (live_db.parent / "config" / "strategy_overrides.yaml").resolve()
+    )
+    if not strategy_config_source.exists():
+        parser.error(
+            f"strategy config not found: {strategy_config_source} "
+            "(provide --strategy-config to pin the deterministic replay config)"
+        )
+
+    timestamp_bucket_ms = _interval_to_bucket_ms(str(args.interval))
+    if timestamp_bucket_ms <= 1:
+        parser.error(
+            f"unsupported interval for deterministic timestamp bucketing: {args.interval!r} "
+            "(expected forms like 1m, 3m, 5m, 15m, 30m, 1h)"
+        )
+
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
     snapshot_path = bundle_dir / snapshot_name
+    strategy_config_snapshot_path = bundle_dir / "strategy_overrides.locked.yaml"
     live_trades_path = bundle_dir / "live_baseline_trades.jsonl"
     audit_report_path = bundle_dir / "state_alignment_report.json"
     replay_trades_csv = bundle_dir / "backtester_trades.csv"
@@ -185,6 +270,32 @@ def main() -> int:
     with live_trades_path.open("w", encoding="utf-8") as fp:
         for row in baseline_trades:
             fp.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False) + "\n")
+
+    shutil.copy2(strategy_config_source, strategy_config_snapshot_path)
+    cfg_entry_interval, cfg_exit_interval = _load_config_sub_intervals(strategy_config_snapshot_path)
+    replay_entry_candles_db = _derive_interval_db(candles_db, cfg_entry_interval)
+    replay_exit_candles_db = _derive_interval_db(candles_db, cfg_exit_interval)
+    base_interval = str(args.interval or "").strip()
+    if cfg_entry_interval and cfg_entry_interval != base_interval and replay_entry_candles_db is None:
+        parser.error(
+            f"entry interval '{cfg_entry_interval}' requires candles DB beside {candles_db} "
+            f"(expected {candles_db.parent / f'candles_{cfg_entry_interval}.db'})"
+        )
+    if cfg_exit_interval and cfg_exit_interval != base_interval and replay_exit_candles_db is None:
+        parser.error(
+            f"exit interval '{cfg_exit_interval}' requires candles DB beside {candles_db} "
+            f"(expected {candles_db.parent / f'candles_{cfg_exit_interval}.db'})"
+        )
+
+    replay_sub_bar_args = ""
+    if cfg_entry_interval:
+        replay_sub_bar_args += f" --entry-interval {shlex.quote(cfg_entry_interval)}"
+        if replay_entry_candles_db is not None:
+            replay_sub_bar_args += f" --entry-candles-db {shlex.quote(str(replay_entry_candles_db))}"
+    if cfg_exit_interval:
+        replay_sub_bar_args += f" --exit-interval {shlex.quote(cfg_exit_interval)}"
+        if replay_exit_candles_db is not None:
+            replay_sub_bar_args += f" --exit-candles-db {shlex.quote(str(replay_exit_candles_db))}"
 
     seed_as_of_ts = max(1, int(args.from_ts) - 1)
 
@@ -219,10 +330,10 @@ def main() -> int:
         "else\n"
         "  BACKTESTER_REPLAY_CMD='cargo run -q --release --package bt-cli -- replay'\n"
         "fi\n"
-        f"$BACKTESTER_REPLAY_CMD --candles-db \"$CANDLES_DB\" "
+        f"$BACKTESTER_REPLAY_CMD --config \"$BUNDLE_DIR/{strategy_config_snapshot_path.name}\" --candles-db \"$CANDLES_DB\" "
         f"--interval {shlex.quote(str(args.interval))} --from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
         f"--init-state \"$SNAPSHOT_PATH\" --export-trades \"$BUNDLE_DIR/{replay_trades_csv.name}\" "
-        f"--output \"$BUNDLE_DIR/{replay_report_path.name}\" --trades{funding_arg}"
+        f"--output \"$BUNDLE_DIR/{replay_report_path.name}\" --trades{funding_arg}{replay_sub_bar_args}"
     )
 
     cmd_audit = (
@@ -244,6 +355,7 @@ def main() -> int:
         "python3 \"$REPO_ROOT/tools/audit_live_backtester_trade_reconcile.py\" "
         f"--live-baseline \"$BUNDLE_DIR/{live_trades_path.name}\" "
         f"--backtester-trades \"$BUNDLE_DIR/{replay_trades_csv.name}\" "
+        f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
         f"--output \"$BUNDLE_DIR/{trade_reconcile_path.name}\""
     )
 
@@ -254,6 +366,7 @@ def main() -> int:
         "python3 \"$REPO_ROOT/tools/audit_live_backtester_action_reconcile.py\" "
         f"--live-baseline \"$BUNDLE_DIR/{live_trades_path.name}\" "
         f"--backtester-replay-report \"$BUNDLE_DIR/{replay_report_path.name}\" "
+        f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
         f"--output \"$BUNDLE_DIR/{action_reconcile_path.name}\""
     )
 
@@ -267,6 +380,7 @@ def main() -> int:
         "--live-db \"$LIVE_DB\" "
         "--paper-db \"$PAPER_DB\" "
         f"--from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
+        f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
         f"--output \"$BUNDLE_DIR/{live_paper_action_reconcile_path.name}\""
     )
 
@@ -280,6 +394,7 @@ def main() -> int:
         "--live-db \"$LIVE_DB\" "
         "--paper-db \"$PAPER_DB\" "
         f"--from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
+        f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
         f"--output \"$BUNDLE_DIR/{live_paper_decision_trace_reconcile_path.name}\""
     )
 
@@ -292,6 +407,7 @@ def main() -> int:
         f"--live-baseline \"$BUNDLE_DIR/{live_trades_path.name}\" "
         "--paper-db \"$PAPER_DB\" "
         f"--from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
+        f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
         "--fail-on-mismatch "
         f"--output \"$BUNDLE_DIR/{event_order_parity_path.name}\""
     )
@@ -301,6 +417,7 @@ def main() -> int:
         "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
         "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
         f"CANDLES_DB=\"${{CANDLES_DB:-{shlex.quote(str(candles_db))}}}\"\n"
+        f"export AQC_PARITY_CONFIG_PATH=\"${{AQC_PARITY_CONFIG_PATH:-$BUNDLE_DIR/{strategy_config_snapshot_path.name}}}\"\n"
         f"{funding_env}"
         "python3 \"$REPO_ROOT/tools/run_bundle_gpu_parity.py\" "
         "--bundle-dir \"$BUNDLE_DIR\" "
@@ -382,17 +499,26 @@ def main() -> int:
             "paper_db": str(paper_db),
             "candles_db": str(candles_db),
             "funding_db": str(funding_db) if funding_db is not None else None,
+            "strategy_config_source": str(strategy_config_source),
             "interval": str(args.interval),
+            "timestamp_bucket_ms": int(timestamp_bucket_ms),
+            "entry_interval": cfg_entry_interval or None,
+            "exit_interval": cfg_exit_interval or None,
+            "entry_candles_db": str(replay_entry_candles_db) if replay_entry_candles_db is not None else None,
+            "exit_candles_db": str(replay_exit_candles_db) if replay_exit_candles_db is not None else None,
             "from_ts": int(args.from_ts),
             "to_ts": int(args.to_ts),
         },
         "input_hashes": {
             "candles_db_sha256": _hash_file(candles_db),
             "funding_db_sha256": _hash_file(funding_db) if funding_db is not None else None,
+            "strategy_config_source_sha256": _hash_file(strategy_config_source),
+            "strategy_config_snapshot_sha256": _hash_file(strategy_config_snapshot_path),
         },
         "candles_provenance": candles_provenance,
         "artefacts": {
             "snapshot_file": snapshot_path.name,
+            "strategy_config_snapshot_file": strategy_config_snapshot_path.name,
             "live_baseline_trades": live_trades_path.name,
             "live_baseline_trades_sha256": _hash_file(live_trades_path),
             "audit_report_file": audit_report_path.name,
