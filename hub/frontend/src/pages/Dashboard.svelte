@@ -1994,6 +1994,7 @@
   .chart-wrap {
     flex-shrink: 0;
     overflow: hidden;
+    touch-action: none;
   }
   .chart-splitter {
     height: 8px;
@@ -2250,6 +2251,7 @@
     flex: 1;
     min-height: 0;
     position: relative;
+    touch-action: none;
   }
   .journey-chart-splitter {
     height: 5px;
