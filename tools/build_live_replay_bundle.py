@@ -85,6 +85,14 @@ def _hash_json_canonical(obj: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _hash_json_canonical_sha1(obj: Any) -> str:
+    try:
+        payload = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    except Exception:
+        payload = repr(obj).encode("utf-8")
+    return hashlib.sha1(payload).hexdigest()
+
+
 def _load_yaml_mapping(path: Path) -> dict[str, Any] | None:
     if yaml is None or not path.exists():
         return None
@@ -101,6 +109,14 @@ def _strategy_overrides_sha1(path: Path) -> str:
     if loaded is None:
         return ""
     return _hash_json_canonical(loaded)
+
+
+def _strategy_overrides_sha1_legacy(path: Path) -> str:
+    """Return historical StrategyManager hash used by older runtimes (SHA-1 digest)."""
+    loaded = _load_yaml_mapping(path)
+    if loaded is None:
+        return ""
+    return _hash_json_canonical_sha1(loaded)
 
 
 def _interval_to_bucket_ms(interval: str) -> int:
@@ -469,7 +485,8 @@ def main() -> int:
             fp.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False) + "\n")
 
     shutil.copy2(strategy_config_source, strategy_config_snapshot_path)
-    locked_strategy_sha1 = _strategy_overrides_sha1(strategy_config_snapshot_path)
+    locked_strategy_sha256 = _strategy_overrides_sha1(strategy_config_snapshot_path)
+    locked_strategy_sha1_legacy = _strategy_overrides_sha1_legacy(strategy_config_snapshot_path)
     runtime_timeline = runtime_strategy_provenance.get("strategy_sha1_timeline")
     runtime_rows = runtime_timeline if isinstance(runtime_timeline, list) else []
     matching_runtime_prefixes = sorted(
@@ -477,13 +494,20 @@ def main() -> int:
             str(row.get("strategy_sha1") or "").strip().lower()
             for row in runtime_rows
             if str(row.get("strategy_sha1") or "").strip()
-            and str(locked_strategy_sha1).startswith(str(row.get("strategy_sha1") or "").strip().lower())
+            and (
+                str(locked_strategy_sha256).startswith(str(row.get("strategy_sha1") or "").strip().lower())
+                or str(locked_strategy_sha1_legacy).startswith(str(row.get("strategy_sha1") or "").strip().lower())
+            )
         }
     )
     oms_timeline = oms_strategy_provenance.get("strategy_sha1_timeline")
     oms_rows = oms_timeline if isinstance(oms_timeline, list) else []
     matches_oms_sha1 = any(
-        str(row.get("strategy_sha1") or "").strip().lower() == str(locked_strategy_sha1).strip().lower()
+        str(row.get("strategy_sha1") or "").strip().lower()
+        in {
+            str(locked_strategy_sha256).strip().lower(),
+            str(locked_strategy_sha1_legacy).strip().lower(),
+        }
         for row in oms_rows
     )
 
@@ -803,8 +827,10 @@ def main() -> int:
         "runtime_strategy_provenance": runtime_strategy_provenance,
         "oms_strategy_provenance": oms_strategy_provenance,
         "locked_strategy_provenance": {
-            "strategy_overrides_sha1": str(locked_strategy_sha1),
-            "strategy_overrides_sha1_prefix8": str(locked_strategy_sha1)[:8],
+            "strategy_overrides_sha1": str(locked_strategy_sha256),
+            "strategy_overrides_sha1_prefix8": str(locked_strategy_sha256)[:8],
+            "strategy_overrides_sha1_legacy": str(locked_strategy_sha1_legacy),
+            "strategy_overrides_sha1_legacy_prefix8": str(locked_strategy_sha1_legacy)[:8],
             "matching_runtime_sha1_prefixes": matching_runtime_prefixes,
             "matches_runtime_strategy_prefix": bool(matching_runtime_prefixes),
             "matches_oms_strategy_sha1": bool(matches_oms_sha1),
