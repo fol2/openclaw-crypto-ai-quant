@@ -196,6 +196,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--from-ts", type=int, required=True, help="Replay start timestamp (ms, inclusive)")
     parser.add_argument("--to-ts", type=int, required=True, help="Replay end timestamp (ms, inclusive)")
+    parser.add_argument(
+        "--allow-partial-first-bar",
+        action="store_true",
+        help=(
+            "Allow from-ts to start mid-bar for the replay interval. "
+            "Default is fail-closed (requires bar-aligned from-ts for deterministic state sync)."
+        ),
+    )
     parser.add_argument("--bundle-dir", required=True, help="Output bundle directory")
     parser.add_argument(
         "--snapshot-name",
@@ -439,13 +447,6 @@ def main() -> int:
             "(provide --strategy-config to pin the deterministic replay config)"
         )
 
-    timestamp_bucket_ms = _interval_to_bucket_ms(str(args.interval))
-    if timestamp_bucket_ms <= 1:
-        parser.error(
-            f"unsupported interval for deterministic timestamp bucketing: {args.interval!r} "
-            "(expected forms like 1m, 3m, 5m, 15m, 30m, 1h)"
-        )
-
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
     snapshot_path = bundle_dir / snapshot_name
@@ -472,12 +473,6 @@ def main() -> int:
     )
     baseline_trade_exit_count = sum(1 for row in baseline_trades if row.get("action") in {"CLOSE", "REDUCE"})
     baseline_trade_funding_count = sum(1 for row in baseline_trades if row.get("action") == "FUNDING")
-    candles_provenance = build_candles_window_provenance(
-        candles_db,
-        interval=str(args.interval),
-        from_ts=int(args.from_ts),
-        to_ts=int(args.to_ts),
-    )
     runtime_strategy_provenance = _load_runtime_strategy_provenance(
         live_db,
         from_ts=int(args.from_ts),
@@ -541,6 +536,30 @@ def main() -> int:
         base_interval = cfg_interval
     else:
         base_interval = requested_interval or cfg_interval or "1h"
+
+    timestamp_bucket_ms = _interval_to_bucket_ms(base_interval)
+    if timestamp_bucket_ms <= 1:
+        parser.error(
+            f"unsupported interval for deterministic timestamp bucketing: {base_interval!r} "
+            "(expected forms like 1m, 3m, 5m, 15m, 30m, 1h)"
+        )
+    from_ts_aligned_to_interval = int(args.from_ts) % int(timestamp_bucket_ms) == 0
+    if not from_ts_aligned_to_interval and not bool(args.allow_partial_first_bar):
+        next_boundary = ((int(args.from_ts) // int(timestamp_bucket_ms)) + 1) * int(timestamp_bucket_ms)
+        parser.error(
+            f"from-ts {int(args.from_ts)} is not aligned to interval '{base_interval}' "
+            f"(bucket_ms={int(timestamp_bucket_ms)}). "
+            f"Use an aligned from-ts (for example {next_boundary}) or pass "
+            "--allow-partial-first-bar if the partial first bar is intentional."
+        )
+
+    candles_provenance = build_candles_window_provenance(
+        candles_db,
+        interval=base_interval,
+        from_ts=int(args.from_ts),
+        to_ts=int(args.to_ts),
+    )
+
     if cfg_entry_interval and cfg_entry_interval != base_interval and replay_entry_candles_db is None:
         parser.error(
             f"entry interval '{cfg_entry_interval}' requires candles DB beside {candles_db} "
@@ -839,6 +858,8 @@ def main() -> int:
             "interval_requested": requested_interval,
             "interval_from_locked_strategy": cfg_interval or None,
             "allow_interval_override": bool(args.allow_interval_override),
+            "allow_partial_first_bar": bool(args.allow_partial_first_bar),
+            "from_ts_aligned_to_interval": bool(from_ts_aligned_to_interval),
             "timestamp_bucket_ms": int(timestamp_bucket_ms),
             "entry_interval": cfg_entry_interval or None,
             "exit_interval": cfg_exit_interval or None,
