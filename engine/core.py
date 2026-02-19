@@ -935,6 +935,18 @@ class UnifiedEngine:
         self.mode = str(mode or os.getenv("AI_QUANT_MODE", "paper") or "paper").strip().lower()
         self.mode_plugin = mode_plugin
         self.decision_provider = decision_provider or _build_default_decision_provider()
+        if self.mode in {"live", "dry_live"}:
+            provider_name = type(self.decision_provider).__name__
+            rust_ssot_providers = {"KernelDecisionRustBindingProvider", "KernelCandleDecisionProvider"}
+            if provider_name not in rust_ssot_providers:
+                logger.fatal(
+                    "FATAL: mode=%s requires a Rust decision provider for SSOT. "
+                    "Got provider=%s. Allowed providers=%s",
+                    self.mode,
+                    provider_name,
+                    ",".join(sorted(rust_ssot_providers)),
+                )
+                raise SystemExit(1)
 
         self.stats = EngineStats()
 
