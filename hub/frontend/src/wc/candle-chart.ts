@@ -258,9 +258,14 @@ export class CandleChart extends LitElement {
       this._vStart = 0;
       this._vCount = total;
     } else if (firstTs < this._prevFirstTs && this._prevFirstTs > 0) {
-      // Prepend detected — shift viewport to keep same candles visible
-      const added = total - this._prevDataLen;
-      this._vStart += added;
+      // Prepend detected — count only candles before the old first timestamp
+      // (handles simultaneous prepend+append correctly)
+      let prepended = 0;
+      for (let i = 0; i < sorted.length; i++) {
+        if (sorted[i].t >= this._prevFirstTs) break;
+        prepended++;
+      }
+      this._vStart += prepended;
     } else if (firstTs === this._prevFirstTs && total > this._prevDataLen) {
       // Append detected — keep viewport as-is (no jump)
     } else if (Math.abs(total - this._prevDataLen) > Math.max(2, this._prevDataLen * 0.1)) {

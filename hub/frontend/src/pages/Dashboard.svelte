@@ -212,20 +212,24 @@
       journeyFromTs = newFrom;
       journeyToTs = newTo;
     } catch (e) { console.error('onJourneyNeedCandles failed:', e); }
-    journeyExtending = false;
+    finally { journeyExtending = false; }
   }
 
   async function onMainNeedCandles(e: CustomEvent) {
     const { before } = e.detail || {};
     if (before == null || mainExtending || !focusSym) return;
+    // Capture current context before async — detect stale responses after await
+    const sym = focusSym;
+    const iv = selectedInterval;
     mainExtending = true;
     try {
-      const res = await getCandlesRange(focusSym, selectedInterval, undefined, before, 500);
+      const res = await getCandlesRange(sym, iv, undefined, before, 500);
+      if (focusSym !== sym || selectedInterval !== iv) return;
       if (res.candles?.length) {
         candles = mergeCandles(res.candles, candles);
       }
     } catch (e) { console.error('onMainNeedCandles failed:', e); }
-    mainExtending = false;
+    finally { mainExtending = false; }
   }
 
   function onChartSplitterDown(e: PointerEvent) {
