@@ -681,6 +681,7 @@ def main() -> int:
         "python3 \"$REPO_ROOT/tools/audit_live_paper_action_reconcile.py\" "
         "--live-db \"$LIVE_DB\" "
         "--paper-db \"$PAPER_DB\" "
+        f"--paper-seed-watermark \"$BUNDLE_DIR/{paper_seed_watermark_path.name}\" "
         f"--from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
         f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
         f"--output \"$BUNDLE_DIR/{live_paper_action_reconcile_path.name}\""

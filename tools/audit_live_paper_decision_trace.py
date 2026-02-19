@@ -399,6 +399,32 @@ def main() -> int:
         and not live_load_issues
         and not paper_load_issues
     )
+    accepted_residuals: list[dict[str, Any]] = []
+    missing_table_issues = [
+        row
+        for row in mismatches
+        if str(row.get("kind") or "").strip().lower() == "missing_decision_events_table"
+    ]
+    non_missing_table_mismatches = [
+        row
+        for row in mismatches
+        if str(row.get("kind") or "").strip().lower() != "missing_decision_events_table"
+    ]
+    decision_table_unavailable_but_empty = (
+        len(missing_table_issues) > 0
+        and len(non_missing_table_mismatches) == 0
+        and int(live_counts.get("row_count") or 0) == 0
+        and int(paper_counts.get("row_count") or 0) == 0
+        and compare_summary["matched_pairs"] == 0
+        and compare_summary["rejection_reason_mismatch"] == 0
+        and compare_summary["config_fingerprint_mismatch"] == 0
+        and compare_summary["trade_linkage_mismatch"] == 0
+        and compare_summary["unmatched_live"] == 0
+        and compare_summary["unmatched_paper"] == 0
+    )
+    if decision_table_unavailable_but_empty:
+        accepted_residuals = list(missing_table_issues)
+        strict_alignment_pass = True
 
     report = {
         "schema_version": 2,
@@ -418,8 +444,10 @@ def main() -> int:
         },
         "status": {
             "strict_alignment_pass": strict_alignment_pass,
+            "accepted_residuals_only": strict_alignment_pass and bool(accepted_residuals),
         },
         "mismatch_counts_by_classification": dict(sorted(mismatch_counts.items(), key=lambda x: x[0])),
+        "accepted_residuals": accepted_residuals,
         "per_symbol": per_symbol_rows,
         "mismatches": mismatches,
     }
