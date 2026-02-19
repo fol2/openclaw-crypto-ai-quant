@@ -578,8 +578,8 @@
   let _candlesSeriesInterval = '';
   // Client/server clock offset for candle-boundary alignment.
   let _serverNowOffsetMs = 0;
-  // Timestamp of last live-candle paint; used to cap redraws at ~15fps
-  let _liveUpdateMs = 0;
+  let _lastLiveFrameMs = 0;
+  let _lastLiveTickKey = '';
   // Candle reconciliation controls.
   const CANDLE_ROLLOVER_RECONCILE_DELAY_MS = 1600;
   const CANDLE_PERIODIC_RECONCILE_MS = 25_000;
@@ -590,6 +590,8 @@
   function setCandlesSeriesContext(sym: string, iv: string) {
     _candlesSeriesSym = sym;
     _candlesSeriesInterval = iv;
+    _lastLiveFrameMs = 0;
+    _lastLiveTickKey = '';
   }
 
   function hasCandlesSeriesContext(sym: string, iv: string): boolean {
@@ -710,15 +712,14 @@
 
   // Live candle update: mutate current developing candle, and roll over to a
   // new synthetic candle once the exchange interval boundary is crossed.
-  // Rate-limited to ~15fps (66ms) to avoid triggering JSON.stringify + full
-  // canvas redraw at the raw WS cadence (~100ms / 10Hz).
   $effect(() => {
     const sym = focusSym;
     if (!sym) return;
     const handler = (data: any) => {
       updateServerClockOffset(data?.server_ts_ms);
       const localNow = Date.now();
-      if (localNow - _liveUpdateMs < 66) return; // ~15fps cap
+      // Keep near-per-tick responsiveness while capping pathological redraw rates.
+      if (localNow - _lastLiveFrameMs < 16) return;
       const mid = extractLiveMid(data, sym);
       if (mid == null || candles.length === 0) return;
 
@@ -728,6 +729,9 @@
       const barStart = Math.floor(now / msPerBar) * msPerBar;
       const barClose = barStart + msPerBar - 1;
       if (!hasCandlesSeriesContext(sym, selectedInterval)) return;
+      const tickKey = `${barStart}:${mid}`;
+      if (tickKey === _lastLiveTickKey) return;
+      _lastLiveTickKey = tickKey;
 
       let liveIdx = newestCandleIndex(candles);
       let c = candles[liveIdx];
@@ -769,7 +773,7 @@
         }
         // Replace synthetic rollover candle with exchange-written candles shortly after boundary.
         scheduleRolloverReconcile();
-        _liveUpdateMs = localNow;
+        _lastLiveFrameMs = localNow;
         return;
       }
 
@@ -778,12 +782,14 @@
         c.t_close = barClose;
       }
 
+      const prevClose = Number.isFinite(Number(c.c)) ? Number(c.c) : mid;
       const prevHigh = Number.isFinite(Number(c.h)) ? Number(c.h) : mid;
       const prevLow = Number.isFinite(Number(c.l)) ? Number(c.l) : mid;
-      _liveUpdateMs = localNow;
+      if (prevClose === mid && prevHigh >= mid && prevLow <= mid) return;
       c.c = mid;
       c.h = Math.max(prevHigh, mid);
       c.l = Math.min(prevLow, mid);
+      _lastLiveFrameMs = localNow;
     };
     hubWs.subscribe('mids', handler);
     hubWs.subscribe('bbo', handler);
