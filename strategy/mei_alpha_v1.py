@@ -5186,28 +5186,35 @@ class PaperTrader:
         # Python entry-gate decision filters (confidence/PESC/SSF/REEF).
         python_entry_gates_enabled = False
 
-        # action kwarg: "OPEN", "CLOSE", "ADD" — match LiveTrader dispatch semantics.
-        if action is not None:
-            action_upper = str(action).upper()
-            if action_upper == "CLOSE":
-                if symbol in self.positions:
-                    self.close_position(symbol, price, timestamp, reason=reason or "Action CLOSE")
-                return
-            if action_upper == "ADD":
-                if symbol in self.positions:
-                    self.add_to_position(symbol, price, timestamp, confidence, atr=atr, indicators=indicators)
-                return
-            if action_upper == "REDUCE":
-                if symbol in self.positions:
-                    pos = self.positions[symbol]
-                    reduce_sz = float(target_size) if target_size is not None else float(pos.get("size", 0))
-                    self.reduce_position(
-                        symbol, reduce_sz, price, timestamp, reason=reason or "Action REDUCE", confidence=confidence
-                    )
-                return
-            if action_upper == "OPEN":
-                if symbol in self.positions:
-                    return  # already open — skip (match LiveTrader)
+        action_upper = str(action or "").strip().upper()
+        if action_upper not in {"OPEN", "ADD", "CLOSE", "REDUCE"}:
+            logger.debug(
+                "execute_trade: skip legacy signal-only path for %s (action=%r)",
+                symbol,
+                action,
+            )
+            return
+
+        # action kwarg: "OPEN", "CLOSE", "ADD", "REDUCE" — Rust-kernel SSOT dispatch.
+        if action_upper == "CLOSE":
+            if symbol in self.positions:
+                self.close_position(symbol, price, timestamp, reason=reason or "Action CLOSE")
+            return
+        if action_upper == "ADD":
+            if symbol in self.positions:
+                self.add_to_position(symbol, price, timestamp, confidence, atr=atr, indicators=indicators)
+            return
+        if action_upper == "REDUCE":
+            if symbol in self.positions:
+                pos = self.positions[symbol]
+                reduce_sz = float(target_size) if target_size is not None else float(pos.get("size", 0))
+                self.reduce_position(
+                    symbol, reduce_sz, price, timestamp, reason=reason or "Action REDUCE", confidence=confidence
+                )
+            return
+        if action_upper == "OPEN":
+            if symbol in self.positions:
+                return  # already open — skip (match LiveTrader)
 
         # Normalise indicators: pandas Series → dict (avoids truth-value crash)
         if indicators is not None and not isinstance(indicators, dict):
