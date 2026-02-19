@@ -3,8 +3,8 @@
   import { hubWs } from '../lib/ws';
   import { CANDIDATE_FAMILY_ORDER, getModeLabel, LIVE_MODE } from '../lib/mode-labels';
 
-  let mode = $state('paper1');
-  let gridSize = $state(3);
+  let mode = $state('_pending_');     // set after cookie helpers
+  let gridSize = $state(3);          // set after cookie helpers
   let symbols: any[] = $state([]);
   let mids: Record<string, number> = $state({});
   let trendCloses: Record<string, number[]> = $state({});
@@ -43,14 +43,46 @@
     return syms;
   });
 
-  // ── Trend debug controls ──────────────────────────────────────────
-  let debugTrend = $state(new URLSearchParams(window.location.search).has('trend_debug'));
-  let trendFullPct = $state(1.0);   // ±X% maps to full intensity
-  let trendCurve   = $state(1.0);   // exponent: <1 compress, >1 amplify
-  let trendWindow  = $state(0);     // 0 = all points
-  let trendInterval = $state('5m'); // candle interval for trend data
-  let trendBars    = $state(60);    // number of candle bars
-  let trendStrengthMul = $state(1.0); // OKLCH intensity multiplier
+  // ── Cookie helpers ───────────────────────────────────────────────
+  function getCookie(key: string, fallback: string): string {
+    const m = document.cookie.match(new RegExp(`(?:^|; )${key}=([^;]*)`));
+    return m ? decodeURIComponent(m[1]) : fallback;
+  }
+  function setCookie(key: string, val: string) {
+    document.cookie = `${key}=${encodeURIComponent(val)};path=/;max-age=31536000;SameSite=Lax`;
+  }
+  function getNumCookie(key: string, fallback: number): number {
+    const v = Number(getCookie(key, String(fallback)));
+    return Number.isFinite(v) ? v : fallback;
+  }
+
+  // ── Persisted view settings ─────────────────────────────────────
+  mode = getCookie('gridMode', 'paper1');
+  gridSize = getNumCookie('gridSize', 3);
+
+  // ── Trend debug controls (persisted via cookies) ───────────────
+  let debugTrend = $state(getCookie('trendDebug', '') === '1' || new URLSearchParams(window.location.search).has('trend_debug'));
+  let trendFullPct = $state(getNumCookie('trendFullPct', 1.0));
+  let trendCurve   = $state(getNumCookie('trendCurve', 1.0));
+  let trendWindow  = $state(getNumCookie('trendWindow', 0));
+  let trendInterval = $state(getCookie('trendInterval', '5m'));
+  let trendBars    = $state(getNumCookie('trendBars', 60));
+  let trendStrengthMul = $state(getNumCookie('trendStrengthMul', 1.0));
+  let showCardDbg = $state(getCookie('showCardDbg', '1') === '1');
+
+  // Persist debug settings to cookies on change
+  $effect(() => {
+    setCookie('trendDebug', debugTrend ? '1' : '0');
+    setCookie('trendFullPct', String(trendFullPct));
+    setCookie('trendCurve', String(trendCurve));
+    setCookie('trendWindow', String(trendWindow));
+    setCookie('trendInterval', trendInterval);
+    setCookie('trendBars', String(trendBars));
+    setCookie('trendStrengthMul', String(trendStrengthMul));
+    setCookie('showCardDbg', showCardDbg ? '1' : '0');
+    setCookie('gridMode', mode);
+    setCookie('gridSize', String(gridSize));
+  });
 
   // ── Trend computation (OLS linear regression) ───────────────────
   function linregTrend(pts: number[], win: number): number {
@@ -186,32 +218,34 @@
   {#if debugTrend}
     <div class="debug-bar">
       <label>
-        <span class="db-label">Interval</span>
-        <select bind:value={trendInterval} onchange={refreshTrend}>
+        <span class="db-label" title="Candle interval for trend calculation (e.g. 5m = 5-minute candles)">Interval</span>
+        <select title="Candle interval for trend calculation (e.g. 5m = 5-minute candles)" bind:value={trendInterval} onchange={refreshTrend}>
           <option value="1m">1m</option>
+          <option value="3m">3m</option>
           <option value="5m">5m</option>
           <option value="15m">15m</option>
+          <option value="30m">30m</option>
           <option value="1h">1h</option>
         </select>
       </label>
       <label>
-        <span class="db-label">Bars</span>
-        <input type="range" min="10" max="200" step="10" bind:value={trendBars} onchange={refreshTrend} />
+        <span class="db-label" title="Number of candle bars in the trend regression. More bars = longer lookback">Bars</span>
+        <input title="Number of candle bars in the trend regression. More bars = longer lookback" type="range" min="10" max="200" step="10" bind:value={trendBars} onchange={refreshTrend} />
         <span class="db-val">{trendBars}</span>
       </label>
       <label>
-        <span class="db-label">Full&nbsp;%</span>
-        <input type="range" min="0.1" max="5" step="0.1" bind:value={trendFullPct} />
+        <span class="db-label" title="Price change (%) that maps to full intensity. Lower = more sensitive">Full&nbsp;%</span>
+        <input title="Price change (%) that maps to full intensity. Lower = more sensitive" type="range" min="0.1" max="5" step="0.1" bind:value={trendFullPct} />
         <span class="db-val">{trendFullPct.toFixed(1)}</span>
       </label>
       <label>
-        <span class="db-label">Curve</span>
-        <input type="range" min="0.2" max="3" step="0.1" bind:value={trendCurve} />
+        <span class="db-label" title="Exponent curve. <1 = compress (subtle diffs visible), >1 = amplify (only strong trends)">Curve</span>
+        <input title="Exponent curve. <1 = compress (subtle diffs visible), >1 = amplify (only strong trends)" type="range" min="0.2" max="3" step="0.1" bind:value={trendCurve} />
         <span class="db-val">{trendCurve.toFixed(1)}</span>
       </label>
       <label>
-        <span class="db-label">Window</span>
-        <select bind:value={trendWindow}>
+        <span class="db-label" title="Use only the last N bars for regression. 0 = use all bars">Window</span>
+        <select title="Use only the last N bars for regression. 0 = use all bars" bind:value={trendWindow}>
           <option value={0}>All</option>
           <option value={10}>10</option>
           <option value={20}>20</option>
@@ -220,9 +254,13 @@
         </select>
       </label>
       <label>
-        <span class="db-label">Strength</span>
-        <input type="range" min="0.5" max="5" step="0.1" bind:value={trendStrengthMul} />
+        <span class="db-label" title="OKLCH color intensity multiplier. Higher = more vivid background">Strength</span>
+        <input title="OKLCH color intensity multiplier. Higher = more vivid background" type="range" min="0.5" max="5" step="0.1" bind:value={trendStrengthMul} />
         <span class="db-val">{trendStrengthMul.toFixed(1)}x</span>
+      </label>
+      <label class="db-checkbox">
+        <input title="Show per-card debug text (data points, raw %, trend strength)" type="checkbox" bind:checked={showCardDbg} />
+        <span class="db-label" title="Show per-card debug text (data points, raw %, trend strength)">Card text</span>
       </label>
     </div>
   {/if}
@@ -235,7 +273,7 @@
         {@const hist = trendCloses[s.symbol] || []}
         {@const trend = trendStrength(hist)}
         <div class="grid-cell" class:has-trend={Math.abs(trend) >= 0.05} style={trendVars(trend)}>
-          {#if debugTrend}
+          {#if debugTrend && showCardDbg}
             <span class="trend-dbg">{hist.length}pt {(linregTrend(hist, trendWindow) * 100).toFixed(3)}%→{trend.toFixed(2)}</span>
           {/if}
           <div class="cell-header">
@@ -420,7 +458,10 @@
     font-size: 11px;
     font-family: 'IBM Plex Mono', monospace;
     color: var(--text-dim);
+    overflow-x: auto;
+    scrollbar-width: none;
   }
+  .debug-bar::-webkit-scrollbar { display: none; }
   .debug-bar label {
     display: flex;
     align-items: center;
@@ -435,6 +476,10 @@
     color: var(--accent);
     min-width: 28px;
     text-align: right;
+  }
+  .db-checkbox input[type="checkbox"] {
+    accent-color: var(--accent);
+    margin: 0;
   }
   .debug-bar input[type="range"] {
     width: 100px;
