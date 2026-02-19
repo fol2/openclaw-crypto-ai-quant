@@ -31,6 +31,8 @@ except Exception:  # pragma: no cover - optional runtime dependency
     yaml = None
 
 TRADE_ACTIONS = {"OPEN", "ADD", "REDUCE", "CLOSE", "FUNDING"}
+_STRATEGY_SHA1_RE = re.compile(r"strategy_sha1=([0-9a-fA-F]{7,40})")
+_STRATEGY_VERSION_RE = re.compile(r"version=([A-Za-z0-9._-]+)")
 
 
 def _connect_ro(path: Path) -> sqlite3.Connection:
@@ -195,6 +197,88 @@ def _load_live_baseline_trades(live_db: Path, *, from_ts: int, to_ts: int) -> li
     return out
 
 
+def _load_runtime_strategy_provenance(
+    live_db: Path,
+    *,
+    from_ts: int,
+    to_ts: int,
+) -> dict[str, Any]:
+    conn = _connect_ro(live_db)
+    try:
+        rows = conn.execute(
+            "SELECT ts_ms, message FROM runtime_logs WHERE ts_ms >= ? AND ts_ms <= ? ORDER BY ts_ms ASC, id ASC",
+            (int(from_ts), int(to_ts)),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    per_sha: dict[str, dict[str, Any]] = {}
+    distinct_versions: set[str] = set()
+    sampled_rows = 0
+
+    for row in rows:
+        ts_ms = int(row["ts_ms"] or 0)
+        message = str(row["message"] or "")
+        if ts_ms <= 0 or not message:
+            continue
+
+        sha_match = _STRATEGY_SHA1_RE.search(message)
+        if sha_match is None:
+            continue
+
+        sha = str(sha_match.group(1) or "").strip().lower()
+        if not sha:
+            continue
+
+        sampled_rows += 1
+
+        version_match = _STRATEGY_VERSION_RE.search(message)
+        version = str(version_match.group(1) or "").strip() if version_match is not None else ""
+
+        bucket = per_sha.get(sha)
+        if bucket is None:
+            bucket = {
+                "strategy_sha1": sha,
+                "sample_count": 0,
+                "first_ts_ms": ts_ms,
+                "last_ts_ms": ts_ms,
+                "versions": set(),
+            }
+            per_sha[sha] = bucket
+
+        bucket["sample_count"] = int(bucket["sample_count"]) + 1
+        bucket["first_ts_ms"] = min(int(bucket["first_ts_ms"]), ts_ms)
+        bucket["last_ts_ms"] = max(int(bucket["last_ts_ms"]), ts_ms)
+        if version:
+            cast_versions = bucket["versions"]
+            if isinstance(cast_versions, set):
+                cast_versions.add(version)
+            distinct_versions.add(version)
+
+    strategy_rows: list[dict[str, Any]] = []
+    for _, item in sorted(per_sha.items(), key=lambda kv: int(kv[1]["first_ts_ms"])):
+        versions = item.get("versions")
+        strategy_rows.append(
+            {
+                "strategy_sha1": str(item["strategy_sha1"]),
+                "sample_count": int(item["sample_count"]),
+                "first_ts_ms": int(item["first_ts_ms"]),
+                "last_ts_ms": int(item["last_ts_ms"]),
+                "versions": sorted(str(v) for v in versions) if isinstance(versions, set) else [],
+            }
+        )
+
+    return {
+        "window_from_ts": int(from_ts),
+        "window_to_ts": int(to_ts),
+        "runtime_rows_in_window": len(rows),
+        "strategy_rows_sampled": int(sampled_rows),
+        "strategy_sha1_distinct": len(strategy_rows),
+        "strategy_version_distinct": len(distinct_versions),
+        "strategy_sha1_timeline": strategy_rows,
+    }
+
+
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
@@ -263,6 +347,11 @@ def main() -> int:
     candles_provenance = build_candles_window_provenance(
         candles_db,
         interval=str(args.interval),
+        from_ts=int(args.from_ts),
+        to_ts=int(args.to_ts),
+    )
+    runtime_strategy_provenance = _load_runtime_strategy_provenance(
+        live_db,
         from_ts=int(args.from_ts),
         to_ts=int(args.to_ts),
     )
@@ -445,6 +534,8 @@ def main() -> int:
         "--require-event-order "
         f"--gpu-parity-report \"$BUNDLE_DIR/{gpu_parity_report_path.name}\" "
         "--require-gpu-parity "
+        "--require-runtime-strategy-provenance "
+        "--max-strategy-sha1-distinct 1 "
         f"--output \"$BUNDLE_DIR/{alignment_gate_path.name}\""
     )
 
@@ -518,6 +609,7 @@ def main() -> int:
             "strategy_config_snapshot_sha256": _hash_file(strategy_config_snapshot_path),
         },
         "candles_provenance": candles_provenance,
+        "runtime_strategy_provenance": runtime_strategy_provenance,
         "artefacts": {
             "snapshot_file": snapshot_path.name,
             "strategy_config_snapshot_file": strategy_config_snapshot_path.name,
