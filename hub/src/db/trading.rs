@@ -500,6 +500,45 @@ pub fn position_entries(
 
 // ── Trade Journeys ──────────────────────────────────────────────────────
 
+/// Enrich generic "Signal Trigger" entry reasons using audit tags from meta_json.
+fn enrich_entry_reason(reason: &str, meta_json: &str) -> String {
+    if reason != "Signal Trigger" || meta_json.is_empty() {
+        return reason.to_string();
+    }
+    let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_json) else {
+        return reason.to_string();
+    };
+    let Some(tags) = meta.pointer("/audit/tags").and_then(|v| v.as_array()) else {
+        return reason.to_string();
+    };
+    let tags: Vec<&str> = tags.iter().filter_map(|v| v.as_str()).collect();
+    let has = |t: &str| tags.iter().any(|&s| s == t);
+
+    // Determine entry mode
+    let mode = if has("mode:pullback") {
+        "Pullback"
+    } else if has("mode:slow_drift") {
+        "Slow Drift"
+    } else {
+        "Trend"
+    };
+
+    // Collect modifiers
+    let mut mods = Vec::new();
+    if has("filter:macro_required") {
+        mods.push("Macro");
+    }
+    if has("conf:high_volume") {
+        mods.push("Vol+");
+    }
+
+    if mods.is_empty() {
+        format!("{mode} Entry")
+    } else {
+        format!("{mode} Entry ({})", mods.join("+"))
+    }
+}
+
 /// Reconstruct trade journeys (OPEN→…→CLOSE lifecycles) from the trades table.
 /// Returns most-recent journeys first (open ones at the top, then closed by close_ts DESC).
 ///
@@ -513,12 +552,12 @@ pub fn trade_journeys(
     symbol_filter: Option<&str>,
 ) -> Result<Vec<TradeJourney>, HubError> {
     let sql = if symbol_filter.is_some() {
-        "SELECT id, timestamp, symbol, type, action, price, size, pnl, fee_usd, reason, confidence
+        "SELECT id, timestamp, symbol, type, action, price, size, pnl, fee_usd, reason, confidence, meta_json
          FROM trades
          WHERE action IN ('OPEN','ADD','REDUCE','CLOSE') AND symbol = ?
          ORDER BY id ASC"
     } else {
-        "SELECT id, timestamp, symbol, type, action, price, size, pnl, fee_usd, reason, confidence
+        "SELECT id, timestamp, symbol, type, action, price, size, pnl, fee_usd, reason, confidence, meta_json
          FROM trades
          WHERE action IN ('OPEN','ADD','REDUCE','CLOSE')
          ORDER BY id ASC"
@@ -526,7 +565,7 @@ pub fn trade_journeys(
 
     let mut stmt = conn.prepare(sql)?;
 
-    let rows: Vec<(i64, String, String, String, String, f64, f64, f64, f64, String, String)> =
+    let rows: Vec<(i64, String, String, String, String, f64, f64, f64, f64, String, String, String)> =
         if let Some(sym) = symbol_filter {
             stmt.query_map(params![sym], |row| {
                 Ok((
@@ -541,6 +580,7 @@ pub fn trade_journeys(
                     row.get::<_, f64>(8).unwrap_or(0.0),
                     row.get::<_, Option<String>>(9)?.unwrap_or_default(),
                     row.get::<_, Option<String>>(10)?.unwrap_or_default(),
+                    row.get::<_, Option<String>>(11)?.unwrap_or_default(),
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?
@@ -558,6 +598,7 @@ pub fn trade_journeys(
                     row.get::<_, f64>(8).unwrap_or(0.0),
                     row.get::<_, Option<String>>(9)?.unwrap_or_default(),
                     row.get::<_, Option<String>>(10)?.unwrap_or_default(),
+                    row.get::<_, Option<String>>(11)?.unwrap_or_default(),
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?
@@ -575,7 +616,8 @@ pub fn trade_journeys(
         std::collections::HashMap::new();
     let mut completed: Vec<TradeJourney> = Vec::new();
 
-    for (id, ts, symbol, pos_type, action, price, size, pnl, fee, reason, confidence) in rows {
+    for (id, ts, symbol, pos_type, action, price, size, pnl, fee, reason, confidence, meta_json) in rows {
+        let reason = enrich_entry_reason(&reason, &meta_json);
         let action_upper = action.to_uppercase();
         let sym_upper = symbol.to_uppercase();
 

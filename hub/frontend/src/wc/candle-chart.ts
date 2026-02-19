@@ -168,6 +168,7 @@ export class CandleChart extends LitElement {
   private _tapStartX = 0;
   private _tapStartY = 0;
   private _tapStartTime = 0;
+  private _tapPanStarted = false;  // true once finger moved enough to count as pan
 
   static styles = css`
     :host {
@@ -451,10 +452,10 @@ export class CandleChart extends LitElement {
       this._touchStartVStart = this._vStart;
       this._hoverIdx = null;
       // Record tap start for tap detection
-      const rect = (e.target as HTMLCanvasElement).getBoundingClientRect();
-      this._tapStartX = t.clientX - rect.left;
-      this._tapStartY = t.clientY - rect.top;
+      this._tapStartX = t.clientX;
+      this._tapStartY = t.clientY;
       this._tapStartTime = performance.now();
+      this._tapPanStarted = false;
     } else if (e.touches.length === 2) {
       e.preventDefault();
       e.stopPropagation();
@@ -471,8 +472,15 @@ export class CandleChart extends LitElement {
     if (e.touches.length === 1 && this._touchPanId !== null) {
       e.preventDefault();
       e.stopPropagation();
-      this._pinnedMark = null;
       const t = e.touches[0];
+      // Only dismiss pinned tooltip once finger has moved enough to be a real pan
+      if (!this._tapPanStarted) {
+        const md = Math.hypot(t.clientX - this._tapStartX, t.clientY - this._tapStartY);
+        if (md > 10) {
+          this._tapPanStarted = true;
+          this._pinnedMark = null;
+        }
+      }
       if (t.identifier !== this._touchPanId) return;
       const W    = this.offsetWidth || 400;
       const vn   = this._vCount || this.candles.length;
@@ -525,20 +533,21 @@ export class CandleChart extends LitElement {
       return;
     }
     // Tap detection: short distance + short duration → toggle pin tooltip
-    if (e.touches.length === 0 && e.changedTouches.length > 0) {
+    if (e.touches.length === 0 && e.changedTouches.length > 0 && !this._tapPanStarted) {
       const ct = e.changedTouches[0];
-      const rect = (e.target as HTMLCanvasElement).getBoundingClientRect();
-      const tapX = ct.clientX - rect.left;
-      const tapY = ct.clientY - rect.top;
-      const dist = Math.hypot(tapX - this._tapStartX, tapY - this._tapStartY);
+      const dist = Math.hypot(ct.clientX - this._tapStartX, ct.clientY - this._tapStartY);
       const dur = performance.now() - this._tapStartTime;
-      if (dist < 10 && dur < 300) {
-        const hit = this._hitTestPin(tapX, tapY);
-        if (hit) {
-          this._pinnedMark = hit;
-          this._scheduleRedraw();
-        } else {
-          if (this._pinnedMark) {
+      if (dist < 15 && dur < 500) {
+        const cv = this.shadowRoot?.querySelector('canvas');
+        if (cv) {
+          const rect = cv.getBoundingClientRect();
+          const tapX = ct.clientX - rect.left;
+          const tapY = ct.clientY - rect.top;
+          const hit = this._hitTestPin(tapX, tapY, 26);
+          if (hit) {
+            this._pinnedMark = hit;
+            this._scheduleRedraw();
+          } else if (this._pinnedMark) {
             this._pinnedMark = null;
             this._scheduleRedraw();
           }
