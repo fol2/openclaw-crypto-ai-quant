@@ -11,6 +11,7 @@ use crate::accounting;
 use crate::indicators::IndicatorSnapshot;
 use crate::kernel_entries::EntryParams;
 use crate::kernel_exits::{ExitParams, KernelExitResult};
+use crate::reason_codes::{classify_reason_code, ReasonCode};
 use crate::signals::gates::GateResult;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -577,6 +578,24 @@ fn with_intent_id(step: u64, offset: u64) -> u64 {
     step.saturating_mul(1000).saturating_add(offset)
 }
 
+fn reason_code_text(code: ReasonCode) -> &'static str {
+    match code {
+        ReasonCode::EntrySignal => "entry_signal",
+        ReasonCode::EntrySignalSubBar => "entry_signal_sub_bar",
+        ReasonCode::EntryPyramid => "entry_pyramid",
+        ReasonCode::ExitStopLoss => "exit_stop_loss",
+        ReasonCode::ExitTakeProfit => "exit_take_profit",
+        ReasonCode::ExitTrailingStop => "exit_trailing_stop",
+        ReasonCode::ExitSignalFlip => "exit_signal_flip",
+        ReasonCode::ExitFilter => "exit_filter",
+        ReasonCode::ExitFunding => "exit_funding",
+        ReasonCode::ExitForceClose => "exit_force_close",
+        ReasonCode::ExitEndOfBacktest => "exit_end_of_backtest",
+        ReasonCode::FundingPayment => "funding_payment",
+        ReasonCode::Unknown => "unknown",
+    }
+}
+
 struct ApplyOpenInput<'a> {
     symbol: &'a str,
     side: PositionSide,
@@ -941,6 +960,11 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                     } => {
                         if let Some(pos) = next_state.positions.get(&event.symbol) {
                             let closed_side = pos.side;
+                            let action_code = match closed_side {
+                                PositionSide::Long => "CLOSE_LONG",
+                                PositionSide::Short => "CLOSE_SHORT",
+                            };
+                            let reason_code = reason_code_text(classify_reason_code(action_code, reason));
                             if let Some((intent, fill)) = apply_close(
                                 &mut next_state,
                                 &event.symbol,
@@ -949,6 +973,8 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                                 fee_rate,
                                 Some(1.0),
                                 close_id,
+                                reason,
+                                reason_code,
                                 &mut diagnostics,
                             ) {
                                 intents.push(intent);
@@ -972,12 +998,18 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                         }
                     }
                     KernelExitResult::PartialClose {
+                        ref reason,
                         exit_price,
                         fraction,
                         ..
                     } => {
                         if let Some(pos) = next_state.positions.get(&event.symbol) {
                             let closed_side = pos.side;
+                            let action_code = match closed_side {
+                                PositionSide::Long => "REDUCE_LONG",
+                                PositionSide::Short => "REDUCE_SHORT",
+                            };
+                            let reason_code = reason_code_text(classify_reason_code(action_code, reason));
                             if let Some((intent, fill)) = apply_close(
                                 &mut next_state,
                                 &event.symbol,
@@ -986,6 +1018,8 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                                 fee_rate,
                                 Some(fraction),
                                 close_id,
+                                reason,
+                                reason_code,
                                 &mut diagnostics,
                             ) {
                                 intents.push(intent);
