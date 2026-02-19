@@ -55,6 +55,14 @@ def _safe_float(val, default: float = 0.0) -> float:
         return default
 
 
+def _current_run_fingerprint() -> str:
+    try:
+        return str(mei_alpha_v1.get_run_fingerprint() or "unknown")
+    except Exception:
+        raw = str(os.getenv("AI_QUANT_RUN_FINGERPRINT", "") or "").strip()
+        return raw or "unknown"
+
+
 def _configure_live_db_connection(conn: sqlite3.Connection) -> None:
     """Apply SQLite pragmas for low-latency live-path reads/writes."""
     try:
@@ -2939,6 +2947,7 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
     _ensure_live_tables()
 
     inserted = 0
+    run_fingerprint = _current_run_fingerprint()
     conn = sqlite3.connect(mei_alpha_v1.DB_PATH, timeout=_DB_TIMEOUT_S)
     try:
         cur = conn.cursor()
@@ -3102,7 +3111,41 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                         INSERT OR IGNORE INTO trades (
                             timestamp, symbol, type, action, price, size, notional, reason, confidence,
                             pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
-                            meta_json, fill_hash, fill_tid
+                            meta_json, run_fingerprint, fill_hash, fill_tid
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            ts_iso,
+                            sym,
+                            pos_type,
+                            action,
+                            px,
+                            sz,
+                            notional,
+                            reason,
+                            conf,
+                            pnl,
+                            fee,
+                            fee_token,
+                            fee_rate,
+                            account_value,
+                            entry_atr,
+                            lev,
+                            margin_used,
+                            meta_json,
+                            run_fingerprint,
+                            fill_hash,
+                            tid,
+                        ),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT OR IGNORE INTO trades (
+                            timestamp, symbol, type, action, price, size, notional, reason, confidence,
+                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
+                            run_fingerprint, fill_hash, fill_tid
                         )
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
@@ -3124,39 +3167,7 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                             entry_atr,
                             lev,
                             margin_used,
-                            meta_json,
-                            fill_hash,
-                            tid,
-                        ),
-                    )
-                else:
-                    cur.execute(
-                        """
-                        INSERT OR IGNORE INTO trades (
-                            timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
-                            fill_hash, fill_tid
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            ts_iso,
-                            sym,
-                            pos_type,
-                            action,
-                            px,
-                            sz,
-                            notional,
-                            reason,
-                            conf,
-                            pnl,
-                            fee,
-                            fee_token,
-                            fee_rate,
-                            account_value,
-                            entry_atr,
-                            lev,
-                            margin_used,
+                            run_fingerprint,
                             fill_hash,
                             tid,
                         ),
@@ -3248,7 +3259,38 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                         """
                         INSERT INTO trades (
                             timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used, meta_json
+                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used, meta_json, run_fingerprint
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            ts_iso,
+                            sym,
+                            pos_type,
+                            action,
+                            px,
+                            sz,
+                            notional,
+                            reason,
+                            conf,
+                            pnl,
+                            fee,
+                            fee_token,
+                            fee_rate,
+                            account_value,
+                            entry_atr,
+                            lev,
+                            margin_used,
+                            meta_json,
+                            run_fingerprint,
+                        ),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO trades (
+                            timestamp, symbol, type, action, price, size, notional, reason, confidence,
+                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used, run_fingerprint
                         )
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
@@ -3270,36 +3312,7 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                             entry_atr,
                             lev,
                             margin_used,
-                            meta_json,
-                        ),
-                    )
-                else:
-                    cur.execute(
-                        """
-                        INSERT INTO trades (
-                            timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            ts_iso,
-                            sym,
-                            pos_type,
-                            action,
-                            px,
-                            sz,
-                            notional,
-                            reason,
-                            conf,
-                            pnl,
-                            fee,
-                            fee_token,
-                            fee_rate,
-                            account_value,
-                            entry_atr,
-                            lev,
-                            margin_used,
+                            run_fingerprint,
                         ),
                     )
                 inserted += 1
@@ -3470,6 +3483,7 @@ def process_user_fundings(trader: LiveTrader, events: list[dict]) -> int:
             account_value = 0.0
 
         inserted = 0
+        run_fingerprint = _current_run_fingerprint()
 
         def _iter_funding_items() -> list[dict]:
             items: list[dict] = []
@@ -3552,7 +3566,41 @@ def process_user_fundings(trader: LiveTrader, events: list[dict]) -> int:
                         INSERT OR IGNORE INTO trades (
                             timestamp, symbol, type, action, price, size, notional, reason, confidence,
                             pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
-                            meta_json, fill_hash, fill_tid
+                            meta_json, run_fingerprint, fill_hash, fill_tid
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            ts_iso,
+                            sym,
+                            pos_type,
+                            "FUNDING",
+                            px,
+                            size,
+                            notional,
+                            reason,
+                            "N/A",
+                            usdc_delta,
+                            0.0,
+                            "USDC",
+                            0.0,
+                            account_value,
+                            None,
+                            None,
+                            None,
+                            meta_json,
+                            run_fingerprint,
+                            fill_hash,
+                            fill_tid,
+                        ),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT OR IGNORE INTO trades (
+                            timestamp, symbol, type, action, price, size, notional, reason, confidence,
+                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
+                            run_fingerprint, fill_hash, fill_tid
                         )
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
@@ -3574,18 +3622,20 @@ def process_user_fundings(trader: LiveTrader, events: list[dict]) -> int:
                             None,
                             None,
                             None,
-                            meta_json,
+                            run_fingerprint,
                             fill_hash,
                             fill_tid,
                         ),
                     )
-                else:
+                if cur.rowcount and cur.rowcount > 0:
+                    inserted += 1
+            else:
+                if has_meta:
                     cur.execute(
                         """
-                        INSERT OR IGNORE INTO trades (
+                        INSERT INTO trades (
                             timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
-                            fill_hash, fill_tid
+                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used, meta_json, run_fingerprint
                         )
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
@@ -3607,19 +3657,16 @@ def process_user_fundings(trader: LiveTrader, events: list[dict]) -> int:
                             None,
                             None,
                             None,
-                            fill_hash,
-                            fill_tid,
+                            meta_json,
+                            run_fingerprint,
                         ),
                     )
-                if cur.rowcount and cur.rowcount > 0:
-                    inserted += 1
-            else:
-                if has_meta:
+                else:
                     cur.execute(
                         """
                         INSERT INTO trades (
                             timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used, meta_json
+                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used, run_fingerprint
                         )
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
@@ -3641,36 +3688,7 @@ def process_user_fundings(trader: LiveTrader, events: list[dict]) -> int:
                             None,
                             None,
                             None,
-                            meta_json,
-                        ),
-                    )
-                else:
-                    cur.execute(
-                        """
-                        INSERT INTO trades (
-                            timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                            pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            ts_iso,
-                            sym,
-                            pos_type,
-                            "FUNDING",
-                            px,
-                            size,
-                            notional,
-                            reason,
-                            "N/A",
-                            usdc_delta,
-                            0.0,
-                            "USDC",
-                            0.0,
-                            account_value,
-                            None,
-                            None,
-                            None,
+                            run_fingerprint,
                         ),
                     )
                 inserted += 1
@@ -3753,8 +3771,8 @@ def log_live_signal(*, symbol: str, signal: str, confidence: str, price: float, 
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO signals (timestamp, symbol, signal, confidence, price, rsi, ema_fast, ema_slow, meta_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO signals (timestamp, symbol, signal, confidence, price, rsi, ema_fast, ema_slow, meta_json, run_fingerprint)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 utc_iso(),
@@ -3766,6 +3784,7 @@ def log_live_signal(*, symbol: str, signal: str, confidence: str, price: float, 
                 ema_fast,
                 ema_slow,
                 meta_json,
+                _current_run_fingerprint(),
             ),
         )
         conn.commit()

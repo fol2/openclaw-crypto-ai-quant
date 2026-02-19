@@ -2069,6 +2069,32 @@ if _QTStrategyManager is not None:
         _strategy_mgr = None
 
 
+_RUN_FINGERPRINT = str(os.getenv("AI_QUANT_RUN_FINGERPRINT", "") or "").strip() or None
+
+
+def set_run_fingerprint(value: str | None) -> None:
+    """Set the process-wide run fingerprint used for audit persistence."""
+    global _RUN_FINGERPRINT
+    text = str(value or "").strip()
+    _RUN_FINGERPRINT = text or None
+    if text:
+        os.environ["AI_QUANT_RUN_FINGERPRINT"] = text
+    else:
+        os.environ.pop("AI_QUANT_RUN_FINGERPRINT", None)
+
+
+def get_run_fingerprint() -> str:
+    """Return the current run fingerprint, or ``"unknown"`` when unset."""
+    global _RUN_FINGERPRINT
+    if _RUN_FINGERPRINT:
+        return _RUN_FINGERPRINT
+    text = str(os.getenv("AI_QUANT_RUN_FINGERPRINT", "") or "").strip()
+    if text:
+        _RUN_FINGERPRINT = text
+        return text
+    return "unknown"
+
+
 def _deep_merge(base: dict, override: dict) -> dict:
     for k, v in (override or {}).items():
         if isinstance(v, dict) and isinstance(base.get(k), dict):
@@ -2533,6 +2559,7 @@ def ensure_db():
             leverage REAL,
             margin_used REAL,
             meta_json TEXT,
+            run_fingerprint TEXT,
             fill_hash TEXT,
             fill_tid INTEGER
         )
@@ -2580,7 +2607,8 @@ def ensure_db():
             rsi REAL,
             ema_fast REAL,
             ema_slow REAL,
-            meta_json TEXT
+            meta_json TEXT,
+            run_fingerprint TEXT
         )
         """
     )
@@ -2606,9 +2634,12 @@ def ensure_db():
         cursor.execute("ALTER TABLE trades ADD COLUMN fill_tid INTEGER")
     if "meta_json" not in cols:
         cursor.execute("ALTER TABLE trades ADD COLUMN meta_json TEXT")
+    if "run_fingerprint" not in cols:
+        cursor.execute("ALTER TABLE trades ADD COLUMN run_fingerprint TEXT")
 
     # Dedup live fills (userFills snapshots / reconnects) when available.
     cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_fill_hash_tid ON trades(fill_hash, fill_tid)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_run_fingerprint ON trades(run_fingerprint)")
 
     # Live WS event capture (no-op for paper if unused).
     cursor.execute(
@@ -2633,7 +2664,8 @@ def ensure_db():
             symbol TEXT,
             event TEXT,
             level TEXT,
-            data_json TEXT
+            data_json TEXT,
+            run_fingerprint TEXT
         )
         """
     )
@@ -2677,6 +2709,15 @@ def ensure_db():
     sig_cols = {row[1] for row in cursor.fetchall()}
     if "meta_json" not in sig_cols:
         cursor.execute("ALTER TABLE signals ADD COLUMN meta_json TEXT")
+    if "run_fingerprint" not in sig_cols:
+        cursor.execute("ALTER TABLE signals ADD COLUMN run_fingerprint TEXT")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_run_fingerprint ON signals(run_fingerprint)")
+
+    cursor.execute("PRAGMA table_info(audit_events)")
+    audit_cols = {row[1] for row in cursor.fetchall()}
+    if "run_fingerprint" not in audit_cols:
+        cursor.execute("ALTER TABLE audit_events ADD COLUMN run_fingerprint TEXT")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_events_run_fingerprint ON audit_events(run_fingerprint)")
 
     # One-time backfill for legacy rows (pre leverage/margin columns).
     migration_id = "2026-02-04_backfill_leverage_margin_used"
@@ -2715,6 +2756,7 @@ def ensure_db():
             action_taken TEXT,                      -- 'open_long', 'close_short', 'hold', 'blocked'
             rejection_reason TEXT,                  -- if blocked/rejected
             config_fingerprint TEXT,                -- strategy config fingerprint at decision time
+            run_fingerprint TEXT,                   -- process/run fingerprint at decision time
             context_json TEXT                       -- full indicator + threshold snapshot
         )
         """
@@ -2723,6 +2765,8 @@ def ensure_db():
     decision_event_cols = {str(row[1]) for row in cursor.fetchall()}
     if "config_fingerprint" not in decision_event_cols:
         cursor.execute("ALTER TABLE decision_events ADD COLUMN config_fingerprint TEXT")
+    if "run_fingerprint" not in decision_event_cols:
+        cursor.execute("ALTER TABLE decision_events ADD COLUMN run_fingerprint TEXT")
 
     # Normalized indicator values at decision time (queryable without JSON parsing)
     cursor.execute(
@@ -2788,6 +2832,7 @@ def ensure_db():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_de_event_type ON decision_events(event_type)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_de_trade_id ON decision_events(trade_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_de_config_fingerprint ON decision_events(config_fingerprint)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_de_run_fingerprint ON decision_events(run_fingerprint)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_ge_decision ON gate_evaluations(decision_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_dl_entry ON decision_lineage(entry_trade_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_dl_exit ON decision_lineage(exit_trade_id)")
@@ -2835,6 +2880,7 @@ def create_decision_event(
     action_taken: str | None = None,
     rejection_reason: str | None = None,
     config_fingerprint: str | None = None,
+    run_fingerprint: str | None = None,
     context: dict | None = None,
     timestamp_ms: int | None = None,
 ) -> str:
@@ -2934,6 +2980,7 @@ def create_decision_event(
     decision_id = generate_ulid()
     ts = timestamp_ms if timestamp_ms is not None else int(time.time() * 1000)
     cfg_fp = str(config_fingerprint or "").strip() or _extract_config_fingerprint(context, symbol)
+    run_fp = str(run_fingerprint or "").strip() or get_run_fingerprint()
     conn = None
     try:
         conn = sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT_S)
@@ -2942,8 +2989,8 @@ def create_decision_event(
             INSERT INTO decision_events
                 (id, timestamp_ms, symbol, event_type, status, decision_phase,
                  parent_decision_id, trade_id, triggered_by, action_taken,
-                 rejection_reason, config_fingerprint, context_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 rejection_reason, config_fingerprint, run_fingerprint, context_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 decision_id,
@@ -2958,6 +3005,7 @@ def create_decision_event(
                 action_taken,
                 rejection_reason,
                 cfg_fp,
+                run_fp,
                 _json_dumps_safe(context) if context else None,
             ),
         )
@@ -3504,13 +3552,14 @@ def log_audit_event(
         ts = timestamp or datetime.datetime.now(datetime.timezone.utc).isoformat()
         sym = str(symbol or "").strip().upper() or None
         cur.execute(
-            "INSERT INTO audit_events (timestamp, symbol, event, level, data_json) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO audit_events (timestamp, symbol, event, level, data_json, run_fingerprint) VALUES (?, ?, ?, ?, ?, ?)",
             (
                 ts,
                 sym,
                 str(event or ""),
                 str(level or "info"),
                 _json_dumps_safe(data) if data else None,
+                get_run_fingerprint(),
             ),
         )
         conn.commit()
@@ -4208,8 +4257,8 @@ class PaperTrader:
 
         cursor.execute(
             """
-            INSERT INTO trades (timestamp, symbol, type, action, price, size, notional, reason, confidence, pnl, fee_usd, fee_rate, balance, entry_atr, leverage, margin_used, meta_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO trades (timestamp, symbol, type, action, price, size, notional, reason, confidence, pnl, fee_usd, fee_rate, balance, entry_atr, leverage, margin_used, meta_json, run_fingerprint)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
                 timestamp,
@@ -4229,6 +4278,7 @@ class PaperTrader:
                 leverage,
                 margin_used,
                 meta_json,
+                get_run_fingerprint(),
             ),
         )
         trade_id = cursor.lastrowid
@@ -5236,8 +5286,8 @@ class PaperTrader:
             meta_json = _json_dumps_safe(audit) if audit else None
             cursor.execute(
                 """
-                INSERT INTO signals (timestamp, symbol, signal, confidence, price, rsi, ema_fast, ema_slow, meta_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO signals (timestamp, symbol, signal, confidence, price, rsi, ema_fast, ema_slow, meta_json, run_fingerprint)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -5249,6 +5299,7 @@ class PaperTrader:
                     indicators.get("EMA_fast", 0) if indicators is not None else 0,
                     indicators.get("EMA_slow", 0) if indicators is not None else 0,
                     meta_json,
+                    get_run_fingerprint(),
                 ),
             )
             conn.commit()

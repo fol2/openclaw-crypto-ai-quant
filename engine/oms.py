@@ -19,6 +19,18 @@ logger = logging.getLogger(__name__)
 _EPOCH_MS_MIN_ABS = 100_000_000_000  # ~= 1973-03 in milliseconds
 
 
+def _current_run_fingerprint() -> str:
+    raw = str(os.getenv("AI_QUANT_RUN_FINGERPRINT", "") or "").strip()
+    if raw:
+        return raw
+    try:
+        import strategy.mei_alpha_v1 as mei_alpha_v1
+
+        return str(mei_alpha_v1.get_run_fingerprint() or "unknown")
+    except Exception:
+        return "unknown"
+
+
 def _coerce_ts_ms(ts: Any) -> int | None:
     """Best-effort convert an arbitrary timestamp-like value to epoch milliseconds."""
     if ts is None:
@@ -1783,8 +1795,8 @@ class LiveOms:
         try:
             cur.execute(
                 """
-                INSERT INTO signals (timestamp, symbol, signal, confidence, price, rsi, ema_fast, ema_slow, meta_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO signals (timestamp, symbol, signal, confidence, price, rsi, ema_fast, ema_slow, meta_json, run_fingerprint)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(ts_iso),
@@ -1796,6 +1808,7 @@ class LiveOms:
                     None,
                     None,
                     meta_json,
+                    _current_run_fingerprint(),
                 ),
             )
             return bool(cur.rowcount and cur.rowcount > 0)
@@ -1934,8 +1947,8 @@ class LiveOms:
                 try:
                     cur.execute(
                         """
-                        INSERT INTO signals (timestamp, symbol, signal, confidence, price, rsi, ema_fast, ema_slow, meta_json)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO signals (timestamp, symbol, signal, confidence, price, rsi, ema_fast, ema_slow, meta_json, run_fingerprint)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             str(ts_iso),
@@ -1947,6 +1960,7 @@ class LiveOms:
                             None,
                             None,
                             meta_json2,
+                            _current_run_fingerprint(),
                         ),
                     )
                     if cur.rowcount and cur.rowcount > 0:
@@ -1984,6 +1998,7 @@ class LiveOms:
         inserted_oms_fills = 0
         deduped_oms_fills = 0
         considered = 0
+        run_fingerprint = _current_run_fingerprint()
         unmatched_samples: list[dict[str, Any]] = []
         # Buffer notifications until AFTER the sqlite commit succeeds.
         notify_rows: list[dict[str, Any]] = []
@@ -2239,7 +2254,41 @@ class LiveOms:
                             INSERT OR IGNORE INTO trades (
                                 timestamp, symbol, type, action, price, size, notional, reason, confidence,
                                 pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
-                                meta_json, fill_hash, fill_tid
+                                meta_json, run_fingerprint, fill_hash, fill_tid
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                ts_iso,
+                                sym,
+                                pos_type,
+                                action,
+                                float(px),
+                                float(sz),
+                                float(notional),
+                                reason,
+                                conf,
+                                float(pnl),
+                                float(fee),
+                                fee_token,
+                                fee_rate,
+                                float(account_value),
+                                entry_atr,
+                                lev,
+                                margin_used,
+                                meta_json,
+                                run_fingerprint,
+                                fill_hash,
+                                tid,
+                            ),
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            INSERT OR IGNORE INTO trades (
+                                timestamp, symbol, type, action, price, size, notional, reason, confidence,
+                                pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
+                                run_fingerprint, fill_hash, fill_tid
                             )
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
@@ -2261,18 +2310,18 @@ class LiveOms:
                                 entry_atr,
                                 lev,
                                 margin_used,
-                                meta_json,
+                                run_fingerprint,
                                 fill_hash,
                                 tid,
                             ),
                         )
-                    else:
+                else:
+                    if has_meta:
                         cur.execute(
                             """
-                            INSERT OR IGNORE INTO trades (
+                            INSERT INTO trades (
                                 timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                                pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
-                                fill_hash, fill_tid
+                                pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used, meta_json, run_fingerprint
                             )
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
@@ -2294,17 +2343,16 @@ class LiveOms:
                                 entry_atr,
                                 lev,
                                 margin_used,
-                                fill_hash,
-                                tid,
+                                meta_json,
+                                run_fingerprint,
                             ),
                         )
-                else:
-                    if has_meta:
+                    else:
                         cur.execute(
                             """
                             INSERT INTO trades (
                                 timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                                pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used, meta_json
+                                pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used, run_fingerprint
                             )
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
@@ -2326,36 +2374,7 @@ class LiveOms:
                                 entry_atr,
                                 lev,
                                 margin_used,
-                                meta_json,
-                            ),
-                        )
-                    else:
-                        cur.execute(
-                            """
-                            INSERT INTO trades (
-                                timestamp, symbol, type, action, price, size, notional, reason, confidence,
-                                pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used
-                            )
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (
-                                ts_iso,
-                                sym,
-                                pos_type,
-                                action,
-                                float(px),
-                                float(sz),
-                                float(notional),
-                                reason,
-                                conf,
-                                float(pnl),
-                                float(fee),
-                                fee_token,
-                                fee_rate,
-                                float(account_value),
-                                entry_atr,
-                                lev,
-                                margin_used,
+                                run_fingerprint,
                             ),
                         )
 

@@ -473,26 +473,58 @@ class ShadowDecisionTracker:
         conn: sqlite3.Connection | None = None
         try:
             conn = sqlite3.connect(db_path, timeout=5.0)
-            conn.execute(
-                """
-                INSERT INTO decision_events
-                    (id, timestamp_ms, symbol, event_type, status,
-                     decision_phase, triggered_by, action_taken,
-                     context_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    event_id,
-                    comparison.timestamp_ms,
-                    comparison.symbol,
-                    "shadow_comparison",
-                    "match" if comparison.is_match else "mismatch",
-                    "shadow_evaluation",
-                    "shadow_mode",
-                    comparison.comparison_type,
-                    json.dumps(context, separators=(",", ":")),
-                ),
-            )
+            col_rows = conn.execute("PRAGMA table_info(decision_events)").fetchall()
+            has_run_fingerprint = any(str(row[1]) == "run_fingerprint" for row in col_rows)
+            run_fingerprint = str(os.getenv("AI_QUANT_RUN_FINGERPRINT", "") or "").strip() or "unknown"
+            try:
+                from strategy.mei_alpha_v1 import get_run_fingerprint as _get_run_fingerprint
+
+                run_fingerprint = str(_get_run_fingerprint() or run_fingerprint)
+            except Exception:
+                pass
+            if has_run_fingerprint:
+                conn.execute(
+                    """
+                    INSERT INTO decision_events
+                        (id, timestamp_ms, symbol, event_type, status,
+                         decision_phase, triggered_by, action_taken,
+                         run_fingerprint, context_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event_id,
+                        comparison.timestamp_ms,
+                        comparison.symbol,
+                        "shadow_comparison",
+                        "match" if comparison.is_match else "mismatch",
+                        "shadow_evaluation",
+                        "shadow_mode",
+                        comparison.comparison_type,
+                        run_fingerprint,
+                        json.dumps(context, separators=(",", ":")),
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO decision_events
+                        (id, timestamp_ms, symbol, event_type, status,
+                         decision_phase, triggered_by, action_taken,
+                         context_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event_id,
+                        comparison.timestamp_ms,
+                        comparison.symbol,
+                        "shadow_comparison",
+                        "match" if comparison.is_match else "mismatch",
+                        "shadow_evaluation",
+                        "shadow_mode",
+                        comparison.comparison_type,
+                        json.dumps(context, separators=(",", ":")),
+                    ),
+                )
             conn.commit()
             return event_id
         except Exception:
@@ -639,4 +671,3 @@ def should_run_kernel(mode: DecisionMode) -> bool:
 def is_shadow_mode(mode: DecisionMode) -> bool:
     """Return ``True`` only for ``DecisionMode.SHADOW``."""
     return mode is DecisionMode.SHADOW
-

@@ -604,7 +604,18 @@ class PositionReconciler:
         event_ids: list[str] = []
         conn: sqlite3.Connection | None = None
         try:
+            import os
+
             conn = sqlite3.connect(db_path, timeout=5.0)
+            col_rows = conn.execute("PRAGMA table_info(decision_events)").fetchall()
+            has_run_fingerprint = any(str(row[1]) == "run_fingerprint" for row in col_rows)
+            run_fingerprint = str(os.getenv("AI_QUANT_RUN_FINGERPRINT", "") or "").strip() or "unknown"
+            try:
+                from strategy.mei_alpha_v1 import get_run_fingerprint as _get_run_fingerprint
+
+                run_fingerprint = str(_get_run_fingerprint() or run_fingerprint)
+            except Exception:
+                pass
             for disc in report.discrepancies:
                 event_id = _generate_event_id()
                 context = {
@@ -615,26 +626,49 @@ class PositionReconciler:
                     "type": disc.type,
                     "details": disc.details,
                 }
-                conn.execute(
-                    """
-                    INSERT INTO decision_events
-                        (id, timestamp_ms, symbol, event_type, status,
-                         decision_phase, triggered_by, action_taken,
-                         context_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        event_id,
-                        report.timestamp_ms,
-                        disc.symbol,
-                        "reconciliation",
-                        disc.severity,
-                        "execution",
-                        "heartbeat",
-                        disc.type,
-                        json.dumps(context, separators=(",", ":")),
-                    ),
-                )
+                if has_run_fingerprint:
+                    conn.execute(
+                        """
+                        INSERT INTO decision_events
+                            (id, timestamp_ms, symbol, event_type, status,
+                             decision_phase, triggered_by, action_taken,
+                             run_fingerprint, context_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            event_id,
+                            report.timestamp_ms,
+                            disc.symbol,
+                            "reconciliation",
+                            disc.severity,
+                            "execution",
+                            "heartbeat",
+                            disc.type,
+                            run_fingerprint,
+                            json.dumps(context, separators=(",", ":")),
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO decision_events
+                            (id, timestamp_ms, symbol, event_type, status,
+                             decision_phase, triggered_by, action_taken,
+                             context_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            event_id,
+                            report.timestamp_ms,
+                            disc.symbol,
+                            "reconciliation",
+                            disc.severity,
+                            "execution",
+                            "heartbeat",
+                            disc.type,
+                            json.dumps(context, separators=(",", ":")),
+                        ),
+                    )
                 event_ids.append(event_id)
             conn.commit()
         except Exception:
@@ -644,4 +678,3 @@ class PositionReconciler:
                 conn.close()
 
         return event_ids
-
