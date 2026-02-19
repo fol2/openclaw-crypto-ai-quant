@@ -371,49 +371,40 @@
           {/if}
           <div class="cell-header">
             <span class="cell-symbol">{s.symbol}</span>
-            {#if s.position_side && s.position_side !== 'NONE'}
-              <span class="pos-badge" class:long={s.position_side === 'LONG'} class:short={s.position_side === 'SHORT'}>
-                {s.position_side}
-              </span>
+          </div>
+          <div class="cell-price-row">
+            <span class="cell-price">
+              <mid-price
+                symbol={s.symbol}
+                value={(mids[s.symbol] ?? s.mid) != null ? String(mids[s.symbol] ?? s.mid) : ''}
+                decimals={adaptiveDecimals(mids[s.symbol] ?? s.mid)}
+                tone="grid"
+              ></mid-price>
+            </span>
+            {#if s.position}
+              {@const pnl = livePnlPct(s)}
+              <span class="entry-at">@{s.position.entry_price.toFixed(adaptiveDecimals(s.position.entry_price))}</span>
+              <span class="pnl-badge" class:up={pnl >= 0} class:down={pnl < 0}>{fmtPnl(pnl)}</span>
             {/if}
           </div>
-          <div class="cell-price">
-            <mid-price
-              symbol={s.symbol}
-              value={(mids[s.symbol] ?? s.mid) != null ? String(mids[s.symbol] ?? s.mid) : ''}
-              decimals={adaptiveDecimals(mids[s.symbol] ?? s.mid)}
-              tone="grid"
-            ></mid-price>
-          </div>
+          {#if s.position}
+            <div class="cell-pos-meta">
+              <span class="lev-box">{Math.round(s.position.leverage ?? 1)}&times;</span>
+              <span class="meta-notional">{fmtNotional(posEquity(s))}</span>
+            </div>
+          {/if}
           {#if s.signal}
             <div class="cell-signal">
               <span class="signal-badge">{s.signal}</span>
             </div>
           {/if}
-          <div class="cell-candle-area">
-            <div class="cell-candles">
-              <mini-candles
-                candles={JSON.stringify(liveCandles(s.symbol))}
-                width={200}
-                height={56}
-                live
-              ></mini-candles>
-            </div>
-            {#if s.position}
-              {@const pnl = livePnlPct(s)}
-              <div class="pos-overlay">
-                <div class="cell-entry">
-                  <span class="entry-label">@</span>
-                  <span class="entry-price">{s.position.entry_price.toFixed(adaptiveDecimals(s.position.entry_price))}</span>
-                  <span class="pnl-badge" class:up={pnl >= 0} class:down={pnl < 0}>{fmtPnl(pnl)}</span>
-                </div>
-                <div class="cell-pos-strip">
-                  <span>{s.position.leverage?.toFixed(1) ?? '1.0'}&times;</span>
-                  <span class="strip-dot">&middot;</span>
-                  <span>{fmtNotional(posEquity(s))}</span>
-                </div>
-              </div>
-            {/if}
+          <div class="cell-candles">
+            <mini-candles
+              candles={JSON.stringify(liveCandles(s.symbol))}
+              width={200}
+              height={56}
+              live
+            ></mini-candles>
           </div>
         </div>
       {/each}
@@ -599,23 +590,65 @@
     letter-spacing: 0.02em;
   }
 
+  /* ── Price row (mid + entry + PnL inline) ───────── */
+  .cell-price-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 2px;
+    flex-wrap: wrap;
+  }
   .cell-price {
     font-size: 18px;
     font-weight: 600;
     font-family: 'IBM Plex Mono', monospace;
-    margin-bottom: 4px;
     letter-spacing: -0.01em;
   }
-
-  .pos-badge {
-    font-size: 9px;
-    padding: 2px 6px;
-    border-radius: var(--radius-sm);
-    font-weight: 700;
-    letter-spacing: 0.06em;
+  .entry-at {
+    font-size: 18px;
+    font-weight: 600;
+    font-family: 'IBM Plex Mono', monospace;
+    letter-spacing: -0.01em;
+    color: var(--text);
   }
-  .pos-badge.long { background: var(--green-bg); color: var(--green); }
-  .pos-badge.short { background: var(--red-bg); color: var(--red); }
+  .pnl-badge {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: var(--radius-sm);
+    letter-spacing: 0.02em;
+    margin-left: auto;
+  }
+  .pnl-badge.up {
+    background: var(--green-bg);
+    color: var(--green);
+  }
+  .pnl-badge.down {
+    background: var(--red-bg);
+    color: var(--red);
+  }
+
+  /* ── Position meta (leverage box + notional) ──────── */
+  .cell-pos-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 2px;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .lev-box {
+    font-size: 9px;
+    font-weight: 700;
+    padding: 1px 5px;
+    border: 1px solid var(--text-muted);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    letter-spacing: 0.03em;
+  }
+  .meta-notional {
+    font-size: 9px;
+    color: var(--text-muted);
+  }
 
   .signal-badge {
     font-size: 10px;
@@ -626,11 +659,7 @@
     font-weight: 600;
   }
 
-  .cell-candle-area {
-    position: relative;
-    margin-top: 6px;
-  }
-  .cell-candles { }
+  .cell-candles { margin-top: 6px; }
 
   .trend-overlay {
     position: absolute;
@@ -665,69 +694,6 @@
   }
   .grid-cell.pos-short::before {
     background: var(--red);
-  }
-
-  /* ── Position overlay (floats over candles) ─────────── */
-  .pos-overlay {
-    position: absolute;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    padding: 16px 4px 2px;
-    background: linear-gradient(to top,
-      var(--trend-bg, var(--surface)) 0%,
-      var(--trend-bg, var(--surface)) 20%,
-      color-mix(in srgb, var(--trend-bg, var(--surface)) 70%, transparent) 60%,
-      transparent 100%
-    );
-    pointer-events: none;
-  }
-
-  /* ── Entry price + PnL row ────────────────────────── */
-  .cell-entry {
-    display: flex;
-    align-items: baseline;
-    gap: 6px;
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 11px;
-    margin-bottom: 2px;
-  }
-  .entry-label {
-    color: var(--text-muted);
-    opacity: 0.7;
-  }
-  .entry-price {
-    color: var(--text-muted);
-  }
-  .pnl-badge {
-    margin-left: auto;
-    font-size: 10px;
-    font-weight: 700;
-    padding: 1px 5px;
-    border-radius: var(--radius-sm);
-    letter-spacing: 0.02em;
-  }
-  .pnl-badge.up {
-    background: var(--green-bg);
-    color: var(--green);
-  }
-  .pnl-badge.down {
-    background: var(--red-bg);
-    color: var(--red);
-  }
-
-  /* ── Position strip (leverage + notional) ─────────── */
-  .cell-pos-strip {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 9px;
-    color: var(--text-muted);
-    opacity: 0.8;
-  }
-  .strip-dot {
-    opacity: 0.5;
   }
 
   @media (max-width: 768px) {
