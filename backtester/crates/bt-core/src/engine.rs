@@ -904,6 +904,10 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
 
         // Per-symbol EMA-slow slope cache for sub-bar entry evaluation
         let mut sub_bar_slopes: FxHashMap<String, f64> = FxHashMap::default();
+        // Last fully-closed indicator snapshot per symbol.
+        // Sub-bar entry evaluation must use this previous snapshot to avoid
+        // peeking at the current indicator bar before it has closed.
+        let mut prev_indicator_snaps: FxHashMap<String, IndicatorSnapshot> = FxHashMap::default();
 
         // Per-bar entry counter (limits entries to max_entry_orders_per_loop)
         let mut entries_this_bar: usize = 0;
@@ -931,6 +935,8 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                     continue;
                 }
             };
+            let prev_snap = bank.latest_snap();
+            prev_indicator_snaps.insert(sym.to_string(), prev_snap);
             let snap = bank.update(bar);
 
             // Store EMA slow for slope computation (borrow ends immediately)
@@ -1583,10 +1589,9 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                             let (_, bar_i) = sym_entry_idx[idx];
                             if let Some(entry_bars) = enc.get(sym.as_str()) {
                                 if let Some(sub_bar) = entry_bars.get(bar_i) {
-                                    let base_snap = state
-                                        .indicators
+                                    let base_snap = prev_indicator_snaps
                                         .get(sym.as_str())
-                                        .map(|bank| bank.latest_snap())
+                                        .cloned()
                                         .unwrap_or_else(|| make_minimal_snap(0.0, *sub_ts));
                                     let sub_snap = make_exit_snap(&base_snap, sub_bar);
                                     let slope =
