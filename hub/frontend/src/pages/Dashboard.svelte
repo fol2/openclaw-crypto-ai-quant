@@ -52,6 +52,10 @@
   let journeyLoading = $state(false);
   let journeyInterval = $state('15m');
   let journeyHasMore = $state(true);
+  let journeyChartHeight = $state(280);
+  let journeyChartDragging = $state(false);
+  const JOURNEY_CHART_MIN = 120;
+  const JOURNEY_CHART_MAX = 600;
 
   function pickJourneyInterval(durationMs: number): string {
     if (durationMs < 30 * 60_000)       return '1m';
@@ -90,7 +94,7 @@
         journeyOffset += batch.length;
       }
       journeyHasMore = batch.length >= 50;
-    } catch { /* ignore */ }
+    } catch (e) { console.error('fetchJourneys failed:', e); }
     journeyLoading = false;
   }
 
@@ -99,8 +103,8 @@
     journeyCandles = [];
     journeyMarks = [];
 
-    const openTs = Date.parse((j.open_ts || '').replace(' ', 'T'));
-    const closeTs = j.close_ts ? Date.parse((j.close_ts || '').replace(' ', 'T')) : Date.now();
+    const openTs = Date.parse(j.open_ts || '');
+    const closeTs = j.close_ts ? Date.parse(j.close_ts) : Date.now();
     if (!isFinite(openTs)) return;
 
     const dur = closeTs - openTs;
@@ -109,13 +113,13 @@
 
     // Fetch candles with 10% padding
     const pad = Math.max(dur * 0.1, 60_000);
-    const fromTs = openTs - pad;
-    const toTs = closeTs + pad;
+    const fromTs = Math.floor(openTs - pad);
+    const toTs = Math.ceil(closeTs + pad);
 
     try {
       const res = await getCandlesRange(j.symbol, iv, fromTs, toTs, 500);
       journeyCandles = res.candles || [];
-    } catch { /* ignore */ }
+    } catch (e) { console.error('getCandlesRange failed:', e); }
 
     // Build journey marks from legs
     journeyMarks = (j.legs || []).map((leg: any) => ({
@@ -126,6 +130,44 @@
       size: leg.size,
       pnl: leg.pnl,
     }));
+  }
+
+  function onJourneyChartSplitterDown(e: PointerEvent) {
+    e.preventDefault();
+    journeyChartDragging = true;
+    const startY = e.clientY;
+    const startH = journeyChartHeight;
+    const target = e.currentTarget as HTMLElement;
+    target.setPointerCapture(e.pointerId);
+
+    function onMove(ev: PointerEvent) {
+      const h = startH + (ev.clientY - startY);
+      journeyChartHeight = Math.max(JOURNEY_CHART_MIN, Math.min(JOURNEY_CHART_MAX, h));
+    }
+    function onUp() {
+      journeyChartDragging = false;
+      target.removeEventListener('pointermove', onMove);
+      target.removeEventListener('pointerup', onUp);
+    }
+    target.addEventListener('pointermove', onMove);
+    target.addEventListener('pointerup', onUp);
+  }
+
+  async function changeJourneyInterval(newIv: string) {
+    if (!selectedJourney) return;
+    journeyInterval = newIv;
+    const j = selectedJourney;
+    const openTs = Date.parse(j.open_ts || '');
+    const closeTs = j.close_ts ? Date.parse(j.close_ts) : Date.now();
+    if (!isFinite(openTs)) return;
+    const dur = closeTs - openTs;
+    const pad = Math.max(dur * 0.1, 60_000);
+    const fromTs = Math.floor(openTs - pad);
+    const toTs = Math.ceil(closeTs + pad);
+    try {
+      const res = await getCandlesRange(j.symbol, newIv, fromTs, toTs, 500);
+      journeyCandles = res.candles || [];
+    } catch (e) { console.error('getCandlesRange failed:', e); }
   }
 
   function onChartSplitterDown(e: PointerEvent) {
@@ -878,7 +920,7 @@
   </button>
 </div>
 
-<div class="dashboard-grid" class:is-dragging={dragging || chartDragging} class:drag-col={dragging} class:drag-row={chartDragging}>
+<div class="dashboard-grid" class:is-dragging={dragging || chartDragging || journeyChartDragging} class:drag-col={dragging} class:drag-row={chartDragging}>
   <!-- Symbol table -->
   <div class="panel symbols-panel" class:mobile-visible={mobileTab === 'symbols'} class:expanded-hidden={detailExpanded} style="width:{symWidth}px;min-width:{symWidth}px">
     <div class="panel-header">
@@ -1079,19 +1121,27 @@
       <div class="feed-content">
         {#if detailTab === 'trades'}
           <!-- Journey chart -->
-          <div class="journey-chart-area" style="height:{selectedJourney ? chartHeight : 48}px">
+          <div class="journey-chart-area" style="height:{selectedJourney ? journeyChartHeight : 48}px">
             {#if selectedJourney}
               <div class="journey-chart-header">
                 <span class="journey-chart-label">
                   {selectedJourney.symbol}
                   <span class="badge" class:badge-long={selectedJourney.type === 'LONG'} class:badge-short={selectedJourney.type !== 'LONG'}>{selectedJourney.type}</span>
-                  <span class="mono dim">{journeyInterval.toUpperCase()}</span>
                 </span>
+                <div class="journey-iv-bar">
+                  {#each INTERVALS as iv}
+                    <button
+                      class="jiv-tab"
+                      class:is-on={journeyInterval === iv}
+                      onclick={() => changeJourneyInterval(iv)}
+                    >{iv.toUpperCase()}</button>
+                  {/each}
+                </div>
                 <button class="journey-close-btn" onclick={() => { selectedJourney = null; journeyCandles = []; journeyMarks = []; }}>
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg>
                 </button>
               </div>
-              <div class="journey-chart-wrap" style="height:{chartHeight - 28}px">
+              <div class="journey-chart-wrap" style="height:{journeyChartHeight - 30}px">
                 <candle-chart
                   candles={JSON.stringify(journeyCandles)}
                   entries="[]"
@@ -1110,11 +1160,14 @@
               </div>
             {/if}
           </div>
+          {#if selectedJourney}
+            <div class="journey-chart-splitter" class:active={journeyChartDragging} role="separator" aria-orientation="horizontal" onpointerdown={onJourneyChartSplitterDown}></div>
+          {/if}
           <!-- Journey list -->
           <div class="journey-list">
             {#each journeys as j (j.id)}
-              {@const openMs = Date.parse((j.open_ts || '').replace(' ', 'T'))}
-              {@const closeMs = j.close_ts ? Date.parse((j.close_ts || '').replace(' ', 'T')) : Date.now()}
+              {@const openMs = Date.parse(j.open_ts || '')}
+              {@const closeMs = j.close_ts ? Date.parse(j.close_ts) : Date.now()}
               {@const dur = isFinite(openMs) && isFinite(closeMs) ? closeMs - openMs : 0}
               <button
                 class="journey-card"
@@ -1125,6 +1178,7 @@
                   <span class="jc-sym">{j.symbol}</span>
                   <span class="badge" class:badge-long={j.type === 'LONG'} class:badge-short={j.type !== 'LONG'}>{j.type}</span>
                   {#if j.is_open}<span class="jc-open-dot" title="Still open"></span>{/if}
+                  <span class="jc-age dim">{sigAge(j.close_ts || j.open_ts)}</span>
                   <span class="jc-dur dim">{fmtDuration(dur)}</span>
                   <span class="jc-pnl mono {j.total_pnl >= 0 ? 'green' : 'red'}">{j.total_pnl >= 0 ? '+' : ''}{fmtNum(j.total_pnl)}</span>
                 </div>
@@ -1940,6 +1994,8 @@
   .feed-content {
     overflow-y: auto;
     flex: 1;
+    display: flex;
+    flex-direction: column;
   }
   .feed-item {
     padding: 8px 14px;
@@ -1979,15 +2035,14 @@
 
   /* ─── Journey ─── */
   .journey-chart-area {
-    border-bottom: 1px solid var(--border);
     overflow: hidden;
     display: flex;
     flex-direction: column;
+    flex-shrink: 0;
   }
   .journey-chart-header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
     padding: 4px 10px;
     font-size: 11px;
     gap: 6px;
@@ -1997,6 +2052,29 @@
     align-items: center;
     gap: 6px;
     font-weight: 600;
+    flex-shrink: 0;
+  }
+  .journey-iv-bar {
+    display: flex;
+    gap: 2px;
+    margin-left: auto;
+  }
+  .jiv-tab {
+    background: none;
+    border: 1px solid transparent;
+    color: var(--text-dim);
+    font-size: 9px;
+    font-weight: 600;
+    padding: 1px 5px;
+    border-radius: 3px;
+    cursor: pointer;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .jiv-tab:hover { color: var(--text); }
+  .jiv-tab.is-on {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-bg);
   }
   .journey-close-btn {
     background: none;
@@ -2004,11 +2082,26 @@
     color: var(--text-dim);
     cursor: pointer;
     padding: 2px;
+    flex-shrink: 0;
+    margin-left: 4px;
   }
   .journey-close-btn:hover { color: var(--text); }
   .journey-chart-wrap {
     flex: 1;
     min-height: 0;
+    position: relative;
+  }
+  .journey-chart-splitter {
+    height: 5px;
+    cursor: row-resize;
+    background: transparent;
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+    transition: background 0.15s;
+  }
+  .journey-chart-splitter:hover,
+  .journey-chart-splitter.active {
+    background: var(--accent-bg, rgba(59,130,246,0.1));
   }
   .journey-hint {
     display: flex;
@@ -2022,6 +2115,7 @@
   .journey-list {
     overflow-y: auto;
     flex: 1;
+    min-height: 80px;
   }
   .journey-card {
     display: block;
@@ -2067,7 +2161,8 @@
     background: var(--green);
     display: inline-block;
   }
-  .jc-dur { font-size: 10px; }
+  .jc-age { font-size: 10px; }
+  .jc-dur { font-size: 10px; opacity: 0.7; }
   .jc-pnl {
     margin-left: auto;
     font-weight: 600;
