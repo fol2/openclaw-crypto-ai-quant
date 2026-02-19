@@ -16,12 +16,12 @@ import json
 import random
 import shutil
 import subprocess
-import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import yaml
 
 @dataclass(frozen=True)
 class SnapshotFile:
@@ -77,32 +77,64 @@ def _write_json(path: Path, obj: Any) -> None:
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def _build_single_spec(
-    *,
-    repo_root: Path,
-    full_spec: Path,
-    sample_json: Path,
-    output_spec: Path,
-) -> None:
-    cmd = [
-        sys.executable,
-        str(repo_root / "tools" / "build_single_combo_sweep_spec.py"),
-        "--sweep-spec",
-        str(full_spec),
-        "--candidate-row",
-        str(sample_json),
-        "--output",
-        str(output_spec),
-        "--allow-extra",
-    ]
-    proc = subprocess.run(cmd, cwd=str(repo_root), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if proc.returncode != 0:
-        raise RuntimeError(f"failed to build single-combo spec: {output_spec}")
+def _normalise_overrides(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return {str(k): v for k, v in raw.items()}
+    if isinstance(raw, list):
+        out: dict[str, Any] = {}
+        for item in raw:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                out[str(item[0])] = item[1]
+        return out
+    return {}
+
+
+def _build_single_spec(*, full_spec: Path, sample_row: dict[str, Any], output_spec: Path) -> None:
+    src = yaml.safe_load(full_spec.read_text(encoding="utf-8"))
+    if not isinstance(src, dict):
+        raise RuntimeError(f"invalid sweep spec root: {full_spec}")
+    axes = src.get("axes")
+    if not isinstance(axes, list):
+        raise RuntimeError(f"invalid sweep spec axes: {full_spec}")
+
+    overrides = _normalise_overrides(sample_row.get("overrides"))
+    if not overrides:
+        raise RuntimeError("sample row has no overrides")
+
+    out = dict(src)
+    out_axes: list[dict[str, Any]] = []
+    for axis in axes:
+        if not isinstance(axis, dict) or "path" not in axis:
+            raise RuntimeError("invalid axis entry in sweep spec")
+        path = str(axis["path"])
+        axis_out = dict(axis)
+        if path in overrides:
+            axis_out["values"] = [overrides[path]]
+        else:
+            old_values = axis_out.get("values")
+            if isinstance(old_values, list) and old_values:
+                axis_out["values"] = [old_values[0]]
+            else:
+                axis_out["values"] = [0.0]
+        out_axes.append(axis_out)
+    out["axes"] = out_axes
+
+    output_spec.parent.mkdir(parents=True, exist_ok=True)
+    output_spec.write_text(yaml.safe_dump(out, sort_keys=False), encoding="utf-8")
+
+
+def _snapshot_meta(sf: SnapshotFile | None) -> dict[str, str] | None:
+    if sf is None:
+        return None
+    return {
+        "source": str(sf.source),
+        "snapped": str(sf.snapped),
+        "sha256": sf.sha256,
+    }
 
 
 def _pair_trial(
     *,
-    repo_root: Path,
     backtester_dir: Path,
     mei_backtester: Path,
     config_snapshot: Path,
@@ -183,9 +215,8 @@ def _pair_trial(
 
         spec_path = pairing_dir / "specs" / f"{name}.yaml"
         _build_single_spec(
-            repo_root=repo_root,
             full_spec=sweep_spec_full,
-            sample_json=sample_path,
+            sample_row=sample_row,
             output_spec=spec_path,
         )
 
@@ -325,12 +356,12 @@ def main() -> int:
         "out_dir": str(out_dir),
         "generated_at_utc": ts,
         "inputs": {
-            "config": snapped_cfg.__dict__,
-            "candles_main": snapped_candles.__dict__,
-            "candles_entry": snapped_entry.__dict__ if snapped_entry else None,
-            "candles_exit": snapped_exit.__dict__ if snapped_exit else None,
-            "funding_db": snapped_funding.__dict__ if snapped_funding else None,
-            "balance_from": snapped_balance.__dict__ if snapped_balance else None,
+            "config": _snapshot_meta(snapped_cfg),
+            "candles_main": _snapshot_meta(snapped_candles),
+            "candles_entry": _snapshot_meta(snapped_entry),
+            "candles_exit": _snapshot_meta(snapped_exit),
+            "funding_db": _snapshot_meta(snapped_funding),
+            "balance_from": _snapshot_meta(snapped_balance),
             "interval": args.interval,
             "entry_interval": args.entry_interval,
             "exit_interval": args.exit_interval,
@@ -406,7 +437,6 @@ def main() -> int:
 
         pairing_dir = pairing_root / f"trials_{trial_count}"
         pairing_summary = _pair_trial(
-            repo_root=repo_root,
             backtester_dir=backtester_dir,
             mei_backtester=mei_backtester,
             config_snapshot=snapped_cfg.snapped,
