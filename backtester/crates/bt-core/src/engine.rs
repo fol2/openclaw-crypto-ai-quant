@@ -888,6 +888,14 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
 
     // -- Main loop: iterate every timestamp --
     for &ts in &timestamps {
+        // Hard stop at the upper replay bound so that hourly funding settlement
+        // and equity sampling cannot leak beyond the requested time window.
+        if let Some(tt) = to_ts {
+            if ts > tt {
+                break;
+            }
+        }
+
         // 1. BTC context: determine if BTC is bullish
         let btc_bullish = compute_btc_bullish(&state, ts, &bar_index, candles);
 
