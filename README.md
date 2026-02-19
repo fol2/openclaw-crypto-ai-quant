@@ -2,6 +2,57 @@
 
 AI-powered crypto perpetual futures trading engine for [Hyperliquid DEX](https://hyperliquid.xyz), with a high-performance Rust backtester featuring CPU and CUDA GPU acceleration.
 
+## Architecture
+
+```
+                    ┌─────────────┐
+                    │  Hyperliquid │
+                    │     DEX      │
+                    └──────┬───────┘
+                           │ WS + REST
+                    ┌──────▼───────┐
+                    │  WS Sidecar  │  (Rust)
+                    │ (market data) │
+                    └──────┬───────┘
+                           │ Unix socket
+              ┌────────────▼────────────┐
+              │     Unified Engine      │
+              │       (engine/)         │
+              ├──────────┬──────────────┤
+              │  Paper   │    Live      │
+              │ Trader   │   Trader     │
+              ├──────────┴──────────────┤
+              │   Kernel Orchestrator   │
+              │  (Rust bt-runtime/PyO3) │
+              ├─────────────────────────┤
+              │     Risk Manager        │
+              ├─────────────────────────┤
+              │   Order Mgmt System     │
+              └────────────┬────────────┘
+                           │
+         ┌─────────────────┼─────────────────┐
+         │                 │                 │
+   ┌─────▼─────┐   ┌──────▼──────┐   ┌──────▼──────┐
+   │  Monitor   │   │  Hub (Rust  │   │  Alerting   │
+   │ Dashboard  │   │  + Svelte)  │   │  (Discord/  │
+   │ (Python)   │   │             │   │  Telegram)  │
+   └────────────┘   └─────────────┘   └─────────────┘
+
+Standalone:
+   ┌──────────────────────────────────────────────┐
+   │          Rust Backtester (CPU / CUDA GPU)     │
+   │  bt-core · bt-signals · bt-gpu · risk-core   │
+   └──────────────────────────────────────────────┘
+
+Nightly pipeline:
+   ┌──────────────────────────────────────────────┐
+   │  Strategy Factory (factory_run.py / cycle)    │
+   │  sweep → validate → deploy → paper → promote  │
+   └──────────────────────────────────────────────┘
+```
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed component descriptions, data flow, and project structure.
+
 ## Highlights
 
 | | |
