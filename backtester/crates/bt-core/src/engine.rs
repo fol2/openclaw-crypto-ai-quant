@@ -1556,20 +1556,23 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
         if let (Some(enc), Some(ref enc_idx)) = (entry_candles, &entry_bar_index) {
             let sub_equity = state.balance
                 + unrealized_pnl(&state.positions, &state.indicators, ts, candles, &bar_index);
+            let entry_bar_ms = if cfg.engine.signal_on_candle_close {
+                interval_to_ms(&cfg.engine.entry_interval)
+            } else {
+                0
+            };
 
             // Build a merged timeline of unique sub-bar timestamps across all symbols.
             // Default range is (ts+1 .. next_ts], but when signal-on-candle-close
-            // is enabled we only evaluate at the indicator bar close timestamp.
-            let sub_tick_from = if cfg.engine.signal_on_candle_close {
+            // is enabled we evaluate the sub-bar whose close aligns to next_ts.
+            let sub_tick_from = if cfg.engine.signal_on_candle_close && entry_bar_ms > 0 {
+                next_ts.saturating_sub(entry_bar_ms)
+            } else if cfg.engine.signal_on_candle_close {
                 next_ts
             } else {
                 ts + 1
             };
-            let sub_tick_to = if cfg.engine.signal_on_candle_close {
-                next_ts
-            } else {
-                next_ts
-            };
+            let sub_tick_to = next_ts;
             let mut sub_bar_ticks: Vec<i64> = Vec::new();
             for sym in &symbols {
                 if let Some(sym_entry_idx) = enc_idx.get(sym.as_str()) {
@@ -1580,6 +1583,15 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                     for &(sub_ts, _) in &sym_entry_idx[start..] {
                         if sub_ts > sub_tick_to {
                             break;
+                        }
+                        if cfg.engine.signal_on_candle_close && entry_bar_ms > 0 {
+                            let sub_close_ts = sub_ts.saturating_add(entry_bar_ms);
+                            if sub_close_ts < next_ts {
+                                continue;
+                            }
+                            if sub_close_ts > next_ts {
+                                break;
+                            }
                         }
                         sub_bar_ticks.push(sub_ts);
                     }
@@ -1614,16 +1626,21 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                             let (_, bar_i) = sym_entry_idx[idx];
                             if let Some(entry_bars) = enc.get(sym.as_str()) {
                                 if let Some(sub_bar) = entry_bars.get(bar_i) {
+                                    let eval_ts = if cfg.engine.signal_on_candle_close {
+                                        next_ts
+                                    } else {
+                                        *sub_ts
+                                    };
                                     let base_snap = if cfg.engine.signal_on_candle_close {
                                         current_indicator_snaps
                                             .get(sym.as_str())
                                             .cloned()
-                                            .unwrap_or_else(|| make_minimal_snap(0.0, *sub_ts))
+                                            .unwrap_or_else(|| make_minimal_snap(0.0, eval_ts))
                                     } else {
                                         prev_indicator_snaps
                                             .get(sym.as_str())
                                             .cloned()
-                                            .unwrap_or_else(|| make_minimal_snap(0.0, *sub_ts))
+                                            .unwrap_or_else(|| make_minimal_snap(0.0, eval_ts))
                                     };
                                     let sub_snap = make_exit_snap(&base_snap, sub_bar);
                                     let slope =
@@ -1638,7 +1655,7 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                                         btc_bullish,
                                         breadth_pct,
                                         slope,
-                                        *sub_ts,
+                                        eval_ts,
                                     ) {
                                         sub_candidates.push(cand);
                                     }
