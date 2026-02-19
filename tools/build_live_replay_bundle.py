@@ -776,7 +776,7 @@ def main() -> int:
         f"--backtester-replay-report \"$BUNDLE_DIR/{replay_report_path.name}\" "
         f"--live-order-fail-events \"$BUNDLE_DIR/{live_order_fail_events_path.name}\" "
         f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
-        "--timestamp-bucket-anchor ceil "
+        "--timestamp-bucket-anchor floor "
         f"--output \"$BUNDLE_DIR/{action_reconcile_path.name}\""
     )
 
