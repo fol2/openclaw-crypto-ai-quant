@@ -387,6 +387,9 @@ export class CandleChart extends LitElement {
         ctx.stroke();
       }
 
+      // Compute total PnL once for reuse
+      const totalPnl = jm.reduce((s, m) => s + (m.pnl ?? 0), 0);
+
       // Entry avg horizontal line (from first pin to last pin or right edge)
       const firstOpen = pts.find(p => p.m.action === 'OPEN');
       const lastClose = [...pts].reverse().find(p => p.m.action === 'CLOSE');
@@ -415,7 +418,6 @@ export class CandleChart extends LitElement {
         // Exit price dashed line
         if (lastClose && lastClose.m.price > 0) {
           const exitY = pToY(lastClose.m.price);
-          const totalPnl = jm.reduce((s, m) => s + (m.pnl ?? 0), 0);
           ctx.strokeStyle = totalPnl >= 0 ? C.jrnPnlPos : C.jrnPnlNeg;
           ctx.lineWidth = 1;
           ctx.setLineDash([4, 3]);
@@ -456,7 +458,6 @@ export class CandleChart extends LitElement {
 
       // PnL badge near CLOSE pin
       if (lastClose) {
-        const totalPnl = jm.reduce((s, m) => s + (m.pnl ?? 0), 0);
         const sign = totalPnl >= 0 ? '+' : '';
         const pnlText = `${sign}$${totalPnl.toFixed(2)}`;
         ctx.font = FONT_B;

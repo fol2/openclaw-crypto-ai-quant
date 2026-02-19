@@ -500,6 +500,10 @@ pub fn position_entries(
 
 /// Reconstruct trade journeys (OPEN→…→CLOSE lifecycles) from the trades table.
 /// Returns most-recent journeys first (open ones at the top, then closed by close_ts DESC).
+///
+/// NOTE: This loads all matching trades into memory and reconstructs journeys in Rust.
+/// For tables with <10k trades this is fine; for larger datasets consider a materialized
+/// journeys table populated on write.
 pub fn trade_journeys(
     conn: &Connection,
     limit: u32,
@@ -554,7 +558,14 @@ pub fn trade_journeys(
         };
 
     // Walk chronologically, building journeys keyed by symbol.
-    let mut in_progress: std::collections::HashMap<String, TradeJourney> =
+    // current_size tracks live position size for weighted avg entry calc;
+    // peak_size records the high-water mark for display.
+    struct InProgress {
+        journey: TradeJourney,
+        current_size: f64,
+    }
+
+    let mut in_progress: std::collections::HashMap<String, InProgress> =
         std::collections::HashMap::new();
     let mut completed: Vec<TradeJourney> = Vec::new();
 
@@ -566,45 +577,51 @@ pub fn trade_journeys(
             "OPEN" => {
                 // Flush any orphaned previous journey for this symbol
                 if let Some(orphan) = in_progress.remove(&sym_upper) {
-                    completed.push(orphan);
+                    completed.push(orphan.journey);
                 }
                 in_progress.insert(
                     sym_upper.clone(),
-                    TradeJourney {
-                        id,
-                        symbol: sym_upper,
-                        pos_type: pos_type.to_uppercase(),
-                        open_ts: ts.clone(),
-                        close_ts: None,
-                        entry_price: price,
-                        exit_price: None,
-                        peak_size: size,
-                        total_pnl: pnl,
-                        total_fees: fee.abs(),
-                        is_open: true,
-                        legs: vec![JourneyLeg {
+                    InProgress {
+                        journey: TradeJourney {
                             id,
-                            timestamp: ts,
-                            action: action_upper,
-                            price,
-                            size,
-                            pnl,
-                        }],
+                            symbol: sym_upper,
+                            pos_type: pos_type.to_uppercase(),
+                            open_ts: ts.clone(),
+                            close_ts: None,
+                            entry_price: price,
+                            exit_price: None,
+                            peak_size: size,
+                            total_pnl: pnl,
+                            total_fees: fee.abs(),
+                            is_open: true,
+                            legs: vec![JourneyLeg {
+                                id,
+                                timestamp: ts,
+                                action: action_upper,
+                                price,
+                                size,
+                                pnl,
+                            }],
+                        },
+                        current_size: size,
                     },
                 );
             }
             "ADD" => {
-                if let Some(j) = in_progress.get_mut(&sym_upper) {
-                    // Recalculate weighted avg entry
-                    let prev_notional = j.entry_price * j.peak_size;
-                    let new_size = j.peak_size + size;
+                if let Some(ip) = in_progress.get_mut(&sym_upper) {
+                    // Recalculate weighted avg entry using current (not peak) size
+                    let prev_notional = ip.journey.entry_price * ip.current_size;
+                    let new_size = ip.current_size + size;
                     if new_size > 0.0 {
-                        j.entry_price = (prev_notional + price * size) / new_size;
+                        ip.journey.entry_price = (prev_notional + price * size) / new_size;
                     }
-                    j.peak_size = new_size;
-                    j.total_pnl += pnl;
-                    j.total_fees += fee.abs();
-                    j.legs.push(JourneyLeg {
+                    ip.current_size = new_size;
+                    if new_size > ip.journey.peak_size {
+                        ip.journey.peak_size = new_size;
+                    }
+                    ip.journey.total_pnl += pnl;
+                    ip.journey.total_fees += fee.abs();
+                    ip.journey.legs.push(JourneyLeg {
                         id,
                         timestamp: ts,
                         action: action_upper,
@@ -616,10 +633,11 @@ pub fn trade_journeys(
                 // Ignore ADD without a preceding OPEN
             }
             "REDUCE" => {
-                if let Some(j) = in_progress.get_mut(&sym_upper) {
-                    j.total_pnl += pnl;
-                    j.total_fees += fee.abs();
-                    j.legs.push(JourneyLeg {
+                if let Some(ip) = in_progress.get_mut(&sym_upper) {
+                    ip.current_size = (ip.current_size - size).max(0.0);
+                    ip.journey.total_pnl += pnl;
+                    ip.journey.total_fees += fee.abs();
+                    ip.journey.legs.push(JourneyLeg {
                         id,
                         timestamp: ts,
                         action: action_upper,
@@ -630,7 +648,8 @@ pub fn trade_journeys(
                 }
             }
             "CLOSE" => {
-                if let Some(mut j) = in_progress.remove(&sym_upper) {
+                if let Some(ip) = in_progress.remove(&sym_upper) {
+                    let mut j = ip.journey;
                     j.close_ts = Some(ts.clone());
                     j.exit_price = Some(price);
                     j.is_open = false;
@@ -646,6 +665,8 @@ pub fn trade_journeys(
                     });
                     completed.push(j);
                 }
+                // Orphaned CLOSE (no preceding OPEN) is silently dropped.
+                // This can happen when the OPEN predates the DB or data was truncated.
             }
             _ => {}
         }
@@ -655,12 +676,13 @@ pub fn trade_journeys(
     let mut result: Vec<TradeJourney> = Vec::new();
 
     // Open journeys (still in progress)
-    let mut open_journeys: Vec<TradeJourney> = in_progress.into_values().collect();
+    let mut open_journeys: Vec<TradeJourney> =
+        in_progress.into_values().map(|ip| ip.journey).collect();
     open_journeys.sort_by(|a, b| b.open_ts.cmp(&a.open_ts));
     result.extend(open_journeys);
 
-    // Closed journeys, most recent first
-    completed.reverse();
+    // Closed journeys, most recent close_ts first
+    completed.sort_by(|a, b| b.close_ts.cmp(&a.close_ts));
     result.extend(completed);
 
     // Apply offset + limit
