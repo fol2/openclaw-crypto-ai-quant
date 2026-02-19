@@ -182,8 +182,14 @@ def _reconstruct_positions_and_balance(
         if margin_used <= 0.0:
             margin_used = abs(net_size) * avg_entry / leverage
 
+        trailing_sl = None
+        adds_count = 0
+        tp1_taken = False
+        last_add_time_ms = 0
+        entry_adx_threshold = 0.0
+
         fills_q = (
-            "SELECT action, price, size, entry_atr FROM trades "
+            "SELECT action, price, size, entry_atr, timestamp, reason FROM trades "
             "WHERE symbol = ? AND id > ? AND action IN ('ADD', 'REDUCE')"
         )
         fills_params: list[Any] = [symbol, open_id]
@@ -198,10 +204,15 @@ def _reconstruct_positions_and_balance(
             px = float(fill["price"] or 0.0)
             sz = float(fill["size"] or 0.0)
             fill_atr = float(fill["entry_atr"] or 0.0)
+            fill_ts_ms = _parse_timestamp_ms(fill["timestamp"])
+            reason_text = str(fill["reason"] or "").strip().lower()
             if px <= 0.0 or sz <= 0.0:
                 continue
 
             if action == "ADD":
+                adds_count += 1
+                if fill_ts_ms > 0:
+                    last_add_time_ms = max(last_add_time_ms, int(fill_ts_ms))
                 new_total = net_size + sz
                 if new_total > 0:
                     avg_entry = ((avg_entry * net_size) + (px * sz)) / new_total
@@ -211,6 +222,8 @@ def _reconstruct_positions_and_balance(
                         entry_atr = fill_atr
                     net_size = new_total
             elif action == "REDUCE":
+                if "take profit (partial)" in reason_text:
+                    tp1_taken = True
                 net_size -= sz
                 if net_size <= 0:
                     net_size = 0.0
@@ -218,12 +231,6 @@ def _reconstruct_positions_and_balance(
 
         if net_size <= 0.0:
             continue
-
-        trailing_sl = None
-        adds_count = 0
-        tp1_taken = False
-        last_add_time_ms = 0
-        entry_adx_threshold = 0.0
 
         if as_of_ts is None and _table_exists(conn, "position_state"):
             ps_row = conn.execute(
