@@ -107,6 +107,80 @@
     return 'var(--red)';
   }
 
+  function fmtNum(v: number | null | undefined, dp = 2): string {
+    if (v === null || v === undefined || !Number.isFinite(v)) return '\u2014';
+    return v.toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp });
+  }
+  function pnlClass(v: number | null | undefined): string {
+    if (v === null || v === undefined) return '';
+    return v >= 0 ? 'green' : 'red';
+  }
+
+  // ── Derived metrics from snapshot ─────────────────────────────────
+  let health = $derived(snap?.health || {});
+  let balances = $derived(snap?.balances || {});
+  let daily = $derived(snap?.daily || {});
+  let openPositions = $derived(snap?.open_positions || []);
+
+  // ── Range selector for PnL / DD ───────────────────────────────────
+  let metricsRange = $state<'today' | 'since' | 'all'>('today');
+  let rangeMenuOpen = $state(false);
+
+  let activePnl = $derived(
+    metricsRange === 'today' ? daily.pnl_usd
+    : metricsRange === 'since' ? snap?.since_config?.pnl_usd
+    : snap?.all_time?.pnl_usd
+  );
+  let activeDd = $derived(
+    metricsRange === 'today' ? daily.drawdown_pct
+    : metricsRange === 'since' ? snap?.since_config?.drawdown_pct
+    : snap?.all_time?.drawdown_pct
+  );
+  let pnlLabel = $derived(
+    metricsRange === 'today' ? 'PnL'
+    : metricsRange === 'since' ? 'PnL\u2219cfg'
+    : 'PnL\u2219all'
+  );
+  let ddLabel = $derived(
+    metricsRange === 'today' ? 'DD'
+    : metricsRange === 'since' ? 'DD\u2219cfg'
+    : 'DD\u2219all'
+  );
+  let sinceLabel = $derived(snap?.since_config?.label ?? 'Since cfg');
+
+  function selectRange(r: 'today' | 'since' | 'all') {
+    metricsRange = r;
+    rangeMenuOpen = false;
+  }
+
+  function onRangeClickOutside(e: MouseEvent) {
+    const target = e.target as HTMLElement;
+    if (!target.closest('.range-dropdown-wrap')) {
+      rangeMenuOpen = false;
+    }
+  }
+
+  $effect(() => {
+    if (rangeMenuOpen) {
+      document.addEventListener('click', onRangeClickOutside, true);
+      return () => document.removeEventListener('click', onRangeClickOutside, true);
+    }
+  });
+
+  const gateReasonMap: Record<string, { label: string; desc: string }> = {
+    disabled:            { label: 'Disabled',        desc: 'Gate feature is off — new entries always allowed.' },
+    trend_ok:            { label: 'Trend OK',         desc: 'Market breadth is trending and BTC ADX + ATR% pass thresholds. Gate is open.' },
+    breadth_chop:        { label: 'Breadth chop',     desc: 'Market breadth is inside the chop zone. New entries are blocked.' },
+    btc_adx_low:         { label: 'BTC ADX weak',     desc: 'BTC ADX is below the minimum threshold (weak trend). New entries are blocked.' },
+    btc_atr_low:         { label: 'BTC ATR low',      desc: 'BTC ATR% is below the minimum threshold (low volatility). New entries are blocked.' },
+    breadth_missing:     { label: 'No breadth data',  desc: 'Market breadth data is unavailable. Gate state depends on fail-open setting.' },
+    btc_metrics_missing: { label: 'No BTC metrics',   desc: 'BTC ADX/ATR could not be computed. Gate state depends on fail-open setting.' },
+  };
+  let gateInfo = $derived(
+    gateReasonMap[(health.regime_reason ?? '').toLowerCase()] ??
+    { label: (health.regime_reason ?? '—'), desc: '' }
+  );
+
   let filteredSymbols = $derived.by(() => {
     const q = filter.trim().toUpperCase();
     let syms = symbols;
@@ -294,6 +368,64 @@
     </div>
   </div>
 
+  <div class="metrics-bar">
+    {#if health.kill_mode && health.kill_mode !== 'off'}
+      <span class="metric-pill danger">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+        KILL: {health.kill_mode}
+      </span>
+    {/if}
+    {#if health.regime_gate !== undefined && health.regime_gate !== null}
+      <span class="metric-pill gate-pill" class:gate-on={health.regime_gate} class:gate-off={!health.regime_gate}>
+        GATE {health.regime_gate ? 'ON' : 'OFF'}
+        <span class="gate-tooltip">
+          <span class="gt-title" class:gt-on={health.regime_gate} class:gt-off={!health.regime_gate}>
+            GATE {health.regime_gate ? 'ON' : 'OFF'} — {gateInfo.label}
+          </span>
+          {#if gateInfo.desc}
+            <span class="gt-desc">{gateInfo.desc}</span>
+          {/if}
+          <span class="gt-note">Gate OFF blocks new entries. Exits always continue.</span>
+        </span>
+      </span>
+    {/if}
+    <span class="metric-pill">
+      <span class="metric-label">BAL</span>
+      <span class="metric-value">${fmtNum(balances.realised_usd)}</span>
+    </span>
+    <span class="metric-pill">
+      <span class="metric-label">EQ</span>
+      <span class="metric-value">${fmtNum(balances.equity_est_usd)}</span>
+    </span>
+    <span class="range-dropdown-wrap">
+      <button class="metric-pill range-pill {pnlClass(activePnl)}" onclick={() => rangeMenuOpen = !rangeMenuOpen}>
+        <span class="metric-label">{pnlLabel}<svg class="range-caret" class:open={rangeMenuOpen} width="8" height="8" viewBox="0 0 8 8"><path d="M1.5 3L4 5.5L6.5 3" fill="none" stroke="currentColor" stroke-width="1.2"/></svg></span>
+        <span class="metric-value">${fmtNum(activePnl)}</span>
+      </button>
+      {#if rangeMenuOpen}
+        <div class="range-menu">
+          <button class="range-opt" class:active={metricsRange === 'today'} onclick={() => selectRange('today')}>
+            <span class="range-dot"></span>Today
+          </button>
+          <button class="range-opt" class:active={metricsRange === 'since'} onclick={() => selectRange('since')}>
+            <span class="range-dot"></span>{sinceLabel}
+          </button>
+          <button class="range-opt" class:active={metricsRange === 'all'} onclick={() => selectRange('all')}>
+            <span class="range-dot"></span>All-time
+          </button>
+        </div>
+      {/if}
+    </span>
+    <span class="metric-pill">
+      <span class="metric-label">{ddLabel}</span>
+      <span class="metric-value">{fmtNum(activeDd, 1)}%</span>
+    </span>
+    <span class="metric-pill">
+      <span class="metric-label">POS</span>
+      <span class="metric-value">{openPositions.length}</span>
+    </span>
+  </div>
+
   {#if showTrendBar}
   <div class="trend-bar">
     <span class="trend-bar-title">TREND</span>
@@ -446,6 +578,160 @@
   }
   .page-header h1 {
     font-size: 20px; font-weight: 700; margin: 0; letter-spacing: -0.02em;
+  }
+
+  /* ── Metrics pills ─────────────────────────────────────────────── */
+  .metrics-bar {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-bottom: var(--sp-sm);
+  }
+  .metric-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-pill);
+    padding: 3px 10px;
+    font-size: 11px;
+    font-weight: 500;
+    white-space: nowrap;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .metric-pill.danger {
+    border-color: rgba(255,107,107,0.3);
+    color: var(--red);
+    background: var(--red-bg);
+  }
+  .metric-pill.gate-on {
+    border-color: rgba(81,207,102,0.3);
+    color: var(--green);
+  }
+  .metric-pill.gate-off {
+    border-color: rgba(255,107,107,0.3);
+    color: var(--red);
+  }
+  .gate-pill {
+    position: relative;
+    cursor: help;
+  }
+  .gate-tooltip {
+    display: none;
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    width: 250px;
+    background: #111118;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 8px 10px;
+    font-size: 11px;
+    font-family: 'IBM Plex Mono', monospace;
+    z-index: 200;
+    flex-direction: column;
+    gap: 4px;
+    white-space: normal;
+    pointer-events: none;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  }
+  .gate-pill:hover .gate-tooltip {
+    display: flex;
+  }
+  .gt-title { font-weight: 600; font-size: 11px; }
+  .gt-title.gt-on  { color: var(--green); }
+  .gt-title.gt-off { color: var(--red); }
+  .gt-desc {
+    color: var(--text);
+    font-size: 10px;
+    margin-top: 2px;
+    line-height: 1.4;
+  }
+  .gt-note {
+    color: var(--text-muted);
+    font-size: 10px;
+    margin-top: 4px;
+    padding-top: 4px;
+    border-top: 1px solid var(--border);
+    line-height: 1.4;
+  }
+  .metric-label {
+    color: var(--text-muted);
+    font-size: 10px;
+    font-weight: 400;
+  }
+  .metric-value {
+    font-weight: 600;
+  }
+  .metric-pill.green .metric-value { color: var(--green); }
+  .metric-pill.red .metric-value { color: var(--red); }
+
+  .range-dropdown-wrap {
+    position: relative;
+    display: inline-flex;
+  }
+  .range-pill {
+    cursor: pointer;
+    user-select: none;
+  }
+  .range-caret {
+    display: inline-block;
+    margin-left: 2px;
+    vertical-align: middle;
+    transition: transform var(--t-fast);
+  }
+  .range-caret.open {
+    transform: rotate(180deg);
+  }
+  .range-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    min-width: 130px;
+    background: #111118;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 4px 0;
+    z-index: 200;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+    font-size: 11px;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .range-opt {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 5px 10px;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 11px;
+    font-family: inherit;
+    text-align: left;
+    transition: background var(--t-fast), color var(--t-fast);
+  }
+  .range-opt:hover {
+    background: rgba(255,255,255,0.04);
+    color: var(--text);
+  }
+  .range-opt.active {
+    color: var(--accent);
+  }
+  .range-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .range-opt.active .range-dot {
+    background: var(--accent);
+    border-color: var(--accent);
   }
 
   .controls {
@@ -724,6 +1010,13 @@
     }
     .controls {
       flex-wrap: wrap;
+    }
+    .metrics-bar {
+      gap: 4px;
+    }
+    .metric-pill {
+      font-size: 10px;
+      padding: 2px 7px;
     }
     .symbol-grid {
       grid-template-columns: repeat(2, 1fr) !important;
