@@ -256,6 +256,52 @@ def _load_live_baseline_trades(live_db: Path, *, from_ts: int, to_ts: int) -> li
     return out
 
 
+def _load_live_order_fail_events(live_db: Path, *, from_ts: int, to_ts: int) -> list[dict[str, Any]]:
+    conn = _connect_ro(live_db)
+    try:
+        try:
+            rows = conn.execute(
+                "SELECT id, timestamp, symbol, event, data_json FROM audit_events ORDER BY id ASC"
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+    finally:
+        conn.close()
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        event = str(row["event"] or "").strip().upper()
+        if not event.startswith("LIVE_ORDER_FAIL_"):
+            continue
+
+        ts_ms = _parse_timestamp_ms(row["timestamp"])
+        if ts_ms < from_ts or ts_ms > to_ts:
+            continue
+
+        data_json = str(row["data_json"] or "").strip()
+        data_obj: dict[str, Any] = {}
+        if data_json:
+            try:
+                loaded = json.loads(data_json)
+            except Exception:
+                loaded = {}
+            if isinstance(loaded, dict):
+                data_obj = loaded
+
+        out.append(
+            {
+                "id": int(row["id"] or 0),
+                "timestamp": row["timestamp"],
+                "timestamp_ms": ts_ms,
+                "symbol": str(row["symbol"] or "").strip().upper(),
+                "event": event,
+                "data": data_obj,
+            }
+        )
+
+    return out
+
+
 def _load_runtime_strategy_provenance(
     live_db: Path,
     *,
@@ -452,6 +498,7 @@ def main() -> int:
     snapshot_path = bundle_dir / snapshot_name
     strategy_config_snapshot_path = bundle_dir / "strategy_overrides.locked.yaml"
     live_trades_path = bundle_dir / "live_baseline_trades.jsonl"
+    live_order_fail_events_path = bundle_dir / "live_order_fail_events.jsonl"
     audit_report_path = bundle_dir / "state_alignment_report.json"
     replay_trades_csv = bundle_dir / "backtester_trades.csv"
     replay_report_path = bundle_dir / "backtester_replay_report.json"
@@ -473,6 +520,11 @@ def main() -> int:
     )
     baseline_trade_exit_count = sum(1 for row in baseline_trades if row.get("action") in {"CLOSE", "REDUCE"})
     baseline_trade_funding_count = sum(1 for row in baseline_trades if row.get("action") == "FUNDING")
+    live_order_fail_events = _load_live_order_fail_events(
+        live_db,
+        from_ts=int(args.from_ts),
+        to_ts=int(args.to_ts),
+    )
     runtime_strategy_provenance = _load_runtime_strategy_provenance(
         live_db,
         from_ts=int(args.from_ts),
@@ -486,6 +538,9 @@ def main() -> int:
 
     with live_trades_path.open("w", encoding="utf-8") as fp:
         for row in baseline_trades:
+            fp.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False) + "\n")
+    with live_order_fail_events_path.open("w", encoding="utf-8") as fp:
+        for row in live_order_fail_events:
             fp.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False) + "\n")
 
     shutil.copy2(strategy_config_source, strategy_config_snapshot_path)
@@ -719,6 +774,7 @@ def main() -> int:
         "python3 \"$REPO_ROOT/tools/audit_live_backtester_action_reconcile.py\" "
         f"--live-baseline \"$BUNDLE_DIR/{live_trades_path.name}\" "
         f"--backtester-replay-report \"$BUNDLE_DIR/{replay_report_path.name}\" "
+        f"--live-order-fail-events \"$BUNDLE_DIR/{live_order_fail_events_path.name}\" "
         f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
         "--timestamp-bucket-anchor ceil "
         f"--output \"$BUNDLE_DIR/{action_reconcile_path.name}\""
@@ -898,6 +954,8 @@ def main() -> int:
             "strategy_config_snapshot_file": strategy_config_snapshot_path.name,
             "live_baseline_trades": live_trades_path.name,
             "live_baseline_trades_sha256": _hash_file(live_trades_path),
+            "live_order_fail_events": live_order_fail_events_path.name,
+            "live_order_fail_events_sha256": _hash_file(live_order_fail_events_path),
             "audit_report_file": audit_report_path.name,
             "backtester_trades_csv": replay_trades_csv.name,
             "backtester_replay_report_json": replay_report_path.name,
@@ -915,6 +973,7 @@ def main() -> int:
             "live_baseline_trades": len(baseline_trades),
             "live_baseline_simulatable_exits": baseline_trade_exit_count,
             "live_baseline_funding_events": baseline_trade_funding_count,
+            "live_order_fail_events": len(live_order_fail_events),
         },
         "commands": {
             "export_and_seed": cmd_export_seed,

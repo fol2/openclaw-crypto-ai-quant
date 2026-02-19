@@ -27,13 +27,26 @@ except ModuleNotFoundError:  # pragma: no cover - module execution path
 SIDE_ACTIONS = {"OPEN", "ADD", "REDUCE", "CLOSE"}
 FUNDING_ACTION = "FUNDING"
 END_OF_BACKTEST_REASON_CODES = {"exit_end_of_backtest"}
+ORDER_FAIL_EVENTS = {
+    "LIVE_ORDER_FAIL_UPDATE_LEVERAGE",
+    "LIVE_ORDER_FAIL_MARKET_OPEN",
+    "LIVE_ORDER_FAIL_MARKET_CLOSE",
+}
 DEFAULT_TOL = 1e-9
+DEFAULT_ORDER_FAIL_MATCH_WINDOW_MS = 300_000
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Audit live-vs-backtester action-level parity from replay bundle artefacts.")
     parser.add_argument("--live-baseline", required=True, help="Path to live_baseline_trades.jsonl")
     parser.add_argument("--backtester-replay-report", required=True, help="Path to backtester replay JSON report (with trades)")
+    parser.add_argument(
+        "--live-order-fail-events",
+        help=(
+            "Optional path to live order-fail event JSONL exported from audit_events "
+            "(events beginning with LIVE_ORDER_FAIL_)."
+        ),
+    )
     parser.add_argument("--output", required=True, help="Path to output JSON report")
     parser.add_argument(
         "--timestamp-bucket-ms",
@@ -52,6 +65,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pnl-tol", type=float, default=DEFAULT_TOL, help="Absolute tolerance for pnl comparison")
     parser.add_argument("--fee-tol", type=float, default=DEFAULT_TOL, help="Absolute tolerance for fee comparison")
     parser.add_argument("--balance-tol", type=float, default=DEFAULT_TOL, help="Absolute tolerance for balance comparison")
+    parser.add_argument(
+        "--order-fail-match-window-ms",
+        type=int,
+        default=DEFAULT_ORDER_FAIL_MATCH_WINDOW_MS,
+        help="Absolute timestamp window for matching missing live actions to LIVE_ORDER_FAIL events",
+    )
     return parser
 
 
@@ -109,6 +128,13 @@ def _normalise_confidence(value: Any) -> str:
     if conf in {"low", "medium", "high"}:
         return conf
     return conf
+
+
+def _normalise_signal(value: Any) -> str:
+    signal = str(value or "").strip().upper()
+    if signal in {"BUY", "SELL"}:
+        return signal
+    return ""
 
 
 def _almost_equal(left: float, right: float, tol: float) -> bool:
@@ -253,6 +279,126 @@ def _load_backtester_actions(path: Path) -> tuple[list[dict[str, Any]], dict[str
     return actions, counts
 
 
+def _load_live_order_fail_events(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    total_rows = 0
+    skipped_rows = 0
+
+    with path.open("r", encoding="utf-8") as fp:
+        for line_no, raw in enumerate(fp, start=1):
+            line = raw.strip()
+            if not line:
+                continue
+            total_rows += 1
+            try:
+                row = json.loads(line)
+            except Exception:
+                skipped_rows += 1
+                continue
+
+            event = str(row.get("event") or "").strip().upper()
+            symbol = _normalise_symbol(row.get("symbol"))
+            ts_ms = _parse_timestamp_ms(row.get("timestamp_ms"))
+            if ts_ms <= 0:
+                ts_ms = _parse_timestamp_ms(row.get("timestamp"))
+            if event not in ORDER_FAIL_EVENTS or not symbol or ts_ms <= 0:
+                skipped_rows += 1
+                continue
+
+            data = row.get("data")
+            if not isinstance(data, dict):
+                data = {}
+
+            events.append(
+                {
+                    "source": "live_order_fail",
+                    "source_id": int(row.get("id") or 0),
+                    "line_no": line_no,
+                    "timestamp_ms": ts_ms,
+                    "symbol": symbol,
+                    "event": event,
+                    "signal": _normalise_signal(data.get("signal")),
+                    "kind": str(data.get("kind") or "").strip().upper(),
+                    "submit_err_kind": str(data.get("submit_err_kind") or "").strip().lower(),
+                    "submit_err": str(data.get("submit_err") or ""),
+                    "data": data,
+                }
+            )
+
+    events.sort(key=lambda r: (r["timestamp_ms"], r["symbol"], r["event"], int(r["source_id"])))
+    counts = {
+        "live_order_fail_total_rows": total_rows,
+        "live_order_fail_events": len(events),
+        "live_order_fail_skipped_rows": skipped_rows,
+    }
+    return events, counts
+
+
+def _is_order_fail_compatible(action_code: str, event_row: dict[str, Any]) -> bool:
+    code = str(action_code or "").strip().upper()
+    if "_" not in code:
+        return False
+    base, side = code.split("_", 1)
+    event = str(event_row.get("event") or "").strip().upper()
+    kind = str(event_row.get("kind") or "").strip().upper()
+    signal = str(event_row.get("signal") or "").strip().upper()
+
+    if event not in ORDER_FAIL_EVENTS:
+        return False
+
+    if base == "ADD":
+        return event in {"LIVE_ORDER_FAIL_UPDATE_LEVERAGE", "LIVE_ORDER_FAIL_MARKET_OPEN"} and kind == "ADD"
+
+    if base == "OPEN":
+        if event not in {"LIVE_ORDER_FAIL_UPDATE_LEVERAGE", "LIVE_ORDER_FAIL_MARKET_OPEN"}:
+            return False
+        if kind == "ADD":
+            return False
+        if signal == "BUY":
+            return side == "LONG"
+        if signal == "SELL":
+            return side == "SHORT"
+        return False
+
+    if base in {"CLOSE", "REDUCE"}:
+        return event == "LIVE_ORDER_FAIL_MARKET_CLOSE"
+
+    return False
+
+
+def _match_live_order_fail_event(
+    live_order_fail_by_symbol: dict[str, list[dict[str, Any]]],
+    *,
+    consumed_event_ids: set[int],
+    symbol: str,
+    action_code: str,
+    target_ts_ms: int,
+    window_ms: int,
+) -> dict[str, Any] | None:
+    candidates = live_order_fail_by_symbol.get(symbol, [])
+    best: dict[str, Any] | None = None
+    best_delta: int | None = None
+
+    for row in candidates:
+        source_id = int(row.get("source_id") or 0)
+        if source_id > 0 and source_id in consumed_event_ids:
+            continue
+        if not _is_order_fail_compatible(action_code, row):
+            continue
+        delta = abs(int(row.get("timestamp_ms") or 0) - int(target_ts_ms))
+        if delta > window_ms:
+            continue
+        if best is None or best_delta is None or delta < best_delta:
+            best = row
+            best_delta = delta
+
+    if best is not None:
+        source_id = int(best.get("source_id") or 0)
+        if source_id > 0:
+            consumed_event_ids.add(source_id)
+    return best
+
+
 def _group_events(
     rows: list[dict[str, Any]],
     *,
@@ -284,6 +430,7 @@ def _group_events(
 def _compare_actions(
     live_actions: list[dict[str, Any]],
     backtester_actions: list[dict[str, Any]],
+    live_order_fail_events: list[dict[str, Any]],
     *,
     timestamp_bucket_ms: int,
     timestamp_bucket_anchor: str,
@@ -292,6 +439,7 @@ def _compare_actions(
     pnl_tol: float,
     fee_tol: float,
     balance_tol: float,
+    order_fail_match_window_ms: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
     mismatches: list[dict[str, Any]] = []
     matched_pairs = 0
@@ -302,6 +450,11 @@ def _compare_actions(
     unmatched_backtester = 0
     non_simulatable_residuals = 0
     state_scope_residuals = 0
+    order_fail_residuals = 0
+    consumed_order_fail_event_ids: set[int] = set()
+    live_order_fail_by_symbol: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in live_order_fail_events:
+        live_order_fail_by_symbol[str(row.get("symbol") or "")].append(row)
 
     per_symbol: dict[str, dict[str, Any]] = defaultdict(
         lambda: {
@@ -533,6 +686,48 @@ def _compare_actions(
                         )
                         continue
 
+                    matched_fail = _match_live_order_fail_event(
+                        live_order_fail_by_symbol,
+                        consumed_event_ids=consumed_order_fail_event_ids,
+                        symbol=symbol,
+                        action_code=action_code,
+                        target_ts_ms=int(brow["timestamp_ms"]),
+                        window_ms=max(1, int(order_fail_match_window_ms)),
+                    )
+                    if matched_fail is not None:
+                        non_simulatable_residuals += 1
+                        order_fail_residuals += 1
+                        mismatches.append(
+                            {
+                                "classification": "non-simulatable_exchange_oms_effect",
+                                "kind": "missing_live_action_live_order_fail",
+                                "symbol": symbol,
+                                "action_code": action_code,
+                                "match_key_timestamp_ms": ts_ms,
+                                "backtester_timestamp_ms": brow["timestamp_ms"],
+                                "backtester_ref": {"row_no": brow["row_no"]},
+                                "backtester": {
+                                    "price": brow["price"],
+                                    "size": brow["size"],
+                                    "pnl_usd": brow["pnl_usd"],
+                                    "fee_usd": brow["fee_usd"],
+                                    "balance": brow["balance"],
+                                    "confidence": brow["confidence"],
+                                    "reason_code": brow["reason_code"],
+                                    "reason": brow["reason"],
+                                },
+                                "live_order_fail_event": {
+                                    "id": matched_fail.get("source_id"),
+                                    "timestamp_ms": matched_fail.get("timestamp_ms"),
+                                    "event": matched_fail.get("event"),
+                                    "kind": matched_fail.get("kind"),
+                                    "signal": matched_fail.get("signal"),
+                                    "submit_err_kind": matched_fail.get("submit_err_kind"),
+                                },
+                            }
+                        )
+                        continue
+
                     unmatched_backtester += 1
                     mismatches.append(
                         {
@@ -577,6 +772,7 @@ def _compare_actions(
         "unmatched_backtester": unmatched_backtester,
         "non_simulatable_residuals": non_simulatable_residuals,
         "state_scope_residuals": state_scope_residuals,
+        "order_fail_residuals": order_fail_residuals,
     }
     return mismatches, summary, per_symbol_rows
 
@@ -587,22 +783,34 @@ def main() -> int:
 
     live_baseline = Path(args.live_baseline).expanduser().resolve()
     backtester_report = Path(args.backtester_replay_report).expanduser().resolve()
+    live_order_fail_events_path = Path(args.live_order_fail_events).expanduser().resolve() if args.live_order_fail_events else None
     output = Path(args.output).expanduser().resolve()
 
     if not live_baseline.exists():
         parser.error(f"live baseline not found: {live_baseline}")
     if not backtester_report.exists():
         parser.error(f"backtester replay report not found: {backtester_report}")
+    if live_order_fail_events_path is not None and not live_order_fail_events_path.exists():
+        parser.error(f"live order-fail events file not found: {live_order_fail_events_path}")
 
     live_actions, live_counts = _load_live_actions(live_baseline)
     try:
         backtester_actions, backtester_counts = _load_backtester_actions(backtester_report)
     except ValueError as exc:
         parser.error(str(exc))
+    if live_order_fail_events_path is not None:
+        live_order_fail_events, order_fail_counts = _load_live_order_fail_events(live_order_fail_events_path)
+    else:
+        live_order_fail_events, order_fail_counts = [], {
+            "live_order_fail_total_rows": 0,
+            "live_order_fail_events": 0,
+            "live_order_fail_skipped_rows": 0,
+        }
 
     mismatches, compare_summary, per_symbol_rows = _compare_actions(
         live_actions,
         backtester_actions,
+        live_order_fail_events,
         timestamp_bucket_ms=max(1, int(args.timestamp_bucket_ms)),
         timestamp_bucket_anchor=str(args.timestamp_bucket_anchor or "floor"),
         price_tol=float(args.price_tol),
@@ -610,6 +818,7 @@ def main() -> int:
         pnl_tol=float(args.pnl_tol),
         fee_tol=float(args.fee_tol),
         balance_tol=float(args.balance_tol),
+        order_fail_match_window_ms=max(1, int(args.order_fail_match_window_ms)),
     )
 
     mismatch_counts: dict[str, int] = defaultdict(int)
@@ -633,6 +842,7 @@ def main() -> int:
         "inputs": {
             "live_baseline": str(live_baseline),
             "backtester_replay_report": str(backtester_report),
+            "live_order_fail_events": str(live_order_fail_events_path) if live_order_fail_events_path else None,
             "timestamp_bucket_ms": max(1, int(args.timestamp_bucket_ms)),
             "timestamp_bucket_anchor": str(args.timestamp_bucket_anchor or "floor"),
             "price_tol": float(args.price_tol),
@@ -640,10 +850,12 @@ def main() -> int:
             "pnl_tol": float(args.pnl_tol),
             "fee_tol": float(args.fee_tol),
             "balance_tol": float(args.balance_tol),
+            "order_fail_match_window_ms": max(1, int(args.order_fail_match_window_ms)),
         },
         "counts": {
             **live_counts,
             **backtester_counts,
+            **order_fail_counts,
             **compare_summary,
             "mismatch_total": len(mismatches),
         },
