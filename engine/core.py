@@ -486,6 +486,7 @@ class KernelDecisionRustBindingProvider:
     """Call the Rust decision kernel via the `bt_runtime` extension."""
 
     _KERNEL_STATE_PATH = str(Path("~/.mei/kernel_state.json").expanduser())
+    _KERNEL_STATE_BASENAME = "kernel_state.json"
 
     _tunnel_table_ready: set[str] = set()
 
@@ -493,13 +494,301 @@ class KernelDecisionRustBindingProvider:
         self._runtime = _load_kernel_runtime_module(module_name)
         self._path = str(path).strip() if path else None
         self._db_path = str(db_path).strip() if db_path else None
+        self._state_path = self._resolve_state_path(self._db_path)
         self._state_json = self._load_or_create_state()
         self._params_json = self._runtime.default_kernel_params_json()
+        self._state_json = self._bootstrap_state_from_db_if_needed(self._state_json)
         self._event_id = 1
+
+    @classmethod
+    def _resolve_state_path(cls, db_path: str | None) -> str:
+        explicit = str(os.getenv("AI_QUANT_KERNEL_STATE_PATH", "") or "").strip()
+        if explicit:
+            return os.path.expanduser(explicit)
+
+        base_dir = str(os.getenv("AI_QUANT_KERNEL_STATE_DIR", "~/.mei") or "~/.mei").strip() or "~/.mei"
+        base_dir = os.path.expanduser(base_dir)
+        if not os.path.isabs(base_dir):
+            anchor_dir = os.path.dirname(str(db_path or "").strip()) if str(db_path or "").strip() else os.getcwd()
+            base_dir = os.path.abspath(os.path.join(anchor_dir, base_dir))
+
+        basename = cls._KERNEL_STATE_BASENAME
+        tag = str(os.getenv("AI_QUANT_INSTANCE_TAG", "") or "").strip()
+        if tag:
+            stem, ext = os.path.splitext(basename)
+            basename = f"{stem}_{tag}{ext}"
+        return str(Path(base_dir) / basename)
+
+    def _load_open_positions_from_db(self) -> dict[str, dict[str, Any]]:
+        db_path = str(self._db_path or "").strip()
+        if not db_path:
+            return {}
+        try:
+            import sqlite3
+            import datetime as _dt
+        except Exception:
+            return {}
+
+        out: dict[str, dict[str, Any]] = {}
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = sqlite3.connect(db_path, timeout=5.0)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+
+            has_position_state = bool(
+                cur.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='position_state' LIMIT 1"
+                ).fetchone()
+            )
+            state_cols: set[str] = set()
+            if has_position_state:
+                state_cols = {str(row[1]) for row in cur.execute("PRAGMA table_info(position_state)").fetchall()}
+
+            open_rows = cur.execute(
+                """
+                SELECT t.id AS open_trade_id, t.timestamp AS open_ts, t.symbol, t.type AS pos_type,
+                       t.price AS open_px, t.size AS open_sz, t.confidence, t.entry_atr, t.leverage, t.margin_used
+                FROM trades t
+                JOIN (
+                    SELECT symbol, MAX(id) AS open_id
+                    FROM trades
+                    WHERE action = 'OPEN'
+                    GROUP BY symbol
+                ) lo ON lo.symbol = t.symbol AND lo.open_id = t.id
+                LEFT JOIN (
+                    SELECT symbol, MAX(id) AS close_id
+                    FROM trades
+                    WHERE action = 'CLOSE'
+                    GROUP BY symbol
+                ) lc ON lc.symbol = t.symbol
+                WHERE lc.close_id IS NULL OR t.id > lc.close_id
+                """
+            ).fetchall()
+
+            for row in open_rows:
+                symbol = str(row["symbol"] or "").strip().upper()
+                if not symbol:
+                    continue
+                pos_type = str(row["pos_type"] or "").strip().upper()
+                if pos_type not in {"LONG", "SHORT"}:
+                    continue
+
+                try:
+                    avg_entry = float(row["open_px"] or 0.0)
+                    net_size = float(row["open_sz"] or 0.0)
+                except Exception:
+                    continue
+                if avg_entry <= 0.0 or net_size <= 0.0:
+                    continue
+
+                try:
+                    entry_atr = float(row["entry_atr"] or 0.0)
+                except Exception:
+                    entry_atr = 0.0
+
+                open_trade_id = int(row["open_trade_id"])
+                add_count_hist = 0
+                last_add_time_hist = 0
+                fill_rows = cur.execute(
+                    """
+                    SELECT action, price, size, entry_atr, timestamp
+                    FROM trades
+                    WHERE symbol = ?
+                      AND id > ?
+                      AND action IN ('ADD', 'REDUCE')
+                    ORDER BY id ASC
+                    """,
+                    (symbol, open_trade_id),
+                ).fetchall()
+                for fill in fill_rows:
+                    try:
+                        px = float(fill["price"] or 0.0)
+                        sz = float(fill["size"] or 0.0)
+                    except Exception:
+                        continue
+                    if px <= 0.0 or sz <= 0.0:
+                        continue
+                    action = str(fill["action"] or "").strip().upper()
+                    if action == "ADD":
+                        new_total = net_size + sz
+                        if new_total > 0.0:
+                            avg_entry = ((avg_entry * net_size) + (px * sz)) / new_total
+                            fill_atr_raw = fill["entry_atr"]
+                            fill_atr = None
+                            if fill_atr_raw is not None:
+                                try:
+                                    fill_atr = float(fill_atr_raw)
+                                except Exception:
+                                    fill_atr = None
+                            if fill_atr and fill_atr > 0:
+                                if entry_atr > 0:
+                                    entry_atr = ((entry_atr * net_size) + (fill_atr * sz)) / new_total
+                                else:
+                                    entry_atr = fill_atr
+                            net_size = new_total
+                        add_count_hist += 1
+                        fill_ts = 0
+                        try:
+                            fill_ts = int(_dt.datetime.fromisoformat(str(fill["timestamp"])).timestamp() * 1000)
+                        except Exception:
+                            fill_ts = 0
+                        if fill_ts > 0:
+                            last_add_time_hist = max(last_add_time_hist, fill_ts)
+                    elif action == "REDUCE":
+                        net_size -= sz
+                        if net_size <= 0.0:
+                            net_size = 0.0
+                            break
+
+                if net_size <= 0.0:
+                    continue
+
+                try:
+                    leverage = float(row["leverage"]) if row["leverage"] is not None else 1.0
+                except Exception:
+                    leverage = 1.0
+                leverage = max(1.0, float(leverage))
+
+                margin_used = 0.0
+                try:
+                    if row["margin_used"] is not None:
+                        margin_used = float(row["margin_used"])
+                except Exception:
+                    margin_used = 0.0
+                if margin_used <= 0.0 and avg_entry > 0.0:
+                    margin_used = abs(net_size) * avg_entry / leverage
+
+                trailing_sl = None
+                last_funding_time = 0
+                adds_count = int(add_count_hist)
+                tp1_taken = 0
+                last_add_time = int(last_add_time_hist)
+                entry_adx_threshold = 0.0
+
+                if has_position_state:
+                    ps = cur.execute(
+                        "SELECT * FROM position_state WHERE symbol = ? LIMIT 1",
+                        (symbol,),
+                    ).fetchone()
+                    if ps and ("open_trade_id" not in state_cols or ps["open_trade_id"] is None or int(ps["open_trade_id"]) == open_trade_id):
+                        if "trailing_sl" in state_cols and ps["trailing_sl"] is not None:
+                            try:
+                                trailing_sl = float(ps["trailing_sl"])
+                            except Exception:
+                                trailing_sl = None
+                        if "last_funding_time" in state_cols:
+                            try:
+                                last_funding_time = int(ps["last_funding_time"] or 0)
+                            except Exception:
+                                last_funding_time = 0
+                        if "adds_count" in state_cols:
+                            try:
+                                adds_count = int(ps["adds_count"] or add_count_hist)
+                            except Exception:
+                                adds_count = int(add_count_hist)
+                        if "tp1_taken" in state_cols:
+                            try:
+                                tp1_taken = int(ps["tp1_taken"] or 0)
+                            except Exception:
+                                tp1_taken = 0
+                        if "last_add_time" in state_cols:
+                            try:
+                                ps_last_add = int(ps["last_add_time"] or 0)
+                            except Exception:
+                                ps_last_add = 0
+                            if ps_last_add > 0:
+                                last_add_time = ps_last_add
+                        if "entry_adx_threshold" in state_cols:
+                            try:
+                                entry_adx_threshold = float(ps["entry_adx_threshold"] or 0.0)
+                            except Exception:
+                                entry_adx_threshold = 0.0
+
+                if last_funding_time <= 0:
+                    try:
+                        last_funding_time = int(_dt.datetime.fromisoformat(str(row["open_ts"])).timestamp() * 1000)
+                    except Exception:
+                        last_funding_time = int(now_ms())
+
+                out[symbol] = {
+                    "type": pos_type,
+                    "entry_price": float(avg_entry),
+                    "size": float(net_size),
+                    "confidence": str(row["confidence"] or "medium").strip().lower() or "medium",
+                    "entry_atr": float(entry_atr),
+                    "entry_adx_threshold": float(entry_adx_threshold),
+                    "open_timestamp": str(row["open_ts"] or ""),
+                    "trailing_sl": trailing_sl,
+                    "last_funding_time": int(last_funding_time),
+                    "leverage": float(leverage),
+                    "margin_used": float(abs(net_size) * avg_entry / leverage if avg_entry > 0 else margin_used),
+                    "adds_count": int(adds_count),
+                    "tp1_taken": int(tp1_taken),
+                    "last_add_time": int(last_add_time),
+                }
+        except Exception:
+            logger.warning("Kernel DB bootstrap scan failed: %s", traceback.format_exc())
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
+        return out
+
+    def _bootstrap_state_from_db_if_needed(self, state_json: str) -> str:
+        try:
+            state = json.loads(state_json)
+        except Exception:
+            return state_json
+        if not isinstance(state, dict):
+            return state_json
+
+        existing_positions = state.get("positions")
+        if isinstance(existing_positions, dict) and len(existing_positions) > 0:
+            return state_json
+
+        py_positions = self._load_open_positions_from_db()
+        if not py_positions:
+            return state_json
+
+        try:
+            from strategy.mei_alpha_v1 import python_position_to_kernel
+        except Exception:
+            logger.warning("Kernel DB bootstrap skipped: failed to import python_position_to_kernel", exc_info=True)
+            return state_json
+
+        kernel_positions: dict[str, dict[str, Any]] = {}
+        for symbol, py_pos in py_positions.items():
+            try:
+                kp = python_position_to_kernel(symbol, py_pos)
+            except Exception:
+                logger.debug("Kernel bootstrap conversion failed for %s", symbol, exc_info=True)
+                continue
+            if isinstance(kp, dict):
+                clean = dict(kp)
+                clean.pop("symbol", None)
+                kernel_positions[str(symbol).upper()] = clean
+
+        if not kernel_positions:
+            return state_json
+
+        state["positions"] = kernel_positions
+        state["timestamp_ms"] = int(now_ms())
+        hydrated = json.dumps(state, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        self._persist_state(hydrated)
+        logger.warning(
+            "Kernel state bootstrapped from DB positions: positions=%d state_path=%s db=%s",
+            len(kernel_positions),
+            self._state_path,
+            self._db_path or "",
+        )
+        return hydrated
 
     def _load_or_create_state(self) -> str:
         """Load kernel state from disk, or create fresh if missing/corrupt."""
-        state_path = self._KERNEL_STATE_PATH
+        state_path = self._state_path
         try:
             state_json = self._runtime.load_state(state_path)
             # Parse to extract log fields.
@@ -549,9 +838,9 @@ class KernelDecisionRustBindingProvider:
     def _persist_state(self, state_json: str) -> None:
         """Save kernel state to disk. Best-effort, never raises."""
         try:
-            state_dir = Path(self._KERNEL_STATE_PATH).parent
+            state_dir = Path(self._state_path).parent
             state_dir.mkdir(parents=True, exist_ok=True)
-            self._runtime.save_state(state_json, self._KERNEL_STATE_PATH)
+            self._runtime.save_state(state_json, self._state_path)
         except Exception:
             logger.warning(
                 "Failed to persist kernel state: %s",
