@@ -73,11 +73,11 @@ const C = {
   ttDim:      'rgba(255,255,255,0.42)',
   noData:     'rgba(255,255,255,0.22)',
   // Exit tunnel
-  tnlGreen:   'rgba(34,197,94,0.12)',    // profit zone fill
-  tnlRed:     'rgba(239,68,68,0.12)',    // risk zone fill
-  tnlTP:      'rgba(34,197,94,0.40)',    // TP boundary line
-  tnlSL:      'rgba(239,68,68,0.40)',    // SL boundary line
-  tnlPartial: 'rgba(34,197,94,0.25)',    // TP1 partial boundary
+  tnlGreen:   'rgba(34,197,94,0.22)',    // profit zone fill
+  tnlRed:     'rgba(239,68,68,0.22)',    // risk zone fill
+  tnlTP:      'rgba(34,197,94,0.55)',    // TP boundary line
+  tnlSL:      'rgba(239,68,68,0.55)',    // SL boundary line
+  tnlPartial: 'rgba(34,197,94,0.35)',    // TP1 partial boundary
 } as const;
 
 // ─── Layout constants (logical px) ────────────────────────────────────────────
