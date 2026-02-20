@@ -919,6 +919,12 @@ fn evaluate_trade_only_batch(
     trade_end: u32,
 ) -> Vec<buffers::GpuResult> {
     let trial_n = trial_overrides.len();
+    let entry_interval_sec = interval_to_seconds(&base_cfg.engine.entry_interval);
+    let signal_on_candle_close = if base_cfg.engine.signal_on_candle_close {
+        1
+    } else {
+        0
+    };
     let ind_config = buffers::GpuIndicatorConfig::from_strategy_config(base_cfg, lookback);
 
     // H11: handle GPU memory allocation failure gracefully
@@ -978,6 +984,8 @@ fn evaluate_trade_only_batch(
         }
     };
     trade_bufs.max_sub_per_bar = max_sub_per_bar;
+    trade_bufs.entry_interval_sec = entry_interval_sec;
+    trade_bufs.signal_on_candle_close = signal_on_candle_close;
     // Arc clone only bumps refcount; avoids cudarc CudaSlice device-to-device copy.
     trade_bufs.sub_candles = sub_candles_gpu.cloned();
     trade_bufs.sub_counts = sub_counts_gpu.cloned();
