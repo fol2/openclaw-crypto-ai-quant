@@ -4,6 +4,7 @@ import math
 import logging
 import os
 import json
+import hashlib
 import time
 import traceback
 import importlib
@@ -496,6 +497,7 @@ class KernelDecisionRustBindingProvider:
         self._db_path = str(db_path).strip() if db_path else None
         self._state_path = self._resolve_state_path(self._db_path)
         self._legacy_state_path = self._KERNEL_STATE_PATH
+        self._allow_legacy_state_fallback = _env_bool("AI_QUANT_KERNEL_STATE_LEGACY_FALLBACK", False)
         self._state_json = self._load_or_create_state()
         self._params_json = self._runtime.default_kernel_params_json()
         self._state_json = self._bootstrap_state_from_db_if_needed(self._state_json)
@@ -519,10 +521,12 @@ class KernelDecisionRustBindingProvider:
             stem, ext = os.path.splitext(basename)
             basename = f"{stem}_{tag}{ext}"
         elif db_path:
-            db_stem = Path(str(db_path)).stem.strip()
+            db_real = str(Path(str(db_path)).expanduser().resolve())
+            db_stem = Path(db_real).stem.strip()
             if db_stem:
                 stem, ext = os.path.splitext(basename)
-                basename = f"{stem}_{db_stem}{ext}"
+                db_hash = hashlib.sha1(db_real.encode("utf-8")).hexdigest()[:12]
+                basename = f"{stem}_{db_stem}_{db_hash}{ext}"
         return str(Path(base_dir) / basename)
 
     def _load_latest_balance_from_db(self) -> float | None:
@@ -837,8 +841,11 @@ class KernelDecisionRustBindingProvider:
 
     def _load_or_create_state(self) -> str:
         """Load kernel state from disk, or create fresh if missing/corrupt."""
+        load_candidates_raw: list[str] = [self._state_path]
+        if self._allow_legacy_state_fallback:
+            load_candidates_raw.append(self._legacy_state_path)
         load_candidates: list[str] = []
-        for candidate in (self._state_path, self._legacy_state_path):
+        for candidate in load_candidates_raw:
             c = str(candidate or "").strip()
             if c and c not in load_candidates:
                 load_candidates.append(c)

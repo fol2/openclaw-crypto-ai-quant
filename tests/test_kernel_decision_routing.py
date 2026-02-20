@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 import types
 from dataclasses import dataclass
 import importlib
@@ -606,8 +607,20 @@ def test_rust_binding_provider_uses_db_scoped_state_path_without_tag(monkeypatch
     monkeypatch.setattr("engine.core._load_kernel_runtime_module", lambda *_args, **_kwargs: _FakeKernelRuntime())
 
     provider = KernelDecisionRustBindingProvider(path=str(payload_path), db_path=str(db_path))
+    db_real = str(db_path.expanduser().resolve())
+    db_hash = hashlib.sha1(db_real.encode("utf-8")).hexdigest()[:12]
+    expected = state_dir / f"kernel_state_trading_engine_v8_paper2_{db_hash}.json"
+    assert provider._state_path == str(expected)
 
-    assert provider._state_path == str(state_dir / "kernel_state_trading_engine_v8_paper2.json")
+
+def test_rust_binding_provider_legacy_fallback_disabled_by_default(monkeypatch, tmp_path) -> None:
+    payload_path = tmp_path / "events.json"
+    payload_path.write_text("[]", encoding="utf-8")
+    monkeypatch.delenv("AI_QUANT_KERNEL_STATE_LEGACY_FALLBACK", raising=False)
+    monkeypatch.setattr("engine.core._load_kernel_runtime_module", lambda *_args, **_kwargs: _FakeKernelRuntime())
+
+    provider = KernelDecisionRustBindingProvider(path=str(payload_path))
+    assert provider._allow_legacy_state_fallback is False
 
 
 def test_rust_binding_provider_bootstraps_positions_from_db_when_state_empty(monkeypatch, tmp_path) -> None:
