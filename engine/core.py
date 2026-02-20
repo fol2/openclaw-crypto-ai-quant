@@ -495,6 +495,7 @@ class KernelDecisionRustBindingProvider:
         self._path = str(path).strip() if path else None
         self._db_path = str(db_path).strip() if db_path else None
         self._state_path = self._resolve_state_path(self._db_path)
+        self._legacy_state_path = self._KERNEL_STATE_PATH
         self._state_json = self._load_or_create_state()
         self._params_json = self._runtime.default_kernel_params_json()
         self._state_json = self._bootstrap_state_from_db_if_needed(self._state_json)
@@ -512,12 +513,44 @@ class KernelDecisionRustBindingProvider:
             anchor_dir = os.path.dirname(str(db_path or "").strip()) if str(db_path or "").strip() else os.getcwd()
             base_dir = os.path.abspath(os.path.join(anchor_dir, base_dir))
 
-        basename = cls._KERNEL_STATE_BASENAME
         tag = str(os.getenv("AI_QUANT_INSTANCE_TAG", "") or "").strip()
+        basename = cls._KERNEL_STATE_BASENAME
         if tag:
             stem, ext = os.path.splitext(basename)
             basename = f"{stem}_{tag}{ext}"
+        elif db_path:
+            db_stem = Path(str(db_path)).stem.strip()
+            if db_stem:
+                stem, ext = os.path.splitext(basename)
+                basename = f"{stem}_{db_stem}{ext}"
         return str(Path(base_dir) / basename)
+
+    def _load_latest_balance_from_db(self) -> float | None:
+        db_path = str(self._db_path or "").strip()
+        if not db_path:
+            return None
+        try:
+            import sqlite3
+        except Exception:
+            return None
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = sqlite3.connect(db_path, timeout=5.0)
+            row = conn.execute("SELECT balance FROM trades WHERE balance IS NOT NULL ORDER BY id DESC LIMIT 1").fetchone()
+            if not row:
+                return None
+            bal = _finite_float_or_default(row[0], float("nan"))
+            if not math.isfinite(bal) or bal < 0.0:
+                return None
+            return float(bal)
+        except Exception:
+            return None
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
 
     def _load_open_positions_from_db(self) -> dict[str, dict[str, Any]]:
         db_path = str(self._db_path or "").strip()
@@ -535,6 +568,7 @@ class KernelDecisionRustBindingProvider:
             conn = sqlite3.connect(db_path, timeout=5.0)
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
+            require_position_state = _env_bool("AI_QUANT_KERNEL_BOOTSTRAP_REQUIRE_POSITION_STATE", True)
 
             has_position_state = bool(
                 cur.execute(
@@ -544,6 +578,12 @@ class KernelDecisionRustBindingProvider:
             state_cols: set[str] = set()
             if has_position_state:
                 state_cols = {str(row[1]) for row in cur.execute("PRAGMA table_info(position_state)").fetchall()}
+            elif require_position_state:
+                logger.warning(
+                    "Kernel DB bootstrap skipped: position_state table missing (db=%s)",
+                    db_path,
+                )
+                return {}
 
             open_rows = cur.execute(
                 """
@@ -666,12 +706,14 @@ class KernelDecisionRustBindingProvider:
                 last_add_time = int(last_add_time_hist)
                 entry_adx_threshold = 0.0
 
+                has_matching_state = False
                 if has_position_state:
                     ps = cur.execute(
                         "SELECT * FROM position_state WHERE symbol = ? LIMIT 1",
                         (symbol,),
                     ).fetchone()
                     if ps and ("open_trade_id" not in state_cols or ps["open_trade_id"] is None or int(ps["open_trade_id"]) == open_trade_id):
+                        has_matching_state = True
                         if "trailing_sl" in state_cols and ps["trailing_sl"] is not None:
                             try:
                                 trailing_sl = float(ps["trailing_sl"])
@@ -704,6 +746,9 @@ class KernelDecisionRustBindingProvider:
                                 entry_adx_threshold = float(ps["entry_adx_threshold"] or 0.0)
                             except Exception:
                                 entry_adx_threshold = 0.0
+
+                if require_position_state and not has_matching_state:
+                    continue
 
                 if last_funding_time <= 0:
                     try:
@@ -775,12 +820,16 @@ class KernelDecisionRustBindingProvider:
             return state_json
 
         state["positions"] = kernel_positions
+        db_balance = self._load_latest_balance_from_db()
+        if db_balance is not None:
+            state["cash_usd"] = float(db_balance)
         state["timestamp_ms"] = int(now_ms())
         hydrated = json.dumps(state, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
         self._persist_state(hydrated)
         logger.warning(
-            "Kernel state bootstrapped from DB positions: positions=%d state_path=%s db=%s",
+            "Kernel state bootstrapped from DB positions: positions=%d cash=%s state_path=%s db=%s",
             len(kernel_positions),
+            f"{db_balance:.2f}" if db_balance is not None else "unchanged",
             self._state_path,
             self._db_path or "",
         )
@@ -788,47 +837,59 @@ class KernelDecisionRustBindingProvider:
 
     def _load_or_create_state(self) -> str:
         """Load kernel state from disk, or create fresh if missing/corrupt."""
-        state_path = self._state_path
-        try:
-            state_json = self._runtime.load_state(state_path)
-            # Parse to extract log fields.
+        load_candidates: list[str] = []
+        for candidate in (self._state_path, self._legacy_state_path):
+            c = str(candidate or "").strip()
+            if c and c not in load_candidates:
+                load_candidates.append(c)
+        for state_path in load_candidates:
             try:
-                state = json.loads(state_json)
-                if not isinstance(state, dict):
-                    logger.warning(
-                        "Kernel state: expected dict, got %s; loaded from %s",
-                        type(state).__name__,
-                        state_path,
-                    )
-                    return state_json
-                ts_ms = int(state.get("timestamp_ms", 0))
-                positions = state.get("positions")
-                n_pos = len(positions) if isinstance(positions, dict) else 0
-                cash = float(state.get("cash_usd", 0.0))
-                age_s = max(0.0, (now_ms() - ts_ms) / 1000.0) if ts_ms > 0 else 0.0
-                logger.info(
-                    "Kernel state loaded, age=%.1fs, positions=%d, cash=$%.2f",
-                    age_s,
-                    n_pos,
-                    cash,
-                )
-                if age_s > 300.0:
-                    logger.warning(
-                        "Kernel state stale by %.0fs",
+                state_json = self._runtime.load_state(state_path)
+                # Parse to extract log fields.
+                try:
+                    state = json.loads(state_json)
+                    if not isinstance(state, dict):
+                        logger.warning(
+                            "Kernel state: expected dict, got %s; loaded from %s",
+                            type(state).__name__,
+                            state_path,
+                        )
+                        return state_json
+                    ts_ms = int(state.get("timestamp_ms", 0))
+                    positions = state.get("positions")
+                    n_pos = len(positions) if isinstance(positions, dict) else 0
+                    cash = float(state.get("cash_usd", 0.0))
+                    age_s = max(0.0, (now_ms() - ts_ms) / 1000.0) if ts_ms > 0 else 0.0
+                    logger.info(
+                        "Kernel state loaded, age=%.1fs, positions=%d, cash=$%.2f",
                         age_s,
+                        n_pos,
+                        cash,
                     )
-            except (ValueError, TypeError, KeyError) as exc:
-                logger.warning("Kernel state metadata parsing failed: %s; loaded from %s", exc, state_path)
-            return state_json
-        except OSError:
-            # File missing — normal on first run.
-            pass
-        except Exception:
-            logger.error(
-                "Kernel state file corrupt, creating fresh: %s\n%s",
-                state_path,
-                traceback.format_exc(),
-            )
+                    if age_s > 300.0:
+                        logger.warning(
+                            "Kernel state stale by %.0fs",
+                            age_s,
+                        )
+                except (ValueError, TypeError, KeyError) as exc:
+                    logger.warning("Kernel state metadata parsing failed: %s; loaded from %s", exc, state_path)
+                if state_path != self._state_path:
+                    self._persist_state(state_json)
+                    logger.info(
+                        "Kernel state migrated from %s to %s",
+                        state_path,
+                        self._state_path,
+                    )
+                return state_json
+            except OSError:
+                # File missing — normal on first run.
+                continue
+            except Exception:
+                logger.error(
+                    "Kernel state file corrupt, creating fresh: %s\n%s",
+                    state_path,
+                    traceback.format_exc(),
+                )
         _seed = float(os.getenv("AI_QUANT_PAPER_BALANCE", "10000.0"))
         fresh = self._runtime.default_kernel_state_json(_seed, now_ms())
         logger.info("Kernel state created fresh")
