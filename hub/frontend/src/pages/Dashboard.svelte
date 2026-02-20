@@ -738,6 +738,34 @@
         developingCurrent ?? developingBeforeFetch,
         bars,
       );
+      // Advance to the current bar if the newest candle's period has elapsed.
+      // Without this, after a reconcile replaces the developing candle with an
+      // official completed candle, the chart stalls until the next WS tick.
+      const msPerBar = intervalToMs(iv);
+      const nowMs = serverNowMs();
+      const currentBarStart = Math.floor(nowMs / msPerBar) * msPerBar;
+      if (candles.length > 0) {
+        const nIdx = newestCandleIndex(candles);
+        const nT = Number(candles[nIdx]?.t || 0);
+        if (nT > 0 && nT < currentBarStart) {
+          const prevClose = Number(candles[nIdx]?.c || 0);
+          const symData = snap?.symbols?.find((s: any) => s.symbol === sym);
+          const mid = finitePositive(symData?.mid) ?? prevClose;
+          const open = prevClose > 0 ? prevClose : mid;
+          candles.push({
+            t: currentBarStart,
+            t_close: currentBarStart + msPerBar - 1,
+            o: open,
+            h: Math.max(open, mid),
+            l: Math.min(open, mid),
+            c: mid,
+            v: 0, n: 0,
+          });
+          if (candles.length > bars) candles.splice(0, candles.length - bars);
+        }
+      }
+      // Reset tick dedup so the next WS tick processes even if mid is unchanged.
+      _lastLiveTickKey = '';
       setCandlesSeriesContext(sym, iv);
       void fetchTunnelForLive();
     } catch {
