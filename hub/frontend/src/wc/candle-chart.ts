@@ -665,12 +665,12 @@ export class CandleChart extends LitElement {
       }
     }
     for (const tp of this.tunnelPoints) {
-      if (tp.upper_full > 0) {
-        if (tp.upper_full > maxP) maxP = tp.upper_full;
-      }
-      if (tp.lower_full > 0) {
-        if (tp.lower_full < minP) minP = tp.lower_full;
-      }
+      // upper_full/lower_full are exit types (TP/SL), not price ordering —
+      // for SHORT, upper_full (TP) < entry < lower_full (SL).
+      const hi = Math.max(tp.upper_full, tp.lower_full);
+      const lo = Math.min(tp.upper_full, tp.lower_full);
+      if (hi > maxP) maxP = hi;
+      if (lo > 0 && lo < minP) minP = lo;
     }
     const pad    = (maxP - minP) * 0.06 || maxP * 0.01 || 1;
     minP -= pad; maxP += pad;
