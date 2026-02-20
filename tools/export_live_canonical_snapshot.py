@@ -123,26 +123,33 @@ def _load_position_state_history_as_of(
     if not has_event_ts and not has_updated_at:
         return None
 
-    where_parts = ["symbol = ?", "(open_trade_id IS NULL OR open_trade_id = ?)"]
-    params: list[Any] = [str(symbol).strip().upper(), int(open_trade_id)]
-    order_col = "id"
-    if has_event_ts:
-        where_parts.append("event_ts_ms <= ?")
-        params.append(int(as_of_ts))
-        order_col = "event_ts_ms"
-    else:
-        where_parts.append("CAST(strftime('%s', updated_at) AS INTEGER) * 1000 <= ?")
-        params.append(int(as_of_ts))
-        order_col = "updated_at"
+    symbol_norm = str(symbol).strip().upper()
+    order_col = "event_ts_ms" if has_event_ts else "updated_at"
+    cutoff_expr = "event_ts_ms <= ?" if has_event_ts else "CAST(strftime('%s', updated_at) AS INTEGER) * 1000 <= ?"
 
-    q = (
-        "SELECT open_trade_id, trailing_sl, adds_count, tp1_taken, last_add_time, "
-        "entry_adx_threshold, updated_at "
-        "FROM position_state_history "
-        f"WHERE {' AND '.join(where_parts)} "
-        f"ORDER BY {order_col} DESC, id DESC LIMIT 1"
-    )
-    return conn.execute(q, tuple(params)).fetchone()
+    # Query exact open_trade_id first to keep index usage predictable.
+    for include_null_open_trade_id in (False, True):
+        where_parts = ["symbol = ?"]
+        params: list[Any] = [symbol_norm]
+        if include_null_open_trade_id:
+            where_parts.append("open_trade_id IS NULL")
+        else:
+            where_parts.append("open_trade_id = ?")
+            params.append(int(open_trade_id))
+        where_parts.append(cutoff_expr)
+        params.append(int(as_of_ts))
+
+        q = (
+            "SELECT open_trade_id, trailing_sl, adds_count, tp1_taken, last_add_time, "
+            "entry_adx_threshold, updated_at "
+            "FROM position_state_history "
+            f"WHERE {' AND '.join(where_parts)} "
+            f"ORDER BY {order_col} DESC, id DESC LIMIT 1"
+        )
+        row = conn.execute(q, tuple(params)).fetchone()
+        if row is not None:
+            return row
+    return None
 
 
 def _max_id(conn: sqlite3.Connection, table_name: str) -> int | None:

@@ -63,6 +63,39 @@ def _current_run_fingerprint() -> str:
         return raw or "unknown"
 
 
+def _ensure_position_state_history_table(cur: sqlite3.Cursor) -> bool:
+    try:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS position_state_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_ts_ms INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                open_trade_id INTEGER,
+                trailing_sl REAL,
+                last_funding_time INTEGER,
+                adds_count INTEGER,
+                tp1_taken INTEGER,
+                last_add_time INTEGER,
+                entry_adx_threshold REAL,
+                event_type TEXT NOT NULL,
+                run_fingerprint TEXT
+            )
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_position_state_history_symbol_ts ON position_state_history(symbol, event_ts_ms)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_position_state_history_open_trade_ts ON position_state_history(open_trade_id, event_ts_ms)"
+        )
+        return True
+    except sqlite3.Error as exc:
+        logger.debug("position_state_history schema ensure skipped: %s", exc)
+        return False
+
+
 def _canonical_reason_code(action: str, pos_type: str | None, reason: str | None) -> str:
     action_code = str(action or "").strip().upper()
     side = str(pos_type or "").strip().upper()
@@ -667,6 +700,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             now_iso = now_dt.isoformat()
             now_ms = int(now_dt.timestamp() * 1000)
             sym = str(symbol).strip().upper()
+            history_ready = _ensure_position_state_history_table(cur)
             cur.execute(
                 """
                 INSERT INTO position_state (
@@ -695,7 +729,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     now_iso,
                 ),
             )
-            try:
+            if history_ready:
                 cur.execute(
                     """
                     INSERT INTO position_state_history (
@@ -720,8 +754,6 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                         _current_run_fingerprint(),
                     ),
                 )
-            except sqlite3.Error as hist_exc:
-                logger.debug("position_state_history upsert skipped for %s: %s", sym, hist_exc)
             conn.commit()
         except sqlite3.Error as exc:
             if "locked" not in str(exc).lower():
@@ -747,6 +779,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             conn = sqlite3.connect(mei_alpha_v1.DB_PATH, timeout=timeout_s)
             _configure_live_db_connection(conn)
             cur = conn.cursor()
+            history_ready = _ensure_position_state_history_table(cur)
             sym = str(symbol).strip().upper()
             row = cur.execute(
                 """
@@ -761,7 +794,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 now_dt = datetime.datetime.now(datetime.timezone.utc)
                 now_iso = now_dt.isoformat()
                 now_ms = int(now_dt.timestamp() * 1000)
-                try:
+                if history_ready:
                     cur.execute(
                         """
                         INSERT INTO position_state_history (
@@ -786,8 +819,6 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                             _current_run_fingerprint(),
                         ),
                     )
-                except sqlite3.Error as hist_exc:
-                    logger.debug("position_state_history clear skipped for %s: %s", sym, hist_exc)
             cur.execute("DELETE FROM position_state WHERE symbol = ?", (sym,))
             conn.commit()
         except sqlite3.Error as exc:
@@ -819,6 +850,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             conn = sqlite3.connect(mei_alpha_v1.DB_PATH, timeout=timeout_s)
             _configure_live_db_connection(conn)
             cur = conn.cursor()
+            history_ready = _ensure_position_state_history_table(cur)
             if open_symbols:
                 sym_list = [s.strip().upper() for s in open_symbols]
                 # Safety: `placeholders` contains only '?' chars — no user input in SQL structure.
@@ -835,7 +867,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     now_dt = datetime.datetime.now(datetime.timezone.utc)
                     now_iso = now_dt.isoformat()
                     now_ms = int(now_dt.timestamp() * 1000)
-                    try:
+                    if history_ready:
                         cur.executemany(
                             """
                             INSERT INTO position_state_history (
@@ -863,8 +895,6 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                                 for r in stale_rows
                             ],
                         )
-                    except sqlite3.Error as hist_exc:
-                        logger.debug("position_state_history reconcile_clear skipped: %s", hist_exc)
                 cur.execute(
                     f"DELETE FROM position_state WHERE symbol NOT IN ({placeholders})",
                     sym_list,
@@ -880,7 +910,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     now_dt = datetime.datetime.now(datetime.timezone.utc)
                     now_iso = now_dt.isoformat()
                     now_ms = int(now_dt.timestamp() * 1000)
-                    try:
+                    if history_ready:
                         cur.executemany(
                             """
                             INSERT INTO position_state_history (
@@ -908,8 +938,6 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                                 for r in stale_rows
                             ],
                         )
-                    except sqlite3.Error as hist_exc:
-                        logger.debug("position_state_history reconcile_clear_all skipped: %s", hist_exc)
                 cur.execute("DELETE FROM position_state")
             conn.commit()
         except sqlite3.Error as exc:
