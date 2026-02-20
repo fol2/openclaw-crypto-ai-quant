@@ -468,7 +468,7 @@ class TestEvaluateExitKernel:
 
 
 class TestCheckExitWithKernel:
-    """Test the orchestrator combining kernel basic exits + Python smart exits."""
+    """Test kernel-only exit orchestration in SSOT mode."""
 
     def _patch_kernel_exit(self, mock_runtime, result_json):
         """Helper to configure mock bt_runtime for exit evaluation."""
@@ -502,16 +502,16 @@ class TestCheckExitWithKernel:
         assert exit_ctx is not None
         assert exit_ctx["exit_type"] == "stop_loss"
 
-    def test_smart_exit_adx_exhaustion(self):
-        """When kernel holds, ADX exhaustion smart exit should fire."""
+    def test_kernel_hold_not_overridden_by_python_adx_exhaustion(self):
+        """When kernel holds, Python ADX heuristics must not force an exit."""
         df = _make_trending_df(60)
         mock_runtime = MagicMock()
         # Kernel returns hold
         self._patch_kernel_exit(mock_runtime, _make_kernel_step_result())
 
-        # Indicators with low ADX (below exhaustion threshold of 18)
+        # Indicators that would have triggered legacy Python ADX exit.
         indicators = {
-            "ADX": 15.0,      # Below default threshold of 18.0
+            "ADX": 15.0,
             "RSI": 55.0,
             "EMA_fast": 95500.0,
             "EMA_slow": 95000.0,
@@ -524,36 +524,28 @@ class TestCheckExitWithKernel:
             entry_price=94000.0, entry_atr=500.0,
         )
 
-        # Explicitly use default config to avoid YAML overrides
-        # that might set smart_exit_adx_exhaustion_lt=0
-        import copy
-        cfg = copy.deepcopy(_DEFAULT_STRATEGY_CONFIG)
-
         with patch("strategy.mei_alpha_v1._BT_RUNTIME_AVAILABLE", True), \
              patch("strategy.mei_alpha_v1._bt_runtime", mock_runtime):
             action, exit_ctx, diag = check_exit_with_kernel(
                 df, "ETH", state_json, _default_params_json(),
-                current_price=95500.0,  # profit = 1500/500 = 3.0 ATR > 1.0
+                current_price=95500.0,
                 timestamp_ms=1700000060000,
                 indicators=indicators,
-                config=cfg,
             )
 
-        assert action == "full_close"
-        assert exit_ctx is not None
-        assert exit_ctx["exit_type"] == "smart_exit"
-        assert "ADX Exhaustion" in exit_ctx["exit_reason"]
+        assert action == "hold"
+        assert exit_ctx is None
 
-    def test_smart_exit_rsi_overextension_long(self):
-        """When kernel holds, RSI overextension should fire for overbought long."""
+    def test_kernel_hold_not_overridden_by_python_rsi_overextension(self):
+        """When kernel holds, Python RSI heuristics must not force an exit."""
         df = _make_trending_df(60)
         mock_runtime = MagicMock()
         self._patch_kernel_exit(mock_runtime, _make_kernel_step_result())
 
-        # Indicators with high RSI (above overbought threshold)
+        # Indicators that would have triggered legacy Python RSI exit.
         indicators = {
-            "ADX": 30.0,       # Above exhaustion threshold
-            "RSI": 85.0,       # Above rsi_exit_ub_lo_profit (80.0)
+            "ADX": 30.0,
+            "RSI": 85.0,
             "EMA_fast": 95500.0,
             "EMA_slow": 95000.0,
             "ATR": 500.0,
@@ -568,22 +560,21 @@ class TestCheckExitWithKernel:
              patch("strategy.mei_alpha_v1._bt_runtime", mock_runtime):
             action, exit_ctx, diag = check_exit_with_kernel(
                 df, "ETH", state_json, _default_params_json(),
-                current_price=95200.0,  # small profit < rsi_switch (1.5 ATR)
+                current_price=95200.0,
                 timestamp_ms=1700000060000,
                 indicators=indicators,
             )
 
-        assert action == "full_close"
-        assert exit_ctx is not None
-        assert "RSI Overbought" in exit_ctx["exit_reason"]
+        assert action == "hold"
+        assert exit_ctx is None
 
-    def test_smart_exit_trend_breakdown(self):
-        """When kernel holds, EMA cross trend breakdown should fire."""
+    def test_kernel_hold_not_overridden_by_python_trend_breakdown(self):
+        """When kernel holds, Python EMA-cross heuristics must not force an exit."""
         df = _make_trending_df(60)
         mock_runtime = MagicMock()
         self._patch_kernel_exit(mock_runtime, _make_kernel_step_result())
 
-        # Indicators showing trend breakdown for long: EMA_fast < EMA_slow
+        # Indicators that would have triggered legacy Python EMA-cross exit.
         indicators = {
             "ADX": 30.0,
             "RSI": 50.0,
@@ -606,12 +597,11 @@ class TestCheckExitWithKernel:
                 indicators=indicators,
             )
 
-        assert action == "full_close"
-        assert exit_ctx is not None
-        assert "Trend Breakdown" in exit_ctx["exit_reason"]
+        assert action == "hold"
+        assert exit_ctx is None
 
     def test_pure_hold_when_nothing_fires(self):
-        """When kernel holds and no smart exit fires, return 'hold'."""
+        """When kernel holds, return hold."""
         df = _make_trending_df(60)
         mock_runtime = MagicMock()
         self._patch_kernel_exit(mock_runtime, _make_kernel_step_result())
@@ -704,8 +694,8 @@ class TestCheckExitWithKernel:
         assert action == "hold"
         assert exit_ctx is None
 
-    def test_short_position_trend_breakdown(self):
-        """Trend breakdown should fire when EMA_fast > EMA_slow for shorts."""
+    def test_short_position_python_trend_breakdown_not_applied(self):
+        """Kernel hold should not be overridden by Python EMA-cross on shorts."""
         df = _make_trending_df(60)
         mock_runtime = MagicMock()
         self._patch_kernel_exit(mock_runtime, _make_kernel_step_result())
@@ -732,9 +722,8 @@ class TestCheckExitWithKernel:
                 indicators=indicators,
             )
 
-        assert action == "full_close"
-        assert "Trend Breakdown" in exit_ctx["exit_reason"]
-        assert "fast > slow" in exit_ctx["exit_reason"]
+        assert action == "hold"
+        assert exit_ctx is None
 
 
 # ---------------------------------------------------------------------------
