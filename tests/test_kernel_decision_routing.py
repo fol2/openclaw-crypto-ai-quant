@@ -100,6 +100,31 @@ class FakeDecisionProvider:
         return self.decisions
 
 
+class _FakeKernelStrategy:
+    def __init__(self, *, sha1: str, symbol_cfg: dict[str, Any] | None = None) -> None:
+        self.snapshot = types.SimpleNamespace(version="v-test", overrides_sha1=str(sha1))
+        self._symbol_cfg = symbol_cfg or {}
+        self.get_config_calls: list[str] = []
+
+    def get_config(self, scope: str) -> dict[str, Any]:
+        key = str(scope or "").strip().upper()
+        self.get_config_calls.append(key)
+        if key == "__GLOBAL__":
+            return {
+                "thresholds": {
+                    "entry": {
+                        "macd_hist_entry_mode": "accel",
+                    }
+                },
+                "trade": {
+                    "sl_atr_mult": 2.0,
+                    "tp_atr_mult": 4.0,
+                },
+                "filters": {},
+            }
+        return dict(self._symbol_cfg) if isinstance(self._symbol_cfg, dict) else {}
+
+
 class FakeTrader:
     def __init__(self) -> None:
         self.positions: dict[str, dict[str, object]] = {}
@@ -419,6 +444,7 @@ class _FakeKernelRuntime:
             "allow_pyramid": True,
             "allow_reverse": True,
         }
+        self.step_params: list[dict[str, Any]] = []
 
     def default_kernel_state_json(self, initial_cash_usd: float, timestamp_ms: int) -> str:
         state = dict(self.default_state)
@@ -437,10 +463,15 @@ class _FakeKernelRuntime:
         if parent:
             os.makedirs(parent, exist_ok=True)
 
-    def step_decision(self, state_json: str, event_json: str, _params_json: str) -> str:
+    def step_decision(self, state_json: str, event_json: str, params_json: str) -> str:
         event = json.loads(event_json)
         if not isinstance(event, dict):
             return json.dumps({"ok": False, "error": {"code": "INVALID_EVENT", "message": "invalid", "details": []}})
+
+        params = json.loads(params_json)
+        if not isinstance(params, dict):
+            params = {}
+        self.step_params.append(dict(params))
 
         symbol = str(event.get("symbol", "")).strip().upper()
         if not symbol:
@@ -455,6 +486,44 @@ class _FakeKernelRuntime:
 
         state["step"] = int(state.get("step", 0)) + 1
         state["timestamp_ms"] = int(event.get("timestamp_ms", 0))
+
+        exit_bounds = None
+        positions = state.get("positions")
+        exit_params = params.get("exit_params")
+        if isinstance(positions, dict) and isinstance(exit_params, Mapping):
+            pos = positions.get(symbol)
+            if isinstance(pos, dict):
+                try:
+                    entry_price = float(pos.get("avg_entry_price", 0.0) or 0.0)
+                except Exception:
+                    entry_price = 0.0
+                side = str(pos.get("side", "long") or "long").strip().lower()
+                try:
+                    entry_atr = float(pos.get("entry_atr", 0.0) or 0.0)
+                except Exception:
+                    entry_atr = 0.0
+                if entry_atr <= 0.0 and entry_price > 0.0:
+                    entry_atr = entry_price * 0.005
+                if entry_price > 0.0 and entry_atr > 0.0:
+                    try:
+                        sl_mult = float(exit_params.get("sl_atr_mult", 2.0) or 2.0)
+                    except Exception:
+                        sl_mult = 2.0
+                    try:
+                        tp_mult = float(exit_params.get("tp_atr_mult", 4.0) or 4.0)
+                    except Exception:
+                        tp_mult = 4.0
+                    if side == "short":
+                        lower_full = entry_price - (tp_mult * entry_atr)
+                        upper_full = entry_price + (sl_mult * entry_atr)
+                    else:
+                        lower_full = entry_price - (sl_mult * entry_atr)
+                        upper_full = entry_price + (tp_mult * entry_atr)
+                    exit_bounds = {
+                        "upper_full": float(upper_full),
+                        "upper_partial": float(upper_full),
+                        "lower_full": float(lower_full),
+                    }
 
         intents = []
         for offset, raw_intent in enumerate(self._decision_intents, start=1):
@@ -487,6 +556,8 @@ class _FakeKernelRuntime:
                 "intent_count": len(intents),
                 "fill_count": 0,
                 "step": 2,
+                "exit_bounds": exit_bounds,
+                "applied_thresholds": 1 if isinstance(exit_bounds, Mapping) else 0,
             },
         }
         return json.dumps({"ok": True, "decision": decision})
@@ -577,6 +648,197 @@ def test_rust_binding_provider_converts_kernel_intents(monkeypatch, tmp_path) ->
     assert decisions[0].symbol == "ETH"
     assert decisions[0].target_size == 0.25
     assert decisions[0].confidence == "medium"
+
+
+def test_rust_binding_provider_merges_entry_exit_params_from_strategy_and_caches(monkeypatch, tmp_path) -> None:
+    payload_path = tmp_path / "events.json"
+    payload_path.write_text(
+        json.dumps(
+            [
+                {
+                    "schema_version": 1,
+                    "symbol": "ETH",
+                    "signal": "evaluate",
+                    "price": 100.0,
+                    "timestamp_ms": 1700000000000,
+                    "indicators": {"close": 100.0, "atr": 2.0, "ema_fast": 101.0, "ema_slow": 99.0},
+                    "gate_result": {"allow_trade": True, "confidence": "high", "reasons": []},
+                    "ema_slow_slope_pct": 0.001,
+                },
+                {
+                    "schema_version": 1,
+                    "symbol": "ETH",
+                    "signal": "evaluate",
+                    "price": 101.0,
+                    "timestamp_ms": 1700000001000,
+                    "indicators": {"close": 101.0, "atr": 2.1, "ema_fast": 101.5, "ema_slow": 99.5},
+                    "gate_result": {"allow_trade": True, "confidence": "high", "reasons": []},
+                    "ema_slow_slope_pct": 0.001,
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    runtime = _FakeKernelRuntime(intents=[])
+    monkeypatch.setattr("engine.core._load_kernel_runtime_module", lambda *_args, **_kwargs: runtime)
+
+    provider = KernelDecisionRustBindingProvider(path=str(payload_path))
+    strategy = _FakeKernelStrategy(
+        sha1="4c021600d43a799ffc326ff70b375fee4a731119",
+        symbol_cfg={
+            "thresholds": {
+                "entry": {
+                    "macd_hist_entry_mode": "sign",
+                }
+            },
+            "trade": {
+                "sl_atr_mult": 1.8,
+                "tp_atr_mult": 3.2,
+            },
+            "filters": {},
+        },
+    )
+
+    _ = list(
+        provider.get_decisions(
+            symbols=["ETH"],
+            watchlist=["ETH"],
+            open_symbols=[],
+            market=None,
+            interval="1m",
+            lookback_bars=50,
+            mode="paper",
+            not_ready_symbols=set(),
+            strategy=strategy,
+            now_ms=1700000000000,
+        )
+    )
+
+    assert len(runtime.step_params) == 2
+    first = runtime.step_params[0]
+    assert isinstance(first.get("entry_params"), Mapping)
+    assert isinstance(first.get("exit_params"), Mapping)
+    assert int(first["entry_params"]["macd_mode"]) == 1
+    assert float(first["exit_params"]["sl_atr_mult"]) == pytest.approx(1.8)
+    assert float(first["exit_params"]["tp_atr_mult"]) == pytest.approx(3.2)
+    assert strategy.get_config_calls.count("ETH") == 1
+
+
+def test_rust_binding_provider_can_fail_closed_when_exit_params_missing(monkeypatch, tmp_path, caplog) -> None:
+    payload_path = tmp_path / "events.json"
+    payload_path.write_text(
+        json.dumps(
+            [
+                {
+                    "schema_version": 1,
+                    "symbol": "ETH",
+                    "signal": "evaluate",
+                    "price": 100.0,
+                    "timestamp_ms": 1700000000000,
+                    "indicators": {"close": 100.0, "atr": 2.0, "ema_fast": 101.0, "ema_slow": 99.0},
+                    "gate_result": {"allow_trade": True, "confidence": "high", "reasons": []},
+                    "ema_slow_slope_pct": 0.001,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    runtime = _FakeKernelRuntime(intents=[])
+    monkeypatch.setenv("AI_QUANT_KERNEL_REQUIRE_EXIT_PARAMS", "1")
+    monkeypatch.setattr("engine.core._load_kernel_runtime_module", lambda *_args, **_kwargs: runtime)
+    monkeypatch.setattr("strategy.mei_alpha_v1.build_exit_params", lambda *_args, **_kwargs: None)
+
+    provider = KernelDecisionRustBindingProvider(path=str(payload_path))
+    strategy = _FakeKernelStrategy(sha1="4c021600d43a799ffc326ff70b375fee4a731119")
+    with caplog.at_level("WARNING", logger="engine.core"):
+        decisions = list(
+            provider.get_decisions(
+                symbols=["ETH"],
+                watchlist=["ETH"],
+                open_symbols=[],
+                market=None,
+                interval="1m",
+                lookback_bars=50,
+                mode="paper",
+                not_ready_symbols=set(),
+                strategy=strategy,
+                now_ms=1700000000000,
+            )
+        )
+
+    assert decisions == []
+    assert runtime.step_params == []
+    assert "missing exit_params" in caplog.text
+
+
+def test_rust_binding_provider_persists_exit_tunnel_when_exit_bounds_available(monkeypatch, tmp_path) -> None:
+    payload_path = tmp_path / "events.json"
+    payload_path.write_text(
+        json.dumps(
+            [
+                {
+                    "schema_version": 1,
+                    "symbol": "ETH",
+                    "signal": "price_update",
+                    "price": 102.0,
+                    "timestamp_ms": 1700000000000,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    runtime = _FakeKernelRuntime(intents=[])
+    monkeypatch.setattr("engine.core._load_kernel_runtime_module", lambda *_args, **_kwargs: runtime)
+    db_path = tmp_path / "paper.db"
+    provider = KernelDecisionRustBindingProvider(path=str(payload_path), db_path=str(db_path))
+
+    state = json.loads(provider._state_json)
+    state["positions"] = {
+        "ETH": {
+            "schema_version": 1,
+            "symbol": "ETH",
+            "side": "long",
+            "avg_entry_price": 100.0,
+            "quantity": 1.0,
+            "entry_atr": 2.0,
+        }
+    }
+    provider._state_json = json.dumps(state)
+
+    strategy = _FakeKernelStrategy(
+        sha1="4c021600d43a799ffc326ff70b375fee4a731119",
+        symbol_cfg={
+            "trade": {"sl_atr_mult": 2.0, "tp_atr_mult": 4.0},
+            "filters": {},
+        },
+    )
+    _ = list(
+        provider.get_decisions(
+            symbols=["ETH"],
+            watchlist=["ETH"],
+            open_symbols=["ETH"],
+            market=None,
+            interval="1m",
+            lookback_bars=50,
+            mode="paper",
+            not_ready_symbols=set(),
+            strategy=strategy,
+            now_ms=1700000000000,
+        )
+    )
+
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT symbol, upper_full, lower_full, entry_price, pos_type FROM exit_tunnel ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    assert row is not None
+    assert row[0] == "ETH"
+    assert float(row[1]) > float(row[2])
+    assert float(row[3]) == pytest.approx(100.0)
+    assert row[4] == "LONG"
 
 
 def test_rust_binding_provider_uses_instance_tagged_state_path(monkeypatch, tmp_path) -> None:
