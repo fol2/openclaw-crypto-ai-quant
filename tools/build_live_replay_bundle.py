@@ -14,6 +14,7 @@ import datetime as dt
 import hashlib
 import json
 import math
+import os
 import re
 import shlex
 import shutil
@@ -1016,6 +1017,13 @@ def main() -> int:
         script_path = bundle_dir / script_name
         script_path.chmod(0o755)
 
+    snapshot_strict_replace = str(os.getenv("AQC_SNAPSHOT_STRICT_REPLACE", "0") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
     manifest = {
         "schema_version": 1,
         "generated_at_ms": int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000),
@@ -1041,6 +1049,7 @@ def main() -> int:
             "from_ts": int(args.from_ts),
             "to_ts": int(args.to_ts),
             "live_window_to_ts": int(live_window_to_ts),
+            "snapshot_strict_replace": bool(snapshot_strict_replace),
         },
         "input_hashes": {
             "candles_db_sha256": _hash_file(candles_db),

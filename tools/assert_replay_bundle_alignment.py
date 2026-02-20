@@ -163,6 +163,19 @@ def _as_int(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return bool(default)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
 def _hash_json_canonical(obj: Any) -> str:
     try:
         payload = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
@@ -821,6 +834,8 @@ def main() -> int:
                     }
                 )
 
+    manifest_inputs = (manifest.get("inputs") or {}) if isinstance(manifest, dict) else {}
+    manifest_snapshot_strict_replace = _as_bool(manifest_inputs.get("snapshot_strict_replace"), False)
     live_paper_decision_trace_report: dict[str, Any] | None = None
     live_paper_decision_trace_skipped_empty_paper = False
     if not live_paper_decision_trace_path.exists():
@@ -841,7 +856,7 @@ def main() -> int:
         live_decision_rows = _as_int(decision_counts.get("live_decision_rows"), -1)
         paper_decision_rows = _as_int(decision_counts.get("paper_decision_rows"), -1)
         if not decision_trace_status:
-            if paper_decision_rows == 0 and live_decision_rows > 0:
+            if manifest_snapshot_strict_replace and paper_decision_rows == 0 and live_decision_rows > 0:
                 live_paper_decision_trace_skipped_empty_paper = True
             else:
                 failures.append(
