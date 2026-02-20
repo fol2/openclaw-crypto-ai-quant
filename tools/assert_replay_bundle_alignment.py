@@ -434,13 +434,17 @@ def main() -> int:
                 )
         else:
             oms_distinct_sha = _as_int(oms_strategy.get("strategy_sha1_distinct"), 0)
+            has_oms_rows_in_window = "oms_rows_in_window" in oms_strategy
             oms_rows_in_window = _as_int(oms_strategy.get("oms_rows_in_window"), 0)
             oms_rows_sampled = _as_int(oms_strategy.get("oms_rows_sampled"), 0)
             oms_timeline = oms_strategy.get("strategy_sha1_timeline")
             oms_timeline_count = len(oms_timeline) if isinstance(oms_timeline, list) else 0
+            enforce_non_empty_oms_provenance = (
+                (oms_rows_in_window > 0) if has_oms_rows_in_window else True
+            )
             if (
                 args.require_oms_strategy_provenance
-                and oms_rows_in_window > 0
+                and enforce_non_empty_oms_provenance
                 and (oms_rows_sampled <= 0 or oms_timeline_count <= 0)
             ):
                 strategy_oms_stability_ok = False
@@ -450,6 +454,7 @@ def main() -> int:
                         "classification": "state_initialisation_gap",
                         "detail": "OMS strategy provenance is present but contains no sampled strategy_sha1 rows",
                         "counts": {
+                            "has_oms_rows_in_window": bool(has_oms_rows_in_window),
                             "oms_rows_in_window": oms_rows_in_window,
                             "oms_rows_sampled": oms_rows_sampled,
                             "strategy_sha1_timeline_count": oms_timeline_count,
