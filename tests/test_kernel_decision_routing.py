@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import hashlib
 import types
 from dataclasses import dataclass
 import importlib
@@ -427,6 +429,14 @@ class _FakeKernelRuntime:
     def default_kernel_params_json(self) -> str:
         return json.dumps(self.default_params)
 
+    def load_state(self, path: str) -> str:
+        raise OSError(f"state not found: {path}")
+
+    def save_state(self, state_json: str, path: str) -> None:
+        parent = os.path.dirname(str(path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+
     def step_decision(self, state_json: str, event_json: str, _params_json: str) -> str:
         event = json.loads(event_json)
         if not isinstance(event, dict):
@@ -568,6 +578,178 @@ def test_rust_binding_provider_converts_kernel_intents(monkeypatch, tmp_path) ->
     assert decisions[0].target_size == 0.25
     assert decisions[0].confidence == "medium"
 
+
+def test_rust_binding_provider_uses_instance_tagged_state_path(monkeypatch, tmp_path) -> None:
+    payload_path = tmp_path / "events.json"
+    payload_path.write_text("[]", encoding="utf-8")
+    state_dir = tmp_path / "state"
+
+    monkeypatch.setenv("AI_QUANT_INSTANCE_TAG", "v8-paper1")
+    monkeypatch.setenv("AI_QUANT_KERNEL_STATE_DIR", str(state_dir))
+    monkeypatch.delenv("AI_QUANT_KERNEL_STATE_PATH", raising=False)
+    monkeypatch.setattr("engine.core._load_kernel_runtime_module", lambda *_args, **_kwargs: _FakeKernelRuntime())
+
+    provider = KernelDecisionRustBindingProvider(path=str(payload_path))
+
+    assert provider._state_path == str(state_dir / "kernel_state_v8-paper1.json")
+
+
+def test_rust_binding_provider_uses_db_scoped_state_path_without_tag(monkeypatch, tmp_path) -> None:
+    payload_path = tmp_path / "events.json"
+    payload_path.write_text("[]", encoding="utf-8")
+    state_dir = tmp_path / "state"
+    db_path = tmp_path / "trading_engine_v8_paper2.db"
+    db_path.write_text("", encoding="utf-8")
+
+    monkeypatch.delenv("AI_QUANT_INSTANCE_TAG", raising=False)
+    monkeypatch.setenv("AI_QUANT_KERNEL_STATE_DIR", str(state_dir))
+    monkeypatch.delenv("AI_QUANT_KERNEL_STATE_PATH", raising=False)
+    monkeypatch.setattr("engine.core._load_kernel_runtime_module", lambda *_args, **_kwargs: _FakeKernelRuntime())
+
+    provider = KernelDecisionRustBindingProvider(path=str(payload_path), db_path=str(db_path))
+    db_real = str(db_path.expanduser().resolve())
+    db_hash = hashlib.sha1(db_real.encode("utf-8")).hexdigest()[:12]
+    expected = state_dir / f"kernel_state_trading_engine_v8_paper2_{db_hash}.json"
+    assert provider._state_path == str(expected)
+
+
+def test_rust_binding_provider_legacy_fallback_disabled_by_default(monkeypatch, tmp_path) -> None:
+    payload_path = tmp_path / "events.json"
+    payload_path.write_text("[]", encoding="utf-8")
+    monkeypatch.delenv("AI_QUANT_KERNEL_STATE_LEGACY_FALLBACK", raising=False)
+    monkeypatch.setattr("engine.core._load_kernel_runtime_module", lambda *_args, **_kwargs: _FakeKernelRuntime())
+
+    provider = KernelDecisionRustBindingProvider(path=str(payload_path))
+    assert provider._allow_legacy_state_fallback is False
+
+
+def test_rust_binding_provider_bootstraps_positions_from_db_when_state_empty(monkeypatch, tmp_path) -> None:
+    payload_path = tmp_path / "events.json"
+    payload_path.write_text("[]", encoding="utf-8")
+    state_dir = tmp_path / "state"
+    db_path = tmp_path / "paper.db"
+
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            symbol TEXT,
+            type TEXT,
+            action TEXT,
+            price REAL,
+            size REAL,
+            confidence TEXT,
+            entry_atr REAL,
+            leverage REAL,
+            margin_used REAL,
+            balance REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE position_state (
+            symbol TEXT PRIMARY KEY,
+            open_trade_id INTEGER,
+            trailing_sl REAL,
+            last_funding_time INTEGER,
+            adds_count INTEGER,
+            tp1_taken INTEGER,
+            last_add_time INTEGER,
+            entry_adx_threshold REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO trades (id, timestamp, symbol, type, action, price, size, confidence, entry_atr, leverage, margin_used)
+        VALUES (101, '2026-02-15T19:00:00+00:00', 'ETH', 'LONG', 'OPEN', 100.0, 1.0, 'medium', 2.0, 5.0, 20.0)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO trades (id, timestamp, symbol, type, action, price, size, confidence, entry_atr, leverage, margin_used, balance)
+        VALUES (102, '2026-02-15T19:30:00+00:00', 'ETH', 'LONG', 'ADD', 110.0, 0.5, 'medium', 2.2, 5.0, 11.0, 321.5)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_state (symbol, open_trade_id, trailing_sl, last_funding_time, adds_count, tp1_taken, last_add_time, entry_adx_threshold)
+        VALUES ('ETH', 101, 95.0, 1771185600000, 1, 0, 1771183800000, 18.5)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setenv("AI_QUANT_INSTANCE_TAG", "v8-paper1")
+    monkeypatch.setenv("AI_QUANT_KERNEL_STATE_DIR", str(state_dir))
+    monkeypatch.delenv("AI_QUANT_KERNEL_STATE_PATH", raising=False)
+    monkeypatch.setattr("engine.core._load_kernel_runtime_module", lambda *_args, **_kwargs: _FakeKernelRuntime())
+
+    provider = KernelDecisionRustBindingProvider(path=str(payload_path), db_path=str(db_path))
+    state = json.loads(provider._state_json)
+    positions = state.get("positions") if isinstance(state, dict) else None
+
+    assert isinstance(positions, dict)
+    assert "ETH" in positions
+    assert positions["ETH"]["side"] == "long"
+    assert positions["ETH"]["quantity"] == pytest.approx(1.5)
+    assert positions["ETH"]["adds_count"] == 1
+    assert state["cash_usd"] == pytest.approx(321.5)
+
+
+def test_rust_binding_provider_skips_bootstrap_without_matching_position_state(monkeypatch, tmp_path) -> None:
+    payload_path = tmp_path / "events.json"
+    payload_path.write_text("[]", encoding="utf-8")
+    state_dir = tmp_path / "state"
+    db_path = tmp_path / "paper.db"
+
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            symbol TEXT,
+            type TEXT,
+            action TEXT,
+            price REAL,
+            size REAL,
+            confidence TEXT,
+            entry_atr REAL,
+            leverage REAL,
+            margin_used REAL,
+            balance REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO trades (id, timestamp, symbol, type, action, price, size, confidence, entry_atr, leverage, margin_used, balance)
+        VALUES (1, '2026-02-15T19:00:00+00:00', 'ETH', 'LONG', 'OPEN', 100.0, 1.0, 'medium', 2.0, 5.0, 20.0, 111.0)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setenv("AI_QUANT_KERNEL_STATE_DIR", str(state_dir))
+    monkeypatch.delenv("AI_QUANT_INSTANCE_TAG", raising=False)
+    monkeypatch.delenv("AI_QUANT_KERNEL_STATE_PATH", raising=False)
+    monkeypatch.setenv("AI_QUANT_KERNEL_BOOTSTRAP_REQUIRE_POSITION_STATE", "1")
+    monkeypatch.setattr("engine.core._load_kernel_runtime_module", lambda *_args, **_kwargs: _FakeKernelRuntime())
+
+    provider = KernelDecisionRustBindingProvider(path=str(payload_path), db_path=str(db_path))
+    state = json.loads(provider._state_json)
+    positions = state.get("positions") if isinstance(state, dict) else None
+
+    assert isinstance(positions, dict)
+    assert positions == {}
 
 @pytest.mark.parametrize(
     ("intents", "expected_actions", "expected_sizes"),
