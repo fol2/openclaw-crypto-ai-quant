@@ -13,6 +13,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import re
 import shlex
 import shutil
@@ -117,27 +118,26 @@ def _normalise_macd_mode(value: Any) -> str | None:
         if raw in _MACD_MODE_ALLOWED:
             return raw
         try:
-            num = int(raw)
+            num_f = float(raw)
         except Exception:
-            try:
-                num_f = float(raw)
-            except Exception:
-                return None
-            if not float(num_f).is_integer():
-                return None
-            num = int(num_f)
-        return _MACD_MODE_NUMERIC_MAP.get(int(num))
-
-    if isinstance(value, bool):
+            return None
+    elif isinstance(value, bool):
+        return None
+    elif isinstance(value, (int, float)):
+        num_f = float(value)
+    else:
         return None
 
-    if isinstance(value, (int, float)):
-        num_f = float(value)
-        if not num_f.is_integer():
-            return None
-        return _MACD_MODE_NUMERIC_MAP.get(int(num_f))
+    if not math.isfinite(num_f):
+        return None
 
-    return None
+    # Mirror sweep/deploy coercion semantics: truncate toward zero and clamp to u8.
+    idx = int(num_f)
+    if idx < 0:
+        idx = 0
+    elif idx > 255:
+        idx = 255
+    return _MACD_MODE_NUMERIC_MAP.get(idx, "none")
 
 
 def _normalise_macd_modes_inplace(
@@ -570,6 +570,10 @@ def main() -> int:
         parser.error(
             f"strategy config YAML parse failed: {strategy_config_source}"
         )
+    # Keep lock hashes from the original source object so runtime/OMS provenance
+    # matching remains consistent with StrategyManager hashing semantics.
+    locked_strategy_sha256 = _hash_json_canonical(loaded_strategy_cfg)
+    locked_strategy_sha1_legacy = _hash_json_canonical_sha1(loaded_strategy_cfg)
     strategy_cfg_normalised: dict[str, Any] = json.loads(json.dumps(loaded_strategy_cfg))
     mode_errors: list[str] = []
     _normalise_macd_modes_inplace(
@@ -640,8 +644,6 @@ def main() -> int:
             yaml.safe_dump(strategy_cfg_normalised, sort_keys=False),
             encoding="utf-8",
         )
-    locked_strategy_sha256 = _strategy_overrides_sha1(strategy_config_snapshot_path)
-    locked_strategy_sha1_legacy = _strategy_overrides_sha1_legacy(strategy_config_snapshot_path)
     runtime_timeline = runtime_strategy_provenance.get("strategy_sha1_timeline")
     runtime_rows = runtime_timeline if isinstance(runtime_timeline, list) else []
     matching_runtime_prefixes = sorted(
