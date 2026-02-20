@@ -125,6 +125,24 @@ struct AxisOptimizer {
     optimizer: tpe::TpeOptimizer,
     is_indicator: bool,
     is_integer: bool,
+    freeze_val: f64,
+    gate: Option<AxisGateBinding>,
+}
+
+#[derive(Clone, Copy)]
+struct AxisGateBinding {
+    parent_idx: usize,
+    eq: f64,
+}
+
+fn gate_is_active(axis: &AxisOptimizer, resolved_vals: &[f64]) -> bool {
+    if let Some(g) = axis.gate {
+        resolved_vals
+            .get(g.parent_idx)
+            .map_or(true, |v| (*v - g.eq).abs() < 1e-9)
+    } else {
+        true
+    }
 }
 
 // =============================================================================
@@ -153,7 +171,7 @@ fn tpe_worker(
     result_rx: crossbeam_channel::Receiver<GpuBatchResult>,
     request_tx: crossbeam_channel::Sender<Option<TpeBatchRequest>>,
 ) {
-    let mut observation_cache: Vec<(Vec<f64>, f64)> = Vec::new();
+    let mut observation_cache: Vec<(Vec<f64>, Vec<f64>, f64)> = Vec::new();
     let mut obs_count: usize = 0;
     let mut trials_sampled: usize = 0;
     let mut batch_idx: usize = 0;
@@ -275,8 +293,8 @@ fn sample_batch(
     let mut trial_raw_values: Vec<Vec<f64>> = Vec::with_capacity(batch_n);
 
     for t in 0..batch_n {
-        let mut overrides = Vec::with_capacity(axis_opts.len());
         let mut raw_vals = Vec::with_capacity(axis_opts.len());
+        let mut resolved_vals = Vec::with_capacity(axis_opts.len());
 
         for (a, axis) in axis_opts.iter().enumerate() {
             let raw_val = axis_samples[a][t];
@@ -287,7 +305,20 @@ fn sample_batch(
             } else {
                 raw_val.clamp(axis.min_val, axis.max_val)
             };
-            overrides.push((axis.path.clone(), val));
+            resolved_vals.push(val);
+        }
+
+        // Gate-aware freeze (matches bt-core sweep semantics): when gate parent is
+        // off, fix child axis to its first value so no-op sub-axes are not sampled.
+        for (j, axis) in axis_opts.iter().enumerate() {
+            if !gate_is_active(axis, &resolved_vals) {
+                resolved_vals[j] = axis.freeze_val;
+            }
+        }
+
+        let mut overrides = Vec::with_capacity(axis_opts.len());
+        for (axis, value) in axis_opts.iter().zip(resolved_vals.iter()) {
+            overrides.push((axis.path.clone(), *value));
         }
 
         trial_overrides.push(overrides);
@@ -301,7 +332,7 @@ fn sample_batch(
 fn tell_results(
     axis_opts: &mut [AxisOptimizer],
     gpu_result: &GpuBatchResult,
-    observation_cache: &mut Vec<(Vec<f64>, f64)>,
+    observation_cache: &mut Vec<(Vec<f64>, Vec<f64>, f64)>,
     obs_count: &mut usize,
 ) {
     for (i, result) in gpu_result.results.iter().enumerate() {
@@ -312,9 +343,16 @@ fn tell_results(
             let trade_penalty = if result.total_trades < 20 { 0.5 } else { 1.0 };
             -(pnl * trade_penalty)
         };
+        let resolved_vals: Vec<f64> = gpu_result.trial_overrides[i]
+            .iter()
+            .map(|(_, v)| *v)
+            .collect();
 
         for (j, axis) in axis_opts.iter_mut().enumerate() {
             if (axis.max_val - axis.min_val).abs() < 1e-12 {
+                continue;
+            }
+            if !gate_is_active(axis, &resolved_vals) {
                 continue;
             }
             let _ = axis
@@ -322,7 +360,11 @@ fn tell_results(
                 .tell(gpu_result.trial_raw_values[i][j], objective);
         }
 
-        observation_cache.push((gpu_result.trial_raw_values[i].clone(), objective));
+        observation_cache.push((
+            gpu_result.trial_raw_values[i].clone(),
+            resolved_vals,
+            objective,
+        ));
         *obs_count += 1;
     }
 
@@ -345,9 +387,12 @@ fn tell_results(
             );
         }
 
-        for (raw_vals, objective) in observation_cache.iter() {
+        for (raw_vals, resolved_vals, objective) in observation_cache.iter() {
             for (j, axis) in axis_opts.iter_mut().enumerate() {
                 if (axis.max_val - axis.min_val).abs() < 1e-12 {
+                    continue;
+                }
+                if !gate_is_active(axis, resolved_vals) {
                     continue;
                 }
                 let _ = axis.optimizer.tell(raw_vals[j], *objective);
@@ -447,6 +492,12 @@ pub fn run_tpe_sweep(
     top_k: usize,
 ) -> Vec<GpuSweepResult> {
     let rng = StdRng::seed_from_u64(tpe_cfg.seed);
+    let axis_idx_by_path: HashMap<&str, usize> = spec
+        .axes
+        .iter()
+        .enumerate()
+        .map(|(i, axis)| (axis.path.as_str(), i))
+        .collect();
 
     // -- 1. Create per-axis TPE optimizers ----------------------------------------
     let mut axis_opts: Vec<AxisOptimizer> = Vec::new();
@@ -457,6 +508,13 @@ pub fn run_tpe_sweep(
             .iter()
             .cloned()
             .fold(f64::NEG_INFINITY, f64::max);
+        let freeze_val = axis.values.first().copied().unwrap_or(min_val);
+        let gate = axis.gate.as_ref().and_then(|g| {
+            axis_idx_by_path
+                .get(g.path.as_str())
+                .copied()
+                .map(|parent_idx| AxisGateBinding { parent_idx, eq: g.eq })
+        });
 
         if (max_val - min_val).abs() < 1e-12 {
             axis_opts.push(AxisOptimizer {
@@ -469,6 +527,8 @@ pub fn run_tpe_sweep(
                 ),
                 is_indicator: is_indicator_path(&axis.path),
                 is_integer: is_integer_axis(&axis.path),
+                freeze_val,
+                gate,
             });
             continue;
         }
@@ -485,16 +545,20 @@ pub fn run_tpe_sweep(
             optimizer,
             is_indicator: is_indicator_path(&axis.path),
             is_integer: is_integer_axis(&axis.path),
+            freeze_val,
+            gate,
         });
     }
 
     let has_indicator_axes = axis_opts.iter().any(|a| a.is_indicator);
+    let gated_axes = axis_opts.iter().filter(|a| a.gate.is_some()).count();
 
     eprintln!(
-        "[TPE] {} axes ({} indicator, {} trade), {} trials, batch={}",
+        "[TPE] {} axes ({} indicator, {} trade, {} gated), {} trials, batch={}",
         axis_opts.len(),
         axis_opts.iter().filter(|a| a.is_indicator).count(),
         axis_opts.iter().filter(|a| !a.is_indicator).count(),
+        gated_axes,
         tpe_cfg.trials,
         tpe_cfg.batch_size,
     );
