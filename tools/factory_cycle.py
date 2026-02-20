@@ -1456,6 +1456,19 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             return {}
 
+    resume_run_args: dict[str, Any] = {}
+    if bool(args.resume):
+        try:
+            _registry_db = default_registry_db_path(artifacts_root=artifacts_dir)
+            _run_dir = _query_run_dir(registry_db=_registry_db, run_id=run_id)
+            _resume_meta = _read_metadata(_run_dir / "run_metadata.json")
+            if isinstance(_resume_meta.get("orig_args"), dict):
+                resume_run_args = dict(_resume_meta.get("orig_args") or {})
+            elif isinstance(_resume_meta.get("args"), dict):
+                resume_run_args = dict(_resume_meta.get("args") or {})
+        except Exception:
+            resume_run_args = {}
+
     factory_argv: list[str] = [
         "--run-id",
         run_id,
@@ -1482,6 +1495,30 @@ def main(argv: list[str] | None = None) -> int:
     ]
     if bool(args.resume):
         factory_argv.append("--resume")
+        # Rehydrate shortlist knobs from the resumed run so factory_run --resume
+        # guard keys remain reproducible across default changes.
+        _shortlist_modes = str(resume_run_args.get("shortlist_modes", "") or "").strip()
+        if _shortlist_modes:
+            factory_argv += ["--shortlist-modes", _shortlist_modes]
+        try:
+            _shortlist_per_mode = int(resume_run_args.get("shortlist_per_mode", 0) or 0)
+        except Exception:
+            _shortlist_per_mode = 0
+        if _shortlist_per_mode > 0:
+            factory_argv += ["--shortlist-per-mode", str(_shortlist_per_mode)]
+        try:
+            _shortlist_max_rank = int(resume_run_args.get("shortlist_max_rank", 0) or 0)
+        except Exception:
+            _shortlist_max_rank = 0
+        if _shortlist_max_rank > 0:
+            factory_argv += ["--shortlist-max-rank", str(_shortlist_max_rank)]
+        if "shortlist_top_pnl" in resume_run_args and resume_run_args.get("shortlist_top_pnl") is not None:
+            try:
+                _shortlist_top_pnl = int(resume_run_args.get("shortlist_top_pnl") or 0)
+            except Exception:
+                _shortlist_top_pnl = 0
+            if _shortlist_top_pnl > 0:
+                factory_argv += ["--shortlist-top-pnl", str(_shortlist_top_pnl)]
     if bool(run_with_gpu):
         factory_argv.append("--gpu")
     if bool(run_with_tpe):
