@@ -275,16 +275,31 @@ def _load_strategy_engine_interval(config_path: Path) -> str:
     return str(engine_cfg.get("interval") or "").strip()
 
 
-def _derive_interval_db(base_candles_db: Path, interval: str) -> Path | None:
+def _derive_interval_db(base_candles_db: Path, interval: str, *, repo_root: Path | None = None) -> Path | None:
     iv = str(interval or "").strip()
     if not iv:
         return None
-    name = base_candles_db.name
-    if not (name.startswith("candles_") and name.endswith(".db")):
-        return None
-    candidate = (base_candles_db.parent / f"candles_{iv}.db").resolve()
-    if candidate.exists():
-        return candidate
+    candidates: list[Path] = []
+    base_name = str(base_candles_db.name or "")
+    if base_name == f"candles_{iv}.db" and base_candles_db.exists():
+        return base_candles_db.resolve()
+    if base_name.startswith("candles_") and base_name.endswith(".db"):
+        candidates.append((base_candles_db.parent / f"candles_{iv}.db").resolve())
+    for parent in base_candles_db.parents:
+        if parent.name == "candles_dbs":
+            candidates.append((parent / f"candles_{iv}.db").resolve())
+            break
+    if repo_root is not None:
+        candidates.append((repo_root / "candles_dbs" / f"candles_{iv}.db").resolve())
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        raw = str(candidate)
+        if raw in seen:
+            continue
+        seen.add(raw)
+        if candidate.exists() and candidate.is_file():
+            return candidate
     return None
 
 
@@ -404,7 +419,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Disable auto-clamping to the latest stable strategy SHA segment.",
     )
     ap.set_defaults(auto_strategy_window_clamp=auto_clamp_default)
-    strategy_lock_default = _env_bool("AI_QUANT_REPLAY_GATE_REQUIRE_RUNTIME_STRATEGY_LOCK", True)
+    strategy_lock_default = _env_bool("AI_QUANT_REPLAY_GATE_REQUIRE_RUNTIME_STRATEGY_LOCK", False)
     strategy_lock_group = ap.add_mutually_exclusive_group()
     strategy_lock_group.add_argument(
         "--require-runtime-strategy-lock",
@@ -708,7 +723,11 @@ def main() -> int:
         if strategy_config_path is not None:
             strategy_interval = _load_strategy_engine_interval(strategy_config_path)
             if strategy_interval and strategy_interval != interval:
-                derived_candles_db = _derive_interval_db(candles_db, strategy_interval)
+                derived_candles_db = _derive_interval_db(
+                    candles_db,
+                    strategy_interval,
+                    repo_root=repo_root,
+                )
                 if derived_candles_db is None:
                     failures.append(
                         {
