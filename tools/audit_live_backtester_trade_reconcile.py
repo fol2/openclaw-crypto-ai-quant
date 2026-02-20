@@ -26,6 +26,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Audit live-vs-backtester trade alignment from replay bundle artefacts.")
     parser.add_argument("--live-baseline", required=True, help="Path to live_baseline_trades.jsonl")
     parser.add_argument("--backtester-trades", required=True, help="Path to backtester_trades.csv")
+    parser.add_argument(
+        "--bundle-manifest",
+        default=None,
+        help="Optional replay_bundle_manifest.json path for execution-model assumptions.",
+    )
     parser.add_argument("--output", required=True, help="Path to output JSON report")
     parser.add_argument(
         "--timestamp-bucket-ms",
@@ -43,6 +48,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pnl-tol", type=float, default=DEFAULT_TOL, help="Absolute tolerance for pnl comparison")
     parser.add_argument("--fee-tol", type=float, default=DEFAULT_TOL, help="Absolute tolerance for fee comparison")
     return parser
+
+
+def _load_json_object(path: Path) -> dict[str, Any]:
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
 
 
 def _parse_float(value: Any) -> float:
@@ -433,12 +446,26 @@ def main() -> int:
 
     live_baseline = Path(args.live_baseline).expanduser().resolve()
     backtester_trades = Path(args.backtester_trades).expanduser().resolve()
+    bundle_manifest = Path(args.bundle_manifest).expanduser().resolve() if args.bundle_manifest else None
     output = Path(args.output).expanduser().resolve()
 
     if not live_baseline.exists():
         parser.error(f"live baseline not found: {live_baseline}")
     if not backtester_trades.exists():
         parser.error(f"backtester trades not found: {backtester_trades}")
+    if bundle_manifest is not None and not bundle_manifest.exists():
+        parser.error(f"bundle manifest not found: {bundle_manifest}")
+
+    alignment_assumptions: dict[str, Any] = {}
+    bbo_fill_model_enabled = False
+    if bundle_manifest is not None:
+        manifest_obj = _load_json_object(bundle_manifest)
+        raw_assumptions = manifest_obj.get("alignment_assumptions")
+        if isinstance(raw_assumptions, dict):
+            alignment_assumptions = raw_assumptions
+            bbo_obj = raw_assumptions.get("bbo_fill_model")
+            if isinstance(bbo_obj, dict):
+                bbo_fill_model_enabled = bool(bbo_obj.get("enabled_any"))
 
     live_exits, live_counts = _load_live_simulatable_exits(live_baseline)
     backtester_exits = _load_backtester_exits(backtester_trades)
@@ -467,6 +494,18 @@ def main() -> int:
                 "pnl_usd": float(live_counts["live_non_simulatable_pnl_usd"]),
             }
         )
+    if bbo_fill_model_enabled:
+        non_simulatable_residuals.append(
+            {
+                "classification": "non-simulatable_exchange_oms_effect",
+                "kind": "bbo_fill_model_execution_assumption",
+                "detail": (
+                    "bundle manifest reports bbo_fill_model.enabled_any=true; "
+                    "numeric price/PnL drift may include execution-model residuals"
+                ),
+                "numeric_mismatch_count": int(compare_summary["numeric_mismatch"]),
+            }
+        )
     accepted_residuals = list(non_simulatable_residuals)
     accepted_residuals.extend(
         [m for m in mismatches if str(m.get("classification") or "") == "state_initialisation_gap"]
@@ -484,6 +523,7 @@ def main() -> int:
         "inputs": {
             "live_baseline": str(live_baseline),
             "backtester_trades": str(backtester_trades),
+            "bundle_manifest": str(bundle_manifest) if bundle_manifest is not None else None,
             "timestamp_bucket_ms": max(1, int(args.timestamp_bucket_ms)),
             "timestamp_bucket_anchor": str(args.timestamp_bucket_anchor or "floor"),
             "size_tol": float(args.size_tol),
@@ -499,6 +539,11 @@ def main() -> int:
         "status": {
             "strict_alignment_pass": strict_alignment_pass,
             "accepted_residuals_only": strict_alignment_pass and bool(accepted_residuals),
+        },
+        "execution_model_assumptions": {
+            "bundle_manifest_present": bundle_manifest is not None,
+            "bbo_fill_model_enabled": bool(bbo_fill_model_enabled),
+            "alignment_assumptions": alignment_assumptions,
         },
         "mismatch_counts_by_classification": dict(sorted(mismatch_counts.items(), key=lambda x: x[0])),
         "accepted_residuals": accepted_residuals,
