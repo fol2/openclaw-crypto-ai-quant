@@ -2,8 +2,8 @@
   import { getCandles, getMarks, getCandlesRange, getJourneys, getTunnel, tradeEnabled, getSystemServices } from '../lib/api';
   import { hubWs } from '../lib/ws';
 
-  const INTERVALS = ['1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d'] as const;
-  const BAR_COUNTS = [50, 100, 200, 400] as const;
+  const INTERVALS = ['1m', '3m', '5m', '15m', '30m', '1h'] as const;
+  const BAR_COUNTS = [50, 100, 200] as const;
   const CHART_MIN = 120;
   const CHART_MAX = 600;
   const JOURNEY_CHART_MIN = 120;
@@ -168,9 +168,7 @@
     if (durationMs < 2 * 60 * 60_000)   return '3m';
     if (durationMs < 6 * 60 * 60_000)   return '5m';
     if (durationMs < 24 * 60 * 60_000)  return '15m';
-    if (durationMs < 3 * 24 * 60 * 60_000)  return '1h';
-    if (durationMs < 7 * 24 * 60 * 60_000)  return '4h';
-    return '1d';
+    return '1h';
   }
   function journeyTimeRange(j: any) {
     const openTs = Date.parse((j.open_ts || '').replace(' ', 'T'));
