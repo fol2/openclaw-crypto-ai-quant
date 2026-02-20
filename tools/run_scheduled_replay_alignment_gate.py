@@ -23,6 +23,11 @@ from typing import Any
 
 _STRATEGY_SHA1_RE = re.compile(r"strategy_sha1=([0-9a-fA-F]{7,40})")
 
+try:
+    import yaml
+except Exception:  # pragma: no cover - optional runtime dependency
+    yaml = None
+
 
 def _now_ms() -> int:
     return int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
@@ -132,6 +137,25 @@ def _candles_interval_coverage_ms(candles_db: Path, interval: str) -> tuple[int 
         return None, None
 
 
+def _interval_to_bucket_ms(interval: str) -> int:
+    raw = str(interval or "").strip().lower()
+    if not raw:
+        return 1
+    m = re.fullmatch(r"(\d+)([mhd])", raw)
+    if m is None:
+        return 1
+    qty = int(m.group(1))
+    unit = m.group(2)
+    unit_ms = {
+        "m": 60_000,
+        "h": 3_600_000,
+        "d": 86_400_000,
+    }[unit]
+    if qty <= 0:
+        return 1
+    return int(qty * unit_ms)
+
+
 def _runtime_strategy_window_stats(live_db: Path, *, from_ts: int, to_ts: int) -> dict[str, Any]:
     if not live_db.exists():
         return {
@@ -233,6 +257,69 @@ def _default_repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _load_strategy_engine_interval(config_path: Path) -> str:
+    if yaml is None or not config_path.exists():
+        return ""
+    try:
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return ""
+    if not isinstance(raw, dict):
+        return ""
+    global_cfg = raw.get("global") or {}
+    if not isinstance(global_cfg, dict):
+        return ""
+    engine_cfg = global_cfg.get("engine") or {}
+    if not isinstance(engine_cfg, dict):
+        return ""
+    return str(engine_cfg.get("interval") or "").strip()
+
+
+def _derive_interval_db(base_candles_db: Path, interval: str, *, repo_root: Path | None = None) -> Path | None:
+    iv = str(interval or "").strip()
+    if not iv:
+        return None
+    candidates: list[Path] = []
+    base_name = str(base_candles_db.name or "")
+    if base_name == f"candles_{iv}.db" and base_candles_db.exists():
+        return base_candles_db.resolve()
+    if base_name.startswith("candles_") and base_name.endswith(".db"):
+        candidates.append((base_candles_db.parent / f"candles_{iv}.db").resolve())
+    for parent in base_candles_db.parents:
+        if parent.name == "candles_dbs":
+            candidates.append((parent / f"candles_{iv}.db").resolve())
+            break
+    if repo_root is not None:
+        candidates.append((repo_root / "candles_dbs" / f"candles_{iv}.db").resolve())
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        raw = str(candidate)
+        if raw in seen:
+            continue
+        seen.add(raw)
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+def _resolve_runtime_strategy_lock_file(*, bundle_root: Path, repo_root: Path, runtime_sha1: str) -> Path | None:
+    sha = str(runtime_sha1 or "").strip().lower()
+    if not sha:
+        return None
+    short = sha[:8]
+    candidates = [
+        (bundle_root / f"strategy_overrides_{sha}.yaml").resolve(),
+        (bundle_root / f"strategy_overrides_{short}.yaml").resolve(),
+        (repo_root / "config" / f"strategy_overrides_{sha}.yaml").resolve(),
+        (repo_root / "config" / f"strategy_overrides_{short}.yaml").resolve(),
+    ]
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
 def _build_parser() -> argparse.ArgumentParser:
     repo_root = _default_repo_root()
     ap = argparse.ArgumentParser(description="Run scheduled replay alignment gate checks.")
@@ -261,6 +348,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--interval",
         default=str(os.getenv("AI_QUANT_REPLAY_GATE_INTERVAL", "1h") or "1h"),
         help="Replay interval.",
+    )
+    ap.add_argument(
+        "--strategy-config",
+        default=str(os.getenv("AI_QUANT_REPLAY_GATE_STRATEGY_CONFIG", "") or ""),
+        help=(
+            "Optional strategy YAML for deterministic replay. "
+            "When unset, the scheduler tries runtime SHA lock files before bundle defaults."
+        ),
     )
     ap.add_argument(
         "--window-minutes",
@@ -324,6 +419,27 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Disable auto-clamping to the latest stable strategy SHA segment.",
     )
     ap.set_defaults(auto_strategy_window_clamp=auto_clamp_default)
+    strategy_lock_default = _env_bool("AI_QUANT_REPLAY_GATE_REQUIRE_RUNTIME_STRATEGY_LOCK", False)
+    strategy_lock_group = ap.add_mutually_exclusive_group()
+    strategy_lock_group.add_argument(
+        "--require-runtime-strategy-lock",
+        dest="require_runtime_strategy_lock",
+        action="store_true",
+        help=(
+            "Fail closed when runtime strategy SHA is present but no matching "
+            "strategy_overrides_<sha>.yaml lock file can be resolved."
+        ),
+    )
+    strategy_lock_group.add_argument(
+        "--allow-missing-runtime-strategy-lock",
+        dest="require_runtime_strategy_lock",
+        action="store_false",
+        help=(
+            "Allow fallback to bundle defaults when runtime strategy lock YAML "
+            "cannot be resolved."
+        ),
+    )
+    ap.set_defaults(require_runtime_strategy_lock=strategy_lock_default)
     return ap
 
 
@@ -353,6 +469,7 @@ def main() -> int:
     coverage_to_ts: int | None = None
     strategy_window_stats: dict[str, Any] | None = None
     strategy_window_adjustment: dict[str, Any] | None = None
+    strategy_config_resolution: dict[str, Any] | None = None
 
     bundle_root = _resolve_path(str(args.bundle_root), base=resolve_base)
     try:
@@ -384,6 +501,10 @@ def main() -> int:
     env = os.environ.copy()
     env["REPO_ROOT"] = str(repo_root)
     failures: list[dict[str, Any]] = []
+    strategy_config_raw = str(args.strategy_config or "").strip()
+    strategy_config_path: Path | None = (
+        _resolve_path(strategy_config_raw, base=resolve_base) if strategy_config_raw else None
+    )
 
     if not repo_root.exists():
         failures.append(
@@ -473,6 +594,14 @@ def main() -> int:
                 "detail": f"from_ts={requested_from_ts} > to_ts={requested_to_ts}",
             }
         )
+    if strategy_config_path is not None and not strategy_config_path.exists():
+        failures.append(
+            {
+                "code": "strategy_config_not_found",
+                "classification": "state_initialisation_gap",
+                "detail": str(strategy_config_path),
+            }
+        )
     if not failures:
         strategy_window_stats = _runtime_strategy_window_stats(
             live_db,
@@ -559,6 +688,88 @@ def main() -> int:
                         from_ts = int(selected_from_ts)
                         to_ts = int(selected_to_ts)
 
+        selected_runtime_sha = ""
+        if isinstance(strategy_window_adjustment, dict):
+            selected_runtime_sha = str(strategy_window_adjustment.get("selected_segment_sha1") or "").strip().lower()
+        if not selected_runtime_sha and isinstance(strategy_window_stats, dict):
+            selected_runtime_sha = str(strategy_window_stats.get("last_segment_sha1") or "").strip().lower()
+        if strategy_config_path is None and selected_runtime_sha:
+            resolved = _resolve_runtime_strategy_lock_file(
+                bundle_root=bundle_root,
+                repo_root=repo_root,
+                runtime_sha1=selected_runtime_sha,
+            )
+            strategy_config_resolution = {
+                "selected_runtime_sha1": selected_runtime_sha,
+                "selected_runtime_sha1_prefix8": selected_runtime_sha[:8],
+                "resolved_strategy_config": str(resolved) if resolved is not None else None,
+                "required": bool(args.require_runtime_strategy_lock),
+            }
+            if resolved is not None:
+                strategy_config_path = resolved
+            elif bool(args.require_runtime_strategy_lock):
+                failures.append(
+                    {
+                        "code": "missing_runtime_strategy_lock",
+                        "classification": "state_initialisation_gap",
+                        "detail": (
+                            "runtime strategy lock YAML not found; expected one of "
+                            f"{bundle_root / f'strategy_overrides_{selected_runtime_sha}.yaml'} or "
+                            f"{bundle_root / f'strategy_overrides_{selected_runtime_sha[:8]}.yaml'}"
+                        ),
+                    }
+                )
+
+        if strategy_config_path is not None:
+            strategy_interval = _load_strategy_engine_interval(strategy_config_path)
+            if strategy_interval and strategy_interval != interval:
+                derived_candles_db = _derive_interval_db(
+                    candles_db,
+                    strategy_interval,
+                    repo_root=repo_root,
+                )
+                if derived_candles_db is None:
+                    failures.append(
+                        {
+                            "code": "missing_strategy_interval_candles_db",
+                            "classification": "market_data_alignment_gap",
+                            "detail": (
+                                f"strategy interval '{strategy_interval}' requires candles DB "
+                                f"{candles_db.parent / f'candles_{strategy_interval}.db'}"
+                            ),
+                        }
+                    )
+                else:
+                    interval = strategy_interval
+                    candles_db = derived_candles_db
+                    if strategy_config_resolution is None:
+                        strategy_config_resolution = {}
+                    strategy_config_resolution["interval_aligned_from"] = str(args.interval or "").strip()
+                    strategy_config_resolution["interval_aligned_to"] = str(strategy_interval)
+                    strategy_config_resolution["candles_db_aligned_to"] = str(candles_db)
+
+        bucket_ms = _interval_to_bucket_ms(interval)
+        if bucket_ms > 1 and (int(from_ts) % int(bucket_ms)) != 0:
+            aligned_from_ts = ((int(from_ts) // int(bucket_ms)) + 1) * int(bucket_ms)
+            if aligned_from_ts > int(to_ts):
+                failures.append(
+                    {
+                        "code": "invalid_aligned_replay_window",
+                        "classification": "state_initialisation_gap",
+                        "detail": (
+                            f"from_ts alignment for interval={interval} produced empty window: "
+                            f"aligned_from_ts={aligned_from_ts} > to_ts={int(to_ts)}"
+                        ),
+                    }
+                )
+            else:
+                if strategy_config_resolution is None:
+                    strategy_config_resolution = {}
+                strategy_config_resolution["from_ts_aligned_from"] = int(from_ts)
+                strategy_config_resolution["from_ts_aligned_to"] = int(aligned_from_ts)
+                strategy_config_resolution["from_ts_alignment_bucket_ms"] = int(bucket_ms)
+                from_ts = int(aligned_from_ts)
+
         coverage_from_ts, coverage_to_ts = _candles_interval_coverage_ms(candles_db, interval)
         if coverage_from_ts is None or coverage_to_ts is None:
             failures.append(
@@ -604,6 +815,8 @@ def main() -> int:
         "--bundle-dir",
         str(bundle_dir),
     ]
+    if strategy_config_path is not None:
+        build_cmd.extend(["--strategy-config", str(strategy_config_path)])
     if funding_db is not None:
         build_cmd.extend(["--funding-db", str(funding_db)])
 
@@ -794,6 +1007,7 @@ def main() -> int:
         "paths": {
             "bundle_root": str(bundle_root),
             "bundle_dir": str(bundle_dir),
+            "strategy_config": str(strategy_config_path) if strategy_config_path is not None else None,
             "live_db": str(live_db),
             "paper_db": str(paper_db),
             "candles_db": str(candles_db),
@@ -811,6 +1025,7 @@ def main() -> int:
         "build_exit_code": None if build_rc is None else int(build_rc),
         "harness_exit_code": None if harness_rc is None else int(harness_rc),
         "market_data_provenance": market_data_provenance,
+        "strategy_config_resolution": strategy_config_resolution,
         "failures": failures,
         "db_checks": {
             "live_has_trades_table": _db_has_table(live_db, "trades"),
