@@ -1373,7 +1373,8 @@ fn dispatch_trade_arena(
             trade_end_bar: trade_end,
             debug_t_sec,
             funding_enabled: if funding_enabled { 1 } else { 0 },
-            _debug_pad: [0; 2],
+            entry_interval_sec: 0,
+            signal_on_candle_close: 0,
         };
         let params_gpu = ds
             .dev

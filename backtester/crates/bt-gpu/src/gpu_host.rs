@@ -327,6 +327,8 @@ pub struct BatchBuffers {
     pub maker_fee_rate: f32,
     pub taker_fee_rate: f32,
     pub max_sub_per_bar: u32,
+    pub entry_interval_sec: u32,
+    pub signal_on_candle_close: u32,
     pub sub_candles: Option<Arc<CudaSlice<GpuRawCandle>>>,
     pub sub_counts: Option<Arc<CudaSlice<u32>>>,
     pub funding_spans: Option<Arc<CudaSlice<GpuFundingSpan>>>,
@@ -388,7 +390,8 @@ impl BatchBuffers {
             trade_end_bar: num_bars,
             debug_t_sec: debug_t_sec_env(),
             funding_enabled: 0,
-            _debug_pad: [0; 2],
+            entry_interval_sec: 0,
+            signal_on_candle_close: 0,
         };
         let params = ds
             .dev
@@ -412,6 +415,8 @@ impl BatchBuffers {
             maker_fee_rate,
             taker_fee_rate,
             max_sub_per_bar: 0,
+            entry_interval_sec: 0,
+            signal_on_candle_close: 0,
             sub_candles: None,
             sub_counts: None,
             funding_spans: None,
@@ -488,7 +493,8 @@ impl BatchBuffers {
             trade_end_bar: num_bars,
             debug_t_sec: debug_t_sec_env(),
             funding_enabled: 0,
-            _debug_pad: [0; 2],
+            entry_interval_sec: 0,
+            signal_on_candle_close: 0,
         };
         let params = ds
             .dev
@@ -512,6 +518,8 @@ impl BatchBuffers {
             maker_fee_rate,
             taker_fee_rate,
             max_sub_per_bar: 0,
+            entry_interval_sec: 0,
+            signal_on_candle_close: 0,
             sub_candles: None,
             sub_counts: None,
             funding_spans: None,
@@ -620,7 +628,8 @@ pub fn dispatch_and_readback(
             trade_end_bar: trade_end,
             debug_t_sec: debug_t_sec_env(),
             funding_enabled: if funding_enabled { 1 } else { 0 },
-            _debug_pad: [0; 2],
+            entry_interval_sec: buffers.entry_interval_sec,
+            signal_on_candle_close: buffers.signal_on_candle_close,
         };
         ds.dev
             .htod_sync_copy_into(&[params_host], &mut buffers.params)
