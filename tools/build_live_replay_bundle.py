@@ -1019,7 +1019,7 @@ def main() -> int:
         script_path = bundle_dir / script_name
         script_path.chmod(0o755)
 
-    snapshot_strict_replace = str(os.getenv("AQC_SNAPSHOT_STRICT_REPLACE", "0") or "").strip() == "1"
+    snapshot_strict_replace = str(os.getenv("AQC_SNAPSHOT_STRICT_REPLACE", "0") or "") == "1"
 
     manifest = {
         "schema_version": 1,
