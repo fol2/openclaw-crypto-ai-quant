@@ -204,6 +204,14 @@ def _build_parser() -> argparse.ArgumentParser:
             "Default is fail-closed (requires bar-aligned from-ts for deterministic state sync)."
         ),
     )
+    parser.add_argument(
+        "--paper-filter-post-seed",
+        action="store_true",
+        help=(
+            "Apply paper seed watermark lower-bound filtering in live-paper "
+            "and event-order reconcile steps. Default is disabled."
+        ),
+    )
     parser.add_argument("--bundle-dir", required=True, help="Output bundle directory")
     parser.add_argument(
         "--snapshot-name",
@@ -780,6 +788,13 @@ def main() -> int:
         f"--output \"$BUNDLE_DIR/{action_reconcile_path.name}\""
     )
 
+    paper_seed_filter_arg = (
+        f"--paper-seed-watermark \"$BUNDLE_DIR/{paper_seed_watermark_path.name}\" "
+        "--apply-paper-seed-watermark "
+        if args.paper_filter_post_seed
+        else ""
+    )
+
     cmd_live_paper_action_reconcile = (
         "set -euo pipefail\n"
         "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
@@ -789,7 +804,7 @@ def main() -> int:
         "python3 \"$REPO_ROOT/tools/audit_live_paper_action_reconcile.py\" "
         "--live-db \"$LIVE_DB\" "
         "--paper-db \"$PAPER_DB\" "
-        f"--paper-seed-watermark \"$BUNDLE_DIR/{paper_seed_watermark_path.name}\" "
+        f"{paper_seed_filter_arg}"
         f"--from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
         f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
         f"--output \"$BUNDLE_DIR/{live_paper_action_reconcile_path.name}\""
@@ -817,7 +832,7 @@ def main() -> int:
         "python3 \"$REPO_ROOT/tools/audit_live_baseline_paper_order_parity.py\" "
         f"--live-baseline \"$BUNDLE_DIR/{live_trades_path.name}\" "
         "--paper-db \"$PAPER_DB\" "
-        f"--paper-seed-watermark \"$BUNDLE_DIR/{paper_seed_watermark_path.name}\" "
+        f"{paper_seed_filter_arg}"
         f"--from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
         f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
         "--fail-on-mismatch "
@@ -922,6 +937,7 @@ def main() -> int:
             "interval_from_locked_strategy": cfg_interval or None,
             "allow_interval_override": bool(args.allow_interval_override),
             "allow_partial_first_bar": bool(args.allow_partial_first_bar),
+            "paper_filter_post_seed": bool(args.paper_filter_post_seed),
             "from_ts_aligned_to_interval": bool(from_ts_aligned_to_interval),
             "timestamp_bucket_ms": int(timestamp_bucket_ms),
             "entry_interval": cfg_entry_interval or None,
