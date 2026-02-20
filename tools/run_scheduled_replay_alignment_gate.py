@@ -20,6 +20,7 @@ import re
 import shlex
 import sqlite3
 import subprocess
+import sys
 from typing import Any
 
 _STRATEGY_SHA1_RE = re.compile(r"strategy_sha1=([0-9a-fA-F]{7,40})")
@@ -58,6 +59,17 @@ def _resolve_path(raw: str, *, base: Path) -> Path:
     if p.is_absolute():
         return p.resolve()
     return (base / p).resolve()
+
+
+def _cli_arg_present(flag: str) -> bool:
+    needle = str(flag or "").strip()
+    if not needle:
+        return False
+    for arg in sys.argv[1:]:
+        text = str(arg or "")
+        if text == needle or text.startswith(f"{needle}="):
+            return True
+    return False
 
 
 def _read_live_baseline_count(manifest_path: Path) -> int:
@@ -138,6 +150,25 @@ def _candles_interval_coverage_ms(candles_db: Path, interval: str) -> tuple[int 
             conn.close()
     except Exception:
         return None, None
+
+
+def _latest_closed_bar_start_ts(candles_db: Path, *, interval: str, cutoff_ts: int) -> int | None:
+    if not candles_db.exists():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{candles_db}?mode=ro", uri=True, timeout=10)
+        try:
+            row = conn.execute(
+                "SELECT MAX(t) FROM candles WHERE interval = ? AND t_close IS NOT NULL AND t_close <= ?",
+                (str(interval), int(cutoff_ts)),
+            ).fetchone()
+            if not row or row[0] is None:
+                return None
+            return int(row[0])
+        finally:
+            conn.close()
+    except Exception:
+        return None
 
 
 def _interval_to_bucket_ms(interval: str) -> int:
@@ -674,6 +705,7 @@ def main() -> int:
     env["REPO_ROOT"] = str(repo_root)
     failures: list[dict[str, Any]] = []
     strategy_config_raw = str(args.strategy_config or "").strip()
+    strategy_config_cli_override = _cli_arg_present("--strategy-config")
     strategy_config_path: Path | None = (
         _resolve_path(strategy_config_raw, base=resolve_base) if strategy_config_raw else None
     )
@@ -929,10 +961,14 @@ def main() -> int:
             strategy_config_resolution["explicit_strategy_config_sha256_prefix8"] = explicit_sha256[:8]
             strategy_config_resolution["explicit_strategy_config_sha1_prefix8"] = explicit_sha1[:8]
             strategy_config_resolution["explicit_matches_runtime_sha"] = bool(explicit_match)
+            strategy_config_resolution["explicit_strategy_config_cli_override"] = bool(strategy_config_cli_override)
             if (not explicit_match) and runtime_yaml_match is not None:
-                strategy_config_path = runtime_yaml_match
-                strategy_config_resolution["resolved_strategy_config"] = str(strategy_config_path)
-                strategy_config_resolution["resolution_mode"] = "override_explicit_with_runtime_promoted_config"
+                if strategy_config_cli_override and (not bool(args.require_runtime_strategy_lock)):
+                    strategy_config_resolution["resolution_mode"] = "keep_explicit_strategy_config"
+                else:
+                    strategy_config_path = runtime_yaml_match
+                    strategy_config_resolution["resolved_strategy_config"] = str(strategy_config_path)
+                    strategy_config_resolution["resolution_mode"] = "override_explicit_with_runtime_promoted_config"
             elif (not explicit_match) and bool(args.require_runtime_strategy_lock):
                 failures.append(
                     {
@@ -996,8 +1032,23 @@ def main() -> int:
                 from_ts = int(aligned_from_ts)
 
         if bucket_ms > 1:
-            closed_to_ts = ((int(to_ts) - int(bucket_ms)) // int(bucket_ms)) * int(bucket_ms)
-            if closed_to_ts < int(from_ts):
+            closed_to_ts = _latest_closed_bar_start_ts(
+                candles_db,
+                interval=interval,
+                cutoff_ts=int(to_ts),
+            )
+            if closed_to_ts is None:
+                failures.append(
+                    {
+                        "code": "missing_closed_bar_for_replay_cutoff",
+                        "classification": "market_data_alignment_gap",
+                        "detail": (
+                            f"unable to resolve latest closed bar for interval={interval} "
+                            f"and cutoff_ts={int(to_ts)} from {candles_db}"
+                        ),
+                    }
+                )
+            elif int(closed_to_ts) < int(from_ts):
                 failures.append(
                     {
                         "code": "invalid_closed_bar_replay_window",
