@@ -1207,9 +1207,11 @@ def main() -> int:
             int((oms_strategy_stats or {}).get("rows_with_strategy_sha1") or 0) > 0
         )
         env["AQC_REQUIRE_OMS_STRATEGY_PROVENANCE"] = "1" if require_oms_strategy_provenance else "0"
+        env["AQC_SNAPSHOT_STRICT_REPLACE"] = "1"
         if strategy_config_resolution is None:
             strategy_config_resolution = {}
         strategy_config_resolution["require_oms_strategy_provenance"] = bool(require_oms_strategy_provenance)
+        strategy_config_resolution["snapshot_strict_replace"] = True
         strategy_config_resolution["oms_strategy_window_stats"] = oms_strategy_stats
 
         harness_cmd = [

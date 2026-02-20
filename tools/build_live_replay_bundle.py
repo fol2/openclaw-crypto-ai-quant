@@ -771,8 +771,10 @@ def main() -> int:
         "print(output_path)\n"
         "PY\n"
         f"SNAPSHOT_PATH=\"$BUNDLE_DIR/{snapshot_name}\"\n"
+        "STRICT_REPLACE_FLAG=\"\"\n"
+        "if [ \"${AQC_SNAPSHOT_STRICT_REPLACE:-0}\" = \"1\" ]; then STRICT_REPLACE_FLAG=\"--strict-replace\"; fi\n"
         f"python3 \"$REPO_ROOT/tools/export_live_canonical_snapshot.py\" --source live --db-path \"$LIVE_DB\" --as-of-ts {seed_as_of_ts} --output \"$SNAPSHOT_PATH\"\n"
-        "python3 \"$REPO_ROOT/tools/apply_canonical_snapshot_to_paper.py\" --snapshot \"$SNAPSHOT_PATH\" --target-db \"$PAPER_DB\""
+        "python3 \"$REPO_ROOT/tools/apply_canonical_snapshot_to_paper.py\" --snapshot \"$SNAPSHOT_PATH\" --target-db \"$PAPER_DB\" $STRICT_REPLACE_FLAG"
     )
 
     if funding_db is not None:
