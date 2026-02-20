@@ -644,6 +644,8 @@ def main() -> int:
             yaml.safe_dump(strategy_cfg_normalised, sort_keys=False),
             encoding="utf-8",
         )
+    snapshot_locked_sha256 = _strategy_overrides_sha1(strategy_config_snapshot_path)
+    snapshot_locked_sha1_legacy = _strategy_overrides_sha1_legacy(strategy_config_snapshot_path)
     runtime_timeline = runtime_strategy_provenance.get("strategy_sha1_timeline")
     runtime_rows = runtime_timeline if isinstance(runtime_timeline, list) else []
     matching_runtime_prefixes = sorted(
@@ -1046,10 +1048,18 @@ def main() -> int:
         "runtime_strategy_provenance": runtime_strategy_provenance,
         "oms_strategy_provenance": oms_strategy_provenance,
         "locked_strategy_provenance": {
+            "strategy_overrides_source_sha1": str(locked_strategy_sha256),
+            "strategy_overrides_source_sha1_prefix8": str(locked_strategy_sha256)[:8],
+            "strategy_overrides_source_sha1_legacy": str(locked_strategy_sha1_legacy),
+            "strategy_overrides_source_sha1_legacy_prefix8": str(locked_strategy_sha1_legacy)[:8],
             "strategy_overrides_sha1": str(locked_strategy_sha256),
             "strategy_overrides_sha1_prefix8": str(locked_strategy_sha256)[:8],
             "strategy_overrides_sha1_legacy": str(locked_strategy_sha1_legacy),
             "strategy_overrides_sha1_legacy_prefix8": str(locked_strategy_sha1_legacy)[:8],
+            "strategy_overrides_snapshot_sha1": str(snapshot_locked_sha256),
+            "strategy_overrides_snapshot_sha1_prefix8": str(snapshot_locked_sha256)[:8],
+            "strategy_overrides_snapshot_sha1_legacy": str(snapshot_locked_sha1_legacy),
+            "strategy_overrides_snapshot_sha1_legacy_prefix8": str(snapshot_locked_sha1_legacy)[:8],
             "matching_runtime_sha1_prefixes": matching_runtime_prefixes,
             "matches_runtime_strategy_prefix": bool(matching_runtime_prefixes),
             "matches_oms_strategy_sha1": bool(matches_oms_sha1),
