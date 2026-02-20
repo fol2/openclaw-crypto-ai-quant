@@ -2619,8 +2619,10 @@ def main(argv: list[str] | None = None) -> int:
         current_stage = "data_checks"
         if _shutdown_stage_guard(run_dir=run_dir, meta=meta, stage=current_stage):
             return 130
-        candle_out = run_dir / "data_checks" / "candle_dbs.json"
-        candle_err = run_dir / "data_checks" / "candle_dbs.stderr.txt"
+        data_checks_dir = run_dir / "data_checks"
+        data_checks_dir.mkdir(parents=True, exist_ok=True)
+        candle_out = data_checks_dir / "candle_dbs.json"
+        candle_err = data_checks_dir / "candle_dbs.stderr.txt"
         if bool(args.resume) and _is_nonempty_file(candle_out):
             meta["steps"].append(
                 {
@@ -2666,8 +2668,8 @@ def main(argv: list[str] | None = None) -> int:
                         continue
     
                     symbols = _symbols_from_candle_db(db_path)
-                    out_path = run_dir / "data_checks" / f"candle_{interval}_{db_path.stem}.json"
-                    err_path = run_dir / "data_checks" / f"candle_{interval}_{db_path.stem}.stderr.txt"
+                    out_path = data_checks_dir / f"candle_{interval}_{db_path.stem}.json"
+                    err_path = data_checks_dir / f"candle_{interval}_{db_path.stem}.stderr.txt"
     
                     if not symbols:
                         check_targets.append(

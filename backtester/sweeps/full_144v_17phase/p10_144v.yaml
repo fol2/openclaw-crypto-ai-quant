@@ -14,10 +14,6 @@ axes:
   - 14.0
   - 16.0
   - 20.0
-- path: thresholds.entry.ave_enabled
-  values:
-  - 0.0
-  - 1.0
 - path: thresholds.entry.slow_drift_min_adx
   values:
   - 7.0

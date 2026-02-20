@@ -44,7 +44,7 @@ axes:
     values: [10, 15, 20, 25, 30, 35, 40]
 
   # ═══════════════════════════════════════════════════════════════
-  # TRADE AXES (20) — cheap, share indicator data
+  # TRADE AXES (19) — cheap, share indicator data
   # ═══════════════════════════════════════════════════════════════
 
   # Core sizing
@@ -54,9 +54,6 @@ axes:
     values: [1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0]
   - path: trade.tp_atr_mult
     values: [3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0, 7.5, 8.0]
-  - path: trade.leverage
-    values: [1.0, 2.0, 3.0, 4.0, 5.0]
-
   # Trailing
   - path: trade.trailing_start_atr
     values: [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]

@@ -73,7 +73,7 @@ axes:
     values: [10, 14, 18, 20, 22, 23, 26, 30]
 
   # ═══════════════════════════════════════════════════════════════
-  # TRADE AXES (16) — 4 locked out
+  # TRADE AXES (15) — 4 locked out
   # Locked: enable_dynamic_sizing=OFF, enable_breakeven_stop=OFF,
   #         max_adds_per_symbol=2, trailing_start_atr=1.73
   # ═══════════════════════════════════════════════════════════════
@@ -89,10 +89,6 @@ axes:
   # NARROW: P10=4.43, P90=6.01
   - path: trade.tp_atr_mult
     values: [4.4, 4.6, 4.8, 5.0, 5.2, 5.5, 6.0]
-
-  # NARROW: P10=3.08, P90=4.36
-  - path: trade.leverage
-    values: [3.0, 3.3, 3.5, 3.6, 3.7, 4.0, 4.3]
 
   # OPEN: CV=30%
   - path: trade.trailing_distance_atr
