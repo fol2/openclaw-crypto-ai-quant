@@ -918,6 +918,13 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
         // Indicator-bar entry candidates (collected in phase 1, ranked in phase 2)
         let mut indicator_bar_candidates: Vec<EntryCandidate> = Vec::new();
 
+        // When an explicit finer exit interval is configured, exit checks must
+        // run on the exit sub-bar stream only. Running base-interval exits
+        // first can close positions too early versus live.
+        let use_exit_sub_bar = exit_candles.is_some()
+            && exit_bar_index.is_some()
+            && cfg.engine.exit_interval != cfg.engine.interval;
+
         // 3. Process each symbol at this timestamp
         for sym in &symbols {
             let sym_str: &str = sym.as_str();
@@ -979,7 +986,7 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
             // which handles SL, trailing, TP, glitch guard, and smart exits.
             // The kernel updates trailing_sl/tp1_taken in-place; we sync them
             // back to the engine position after each evaluation.
-            if state.positions.contains_key(sym_str) {
+            if state.positions.contains_key(sym_str) && !use_exit_sub_bar {
                 if !is_exit_cooldown_active(&state, sym_str, ts, cfg) {
                     if let Some(exit_result) = evaluate_kernel_exit(&mut state, sym_str, &snap, ts)
                     {
@@ -1493,52 +1500,63 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
         // Scan exit candles (e.g. 1m) within this indicator bar's time range
         // for SL/TP exit precision, matching live behavior.
         // Uses kernel exit evaluation instead of direct exits::check_all_exits.
-        if let (Some(ec), Some(ref ec_idx)) = (exit_candles, &exit_bar_index) {
-            if !state.positions.is_empty() {
-                let mut exit_syms: Vec<String> = state.positions.keys().cloned().collect();
-                exit_syms.sort();
+        if use_exit_sub_bar {
+            if let (Some(ec), Some(ref ec_idx)) = (exit_candles, &exit_bar_index) {
+                if !state.positions.is_empty() {
+                    let mut exit_syms: Vec<String> = state.positions.keys().cloned().collect();
+                    exit_syms.sort();
 
-                for sym in &exit_syms {
-                    if let Some(sym_exit_idx) = ec_idx.get(sym.as_str()) {
-                        let start = match sym_exit_idx.binary_search_by_key(&(ts + 1), |(t, _)| *t)
-                        {
-                            Ok(i) => i,
-                            Err(i) => i,
-                        };
+                    for sym in &exit_syms {
+                        if let Some(sym_exit_idx) = ec_idx.get(sym.as_str()) {
+                            let start = match sym_exit_idx.binary_search_by_key(&(ts + 1), |(t, _)| *t)
+                            {
+                                Ok(i) => i,
+                                Err(i) => i,
+                            };
 
-                        if let Some(exit_bars) = ec.get(sym.as_str()) {
-                            let base_snap = state
-                                .indicators
-                                .get(sym.as_str())
-                                .map(|bank| bank.latest_snap())
-                                .unwrap_or_else(|| make_minimal_snap(0.0, ts));
+                            if let Some(exit_bars) = ec.get(sym.as_str()) {
+                                // Use the last fully-closed indicator-bar snapshot for
+                                // sub-bar exits to avoid peeking at the current indicator
+                                // bar before it closes (same anti-lookahead rule as
+                                // sub-bar entry evaluation).
+                                let base_snap = prev_indicator_snaps
+                                    .get(sym.as_str())
+                                    .cloned()
+                                    .or_else(|| {
+                                        state
+                                            .indicators
+                                            .get(sym.as_str())
+                                            .map(|bank| bank.latest_snap())
+                                    })
+                                    .unwrap_or_else(|| make_minimal_snap(0.0, ts));
 
-                            for &(sub_ts, bar_i) in &sym_exit_idx[start..] {
-                                if sub_ts > next_ts {
-                                    break;
-                                }
-                                if !state.positions.contains_key(sym.as_str()) {
-                                    break; // Already exited
-                                }
-                                if let Some(sub_bar) = exit_bars.get(bar_i) {
-                                    if is_exit_cooldown_active(&state, sym.as_str(), sub_ts, cfg) {
-                                        continue;
+                                for &(sub_ts, bar_i) in &sym_exit_idx[start..] {
+                                    if sub_ts > next_ts {
+                                        break;
                                     }
-                                    let sub_snap = make_exit_snap(&base_snap, sub_bar);
-                                    if let Some(exit_result) = evaluate_kernel_exit(
-                                        &mut state,
-                                        sym.as_str(),
-                                        &sub_snap,
-                                        sub_ts,
-                                    ) {
-                                        apply_exit(
+                                    if !state.positions.contains_key(sym.as_str()) {
+                                        break; // Already exited
+                                    }
+                                    if let Some(sub_bar) = exit_bars.get(bar_i) {
+                                        if is_exit_cooldown_active(&state, sym.as_str(), sub_ts, cfg) {
+                                            continue;
+                                        }
+                                        let sub_snap = make_exit_snap(&base_snap, sub_bar);
+                                        if let Some(exit_result) = evaluate_kernel_exit(
                                             &mut state,
                                             sym.as_str(),
-                                            &exit_result,
                                             &sub_snap,
                                             sub_ts,
-                                            cfg,
-                                        );
+                                        ) {
+                                            apply_exit(
+                                                &mut state,
+                                                sym.as_str(),
+                                                &exit_result,
+                                                &sub_snap,
+                                                sub_ts,
+                                                cfg,
+                                            );
+                                        }
                                     }
                                 }
                             }
