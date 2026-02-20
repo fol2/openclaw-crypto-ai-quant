@@ -78,6 +78,18 @@ def _seed_trades_and_positions(
     open_symbol_type: dict[str, str] = {}
     if strict_replace:
         conn.execute("DELETE FROM trades")
+        for table_name in (
+            "decision_events",
+            "gate_evaluations",
+            "signals",
+            "audit_events",
+            "oms_intents",
+            "oms_orders",
+            "oms_fills",
+            "ws_events",
+        ):
+            if _table_exists(conn, table_name):
+                conn.execute(f"DELETE FROM {table_name}")
     else:
         # Keep real history; remove only previous synthetic seed rows.
         conn.execute(
@@ -318,7 +330,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--strict-replace",
         action="store_true",
-        help="Replace current paper trade state strictly from snapshot (clears trades before seeding).",
+        help=(
+            "Replace current paper state strictly from snapshot "
+            "(clears trades plus deterministic replay projection tables before seeding)."
+        ),
     )
     parser.add_argument("--dry-run", action="store_true", help="Show plan without writing")
     return parser
