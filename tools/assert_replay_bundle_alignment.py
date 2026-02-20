@@ -283,6 +283,9 @@ def main() -> int:
     backtester_replay_report_path: Path | None = None
     backtester_replay_report: dict[str, Any] | None = None
     replay_config_fingerprint = ""
+    snapshot_init_state_path: Path | None = None
+    snapshot_position_state_provenance: dict[str, Any] | None = None
+    snapshot_trades_only_positions = 0
 
     manifest: dict[str, Any] | None = None
     if not manifest_path.exists():
@@ -300,6 +303,14 @@ def main() -> int:
             raw_candles_provenance = manifest.get("candles_provenance")
             if isinstance(raw_candles_provenance, dict):
                 manifest_candles_provenance = raw_candles_provenance
+            snapshot_file = str(((manifest.get("artefacts") or {}).get("snapshot_file") or "").strip())
+            if snapshot_file:
+                snap_path = Path(snapshot_file).expanduser()
+                if not snap_path.is_absolute():
+                    snap_path = (bundle_dir / snap_path).resolve()
+                else:
+                    snap_path = snap_path.resolve()
+                snapshot_init_state_path = snap_path
             artefacts = manifest.get("artefacts") or {}
             replay_report_raw = str((artefacts.get("backtester_replay_report_json") or "").strip())
             if replay_report_raw:
@@ -325,6 +336,21 @@ def main() -> int:
                     "detail": "bundle manifest is not a JSON object",
                 }
             )
+
+    if snapshot_init_state_path is None:
+        fallback_snapshot = (bundle_dir / "live_init_state_v2.json").resolve()
+        if fallback_snapshot.exists():
+            snapshot_init_state_path = fallback_snapshot
+    if snapshot_init_state_path is not None and snapshot_init_state_path.exists():
+        loaded_snapshot = _load_json(snapshot_init_state_path)
+        if isinstance(loaded_snapshot, dict):
+            raw_pos_prov = ((loaded_snapshot.get("canonical") or {}).get("position_state_provenance"))
+            if isinstance(raw_pos_prov, dict):
+                snapshot_position_state_provenance = raw_pos_prov
+                snapshot_trades_only_positions = _as_int(
+                    ((raw_pos_prov.get("counts") or {}).get("trades_only")),
+                    0,
+                )
 
     if backtester_replay_report_path is not None:
         if not backtester_replay_report_path.exists():
@@ -815,6 +841,38 @@ def main() -> int:
                     }
                 )
 
+    if (
+        snapshot_trades_only_positions > 0
+        and (
+            (trade_report is not None and not bool(((trade_report.get("status") or {}).get("strict_alignment_pass"))))
+            or (
+                action_report is not None
+                and not bool(((action_report.get("status") or {}).get("strict_alignment_pass")))
+            )
+        )
+    ):
+        failures.append(
+            {
+                "code": "snapshot_position_state_provenance_gap",
+                "classification": "state_initialisation_gap",
+                "detail": (
+                    "snapshot includes trades-only position-state fallbacks; "
+                    "deterministic mismatches may be state-fidelity induced"
+                ),
+                "counts": {
+                    "trades_only_positions": int(snapshot_trades_only_positions),
+                    "position_state_positions": _as_int(
+                        ((snapshot_position_state_provenance or {}).get("counts") or {}).get("position_state"),
+                        0,
+                    ),
+                    "position_state_history_positions": _as_int(
+                        ((snapshot_position_state_provenance or {}).get("counts") or {}).get("position_state_history"),
+                        0,
+                    ),
+                },
+            }
+        )
+
     live_paper_report: dict[str, Any] | None = None
     if not live_paper_path.exists():
         if args.require_live_paper:
@@ -1077,6 +1135,11 @@ def main() -> int:
             "candles_provenance_ok": candles_provenance_ok,
             "manifest": manifest_candles_provenance,
             "recomputed": recomputed_candles_provenance,
+        },
+        "snapshot_position_state_provenance": {
+            "snapshot_path": str(snapshot_init_state_path) if snapshot_init_state_path else None,
+            "provenance": snapshot_position_state_provenance,
+            "trades_only_positions": int(snapshot_trades_only_positions),
         },
         "failure_count": len(failures),
         "failures": failures,

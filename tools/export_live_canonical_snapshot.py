@@ -183,7 +183,7 @@ def _reconstruct_positions_and_balance(
     conn: sqlite3.Connection,
     *,
     as_of_ts: int | None = None,
-) -> tuple[float, list[dict[str, Any]]]:
+) -> tuple[float, list[dict[str, Any]], dict[str, int], dict[str, str]]:
     balance_q = "SELECT balance FROM trades"
     balance_params: list[Any] = []
     if as_of_ts is not None:
@@ -219,6 +219,12 @@ def _reconstruct_positions_and_balance(
     """.format(open_where=open_where, close_where=close_where)
 
     positions: list[dict[str, Any]] = []
+    state_source_counts: dict[str, int] = {
+        "trades_only": 0,
+        "position_state": 0,
+        "position_state_history": 0,
+    }
+    state_source_by_symbol: dict[str, str] = {}
     for row in conn.execute(sql_open, tuple(open_close_params)).fetchall():
         symbol = str(row["symbol"] or "").strip().upper()
         if not symbol:
@@ -249,6 +255,7 @@ def _reconstruct_positions_and_balance(
         tp1_taken = False
         last_add_time_ms = 0
         entry_adx_threshold = 0.0
+        state_source = "trades_only"
 
         fills_q = (
             "SELECT action, price, size, entry_atr, timestamp, reason FROM trades "
@@ -331,6 +338,7 @@ def _reconstruct_positions_and_balance(
                         if as_of_ts is not None and last_add_time_ms > int(as_of_ts):
                             last_add_time_ms = 0
                         entry_adx_threshold = float(ps_row["entry_adx_threshold"] or 0.0)
+                        state_source = "position_state"
                     elif as_of_ts is not None:
                         # Strict as-of mode: avoid consuming position_state without
                         # timestamp guarantees.
@@ -359,8 +367,11 @@ def _reconstruct_positions_and_balance(
                             if last_add_time_ms > int(as_of_ts):
                                 last_add_time_ms = 0
                             entry_adx_threshold = float(hist_row["entry_adx_threshold"] or 0.0)
+                            state_source = "position_state_history"
 
         side = "long" if pos_type == "LONG" else "short"
+        state_source_counts[state_source] = int(state_source_counts.get(state_source, 0)) + 1
+        state_source_by_symbol[symbol] = state_source
         positions.append(
             {
                 "symbol": symbol,
@@ -381,7 +392,7 @@ def _reconstruct_positions_and_balance(
         )
 
     positions.sort(key=lambda p: str(p.get("symbol") or ""))
-    return balance, positions
+    return balance, positions, state_source_counts, state_source_by_symbol
 
 
 def _load_attempt_markers(
@@ -502,7 +513,12 @@ def main() -> int:
 
     conn = _connect_ro(db_path)
     try:
-        balance, positions = _reconstruct_positions_and_balance(conn, as_of_ts=as_of_ts)
+        (
+            balance,
+            positions,
+            state_source_counts,
+            state_source_by_symbol,
+        ) = _reconstruct_positions_and_balance(conn, as_of_ts=as_of_ts)
         entry_attempt_ms, exit_attempt_ms = _load_attempt_markers(conn, as_of_ts=as_of_ts)
         open_orders = _load_open_orders(conn, as_of_ts=args.as_of_ts)
 
@@ -517,6 +533,10 @@ def main() -> int:
 
         if balance <= 0.0:
             warnings.append("balance_non_positive")
+        if as_of_ts is not None and int(state_source_counts.get("trades_only", 0)) > 0:
+            warnings.append(
+                f"position_state_as_of_fallback_trades_only:{int(state_source_counts.get('trades_only', 0))}"
+            )
 
         snapshot = {
             "version": 2,
@@ -531,6 +551,10 @@ def main() -> int:
             "canonical": {
                 "db_path": str(db_path),
                 "as_of_ts": as_of_ts,
+                "position_state_provenance": {
+                    "counts": state_source_counts,
+                    "by_symbol": state_source_by_symbol,
+                },
                 "open_orders": open_orders,
                 "cursors": cursors,
                 "warnings": warnings,
