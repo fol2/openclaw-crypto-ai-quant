@@ -237,6 +237,89 @@ def _derive_interval_db(base_candles_db: Path, interval: str) -> Path | None:
     return None
 
 
+def _coerce_optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(int(value))
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def _coerce_optional_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        return float(text)
+    except Exception:
+        return None
+
+
+def _extract_alignment_assumptions(strategy_cfg: dict[str, Any]) -> dict[str, Any]:
+    global_cfg = strategy_cfg.get("global") if isinstance(strategy_cfg, dict) else {}
+    if not isinstance(global_cfg, dict):
+        global_cfg = {}
+    global_trade = global_cfg.get("trade") if isinstance(global_cfg, dict) else {}
+    if not isinstance(global_trade, dict):
+        global_trade = {}
+
+    use_bbo_global = _coerce_optional_bool(global_trade.get("use_bbo_for_fills"))
+    slippage_bps_global = _coerce_optional_float(global_trade.get("slippage_bps"))
+
+    symbols_cfg = strategy_cfg.get("symbols") if isinstance(strategy_cfg, dict) else {}
+    if not isinstance(symbols_cfg, dict):
+        symbols_cfg = {}
+
+    use_bbo_overrides: dict[str, bool] = {}
+    slippage_bps_overrides: dict[str, float] = {}
+    for symbol, raw_cfg in symbols_cfg.items():
+        symbol_key = str(symbol or "").strip().upper()
+        if not symbol_key:
+            continue
+        sym_cfg = raw_cfg if isinstance(raw_cfg, dict) else {}
+        trade_cfg = sym_cfg.get("trade") if isinstance(sym_cfg, dict) else {}
+        if not isinstance(trade_cfg, dict):
+            continue
+
+        if "use_bbo_for_fills" in trade_cfg:
+            parsed = _coerce_optional_bool(trade_cfg.get("use_bbo_for_fills"))
+            if parsed is not None:
+                use_bbo_overrides[symbol_key] = bool(parsed)
+        if "slippage_bps" in trade_cfg:
+            parsed = _coerce_optional_float(trade_cfg.get("slippage_bps"))
+            if parsed is not None:
+                slippage_bps_overrides[symbol_key] = float(parsed)
+
+    enabled_symbols = sorted([symbol for symbol, enabled in use_bbo_overrides.items() if enabled])
+    disabled_symbols = sorted([symbol for symbol, enabled in use_bbo_overrides.items() if not enabled])
+    bbo_enabled_any = bool(use_bbo_global) or bool(enabled_symbols)
+
+    return {
+        "bbo_fill_model": {
+            "enabled_any": bool(bbo_enabled_any),
+            "global_use_bbo_for_fills": use_bbo_global,
+            "symbol_use_bbo_for_fills_overrides": use_bbo_overrides,
+            "symbol_use_bbo_enabled": enabled_symbols,
+            "symbol_use_bbo_disabled": disabled_symbols,
+            "slippage_bps_global": slippage_bps_global,
+            "symbol_slippage_bps_overrides": slippage_bps_overrides,
+            "notes": [
+                "Backtester replay currently uses candle-price execution without BBO microstructure fills.",
+                "When bbo_fill_model.enabled_any=true, fill-price and realised PnL drift must be treated as a model residual unless explicitly simulated.",
+            ],
+        }
+    }
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build a live replay bundle with deterministic artefacts.")
     parser.add_argument("--live-db", default="./trading_engine_live.db", help="Path to live SQLite DB")
@@ -759,6 +842,7 @@ def main() -> int:
         }
         for row in oms_rows
     )
+    alignment_assumptions = _extract_alignment_assumptions(strategy_cfg_normalised)
 
     with live_trades_path.open("w", encoding="utf-8") as fp:
         for row in baseline_trades:
@@ -1133,6 +1217,7 @@ def main() -> int:
             "matches_runtime_strategy_prefix": bool(matching_runtime_prefixes),
             "matches_oms_strategy_sha1": bool(matches_oms_sha1),
         },
+        "alignment_assumptions": alignment_assumptions,
         "artefacts": {
             "snapshot_file": snapshot_path.name,
             "strategy_config_snapshot_file": strategy_config_snapshot_path.name,
