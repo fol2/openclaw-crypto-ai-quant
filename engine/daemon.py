@@ -256,6 +256,57 @@ def _db_path() -> str:
     return str(os.getenv("AI_QUANT_DB_PATH", _default_db_path()) or _default_db_path())
 
 
+def _safe_name_fragment(value: str) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return "default"
+    out = []
+    for ch in text:
+        if ch.isalnum():
+            out.append(ch)
+        elif ch in {"-", "_", "."}:
+            out.append(ch)
+        else:
+            out.append("_")
+    normalised = "".join(out).strip("_.-")
+    return normalised or "default"
+
+
+def _resolve_kernel_decision_file_path(*, mode: str, db_path: str) -> str | None:
+    raw = str(os.getenv("AI_QUANT_KERNEL_DECISION_FILE", "") or "").strip()
+    if not raw:
+        return None
+
+    db_path_resolved = str(Path(str(db_path or _default_db_path())).expanduser().resolve())
+    db_stem = Path(db_path_resolved).stem
+    mode_part = _safe_name_fragment(mode)
+    db_part = _safe_name_fragment(db_stem)
+    db_hash8 = hashlib.sha1(db_path_resolved.encode("utf-8")).hexdigest()[:8]
+    suffix = f"{mode_part}_{db_part}_{db_hash8}"
+
+    rendered = (
+        raw.replace("{mode}", str(mode))
+        .replace("{db}", str(db_stem))
+        .replace("{db_stem}", str(db_stem))
+    )
+    if rendered != raw:
+        return str(Path(rendered).expanduser().resolve())
+
+    path = Path(raw).expanduser()
+    allow_shared = _env_bool("AI_QUANT_KERNEL_DECISION_FILE_ALLOW_SHARED", False)
+    if allow_shared:
+        return str(path.resolve())
+
+    as_text = str(raw)
+    if as_text.endswith("/") or as_text.endswith("\\") or (path.exists() and path.is_dir()):
+        return str((path / f"kernel_events_{suffix}.json").resolve())
+
+    ext = path.suffix if path.suffix else ".json"
+    stem = path.stem if path.suffix else path.name
+    namespaced = path.with_name(f"{stem}_{suffix}{ext}")
+    return str(namespaced.resolve())
+
+
 def _harden_db_permissions(*paths: str, project_root: Path | None = None) -> None:
     """Best-effort DB permission hardening (`0600`) for existing SQLite data + sidecar files."""
     root = Path(project_root) if project_root is not None else Path(__file__).resolve().parents[1]
@@ -1387,7 +1438,18 @@ def main() -> None:
     except Exception:
         logger.warning("failed to build run fingerprint", exc_info=True)
 
-    decision_provider = _build_default_decision_provider(db_path=_db_path())
+    runtime_db_path = _db_path()
+    kernel_decision_file_before = str(os.getenv("AI_QUANT_KERNEL_DECISION_FILE", "") or "").strip()
+    resolved_kernel_decision_file = _resolve_kernel_decision_file_path(mode=mode, db_path=runtime_db_path)
+    if resolved_kernel_decision_file:
+        os.environ["AI_QUANT_KERNEL_DECISION_FILE"] = str(resolved_kernel_decision_file)
+        if kernel_decision_file_before and kernel_decision_file_before != str(resolved_kernel_decision_file):
+            logger.info(
+                "kernel decision file namespaced for daemon instance: %s -> %s",
+                kernel_decision_file_before,
+                resolved_kernel_decision_file,
+            )
+    decision_provider = _build_default_decision_provider(db_path=runtime_db_path)
 
     # Wire kernel provider to OMS for fill reconciliation (AQC-743).
     if hasattr(plugin, "oms") and plugin.oms is not None:
