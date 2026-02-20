@@ -253,6 +253,10 @@ class DeployTarget:
     yaml_path: Path
 
 
+_PROMOTION_ROLE_ORDER: tuple[str, ...] = ("primary", "fallback", "conservative")
+_DEFAULT_SLOT_ROLE: dict[int, str] = {1: "primary", 2: "fallback", 3: "conservative"}
+
+
 def _parse_iso_to_epoch_s(ts: str) -> float | None:
     s = str(ts or "").strip()
     if not s:
@@ -850,6 +854,122 @@ def _service_environment(service: str) -> dict[str, str]:
     return out
 
 
+def _normalise_promoted_role(raw: str) -> str:
+    role = _norm_mode_key(raw)
+    return role if role in _PROMOTION_ROLE_ORDER else ""
+
+
+def _target_promoted_role(target: DeployTarget) -> str:
+    env = _service_environment(str(target.service))
+    for key in ("AI_QUANT_PROMOTED_ROLE", "AI_QUANT_STRATEGY_MODE"):
+        role = _normalise_promoted_role(str(env.get(key, "") or ""))
+        if role:
+            return role
+    return _DEFAULT_SLOT_ROLE.get(int(target.slot), "primary")
+
+
+def _promotion_role_config_ids(run_meta: dict[str, Any]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    promotion = run_meta.get("promotion", {}) if isinstance(run_meta, dict) else {}
+    roles = promotion.get("roles", {}) if isinstance(promotion, dict) else {}
+    if not isinstance(roles, dict):
+        return out
+    for role_key, payload in roles.items():
+        role = _normalise_promoted_role(str(role_key or ""))
+        if not role:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        cfg_id = str(payload.get("config_id", "") or "").strip()
+        if cfg_id:
+            out[role] = cfg_id
+    return out
+
+
+def _build_deploy_selection_plan(
+    *,
+    parsed: list[Candidate],
+    run_meta: dict[str, Any],
+    deploy_targets: list[DeployTarget],
+    require_ssot_evidence: bool,
+) -> tuple[str, list[Candidate], dict[int, Candidate], list[dict[str, Any]], list[str]]:
+    ranked = _select_deployable_candidates(
+        parsed,
+        limit=max(1, len(parsed)),
+        require_ssot_evidence=bool(require_ssot_evidence),
+    )
+    if not ranked:
+        return ("none", [], {}, [], [])
+
+    by_id: dict[str, Candidate] = {c.config_id: c for c in ranked}
+    role_cfg_ids = _promotion_role_config_ids(run_meta)
+    warnings: list[str] = []
+    bindings: list[dict[str, Any]] = []
+    slot_to_candidate: dict[int, Candidate] = {}
+    selected: list[Candidate] = []
+
+    if role_cfg_ids:
+        for target in deploy_targets:
+            role = _target_promoted_role(target)
+            cfg_id = str(role_cfg_ids.get(role, "") or "").strip()
+            cand = by_id.get(cfg_id) if cfg_id else None
+            if cand is not None:
+                slot_to_candidate[int(target.slot)] = cand
+                selected.append(cand)
+            else:
+                if not cfg_id:
+                    warnings.append(
+                        f"missing promotion role mapping for slot={int(target.slot)} service={target.service} role={role}"
+                    )
+                else:
+                    warnings.append(
+                        f"promotion role config not deployable: slot={int(target.slot)} service={target.service} role={role} config={cfg_id[:12]}"
+                    )
+            bindings.append(
+                {
+                    "slot": int(target.slot),
+                    "service": str(target.service),
+                    "role": role,
+                    "config_id": cfg_id or None,
+                    "selected": bool(cand is not None),
+                    "source": "promotion_roles",
+                }
+            )
+        if slot_to_candidate:
+            return ("promotion_roles_v1", selected, slot_to_candidate, bindings, warnings)
+
+        warnings.append("promotion role metadata exists but no slot resolved to deployable candidate; fallback to ranked deployables")
+
+    # Backward-compatible fallback for runs without promotion role metadata.
+    for idx, target in enumerate(deploy_targets):
+        if idx >= len(ranked):
+            bindings.append(
+                {
+                    "slot": int(target.slot),
+                    "service": str(target.service),
+                    "role": _target_promoted_role(target),
+                    "config_id": None,
+                    "selected": False,
+                    "source": "ranked_fallback",
+                }
+            )
+            continue
+        cand = ranked[idx]
+        slot_to_candidate[int(target.slot)] = cand
+        selected.append(cand)
+        bindings.append(
+            {
+                "slot": int(target.slot),
+                "service": str(target.service),
+                "role": _target_promoted_role(target),
+                "config_id": str(cand.config_id),
+                "selected": True,
+                "source": "ranked_fallback",
+            }
+        )
+    return ("deployable_rank_v1", selected, slot_to_candidate, bindings, warnings)
+
+
 def _parse_service_path_map(raw: str) -> dict[str, Path]:
     out: dict[str, Path] = {}
     for part in _split_csv(raw):
@@ -1441,13 +1561,39 @@ def main(argv: list[str] | None = None) -> int:
     for lines in _build_candidates_messages(run_id=run_id, parsed=parsed):
         _send_discord_chunks(target=str(args.discord_target), lines=lines)
 
-    deployable = _select_deployable_candidates(
-        parsed, limit=max(1, len(deploy_targets)), require_ssot_evidence=bool(args.require_ssot_evidence)
+    (
+        selection_policy,
+        deployable_selected,
+        deployable_by_slot,
+        deploy_role_bindings,
+        deploy_selection_warnings,
+    ) = _build_deploy_selection_plan(
+        parsed=parsed,
+        run_meta=run_meta,
+        deploy_targets=deploy_targets,
+        require_ssot_evidence=bool(args.require_ssot_evidence),
     )
-    if not deployable:
+    if not deployable_by_slot:
         _send_discord(
             target=str(args.discord_target),
             message=f"⚠️ Factory OK • `{run_id}` but no deployable candidates (all rejected)",
+        )
+        return 0
+    for warn in deploy_selection_warnings:
+        _send_discord(
+            target=str(args.discord_target),
+            message=f"⚠️ Selection WARN • `{run_id}` {warn}",
+        )
+
+    selected_primary: Candidate | None = None
+    if deploy_targets:
+        selected_primary = deployable_by_slot.get(int(deploy_targets[0].slot))
+    if selected_primary is None and deployable_selected:
+        selected_primary = deployable_selected[0]
+    if selected_primary is None:
+        _send_discord(
+            target=str(args.discord_target),
+            message=f"⚠️ Factory OK • `{run_id}` but selection produced no deployable candidate",
         )
         return 0
 
@@ -1465,8 +1611,11 @@ def main(argv: list[str] | None = None) -> int:
             "configs_dir": str(run_dir / "configs"),
             "replays_dir": str(run_dir / "replays"),
         },
-        "selected": deployable[0].__dict__,
-        "selected_candidates": [c.__dict__ for c in deployable],
+        "selection_policy": str(selection_policy),
+        "selection_warnings": list(deploy_selection_warnings),
+        "selected": selected_primary.__dict__,
+        "selected_candidates": [c.__dict__ for c in deployable_selected],
+        "selected_candidates_by_role": deploy_role_bindings,
         "selected_targets": [
             {"slot": t.slot, "service": t.service, "yaml_path": str(t.yaml_path)} for t in deploy_targets
         ],
@@ -1487,7 +1636,7 @@ def main(argv: list[str] | None = None) -> int:
             target=str(args.discord_target),
             message=(
                 f"✅ Factory OK (no-deploy) • `{run_id}` "
-                f"`selected` {','.join([c.config_id[:12] for c in deployable[: len(deploy_targets)]])}"
+                f"`selected` {','.join([str(c.config_id)[:12] for c in deployable_selected[: len(deploy_targets)]])}"
             ),
         )
         selection["deploy_stage"] = "no_deploy"
@@ -1504,7 +1653,8 @@ def main(argv: list[str] | None = None) -> int:
     deployments: list[dict[str, Any]] = []
     deployed_any = False
     for i, target in enumerate(deploy_targets):
-        if i >= len(deployable):
+        cand = deployable_by_slot.get(int(target.slot))
+        if cand is None:
             deployments.append(
                 {
                     "slot": int(target.slot),
@@ -1516,7 +1666,6 @@ def main(argv: list[str] | None = None) -> int:
             )
             continue
 
-        cand = deployable[i]
         prev_yaml_text = target.yaml_path.read_text(encoding="utf-8") if target.yaml_path.exists() else ""
         prev_cfg_id = _yaml_config_id(prev_yaml_text)
         next_yaml_text = Path(cand.config_path).expanduser().resolve().read_text(encoding="utf-8")
@@ -1526,7 +1675,7 @@ def main(argv: list[str] | None = None) -> int:
         diff_lines = _diff_yaml_summaries(prev_summary, next_summary)
         selection_lines = [
             f"🎯 Selection • `{run_id}` • slot={target.slot}",
-            (f"`target` {target.service}  `rank` {i + 1}/{len(deployable)}"),
+            (f"`target` {target.service}  `rank` {i + 1}/{len(deploy_targets)}"),
             (
                 f"`config` `{cand.config_id[:12]}`  "
                 f"`pf` {_format_float(cand.profit_factor, ndigits=3)}  "
@@ -1548,7 +1697,7 @@ def main(argv: list[str] | None = None) -> int:
             artifacts_dir / "deployments" / "paper" / str(target.service) / f"{_utc_compact()}_{cand.config_id[:12]}"
         ).resolve()
         reason = (
-            f"{reason_base}; slot={target.slot}; target={target.service}; rank={i + 1}; config={cand.config_id[:12]}"
+            f"{reason_base}; slot={target.slot}; target={target.service}; rank={i + 1}; policy={selection_policy}; config={cand.config_id[:12]}"
         )
         try:
             deploy_dir = deploy_paper_config(

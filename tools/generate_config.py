@@ -206,6 +206,8 @@ SORT_KEYS = {
     "wr":       lambda r: r.get("win_rate", 0),
     "sharpe":   lambda r: r.get("sharpe_ratio", 0),
     "trades":   lambda r: r.get("total_trades", 0),
+    # Alias: conservative lane is pure DD ordering.
+    "conservative": lambda r: -r.get("max_drawdown_pct", 1),
 }
 
 
@@ -237,6 +239,22 @@ def balanced_score(r: dict) -> float:
     return (pnl * 0.3 + pf * 20 + sharpe * 15 - dd * 100) * trade_penalty
 
 
+def efficient_score(r: dict) -> float:
+    """Efficient lane: (PnL / DD) × PF."""
+    pnl = _safe_float(r.get("total_pnl", 0.0), 0.0)
+    dd = max(_safe_float(r.get("max_drawdown_pct", 1.0), 1.0), 0.01)
+    pf = max(_safe_float(r.get("profit_factor", 1.0), 1.0), 0.0)
+    return (pnl / dd) * pf
+
+
+def growth_score(r: dict) -> float:
+    """Growth lane: PnL × (1 − DD) × PF (minor DD penalty)."""
+    pnl = _safe_float(r.get("total_pnl", 0.0), 0.0)
+    dd = min(max(_safe_float(r.get("max_drawdown_pct", 0.0), 0.0), 0.0), 1.0)
+    pf = max(_safe_float(r.get("profit_factor", 1.0), 1.0), 0.0)
+    return pnl * (1.0 - dd) * pf
+
+
 def load_sweep_results(path: str, sort_by: str = "pnl",
                        min_trades: int = 0) -> list[dict]:
     """Load JSONL sweep results sorted by chosen metric."""
@@ -254,6 +272,10 @@ def load_sweep_results(path: str, sort_by: str = "pnl",
 
     if sort_by == "balanced":
         results.sort(key=balanced_score, reverse=True)
+    elif sort_by == "efficient":
+        results.sort(key=efficient_score, reverse=True)
+    elif sort_by == "growth":
+        results.sort(key=growth_score, reverse=True)
     else:
         key_fn = SORT_KEYS.get(sort_by, SORT_KEYS["pnl"])
         results.sort(key=key_fn, reverse=True)
@@ -365,7 +387,7 @@ def main():
     parser.add_argument("--base-config", default=None,
                         help="Base YAML config to apply overrides to")
     parser.add_argument("--sort-by", default="pnl",
-                        choices=["pnl", "dd", "pf", "wr", "sharpe", "trades", "balanced"],
+                        choices=["pnl", "dd", "pf", "wr", "sharpe", "trades", "balanced", "efficient", "growth", "conservative"],
                         help="Sort metric for ranking (default: pnl)")
     parser.add_argument("--rank", type=int, default=1,
                         help="Pick Nth best result by sort metric (default: 1)")
