@@ -226,22 +226,6 @@ def _load_seed_history_rows(
         if acc:
             rows_by_table["gate_evaluations"] = acc
 
-    if decision_ids and _table_exists(conn, "decision_lineage"):
-        acc = []
-        chunk_size = 300
-        for start in range(0, len(decision_ids), chunk_size):
-            chunk = decision_ids[start : start + chunk_size]
-            placeholders = ",".join("?" for _ in chunk)
-            q = (
-                f"SELECT * FROM decision_lineage "
-                f"WHERE signal_decision_id IN ({placeholders}) OR exit_decision_id IN ({placeholders}) "
-                "ORDER BY id ASC"
-            )
-            params = tuple(chunk + chunk)
-            acc.extend(_rows_to_json(conn.execute(q, params).fetchall()))
-        if acc:
-            rows_by_table["decision_lineage"] = acc
-
     if _table_exists(conn, "signals"):
         ts_expr = _sqlite_ts_ms_expr("timestamp")
         rows = conn.execute(

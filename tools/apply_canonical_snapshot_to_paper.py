@@ -116,7 +116,6 @@ def _seed_history_rows(
         "decision_events",
         "decision_context",
         "gate_evaluations",
-        "decision_lineage",
     )
     for table_name in load_order:
         if not _table_exists(conn, table_name):
@@ -128,7 +127,10 @@ def _seed_history_rows(
         for row in raw_rows:
             if not isinstance(row, dict):
                 continue
-            _insert_projection(conn, table_name, row)
+            insert_row = dict(row)
+            if table_name == "decision_events" and "trade_id" in insert_row:
+                insert_row["trade_id"] = None
+            _insert_projection(conn, table_name, insert_row)
             count += 1
         if count > 0:
             inserted[table_name] = count
