@@ -845,6 +845,13 @@ def main() -> int:
             )
 
     trade_report: dict[str, Any] | None = None
+    trade_status = False
+    trade_effective_ok = False
+    trade_bbo_execution_residual_accepted = False
+    trade_bbo_fill_model_enabled = False
+    trade_numeric_mismatch = 0
+    trade_unmatched_live = 0
+    trade_unmatched_backtester = 0
     if not trade_path.exists():
         failures.append(
             {
@@ -856,15 +863,45 @@ def main() -> int:
     else:
         trade_report = _load_json(trade_path)
         trade_status = bool(((trade_report.get("status") or {}).get("strict_alignment_pass")))
+        trade_effective_ok = bool(trade_status)
+        trade_counts = trade_report.get("counts") or {}
+        if not isinstance(trade_counts, dict):
+            trade_counts = {}
+        trade_numeric_mismatch = _as_int(trade_counts.get("numeric_mismatch"), 0)
+        trade_unmatched_live = _as_int(trade_counts.get("unmatched_live"), 0)
+        trade_unmatched_backtester = _as_int(trade_counts.get("unmatched_backtester"), 0)
+        raw_exec_model = trade_report.get("execution_model_assumptions") or {}
+        if isinstance(raw_exec_model, dict):
+            trade_bbo_fill_model_enabled = _as_bool(raw_exec_model.get("bbo_fill_model_enabled"), False)
+
+        bbo_numeric_only_residual = (
+            bool(trade_bbo_fill_model_enabled)
+            and trade_numeric_mismatch > 0
+            and trade_unmatched_live == 0
+            and trade_unmatched_backtester == 0
+        )
         if not trade_status:
-            failures.append(
-                {
-                    "code": "trade_alignment_failed",
-                    "classification": "deterministic_logic_divergence",
-                    "detail": "trade reconciliation strict alignment failed",
-                    "counts": trade_report.get("counts") or {},
-                }
-            )
+            if bbo_numeric_only_residual and not bool(args.strict_no_residuals):
+                trade_effective_ok = True
+                trade_bbo_execution_residual_accepted = True
+            else:
+                failures.append(
+                    {
+                        "code": "trade_alignment_failed",
+                        "classification": (
+                            "non-simulatable_exchange_oms_effect"
+                            if bbo_numeric_only_residual
+                            else "deterministic_logic_divergence"
+                        ),
+                        "detail": (
+                            "trade reconciliation strict alignment failed "
+                            "(BBO execution-model residual detected)"
+                            if bbo_numeric_only_residual
+                            else "trade reconciliation strict alignment failed"
+                        ),
+                        "counts": trade_counts,
+                    }
+                )
         if args.strict_no_residuals:
             trade_residuals = list(trade_report.get("accepted_residuals") or [])
             blocking_trade_residuals = _blocking_residuals_for_strict_mode(trade_residuals)
@@ -931,7 +968,7 @@ def main() -> int:
     if (
         snapshot_trades_only_gate
         and (
-            (trade_report is not None and not bool(((trade_report.get("status") or {}).get("strict_alignment_pass"))))
+            (trade_report is not None and not bool(trade_effective_ok))
             or (
                 action_report is not None
                 and not bool(((action_report.get("status") or {}).get("strict_alignment_pass")))
@@ -1188,7 +1225,13 @@ def main() -> int:
             "candles_provenance_checked": candles_provenance_checked,
             "candles_provenance_ok": candles_provenance_ok,
             "state_ok": bool(state_report.get("ok")) if state_report is not None else False,
-            "trade_ok": bool((trade_report.get("status") or {}).get("strict_alignment_pass")) if trade_report else False,
+            "trade_ok": bool(trade_effective_ok),
+            "trade_raw_strict_ok": bool(trade_status),
+            "trade_bbo_fill_model_enabled": bool(trade_bbo_fill_model_enabled),
+            "trade_bbo_execution_residual_accepted": bool(trade_bbo_execution_residual_accepted),
+            "trade_numeric_mismatch": int(trade_numeric_mismatch),
+            "trade_unmatched_live": int(trade_unmatched_live),
+            "trade_unmatched_backtester": int(trade_unmatched_backtester),
             "action_ok": bool((action_report.get("status") or {}).get("strict_alignment_pass")) if action_report else False,
             "live_paper_ok": bool((live_paper_report.get("status") or {}).get("strict_alignment_pass"))
             if live_paper_report
