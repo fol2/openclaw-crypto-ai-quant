@@ -33,6 +33,14 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     return row is not None
 
 
+def _table_has_column(conn: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+    if not _table_exists(conn, table_name):
+        return False
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    wanted = str(column_name or "").strip().lower()
+    return any(str(row["name"] if isinstance(row, sqlite3.Row) else row[1]).strip().lower() == wanted for row in rows)
+
+
 def _parse_timestamp_ms(value: Any) -> int:
     if value is None:
         return 0
@@ -70,6 +78,7 @@ def _reconstruct_positions(
     conn: sqlite3.Connection,
     *,
     as_of_ts: int | None = None,
+    use_position_state_as_of: bool = False,
 ) -> list[dict[str, Any]]:
     if not _table_exists(conn, "trades"):
         return []
@@ -164,19 +173,28 @@ def _reconstruct_positions(
         margin_used = abs(net_size) * avg_entry / leverage if leverage > 0 else 0.0
         trailing_sl = None
 
-        if _table_exists(conn, "position_state"):
+        should_use_position_state = _table_exists(conn, "position_state") and (
+            as_of_ts is None or bool(use_position_state_as_of)
+        )
+        if should_use_position_state:
+            has_updated_at = _table_has_column(conn, "position_state", "updated_at")
+            select_cols = "open_trade_id, trailing_sl, adds_count, tp1_taken, last_add_time, entry_adx_threshold"
+            if has_updated_at:
+                select_cols += ", updated_at"
             ps_row = conn.execute(
-                "SELECT open_trade_id, trailing_sl, adds_count, tp1_taken, last_add_time, entry_adx_threshold, updated_at "
-                "FROM position_state WHERE symbol = ? LIMIT 1",
+                f"SELECT {select_cols} FROM position_state WHERE symbol = ? LIMIT 1",
                 (symbol,),
             ).fetchone()
             if ps_row:
                 open_trade_id = ps_row["open_trade_id"]
                 if open_trade_id is None or int(open_trade_id) == open_id:
                     if as_of_ts is not None:
-                        updated_at_ms = _parse_timestamp_ms(ps_row["updated_at"])
-                        if updated_at_ms > 0 and updated_at_ms > int(as_of_ts):
+                        if not has_updated_at:
                             ps_row = None
+                        else:
+                            updated_at_ms = _parse_timestamp_ms(ps_row["updated_at"])
+                            if updated_at_ms <= 0 or updated_at_ms > int(as_of_ts):
+                                ps_row = None
                     if ps_row is not None:
                         trailing_sl = float(ps_row["trailing_sl"]) if ps_row["trailing_sl"] is not None else None
                         adds_count = int(ps_row["adds_count"] or 0)
@@ -185,6 +203,29 @@ def _reconstruct_positions(
                         if as_of_ts is not None and last_add_time_ms > int(as_of_ts):
                             last_add_time_ms = 0
                         entry_adx_threshold = float(ps_row["entry_adx_threshold"] or 0.0)
+
+                    if as_of_ts is not None and ps_row is None:
+                        # Strict as-of mode: do not consume position_state without
+                        # timestamp guarantees.
+                        trailing_sl = None
+                        tp1_taken = False
+                        entry_adx_threshold = 0.0
+                        if last_add_time_ms > int(as_of_ts):
+                            last_add_time_ms = 0
+
+                    if as_of_ts is not None and ps_row is not None:
+                        # Keep scalar state coherent with as-of cutoff.
+                        if last_add_time_ms > int(as_of_ts):
+                            last_add_time_ms = 0
+                else:
+                    ps_row = None
+                    if as_of_ts is not None:
+                        # Ensure we do not leak unrelated position_state rows.
+                        trailing_sl = None
+                        tp1_taken = False
+                        entry_adx_threshold = 0.0
+                        if last_add_time_ms > int(as_of_ts):
+                            last_add_time_ms = 0
 
         positions.append(
             {
@@ -443,14 +484,23 @@ def _load_balance(conn: sqlite3.Connection, *, as_of_ts: int | None = None) -> f
     return float(row["balance"] or 0.0) if row else 0.0
 
 
-def _build_state(db_path: Path, *, as_of_ts: int | None = None) -> dict[str, Any]:
+def _build_state(
+    db_path: Path,
+    *,
+    as_of_ts: int | None = None,
+    use_position_state_as_of: bool = False,
+) -> dict[str, Any]:
     conn = _connect_ro(db_path)
     try:
         return {
             "db_path": str(db_path),
             "as_of_ts": as_of_ts,
             "balance": _load_balance(conn, as_of_ts=as_of_ts),
-            "positions": _reconstruct_positions(conn, as_of_ts=as_of_ts),
+            "positions": _reconstruct_positions(
+                conn,
+                as_of_ts=as_of_ts,
+                use_position_state_as_of=use_position_state_as_of,
+            ),
             "open_orders": _load_open_orders(conn, as_of_ts=as_of_ts),
         }
     finally:
@@ -503,8 +553,16 @@ def main() -> int:
     if effective_as_of_ts is not None and effective_as_of_ts <= 0:
         parser.error("--as-of-ts must be a positive epoch millisecond value")
 
-    live_state = _build_state(live_db, as_of_ts=effective_as_of_ts)
-    paper_state = _build_state(paper_db, as_of_ts=effective_as_of_ts)
+    live_state = _build_state(
+        live_db,
+        as_of_ts=effective_as_of_ts,
+        use_position_state_as_of=False,
+    )
+    paper_state = _build_state(
+        paper_db,
+        as_of_ts=effective_as_of_ts,
+        use_position_state_as_of=True,
+    )
 
     diffs: list[dict[str, Any]] = []
 
