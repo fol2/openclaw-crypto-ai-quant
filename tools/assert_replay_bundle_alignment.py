@@ -72,6 +72,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional live/paper decision trace reconcile report filename/path",
     )
     parser.add_argument(
+        "--paper-seed-apply-report",
+        default="paper_seed_apply_report.json",
+        help="Optional paper seed apply report filename/path (captures strict_replace actually used)",
+    )
+    parser.add_argument(
         "--require-live-paper-decision-trace",
         action="store_true",
         default=False,
@@ -266,6 +271,7 @@ def main() -> int:
     action_path = _resolve_report_path(bundle_dir, args.action_report)
     live_paper_path = _resolve_report_path(bundle_dir, args.live_paper_report)
     live_paper_decision_trace_path = _resolve_report_path(bundle_dir, args.live_paper_decision_trace_report)
+    paper_seed_apply_path = _resolve_report_path(bundle_dir, args.paper_seed_apply_report)
     event_order_path = _resolve_report_path(bundle_dir, args.event_order_report)
     gpu_parity_path = _resolve_report_path(bundle_dir, args.gpu_parity_report)
 
@@ -836,6 +842,13 @@ def main() -> int:
 
     manifest_inputs = (manifest.get("inputs") or {}) if isinstance(manifest, dict) else {}
     manifest_snapshot_strict_replace = _as_bool(manifest_inputs.get("snapshot_strict_replace"), False)
+    paper_seed_apply_report: dict[str, Any] | None = None
+    if paper_seed_apply_path.exists():
+        paper_seed_apply_report = _load_json(paper_seed_apply_path)
+    seed_apply_strict_replace = _as_bool(
+        (paper_seed_apply_report or {}).get("strict_replace"),
+        False,
+    )
     live_paper_decision_trace_report: dict[str, Any] | None = None
     live_paper_decision_trace_skipped_empty_paper = False
     if not live_paper_decision_trace_path.exists():
@@ -856,7 +869,12 @@ def main() -> int:
         live_decision_rows = _as_int(decision_counts.get("live_decision_rows"), -1)
         paper_decision_rows = _as_int(decision_counts.get("paper_decision_rows"), -1)
         if not decision_trace_status:
-            if manifest_snapshot_strict_replace and paper_decision_rows == 0 and live_decision_rows > 0:
+            if (
+                manifest_snapshot_strict_replace
+                and seed_apply_strict_replace
+                and paper_decision_rows == 0
+                and live_decision_rows > 0
+            ):
                 live_paper_decision_trace_skipped_empty_paper = True
             else:
                 failures.append(
@@ -993,6 +1011,7 @@ def main() -> int:
             "live_paper_report": str(live_paper_path),
             "require_live_paper": bool(args.require_live_paper),
             "live_paper_decision_trace_report": str(live_paper_decision_trace_path),
+            "paper_seed_apply_report": str(paper_seed_apply_path),
             "require_live_paper_decision_trace": bool(args.require_live_paper_decision_trace),
             "event_order_report": str(event_order_path),
             "require_event_order": bool(args.require_event_order),
@@ -1031,6 +1050,8 @@ def main() -> int:
             "live_paper_decision_trace_skipped_empty_paper": bool(
                 live_paper_decision_trace_skipped_empty_paper
             ),
+            "manifest_snapshot_strict_replace": bool(manifest_snapshot_strict_replace),
+            "seed_apply_strict_replace": bool(seed_apply_strict_replace),
             "event_order_ok": bool((event_order_report.get("status") or {}).get("order_parity_pass"))
             if event_order_report
             else (not bool(args.require_event_order)),

@@ -606,6 +606,7 @@ def main() -> int:
     alignment_gate_path = bundle_dir / "alignment_gate_report.json"
     paper_harness_report_path = bundle_dir / "paper_deterministic_replay_run.json"
     paper_seed_watermark_path = bundle_dir / "paper_seed_watermark.json"
+    paper_seed_apply_report_path = bundle_dir / "paper_seed_apply_report.json"
     manifest_path = bundle_dir / "replay_bundle_manifest.json"
 
     if yaml is None:
@@ -773,10 +774,11 @@ def main() -> int:
         "print(output_path)\n"
         "PY\n"
         f"SNAPSHOT_PATH=\"$BUNDLE_DIR/{snapshot_name}\"\n"
+        f"PAPER_SEED_APPLY_REPORT=\"$BUNDLE_DIR/{paper_seed_apply_report_path.name}\"\n"
         "STRICT_REPLACE_FLAG=\"\"\n"
         "if [ \"${AQC_SNAPSHOT_STRICT_REPLACE:-0}\" = \"1\" ]; then STRICT_REPLACE_FLAG=\"--strict-replace\"; fi\n"
         f"python3 \"$REPO_ROOT/tools/export_live_canonical_snapshot.py\" --source live --db-path \"$LIVE_DB\" --as-of-ts {seed_as_of_ts} --output \"$SNAPSHOT_PATH\"\n"
-        "python3 \"$REPO_ROOT/tools/apply_canonical_snapshot_to_paper.py\" --snapshot \"$SNAPSHOT_PATH\" --target-db \"$PAPER_DB\" $STRICT_REPLACE_FLAG"
+        "python3 \"$REPO_ROOT/tools/apply_canonical_snapshot_to_paper.py\" --snapshot \"$SNAPSHOT_PATH\" --target-db \"$PAPER_DB\" $STRICT_REPLACE_FLAG > \"$PAPER_SEED_APPLY_REPORT\""
     )
 
     if funding_db is not None:
@@ -1017,12 +1019,7 @@ def main() -> int:
         script_path = bundle_dir / script_name
         script_path.chmod(0o755)
 
-    snapshot_strict_replace = str(os.getenv("AQC_SNAPSHOT_STRICT_REPLACE", "0") or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    snapshot_strict_replace = str(os.getenv("AQC_SNAPSHOT_STRICT_REPLACE", "0") or "").strip() == "1"
 
     manifest = {
         "schema_version": 1,
@@ -1096,6 +1093,10 @@ def main() -> int:
             "alignment_gate_report_file": alignment_gate_path.name,
             "paper_deterministic_replay_run_report_file": paper_harness_report_path.name,
             "paper_seed_watermark_file": paper_seed_watermark_path.name,
+            "paper_seed_apply_report_file": paper_seed_apply_report_path.name,
+            "paper_seed_apply_report_sha256": _hash_file(paper_seed_apply_report_path)
+            if paper_seed_apply_report_path.exists()
+            else None,
         },
         "counts": {
             "live_baseline_trades": len(baseline_trades),
