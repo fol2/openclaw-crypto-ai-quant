@@ -817,7 +817,7 @@ class KernelDecisionRustBindingProvider:
                 continue
             if isinstance(kp, dict):
                 clean = dict(kp)
-                clean.pop("symbol", None)
+                clean["symbol"] = str(symbol).upper()
                 kernel_positions[str(symbol).upper()] = clean
 
         if not kernel_positions:
