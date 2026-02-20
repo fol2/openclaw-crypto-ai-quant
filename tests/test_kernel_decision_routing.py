@@ -696,6 +696,7 @@ def test_rust_binding_provider_bootstraps_positions_from_db_when_state_empty(mon
 
     assert isinstance(positions, dict)
     assert "ETH" in positions
+    assert positions["ETH"]["symbol"] == "ETH"
     assert positions["ETH"]["side"] == "long"
     assert positions["ETH"]["quantity"] == pytest.approx(1.5)
     assert positions["ETH"]["adds_count"] == 1
