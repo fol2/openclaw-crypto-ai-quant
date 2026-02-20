@@ -618,7 +618,8 @@ pub struct GpuParams {
     pub trade_end_bar: u32,        // last bar index for result write-back (scoped trade range)
     pub debug_t_sec: u32,          // 0 = disabled; otherwise enable debug logs at this timestamp
     pub funding_enabled: u32,      // 1 = apply funding settlements in trade kernel
-    pub _debug_pad: [u32; 2],
+    pub entry_interval_sec: u32,   // entry sub-bar interval in seconds (for signal-on-close alignment)
+    pub signal_on_candle_close: u32, // 1 = evaluate sub-bar entries on candle close semantics
 }
 
 const _: () = assert!(std::mem::size_of::<GpuParams>() == 64);

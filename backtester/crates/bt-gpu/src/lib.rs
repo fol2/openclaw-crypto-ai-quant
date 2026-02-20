@@ -74,6 +74,23 @@ fn checked_offset_u32(label: &str, lhs: usize, rhs: usize) -> Result<u32, String
     usize_to_u32(label, value)
 }
 
+fn interval_to_seconds(interval: &str) -> u32 {
+    let iv = interval.trim();
+    if iv.is_empty() {
+        return 0;
+    }
+    if let Some(m) = iv.strip_suffix('m').and_then(|s| s.parse::<u32>().ok()) {
+        return m.saturating_mul(60);
+    }
+    if let Some(h) = iv.strip_suffix('h').and_then(|s| s.parse::<u32>().ok()) {
+        return h.saturating_mul(3_600);
+    }
+    if let Some(d) = iv.strip_suffix('d').and_then(|s| s.parse::<u32>().ok()) {
+        return d.saturating_mul(86_400);
+    }
+    0
+}
+
 /// Run a GPU-accelerated parameter sweep.
 ///
 /// **All-GPU pipeline**: Raw candles uploaded once → indicator kernel computes
@@ -235,6 +252,12 @@ fn run_gpu_sweep_internal(
     // Fee rates from bt_core accounting constants (H9: not hardcoded)
     let maker_fee_rate = bt_core::accounting::DEFAULT_MAKER_FEE_RATE as f32;
     let taker_fee_rate = bt_core::accounting::DEFAULT_TAKER_FEE_RATE as f32;
+    let signal_on_candle_close = if base_cfg.engine.signal_on_candle_close {
+        1
+    } else {
+        0
+    };
+    let entry_interval_sec = interval_to_seconds(&base_cfg.engine.entry_interval);
 
     // ── 2. Init CUDA device, upload raw candles ONCE ─────────────────────
     // C6: graceful fallback — return empty results if GPU init fails
@@ -628,6 +651,8 @@ fn run_gpu_sweep_internal(
             }
         };
         trade_bufs.max_sub_per_bar = max_sub_per_bar;
+        trade_bufs.entry_interval_sec = entry_interval_sec;
+        trade_bufs.signal_on_candle_close = signal_on_candle_close;
         // Arc clone only bumps refcount; avoids cudarc CudaSlice device-to-device copy.
         trade_bufs.sub_candles = sub_candles_gpu.clone();
         trade_bufs.sub_counts = sub_counts_gpu.clone();

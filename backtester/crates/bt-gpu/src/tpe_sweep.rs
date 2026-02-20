@@ -46,6 +46,23 @@ fn checked_num_bars_u32(num_bars: usize) -> Result<u32, String> {
     u32::try_from(num_bars).map_err(|_| format!("num_bars {num_bars} exceeds u32::MAX"))
 }
 
+fn interval_to_seconds(interval: &str) -> u32 {
+    let iv = interval.trim();
+    if iv.is_empty() {
+        return 0;
+    }
+    if let Some(m) = iv.strip_suffix('m').and_then(|s| s.parse::<u32>().ok()) {
+        return m.saturating_mul(60);
+    }
+    if let Some(h) = iv.strip_suffix('h').and_then(|s| s.parse::<u32>().ok()) {
+        return h.saturating_mul(3_600);
+    }
+    if let Some(d) = iv.strip_suffix('d').and_then(|s| s.parse::<u32>().ok()) {
+        return d.saturating_mul(86_400);
+    }
+    0
+}
+
 fn failed_batch_results(n: usize, reason: &str) -> Vec<buffers::GpuResult> {
     eprintln!("[TPE] {reason} — marking {n} trial(s) as failed");
     let mut out = vec![buffers::GpuResult::zeroed(); n];
@@ -902,6 +919,12 @@ fn evaluate_trade_only_batch(
     trade_end: u32,
 ) -> Vec<buffers::GpuResult> {
     let trial_n = trial_overrides.len();
+    let entry_interval_sec = interval_to_seconds(&base_cfg.engine.entry_interval);
+    let signal_on_candle_close = if base_cfg.engine.signal_on_candle_close {
+        1
+    } else {
+        0
+    };
     let ind_config = buffers::GpuIndicatorConfig::from_strategy_config(base_cfg, lookback);
 
     // H11: handle GPU memory allocation failure gracefully
@@ -961,6 +984,8 @@ fn evaluate_trade_only_batch(
         }
     };
     trade_bufs.max_sub_per_bar = max_sub_per_bar;
+    trade_bufs.entry_interval_sec = entry_interval_sec;
+    trade_bufs.signal_on_candle_close = signal_on_candle_close;
     // Arc clone only bumps refcount; avoids cudarc CudaSlice device-to-device copy.
     trade_bufs.sub_candles = sub_candles_gpu.cloned();
     trade_bufs.sub_counts = sub_counts_gpu.cloned();
@@ -1133,6 +1158,14 @@ fn evaluate_mixed_batch_arena(
             continue;
         }
 
+        let first_trial_cfg = &trial_cfgs[group_trial_indices[0]];
+        let entry_interval_sec = interval_to_seconds(&first_trial_cfg.engine.entry_interval);
+        let signal_on_candle_close = if first_trial_cfg.engine.signal_on_candle_close {
+            1
+        } else {
+            0
+        };
+
         let trade_results = match dispatch_trade_arena(
             ds,
             candles_gpu,
@@ -1154,6 +1187,8 @@ fn evaluate_mixed_batch_arena(
             funding_rates_gpu,
             trade_start,
             trade_end,
+            entry_interval_sec,
+            signal_on_candle_close,
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -1282,6 +1317,8 @@ fn dispatch_trade_arena(
     funding_rates_gpu: Option<&CudaSlice<f64>>,
     trade_start: u32,
     trade_end: u32,
+    entry_interval_sec: u32,
+    signal_on_candle_close: u32,
 ) -> Result<Vec<buffers::GpuResult>, String> {
     let num_combos = u32::try_from(gpu_configs.len())
         .map_err(|_| format!("gpu_configs.len() {} exceeds u32::MAX", gpu_configs.len()))?;
@@ -1373,7 +1410,8 @@ fn dispatch_trade_arena(
             trade_end_bar: trade_end,
             debug_t_sec,
             funding_enabled: if funding_enabled { 1 } else { 0 },
-            _debug_pad: [0; 2],
+            entry_interval_sec,
+            signal_on_candle_close,
         };
         let params_gpu = ds
             .dev

@@ -112,7 +112,8 @@ struct GpuParams {
     unsigned int trade_end_bar;
     unsigned int debug_t_sec;
     unsigned int funding_enabled;
-    unsigned int _debug_pad[2];
+    unsigned int entry_interval_sec;
+    unsigned int signal_on_candle_close;
 };
 
 struct __align__(16) GpuSnapshot {
@@ -1118,6 +1119,17 @@ extern "C" __global__ void sweep_engine_kernel(
                 sub_cursor[sym] = 0u;
             }
 
+            unsigned int next_bar_t_sec = 0u;
+            if (bar + 1u < params->num_bars) {
+                for (unsigned int s = 0u; s < ns; s++) {
+                    const GpuRawCandle& next_mc = main_candles[(bar + 1u) * ns + s];
+                    if (next_mc.t_sec != 0u) {
+                        next_bar_t_sec = next_mc.t_sec;
+                        break;
+                    }
+                }
+            }
+
             while (true) {
                 unsigned int tick_ts = 0xFFFFFFFFu;
                 bool has_tick = false;
@@ -1167,6 +1179,18 @@ extern "C" __global__ void sweep_engine_kernel(
                     const GpuRawCandle& sc = sub_candles[sc_idx];
                     if (sc.close <= 0.0f) { continue; }
                     if (sc.t_sec != tick_ts) { continue; }
+                    unsigned int eval_t_sec = sc.t_sec;
+                    if (params->signal_on_candle_close != 0u) {
+                        if (params->entry_interval_sec == 0u || next_bar_t_sec == 0u) {
+                            continue;
+                        }
+                        unsigned long long sub_close_t_sec =
+                            (unsigned long long)sc.t_sec + (unsigned long long)params->entry_interval_sec;
+                        if (sub_close_t_sec != (unsigned long long)next_bar_t_sec) {
+                            continue;
+                        }
+                        eval_t_sec = next_bar_t_sec;
+                    }
 
                     const GpuSnapshot& ind_snap = snapshots[cfg.snapshot_offset + bar * ns + sym];
                     if (ind_snap.valid == 0u) { continue; }
@@ -1177,7 +1201,7 @@ extern "C" __global__ void sweep_engine_kernel(
                     hybrid.high = sc.high;
                     hybrid.low = sc.low;
                     hybrid.open = sc.open;
-                    hybrid.t_sec = sc.t_sec;
+                    hybrid.t_sec = eval_t_sec;
 
                     const GpuPosition& pos = state.positions[sym];
 
@@ -1405,7 +1429,9 @@ extern "C" __global__ void sweep_engine_kernel(
                     hybrid.high = sc.high;
                     hybrid.low = sc.low;
                     hybrid.open = sc.open;
-                    hybrid.t_sec = sc.t_sec;
+                    hybrid.t_sec = (params->signal_on_candle_close != 0u && next_bar_t_sec != 0u)
+                        ? next_bar_t_sec
+                        : sc.t_sec;
                     double entry_close = (double)sc.close;
                     // Margin cap
                     double total_margin = 0.0;
