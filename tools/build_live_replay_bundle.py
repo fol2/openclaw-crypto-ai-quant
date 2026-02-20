@@ -13,6 +13,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import re
 import shlex
 import shutil
@@ -101,6 +102,69 @@ def _load_yaml_mapping(path: Path) -> dict[str, Any] | None:
     except Exception:
         return None
     return raw if isinstance(raw, dict) else {}
+
+
+_MACD_MODE_NUMERIC_MAP: dict[int, str] = {
+    0: "accel",
+    1: "sign",
+    2: "none",
+}
+_MACD_MODE_ALLOWED: set[str] = {"accel", "sign", "none"}
+
+
+def _normalise_macd_mode(value: Any) -> str | None:
+    if isinstance(value, str):
+        raw = str(value or "").strip().lower()
+        if raw in _MACD_MODE_ALLOWED:
+            return raw
+        try:
+            num_f = float(raw)
+        except Exception:
+            return None
+    elif isinstance(value, bool):
+        return None
+    elif isinstance(value, (int, float)):
+        num_f = float(value)
+    else:
+        return None
+
+    if not math.isfinite(num_f):
+        return None
+
+    # Mirror sweep/deploy coercion semantics: truncate toward zero and clamp to u8.
+    idx = int(num_f)
+    if idx < 0:
+        idx = 0
+    elif idx > 255:
+        idx = 255
+    return _MACD_MODE_NUMERIC_MAP.get(idx, "none")
+
+
+def _normalise_macd_modes_inplace(
+    node: Any,
+    *,
+    path: str,
+    errors: list[str],
+) -> None:
+    if isinstance(node, dict):
+        for key, value in list(node.items()):
+            child_path = f"{path}.{key}" if path else str(key)
+            if str(key) == "macd_hist_entry_mode":
+                norm = _normalise_macd_mode(value)
+                if norm is None:
+                    errors.append(
+                        f"{child_path}={value!r} (expected accel|sign|none or numeric 0/1/2)"
+                    )
+                else:
+                    node[key] = norm
+                continue
+            _normalise_macd_modes_inplace(value, path=child_path, errors=errors)
+        return
+
+    if isinstance(node, list):
+        for idx, item in enumerate(node):
+            item_path = f"{path}[{idx}]"
+            _normalise_macd_modes_inplace(item, path=item_path, errors=errors)
 
 
 def _strategy_overrides_sha1(path: Path) -> str:
@@ -501,6 +565,28 @@ def main() -> int:
             "(provide --strategy-config to pin the deterministic replay config)"
         )
 
+    loaded_strategy_cfg = _load_yaml_mapping(strategy_config_source)
+    if loaded_strategy_cfg is None:
+        parser.error(
+            f"strategy config YAML parse failed: {strategy_config_source}"
+        )
+    # Keep lock hashes from the original source object so runtime/OMS provenance
+    # matching remains consistent with StrategyManager hashing semantics.
+    locked_strategy_sha256 = _hash_json_canonical(loaded_strategy_cfg)
+    locked_strategy_sha1_legacy = _hash_json_canonical_sha1(loaded_strategy_cfg)
+    strategy_cfg_normalised: dict[str, Any] = json.loads(json.dumps(loaded_strategy_cfg))
+    mode_errors: list[str] = []
+    _normalise_macd_modes_inplace(
+        strategy_cfg_normalised,
+        path="",
+        errors=mode_errors,
+    )
+    if mode_errors:
+        parser.error(
+            "invalid strategy config: macd_hist_entry_mode contains unsupported values: "
+            + "; ".join(mode_errors)
+        )
+
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
     snapshot_path = bundle_dir / snapshot_name
@@ -551,9 +637,13 @@ def main() -> int:
         for row in live_order_fail_events:
             fp.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False) + "\n")
 
-    shutil.copy2(strategy_config_source, strategy_config_snapshot_path)
-    locked_strategy_sha256 = _strategy_overrides_sha1(strategy_config_snapshot_path)
-    locked_strategy_sha1_legacy = _strategy_overrides_sha1_legacy(strategy_config_snapshot_path)
+    if yaml is None:
+        shutil.copy2(strategy_config_source, strategy_config_snapshot_path)
+    else:
+        strategy_config_snapshot_path.write_text(
+            yaml.safe_dump(strategy_cfg_normalised, sort_keys=False),
+            encoding="utf-8",
+        )
     runtime_timeline = runtime_strategy_provenance.get("strategy_sha1_timeline")
     runtime_rows = runtime_timeline if isinstance(runtime_timeline, list) else []
     matching_runtime_prefixes = sorted(
