@@ -2542,6 +2542,7 @@ def main(argv: list[str] | None = None) -> int:
                 "shortlist_modes",
                 "shortlist_per_mode",
                 "shortlist_max_rank",
+                "shortlist_top_pnl",
             }
             mismatches: list[str] = []
             for k in sorted(guard_keys):
@@ -3194,8 +3195,8 @@ def main(argv: list[str] | None = None) -> int:
             if not modes:
                 modes = ["efficient", "growth", "conservative"]
             if shortlist_max_rank <= 0:
-                shortlist_max_rank = int(getattr(args, "shortlist_top_pnl", 1000) or 1000)
-            shortlist_max_rank = min(shortlist_max_rank, int(getattr(args, "shortlist_top_pnl", 1000) or 1000))
+                shortlist_max_rank = shortlist_top_pnl
+            shortlist_max_rank = min(shortlist_max_rank, shortlist_top_pnl)
     
             seen_ids: set[str] = set()
             for mode in modes:
