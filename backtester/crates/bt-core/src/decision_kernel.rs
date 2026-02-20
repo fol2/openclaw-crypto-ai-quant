@@ -608,6 +608,7 @@ fn evaluate_exits_for_event(
     params: &KernelParams,
     diagnostics: &mut Diagnostics,
     cooldown_is_terminal: bool,
+    close_intent_offset: u64,
 ) -> ExitEvaluationOutcome {
     let mut intents = Vec::new();
     let mut fills = Vec::new();
@@ -659,7 +660,7 @@ fn evaluate_exits_for_event(
             };
             let role = event.fee_role.unwrap_or(accounting::FeeRole::Taker);
             let fee_rate = fee_model.role_rate(role);
-            let close_id = with_intent_id(next_state.step, 1);
+            let close_id = with_intent_id(next_state.step, close_intent_offset);
 
             match result {
                 KernelExitResult::Hold => {}
@@ -1057,8 +1058,15 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
         next_state.step = next_state.step.saturating_add(1);
         next_state.timestamp_ms = event.timestamp_ms;
 
-        let exit_outcome =
-            evaluate_exits_for_event(state, &mut next_state, event, params, &mut diagnostics, true);
+        let exit_outcome = evaluate_exits_for_event(
+            state,
+            &mut next_state,
+            event,
+            params,
+            &mut diagnostics,
+            true,
+            1,
+        );
 
         diagnostics.intent_count = exit_outcome.intents.len();
         diagnostics.fill_count = exit_outcome.fills.len();
@@ -1079,8 +1087,15 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
         let mut intents = Vec::new();
         let mut fills = Vec::new();
 
-        let exit_outcome =
-            evaluate_exits_for_event(state, &mut next_state, event, params, &mut diagnostics, false);
+        let exit_outcome = evaluate_exits_for_event(
+            state,
+            &mut next_state,
+            event,
+            params,
+            &mut diagnostics,
+            false,
+            10,
+        );
         intents.extend(exit_outcome.intents);
         fills.extend(exit_outcome.fills);
 
