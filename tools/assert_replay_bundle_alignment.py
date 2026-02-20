@@ -841,8 +841,22 @@ def main() -> int:
                     }
                 )
 
-    if (
+    snapshot_position_state_count = _as_int(
+        ((snapshot_position_state_provenance or {}).get("counts") or {}).get("position_state"),
+        0,
+    )
+    snapshot_position_state_history_count = _as_int(
+        ((snapshot_position_state_provenance or {}).get("counts") or {}).get("position_state_history"),
+        0,
+    )
+    snapshot_trades_only_gate = (
         snapshot_trades_only_positions > 0
+        and snapshot_position_state_count <= 0
+        and snapshot_position_state_history_count <= 0
+    )
+
+    if (
+        snapshot_trades_only_gate
         and (
             (trade_report is not None and not bool(((trade_report.get("status") or {}).get("strict_alignment_pass"))))
             or (
@@ -861,14 +875,8 @@ def main() -> int:
                 ),
                 "counts": {
                     "trades_only_positions": int(snapshot_trades_only_positions),
-                    "position_state_positions": _as_int(
-                        ((snapshot_position_state_provenance or {}).get("counts") or {}).get("position_state"),
-                        0,
-                    ),
-                    "position_state_history_positions": _as_int(
-                        ((snapshot_position_state_provenance or {}).get("counts") or {}).get("position_state_history"),
-                        0,
-                    ),
+                    "position_state_positions": int(snapshot_position_state_count),
+                    "position_state_history_positions": int(snapshot_position_state_history_count),
                 },
             }
         )
