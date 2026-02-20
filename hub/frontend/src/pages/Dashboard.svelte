@@ -1,6 +1,6 @@
 <script lang="ts">
   import { appState } from '../lib/stores.svelte';
-  import { getSnapshot, getCandles, getMarks, postFlashDebug, tradeEnabled, getSystemServices, getJourneys, getCandlesRange, getVolumes } from '../lib/api';
+  import { getSnapshot, getCandles, getMarks, postFlashDebug, tradeEnabled, getSystemServices, getJourneys, getCandlesRange, getVolumes, getTunnel } from '../lib/api';
   import { hubWs } from '../lib/ws';
   import { CANDIDATE_FAMILY_ORDER, getModeLabel, LIVE_MODE } from '../lib/mode-labels';
 
@@ -62,6 +62,10 @@
   let mainExtending = false;
   const JOURNEY_CHART_MIN = 120;
   const JOURNEY_CHART_MAX = 600;
+
+  // ── Tunnel state (exit bounds visualization) ──────────────────────
+  let tunnelPoints: any[] = $state([]);
+  let journeyTunnelPoints: any[] = $state([]);
 
   function pickJourneyInterval(durationMs: number): string {
     if (durationMs < 30 * 60_000)       return '1m';
@@ -144,6 +148,25 @@
       reason: leg.reason,
       confidence: leg.confidence,
     }));
+    void fetchTunnelForJourney(j, tr.fromTs, tr.toTs);
+  }
+
+  // ── Tunnel data fetch (live position) ─────────────────────────────
+  async function fetchTunnelForLive() {
+    if (!focusSym || !marks?.position) { tunnelPoints = []; return; }
+    try {
+      const res = await getTunnel(focusSym, appState.mode);
+      tunnelPoints = Array.isArray(res?.tunnel) ? res.tunnel : [];
+    } catch { tunnelPoints = []; }
+  }
+
+  // ── Tunnel data fetch (journey review) ────────────────────────────
+  async function fetchTunnelForJourney(j: any, fromTs: number, toTs: number) {
+    if (!j) { journeyTunnelPoints = []; return; }
+    try {
+      const res = await getTunnel(j.symbol, appState.mode, fromTs, toTs);
+      journeyTunnelPoints = Array.isArray(res?.tunnel) ? res.tunnel : [];
+    } catch { journeyTunnelPoints = []; }
   }
 
   function onJourneyChartSplitterDown(e: PointerEvent) {
@@ -181,6 +204,7 @@
       if (seq !== journeyFetchSeq) return;
       journeyCandles = res.candles || [];
     } catch (e) { console.error('getCandlesRange failed:', e); }
+    void fetchTunnelForJourney(j, tr.fromTs, tr.toTs);
   }
 
   // ── Dynamic candle loading ──────────────────────────────────────────
@@ -717,6 +741,7 @@
         bars,
       );
       setCandlesSeriesContext(sym, iv);
+      void fetchTunnelForLive();
     } catch {
       // Keep rendering the current candles on transient API failures.
     } finally {
@@ -740,6 +765,7 @@
     focusSym = sym;
     appState.focus = sym;
     candles = [];
+    tunnelPoints = [];
     setCandlesSeriesContext('', '');
     marks = null;
     _candlesFetchQueued = false;
@@ -1392,6 +1418,7 @@
             postype={marks?.position?.type ?? ''}
             symbol={focusSym}
             interval={selectedInterval}
+            tunnelpoints={JSON.stringify(tunnelPoints)}
             onneed-candles={onMainNeedCandles}
           ></candle-chart>
         </div>
@@ -1463,7 +1490,7 @@
                     >{iv.toUpperCase()}</button>
                   {/each}
                 </div>
-                <button class="journey-close-btn" onclick={() => { selectedJourney = null; journeyCandles = []; journeyMarks = []; }}>
+                <button class="journey-close-btn" onclick={() => { selectedJourney = null; journeyCandles = []; journeyMarks = []; journeyTunnelPoints = []; }}>
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg>
                 </button>
               </div>
@@ -1477,6 +1504,7 @@
                   interval={journeyInterval}
                   journeymarks={JSON.stringify(journeyMarks)}
                   journeyoverlay={true}
+                  tunnelpoints={JSON.stringify(journeyTunnelPoints)}
                   onneed-candles={onJourneyNeedCandles}
                 ></candle-chart>
               </div>
