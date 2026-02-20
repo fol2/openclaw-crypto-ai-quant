@@ -277,10 +277,12 @@ def _resolve_kernel_decision_file_path(*, mode: str, db_path: str) -> str | None
     if not raw:
         return None
 
-    db_stem = Path(str(db_path or _default_db_path())).expanduser().stem
+    db_path_resolved = str(Path(str(db_path or _default_db_path())).expanduser().resolve())
+    db_stem = Path(db_path_resolved).stem
     mode_part = _safe_name_fragment(mode)
     db_part = _safe_name_fragment(db_stem)
-    suffix = f"{mode_part}_{db_part}"
+    db_hash8 = hashlib.sha1(db_path_resolved.encode("utf-8")).hexdigest()[:8]
+    suffix = f"{mode_part}_{db_part}_{db_hash8}"
 
     rendered = (
         raw.replace("{mode}", str(mode))
