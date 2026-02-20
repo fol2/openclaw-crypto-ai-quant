@@ -12,6 +12,14 @@ The scheduled gate performs:
 3. strict alignment gate evaluation (including live/paper reconcile and GPU parity)
 4. release-blocker status update
 
+The strict gate is fail-closed for live run continuity:
+
+- the replay bundle records `manifest.live_run_fingerprint_provenance`
+- alignment asserts `run_fingerprint_distinct <= 1` by default
+- windows spanning live daemon restarts (multiple run fingerprints) fail as `state_initialisation_gap`
+
+This prevents mixing multiple live runtime states into one deterministic replay claim.
+
 ## Command
 
 ```bash
@@ -54,3 +62,11 @@ You may configure the scheduler via environment variables:
 - `blocked = false`: latest scheduled gate run passed
 
 The file also records `reason_codes` and the exact report path for audit.
+
+## Operating Notes for Run-Fingerprint Drift
+
+When a scheduled run fails with `live_run_fingerprint_drift_within_window`:
+
+1. Prefer a narrower replay window that stays within one live run fingerprint.
+2. Re-run after the live daemon has remained stable for the full target window.
+3. Use an override only for emergency diagnostics, not for release promotion.
