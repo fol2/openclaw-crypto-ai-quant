@@ -499,9 +499,110 @@ class KernelDecisionRustBindingProvider:
         self._legacy_state_path = self._KERNEL_STATE_PATH
         self._allow_legacy_state_fallback = _env_bool("AI_QUANT_KERNEL_STATE_LEGACY_FALLBACK", False)
         self._state_json = self._load_or_create_state()
-        self._params_json = self._runtime.default_kernel_params_json()
+        self._base_params_json = self._runtime.default_kernel_params_json()
+        self._base_params_obj = self._load_json_obj(self._base_params_json)
+        self._params_json = json.dumps(self._base_params_obj, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        self._params_cache: dict[tuple[str, str], str] = {}
+        self._missing_exit_params_warned: set[tuple[str, str]] = set()
+        try:
+            _cache_limit_raw = int(str(os.getenv("AI_QUANT_KERNEL_PARAMS_CACHE_SIZE", "256") or "256").strip())
+        except Exception:
+            _cache_limit_raw = 256
+        self._params_cache_limit = max(16, int(_cache_limit_raw))
+        self._require_exit_params = _env_bool("AI_QUANT_KERNEL_REQUIRE_EXIT_PARAMS", False)
         self._state_json = self._bootstrap_state_from_db_if_needed(self._state_json)
         self._event_id = 1
+
+    @staticmethod
+    def _load_json_obj(raw_json: str) -> dict[str, Any]:
+        try:
+            loaded = json.loads(str(raw_json or "{}"))
+        except Exception:
+            loaded = {}
+        if isinstance(loaded, dict):
+            return dict(loaded)
+        return {}
+
+    def _resolve_params_json(self, *, symbol: str, strategy: Any) -> str:
+        symbol_u = str(symbol or "").strip().upper()
+        if not symbol_u:
+            return self._params_json
+
+        strategy_sha = ""
+        if strategy is not None:
+            snap = getattr(strategy, "snapshot", None)
+            strategy_sha = str(getattr(snap, "overrides_sha1", "") or "").strip().lower()
+        cache_key = (strategy_sha or "no_strategy_sha", symbol_u)
+        cached = self._params_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        cfg: dict[str, Any] | None = None
+        if strategy is not None:
+            try:
+                maybe_cfg = strategy.get_config(symbol_u)
+                if isinstance(maybe_cfg, dict):
+                    cfg = maybe_cfg
+            except Exception:
+                logger.warning(
+                    "Kernel params: failed to load strategy config for %s (strategy_sha1=%s)",
+                    symbol_u,
+                    strategy_sha[:8] or "none",
+                    exc_info=True,
+                )
+
+        if cfg is None:
+            try:
+                maybe_global = strategy.get_config("__GLOBAL__") if strategy is not None else None
+                if isinstance(maybe_global, dict):
+                    cfg = maybe_global
+            except Exception:
+                cfg = None
+
+        params_obj = dict(self._base_params_obj)
+        params_obj.pop("entry_params", None)
+        params_obj.pop("exit_params", None)
+        entry_params: Mapping[str, Any] | None = None
+        exit_params: Mapping[str, Any] | None = None
+        try:
+            from strategy.mei_alpha_v1 import build_entry_params, build_exit_params
+
+            entry_candidate = build_entry_params(cfg if isinstance(cfg, dict) else None)
+            exit_candidate = build_exit_params(cfg if isinstance(cfg, dict) else None)
+            if isinstance(entry_candidate, Mapping):
+                entry_params = entry_candidate
+            if isinstance(exit_candidate, Mapping):
+                exit_params = exit_candidate
+        except Exception:
+            logger.warning(
+                "Kernel params merge failed for %s (strategy_sha1=%s)",
+                symbol_u,
+                strategy_sha[:8] or "none",
+                exc_info=True,
+            )
+
+        if isinstance(entry_params, Mapping):
+            params_obj["entry_params"] = dict(entry_params)
+        if isinstance(exit_params, Mapping):
+            params_obj["exit_params"] = dict(exit_params)
+        else:
+            warn_key = (strategy_sha[:8] or "none", symbol_u)
+            if warn_key not in self._missing_exit_params_warned:
+                logger.warning(
+                    "Kernel params missing exit_params for %s (strategy_sha1=%s require_exit_params=%s)",
+                    symbol_u,
+                    strategy_sha[:8] or "none",
+                    self._require_exit_params,
+                )
+                self._missing_exit_params_warned.add(warn_key)
+            if self._require_exit_params:
+                raise RuntimeError(f"missing exit_params for symbol={symbol_u}")
+
+        params_json = json.dumps(params_obj, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        if len(self._params_cache) >= self._params_cache_limit:
+            self._params_cache.pop(next(iter(self._params_cache)), None)
+        self._params_cache[cache_key] = params_json
+        return params_json
 
     @classmethod
     def _resolve_state_path(cls, db_path: str | None) -> str:
@@ -1156,7 +1257,7 @@ class KernelDecisionRustBindingProvider:
         strategy: Any,
         now_ms: int,
     ) -> Iterable[KernelDecision]:
-        del watchlist, market, interval, lookback_bars, mode, strategy
+        del watchlist, market, interval, lookback_bars, mode
 
         scope_symbols = {str(sym).strip().upper() for sym in (symbols or []) if str(sym).strip()}
         open_symbol_set = {str(sym).strip().upper() for sym in (open_symbols or []) if str(sym).strip()}
@@ -1183,7 +1284,16 @@ class KernelDecisionRustBindingProvider:
             event_json = self._build_market_event(raw, now_ms_value=int(now_ms or 0))
             if event_json is None:
                 continue
-            response = self._runtime.step_decision(state_json, event_json, self._params_json)
+            try:
+                params_json = self._resolve_params_json(symbol=raw_symbol, strategy=strategy)
+            except Exception as exc:
+                logger.warning(
+                    "Kernel step skipped due to params resolution failure (symbol=%s): %s",
+                    raw_symbol or "unknown",
+                    exc,
+                )
+                continue
+            response = self._runtime.step_decision(state_json, event_json, params_json)
             try:
                 envelope = json.loads(response)
             except (json.JSONDecodeError, TypeError) as exc:
