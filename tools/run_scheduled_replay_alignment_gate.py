@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,9 +20,12 @@ import re
 import shlex
 import sqlite3
 import subprocess
+import sys
 from typing import Any
 
 _STRATEGY_SHA1_RE = re.compile(r"strategy_sha1=([0-9a-fA-F]{7,40})")
+_PROMOTED_ENV_PATH_RE = re.compile(r"AI_QUANT_STRATEGY_YAML\s*→\s*(\S+)")
+_PROMOTED_LOADED_PATH_RE = re.compile(r"loaded role='[^']+'\s+from\s+(\S+)")
 
 try:
     import yaml
@@ -55,6 +59,17 @@ def _resolve_path(raw: str, *, base: Path) -> Path:
     if p.is_absolute():
         return p.resolve()
     return (base / p).resolve()
+
+
+def _cli_arg_present(flag: str) -> bool:
+    needle = str(flag or "").strip()
+    if not needle:
+        return False
+    for arg in sys.argv[1:]:
+        text = str(arg or "")
+        if text == needle or text.startswith(f"{needle}="):
+            return True
+    return False
 
 
 def _read_live_baseline_count(manifest_path: Path) -> int:
@@ -135,6 +150,25 @@ def _candles_interval_coverage_ms(candles_db: Path, interval: str) -> tuple[int 
             conn.close()
     except Exception:
         return None, None
+
+
+def _latest_closed_bar_start_ts(candles_db: Path, *, interval: str, cutoff_ts: int) -> int | None:
+    if not candles_db.exists():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{candles_db}?mode=ro", uri=True, timeout=10)
+        try:
+            row = conn.execute(
+                "SELECT MAX(t) FROM candles WHERE interval = ? AND t_close IS NOT NULL AND t_close <= ?",
+                (str(interval), int(cutoff_ts)),
+            ).fetchone()
+            if not row or row[0] is None:
+                return None
+            return int(row[0])
+        finally:
+            conn.close()
+    except Exception:
+        return None
 
 
 def _interval_to_bucket_ms(interval: str) -> int:
@@ -298,6 +332,46 @@ def _live_decision_trace_window_stats(live_db: Path, *, from_ts: int, to_ts: int
         return out
 
 
+def _oms_strategy_window_stats(live_db: Path, *, from_ts: int, to_ts: int) -> dict[str, Any]:
+    out = {
+        "table_present": False,
+        "rows_total": 0,
+        "rows_with_strategy_sha1": 0,
+    }
+    if not live_db.exists() or from_ts > to_ts:
+        return out
+    try:
+        conn = sqlite3.connect(f"file:{live_db}?mode=ro", uri=True, timeout=10)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='oms_intents' LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return out
+            out["table_present"] = True
+            q = (
+                "FROM oms_intents WHERE COALESCE(decision_ts_ms, created_ts_ms) >= ? "
+                "AND COALESCE(decision_ts_ms, created_ts_ms) <= ?"
+            )
+            from_i = int(from_ts)
+            to_i = int(to_ts)
+            total = conn.execute(f"SELECT COUNT(1) {q}", (from_i, to_i)).fetchone()
+            out["rows_total"] = int((total[0] if total else 0) or 0)
+            with_sha = conn.execute(
+                "SELECT COUNT(1) "
+                f"{q} "
+                "AND strategy_sha1 IS NOT NULL AND TRIM(strategy_sha1) <> ''",
+                (from_i, to_i),
+            ).fetchone()
+            out["rows_with_strategy_sha1"] = int((with_sha[0] if with_sha else 0) or 0)
+            return out
+        finally:
+            conn.close()
+    except Exception:
+        return out
+
+
 def _default_repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -363,6 +437,88 @@ def _resolve_runtime_strategy_lock_file(*, bundle_root: Path, repo_root: Path, r
         if candidate.exists() and candidate.is_file():
             return candidate
     return None
+
+
+def _load_yaml_mapping(path: Path) -> dict[str, Any] | None:
+    if yaml is None or not path.exists():
+        return None
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return None
+    return raw if isinstance(raw, dict) else {}
+
+
+def _hash_json_canonical(obj: Any) -> str:
+    try:
+        payload = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    except Exception:
+        payload = repr(obj).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _hash_json_canonical_sha1(obj: Any) -> str:
+    try:
+        payload = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    except Exception:
+        payload = repr(obj).encode("utf-8")
+    return hashlib.sha1(payload).hexdigest()
+
+
+def _strategy_config_hashes(path: Path) -> tuple[str, str]:
+    loaded = _load_yaml_mapping(path)
+    if loaded is None:
+        return "", ""
+    return _hash_json_canonical(loaded), _hash_json_canonical_sha1(loaded)
+
+
+def _extract_runtime_strategy_yaml_candidates(
+    live_db: Path,
+    *,
+    from_ts: int,
+    to_ts: int,
+) -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[str] = set()
+    if not live_db.exists() or from_ts > to_ts:
+        return candidates
+    try:
+        conn = sqlite3.connect(f"file:{live_db}?mode=ro", uri=True, timeout=10)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT message FROM runtime_logs WHERE ts_ms >= ? AND ts_ms <= ? ORDER BY ts_ms DESC, id DESC",
+                (int(from_ts), int(to_ts)),
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return candidates
+
+    for row in rows:
+        message = str(row["message"] or "")
+        if "promoted_config" not in message:
+            continue
+        hit = _PROMOTED_ENV_PATH_RE.search(message)
+        if hit is None:
+            hit = _PROMOTED_LOADED_PATH_RE.search(message)
+        if hit is None:
+            continue
+        raw_path = str(hit.group(1) or "").strip().strip("'\"")
+        if not raw_path:
+            continue
+        path = Path(raw_path).expanduser()
+        try:
+            resolved = path.resolve()
+        except Exception:
+            continue
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        if resolved.exists() and resolved.is_file():
+            candidates.append(resolved)
+    return candidates
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -516,6 +672,7 @@ def main() -> int:
     strategy_window_adjustment: dict[str, Any] | None = None
     strategy_config_resolution: dict[str, Any] | None = None
     live_decision_trace_stats: dict[str, Any] | None = None
+    oms_strategy_stats: dict[str, Any] | None = None
 
     bundle_root = _resolve_path(str(args.bundle_root), base=resolve_base)
     try:
@@ -548,6 +705,7 @@ def main() -> int:
     env["REPO_ROOT"] = str(repo_root)
     failures: list[dict[str, Any]] = []
     strategy_config_raw = str(args.strategy_config or "").strip()
+    strategy_config_cli_override = _cli_arg_present("--strategy-config")
     strategy_config_path: Path | None = (
         _resolve_path(strategy_config_raw, base=resolve_base) if strategy_config_raw else None
     )
@@ -739,18 +897,45 @@ def main() -> int:
             selected_runtime_sha = str(strategy_window_adjustment.get("selected_segment_sha1") or "").strip().lower()
         if not selected_runtime_sha and isinstance(strategy_window_stats, dict):
             selected_runtime_sha = str(strategy_window_stats.get("last_segment_sha1") or "").strip().lower()
-        if strategy_config_path is None and selected_runtime_sha:
+        runtime_yaml_candidates: list[Path] = []
+        runtime_yaml_match: Path | None = None
+        if selected_runtime_sha:
+            runtime_yaml_candidates = _extract_runtime_strategy_yaml_candidates(
+                live_db,
+                from_ts=int(from_ts),
+                to_ts=int(to_ts),
+            )
+            for candidate in runtime_yaml_candidates:
+                cand_sha256, cand_sha1 = _strategy_config_hashes(candidate)
+                if cand_sha256.startswith(selected_runtime_sha) or cand_sha1.startswith(selected_runtime_sha):
+                    runtime_yaml_match = candidate
+                    break
+
+        if selected_runtime_sha:
+            strategy_config_resolution = {
+                "selected_runtime_sha1": selected_runtime_sha,
+                "selected_runtime_sha1_prefix8": selected_runtime_sha[:8],
+                "runtime_yaml_candidates": [str(p) for p in runtime_yaml_candidates],
+                "runtime_yaml_match": str(runtime_yaml_match) if runtime_yaml_match is not None else None,
+                "required": bool(args.require_runtime_strategy_lock),
+            }
+
+        if strategy_config_path is None and runtime_yaml_match is not None:
+            strategy_config_path = runtime_yaml_match
+            if strategy_config_resolution is None:
+                strategy_config_resolution = {}
+            strategy_config_resolution["resolved_strategy_config"] = str(strategy_config_path)
+            strategy_config_resolution["resolution_mode"] = "runtime_promoted_config_match"
+        elif strategy_config_path is None and selected_runtime_sha:
             resolved = _resolve_runtime_strategy_lock_file(
                 bundle_root=bundle_root,
                 repo_root=repo_root,
                 runtime_sha1=selected_runtime_sha,
             )
-            strategy_config_resolution = {
-                "selected_runtime_sha1": selected_runtime_sha,
-                "selected_runtime_sha1_prefix8": selected_runtime_sha[:8],
-                "resolved_strategy_config": str(resolved) if resolved is not None else None,
-                "required": bool(args.require_runtime_strategy_lock),
-            }
+            if strategy_config_resolution is None:
+                strategy_config_resolution = {}
+            strategy_config_resolution["resolved_strategy_config"] = str(resolved) if resolved is not None else None
+            strategy_config_resolution["resolution_mode"] = "runtime_lock_file"
             if resolved is not None:
                 strategy_config_path = resolved
             elif bool(args.require_runtime_strategy_lock):
@@ -762,6 +947,36 @@ def main() -> int:
                             "runtime strategy lock YAML not found; expected one of "
                             f"{bundle_root / f'strategy_overrides_{selected_runtime_sha}.yaml'} or "
                             f"{bundle_root / f'strategy_overrides_{selected_runtime_sha[:8]}.yaml'}"
+                        ),
+                    }
+                )
+        elif strategy_config_path is not None and selected_runtime_sha:
+            explicit_sha256, explicit_sha1 = _strategy_config_hashes(strategy_config_path)
+            explicit_match = bool(
+                explicit_sha256.startswith(selected_runtime_sha) or explicit_sha1.startswith(selected_runtime_sha)
+            )
+            if strategy_config_resolution is None:
+                strategy_config_resolution = {}
+            strategy_config_resolution["explicit_strategy_config"] = str(strategy_config_path)
+            strategy_config_resolution["explicit_strategy_config_sha256_prefix8"] = explicit_sha256[:8]
+            strategy_config_resolution["explicit_strategy_config_sha1_prefix8"] = explicit_sha1[:8]
+            strategy_config_resolution["explicit_matches_runtime_sha"] = bool(explicit_match)
+            strategy_config_resolution["explicit_strategy_config_cli_override"] = bool(strategy_config_cli_override)
+            if (not explicit_match) and runtime_yaml_match is not None:
+                if strategy_config_cli_override and (not bool(args.require_runtime_strategy_lock)):
+                    strategy_config_resolution["resolution_mode"] = "keep_explicit_strategy_config"
+                else:
+                    strategy_config_path = runtime_yaml_match
+                    strategy_config_resolution["resolved_strategy_config"] = str(strategy_config_path)
+                    strategy_config_resolution["resolution_mode"] = "override_explicit_with_runtime_promoted_config"
+            elif (not explicit_match) and bool(args.require_runtime_strategy_lock):
+                failures.append(
+                    {
+                        "code": "explicit_strategy_config_runtime_sha_mismatch",
+                        "classification": "state_initialisation_gap",
+                        "detail": (
+                            f"explicit strategy-config {strategy_config_path} does not match runtime "
+                            f"strategy_sha1 prefix {selected_runtime_sha[:8]}"
                         ),
                     }
                 )
@@ -815,6 +1030,42 @@ def main() -> int:
                 strategy_config_resolution["from_ts_aligned_to"] = int(aligned_from_ts)
                 strategy_config_resolution["from_ts_alignment_bucket_ms"] = int(bucket_ms)
                 from_ts = int(aligned_from_ts)
+
+        if bucket_ms > 1:
+            closed_to_ts = _latest_closed_bar_start_ts(
+                candles_db,
+                interval=interval,
+                cutoff_ts=int(to_ts),
+            )
+            if closed_to_ts is None:
+                failures.append(
+                    {
+                        "code": "missing_closed_bar_for_replay_cutoff",
+                        "classification": "market_data_alignment_gap",
+                        "detail": (
+                            f"unable to resolve latest closed bar for interval={interval} "
+                            f"and cutoff_ts={int(to_ts)} from {candles_db}"
+                        ),
+                    }
+                )
+            elif int(closed_to_ts) < int(from_ts):
+                failures.append(
+                    {
+                        "code": "invalid_closed_bar_replay_window",
+                        "classification": "state_initialisation_gap",
+                        "detail": (
+                            f"closed-bar clamp produced empty window: from_ts={int(from_ts)} > "
+                            f"closed_to_ts={int(closed_to_ts)} (interval={interval}, bucket_ms={int(bucket_ms)})"
+                        ),
+                    }
+                )
+            else:
+                if strategy_config_resolution is None:
+                    strategy_config_resolution = {}
+                strategy_config_resolution["to_ts_closed_bar_aligned_from"] = int(to_ts)
+                strategy_config_resolution["to_ts_closed_bar_aligned_to"] = int(closed_to_ts)
+                strategy_config_resolution["to_ts_closed_bar_bucket_ms"] = int(bucket_ms)
+                to_ts = int(closed_to_ts)
 
         coverage_from_ts, coverage_to_ts = _candles_interval_coverage_ms(candles_db, interval)
         if coverage_from_ts is None or coverage_to_ts is None:
@@ -940,12 +1191,27 @@ def main() -> int:
     harness_rc: int | None = None
     harness_report: dict[str, Any] | None = None
     gate_report: dict[str, Any] | None = None
+    require_oms_strategy_provenance = True
     market_data_provenance: dict[str, Any] = {
         "manifest_candles_provenance": None,
         "alignment_gate_market_data_provenance": None,
     }
 
     if not failures:
+        oms_strategy_stats = _oms_strategy_window_stats(
+            live_db,
+            from_ts=int(from_ts),
+            to_ts=int(to_ts),
+        )
+        require_oms_strategy_provenance = bool(
+            int((oms_strategy_stats or {}).get("rows_with_strategy_sha1") or 0) > 0
+        )
+        env["AQC_REQUIRE_OMS_STRATEGY_PROVENANCE"] = "1" if require_oms_strategy_provenance else "0"
+        if strategy_config_resolution is None:
+            strategy_config_resolution = {}
+        strategy_config_resolution["require_oms_strategy_provenance"] = bool(require_oms_strategy_provenance)
+        strategy_config_resolution["oms_strategy_window_stats"] = oms_strategy_stats
+
         harness_cmd = [
             "python3",
             str((repo_root / "tools" / "run_paper_deterministic_replay.py").resolve()),
@@ -1117,6 +1383,7 @@ def main() -> int:
             "live_has_trades_table": _db_has_table(live_db, "trades"),
             "paper_has_trades_table": _db_has_table(paper_db, "trades"),
             "live_decision_trace_window_stats": live_decision_trace_stats,
+            "oms_strategy_window_stats": oms_strategy_stats,
         },
     }
     try:

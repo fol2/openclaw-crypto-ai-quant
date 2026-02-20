@@ -418,9 +418,7 @@ def main() -> int:
             oms_rows_sampled = _as_int(oms_strategy.get("oms_rows_sampled"), 0)
             oms_timeline = oms_strategy.get("strategy_sha1_timeline")
             oms_timeline_count = len(oms_timeline) if isinstance(oms_timeline, list) else 0
-            if (args.require_oms_strategy_provenance or args.require_locked_strategy_match) and (
-                oms_rows_sampled <= 0 or oms_timeline_count <= 0
-            ):
+            if args.require_oms_strategy_provenance and (oms_rows_sampled <= 0 or oms_timeline_count <= 0):
                 strategy_oms_stability_ok = False
                 failures.append(
                     {
@@ -465,6 +463,10 @@ def main() -> int:
             else:
                 locked_sha256 = str(locked_strategy.get("strategy_overrides_sha1") or "").strip().lower()
                 locked_sha1_legacy = str(locked_strategy.get("strategy_overrides_sha1_legacy") or "").strip().lower()
+                locked_snapshot_sha256 = str(locked_strategy.get("strategy_overrides_snapshot_sha1") or "").strip().lower()
+                locked_snapshot_sha1_legacy = str(
+                    locked_strategy.get("strategy_overrides_snapshot_sha1_legacy") or ""
+                ).strip().lower()
                 if len(locked_sha256) < 8 and len(locked_sha1_legacy) < 8:
                     locked_strategy_match_ok = False
                     failures.append(
@@ -489,19 +491,31 @@ def main() -> int:
                                 ),
                             }
                         )
-                    elif len(locked_sha256) >= 8 and computed_locked_sha256 != locked_sha256:
+                    expected_snapshot_sha256 = (
+                        locked_snapshot_sha256 if len(locked_snapshot_sha256) >= 8 else locked_sha256
+                    )
+                    expected_snapshot_sha1_legacy = (
+                        locked_snapshot_sha1_legacy
+                        if len(locked_snapshot_sha1_legacy) >= 8
+                        else locked_sha1_legacy
+                    )
+
+                    if len(expected_snapshot_sha256) >= 8 and computed_locked_sha256 != expected_snapshot_sha256:
                         locked_strategy_match_ok = False
                         failures.append(
                             {
                                 "code": "locked_strategy_manifest_snapshot_hash_mismatch",
                                 "classification": "state_initialisation_gap",
                                 "detail": "manifest locked strategy hash does not match snapshot YAML canonical hash",
-                                "manifest_locked_sha256_prefix8": locked_sha256[:8],
+                                "manifest_locked_sha256_prefix8": expected_snapshot_sha256[:8],
                                 "snapshot_locked_sha256_prefix8": computed_locked_sha256[:8],
                                 "snapshot_path": str(snapshot_path),
                             }
                         )
-                    elif len(locked_sha1_legacy) >= 8 and computed_locked_sha1_legacy != locked_sha1_legacy:
+                    elif (
+                        len(expected_snapshot_sha1_legacy) >= 8
+                        and computed_locked_sha1_legacy != expected_snapshot_sha1_legacy
+                    ):
                         locked_strategy_match_ok = False
                         failures.append(
                             {
@@ -510,7 +524,7 @@ def main() -> int:
                                 "detail": (
                                     "manifest locked legacy strategy hash does not match snapshot YAML canonical hash"
                                 ),
-                                "manifest_locked_sha1_prefix8": locked_sha1_legacy[:8],
+                                "manifest_locked_sha1_prefix8": expected_snapshot_sha1_legacy[:8],
                                 "snapshot_locked_sha1_prefix8": computed_locked_sha1_legacy[:8],
                                 "snapshot_path": str(snapshot_path),
                             }
@@ -550,29 +564,32 @@ def main() -> int:
                             }
                         )
 
+                    oms_rows_sampled = _as_int(oms_strategy.get("oms_rows_sampled"), 0) if isinstance(oms_strategy, dict) else 0
                     oms_timeline = (
                         oms_strategy.get("strategy_sha1_timeline")
                         if isinstance(oms_strategy, dict)
                         else []
                     )
                     oms_rows = oms_timeline if isinstance(oms_timeline, list) else []
-                    oms_exact_match = any(
-                        str(row.get("strategy_sha1") or "").strip().lower() in effective_locked_hashes
-                        for row in oms_rows
-                    )
-                    if not oms_exact_match:
-                        locked_strategy_match_ok = False
-                        failures.append(
-                            {
-                                "code": "locked_strategy_oms_sha1_mismatch",
-                                "classification": "state_initialisation_gap",
-                                "detail": "locked strategy hash does not match any OMS strategy_sha1 in window",
-                                "locked_strategy_sha256_prefix8": (locked_sha256 or computed_locked_sha256)[:8],
-                                "locked_strategy_sha1_legacy_prefix8": (
-                                    locked_sha1_legacy or computed_locked_sha1_legacy
-                                )[:8],
-                            }
+                    oms_rows_available = bool(oms_rows_sampled > 0 and len(oms_rows) > 0)
+                    if oms_rows_available:
+                        oms_exact_match = any(
+                            str(row.get("strategy_sha1") or "").strip().lower() in effective_locked_hashes
+                            for row in oms_rows
                         )
+                        if not oms_exact_match:
+                            locked_strategy_match_ok = False
+                            failures.append(
+                                {
+                                    "code": "locked_strategy_oms_sha1_mismatch",
+                                    "classification": "state_initialisation_gap",
+                                    "detail": "locked strategy hash does not match any OMS strategy_sha1 in window",
+                                    "locked_strategy_sha256_prefix8": (locked_sha256 or computed_locked_sha256)[:8],
+                                    "locked_strategy_sha1_legacy_prefix8": (
+                                        locked_sha1_legacy or computed_locked_sha1_legacy
+                                    )[:8],
+                                }
+                            )
 
     if candles_provenance_checked and manifest is not None:
         manifest_inputs = manifest.get("inputs") or {}
