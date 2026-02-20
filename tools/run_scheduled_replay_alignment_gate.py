@@ -377,21 +377,29 @@ def _default_repo_root() -> Path:
 
 
 def _load_strategy_engine_interval(config_path: Path) -> str:
+    interval, _, _ = _load_strategy_engine_intervals(config_path)
+    return interval
+
+
+def _load_strategy_engine_intervals(config_path: Path) -> tuple[str, str, str]:
     if yaml is None or not config_path.exists():
-        return ""
+        return "", "", ""
     try:
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     except Exception:
-        return ""
+        return "", "", ""
     if not isinstance(raw, dict):
-        return ""
+        return "", "", ""
     global_cfg = raw.get("global") or {}
     if not isinstance(global_cfg, dict):
-        return ""
+        return "", "", ""
     engine_cfg = global_cfg.get("engine") or {}
     if not isinstance(engine_cfg, dict):
-        return ""
-    return str(engine_cfg.get("interval") or "").strip()
+        return "", "", ""
+    interval = str(engine_cfg.get("interval") or "").strip()
+    entry_interval = str(engine_cfg.get("entry_interval") or "").strip()
+    exit_interval = str(engine_cfg.get("exit_interval") or "").strip()
+    return interval, entry_interval, exit_interval
 
 
 def _derive_interval_db(base_candles_db: Path, interval: str, *, repo_root: Path | None = None) -> Path | None:
@@ -420,6 +428,77 @@ def _derive_interval_db(base_candles_db: Path, interval: str, *, repo_root: Path
         if candidate.exists() and candidate.is_file():
             return candidate
     return None
+
+
+def _snapshot_sqlite_db(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        target.unlink()
+    src_conn = sqlite3.connect(f"file:{source}?mode=ro", uri=True, timeout=30)
+    dst_conn = sqlite3.connect(str(target), timeout=30)
+    try:
+        src_conn.backup(dst_conn)
+        dst_conn.commit()
+    finally:
+        dst_conn.close()
+        src_conn.close()
+
+
+def _freeze_market_data_dbs(
+    *,
+    bundle_dir: Path,
+    base_candles_db: Path,
+    interval: str,
+    entry_interval: str,
+    exit_interval: str,
+    funding_db: Path | None,
+    repo_root: Path,
+) -> dict[str, Any]:
+    snapshot_dir = (bundle_dir / "market_data_snapshot").resolve()
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+    intervals: list[str] = []
+    for raw in (interval, entry_interval, exit_interval):
+        iv = str(raw or "").strip()
+        if iv and iv not in intervals:
+            intervals.append(iv)
+
+    if not intervals:
+        raise ValueError("no replay intervals available for market-data snapshot")
+
+    src_to_dst: dict[str, Path] = {}
+    interval_to_dst: dict[str, Path] = {}
+
+    for iv in intervals:
+        if iv == str(interval).strip():
+            src = base_candles_db.resolve()
+        else:
+            resolved = _derive_interval_db(base_candles_db, iv, repo_root=repo_root)
+            if resolved is None:
+                raise FileNotFoundError(f"missing candles DB for interval {iv!r} beside {base_candles_db}")
+            src = resolved.resolve()
+
+        src_key = str(src)
+        dst = src_to_dst.get(src_key)
+        if dst is None:
+            dst = (snapshot_dir / src.name).resolve()
+            _snapshot_sqlite_db(src, dst)
+            src_to_dst[src_key] = dst
+        interval_to_dst[iv] = dst
+
+    funding_snapshot: Path | None = None
+    if funding_db is not None:
+        funding_snapshot = (snapshot_dir / funding_db.name).resolve()
+        _snapshot_sqlite_db(funding_db.resolve(), funding_snapshot)
+
+    return {
+        "snapshot_dir": str(snapshot_dir),
+        "candles_db": str(interval_to_dst[str(interval).strip()]),
+        "entry_candles_db": str(interval_to_dst.get(str(entry_interval).strip() or str(interval).strip(), interval_to_dst[str(interval).strip()])),
+        "exit_candles_db": str(interval_to_dst.get(str(exit_interval).strip() or str(interval).strip(), interval_to_dst[str(interval).strip()])),
+        "funding_db": str(funding_snapshot) if funding_snapshot is not None else None,
+        "intervals": intervals,
+    }
 
 
 def _resolve_runtime_strategy_lock_file(*, bundle_root: Path, repo_root: Path, runtime_sha1: str) -> Path | None:
@@ -673,6 +752,7 @@ def main() -> int:
     strategy_config_resolution: dict[str, Any] | None = None
     live_decision_trace_stats: dict[str, Any] | None = None
     oms_strategy_stats: dict[str, Any] | None = None
+    market_data_snapshot: dict[str, Any] | None = None
 
     bundle_root = _resolve_path(str(args.bundle_root), base=resolve_base)
     try:
@@ -1134,6 +1214,41 @@ def main() -> int:
                         ),
                     }
                 )
+
+    if not failures:
+        cfg_entry_interval = ""
+        cfg_exit_interval = ""
+        if strategy_config_path is not None:
+            _, cfg_entry_interval, cfg_exit_interval = _load_strategy_engine_intervals(strategy_config_path)
+
+        replay_entry_interval = str(cfg_entry_interval or interval).strip()
+        replay_exit_interval = str(cfg_exit_interval or interval).strip()
+        try:
+            market_data_snapshot = _freeze_market_data_dbs(
+                bundle_dir=bundle_dir,
+                base_candles_db=candles_db,
+                interval=interval,
+                entry_interval=replay_entry_interval,
+                exit_interval=replay_exit_interval,
+                funding_db=funding_db,
+                repo_root=repo_root,
+            )
+        except Exception as exc:
+            failures.append(
+                {
+                    "code": "market_data_snapshot_failed",
+                    "classification": "market_data_alignment_gap",
+                    "detail": str(exc),
+                }
+            )
+        else:
+            candles_db = Path(str(market_data_snapshot.get("candles_db") or candles_db)).resolve()
+            frozen_funding_raw = str(market_data_snapshot.get("funding_db") or "").strip()
+            if funding_db is not None and frozen_funding_raw:
+                funding_db = Path(frozen_funding_raw).resolve()
+            if strategy_config_resolution is None:
+                strategy_config_resolution = {}
+            strategy_config_resolution["market_data_snapshot"] = market_data_snapshot
 
     build_cmd = [
         "python3",
