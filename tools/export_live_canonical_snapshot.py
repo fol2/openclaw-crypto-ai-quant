@@ -50,6 +50,23 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     return row is not None
 
 
+def _table_has_column(conn: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+    try:
+        rows = conn.execute(f"PRAGMA table_info({_validate_identifier(table_name)})").fetchall()
+    except Exception:
+        return False
+    wanted = str(column_name or "").strip().lower()
+    if not wanted:
+        return False
+    for row in rows:
+        try:
+            if str(row[1]).strip().lower() == wanted:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _parse_timestamp_ms(value: Any) -> int:
     if value is None:
         return 0
@@ -88,6 +105,51 @@ def _as_json_value(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
+
+
+def _load_position_state_history_as_of(
+    conn: sqlite3.Connection,
+    *,
+    symbol: str,
+    open_trade_id: int,
+    as_of_ts: int,
+) -> sqlite3.Row | None:
+    if as_of_ts <= 0:
+        return None
+    if not _table_exists(conn, "position_state_history"):
+        return None
+    has_event_ts = _table_has_column(conn, "position_state_history", "event_ts_ms")
+    has_updated_at = _table_has_column(conn, "position_state_history", "updated_at")
+    if not has_event_ts and not has_updated_at:
+        return None
+
+    symbol_norm = str(symbol).strip().upper()
+    order_col = "event_ts_ms" if has_event_ts else "updated_at"
+    cutoff_expr = "event_ts_ms <= ?" if has_event_ts else "CAST(strftime('%s', updated_at) AS INTEGER) * 1000 <= ?"
+
+    # Query exact open_trade_id first to keep index usage predictable.
+    for include_null_open_trade_id in (False, True):
+        where_parts = ["symbol = ?"]
+        params: list[Any] = [symbol_norm]
+        if include_null_open_trade_id:
+            where_parts.append("open_trade_id IS NULL")
+        else:
+            where_parts.append("open_trade_id = ?")
+            params.append(int(open_trade_id))
+        where_parts.append(cutoff_expr)
+        params.append(int(as_of_ts))
+
+        q = (
+            "SELECT open_trade_id, trailing_sl, adds_count, tp1_taken, last_add_time, "
+            "entry_adx_threshold, updated_at "
+            "FROM position_state_history "
+            f"WHERE {' AND '.join(where_parts)} "
+            f"ORDER BY {order_col} DESC, id DESC LIMIT 1"
+        )
+        row = conn.execute(q, tuple(params)).fetchone()
+        if row is not None:
+            return row
+    return None
 
 
 def _max_id(conn: sqlite3.Connection, table_name: str) -> int | None:
@@ -236,20 +298,67 @@ def _reconstruct_positions_and_balance(
         if reconstructed_margin > 0.0:
             margin_used = reconstructed_margin
 
-        if as_of_ts is None and _table_exists(conn, "position_state"):
+        if _table_exists(conn, "position_state"):
+            has_updated_at = _table_has_column(conn, "position_state", "updated_at")
+            select_cols = (
+                "open_trade_id, trailing_sl, adds_count, tp1_taken, last_add_time, "
+                "entry_adx_threshold"
+            )
+            if has_updated_at:
+                select_cols += ", updated_at"
             ps_row = conn.execute(
-                "SELECT open_trade_id, trailing_sl, adds_count, tp1_taken, last_add_time, entry_adx_threshold "
-                "FROM position_state WHERE symbol = ? LIMIT 1",
+                f"SELECT {select_cols} FROM position_state WHERE symbol = ? LIMIT 1",
                 (symbol,),
             ).fetchone()
             if ps_row:
                 open_trade_id = ps_row["open_trade_id"]
                 if open_trade_id is None or int(open_trade_id) == open_id:
-                    trailing_sl = float(ps_row["trailing_sl"]) if ps_row["trailing_sl"] is not None else None
-                    adds_count = int(ps_row["adds_count"] or 0)
-                    tp1_taken = bool(ps_row["tp1_taken"] or 0)
-                    last_add_time_ms = int(ps_row["last_add_time"] or 0)
-                    entry_adx_threshold = float(ps_row["entry_adx_threshold"] or 0.0)
+                    if as_of_ts is not None:
+                        if not has_updated_at:
+                            ps_row = None
+                        else:
+                            updated_at_ms = _parse_timestamp_ms(ps_row["updated_at"])
+                            if updated_at_ms <= 0 or updated_at_ms > int(as_of_ts):
+                                ps_row = None
+
+                    if ps_row is not None:
+                        trailing_sl = (
+                            float(ps_row["trailing_sl"]) if ps_row["trailing_sl"] is not None else None
+                        )
+                        adds_count = int(ps_row["adds_count"] or 0)
+                        tp1_taken = bool(ps_row["tp1_taken"] or 0)
+                        last_add_time_ms = int(ps_row["last_add_time"] or 0)
+                        if as_of_ts is not None and last_add_time_ms > int(as_of_ts):
+                            last_add_time_ms = 0
+                        entry_adx_threshold = float(ps_row["entry_adx_threshold"] or 0.0)
+                    elif as_of_ts is not None:
+                        # Strict as-of mode: avoid consuming position_state without
+                        # timestamp guarantees.
+                        trailing_sl = None
+                        tp1_taken = False
+                        entry_adx_threshold = 0.0
+                        if last_add_time_ms > int(as_of_ts):
+                            last_add_time_ms = 0
+
+                    if ps_row is None and as_of_ts is not None:
+                        hist_row = _load_position_state_history_as_of(
+                            conn,
+                            symbol=symbol,
+                            open_trade_id=open_id,
+                            as_of_ts=int(as_of_ts),
+                        )
+                        if hist_row is not None:
+                            trailing_sl = (
+                                float(hist_row["trailing_sl"])
+                                if hist_row["trailing_sl"] is not None
+                                else None
+                            )
+                            adds_count = int(hist_row["adds_count"] or 0)
+                            tp1_taken = bool(hist_row["tp1_taken"] or 0)
+                            last_add_time_ms = int(hist_row["last_add_time"] or 0)
+                            if last_add_time_ms > int(as_of_ts):
+                                last_add_time_ms = 0
+                            entry_adx_threshold = float(hist_row["entry_adx_threshold"] or 0.0)
 
         side = "long" if pos_type == "LONG" else "short"
         positions.append(

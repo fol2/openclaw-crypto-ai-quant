@@ -62,6 +62,34 @@ def _load_snapshot(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _ensure_position_state_history_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS position_state_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_ts_ms INTEGER NOT NULL,
+            updated_at TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            open_trade_id INTEGER,
+            trailing_sl REAL,
+            last_funding_time INTEGER,
+            adds_count INTEGER,
+            tp1_taken INTEGER,
+            last_add_time INTEGER,
+            entry_adx_threshold REAL,
+            event_type TEXT NOT NULL,
+            run_fingerprint TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_position_state_history_symbol_ts ON position_state_history(symbol, event_ts_ms)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_position_state_history_open_trade_ts ON position_state_history(open_trade_id, event_ts_ms)"
+    )
+
+
 def _seed_trades_and_positions(
     conn: sqlite3.Connection,
     *,
@@ -74,6 +102,7 @@ def _seed_trades_and_positions(
         return 0, 0
 
     seed_iso = _iso_from_ms(seed_ts_ms)
+    _ensure_position_state_history_table(conn)
 
     open_symbol_type: dict[str, str] = {}
     if strict_replace:
@@ -87,6 +116,7 @@ def _seed_trades_and_positions(
             "oms_orders",
             "oms_fills",
             "ws_events",
+            "position_state_history",
         ):
             if _table_exists(conn, table_name):
                 conn.execute(f"DELETE FROM {table_name}")
@@ -211,6 +241,25 @@ def _seed_trades_and_positions(
                 },
             )
             seeded_positions += 1
+            if _table_exists(conn, "position_state_history"):
+                _insert_projection(
+                    conn,
+                    "position_state_history",
+                    {
+                        "event_ts_ms": int(ts_ms),
+                        "updated_at": seed_iso,
+                        "symbol": symbol,
+                        "open_trade_id": int(trade_id),
+                        "trailing_sl": pos.get("trailing_sl"),
+                        "last_funding_time": int(pos.get("open_time_ms") or ts_ms),
+                        "adds_count": int(pos.get("adds_count") or 0),
+                        "tp1_taken": 1 if bool(pos.get("tp1_taken")) else 0,
+                        "last_add_time": int(pos.get("last_add_time_ms") or 0),
+                        "entry_adx_threshold": float(pos.get("entry_adx_threshold") or 0.0),
+                        "event_type": "state_sync_seed",
+                        "run_fingerprint": "state_sync_seed",
+                    },
+                )
 
     if not strict_replace:
         for symbol, pos_type in sorted(open_symbol_type.items()):
