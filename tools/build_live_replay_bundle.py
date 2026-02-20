@@ -469,7 +469,6 @@ def _load_oms_strategy_provenance(
             "SELECT COALESCE(decision_ts_ms, created_ts_ms) AS ts_ms, strategy_sha1, strategy_version "
             "FROM oms_intents "
             "WHERE COALESCE(decision_ts_ms, created_ts_ms) >= ? AND COALESCE(decision_ts_ms, created_ts_ms) <= ? "
-            "  AND strategy_sha1 IS NOT NULL AND TRIM(strategy_sha1) <> '' "
             "ORDER BY ts_ms ASC, created_ts_ms ASC, intent_id ASC",
             (int(from_ts), int(to_ts)),
         ).fetchall()
@@ -481,12 +480,16 @@ def _load_oms_strategy_provenance(
     per_sha: dict[str, dict[str, Any]] = {}
     distinct_versions: set[str] = set()
     sampled_rows = 0
+    rows_in_window = 0
 
     for row in rows:
         ts_ms = int(row["ts_ms"] or 0)
         sha = str(row["strategy_sha1"] or "").strip().lower()
         version = str(row["strategy_version"] or "").strip()
-        if ts_ms <= 0 or not sha:
+        if ts_ms <= 0:
+            continue
+        rows_in_window += 1
+        if not sha:
             continue
 
         sampled_rows += 1
@@ -526,6 +529,7 @@ def _load_oms_strategy_provenance(
     return {
         "window_from_ts": int(from_ts),
         "window_to_ts": int(to_ts),
+        "oms_rows_in_window": int(rows_in_window),
         "oms_rows_sampled": int(sampled_rows),
         "strategy_sha1_distinct": len(strategy_rows),
         "strategy_version_distinct": len(distinct_versions),
