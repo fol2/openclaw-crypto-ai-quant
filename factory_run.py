@@ -642,7 +642,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, int | str]] = {
     "daily": {
         "tpe_trials": 1000000,
         "num_candidates": 5,
-        "shortlist_per_mode": 20,
+        "shortlist_per_mode": 10,
         "shortlist_max_rank": 200,
         "sweep_spec": "backtester/sweeps/full_144v.yaml",
     },
@@ -652,7 +652,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, int | str]] = {
     "deep": {
         "tpe_trials": 2000000,
         "num_candidates": 10,
-        "shortlist_per_mode": 40,
+        "shortlist_per_mode": 10,
         "shortlist_max_rank": 500,
         "sweep_spec": "backtester/sweeps/full_144v.yaml",
     },
@@ -660,7 +660,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, int | str]] = {
     "weekly": {
         "tpe_trials": 2000000,
         "num_candidates": 10,
-        "shortlist_per_mode": 40,
+        "shortlist_per_mode": 10,
         "shortlist_max_rank": 500,
         "sweep_spec": "backtester/sweeps/full_144v.yaml",
     },
@@ -1669,6 +1669,8 @@ _EXTRACT_SORT_KEYS: dict[str, Any] = {
     "wr":       lambda r: float(r.get("win_rate", 0) or 0),
     "sharpe":   lambda r: float(r.get("sharpe_ratio", 0) or 0),
     "trades":   lambda r: float(r.get("total_trades", 0) or 0),
+    # Alias: "conservative" is pure DD lane (lower DD is better).
+    "conservative": lambda r: -float(r.get("max_drawdown_pct", 1) or 1),
 }
 
 
@@ -1698,6 +1700,44 @@ def _extract_balanced_score(r: dict) -> float:
     return (pnl * 0.3 + pf * 20 + sharpe * 15 - dd * 100) * trade_penalty
 
 
+def _extract_efficient_score(r: dict) -> float:
+    """Efficient lane: (PnL / DD) × PF."""
+    try:
+        pnl = float(r.get("total_pnl", 0.0) or 0.0)
+    except Exception:
+        pnl = 0.0
+    try:
+        dd = float(r.get("max_drawdown_pct", 1.0) or 1.0)
+    except Exception:
+        dd = 1.0
+    try:
+        pf = float(r.get("profit_factor", 1.0) or 1.0)
+    except Exception:
+        pf = 1.0
+    dd = max(dd, 0.01)
+    pf = max(pf, 0.0)
+    return (pnl / dd) * pf
+
+
+def _extract_growth_score(r: dict) -> float:
+    """Growth lane: PnL × (1 − DD) × PF (minor DD penalty)."""
+    try:
+        pnl = float(r.get("total_pnl", 0.0) or 0.0)
+    except Exception:
+        pnl = 0.0
+    try:
+        dd = float(r.get("max_drawdown_pct", 0.0) or 0.0)
+    except Exception:
+        dd = 0.0
+    try:
+        pf = float(r.get("profit_factor", 1.0) or 1.0)
+    except Exception:
+        pf = 1.0
+    dd = min(max(dd, 0.0), 1.0)
+    pf = max(pf, 0.0)
+    return pnl * (1.0 - dd) * pf
+
+
 def _extract_top_candidates(
     src: Path,
     dst: Path,
@@ -1722,7 +1762,12 @@ def _extract_top_candidates(
     """
     import heapq
 
-    sort_fns: dict[str, Any] = {**_EXTRACT_SORT_KEYS, "balanced": _extract_balanced_score}
+    sort_fns: dict[str, Any] = {
+        **_EXTRACT_SORT_KEYS,
+        "balanced": _extract_balanced_score,
+        "efficient": _extract_efficient_score,
+        "growth": _extract_growth_score,
+    }
 
     # One min-heap per mode, each capped at max_rank entries.
     heaps: dict[str, list[tuple[float, int, str]]] = {m: [] for m in modes if m in sort_fns}
@@ -3045,11 +3090,11 @@ def main(argv: list[str] | None = None) -> int:
         shortlist_max_rank = int(getattr(args, "shortlist_max_rank", 0) or 0)
         shortlist_modes_raw = str(getattr(args, "shortlist_modes", "") or "").strip()
     
-        allowed_modes = {"pnl", "dd", "pf", "wr", "sharpe", "trades", "balanced"}
+        allowed_modes = {"pnl", "dd", "pf", "wr", "sharpe", "trades", "balanced", "efficient", "growth", "conservative"}
         extract_modes = [m.strip() for m in shortlist_modes_raw.split(",") if m.strip()]
         extract_modes = [m for m in extract_modes if m in allowed_modes]
         if not extract_modes:
-            extract_modes = ["dd", "balanced"]
+            extract_modes = ["efficient", "growth", "conservative"]
         # Always include the legacy sort-by mode so single-mode generation works.
         legacy_sort = str(getattr(args, "sort_by", "balanced") or "balanced").strip()
         if legacy_sort in allowed_modes and legacy_sort not in extract_modes:
@@ -3151,11 +3196,11 @@ def main(argv: list[str] | None = None) -> int:
     
         # Multi-mode shortlist generation (AQC-403). Deduplicate across modes by config_id.
         if not skip_generation and shortlist_per_mode > 0:
-            allowed_modes = {"pnl", "dd", "pf", "wr", "sharpe", "trades", "balanced"}
+            allowed_modes = {"pnl", "dd", "pf", "wr", "sharpe", "trades", "balanced", "efficient", "growth", "conservative"}
             modes = [m.strip() for m in shortlist_modes_raw.split(",") if m.strip()]
             modes = [m for m in modes if m in allowed_modes]
             if not modes:
-                modes = ["dd", "balanced"]
+                modes = ["efficient", "growth", "conservative"]
             if shortlist_max_rank <= 0:
                 shortlist_max_rank = max(10, shortlist_per_mode * 5)
     
@@ -3856,28 +3901,27 @@ def _promote_candidates(
     promote_dir: str = "promoted_configs",
     promote_count: int = 3,
 ) -> dict[str, Any]:
-    """Select up to *promote_count* candidates for distinct roles and write promoted YAMLs.
+    """Select up to *promote_count* candidates for role channels and write promoted YAMLs.
 
-    Roles (when promote_count >= 3):
-      - **primary**: best risk-adjusted score  ((PnL / max_dd) × profit_factor)
-      - **fallback**: best balanced score  (PnL × (1 - max_dd) × profit_factor)
-      - **conservative**: absolute lowest max_drawdown_pct with positive PnL required
-
-    Returns a dict of promotion metadata suitable for embedding in run_metadata.json.
+    Channel policy:
+      1) shortlist/backtest lanes: efficient, growth, conservative
+      2) promotion picks rank #1 per lane after gate/evidence checks
+      3) if a lane has no eligible row, fallback to role formula ranking
     """
 
     if promote_count <= 0:
         return {"skipped": True, "reason": "promote_count=0"}
 
-    # Filter to candidates with positive PnL and a config path.
-    positive = [
+    # Gate/evidence eligibility first, then role/channel selection.
+    gated = [
         c for c in candidates
-        if float(c.get("total_pnl", 0.0)) > 0.0
-        and str(c.get("config_path", "") or c.get("path", "")).strip()
+        if str(c.get("config_path", "") or c.get("path", "")).strip()
+        and not bool(c.get("rejected", False))
+        and bool(c.get("canonical_cpu_verified", True))
+        and str(c.get("replay_equivalence_status", "pass")).strip().lower() == "pass"
     ]
-
-    if not positive:
-        return {"skipped": True, "reason": "no_positive_pnl_candidates"}
+    if not gated:
+        return {"skipped": True, "reason": "no_gate_eligible_candidates"}
 
     # ---- Scoring helpers ------------------------------------------------
     def _risk_adjusted_score(c: dict[str, Any]) -> float:
@@ -3888,26 +3932,95 @@ def _promote_candidates(
         return (pnl / dd) * pf
 
     def _balanced_score(c: dict[str, Any]) -> float:
-        """Balanced: PnL × (1 - DD) × PF.  Rewards raw PnL with mild DD penalty."""
+        """Growth: PnL × (1 - DD) × PF.  Rewards raw PnL with mild DD penalty."""
         pnl = float(c.get("total_pnl", 0.0))
         dd = float(c.get("max_drawdown_pct", 0.0))
         pf = float(c.get("profit_factor", 1.0))
         return pnl * (1.0 - min(dd, 1.0)) * max(pf, 0.0)
 
+    def _channel_ranked(rows: list[dict[str, Any]], channel: str) -> list[dict[str, Any]]:
+        chan = str(channel).strip().lower()
+        xs = [r for r in rows if str(r.get("sort_by", "")).strip().lower() == chan]
+        xs.sort(
+            key=lambda r: (
+                int(r.get("rank", 10**9) or 10**9),
+                -(float(r.get("score_v1", float("-inf")) or float("-inf"))),
+                -(float(r.get("total_pnl", 0.0) or 0.0)),
+            )
+        )
+        return xs
+
     # ---- Role selection -------------------------------------------------
     roles: dict[str, dict[str, Any]] = {}
+    role_meta: dict[str, dict[str, Any]] = {}
+    used_ids: set[str] = set()
 
-    # PRIMARY: best risk-adjusted score (PnL/DD × PF)
-    primary = max(positive, key=_risk_adjusted_score)
-    roles["primary"] = primary
+    eff_ranked = _channel_ranked(gated, "efficient")
+    gro_ranked = _channel_ranked(gated, "growth")
+    con_ranked = _channel_ranked(gated, "conservative")
 
-    # FALLBACK: highest balanced score (PnL × (1-DD) × PF)
-    fallback = max(positive, key=_balanced_score)
-    roles["fallback"] = fallback
+    # Backward-compatible aliases for older runs.
+    if not gro_ranked:
+        gro_ranked = _channel_ranked(gated, "balanced")
+    if not con_ranked:
+        con_ranked = _channel_ranked(gated, "dd")
 
-    # CONSERVATIVE: absolute lowest max_drawdown_pct with positive PnL
-    conservative = min(positive, key=lambda c: float(c.get("max_drawdown_pct", 1.0)))
-    roles["conservative"] = conservative
+    eff_formula = sorted(gated, key=_risk_adjusted_score, reverse=True)
+    gro_formula = sorted(gated, key=_balanced_score, reverse=True)
+    con_formula = sorted(
+        gated,
+        key=lambda c: (
+            float(c.get("max_drawdown_pct", 1.0) or 1.0),
+            -(float(c.get("total_pnl", 0.0) or 0.0)),
+            -(float(c.get("profit_factor", 0.0) or 0.0)),
+        ),
+    )
+
+    def _pick_role(
+        role_name: str,
+        channel_rows: list[dict[str, Any]],
+        formula_rows: list[dict[str, Any]],
+        channel_label: str,
+    ) -> dict[str, Any] | None:
+        for cand in channel_rows:
+            cid = str(cand.get("config_id", "")).strip()
+            if cid and cid not in used_ids:
+                used_ids.add(cid)
+                role_meta[role_name] = {"selection_source": "channel_rank1", "channel": channel_label}
+                return cand
+        for cand in formula_rows:
+            cid = str(cand.get("config_id", "")).strip()
+            if cid and cid not in used_ids:
+                used_ids.add(cid)
+                role_meta[role_name] = {"selection_source": "formula_fallback", "channel": channel_label}
+                return cand
+        if channel_rows:
+            cand = channel_rows[0]
+            cid = str(cand.get("config_id", "")).strip()
+            if cid:
+                used_ids.add(cid)
+            role_meta[role_name] = {"selection_source": "channel_rank1_reuse", "channel": channel_label}
+            return cand
+        if formula_rows:
+            cand = formula_rows[0]
+            cid = str(cand.get("config_id", "")).strip()
+            if cid:
+                used_ids.add(cid)
+            role_meta[role_name] = {"selection_source": "formula_fallback_reuse", "channel": channel_label}
+            return cand
+        return None
+
+    primary = _pick_role("primary", eff_ranked, eff_formula, "efficient")
+    fallback = _pick_role("fallback", gro_ranked, gro_formula, "growth")
+    conservative = _pick_role("conservative", con_ranked, con_formula, "conservative")
+    if primary is not None:
+        roles["primary"] = primary
+    if fallback is not None:
+        roles["fallback"] = fallback
+    if conservative is not None:
+        roles["conservative"] = conservative
+    if not roles:
+        return {"skipped": True, "reason": "unable_to_select_roles_from_gated_candidates"}
 
     # ---- Write promoted configs -----------------------------------------
     out_dir = run_dir / promote_dir
@@ -3957,6 +4070,11 @@ def _promote_candidates(
             "max_drawdown_pct": float(cand.get("max_drawdown_pct", 0.0)),
             "profit_factor": float(cand.get("profit_factor", 0.0)),
             "balanced_score": _balanced_score(cand),
+            "risk_adjusted_score": _risk_adjusted_score(cand),
+            "selection_source": str((role_meta.get(role_name, {}) or {}).get("selection_source", "")),
+            "channel": str((role_meta.get(role_name, {}) or {}).get("channel", "")),
+            "rank": int(cand.get("rank", 0) or 0),
+            "sort_by": str(cand.get("sort_by", "") or ""),
         }
         written += 1
 
@@ -4030,7 +4148,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--sort-by",
         default="balanced",
-        choices=["pnl", "dd", "pf", "wr", "sharpe", "trades", "balanced"],
+        choices=["pnl", "dd", "pf", "wr", "sharpe", "trades", "balanced", "efficient", "growth", "conservative"],
         help="Sort metric for candidate selection when shortlist is disabled (default: balanced).",
     )
     ap.add_argument(
@@ -4044,8 +4162,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument(
         "--shortlist-modes",
-        default="dd,balanced",
-        help="Comma-separated sort modes to generate per sweep (default: dd,balanced).",
+        default="efficient,growth,conservative",
+        help="Comma-separated channel modes to generate per sweep (default: efficient,growth,conservative).",
     )
     ap.add_argument(
         "--shortlist-per-mode",
