@@ -1008,6 +1008,7 @@ def main() -> int:
         "python3 \"$REPO_ROOT/tools/audit_live_backtester_trade_reconcile.py\" "
         f"--live-baseline \"$BUNDLE_DIR/{live_trades_path.name}\" "
         f"--backtester-trades \"$BUNDLE_DIR/{replay_trades_csv.name}\" "
+        f"--bundle-manifest \"$BUNDLE_DIR/{manifest_path.name}\" "
         f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
         "--timestamp-bucket-anchor ceil "
         f"--output \"$BUNDLE_DIR/{trade_reconcile_path.name}\""
