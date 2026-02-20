@@ -39,15 +39,6 @@ def _build_parser() -> argparse.ArgumentParser:
             "(expects key pre_seed_max_trade_id)."
         ),
     )
-    parser.add_argument(
-        "--apply-paper-seed-watermark",
-        action="store_true",
-        default=False,
-        help=(
-            "Apply paper seed watermark as a lower-bound trade-id filter. "
-            "Default is disabled to preserve historical live-paper parity windows."
-        ),
-    )
     parser.add_argument("--output", required=True, help="Path to output JSON report")
     parser.add_argument("--from-ts", type=int, help="Filter start timestamp (ms, inclusive)")
     parser.add_argument("--to-ts", type=int, help="Filter end timestamp (ms, inclusive)")
@@ -157,10 +148,9 @@ def _resolve_paper_min_id_exclusive(
     *,
     raw_min_id: int | None,
     watermark_path_raw: str | None,
-    apply_watermark: bool,
 ) -> int | None:
     resolved: int | None = int(raw_min_id) if raw_min_id is not None else None
-    if not watermark_path_raw or not apply_watermark:
+    if not watermark_path_raw:
         return resolved
 
     watermark_path = Path(str(watermark_path_raw)).expanduser().resolve()
@@ -524,7 +514,6 @@ def main() -> int:
             watermark_path_raw=str(args.paper_seed_watermark).strip()
             if args.paper_seed_watermark
             else None,
-            apply_watermark=bool(args.apply_paper_seed_watermark),
         )
     except ValueError as exc:
         parser.error(str(exc))
@@ -605,7 +594,6 @@ def main() -> int:
             "paper_min_id_exclusive": int(paper_min_id_exclusive)
             if paper_min_id_exclusive is not None
             else None,
-            "apply_paper_seed_watermark": bool(args.apply_paper_seed_watermark),
             "from_ts": from_ts,
             "to_ts": to_ts,
             "timestamp_bucket_ms": max(1, int(args.timestamp_bucket_ms)),

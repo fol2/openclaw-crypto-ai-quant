@@ -790,7 +790,6 @@ def main() -> int:
 
     paper_seed_filter_arg = (
         f"--paper-seed-watermark \"$BUNDLE_DIR/{paper_seed_watermark_path.name}\" "
-        "--apply-paper-seed-watermark "
         if args.paper_filter_post_seed
         else ""
     )
