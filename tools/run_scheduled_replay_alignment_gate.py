@@ -253,6 +253,51 @@ def _count_live_trades_in_window(live_db: Path, *, from_ts: int, to_ts: int) -> 
         return 0
 
 
+def _live_decision_trace_window_stats(live_db: Path, *, from_ts: int, to_ts: int) -> dict[str, Any]:
+    out = {
+        "table_present": False,
+        "rows_total": 0,
+        "rows_with_config_fingerprint": 0,
+    }
+    if not live_db.exists() or from_ts > to_ts:
+        return out
+    try:
+        conn = sqlite3.connect(f"file:{live_db}?mode=ro", uri=True, timeout=10)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='decision_events' LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return out
+            out["table_present"] = True
+
+            from_i = int(from_ts)
+            to_i = int(to_ts)
+            total = conn.execute(
+                "SELECT COUNT(1) FROM decision_events WHERE timestamp_ms >= ? AND timestamp_ms <= ?",
+                (from_i, to_i),
+            ).fetchone()
+            out["rows_total"] = int((total[0] if total else 0) or 0)
+
+            cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(decision_events)").fetchall()}
+            if "config_fingerprint" in cols:
+                cfg = conn.execute(
+                    "SELECT COUNT(1) FROM decision_events "
+                    "WHERE timestamp_ms >= ? AND timestamp_ms <= ? "
+                    "AND COALESCE(config_fingerprint,'') <> ''",
+                    (from_i, to_i),
+                ).fetchone()
+                out["rows_with_config_fingerprint"] = int((cfg[0] if cfg else 0) or 0)
+            else:
+                out["rows_with_config_fingerprint"] = 0
+            return out
+        finally:
+            conn.close()
+    except Exception:
+        return out
+
+
 def _default_repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -470,6 +515,7 @@ def main() -> int:
     strategy_window_stats: dict[str, Any] | None = None
     strategy_window_adjustment: dict[str, Any] | None = None
     strategy_config_resolution: dict[str, Any] | None = None
+    live_decision_trace_stats: dict[str, Any] | None = None
 
     bundle_root = _resolve_path(str(args.bundle_root), base=resolve_base)
     try:
@@ -797,6 +843,46 @@ def main() -> int:
                     }
                 )
 
+        if not failures:
+            live_decision_trace_stats = _live_decision_trace_window_stats(
+                live_db,
+                from_ts=int(from_ts),
+                to_ts=int(to_ts),
+            )
+            table_present = bool((live_decision_trace_stats or {}).get("table_present"))
+            rows_total = int((live_decision_trace_stats or {}).get("rows_total") or 0)
+            rows_cfg = int((live_decision_trace_stats or {}).get("rows_with_config_fingerprint") or 0)
+            if not table_present:
+                failures.append(
+                    {
+                        "code": "missing_live_decision_events_table",
+                        "classification": "state_initialisation_gap",
+                        "detail": "live DB has no decision_events table in scheduled replay window",
+                    }
+                )
+            elif rows_total <= 0:
+                failures.append(
+                    {
+                        "code": "missing_live_decision_events_in_window",
+                        "classification": "state_initialisation_gap",
+                        "detail": (
+                            f"decision_events rows are empty in window "
+                            f"from_ts={int(from_ts)} to_ts={int(to_ts)}"
+                        ),
+                    }
+                )
+            elif rows_cfg <= 0:
+                failures.append(
+                    {
+                        "code": "missing_live_config_fingerprint_in_window",
+                        "classification": "state_initialisation_gap",
+                        "detail": (
+                            f"decision_events has no non-empty config_fingerprint rows in window "
+                            f"from_ts={int(from_ts)} to_ts={int(to_ts)}"
+                        ),
+                    }
+                )
+
     build_cmd = [
         "python3",
         str((repo_root / "tools" / "build_live_replay_bundle.py").resolve()),
@@ -1030,6 +1116,7 @@ def main() -> int:
         "db_checks": {
             "live_has_trades_table": _db_has_table(live_db, "trades"),
             "paper_has_trades_table": _db_has_table(paper_db, "trades"),
+            "live_decision_trace_window_stats": live_decision_trace_stats,
         },
     }
     try:

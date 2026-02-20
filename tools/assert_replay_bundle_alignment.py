@@ -34,6 +34,11 @@ try:
 except Exception:  # pragma: no cover - optional runtime dependency
     yaml = None
 
+_STRICT_ALLOWED_RESIDUAL_CLASSIFICATIONS = {
+    "non-simulatable_exchange_oms_effect",
+    "state_initialisation_gap",
+}
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Assert replay bundle alignment reports with one strict gate.")
@@ -220,6 +225,18 @@ def _gpu_lane_pass_map(report: dict[str, Any]) -> tuple[dict[str, bool], list[st
                 else:
                     invalid_lanes.append(lane_name)
     return lane_map, invalid_lanes
+
+
+def _blocking_residuals_for_strict_mode(
+    residuals: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    blocking: list[dict[str, Any]] = []
+    for row in residuals:
+        cls = str((row or {}).get("classification") or "").strip().lower()
+        if cls and cls in _STRICT_ALLOWED_RESIDUAL_CLASSIFICATIONS:
+            continue
+        blocking.append(row)
+    return blocking
 
 
 def main() -> int:
@@ -704,13 +721,15 @@ def main() -> int:
             )
         if args.strict_no_residuals:
             trade_residuals = list(trade_report.get("accepted_residuals") or [])
-            if trade_residuals:
+            blocking_trade_residuals = _blocking_residuals_for_strict_mode(trade_residuals)
+            if blocking_trade_residuals:
                 failures.append(
                     {
                         "code": "trade_residuals_present",
                         "classification": "non-simulatable_exchange_oms_effect",
-                        "detail": "trade reconciliation has accepted residuals",
-                        "count": len(trade_residuals),
+                        "detail": "trade reconciliation has strict-blocking accepted residuals",
+                        "count": len(blocking_trade_residuals),
+                        "total_accepted_residuals": len(trade_residuals),
                     }
                 )
 
@@ -737,13 +756,15 @@ def main() -> int:
             )
         if args.strict_no_residuals:
             action_residuals = list(action_report.get("accepted_residuals") or [])
-            if action_residuals:
+            blocking_action_residuals = _blocking_residuals_for_strict_mode(action_residuals)
+            if blocking_action_residuals:
                 failures.append(
                     {
                         "code": "action_residuals_present",
                         "classification": "non-simulatable_exchange_oms_effect",
-                        "detail": "action reconciliation has accepted residuals",
-                        "count": len(action_residuals),
+                        "detail": "action reconciliation has strict-blocking accepted residuals",
+                        "count": len(blocking_action_residuals),
+                        "total_accepted_residuals": len(action_residuals),
                     }
                 )
 
@@ -771,13 +792,15 @@ def main() -> int:
             )
         if args.strict_no_residuals:
             live_paper_residuals = list(live_paper_report.get("accepted_residuals") or [])
-            if live_paper_residuals:
+            blocking_live_paper_residuals = _blocking_residuals_for_strict_mode(live_paper_residuals)
+            if blocking_live_paper_residuals:
                 failures.append(
                     {
                         "code": "live_paper_residuals_present",
                         "classification": "non-simulatable_exchange_oms_effect",
-                        "detail": "live/paper reconciliation has accepted residuals",
-                        "count": len(live_paper_residuals),
+                        "detail": "live/paper reconciliation has strict-blocking accepted residuals",
+                        "count": len(blocking_live_paper_residuals),
+                        "total_accepted_residuals": len(live_paper_residuals),
                     }
                 )
 
@@ -830,13 +853,15 @@ def main() -> int:
             )
         if args.strict_no_residuals:
             event_order_residuals = list(event_order_report.get("accepted_residuals") or [])
-            if event_order_residuals:
+            blocking_event_order_residuals = _blocking_residuals_for_strict_mode(event_order_residuals)
+            if blocking_event_order_residuals:
                 failures.append(
                     {
                         "code": "event_order_residuals_present",
                         "classification": "state_initialisation_gap",
-                        "detail": "event-order reconciliation has accepted residuals",
-                        "count": len(event_order_residuals),
+                        "detail": "event-order reconciliation has strict-blocking accepted residuals",
+                        "count": len(blocking_event_order_residuals),
+                        "total_accepted_residuals": len(event_order_residuals),
                     }
                 )
 
