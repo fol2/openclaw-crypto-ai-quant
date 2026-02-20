@@ -254,6 +254,30 @@
       const officialRows = Array.isArray(res?.candles) ? res.candles : [];
       const developingCurrent = keepDeveloping ? snapshotDevelopingCandle(candles, iv) : null;
       candles = mergeOfficialCandlesWithDeveloping(officialRows, developingCurrent ?? developingBeforeFetch, bars);
+      // Advance to the current bar if the newest candle's period has elapsed.
+      const msPerBar = intervalToMs(iv);
+      const nowMs = serverNowMs();
+      const currentBarStart = Math.floor(nowMs / msPerBar) * msPerBar;
+      if (candles.length > 0) {
+        const nIdx = newestCandleIndex(candles);
+        const nT = Number(candles[nIdx]?.t || 0);
+        if (nT > 0 && nT < currentBarStart) {
+          const prevClose = Number(candles[nIdx]?.c || 0);
+          const mid = finitePositive(mids[sym]) ?? liveMid ?? prevClose;
+          const open = prevClose > 0 ? prevClose : mid;
+          candles.push({
+            t: currentBarStart,
+            t_close: currentBarStart + msPerBar - 1,
+            o: open,
+            h: Math.max(open, mid),
+            l: Math.min(open, mid),
+            c: mid,
+            v: 0, n: 0,
+          });
+          if (candles.length > bars) candles.splice(0, candles.length - bars);
+        }
+      }
+      _lastLiveTickKey = '';
       setCandlesSeriesContext(sym, iv);
       void fetchTunnelForLive();
     } catch {} finally {
