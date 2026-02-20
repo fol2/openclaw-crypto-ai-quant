@@ -703,6 +703,7 @@ def main() -> int:
 
     env = os.environ.copy()
     env["REPO_ROOT"] = str(repo_root)
+    env["AQC_SNAPSHOT_STRICT_REPLACE"] = "1"
     failures: list[dict[str, Any]] = []
     strategy_config_raw = str(args.strategy_config or "").strip()
     strategy_config_cli_override = _cli_arg_present("--strategy-config")
@@ -1210,6 +1211,7 @@ def main() -> int:
         if strategy_config_resolution is None:
             strategy_config_resolution = {}
         strategy_config_resolution["require_oms_strategy_provenance"] = bool(require_oms_strategy_provenance)
+        strategy_config_resolution["snapshot_strict_replace"] = True
         strategy_config_resolution["oms_strategy_window_stats"] = oms_strategy_stats
 
         harness_cmd = [
