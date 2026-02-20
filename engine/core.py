@@ -604,6 +604,77 @@ class KernelDecisionRustBindingProvider:
         self._params_cache[cache_key] = params_json
         return params_json
 
+    @staticmethod
+    def _extract_exit_params_json(params_json: str) -> str | None:
+        params = KernelDecisionRustBindingProvider._load_json_obj(params_json)
+        exit_params = params.get("exit_params")
+        if isinstance(exit_params, Mapping):
+            return json.dumps(dict(exit_params), ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        return None
+
+    def _probe_exit_bounds_from_evaluate(
+        self,
+        *,
+        raw_event: Mapping[str, Any],
+        state_json: str,
+        params_json: str,
+        exit_params_json: str,
+        now_ms_value: int,
+    ) -> dict[str, Any] | None:
+        symbol = str(raw_event.get("symbol", "")).strip().upper()
+        if not symbol:
+            return None
+        indicators = raw_event.get("indicators")
+        if not isinstance(indicators, Mapping):
+            return None
+        price = _normalise_kernel_price(raw_event.get("price"), default=0.0)
+        if price <= 0.0:
+            return None
+        timestamp_ms = raw_event.get("timestamp_ms")
+        try:
+            timestamp_ms = int(timestamp_ms)
+            if timestamp_ms <= 0:
+                timestamp_ms = int(now_ms_value or 0)
+        except Exception:
+            timestamp_ms = int(now_ms_value or 0)
+        if int(timestamp_ms) <= 0:
+            timestamp_ms = int(now_ms())
+
+        probe_event = {
+            "schema_version": 1,
+            "event_id": _normalise_kernel_event_id(raw_event.get("event_id"), int(timestamp_ms)),
+            "timestamp_ms": int(timestamp_ms),
+            "symbol": symbol,
+            "signal": "price_update",
+            "price": float(price),
+            "indicators": dict(indicators),
+        }
+        try:
+            probe_resp_raw = self._runtime.step_full(
+                state_json,
+                json.dumps(probe_event, ensure_ascii=False),
+                params_json,
+                exit_params_json,
+            )
+            probe_env = json.loads(probe_resp_raw)
+        except Exception:
+            logger.debug(
+                "Kernel exit-bounds probe failed for %s",
+                symbol,
+                exc_info=True,
+            )
+            return None
+        if not isinstance(probe_env, dict) or not bool(probe_env.get("ok", False)):
+            return None
+        probe_decision = probe_env.get("decision")
+        if not isinstance(probe_decision, dict):
+            return None
+        probe_diag = probe_decision.get("diagnostics")
+        probe_eb = probe_diag.get("exit_bounds") if isinstance(probe_diag, dict) else None
+        if not isinstance(probe_eb, dict):
+            return None
+        return dict(probe_eb)
+
     @classmethod
     def _resolve_state_path(cls, db_path: str | None) -> str:
         explicit = str(os.getenv("AI_QUANT_KERNEL_STATE_PATH", "") or "").strip()
@@ -1284,6 +1355,7 @@ class KernelDecisionRustBindingProvider:
             event_json = self._build_market_event(raw, now_ms_value=int(now_ms or 0))
             if event_json is None:
                 continue
+            state_json_before_step = state_json
             try:
                 params_json = self._resolve_params_json(symbol=raw_symbol, strategy=strategy)
             except Exception as exc:
@@ -1293,7 +1365,14 @@ class KernelDecisionRustBindingProvider:
                     exc,
                 )
                 continue
-            response = self._runtime.step_decision(state_json, event_json, params_json)
+            exit_params_json = self._extract_exit_params_json(params_json)
+            if exit_params_json and hasattr(self._runtime, "step_full"):
+                try:
+                    response = self._runtime.step_full(state_json, event_json, params_json, exit_params_json)
+                except TypeError:
+                    response = self._runtime.step_decision(state_json, event_json, params_json)
+            else:
+                response = self._runtime.step_decision(state_json, event_json, params_json)
             try:
                 envelope = json.loads(response)
             except (json.JSONDecodeError, TypeError) as exc:
@@ -1325,9 +1404,26 @@ class KernelDecisionRustBindingProvider:
             # Persist exit tunnel bounds (diagnostic visualization data).
             diag = decision_payload.get("diagnostics")
             eb = diag.get("exit_bounds") if isinstance(diag, dict) else None
+            state_positions_for_tunnel = state_value.get("positions", {})
+            raw_signal = str(raw.get("signal", "")).strip().lower()
+            if (
+                not (isinstance(eb, dict) and eb.get("upper_full") is not None)
+                and raw_signal == "evaluate"
+            ):
+                exit_params_json = self._extract_exit_params_json(params_json)
+                if exit_params_json:
+                    probe_eb = self._probe_exit_bounds_from_evaluate(
+                        raw_event=raw,
+                        state_json=state_json_before_step,
+                        params_json=params_json,
+                        exit_params_json=exit_params_json,
+                        now_ms_value=int(now_ms or 0),
+                    )
+                    if isinstance(probe_eb, dict) and probe_eb.get("upper_full") is not None:
+                        eb = probe_eb
             if isinstance(eb, dict) and eb.get("upper_full") is not None:
                 self._persist_exit_bounds(
-                    int(now_ms or 0), raw_symbol, eb, state_value.get("positions", {})
+                    int(now_ms or 0), raw_symbol, eb, state_positions_for_tunnel
                 )
 
             intents = decision_payload.get("intents", [])

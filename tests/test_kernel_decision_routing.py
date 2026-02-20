@@ -445,6 +445,8 @@ class _FakeKernelRuntime:
             "allow_reverse": True,
         }
         self.step_params: list[dict[str, Any]] = []
+        self.step_decision_calls: int = 0
+        self.step_full_calls: int = 0
 
     def default_kernel_state_json(self, initial_cash_usd: float, timestamp_ms: int) -> str:
         state = dict(self.default_state)
@@ -464,6 +466,7 @@ class _FakeKernelRuntime:
             os.makedirs(parent, exist_ok=True)
 
     def step_decision(self, state_json: str, event_json: str, params_json: str) -> str:
+        self.step_decision_calls += 1
         event = json.loads(event_json)
         if not isinstance(event, dict):
             return json.dumps({"ok": False, "error": {"code": "INVALID_EVENT", "message": "invalid", "details": []}})
@@ -490,7 +493,9 @@ class _FakeKernelRuntime:
         exit_bounds = None
         positions = state.get("positions")
         exit_params = params.get("exit_params")
-        if isinstance(positions, dict) and isinstance(exit_params, Mapping):
+        signal = str(event.get("signal", "")).strip().lower()
+        allow_exit_eval = signal == "price_update"
+        if allow_exit_eval and isinstance(positions, dict) and isinstance(exit_params, Mapping):
             pos = positions.get(symbol)
             if isinstance(pos, dict):
                 try:
@@ -561,6 +566,19 @@ class _FakeKernelRuntime:
             },
         }
         return json.dumps({"ok": True, "decision": decision})
+
+    def step_full(self, state_json: str, event_json: str, params_json: str, exit_params_json: str) -> str:
+        self.step_full_calls += 1
+        params = json.loads(params_json)
+        if not isinstance(params, dict):
+            params = {}
+        exit_params = json.loads(exit_params_json)
+        if not isinstance(exit_params, dict):
+            exit_params = {}
+        merged = dict(params)
+        merged["exit_params"] = dict(exit_params)
+        merged["__step_full__"] = True
+        return self.step_decision(state_json, event_json, json.dumps(merged))
 
 
 @pytest.mark.parametrize(
@@ -715,6 +733,7 @@ def test_rust_binding_provider_merges_entry_exit_params_from_strategy_and_caches
     )
 
     assert len(runtime.step_params) == 2
+    assert runtime.step_full_calls == 2
     first = runtime.step_params[0]
     assert isinstance(first.get("entry_params"), Mapping)
     assert isinstance(first.get("exit_params"), Mapping)
@@ -779,9 +798,12 @@ def test_rust_binding_provider_persists_exit_tunnel_when_exit_bounds_available(m
                 {
                     "schema_version": 1,
                     "symbol": "ETH",
-                    "signal": "price_update",
+                    "signal": "evaluate",
                     "price": 102.0,
                     "timestamp_ms": 1700000000000,
+                    "indicators": {"close": 102.0, "atr": 2.0, "ema_fast": 103.0, "ema_slow": 99.0},
+                    "gate_result": {"allow_trade": True, "confidence": "high", "reasons": []},
+                    "ema_slow_slope_pct": 0.001,
                 }
             ]
         ),
