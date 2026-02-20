@@ -607,36 +607,6 @@ def main() -> int:
     paper_seed_watermark_path = bundle_dir / "paper_seed_watermark.json"
     manifest_path = bundle_dir / "replay_bundle_manifest.json"
 
-    baseline_trades = _load_live_baseline_trades(
-        live_db,
-        from_ts=int(args.from_ts),
-        to_ts=int(args.to_ts),
-    )
-    baseline_trade_exit_count = sum(1 for row in baseline_trades if row.get("action") in {"CLOSE", "REDUCE"})
-    baseline_trade_funding_count = sum(1 for row in baseline_trades if row.get("action") == "FUNDING")
-    live_order_fail_events = _load_live_order_fail_events(
-        live_db,
-        from_ts=int(args.from_ts),
-        to_ts=int(args.to_ts),
-    )
-    runtime_strategy_provenance = _load_runtime_strategy_provenance(
-        live_db,
-        from_ts=int(args.from_ts),
-        to_ts=int(args.to_ts),
-    )
-    oms_strategy_provenance = _load_oms_strategy_provenance(
-        live_db,
-        from_ts=int(args.from_ts),
-        to_ts=int(args.to_ts),
-    )
-
-    with live_trades_path.open("w", encoding="utf-8") as fp:
-        for row in baseline_trades:
-            fp.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False) + "\n")
-    with live_order_fail_events_path.open("w", encoding="utf-8") as fp:
-        for row in live_order_fail_events:
-            fp.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False) + "\n")
-
     if yaml is None:
         shutil.copy2(strategy_config_source, strategy_config_snapshot_path)
     else:
@@ -646,29 +616,6 @@ def main() -> int:
         )
     snapshot_locked_sha256 = _strategy_overrides_sha1(strategy_config_snapshot_path)
     snapshot_locked_sha1_legacy = _strategy_overrides_sha1_legacy(strategy_config_snapshot_path)
-    runtime_timeline = runtime_strategy_provenance.get("strategy_sha1_timeline")
-    runtime_rows = runtime_timeline if isinstance(runtime_timeline, list) else []
-    matching_runtime_prefixes = sorted(
-        {
-            str(row.get("strategy_sha1") or "").strip().lower()
-            for row in runtime_rows
-            if str(row.get("strategy_sha1") or "").strip()
-            and (
-                str(locked_strategy_sha256).startswith(str(row.get("strategy_sha1") or "").strip().lower())
-                or str(locked_strategy_sha1_legacy).startswith(str(row.get("strategy_sha1") or "").strip().lower())
-            )
-        }
-    )
-    oms_timeline = oms_strategy_provenance.get("strategy_sha1_timeline")
-    oms_rows = oms_timeline if isinstance(oms_timeline, list) else []
-    matches_oms_sha1 = any(
-        str(row.get("strategy_sha1") or "").strip().lower()
-        in {
-            str(locked_strategy_sha256).strip().lower(),
-            str(locked_strategy_sha1_legacy).strip().lower(),
-        }
-        for row in oms_rows
-    )
 
     cfg_interval, cfg_entry_interval, cfg_exit_interval = _load_config_engine_intervals(
         strategy_config_snapshot_path
@@ -707,6 +654,60 @@ def main() -> int:
             f"Use an aligned from-ts (for example {next_boundary}) or pass "
             "--allow-partial-first-bar if the partial first bar is intentional."
         )
+
+    live_window_to_ts = int(args.to_ts) + int(timestamp_bucket_ms) - 1
+    baseline_trades = _load_live_baseline_trades(
+        live_db,
+        from_ts=int(args.from_ts),
+        to_ts=int(live_window_to_ts),
+    )
+    baseline_trade_exit_count = sum(1 for row in baseline_trades if row.get("action") in {"CLOSE", "REDUCE"})
+    baseline_trade_funding_count = sum(1 for row in baseline_trades if row.get("action") == "FUNDING")
+    live_order_fail_events = _load_live_order_fail_events(
+        live_db,
+        from_ts=int(args.from_ts),
+        to_ts=int(live_window_to_ts),
+    )
+    runtime_strategy_provenance = _load_runtime_strategy_provenance(
+        live_db,
+        from_ts=int(args.from_ts),
+        to_ts=int(live_window_to_ts),
+    )
+    oms_strategy_provenance = _load_oms_strategy_provenance(
+        live_db,
+        from_ts=int(args.from_ts),
+        to_ts=int(live_window_to_ts),
+    )
+    runtime_timeline = runtime_strategy_provenance.get("strategy_sha1_timeline")
+    runtime_rows = runtime_timeline if isinstance(runtime_timeline, list) else []
+    matching_runtime_prefixes = sorted(
+        {
+            str(row.get("strategy_sha1") or "").strip().lower()
+            for row in runtime_rows
+            if str(row.get("strategy_sha1") or "").strip()
+            and (
+                str(locked_strategy_sha256).startswith(str(row.get("strategy_sha1") or "").strip().lower())
+                or str(locked_strategy_sha1_legacy).startswith(str(row.get("strategy_sha1") or "").strip().lower())
+            )
+        }
+    )
+    oms_timeline = oms_strategy_provenance.get("strategy_sha1_timeline")
+    oms_rows = oms_timeline if isinstance(oms_timeline, list) else []
+    matches_oms_sha1 = any(
+        str(row.get("strategy_sha1") or "").strip().lower()
+        in {
+            str(locked_strategy_sha256).strip().lower(),
+            str(locked_strategy_sha1_legacy).strip().lower(),
+        }
+        for row in oms_rows
+    )
+
+    with live_trades_path.open("w", encoding="utf-8") as fp:
+        for row in baseline_trades:
+            fp.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False) + "\n")
+    with live_order_fail_events_path.open("w", encoding="utf-8") as fp:
+        for row in live_order_fail_events:
+            fp.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False) + "\n")
 
     candles_provenance = build_candles_window_provenance(
         candles_db,
@@ -1039,6 +1040,7 @@ def main() -> int:
             "exit_candles_db": str(replay_exit_candles_db) if replay_exit_candles_db is not None else None,
             "from_ts": int(args.from_ts),
             "to_ts": int(args.to_ts),
+            "live_window_to_ts": int(live_window_to_ts),
         },
         "input_hashes": {
             "candles_db_sha256": _hash_file(candles_db),
