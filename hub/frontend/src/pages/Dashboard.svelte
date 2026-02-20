@@ -4,8 +4,8 @@
   import { hubWs } from '../lib/ws';
   import { CANDIDATE_FAMILY_ORDER, getModeLabel, LIVE_MODE } from '../lib/mode-labels';
 
-  const INTERVALS = ['1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d'] as const;
-  const BAR_COUNTS = [50, 100, 200, 400] as const;
+  const INTERVALS = ['1m', '3m', '5m', '15m', '30m', '1h'] as const;
+  const BAR_COUNTS = [50, 100, 200] as const;
   const CHART_PREF_INTERVAL_COOKIE = 'aiq_dash_iv';
   const CHART_PREF_BARS_COOKIE = 'aiq_dash_bars';
   const MODE_SERVICE_MAP: Record<string, string> = {
@@ -72,9 +72,7 @@
     if (durationMs < 2 * 60 * 60_000)   return '3m';
     if (durationMs < 6 * 60 * 60_000)   return '5m';
     if (durationMs < 24 * 60 * 60_000)  return '15m';
-    if (durationMs < 3 * 24 * 60 * 60_000)  return '1h';
-    if (durationMs < 7 * 24 * 60 * 60_000)  return '4h';
-    return '1d';
+    return '1h';
   }
 
   function fmtDuration(ms: number): string {
