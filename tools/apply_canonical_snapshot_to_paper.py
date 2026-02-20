@@ -90,6 +90,54 @@ def _ensure_position_state_history_table(conn: sqlite3.Connection) -> None:
     )
 
 
+def _seed_history_rows(
+    conn: sqlite3.Connection,
+    *,
+    seed_history: dict[str, Any],
+    strict_replace: bool,
+) -> dict[str, int]:
+    if not strict_replace:
+        return {}
+    if not isinstance(seed_history, dict):
+        return {}
+
+    rows_by_table = seed_history.get("rows")
+    if not isinstance(rows_by_table, dict):
+        return {}
+
+    inserted: dict[str, int] = {}
+    load_order = (
+        "ws_events",
+        "oms_intents",
+        "oms_orders",
+        "oms_fills",
+        "signals",
+        "audit_events",
+        "decision_events",
+        "decision_context",
+        "gate_evaluations",
+    )
+    for table_name in load_order:
+        if not _table_exists(conn, table_name):
+            continue
+        raw_rows = rows_by_table.get(table_name)
+        if not isinstance(raw_rows, list) or not raw_rows:
+            continue
+        count = 0
+        for row in raw_rows:
+            if not isinstance(row, dict):
+                continue
+            insert_row = dict(row)
+            if table_name == "decision_events" and "trade_id" in insert_row:
+                insert_row["trade_id"] = None
+            _insert_projection(conn, table_name, insert_row)
+            count += 1
+        if count > 0:
+            inserted[table_name] = count
+
+    return inserted
+
+
 def _seed_trades_and_positions(
     conn: sqlite3.Connection,
     *,
@@ -109,7 +157,9 @@ def _seed_trades_and_positions(
         conn.execute("DELETE FROM trades")
         for table_name in (
             "decision_events",
+            "decision_context",
             "gate_evaluations",
+            "decision_lineage",
             "signals",
             "audit_events",
             "oms_intents",
@@ -418,6 +468,9 @@ def main() -> int:
     open_orders = canonical.get("open_orders") or []
     if not isinstance(open_orders, list):
         open_orders = []
+    seed_history = canonical.get("seed_history") or {}
+    if not isinstance(seed_history, dict):
+        seed_history = {}
     runtime = snapshot.get("runtime") or {}
     if not isinstance(runtime, dict):
         runtime = {}
@@ -429,6 +482,14 @@ def main() -> int:
         print(f"balance: {balance:.8f}")
         print(f"positions: {len(positions)}")
         print(f"open_orders: {len(open_orders)}")
+        dry_seed_history_counts = (seed_history.get("row_counts") or {}) if isinstance(seed_history, dict) else {}
+        if isinstance(dry_seed_history_counts, dict):
+            dry_seed_history_total = sum(
+                int(v or 0) for v in dry_seed_history_counts.values() if isinstance(v, (int, float))
+            )
+        else:
+            dry_seed_history_total = 0
+        print(f"seed_history_rows: {int(dry_seed_history_total)}")
         print(
             "runtime_cooldown_symbols: "
             f"{len((runtime.get('entry_attempt_ms_by_symbol') or {})) + len((runtime.get('exit_attempt_ms_by_symbol') or {}))}"
@@ -445,6 +506,11 @@ def main() -> int:
             balance=balance,
             seed_ts_ms=seed_ts_ms,
             positions=positions,
+            strict_replace=bool(args.strict_replace),
+        )
+        seeded_history_rows = _seed_history_rows(
+            conn,
+            seed_history=seed_history,
             strict_replace=bool(args.strict_replace),
         )
         seeded_open_orders = _replace_open_orders(conn, open_orders)
@@ -467,6 +533,8 @@ def main() -> int:
             "target_db": str(target_db_path),
             "seeded_trades": int(seeded_trades),
             "seeded_positions": int(seeded_positions),
+            "seeded_history_rows": seeded_history_rows,
+            "seeded_history_rows_total": int(sum(int(v or 0) for v in seeded_history_rows.values())),
             "seeded_open_orders": int(seeded_open_orders),
             "seeded_runtime_cooldowns": int(seeded_runtime_cooldowns),
             "seed_timestamp_ms": int(seed_ts_ms),

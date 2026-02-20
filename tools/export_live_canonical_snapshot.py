@@ -171,6 +171,136 @@ def _max_id(conn: sqlite3.Connection, table_name: str) -> int | None:
         return None
 
 
+def _rows_to_json(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        out.append({k: _as_json_value(row[k]) for k in row.keys()})
+    return out
+
+
+def _load_seed_history_rows(
+    conn: sqlite3.Connection,
+    *,
+    window_from_ts: int,
+    window_to_ts: int,
+) -> dict[str, list[dict[str, Any]]]:
+    rows_by_table: dict[str, list[dict[str, Any]]] = {}
+
+    decision_rows: list[dict[str, Any]] = []
+    decision_ids: list[str] = []
+    if _table_exists(conn, "decision_events"):
+        rows = conn.execute(
+            """
+            SELECT * FROM decision_events
+            WHERE timestamp_ms >= ? AND timestamp_ms <= ?
+            ORDER BY timestamp_ms ASC, id ASC
+            """,
+            (int(window_from_ts), int(window_to_ts)),
+        ).fetchall()
+        decision_rows = _rows_to_json(rows)
+        if decision_rows:
+            rows_by_table["decision_events"] = decision_rows
+            decision_ids = [str(r.get("id") or "").strip() for r in decision_rows if str(r.get("id") or "").strip()]
+
+    if decision_ids and _table_exists(conn, "decision_context"):
+        acc: list[dict[str, Any]] = []
+        chunk_size = 400
+        for start in range(0, len(decision_ids), chunk_size):
+            chunk = decision_ids[start : start + chunk_size]
+            q = "SELECT * FROM decision_context WHERE decision_id IN ({}) ORDER BY decision_id ASC".format(
+                ",".join("?" for _ in chunk)
+            )
+            acc.extend(_rows_to_json(conn.execute(q, tuple(chunk)).fetchall()))
+        if acc:
+            rows_by_table["decision_context"] = acc
+
+    if decision_ids and _table_exists(conn, "gate_evaluations"):
+        acc = []
+        chunk_size = 400
+        for start in range(0, len(decision_ids), chunk_size):
+            chunk = decision_ids[start : start + chunk_size]
+            q = "SELECT * FROM gate_evaluations WHERE decision_id IN ({}) ORDER BY id ASC".format(
+                ",".join("?" for _ in chunk)
+            )
+            acc.extend(_rows_to_json(conn.execute(q, tuple(chunk)).fetchall()))
+        if acc:
+            rows_by_table["gate_evaluations"] = acc
+
+    if _table_exists(conn, "signals"):
+        ts_expr = _sqlite_ts_ms_expr("timestamp")
+        rows = conn.execute(
+            f"SELECT * FROM signals WHERE {ts_expr} >= ? AND {ts_expr} <= ? ORDER BY id ASC",
+            (int(window_from_ts), int(window_to_ts)),
+        ).fetchall()
+        payload = _rows_to_json(rows)
+        if payload:
+            rows_by_table["signals"] = payload
+
+    if _table_exists(conn, "audit_events"):
+        ts_expr = _sqlite_ts_ms_expr("timestamp")
+        rows = conn.execute(
+            f"SELECT * FROM audit_events WHERE {ts_expr} >= ? AND {ts_expr} <= ? ORDER BY id ASC",
+            (int(window_from_ts), int(window_to_ts)),
+        ).fetchall()
+        payload = _rows_to_json(rows)
+        if payload:
+            rows_by_table["audit_events"] = payload
+
+    if _table_exists(conn, "oms_intents"):
+        rows = conn.execute(
+            """
+            SELECT * FROM oms_intents
+            WHERE created_ts_ms >= ? AND created_ts_ms <= ?
+            ORDER BY created_ts_ms ASC, intent_id ASC
+            """,
+            (int(window_from_ts), int(window_to_ts)),
+        ).fetchall()
+        payload = _rows_to_json(rows)
+        if payload:
+            rows_by_table["oms_intents"] = payload
+
+    if _table_exists(conn, "oms_orders"):
+        rows = conn.execute(
+            """
+            SELECT * FROM oms_orders
+            WHERE created_ts_ms >= ? AND created_ts_ms <= ?
+            ORDER BY created_ts_ms ASC, id ASC
+            """,
+            (int(window_from_ts), int(window_to_ts)),
+        ).fetchall()
+        payload = _rows_to_json(rows)
+        if payload:
+            rows_by_table["oms_orders"] = payload
+
+    if _table_exists(conn, "oms_fills"):
+        rows = conn.execute(
+            """
+            SELECT * FROM oms_fills
+            WHERE ts_ms >= ? AND ts_ms <= ?
+            ORDER BY ts_ms ASC, id ASC
+            """,
+            (int(window_from_ts), int(window_to_ts)),
+        ).fetchall()
+        payload = _rows_to_json(rows)
+        if payload:
+            rows_by_table["oms_fills"] = payload
+
+    if _table_exists(conn, "ws_events"):
+        rows = conn.execute(
+            """
+            SELECT * FROM ws_events
+            WHERE ts >= ? AND ts <= ?
+            ORDER BY ts ASC, id ASC
+            """,
+            (int(window_from_ts), int(window_to_ts)),
+        ).fetchall()
+        payload = _rows_to_json(rows)
+        if payload:
+            rows_by_table["ws_events"] = payload
+
+    return rows_by_table
+
+
 def _sqlite_ts_ms_expr(column_name: str = "timestamp") -> str:
     # Use integer epoch arithmetic to avoid float rounding drift on boundary cut-offs.
     return (
@@ -490,6 +620,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional snapshot cutoff timestamp in milliseconds (inclusive).",
     )
+    parser.add_argument(
+        "--seed-history-lookback-minutes",
+        type=int,
+        default=360,
+        help=(
+            "Lookback window (minutes) for exporting seed_history rows "
+            "for decision/audit/OMS replay context."
+        ),
+    )
     return parser
 
 
@@ -521,6 +660,15 @@ def main() -> int:
         ) = _reconstruct_positions_and_balance(conn, as_of_ts=as_of_ts)
         entry_attempt_ms, exit_attempt_ms = _load_attempt_markers(conn, as_of_ts=as_of_ts)
         open_orders = _load_open_orders(conn, as_of_ts=args.as_of_ts)
+        lookback_minutes = max(0, int(args.seed_history_lookback_minutes))
+        seed_history_window_to = int(as_of_ts) if as_of_ts is not None else int(now_ms)
+        seed_history_window_from = max(0, int(seed_history_window_to - lookback_minutes * 60_000))
+        seed_history_rows = _load_seed_history_rows(
+            conn,
+            window_from_ts=int(seed_history_window_from),
+            window_to_ts=int(seed_history_window_to),
+        )
+        seed_history_counts = {table: len(rows) for table, rows in seed_history_rows.items()}
 
         cursors = {
             "trades_max_id": _max_id(conn, "trades"),
@@ -557,6 +705,13 @@ def main() -> int:
                 },
                 "open_orders": open_orders,
                 "cursors": cursors,
+                "seed_history": {
+                    "window_from_ts": int(seed_history_window_from),
+                    "window_to_ts": int(seed_history_window_to),
+                    "lookback_minutes": int(lookback_minutes),
+                    "row_counts": seed_history_counts,
+                    "rows": seed_history_rows,
+                },
                 "warnings": warnings,
                 "notes": [
                     "This snapshot is live-canonical for deterministic replay seeding.",
