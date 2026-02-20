@@ -596,6 +596,173 @@ fn reason_code_text(code: ReasonCode) -> &'static str {
     }
 }
 
+struct ExitEvaluationOutcome {
+    intents: Vec<OrderIntent>,
+    fills: Vec<FillEvent>,
+}
+
+fn evaluate_exits_for_event(
+    state: &StrategyState,
+    next_state: &mut StrategyState,
+    event: &MarketEvent,
+    params: &KernelParams,
+    diagnostics: &mut Diagnostics,
+    cooldown_is_terminal: bool,
+    close_intent_offset: u64,
+) -> ExitEvaluationOutcome {
+    let mut intents = Vec::new();
+    let mut fills = Vec::new();
+
+    if let Some(ref cd) = params.cooldown_params {
+        if is_exit_cooldown_active(next_state, &event.symbol, event.timestamp_ms, cd.exit_cooldown_s) {
+            diagnostics
+                .warnings
+                .push(format!("exit cooldown active for {}", event.symbol));
+            diagnostics.cooldown_blocked = true;
+            if cooldown_is_terminal {
+                return ExitEvaluationOutcome { intents, fills };
+            }
+        }
+    }
+
+    if diagnostics.cooldown_blocked {
+        return ExitEvaluationOutcome { intents, fills };
+    }
+
+    if let (Some(exit_params), Some(snap)) = (&params.exit_params, &event.indicators) {
+        if diagnostics.indicator_snapshot.is_none() {
+            diagnostics.indicator_snapshot = Some(IndicatorSnapshotTrace::from_snapshot(snap));
+        }
+
+        let pre_exit_side = state.positions.get(&event.symbol).map(|p| p.side);
+
+        let exit_eval = {
+            if let Some(pos) = next_state.positions.get_mut(&event.symbol) {
+                Some(crate::kernel_exits::evaluate_exits_with_diagnostics(
+                    pos,
+                    snap,
+                    exit_params,
+                    event.timestamp_ms,
+                ))
+            } else {
+                None
+            }
+        };
+
+        if let Some(eval) = exit_eval {
+            diagnostics.applied_thresholds = eval.threshold_records;
+            diagnostics.exit_context = eval.exit_context;
+            diagnostics.exit_bounds = eval.exit_bounds;
+            let result = eval.result;
+            let fee_model = accounting::FeeModel {
+                maker_fee_bps: params.maker_fee_bps,
+                taker_fee_bps: params.taker_fee_bps,
+            };
+            let role = event.fee_role.unwrap_or(accounting::FeeRole::Taker);
+            let fee_rate = fee_model.role_rate(role);
+            let close_id = with_intent_id(next_state.step, close_intent_offset);
+
+            match result {
+                KernelExitResult::Hold => {}
+                KernelExitResult::FullClose {
+                    exit_price,
+                    ref reason,
+                } => {
+                    if let Some(pos) = next_state.positions.get(&event.symbol) {
+                        let closed_side = pos.side;
+                        let action_code = match closed_side {
+                            PositionSide::Long => "CLOSE_LONG",
+                            PositionSide::Short => "CLOSE_SHORT",
+                        };
+                        let reason_code = reason_code_text(classify_reason_code(action_code, reason));
+                        if let Some((intent, fill)) = apply_close(
+                            next_state,
+                            &event.symbol,
+                            closed_side,
+                            exit_price,
+                            fee_rate,
+                            Some(1.0),
+                            close_id,
+                            reason,
+                            reason_code,
+                            diagnostics,
+                        ) {
+                            intents.push(intent);
+                            fills.push(fill);
+                            next_state
+                                .last_exit_ms
+                                .insert(event.symbol.clone(), event.timestamp_ms);
+                            if let Some(side) = pre_exit_side {
+                                let side_str = match side {
+                                    PositionSide::Long => "long",
+                                    PositionSide::Short => "short",
+                                };
+                                next_state.last_close_info.insert(
+                                    event.symbol.clone(),
+                                    (event.timestamp_ms, side_str.to_string(), reason.clone()),
+                                );
+                            }
+                        }
+                    }
+                }
+                KernelExitResult::PartialClose {
+                    ref reason,
+                    exit_price,
+                    fraction,
+                    ..
+                } => {
+                    if let Some(pos) = next_state.positions.get(&event.symbol) {
+                        let closed_side = pos.side;
+                        let action_code = match closed_side {
+                            PositionSide::Long => "REDUCE_LONG",
+                            PositionSide::Short => "REDUCE_SHORT",
+                        };
+                        let reason_code = reason_code_text(classify_reason_code(action_code, reason));
+                        if let Some((intent, fill)) = apply_close(
+                            next_state,
+                            &event.symbol,
+                            closed_side,
+                            exit_price,
+                            fee_rate,
+                            Some(fraction),
+                            close_id,
+                            reason,
+                            reason_code,
+                            diagnostics,
+                        ) {
+                            intents.push(intent);
+                            fills.push(fill);
+                            next_state
+                                .last_exit_ms
+                                .insert(event.symbol.clone(), event.timestamp_ms);
+                            if let Some(pos) = next_state.positions.get_mut(&event.symbol) {
+                                pos.tp1_taken = true;
+                                let entry = pos.avg_entry_price;
+                                match pos.side {
+                                    PositionSide::Long => {
+                                        pos.trailing_sl = Some(match pos.trailing_sl {
+                                            Some(prev) => prev.max(entry),
+                                            None => entry,
+                                        });
+                                    }
+                                    PositionSide::Short => {
+                                        pos.trailing_sl = Some(match pos.trailing_sl {
+                                            Some(prev) => prev.min(entry),
+                                            None => entry,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    ExitEvaluationOutcome { intents, fills }
+}
+
 struct ApplyOpenInput<'a> {
     symbol: &'a str,
     side: PositionSide,
@@ -891,177 +1058,23 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
         next_state.step = next_state.step.saturating_add(1);
         next_state.timestamp_ms = event.timestamp_ms;
 
-        let mut intents = Vec::new();
-        let mut fills = Vec::new();
+        let exit_outcome = evaluate_exits_for_event(
+            state,
+            &mut next_state,
+            event,
+            params,
+            &mut diagnostics,
+            true,
+            1,
+        );
 
-        // Exit cooldown check
-        if let Some(ref cd) = params.cooldown_params {
-            if is_exit_cooldown_active(
-                &next_state,
-                &event.symbol,
-                event.timestamp_ms,
-                cd.exit_cooldown_s,
-            ) {
-                diagnostics
-                    .warnings
-                    .push(format!("exit cooldown active for {}", event.symbol));
-                diagnostics.cooldown_blocked = true;
-                diagnostics.intent_count = 0;
-                diagnostics.fill_count = 0;
-                return DecisionResult {
-                    schema_version: KERNEL_SCHEMA_VERSION,
-                    state: next_state,
-                    intents: vec![],
-                    fills: vec![],
-                    diagnostics,
-                };
-            }
-        }
-
-        if let (Some(exit_params), Some(snap)) = (&params.exit_params, &event.indicators) {
-            // Capture indicator snapshot for diagnostics.
-            diagnostics.indicator_snapshot = Some(IndicatorSnapshotTrace::from_snapshot(snap));
-
-            // Capture position side from original state before any mutations.
-            let pre_exit_side = state.positions.get(&event.symbol).map(|p| p.side);
-
-            // Evaluate exits with full diagnostics (threshold records + exit context).
-            let exit_eval = {
-                if let Some(pos) = next_state.positions.get_mut(&event.symbol) {
-                    Some(crate::kernel_exits::evaluate_exits_with_diagnostics(
-                        pos,
-                        snap,
-                        exit_params,
-                        event.timestamp_ms,
-                    ))
-                } else {
-                    None
-                }
-            };
-
-            if let Some(eval) = exit_eval {
-                diagnostics.applied_thresholds = eval.threshold_records;
-                diagnostics.exit_context = eval.exit_context;
-                diagnostics.exit_bounds = eval.exit_bounds;
-                let result = eval.result;
-                let fee_model = accounting::FeeModel {
-                    maker_fee_bps: params.maker_fee_bps,
-                    taker_fee_bps: params.taker_fee_bps,
-                };
-                let role = event.fee_role.unwrap_or(accounting::FeeRole::Taker);
-                let fee_rate = fee_model.role_rate(role);
-                let close_id = with_intent_id(next_state.step, 1);
-
-                match result {
-                    KernelExitResult::Hold => {}
-                    KernelExitResult::FullClose {
-                        exit_price,
-                        ref reason,
-                    } => {
-                        if let Some(pos) = next_state.positions.get(&event.symbol) {
-                            let closed_side = pos.side;
-                            let action_code = match closed_side {
-                                PositionSide::Long => "CLOSE_LONG",
-                                PositionSide::Short => "CLOSE_SHORT",
-                            };
-                            let reason_code = reason_code_text(classify_reason_code(action_code, reason));
-                            if let Some((intent, fill)) = apply_close(
-                                &mut next_state,
-                                &event.symbol,
-                                closed_side,
-                                exit_price,
-                                fee_rate,
-                                Some(1.0),
-                                close_id,
-                                reason,
-                                reason_code,
-                                &mut diagnostics,
-                            ) {
-                                intents.push(intent);
-                                fills.push(fill);
-                                // Record cooldown timestamps
-                                next_state
-                                    .last_exit_ms
-                                    .insert(event.symbol.clone(), event.timestamp_ms);
-                                // Record PESC info from original state's position side
-                                if let Some(side) = pre_exit_side {
-                                    let side_str = match side {
-                                        PositionSide::Long => "long",
-                                        PositionSide::Short => "short",
-                                    };
-                                    next_state.last_close_info.insert(
-                                        event.symbol.clone(),
-                                        (event.timestamp_ms, side_str.to_string(), reason.clone()),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    KernelExitResult::PartialClose {
-                        ref reason,
-                        exit_price,
-                        fraction,
-                        ..
-                    } => {
-                        if let Some(pos) = next_state.positions.get(&event.symbol) {
-                            let closed_side = pos.side;
-                            let action_code = match closed_side {
-                                PositionSide::Long => "REDUCE_LONG",
-                                PositionSide::Short => "REDUCE_SHORT",
-                            };
-                            let reason_code = reason_code_text(classify_reason_code(action_code, reason));
-                            if let Some((intent, fill)) = apply_close(
-                                &mut next_state,
-                                &event.symbol,
-                                closed_side,
-                                exit_price,
-                                fee_rate,
-                                Some(fraction),
-                                close_id,
-                                reason,
-                                reason_code,
-                                &mut diagnostics,
-                            ) {
-                                intents.push(intent);
-                                fills.push(fill);
-                                // Record exit timestamp (partial exits also trigger exit cooldown)
-                                next_state
-                                    .last_exit_ms
-                                    .insert(event.symbol.clone(), event.timestamp_ms);
-                                // Mark tp1_taken after successful partial close.
-                                if let Some(pos) = next_state.positions.get_mut(&event.symbol) {
-                                    pos.tp1_taken = true;
-                                    // Lock trailing_sl to at least entry (breakeven).
-                                    let entry = pos.avg_entry_price;
-                                    match pos.side {
-                                        PositionSide::Long => {
-                                            pos.trailing_sl = Some(match pos.trailing_sl {
-                                                Some(prev) => prev.max(entry),
-                                                None => entry,
-                                            });
-                                        }
-                                        PositionSide::Short => {
-                                            pos.trailing_sl = Some(match pos.trailing_sl {
-                                                Some(prev) => prev.min(entry),
-                                                None => entry,
-                                            });
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        diagnostics.intent_count = intents.len();
-        diagnostics.fill_count = fills.len();
+        diagnostics.intent_count = exit_outcome.intents.len();
+        diagnostics.fill_count = exit_outcome.fills.len();
         return DecisionResult {
             schema_version: KERNEL_SCHEMA_VERSION,
             state: next_state,
-            intents,
-            fills,
+            intents: exit_outcome.intents,
+            fills: exit_outcome.fills,
             diagnostics,
         };
     }
@@ -1071,6 +1084,20 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
         let mut next_state = state.clone();
         next_state.step = next_state.step.saturating_add(1);
         next_state.timestamp_ms = event.timestamp_ms;
+        let mut intents = Vec::new();
+        let mut fills = Vec::new();
+
+        let exit_outcome = evaluate_exits_for_event(
+            state,
+            &mut next_state,
+            event,
+            params,
+            &mut diagnostics,
+            false,
+            10,
+        );
+        intents.extend(exit_outcome.intents);
+        fills.extend(exit_outcome.fills);
 
         let (entry_params, snap, gate_result) =
             match (&params.entry_params, &event.indicators, &event.gate_result) {
@@ -1080,11 +1107,13 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                         "Evaluate signal requires entry_params, indicators, and gate_result"
                             .to_string(),
                     );
+                    diagnostics.intent_count = intents.len();
+                    diagnostics.fill_count = fills.len();
                     return DecisionResult {
                         schema_version: KERNEL_SCHEMA_VERSION,
                         state: next_state,
-                        intents: vec![],
-                        fills: vec![],
+                        intents,
+                        fills,
                         diagnostics,
                     };
                 }
@@ -1156,13 +1185,13 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
         }
 
         if entry_result.signal == bt_signals::Signal::Neutral {
-            diagnostics.intent_count = 0;
-            diagnostics.fill_count = 0;
+            diagnostics.intent_count = intents.len();
+            diagnostics.fill_count = fills.len();
             return DecisionResult {
                 schema_version: KERNEL_SCHEMA_VERSION,
                 state: next_state,
-                intents: vec![],
-                fills: vec![],
+                intents,
+                fills,
                 diagnostics,
             };
         }
@@ -1205,13 +1234,13 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                 if !has_position || is_same_side {
                     diagnostics.gate_blocked = true;
                     diagnostics.gate_block_reasons = blocked_reasons;
-                    diagnostics.intent_count = 0;
-                    diagnostics.fill_count = 0;
+                    diagnostics.intent_count = intents.len();
+                    diagnostics.fill_count = fills.len();
                     return DecisionResult {
                         schema_version: KERNEL_SCHEMA_VERSION,
                         state: next_state,
-                        intents: vec![],
-                        fills: vec![],
+                        intents,
+                        fills,
                         diagnostics,
                     };
                 }
@@ -1239,13 +1268,13 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                             .warnings
                             .push(format!("entry cooldown active for {}", event.symbol));
                         diagnostics.cooldown_blocked = true;
-                        diagnostics.intent_count = 0;
-                        diagnostics.fill_count = 0;
+                        diagnostics.intent_count = intents.len();
+                        diagnostics.fill_count = fills.len();
                         return DecisionResult {
                             schema_version: KERNEL_SCHEMA_VERSION,
                             state: next_state,
-                            intents: vec![],
-                            fills: vec![],
+                            intents,
+                            fills,
                             diagnostics,
                         };
                     }
@@ -1268,13 +1297,13 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
                             .warnings
                             .push(format!("PESC blocked for {}", event.symbol));
                         diagnostics.pesc_blocked = true;
-                        diagnostics.intent_count = 0;
-                        diagnostics.fill_count = 0;
+                        diagnostics.intent_count = intents.len();
+                        diagnostics.fill_count = fills.len();
                         return DecisionResult {
                             schema_version: KERNEL_SCHEMA_VERSION,
                             state: next_state,
-                            intents: vec![],
-                            fills: vec![],
+                            intents,
+                            fills,
                             diagnostics,
                         };
                     }
@@ -1282,18 +1311,20 @@ pub fn step(state: &StrategyState, event: &MarketEvent, params: &KernelParams) -
             }
         }
 
-        let (intents, fills) = execute_entry(
+        let (entry_intents, entry_fills) = execute_entry(
             &mut next_state,
             event,
             params,
             requested_side,
             &mut diagnostics,
         );
-
-        // Record entry timestamp only for actual entry fills (Open/Add), not closes
-        let has_entry_fill = intents
+        let has_entry_fill = entry_intents
             .iter()
             .any(|i| matches!(i.kind, OrderIntentKind::Open | OrderIntentKind::Add));
+        intents.extend(entry_intents);
+        fills.extend(entry_fills);
+
+        // Record entry timestamp only for actual entry fills (Open/Add), not closes
         if has_entry_fill {
             next_state
                 .last_entry_ms
@@ -3251,6 +3282,29 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_runs_exit_checks_before_entry() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let mut state_with_atr = state.clone();
+        state_with_atr.positions.get_mut("BTC").unwrap().entry_atr = Some(100.0);
+
+        let mut params = eval_params();
+        params.exit_params = Some(ExitParams::default());
+        let event = evaluate_event(test_snap(9_750.0), failing_gate_result());
+
+        let result = step(&state_with_atr, &event, &params);
+
+        assert!(
+            !result.intents.is_empty(),
+            "Evaluate should emit close intent when SL is hit"
+        );
+        assert_eq!(result.intents[0].kind, OrderIntentKind::Close);
+        assert!(
+            result.state.positions.get("BTC").is_none(),
+            "position should be closed by Evaluate-triggered exit check"
+        );
+    }
+
+    #[test]
     fn evaluate_backwards_compat() {
         // Buy signal with entry_params present → still works via Buy path
         let state = init_state();
@@ -3281,6 +3335,37 @@ mod tests {
             "Evaluate without entry_params should not open position"
         );
         assert!(result.intents.is_empty());
+        assert!(result
+            .diagnostics
+            .warnings
+            .iter()
+            .any(|w| w.contains("entry_params")));
+    }
+
+    #[test]
+    fn evaluate_missing_entry_params_still_runs_exit_checks() {
+        let state = open_long_btc(10_000.0, 10_000.0);
+        let mut state_with_atr = state.clone();
+        state_with_atr.positions.get_mut("BTC").unwrap().entry_atr = Some(100.0);
+
+        let params = KernelParams {
+            entry_params: None,
+            exit_params: Some(ExitParams::default()),
+            ..KernelParams::default()
+        };
+        let event = evaluate_event(test_snap(9_750.0), failing_gate_result());
+
+        let result = step(&state_with_atr, &event, &params);
+
+        assert!(
+            !result.intents.is_empty(),
+            "Evaluate should still execute exit checks when entry_params are missing"
+        );
+        assert_eq!(result.intents[0].kind, OrderIntentKind::Close);
+        assert!(
+            result.state.positions.get("BTC").is_none(),
+            "position should be closed even without entry_params"
+        );
         assert!(result
             .diagnostics
             .warnings
