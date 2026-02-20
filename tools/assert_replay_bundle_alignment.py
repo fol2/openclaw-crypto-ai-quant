@@ -142,6 +142,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Maximum allowed distinct OMS strategy_sha1 within the replay window",
     )
     parser.add_argument(
+        "--require-live-run-fingerprint-provenance",
+        action="store_true",
+        default=False,
+        help="Fail when manifest live run fingerprint provenance is missing",
+    )
+    parser.add_argument(
+        "--max-live-run-fingerprint-distinct",
+        type=int,
+        default=None,
+        help="Maximum allowed distinct live run_fingerprint within the replay window",
+    )
+    parser.add_argument(
         "--require-locked-strategy-match",
         action="store_true",
         default=False,
@@ -394,10 +406,13 @@ def main() -> int:
 
     strategy_runtime_stability_ok = True
     strategy_oms_stability_ok = True
+    live_run_fingerprint_stability_ok = True
     locked_strategy_match_ok = True
+    live_run_fingerprint_provenance: dict[str, Any] | None = None
     if manifest is not None:
         runtime_strategy = manifest.get("runtime_strategy_provenance")
         oms_strategy = manifest.get("oms_strategy_provenance")
+        run_fingerprint_provenance = manifest.get("live_run_fingerprint_provenance")
         locked_strategy = manifest.get("locked_strategy_provenance")
         if not isinstance(runtime_strategy, dict):
             strategy_runtime_stability_ok = False
@@ -502,6 +517,64 @@ def main() -> int:
                             "strategy_sha1_distinct": oms_distinct_sha,
                             "strategy_version_distinct": _as_int(oms_strategy.get("strategy_version_distinct"), 0),
                             "oms_rows_sampled": oms_rows_sampled,
+                        },
+                    }
+                )
+
+        if not isinstance(run_fingerprint_provenance, dict):
+            live_run_fingerprint_stability_ok = False
+            if args.require_live_run_fingerprint_provenance:
+                failures.append(
+                    {
+                        "code": "missing_live_run_fingerprint_provenance",
+                        "classification": "state_initialisation_gap",
+                        "detail": "manifest.live_run_fingerprint_provenance is missing",
+                    }
+                )
+        else:
+            live_run_fingerprint_provenance = run_fingerprint_provenance
+            run_fp_distinct = _as_int(run_fingerprint_provenance.get("run_fingerprint_distinct"), 0)
+            run_fp_rows_sampled = _as_int(run_fingerprint_provenance.get("rows_sampled"), 0)
+            run_fp_timeline = run_fingerprint_provenance.get("run_fingerprint_timeline")
+            run_fp_timeline_count = len(run_fp_timeline) if isinstance(run_fp_timeline, list) else 0
+            if (
+                args.require_live_run_fingerprint_provenance
+                and run_fp_rows_sampled > 0
+                and run_fp_timeline_count <= 0
+            ):
+                live_run_fingerprint_stability_ok = False
+                failures.append(
+                    {
+                        "code": "empty_live_run_fingerprint_provenance",
+                        "classification": "state_initialisation_gap",
+                        "detail": (
+                            "live run fingerprint provenance is present but contains no sampled "
+                            "run_fingerprint rows"
+                        ),
+                        "counts": {
+                            "rows_sampled": run_fp_rows_sampled,
+                            "run_fingerprint_timeline_count": run_fp_timeline_count,
+                        },
+                    }
+                )
+            max_live_run_fp_distinct = args.max_live_run_fingerprint_distinct
+            if (
+                max_live_run_fp_distinct is not None
+                and run_fp_distinct > int(max_live_run_fp_distinct)
+            ):
+                live_run_fingerprint_stability_ok = False
+                failures.append(
+                    {
+                        "code": "live_run_fingerprint_drift_within_window",
+                        "classification": "state_initialisation_gap",
+                        "detail": (
+                            f"live run_fingerprint drift exceeded limit: "
+                            f"distinct={run_fp_distinct} > max={int(max_live_run_fp_distinct)}"
+                        ),
+                        "counts": {
+                            "run_fingerprint_distinct": run_fp_distinct,
+                            "rows_sampled": run_fp_rows_sampled,
+                            "run_fingerprint_timeline_count": run_fp_timeline_count,
                         },
                     }
                 )
@@ -1080,6 +1153,10 @@ def main() -> int:
             "max_oms_strategy_sha1_distinct": int(args.max_oms_strategy_sha1_distinct)
             if args.max_oms_strategy_sha1_distinct is not None
             else None,
+            "require_live_run_fingerprint_provenance": bool(args.require_live_run_fingerprint_provenance),
+            "max_live_run_fingerprint_distinct": int(args.max_live_run_fingerprint_distinct)
+            if args.max_live_run_fingerprint_distinct is not None
+            else None,
             "require_locked_strategy_match": bool(args.require_locked_strategy_match),
             "backtester_replay_report": str(backtester_replay_report_path) if backtester_replay_report_path else None,
             "state_report": str(state_path),
@@ -1100,6 +1177,7 @@ def main() -> int:
             "manifest_present": manifest is not None,
             "strategy_runtime_stability_ok": strategy_runtime_stability_ok,
             "strategy_oms_stability_ok": strategy_oms_stability_ok,
+            "live_run_fingerprint_stability_ok": live_run_fingerprint_stability_ok,
             "locked_strategy_match_ok": locked_strategy_match_ok,
             "backtester_replay_report_present": backtester_replay_report is not None,
             "backtester_replay_config_fingerprint_present": bool(replay_config_fingerprint),
@@ -1149,6 +1227,7 @@ def main() -> int:
             "provenance": snapshot_position_state_provenance,
             "trades_only_positions": int(snapshot_trades_only_positions),
         },
+        "live_run_fingerprint_provenance": live_run_fingerprint_provenance,
         "failure_count": len(failures),
         "failures": failures,
     }

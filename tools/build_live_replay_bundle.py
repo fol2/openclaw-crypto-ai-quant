@@ -290,7 +290,7 @@ def _load_live_baseline_trades(live_db: Path, *, from_ts: int, to_ts: int) -> li
     conn = _connect_ro(live_db)
     try:
         rows = conn.execute(
-            "SELECT id, timestamp, symbol, action, type, price, size, pnl, balance, reason, confidence, fee_usd, leverage, margin_used "
+            "SELECT id, timestamp, symbol, action, type, price, size, pnl, balance, reason, confidence, fee_usd, leverage, margin_used, run_fingerprint "
             "FROM trades ORDER BY id ASC"
         ).fetchall()
     finally:
@@ -323,10 +323,57 @@ def _load_live_baseline_trades(live_db: Path, *, from_ts: int, to_ts: int) -> li
                 "fee_usd": float(row["fee_usd"] or 0.0),
                 "leverage": float(row["leverage"] or 0.0),
                 "margin_used": float(row["margin_used"] or 0.0),
+                "run_fingerprint": str(row["run_fingerprint"] or "").strip(),
             }
         )
 
     return out
+
+
+def _summarise_live_run_fingerprint_provenance(
+    baseline_trades: list[dict[str, Any]],
+    *,
+    from_ts: int,
+    to_ts: int,
+) -> dict[str, Any]:
+    per_fp: dict[str, dict[str, Any]] = {}
+    sampled_rows = 0
+
+    for row in baseline_trades:
+        ts_ms = int(row.get("timestamp_ms") or 0)
+        if ts_ms <= 0:
+            continue
+        sampled_rows += 1
+        fp = str(row.get("run_fingerprint") or "").strip().lower() or "unknown"
+        bucket = per_fp.get(fp)
+        if bucket is None:
+            bucket = {
+                "run_fingerprint": fp,
+                "sample_count": 0,
+                "first_ts_ms": ts_ms,
+                "last_ts_ms": ts_ms,
+            }
+            per_fp[fp] = bucket
+        bucket["sample_count"] = int(bucket["sample_count"]) + 1
+        bucket["first_ts_ms"] = min(int(bucket["first_ts_ms"]), ts_ms)
+        bucket["last_ts_ms"] = max(int(bucket["last_ts_ms"]), ts_ms)
+
+    timeline = [
+        {
+            "run_fingerprint": str(item["run_fingerprint"]),
+            "sample_count": int(item["sample_count"]),
+            "first_ts_ms": int(item["first_ts_ms"]),
+            "last_ts_ms": int(item["last_ts_ms"]),
+        }
+        for _, item in sorted(per_fp.items(), key=lambda kv: int(kv[1]["first_ts_ms"]))
+    ]
+    return {
+        "window_from_ts": int(from_ts),
+        "window_to_ts": int(to_ts),
+        "rows_sampled": int(sampled_rows),
+        "run_fingerprint_distinct": len(timeline),
+        "run_fingerprint_timeline": timeline,
+    }
 
 
 def _load_live_order_fail_events(live_db: Path, *, from_ts: int, to_ts: int) -> list[dict[str, Any]]:
@@ -669,6 +716,11 @@ def main() -> int:
     )
     baseline_trade_exit_count = sum(1 for row in baseline_trades if row.get("action") in {"CLOSE", "REDUCE"})
     baseline_trade_funding_count = sum(1 for row in baseline_trades if row.get("action") == "FUNDING")
+    live_run_fingerprint_provenance = _summarise_live_run_fingerprint_provenance(
+        baseline_trades,
+        from_ts=int(args.from_ts),
+        to_ts=int(live_window_to_ts),
+    )
     live_order_fail_events = _load_live_order_fail_events(
         live_db,
         from_ts=int(args.from_ts),
@@ -975,6 +1027,8 @@ def main() -> int:
         "--max-strategy-sha1-distinct 1 "
         "--require-oms-strategy-provenance "
         "--max-oms-strategy-sha1-distinct 1 "
+        "--require-live-run-fingerprint-provenance "
+        "--max-live-run-fingerprint-distinct 1 "
         "--require-locked-strategy-match "
         f"--output \"$BUNDLE_DIR/{alignment_gate_path.name}\""
     )
@@ -1061,6 +1115,7 @@ def main() -> int:
         "candles_provenance": candles_provenance,
         "runtime_strategy_provenance": runtime_strategy_provenance,
         "oms_strategy_provenance": oms_strategy_provenance,
+        "live_run_fingerprint_provenance": live_run_fingerprint_provenance,
         "locked_strategy_provenance": {
             "strategy_overrides_source_sha1": str(locked_strategy_sha256),
             "strategy_overrides_source_sha1_prefix8": str(locked_strategy_sha256)[:8],
