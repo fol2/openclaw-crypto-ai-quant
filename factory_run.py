@@ -643,7 +643,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, int | str]] = {
         "tpe_trials": 1000000,
         "num_candidates": 5,
         "shortlist_per_mode": 10,
-        "shortlist_max_rank": 200,
+        "shortlist_max_rank": 1000,
         "sweep_spec": "backtester/sweeps/full_144v.yaml",
     },
     # Deep/weekly profile.
@@ -653,7 +653,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, int | str]] = {
         "tpe_trials": 2000000,
         "num_candidates": 10,
         "shortlist_per_mode": 10,
-        "shortlist_max_rank": 500,
+        "shortlist_max_rank": 1000,
         "sweep_spec": "backtester/sweeps/full_144v.yaml",
     },
     # Weekly profile — identical to deep; weekly is the canonical name going forward.
@@ -661,7 +661,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, int | str]] = {
         "tpe_trials": 2000000,
         "num_candidates": 10,
         "shortlist_per_mode": 10,
-        "shortlist_max_rank": 500,
+        "shortlist_max_rank": 1000,
         "sweep_spec": "backtester/sweeps/full_144v.yaml",
     },
 }
@@ -2960,13 +2960,10 @@ def main(argv: list[str] | None = None) -> int:
                 sweep_argv += ["--balance-from", str(live_initial_balance_path)]
             top_n = int(args.top_n or 0)
             if top_n <= 0:
-                # Auto-derive --top-n from profile to reduce sweep output size.
-                # A 5× safety margin over shortlist_max_rank ensures multi-criteria
-                # extraction has ample headroom while cutting output from GBs to MBs.
-                _slm = int(getattr(args, "shortlist_max_rank", 0) or 0)
-                _spm = int(getattr(args, "shortlist_per_mode", 0) or 0)
-                _effective_max_rank = _slm if _slm > 0 else (max(10, _spm * 5) if _spm > 0 else 200)
-                top_n = _effective_max_rank * 5
+                # Stage-1 shortlist contract:
+                # 1M sweep -> top 1000 by PnL -> 3 lanes x 10 -> CPU backtest/gate -> promotion.
+                _top_pnl_pool = int(getattr(args, "shortlist_top_pnl", 1000) or 1000)
+                top_n = _top_pnl_pool if _top_pnl_pool > 0 else 1000
             if top_n > 0:
                 sweep_argv += ["--top-n", str(top_n)]
             if bt_candles_db:
@@ -3088,24 +3085,18 @@ def main(argv: list[str] | None = None) -> int:
         # ------------------------------------------------------------------
         shortlist_per_mode = int(getattr(args, "shortlist_per_mode", 0) or 0)
         shortlist_max_rank = int(getattr(args, "shortlist_max_rank", 0) or 0)
+        shortlist_top_pnl = int(getattr(args, "shortlist_top_pnl", 1000) or 1000)
+        if shortlist_top_pnl <= 0:
+            shortlist_top_pnl = 1000
         shortlist_modes_raw = str(getattr(args, "shortlist_modes", "") or "").strip()
-    
-        allowed_modes = {"pnl", "dd", "pf", "wr", "sharpe", "trades", "balanced", "efficient", "growth", "conservative"}
-        extract_modes = [m.strip() for m in shortlist_modes_raw.split(",") if m.strip()]
-        extract_modes = [m for m in extract_modes if m in allowed_modes]
-        if not extract_modes:
-            extract_modes = ["efficient", "growth", "conservative"]
-        # Always include the legacy sort-by mode so single-mode generation works.
-        legacy_sort = str(getattr(args, "sort_by", "balanced") or "balanced").strip()
-        if legacy_sort in allowed_modes and legacy_sort not in extract_modes:
-            extract_modes.append(legacy_sort)
-        # Always include "pnl" so default ranking is available.
-        if "pnl" not in extract_modes:
-            extract_modes.append("pnl")
-    
+
+        # Extract a deterministic stage-1 pool by PnL first.
+        extract_modes = ["pnl"]
+
         if shortlist_max_rank <= 0:
-            shortlist_max_rank = max(10, shortlist_per_mode * 5) if shortlist_per_mode > 0 else 200
-    
+            shortlist_max_rank = shortlist_top_pnl
+        shortlist_max_rank = min(shortlist_max_rank, shortlist_top_pnl)
+
         candidate_min_trades = max(0, int(getattr(args, "candidate_min_trades", 1) or 0))
     
         sweep_candidates_out = run_dir / "sweeps" / "sweep_candidates.jsonl"
@@ -3127,6 +3118,7 @@ def main(argv: list[str] | None = None) -> int:
                 "source_path": str(sweep_out),
                 "total_rows_scanned": extract_rows,
                 "modes": extract_modes,
+                "top_pnl_pool": shortlist_top_pnl,
                 "max_rank": shortlist_max_rank,
                 "min_trades": candidate_min_trades,
                 "elapsed_s": round(elapsed, 2),
@@ -3202,7 +3194,8 @@ def main(argv: list[str] | None = None) -> int:
             if not modes:
                 modes = ["efficient", "growth", "conservative"]
             if shortlist_max_rank <= 0:
-                shortlist_max_rank = max(10, shortlist_per_mode * 5)
+                shortlist_max_rank = int(getattr(args, "shortlist_top_pnl", 1000) or 1000)
+            shortlist_max_rank = min(shortlist_max_rank, int(getattr(args, "shortlist_top_pnl", 1000) or 1000))
     
             seen_ids: set[str] = set()
             for mode in modes:
@@ -4176,6 +4169,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Max rank to scan per mode while deduplicating (default depends on --profile).",
+    )
+    ap.add_argument(
+        "--shortlist-top-pnl",
+        type=int,
+        default=1000,
+        help="Stage-1 shortlist pool size by PnL from sweep results (default: 1000).",
     )
 
     ap.add_argument("--walk-forward", action="store_true", help="Run walk-forward validation for each candidate.")
