@@ -2619,6 +2619,32 @@ def ensure_db():
     if "entry_adx_threshold" not in state_cols:
         cursor.execute("ALTER TABLE position_state ADD COLUMN entry_adx_threshold REAL")
 
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS position_state_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_ts_ms INTEGER NOT NULL,
+            updated_at TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            open_trade_id INTEGER,
+            trailing_sl REAL,
+            last_funding_time INTEGER,
+            adds_count INTEGER,
+            tp1_taken INTEGER,
+            last_add_time INTEGER,
+            entry_adx_threshold REAL,
+            event_type TEXT NOT NULL,
+            run_fingerprint TEXT
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_position_state_history_symbol_ts ON position_state_history(symbol, event_ts_ms)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_position_state_history_open_trade_ts ON position_state_history(open_trade_id, event_ts_ms)"
+    )
+
     # Helpful indexes for restart-safe position reconstruction.
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_action_id ON trades(symbol, action, id)")
 
@@ -4321,6 +4347,10 @@ class PaperTrader:
         ensure_db()
         conn = sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT_S)
         cursor = conn.cursor()
+        now_dt = datetime.datetime.now(datetime.timezone.utc)
+        now_iso = now_dt.isoformat()
+        now_ms = int(now_dt.timestamp() * 1000)
+        sym = str(symbol or "").strip().upper()
         cursor.execute(
             """
             INSERT INTO position_state (
@@ -4338,7 +4368,7 @@ class PaperTrader:
                 updated_at = excluded.updated_at
             """,
             (
-                symbol,
+                sym,
                 pos.get("open_trade_id"),
                 pos.get("trailing_sl"),
                 pos.get("last_funding_time"),
@@ -4346,7 +4376,31 @@ class PaperTrader:
                 pos.get("tp1_taken"),
                 pos.get("last_add_time"),
                 pos.get("entry_adx_threshold"),
-                datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                now_iso,
+            ),
+        )
+        cursor.execute(
+            """
+            INSERT INTO position_state_history (
+                event_ts_ms, updated_at, symbol, open_trade_id, trailing_sl,
+                last_funding_time, adds_count, tp1_taken, last_add_time, entry_adx_threshold,
+                event_type, run_fingerprint
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                now_ms,
+                now_iso,
+                sym,
+                pos.get("open_trade_id"),
+                pos.get("trailing_sl"),
+                pos.get("last_funding_time"),
+                pos.get("adds_count"),
+                1 if bool(pos.get("tp1_taken")) else 0,
+                pos.get("last_add_time"),
+                pos.get("entry_adx_threshold"),
+                "upsert",
+                get_run_fingerprint(),
             ),
         )
         conn.commit()
@@ -4356,7 +4410,45 @@ class PaperTrader:
         ensure_db()
         conn = sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT_S)
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM position_state WHERE symbol = ?", (symbol,))
+        sym = str(symbol or "").strip().upper()
+        row = cursor.execute(
+            """
+            SELECT open_trade_id, trailing_sl, last_funding_time, adds_count, tp1_taken, last_add_time, entry_adx_threshold
+            FROM position_state
+            WHERE symbol = ?
+            LIMIT 1
+            """,
+            (sym,),
+        ).fetchone()
+        if row:
+            now_dt = datetime.datetime.now(datetime.timezone.utc)
+            now_iso = now_dt.isoformat()
+            now_ms = int(now_dt.timestamp() * 1000)
+            cursor.execute(
+                """
+                INSERT INTO position_state_history (
+                    event_ts_ms, updated_at, symbol, open_trade_id, trailing_sl,
+                    last_funding_time, adds_count, tp1_taken, last_add_time, entry_adx_threshold,
+                    event_type, run_fingerprint
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now_ms,
+                    now_iso,
+                    sym,
+                    row[0],
+                    row[1],
+                    row[2],
+                    row[3],
+                    row[4],
+                    row[5],
+                    row[6],
+                    "clear",
+                    get_run_fingerprint(),
+                ),
+            )
+        cursor.execute("DELETE FROM position_state WHERE symbol = ?", (sym,))
         conn.commit()
         conn.close()
 

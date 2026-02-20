@@ -663,6 +663,10 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             conn = sqlite3.connect(mei_alpha_v1.DB_PATH, timeout=timeout_s)
             _configure_live_db_connection(conn)
             cur = conn.cursor()
+            now_dt = datetime.datetime.now(datetime.timezone.utc)
+            now_iso = now_dt.isoformat()
+            now_ms = int(now_dt.timestamp() * 1000)
+            sym = str(symbol).strip().upper()
             cur.execute(
                 """
                 INSERT INTO position_state (
@@ -680,7 +684,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     updated_at = excluded.updated_at
                 """,
                 (
-                    str(symbol).strip().upper(),
+                    sym,
                     pos.get("open_trade_id"),
                     pos.get("trailing_sl"),
                     pos.get("last_funding_time"),
@@ -688,9 +692,36 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     pos.get("tp1_taken"),
                     pos.get("last_add_time"),
                     pos.get("entry_adx_threshold"),
-                    datetime.datetime.now().isoformat(),
+                    now_iso,
                 ),
             )
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO position_state_history (
+                        event_ts_ms, updated_at, symbol, open_trade_id, trailing_sl,
+                        last_funding_time, adds_count, tp1_taken, last_add_time, entry_adx_threshold,
+                        event_type, run_fingerprint
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        now_ms,
+                        now_iso,
+                        sym,
+                        pos.get("open_trade_id"),
+                        pos.get("trailing_sl"),
+                        pos.get("last_funding_time"),
+                        pos.get("adds_count"),
+                        1 if bool(pos.get("tp1_taken")) else 0,
+                        pos.get("last_add_time"),
+                        pos.get("entry_adx_threshold"),
+                        "upsert",
+                        _current_run_fingerprint(),
+                    ),
+                )
+            except sqlite3.Error as hist_exc:
+                logger.debug("position_state_history upsert skipped for %s: %s", sym, hist_exc)
             conn.commit()
         except sqlite3.Error as exc:
             if "locked" not in str(exc).lower():
@@ -716,7 +747,48 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             conn = sqlite3.connect(mei_alpha_v1.DB_PATH, timeout=timeout_s)
             _configure_live_db_connection(conn)
             cur = conn.cursor()
-            cur.execute("DELETE FROM position_state WHERE symbol = ?", (str(symbol).strip().upper(),))
+            sym = str(symbol).strip().upper()
+            row = cur.execute(
+                """
+                SELECT open_trade_id, trailing_sl, last_funding_time, adds_count, tp1_taken, last_add_time, entry_adx_threshold
+                FROM position_state
+                WHERE symbol = ?
+                LIMIT 1
+                """,
+                (sym,),
+            ).fetchone()
+            if row:
+                now_dt = datetime.datetime.now(datetime.timezone.utc)
+                now_iso = now_dt.isoformat()
+                now_ms = int(now_dt.timestamp() * 1000)
+                try:
+                    cur.execute(
+                        """
+                        INSERT INTO position_state_history (
+                            event_ts_ms, updated_at, symbol, open_trade_id, trailing_sl,
+                            last_funding_time, adds_count, tp1_taken, last_add_time, entry_adx_threshold,
+                            event_type, run_fingerprint
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            now_ms,
+                            now_iso,
+                            sym,
+                            row[0],
+                            row[1],
+                            row[2],
+                            row[3],
+                            row[4],
+                            row[5],
+                            row[6],
+                            "clear",
+                            _current_run_fingerprint(),
+                        ),
+                    )
+                except sqlite3.Error as hist_exc:
+                    logger.debug("position_state_history clear skipped for %s: %s", sym, hist_exc)
+            cur.execute("DELETE FROM position_state WHERE symbol = ?", (sym,))
             conn.commit()
         except sqlite3.Error as exc:
             if "locked" not in str(exc).lower():
@@ -748,13 +820,96 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             _configure_live_db_connection(conn)
             cur = conn.cursor()
             if open_symbols:
+                sym_list = [s.strip().upper() for s in open_symbols]
                 # Safety: `placeholders` contains only '?' chars — no user input in SQL structure.
                 placeholders = ",".join("?" for _ in open_symbols)
+                stale_rows = cur.execute(
+                    f"""
+                    SELECT symbol, open_trade_id, trailing_sl, last_funding_time, adds_count, tp1_taken, last_add_time, entry_adx_threshold
+                    FROM position_state
+                    WHERE symbol NOT IN ({placeholders})
+                    """,
+                    sym_list,
+                ).fetchall()
+                if stale_rows:
+                    now_dt = datetime.datetime.now(datetime.timezone.utc)
+                    now_iso = now_dt.isoformat()
+                    now_ms = int(now_dt.timestamp() * 1000)
+                    try:
+                        cur.executemany(
+                            """
+                            INSERT INTO position_state_history (
+                                event_ts_ms, updated_at, symbol, open_trade_id, trailing_sl,
+                                last_funding_time, adds_count, tp1_taken, last_add_time, entry_adx_threshold,
+                                event_type, run_fingerprint
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            [
+                                (
+                                    now_ms,
+                                    now_iso,
+                                    str(r[0]).strip().upper(),
+                                    r[1],
+                                    r[2],
+                                    r[3],
+                                    r[4],
+                                    r[5],
+                                    r[6],
+                                    r[7],
+                                    "reconcile_clear",
+                                    _current_run_fingerprint(),
+                                )
+                                for r in stale_rows
+                            ],
+                        )
+                    except sqlite3.Error as hist_exc:
+                        logger.debug("position_state_history reconcile_clear skipped: %s", hist_exc)
                 cur.execute(
                     f"DELETE FROM position_state WHERE symbol NOT IN ({placeholders})",
-                    [s.strip().upper() for s in open_symbols],
+                    sym_list,
                 )
             else:
+                stale_rows = cur.execute(
+                    """
+                    SELECT symbol, open_trade_id, trailing_sl, last_funding_time, adds_count, tp1_taken, last_add_time, entry_adx_threshold
+                    FROM position_state
+                    """
+                ).fetchall()
+                if stale_rows:
+                    now_dt = datetime.datetime.now(datetime.timezone.utc)
+                    now_iso = now_dt.isoformat()
+                    now_ms = int(now_dt.timestamp() * 1000)
+                    try:
+                        cur.executemany(
+                            """
+                            INSERT INTO position_state_history (
+                                event_ts_ms, updated_at, symbol, open_trade_id, trailing_sl,
+                                last_funding_time, adds_count, tp1_taken, last_add_time, entry_adx_threshold,
+                                event_type, run_fingerprint
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            [
+                                (
+                                    now_ms,
+                                    now_iso,
+                                    str(r[0]).strip().upper(),
+                                    r[1],
+                                    r[2],
+                                    r[3],
+                                    r[4],
+                                    r[5],
+                                    r[6],
+                                    r[7],
+                                    "reconcile_clear_all",
+                                    _current_run_fingerprint(),
+                                )
+                                for r in stale_rows
+                            ],
+                        )
+                    except sqlite3.Error as hist_exc:
+                        logger.debug("position_state_history reconcile_clear_all skipped: %s", hist_exc)
                 cur.execute("DELETE FROM position_state")
             conn.commit()
         except sqlite3.Error as exc:

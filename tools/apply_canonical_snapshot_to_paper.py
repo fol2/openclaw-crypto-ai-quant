@@ -87,6 +87,7 @@ def _seed_trades_and_positions(
             "oms_orders",
             "oms_fills",
             "ws_events",
+            "position_state_history",
         ):
             if _table_exists(conn, table_name):
                 conn.execute(f"DELETE FROM {table_name}")
@@ -211,6 +212,25 @@ def _seed_trades_and_positions(
                 },
             )
             seeded_positions += 1
+            if _table_exists(conn, "position_state_history"):
+                _insert_projection(
+                    conn,
+                    "position_state_history",
+                    {
+                        "event_ts_ms": int(ts_ms),
+                        "updated_at": seed_iso,
+                        "symbol": symbol,
+                        "open_trade_id": int(trade_id),
+                        "trailing_sl": pos.get("trailing_sl"),
+                        "last_funding_time": int(pos.get("open_time_ms") or ts_ms),
+                        "adds_count": int(pos.get("adds_count") or 0),
+                        "tp1_taken": 1 if bool(pos.get("tp1_taken")) else 0,
+                        "last_add_time": int(pos.get("last_add_time_ms") or 0),
+                        "entry_adx_threshold": float(pos.get("entry_adx_threshold") or 0.0),
+                        "event_type": "state_sync_seed",
+                        "run_fingerprint": "state_sync_seed",
+                    },
+                )
 
     if not strict_replace:
         for symbol, pos_type in sorted(open_symbol_type.items()):
