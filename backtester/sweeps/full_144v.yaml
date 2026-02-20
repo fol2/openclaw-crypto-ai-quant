@@ -230,27 +230,18 @@ axes:
   - 0.1
   - 0.13
 - path: thresholds.entry.ave_adx_mult
-  gate:
-    path: thresholds.entry.ave_enabled
-    eq: 1
   values:
   - 0.8
   - 1.0
   - 1.25
   - 1.5
 - path: thresholds.entry.ave_atr_ratio_gt
-  gate:
-    path: thresholds.entry.ave_enabled
-    eq: 1
   values:
   - 1.0
   - 1.25
   - 1.5
   - 2.0
 - path: thresholds.entry.ave_avg_atr_window
-  gate:
-    path: thresholds.entry.ave_enabled
-    eq: 1
   values:
   - 30
   - 40
@@ -258,10 +249,6 @@ axes:
   - 60
   - 70
   - 80
-- path: thresholds.entry.ave_enabled
-  values:
-  - 0
-  - 1
 - path: thresholds.entry.btc_adx_override
   values:
   - 28
@@ -597,10 +584,6 @@ axes:
   values:
   - 0
   - 1
-- path: trade.enable_dynamic_leverage
-  values:
-  - 0
-  - 1
 - path: trade.enable_dynamic_sizing
   values:
   - 0
@@ -654,35 +637,16 @@ axes:
   - 0.25
   - 0.4
   - 0.55
-- path: trade.leverage
-  gate:
-    path: trade.enable_dynamic_leverage
-    eq: 0
-  values:
-  - 1
-  - 2
-  - 3
-  - 4
-  - 5
 - path: trade.leverage_high
-  gate:
-    path: trade.enable_dynamic_leverage
-    eq: 1
   values:
   - 5
   - 6
   - 7
 - path: trade.leverage_low
-  gate:
-    path: trade.enable_dynamic_leverage
-    eq: 1
   values:
   - 1
   - 2
 - path: trade.leverage_medium
-  gate:
-    path: trade.enable_dynamic_leverage
-    eq: 1
   values:
   - 3
   - 4

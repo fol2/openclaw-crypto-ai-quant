@@ -25,10 +25,6 @@ axes:
   - 0.42
   - 0.6
   - 0.78
-- path: trade.enable_dynamic_leverage
-  values:
-  - 0.0
-  - 1.0
 - path: trade.max_adds_per_symbol
   values:
   - 0.0

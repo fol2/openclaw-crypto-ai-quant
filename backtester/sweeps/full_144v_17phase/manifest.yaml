@@ -1,14 +1,14 @@
 source_spec: backtester/sweeps/full_144v.yaml
 reference_spec: backtester/sweeps/full_34axis.yaml
 phase_count: 17
-total_axes: 141
+total_axes: 138
 base_combo: 16416
 target_combo: 100000
-achieved_combo: 100602
-total_combo: 100602
+achieved_combo: 90882
+total_combo: 90882
 four_value_axes_total: 10
-three_value_axes_total: 102
-two_value_axes_total: 29
+three_value_axes_total: 101
+two_value_axes_total: 27
 notes:
 - All sweepable full_144v axes are included once across the 17 phases.
 - 'Known no-op axes are excluded from sweep output (currently: trade.use_bbo_for_fills).'
@@ -17,9 +17,9 @@ notes:
 phases:
 - id: p01_144v
   file: p01_144v.yaml
-  axis_count: 8
-  combo: 5832
-  two_value_axes: 1
+  axis_count: 7
+  combo: 2916
+  two_value_axes: 0
   three_value_axes: 6
   four_value_axes: 1
   paths:
@@ -27,7 +27,6 @@ phases:
   - thresholds.entry.btc_adx_override
   - thresholds.ranging.rsi_high
   - trade.adx_sizing_min_mult
-  - trade.enable_dynamic_leverage
   - trade.max_adds_per_symbol
   - trade.rsi_exit_lb_lo_profit_low_conf
   - trade.tsme_min_profit_atr
@@ -166,15 +165,14 @@ phases:
   - trade.smart_exit_adx_exhaustion_lt
 - id: p10_144v
   file: p10_144v.yaml
-  axis_count: 9
-  combo: 7776
-  two_value_axes: 3
+  axis_count: 8
+  combo: 3888
+  two_value_axes: 2
   three_value_axes: 5
   four_value_axes: 1
   paths:
   - filters.require_macro_alignment
   - indicators.stoch_rsi_window
-  - thresholds.entry.ave_enabled
   - thresholds.entry.slow_drift_min_adx
   - thresholds.tp_and_momentum.rsi_short_weak
   - trade.exit_cooldown_s
@@ -216,10 +214,10 @@ phases:
   - trade.tp_partial_min_notional_usd
 - id: p13_144v
   file: p13_144v.yaml
-  axis_count: 8
-  combo: 4374
+  axis_count: 7
+  combo: 1458
   two_value_axes: 1
-  three_value_axes: 7
+  three_value_axes: 6
   four_value_axes: 0
   paths:
   - indicators.ema_macro_window
@@ -227,7 +225,6 @@ phases:
   - thresholds.entry.pullback_require_macd_sign
   - thresholds.entry.slow_drift_rsi_short_max
   - trade.add_cooldown_minutes
-  - trade.leverage
   - trade.reentry_cooldown_min_mins
   - trade.tp_partial_pct
 - id: p14_144v

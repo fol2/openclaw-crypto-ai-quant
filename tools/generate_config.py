@@ -88,24 +88,6 @@ STRING_FIELDS = {
 }
 
 
-def _round_half_away_from_zero(x: float) -> int:
-    """Round half values away from zero.
-
-    Python's built-in round() uses bankers rounding (e.g. round(0.5) == 0).
-    For config coercion we prefer the more intuitive behaviour:
-    - 0.5 -> 1
-    - -0.5 -> -1
-    """
-    xf = float(x)
-    if xf >= 0:
-        return int(math.floor(xf + 0.5))
-    return int(math.ceil(xf - 0.5))
-
-
-def _clamp_int(v: int, lo: int, hi: int) -> int:
-    return int(min(int(hi), max(int(lo), int(v))))
-
-
 def _trunc_towards_zero(x: float) -> int:
     return int(float(x))
 
@@ -183,15 +165,9 @@ def coerce_value(param_name: str, raw_value):
         except Exception:
             return int(raw_value)
 
-    # Default: float (round to 6 significant digits for readability)
+    # Default: float with zero mutation to preserve sweep semantics.
     if isinstance(raw_value, (int, float)):
-        val = float(raw_value)
-        if val == 0:
-            return 0.0
-        if abs(val) >= 1:
-            return round(val, 6)
-        digits = 6 - int(math.floor(math.log10(abs(val)))) - 1
-        return round(val, max(0, digits))
+        return float(raw_value)
     return raw_value
 
 
@@ -403,27 +379,18 @@ def main():
         "--strict-replay",
         action="store_true",
         help=(
-            "Preserve sweep values for deterministic replay pairing. "
-            "Disables deployment safety clamps (leverage rounding, "
-            "min-notional floor, leverage_max_cap override)."
+            "Deprecated no-op flag kept for CLI compatibility. "
+            "generate_config now always runs in zero-mutation mode."
         ),
     )
     parser.add_argument(
         "--allow-unsafe-strict-replay",
         action="store_true",
         help=(
-            "Required with --strict-replay. Acknowledges unsafe output mode "
-            "for replay-only parity workflows."
+            "Deprecated no-op flag kept for CLI compatibility."
         ),
     )
     args = parser.parse_args()
-
-    if args.strict_replay and not args.allow_unsafe_strict_replay:
-        print(
-            "[generate] Error: --strict-replay requires --allow-unsafe-strict-replay.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
 
     # Load & sort results
     results = load_sweep_results(args.sweep_results, sort_by=args.sort_by,
@@ -478,36 +445,11 @@ def main():
         _set_nested(base_data, path, coerced)
         applied += 1
 
-    # --- Post-override validation & clamping ---
-    if args.strict_replay:
+    if args.strict_replay or args.allow_unsafe_strict_replay:
         print(
-            "[generate] strict replay mode enabled: deployment safety clamps disabled.",
+            "[generate] Note: --strict-replay flags are deprecated; zero-mutation is now default.",
             file=sys.stderr,
         )
-    else:
-        # Force leverage_max_cap to 0 (disabled) — individual leverage tiers should
-        # be respected without an artificial hard cap overriding them.
-        _set_nested(base_data, "global.trade.leverage_max_cap", 0.0)
-
-        # Clamp min_notional_usd to Hyperliquid's $10 hard minimum.
-        _HL_MIN_NOTIONAL = 10.0
-        for npath in ("global.trade.min_notional_usd", "global.trade.tp_partial_min_notional_usd"):
-            val = _get_nested(base_data, npath, _HL_MIN_NOTIONAL)
-            if isinstance(val, (int, float)) and val < _HL_MIN_NOTIONAL:
-                print(f"⚠️  {npath}={val} below exchange minimum — clamped to ${_HL_MIN_NOTIONAL:.0f}",
-                      file=sys.stderr)
-                _set_nested(base_data, npath, _HL_MIN_NOTIONAL)
-
-        # Clamp leverage values to integers in [1, 10].
-        for lpath in ("global.trade.leverage", "global.trade.leverage_low",
-                       "global.trade.leverage_medium", "global.trade.leverage_high"):
-            val = _get_nested(base_data, lpath, None)
-            if isinstance(val, (int, float)):
-                clamped = _clamp_int(_round_half_away_from_zero(val), 1, 10)
-                if clamped != val:
-                    print(f"⚠️  {lpath}={val} clamped to integer {clamped}",
-                          file=sys.stderr)
-                _set_nested(base_data, lpath, clamped)
 
     # Update header comment
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
