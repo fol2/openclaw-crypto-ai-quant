@@ -1456,6 +1456,41 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             return {}
 
+    resume_run_args: dict[str, Any] = {}
+    if bool(args.resume):
+        _resume_meta_path: Path | None = None
+        try:
+            _registry_db = default_registry_db_path(artifacts_root=artifacts_dir)
+            _run_dir = _query_run_dir(registry_db=_registry_db, run_id=run_id)
+            _resume_meta_path = (_run_dir / "run_metadata.json").resolve()
+        except Exception:
+            _resume_meta_path = None
+
+        # Registry may be stale/missing; fallback to deterministic artifacts lookup.
+        if _resume_meta_path is None or not _resume_meta_path.is_file():
+            probe_paths: list[Path] = [
+                (artifacts_dir / run_id / "run_metadata.json").resolve(),
+                (artifacts_dir / f"run_{run_id}" / "run_metadata.json").resolve(),
+            ]
+            try:
+                dated_dirs = sorted([p for p in artifacts_dir.iterdir() if p.is_dir() and p.name.count("-") == 2], reverse=True)
+            except Exception:
+                dated_dirs = []
+            for d in dated_dirs:
+                probe_paths.append((d / run_id / "run_metadata.json").resolve())
+                probe_paths.append((d / f"run_{run_id}" / "run_metadata.json").resolve())
+            for candidate in probe_paths:
+                if candidate.is_file():
+                    _resume_meta_path = candidate
+                    break
+
+        if _resume_meta_path is not None and _resume_meta_path.is_file():
+            _resume_meta = _read_metadata(_resume_meta_path)
+            if isinstance(_resume_meta.get("orig_args"), dict):
+                resume_run_args = dict(_resume_meta.get("orig_args") or {})
+            elif isinstance(_resume_meta.get("args"), dict):
+                resume_run_args = dict(_resume_meta.get("args") or {})
+
     factory_argv: list[str] = [
         "--run-id",
         run_id,
@@ -1482,6 +1517,28 @@ def main(argv: list[str] | None = None) -> int:
     ]
     if bool(args.resume):
         factory_argv.append("--resume")
+        # Rehydrate shortlist knobs from the resumed run so factory_run --resume
+        # guard keys remain reproducible across default changes.
+        if "shortlist_modes" in resume_run_args and resume_run_args.get("shortlist_modes") is not None:
+            factory_argv += ["--shortlist-modes", str(resume_run_args.get("shortlist_modes") or "")]
+        if "shortlist_per_mode" in resume_run_args and resume_run_args.get("shortlist_per_mode") is not None:
+            try:
+                _shortlist_per_mode = int(resume_run_args.get("shortlist_per_mode"))
+                factory_argv += ["--shortlist-per-mode", str(_shortlist_per_mode)]
+            except Exception:
+                pass
+        if "shortlist_max_rank" in resume_run_args and resume_run_args.get("shortlist_max_rank") is not None:
+            try:
+                _shortlist_max_rank = int(resume_run_args.get("shortlist_max_rank"))
+                factory_argv += ["--shortlist-max-rank", str(_shortlist_max_rank)]
+            except Exception:
+                pass
+        if "shortlist_top_pnl" in resume_run_args and resume_run_args.get("shortlist_top_pnl") is not None:
+            try:
+                _shortlist_top_pnl = int(resume_run_args.get("shortlist_top_pnl"))
+                factory_argv += ["--shortlist-top-pnl", str(_shortlist_top_pnl)]
+            except Exception:
+                pass
     if bool(run_with_gpu):
         factory_argv.append("--gpu")
     if bool(run_with_tpe):
