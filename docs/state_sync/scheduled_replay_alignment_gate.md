@@ -70,3 +70,13 @@ When a scheduled run fails with `live_run_fingerprint_drift_within_window`:
 1. Prefer a narrower replay window that stays within one live run fingerprint.
 2. Re-run after the live daemon has remained stable for the full target window.
 3. Use an override only for emergency diagnostics, not for release promotion.
+
+## Execution-Model Assumptions in Replay Manifests
+
+`replay_bundle_manifest.json` now includes `alignment_assumptions.bbo_fill_model`.
+
+- `enabled_any=true` means one or more strategy scopes use `trade.use_bbo_for_fills`.
+- Live/paper may then execute entries/exits with BBO-derived fill prices, while current backtester replay remains candle-price based.
+- In that mode, price/PnL drift can be an expected model residual and must be labelled explicitly in audit triage.
+
+Do not treat this as an unknown deterministic logic bug unless BBO execution is also simulated in replay.
