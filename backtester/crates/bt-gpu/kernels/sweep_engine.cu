@@ -845,6 +845,10 @@ __device__ void apply_partial_close(GpuComboState* state, unsigned int sym, cons
     state->positions[sym].kernel_margin_used =
         quantize12(state->positions[sym].kernel_margin_used - kernel_margin_released);
     state->positions[sym].tp1_taken = 1u;
+    // CPU parity: partial exits also refresh PESC cooldown state.
+    state->pesc_close_time_sec[sym] = snap.t_sec;
+    state->pesc_close_type[sym] = pos.active;
+    state->pesc_close_reason[sym] = PESC_OTHER;
     state->last_exit_attempt_sec[sym] = snap.t_sec;
     // CPU semantics: trailing SL is NOT modified on partial close.
     // compute_trailing() continues ratcheting on subsequent bars.
