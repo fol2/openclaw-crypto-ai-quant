@@ -1367,11 +1367,16 @@ def _attach_replay_metadata(
             "replay_equivalence_status",
             "replay_equivalence_mode",
             "replay_equivalence_strict",
+            "replay_equivalence_auto_seed",
+            "replay_equivalence_seed_mode",
+            "replay_equivalence_seed_reason",
             "replay_equivalence_count",
             "replay_equivalence_error",
             "replay_equivalence_report_path",
             "replay_equivalence_diffs",
             "replay_equivalence_failure_code",
+            "replay_equivalence_contract_fingerprint",
+            "replay_equivalence_baseline_contract_fingerprint",
         ]:
             if proof_field in summary:
                 entry[proof_field] = summary[proof_field]
@@ -1386,6 +1391,134 @@ def _replay_equivalence_env_var(env_name: str, mode: str) -> str | None:
         return raw
     raw = os.getenv(f"AI_QUANT_REPLAY_EQUIVALENCE_{env_name}", "").strip()
     return raw or None
+
+
+_REPLAY_EQUIVALENCE_CONTRACT_SCHEMA_VERSION = 1
+
+
+def _replay_equivalence_auto_seed(*, mode: str) -> bool:
+    mode = _normalise_replay_equivalence_mode(mode)
+    scoped = _env_bool_optional(f"AI_QUANT_REPLAY_EQUIVALENCE_{mode.upper()}_AUTO_SEED")
+    if scoped is not None:
+        return scoped
+    return _env_bool("AI_QUANT_REPLAY_EQUIVALENCE_AUTO_SEED", True)
+
+
+def _coerce_int(value: Any, default: int = 0) -> int:
+    try:
+        if isinstance(value, bool):
+            return int(value)
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _coerce_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if isinstance(value, bool):
+            return float(int(value))
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        raw = value.strip().lower()
+        if raw in {"1", "true", "yes", "y", "on"}:
+            return True
+        if raw in {"0", "false", "no", "n", "off"}:
+            return False
+    return bool(default)
+
+
+def _normalise_shortlist_modes_list(raw: Any) -> list[str]:
+    if isinstance(raw, (list, tuple)):
+        parts = [str(x).strip().lower() for x in raw]
+    else:
+        parts = [p.strip().lower() for p in str(raw or "").split(",")]
+    out: list[str] = []
+    seen: set[str] = set()
+    for p in parts:
+        if not p or p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+    return out
+
+
+def _build_replay_equivalence_contract_payload(*, args_obj: dict[str, Any], mode: str) -> dict[str, Any]:
+    raw_sweep_spec = str(args_obj.get("sweep_spec", "") or "").strip()
+    if raw_sweep_spec:
+        resolved = _resolve_path_for_backtester(raw_sweep_spec)
+        sweep_spec_fp = _file_fingerprint(Path(resolved) if resolved else (AIQ_ROOT / raw_sweep_spec))
+    else:
+        sweep_spec_fp = {"path": "", "exists": False}
+    sweep_spec_exists = bool(sweep_spec_fp.get("exists", False))
+    version_file = AIQ_ROOT / "VERSION"
+    version_text = ""
+    try:
+        if version_file.exists():
+            version_text = str(version_file.read_text(encoding="utf-8").strip() or "")
+    except Exception:
+        version_text = ""
+    factory_fp = _file_fingerprint(AIQ_ROOT / "factory_run.py")
+    return {
+        "schema_version": int(_REPLAY_EQUIVALENCE_CONTRACT_SCHEMA_VERSION),
+        "mode": _normalise_replay_equivalence_mode(mode),
+        "profile": str(args_obj.get("profile", "") or ""),
+        "interval": str(args_obj.get("interval", "") or ""),
+        "sweep_spec_sha256": str(sweep_spec_fp.get("sha256", "") if sweep_spec_exists else ""),
+        "sweep_spec_size_bytes": int(_coerce_int(sweep_spec_fp.get("size_bytes", 0), 0) if sweep_spec_exists else 0),
+        "gpu": bool(_coerce_bool(args_obj.get("gpu", False))),
+        "tpe": bool(_coerce_bool(args_obj.get("tpe", False))),
+        "tpe_trials": int(_coerce_int(args_obj.get("tpe_trials", 0), 0)),
+        "tpe_batch": int(_coerce_int(args_obj.get("tpe_batch", 0), 0)),
+        "tpe_seed": int(_coerce_int(args_obj.get("tpe_seed", 0), 0)),
+        "shortlist_modes": _normalise_shortlist_modes_list(args_obj.get("shortlist_modes", "")),
+        "shortlist_per_mode": int(_coerce_int(args_obj.get("shortlist_per_mode", 0), 0)),
+        "shortlist_max_rank": int(_coerce_int(args_obj.get("shortlist_max_rank", 0), 0)),
+        "shortlist_top_pnl": int(_coerce_int(args_obj.get("shortlist_top_pnl", 1000), 1000)),
+        "candidate_min_trades": int(_coerce_int(args_obj.get("candidate_min_trades", 0), 0)),
+        "num_candidates": int(_coerce_int(args_obj.get("num_candidates", 0), 0)),
+        "sort_by": str(args_obj.get("sort_by", "") or ""),
+        "top_n": int(_coerce_int(args_obj.get("top_n", 0), 0)),
+        "walk_forward": bool(_coerce_bool(args_obj.get("walk_forward", False))),
+        "slippage_stress": bool(_coerce_bool(args_obj.get("slippage_stress", False))),
+        "concentration_checks": bool(_coerce_bool(args_obj.get("concentration_checks", False))),
+        "sensitivity_checks": bool(_coerce_bool(args_obj.get("sensitivity_checks", False))),
+        "monte_carlo": bool(_coerce_bool(args_obj.get("monte_carlo", False))),
+        "score_min_trades": int(_coerce_int(args_obj.get("score_min_trades", 0), 0)),
+        "score_trades_penalty_weight": float(_coerce_float(args_obj.get("score_trades_penalty_weight", 0.0), 0.0)),
+        "promote_count": int(_coerce_int(args_obj.get("promote_count", 0), 0)),
+        "factory_run_sha256": str(factory_fp.get("sha256", "") if bool(factory_fp.get("exists", False)) else ""),
+        "version": version_text,
+    }
+
+
+def _build_replay_equivalence_contract(*, args_obj: dict[str, Any], mode: str) -> dict[str, Any]:
+    payload = _build_replay_equivalence_contract_payload(args_obj=args_obj, mode=mode)
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+    return {
+        "schema_version": int(_REPLAY_EQUIVALENCE_CONTRACT_SCHEMA_VERSION),
+        "mode": _normalise_replay_equivalence_mode(mode),
+        "fingerprint": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        "payload": payload,
+    }
+
+
+def _replay_equivalence_contract_from_meta(meta: dict[str, Any], *, mode: str) -> dict[str, Any] | None:
+    existing = meta.get("replay_equivalence_contract")
+    if isinstance(existing, dict) and str(existing.get("fingerprint", "")).strip():
+        return existing
+    args_obj = meta.get("args")
+    if not isinstance(args_obj, dict):
+        return None
+    return _build_replay_equivalence_contract(args_obj=args_obj, mode=mode)
 
 
 def _find_run_dir(path: Path) -> Path | None:
@@ -1563,6 +1696,22 @@ def _replay_equivalence_failure_code(status: str) -> str:
     if status == "fail":
         return "mismatch"
     return status
+
+
+def _baseline_replay_equivalence_contract(*, baseline_path: Path, mode: str) -> dict[str, Any] | None:
+    run_dir = _find_run_dir(baseline_path)
+    if run_dir is None:
+        return None
+    meta_path = run_dir / "run_metadata.json"
+    if not meta_path.exists():
+        return None
+    try:
+        loaded = _load_json(meta_path)
+    except Exception:
+        return None
+    if not isinstance(loaded, dict):
+        return None
+    return _replay_equivalence_contract_from_meta(loaded, mode=mode)
 
 
 def _validate_candidate_schema_row(row: Any) -> tuple[bool, list[str]]:
@@ -1863,11 +2012,17 @@ def _run_replay_equivalence_check(
     *,
     right_report: Path,
     summary: dict[str, Any],
+    current_contract: dict[str, Any] | None = None,
 ) -> bool:
     mode = _replay_equivalence_mode()
     summary["replay_equivalence_mode"] = mode
     strict = _replay_equivalence_strict(mode=mode)
     summary["replay_equivalence_strict"] = strict
+    auto_seed = _replay_equivalence_auto_seed(mode=mode)
+    summary["replay_equivalence_auto_seed"] = bool(auto_seed)
+    current_fp = str((current_contract or {}).get("fingerprint", "")).strip()
+    if current_fp:
+        summary["replay_equivalence_contract_fingerprint"] = current_fp
 
     baseline = _replay_equivalence_baseline_path(mode=mode)
     if baseline is not None:
@@ -1877,12 +2032,20 @@ def _run_replay_equivalence_check(
             right_report=right_report,
             summary=summary,
         )
+    baseline_contract = _baseline_replay_equivalence_contract(baseline_path=baseline, mode=mode) if baseline is not None else None
+    baseline_fp = str((baseline_contract or {}).get("fingerprint", "")).strip()
+    if baseline_fp:
+        summary["replay_equivalence_baseline_contract_fingerprint"] = baseline_fp
     if baseline is None:
         summary["replay_equivalence_status"] = "not_run"
         summary["replay_equivalence_failure_code"] = _replay_equivalence_failure_code("not_run")
         summary["replay_equivalence_error"] = "AI_QUANT_REPLAY_EQUIVALENCE_BASELINE not configured"
         summary["replay_equivalence_diffs"] = []
         summary["replay_equivalence_count"] = 0
+        summary["replay_equivalence_seed_mode"] = bool(auto_seed)
+        if auto_seed:
+            summary["replay_equivalence_seed_reason"] = "baseline_not_configured"
+            return True
         return not strict
 
     if not baseline.exists():
@@ -1891,6 +2054,24 @@ def _run_replay_equivalence_check(
         summary["replay_equivalence_error"] = f"missing baseline report: {baseline}"
         summary["replay_equivalence_diffs"] = []
         summary["replay_equivalence_count"] = 0
+        summary["replay_equivalence_seed_mode"] = bool(auto_seed)
+        if auto_seed:
+            summary["replay_equivalence_seed_reason"] = "baseline_missing"
+            return True
+        return not strict
+
+    if current_fp and baseline_fp and current_fp != baseline_fp:
+        summary["replay_equivalence_status"] = "baseline_stale"
+        summary["replay_equivalence_failure_code"] = _replay_equivalence_failure_code("baseline_stale")
+        summary["replay_equivalence_error"] = (
+            f"baseline contract fingerprint mismatch: current={current_fp[:12]} baseline={baseline_fp[:12]}"
+        )
+        summary["replay_equivalence_diffs"] = []
+        summary["replay_equivalence_count"] = 0
+        summary["replay_equivalence_seed_mode"] = bool(auto_seed)
+        if auto_seed:
+            summary["replay_equivalence_seed_reason"] = "baseline_stale"
+            return True
         return not strict
 
     try:
@@ -1927,6 +2108,8 @@ def _run_replay_equivalence_check(
         "summary": rep,
         "mode": mode,
         "strict": strict,
+        "contract_fingerprint": current_fp,
+        "baseline_contract_fingerprint": baseline_fp,
     }
     report_path.write_text(json.dumps(report_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -1935,8 +2118,57 @@ def _run_replay_equivalence_check(
     summary["replay_equivalence_failure_code"] = _replay_equivalence_failure_code(summary["replay_equivalence_status"])
     summary["replay_equivalence_diffs"] = diffs
     summary["replay_equivalence_count"] = len(diffs)
+    summary["replay_equivalence_seed_mode"] = False
 
     return ok or not strict
+
+
+def _write_replay_equivalence_baseline_manifest(
+    *,
+    run_dir: Path,
+    meta: dict[str, Any],
+    replay_reports: list[dict[str, Any]],
+) -> Path | None:
+    contract = meta.get("replay_equivalence_contract")
+    if not isinstance(contract, dict):
+        return None
+    contract_fp = str(contract.get("fingerprint", "")).strip()
+    if not contract_fp:
+        return None
+
+    rows: list[dict[str, Any]] = []
+    for rep in replay_reports:
+        if not isinstance(rep, dict):
+            continue
+        cfg_id = str(rep.get("config_id", "")).strip()
+        replay_path = str(rep.get("path", "") or rep.get("replay_report_path", "")).strip()
+        if not cfg_id or not replay_path:
+            continue
+        rows.append(
+            {
+                "config_id": cfg_id,
+                "replay_report_path": replay_path,
+                "replay_equivalence_status": str(rep.get("replay_equivalence_status", "")).strip().lower(),
+                "seed_mode": bool(rep.get("replay_equivalence_seed_mode", False)),
+            }
+        )
+
+    payload = {
+        "schema_version": 1,
+        "generated_at_ms": int(time.time() * 1000),
+        "run_id": str(meta.get("run_id", "")).strip(),
+        "run_dir": str(run_dir),
+        "contract": contract,
+        "candidate_count": len(rows),
+        "seed_mode_count": int(sum(1 for row in rows if bool(row.get("seed_mode", False)))),
+        "candidates": rows,
+    }
+    out_path = run_dir / "replay_equivalence_baseline_manifest.json"
+    _write_json(out_path, payload)
+    meta["replay_equivalence_baseline_manifest"] = str(out_path)
+    meta["replay_equivalence_baseline_candidate_count"] = int(payload["candidate_count"])
+    meta["replay_equivalence_seed_mode_count"] = int(payload["seed_mode_count"])
+    return out_path
 
 
 def _render_ranked_report_md(items: list[dict[str, Any]]) -> str:
@@ -2274,6 +2506,10 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
             "applied_to_replay": bool(replay_uses_funding),
             "reason": "enabled_cpu_and_gpu_settlement_model",
         }
+    replay_mode = _replay_equivalence_mode()
+    replay_contract = _replay_equivalence_contract_from_meta(meta, mode=replay_mode)
+    if replay_contract is not None:
+        meta["replay_equivalence_contract"] = replay_contract
 
     bt_cmd = _resolve_backtester_cmd()
     _capture_repro_metadata(run_dir=run_dir, artifacts_root=artifacts_root, bt_cmd=bt_cmd, meta=meta)
@@ -2390,7 +2626,13 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
         summary = _summarise_replay_report(out_json)
         summary["config_path"] = str(cfg_path)
         summary["config_id"] = candidate_config_ids[str(cfg_path)]
-        if not _run_replay_equivalence_check(right_report=out_json, summary=summary):
+        if not _run_replay_equivalence_check(
+            right_report=out_json,
+            summary=summary,
+            current_contract=meta.get("replay_equivalence_contract")
+            if isinstance(meta.get("replay_equivalence_contract"), dict)
+            else None,
+        ):
             _write_json(run_dir / "run_metadata.json", meta)
             return 1
         replay_entry = entry_by_path.get(str(cfg_path))
@@ -2402,6 +2644,12 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
             entry["replay_report_path"] = str(out_json)
             entry["replay_stdout_path"] = str(replay_res.stdout_path or "")
             entry["replay_stderr_path"] = str(replay_res.stderr_path or "")
+
+    _write_replay_equivalence_baseline_manifest(
+        run_dir=run_dir,
+        meta=meta,
+        replay_reports=replay_reports,
+    )
 
     # ------------------------------------------------------------------
     # Reports + registry
@@ -2582,6 +2830,11 @@ def main(argv: list[str] | None = None) -> int:
                 "args": args_meta,
                 "steps": [],
             }
+
+        replay_mode = _replay_equivalence_mode()
+        replay_contract = _replay_equivalence_contract_from_meta(meta, mode=replay_mode)
+        if replay_contract is not None:
+            meta["replay_equivalence_contract"] = replay_contract
 
         # Resolve backtester cmd once and persist early metadata.
         bt_cmd = _resolve_backtester_cmd()
@@ -3401,7 +3654,13 @@ def main(argv: list[str] | None = None) -> int:
             summary = _summarise_replay_report(out_json)
             summary["config_path"] = str(cfg_path)
             summary["config_id"] = candidate_config_ids[str(cfg_path)]
-            if not _run_replay_equivalence_check(right_report=out_json, summary=summary):
+            if not _run_replay_equivalence_check(
+                right_report=out_json,
+                summary=summary,
+                current_contract=meta.get("replay_equivalence_contract")
+                if isinstance(meta.get("replay_equivalence_contract"), dict)
+                else None,
+            ):
                 _write_json(run_dir / "run_metadata.json", meta)
                 return 1
             replay_entry = entry_by_path.get(str(cfg_path))
@@ -3806,7 +4065,13 @@ def main(argv: list[str] | None = None) -> int:
                 summary["score_v1_components"] = score_obj.get("components", {})
     
             replay_reports.append(summary)
-    
+
+        _write_replay_equivalence_baseline_manifest(
+            run_dir=run_dir,
+            meta=meta,
+            replay_reports=replay_reports,
+        )
+
         # ------------------------------------------------------------------
         # 5) Final report
         # ------------------------------------------------------------------
