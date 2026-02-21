@@ -1008,11 +1008,17 @@ def _lookup_config_yaml_text(*, registry_db: Path, config_id: str) -> str:
         con.close()
 
 
-def _latest_paper_deploy_event_for_service(*, artifacts_dir: Path, service: str) -> dict[str, Any] | None:
+def _latest_paper_deploy_event_for_service(
+    *,
+    artifacts_dir: Path,
+    service: str,
+    before_epoch_s: float | None = None,
+) -> dict[str, Any] | None:
     root = (Path(artifacts_dir) / "deployments" / "paper").expanduser().resolve()
     if not root.exists():
         return None
     events: list[dict[str, Any]] = []
+    cutoff = float(before_epoch_s) if before_epoch_s is not None else None
     for ev_path in root.glob("**/deploy_event.json"):
         try:
             ev = json.loads(ev_path.read_text(encoding="utf-8"))
@@ -1026,6 +1032,8 @@ def _latest_paper_deploy_event_for_service(*, artifacts_dir: Path, service: str)
             continue
         ts = _parse_iso_to_epoch_s(str(ev.get("ts_utc", "") or ""))
         if ts is None:
+            continue
+        if cutoff is not None and float(ts) > cutoff:
             continue
         cfg = str(((ev.get("what") or {}).get("config_id") or "")).strip()
         events.append(
@@ -1043,7 +1051,13 @@ def _latest_paper_deploy_event_for_service(*, artifacts_dir: Path, service: str)
     return events[-1]
 
 
-def _stable_promotion_since_s(*, artifacts_dir: Path, service: str, config_id: str) -> float | None:
+def _stable_promotion_since_s(
+    *,
+    artifacts_dir: Path,
+    service: str,
+    config_id: str,
+    before_epoch_s: float | None = None,
+) -> float | None:
     """Return a stable gate start for the latest contiguous deploy segment of service+config_id."""
     cfg = str(config_id or "").strip()
     if not cfg:
@@ -1053,6 +1067,7 @@ def _stable_promotion_since_s(*, artifacts_dir: Path, service: str, config_id: s
         return None
 
     events: list[dict[str, Any]] = []
+    cutoff = float(before_epoch_s) if before_epoch_s is not None else None
     for ev_path in root.glob("**/deploy_event.json"):
         try:
             ev = json.loads(ev_path.read_text(encoding="utf-8"))
@@ -1067,6 +1082,8 @@ def _stable_promotion_since_s(*, artifacts_dir: Path, service: str, config_id: s
         cfg_id = str(((ev.get("what") or {}).get("config_id") or "")).strip()
         ts = _parse_iso_to_epoch_s(str(ev.get("ts_utc", "") or ""))
         if ts is None:
+            continue
+        if cutoff is not None and float(ts) > cutoff:
             continue
         events.append(
             {
@@ -1684,6 +1701,10 @@ def main(argv: list[str] | None = None) -> int:
         "deployed": False,
         "deployments": [],
     }
+    # Keep a stable promotion reference point so promotion gates evaluate the incumbent
+    # paper windows before this cycle's deploy writes new deploy_event rows.
+    promotion_reference_epoch_s = float(time.time())
+    selection["promotion_reference_epoch_s"] = float(promotion_reference_epoch_s)
     (run_dir / "reports" / "selection.json").write_text(
         json.dumps(selection, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
@@ -1888,7 +1909,9 @@ def main(argv: list[str] | None = None) -> int:
             gate_rows: list[dict[str, Any]] = []
             for target in deploy_targets:
                 latest = _latest_paper_deploy_event_for_service(
-                    artifacts_dir=artifacts_dir, service=str(target.service)
+                    artifacts_dir=artifacts_dir,
+                    service=str(target.service),
+                    before_epoch_s=promotion_reference_epoch_s,
                 )
                 if latest is None:
                     gate_rows.append(
@@ -1908,6 +1931,7 @@ def main(argv: list[str] | None = None) -> int:
                     artifacts_dir=artifacts_dir,
                     service=str(target.service),
                     config_id=config_id,
+                    before_epoch_s=promotion_reference_epoch_s,
                 )
                 since_s = stable_since_s if stable_since_s is not None else deploy_since_s
                 paper_db = _paper_db_for_service(str(target.service), explicit_db)
@@ -2006,7 +2030,9 @@ def main(argv: list[str] | None = None) -> int:
                 "deploy_event_path": "",
             }
             incumbent_latest = _latest_paper_deploy_event_for_service(
-                artifacts_dir=artifacts_dir, service=str(live_service)
+                artifacts_dir=artifacts_dir,
+                service=str(live_service),
+                before_epoch_s=promotion_reference_epoch_s,
             )
             incumbent_since_s: float | None = None
             incumbent_cfg_id = str(live_prev_cfg or "").strip()
@@ -2023,6 +2049,7 @@ def main(argv: list[str] | None = None) -> int:
                     artifacts_dir=artifacts_dir,
                     service=str(live_service),
                     config_id=str(incumbent_cfg_id),
+                    before_epoch_s=promotion_reference_epoch_s,
                 )
                 if incumbent_stable_since_s is not None:
                     incumbent_since_s = float(incumbent_stable_since_s)
