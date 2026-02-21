@@ -17,6 +17,7 @@
 //   results    -- GpuResult*                [num_combos]  (read-write)
 
 #include <cstdint>
+#include <cmath>
 
 // Bounds-checked array access macro (H10: prevent out-of-bounds GPU reads)
 #define SAFE_IDX(arr, idx, max_idx, fallback) \
@@ -280,7 +281,12 @@ __device__ float get_taker_fee_rate(const GpuParams* params) {
 
 __device__ __forceinline__ double quantize12(double value) {
     const double q = 1000000000000.0;
-    return nearbyint(value * q) / q;
+    // CPU parity: Rust f64::round rounds half away from zero.
+    // C/CUDA nearbyint() uses the current rounding mode (typically bankers),
+    // which can diverge at half-quantum boundaries.
+    double scaled = value * q;
+    double rounded = (scaled >= 0.0) ? floor(scaled + 0.5) : ceil(scaled - 0.5);
+    return rounded / q;
 }
 
 __device__ __forceinline__ double resolve_main_close(
