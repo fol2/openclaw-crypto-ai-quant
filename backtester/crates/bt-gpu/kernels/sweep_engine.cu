@@ -305,16 +305,11 @@ __device__ __forceinline__ double resolve_mark_price_for_funding(
     unsigned int sym,
     double fallback_price
 ) {
-    unsigned int probe = bar;
-    while (true) {
-        const GpuSnapshot& s = snapshots[cfg->snapshot_offset + probe * ns + sym];
-        if (s.valid != 0u) {
-            return resolve_main_close(main_candles, probe, ns, sym, s);
-        }
-        if (probe == 0u) { break; }
-        probe -= 1u;
-    }
-    return fallback_price;
+    (void)fallback_price;
+    // CPU parity: funding mark price resolves to the latest known close.
+    // With missing-bar carry-forward snapshots, we can resolve this in O(1).
+    const GpuSnapshot& s = snapshots[cfg->snapshot_offset + bar * ns + sym];
+    return resolve_main_close(main_candles, bar, ns, sym, s);
 }
 
 __device__ double profit_atr(const GpuPosition& pos, double price) {
@@ -795,7 +790,13 @@ __device__ void apply_partial_close(GpuComboState* state, unsigned int sym, cons
     const GpuPosition& pos = state->positions[sym];
     if (pos.active == POS_EMPTY) { return; }
 
-    double exit_size = (double)pos.size * (double)pct;
+    // CPU parity: bt-core/accounting::build_partial_close_plan quantizes the
+    // closed size before applying the fraction, then derives close_frac from
+    // that quantised closed size.
+    double frac = fmin(fmax((double)pct, 0.0), 1.0);
+    double exit_size = quantize12((double)pos.size * frac);
+    if (exit_size <= 0.0) { return; }
+    if (exit_size > (double)pos.size) { exit_size = (double)pos.size; }
     (void)slippage_bps;
     double fill_price = quantize12(market_close
                                    * ((pos.active == POS_LONG)
@@ -841,7 +842,7 @@ __device__ void apply_partial_close(GpuComboState* state, unsigned int sym, cons
 
     // Reduce position
     state->positions[sym].size -= exit_size;
-    state->positions[sym].margin_used *= (1.0 - (double)pct);
+    state->positions[sym].margin_used *= (1.0 - close_frac);
     state->positions[sym].kernel_margin_used =
         quantize12(state->positions[sym].kernel_margin_used - kernel_margin_released);
     state->positions[sym].tp1_taken = 1u;
@@ -1108,10 +1109,10 @@ extern "C" __global__ void sweep_engine_kernel(
             for (unsigned int eq_s = 0u; eq_s < ns; eq_s++) {
                 if (state.positions[eq_s].active != POS_EMPTY) {
                     const GpuSnapshot& eq_snap = snapshots[cfg.snapshot_offset + bar * ns + eq_s];
-                    if (eq_snap.valid != 0u) {
-                        double eq_close = resolve_main_close(main_candles, bar, ns, eq_s, eq_snap);
-                        sub_entry_equity += profit_usd(state.positions[eq_s], eq_close);
-                    }
+                    // CPU parity: unrealised PnL marks to the latest known close even if
+                    // the current (bar, symbol) candle is missing.
+                    double eq_close = resolve_main_close(main_candles, bar, ns, eq_s, eq_snap);
+                    sub_entry_equity += profit_usd(state.positions[eq_s], eq_close);
                 }
             }
             if (sub_entry_equity < 0.0) { sub_entry_equity = 0.0; }
@@ -1732,9 +1733,7 @@ extern "C" __global__ void sweep_engine_kernel(
 
                                 // CPU parity: margin-cap guard for adds
                                 if (cfg.max_total_margin_pct > 0.0f) {
-                                    double max_margin_pct =
-                                        (double)((int)((double)cfg.max_total_margin_pct * 1000000.0 + 0.5))
-                                        / 1000000.0;
+                                    double max_margin_pct = (double)cfg.max_total_margin_pct;
                                     double total_margin = 0.0;
                                     for (unsigned int m = 0u; m < ns; m++) {
                                         if (state.positions[m].active != POS_EMPTY) {
@@ -2038,10 +2037,10 @@ extern "C" __global__ void sweep_engine_kernel(
             for (unsigned int eq_s3 = 0u; eq_s3 < ns; eq_s3++) {
                 if (state.positions[eq_s3].active != POS_EMPTY) {
                     const GpuSnapshot& eq_snap3 = snapshots[cfg.snapshot_offset + bar * ns + eq_s3];
-                    if (eq_snap3.valid != 0u) {
-                        double eq_close3 = resolve_main_close(main_candles, bar, ns, eq_s3, eq_snap3);
-                        main_entry_equity += profit_usd(state.positions[eq_s3], eq_close3);
-                    }
+                    // CPU parity: unrealised PnL marks to the latest known close even if
+                    // the current (bar, symbol) candle is missing.
+                    double eq_close3 = resolve_main_close(main_candles, bar, ns, eq_s3, eq_snap3);
+                    main_entry_equity += profit_usd(state.positions[eq_s3], eq_close3);
                 }
             }
             if (main_entry_equity < 0.0) { main_entry_equity = 0.0; }
@@ -2060,9 +2059,7 @@ extern "C" __global__ void sweep_engine_kernel(
                         total_margin += (double)state.positions[s].margin_used;
                     }
                 }
-                double max_margin_pct =
-                    (double)((int)((double)cfg.max_total_margin_pct * 1000000.0 + 0.5))
-                    / 1000000.0;
+                double max_margin_pct = (double)cfg.max_total_margin_pct;
                 double headroom = main_entry_equity * max_margin_pct - total_margin;
                 if (headroom <= 0.0) { continue; }
 

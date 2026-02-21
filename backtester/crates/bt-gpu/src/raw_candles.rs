@@ -206,13 +206,16 @@ pub fn prepare_raw_candles(candles: &CandleData, symbols: &[String]) -> RawCandl
     let total_slots = num_bars * num_symbols;
     let mut raw = vec![GpuRawCandle::zeroed(); total_slots];
 
-    // Fill: for each (bar, symbol), copy OHLCV or leave zeroed
+    // Fill: for each (bar, symbol), copy OHLCV. If missing, keep OHLCV=0 but
+    // still stamp t_sec to the unified timeline.
     for (bar_idx, &ts) in all_ts.iter().enumerate() {
         for (sym_idx, sym) in symbols.iter().enumerate() {
             let bar = bar_indices
                 .get(sym.as_str())
                 .and_then(|idx| idx.get(&ts))
                 .and_then(|&i| candles.get(sym).and_then(|bars| bars.get(i)));
+
+            let t_sec = to_gpu_t_sec(ts);
 
             if let Some(bar) = bar {
                 raw[bar_idx * num_symbols + sym_idx] = GpuRawCandle {
@@ -221,11 +224,13 @@ pub fn prepare_raw_candles(candles: &CandleData, symbols: &[String]) -> RawCandl
                     low: bar.l,
                     close: bar.c,
                     volume: bar.v,
-                    t_sec: to_gpu_t_sec(ts),
+                    t_sec,
                     _pad: [0; 3],
                 };
+            } else {
+                // Preserve timeline time for missing bars (close=0 still signals "missing").
+                raw[bar_idx * num_symbols + sym_idx].t_sec = t_sec;
             }
-            // else: stays zeroed (close=0 → indicator kernel skips)
         }
     }
 
@@ -404,6 +409,55 @@ pub fn prepare_sub_bar_candles(
 mod tests {
     use super::*;
     use bt_core::candle::{FundingRateData, OhlcvBar};
+
+    #[test]
+    fn prepare_raw_candles_stamps_t_sec_for_missing_bars() {
+        let symbols = vec!["AAA".to_string(), "BBB".to_string()];
+
+        // AAA has a bar at t=1000ms, BBB only at t=2000ms.
+        let mut candles: CandleData = CandleData::default();
+        candles.insert(
+            "AAA".to_string(),
+            vec![OhlcvBar {
+                t: 1_000,
+                t_close: 1_000,
+                o: 1.0,
+                h: 1.0,
+                l: 1.0,
+                c: 1.0,
+                v: 1.0,
+                n: 1,
+            }],
+        );
+        candles.insert(
+            "BBB".to_string(),
+            vec![OhlcvBar {
+                t: 2_000,
+                t_close: 2_000,
+                o: 2.0,
+                h: 2.0,
+                l: 2.0,
+                c: 2.0,
+                v: 2.0,
+                n: 1,
+            }],
+        );
+
+        let out = prepare_raw_candles(&candles, &symbols);
+        assert_eq!(out.num_bars, 2);
+        assert_eq!(out.num_symbols, 2);
+        assert_eq!(out.timestamps, vec![1_000, 2_000]);
+
+        // Missing slot: BBB at bar0 has close=0 but t_sec should still be stamped.
+        let bbb_bar0 = out.candles[0 * out.num_symbols + 1];
+        assert_eq!(bbb_bar0.close, 0.0);
+        assert_eq!(bbb_bar0.t_sec, 1u32);
+
+        // Missing slot: AAA at bar1 has close=0 but t_sec should still be stamped.
+        let aaa_bar1 = out.candles[1 * out.num_symbols + 0];
+        assert_eq!(aaa_bar1.close, 0.0);
+        assert_eq!(aaa_bar1.t_sec, 2u32);
+    }
 
     #[test]
     fn prepare_sub_bars_matches_cpu_exit_windows() {
