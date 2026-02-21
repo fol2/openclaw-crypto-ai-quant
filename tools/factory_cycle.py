@@ -1834,7 +1834,7 @@ def main(argv: list[str] | None = None) -> int:
                     lane_kind="paper candidate lane",
                     previous_cfg=str(prev_cfg_id),
                     next_cfg=str(cand.config_id),
-                    source_note=f"candidate rank {i + 1}/{len(deployable)}",
+                    source_note=f"candidate rank {i + 1}/{len(deploy_targets)}",
                     metrics={
                         "profit_factor": float(cand.profit_factor),
                         "max_drawdown_pct": float(cand.max_drawdown_pct) * 100.0,
