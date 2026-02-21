@@ -101,3 +101,6 @@ sweep_results.jsonl
 
 # Backtester binaries (built locally)
 backtester/dist/
+
+# Cursor IDE local config
+.cursor/
