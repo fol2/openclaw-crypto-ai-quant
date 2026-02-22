@@ -959,6 +959,37 @@ extern "C" __global__ void sweep_engine_kernel(
             // Indicators come from the main bar snapshot (1h resolution)
             // ================================================================
 
+            // CPU SSOT windowing invariant:
+            //   - Exit/entry sub-bar scans are strictly within (bar_ts, next_bar_ts],
+            //     implemented on CPU as a lower-bound search from ts+1ms.
+            //
+            // Some GPU sub-bar buckets can include a candle whose t_sec equals bar_ts.
+            // If we process that candle, we can trigger early exits/partials/entries that
+            // CPU never sees, cascading into extra trades and state-machine divergence.
+            //
+            // Derive bar_ts once per indicator bar (shared across symbols) and enforce
+            // the same strict lower bound in both exit + entry sub-bar loops.
+            unsigned int bar_t_sec = 0u;
+            for (unsigned int ts = 0u; ts < ns; ts++) {
+                unsigned int t = main_candles[bar * ns + ts].t_sec;
+                if (t != 0u) {
+                    bar_t_sec = t;
+                    break;
+                }
+            }
+
+            // Upper bound for CPU-style (bar_ts, next_bar_ts] windowing.
+            unsigned int next_bar_t_sec = 0u;
+            if (bar + 1u < params->num_bars) {
+                for (unsigned int ts = 0u; ts < ns; ts++) {
+                    unsigned int t = main_candles[(bar + 1u) * ns + ts].t_sec;
+                    if (t != 0u) {
+                        next_bar_t_sec = t;
+                        break;
+                    }
+                }
+            }
+
             // ── Sub-bar exits (per symbol, chronological) ───────────────────
             for (unsigned int sym = 0u; sym < ns; sym++) {
                 if (state.positions[sym].active == POS_EMPTY) { continue; }
@@ -977,7 +1008,9 @@ extern "C" __global__ void sweep_engine_kernel(
                     unsigned long long sc_idx = SUB_CANDLE_INDEX(bar, sub_i, max_sub, ns, sym);
                     if (sc_idx >= sub_candles_cap) { continue; }
                     const GpuRawCandle& sc = sub_candles[sc_idx];
-                    if (sc.close <= 0.0f) { continue; }
+                    if (sc.close <= 0.0f || sc.t_sec == 0u) { continue; }
+                    if (bar_t_sec != 0u && sc.t_sec <= bar_t_sec) { continue; }
+                    if (next_bar_t_sec != 0u && sc.t_sec > next_bar_t_sec) { break; }
                     double sub_market_close = (double)sc.close;
 
                     // Build hybrid snapshot for sub-bar exits:
@@ -1072,18 +1105,6 @@ extern "C" __global__ void sweep_engine_kernel(
             for (unsigned int sym = 0u; sym < ns; sym++) {
                 sub_cursor[sym] = 0u;
             }
-
-            unsigned int next_bar_t_sec = 0u;
-            if (bar + 1u < params->num_bars) {
-                for (unsigned int s = 0u; s < ns; s++) {
-                    const GpuRawCandle& next_mc = main_candles[(bar + 1u) * ns + s];
-                    if (next_mc.t_sec != 0u) {
-                        next_bar_t_sec = next_mc.t_sec;
-                        break;
-                    }
-                }
-            }
-
             while (true) {
                 unsigned int tick_ts = 0xFFFFFFFFu;
                 bool has_tick = false;
@@ -1099,8 +1120,13 @@ extern "C" __global__ void sweep_engine_kernel(
                             break;
                         }
                         const GpuRawCandle& probe = sub_candles[probe_idx];
-                        if (probe.close > 0.0f) { break; }
-                        cur += 1u;
+                        if (probe.close <= 0.0f || probe.t_sec == 0u) { cur += 1u; continue; }
+                        if (bar_t_sec != 0u && probe.t_sec <= bar_t_sec) { cur += 1u; continue; }
+                        if (next_bar_t_sec != 0u && probe.t_sec > next_bar_t_sec) {
+                            cur = count;
+                            break;
+                        }
+                        break;
                     }
                     sub_cursor[sym] = cur;
                     if (cur >= count) { continue; }
@@ -1131,7 +1157,7 @@ extern "C" __global__ void sweep_engine_kernel(
                     unsigned long long sc_idx = SUB_CANDLE_INDEX(bar, sub_slot, max_sub, ns, sym);
                     if (sc_idx >= sub_candles_cap) { continue; }
                     const GpuRawCandle& sc = sub_candles[sc_idx];
-                    if (sc.close <= 0.0f) { continue; }
+                    if (sc.close <= 0.0f || sc.t_sec == 0u || (bar_t_sec != 0u && sc.t_sec <= bar_t_sec)) { continue; }
                     if (sc.t_sec != tick_ts) { continue; }
                     unsigned int eval_t_sec = sc.t_sec;
                     if (params->signal_on_candle_close != 0u) {
