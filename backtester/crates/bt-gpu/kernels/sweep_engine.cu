@@ -963,70 +963,12 @@ extern "C" __global__ void sweep_engine_kernel(
             for (unsigned int sym = 0u; sym < ns; sym++) {
                 if (state.positions[sym].active == POS_EMPTY) { continue; }
 
-                const GpuSnapshot& ind_snap = snapshots[cfg.snapshot_offset + bar * ns + sym];
-                if (ind_snap.valid == 0u) { continue; }
-                double ind_market_close = resolve_main_close(main_candles, bar, ns, sym, ind_snap);
-
-                // CPU semantics: always evaluate exits once on the indicator-bar snapshot at `ts`
-                // (using the main bar OHLCV), then scan sub-bars in (ts, next_ts].
-                //
-                // Note: if glitch guard blocks exits on the indicator bar, we skip ALL exit
-                // processing including trailing SL update (matching CPU Hold semantics).
-                {
-                    const GpuPosition& pos = state.positions[sym];
-                    if (pos.active != POS_EMPTY) {
-                        double p_atr = profit_atr(pos, ind_snap.close);
-
-                        // Glitch guard (CPU semantics): block ALL exit processing including trailing update.
-                        bool block_exits = false;
-                        if (cfg.block_exits_on_extreme_dev != 0u && ind_snap.prev_close > 0.0f) {
-                            float price_change_pct = fabsf(ind_snap.close - ind_snap.prev_close) / ind_snap.prev_close;
-                            block_exits = (price_change_pct > cfg.glitch_price_dev_pct)
-                                || (ind_snap.atr > 0.0f
-                                    && fabsf(ind_snap.close - ind_snap.prev_close) > ind_snap.atr * cfg.glitch_atr_mult);
-                        }
-
-                        if (block_exits) {
-                            // CPU returns Hold immediately — skip trailing update too.
-                        } else if (!is_exit_cooldown_active(&state, sym, ind_snap.t_sec, &cfg)) {
-                            // CPU parity: sync is performed inside each kernel-exit evaluation call.
-                            state.positions[sym].kernel_margin_used = state.positions[sym].margin_used;
-
-                            // Stop loss
-                            if (check_stop_loss(pos, ind_snap, &cfg)) {
-                                apply_close(&state, sym, ind_snap, ind_market_close, TRACE_REASON_EXIT_STOP, fee_rate, cfg.slippage_bps);
-                            } else {
-                                // Update trailing stop
-                                double new_tsl = compute_trailing(pos, ind_snap, &cfg, p_atr);
-                                if (new_tsl > 0.0f) {
-                                    state.positions[sym].trailing_sl = new_tsl;
-                                }
-
-                                // Trailing stop exit
-                                if (state.positions[sym].active != POS_EMPTY
-                                    && check_trailing_exit(state.positions[sym], ind_snap)) {
-                                    apply_close(&state, sym, ind_snap, ind_market_close, TRACE_REASON_EXIT_TRAILING, fee_rate, cfg.slippage_bps);
-                                } else if (state.positions[sym].active != POS_EMPTY) {
-                                    // Take profit
-                                    float tp_mult = get_tp_mult(ind_snap, &cfg);
-                                    unsigned int tp_result = check_tp(state.positions[sym], ind_snap, &cfg, tp_mult);
-                                    if (tp_result == 1u) {
-                                        apply_partial_close(&state, sym, ind_snap, ind_market_close, cfg.tp_partial_pct, fee_rate, cfg.slippage_bps);
-                                    } else if (tp_result == 2u) {
-                                        apply_close(&state, sym, ind_snap, ind_market_close, TRACE_REASON_EXIT_TP, fee_rate, cfg.slippage_bps);
-                                    } else {
-                                        // Smart exits
-                                        if (check_smart_exits(state.positions[sym], ind_snap, &cfg, p_atr, sym, params)) {
-                                            apply_close(&state, sym, ind_snap, ind_market_close, TRACE_REASON_EXIT_SMART, fee_rate, cfg.slippage_bps);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (state.positions[sym].active == POS_EMPTY) { continue; }
+                // CPU parity: when sub-bar exits are enabled, exit checks must use the
+                // previous fully-closed indicator snapshot while scanning sub-bars inside
+                // the current indicator-bar window (avoid peeking into the current bar).
+                const unsigned int base_bar = (bar > 0u) ? (bar - 1u) : bar;
+                const GpuSnapshot& ind_snap_prev = snapshots[cfg.snapshot_offset + base_bar * ns + sym];
+                if (ind_snap_prev.valid == 0u) { continue; }
 
                 unsigned long long count_idx = SUB_COUNT_INDEX(bar, sym, ns);
                 unsigned int n_sub = (count_idx < sub_counts_cap) ? sub_counts[count_idx] : 0u;
@@ -1038,8 +980,9 @@ extern "C" __global__ void sweep_engine_kernel(
                     if (sc.close <= 0.0f) { continue; }
                     double sub_market_close = (double)sc.close;
 
-                    // Build hybrid snapshot: indicator values from main bar, OHLCV from sub-bar
-                    GpuSnapshot hybrid = ind_snap;
+                    // Build hybrid snapshot for sub-bar exits:
+                    // indicator values from previous indicator-bar, price/time from sub-bar.
+                    GpuSnapshot hybrid = ind_snap_prev;
                     hybrid.close = sc.close;
                     hybrid.high = sc.high;
                     hybrid.low = sc.low;
@@ -1203,11 +1146,22 @@ extern "C" __global__ void sweep_engine_kernel(
                         eval_t_sec = next_bar_t_sec;
                     }
 
-                    const GpuSnapshot& ind_snap = snapshots[cfg.snapshot_offset + bar * ns + sym];
-                    if (ind_snap.valid == 0u) { continue; }
+                    const GpuSnapshot& ind_snap_cur = snapshots[cfg.snapshot_offset + bar * ns + sym];
+                    if (ind_snap_cur.valid == 0u) { continue; }
 
-                    // Build hybrid: indicators from main bar, price from sub-bar
-                    GpuSnapshot hybrid = ind_snap;
+                    // CPU parity:
+                    // - signal_on_candle_close == 0 => use the previous fully-closed indicator snapshot
+                    //   for sub-bar entry evaluation (avoid peeking into the current bar).
+                    // - signal_on_candle_close == 1 => evaluation happens at the bar boundary and
+                    //   uses the current indicator snapshot.
+                    const unsigned int base_bar = (params->signal_on_candle_close != 0u)
+                        ? bar
+                        : ((bar > 0u) ? (bar - 1u) : bar);
+                    const GpuSnapshot& base_snap = snapshots[cfg.snapshot_offset + base_bar * ns + sym];
+                    if (base_snap.valid == 0u) { continue; }
+
+                    // Build hybrid: indicators from selected base snapshot, price from sub-bar
+                    GpuSnapshot hybrid = base_snap;
                     hybrid.close = sc.close;
                     hybrid.high = sc.high;
                     hybrid.low = sc.low;
@@ -1222,7 +1176,9 @@ extern "C" __global__ void sweep_engine_kernel(
                     // Gates, signal generation, filters (using hybrid snapshot with indicator values)
                     // AQC-1213: gates and signal now use codegen (double precision)
                     bool is_btc_symbol = (sym == params->btc_sym_idx);
-                    GateResult gates = check_gates(hybrid, &cfg, hybrid.ema_slow_slope_pct,
+                    // CPU parity: ema_slow_slope_pct is sourced from the current indicator-bar update.
+                    float ema_slope = ind_snap_cur.ema_slow_slope_pct;
+                    GateResult gates = check_gates(hybrid, &cfg, ema_slope,
                                                     btc_bull, is_btc_symbol);
                     SignalResultLegacy sig_result = generate_signal(
                         hybrid,
@@ -1230,7 +1186,7 @@ extern "C" __global__ void sweep_engine_kernel(
                         gates,
                         btc_bull,
                         is_btc_symbol,
-                        hybrid.ema_slow_slope_pct
+                        ema_slope
                     );
                     unsigned int signal = sig_result.signal;
                     unsigned int confidence = sig_result.confidence;
@@ -1433,9 +1389,15 @@ extern "C" __global__ void sweep_engine_kernel(
                     // Re-read sub-bar candle for fill price
                     unsigned int cand_sub_slot = candidate_sub_slot[i];
                     const GpuRawCandle& sc = sub_candles[(bar * max_sub + cand_sub_slot) * ns + cand.sym_idx];
-                    const GpuSnapshot& ind_snap = snapshots[cfg.snapshot_offset + bar * ns + cand.sym_idx];
 
-                    GpuSnapshot hybrid = ind_snap;
+                    // CPU parity: entry sizing must use the same indicator snapshot selection
+                    // as candidate evaluation.
+                    const unsigned int base_bar = (params->signal_on_candle_close != 0u)
+                        ? bar
+                        : ((bar > 0u) ? (bar - 1u) : bar);
+                    const GpuSnapshot& base_snap = snapshots[cfg.snapshot_offset + base_bar * ns + cand.sym_idx];
+
+                    GpuSnapshot hybrid = base_snap;
                     hybrid.close = sc.close;
                     hybrid.high = sc.high;
                     hybrid.low = sc.low;
