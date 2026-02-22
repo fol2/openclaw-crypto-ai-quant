@@ -1568,13 +1568,13 @@ fn sub_entry_margin_cap_uses_full_precision_pct() {
     let rounded_count = kernel_src.matches(rounded_expr).count();
 
     assert_eq!(
-        full_precision_count, 1,
-        "Expected exactly one full-precision max_total_margin_pct statement (sub-entry path), found {}",
+        full_precision_count, 3,
+        "Expected full-precision max_total_margin_pct in sub-entry/add/main-entry paths, found {}",
         full_precision_count
     );
     assert_eq!(
-        rounded_count, 2,
-        "Expected exactly two rounded max_total_margin_pct uses (main-entry/add paths), found {}",
+        rounded_count, 0,
+        "Expected rounded max_total_margin_pct usage to be removed from all paths, found {}",
         rounded_count
     );
 }

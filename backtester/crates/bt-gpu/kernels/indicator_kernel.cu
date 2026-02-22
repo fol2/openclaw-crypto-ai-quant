@@ -249,10 +249,70 @@ __global__ void indicator_kernel(
         GpuRawCandle c = candles[bar * ns + sym_idx];
         unsigned int out_idx = snap_base + bar * ns + sym_idx;
 
-        // No candle for this (bar, symbol) → zeroed snapshot
+        // No candle for this (bar, symbol)
+        //
+        // CPU semantics (bt-core): if a bar is missing, the IndicatorBank is NOT updated,
+        // but its *state* (prev_close/prev_ema_*) remains available and is still used
+        // for market breadth + BTC alignment and equity/unrealised PnL (via prev_close).
+        //
+        // For parity, emit a snapshot that:
+        //   - has valid=0 (so the trade kernel skips symbol processing)
+        //   - carries forward the last known indicator state + lagged values
+        //   - preserves bar_count (do NOT reset to 0)
+        //   - carries forward close as the last known close (used by equity marking)
+        //
+        // This prevents breadth/equity from spuriously dropping to zero on sparse symbols.
         if (c.close <= 0.0f) {
             GpuSnapshot snap;
             memset(&snap, 0, sizeof(GpuSnapshot));
+
+            // Carry forward last known mark. Keep OHLC consistent.
+            snap.close = prev_close;
+            snap.high = prev_close;
+            snap.low = prev_close;
+            snap.open = prev_close;
+            snap.volume = 0.0f;
+            snap.t_sec = c.t_sec;
+
+            // Carry forward indicator state (no update).
+            snap.ema_fast = (float)ema_fast_val;
+            snap.ema_slow = (float)ema_slow_val;
+            snap.ema_macro = (float)ema_macro_val;
+            snap.adx = prev_adx;
+            snap.adx_slope = 0.0f;
+            snap.adx_pos = 0.0f;
+            snap.adx_neg = 0.0f;
+            snap.atr = prev_atr;
+            snap.atr_slope = 0.0f;
+            snap.avg_atr = 0.0f;
+            snap.bb_upper = 0.0f;
+            snap.bb_lower = 0.0f;
+            snap.bb_width = 0.0f;
+            snap.bb_width_ratio = 0.0f;
+            snap.rsi = 0.0f;
+            snap.stoch_k = 0.0f;
+            snap.stoch_d = 0.0f;
+            snap.macd_hist = prev_macd_hist;
+            snap.prev_macd_hist = prev_macd_hist;
+            snap.prev2_macd_hist = prev2_macd_hist;
+            snap.prev3_macd_hist = prev3_macd_hist;
+            snap.vol_sma = 0.0f;
+            snap.vol_trend = 0u;
+
+            // Lagged fields (CPU uses these even on missing-bar timestamps).
+            snap.prev_close = prev_close;
+            snap.prev_ema_fast = prev_ema_fast;
+            snap.prev_ema_slow = prev_ema_slow;
+            snap.ema_slow_slope_pct = 0.0f;
+
+            snap.bar_count = bar_count;
+            snap.valid = 0u;
+            snap.funding_rate = 0.0f;
+            snap._pad[0] = 0;
+            snap._pad[1] = 0;
+            snap._pad[2] = 0;
+            snap._pad[3] = 0;
+
             snapshots[out_idx] = snap;
             continue;
         }
@@ -624,7 +684,8 @@ __global__ void breadth_kernel(
     unsigned int btc_idx = params->btc_sym_idx;
     if (btc_idx < ns) {
         GpuSnapshot btc = snapshots[snap_base + bar_idx * ns + btc_idx];
-        if (btc.bar_count >= 2) {
+        // CPU parity: bt-core::compute_btc_bullish returns Some(..) once bar_count > 0.
+        if (btc.bar_count > 0) {
             btc_bullish[out_idx] = (btc.prev_close > btc.prev_ema_slow) ? 1u : 0u;
         } else {
             btc_bullish[out_idx] = BTC_BULL_UNKNOWN;
