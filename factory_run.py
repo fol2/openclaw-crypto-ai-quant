@@ -14,10 +14,12 @@ The goal is reproducibility: every run has a `run_id` and a self-contained artif
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import signal
 import sqlite3
@@ -1006,6 +1008,86 @@ def _file_fingerprint(path: Path) -> dict[str, Any]:
     return out
 
 
+def _stat_fingerprint(path: Path) -> dict[str, Any]:
+    """Lightweight fingerprint that does *not* read file contents.
+
+    Useful for large SQLite DB inputs where sha256 over the full file is too expensive.
+    """
+
+    p = Path(path).expanduser()
+    if not p.exists():
+        return {"path": str(p), "exists": False}
+    try:
+        st = p.stat()
+        return {
+            "path": str(p),
+            "exists": True,
+            "is_file": p.is_file(),
+            "is_dir": p.is_dir(),
+            "size_bytes": int(st.st_size),
+            "mtime_ns": int(st.st_mtime_ns),
+        }
+    except Exception:
+        return {"path": str(p), "exists": True}
+
+
+def _split_csv_paths(arg: str | None) -> list[str]:
+    if arg is None:
+        return []
+    raw = str(arg).strip()
+    if not raw:
+        return []
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+def _fingerprint_db_arg(arg: str | None) -> dict[str, Any]:
+    """Fingerprint a --candles-db/--funding-db style argument.
+
+    Accepts a single path or a comma-separated list of paths.
+    Returns a stable, JSON-serialisable structure.
+    """
+
+    paths = _split_csv_paths(arg)
+    fps: list[dict[str, Any]] = []
+    for p in paths:
+        resolved = _resolve_path_for_backtester(p)
+        fps.append(_stat_fingerprint(Path(resolved) if resolved else Path(p)))
+    fps.sort(key=lambda x: str(x.get("path", "")))
+    raw = json.dumps(fps, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return {
+        "schema_version": 1,
+        "count": len(fps),
+        "fingerprint": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        "files": fps,
+    }
+
+
+_EFFECTIVE_RANGE_RE = re.compile(
+    r"\[(?:sweep|replay)\] Effective time range: (?P<from>-?\d+) \([^)]*\)\.\.(?P<to>-?\d+) \([^)]*\)"
+)
+
+
+def _parse_effective_time_range_ms(log_path: Path) -> tuple[int | None, int | None, str | None]:
+    """Parse the Rust backtester '[sweep] Effective time range: <ms>..<ms>' line."""
+
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None, None, None
+
+    for line in text.splitlines():
+        m = _EFFECTIVE_RANGE_RE.search(line)
+        if not m:
+            continue
+        try:
+            from_ms = int(m.group("from"))
+            to_ms = int(m.group("to"))
+            return from_ms, to_ms, line.strip()
+        except Exception:
+            continue
+    return None, None, None
+
+
 def _capture_repro_metadata(*, run_dir: Path, artifacts_root: Path, bt_cmd: list[str], meta: dict[str, Any]) -> None:
     repro_dir = run_dir / "repro"
     repro_dir.mkdir(parents=True, exist_ok=True)
@@ -1111,6 +1193,22 @@ def _capture_repro_metadata(*, run_dir: Path, artifacts_root: Path, bt_cmd: list
 
 def _load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _load_jsonl_rows(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                rows.append(obj)
+    return rows
 
 
 def _is_nonempty_file(path: Path) -> bool:
@@ -1519,6 +1617,74 @@ def _replay_equivalence_contract_from_meta(meta: dict[str, Any], *, mode: str) -
     if not isinstance(args_obj, dict):
         return None
     return _build_replay_equivalence_contract(args_obj=args_obj, mode=mode)
+
+
+# ---------------------------------------------------------------------------
+# Step-4 GPU↔CPU parity contract (factory_cycle step 4)
+# ---------------------------------------------------------------------------
+
+_STEP4_PARITY_CONTRACT_SCHEMA_VERSION = 1
+
+
+def _build_step4_parity_contract_payload(meta: dict[str, Any]) -> dict[str, Any]:
+    """Build a *comparison* contract for Step-4 GPU↔CPU parity.
+
+    This is the non-negotiable anchor that prevents "false regressions" caused by:
+    - different candle DB snapshots / updated market data
+    - different effective time windows (auto-scope drift)
+    - different backtester binaries / codegen outputs
+    """
+
+    args_obj = meta.get("args") if isinstance(meta.get("args"), dict) else {}
+    sweep_range = meta.get("sweep_effective_time_range_ms") if isinstance(meta.get("sweep_effective_time_range_ms"), dict) else {}
+    inputs = meta.get("input_fingerprints") if isinstance(meta.get("input_fingerprints"), dict) else {}
+    repro = meta.get("repro") if isinstance(meta.get("repro"), dict) else {}
+    repro_files = repro.get("files") if isinstance(repro.get("files"), dict) else {}
+
+    bt_bin = repro_files.get("mei_backtester_bin") if isinstance(repro_files.get("mei_backtester_bin"), dict) else {}
+
+    return {
+        "schema_version": int(_STEP4_PARITY_CONTRACT_SCHEMA_VERSION),
+        "run_id": str(meta.get("run_id", "") or ""),
+        "git_head": str(meta.get("git_head", "") or ""),
+        "profile": str(args_obj.get("profile", "") or ""),
+        "interval": str(args_obj.get("interval", "") or ""),
+        "start_ts_arg": str(args_obj.get("start_ts", "") or ""),
+        "end_ts_arg": str(args_obj.get("end_ts", "") or ""),
+        "sweep_parity_mode": str(args_obj.get("sweep_parity_mode", "") or ""),
+        "gpu": bool(_coerce_bool(args_obj.get("gpu", False))),
+        "tpe": bool(_coerce_bool(args_obj.get("tpe", False))),
+        "effective_from_ts_ms": int(_coerce_int(sweep_range.get("from_ts_ms"), 0) or 0),
+        "effective_to_ts_ms": int(_coerce_int(sweep_range.get("to_ts_ms"), 0) or 0),
+        "candles_db": {
+            "fingerprint": str(inputs.get("candles_db", {}).get("fingerprint", "") if isinstance(inputs.get("candles_db"), dict) else ""),
+            "count": int(_coerce_int(inputs.get("candles_db", {}).get("count"), 0) if isinstance(inputs.get("candles_db"), dict) else 0),
+        },
+        "funding_db": {
+            "fingerprint": str(inputs.get("funding_db", {}).get("fingerprint", "") if isinstance(inputs.get("funding_db"), dict) else ""),
+            "count": int(_coerce_int(inputs.get("funding_db", {}).get("count"), 0) if isinstance(inputs.get("funding_db"), dict) else 0),
+        },
+        "balance_from": {
+            "fingerprint": str(inputs.get("balance_from", {}).get("fingerprint", "") if isinstance(inputs.get("balance_from"), dict) else ""),
+        },
+        "sweep_spec_sha256": str(
+            repro_files.get("sweep_spec", {}).get("sha256", "")
+            if isinstance(repro_files.get("sweep_spec"), dict)
+            else ""
+        ),
+        "mei_backtester_sha256": str(bt_bin.get("sha256", "") or ""),
+        "mei_backtester_version": str(meta.get("backtester_version", "") or ""),
+    }
+
+
+def _build_step4_parity_contract(meta: dict[str, Any]) -> dict[str, Any]:
+    payload = _build_step4_parity_contract_payload(meta)
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+    return {
+        "schema_version": int(_STEP4_PARITY_CONTRACT_SCHEMA_VERSION),
+        "fingerprint": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        "payload": payload,
+    }
 
 
 def _find_run_dir(path: Path) -> Path | None:
@@ -2397,6 +2563,167 @@ def _render_validation_report_md(items: list[dict[str, Any]], *, score_min_trade
     return "\n".join(lines)
 
 
+def _normalise_overrides(raw_overrides: Any) -> list[tuple[str, Any]]:
+    """Accept both list-of-pairs and dict formats (matches tools/generate_config.py)."""
+
+    if isinstance(raw_overrides, dict):
+        out = list(raw_overrides.items())
+    elif isinstance(raw_overrides, list):
+        out = []
+        for pair in raw_overrides:
+            if isinstance(pair, (list, tuple)) and len(pair) == 2 and isinstance(pair[0], str):
+                out.append((pair[0], pair[1]))
+    else:
+        out = []
+    out.sort(key=lambda kv: kv[0])
+    return out
+
+
+def _format_overrides_key(raw_overrides: Any) -> str:
+    parts: list[str] = []
+    for k, v in _normalise_overrides(raw_overrides):
+        if isinstance(v, float):
+            parts.append(f"{k}={v:.10g}")
+        else:
+            parts.append(f"{k}={v}")
+    return ",".join(parts)
+
+
+def _write_tsv(path: Path, rows: list[dict[str, Any]], *, fieldnames: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t", extrasaction="ignore")
+        w.writeheader()
+        for row in rows:
+            w.writerow(row)
+
+
+def _compute_step4_parity(
+    *,
+    cpu: dict[str, Any],
+    gpu: dict[str, Any],
+    rel_eps: float,
+    abs_eps: float,
+    dd_eps: float,
+    pf_eps: float,
+) -> dict[str, Any]:
+    """Compute Step-4 CPU vs GPU deltas and pass/fail classification."""
+
+    cpu_pnl = float(_coerce_float(cpu.get("total_pnl"), 0.0))
+    gpu_pnl = float(_coerce_float(gpu.get("total_pnl"), 0.0))
+    cpu_bal = float(_coerce_float(cpu.get("final_balance"), 0.0))
+    gpu_bal = float(_coerce_float(gpu.get("final_balance"), 0.0))
+    cpu_dd = float(_coerce_float(cpu.get("max_drawdown_pct"), 0.0))
+    gpu_dd = float(_coerce_float(gpu.get("max_drawdown_pct"), 0.0))
+    cpu_pf = float(_coerce_float(cpu.get("profit_factor"), 0.0))
+    gpu_pf = float(_coerce_float(gpu.get("profit_factor"), 0.0))
+    cpu_trades = int(_coerce_int(cpu.get("total_trades"), 0) or 0)
+    gpu_trades = int(_coerce_int(gpu.get("total_trades"), 0) or 0)
+
+    init_bal = float(_coerce_float(cpu.get("initial_balance"), 0.0))
+
+    # Some sweep outputs omit final_balance; derive it from initial_balance + pnl.
+    if ("final_balance" not in gpu or gpu.get("final_balance") in (None, "")) and init_bal:
+        gpu_bal = init_bal + gpu_pnl
+    if ("final_balance" not in cpu or cpu.get("final_balance") in (None, "")) and init_bal:
+        cpu_bal = init_bal + cpu_pnl
+    scale = max(abs(cpu_bal), abs(gpu_bal), abs(cpu_pnl), abs(gpu_pnl), abs(init_bal), 1.0)
+
+    pnl_delta = cpu_pnl - gpu_pnl
+    bal_delta = cpu_bal - gpu_bal
+    dd_delta = cpu_dd - gpu_dd
+    pf_delta = cpu_pf - gpu_pf
+    trades_delta = cpu_trades - gpu_trades
+
+    pnl_ok = abs(pnl_delta) <= max(abs_eps, rel_eps * scale)
+    bal_ok = abs(bal_delta) <= max(abs_eps, rel_eps * scale)
+    dd_ok = abs(dd_delta) <= dd_eps
+    pf_ok = abs(pf_delta) <= pf_eps
+    trades_ok = trades_delta == 0
+
+    status = "pass" if (trades_ok and pnl_ok and bal_ok and dd_ok and pf_ok) else "fail"
+    if status == "pass":
+        cause = ""
+    elif not trades_ok:
+        cause = "state_machine"
+    else:
+        cause = "reduction_order"
+
+    return {
+        "status": status,
+        "cause": cause,
+        "cpu_total_pnl": cpu_pnl,
+        "gpu_total_pnl": gpu_pnl,
+        "pnl_delta": pnl_delta,
+        "cpu_final_balance": cpu_bal,
+        "gpu_final_balance": gpu_bal,
+        "balance_delta": bal_delta,
+        "cpu_max_drawdown_pct": cpu_dd,
+        "gpu_max_drawdown_pct": gpu_dd,
+        "dd_delta": dd_delta,
+        "cpu_profit_factor": cpu_pf,
+        "gpu_profit_factor": gpu_pf,
+        "pf_delta": pf_delta,
+        "cpu_total_trades": cpu_trades,
+        "gpu_total_trades": gpu_trades,
+        "trades_delta": trades_delta,
+        "scale": scale,
+        "thresholds": {
+            "rel_eps": float(rel_eps),
+            "abs_eps": float(abs_eps),
+            "dd_eps": float(dd_eps),
+            "pf_eps": float(pf_eps),
+        },
+    }
+
+
+def _render_step4_parity_report_md(
+    items: list[dict[str, Any]],
+    *,
+    contract_fingerprint: str,
+    thresholds: dict[str, Any],
+) -> str:
+    lines: list[str] = []
+    lines.append("# Step-4 GPU↔CPU Parity Report")
+    lines.append("")
+    lines.append(f"Contract fingerprint: `{contract_fingerprint}`")
+    lines.append("")
+    lines.append(
+        "Thresholds: "
+        + ", ".join(f"{k}={v}" for k, v in sorted(thresholds.items()))
+    )
+    lines.append("")
+    if not items:
+        lines.append("No parity items were generated.")
+        lines.append("")
+        return "\n".join(lines)
+
+    lines.append(
+        "| status | cause | mode | rank | trades Δ | pnl Δ | dd Δ | pf Δ | config | overrides |"
+    )
+    lines.append(
+        "| :----: | :---- | :--- | ---: | -------: | ----: | ---: | ---: | :----- | :------- |"
+    )
+    for it in items:
+        lines.append(
+            "| {status} | {cause} | {mode} | {rank} | {td} | {pnl:.6f} | {dd:.6f} | {pf:.6f} | `{cfg}` | `{ov}` |".format(
+                status=str(it.get("status", "")),
+                cause=str(it.get("cause", "")),
+                mode=str(it.get("sort_by", "")),
+                rank=int(_coerce_int(it.get("rank"), 0) or 0),
+                td=int(_coerce_int(it.get("trades_delta"), 0) or 0),
+                pnl=float(_coerce_float(it.get("pnl_delta"), 0.0)),
+                dd=float(_coerce_float(it.get("dd_delta"), 0.0)),
+                pf=float(_coerce_float(it.get("pf_delta"), 0.0)),
+                cfg=str(it.get("config_path", "") or ""),
+                ov=str(it.get("overrides_key", "") or ""),
+            )
+        )
+
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _run_date_utc(generated_at_ms: int) -> str:
     return time.strftime("%Y-%m-%d", time.gmtime(generated_at_ms / 1000))
 
@@ -2738,6 +3065,8 @@ def main(argv: list[str] | None = None) -> int:
         except FileNotFoundError:
             existing_run_dir = None
 
+        resuming_run = existing_run_dir is not None
+
         now_ms = int(time.time() * 1000)
 
         if existing_run_dir is not None:
@@ -2751,9 +3080,16 @@ def main(argv: list[str] | None = None) -> int:
 
             # Safety: do not allow resuming with different core parameters.
             orig_args = meta.get("args", {}) if isinstance(meta.get("args", {}), dict) else {}
+
+            # Backward-compatible defaults for older run_metadata.json files.
+            orig_args.setdefault("start_ts", "")
+            orig_args.setdefault("end_ts", "")
+            orig_args.setdefault("sweep_parity_mode", "production")
             guard_keys = {
                 "config",
                 "interval",
+                "start_ts",
+                "end_ts",
                 "candles_db",
                 "funding_db",
                 "max_age_fail_hours",
@@ -2791,6 +3127,7 @@ def main(argv: list[str] | None = None) -> int:
                 "shortlist_per_mode",
                 "shortlist_max_rank",
                 "shortlist_top_pnl",
+                "sweep_parity_mode",
             }
             mismatches: list[str] = []
             for k in sorted(guard_keys):
@@ -2838,6 +3175,37 @@ def main(argv: list[str] | None = None) -> int:
 
         # Resolve backtester cmd once and persist early metadata.
         bt_cmd = _resolve_backtester_cmd()
+
+        # Resume safety: prevent silent binary drift (a common source of "regressions").
+        if resuming_run and not bool(getattr(args, "allow_binary_drift", False)):
+            try:
+                repro_obj = meta.get("repro") if isinstance(meta.get("repro"), dict) else {}
+                orig_cmd = repro_obj.get("backtester_cmd") if isinstance(repro_obj.get("backtester_cmd"), list) else []
+                if orig_cmd and list(orig_cmd) != list(bt_cmd):
+                    raise SystemExit(
+                        "--resume refused: backtester_cmd changed; pass --allow-binary-drift to override"
+                    )
+                orig_sha = (
+                    repro_obj.get("files", {})
+                    .get("mei_backtester_bin", {})
+                    .get("sha256", "")
+                    if isinstance(repro_obj.get("files"), dict)
+                    and isinstance(repro_obj.get("files", {}).get("mei_backtester_bin"), dict)
+                    else ""
+                )
+                bt0 = str(bt_cmd[0]) if bt_cmd else ""
+                bt_path = Path(bt0) if bt0 and ("/" in bt0 or bt0.endswith(".exe")) else None
+                if orig_sha and bt_path and bt_path.exists():
+                    cur_sha = _sha256_file(bt_path)
+                    if cur_sha and cur_sha != orig_sha:
+                        raise SystemExit(
+                            "--resume refused: mei-backtester binary sha256 changed; pass --allow-binary-drift to override"
+                        )
+            except SystemExit:
+                raise
+            except Exception:
+                # Non-fatal: proceed if we cannot validate.
+                pass
         if "repro" not in meta:
             _capture_repro_metadata(run_dir=run_dir, artifacts_root=artifacts_root, bt_cmd=bt_cmd, meta=meta)
         _write_json(run_dir / "run_metadata.json", meta)
@@ -2847,6 +3215,33 @@ def main(argv: list[str] | None = None) -> int:
         bt_sweep_spec = _resolve_path_for_backtester(str(args.sweep_spec)) or str(args.sweep_spec)
         bt_candles_db = _normalise_candles_db_arg_for_backtester(str(args.candles_db)) if args.candles_db else None
         bt_funding_db = _resolve_path_for_backtester(str(args.funding_db)) if args.funding_db else None
+
+        # Record lightweight input fingerprints early so resume runs cannot silently
+        # compare against a different data snapshot.
+        current_inputs = {
+            "candles_db": _fingerprint_db_arg(str(bt_candles_db) if bt_candles_db else ""),
+            "funding_db": _fingerprint_db_arg(str(bt_funding_db) if bt_funding_db else ""),
+        }
+        orig_inputs_snapshot = meta.get("input_fingerprints") if isinstance(meta.get("input_fingerprints"), dict) else {}
+
+        if resuming_run and not bool(getattr(args, "allow_input_drift", False)):
+            try:
+                for key in ("candles_db", "funding_db"):
+                    orig_fp = orig_inputs_snapshot.get(key) if isinstance(orig_inputs_snapshot.get(key), dict) else {}
+                    cur_fp = current_inputs.get(key) if isinstance(current_inputs.get(key), dict) else {}
+                    if str(orig_fp.get("fingerprint", "")) and str(cur_fp.get("fingerprint", "")):
+                        if str(orig_fp.get("fingerprint")) != str(cur_fp.get("fingerprint")):
+                            raise SystemExit(
+                                f"--resume refused: input drift detected for {key}; pass --allow-input-drift to override"
+                            )
+            except SystemExit:
+                raise
+            except Exception:
+                pass
+
+        if not isinstance(meta.get("input_fingerprints"), dict):
+            meta["input_fingerprints"] = {}
+        meta["input_fingerprints"].update(current_inputs)
         gpu_path_requested = bool(args.gpu) or bool(getattr(args, "tpe", False))
         funding_for_pairing = bool(bt_funding_db)
         if bt_funding_db:
@@ -3171,6 +3566,21 @@ def main(argv: list[str] | None = None) -> int:
             **live_initial_balance_meta,
         }
 
+        # Extend input fingerprints with the resolved balance snapshot (if any).
+        if isinstance(meta.get("input_fingerprints"), dict):
+            if live_initial_balance_path is not None:
+                bf = _file_fingerprint(Path(live_initial_balance_path))
+                meta["input_fingerprints"]["balance_from"] = {
+                    "schema_version": 1,
+                    "fingerprint": str(bf.get("sha256", "") or ""),
+                    "file": bf,
+                }
+            else:
+                meta["input_fingerprints"].setdefault(
+                    "balance_from",
+                    {"schema_version": 1, "fingerprint": "", "file": {"path": "", "exists": False}},
+                )
+
         # ------------------------------------------------------------------
         # 2) Sweep
         # ------------------------------------------------------------------
@@ -3212,6 +3622,19 @@ def main(argv: list[str] | None = None) -> int:
                 "--output-mode",
                 _sweep_output_mode_from_args(args),
             ]
+
+            # Lock the sweep window when provided. Even if omitted, we later parse
+            # the effective window from stderr and reuse it for CPU replays.
+            start_ts = str(getattr(args, "start_ts", "") or "").strip()
+            end_ts = str(getattr(args, "end_ts", "") or "").strip()
+            if start_ts:
+                sweep_argv += ["--start-ts", start_ts]
+            if end_ts:
+                sweep_argv += ["--end-ts", end_ts]
+
+            parity_mode = str(getattr(args, "sweep_parity_mode", "") or "").strip()
+            if parity_mode:
+                sweep_argv += ["--parity-mode", parity_mode]
             if live_initial_balance_path is not None:
                 sweep_argv += ["--balance-from", str(live_initial_balance_path)]
             top_n = int(args.top_n or 0)
@@ -3333,6 +3756,29 @@ def main(argv: list[str] | None = None) -> int:
                     "path": str(sweep_out),
                     "errors": [],
                 }
+
+        # Capture effective time window used by the sweep (auto-scope output) and
+        # store it as a contract anchor for Step-4 CPU replays.
+        try:
+            sweep_stderr_p = Path(str(sweep_res.stderr_path or ""))
+            if sweep_stderr_p.is_file():
+                from_ms, to_ms, line = _parse_effective_time_range_ms(sweep_stderr_p)
+                if from_ms is not None and to_ms is not None:
+                    meta["sweep_effective_time_range_ms"] = {
+                        "from_ts_ms": int(from_ms),
+                        "to_ts_ms": int(to_ms),
+                        "source": "stderr_parse",
+                        "stderr_path": str(sweep_stderr_p),
+                        "line": str(line or ""),
+                    }
+        except Exception:
+            pass
+
+        # Update / (re)compute Step-4 parity contract once sweep inputs are known.
+        try:
+            meta["step4_parity_contract"] = _build_step4_parity_contract(meta)
+        except Exception:
+            pass
     
         _write_json(run_dir / "run_metadata.json", meta)
     
@@ -3572,6 +4018,56 @@ def main(argv: list[str] | None = None) -> int:
                 entry_by_path[str(out_yaml)] = entry
     
         meta["candidate_configs"] = candidate_entries
+
+        # Attach the originating sweep row (metrics + overrides) to each generated
+        # candidate so Step-4 can compare GPU sweep vs CPU replay deterministically.
+        try:
+            sweep_rows_path = Path(str(sweep_gen_source))
+            if sweep_rows_path.is_file():
+                sweep_rows_all = _load_jsonl_rows(sweep_rows_path)
+                sweep_rows_filtered = [
+                    r
+                    for r in sweep_rows_all
+                    if int(_coerce_int(r.get("total_trades"), 0) or 0) >= int(candidate_min_trades)
+                ]
+
+                sort_fns: dict[str, Any] = {
+                    **_EXTRACT_SORT_KEYS,
+                    "balanced": _extract_balanced_score,
+                    "efficient": _extract_efficient_score,
+                    "growth": _extract_growth_score,
+                }
+                sort_cache: dict[str, list[dict[str, Any]]] = {}
+
+                for entry in candidate_entries:
+                    mode_raw = str(entry.get("sort_by", "") or "").strip()
+                    mode = "dd" if mode_raw == "conservative" else mode_raw
+                    if mode not in sort_fns:
+                        continue
+                    rank = int(_coerce_int(entry.get("rank"), 0) or 0)
+                    if rank <= 0:
+                        continue
+                    if mode not in sort_cache:
+                        rows = list(sweep_rows_filtered)
+                        rows.sort(key=sort_fns[mode], reverse=True)
+                        sort_cache[mode] = rows
+                    rows = sort_cache[mode]
+                    idx = rank - 1
+                    if idx < 0 or idx >= len(rows):
+                        continue
+                    row = rows[idx]
+                    entry["sweep_candidate_row"] = {
+                        "config_id": row.get("config_id"),
+                        "total_pnl": row.get("total_pnl"),
+                        "final_balance": row.get("final_balance"),
+                        "total_trades": row.get("total_trades"),
+                        "profit_factor": row.get("profit_factor"),
+                        "max_drawdown_pct": row.get("max_drawdown_pct"),
+                        "overrides": row.get("overrides"),
+                    }
+                    entry["overrides_key"] = _format_overrides_key(row.get("overrides"))
+        except Exception as e:
+            meta["step4_parity_attach_error"] = f"{type(e).__name__}: {e}"
         _write_json(run_dir / "run_metadata.json", meta)
     
         if not candidate_paths:
@@ -3592,6 +4088,18 @@ def main(argv: list[str] | None = None) -> int:
         replays_dir.mkdir(parents=True, exist_ok=True)
     
         replay_reports: list[dict[str, Any]] = []
+        step4_parity_enabled = bool(getattr(args, "step4_parity", True))
+        step4_parity_rel_eps = float(getattr(args, "step4_parity_rel_eps", 1e-6) or 1e-6)
+        step4_parity_abs_eps = float(getattr(args, "step4_parity_abs_eps", 1e-3) or 1e-3)
+        step4_parity_dd_eps = float(getattr(args, "step4_parity_dd_eps", 1e-6) or 1e-6)
+        step4_parity_pf_eps = float(getattr(args, "step4_parity_pf_eps", 1e-4) or 1e-4)
+        step4_parity_rows: list[dict[str, Any]] = []
+        step4_parity_thresholds = {
+            "rel_eps": step4_parity_rel_eps,
+            "abs_eps": step4_parity_abs_eps,
+            "dd_eps": step4_parity_dd_eps,
+            "pf_eps": step4_parity_pf_eps,
+        }
         for cfg_path in candidate_paths:
             out_json = replays_dir / f"{cfg_path.stem}.replay.json"
     
@@ -3610,6 +4118,29 @@ def main(argv: list[str] | None = None) -> int:
                 "--output",
                 str(out_json),
             ]
+
+            # Step-4 contract lock: replay MUST use the *same* effective time
+            # window as the sweep. This avoids false mismatches when candle DBs
+            # advance between sweep and replay.
+            try:
+                sweep_range = (
+                    meta.get("sweep_effective_time_range_ms")
+                    if isinstance(meta.get("sweep_effective_time_range_ms"), dict)
+                    else {}
+                )
+                from_ms = _coerce_int(sweep_range.get("from_ts_ms"), 0)
+                to_ms = _coerce_int(sweep_range.get("to_ts_ms"), 0)
+                if from_ms and to_ms:
+                    replay_argv += ["--start-ts", str(int(from_ms)), "--end-ts", str(int(to_ms))]
+                else:
+                    start_ts = str(getattr(args, "start_ts", "") or "").strip()
+                    end_ts = str(getattr(args, "end_ts", "") or "").strip()
+                    if start_ts:
+                        replay_argv += ["--start-ts", start_ts]
+                    if end_ts:
+                        replay_argv += ["--end-ts", end_ts]
+            except Exception:
+                pass
             if live_initial_balance_path is not None:
                 replay_argv += ["--balance-from", str(live_initial_balance_path)]
             if bt_candles_db:
@@ -3667,6 +4198,42 @@ def main(argv: list[str] | None = None) -> int:
             _attach_replay_metadata(summary=summary, entry=replay_entry, args=args)
             if replay_entry is None:
                 summary["config_path"] = str(cfg_path)
+
+            # Step-4 GPU↔CPU parity: compare CPU replay metrics to the sweep row
+            # (GPU metrics) that generated this candidate config.
+            if step4_parity_enabled and isinstance(replay_entry, dict):
+                sweep_row = replay_entry.get("sweep_candidate_row")
+                if isinstance(sweep_row, dict):
+                    parity = _compute_step4_parity(
+                        cpu=summary,
+                        gpu=sweep_row,
+                        rel_eps=step4_parity_rel_eps,
+                        abs_eps=step4_parity_abs_eps,
+                        dd_eps=step4_parity_dd_eps,
+                        pf_eps=step4_parity_pf_eps,
+                    )
+                    summary["step4_parity"] = parity
+                    replay_entry["step4_parity"] = parity
+                    step4_parity_rows.append(
+                        {
+                            "status": parity.get("status", ""),
+                            "cause": parity.get("cause", ""),
+                            "sort_by": replay_entry.get("sort_by"),
+                            "rank": replay_entry.get("rank"),
+                            "config_path": str(cfg_path),
+                            "overrides_key": replay_entry.get("overrides_key", ""),
+                            "trades_delta": parity.get("trades_delta"),
+                            "pnl_delta": parity.get("pnl_delta"),
+                            "dd_delta": parity.get("dd_delta"),
+                            "pf_delta": parity.get("pf_delta"),
+                            "cpu_total_trades": parity.get("cpu_total_trades"),
+                            "gpu_total_trades": parity.get("gpu_total_trades"),
+                            "cpu_total_pnl": parity.get("cpu_total_pnl"),
+                            "gpu_total_pnl": parity.get("gpu_total_pnl"),
+                            "cpu_final_balance": parity.get("cpu_final_balance"),
+                            "gpu_final_balance": parity.get("gpu_final_balance"),
+                        }
+                    )
     
             if bool(getattr(args, "monte_carlo", False)) and trades_csv is not None:
                 mc_dir = run_dir / "monte_carlo" / str(cfg_path.stem)
@@ -4073,6 +4640,79 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         # ------------------------------------------------------------------
+        # 4b) Step-4 GPU↔CPU parity report (sweep vs replay)
+        # ------------------------------------------------------------------
+        if step4_parity_enabled:
+            try:
+                reports_dir = run_dir / "reports"
+                reports_dir.mkdir(parents=True, exist_ok=True)
+
+                contract_fp = ""
+                if isinstance(meta.get("step4_parity_contract"), dict):
+                    contract_fp = str(meta.get("step4_parity_contract", {}).get("fingerprint", "") or "")
+
+                # Persist TSV / JSON / MD reports for the 30-row validation table.
+                fieldnames = [
+                    "status",
+                    "cause",
+                    "sort_by",
+                    "rank",
+                    "trades_delta",
+                    "pnl_delta",
+                    "dd_delta",
+                    "pf_delta",
+                    "cpu_total_trades",
+                    "gpu_total_trades",
+                    "cpu_total_pnl",
+                    "gpu_total_pnl",
+                    "cpu_final_balance",
+                    "gpu_final_balance",
+                    "config_path",
+                    "overrides_key",
+                ]
+                _write_tsv(reports_dir / "step4_gpu_cpu_parity.tsv", step4_parity_rows, fieldnames=fieldnames)
+
+                step4_md = _render_step4_parity_report_md(
+                    step4_parity_rows,
+                    contract_fingerprint=contract_fp,
+                    thresholds=step4_parity_thresholds,
+                )
+                (reports_dir / "step4_gpu_cpu_parity.md").write_text(step4_md, encoding="utf-8")
+                _write_json(
+                    reports_dir / "step4_gpu_cpu_parity.json",
+                    {
+                        "contract_fingerprint": contract_fp,
+                        "thresholds": step4_parity_thresholds,
+                        "items": step4_parity_rows,
+                    },
+                )
+
+                fails = [r for r in step4_parity_rows if str(r.get("status")) != "pass"]
+                meta["step4_parity"] = {
+                    "enabled": True,
+                    "contract_fingerprint": contract_fp,
+                    "thresholds": step4_parity_thresholds,
+                    "total": len(step4_parity_rows),
+                    "failures": len(fails),
+                    "failures_by_cause": {
+                        "state_machine": sum(1 for r in fails if str(r.get("cause")) == "state_machine"),
+                        "reduction_order": sum(1 for r in fails if str(r.get("cause")) == "reduction_order"),
+                    },
+                    "report_paths": {
+                        "tsv": str(reports_dir / "step4_gpu_cpu_parity.tsv"),
+                        "md": str(reports_dir / "step4_gpu_cpu_parity.md"),
+                        "json": str(reports_dir / "step4_gpu_cpu_parity.json"),
+                    },
+                }
+
+                if fails and bool(getattr(args, "step4_parity_enforce", False)):
+                    meta["step4_parity"]["enforced"] = True
+                    _write_json(run_dir / "run_metadata.json", meta)
+                    return 1
+            except Exception as e:
+                meta["step4_parity_error"] = f"{type(e).__name__}: {e}"
+
+        # ------------------------------------------------------------------
         # 5) Final report
         # ------------------------------------------------------------------
         current_stage = "final_report"
@@ -4350,6 +4990,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     mx.add_argument("--reproduce", metavar="RUN_ID", help="Reproduce an existing run_id (CPU replay + reports only).")
     ap.add_argument("--artifacts-dir", default="artifacts", help="Artifacts root directory (default: artifacts).")
     ap.add_argument("--resume", action="store_true", help="Resume an existing run_id from artifacts.")
+    ap.add_argument(
+        "--allow-binary-drift",
+        action="store_true",
+        help="Allow --resume even if the backtester command/binary fingerprint differs from the original run.",
+    )
+    ap.add_argument(
+        "--allow-input-drift",
+        action="store_true",
+        help="Allow --resume even if candles/funding inputs drift (mtime/size fingerprint mismatch).",
+    )
 
     ap.add_argument(
         "--profile",
@@ -4360,6 +5010,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
     ap.add_argument("--config", default="config/strategy_overrides.yaml", help="Base strategy YAML config path.")
     ap.add_argument("--interval", default="30m", help="Main interval for sweep/replay (default: 30m).")
+    ap.add_argument(
+        "--start-ts",
+        default="",
+        help="Backtest window start timestamp (forwarded to mei-backtester; ms epoch recommended).",
+    )
+    ap.add_argument(
+        "--end-ts",
+        default="",
+        help="Backtest window end timestamp (forwarded to mei-backtester; ms epoch recommended).",
+    )
     ap.add_argument("--candles-db", default=None, help="Optional candle DB path override.")
     ap.add_argument("--funding-db", default=None, help="Optional funding DB path for replay/sweep.")
     ap.add_argument(
@@ -4376,6 +5036,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
 
     ap.add_argument("--sweep-spec", default=None, help="Sweep spec YAML path.")
+    ap.add_argument(
+        "--sweep-parity-mode",
+        default="production",
+        choices=["production", "identical-symbol-universe"],
+        help="Sweep parity mode (default: production).",
+    )
     ap.add_argument("--gpu", action="store_true", help="Use GPU sweep (requires CUDA build/runtime).")
     ap.add_argument(
         "--allow-unsafe-gpu-sweep",
@@ -4443,6 +5109,44 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=1000,
         help="Stage-1 shortlist pool size by PnL from sweep results (default: 1000).",
+    )
+
+    # Step-4 GPU↔CPU parity report / gate
+    ap.set_defaults(step4_parity=True)
+    ap.add_argument(
+        "--no-step4-parity",
+        dest="step4_parity",
+        action="store_false",
+        help="Disable Step-4 GPU↔CPU parity report generation.",
+    )
+    ap.add_argument(
+        "--step4-parity-enforce",
+        action="store_true",
+        help="Fail the run when Step-4 GPU↔CPU parity mismatches are detected.",
+    )
+    ap.add_argument(
+        "--step4-parity-rel-eps",
+        type=float,
+        default=1e-6,
+        help="Relative epsilon for Step-4 parity (default: 1e-6).",
+    )
+    ap.add_argument(
+        "--step4-parity-abs-eps",
+        type=float,
+        default=1e-3,
+        help="Absolute epsilon for Step-4 parity (default: 1e-3).",
+    )
+    ap.add_argument(
+        "--step4-parity-dd-eps",
+        type=float,
+        default=1e-6,
+        help="Max drawdown pct epsilon for Step-4 parity (default: 1e-6).",
+    )
+    ap.add_argument(
+        "--step4-parity-pf-eps",
+        type=float,
+        default=1e-4,
+        help="Profit factor epsilon for Step-4 parity (default: 1e-4).",
     )
 
     ap.add_argument("--walk-forward", action="store_true", help="Run walk-forward validation for each candidate.")

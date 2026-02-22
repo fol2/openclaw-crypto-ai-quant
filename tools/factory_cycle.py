@@ -1248,6 +1248,16 @@ def main(argv: list[str] | None = None) -> int:
 
     ap.add_argument("--sweep-spec", default="backtester/sweeps/full_144v.yaml", help="Sweep spec YAML path.")
     ap.add_argument("--interval", default="", help="Main interval for sweep/replay (default: from effective YAML).")
+    ap.add_argument(
+        "--start-ts",
+        default="",
+        help="Backtest window start timestamp (forwarded to factory_run / mei-backtester).",
+    )
+    ap.add_argument(
+        "--end-ts",
+        default="",
+        help="Backtest window end timestamp (forwarded to factory_run / mei-backtester).",
+    )
     ap.add_argument("--candles-db", default="candles_dbs", help="Candle DB path (dir or glob).")
     ap.add_argument("--funding-db", default="candles_dbs/funding_rates.db", help="Funding DB path.")
     ap.add_argument(
@@ -1265,6 +1275,50 @@ def main(argv: list[str] | None = None) -> int:
 
     ap.add_argument("--gpu", action="store_true", help="Use GPU sweep (requires CUDA build/runtime).")
     ap.add_argument("--tpe", action="store_true", help="Use TPE Bayesian optimisation for GPU sweeps (requires --gpu).")
+    ap.add_argument(
+        "--sweep-parity-mode",
+        default="production",
+        choices=["production", "identical-symbol-universe"],
+        help="Sweep parity mode passed to mei-backtester sweep (default: production).",
+    )
+
+    # Step-4 GPU↔CPU parity report / gate (forwarded to factory_run)
+    ap.set_defaults(step4_parity=True)
+    ap.add_argument(
+        "--no-step4-parity",
+        dest="step4_parity",
+        action="store_false",
+        help="Disable Step-4 GPU↔CPU parity report generation.",
+    )
+    ap.add_argument(
+        "--step4-parity-enforce",
+        action="store_true",
+        help="Fail the run when Step-4 GPU↔CPU parity mismatches are detected.",
+    )
+    ap.add_argument(
+        "--step4-parity-rel-eps",
+        type=float,
+        default=1e-6,
+        help="Relative epsilon for Step-4 parity (default: 1e-6).",
+    )
+    ap.add_argument(
+        "--step4-parity-abs-eps",
+        type=float,
+        default=1e-3,
+        help="Absolute epsilon for Step-4 parity (default: 1e-3).",
+    )
+    ap.add_argument(
+        "--step4-parity-dd-eps",
+        type=float,
+        default=1e-6,
+        help="Max drawdown pct epsilon for Step-4 parity (default: 1e-6).",
+    )
+    ap.add_argument(
+        "--step4-parity-pf-eps",
+        type=float,
+        default=1e-4,
+        help="Profit factor epsilon for Step-4 parity (default: 1e-4).",
+    )
     ap.add_argument("--tpe-batch", type=int, default=256, help="TPE batch size (trials per GPU batch, default: 256).")
     ap.add_argument("--tpe-seed", type=int, default=None, help="TPE RNG seed (default: from profile).")
     ap.add_argument(
@@ -1285,6 +1339,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--sensitivity-checks", action="store_true", help="Enable sensitivity checks.")
     ap.add_argument(
         "--resume", action="store_true", help="Resume an existing run-id from artifacts (factory_run --resume)."
+    )
+    ap.add_argument(
+        "--allow-binary-drift",
+        action="store_true",
+        help="Allow resume even if backtester command/binary fingerprint differs (factory_run --allow-binary-drift).",
+    )
+    ap.add_argument(
+        "--allow-input-drift",
+        action="store_true",
+        help="Allow resume even if candles/funding input fingerprints differ (factory_run --allow-input-drift).",
     )
     ap.add_argument(
         "--require-ssot-evidence",
@@ -1534,6 +1598,11 @@ def main(argv: list[str] | None = None) -> int:
     ]
     if bool(args.resume):
         factory_argv.append("--resume")
+        if bool(getattr(args, "allow_binary_drift", False)):
+            factory_argv.append("--allow-binary-drift")
+        if bool(getattr(args, "allow_input_drift", False)):
+            factory_argv.append("--allow-input-drift")
+
         # Rehydrate shortlist knobs from the resumed run so factory_run --resume
         # guard keys remain reproducible across default changes.
         if "shortlist_modes" in resume_run_args and resume_run_args.get("shortlist_modes") is not None:
@@ -1556,6 +1625,43 @@ def main(argv: list[str] | None = None) -> int:
                 factory_argv += ["--shortlist-top-pnl", str(_shortlist_top_pnl)]
             except Exception:
                 pass
+
+        # Rehydrate sweep window + parity mode (also guard-keyed in factory_run).
+        _start_ts = str(resume_run_args.get("start_ts", "") or "").strip()
+        _end_ts = str(resume_run_args.get("end_ts", "") or "").strip()
+        _parity_mode = str(resume_run_args.get("sweep_parity_mode", "production") or "production").strip()
+        if _start_ts:
+            factory_argv += ["--start-ts", _start_ts]
+        if _end_ts:
+            factory_argv += ["--end-ts", _end_ts]
+        if _parity_mode:
+            factory_argv += ["--sweep-parity-mode", _parity_mode]
+    else:
+        _start_ts = str(getattr(args, "start_ts", "") or "").strip()
+        _end_ts = str(getattr(args, "end_ts", "") or "").strip()
+        _parity_mode = str(getattr(args, "sweep_parity_mode", "production") or "production").strip()
+        if _start_ts:
+            factory_argv += ["--start-ts", _start_ts]
+        if _end_ts:
+            factory_argv += ["--end-ts", _end_ts]
+        if _parity_mode:
+            factory_argv += ["--sweep-parity-mode", _parity_mode]
+
+    # Forward Step-4 parity report / gate flags.
+    if not bool(getattr(args, "step4_parity", True)):
+        factory_argv.append("--no-step4-parity")
+    if bool(getattr(args, "step4_parity_enforce", False)):
+        factory_argv.append("--step4-parity-enforce")
+    factory_argv += [
+        "--step4-parity-rel-eps",
+        str(float(getattr(args, "step4_parity_rel_eps", 1e-6) or 1e-6)),
+        "--step4-parity-abs-eps",
+        str(float(getattr(args, "step4_parity_abs_eps", 1e-3) or 1e-3)),
+        "--step4-parity-dd-eps",
+        str(float(getattr(args, "step4_parity_dd_eps", 1e-6) or 1e-6)),
+        "--step4-parity-pf-eps",
+        str(float(getattr(args, "step4_parity_pf_eps", 1e-4) or 1e-4)),
+    ]
     if bool(run_with_gpu):
         factory_argv.append("--gpu")
     if bool(run_with_tpe):
