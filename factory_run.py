@@ -1063,7 +1063,7 @@ def _fingerprint_db_arg(arg: str | None) -> dict[str, Any]:
 
 
 _EFFECTIVE_RANGE_RE = re.compile(
-    r"\\[(?:sweep|replay)\\] Effective time range: (?P<from>-?\\d+) \\([^)]*\\)\\.\\.(?P<to>-?\\d+) \\([^)]*\\)"
+    r"\[(?:sweep|replay)\] Effective time range: (?P<from>-?\d+) \([^)]*\)\.\.(?P<to>-?\d+) \([^)]*\)"
 )
 
 
