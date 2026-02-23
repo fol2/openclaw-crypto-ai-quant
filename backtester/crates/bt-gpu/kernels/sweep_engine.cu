@@ -969,12 +969,31 @@ extern "C" __global__ void sweep_engine_kernel(
             //
             // Derive bar_ts once per indicator bar (shared across symbols) and enforce
             // the same strict lower bound in both exit + entry sub-bar loops.
+            //
+            // CPU SSOT bar timing is anchored on the indicator/snapshot timeline.
+            // Resolve from snapshots first, then fall back to main_candles.
+            // As a final fallback, infer from entry interval geometry.
+            const unsigned int main_bar_sec = params->max_sub_per_bar * params->entry_interval_sec;
             unsigned int bar_t_sec = 0u;
             for (unsigned int ts = 0u; ts < ns; ts++) {
-                unsigned int t = main_candles[bar * ns + ts].t_sec;
+                unsigned long long s_idx =
+                    (unsigned long long)cfg.snapshot_offset
+                    + (unsigned long long)bar * (unsigned long long)ns
+                    + (unsigned long long)ts;
+                if (s_idx >= (unsigned long long)snap_buf_size) { continue; }
+                unsigned int t = snapshots[s_idx].t_sec;
                 if (t != 0u) {
                     bar_t_sec = t;
                     break;
+                }
+            }
+            if (bar_t_sec == 0u) {
+                for (unsigned int ts = 0u; ts < ns; ts++) {
+                    unsigned int t = main_candles[bar * ns + ts].t_sec;
+                    if (t != 0u) {
+                        bar_t_sec = t;
+                        break;
+                    }
                 }
             }
 
@@ -982,12 +1001,37 @@ extern "C" __global__ void sweep_engine_kernel(
             unsigned int next_bar_t_sec = 0u;
             if (bar + 1u < params->num_bars) {
                 for (unsigned int ts = 0u; ts < ns; ts++) {
-                    unsigned int t = main_candles[(bar + 1u) * ns + ts].t_sec;
+                    unsigned long long s_idx =
+                        (unsigned long long)cfg.snapshot_offset
+                        + (unsigned long long)(bar + 1u) * (unsigned long long)ns
+                        + (unsigned long long)ts;
+                    if (s_idx >= (unsigned long long)snap_buf_size) { continue; }
+                    unsigned int t = snapshots[s_idx].t_sec;
                     if (t != 0u) {
                         next_bar_t_sec = t;
                         break;
                     }
                 }
+                if (next_bar_t_sec == 0u) {
+                    for (unsigned int ts = 0u; ts < ns; ts++) {
+                        unsigned int t = main_candles[(bar + 1u) * ns + ts].t_sec;
+                        if (t != 0u) {
+                            next_bar_t_sec = t;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (next_bar_t_sec == 0u && bar_t_sec != 0u && main_bar_sec != 0u) {
+                next_bar_t_sec = bar_t_sec + main_bar_sec;
+            }
+            if (
+                bar_t_sec == 0u
+                && next_bar_t_sec != 0u
+                && main_bar_sec != 0u
+                && next_bar_t_sec > main_bar_sec
+            ) {
+                bar_t_sec = next_bar_t_sec - main_bar_sec;
             }
 
             // ── Sub-bar exits (per symbol, chronological) ───────────────────
@@ -1040,9 +1084,23 @@ extern "C" __global__ void sweep_engine_kernel(
                     if (is_exit_cooldown_active(&state, sym, hybrid.t_sec, &cfg)) {
                         continue;
                     }
-
-                    // CPU parity: sync is performed inside each kernel-exit evaluation call.
-                    state.positions[sym].kernel_margin_used = state.positions[sym].margin_used;
+                    // CPU parity: kernel_margin_used tracks the decision-kernel margin model
+                    // (base leverage) and MUST NOT be overwritten during exit evaluation.
+                    // If a position was seeded without kernel_margin_used (legacy init-state),
+                    // derive it once from (size * entry_price) and cfg.leverage.
+                    if (state.positions[sym].kernel_margin_used <= 0.0
+                        && state.positions[sym].active != POS_EMPTY
+                        && state.positions[sym].size > 0.0
+                        && state.positions[sym].entry_price > 0.0) {
+                        double kernel_lev = ((double)cfg.leverage > 1.0)
+                            ? (double)cfg.leverage
+                            : 1.0;
+                        double seed_notional =
+                            (double)state.positions[sym].size * (double)state.positions[sym].entry_price;
+                        double seed_kernel_notional = clamp_kernel_notional(seed_notional);
+                        state.positions[sym].kernel_margin_used =
+                            quantize12(seed_kernel_notional / kernel_lev);
+                    }
 
                     // Stop loss
                     if (check_stop_loss(pos, hybrid, &cfg)) {
@@ -1194,10 +1252,13 @@ extern "C" __global__ void sweep_engine_kernel(
                     hybrid.open = sc.open;
                     hybrid.t_sec = eval_t_sec;
 
-                    const GpuPosition& pos = state.positions[sym];
+                    GpuPosition& pos = state.positions[sym];
+                    const bool pos_open = (pos.active != POS_EMPTY);
 
-                    if (pos.active != POS_EMPTY) { continue; }
-                    if (is_entry_cooldown_active(&state, sym, hybrid.t_sec, &cfg)) { continue; }
+                    // CPU SSOT parity:
+                    // - Evaluate sub-bar candidates even when a position is already open (needed for same-direction pyramiding).
+                    // - Entry cooldown is only an early-out for fresh OPEN candidates; pyramiding re-checks cooldown internally.
+                    if (!pos_open && is_entry_cooldown_active(&state, sym, hybrid.t_sec, &cfg)) { continue; }
 
                     // Gates, signal generation, filters (using hybrid snapshot with indicator values)
                     // AQC-1213: gates and signal now use codegen (double precision)
@@ -1374,6 +1435,192 @@ extern "C" __global__ void sweep_engine_kernel(
                         );
                     }
 
+                    // CPU parity: if a same-direction signal arrives while a position is already open,
+                    // route it through pyramiding checks instead of treating it as a fresh OPEN candidate.
+                    if (pos_open) {
+                        if (cfg.enable_pyramiding != 0u && pos.active == desired_type) {
+                            // try_pyramid() — mirror CPU behaviour used in the sub-bar entry block (engine.rs).
+                            if (pos.adds_count >= cfg.max_adds_per_symbol) {
+                                if (debug_target) {
+                                    printf(
+                                        "[gpu-sub-pyr-debug] sym=%u ts=%u rejected=max_adds adds=%u max=%u\n",
+                                        sym, hybrid.t_sec, pos.adds_count, cfg.max_adds_per_symbol
+                                    );
+                                }
+                            } else if (cfg.add_min_confidence != 0u && confidence < cfg.add_min_confidence) {
+                                if (debug_target) {
+                                    printf(
+                                        "[gpu-sub-pyr-debug] sym=%u ts=%u rejected=min_conf conf=%u min=%u\n",
+                                        sym, hybrid.t_sec, confidence, cfg.add_min_confidence
+                                    );
+                                }
+                            } else if (is_entry_cooldown_active(&state, sym, hybrid.t_sec, &cfg)) {
+                                if (debug_target) {
+                                    printf(
+                                        "[gpu-sub-pyr-debug] sym=%u ts=%u rejected=entry_cooldown\n",
+                                        sym, hybrid.t_sec
+                                    );
+                                }
+                            } else {
+                                double min_profit_atr = (double)cfg.add_min_profit_atr;
+                                // Reduce min_profit_atr in a strong trend with stable ATR, unless RSI is extreme.
+                                if ((double)hybrid.adx_slope > 0.75 && (double)hybrid.atr_slope <= 0.0) {
+                                    bool is_rsi_extreme = (pos.active == POS_LONG)
+                                        ? ((double)hybrid.rsi > 65.0)
+                                        : ((double)hybrid.rsi < 35.0);
+                                    if (!is_rsi_extreme) {
+                                        min_profit_atr *= 0.5;
+                                    }
+                                }
+
+                                double current_atr = atr;
+                                if (!(current_atr > 0.0)) {
+                                    current_atr = ((double)pos.entry_atr > 0.0)
+                                        ? (double)pos.entry_atr
+                                        : ((double)pos.entry_price * 0.005);
+                                }
+
+                                double entry_close = (double)sc.close;
+                                if (current_atr > 0.0 && entry_close > 0.0) {
+                                    double p_atr_pyr = (pos.active == POS_LONG)
+                                        ? ((entry_close - (double)pos.entry_price) / current_atr)
+                                        : (((double)pos.entry_price - entry_close) / current_atr);
+                                    if (!isfinite(p_atr_pyr)) { p_atr_pyr = 0.0; }
+
+                                    if (p_atr_pyr >= min_profit_atr) {
+                                        long long elapsed_sec =
+                                            (long long)hybrid.t_sec - (long long)pos.last_add_time_sec;
+                                        long long min_add_cooldown_sec =
+                                            (long long)cfg.add_cooldown_minutes * 60ll;
+                                        if (elapsed_sec >= min_add_cooldown_sec) {
+                                            // CPU parity: try_pyramid uses balance-only equity approximation.
+                                            double equity = state.balance;
+                                            if (equity < 0.0) { equity = 0.0; }
+
+                                            double allocation_pct = (double)cfg.allocation_pct;
+                                            if (allocation_pct < 0.0) { allocation_pct = 0.0; }
+
+                                            double base_margin = equity * allocation_pct;
+                                            double add_margin =
+                                                base_margin * (double)cfg.add_fraction_of_base_margin;
+
+                                            if (add_margin > 0.0) {
+                                                // Margin cap (max_total_margin_pct)
+                                                double max_margin_pct = (double)cfg.max_total_margin_pct;
+                                                if (max_margin_pct > 0.0) {
+                                                    double total_margin = 0.0;
+                                                    for (unsigned int s = 0u; s < ns; s++) {
+                                                        if (state.positions[s].active != POS_EMPTY) {
+                                                            total_margin += (double)state.positions[s].margin_used;
+                                                        }
+                                                    }
+                                                    double max_margin = equity * max_margin_pct;
+                                                    if (total_margin + add_margin > max_margin) {
+                                                        if (debug_target) {
+                                                            printf(
+                                                                "[gpu-sub-pyr-debug] sym=%u ts=%u rejected=margin total=%.12f add=%.12f max=%.12f\n",
+                                                                sym, hybrid.t_sec, total_margin, add_margin, max_margin
+                                                            );
+                                                        }
+                                                        // Do not open new positions when already open; just move on.
+                                                        continue;
+                                                    }
+                                                }
+
+                                                double lev = (double)pos.leverage;
+                                                double add_notional = add_margin * lev;
+                                                double add_size = add_notional / entry_close;
+
+                                                if (add_notional < cfg.min_notional_usd) {
+                                                    if (cfg.bump_to_min_notional != 0u && entry_close > 0.0) {
+                                                        add_notional = (double)cfg.min_notional_usd;
+                                                        add_size = add_notional / entry_close;
+                                                    } else {
+                                                        if (debug_target) {
+                                                            printf(
+                                                                "[gpu-sub-pyr-debug] sym=%u ts=%u rejected=min_notional add_notional=%.12f min=%.12f\n",
+                                                                sym, hybrid.t_sec, add_notional, (double)cfg.min_notional_usd
+                                                            );
+                                                        }
+                                                        continue;
+                                                    }
+                                                }
+
+                                                double kernel_lev = ((double)cfg.leverage > 1.0)
+                                                    ? (double)cfg.leverage
+                                                    : 1.0;
+                                                double kernel_add_notional = clamp_kernel_notional(add_notional);
+                                                double kernel_margin_add =
+                                                    quantize12(kernel_add_notional / kernel_lev);
+                                                double add_fee =
+                                                    quantize12(kernel_add_notional * (double)fee_rate);
+
+                                                if (kernel_margin_add + add_fee > state.kernel_cash) {
+                                                    if (debug_target) {
+                                                        printf(
+                                                            "[gpu-sub-pyr-debug] sym=%u ts=%u rejected=insufficient_cash add_notional=%.12f kernel_margin_add=%.12f kernel_cash=%.12f fee=%.12f\n",
+                                                            sym, hybrid.t_sec, add_notional, kernel_margin_add, state.kernel_cash, add_fee
+                                                        );
+                                                    }
+                                                    continue;
+                                                }
+
+                                                double fee = quantize12((double)add_notional * (double)fee_rate);
+                                                state.balance -= fee;
+                                                state.kernel_cash =
+                                                    quantize12(state.kernel_cash - (kernel_margin_add + add_fee));
+                                                state.total_fees += fee;
+
+                                                double old_size = pos.size;
+                                                double new_size = old_size + add_size;
+                                                float add_slip =
+                                                    (pos.active == POS_LONG) ? cfg.slippage_bps : -cfg.slippage_bps;
+                                                double add_fill_price = quantize12(
+                                                    entry_close * (1.0 + (double)add_slip / 10000.0));
+                                                double new_entry =
+                                                    ((double)pos.entry_price * old_size + (add_fill_price * add_size))
+                                                    / new_size;
+
+                                                state.positions[sym].entry_price = new_entry;
+                                                state.positions[sym].size = new_size;
+                                                state.positions[sym].margin_used =
+                                                    state.positions[sym].margin_used + add_margin;
+                                                state.positions[sym].kernel_margin_used =
+                                                    quantize12(state.positions[sym].kernel_margin_used + kernel_margin_add);
+                                                state.positions[sym].adds_count += 1u;
+                                                state.positions[sym].last_add_time_sec = hybrid.t_sec;
+                                                state.last_entry_attempt_sec[sym] = hybrid.t_sec;
+
+                                                trace_record(
+                                                    &state,
+                                                    sym,
+                                                    hybrid.t_sec,
+                                                    TRACE_KIND_ADD,
+                                                    pos.active,
+                                                    TRACE_REASON_PYRAMID,
+                                                    (float)add_fill_price,
+                                                    (float)add_size,
+                                                    0.0f
+                                                );
+                                            }
+                                        } else if (debug_target) {
+                                            printf(
+                                                "[gpu-sub-pyr-debug] sym=%u ts=%u rejected=add_cooldown elapsed_sec=%lld min_sec=%lld\n",
+                                                sym, hybrid.t_sec, elapsed_sec, min_add_cooldown_sec
+                                            );
+                                        }
+                                    } else if (debug_target) {
+                                        printf(
+                                            "[gpu-sub-pyr-debug] sym=%u ts=%u rejected=min_profit_atr profit_atr=%.12f min=%.12f atr=%.12f\n",
+                                            sym, hybrid.t_sec, p_atr_pyr, min_profit_atr, current_atr
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        // Regardless of whether pyramiding was accepted, do not treat this as a fresh OPEN candidate.
+                        continue;
+                    }
                     int score = (int)(confidence) * 100 + (int)(hybrid.adx);
 
                     EntryCandidate cand;
@@ -1567,8 +1814,23 @@ extern "C" __global__ void sweep_engine_kernel(
                 }
                 bool partial_tp_taken = false;
                 if (!block_exits && !is_exit_cooldown_active(&state, sym, snap.t_sec, &cfg)) {
-                    // CPU parity: sync is performed inside each kernel-exit evaluation call.
-                    state.positions[sym].kernel_margin_used = state.positions[sym].margin_used;
+                    // CPU parity: kernel_margin_used tracks the decision-kernel margin model
+                    // (base leverage) and MUST NOT be overwritten during exit evaluation.
+                    // If a position was seeded without kernel_margin_used (legacy init-state),
+                    // derive it once from (size * entry_price) and cfg.leverage.
+                    if (state.positions[sym].kernel_margin_used <= 0.0
+                        && state.positions[sym].active != POS_EMPTY
+                        && state.positions[sym].size > 0.0
+                        && state.positions[sym].entry_price > 0.0) {
+                        double kernel_lev = ((double)cfg.leverage > 1.0)
+                            ? (double)cfg.leverage
+                            : 1.0;
+                        double seed_notional =
+                            (double)state.positions[sym].size * (double)state.positions[sym].entry_price;
+                        double seed_kernel_notional = clamp_kernel_notional(seed_notional);
+                        state.positions[sym].kernel_margin_used =
+                            quantize12(seed_kernel_notional / kernel_lev);
+                    }
 
                     // Stop loss
                     if (check_stop_loss(pos, snap, &cfg)) {
