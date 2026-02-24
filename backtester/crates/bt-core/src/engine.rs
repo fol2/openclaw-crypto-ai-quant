@@ -2245,7 +2245,6 @@ fn compute_entry_size(
         vol_baseline_pct: tc.vol_baseline_pct,
         vol_scalar_min: tc.vol_scalar_min,
         vol_scalar_max: tc.vol_scalar_max,
-        leverage: tc.leverage,
         leverage_low: tc.leverage_low,
         leverage_medium: tc.leverage_medium,
         leverage_high: tc.leverage_high,

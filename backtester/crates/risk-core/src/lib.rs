@@ -28,7 +28,6 @@ pub struct EntrySizingInput {
     pub vol_baseline_pct: f64,
     pub vol_scalar_min: f64,
     pub vol_scalar_max: f64,
-    pub leverage: f64,
     pub leverage_low: f64,
     pub leverage_medium: f64,
     pub leverage_high: f64,
@@ -228,7 +227,6 @@ mod tests {
             vol_baseline_pct: 0.01,
             vol_scalar_min: 0.6,
             vol_scalar_max: 1.4,
-            leverage: 3.0,
             leverage_low: 1.0,
             leverage_medium: 3.0,
             leverage_high: 5.0,
@@ -258,14 +256,15 @@ mod tests {
             vol_baseline_pct: 0.01,
             vol_scalar_min: 0.6,
             vol_scalar_max: 1.4,
-            leverage: 3.0,
             leverage_low: 1.0,
-            leverage_medium: 3.0,
+            leverage_medium: 2.0,
             leverage_high: 5.0,
         });
 
+        // Medium confidence → leverage_medium=2.0, margin=30, notional=60
         assert!((out.margin_used - 30.0).abs() < 1e-9);
-        assert!((out.notional - 90.0).abs() < 1e-9);
+        assert!((out.leverage - 2.0).abs() < 1e-9);
+        assert!((out.notional - 60.0).abs() < 1e-9);
         assert!((out.size - 0.0).abs() < 1e-9);
     }
 
