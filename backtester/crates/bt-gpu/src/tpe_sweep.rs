@@ -367,6 +367,15 @@ fn sample_batch(
             Some(g) => g,
             None => continue,
         };
+        debug_assert!(
+            gate.parent_idx < a || axis_opts[gate.parent_idx].gate.is_none(),
+            "gate parent axis [{}] '{}' must be ungated or precede child axis [{}] '{}' \
+             — check YAML axis ordering",
+            gate.parent_idx,
+            axis_opts[gate.parent_idx].path,
+            a,
+            axis_opts[a].path,
+        );
         for t in 0..batch_n {
             let parent_val = resolved_all[t][gate.parent_idx];
             let gate_active = (parent_val - gate.eq).abs() < 1e-9;
