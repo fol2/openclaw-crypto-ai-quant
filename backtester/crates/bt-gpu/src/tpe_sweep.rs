@@ -291,7 +291,12 @@ fn resolve_raw(axis: &AxisOptimizer, raw_val: f64) -> f64 {
         AxisType::Integer => raw_val.round().clamp(axis.min_val, axis.max_val),
         AxisType::Float { step } => {
             if *step > 1e-9 {
-                ((raw_val / step).round() * step).clamp(axis.min_val, axis.max_val)
+                // Anchor quantization grid at min_val so offset value lists
+                // (e.g. [28, 40, 52] with step=12) snap to their intended values
+                // instead of zero-origin multiples (36, 48).
+                let origin = axis.min_val;
+                (((raw_val - origin) / step).round() * step + origin)
+                    .clamp(axis.min_val, axis.max_val)
             } else {
                 raw_val.clamp(axis.min_val, axis.max_val)
             }
@@ -1798,7 +1803,8 @@ fn classify_axis(path: &str, values: &[f64]) -> AxisType {
 #[cfg(test)]
 mod tests {
     use super::{
-        approx_step_from_values, checked_num_bars_u32, classify_axis, is_integer_path, AxisType,
+        approx_step_from_values, checked_num_bars_u32, classify_axis, is_integer_path,
+        resolve_raw, AxisOptimizer, AxisType,
     };
 
     #[test]
@@ -1933,6 +1939,65 @@ mod tests {
 
         let step = approx_step_from_values(&[10.0, 15.0, 20.0, 25.0]);
         assert!((step - 5.0).abs() < 1e-4, "step={step}, expected 5.0");
+    }
+
+    /// Build a minimal AxisOptimizer for `resolve_raw` tests (only axis_type,
+    /// min_val, max_val matter; optimizer is a dummy).
+    fn dummy_axis(min_val: f64, max_val: f64, axis_type: AxisType) -> AxisOptimizer {
+        AxisOptimizer {
+            path: String::new(),
+            min_val,
+            max_val,
+            optimizer: tpe::TpeOptimizer::new(
+                tpe::parzen_estimator(),
+                tpe::range(min_val, max_val + 1.0).unwrap(),
+            ),
+            is_indicator: false,
+            axis_type,
+            freeze_val: min_val,
+            gate: None,
+        }
+    }
+
+    #[test]
+    fn float_step_min_origin_quantization() {
+        // Offset grid: [28, 40, 52] step=12, min=28
+        // Zero-origin would produce 36, 48 — wrong.
+        // Min-origin should produce 28, 40, 52.
+        let axis = dummy_axis(28.0, 52.0, AxisType::Float { step: 12.0 });
+        assert_eq!(resolve_raw(&axis, 28.0), 28.0);
+        assert_eq!(resolve_raw(&axis, 33.0), 28.0); // closer to 28 than 40
+        assert_eq!(resolve_raw(&axis, 34.0), 40.0); // 34-28=6, 6/12=0.5, rounds to 1 → 40
+        assert_eq!(resolve_raw(&axis, 40.0), 40.0);
+        assert_eq!(resolve_raw(&axis, 46.0), 52.0); // 46-28=18, 18/12=1.5, rounds to 2 → 52
+        assert_eq!(resolve_raw(&axis, 52.0), 52.0);
+
+        // Offset grid: [0.35, 0.50, 0.65] step=0.15, min=0.35
+        let axis = dummy_axis(0.35, 0.65, AxisType::Float { step: 0.15 });
+        assert!((resolve_raw(&axis, 0.35) - 0.35).abs() < 1e-9);
+        assert!((resolve_raw(&axis, 0.50) - 0.50).abs() < 1e-9);
+        assert!((resolve_raw(&axis, 0.65) - 0.65).abs() < 1e-9);
+
+        // Zero-aligned grid: [0.05, 0.10, 0.15, 0.20] step=0.05
+        // Should still work correctly with min-origin.
+        let axis = dummy_axis(0.05, 0.20, AxisType::Float { step: 0.05 });
+        assert!((resolve_raw(&axis, 0.05) - 0.05).abs() < 1e-9);
+        assert!((resolve_raw(&axis, 0.10) - 0.10).abs() < 1e-9);
+        assert!((resolve_raw(&axis, 0.15) - 0.15).abs() < 1e-9);
+        assert!((resolve_raw(&axis, 0.20) - 0.20).abs() < 1e-9);
+
+        // Clamping at boundaries still works
+        assert_eq!(resolve_raw(&axis, 0.01), 0.05);
+        assert_eq!(resolve_raw(&axis, 0.99), 0.20);
+    }
+
+    #[test]
+    fn float_step_offset_grid_vol_baseline() {
+        // [0.007, 0.010, 0.013] step=0.003, min=0.007
+        let axis = dummy_axis(0.007, 0.013, AxisType::Float { step: 0.003 });
+        assert!((resolve_raw(&axis, 0.007) - 0.007).abs() < 1e-9);
+        assert!((resolve_raw(&axis, 0.010) - 0.010).abs() < 1e-9);
+        assert!((resolve_raw(&axis, 0.013) - 0.013).abs() < 1e-9);
     }
 
     #[test]
