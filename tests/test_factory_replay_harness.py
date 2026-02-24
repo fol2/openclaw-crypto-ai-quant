@@ -139,6 +139,7 @@ def test_factory_run_replay_equivalence_missing_baseline_fails_in_strict_mode(mo
 
     monkeypatch.setenv("AI_QUANT_REPLAY_EQUIVALENCE_BASELINE", str(baseline))
     monkeypatch.setenv("AI_QUANT_REPLAY_EQUIVALENCE_STRICT", "1")
+    monkeypatch.setenv("AI_QUANT_REPLAY_EQUIVALENCE_AUTO_SEED", "0")
     monkeypatch.delenv("AI_QUANT_REPLAY_EQUIVALENCE_LIVE_BASELINE", raising=False)
     monkeypatch.delenv("AI_QUANT_REPLAY_EQUIVALENCE_PAPER_BASELINE", raising=False)
     monkeypatch.delenv("AI_QUANT_REPLAY_EQUIVALENCE_BACKTEST_BASELINE", raising=False)
@@ -206,7 +207,18 @@ def test_factory_run_replay_equivalence_mode_specific_strictness_matrix(
     assert summary["replay_equivalence_failure_code"] == "mismatch"
 
 
-def _write_run_metadata(*, run_dir: Path, candidate_id: str, config_path: str, replay_report: str) -> None:
+def _write_run_metadata(
+    *,
+    run_dir: Path,
+    candidate_id: str,
+    config_path: str,
+    replay_report: str,
+    run_id: str = "baseline-run",
+    generated_at_ms: int = 0,
+    contract_fingerprint: str = "",
+    candidate_extra: dict | None = None,
+    artifacts_root: str = "",
+) -> None:
     (run_dir / "replays").mkdir(parents=True, exist_ok=True)
     (run_dir / "replays" / replay_report).write_text("{}\n", encoding="utf-8")
     candidate = {
@@ -220,10 +232,23 @@ def _write_run_metadata(*, run_dir: Path, candidate_id: str, config_path: str, r
         "canonical_cpu_verified": True,
         "candidate_mode": True,
     }
+    if isinstance(candidate_extra, dict):
+        candidate.update(candidate_extra)
     run_meta = {
-        "run_id": "baseline-run",
+        "run_id": str(run_id),
         "candidate_configs": [candidate],
     }
+    if generated_at_ms > 0:
+        run_meta["generated_at_ms"] = int(generated_at_ms)
+    if contract_fingerprint:
+        run_meta["replay_equivalence_contract"] = {
+            "schema_version": 1,
+            "mode": "backtest",
+            "fingerprint": str(contract_fingerprint),
+            "payload": {},
+        }
+    if artifacts_root:
+        run_meta["repro"] = {"artifacts_root": str(artifacts_root)}
     (run_dir / "run_metadata.json").write_text(json.dumps(run_meta), encoding="utf-8")
 
 
@@ -299,3 +324,185 @@ def test_factory_run_resolve_baseline_run_dir_uses_metadata_match(tmp_path: Path
         summary={"config_id": "cfg-beta", "config_path": str(tmp_path / "candidate_beta.yaml")},
     )
     assert resolved == baseline_run / "replays" / "candidate_beta.replay.json"
+
+
+def test_factory_run_resolve_baseline_prefers_mode_rank_identity(tmp_path: Path) -> None:
+    baseline_run = tmp_path / "baseline_run"
+    right_dir = tmp_path / "right"
+    baseline_run.mkdir()
+    right_dir.mkdir()
+    (baseline_run / "replays").mkdir(parents=True, exist_ok=True)
+
+    rows = [
+        {
+            "config_id": "cfg-growth-r1",
+            "path": str(tmp_path / "candidate_growth_rank1.yaml"),
+            "replay_report_path": str(baseline_run / "replays" / "candidate_growth_rank1.replay.json"),
+            "sort_by": "growth",
+            "rank": 1,
+            "candidate_mode": True,
+        },
+        {
+            "config_id": "cfg-growth-r2",
+            "path": str(tmp_path / "candidate_growth_rank2.yaml"),
+            "replay_report_path": str(baseline_run / "replays" / "candidate_growth_rank2.replay.json"),
+            "sort_by": "growth",
+            "rank": 2,
+            "candidate_mode": True,
+        },
+    ]
+    (baseline_run / "replays" / "candidate_growth_rank1.replay.json").write_text("{}", encoding="utf-8")
+    (baseline_run / "replays" / "candidate_growth_rank2.replay.json").write_text("{}", encoding="utf-8")
+    (baseline_run / "run_metadata.json").write_text(
+        json.dumps({"run_id": "baseline", "candidate_configs": rows}), encoding="utf-8"
+    )
+
+    right_report = right_dir / "candidate_growth_rank2.replay.json"
+    right_report.write_text("{}", encoding="utf-8")
+
+    resolved = factory_run._resolve_replay_equivalence_baseline_path(
+        "backtest",
+        baseline_path=baseline_run,
+        right_report=right_report,
+        summary={"config_id": "", "config_path": "", "sort_by": "growth", "rank": 2},
+    )
+    assert resolved == baseline_run / "replays" / "candidate_growth_rank2.replay.json"
+
+
+def test_factory_run_replay_equivalence_auto_fallback_recovers_stale_pinned_baseline(
+    monkeypatch, tmp_path: Path
+) -> None:
+    artifacts_root = tmp_path / "artifacts"
+    stale_run = artifacts_root / "2026-02-20" / "run_stale"
+    good_run = artifacts_root / "2026-02-23" / "run_good"
+    current_run = artifacts_root / "2026-02-24" / "run_current"
+    stale_run.mkdir(parents=True, exist_ok=True)
+    good_run.mkdir(parents=True, exist_ok=True)
+    current_run.mkdir(parents=True, exist_ok=True)
+
+    cfg_path = tmp_path / "candidate_alpha.yaml"
+    cfg_path.write_text("candidate: alpha\n", encoding="utf-8")
+    cfg_sha = factory_run._sha256_file_optional(cfg_path)
+
+    _write_run_metadata(
+        run_dir=stale_run,
+        candidate_id="cfg-alpha",
+        config_path=str(cfg_path),
+        replay_report="candidate_alpha.replay.json",
+        run_id="stale",
+        generated_at_ms=1700000000000,
+        contract_fingerprint="stale-contract-fp",
+        candidate_extra={"sort_by": "growth", "rank": 1, "config_sha256": cfg_sha},
+    )
+    _write_trace(stale_run / "replays" / "candidate_alpha.replay.json", TRACE)
+    (stale_run / "replay_equivalence_baseline_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "generated_at_ms": 1700000000000,
+                "run_id": "stale",
+                "run_dir": str(stale_run),
+                "contract": {
+                    "schema_version": 1,
+                    "mode": "backtest",
+                    "fingerprint": "stale-contract-fp",
+                    "payload": {},
+                },
+                "candidate_count": 1,
+                "seed_mode_count": 0,
+                "candidates": [
+                    {
+                        "config_id": "cfg-alpha",
+                        "replay_report_path": str(stale_run / "replays" / "candidate_alpha.replay.json"),
+                        "config_sha256": cfg_sha,
+                        "sort_by": "growth",
+                        "rank": 1,
+                        "seed_mode": False,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _write_run_metadata(
+        run_dir=good_run,
+        candidate_id="cfg-alpha",
+        config_path=str(cfg_path),
+        replay_report="candidate_alpha.replay.json",
+        run_id="good",
+        generated_at_ms=1700100000000,
+        contract_fingerprint="current-contract-fp",
+        candidate_extra={"sort_by": "growth", "rank": 1, "config_sha256": cfg_sha},
+    )
+    _write_trace(good_run / "replays" / "candidate_alpha.replay.json", TRACE)
+    (good_run / "replay_equivalence_baseline_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "generated_at_ms": 1700100000000,
+                "run_id": "good",
+                "run_dir": str(good_run),
+                "contract": {
+                    "schema_version": 1,
+                    "mode": "backtest",
+                    "fingerprint": "current-contract-fp",
+                    "payload": {},
+                },
+                "candidate_count": 1,
+                "seed_mode_count": 0,
+                "candidates": [
+                    {
+                        "config_id": "cfg-alpha",
+                        "replay_report_path": str(good_run / "replays" / "candidate_alpha.replay.json"),
+                        "config_sha256": cfg_sha,
+                        "sort_by": "growth",
+                        "rank": 1,
+                        "seed_mode": False,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _write_run_metadata(
+        run_dir=current_run,
+        candidate_id="cfg-alpha",
+        config_path=str(cfg_path),
+        replay_report="candidate_alpha.replay.json",
+        run_id="current",
+        generated_at_ms=1700200000000,
+        contract_fingerprint="current-contract-fp",
+        candidate_extra={"sort_by": "growth", "rank": 1, "config_sha256": cfg_sha},
+        artifacts_root=str(artifacts_root),
+    )
+    right_report = current_run / "replays" / "candidate_alpha.replay.json"
+    _write_trace(right_report, TRACE)
+
+    monkeypatch.setenv(
+        "AI_QUANT_REPLAY_EQUIVALENCE_BASELINE",
+        str(stale_run / "replays" / "candidate_alpha.replay.json"),
+    )
+    monkeypatch.setenv("AI_QUANT_REPLAY_EQUIVALENCE_STRICT", "1")
+    monkeypatch.setenv("AI_QUANT_REPLAY_EQUIVALENCE_BASELINE_POLICY", "pinned_or_auto")
+    monkeypatch.setenv("AI_QUANT_REPLAY_EQUIVALENCE_AUTO_FALLBACK", "1")
+    _force_mode(monkeypatch, "backtest")
+
+    summary: dict = {
+        "config_id": "cfg-alpha",
+        "config_path": str(cfg_path),
+        "config_sha256": cfg_sha,
+        "sort_by": "growth",
+        "rank": 1,
+    }
+    ok = _run_replay_equivalence_check(
+        right_report=right_report,
+        summary=summary,
+        current_contract={"schema_version": 1, "mode": "backtest", "fingerprint": "current-contract-fp", "payload": {}},
+    )
+
+    assert ok
+    assert summary["replay_equivalence_status"] == "pass"
+    assert summary["replay_equivalence_baseline_source"] == "auto_fallback"
+    assert summary["replay_equivalence_baseline_path"] == str(good_run / "replays" / "candidate_alpha.replay.json")

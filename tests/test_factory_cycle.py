@@ -6,7 +6,13 @@ import json
 import pytest
 
 import tools.factory_cycle as factory_cycle
-from tools.factory_cycle import _apply_strategy_mode_overlay, _parse_candidate, _select_deployable_candidates, _stable_promotion_since_s
+from tools.factory_cycle import (
+    _apply_strategy_mode_overlay,
+    _build_step5_gate_report,
+    _parse_candidate,
+    _select_deployable_candidates,
+    _stable_promotion_since_s,
+)
 
 
 def _iso(ts: datetime.datetime) -> str:
@@ -309,6 +315,69 @@ def test_require_ssot_evidence_can_be_disabled_for_selection() -> None:
     assert selected[0].config_id == "legacy_proofless"
 
 
+def test_build_step5_gate_report_tracks_block_reasons() -> None:
+    blocked = _parse_candidate(
+        {
+            "config_id": "blocked_cfg",
+            "config_path": "/tmp/blocked.yaml",
+            "total_pnl": 1.0,
+            "total_trades": 1,
+            "profit_factor": 1.1,
+            "max_drawdown_pct": 0.2,
+            "pipeline_stage": "candidate_validation",
+            "sweep_stage": "gpu",
+            "replay_stage": "cpu_replay",
+            "validation_gate": "replay_only",
+            "canonical_cpu_verified": True,
+            "candidate_mode": True,
+            "schema_version": 1,
+            "replay_report_path": "/tmp/blocked.replay.json",
+            "replay_equivalence_report_path": "/tmp/blocked.replay_eq.json",
+            "replay_equivalence_status": "baseline_stale",
+            "replay_equivalence_count": 0,
+        }
+    )
+    deployable = _parse_candidate(
+        {
+            "config_id": "ok_cfg",
+            "config_path": "/tmp/ok.yaml",
+            "total_pnl": 2.0,
+            "total_trades": 2,
+            "profit_factor": 1.4,
+            "max_drawdown_pct": 0.1,
+            "pipeline_stage": "candidate_validation",
+            "sweep_stage": "gpu",
+            "replay_stage": "cpu_replay",
+            "validation_gate": "replay_only",
+            "canonical_cpu_verified": True,
+            "candidate_mode": True,
+            "schema_version": 1,
+            "replay_report_path": "/tmp/ok.replay.json",
+            "replay_equivalence_report_path": "/tmp/ok.replay_eq.json",
+            "replay_equivalence_status": "pass",
+            "replay_equivalence_count": 0,
+        }
+    )
+    assert blocked is not None
+    assert deployable is not None
+
+    report = _build_step5_gate_report(
+        run_id="run_test",
+        parsed=[blocked, deployable],
+        require_ssot_evidence=True,
+        selection_policy="deployable_rank_v1",
+        deployable_selected=[deployable],
+        deployable_by_slot={1: deployable},
+        deploy_targets=[factory_cycle.DeployTarget(slot=1, service="svc", yaml_path=factory_cycle.Path("/tmp/a.yaml"))],
+        selection_warnings=[],
+        blocked_reason="",
+    )
+
+    assert report["blocked"] is False
+    assert report["deployable_count"] == 1
+    assert report["blocked_reasons_count"]["replay_equivalence_baseline_stale"] == 1
+
+
 def test_pid_environ_filters_secret_like_keys(monkeypatch) -> None:
     proc_env_path = "/proc/4242/environ"
     raw_env = (
@@ -366,3 +435,85 @@ def test_service_environment_filters_secret_like_keys(monkeypatch) -> None:
     assert "DB_SECRET" not in env
     assert "MONITOR_TOKEN" not in env
     assert "ADMIN_PASSWORD" not in env
+
+
+def test_factory_cycle_writes_step5_reports_when_blocked(monkeypatch, tmp_path) -> None:
+    run_id = "run_blocked_case"
+    run_dir = tmp_path / "2026-02-24" / f"run_{run_id}"
+    reports_dir = run_dir / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "configs").mkdir(parents=True, exist_ok=True)
+    (run_dir / "replays").mkdir(parents=True, exist_ok=True)
+    (run_dir / "run_metadata.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+
+    items = [
+        {
+            "config_id": "blocked_cfg",
+            "config_path": str(run_dir / "configs" / "blocked.yaml"),
+            "total_pnl": 1.0,
+            "total_trades": 1,
+            "profit_factor": 1.0,
+            "max_drawdown_pct": 0.2,
+            "pipeline_stage": "candidate_validation",
+            "sweep_stage": "gpu",
+            "replay_stage": "cpu_replay",
+            "validation_gate": "replay_only",
+            "canonical_cpu_verified": False,
+            "candidate_mode": True,
+            "schema_version": 1,
+            "replay_report_path": str(run_dir / "replays" / "blocked.replay.json"),
+            "replay_equivalence_report_path": str(run_dir / "replays" / "blocked.replay_eq.json"),
+            "replay_equivalence_status": "baseline_stale",
+            "replay_equivalence_count": 0,
+            "rejected": False,
+        }
+    ]
+    (reports_dir / "report.json").write_text(json.dumps({"items": items}), encoding="utf-8")
+    (reports_dir / "report.md").write_text("# report\n", encoding="utf-8")
+
+    base_cfg = tmp_path / "base.yaml"
+    base_cfg.write_text("global:\n  engine:\n    interval: 30m\n", encoding="utf-8")
+    target_yaml = tmp_path / "target.yaml"
+    target_yaml.write_text("global:\n  engine:\n    interval: 30m\n", encoding="utf-8")
+
+    monkeypatch.setattr(factory_cycle.factory_run, "main", lambda argv=None: 0)
+    monkeypatch.setattr(factory_cycle, "_query_run_dir", lambda *, registry_db, run_id: run_dir)
+    monkeypatch.setattr(factory_cycle, "_send_discord", lambda **kwargs: None)
+    monkeypatch.setattr(factory_cycle, "_send_discord_chunks", lambda **kwargs: None)
+
+    rc = factory_cycle.main(
+        [
+            "--run-id",
+            run_id,
+            "--artifacts-dir",
+            str(tmp_path),
+            "--config",
+            str(base_cfg),
+            "--service",
+            "svc-test",
+            "--yaml-path",
+            str(target_yaml),
+            "--candidate-services",
+            "svc-test",
+            "--candidate-yaml-paths",
+            str(target_yaml),
+            "--candidate-count",
+            "1",
+            "--discord-target",
+            "",
+        ]
+    )
+
+    assert rc == 0
+    selection_path = reports_dir / "selection.json"
+    step5_json = reports_dir / "step5_gate_report.json"
+    step5_md = reports_dir / "step5_gate_report.md"
+    assert selection_path.is_file()
+    assert step5_json.is_file()
+    assert step5_md.is_file()
+
+    selection = json.loads(selection_path.read_text(encoding="utf-8"))
+    assert selection["selection_stage"] == "blocked"
+    assert selection["deploy_stage"] == "blocked"
+    assert selection["promotion_stage"] == "skipped"
+    assert selection["step5_gate_status"] == "blocked"
