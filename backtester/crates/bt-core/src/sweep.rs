@@ -331,7 +331,6 @@ fn apply_one(cfg: &mut StrategyConfig, path: &str, value: f64) {
 
         // === Boolean toggles (0.0 = false, else true) ===
         "trade.enable_dynamic_sizing" => cfg.trade.enable_dynamic_sizing = value != 0.0,
-        "trade.enable_dynamic_leverage" => cfg.trade.enable_dynamic_leverage = value != 0.0,
         "trade.enable_pyramiding" => cfg.trade.enable_pyramiding = value != 0.0,
         "trade.enable_partial_tp" => cfg.trade.enable_partial_tp = value != 0.0,
         "trade.enable_ssf_filter" => cfg.trade.enable_ssf_filter = value != 0.0,
@@ -606,13 +605,6 @@ fn read_one(cfg: &StrategyConfig, path: &str) -> Option<f64> {
         // === Boolean toggles ===
         "trade.enable_dynamic_sizing" => {
             if cfg.trade.enable_dynamic_sizing {
-                1.0
-            } else {
-                0.0
-            }
-        }
-        "trade.enable_dynamic_leverage" => {
-            if cfg.trade.enable_dynamic_leverage {
                 1.0
             } else {
                 0.0
@@ -1262,7 +1254,7 @@ axes:
         // When gate is satisfied (enable=1), gated axes expand normally.
         let axes = vec![
             SweepAxis {
-                path: "trade.enable_dynamic_leverage".to_string(),
+                path: "trade.enable_dynamic_sizing".to_string(),
                 values: vec![0.0, 1.0],
                 gate: None,
             },
@@ -1270,7 +1262,7 @@ axes:
                 path: "trade.leverage".to_string(),
                 values: vec![1.0, 2.0, 3.0],
                 gate: Some(AxisGate {
-                    path: "trade.enable_dynamic_leverage".to_string(),
+                    path: "trade.enable_dynamic_sizing".to_string(),
                     eq: 0.0,
                 }),
             },
@@ -1278,7 +1270,7 @@ axes:
                 path: "trade.leverage_low".to_string(),
                 values: vec![1.0, 2.0],
                 gate: Some(AxisGate {
-                    path: "trade.enable_dynamic_leverage".to_string(),
+                    path: "trade.enable_dynamic_sizing".to_string(),
                     eq: 1.0,
                 }),
             },
@@ -1286,7 +1278,7 @@ axes:
                 path: "trade.leverage_high".to_string(),
                 values: vec![5.0, 7.0],
                 gate: Some(AxisGate {
-                    path: "trade.enable_dynamic_leverage".to_string(),
+                    path: "trade.enable_dynamic_sizing".to_string(),
                     eq: 1.0,
                 }),
             },
@@ -1303,7 +1295,7 @@ axes:
         // Without gates, same axes would produce full cartesian product.
         let axes = vec![
             SweepAxis {
-                path: "trade.enable_dynamic_leverage".to_string(),
+                path: "trade.enable_dynamic_sizing".to_string(),
                 values: vec![0.0, 1.0],
                 gate: None,
             },
@@ -1332,12 +1324,12 @@ axes:
     fn test_gate_deserialization() {
         let yaml = r#"
 axes:
-  - path: trade.enable_dynamic_leverage
+  - path: trade.enable_dynamic_sizing
     values: [0, 1]
   - path: trade.leverage_low
     values: [1, 2, 3]
     gate:
-      path: trade.enable_dynamic_leverage
+      path: trade.enable_dynamic_sizing
       eq: 1
 initial_balance: 10000.0
 lookback: 200
@@ -1346,7 +1338,7 @@ lookback: 200
         assert_eq!(spec.axes.len(), 2);
         assert!(spec.axes[0].gate.is_none());
         let gate = spec.axes[1].gate.as_ref().unwrap();
-        assert_eq!(gate.path, "trade.enable_dynamic_leverage");
+        assert_eq!(gate.path, "trade.enable_dynamic_sizing");
         assert!((gate.eq - 1.0).abs() < 1e-9);
     }
 

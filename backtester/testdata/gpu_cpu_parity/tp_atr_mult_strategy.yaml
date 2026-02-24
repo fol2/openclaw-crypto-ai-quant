@@ -10,7 +10,6 @@ global:
     min_atr_pct: 0.0
     bump_to_min_notional: false
     enable_dynamic_sizing: false
-    enable_dynamic_leverage: false
     enable_pyramiding: false
     enable_partial_tp: false
     enable_ssf_filter: false

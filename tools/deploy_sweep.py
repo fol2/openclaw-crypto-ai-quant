@@ -59,7 +59,7 @@ INT_FIELDS = {
     "stoch_rsi_smooth2", "slow_drift_slope_window", "min_signals",
 }
 BOOL_FIELDS = {
-    "enable_dynamic_leverage", "enable_dynamic_sizing", "enable_pyramiding",
+    "enable_dynamic_sizing", "enable_pyramiding",
     "enable_partial_tp", "enable_vol_buffered_trailing", "enable_reef_filter",
     "enable_ssf_filter", "enable_breakeven_stop", "enable_rsi_overextension_exit",
     "reverse_entry_signal", "block_exits_on_extreme_dev", "bump_to_min_notional",

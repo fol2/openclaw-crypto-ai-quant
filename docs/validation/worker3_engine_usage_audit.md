@@ -137,7 +137,6 @@
 | 82 | `trade.confidence_mult_low` | **USED** | `compute_entry_sizing()`, `add_to_position()` | Sizing multiplier for low confidence. Gated by `enable_dynamic_sizing`. |
 | 83 | `trade.confidence_mult_medium` | **USED** | `compute_entry_sizing()`, `add_to_position()` | Sizing multiplier for medium confidence. Gated by `enable_dynamic_sizing`. |
 | 84 | `trade.enable_breakeven_stop` | **USED** | `check_exit_conditions()` L2795 | Toggle breakeven stop |
-| 85 | `trade.enable_dynamic_leverage` | **USED** | `_select_leverage()` | Toggle dynamic leverage by confidence |
 | 86 | `trade.enable_dynamic_sizing` | **USED** | `compute_entry_sizing()`, `add_to_position()` | Toggle dynamic sizing (confidence + ADX + vol scaling) |
 | 87 | `trade.enable_partial_tp` | **USED** | `check_exit_conditions()` | Toggle partial take-profit ladder |
 | 88 | `trade.enable_pyramiding` | **USED** | `add_to_position()` (paper & live) | Toggle pyramiding (scaling in) |
@@ -151,9 +150,9 @@
 | 96 | `trade.glitch_atr_mult` | **USED** | `check_exit_conditions()` L2769 | Glitch guard ATR multiplier. Gated by `block_exits_on_extreme_dev`. |
 | 97 | `trade.glitch_price_dev_pct` | **USED** | `check_exit_conditions()` L2768 | Glitch guard price deviation %. Gated by `block_exits_on_extreme_dev`. |
 | 98 | `trade.leverage` | **USED** | `_select_leverage()`, `add_to_position()` | Base leverage (used when dynamic leverage is off) |
-| 99 | `trade.leverage_high` | **USED** | `_select_leverage()` | Leverage for high confidence. Gated by `enable_dynamic_leverage`. |
-| 100 | `trade.leverage_low` | **USED** | `_select_leverage()` | Leverage for low confidence. Gated by `enable_dynamic_leverage`. |
-| 102 | `trade.leverage_medium` | **USED** | `_select_leverage()` | Leverage for medium confidence. Gated by `enable_dynamic_leverage`. |
+| 99 | `trade.leverage_high` | **USED** | `_select_leverage()` | Leverage for high confidence |
+| 100 | `trade.leverage_low` | **USED** | `_select_leverage()` | Leverage for low confidence |
+| 102 | `trade.leverage_medium` | **USED** | `_select_leverage()` | Leverage for medium confidence |
 | 103 | `trade.max_adds_per_symbol` | **USED** | `add_to_position()` (paper & live) | Max pyramid adds per symbol. Gated by `enable_pyramiding`. |
 | 104 | `trade.max_entry_orders_per_loop` | **USED** | `daemon.py` PaperPlugin/LivePlugin `before_iteration()` | Per-loop entry budget |
 | 105 | `trade.max_open_positions` | **USED** | `execute_trade()` L2384 | Max concurrent open positions |
@@ -271,12 +270,6 @@ When `enable_pyramiding = false`, `add_to_position()` returns immediately at the
 - `trade.reef_adx_threshold`
 - `trade.reef_long_rsi_extreme_gt`
 - `trade.reef_short_rsi_extreme_lt`
-
-### `enable_dynamic_leverage` gates:
-- `trade.leverage_high`
-- `trade.leverage_medium`
-- `trade.leverage_low`
-(When off, `trade.leverage` is used directly.)
 
 ### `enable_dynamic_sizing` gates:
 - `trade.confidence_mult_high`

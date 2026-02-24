@@ -28,7 +28,6 @@ pub struct EntrySizingInput {
     pub vol_baseline_pct: f64,
     pub vol_scalar_min: f64,
     pub vol_scalar_max: f64,
-    pub enable_dynamic_leverage: bool,
     pub leverage: f64,
     pub leverage_low: f64,
     pub leverage_medium: f64,
@@ -76,15 +75,11 @@ pub fn compute_entry_sizing(input: EntrySizingInput) -> EntrySizingResult {
         margin_used *= confidence_mult * adx_mult * vol_scalar;
     }
 
-    let leverage = if input.enable_dynamic_leverage {
-        let base_lev = match input.confidence {
-            ConfidenceTier::High => input.leverage_high,
-            ConfidenceTier::Medium => input.leverage_medium,
-            ConfidenceTier::Low => input.leverage_low,
-        };
-        base_lev
-    } else {
-        input.leverage
+    // Always use per-confidence-tier leverage (low/medium/high).
+    let leverage = match input.confidence {
+        ConfidenceTier::High => input.leverage_high,
+        ConfidenceTier::Medium => input.leverage_medium,
+        ConfidenceTier::Low => input.leverage_low,
     };
 
     let notional = margin_used * leverage;
@@ -233,7 +228,6 @@ mod tests {
             vol_baseline_pct: 0.01,
             vol_scalar_min: 0.6,
             vol_scalar_max: 1.4,
-            enable_dynamic_leverage: true,
             leverage: 3.0,
             leverage_low: 1.0,
             leverage_medium: 3.0,
@@ -264,7 +258,6 @@ mod tests {
             vol_baseline_pct: 0.01,
             vol_scalar_min: 0.6,
             vol_scalar_max: 1.4,
-            enable_dynamic_leverage: false,
             leverage: 3.0,
             leverage_low: 1.0,
             leverage_medium: 3.0,

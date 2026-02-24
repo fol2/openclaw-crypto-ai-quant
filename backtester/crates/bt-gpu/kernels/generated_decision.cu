@@ -1226,11 +1226,10 @@ __device__ SizingResultD compute_entry_size_codegen(
 
     // ── Leverage ─────────────────────────────────────────────────────────
     double lev = (double)cfg.leverage;
-    if (cfg.enable_dynamic_leverage != 0u) {
-        if (confidence == CONF_HIGH)        { lev = (double)cfg.leverage_high; }
-        else if (confidence == CONF_MEDIUM) { lev = (double)cfg.leverage_medium; }
-        else                                { lev = (double)cfg.leverage_low; }
-    }
+    // Always use per-confidence-tier leverage.
+    if (confidence == CONF_HIGH)        { lev = (double)cfg.leverage_high; }
+    else if (confidence == CONF_MEDIUM) { lev = (double)cfg.leverage_medium; }
+    else                                { lev = (double)cfg.leverage_low; }
 
     // ── Notional & position size ─────────────────────────────────────────
     double notional = margin * lev;

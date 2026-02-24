@@ -57,7 +57,7 @@ INT_FIELDS = {
 
 # Fields that must be booleans
 BOOL_FIELDS = {
-    "enable_dynamic_leverage", "enable_dynamic_sizing", "enable_pyramiding",
+    "enable_dynamic_sizing", "enable_pyramiding",
     "enable_partial_tp", "enable_vol_buffered_trailing", "enable_reef_filter",
     "enable_ssf_filter", "enable_breakeven_stop", "enable_rsi_overextension_exit",
     "reverse_entry_signal", "block_exits_on_extreme_dev", "bump_to_min_notional",
@@ -457,6 +457,7 @@ def main():
     trade_node = _get_nested(base_data, "global.trade", None)
     if isinstance(trade_node, dict):
         trade_node.pop("leverage_max_cap", None)
+        trade_node.pop("enable_dynamic_leverage", None)
 
     # Clamp leverage values to integers in [1, 10].
     # Use math.floor(x + 0.5) to match Rust f64::round() (half-away-from-zero),

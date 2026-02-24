@@ -255,7 +255,8 @@ pub struct GpuComboConfig {
     pub reef_short_rsi_extreme_lt: f32,
 
     // Dynamic leverage [10-13]
-    pub enable_dynamic_leverage: u32,
+    // [10] reserved (was enable_dynamic_leverage, removed — always dynamic now)
+    pub _reserved10: u32,
     pub leverage_low: f32,
     pub leverage_medium: f32,
     pub leverage_high: f32,
@@ -688,7 +689,7 @@ impl GpuComboConfig {
             reef_long_rsi_extreme_gt: checked_f32_field!(tc.reef_long_rsi_extreme_gt),
             reef_short_rsi_extreme_lt: checked_f32_field!(tc.reef_short_rsi_extreme_lt),
 
-            enable_dynamic_leverage: tc.enable_dynamic_leverage as u32,
+            _reserved10: 0,
             leverage_low: checked_f32("leverage_low", tc.leverage_low)?,
             leverage_medium: checked_f32("leverage_medium", tc.leverage_medium)?,
             leverage_high: checked_f32("leverage_high", tc.leverage_high)?,
