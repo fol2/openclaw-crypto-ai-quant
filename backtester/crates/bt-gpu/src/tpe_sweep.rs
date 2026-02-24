@@ -1665,6 +1665,14 @@ fn make_optimizer(axis_type: &AxisType, min_val: f64, max_val: f64) -> tpe::TpeO
 
 /// Classify a sweep axis into the appropriate AxisType based on path and values.
 fn classify_axis(path: &str, values: &[f64]) -> AxisType {
+    // Categorical first: known enum paths always use categorical, even if
+    // narrowed to two values like [0.0, 1.0] (which would match Binary).
+    if CATEGORICAL_PATHS.contains(&path) {
+        return AxisType::Categorical {
+            values: values.to_vec(),
+        };
+    }
+
     // Binary: exactly two values that are {0.0, 1.0} (sorted)
     if values.len() == 2 {
         let mut sorted = [values[0], values[1]];
@@ -1672,13 +1680,6 @@ fn classify_axis(path: &str, values: &[f64]) -> AxisType {
         if (sorted[0] - 0.0).abs() < 1e-9 && (sorted[1] - 1.0).abs() < 1e-9 {
             return AxisType::Binary;
         }
-    }
-
-    // Categorical: known enum paths
-    if CATEGORICAL_PATHS.contains(&path) {
-        return AxisType::Categorical {
-            values: values.to_vec(),
-        };
     }
 
     // Integer: indicator windows and other usize-typed params
@@ -1836,6 +1837,19 @@ mod tests {
         // Even though [0.0, 1.0] subset exists, 3 values + categorical path → Categorical
         assert!(matches!(
             classify_axis("trade.entry_min_confidence", &[0.0, 1.0, 2.0]),
+            AxisType::Categorical { .. }
+        ));
+    }
+
+    #[test]
+    fn categorical_path_with_two_values_stays_categorical() {
+        // Narrowed categorical sweep with only [0.0, 1.0] should NOT be classified as Binary
+        assert!(matches!(
+            classify_axis("trade.entry_min_confidence", &[0.0, 1.0]),
+            AxisType::Categorical { .. }
+        ));
+        assert!(matches!(
+            classify_axis("thresholds.entry.macd_hist_entry_mode", &[0.0, 1.0]),
             AxisType::Categorical { .. }
         ));
     }
