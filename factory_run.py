@@ -205,13 +205,12 @@ def _read_balance_from_live_db(*, db_path: Path) -> float | None:
         return None
 
 
-
-
 def _resolve_live_export_python() -> str:
     venv_py = AIQ_ROOT / ".venv" / "bin" / "python3"
     if venv_py.exists():
         return str(venv_py)
     return sys.executable
+
 
 def _export_live_balance_via_cli(*, output: Path) -> tuple[float | None, dict[str, Any]]:
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -260,9 +259,18 @@ def _export_live_balance_via_cli(*, output: Path) -> tuple[float | None, dict[st
             return None, {"method": "export_state", "success": False, "error": "balance missing from export payload"}
         balance = float(raw_bal)
     except Exception as e:
-        return None, {"method": "export_state", "success": False, "error": f"failed to read export payload: {type(e).__name__}: {e}"}
+        return None, {
+            "method": "export_state",
+            "success": False,
+            "error": f"failed to read export payload: {type(e).__name__}: {e}",
+        }
 
-    return balance, {"method": "export_state", "success": True, "path": str(output), "secrets_path_used": env.get("AI_QUANT_SECRETS_PATH", "")}
+    return balance, {
+        "method": "export_state",
+        "success": True,
+        "path": str(output),
+        "secrets_path_used": env.get("AI_QUANT_SECRETS_PATH", ""),
+    }
 
 
 def _write_initial_balance_state_json(*, path: Path, balance: float, metadata: dict[str, Any]) -> None:
@@ -280,7 +288,9 @@ def _resolve_profile_requires_live_initial_balance(*, profile: str) -> bool:
     return str(profile or "").strip().lower() in LIVE_BALANCE_PROFILES
 
 
-def _resolve_factory_initial_balance(*, run_dir: Path, args: argparse.Namespace) -> tuple[float | None, Path | None, dict[str, Any]]:
+def _resolve_factory_initial_balance(
+    *, run_dir: Path, args: argparse.Namespace
+) -> tuple[float | None, Path | None, dict[str, Any]]:
     if not _resolve_profile_requires_live_initial_balance(profile=str(getattr(args, "profile", "daily").strip())):
         return None, None, {"mode": "disabled", "reason": "profile_no_live_init"}
 
@@ -293,12 +303,16 @@ def _resolve_factory_initial_balance(*, run_dir: Path, args: argparse.Namespace)
             existing = _load_json(state_json)
             if isinstance(existing, dict) and "balance" in existing:
                 bal = float(existing.get("balance") or 0.0)
-                return bal, state_json, {
-                    "mode": "live",
-                    "source": "cache",
-                    "path": str(state_json),
-                    "cached_at_ms": float(existing.get("updated_at_ms", 0.0) or 0.0),
-                }
+                return (
+                    bal,
+                    state_json,
+                    {
+                        "mode": "live",
+                        "source": "cache",
+                        "path": str(state_json),
+                        "cached_at_ms": float(existing.get("updated_at_ms", 0.0) or 0.0),
+                    },
+                )
         except Exception:
             pass
 
@@ -312,24 +326,32 @@ def _resolve_factory_initial_balance(*, run_dir: Path, args: argparse.Namespace)
 
     db_path = _first_existing_live_db_path()
     if db_path is None:
-        return None, None, {
-            "mode": "live",
-            "source": "sqlite",
-            "success": False,
-            "reason": "missing_live_db",
-            "export_error": meta.get("error"),
-        }
+        return (
+            None,
+            None,
+            {
+                "mode": "live",
+                "source": "sqlite",
+                "success": False,
+                "reason": "missing_live_db",
+                "export_error": meta.get("error"),
+            },
+        )
 
     bal_from_db = _read_balance_from_live_db(db_path=db_path)
     if bal_from_db is None:
-        return None, None, {
-            "mode": "live",
-            "source": "sqlite",
-            "success": False,
-            "reason": "live_db_has_no_balance_rows",
-            "live_db_path": str(db_path),
-            "export_error": meta.get("error"),
-        }
+        return (
+            None,
+            None,
+            {
+                "mode": "live",
+                "source": "sqlite",
+                "success": False,
+                "reason": "live_db_has_no_balance_rows",
+                "live_db_path": str(db_path),
+                "export_error": meta.get("error"),
+            },
+        )
 
     fallback_meta = {
         "mode": "live",
@@ -990,6 +1012,13 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _sha256_file_optional(path: Path) -> str:
+    try:
+        return _sha256_file(path)
+    except Exception:
+        return ""
+
+
 def _file_fingerprint(path: Path) -> dict[str, Any]:
     p = Path(path).expanduser()
     if not p.exists():
@@ -1461,6 +1490,11 @@ def _attach_replay_metadata(
         entry["replay_report_path"] = replay_report_path
         summary["config_path"] = config_path
         entry["config_path"] = config_path
+        for identity_field in ("sort_by", "rank", "overrides_key", "config_sha256"):
+            if identity_field in summary and identity_field not in entry:
+                entry[identity_field] = summary[identity_field]
+            elif identity_field in entry and identity_field not in summary:
+                summary[identity_field] = entry[identity_field]
         for proof_field in [
             "replay_equivalence_status",
             "replay_equivalence_mode",
@@ -1636,7 +1670,9 @@ def _build_step4_parity_contract_payload(meta: dict[str, Any]) -> dict[str, Any]
     """
 
     args_obj = meta.get("args") if isinstance(meta.get("args"), dict) else {}
-    sweep_range = meta.get("sweep_effective_time_range_ms") if isinstance(meta.get("sweep_effective_time_range_ms"), dict) else {}
+    sweep_range = (
+        meta.get("sweep_effective_time_range_ms") if isinstance(meta.get("sweep_effective_time_range_ms"), dict) else {}
+    )
     inputs = meta.get("input_fingerprints") if isinstance(meta.get("input_fingerprints"), dict) else {}
     repro = meta.get("repro") if isinstance(meta.get("repro"), dict) else {}
     repro_files = repro.get("files") if isinstance(repro.get("files"), dict) else {}
@@ -1657,15 +1693,35 @@ def _build_step4_parity_contract_payload(meta: dict[str, Any]) -> dict[str, Any]
         "effective_from_ts_ms": int(_coerce_int(sweep_range.get("from_ts_ms"), 0) or 0),
         "effective_to_ts_ms": int(_coerce_int(sweep_range.get("to_ts_ms"), 0) or 0),
         "candles_db": {
-            "fingerprint": str(inputs.get("candles_db", {}).get("fingerprint", "") if isinstance(inputs.get("candles_db"), dict) else ""),
-            "count": int(_coerce_int(inputs.get("candles_db", {}).get("count"), 0) if isinstance(inputs.get("candles_db"), dict) else 0),
+            "fingerprint": str(
+                inputs.get("candles_db", {}).get("fingerprint", "")
+                if isinstance(inputs.get("candles_db"), dict)
+                else ""
+            ),
+            "count": int(
+                _coerce_int(inputs.get("candles_db", {}).get("count"), 0)
+                if isinstance(inputs.get("candles_db"), dict)
+                else 0
+            ),
         },
         "funding_db": {
-            "fingerprint": str(inputs.get("funding_db", {}).get("fingerprint", "") if isinstance(inputs.get("funding_db"), dict) else ""),
-            "count": int(_coerce_int(inputs.get("funding_db", {}).get("count"), 0) if isinstance(inputs.get("funding_db"), dict) else 0),
+            "fingerprint": str(
+                inputs.get("funding_db", {}).get("fingerprint", "")
+                if isinstance(inputs.get("funding_db"), dict)
+                else ""
+            ),
+            "count": int(
+                _coerce_int(inputs.get("funding_db", {}).get("count"), 0)
+                if isinstance(inputs.get("funding_db"), dict)
+                else 0
+            ),
         },
         "balance_from": {
-            "fingerprint": str(inputs.get("balance_from", {}).get("fingerprint", "") if isinstance(inputs.get("balance_from"), dict) else ""),
+            "fingerprint": str(
+                inputs.get("balance_from", {}).get("fingerprint", "")
+                if isinstance(inputs.get("balance_from"), dict)
+                else ""
+            ),
         },
         "sweep_spec_sha256": str(
             repro_files.get("sweep_spec", {}).get("sha256", "")
@@ -1717,44 +1773,112 @@ def _coerce_replay_report_path(value: Any, *, run_dir: Path | None = None) -> Pa
     return p
 
 
+_DATE_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _summary_config_sha256(summary: dict[str, Any]) -> str:
+    cfg_sha = str(summary.get("config_sha256", "") or "").strip()
+    if cfg_sha:
+        return cfg_sha
+    cfg_path = str(summary.get("config_path", "") or "").strip()
+    if not cfg_path:
+        return ""
+    p = Path(cfg_path)
+    if not p.exists() or not p.is_file():
+        return ""
+    return _sha256_file_optional(p)
+
+
+def _candidate_baseline_match_score(
+    *,
+    row: dict[str, Any],
+    summary: dict[str, Any],
+    right_report: Path,
+) -> int:
+    score = 0
+
+    wanted_config_id = str(summary.get("config_id", "") or "").strip()
+    if wanted_config_id and str(row.get("config_id", "") or "").strip() == wanted_config_id:
+        score += 100
+
+    wanted_cfg_sha = _summary_config_sha256(summary)
+    row_cfg_sha = str(row.get("config_sha256", "") or "").strip()
+    if wanted_cfg_sha and row_cfg_sha and wanted_cfg_sha == row_cfg_sha:
+        score += 90
+
+    wanted_overrides = str(summary.get("overrides_key", "") or "").strip()
+    row_overrides = str(row.get("overrides_key", "") or "").strip()
+    if wanted_overrides and row_overrides and wanted_overrides == row_overrides:
+        score += 60
+
+    wanted_mode = str(summary.get("sort_by", "") or "").strip().lower()
+    row_mode = str(row.get("sort_by", "") or "").strip().lower()
+    if wanted_mode and row_mode and wanted_mode == row_mode:
+        score += 20
+
+    wanted_rank = int(_coerce_int(summary.get("rank"), 0) or 0)
+    row_rank = int(_coerce_int(row.get("rank"), 0) or 0)
+    if wanted_rank > 0 and row_rank > 0 and wanted_rank == row_rank:
+        score += 20
+
+    wanted_cfg_name = Path(str(summary.get("config_path", "") or "")).name
+    row_cfg_path = str(row.get("path", "") or row.get("config_path", "") or "").strip()
+    row_cfg_name = Path(row_cfg_path).name if row_cfg_path else ""
+    if wanted_cfg_name and row_cfg_name and wanted_cfg_name == row_cfg_name:
+        score += 15
+
+    row_replay_name = Path(str(row.get("replay_report_path", "") or "")).name
+    if right_report.name and row_replay_name and right_report.name == row_replay_name:
+        score += 10
+
+    return int(score)
+
+
+def _resolve_candidate_replay_baseline_from_rows(
+    *,
+    rows: list[dict[str, Any]],
+    run_dir: Path,
+    summary: dict[str, Any],
+    right_report: Path,
+) -> Path | None:
+    scored: list[tuple[int, int, Path]] = []
+    for idx, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        baseline_path = _coerce_replay_report_path(row.get("replay_report_path"), run_dir=run_dir)
+        if baseline_path is None or not baseline_path.is_file():
+            continue
+        score = _candidate_baseline_match_score(row=row, summary=summary, right_report=right_report)
+        scored.append((int(score), -int(idx), baseline_path))
+
+    if scored:
+        scored.sort(reverse=True)
+        top_score, _neg_idx, top_path = scored[0]
+        if int(top_score) > 0:
+            return top_path
+
+    # Backward-compatible final fallback by replay file name.
+    return _candidate_baseline_in_directory(run_dir / "replays", right_report=right_report)
+
+
 def _candidate_baseline_from_run_metadata(
     run_dir: Path,
     *,
     summary: dict[str, Any],
+    right_report: Path,
 ) -> Path | None:
     meta = _load_json(run_dir / "run_metadata.json")
     candidates = meta.get("candidate_configs")
     if not isinstance(candidates, list):
         return None
 
-    config_id = str(summary.get("config_id", "")).strip()
-    cfg_path = str(summary.get("config_path", "")).strip()
-    cfg_path_name = Path(cfg_path).name if cfg_path else ""
-
-    # Prefer exact config_id match as it is stable across config regenerations in a run.
-    if config_id:
-        for it in candidates:
-            if not isinstance(it, dict):
-                continue
-            if str(it.get("config_id", "")).strip() != config_id:
-                continue
-            bp = _coerce_replay_report_path(it.get("replay_report_path"), run_dir=run_dir)
-            if bp and bp.is_file():
-                return bp
-
-    # Fall back to matching on source file name for compatibility with legacy metadata.
-    if cfg_path_name:
-        for it in candidates:
-            if not isinstance(it, dict):
-                continue
-            it_cfg = str(it.get("path", "")).strip()
-            if Path(it_cfg).name != cfg_path_name:
-                continue
-            bp = _coerce_replay_report_path(it.get("replay_report_path"), run_dir=run_dir)
-            if bp and bp.is_file():
-                return bp
-
-    return None
+    rows = [it for it in candidates if isinstance(it, dict)]
+    return _resolve_candidate_replay_baseline_from_rows(
+        rows=rows,
+        run_dir=run_dir,
+        summary=summary,
+        right_report=right_report,
+    )
 
 
 def _candidate_baseline_in_directory(
@@ -1769,6 +1893,223 @@ def _candidate_baseline_in_directory(
         if c.is_file():
             return c
     return None
+
+
+def _candidate_baseline_from_manifest(
+    manifest_path: Path,
+    *,
+    summary: dict[str, Any],
+    right_report: Path,
+) -> Path | None:
+    try:
+        payload = _load_json(manifest_path)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    run_dir = manifest_path.parent
+    rows_raw = payload.get("candidates")
+    if not isinstance(rows_raw, list):
+        return None
+
+    rows: list[dict[str, Any]] = []
+    for row in rows_raw:
+        if isinstance(row, dict):
+            rows.append(dict(row))
+
+    # Enrich manifest rows with run metadata identity fields when available.
+    meta_path = run_dir / "run_metadata.json"
+    if meta_path.exists():
+        try:
+            meta = _load_json(meta_path)
+        except Exception:
+            meta = {}
+        candidates = meta.get("candidate_configs") if isinstance(meta, dict) else []
+        if isinstance(candidates, list):
+            by_config: dict[str, dict[str, Any]] = {}
+            for it in candidates:
+                if not isinstance(it, dict):
+                    continue
+                cfg_id = str(it.get("config_id", "") or "").strip()
+                if cfg_id and cfg_id not in by_config:
+                    by_config[cfg_id] = it
+
+            for row in rows:
+                cfg_id = str(row.get("config_id", "") or "").strip()
+                candidate = by_config.get(cfg_id)
+                if not isinstance(candidate, dict):
+                    continue
+                for key in ("path", "config_path", "sort_by", "rank", "overrides_key", "config_sha256"):
+                    if key not in row and key in candidate:
+                        row[key] = candidate.get(key)
+                if not str(row.get("replay_report_path", "") or "").strip():
+                    row["replay_report_path"] = candidate.get("replay_report_path")
+
+    return _resolve_candidate_replay_baseline_from_rows(
+        rows=rows,
+        run_dir=run_dir,
+        summary=summary,
+        right_report=right_report,
+    )
+
+
+def _run_generated_at_ms(run_dir: Path) -> int:
+    meta_path = run_dir / "run_metadata.json"
+    if not meta_path.exists():
+        return 0
+    try:
+        meta = _load_json(meta_path)
+    except Exception:
+        return 0
+    if not isinstance(meta, dict):
+        return 0
+    return int(_coerce_int(meta.get("generated_at_ms"), 0) or 0)
+
+
+def _artifacts_root_from_run_dir(run_dir: Path) -> Path | None:
+    run_dir = run_dir.resolve()
+
+    # Preferred source: run metadata explicitly records artifacts root.
+    meta_path = run_dir / "run_metadata.json"
+    if meta_path.exists():
+        try:
+            meta = _load_json(meta_path)
+        except Exception:
+            meta = {}
+        repro = meta.get("repro") if isinstance(meta, dict) else {}
+        raw_root = str((repro or {}).get("artifacts_root", "") or "").strip() if isinstance(repro, dict) else ""
+        if raw_root:
+            candidate = Path(raw_root).expanduser().resolve()
+            if candidate.is_dir():
+                return candidate
+
+    # Standard layout: artifacts/YYYY-MM-DD/run_<run_id>.
+    parent = run_dir.parent
+    if _DATE_DIR_RE.match(parent.name):
+        root = parent.parent
+        if root.is_dir():
+            return root
+
+    return None
+
+
+def _resolve_replay_equivalence_artifacts_root(*, right_report: Path) -> Path | None:
+    run_dir = _find_run_dir(right_report)
+    if run_dir is not None:
+        rooted = _artifacts_root_from_run_dir(run_dir)
+        if rooted is not None:
+            return rooted
+    fallback = (AIQ_ROOT / "artifacts").resolve()
+    if fallback.is_dir():
+        return fallback
+    return None
+
+
+def _iter_replay_equivalence_baseline_manifests(artifacts_root: Path) -> list[Path]:
+    manifests: list[Path] = []
+    if not artifacts_root.exists():
+        return manifests
+
+    for date_dir in sorted(
+        [p for p in artifacts_root.iterdir() if p.is_dir() and _DATE_DIR_RE.match(p.name)], reverse=True
+    ):
+        for run_dir in sorted(
+            [p for p in date_dir.iterdir() if p.is_dir() and p.name.startswith("run_")], reverse=True
+        ):
+            p = run_dir / "replay_equivalence_baseline_manifest.json"
+            if p.is_file():
+                manifests.append(p)
+    return manifests
+
+
+def _auto_replay_equivalence_baseline_path(
+    *,
+    mode: str,
+    right_report: Path,
+    summary: dict[str, Any],
+    current_contract: dict[str, Any] | None,
+) -> tuple[Path | None, dict[str, Any]]:
+    info: dict[str, Any] = {
+        "enabled": True,
+        "selected": False,
+        "selected_path": "",
+        "selected_manifest": "",
+        "selected_run_id": "",
+        "scanned_manifests": 0,
+        "matched_manifests": 0,
+    }
+    current_fp = str((current_contract or {}).get("fingerprint", "") or "").strip()
+    if not current_fp:
+        info["error"] = "missing_current_contract_fingerprint"
+        return None, info
+
+    artifacts_root = _resolve_replay_equivalence_artifacts_root(right_report=right_report)
+    if artifacts_root is None:
+        info["error"] = "artifacts_root_unresolved"
+        return None, info
+    info["artifacts_root"] = str(artifacts_root)
+
+    manifests = _iter_replay_equivalence_baseline_manifests(artifacts_root)
+    info["scanned_manifests"] = len(manifests)
+    if not manifests:
+        info["error"] = "no_baseline_manifests_found"
+        return None, info
+
+    mode_norm = _normalise_replay_equivalence_mode(mode)
+    matches: list[tuple[int, int, Path, Path, str]] = []
+    for idx, manifest_path in enumerate(manifests):
+        try:
+            payload = _load_json(manifest_path)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        contract = payload.get("contract")
+        if not isinstance(contract, dict):
+            continue
+        contract_fp = str(contract.get("fingerprint", "") or "").strip()
+        contract_mode = _normalise_replay_equivalence_mode(str(contract.get("mode", "") or mode_norm))
+        if not contract_fp or contract_fp != current_fp:
+            continue
+        if contract_mode != mode_norm:
+            continue
+
+        candidate_baseline = _candidate_baseline_from_manifest(
+            manifest_path,
+            summary=summary,
+            right_report=right_report,
+        )
+        if candidate_baseline is None:
+            continue
+
+        run_dir = manifest_path.parent
+        generated_at_ms = int(_coerce_int(payload.get("generated_at_ms"), 0) or 0)
+        if generated_at_ms <= 0:
+            generated_at_ms = _run_generated_at_ms(run_dir)
+        run_id = str(payload.get("run_id", "") or "").strip()
+        if not run_id:
+            try:
+                run_meta = _load_json(run_dir / "run_metadata.json")
+            except Exception:
+                run_meta = {}
+            if isinstance(run_meta, dict):
+                run_id = str(run_meta.get("run_id", "") or "").strip()
+
+        matches.append((int(generated_at_ms), -int(idx), candidate_baseline, manifest_path, run_id))
+
+    info["matched_manifests"] = len(matches)
+    if not matches:
+        info["error"] = "no_compatible_baseline_found"
+        return None, info
+
+    matches.sort(reverse=True)
+    _gen_ms, _neg_idx, selected_path, selected_manifest, selected_run_id = matches[0]
+    info["selected"] = True
+    info["selected_path"] = str(selected_path)
+    info["selected_manifest"] = str(selected_manifest)
+    info["selected_run_id"] = str(selected_run_id)
+    return selected_path, info
 
 
 def _resolve_replay_equivalence_baseline_path(
@@ -1795,6 +2136,7 @@ def _resolve_replay_equivalence_baseline_path(
             resolved = _candidate_baseline_from_run_metadata(
                 run_dir,
                 summary=summary,
+                right_report=right_report,
             )
             if resolved is not None:
                 return resolved
@@ -1811,7 +2153,7 @@ def _resolve_replay_equivalence_baseline_path(
 
     run_dir = _find_run_dir(baseline_path) or baseline_path
     if (run_dir / "run_metadata.json").is_file():
-        resolved = _candidate_baseline_from_run_metadata(run_dir, summary=summary)
+        resolved = _candidate_baseline_from_run_metadata(run_dir, summary=summary, right_report=right_report)
         if resolved is not None:
             return resolved
 
@@ -1821,6 +2163,27 @@ def _resolve_replay_equivalence_baseline_path(
         return sibling
 
     return baseline_path / "__missing_replay_equivalence_baseline__.json"
+
+
+def _replay_equivalence_baseline_policy(*, mode: str) -> str:
+    mode = _normalise_replay_equivalence_mode(mode)
+    raw = _replay_equivalence_env_var("BASELINE_POLICY", mode=mode)
+    policy = str(raw or "pinned_or_auto").strip().lower()
+    if policy in {"pinned", "pin", "pinned_only"}:
+        return "pinned_only"
+    if policy in {"auto", "auto_only"}:
+        return "auto_only"
+    if policy in {"hybrid", "pinned_or_auto", "pin_or_auto"}:
+        return "pinned_or_auto"
+    return "pinned_or_auto"
+
+
+def _replay_equivalence_auto_fallback_enabled(*, mode: str) -> bool:
+    mode = _normalise_replay_equivalence_mode(mode)
+    scoped = _env_bool_optional(f"AI_QUANT_REPLAY_EQUIVALENCE_{mode.upper()}_AUTO_FALLBACK")
+    if scoped is not None:
+        return scoped
+    return _env_bool("AI_QUANT_REPLAY_EQUIVALENCE_AUTO_FALLBACK", True)
 
 
 def _replay_equivalence_baseline_path(*, mode: str) -> Path | None:
@@ -1978,12 +2341,12 @@ def _validate_candidate_output_schema(path: Path) -> tuple[bool, list[str]]:
 # ---------------------------------------------------------------------------
 
 _EXTRACT_SORT_KEYS: dict[str, Any] = {
-    "pnl":      lambda r: float(r.get("total_pnl", 0) or 0),
-    "dd":       lambda r: -float(r.get("max_drawdown_pct", 1) or 1),
-    "pf":       lambda r: float(r.get("profit_factor", 0) or 0),
-    "wr":       lambda r: float(r.get("win_rate", 0) or 0),
-    "sharpe":   lambda r: float(r.get("sharpe_ratio", 0) or 0),
-    "trades":   lambda r: float(r.get("total_trades", 0) or 0),
+    "pnl": lambda r: float(r.get("total_pnl", 0) or 0),
+    "dd": lambda r: -float(r.get("max_drawdown_pct", 1) or 1),
+    "pf": lambda r: float(r.get("profit_factor", 0) or 0),
+    "wr": lambda r: float(r.get("win_rate", 0) or 0),
+    "sharpe": lambda r: float(r.get("sharpe_ratio", 0) or 0),
+    "trades": lambda r: float(r.get("total_trades", 0) or 0),
     # Alias: "conservative" is pure DD lane (lower DD is better).
     "conservative": lambda r: -float(r.get("max_drawdown_pct", 1) or 1),
 }
@@ -2186,22 +2549,83 @@ def _run_replay_equivalence_check(
     summary["replay_equivalence_strict"] = strict
     auto_seed = _replay_equivalence_auto_seed(mode=mode)
     summary["replay_equivalence_auto_seed"] = bool(auto_seed)
+    baseline_policy = _replay_equivalence_baseline_policy(mode=mode)
+    allow_auto_fallback = _replay_equivalence_auto_fallback_enabled(mode=mode)
+    summary["replay_equivalence_baseline_policy"] = baseline_policy
+    summary["replay_equivalence_auto_fallback"] = bool(allow_auto_fallback)
     current_fp = str((current_contract or {}).get("fingerprint", "")).strip()
     if current_fp:
         summary["replay_equivalence_contract_fingerprint"] = current_fp
 
-    baseline = _replay_equivalence_baseline_path(mode=mode)
-    if baseline is not None:
-        baseline = _resolve_replay_equivalence_baseline_path(
+    baseline: Path | None = None
+    pinned_baseline: Path | None = None
+    baseline_source = ""
+    baseline_fallback_reason = ""
+
+    if baseline_policy != "auto_only":
+        pinned_baseline = _replay_equivalence_baseline_path(mode=mode)
+        if pinned_baseline is not None:
+            pinned_baseline = _resolve_replay_equivalence_baseline_path(
+                mode=mode,
+                baseline_path=pinned_baseline,
+                right_report=right_report,
+                summary=summary,
+            )
+            baseline = pinned_baseline
+            baseline_source = "pinned"
+
+    if baseline is None and baseline_policy == "auto_only":
+        auto_baseline, auto_info = _auto_replay_equivalence_baseline_path(
             mode=mode,
-            baseline_path=baseline,
             right_report=right_report,
             summary=summary,
+            current_contract=current_contract,
         )
-    baseline_contract = _baseline_replay_equivalence_contract(baseline_path=baseline, mode=mode) if baseline is not None else None
+        summary["replay_equivalence_auto_baseline_lookup"] = auto_info
+        if auto_baseline is not None:
+            baseline = auto_baseline
+            baseline_source = "auto_only"
+
+    pinned_contract = (
+        _baseline_replay_equivalence_contract(baseline_path=baseline, mode=mode) if baseline is not None else None
+    )
+    pinned_fp = str((pinned_contract or {}).get("fingerprint", "")).strip()
+
+    if baseline is not None:
+        if not baseline.exists():
+            baseline_fallback_reason = "baseline_missing"
+        elif current_fp and pinned_fp and current_fp != pinned_fp:
+            baseline_fallback_reason = "baseline_stale"
+
+    can_auto_fallback = bool(allow_auto_fallback) and baseline_policy in {"pinned_or_auto", "auto_only"}
+    if baseline_fallback_reason and can_auto_fallback:
+        auto_baseline, auto_info = _auto_replay_equivalence_baseline_path(
+            mode=mode,
+            right_report=right_report,
+            summary=summary,
+            current_contract=current_contract,
+        )
+        summary["replay_equivalence_auto_baseline_lookup"] = auto_info
+        if auto_baseline is not None:
+            baseline = auto_baseline
+            baseline_source = "auto_fallback"
+            summary["replay_equivalence_baseline_fallback_reason"] = baseline_fallback_reason
+            baseline_fallback_reason = ""
+
+    if baseline is not None:
+        summary["replay_equivalence_baseline_path"] = str(baseline)
+    if baseline_source:
+        summary["replay_equivalence_baseline_source"] = baseline_source
+
+    baseline_contract = (
+        _baseline_replay_equivalence_contract(baseline_path=baseline, mode=mode)
+        if baseline is not None and baseline.exists()
+        else None
+    )
     baseline_fp = str((baseline_contract or {}).get("fingerprint", "")).strip()
     if baseline_fp:
         summary["replay_equivalence_baseline_contract_fingerprint"] = baseline_fp
+
     if baseline is None:
         summary["replay_equivalence_status"] = "not_run"
         summary["replay_equivalence_failure_code"] = _replay_equivalence_failure_code("not_run")
@@ -2274,6 +2698,9 @@ def _run_replay_equivalence_check(
         "summary": rep,
         "mode": mode,
         "strict": strict,
+        "baseline_policy": baseline_policy,
+        "baseline_source": baseline_source,
+        "baseline_path": str(baseline) if baseline is not None else "",
         "contract_fingerprint": current_fp,
         "baseline_contract_fingerprint": baseline_fp,
     }
@@ -2302,6 +2729,16 @@ def _write_replay_equivalence_baseline_manifest(
     if not contract_fp:
         return None
 
+    candidate_meta = meta.get("candidate_configs")
+    meta_by_config_id: dict[str, dict[str, Any]] = {}
+    if isinstance(candidate_meta, list):
+        for row in candidate_meta:
+            if not isinstance(row, dict):
+                continue
+            cfg_id = str(row.get("config_id", "") or "").strip()
+            if cfg_id and cfg_id not in meta_by_config_id:
+                meta_by_config_id[cfg_id] = row
+
     rows: list[dict[str, Any]] = []
     for rep in replay_reports:
         if not isinstance(rep, dict):
@@ -2310,10 +2747,23 @@ def _write_replay_equivalence_baseline_manifest(
         replay_path = str(rep.get("path", "") or rep.get("replay_report_path", "")).strip()
         if not cfg_id or not replay_path:
             continue
+        meta_row = meta_by_config_id.get(cfg_id, {})
+        config_path = str(
+            rep.get("config_path", "") or meta_row.get("path", "") or meta_row.get("config_path", "")
+        ).strip()
+        config_sha256 = str(rep.get("config_sha256", "") or meta_row.get("config_sha256", "")).strip()
+        sort_by = str(rep.get("sort_by", "") or meta_row.get("sort_by", "")).strip()
+        rank = int(_coerce_int(rep.get("rank", meta_row.get("rank", 0)), 0) or 0)
+        overrides_key = str(rep.get("overrides_key", "") or meta_row.get("overrides_key", "")).strip()
         rows.append(
             {
                 "config_id": cfg_id,
                 "replay_report_path": replay_path,
+                "config_path": config_path,
+                "config_sha256": config_sha256,
+                "sort_by": sort_by,
+                "rank": int(rank) if rank > 0 else 0,
+                "overrides_key": overrides_key,
                 "replay_equivalence_status": str(rep.get("replay_equivalence_status", "")).strip().lower(),
                 "seed_mode": bool(rep.get("replay_equivalence_seed_mode", False)),
             }
@@ -2321,7 +2771,7 @@ def _write_replay_equivalence_baseline_manifest(
 
     payload = {
         "schema_version": 1,
-        "generated_at_ms": int(time.time() * 1000),
+        "generated_at_ms": int(_coerce_int(meta.get("generated_at_ms"), 0) or int(time.time() * 1000)),
         "run_id": str(meta.get("run_id", "")).strip(),
         "run_dir": str(run_dir),
         "contract": contract,
@@ -2688,22 +3138,15 @@ def _render_step4_parity_report_md(
     lines.append("")
     lines.append(f"Contract fingerprint: `{contract_fingerprint}`")
     lines.append("")
-    lines.append(
-        "Thresholds: "
-        + ", ".join(f"{k}={v}" for k, v in sorted(thresholds.items()))
-    )
+    lines.append("Thresholds: " + ", ".join(f"{k}={v}" for k, v in sorted(thresholds.items())))
     lines.append("")
     if not items:
         lines.append("No parity items were generated.")
         lines.append("")
         return "\n".join(lines)
 
-    lines.append(
-        "| status | cause | mode | rank | trades Δ | pnl Δ | dd Δ | pf Δ | config | overrides |"
-    )
-    lines.append(
-        "| :----: | :---- | :--- | ---: | -------: | ----: | ---: | ---: | :----- | :------- |"
-    )
+    lines.append("| status | cause | mode | rank | trades Δ | pnl Δ | dd Δ | pf Δ | config | overrides |")
+    lines.append("| :----: | :---- | :--- | ---: | -------: | ----: | ---: | ---: | :----- | :------- |")
     for it in items:
         lines.append(
             "| {status} | {cause} | {mode} | {rank} | {td} | {pnl:.6f} | {dd:.6f} | {pf:.6f} | `{cfg}` | `{ov}` |".format(
@@ -2898,6 +3341,7 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
             entry["candidate_mode"] = False
         entry["path"] = str(dst)
         entry["config_id"] = dst_cfg_id
+        entry["config_sha256"] = _sha256_file_optional(dst)
         entry["source_path"] = str(src)
         entry.setdefault("replay_stage", "")
         entry.setdefault("canonical_cpu_verified", False)
@@ -2953,6 +3397,12 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
         summary = _summarise_replay_report(out_json)
         summary["config_path"] = str(cfg_path)
         summary["config_id"] = candidate_config_ids[str(cfg_path)]
+        summary["config_sha256"] = _sha256_file_optional(cfg_path)
+        replay_entry = entry_by_path.get(str(cfg_path))
+        if isinstance(replay_entry, dict):
+            for identity_field in ("sort_by", "rank", "overrides_key", "config_sha256"):
+                if identity_field in replay_entry:
+                    summary[identity_field] = replay_entry[identity_field]
         if not _run_replay_equivalence_check(
             right_report=out_json,
             summary=summary,
@@ -2962,15 +3412,14 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
         ):
             _write_json(run_dir / "run_metadata.json", meta)
             return 1
-        replay_entry = entry_by_path.get(str(cfg_path))
         _attach_replay_metadata(summary=summary, entry=replay_entry, args=source_args_obj)
         replay_reports.append(summary)
         _write_json(run_dir / "run_metadata.json", meta)
 
-        if entry is not None:
-            entry["replay_report_path"] = str(out_json)
-            entry["replay_stdout_path"] = str(replay_res.stdout_path or "")
-            entry["replay_stderr_path"] = str(replay_res.stderr_path or "")
+        if replay_entry is not None:
+            replay_entry["replay_report_path"] = str(out_json)
+            replay_entry["replay_stdout_path"] = str(replay_res.stdout_path or "")
+            replay_entry["replay_stderr_path"] = str(replay_res.stderr_path or "")
 
     _write_replay_equivalence_baseline_manifest(
         run_dir=run_dir,
@@ -3182,13 +3631,9 @@ def main(argv: list[str] | None = None) -> int:
                 repro_obj = meta.get("repro") if isinstance(meta.get("repro"), dict) else {}
                 orig_cmd = repro_obj.get("backtester_cmd") if isinstance(repro_obj.get("backtester_cmd"), list) else []
                 if orig_cmd and list(orig_cmd) != list(bt_cmd):
-                    raise SystemExit(
-                        "--resume refused: backtester_cmd changed; pass --allow-binary-drift to override"
-                    )
+                    raise SystemExit("--resume refused: backtester_cmd changed; pass --allow-binary-drift to override")
                 orig_sha = (
-                    repro_obj.get("files", {})
-                    .get("mei_backtester_bin", {})
-                    .get("sha256", "")
+                    repro_obj.get("files", {}).get("mei_backtester_bin", {}).get("sha256", "")
                     if isinstance(repro_obj.get("files"), dict)
                     and isinstance(repro_obj.get("files", {}).get("mei_backtester_bin"), dict)
                     else ""
@@ -3222,7 +3667,9 @@ def main(argv: list[str] | None = None) -> int:
             "candles_db": _fingerprint_db_arg(str(bt_candles_db) if bt_candles_db else ""),
             "funding_db": _fingerprint_db_arg(str(bt_funding_db) if bt_funding_db else ""),
         }
-        orig_inputs_snapshot = meta.get("input_fingerprints") if isinstance(meta.get("input_fingerprints"), dict) else {}
+        orig_inputs_snapshot = (
+            meta.get("input_fingerprints") if isinstance(meta.get("input_fingerprints"), dict) else {}
+        )
 
         if resuming_run and not bool(getattr(args, "allow_input_drift", False)):
             try:
@@ -3289,7 +3736,7 @@ def main(argv: list[str] | None = None) -> int:
             check_targets: list[dict[str, Any]] = []
             check_failed = False
             check_errors: list[str] = []
-    
+
             if not candles_db_for_checks:
                 candles_db_for_checks = str(AIQ_ROOT / "candles_dbs")
             db_paths = _iter_candle_db_paths(str(candles_db_for_checks))
@@ -3314,11 +3761,11 @@ def main(argv: list[str] | None = None) -> int:
                         continue
                     if check_intervals and interval not in check_intervals:
                         continue
-    
+
                     symbols = _symbols_from_candle_db(db_path)
                     out_path = data_checks_dir / f"candle_{interval}_{db_path.stem}.json"
                     err_path = data_checks_dir / f"candle_{interval}_{db_path.stem}.stderr.txt"
-    
+
                     if not symbols:
                         check_targets.append(
                             {
@@ -3332,7 +3779,7 @@ def main(argv: list[str] | None = None) -> int:
                             }
                         )
                         continue
-    
+
                     stat_exit, stat_items, bad_symbols, fail_reason = _run_stat_check(
                         sidecar_bin=sidecar_bin,
                         interval=interval,
@@ -3344,7 +3791,7 @@ def main(argv: list[str] | None = None) -> int:
                     fail_interval = (stat_exit != 0) or (fail_reason != "pass")
                     if fail_interval:
                         check_failed = True
-    
+
                     check_targets.append(
                         {
                             "interval": interval,
@@ -3365,18 +3812,18 @@ def main(argv: list[str] | None = None) -> int:
                                 check_errors.append(f"[{interval}] {err_path}\n{err_text.strip()}\n")
                         except Exception:
                             pass
-    
+
                     if fail_interval:
                         check_targets[-1]["status"] = "FAIL"
-    
+
                     if fail_interval and bad_symbols:
                         check_targets[-1]["failed_symbols"] = bad_symbols
-    
+
             if check_errors:
                 check_err_text = "".join(check_errors)
                 candle_err.parent.mkdir(parents=True, exist_ok=True)
                 candle_err.write_text(check_err_text, encoding="utf-8")
-    
+
             _write_json(
                 candle_out,
                 {
@@ -3415,12 +3862,12 @@ def main(argv: list[str] | None = None) -> int:
                             "failed_symbols": interval_check.get("failed_symbols", []),
                         }
                     )
-    
+
                 if not candle_err.exists():
                     # Keep metadata consistent; create empty file even when all failing intervals had no stderr details.
                     candle_err.parent.mkdir(parents=True, exist_ok=True)
                     candle_err.write_text("", encoding="utf-8")
-    
+
                 meta["steps"].append(
                     {
                         "name": "check_candle_dbs",
@@ -3435,7 +3882,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 _write_json(run_dir / "run_metadata.json", meta)
                 return 1
-    
+
             meta["steps"].append(
                 {
                     "name": "check_candle_dbs",
@@ -3451,7 +3898,7 @@ def main(argv: list[str] | None = None) -> int:
                 }
             )
         _write_json(run_dir / "run_metadata.json", meta)
-    
+
         # ── Pre-sweep funding refresh ───────────────────────────────────────
         # Fetch latest funding rates before the freshness check to avoid stale-data failures.
         funding_refresh_out = run_dir / "data_checks" / "funding_refresh.stdout.txt"
@@ -3466,7 +3913,7 @@ def main(argv: list[str] | None = None) -> int:
         if funding_refresh_res.exit_code != 0:
             print(f"⚠️ Funding refresh failed (exit={funding_refresh_res.exit_code}), proceeding with existing data")
         _write_json(run_dir / "run_metadata.json", meta)
-    
+
         funding_out = run_dir / "data_checks" / "funding_rates.json"
         funding_err = run_dir / "data_checks" / "funding_rates.stderr.txt"
         if bool(args.resume) and _is_nonempty_file(funding_out):
@@ -3499,7 +3946,7 @@ def main(argv: list[str] | None = None) -> int:
                     meta["steps"].append(funding_check_step)
                     _write_json(run_dir / "run_metadata.json", meta)
                     return int(funding_check.exit_code)
-    
+
                 funding_json = _load_json_payload(funding_out)
                 allow_stale = int(args.funding_max_stale_symbols or 0)
                 can_degrade, degrade_meta = _funding_check_degraded_allowance(
@@ -3510,7 +3957,7 @@ def main(argv: list[str] | None = None) -> int:
                     meta["steps"].append(funding_check_step)
                     _write_json(run_dir / "run_metadata.json", meta)
                     return int(funding_check.exit_code)
-    
+
                 if isinstance(degrade_meta, dict):
                     funding_check_step["funding_check_degrade_meta"] = {
                         "warn_legacy_exit_code": funding_check.exit_code,
@@ -3527,7 +3974,7 @@ def main(argv: list[str] | None = None) -> int:
                 funding_check_step["funding_check_degraded"] = True
                 funding_check_step["exit_code_original"] = funding_check.exit_code
                 funding_check_step["exit_code"] = 0
-    
+
                 meta["funding_check_degraded"] = {
                     "status": "warn",
                     "symbols": funding_check_step.get("funding_check_degrade_meta", {}).get("symbols", []),
@@ -3543,17 +3990,17 @@ def main(argv: list[str] | None = None) -> int:
                 )
             else:
                 meta.pop("funding_check_degraded", None)
-    
+
             if bool(funding_check_step.get("funding_check_degraded")):
                 (run_dir / "logs" / "factory_run_warn.log").write_text(
                     "WARN: funding check passed with stale-symbol allowance\n",
                     encoding="utf-8",
                 )
-    
+
             meta["steps"].append(funding_check_step)
-    
+
         _write_json(run_dir / "run_metadata.json", meta)
-    
+
         # Resolve live-initial balance for daily/deep/weekly profiles.
         live_initial_balance, live_initial_balance_path, live_initial_balance_meta = _resolve_factory_initial_balance(
             run_dir=run_dir,
@@ -3608,7 +4055,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if rc != 0:
                     return int(rc)
-    
+
             sweep_argv = bt_cmd + [
                 "sweep",
                 "--config",
@@ -3680,7 +4127,7 @@ def main(argv: list[str] | None = None) -> int:
                     "--tpe-seed",
                     str(int(getattr(args, "tpe_seed", 42))),
                 ]
-    
+
             sweep_output_mode = _sweep_output_mode_from_args(args)
             fallback_to_legacy_output = False
             sweep_res = _run_cmd(
@@ -3715,7 +4162,7 @@ def main(argv: list[str] | None = None) -> int:
                                 skip_next = True
                             continue
                         filtered_argv.append(token)
-    
+
                     sweep_res = _run_cmd(
                         filtered_argv,
                         cwd=AIQ_ROOT / "backtester",
@@ -3724,7 +4171,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     if sweep_res.exit_code == 0:
                         fallback_to_legacy_output = True
-    
+
             meta["steps"].append(
                 {
                     "name": "sweep",
@@ -3779,9 +4226,9 @@ def main(argv: list[str] | None = None) -> int:
             meta["step4_parity_contract"] = _build_step4_parity_contract(meta)
         except Exception:
             pass
-    
+
         _write_json(run_dir / "run_metadata.json", meta)
-    
+
         # ------------------------------------------------------------------
         # 2b) Extract top candidates (single-pass streaming)
         # ------------------------------------------------------------------
@@ -3800,7 +4247,7 @@ def main(argv: list[str] | None = None) -> int:
         shortlist_max_rank = min(shortlist_max_rank, shortlist_top_pnl)
 
         candidate_min_trades = max(0, int(getattr(args, "candidate_min_trades", 1) or 0))
-    
+
         sweep_candidates_out = run_dir / "sweeps" / "sweep_candidates.jsonl"
         if bool(args.resume) and _is_nonempty_file(sweep_candidates_out):
             meta["steps"].append({"name": "extract_top_candidates_skip", "path": str(sweep_candidates_out)})
@@ -3814,21 +4261,23 @@ def main(argv: list[str] | None = None) -> int:
                 min_trades=candidate_min_trades,
             )
             elapsed = time.monotonic() - t0
-            meta["steps"].append({
-                "name": "extract_top_candidates",
-                "path": str(sweep_candidates_out),
-                "source_path": str(sweep_out),
-                "total_rows_scanned": extract_rows,
-                "modes": extract_modes,
-                "top_pnl_pool": shortlist_top_pnl,
-                "max_rank": shortlist_max_rank,
-                "min_trades": candidate_min_trades,
-                "elapsed_s": round(elapsed, 2),
-                "output_size_bytes": sweep_candidates_out.stat().st_size if sweep_candidates_out.exists() else 0,
-            })
-    
+            meta["steps"].append(
+                {
+                    "name": "extract_top_candidates",
+                    "path": str(sweep_candidates_out),
+                    "source_path": str(sweep_out),
+                    "total_rows_scanned": extract_rows,
+                    "modes": extract_modes,
+                    "top_pnl_pool": shortlist_top_pnl,
+                    "max_rank": shortlist_max_rank,
+                    "min_trades": candidate_min_trades,
+                    "elapsed_s": round(elapsed, 2),
+                    "output_size_bytes": sweep_candidates_out.stat().st_size if sweep_candidates_out.exists() else 0,
+                }
+            )
+
         _write_json(run_dir / "run_metadata.json", meta)
-    
+
         # All downstream generate_config calls use the compact candidates file.
         sweep_gen_source = sweep_candidates_out
 
@@ -3840,14 +4289,14 @@ def main(argv: list[str] | None = None) -> int:
             return 130
         configs_dir = run_dir / "configs"
         configs_dir.mkdir(parents=True, exist_ok=True)
-    
+
         candidate_paths: list[Path] = []
         candidate_config_ids: dict[str, str] = {}
         candidate_entries: list[dict[str, Any]] = []
         entry_by_path: dict[str, dict[str, Any]] = {}
         skip_generation = False
         default_entry_stage = _stage_defaults_for_candidate(args=args)
-    
+
         if bool(args.resume):
             existing_entries = meta.get("candidate_configs", [])
             if isinstance(existing_entries, list) and existing_entries:
@@ -3869,7 +4318,7 @@ def main(argv: list[str] | None = None) -> int:
                     p = str(it.get("path", "")).strip()
                     if p:
                         entry_by_path[p] = it
-    
+
                 for it in candidate_entries:
                     p_raw = str(it.get("path", "")).strip()
                     if not p_raw:
@@ -3884,13 +4333,26 @@ def main(argv: list[str] | None = None) -> int:
                     if not cid:
                         cid = config_id_from_yaml_file(p)
                         it["config_id"] = cid
+                    if not str(it.get("config_sha256", "") or "").strip():
+                        it["config_sha256"] = _sha256_file_optional(p)
                     candidate_config_ids[str(p)] = cid
-    
+
                 skip_generation = bool(candidate_paths)
-    
+
         # Multi-mode shortlist generation (AQC-403). Deduplicate across modes by config_id.
         if not skip_generation and shortlist_per_mode > 0:
-            allowed_modes = {"pnl", "dd", "pf", "wr", "sharpe", "trades", "balanced", "efficient", "growth", "conservative"}
+            allowed_modes = {
+                "pnl",
+                "dd",
+                "pf",
+                "wr",
+                "sharpe",
+                "trades",
+                "balanced",
+                "efficient",
+                "growth",
+                "conservative",
+            }
             modes = [m.strip() for m in shortlist_modes_raw.split(",") if m.strip()]
             modes = [m for m in modes if m in allowed_modes]
             if not modes:
@@ -3898,7 +4360,7 @@ def main(argv: list[str] | None = None) -> int:
             if shortlist_max_rank <= 0:
                 shortlist_max_rank = shortlist_top_pnl
             shortlist_max_rank = min(shortlist_max_rank, shortlist_top_pnl)
-    
+
             seen_ids: set[str] = set()
             for mode in modes:
                 kept = 0
@@ -3930,21 +4392,22 @@ def main(argv: list[str] | None = None) -> int:
                     if gen_res.exit_code != 0:
                         _write_json(run_dir / "run_metadata.json", meta)
                         return int(gen_res.exit_code)
-    
+
                     cfg_id = config_id_from_yaml_file(out_yaml)
                     candidate_config_ids[str(out_yaml)] = cfg_id
-    
+
                     is_dup = cfg_id in seen_ids
                     selected = (not is_dup) and kept < shortlist_per_mode
                     if selected:
                         seen_ids.add(cfg_id)
                         candidate_paths.append(out_yaml)
                         kept += 1
-    
+
                     entry = {
                         **default_entry_stage,
                         "path": str(out_yaml),
                         "config_id": cfg_id,
+                        "config_sha256": _sha256_file_optional(out_yaml),
                         "sort_by": mode,
                         "rank": int(rank),
                         "selected": bool(selected),
@@ -3960,10 +4423,10 @@ def main(argv: list[str] | None = None) -> int:
                     }
                     candidate_entries.append(entry)
                     entry_by_path[str(out_yaml)] = entry
-    
+
                     if kept >= shortlist_per_mode:
                         break
-    
+
         # Single-mode generation (legacy): args.num_candidates + args.sort_by.
         elif not skip_generation:
             for rank in range(1, int(args.num_candidates) + 1):
@@ -4001,6 +4464,7 @@ def main(argv: list[str] | None = None) -> int:
                     **default_entry_stage,
                     "path": str(out_yaml),
                     "config_id": cfg_id,
+                    "config_sha256": _sha256_file_optional(out_yaml),
                     "sort_by": str(args.sort_by),
                     "rank": int(rank),
                     "selected": True,
@@ -4016,7 +4480,7 @@ def main(argv: list[str] | None = None) -> int:
                 }
                 candidate_entries.append(entry)
                 entry_by_path[str(out_yaml)] = entry
-    
+
         meta["candidate_configs"] = candidate_entries
 
         # Attach the originating sweep row (metrics + overrides) to each generated
@@ -4069,7 +4533,7 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as e:
             meta["step4_parity_attach_error"] = f"{type(e).__name__}: {e}"
         _write_json(run_dir / "run_metadata.json", meta)
-    
+
         if not candidate_paths:
             (run_dir / "reports").mkdir(parents=True, exist_ok=True)
             (run_dir / "reports" / "report.md").write_text(
@@ -4077,7 +4541,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             _write_json(run_dir / "run_metadata.json", meta)
             return 1
-    
+
         # ------------------------------------------------------------------
         # 4) CPU replay / validation (minimal v1: run replay once per candidate)
         # ------------------------------------------------------------------
@@ -4086,7 +4550,7 @@ def main(argv: list[str] | None = None) -> int:
             return 130
         replays_dir = run_dir / "replays"
         replays_dir.mkdir(parents=True, exist_ok=True)
-    
+
         replay_reports: list[dict[str, Any]] = []
         step4_parity_enabled = bool(getattr(args, "step4_parity", True))
         step4_parity_rel_eps = float(getattr(args, "step4_parity_rel_eps", 1e-6) or 1e-6)
@@ -4102,13 +4566,13 @@ def main(argv: list[str] | None = None) -> int:
         }
         for cfg_path in candidate_paths:
             out_json = replays_dir / f"{cfg_path.stem}.replay.json"
-    
+
             trades_csv: Path | None = None
             if bool(getattr(args, "monte_carlo", False)):
                 trades_dir = run_dir / "trades"
                 trades_dir.mkdir(parents=True, exist_ok=True)
                 trades_csv = trades_dir / f"{cfg_path.stem}.trades.csv"
-    
+
             replay_argv = bt_cmd + [
                 "replay",
                 "--config",
@@ -4156,11 +4620,15 @@ def main(argv: list[str] | None = None) -> int:
                 replay_argv += ["--funding-db", str(bt_funding_db)]
             if trades_csv is not None:
                 replay_argv += ["--export-trades", str(trades_csv)]
-    
+
             replay_stdout = run_dir / "replays" / f"{cfg_path.stem}.stdout.txt"
             replay_stderr = run_dir / "replays" / f"{cfg_path.stem}.stderr.txt"
-    
-            if bool(args.resume) and _is_nonempty_file(out_json) and (trades_csv is None or _is_nonempty_file(trades_csv)):
+
+            if (
+                bool(args.resume)
+                and _is_nonempty_file(out_json)
+                and (trades_csv is None or _is_nonempty_file(trades_csv))
+            ):
                 replay_res = CmdResult(
                     argv=[],
                     cwd=str(AIQ_ROOT / "backtester"),
@@ -4181,10 +4649,16 @@ def main(argv: list[str] | None = None) -> int:
                 if replay_res.exit_code != 0:
                     _write_json(run_dir / "run_metadata.json", meta)
                     return int(replay_res.exit_code)
-    
+
             summary = _summarise_replay_report(out_json)
             summary["config_path"] = str(cfg_path)
             summary["config_id"] = candidate_config_ids[str(cfg_path)]
+            summary["config_sha256"] = _sha256_file_optional(cfg_path)
+            replay_entry = entry_by_path.get(str(cfg_path))
+            if isinstance(replay_entry, dict):
+                for identity_field in ("sort_by", "rank", "overrides_key", "config_sha256"):
+                    if identity_field in replay_entry:
+                        summary[identity_field] = replay_entry[identity_field]
             if not _run_replay_equivalence_check(
                 right_report=out_json,
                 summary=summary,
@@ -4194,7 +4668,6 @@ def main(argv: list[str] | None = None) -> int:
             ):
                 _write_json(run_dir / "run_metadata.json", meta)
                 return 1
-            replay_entry = entry_by_path.get(str(cfg_path))
             _attach_replay_metadata(summary=summary, entry=replay_entry, args=args)
             if replay_entry is None:
                 summary["config_path"] = str(cfg_path)
@@ -4234,15 +4707,15 @@ def main(argv: list[str] | None = None) -> int:
                             "gpu_final_balance": parity.get("gpu_final_balance"),
                         }
                     )
-    
+
             if bool(getattr(args, "monte_carlo", False)) and trades_csv is not None:
                 mc_dir = run_dir / "monte_carlo" / str(cfg_path.stem)
                 mc_dir.mkdir(parents=True, exist_ok=True)
                 mc_summary_path = mc_dir / "summary.json"
-    
+
                 mc_stdout = mc_dir / "monte_carlo.stdout.txt"
                 mc_stderr = mc_dir / "monte_carlo.stderr.txt"
-    
+
                 if bool(args.resume) and _is_nonempty_file(mc_summary_path):
                     mc_res = CmdResult(
                         argv=[],
@@ -4274,13 +4747,13 @@ def main(argv: list[str] | None = None) -> int:
                             "--output",
                             str(mc_summary_path),
                         ]
-    
+
                         mc_res = _run_cmd(mc_argv, cwd=AIQ_ROOT, stdout_path=mc_stdout, stderr_path=mc_stderr)
                         meta["steps"].append({"name": f"monte_carlo_{cfg_path.stem}", **mc_res.__dict__})
                         if mc_res.exit_code != 0:
                             _write_json(run_dir / "run_metadata.json", meta)
                             return int(mc_res.exit_code)
-    
+
                 summary["monte_carlo_summary_path"] = str(mc_summary_path)
                 try:
                     mc_obj = _load_json(mc_summary_path)
@@ -4290,7 +4763,9 @@ def main(argv: list[str] | None = None) -> int:
                         for method, payload in dists.items():
                             if not isinstance(payload, dict):
                                 continue
-                            ret = payload.get("return_pct", {}) if isinstance(payload.get("return_pct", {}), dict) else {}
+                            ret = (
+                                payload.get("return_pct", {}) if isinstance(payload.get("return_pct", {}), dict) else {}
+                            )
                             dd = (
                                 payload.get("max_drawdown_pct", {})
                                 if isinstance(payload.get("max_drawdown_pct", {}), dict)
@@ -4305,16 +4780,16 @@ def main(argv: list[str] | None = None) -> int:
                     summary["monte_carlo_ci"] = mc_ci
                 except Exception:
                     summary["monte_carlo_error"] = "failed to load monte_carlo summary.json"
-    
+
             cu_sets = getattr(args, "cross_universe_set", None)
             if isinstance(cu_sets, list) and cu_sets:
                 cu_dir = run_dir / "cross_universe" / str(cfg_path.stem)
                 cu_dir.mkdir(parents=True, exist_ok=True)
                 cu_summary_path = cu_dir / "summary.json"
-    
+
                 cu_stdout = cu_dir / "cross_universe.stdout.txt"
                 cu_stderr = cu_dir / "cross_universe.stderr.txt"
-    
+
                 if bool(args.resume) and _is_nonempty_file(cu_summary_path):
                     cu_res = CmdResult(
                         argv=[],
@@ -4336,13 +4811,13 @@ def main(argv: list[str] | None = None) -> int:
                         if it:
                             cu_argv += ["--symbol-set", str(it)]
                     cu_argv += ["--output", str(cu_summary_path)]
-    
+
                     cu_res = _run_cmd(cu_argv, cwd=AIQ_ROOT, stdout_path=cu_stdout, stderr_path=cu_stderr)
                     meta["steps"].append({"name": f"cross_universe_{cfg_path.stem}", **cu_res.__dict__})
                     if cu_res.exit_code != 0:
                         _write_json(run_dir / "run_metadata.json", meta)
                         return int(cu_res.exit_code)
-    
+
                 summary["cross_universe_summary_path"] = str(cu_summary_path)
                 try:
                     cu_obj = _load_json(cu_summary_path)
@@ -4364,15 +4839,15 @@ def main(argv: list[str] | None = None) -> int:
                     summary["cross_universe"] = cu_map
                 except Exception:
                     summary["cross_universe_error"] = "failed to load cross_universe summary.json"
-    
+
             if bool(getattr(args, "concentration_checks", False)):
                 cc_dir = run_dir / "concentration" / str(cfg_path.stem)
                 cc_dir.mkdir(parents=True, exist_ok=True)
                 cc_summary_path = cc_dir / "summary.json"
-    
+
                 cc_stdout = cc_dir / "concentration.stdout.txt"
                 cc_stderr = cc_dir / "concentration.stderr.txt"
-    
+
                 if bool(args.resume) and _is_nonempty_file(cc_summary_path):
                     cc_res = CmdResult(
                         argv=[],
@@ -4398,13 +4873,13 @@ def main(argv: list[str] | None = None) -> int:
                         "--min-symbols-traded",
                         str(int(getattr(args, "conc_min_symbols_traded", 5) or 5)),
                     ]
-    
+
                     cc_res = _run_cmd(cc_argv, cwd=AIQ_ROOT, stdout_path=cc_stdout, stderr_path=cc_stderr)
                     meta["steps"].append({"name": f"concentration_{cfg_path.stem}", **cc_res.__dict__})
                     if cc_res.exit_code != 0:
                         _write_json(run_dir / "run_metadata.json", meta)
                         return int(cc_res.exit_code)
-    
+
                 summary["concentration_summary_path"] = str(cc_summary_path)
                 try:
                     cc_obj = _load_json(cc_summary_path)
@@ -4418,7 +4893,7 @@ def main(argv: list[str] | None = None) -> int:
                         summary["top5_pnl_pct"] = float(metrics.get("top5_pnl_pct", 0.0) or 0.0)
                         summary["long_pnl_usd"] = float(metrics.get("long_pnl_usd", 0.0) or 0.0)
                         summary["short_pnl_usd"] = float(metrics.get("short_pnl_usd", 0.0) or 0.0)
-    
+
                     if bool(summary.get("concentration_reject")):
                         reasons = cc_obj.get("reject_reasons", []) if isinstance(cc_obj, dict) else []
                         if isinstance(reasons, list) and reasons:
@@ -4427,15 +4902,15 @@ def main(argv: list[str] | None = None) -> int:
                             _append_reject_reason(summary, "concentration")
                 except Exception:
                     summary["concentration_error"] = "failed to load concentration summary.json"
-    
+
             if bool(getattr(args, "walk_forward", False)):
                 wf_dir = run_dir / "walk_forward" / str(cfg_path.stem)
                 wf_dir.mkdir(parents=True, exist_ok=True)
                 wf_summary_path = wf_dir / "summary.json"
-    
+
                 wf_stdout = wf_dir / "walk_forward.stdout.txt"
                 wf_stderr = wf_dir / "walk_forward.stderr.txt"
-    
+
                 if bool(args.resume) and _is_nonempty_file(wf_summary_path):
                     wf_res = CmdResult(
                         argv=[],
@@ -4467,13 +4942,13 @@ def main(argv: list[str] | None = None) -> int:
                         wf_argv += ["--candles-db", str(bt_candles_db)]
                     if bt_funding_db:
                         wf_argv += ["--funding-db", str(bt_funding_db)]
-    
+
                     wf_res = _run_cmd(wf_argv, cwd=AIQ_ROOT, stdout_path=wf_stdout, stderr_path=wf_stderr)
                     meta["steps"].append({"name": f"walk_forward_{cfg_path.stem}", **wf_res.__dict__})
                     if wf_res.exit_code != 0:
                         _write_json(run_dir / "run_metadata.json", meta)
                         return int(wf_res.exit_code)
-    
+
                 summary["walk_forward_summary_path"] = str(wf_summary_path)
                 try:
                     wf_obj = _load_json(wf_summary_path)
@@ -4485,15 +4960,15 @@ def main(argv: list[str] | None = None) -> int:
                 except Exception:
                     # Keep the factory pipeline resilient: store the path and continue.
                     summary["wf_error"] = "failed to load walk_forward summary.json"
-    
+
             if bool(getattr(args, "slippage_stress", False)):
                 ss_dir = run_dir / "slippage_stress" / str(cfg_path.stem)
                 ss_dir.mkdir(parents=True, exist_ok=True)
                 ss_summary_path = ss_dir / "summary.json"
-    
+
                 ss_stdout = ss_dir / "slippage_stress.stdout.txt"
                 ss_stderr = ss_dir / "slippage_stress.stderr.txt"
-    
+
                 if bool(args.resume) and _is_nonempty_file(ss_summary_path):
                     ss_res = CmdResult(
                         argv=[],
@@ -4525,13 +5000,13 @@ def main(argv: list[str] | None = None) -> int:
                         ss_argv += ["--candles-db", str(bt_candles_db)]
                     if bt_funding_db:
                         ss_argv += ["--funding-db", str(bt_funding_db)]
-    
+
                     ss_res = _run_cmd(ss_argv, cwd=AIQ_ROOT, stdout_path=ss_stdout, stderr_path=ss_stderr)
                     meta["steps"].append({"name": f"slippage_stress_{cfg_path.stem}", **ss_res.__dict__})
                     if ss_res.exit_code != 0:
                         _write_json(run_dir / "run_metadata.json", meta)
                         return int(ss_res.exit_code)
-    
+
                 summary["slippage_stress_summary_path"] = str(ss_summary_path)
                 try:
                     ss_obj = _load_json(ss_summary_path)
@@ -4544,7 +5019,7 @@ def main(argv: list[str] | None = None) -> int:
                         summary["slippage_reject_bps"] = float(reject_bps)
                         summary["pnl_drop_at_reject_bps"] = float(agg.get("pnl_drop_at_reject_bps", 0.0))
                         summary["slippage_pnl_at_reject_bps"] = float(agg.get("pnl_at_reject_bps", 0.0))
-    
+
                         # Canonical key for AQC-504 scoring (when using the default 20 bps).
                         if abs(float(reject_bps) - 20.0) < 1e-9:
                             summary["pnl_drop_when_slippage_20bps"] = float(summary.get("pnl_drop_at_reject_bps", 0.0))
@@ -4559,15 +5034,15 @@ def main(argv: list[str] | None = None) -> int:
                             )
                 except Exception:
                     summary["slippage_error"] = "failed to load slippage_stress summary.json"
-    
+
             if bool(getattr(args, "sensitivity_checks", False)):
                 sens_dir = run_dir / "sensitivity" / str(cfg_path.stem)
                 sens_dir.mkdir(parents=True, exist_ok=True)
                 sens_summary_path = sens_dir / "summary.json"
-    
+
                 sens_stdout = sens_dir / "sensitivity.stdout.txt"
                 sens_stderr = sens_dir / "sensitivity.stderr.txt"
-    
+
                 if bool(args.resume) and _is_nonempty_file(sens_summary_path):
                     sens_res = CmdResult(
                         argv=[],
@@ -4601,13 +5076,13 @@ def main(argv: list[str] | None = None) -> int:
                         sens_argv += ["--candles-db", str(bt_candles_db)]
                     if bt_funding_db:
                         sens_argv += ["--funding-db", str(bt_funding_db)]
-    
+
                     sens_res = _run_cmd(sens_argv, cwd=AIQ_ROOT, stdout_path=sens_stdout, stderr_path=sens_stderr)
                     meta["steps"].append({"name": f"sensitivity_{cfg_path.stem}", **sens_res.__dict__})
                     if sens_res.exit_code != 0:
                         _write_json(run_dir / "run_metadata.json", meta)
                         return int(sens_res.exit_code)
-    
+
                 summary["sensitivity_summary_path"] = str(sens_summary_path)
                 try:
                     sens_obj = _load_json(sens_summary_path)
@@ -4621,7 +5096,7 @@ def main(argv: list[str] | None = None) -> int:
                         summary["sensitivity_metric_v1"] = float(agg.get("sensitivity_metric_v1", 0.0))
                 except Exception:
                     summary["sensitivity_error"] = "failed to load sensitivity summary.json"
-    
+
             score_obj = _compute_score_v1(
                 summary,
                 min_trades=int(getattr(args, "score_min_trades", 30) or 30),
@@ -4630,7 +5105,7 @@ def main(argv: list[str] | None = None) -> int:
             if score_obj is not None:
                 summary["score_v1"] = float(score_obj.get("score", 0.0))
                 summary["score_v1_components"] = score_obj.get("components", {})
-    
+
             replay_reports.append(summary)
 
         _write_replay_equivalence_baseline_manifest(
@@ -4726,7 +5201,7 @@ def main(argv: list[str] | None = None) -> int:
             replay_reports, score_min_trades=int(getattr(args, "score_min_trades", 30) or 30)
         )
         (run_dir / "reports" / "validation_report.md").write_text(validation_md, encoding="utf-8")
-    
+
         # ------------------------------------------------------------------
         # 5b) Candidate promotion (20→3)
         # ------------------------------------------------------------------
@@ -4742,10 +5217,10 @@ def main(argv: list[str] | None = None) -> int:
             meta["promotion"] = promotion_meta
         else:
             meta["promotion"] = {"skipped": True, "reason": "promote_count=0 or no replay reports"}
-    
+
         # Persist metadata before registry ingestion (ingest reads run_metadata.json).
         _write_json(run_dir / "run_metadata.json", meta)
-    
+
         # ------------------------------------------------------------------
         # 6) Registry index
         # ------------------------------------------------------------------
@@ -4815,7 +5290,8 @@ def _promote_candidates(
 
     # Gate/evidence eligibility first, then role/channel selection.
     gated = [
-        c for c in candidates
+        c
+        for c in candidates
         if str(c.get("config_path", "") or c.get("path", "")).strip()
         and not bool(c.get("rejected", False))
         and bool(c.get("canonical_cpu_verified", True))

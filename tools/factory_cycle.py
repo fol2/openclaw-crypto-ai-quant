@@ -777,9 +777,193 @@ def _build_candidates_messages(*, run_id: str, parsed: list[Candidate]) -> list[
     return out
 
 
-def _select_best_candidate(
-    items: list[dict[str, Any]], *, require_ssot_evidence: bool = True
-) -> Candidate | None:
+def _candidate_gate_block_reasons(c: Candidate, *, require_ssot_evidence: bool) -> list[str]:
+    reasons: list[str] = []
+    if bool(c.rejected):
+        reasons.append("rejected")
+
+    if not bool(c.candidate_mode):
+        if bool(require_ssot_evidence):
+            reasons.append("legacy_without_candidate_mode")
+            return reasons
+        if not bool(c.canonical_cpu_verified):
+            reasons.append("canonical_cpu_unverified")
+        return reasons
+
+    if not str(c.pipeline_stage).strip():
+        reasons.append("missing_pipeline_stage")
+    if not str(c.sweep_stage).strip():
+        reasons.append("missing_sweep_stage")
+    if not str(c.replay_stage).strip():
+        reasons.append("missing_replay_stage")
+    if not str(c.validation_gate).strip():
+        reasons.append("missing_validation_gate")
+    if not bool(c.canonical_cpu_verified):
+        reasons.append("canonical_cpu_unverified")
+
+    if bool(require_ssot_evidence):
+        replay_status = str(c.replay_equivalence_status or "").strip().lower()
+        if replay_status != "pass":
+            reasons.append(f"replay_equivalence_{replay_status or 'missing'}")
+        if int(c.schema_version) != 1:
+            reasons.append("schema_version_not_1")
+        if int(c.replay_equivalence_count) < 0:
+            reasons.append("replay_equivalence_count_invalid")
+        if not str(c.replay_report_path or "").strip():
+            reasons.append("missing_replay_report_path")
+        if not str(c.replay_equivalence_report_path or "").strip():
+            reasons.append("missing_replay_equivalence_report_path")
+
+    return reasons
+
+
+def _build_step5_gate_report(
+    *,
+    run_id: str,
+    parsed: list[Candidate],
+    require_ssot_evidence: bool,
+    selection_policy: str,
+    deployable_selected: list[Candidate],
+    deployable_by_slot: dict[int, Candidate],
+    deploy_targets: list[DeployTarget],
+    selection_warnings: list[str],
+    blocked_reason: str = "",
+) -> dict[str, Any]:
+    deployable_ids = {str(c.config_id) for c in deployable_selected}
+    rows: list[dict[str, Any]] = []
+    blocked_reasons_count: dict[str, int] = {}
+    for c in sorted(parsed, key=_candidate_sort_key_with_stage, reverse=True):
+        reasons = _candidate_gate_block_reasons(c, require_ssot_evidence=bool(require_ssot_evidence))
+        deployable = str(c.config_id) in deployable_ids and not reasons
+        if (
+            not deployable
+            and not reasons
+            and _candidate_deployable(c, require_ssot_evidence=bool(require_ssot_evidence))
+        ):
+            deployable = True
+        if not deployable:
+            for reason in reasons:
+                blocked_reasons_count[reason] = int(blocked_reasons_count.get(reason, 0) or 0) + 1
+        rows.append(
+            {
+                "config_id": str(c.config_id),
+                "config_path": str(c.config_path),
+                "candidate_mode": bool(c.candidate_mode),
+                "pipeline_stage": str(c.pipeline_stage),
+                "sweep_stage": str(c.sweep_stage),
+                "replay_stage": str(c.replay_stage),
+                "validation_gate": str(c.validation_gate),
+                "canonical_cpu_verified": bool(c.canonical_cpu_verified),
+                "replay_equivalence_status": str(c.replay_equivalence_status),
+                "replay_equivalence_count": int(c.replay_equivalence_count),
+                "replay_report_path": str(c.replay_report_path),
+                "replay_equivalence_report_path": str(c.replay_equivalence_report_path),
+                "rejected": bool(c.rejected),
+                "reject_reason": str(c.reject_reason),
+                "score_v1": None if c.score_v1 is None else float(c.score_v1),
+                "total_pnl": float(c.total_pnl),
+                "max_drawdown_pct": float(c.max_drawdown_pct),
+                "total_trades": int(c.total_trades),
+                "profit_factor": float(c.profit_factor),
+                "deployable": bool(deployable),
+                "gate_block_reasons": reasons,
+            }
+        )
+
+    slot_bindings: list[dict[str, Any]] = []
+    for target in deploy_targets:
+        cand = deployable_by_slot.get(int(target.slot))
+        slot_bindings.append(
+            {
+                "slot": int(target.slot),
+                "service": str(target.service),
+                "yaml_path": str(target.yaml_path),
+                "selected_config_id": None if cand is None else str(cand.config_id),
+            }
+        )
+
+    return {
+        "schema_version": 1,
+        "run_id": str(run_id),
+        "generated_at_ms": int(time.time() * 1000),
+        "selection_policy": str(selection_policy),
+        "require_ssot_evidence": bool(require_ssot_evidence),
+        "blocked": bool(not deployable_by_slot),
+        "blocked_reason": str(blocked_reason or ""),
+        "selection_warnings": list(selection_warnings),
+        "candidate_count": len(rows),
+        "deployable_count": int(sum(1 for row in rows if bool(row.get("deployable", False)))),
+        "selected_count": len(deployable_selected),
+        "slot_bindings": slot_bindings,
+        "blocked_reasons_count": blocked_reasons_count,
+        "candidates": rows,
+    }
+
+
+def _render_step5_gate_report_markdown(report: dict[str, Any]) -> str:
+    rows = report.get("candidates", []) if isinstance(report.get("candidates"), list) else []
+    blocked_counts = (
+        report.get("blocked_reasons_count", {}) if isinstance(report.get("blocked_reasons_count"), dict) else {}
+    )
+    lines: list[str] = [
+        "# Step-5 Gate Report",
+        "",
+        f"- run_id: `{report.get('run_id', '')}`",
+        f"- blocked: {bool(report.get('blocked', False))}",
+        f"- blocked_reason: {str(report.get('blocked_reason', '') or 'n/a')}",
+        f"- selection_policy: {str(report.get('selection_policy', '') or 'n/a')}",
+        f"- require_ssot_evidence: {bool(report.get('require_ssot_evidence', False))}",
+        f"- candidate_count: {int(report.get('candidate_count', 0) or 0)}",
+        f"- deployable_count: {int(report.get('deployable_count', 0) or 0)}",
+        "",
+    ]
+
+    if blocked_counts:
+        lines.append("## Block Reasons")
+        lines.append("")
+        for key, val in sorted(blocked_counts.items(), key=lambda kv: (-int(kv[1]), str(kv[0]))):
+            lines.append(f"- {key}: {int(val)}")
+        lines.append("")
+
+    if not rows:
+        lines.append("No candidates found.")
+        lines.append("")
+        return "\n".join(lines)
+
+    lines.append("## Candidates")
+    lines.append("")
+    lines.append("| deployable | config_id | score_v1 | pnl | dd_pct | trades | pf | replay_eq | block_reasons |")
+    lines.append("| :--------- | :-------- | -------: | --: | -----: | -----: | --: | :-------- | :------------ |")
+    for row in rows:
+        reasons = row.get("gate_block_reasons", []) if isinstance(row.get("gate_block_reasons"), list) else []
+        lines.append(
+            "| {deployable} | `{config_id}` | {score} | {pnl:.4f} | {dd:.4f} | {trades} | {pf:.4f} | {replay} | {reasons} |".format(
+                deployable="yes" if bool(row.get("deployable", False)) else "no",
+                config_id=str(row.get("config_id", "") or "")[:12],
+                score=_format_float(row.get("score_v1"), ndigits=4),
+                pnl=float(row.get("total_pnl", 0.0) or 0.0),
+                dd=float(row.get("max_drawdown_pct", 0.0) or 0.0) * 100.0,
+                trades=int(row.get("total_trades", 0) or 0),
+                pf=float(row.get("profit_factor", 0.0) or 0.0),
+                replay=str(row.get("replay_equivalence_status", "") or ""),
+                reasons=", ".join([str(r) for r in reasons]) if reasons else "",
+            )
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _write_step5_gate_report(*, run_dir: Path, report: dict[str, Any]) -> dict[str, str]:
+    reports_dir = run_dir / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    json_path = reports_dir / "step5_gate_report.json"
+    md_path = reports_dir / "step5_gate_report.md"
+    json_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    md_path.write_text(_render_step5_gate_report_markdown(report) + "\n", encoding="utf-8")
+    return {"json_path": str(json_path), "md_path": str(md_path)}
+
+
+def _select_best_candidate(items: list[dict[str, Any]], *, require_ssot_evidence: bool = True) -> Candidate | None:
     parsed = [c for c in (_parse_candidate(it) for it in items) if c is not None]
     parsed_ok = [c for c in parsed if not bool(c.rejected)]
     if not parsed_ok:
@@ -938,7 +1122,9 @@ def _build_deploy_selection_plan(
         if slot_to_candidate:
             return ("promotion_roles_v1", selected, slot_to_candidate, bindings, warnings)
 
-        warnings.append("promotion role metadata exists but no slot resolved to deployable candidate; fallback to ranked deployables")
+        warnings.append(
+            "promotion role metadata exists but no slot resolved to deployable candidate; fallback to ranked deployables"
+        )
 
     # Backward-compatible fallback for runs without promotion role metadata.
     for idx, target in enumerate(deploy_targets):
@@ -1554,7 +1740,9 @@ def main(argv: list[str] | None = None) -> int:
                 (artifacts_dir / f"run_{run_id}" / "run_metadata.json").resolve(),
             ]
             try:
-                dated_dirs = sorted([p for p in artifacts_dir.iterdir() if p.is_dir() and p.name.count("-") == 2], reverse=True)
+                dated_dirs = sorted(
+                    [p for p in artifacts_dir.iterdir() if p.is_dir() and p.name.count("-") == 2], reverse=True
+                )
             except Exception:
                 dated_dirs = []
             for d in dated_dirs:
@@ -1753,12 +1941,6 @@ def main(argv: list[str] | None = None) -> int:
         deploy_targets=deploy_targets,
         require_ssot_evidence=bool(args.require_ssot_evidence),
     )
-    if not deployable_by_slot:
-        _send_discord(
-            target=str(args.discord_target),
-            message=f"⚠️ Factory OK • `{run_id}` but no deployable candidates (all rejected)",
-        )
-        return 0
     for warn in deploy_selection_warnings:
         _send_discord(
             target=str(args.discord_target),
@@ -1770,13 +1952,28 @@ def main(argv: list[str] | None = None) -> int:
         selected_primary = deployable_by_slot.get(int(deploy_targets[0].slot))
     if selected_primary is None and deployable_selected:
         selected_primary = deployable_selected[0]
-    if selected_primary is None:
-        _send_discord(
-            target=str(args.discord_target),
-            message=f"⚠️ Factory OK • `{run_id}` but selection produced no deployable candidate",
-        )
-        return 0
 
+    blocked_reason = ""
+    if not deployable_by_slot:
+        blocked_reason = "no_deployable_candidate"
+    elif selected_primary is None:
+        blocked_reason = "selection_primary_missing"
+
+    step5_report = _build_step5_gate_report(
+        run_id=run_id,
+        parsed=parsed,
+        require_ssot_evidence=bool(args.require_ssot_evidence),
+        selection_policy=str(selection_policy),
+        deployable_selected=deployable_selected,
+        deployable_by_slot=deployable_by_slot,
+        deploy_targets=deploy_targets,
+        selection_warnings=deploy_selection_warnings,
+        blocked_reason=blocked_reason,
+    )
+    step5_paths = _write_step5_gate_report(run_dir=run_dir, report=step5_report)
+
+    selected_payload = selected_primary.__dict__ if selected_primary is not None else {}
+    selection_stage = "selected" if selected_primary is not None else "blocked"
     selection = {
         "version": "factory_cycle_selection_v1",
         "run_id": run_id,
@@ -1788,20 +1985,24 @@ def main(argv: list[str] | None = None) -> int:
             "report_json": str(run_dir / "reports" / "report.json"),
             "report_md": str(run_dir / "reports" / "report.md"),
             "selection_md": str(run_dir / "reports" / "selection.md"),
+            "step5_gate_report_json": str(step5_paths.get("json_path", "")),
+            "step5_gate_report_md": str(step5_paths.get("md_path", "")),
             "configs_dir": str(run_dir / "configs"),
             "replays_dir": str(run_dir / "replays"),
         },
         "selection_policy": str(selection_policy),
         "selection_warnings": list(deploy_selection_warnings),
-        "selected": selected_primary.__dict__,
+        "selected": selected_payload,
         "selected_candidates": [c.__dict__ for c in deployable_selected],
         "selected_candidates_by_role": deploy_role_bindings,
         "selected_targets": [
             {"slot": t.slot, "service": t.service, "yaml_path": str(t.yaml_path)} for t in deploy_targets
         ],
-        "selection_stage": "selected",
+        "selection_stage": selection_stage,
         "deploy_stage": "pending",
         "promotion_stage": "pending",
+        "step5_gate_status": "blocked" if blocked_reason else "passed",
+        "step5_gate_block_reason": blocked_reason,
         "effective_config_path": str(effective_cfg_path),
         "interval": str(interval),
         "deployed": False,
@@ -1814,6 +2015,31 @@ def main(argv: list[str] | None = None) -> int:
     (run_dir / "reports" / "selection.json").write_text(
         json.dumps(selection, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+
+    if blocked_reason:
+        if blocked_reason == "no_deployable_candidate":
+            _send_discord(
+                target=str(args.discord_target),
+                message=(
+                    f"⚠️ Factory OK • `{run_id}` but no deployable candidates (Step-5 blocked). "
+                    f"`report` {step5_paths.get('json_path', 'n/a')}"
+                ),
+            )
+        else:
+            _send_discord(
+                target=str(args.discord_target),
+                message=(
+                    f"⚠️ Factory OK • `{run_id}` but selection produced no deployable primary candidate. "
+                    f"`report` {step5_paths.get('json_path', 'n/a')}"
+                ),
+            )
+        selection["deploy_stage"] = "blocked"
+        selection["promotion_stage"] = "skipped"
+        (run_dir / "reports" / "selection.json").write_text(
+            json.dumps(selection, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        _write_selection_markdown(run_dir=run_dir, selection=selection)
+        return 0
 
     if bool(args.no_deploy):
         _send_discord(
@@ -1880,9 +2106,7 @@ def main(argv: list[str] | None = None) -> int:
         out_dir = (
             artifacts_dir / "deployments" / "paper" / str(target.service) / f"{_utc_compact()}_{cand.config_id[:12]}"
         ).resolve()
-        reason = (
-            f"{reason_base}; slot={target.slot}; target={target.service}; rank={i + 1}; policy={selection_policy}; config={cand.config_id[:12]}"
-        )
+        reason = f"{reason_base}; slot={target.slot}; target={target.service}; rank={i + 1}; policy={selection_policy}; config={cand.config_id[:12]}"
         try:
             deploy_dir = deploy_paper_config(
                 config_id=str(cand.config_id),
