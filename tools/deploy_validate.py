@@ -135,7 +135,6 @@ def validate_config_obj(obj: Any) -> list[str]:
     req_number("global.trade.leverage_low", min_v=0.0, max_v=MAX_SAFE_LEVERAGE)
     req_number("global.trade.leverage_medium", min_v=0.0, max_v=MAX_SAFE_LEVERAGE)
     req_number("global.trade.leverage_high", min_v=0.0, max_v=MAX_SAFE_LEVERAGE)
-    req_number("global.trade.leverage_max_cap", min_v=0.0, max_v=MAX_SAFE_LEVERAGE)
     req_number("global.trade.sl_atr_mult", min_v=0.0)
     req_number("global.trade.tp_atr_mult", min_v=0.0)
     req_number("global.trade.slippage_bps", min_v=0.0)

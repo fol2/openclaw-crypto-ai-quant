@@ -163,7 +163,7 @@ struct GpuComboConfig {
     unsigned int enable_reef_filter;  float reef_long_rsi_block_gt;  float reef_short_rsi_block_lt;
     float reef_adx_threshold;  float reef_long_rsi_extreme_gt;  float reef_short_rsi_extreme_lt;
     unsigned int enable_dynamic_leverage;  float leverage_low;  float leverage_medium;
-    float leverage_high;  float leverage_max_cap;  float trailing_rsi_floor_default;
+    float leverage_high;  float _reserved14;  float trailing_rsi_floor_default;
     float slippage_bps;  float min_notional_usd;  unsigned int bump_to_min_notional;
     float max_total_margin_pct;  float trailing_rsi_floor_trending;  float trailing_vbts_bb_threshold;
     unsigned int enable_dynamic_sizing;  float confidence_mult_high;  float confidence_mult_medium;

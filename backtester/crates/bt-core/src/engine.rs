@@ -2244,7 +2244,6 @@ fn compute_entry_size(
         leverage_low: tc.leverage_low,
         leverage_medium: tc.leverage_medium,
         leverage_high: tc.leverage_high,
-        leverage_max_cap: tc.leverage_max_cap,
     });
 
     (sizing.size, sizing.margin_used, sizing.leverage)

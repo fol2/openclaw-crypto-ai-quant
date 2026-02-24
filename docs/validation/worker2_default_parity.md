@@ -51,7 +51,6 @@ One structural asymmetry noted (non-blocking). One code-quality issue found in `
 | 12 | `trade.leverage_low` | 1.0 | 1.0 | float → f64 | ✅ |
 | 13 | `trade.leverage_medium` | 3.0 | 3.0 | float → f64 | ✅ |
 | 14 | `trade.leverage_high` | 5.0 | 5.0 | float → f64 | ✅ |
-| 15 | `trade.leverage_max_cap` | 0.0 | 0.0 | float → f64 | ✅ |
 | 16 | `trade.slippage_bps` | 10.0 | 10.0 | float → f64 | ✅ |
 | 17 | `trade.bump_to_min_notional` | False | false | bool → bool | ✅ |
 | 18 | `trade.min_notional_usd` | 10.0 | 10.0 | float → f64 | ✅ |

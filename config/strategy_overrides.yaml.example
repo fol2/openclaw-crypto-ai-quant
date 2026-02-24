@@ -22,7 +22,6 @@ global:
     leverage_low: 1.0                 # SWEPT (default 1.0, same)
     leverage_medium: 5.0              # SWEPT (default 3.0)
     leverage_high: 5.0                # SWEPT (default 5.0, same)
-    leverage_max_cap: 0.0             # default (0 = no cap)
 
     # --- Execution ---
     use_bbo_for_fills: true           # engine-only (backtester: no orderbook data)

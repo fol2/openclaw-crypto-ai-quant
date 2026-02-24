@@ -1535,11 +1535,39 @@ fn is_integer_axis(path: &str) -> bool {
         || path == "trade.max_open_positions"
         || path == "trade.max_entry_orders_per_loop"
         || path == "trade.pyramid_max_adds"
+        || path == "trade.leverage"
+        || path == "trade.leverage_low"
+        || path == "trade.leverage_medium"
+        || path == "trade.leverage_high"
 }
 
 #[cfg(test)]
 mod tests {
-    use super::checked_num_bars_u32;
+    use super::{checked_num_bars_u32, is_integer_axis};
+
+    #[test]
+    fn leverage_axes_are_integer() {
+        assert!(is_integer_axis("trade.leverage"));
+        assert!(is_integer_axis("trade.leverage_low"));
+        assert!(is_integer_axis("trade.leverage_medium"));
+        assert!(is_integer_axis("trade.leverage_high"));
+    }
+
+    #[test]
+    fn indicator_axes_are_integer() {
+        assert!(is_integer_axis("indicators.adx_window"));
+        assert!(is_integer_axis("indicators.ema_fast_window"));
+        assert!(is_integer_axis("trade.max_open_positions"));
+        assert!(is_integer_axis("trade.max_entry_orders_per_loop"));
+    }
+
+    #[test]
+    fn continuous_axes_are_not_integer() {
+        assert!(!is_integer_axis("trade.allocation_pct"));
+        assert!(!is_integer_axis("trade.sl_atr_mult"));
+        assert!(!is_integer_axis("trade.slippage_bps"));
+        assert!(!is_integer_axis("thresholds.entry.min_adx"));
+    }
 
     #[test]
     fn checked_num_bars_u32_accepts_small_values() {

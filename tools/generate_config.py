@@ -451,6 +451,26 @@ def main():
             file=sys.stderr,
         )
 
+    # --- Post-override invariant enforcement ---
+
+    # Remove leverage_max_cap if present (dead parameter).
+    trade_node = _get_nested(base_data, "global.trade", None)
+    if isinstance(trade_node, dict):
+        trade_node.pop("leverage_max_cap", None)
+
+    # Clamp leverage values to integers in [1, 10].
+    # Use math.floor(x + 0.5) to match Rust f64::round() (half-away-from-zero),
+    # NOT Python round() which uses banker's rounding (2.5 → 2).
+    for lpath in ("global.trade.leverage", "global.trade.leverage_low",
+                   "global.trade.leverage_medium", "global.trade.leverage_high"):
+        val = _get_nested(base_data, lpath, None)
+        if isinstance(val, (int, float)):
+            clamped = max(1, min(10, int(math.floor(val + 0.5))))
+            if clamped != val:
+                print(f"[generate] {lpath}={val} → clamped to integer {clamped}",
+                      file=sys.stderr)
+                _set_nested(base_data, lpath, clamped)
+
     # Update header comment
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     cfg_id = config_id_from_obj(base_data)

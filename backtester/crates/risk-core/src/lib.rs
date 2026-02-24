@@ -33,7 +33,6 @@ pub struct EntrySizingInput {
     pub leverage_low: f64,
     pub leverage_medium: f64,
     pub leverage_high: f64,
-    pub leverage_max_cap: f64,
 }
 
 /// Entry sizing output values.
@@ -83,11 +82,7 @@ pub fn compute_entry_sizing(input: EntrySizingInput) -> EntrySizingResult {
             ConfidenceTier::Medium => input.leverage_medium,
             ConfidenceTier::Low => input.leverage_low,
         };
-        if input.leverage_max_cap > 0.0 {
-            base_lev.min(input.leverage_max_cap)
-        } else {
-            base_lev
-        }
+        base_lev
     } else {
         input.leverage
     };
@@ -243,7 +238,6 @@ mod tests {
             leverage_low: 1.0,
             leverage_medium: 3.0,
             leverage_high: 5.0,
-            leverage_max_cap: 0.0,
         });
 
         assert!((out.margin_used - 180.0).abs() < 1e-9);
@@ -275,7 +269,6 @@ mod tests {
             leverage_low: 1.0,
             leverage_medium: 3.0,
             leverage_high: 5.0,
-            leverage_max_cap: 0.0,
         });
 
         assert!((out.margin_used - 30.0).abs() < 1e-9);

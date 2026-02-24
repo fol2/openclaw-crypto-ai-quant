@@ -39,7 +39,6 @@ pub struct TradeConfig {
     pub leverage_low: f64,
     pub leverage_medium: f64,
     pub leverage_high: f64,
-    pub leverage_max_cap: f64,
 
     // Execution
     pub slippage_bps: f64,
@@ -148,7 +147,6 @@ impl Default for TradeConfig {
             leverage_low: 1.0,
             leverage_medium: 3.0,
             leverage_high: 5.0,
-            leverage_max_cap: 0.0,
 
             slippage_bps: 10.0,
             use_bbo_for_fills: true,
@@ -733,7 +731,6 @@ fn trade_to_json(t: &TradeConfig) -> serde_json::Value {
         "leverage_low": t.leverage_low,
         "leverage_medium": t.leverage_medium,
         "leverage_high": t.leverage_high,
-        "leverage_max_cap": t.leverage_max_cap,
         "slippage_bps": t.slippage_bps,
         "use_bbo_for_fills": t.use_bbo_for_fills,
         "min_notional_usd": t.min_notional_usd,

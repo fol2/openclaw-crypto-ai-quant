@@ -546,7 +546,6 @@ fn test_gpu_parity_entry_sizing() {
     cfg_b.trade.leverage_low = 2.0;
     cfg_b.trade.leverage_medium = 3.0;
     cfg_b.trade.leverage_high = 5.0;
-    cfg_b.trade.leverage_max_cap = 5.0;
 
     // Config A: CPU vs GPU
     let (cpu_a_trades, cpu_a_bal, cpu_a_pnl) = run_cpu_single(&cfg_a, &candles, INITIAL_BALANCE);
