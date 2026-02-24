@@ -1,4 +1,4 @@
-# sweep_full 141v profile (was 144v → 142v → 141v — see changelog below)
+# sweep_full 138-axis profile (was 144v → 142v → 141v → 138 — see changelog below)
 #
 # Scope:
 # - Expands sweep coverage from the legacy 34-axis profile to broad strategy coverage.
