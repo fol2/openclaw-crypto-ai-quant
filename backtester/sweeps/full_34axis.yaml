@@ -5,7 +5,7 @@
 # TPE 500K trials with batch=4096: ~4.4s per interval
 #
 # 14 indicator axes + 20 trade axes
-# TPE samples continuously between min/max and rounds integer axes
+# TPE uses histogram_estimator for binary/categorical axes, parzen_estimator for integer/float axes
 
 initial_balance: 10000.0
 lookback: 200
