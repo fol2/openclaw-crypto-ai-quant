@@ -695,8 +695,8 @@ fn compute_entry_size(equity: f32, price: f32, confidence: u32, atr: f32,
         margin *= conf_mult * adx_mult * vol_scalar;
     }
 
-    var lev = (*cfg).leverage;
-    // Always use per-confidence-tier leverage.
+    // Leverage (always per-confidence-tier).
+    var lev = 0.0;
     if confidence == CONF_HIGH { lev = (*cfg).leverage_high; }
     else if confidence == CONF_MEDIUM { lev = (*cfg).leverage_medium; }
     else { lev = (*cfg).leverage_low; }

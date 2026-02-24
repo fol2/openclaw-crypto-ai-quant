@@ -1386,9 +1386,8 @@ __device__ SizingResultD compute_entry_size_codegen(
         margin *= conf_mult * adx_mult * vol_scalar;
     }
 
-    // ── Leverage ─────────────────────────────────────────────────────────
-    double lev = (double)cfg.leverage;
-    // Always use per-confidence-tier leverage.
+    // ── Leverage (always per-confidence-tier) ──────────────────────────
+    double lev;
     if (confidence == CONF_HIGH)        { lev = (double)cfg.leverage_high; }
     else if (confidence == CONF_MEDIUM) { lev = (double)cfg.leverage_medium; }
     else                                { lev = (double)cfg.leverage_low; }
