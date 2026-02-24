@@ -117,6 +117,22 @@ struct GpuBatchResult {
 // Per-axis optimizer state
 // =============================================================================
 
+/// Type-aware axis classification for TPE sampling.
+///
+/// Binary/Categorical use `histogram_estimator` + `categorical_range` for clean
+/// discrete sampling. Integer/Float use `parzen_estimator` + continuous `range`.
+#[derive(Debug, Clone)]
+enum AxisType {
+    /// {0.0, 1.0} — histogram_estimator + categorical_range(2)
+    Binary,
+    /// N unordered choices — histogram_estimator + categorical_range(n)
+    Categorical { values: Vec<f64> },
+    /// Discrete integer — parzen_estimator + range, round() post-sample
+    Integer,
+    /// Continuous float quantized to step — parzen_estimator + range
+    Float { step: f64 },
+}
+
 /// Per-axis optimizer state.
 struct AxisOptimizer {
     path: String,
@@ -124,7 +140,7 @@ struct AxisOptimizer {
     max_val: f64,
     optimizer: tpe::TpeOptimizer,
     is_indicator: bool,
-    is_integer: bool,
+    axis_type: AxisType,
     freeze_val: f64,
     gate: Option<AxisGateBinding>,
 }
@@ -300,10 +316,23 @@ fn sample_batch(
             let raw_val = axis_samples[a][t];
             raw_vals.push(raw_val);
 
-            let val = if axis.is_integer {
-                raw_val.round().clamp(axis.min_val, axis.max_val)
-            } else {
-                raw_val.clamp(axis.min_val, axis.max_val)
+            let val = match &axis.axis_type {
+                AxisType::Binary => {
+                    let idx = raw_val.floor() as usize;
+                    if idx == 0 { 0.0 } else { 1.0 }
+                }
+                AxisType::Categorical { values } => {
+                    let idx = (raw_val.floor() as usize).min(values.len() - 1);
+                    values[idx]
+                }
+                AxisType::Integer => raw_val.round().clamp(axis.min_val, axis.max_val),
+                AxisType::Float { step } => {
+                    if *step > 1e-9 {
+                        ((raw_val / step).round() * step).clamp(axis.min_val, axis.max_val)
+                    } else {
+                        raw_val.clamp(axis.min_val, axis.max_val)
+                    }
+                }
             };
             resolved_vals.push(val);
         }
@@ -381,10 +410,7 @@ fn tell_results(
             if (axis.max_val - axis.min_val).abs() < 1e-12 {
                 continue;
             }
-            axis.optimizer = tpe::TpeOptimizer::new(
-                tpe::parzen_estimator(),
-                tpe::range(axis.min_val, axis.max_val).unwrap(),
-            );
+            axis.optimizer = make_optimizer(&axis.axis_type, axis.min_val, axis.max_val);
         }
 
         for (raw_vals, resolved_vals, objective) in observation_cache.iter() {
@@ -516,7 +542,10 @@ pub fn run_tpe_sweep(
                 .map(|parent_idx| AxisGateBinding { parent_idx, eq: g.eq })
         });
 
+        let axis_type = classify_axis(&axis.path, &axis.values);
+
         if (max_val - min_val).abs() < 1e-12 {
+            // Single-value axis: dummy optimizer (never sampled meaningfully)
             axis_opts.push(AxisOptimizer {
                 path: axis.path.clone(),
                 min_val,
@@ -526,17 +555,14 @@ pub fn run_tpe_sweep(
                     tpe::range(min_val - 0.5, max_val + 0.5).unwrap(),
                 ),
                 is_indicator: is_indicator_path(&axis.path),
-                is_integer: is_integer_axis(&axis.path),
+                axis_type,
                 freeze_val,
                 gate,
             });
             continue;
         }
 
-        let optimizer = tpe::TpeOptimizer::new(
-            tpe::parzen_estimator(),
-            tpe::range(min_val, max_val).unwrap(),
-        );
+        let optimizer = make_optimizer(&axis_type, min_val, max_val);
 
         axis_opts.push(AxisOptimizer {
             path: axis.path.clone(),
@@ -544,7 +570,7 @@ pub fn run_tpe_sweep(
             max_val,
             optimizer,
             is_indicator: is_indicator_path(&axis.path),
-            is_integer: is_integer_axis(&axis.path),
+            axis_type,
             freeze_val,
             gate,
         });
@@ -552,6 +578,23 @@ pub fn run_tpe_sweep(
 
     let has_indicator_axes = axis_opts.iter().any(|a| a.is_indicator);
     let gated_axes = axis_opts.iter().filter(|a| a.gate.is_some()).count();
+
+    let n_binary = axis_opts
+        .iter()
+        .filter(|a| matches!(a.axis_type, AxisType::Binary))
+        .count();
+    let n_cat = axis_opts
+        .iter()
+        .filter(|a| matches!(a.axis_type, AxisType::Categorical { .. }))
+        .count();
+    let n_int = axis_opts
+        .iter()
+        .filter(|a| matches!(a.axis_type, AxisType::Integer))
+        .count();
+    let n_float = axis_opts
+        .iter()
+        .filter(|a| matches!(a.axis_type, AxisType::Float { .. }))
+        .count();
 
     eprintln!(
         "[TPE] {} axes ({} indicator, {} trade, {} gated), {} trials, batch={}",
@@ -562,14 +605,24 @@ pub fn run_tpe_sweep(
         tpe_cfg.trials,
         tpe_cfg.batch_size,
     );
+    eprintln!(
+        "[TPE] Axis types: {} binary, {} categorical, {} integer, {} float",
+        n_binary, n_cat, n_int, n_float,
+    );
     for a in &axis_opts {
+        let type_tag = match &a.axis_type {
+            AxisType::Binary => "(binary)".to_string(),
+            AxisType::Categorical { values } => format!("(cat/{})", values.len()),
+            AxisType::Integer => "(int)".to_string(),
+            AxisType::Float { step } => format!("(float step={:.6})", step),
+        };
         eprintln!(
             "  - {} [{:.4}..{:.4}] {}{}",
             a.path,
             a.min_val,
             a.max_val,
             if a.is_indicator { "(indicator) " } else { "" },
-            if a.is_integer { "(int)" } else { "" },
+            type_tag,
         );
     }
 
@@ -1528,8 +1581,16 @@ fn is_indicator_path(path: &str) -> bool {
     INDICATOR_PATHS.contains(&path)
 }
 
-/// Integer axes are indicator windows and a few other discrete params.
-fn is_integer_axis(path: &str) -> bool {
+/// Categorical axis paths (enum-typed params in `apply_one`).
+const CATEGORICAL_PATHS: &[&str] = &[
+    "trade.entry_min_confidence",
+    "trade.add_min_confidence",
+    "thresholds.entry.pullback_confidence",
+    "thresholds.entry.macd_hist_entry_mode",
+];
+
+/// Integer axis paths (usize-typed params in `apply_one`).
+fn is_integer_path(path: &str) -> bool {
     path.starts_with("indicators.")
         || path.contains("_window")
         || path == "trade.max_open_positions"
@@ -1539,34 +1600,244 @@ fn is_integer_axis(path: &str) -> bool {
         || path == "trade.leverage_low"
         || path == "trade.leverage_medium"
         || path == "trade.leverage_high"
+        || path == "trade.max_adds_per_symbol"
+        || path == "trade.add_cooldown_minutes"
+        || path == "trade.reentry_cooldown_minutes"
+        || path == "trade.reentry_cooldown_min_mins"
+        || path == "trade.reentry_cooldown_max_mins"
+        || path == "trade.entry_cooldown_s"
+        || path == "trade.exit_cooldown_s"
+        || path == "thresholds.ranging.min_signals"
+}
+
+/// Compute approximate GCD of a sorted list of differences to derive step size.
+fn approx_step_from_values(values: &[f64]) -> f64 {
+    if values.len() < 2 {
+        return 0.0;
+    }
+    let mut diffs: Vec<f64> = values.windows(2).map(|w| w[1] - w[0]).collect();
+    diffs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    // Remove near-zero diffs (duplicate values)
+    diffs.retain(|d| *d > 1e-9);
+    if diffs.is_empty() {
+        return 0.0;
+    }
+    // Approximate GCD via Euclidean algorithm on first diff, checking all others
+    let mut gcd = diffs[0];
+    for &d in &diffs[1..] {
+        gcd = approx_gcd(gcd, d);
+        if gcd < 1e-6 {
+            return 1e-6;
+        }
+    }
+    gcd.max(1e-6)
+}
+
+fn approx_gcd(mut a: f64, mut b: f64) -> f64 {
+    for _ in 0..50 {
+        if b < 1e-9 {
+            break;
+        }
+        let rem = a % b;
+        a = b;
+        b = rem;
+    }
+    a
+}
+
+/// Create a TpeOptimizer with the correct estimator/range for the axis type.
+fn make_optimizer(axis_type: &AxisType, min_val: f64, max_val: f64) -> tpe::TpeOptimizer {
+    match axis_type {
+        AxisType::Binary => tpe::TpeOptimizer::new(
+            tpe::histogram_estimator(),
+            tpe::categorical_range(2).unwrap(),
+        ),
+        AxisType::Categorical { values } => tpe::TpeOptimizer::new(
+            tpe::histogram_estimator(),
+            tpe::categorical_range(values.len()).unwrap(),
+        ),
+        AxisType::Integer | AxisType::Float { .. } => tpe::TpeOptimizer::new(
+            tpe::parzen_estimator(),
+            tpe::range(min_val, max_val).unwrap(),
+        ),
+    }
+}
+
+/// Classify a sweep axis into the appropriate AxisType based on path and values.
+fn classify_axis(path: &str, values: &[f64]) -> AxisType {
+    // Binary: exactly two values that are {0.0, 1.0} (sorted)
+    if values.len() == 2 {
+        let mut sorted = [values[0], values[1]];
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        if (sorted[0] - 0.0).abs() < 1e-9 && (sorted[1] - 1.0).abs() < 1e-9 {
+            return AxisType::Binary;
+        }
+    }
+
+    // Categorical: known enum paths
+    if CATEGORICAL_PATHS.contains(&path) {
+        return AxisType::Categorical {
+            values: values.to_vec(),
+        };
+    }
+
+    // Integer: indicator windows and other usize-typed params
+    if is_integer_path(path) {
+        return AxisType::Integer;
+    }
+
+    // Float with step quantization
+    let step = approx_step_from_values(values);
+    AxisType::Float { step }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{checked_num_bars_u32, is_integer_axis};
+    use super::{
+        approx_step_from_values, checked_num_bars_u32, classify_axis, is_integer_path, AxisType,
+    };
+
+    #[test]
+    fn binary_axes_detected_from_values() {
+        assert!(matches!(
+            classify_axis("trade.enable_breakeven_stop", &[0.0, 1.0]),
+            AxisType::Binary
+        ));
+        assert!(matches!(
+            classify_axis("filters.enable_ranging_filter", &[0.0, 1.0]),
+            AxisType::Binary
+        ));
+        // Order doesn't matter
+        assert!(matches!(
+            classify_axis("trade.enable_pyramiding", &[1.0, 0.0]),
+            AxisType::Binary
+        ));
+    }
+
+    #[test]
+    fn two_non_binary_values_not_binary() {
+        // Two values that aren't {0, 1} should NOT be binary
+        assert!(!matches!(
+            classify_axis("trade.allocation_pct", &[0.1, 0.2]),
+            AxisType::Binary
+        ));
+        assert!(!matches!(
+            classify_axis("trade.leverage", &[2.0, 3.0]),
+            AxisType::Binary
+        ));
+    }
+
+    #[test]
+    fn categorical_axes_detected() {
+        assert!(matches!(
+            classify_axis("trade.entry_min_confidence", &[0.0, 1.0, 2.0]),
+            AxisType::Categorical { .. }
+        ));
+        assert!(matches!(
+            classify_axis("trade.add_min_confidence", &[0.0, 1.0, 2.0]),
+            AxisType::Categorical { .. }
+        ));
+        assert!(matches!(
+            classify_axis(
+                "thresholds.entry.macd_hist_entry_mode",
+                &[0.0, 1.0, 2.0]
+            ),
+            AxisType::Categorical { .. }
+        ));
+        if let AxisType::Categorical { values } =
+            classify_axis("trade.entry_min_confidence", &[0.0, 1.0, 2.0])
+        {
+            assert_eq!(values, vec![0.0, 1.0, 2.0]);
+        }
+    }
 
     #[test]
     fn leverage_axes_are_integer() {
-        assert!(is_integer_axis("trade.leverage"));
-        assert!(is_integer_axis("trade.leverage_low"));
-        assert!(is_integer_axis("trade.leverage_medium"));
-        assert!(is_integer_axis("trade.leverage_high"));
+        assert!(matches!(
+            classify_axis("trade.leverage", &[2.0, 3.0, 4.0, 5.0]),
+            AxisType::Integer
+        ));
+        assert!(matches!(
+            classify_axis("trade.leverage_low", &[1.0, 2.0, 3.0]),
+            AxisType::Integer
+        ));
+        assert!(matches!(
+            classify_axis("trade.leverage_medium", &[2.0, 3.0, 4.0, 5.0]),
+            AxisType::Integer
+        ));
+        assert!(matches!(
+            classify_axis("trade.leverage_high", &[3.0, 4.0, 5.0]),
+            AxisType::Integer
+        ));
     }
 
     #[test]
     fn indicator_axes_are_integer() {
-        assert!(is_integer_axis("indicators.adx_window"));
-        assert!(is_integer_axis("indicators.ema_fast_window"));
-        assert!(is_integer_axis("trade.max_open_positions"));
-        assert!(is_integer_axis("trade.max_entry_orders_per_loop"));
+        assert!(matches!(
+            classify_axis("indicators.adx_window", &[8.0, 10.0, 12.0, 14.0]),
+            AxisType::Integer
+        ));
+        assert!(matches!(
+            classify_axis("indicators.ema_fast_window", &[5.0, 10.0, 15.0]),
+            AxisType::Integer
+        ));
+        assert!(matches!(
+            classify_axis("trade.max_open_positions", &[1.0, 2.0, 3.0]),
+            AxisType::Integer
+        ));
+        assert!(matches!(
+            classify_axis("trade.max_entry_orders_per_loop", &[1.0, 2.0]),
+            AxisType::Integer
+        ));
     }
 
     #[test]
-    fn continuous_axes_are_not_integer() {
-        assert!(!is_integer_axis("trade.allocation_pct"));
-        assert!(!is_integer_axis("trade.sl_atr_mult"));
-        assert!(!is_integer_axis("trade.slippage_bps"));
-        assert!(!is_integer_axis("thresholds.entry.min_adx"));
+    fn added_integer_paths() {
+        assert!(is_integer_path("trade.max_adds_per_symbol"));
+        assert!(is_integer_path("trade.add_cooldown_minutes"));
+        assert!(is_integer_path("trade.reentry_cooldown_minutes"));
+        assert!(is_integer_path("trade.reentry_cooldown_min_mins"));
+        assert!(is_integer_path("trade.reentry_cooldown_max_mins"));
+        assert!(is_integer_path("trade.entry_cooldown_s"));
+        assert!(is_integer_path("trade.exit_cooldown_s"));
+        assert!(is_integer_path("thresholds.ranging.min_signals"));
+    }
+
+    #[test]
+    fn continuous_axes_are_float() {
+        assert!(matches!(
+            classify_axis("trade.allocation_pct", &[0.05, 0.10, 0.15, 0.20]),
+            AxisType::Float { .. }
+        ));
+        assert!(matches!(
+            classify_axis("trade.sl_atr_mult", &[1.0, 1.25, 1.5, 1.75, 2.0]),
+            AxisType::Float { .. }
+        ));
+        assert!(matches!(
+            classify_axis("thresholds.entry.min_adx", &[10.0, 15.0, 20.0, 25.0]),
+            AxisType::Float { .. }
+        ));
+    }
+
+    #[test]
+    fn float_step_detection() {
+        let step = approx_step_from_values(&[0.05, 0.10, 0.15, 0.20]);
+        assert!((step - 0.05).abs() < 1e-6, "step={step}, expected 0.05");
+
+        let step = approx_step_from_values(&[1.0, 1.25, 1.5, 1.75, 2.0]);
+        assert!((step - 0.25).abs() < 1e-6, "step={step}, expected 0.25");
+
+        let step = approx_step_from_values(&[10.0, 15.0, 20.0, 25.0]);
+        assert!((step - 5.0).abs() < 1e-4, "step={step}, expected 5.0");
+    }
+
+    #[test]
+    fn confidence_is_categorical_not_binary() {
+        // Even though [0.0, 1.0] subset exists, 3 values + categorical path → Categorical
+        assert!(matches!(
+            classify_axis("trade.entry_min_confidence", &[0.0, 1.0, 2.0]),
+            AxisType::Categorical { .. }
+        ));
     }
 
     #[test]
