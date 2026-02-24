@@ -12,7 +12,7 @@
       "schema_version": 1,
       "step": 1,
       "state_step": 1,
-      "state_cash_usd": 9666.316666666668,
+      "state_cash_usd": 8999.65,
       "state_positions": 1,
       "intent_count": 1,
       "fill_count": 1,
@@ -47,7 +47,7 @@
         "reef_long_rsi_block_gt": 70.0,
         "pullback_rsi_long_min": 50.0,
         "pullback_rsi_short_max": 50.0,
-        "leverage": 3.0,
+        "leverage": 1.0,
         "taker_fee_bps": 3.5,
         "maker_fee_bps": 3.5
       }

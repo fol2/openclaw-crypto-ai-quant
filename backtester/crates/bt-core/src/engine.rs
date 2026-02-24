@@ -224,7 +224,13 @@ fn make_kernel_params(cfg: &StrategyConfig) -> decision_kernel::KernelParams {
     // Engine entry processing closes the existing position first when a reverse
     // signal arrives; keep this behaviour by disabling canonical reverses.
     kernel_params.allow_reverse = false;
-    kernel_params.leverage = cfg.trade.leverage.max(1.0);
+    // Use the lowest leverage tier for kernel cash accounting (most conservative).
+    // Entry sizing already computes the correct notional with the per-confidence
+    // tier; the kernel only needs a single leverage for margin = notional / lev.
+    kernel_params.leverage = cfg.trade.leverage_low
+        .min(cfg.trade.leverage_medium)
+        .min(cfg.trade.leverage_high)
+        .max(1.0);
     kernel_params.exit_params = Some(build_exit_params(cfg));
     kernel_params
 }
@@ -417,7 +423,7 @@ fn build_active_params(
             "pullback_rsi_short_max".into(),
             cfg.thresholds.entry.pullback_rsi_short_max,
         );
-        params.insert("leverage".into(), cfg.trade.leverage);
+        params.insert("leverage".into(), kernel_params.leverage);
         params.insert("taker_fee_bps".into(), kernel_params.taker_fee_bps);
         params.insert("maker_fee_bps".into(), kernel_params.maker_fee_bps);
     } else {
