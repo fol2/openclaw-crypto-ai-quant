@@ -39,6 +39,9 @@ axes:
     values: [0.0, 1.0]
 
   - path: filters.adx_rising_saturation
+    gate:
+      path: filters.require_adx_rising
+      eq: 1
     values: [20, 25, 30, 35, 40]
 
   - path: filters.use_stoch_rsi_filter
@@ -46,9 +49,15 @@ axes:
 
   # ── StochRSI axes (9 combos) ────────────────────────────────
   - path: thresholds.stoch_rsi.overbought
+    gate:
+      path: filters.use_stoch_rsi_filter
+      eq: 1
     values: [0.80, 0.85, 0.90]
 
   - path: thresholds.stoch_rsi.oversold
+    gate:
+      path: filters.use_stoch_rsi_filter
+      eq: 1
     values: [0.10, 0.15, 0.20]
 
   # ── Trade axes (192 combos) ────────────────────────────────────

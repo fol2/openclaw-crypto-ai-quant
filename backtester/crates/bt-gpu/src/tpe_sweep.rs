@@ -277,16 +277,147 @@ fn tpe_worker(
     let _ = request_tx.send(None);
 }
 
+/// Resolve a raw TPE sample to a concrete axis value.
+fn resolve_raw(axis: &AxisOptimizer, raw_val: f64) -> f64 {
+    match &axis.axis_type {
+        AxisType::Binary => {
+            let idx = raw_val.floor() as usize;
+            if idx == 0 { 0.0 } else { 1.0 }
+        }
+        AxisType::Categorical { values } => {
+            let idx = (raw_val.floor() as usize).min(values.len() - 1);
+            values[idx]
+        }
+        AxisType::Integer => raw_val.round().clamp(axis.min_val, axis.max_val),
+        AxisType::Float { step } => {
+            if *step > 1e-9 {
+                ((raw_val / step).round() * step).clamp(axis.min_val, axis.max_val)
+            } else {
+                raw_val.clamp(axis.min_val, axis.max_val)
+            }
+        }
+    }
+}
+
 /// Sample one batch of trial parameters from TPE.
+///
+/// **Gate-aware two-phase sampling**: ungated axes are sampled in parallel
+/// (via rayon), then gated sub-axes are only sampled when their parent toggle
+/// is active. This eliminates wasted TPE ask() calls on frozen sub-axes and
+/// improves Bayesian convergence by not polluting the surrogate with no-op
+/// samples.
 fn sample_batch(
     axis_opts: &mut [AxisOptimizer],
     rng: &mut StdRng,
     batch_n: usize,
 ) -> (Vec<Vec<(String, f64)>>, Vec<Vec<f64>>) {
-    // Generate deterministic per-axis RNG seeds from main rng
+    let has_gated = axis_opts.iter().any(|a| a.gate.is_some());
+
+    if !has_gated {
+        // Fast path: no gates → parallel sample all axes (original behaviour)
+        return sample_batch_ungated(axis_opts, rng, batch_n);
+    }
+
+    // Two-phase gate-aware sampling
+    let n_axes = axis_opts.len();
+
+    // Phase 1: parallel sample all axes — ungated get real ask(), gated get
+    // freeze_val placeholder (will be overwritten in Phase 2 when gate is active).
+    let axis_seeds: Vec<u64> = (0..n_axes).map(|_| rng.gen()).collect();
+
+    let axis_samples: Vec<Vec<f64>> = axis_opts
+        .par_iter_mut()
+        .zip(axis_seeds.par_iter())
+        .map(|(axis, &seed)| {
+            if axis.gate.is_some() {
+                // Gated axis — produce freeze_val placeholder; Phase 2 will
+                // conditionally ask() only when the parent toggle is active.
+                vec![axis.freeze_val; batch_n]
+            } else {
+                let mut local_rng = StdRng::seed_from_u64(seed);
+                (0..batch_n)
+                    .map(|_| {
+                        if (axis.max_val - axis.min_val).abs() < 1e-12 {
+                            axis.min_val
+                        } else {
+                            axis.optimizer.ask(&mut local_rng).unwrap()
+                        }
+                    })
+                    .collect()
+            }
+        })
+        .collect();
+
+    // Resolve ungated samples into per-trial layout
+    let mut raw_vals_all: Vec<Vec<f64>> = vec![vec![0.0; n_axes]; batch_n];
+    let mut resolved_all: Vec<Vec<f64>> = vec![vec![0.0; n_axes]; batch_n];
+
+    for a in 0..n_axes {
+        for t in 0..batch_n {
+            let raw = axis_samples[a][t];
+            raw_vals_all[t][a] = raw;
+            resolved_all[t][a] = resolve_raw(&axis_opts[a], raw);
+        }
+    }
+
+    // Phase 2: sequentially sample gated axes — only ask() when gate is active.
+    // This avoids wasting TPE ask() calls on sub-axes whose parent toggle is OFF.
+    for a in 0..n_axes {
+        let gate = match axis_opts[a].gate {
+            Some(g) => g,
+            None => continue,
+        };
+        debug_assert!(
+            gate.parent_idx < a || axis_opts[gate.parent_idx].gate.is_none(),
+            "gate parent axis [{}] '{}' must be ungated or precede child axis [{}] '{}' \
+             — check YAML axis ordering",
+            gate.parent_idx,
+            axis_opts[gate.parent_idx].path,
+            a,
+            axis_opts[a].path,
+        );
+        for t in 0..batch_n {
+            let parent_val = resolved_all[t][gate.parent_idx];
+            let gate_active = (parent_val - gate.eq).abs() < 1e-9;
+
+            if gate_active && (axis_opts[a].max_val - axis_opts[a].min_val).abs() >= 1e-12 {
+                // Gate is active — ask TPE for an informed sample
+                let raw = axis_opts[a].optimizer.ask(rng).unwrap();
+                raw_vals_all[t][a] = raw;
+                resolved_all[t][a] = resolve_raw(&axis_opts[a], raw);
+            } else {
+                // Gate is inactive — keep freeze_val from Phase 1
+                let freeze = axis_opts[a].freeze_val;
+                raw_vals_all[t][a] = freeze;
+                resolved_all[t][a] = freeze;
+            }
+        }
+    }
+
+    // Build output
+    let mut trial_overrides: Vec<Vec<(String, f64)>> = Vec::with_capacity(batch_n);
+    let mut trial_raw_values: Vec<Vec<f64>> = Vec::with_capacity(batch_n);
+
+    for t in 0..batch_n {
+        let mut overrides = Vec::with_capacity(n_axes);
+        for (a, axis) in axis_opts.iter().enumerate() {
+            overrides.push((axis.path.clone(), resolved_all[t][a]));
+        }
+        trial_overrides.push(overrides);
+        trial_raw_values.push(raw_vals_all[t].clone());
+    }
+
+    (trial_overrides, trial_raw_values)
+}
+
+/// Fast path: sample all axes in parallel (no gate dependencies).
+fn sample_batch_ungated(
+    axis_opts: &mut [AxisOptimizer],
+    rng: &mut StdRng,
+    batch_n: usize,
+) -> (Vec<Vec<(String, f64)>>, Vec<Vec<f64>>) {
     let axis_seeds: Vec<u64> = (0..axis_opts.len()).map(|_| rng.gen()).collect();
 
-    // Parallel ask: each axis generates all batch_n samples independently
     let axis_samples: Vec<Vec<f64>> = axis_opts
         .par_iter_mut()
         .zip(axis_seeds.par_iter())
@@ -304,7 +435,6 @@ fn sample_batch(
         })
         .collect();
 
-    // Transpose [axis][trial] → [trial][axis] and apply clamp/round
     let mut trial_overrides: Vec<Vec<(String, f64)>> = Vec::with_capacity(batch_n);
     let mut trial_raw_values: Vec<Vec<f64>> = Vec::with_capacity(batch_n);
 
@@ -315,34 +445,7 @@ fn sample_batch(
         for (a, axis) in axis_opts.iter().enumerate() {
             let raw_val = axis_samples[a][t];
             raw_vals.push(raw_val);
-
-            let val = match &axis.axis_type {
-                AxisType::Binary => {
-                    let idx = raw_val.floor() as usize;
-                    if idx == 0 { 0.0 } else { 1.0 }
-                }
-                AxisType::Categorical { values } => {
-                    let idx = (raw_val.floor() as usize).min(values.len() - 1);
-                    values[idx]
-                }
-                AxisType::Integer => raw_val.round().clamp(axis.min_val, axis.max_val),
-                AxisType::Float { step } => {
-                    if *step > 1e-9 {
-                        ((raw_val / step).round() * step).clamp(axis.min_val, axis.max_val)
-                    } else {
-                        raw_val.clamp(axis.min_val, axis.max_val)
-                    }
-                }
-            };
-            resolved_vals.push(val);
-        }
-
-        // Gate-aware freeze (matches bt-core sweep semantics): when gate parent is
-        // off, fix child axis to its first value so no-op sub-axes are not sampled.
-        for (j, axis) in axis_opts.iter().enumerate() {
-            if !gate_is_active(axis, &resolved_vals) {
-                resolved_vals[j] = axis.freeze_val;
-            }
+            resolved_vals.push(resolve_raw(axis, raw_val));
         }
 
         let mut overrides = Vec::with_capacity(axis_opts.len());
