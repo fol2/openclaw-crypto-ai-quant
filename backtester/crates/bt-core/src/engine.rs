@@ -224,13 +224,10 @@ fn make_kernel_params(cfg: &StrategyConfig) -> decision_kernel::KernelParams {
     // Engine entry processing closes the existing position first when a reverse
     // signal arrives; keep this behaviour by disabling canonical reverses.
     kernel_params.allow_reverse = false;
-    // Use the lowest leverage tier for kernel cash accounting (most conservative).
-    // Entry sizing already computes the correct notional with the per-confidence
-    // tier; the kernel only needs a single leverage for margin = notional / lev.
-    kernel_params.leverage = cfg.trade.leverage_low
-        .min(cfg.trade.leverage_medium)
-        .min(cfg.trade.leverage_high)
-        .max(1.0);
+    // Leverage is set per-entry before each step_decision call to match
+    // the actual confidence-tier leverage used by compute_entry_size.
+    // Default to 1.0 (spot-equivalent) for non-entry events.
+    kernel_params.leverage = 1.0;
     kernel_params.exit_params = Some(build_exit_params(cfg));
     kernel_params
 }
@@ -1443,6 +1440,9 @@ pub fn run_simulation(input: RunSimulationInput<'_>) -> SimResult {
                     }
                 }
                 let kernel_notional = notional;
+                // Align kernel leverage with this entry's actual tier leverage
+                // so kernel margin = notional / leverage matches sizing intent.
+                state.kernel_params.leverage = leverage.max(1.0);
                 let decision = step_decision(
                     &mut state,
                     StepDecisionInput {
@@ -2626,6 +2626,8 @@ fn try_pyramid(
         PositionType::Long => Signal::Buy,
         PositionType::Short => Signal::Sell,
     };
+    // Align kernel leverage with position's leverage for pyramid margin accounting.
+    state.kernel_params.leverage = leverage.max(1.0);
     let decision = step_decision(
         state,
         StepDecisionInput {
@@ -3019,6 +3021,8 @@ fn execute_sub_bar_entry(state: &mut SimState, input: ExecuteSubBarEntryInput<'_
         }
     }
 
+    // Align kernel leverage with this entry's actual tier leverage.
+    state.kernel_params.leverage = leverage.max(1.0);
     let decision = step_decision(
         state,
         StepDecisionInput {
