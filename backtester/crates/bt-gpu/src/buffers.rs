@@ -254,12 +254,13 @@ pub struct GpuComboConfig {
     pub reef_long_rsi_extreme_gt: f32,
     pub reef_short_rsi_extreme_lt: f32,
 
-    // Dynamic leverage [10-14]
+    // Dynamic leverage [10-13]
     pub enable_dynamic_leverage: u32,
     pub leverage_low: f32,
     pub leverage_medium: f32,
     pub leverage_high: f32,
-    pub leverage_max_cap: f32,
+    // [14] reserved (was leverage_max_cap, removed)
+    pub _reserved14: f32,
     // Trailing config (repurposed pad slots) [15]
     pub trailing_rsi_floor_default: f32,
 
@@ -691,7 +692,7 @@ impl GpuComboConfig {
             leverage_low: checked_f32("leverage_low", tc.leverage_low)?,
             leverage_medium: checked_f32("leverage_medium", tc.leverage_medium)?,
             leverage_high: checked_f32("leverage_high", tc.leverage_high)?,
-            leverage_max_cap: checked_f32("leverage_max_cap", tc.leverage_max_cap)?,
+            _reserved14: 0.0,
             trailing_rsi_floor_default: 0.5,
 
             slippage_bps: checked_f32("slippage_bps", tc.slippage_bps)?,

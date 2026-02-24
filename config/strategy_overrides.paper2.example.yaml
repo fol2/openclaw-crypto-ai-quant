@@ -9,17 +9,16 @@ global:
     allocation_pct: 0.29670269522438114
     sl_atr_mult: 2.9692855857124973
     tp_atr_mult: 5.9505580207139
-    leverage: 2.6886233900762098
+    leverage: 3
     max_open_positions: 14
     max_total_margin_pct: 0.7731957565726952
     min_notional_usd: 11.386467064119204
     min_atr_pct: 0.0005900875857955573
     bump_to_min_notional: false
     enable_dynamic_leverage: false
-    leverage_low: 1.2656652891927285
-    leverage_medium: 3.4525217950714335
-    leverage_high: 5.029515901126028
-    leverage_max_cap: 0.9795718111093873
+    leverage_low: 1
+    leverage_medium: 3
+    leverage_high: 5
     use_bbo_for_fills: true
     slippage_bps: 10.580056058073147
     enable_dynamic_sizing: true

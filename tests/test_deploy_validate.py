@@ -7,7 +7,6 @@ def _valid_yaml(
     leverage_low: float = 1.0,
     leverage_medium: float = 3.0,
     leverage_high: float = 5.0,
-    leverage_max_cap: float = 10.0,
     max_entry_orders_per_loop: int = 6,
     max_adds_per_symbol: int = 2,
     tp_partial_pct: float = 0.5,
@@ -28,7 +27,6 @@ def _valid_yaml(
         f"    leverage_low: {leverage_low}\n"
         f"    leverage_medium: {leverage_medium}\n"
         f"    leverage_high: {leverage_high}\n"
-        f"    leverage_max_cap: {leverage_max_cap}\n"
         "    sl_atr_mult: 2.0\n"
         "    tp_atr_mult: 6.0\n"
         "    slippage_bps: 10.0\n"
@@ -68,7 +66,6 @@ def _minimal_valid_yaml_without_optional_fields() -> str:
         "    leverage_low: 1.0\n"
         "    leverage_medium: 3.0\n"
         "    leverage_high: 5.0\n"
-        "    leverage_max_cap: 10.0\n"
         "    sl_atr_mult: 2.0\n"
         "    tp_atr_mult: 6.0\n"
         "    slippage_bps: 10.0\n"

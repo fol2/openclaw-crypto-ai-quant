@@ -180,7 +180,7 @@ fn random_gpu_combo_config(rng: &mut StdRng) -> GpuComboConfig {
         leverage_low: rng.gen_range(1.0_f32..2.0),
         leverage_medium: rng.gen_range(1.5_f32..3.0),
         leverage_high: rng.gen_range(2.0_f32..5.0),
-        leverage_max_cap: rng.gen_range(3.0_f32..10.0),
+        _reserved14: 0.0,
         trailing_rsi_floor_default: rng.gen_range(0.3_f32..0.7),
 
         // Execution
@@ -576,11 +576,7 @@ fn rust_compute_entry_sizing(
             Confidence::Medium => cfg.leverage_medium as f64,
             Confidence::Low => cfg.leverage_low as f64,
         };
-        if cfg.leverage_max_cap > 0.0 {
-            base_lev.min(cfg.leverage_max_cap as f64)
-        } else {
-            base_lev
-        }
+        base_lev
     } else {
         cfg.leverage as f64
     };
@@ -1181,17 +1177,6 @@ fn full_sweep_100_configs_decision_parity() {
                 notional
             );
 
-            // Leverage cap
-            if cfg.enable_dynamic_leverage != 0 && cfg.leverage_max_cap > 0.0 {
-                assert!(
-                    lev <= cfg.leverage_max_cap as f64 + f64::EPSILON,
-                    "Leverage exceeds cap: cfg={}, lev={}, cap={}",
-                    cfg_idx,
-                    lev,
-                    cfg.leverage_max_cap
-                );
-            }
-
             // Notional = margin * leverage consistency
             if margin > 1e-10 {
                 let expected_notional = margin * lev;
@@ -1462,7 +1447,7 @@ fn random_configs_survive_f32_roundtrip() {
             ("confidence_mult_high", cfg.confidence_mult_high),
             ("confidence_mult_low", cfg.confidence_mult_low),
             ("vol_baseline_pct", cfg.vol_baseline_pct),
-            ("leverage_max_cap", cfg.leverage_max_cap),
+            ("_reserved14", cfg._reserved14),
             ("tp_mult_strong", cfg.tp_mult_strong),
             ("tp_mult_weak", cfg.tp_mult_weak),
             ("ranging_adx_lt", cfg.ranging_adx_lt),

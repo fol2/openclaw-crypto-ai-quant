@@ -153,7 +153,6 @@
 | 98 | `trade.leverage` | **USED** | `_select_leverage()`, `add_to_position()` | Base leverage (used when dynamic leverage is off) |
 | 99 | `trade.leverage_high` | **USED** | `_select_leverage()` | Leverage for high confidence. Gated by `enable_dynamic_leverage`. |
 | 100 | `trade.leverage_low` | **USED** | `_select_leverage()` | Leverage for low confidence. Gated by `enable_dynamic_leverage`. |
-| 101 | `trade.leverage_max_cap` | **USED** | `_select_leverage()` | Hard cap on leverage regardless of confidence |
 | 102 | `trade.leverage_medium` | **USED** | `_select_leverage()` | Leverage for medium confidence. Gated by `enable_dynamic_leverage`. |
 | 103 | `trade.max_adds_per_symbol` | **USED** | `add_to_position()` (paper & live) | Max pyramid adds per symbol. Gated by `enable_pyramiding`. |
 | 104 | `trade.max_entry_orders_per_loop` | **USED** | `daemon.py` PaperPlugin/LivePlugin `before_iteration()` | Per-loop entry budget |

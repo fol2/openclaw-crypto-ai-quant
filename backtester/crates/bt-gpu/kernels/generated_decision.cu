@@ -1230,7 +1230,6 @@ __device__ SizingResultD compute_entry_size_codegen(
         if (confidence == CONF_HIGH)        { lev = (double)cfg.leverage_high; }
         else if (confidence == CONF_MEDIUM) { lev = (double)cfg.leverage_medium; }
         else                                { lev = (double)cfg.leverage_low; }
-        if ((double)cfg.leverage_max_cap > 0.0) { lev = fmin(lev, (double)cfg.leverage_max_cap); }
     }
 
     // ── Notional & position size ─────────────────────────────────────────

@@ -1675,8 +1675,6 @@ _DEFAULT_STRATEGY_CONFIG = {
         "leverage_low": 1.0,
         "leverage_medium": 3.0,
         "leverage_high": 5.0,
-        # Hard cap regardless of confidence (still also capped by HL leverage tiers).
-        "leverage_max_cap": 0.0,
         "slippage_bps": HL_SLIPPAGE_BPS,
         "use_bbo_for_fills": True,
         "min_notional_usd": 10.0,
@@ -2105,14 +2103,6 @@ def _select_leverage(trade_cfg: dict, confidence: str | None) -> float:
             lev = float(trade_cfg.get(key, base_lev))
         except Exception:
             lev = base_lev
-
-    # Optional hard cap (still also capped by HL leverage tiers later).
-    try:
-        cap = float(trade_cfg.get("leverage_max_cap", 0.0) or 0.0)
-    except Exception:
-        cap = 0.0
-    if cap > 0:
-        lev = min(float(lev), float(cap))
 
     try:
         lev = float(lev)

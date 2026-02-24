@@ -32,7 +32,6 @@ RUST_DEFAULTS = {
         "leverage_low": 1.0,
         "leverage_medium": 3.0,
         "leverage_high": 5.0,
-        "leverage_max_cap": 0.0,
         "use_bbo_for_fills": True,
         "slippage_bps": 10.0,
         "enable_dynamic_sizing": True,

@@ -172,7 +172,6 @@ Every YAML path was verified to exist as an explicit match arm in `apply_one`. L
 | 98 | `trade.leverage` | f64 | ✅ |
 | 99 | `trade.leverage_high` | f64 | ✅ |
 | 100 | `trade.leverage_low` | f64 | ✅ |
-| 101 | `trade.leverage_max_cap` | f64 | ✅ |
 | 102 | `trade.leverage_medium` | f64 | ✅ |
 | 103 | `trade.max_adds_per_symbol` | usize (`as usize`) | ✅ |
 | 104 | `trade.max_entry_orders_per_loop` | usize (`as usize`) | ✅ |

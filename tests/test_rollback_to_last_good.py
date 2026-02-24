@@ -16,7 +16,6 @@ VALID_YAML = (
     "    leverage_low: 2.0\n"
     "    leverage_medium: 3.0\n"
     "    leverage_high: 4.0\n"
-    "    leverage_max_cap: 5.0\n"
     "    sl_atr_mult: 2.0\n"
     "    tp_atr_mult: 6.0\n"
     "    slippage_bps: 10.0\n"
