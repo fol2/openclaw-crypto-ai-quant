@@ -25,8 +25,14 @@ axes:
   - path: trade.enable_partial_tp
     values: [0.0, 1.0]
   - path: trade.tp_partial_pct
+    gate:
+      path: trade.enable_partial_tp
+      eq: 1
     values: [0.3, 0.5, 0.7]
   - path: trade.tp_partial_atr_mult
+    gate:
+      path: trade.enable_partial_tp
+      eq: 1
     values: [0.0, 1.0, 2.0, 3.0, 4.0]
 
 lookback: 200

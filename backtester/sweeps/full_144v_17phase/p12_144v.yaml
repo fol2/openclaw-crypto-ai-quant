@@ -14,6 +14,9 @@ axes:
   - 0.0
   - 1.0
 - path: thresholds.entry.slow_drift_rsi_long_min
+  gate:
+    path: thresholds.entry.enable_slow_drift_entries
+    eq: 1
   values:
   - 35.0
   - 50.0

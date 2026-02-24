@@ -40,6 +40,9 @@ axes:
   - 1.5
   - 1.95
 - path: trade.vol_baseline_pct
+  gate:
+    path: trade.enable_dynamic_sizing
+    eq: 1
   values:
   - 0.007
   - 0.01

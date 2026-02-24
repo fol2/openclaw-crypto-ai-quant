@@ -43,6 +43,9 @@ axes:
   - 10.0
   - 13.0
 - path: trade.rsi_exit_ub_lo_profit_low_conf
+  gate:
+    path: trade.enable_rsi_overextension_exit
+    eq: 1
   values:
   - 0.0
   - 30.0

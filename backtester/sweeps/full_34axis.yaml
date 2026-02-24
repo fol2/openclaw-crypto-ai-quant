@@ -96,10 +96,16 @@ axes:
 
   # Sizing
   - path: trade.confidence_mult_medium
+    gate:
+      path: trade.enable_dynamic_sizing
+      eq: 1
     values: [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
 
   # Breakeven
   - path: trade.breakeven_start_atr
+    gate:
+      path: trade.enable_breakeven_stop
+      eq: 1
     values: [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
 
   # Filters
