@@ -107,7 +107,6 @@ _DEFAULT_STRATEGY_CONFIG ← global YAML ← symbols.<SYM> YAML ← live YAML (i
 - `reentry_cooldown_minutes`: Cooldown period before re-entering same symbol
 - `enable_pyramiding`: Enable/disable pyramid ADD orders
 - `enable_partial_tp`: Enable/disable partial take-profit
-- `enable_dynamic_leverage`: Dynamically scale leverage by confidence
 - `enable_dynamic_sizing`: Dynamically scale position size by ADX/volatility
 
 #### `market_regime`

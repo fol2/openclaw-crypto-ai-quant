@@ -1386,13 +1386,11 @@ __device__ SizingResultD compute_entry_size_codegen(
         margin *= conf_mult * adx_mult * vol_scalar;
     }
 
-    // ── Leverage ─────────────────────────────────────────────────────────
-    double lev = (double)cfg.leverage;
-    if (cfg.enable_dynamic_leverage != 0u) {
-        if (confidence == CONF_HIGH)        { lev = (double)cfg.leverage_high; }
-        else if (confidence == CONF_MEDIUM) { lev = (double)cfg.leverage_medium; }
-        else                                { lev = (double)cfg.leverage_low; }
-    }
+    // ── Leverage (always per-confidence-tier) ──────────────────────────
+    double lev;
+    if (confidence == CONF_HIGH)        { lev = (double)cfg.leverage_high; }
+    else if (confidence == CONF_MEDIUM) { lev = (double)cfg.leverage_medium; }
+    else                                { lev = (double)cfg.leverage_low; }
 
     // ── Notional & position size ─────────────────────────────────────────
     double notional = margin * lev;
@@ -3998,9 +3996,10 @@ mod tests {
     #[test]
     fn sizing_codegen_contains_dynamic_leverage() {
         let src = compute_entry_size_codegen();
+        // enable_dynamic_leverage guard removed — always dynamic now
         assert!(
-            src.contains("cfg.enable_dynamic_leverage != 0u"),
-            "must gate dynamic leverage on config flag"
+            !src.contains("enable_dynamic_leverage"),
+            "enable_dynamic_leverage guard must be removed"
         );
         assert!(
             src.contains("cfg.leverage_high"),

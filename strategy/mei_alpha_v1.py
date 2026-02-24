@@ -1669,9 +1669,8 @@ _DEFAULT_STRATEGY_CONFIG = {
         "reef_adx_threshold": 45.0,
         "reef_long_rsi_extreme_gt": 75.0,  # extreme (ADX >= 45)
         "reef_short_rsi_extreme_lt": 25.0,  # extreme (ADX >= 45)
-        # Dynamic leverage (optional): scales leverage by signal confidence for NEW positions.
+        # Dynamic leverage: scales leverage by signal confidence for NEW positions.
         # Adds (pyramiding) reuse existing position leverage to avoid thrash.
-        "enable_dynamic_leverage": True,
         "leverage_low": 1.0,
         "leverage_medium": 3.0,
         "leverage_high": 5.0,
@@ -2086,23 +2085,21 @@ def _conf_bucket(confidence: str | None) -> str:
 def _select_leverage(trade_cfg: dict, confidence: str | None) -> float:
     """
     Returns the leverage to use for a NEW position.
-    - If `enable_dynamic_leverage` is true: use leverage_low/medium/high by confidence bucket.
-    - Otherwise: use `trade.leverage`.
+    Always uses leverage_low/medium/high by confidence bucket.
+    Falls back to `trade.leverage` if the per-tier key is missing.
     NOTE: Adds (pyramiding) reuse the existing position leverage to avoid thrash.
     """
     try:
-        base_lev = float(trade_cfg.get("leverage", HL_DEFAULT_LEVERAGE))
+        fallback = float(trade_cfg.get("leverage", HL_DEFAULT_LEVERAGE))
     except Exception:
-        base_lev = float(HL_DEFAULT_LEVERAGE or 1.0)
+        fallback = float(HL_DEFAULT_LEVERAGE or 1.0)
 
-    lev = base_lev
-    if bool(trade_cfg.get("enable_dynamic_leverage", False)):
-        b = _conf_bucket(confidence)
-        key = "leverage_high" if b == "high" else ("leverage_medium" if b == "medium" else "leverage_low")
-        try:
-            lev = float(trade_cfg.get(key, base_lev))
-        except Exception:
-            lev = base_lev
+    b = _conf_bucket(confidence)
+    key = "leverage_high" if b == "high" else ("leverage_medium" if b == "medium" else "leverage_low")
+    try:
+        lev = float(trade_cfg.get(key, fallback))
+    except Exception:
+        lev = fallback
 
     try:
         lev = float(lev)

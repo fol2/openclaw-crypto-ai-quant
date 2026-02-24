@@ -73,7 +73,6 @@ fn cpu_gpu_parity_sweep_1h_3m_tiny_fixture() {
 
     // Reduce sources of CPU f64 vs GPU f32 drift.
     cfg.trade.enable_dynamic_sizing = false;
-    cfg.trade.enable_dynamic_leverage = false;
     cfg.trade.leverage = 1.0;
     cfg.trade.allocation_pct = 0.10;
     cfg.trade.slippage_bps = 0.0;

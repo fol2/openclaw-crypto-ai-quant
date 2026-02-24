@@ -114,7 +114,6 @@ fn base_permissive_config() -> StrategyConfig {
 
     // ── Static sizing to reduce f32 drift ────────────────────────────────
     cfg.trade.enable_dynamic_sizing = false;
-    cfg.trade.enable_dynamic_leverage = false;
     cfg.trade.leverage = 1.0;
     cfg.trade.allocation_pct = 0.10;
     cfg.trade.slippage_bps = 0.0;
@@ -542,7 +541,6 @@ fn test_gpu_parity_entry_sizing() {
     cfg_b.trade.vol_baseline_pct = 0.01;
     cfg_b.trade.vol_scalar_min = 0.5;
     cfg_b.trade.vol_scalar_max = 1.5;
-    cfg_b.trade.enable_dynamic_leverage = true;
     cfg_b.trade.leverage_low = 2.0;
     cfg_b.trade.leverage_medium = 3.0;
     cfg_b.trade.leverage_high = 5.0;

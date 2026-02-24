@@ -224,6 +224,9 @@ fn make_kernel_params(cfg: &StrategyConfig) -> decision_kernel::KernelParams {
     // Engine entry processing closes the existing position first when a reverse
     // signal arrives; keep this behaviour by disabling canonical reverses.
     kernel_params.allow_reverse = false;
+    // Kernel cash-check leverage uses cfg.trade.leverage (the base/fallback
+    // leverage), NOT the per-confidence-tier value.  This matches the GPU
+    // sweep kernel which computes kernel_margin_req = notional / cfg.leverage.
     kernel_params.leverage = cfg.trade.leverage.max(1.0);
     kernel_params.exit_params = Some(build_exit_params(cfg));
     kernel_params
@@ -417,7 +420,7 @@ fn build_active_params(
             "pullback_rsi_short_max".into(),
             cfg.thresholds.entry.pullback_rsi_short_max,
         );
-        params.insert("leverage".into(), cfg.trade.leverage);
+        params.insert("leverage".into(), kernel_params.leverage);
         params.insert("taker_fee_bps".into(), kernel_params.taker_fee_bps);
         params.insert("maker_fee_bps".into(), kernel_params.maker_fee_bps);
     } else {
@@ -2239,8 +2242,6 @@ fn compute_entry_size(
         vol_baseline_pct: tc.vol_baseline_pct,
         vol_scalar_min: tc.vol_scalar_min,
         vol_scalar_max: tc.vol_scalar_max,
-        enable_dynamic_leverage: tc.enable_dynamic_leverage,
-        leverage: tc.leverage,
         leverage_low: tc.leverage_low,
         leverage_medium: tc.leverage_medium,
         leverage_high: tc.leverage_high,

@@ -28,7 +28,6 @@ RUST_DEFAULTS = {
         "min_notional_usd": 10.0,
         "min_atr_pct": 0.003,
         "bump_to_min_notional": False,
-        "enable_dynamic_leverage": True,
         "leverage_low": 1.0,
         "leverage_medium": 3.0,
         "leverage_high": 5.0,

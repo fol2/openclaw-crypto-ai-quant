@@ -3248,10 +3248,6 @@ fn test_entry_size_dynamic_leverage_tiers() {
     let sz_section = &src[sz_start..];
 
     assert!(
-        sz_section.contains("cfg.enable_dynamic_leverage"),
-        "Must check enable_dynamic_leverage flag"
-    );
-    assert!(
         sz_section.contains("cfg.leverage_high"),
         "Dynamic leverage must use leverage_high"
     );
@@ -3551,7 +3547,6 @@ fn test_config_all_decision_fields_referenced_in_codegen() {
         "cfg.vol_scalar_min",
         "cfg.vol_scalar_max",
         "cfg.leverage",
-        "cfg.enable_dynamic_leverage",
         "cfg.leverage_high",
         "cfg.leverage_medium",
         "cfg.leverage_low",
@@ -3679,8 +3674,6 @@ fn rust_compute_entry_sizing(
     vol_baseline_pct: f64,
     vol_scalar_min: f64,
     vol_scalar_max: f64,
-    enable_dynamic_leverage: bool,
-    leverage: f64,
     leverage_low: f64,
     leverage_medium: f64,
     leverage_high: f64,
@@ -3715,14 +3708,10 @@ fn rust_compute_entry_sizing(
         margin_used *= confidence_mult * adx_mult * vol_scalar;
     }
 
-    let lev = if enable_dynamic_leverage {
-        match confidence {
-            Confidence::High => leverage_high,
-            Confidence::Medium => leverage_medium,
-            Confidence::Low => leverage_low,
-        }
-    } else {
-        leverage
+    let lev = match confidence {
+        Confidence::High => leverage_high,
+        Confidence::Medium => leverage_medium,
+        Confidence::Low => leverage_low,
     };
 
     let notional = margin_used * lev;
@@ -3816,8 +3805,6 @@ struct SizingFixture {
     vol_baseline_pct: f64,
     vol_scalar_min: f64,
     vol_scalar_max: f64,
-    enable_dynamic_leverage: bool,
-    leverage: f64,
     leverage_low: f64,
     leverage_medium: f64,
     leverage_high: f64,
@@ -3864,17 +3851,16 @@ fn make_sizing_fixtures() -> Vec<SizingFixture> {
             vol_baseline_pct: 0.01,
             vol_scalar_min: 0.6,
             vol_scalar_max: 1.4,
-            enable_dynamic_leverage: false,
-            leverage: 3.0,
             leverage_low: 1.0,
             leverage_medium: 3.0,
             leverage_high: 5.0,
 
-            // Static: margin = 1000 * 0.03 = 30, leverage = 3, notional = 90, size = 90/50 = 1.8
+            // Static: margin = 1000 * 0.03 = 30, leverage = High -> 5.0
+            // notional = 30*5 = 150, size = 150/50 = 3.0
             expected_margin: 30.0,
-            expected_leverage: 3.0,
-            expected_notional: 90.0,
-            expected_size: 1.8,
+            expected_leverage: 5.0,
+            expected_notional: 150.0,
+            expected_size: 3.0,
         },
         // ── 2. Static sizing, medium account, medium leverage ────────────
         SizingFixture {
@@ -3894,17 +3880,16 @@ fn make_sizing_fixtures() -> Vec<SizingFixture> {
             vol_baseline_pct: 0.01,
             vol_scalar_min: 0.6,
             vol_scalar_max: 1.4,
-            enable_dynamic_leverage: false,
-            leverage: 2.0,
             leverage_low: 1.0,
             leverage_medium: 3.0,
             leverage_high: 5.0,
 
-            // Static: margin = 10000 * 0.05 = 500, lev = 2, notional = 1000, size = 10
+            // Static: margin = 10000 * 0.05 = 500, leverage = Medium -> 3.0
+            // notional = 500*3 = 1500, size = 1500/100 = 15.0
             expected_margin: 500.0,
-            expected_leverage: 2.0,
-            expected_notional: 1000.0,
-            expected_size: 10.0,
+            expected_leverage: 3.0,
+            expected_notional: 1500.0,
+            expected_size: 15.0,
         },
         // ── 3. Static sizing, large account ──────────────────────────────
         SizingFixture {
@@ -3924,17 +3909,16 @@ fn make_sizing_fixtures() -> Vec<SizingFixture> {
             vol_baseline_pct: 0.01,
             vol_scalar_min: 0.6,
             vol_scalar_max: 1.4,
-            enable_dynamic_leverage: false,
-            leverage: 5.0,
             leverage_low: 1.0,
             leverage_medium: 3.0,
             leverage_high: 5.0,
 
-            // Static: margin = 100000*0.02 = 2000, lev = 5, notional = 10000, size = 10000/65000
+            // Static: margin = 100000*0.02 = 2000, leverage = Low -> 1.0
+            // notional = 2000*1 = 2000, size = 2000/65000
             expected_margin: 2000.0,
-            expected_leverage: 5.0,
-            expected_notional: 10000.0,
-            expected_size: 10000.0 / 65000.0,
+            expected_leverage: 1.0,
+            expected_notional: 2000.0,
+            expected_size: 2000.0 / 65000.0,
         },
         // ── 4. Dynamic sizing, high confidence, full ADX ─────────────────
         SizingFixture {
@@ -3954,8 +3938,6 @@ fn make_sizing_fixtures() -> Vec<SizingFixture> {
             vol_baseline_pct: 0.01,
             vol_scalar_min: 0.6,
             vol_scalar_max: 1.4,
-            enable_dynamic_leverage: true,
-            leverage: 3.0,
             leverage_low: 1.0,
             leverage_medium: 3.0,
             leverage_high: 5.0,
@@ -3988,8 +3970,6 @@ fn make_sizing_fixtures() -> Vec<SizingFixture> {
             vol_baseline_pct: 0.01,
             vol_scalar_min: 0.6,
             vol_scalar_max: 1.4,
-            enable_dynamic_leverage: true,
-            leverage: 3.0,
             leverage_low: 1.0,
             leverage_medium: 3.0,
             leverage_high: 5.0,
@@ -4022,8 +4002,6 @@ fn make_sizing_fixtures() -> Vec<SizingFixture> {
             vol_baseline_pct: 0.01,
             vol_scalar_min: 0.6,
             vol_scalar_max: 1.4,
-            enable_dynamic_leverage: true,
-            leverage: 3.0,
             leverage_low: 1.0,
             leverage_medium: 3.0,
             leverage_high: 5.0,
@@ -4055,8 +4033,6 @@ fn make_sizing_fixtures() -> Vec<SizingFixture> {
             vol_baseline_pct: 0.01,
             vol_scalar_min: 0.6,
             vol_scalar_max: 1.4,
-            enable_dynamic_leverage: false,
-            leverage: 3.0,
             leverage_low: 1.0,
             leverage_medium: 3.0,
             leverage_high: 5.0,
@@ -4064,12 +4040,12 @@ fn make_sizing_fixtures() -> Vec<SizingFixture> {
             // Dynamic: conf=1.0, adx=1.0
             // vol_ratio=(0.5/100.0)/0.01 = 0.5, vol_scalar=1/0.5=2.0, clamped [0.6,1.4]=1.4
             // margin = 10000*0.03 * 1.0 * 1.0 * 1.4 = 420
-            // static leverage = 3.0
-            // notional = 420*3 = 1260, size = 1260/100 = 12.6
+            // leverage = High -> 5.0
+            // notional = 420*5 = 2100, size = 2100/100 = 21.0
             expected_margin: 420.0,
-            expected_leverage: 3.0,
-            expected_notional: 1260.0,
-            expected_size: 12.6,
+            expected_leverage: 5.0,
+            expected_notional: 2100.0,
+            expected_size: 21.0,
         },
         // ── 8. Dynamic sizing, vol contraction (high vol) ────────────────
         SizingFixture {
@@ -4089,8 +4065,6 @@ fn make_sizing_fixtures() -> Vec<SizingFixture> {
             vol_baseline_pct: 0.01,
             vol_scalar_min: 0.6,
             vol_scalar_max: 1.4,
-            enable_dynamic_leverage: false,
-            leverage: 3.0,
             leverage_low: 1.0,
             leverage_medium: 3.0,
             leverage_high: 5.0,
@@ -4098,12 +4072,12 @@ fn make_sizing_fixtures() -> Vec<SizingFixture> {
             // Dynamic: conf=1.0, adx=1.0
             // vol_ratio=(3.0/100.0)/0.01 = 3.0, vol_scalar=1/3.0≈0.333, clamped [0.6,1.4]=0.6
             // margin = 10000*0.03 * 1.0 * 1.0 * 0.6 = 180
-            // static leverage = 3.0
-            // notional = 180*3 = 540, size = 540/100 = 5.4
+            // leverage = High -> 5.0
+            // notional = 180*5 = 900, size = 900/100 = 9.0
             expected_margin: 180.0,
-            expected_leverage: 3.0,
-            expected_notional: 540.0,
-            expected_size: 5.4,
+            expected_leverage: 5.0,
+            expected_notional: 900.0,
+            expected_size: 9.0,
         },
         // ── 9. Dynamic leverage, high confidence, static sizing ─────────
         SizingFixture {
@@ -4123,8 +4097,6 @@ fn make_sizing_fixtures() -> Vec<SizingFixture> {
             vol_baseline_pct: 0.01,
             vol_scalar_min: 0.6,
             vol_scalar_max: 1.4,
-            enable_dynamic_leverage: true,
-            leverage: 3.0,
             leverage_low: 1.0,
             leverage_medium: 3.0,
             leverage_high: 5.0,
@@ -4154,8 +4126,6 @@ fn make_sizing_fixtures() -> Vec<SizingFixture> {
             vol_baseline_pct: 0.015,
             vol_scalar_min: 0.6,
             vol_scalar_max: 1.4,
-            enable_dynamic_leverage: true,
-            leverage: 3.0,
             leverage_low: 1.0,
             leverage_medium: 3.0,
             leverage_high: 5.0,
@@ -4188,8 +4158,6 @@ fn make_sizing_fixtures() -> Vec<SizingFixture> {
             vol_baseline_pct: 0.02,
             vol_scalar_min: 0.6,
             vol_scalar_max: 1.4,
-            enable_dynamic_leverage: true,
-            leverage: 2.0,
             leverage_low: 1.0,
             leverage_medium: 2.0,
             leverage_high: 3.0,
@@ -4222,16 +4190,15 @@ fn make_sizing_fixtures() -> Vec<SizingFixture> {
             vol_baseline_pct: 0.01,
             vol_scalar_min: 0.6,
             vol_scalar_max: 1.4,
-            enable_dynamic_leverage: false,
-            leverage: 3.0,
             leverage_low: 1.0,
             leverage_medium: 3.0,
             leverage_high: 5.0,
 
-            // margin = 10000*0.03 = 300, notional = 900, size = 0 (zero price)
+            // margin = 10000*0.03 = 300, leverage = High -> 5.0
+            // notional = 300*5 = 1500, size = 0 (zero price)
             expected_margin: 300.0,
-            expected_leverage: 3.0,
-            expected_notional: 900.0,
+            expected_leverage: 5.0,
+            expected_notional: 1500.0,
             expected_size: 0.0,
         },
         // ── 13. Dynamic sizing, zero vol baseline ────────────────────────
@@ -4252,18 +4219,17 @@ fn make_sizing_fixtures() -> Vec<SizingFixture> {
             vol_baseline_pct: 0.0, // zero -> vol_ratio = 1.0 (fallback)
             vol_scalar_min: 0.6,
             vol_scalar_max: 1.4,
-            enable_dynamic_leverage: false,
-            leverage: 3.0,
             leverage_low: 1.0,
             leverage_medium: 3.0,
             leverage_high: 5.0,
 
             // vol_ratio fallback=1.0 (zero baseline), vol_scalar=1.0
             // margin = 10000*0.03 * 1.0 * 1.0 * 1.0 = 300
+            // leverage = High -> 5.0, notional = 300*5 = 1500, size = 15.0
             expected_margin: 300.0,
-            expected_leverage: 3.0,
-            expected_notional: 900.0,
-            expected_size: 9.0,
+            expected_leverage: 5.0,
+            expected_notional: 1500.0,
+            expected_size: 15.0,
         },
         // ── 14. Dynamic sizing, zero ADX ─────────────────────────────────
         SizingFixture {
@@ -4283,8 +4249,6 @@ fn make_sizing_fixtures() -> Vec<SizingFixture> {
             vol_baseline_pct: 0.01,
             vol_scalar_min: 0.6,
             vol_scalar_max: 1.4,
-            enable_dynamic_leverage: true,
-            leverage: 3.0,
             leverage_low: 1.0,
             leverage_medium: 3.0,
             leverage_high: 5.0,
@@ -4317,8 +4281,6 @@ fn make_sizing_fixtures() -> Vec<SizingFixture> {
             vol_baseline_pct: 0.01,
             vol_scalar_min: 0.6,
             vol_scalar_max: 1.4,
-            enable_dynamic_leverage: true,
-            leverage: 3.0,
             leverage_low: 1.0,
             leverage_medium: 3.0,
             leverage_high: 5.0,
@@ -4584,8 +4546,6 @@ fn test_sizing_local_reference_matches_risk_core() {
             vol_baseline_pct: f.vol_baseline_pct,
             vol_scalar_min: f.vol_scalar_min,
             vol_scalar_max: f.vol_scalar_max,
-            enable_dynamic_leverage: f.enable_dynamic_leverage,
-            leverage: f.leverage,
             leverage_low: f.leverage_low,
             leverage_medium: f.leverage_medium,
             leverage_high: f.leverage_high,
@@ -4607,8 +4567,6 @@ fn test_sizing_local_reference_matches_risk_core() {
             f.vol_baseline_pct,
             f.vol_scalar_min,
             f.vol_scalar_max,
-            f.enable_dynamic_leverage,
-            f.leverage,
             f.leverage_low,
             f.leverage_medium,
             f.leverage_high,
@@ -4672,8 +4630,6 @@ fn test_sizing_fixtures_match_expected_values() {
             f.vol_baseline_pct,
             f.vol_scalar_min,
             f.vol_scalar_max,
-            f.enable_dynamic_leverage,
-            f.leverage,
             f.leverage_low,
             f.leverage_medium,
             f.leverage_high,
@@ -4741,8 +4697,6 @@ fn test_sizing_f32_roundtrip_within_t2() {
             vol_baseline_pct: f.vol_baseline_pct,
             vol_scalar_min: f.vol_scalar_min,
             vol_scalar_max: f.vol_scalar_max,
-            enable_dynamic_leverage: f.enable_dynamic_leverage,
-            leverage: f.leverage,
             leverage_low: f.leverage_low,
             leverage_medium: f.leverage_medium,
             leverage_high: f.leverage_high,
@@ -5908,8 +5862,6 @@ fn test_sizing_risk_core_equity_scaling() {
         vol_baseline_pct: 0.01,
         vol_scalar_min: 0.6,
         vol_scalar_max: 1.4,
-        enable_dynamic_leverage: false,
-        leverage: 3.0,
         leverage_low: 1.0,
         leverage_medium: 3.0,
         leverage_high: 5.0,
@@ -5945,11 +5897,11 @@ fn test_sizing_risk_core_equity_scaling() {
         );
     }
 
-    // Leverage must be constant (static)
+    // Leverage must be constant (High -> leverage_high=5.0 for all equity levels)
     for r in &results {
         assert!(
-            (r.leverage - 3.0).abs() < 1e-10,
-            "Static leverage should be 3.0 for all equity levels, got {}",
+            (r.leverage - 5.0).abs() < 1e-10,
+            "Leverage should be 5.0 (High confidence) for all equity levels, got {}",
             r.leverage
         );
     }
@@ -5979,8 +5931,6 @@ fn test_sizing_dynamic_leverage_tier_selection() {
         vol_baseline_pct: 0.01,
         vol_scalar_min: 0.6,
         vol_scalar_max: 1.4,
-        enable_dynamic_leverage: true,
-        leverage: 3.0,
         leverage_low: 1.5,
         leverage_medium: 3.0,
         leverage_high: 5.0,
@@ -6030,8 +5980,6 @@ fn test_sizing_dynamic_multiplier_chain() {
         vol_baseline_pct: 0.01,
         vol_scalar_min: 0.6,
         vol_scalar_max: 1.4,
-        enable_dynamic_leverage: false,
-        leverage: 1.0,
         leverage_low: 1.0,
         leverage_medium: 1.0,
         leverage_high: 1.0,
@@ -6190,12 +6138,6 @@ fn test_sizing_fixture_diversity() {
     assert!(
         fixtures.iter().any(|f| f.confidence == Confidence::Low),
         "Must include Low confidence"
-    );
-
-    // Must cover dynamic leverage
-    assert!(
-        fixtures.iter().any(|f| f.enable_dynamic_leverage),
-        "Must include dynamic leverage fixtures"
     );
 
     // Must cover equity levels $1k, $10k, $100k

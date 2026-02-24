@@ -35,7 +35,6 @@ pub struct TradeConfig {
     pub reef_short_rsi_extreme_lt: f64,
 
     // Dynamic leverage
-    pub enable_dynamic_leverage: bool,
     pub leverage_low: f64,
     pub leverage_medium: f64,
     pub leverage_high: f64,
@@ -143,7 +142,6 @@ impl Default for TradeConfig {
             reef_long_rsi_extreme_gt: 75.0,
             reef_short_rsi_extreme_lt: 25.0,
 
-            enable_dynamic_leverage: true,
             leverage_low: 1.0,
             leverage_medium: 3.0,
             leverage_high: 5.0,
@@ -727,7 +725,6 @@ fn trade_to_json(t: &TradeConfig) -> serde_json::Value {
         "reef_adx_threshold": t.reef_adx_threshold,
         "reef_long_rsi_extreme_gt": t.reef_long_rsi_extreme_gt,
         "reef_short_rsi_extreme_lt": t.reef_short_rsi_extreme_lt,
-        "enable_dynamic_leverage": t.enable_dynamic_leverage,
         "leverage_low": t.leverage_low,
         "leverage_medium": t.leverage_medium,
         "leverage_high": t.leverage_high,

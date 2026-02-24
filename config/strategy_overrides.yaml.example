@@ -18,7 +18,6 @@ global:
     bump_to_min_notional: true        # bump <$10 orders to $10
 
     # --- Dynamic leverage ---
-    enable_dynamic_leverage: true     # default
     leverage_low: 1.0                 # SWEPT (default 1.0, same)
     leverage_medium: 5.0              # SWEPT (default 3.0)
     leverage_high: 5.0                # SWEPT (default 5.0, same)

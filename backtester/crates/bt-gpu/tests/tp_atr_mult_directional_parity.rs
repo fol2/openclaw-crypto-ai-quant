@@ -99,7 +99,6 @@ fn make_tp_isolation_config() -> StrategyConfig {
 
     // ── Reduce f32 drift sources ──
     cfg.trade.enable_dynamic_sizing = false;
-    cfg.trade.enable_dynamic_leverage = false;
     cfg.trade.leverage = 1.0;
     cfg.trade.allocation_pct = 0.10;
     cfg.trade.slippage_bps = 0.0;

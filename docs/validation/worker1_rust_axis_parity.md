@@ -156,7 +156,6 @@ Every YAML path was verified to exist as an explicit match arm in `apply_one`. L
 | 82 | `trade.confidence_mult_low` | f64 | ✅ |
 | 83 | `trade.confidence_mult_medium` | f64 | ✅ |
 | 84 | `trade.enable_breakeven_stop` | bool (`value != 0.0`) | ✅ |
-| 85 | `trade.enable_dynamic_leverage` | bool (`value != 0.0`) | ✅ |
 | 86 | `trade.enable_dynamic_sizing` | bool (`value != 0.0`) | ✅ |
 | 87 | `trade.enable_partial_tp` | bool (`value != 0.0`) | ✅ |
 | 88 | `trade.enable_pyramiding` | bool (`value != 0.0`) | ✅ |
@@ -250,7 +249,6 @@ All 29 boolean axes use YAML values `[0.0, 1.0]` and Rust decode `value != 0.0`.
 | 17 | `trade.block_exits_on_extreme_dev` | [0.0, 1.0] | `value != 0.0` | ✅ |
 | 18 | `trade.bump_to_min_notional` | [0.0, 1.0] | `value != 0.0` | ✅ |
 | 19 | `trade.enable_breakeven_stop` | [0.0, 1.0] | `value != 0.0` | ✅ |
-| 20 | `trade.enable_dynamic_leverage` | [0.0, 1.0] | `value != 0.0` | ✅ |
 | 21 | `trade.enable_dynamic_sizing` | [0.0, 1.0] | `value != 0.0` | ✅ |
 | 22 | `trade.enable_partial_tp` | [0.0, 1.0] | `value != 0.0` | ✅ |
 | 23 | `trade.enable_pyramiding` | [0.0, 1.0] | `value != 0.0` | ✅ |

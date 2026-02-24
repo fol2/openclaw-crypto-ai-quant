@@ -175,8 +175,8 @@ fn random_gpu_combo_config(rng: &mut StdRng) -> GpuComboConfig {
         reef_long_rsi_extreme_gt: rng.gen_range(75.0_f32..90.0),
         reef_short_rsi_extreme_lt: rng.gen_range(10.0_f32..25.0),
 
-        // Dynamic leverage
-        enable_dynamic_leverage: rng.gen_range(0_u32..2),
+        // Dynamic leverage (always enabled; _reserved10 replaces former flag)
+        _reserved10: 0,
         leverage_low: rng.gen_range(1.0_f32..2.0),
         leverage_medium: rng.gen_range(1.5_f32..3.0),
         leverage_high: rng.gen_range(2.0_f32..5.0),
@@ -538,7 +538,6 @@ fn rust_compute_entry_sizing(
 ) -> (f64, f64, f64, f64) {
     let allocation_pct = cfg.allocation_pct as f64;
     let enable_dynamic_sizing = cfg.enable_dynamic_sizing != 0;
-    let enable_dynamic_leverage = cfg.enable_dynamic_leverage != 0;
 
     let mut margin_used = equity * allocation_pct;
 
@@ -570,15 +569,10 @@ fn rust_compute_entry_sizing(
         margin_used *= confidence_mult * adx_mult * vol_scalar;
     }
 
-    let lev = if enable_dynamic_leverage {
-        let base_lev = match confidence {
-            Confidence::High => cfg.leverage_high as f64,
-            Confidence::Medium => cfg.leverage_medium as f64,
-            Confidence::Low => cfg.leverage_low as f64,
-        };
-        base_lev
-    } else {
-        cfg.leverage as f64
+    let lev = match confidence {
+        Confidence::High => cfg.leverage_high as f64,
+        Confidence::Medium => cfg.leverage_medium as f64,
+        Confidence::Low => cfg.leverage_low as f64,
     };
 
     let notional = margin_used * lev;
@@ -1472,7 +1466,6 @@ fn random_configs_survive_f32_roundtrip() {
         // Boolean fields should be 0 or 1
         let bool_fields: Vec<(&str, u32)> = vec![
             ("enable_reef_filter", cfg.enable_reef_filter),
-            ("enable_dynamic_leverage", cfg.enable_dynamic_leverage),
             ("enable_dynamic_sizing", cfg.enable_dynamic_sizing),
             ("enable_pyramiding", cfg.enable_pyramiding),
             ("enable_partial_tp", cfg.enable_partial_tp),

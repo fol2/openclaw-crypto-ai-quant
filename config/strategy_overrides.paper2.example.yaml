@@ -15,7 +15,7 @@ global:
     min_notional_usd: 11.386467064119204
     min_atr_pct: 0.0005900875857955573
     bump_to_min_notional: false
-    enable_dynamic_leverage: false
+
     leverage_low: 1
     leverage_medium: 3
     leverage_high: 5

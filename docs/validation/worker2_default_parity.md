@@ -47,7 +47,6 @@ One structural asymmetry noted (non-blocking). One code-quality issue found in `
 | 8 | `trade.reef_adx_threshold` | 45.0 | 45.0 | float → f64 | ✅ |
 | 9 | `trade.reef_long_rsi_extreme_gt` | 75.0 | 75.0 | float → f64 | ✅ |
 | 10 | `trade.reef_short_rsi_extreme_lt` | 25.0 | 25.0 | float → f64 | ✅ |
-| 11 | `trade.enable_dynamic_leverage` | True | true | bool → bool | ✅ |
 | 12 | `trade.leverage_low` | 1.0 | 1.0 | float → f64 | ✅ |
 | 13 | `trade.leverage_medium` | 3.0 | 3.0 | float → f64 | ✅ |
 | 14 | `trade.leverage_high` | 5.0 | 5.0 | float → f64 | ✅ |

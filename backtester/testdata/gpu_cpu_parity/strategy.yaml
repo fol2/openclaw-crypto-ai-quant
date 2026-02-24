@@ -14,7 +14,6 @@ global:
 
     # Disable features not modelled consistently between GPU sweep and CPU replay.
     enable_reef_filter: false
-    enable_dynamic_leverage: false
     enable_dynamic_sizing: false
     enable_pyramiding: false
     enable_partial_tp: false

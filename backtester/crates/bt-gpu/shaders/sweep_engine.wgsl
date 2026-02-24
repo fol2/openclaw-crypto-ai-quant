@@ -97,7 +97,7 @@ struct GpuComboConfig {
     allocation_pct: f32, sl_atr_mult: f32, tp_atr_mult: f32, leverage: f32,
     enable_reef_filter: u32, reef_long_rsi_block_gt: f32, reef_short_rsi_block_lt: f32,
     reef_adx_threshold: f32, reef_long_rsi_extreme_gt: f32, reef_short_rsi_extreme_lt: f32,
-    enable_dynamic_leverage: u32, leverage_low: f32, leverage_medium: f32,
+    _reserved10: u32, leverage_low: f32, leverage_medium: f32,
     leverage_high: f32, _reserved14: f32, _p0: u32,
     slippage_bps: f32, min_notional_usd: f32, bump_to_min_notional: u32,
     max_total_margin_pct: f32, _p1: u32, _p2: u32,
@@ -695,12 +695,11 @@ fn compute_entry_size(equity: f32, price: f32, confidence: u32, atr: f32,
         margin *= conf_mult * adx_mult * vol_scalar;
     }
 
-    var lev = (*cfg).leverage;
-    if (*cfg).enable_dynamic_leverage != 0u {
-        if confidence == CONF_HIGH { lev = (*cfg).leverage_high; }
-        else if confidence == CONF_MEDIUM { lev = (*cfg).leverage_medium; }
-        else { lev = (*cfg).leverage_low; }
-    }
+    // Leverage (always per-confidence-tier).
+    var lev = 0.0;
+    if confidence == CONF_HIGH { lev = (*cfg).leverage_high; }
+    else if confidence == CONF_MEDIUM { lev = (*cfg).leverage_medium; }
+    else { lev = (*cfg).leverage_low; }
 
     let notional = margin * lev;
     var size = 0.0;
