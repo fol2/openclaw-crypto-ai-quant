@@ -1085,15 +1085,15 @@ extern "C" __global__ void sweep_engine_kernel(
                         continue;
                     }
                     // CPU parity: kernel_margin_used tracks the decision-kernel margin model
-                    // (base leverage) and MUST NOT be overwritten during exit evaluation.
+                    // (per-trade leverage) and MUST NOT be overwritten during exit evaluation.
                     // If a position was seeded without kernel_margin_used (legacy init-state),
-                    // derive it once from (size * entry_price) and cfg.leverage.
+                    // derive it once from (size * entry_price) and the position's leverage.
                     if (state.positions[sym].kernel_margin_used <= 0.0
                         && state.positions[sym].active != POS_EMPTY
                         && state.positions[sym].size > 0.0
                         && state.positions[sym].entry_price > 0.0) {
-                        double kernel_lev = ((double)cfg.leverage > 1.0)
-                            ? (double)cfg.leverage
+                        double kernel_lev = ((double)state.positions[sym].leverage > 1.0)
+                            ? (double)state.positions[sym].leverage
                             : 1.0;
                         double seed_notional =
                             (double)state.positions[sym].size * (double)state.positions[sym].entry_price;
@@ -1546,9 +1546,7 @@ extern "C" __global__ void sweep_engine_kernel(
                                                     }
                                                 }
 
-                                                double kernel_lev = ((double)cfg.leverage > 1.0)
-                                                    ? (double)cfg.leverage
-                                                    : 1.0;
+                                                double kernel_lev = (lev > 1.0) ? lev : 1.0;
                                                 double kernel_add_notional = clamp_kernel_notional(add_notional);
                                                 double kernel_margin_add =
                                                     quantize12(kernel_add_notional / kernel_lev);
@@ -1717,11 +1715,8 @@ extern "C" __global__ void sweep_engine_kernel(
                 }
 
                     // CPU parity (decision kernel): require kernel cash >= margin + fee,
-                    // where margin is computed using base leverage (cfg.leverage), not
-                    // dynamic per-trade leverage selected by sizing.
-                    double kernel_lev = ((double)cfg.leverage > 1.0)
-                        ? (double)cfg.leverage
-                        : 1.0;
+                    // where margin is computed using per-trade leverage (lev) from sizing.
+                    double kernel_lev = (lev > 1.0) ? lev : 1.0;
                     double kernel_notional = clamp_kernel_notional(notional);
                     double kernel_margin_req = quantize12(kernel_notional / kernel_lev);
                     double open_fee = quantize12(kernel_notional * (double)fee_rate);
@@ -1815,15 +1810,15 @@ extern "C" __global__ void sweep_engine_kernel(
                 bool partial_tp_taken = false;
                 if (!block_exits && !is_exit_cooldown_active(&state, sym, snap.t_sec, &cfg)) {
                     // CPU parity: kernel_margin_used tracks the decision-kernel margin model
-                    // (base leverage) and MUST NOT be overwritten during exit evaluation.
+                    // (per-trade leverage) and MUST NOT be overwritten during exit evaluation.
                     // If a position was seeded without kernel_margin_used (legacy init-state),
-                    // derive it once from (size * entry_price) and cfg.leverage.
+                    // derive it once from (size * entry_price) and the position's leverage.
                     if (state.positions[sym].kernel_margin_used <= 0.0
                         && state.positions[sym].active != POS_EMPTY
                         && state.positions[sym].size > 0.0
                         && state.positions[sym].entry_price > 0.0) {
-                        double kernel_lev = ((double)cfg.leverage > 1.0)
-                            ? (double)cfg.leverage
+                        double kernel_lev = ((double)state.positions[sym].leverage > 1.0)
+                            ? (double)state.positions[sym].leverage
                             : 1.0;
                         double seed_notional =
                             (double)state.positions[sym].size * (double)state.positions[sym].entry_price;
@@ -2026,9 +2021,7 @@ extern "C" __global__ void sweep_engine_kernel(
                                         continue;
                                     }
                                 }
-                                double kernel_lev = ((double)cfg.leverage > 1.0)
-                                    ? (double)cfg.leverage
-                                    : 1.0;
+                                double kernel_lev = (lev > 1.0) ? lev : 1.0;
                                 double kernel_add_notional = clamp_kernel_notional(add_notional);
                                 double kernel_margin_add = quantize12(kernel_add_notional / kernel_lev);
                                 double add_fee = quantize12(kernel_add_notional * (double)fee_rate);
@@ -2400,11 +2393,8 @@ extern "C" __global__ void sweep_engine_kernel(
                 }
 
                 // CPU parity (decision kernel): require kernel cash >= margin + fee,
-                // where margin is computed using base leverage (cfg.leverage), not
-                // dynamic per-trade leverage selected by sizing.
-                double kernel_lev = ((double)cfg.leverage > 1.0)
-                    ? (double)cfg.leverage
-                    : 1.0;
+                // where margin is computed using per-trade leverage (lev) from sizing.
+                double kernel_lev = (lev > 1.0) ? lev : 1.0;
                 double kernel_notional = clamp_kernel_notional(notional);
                 double kernel_margin_req = quantize12(kernel_notional / kernel_lev);
                 double open_fee = quantize12(kernel_notional * (double)fee_rate);

@@ -812,14 +812,6 @@ fn apply_open(
     let effective_leverage = leverage.max(1.0);
     let margin = quantise(open.notional / effective_leverage);
 
-    // Margin-based cash check: only the collateral (margin) is locked, not full notional.
-    if margin + open.fee_usd > state.cash_usd {
-        diagnostics
-            .warnings
-            .push(format!("skip open for {symbol}: insufficient cash"));
-        return None;
-    }
-
     let quantity = quantise(open.notional / price);
     let notional = open.notional;
 
