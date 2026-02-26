@@ -3588,8 +3588,10 @@ def main(argv: list[str] | None = None) -> int:
                 raise SystemExit(f"--resume args mismatch for keys: {', '.join(mismatches)}")
 
             # Use original args when available to keep the run reproducible.
+            # Skip flags that are session-specific overrides (not part of reproducibility).
+            _resume_skip_keys = {"resume", "allow_binary_drift", "allow_input_drift"}
             for k, v in orig_args.items():
-                if k == "resume":
+                if k in _resume_skip_keys:
                     continue
                 if hasattr(args, k):
                     setattr(args, k, v)
@@ -3654,6 +3656,19 @@ def main(argv: list[str] | None = None) -> int:
         if "repro" not in meta:
             _capture_repro_metadata(run_dir=run_dir, artifacts_root=artifacts_root, bt_cmd=bt_cmd, meta=meta)
         _write_json(run_dir / "run_metadata.json", meta)
+
+        # Snapshot binary SHA256 at start-of-run so we can detect mid-run overwrites
+        # (e.g. an unrelated `cargo build` replacing the binary between sweep and replay).
+        _bt_bin_path_for_guard: Path | None = None
+        _bt_bin_sha_at_start: str = ""
+        try:
+            _bt0 = str(bt_cmd[0]) if bt_cmd else ""
+            if _bt0 and ("/" in _bt0 or _bt0.endswith(".exe")):
+                _bt_bin_path_for_guard = Path(_bt0)
+                if _bt_bin_path_for_guard.exists():
+                    _bt_bin_sha_at_start = _sha256_file(_bt_bin_path_for_guard)
+        except Exception:
+            pass
 
         # The backtester is executed with cwd=AIQ_ROOT/backtester, so normalise common repo-relative paths.
         bt_config = _resolve_path_for_backtester(str(args.config)) or str(args.config)
@@ -4545,6 +4560,31 @@ def main(argv: list[str] | None = None) -> int:
         # ------------------------------------------------------------------
         # 4) CPU replay / validation (minimal v1: run replay once per candidate)
         # ------------------------------------------------------------------
+
+        # Guard: verify the backtester binary has not been overwritten since sweep.
+        if _bt_bin_sha_at_start and _bt_bin_path_for_guard is not None:
+            try:
+                _bt_bin_sha_now = _sha256_file(_bt_bin_path_for_guard)
+                if _bt_bin_sha_now != _bt_bin_sha_at_start:
+                    msg = (
+                        f"FATAL: mei-backtester binary changed mid-run! "
+                        f"sweep used sha256={_bt_bin_sha_at_start[:16]}… "
+                        f"but binary is now sha256={_bt_bin_sha_now[:16]}… "
+                        f"({_bt_bin_path_for_guard}). "
+                        f"Aborting to prevent GPU↔CPU drift."
+                    )
+                    print(msg, file=sys.stderr, flush=True)
+                    meta["binary_drift_detected"] = {
+                        "stage": "pre_cpu_replay",
+                        "sweep_sha256": _bt_bin_sha_at_start,
+                        "current_sha256": _bt_bin_sha_now,
+                        "path": str(_bt_bin_path_for_guard),
+                    }
+                    _write_json(run_dir / "run_metadata.json", meta)
+                    return 1
+            except Exception:
+                pass  # Non-fatal: proceed if we cannot read the binary.
+
         current_stage = "cpu_replay_validation"
         if _shutdown_stage_guard(run_dir=run_dir, meta=meta, stage=current_stage):
             return 130

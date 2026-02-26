@@ -1678,6 +1678,28 @@ def main(argv: list[str] | None = None) -> int:
 
     run_id = str(args.run_id).strip() or f"nightly_{_utc_compact()}"
     artifacts_dir = Path(str(args.artifacts_dir)).expanduser().resolve()
+
+    # ── Guard: skip if a successful cycle already completed for today + profile ──
+    _today_utc = time.strftime("%Y-%m-%d", time.gmtime())
+    _profile_tag = str(args.profile or "daily").strip()
+    _done_marker = artifacts_dir / _today_utc / f".factory_done.{_profile_tag}"
+    if _done_marker.is_file() and not bool(args.resume):
+        _prev_run_id = _done_marker.read_text(encoding="utf-8").strip()
+        print(
+            f"✅ Factory cycle already completed for {_today_utc} "
+            f"(profile={_profile_tag}, run={_prev_run_id}). Skipping.",
+            flush=True,
+        )
+        return 0
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    def _write_done_marker(rid: str = "") -> None:
+        try:
+            _done_marker.parent.mkdir(parents=True, exist_ok=True)
+            _done_marker.write_text((rid or run_id) + "\n", encoding="utf-8")
+        except Exception:
+            pass
+
     base_cfg_path = Path(str(args.config)).expanduser().resolve()
     deploy_targets = _resolve_deploy_targets(
         service=str(args.service),
@@ -2039,6 +2061,7 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(selection, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
         _write_selection_markdown(run_dir=run_dir, selection=selection)
+        _write_done_marker()
         return 0
 
     if bool(args.no_deploy):
@@ -2055,6 +2078,7 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(selection, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
         _write_selection_markdown(run_dir=run_dir, selection=selection)
+        _write_done_marker()
         return 0
 
     pause_file = Path(args.pause_file).expanduser().resolve() if str(args.pause_file).strip() else None
@@ -2509,6 +2533,7 @@ def main(argv: list[str] | None = None) -> int:
                         _service_snapshot_line(svc) for svc in health_services
                     ]
                     _send_discord_chunks(target=str(args.discord_target), lines=snapshot_lines)
+                    _write_done_marker()
                     return 0
 
                 chosen_cfg = str(chosen.get("config_id", "") or "").strip()
@@ -2615,6 +2640,8 @@ def main(argv: list[str] | None = None) -> int:
     health_services = _health_service_list(str(args.service))
     snapshot_lines = [f"🩺 Health Snapshot • `{run_id}`"] + [_service_snapshot_line(svc) for svc in health_services]
     _send_discord_chunks(target=str(args.discord_target), lines=snapshot_lines)
+
+    _write_done_marker()
     return 0
 
 
