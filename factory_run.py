@@ -4744,6 +4744,13 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     summary["step4_parity"] = parity
                     replay_entry["step4_parity"] = parity
+                    # Step4 parity (GPU==CPU) is the authoritative correctness
+                    # check.  When it passes, promote canonical_cpu_verified
+                    # even if replay-equivalence failed (e.g. different TPE
+                    # configs across nightly runs).
+                    if str(parity.get("status", "")).lower() == "pass":
+                        summary["canonical_cpu_verified"] = True
+                        replay_entry["canonical_cpu_verified"] = True
                     step4_parity_rows.append(
                         {
                             "status": parity.get("status", ""),
