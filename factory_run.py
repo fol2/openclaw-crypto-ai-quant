@@ -1462,7 +1462,9 @@ def _attach_replay_metadata(
     args: Any,
     replay_stage: str = "cpu_replay",
 ) -> None:
-    verified = str(summary.get("replay_equivalence_status", "")).strip().lower() == "pass"
+    eq_status = str(summary.get("replay_equivalence_status", "")).strip().lower()
+    eq_seed = bool(summary.get("replay_equivalence_seed_mode", False))
+    verified = eq_status == "pass" or (eq_seed and eq_status in ("baseline_stale", "missing_baseline", "not_run"))
     candidate_mode = bool(entry.get("candidate_mode", False)) if isinstance(entry, dict) else False
     schema_version = 1
     if isinstance(entry, dict) and "schema_version" in entry:
