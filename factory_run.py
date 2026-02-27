@@ -1599,6 +1599,20 @@ def _build_replay_equivalence_contract_payload(*, args_obj: dict[str, Any], mode
     except Exception:
         version_text = ""
     factory_fp = _file_fingerprint(AIQ_ROOT / "factory_run.py")
+    bt_bin_sha256 = ""
+    try:
+        bt_bin_env = str(os.environ.get("MEI_BACKTESTER_BIN", "") or "").strip()
+        bt_bin_candidates = [
+            bt_bin_env,
+            str(AIQ_ROOT / "backtester" / "dist" / "mei-backtester-gpu"),
+            str(AIQ_ROOT / "backtester" / "target" / "release" / "mei-backtester"),
+        ]
+        for bp in bt_bin_candidates:
+            if bp and Path(bp).is_file():
+                bt_bin_sha256 = _sha256_file(Path(bp))
+                break
+    except Exception:
+        pass
     return {
         "schema_version": int(_REPLAY_EQUIVALENCE_CONTRACT_SCHEMA_VERSION),
         "mode": _normalise_replay_equivalence_mode(mode),
@@ -1628,6 +1642,7 @@ def _build_replay_equivalence_contract_payload(*, args_obj: dict[str, Any], mode
         "score_trades_penalty_weight": float(_coerce_float(args_obj.get("score_trades_penalty_weight", 0.0), 0.0)),
         "promote_count": int(_coerce_int(args_obj.get("promote_count", 0), 0)),
         "factory_run_sha256": str(factory_fp.get("sha256", "") if bool(factory_fp.get("exists", False)) else ""),
+        "backtester_bin_sha256": bt_bin_sha256,
         "version": version_text,
     }
 
