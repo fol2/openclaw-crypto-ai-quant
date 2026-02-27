@@ -302,8 +302,8 @@ def _save_config_hash(paper_db_path: str) -> None:
         con.execute("INSERT OR REPLACE INTO _meta (key, value) VALUES ('last_mirror_config_sha1', ?)", (current_sha,))
         con.commit()
         con.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("failed to persist config hash: %s", exc)
 
 
 def _seed_balance_only(balance: float, paper_db_path: str) -> None:
@@ -350,7 +350,6 @@ def _mirror_live_state_to_paper(executor: "HyperliquidLiveExecutor", snap: "Live
     try:
         cols = {row[1] for row in con.execute("PRAGMA table_info(trades)").fetchall()}
         has_run_fp = "run_fingerprint" in cols
-        has_meta = "meta_json" in cols
 
         # Detect positions currently open in paper DB.
         paper_open: set[str] = set()
@@ -1468,6 +1467,10 @@ def main() -> None:
                             _mirror_live_state_to_paper(_exec, _snap, _db_path())
                         except Exception as _mirror_exc:
                             logger.warning("state mirror failed (balance-only fallback): %s", _mirror_exc)
+                            try:
+                                _seed_balance_only(_snap.withdrawable_usd, _db_path())
+                            except Exception:
+                                pass
                     else:
                         # Config unchanged — just seed balance for running balance.
                         try:
