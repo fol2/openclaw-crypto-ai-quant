@@ -256,6 +256,206 @@ def _db_path() -> str:
     return str(os.getenv("AI_QUANT_DB_PATH", _default_db_path()) or _default_db_path())
 
 
+def _config_file_sha1() -> str:
+    """SHA-1 of the active strategy YAML (after promoted_config merge)."""
+    import hashlib
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    yaml_path = os.getenv("AI_QUANT_STRATEGY_YAML", os.path.join(here, "..", "config", "strategy_overrides.yaml"))
+    try:
+        with open(yaml_path, "rb") as f:
+            return hashlib.sha1(f.read()).hexdigest()
+    except Exception:
+        return ""
+
+
+def _has_config_changed(paper_db_path: str) -> bool:
+    """Return True if the strategy config has changed since the last mirror."""
+    import sqlite3 as _sql
+
+    current_sha = _config_file_sha1()
+    if not current_sha:
+        return True  # Can't read config — treat as changed to be safe.
+    try:
+        con = _sql.connect(paper_db_path, timeout=5)
+        con.execute("CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT)")
+        row = con.execute("SELECT value FROM _meta WHERE key = 'last_mirror_config_sha1'").fetchone()
+        con.close()
+        if row and row[0] == current_sha:
+            print(f"config unchanged (sha1={current_sha[:12]}…), continuing with existing dataset")
+            return False
+    except Exception:
+        return True
+    return True
+
+
+def _save_config_hash(paper_db_path: str) -> None:
+    """Persist current config hash after a successful mirror."""
+    import sqlite3 as _sql
+
+    current_sha = _config_file_sha1()
+    if not current_sha:
+        return
+    try:
+        con = _sql.connect(paper_db_path, timeout=5)
+        con.execute("CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT)")
+        con.execute("INSERT OR REPLACE INTO _meta (key, value) VALUES ('last_mirror_config_sha1', ?)", (current_sha,))
+        con.commit()
+        con.close()
+    except Exception as exc:
+        logger.warning("failed to persist config hash: %s", exc)
+
+
+def _seed_balance_only(balance: float, paper_db_path: str) -> None:
+    """Insert a balance-only seed record (no position mirror)."""
+    import sqlite3 as _sql
+
+    run_fp = str(os.getenv("AI_QUANT_RUN_FINGERPRINT", "") or "").strip() or "startup"
+    con = _sql.connect(paper_db_path, timeout=5)
+    cols = {row[1] for row in con.execute("PRAGMA table_info(trades)").fetchall()}
+    if "run_fingerprint" in cols:
+        con.execute(
+            "INSERT INTO trades (timestamp, symbol, type, action, price, size, notional, balance, run_fingerprint)"
+            " VALUES (datetime('now'), '__SEED__', 'SYSTEM', 'SYSTEM', 0, 0, 0, ?, ?)",
+            (balance, run_fp),
+        )
+    else:
+        con.execute(
+            "INSERT INTO trades (timestamp, symbol, type, action, price, size, notional, balance)"
+            " VALUES (datetime('now'), '__SEED__', 'SYSTEM', 'SYSTEM', 0, 0, 0, ?)",
+            (balance,),
+        )
+    con.commit()
+    con.close()
+
+
+def _mirror_live_state_to_paper(executor: "HyperliquidLiveExecutor", snap: "LiveAccountSnapshot", paper_db_path: str) -> None:  # type: ignore[name-defined]  # noqa: F821
+    """Mirror balance + positions from live exchange into paper DB on every restart.
+
+    This ensures paper traders start from the exact same state as live,
+    so paper results are directly comparable.
+    """
+    import sqlite3 as _sql
+    from datetime import datetime, timezone
+
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    balance = float(snap.withdrawable_usd)
+    run_fp = str(os.getenv("AI_QUANT_RUN_FINGERPRINT", "") or "").strip() or "startup"
+
+    # Read live positions from exchange (source of truth).
+    live_positions = executor.get_positions(force=True) or {}
+
+    con = _sql.connect(paper_db_path, timeout=5)
+    con.row_factory = _sql.Row
+    try:
+        cols = {row[1] for row in con.execute("PRAGMA table_info(trades)").fetchall()}
+        has_run_fp = "run_fingerprint" in cols
+
+        # Detect positions currently open in paper DB.
+        paper_open: set[str] = set()
+        try:
+            rows = con.execute(
+                """
+                SELECT t.symbol
+                FROM trades t
+                INNER JOIN (SELECT symbol, MAX(id) AS open_id FROM trades WHERE action='OPEN' GROUP BY symbol) lo
+                    ON t.id = lo.open_id AND t.symbol = lo.symbol
+                LEFT JOIN (SELECT symbol, MAX(id) AS close_id FROM trades WHERE action='CLOSE' GROUP BY symbol) lc
+                    ON t.symbol = lc.symbol
+                WHERE lc.close_id IS NULL OR lo.open_id > lc.close_id
+                """
+            ).fetchall()
+            for r in rows:
+                sym = str(r["symbol"] or "").strip().upper()
+                if sym:
+                    paper_open.add(sym)
+        except Exception:
+            pass
+
+        # 1. Insert synthetic CLOSE for paper positions that are NOT in live.
+        for sym in sorted(paper_open - set(live_positions.keys())):
+            _vals: list = [now_iso, sym, "SYSTEM", "CLOSE", 0.0, 0.0, 0.0, "live_state_sync_close", "medium", balance, 0.0, 0.0]
+            _col_names = "timestamp, symbol, type, action, price, size, notional, reason, confidence, balance, pnl, fee_usd"
+            _placeholders = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
+            if has_run_fp:
+                _col_names += ", run_fingerprint"
+                _placeholders += ", ?"
+                _vals.append(run_fp)
+            con.execute(f"INSERT INTO trades ({_col_names}) VALUES ({_placeholders})", _vals)
+            # Clear position_state for closed symbol.
+            try:
+                con.execute("DELETE FROM position_state WHERE symbol = ?", (sym,))
+            except Exception:
+                pass
+            print(f"  state mirror: closed stale paper position {sym}")
+
+        # 2. Insert balance seed record.
+        _vals = [now_iso, "__SEED__", "SYSTEM", "SYSTEM", 0.0, 0.0, 0.0, balance, 0.0, 0.0]
+        _col_names = "timestamp, symbol, type, action, price, size, notional, balance, pnl, fee_usd"
+        _placeholders = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
+        if has_run_fp:
+            _col_names += ", run_fingerprint"
+            _placeholders += ", ?"
+            _vals.append(run_fp)
+        con.execute(f"INSERT INTO trades ({_col_names}) VALUES ({_placeholders})", _vals)
+
+        # 3. Insert synthetic OPEN for live positions not yet open in paper.
+        #    For positions already open in paper, update position_state from live.
+        for coin, pos in sorted(live_positions.items()):
+            pos_type = str(pos.get("type") or "LONG").upper()
+            size = float(pos.get("size") or 0.0)
+            entry_px = float(pos.get("entry_price") or 0.0)
+            leverage = float(pos.get("leverage") or 1.0)
+            margin_used = float(pos.get("margin_used") or 0.0)
+            if size <= 0 or entry_px <= 0:
+                continue
+            notional = size * entry_px
+
+            if coin not in paper_open:
+                # New position: insert synthetic OPEN trade.
+                _vals = [now_iso, coin, pos_type, "OPEN", entry_px, size, notional,
+                         "live_state_sync", "medium", balance, 0.0, 0.0, 0.0, leverage, margin_used]
+                _col_names = ("timestamp, symbol, type, action, price, size, notional,"
+                              " reason, confidence, balance, pnl, fee_usd, entry_atr, leverage, margin_used")
+                _placeholders = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
+                if has_run_fp:
+                    _col_names += ", run_fingerprint"
+                    _placeholders += ", ?"
+                    _vals.append(run_fp)
+                con.execute(f"INSERT INTO trades ({_col_names}) VALUES ({_placeholders})", _vals)
+                trade_id = con.execute("SELECT last_insert_rowid()").fetchone()[0]
+                print(f"  state mirror: opened {coin} {pos_type} size={size} entry={entry_px}")
+            else:
+                # Position already exists in paper — get its open_trade_id.
+                row = con.execute(
+                    "SELECT open_trade_id FROM position_state WHERE symbol = ?", (coin,)
+                ).fetchone()
+                trade_id = int(row["open_trade_id"]) if row else None
+
+            # Upsert position_state.
+            if trade_id is not None:
+                try:
+                    con.execute(
+                        """
+                        INSERT OR REPLACE INTO position_state
+                            (symbol, open_trade_id, trailing_sl, last_funding_time, adds_count,
+                             tp1_taken, last_add_time, entry_adx_threshold, updated_at)
+                        VALUES (?, ?, NULL, 0, 0, 0, 0, 0.0, ?)
+                        """,
+                        (coin, trade_id, now_iso),
+                    )
+                except Exception:
+                    pass
+
+        con.commit()
+        n_live = len([c for c, p in live_positions.items() if float(p.get("size") or 0) > 0])
+        print(f"state mirror: balance=${balance:,.2f}, {n_live} live positions synced")
+    finally:
+        con.close()
+
+    _save_config_hash(paper_db_path)
+
+
 def _safe_name_fragment(value: str) -> str:
     text = str(value or "").strip().lower()
     if not text:
@@ -1258,30 +1458,25 @@ def main() -> None:
             if _snap.withdrawable_usd and _snap.withdrawable_usd > 0:
                 os.environ["AI_QUANT_PAPER_BALANCE"] = str(_snap.withdrawable_usd)
                 print(f"balance synced from live: ${_snap.withdrawable_usd:,.2f}")
-                # Seed balance into DB so running balance starts from live equity on every restart.
+                # Mirror full state from live when config has changed;
+                # otherwise just seed the balance so running balance continues.
                 if mode == "paper":
-                    try:
-                        import sqlite3 as _sql
-
-                        _con = _sql.connect(_db_path(), timeout=5)
-                        _cols = {row[1] for row in _con.execute("PRAGMA table_info(trades)").fetchall()}
-                        _seed_run_fp = str(os.getenv("AI_QUANT_RUN_FINGERPRINT", "") or "").strip() or "startup"
-                        if "run_fingerprint" in _cols:
-                            _con.execute(
-                                "INSERT INTO trades (timestamp, symbol, type, action, price, size, notional, balance, run_fingerprint)"
-                                " VALUES (datetime('now'), '__SEED__', 'SYSTEM', 'SYSTEM', 0, 0, 0, ?, ?)",
-                                (_snap.withdrawable_usd, _seed_run_fp),
-                            )
-                        else:
-                            _con.execute(
-                                "INSERT INTO trades (timestamp, symbol, type, action, price, size, notional, balance)"
-                                " VALUES (datetime('now'), '__SEED__', 'SYSTEM', 'SYSTEM', 0, 0, 0, ?)",
-                                (_snap.withdrawable_usd,),
-                            )
-                        _con.commit()
-                        _con.close()
-                    except Exception:
-                        pass
+                    _config_changed = _has_config_changed(_db_path())
+                    if _config_changed:
+                        try:
+                            _mirror_live_state_to_paper(_exec, _snap, _db_path())
+                        except Exception as _mirror_exc:
+                            logger.warning("state mirror failed (balance-only fallback): %s", _mirror_exc)
+                            try:
+                                _seed_balance_only(_snap.withdrawable_usd, _db_path())
+                            except Exception:
+                                pass
+                    else:
+                        # Config unchanged — just seed balance for running balance.
+                        try:
+                            _seed_balance_only(_snap.withdrawable_usd, _db_path())
+                        except Exception:
+                            pass
         except Exception as exc:
             print(f"balance sync failed (using default): {exc}")
 
