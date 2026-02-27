@@ -2021,11 +2021,11 @@ class LiveOms:
         # Buffer notifications until AFTER the sqlite commit succeeds.
         notify_rows: list[dict[str, Any]] = []
 
-        # Snapshot account value once.
+        # Snapshot kernel equity for notifications only (may be stale in paper mode).
         try:
-            account_value = float(getattr(trader, "get_live_balance", lambda: 0.0)() or 0.0)
+            _notify_equity = float(getattr(trader, "get_live_balance", lambda: 0.0)() or 0.0)
         except Exception:
-            account_value = 0.0
+            _notify_equity = 0.0
 
         # Snapshot positions once for leverage fallback.
         try:
@@ -2062,6 +2062,18 @@ class LiveOms:
                 cols = set()
             has_dedupe = {"fill_hash", "fill_tid"}.issubset(cols)
             has_meta = "meta_json" in cols
+
+            # --- Running balance from DB (authoritative cash accounting) ---
+            # Each trade's balance = previous balance + pnl - fee.
+            try:
+                _prev_row = cur.execute(
+                    "SELECT balance FROM trades WHERE balance IS NOT NULL ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                _running_balance = float(_prev_row[0]) if _prev_row else float(
+                    getattr(trader, "balance", 0.0) or 0.0
+                )
+            except Exception:
+                _running_balance = float(getattr(trader, "balance", 0.0) or 0.0)
 
             # In-memory cache: map exchange_order_id → intent_id within this batch.
             # Handles partial fills in the same batch where the oid backfill is uncommitted.
@@ -2279,6 +2291,10 @@ class LiveOms:
                 except Exception:
                     logger.debug("failed to attach exchange_order_id to OMS intent for %s", sym, exc_info=True)
 
+                # Advance running balance: cash = prev + realised_pnl - fee.
+                _running_balance = _running_balance + float(pnl) - float(fee)
+                _db_balance = _running_balance
+
                 # Insert into trades (dedupe if schema supports it).
                 if has_dedupe:
                     if has_meta:
@@ -2306,7 +2322,7 @@ class LiveOms:
                                 float(fee),
                                 fee_token,
                                 fee_rate,
-                                float(account_value),
+                                float(_db_balance),
                                 entry_atr,
                                 lev,
                                 margin_used,
@@ -2341,7 +2357,7 @@ class LiveOms:
                                 float(fee),
                                 fee_token,
                                 fee_rate,
-                                float(account_value),
+                                float(_db_balance),
                                 entry_atr,
                                 lev,
                                 margin_used,
@@ -2375,7 +2391,7 @@ class LiveOms:
                                 float(fee),
                                 fee_token,
                                 fee_rate,
-                                float(account_value),
+                                float(_db_balance),
                                 entry_atr,
                                 lev,
                                 margin_used,
@@ -2407,7 +2423,7 @@ class LiveOms:
                                 float(fee),
                                 fee_token,
                                 fee_rate,
-                                float(account_value),
+                                float(_db_balance),
                                 entry_atr,
                                 lev,
                                 margin_used,
@@ -2528,8 +2544,8 @@ class LiveOms:
                             "pnl": float(pnl),
                             "reason": reason,
                             "confidence": conf,
-                            "account_value": float(account_value or 0.0),
-                            "withdrawable": float(getattr(trader, "balance", 0.0) or 0.0),
+                            "account_value": float(_notify_equity or _db_balance),
+                            "withdrawable": float(_db_balance),
                         }
                     )
 
