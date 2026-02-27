@@ -1258,29 +1258,27 @@ def main() -> None:
             if _snap.withdrawable_usd and _snap.withdrawable_usd > 0:
                 os.environ["AI_QUANT_PAPER_BALANCE"] = str(_snap.withdrawable_usd)
                 print(f"balance synced from live: ${_snap.withdrawable_usd:,.2f}")
-                # Seed balance into DB so the monitor shows the correct value before any trades (paper only).
+                # Seed balance into DB so running balance starts from live equity on every restart.
                 if mode == "paper":
                     try:
                         import sqlite3 as _sql
 
                         _con = _sql.connect(_db_path(), timeout=5)
-                        _cur = _con.execute("SELECT COUNT(*) FROM trades")
-                        if _cur.fetchone()[0] == 0:
-                            _cols = {row[1] for row in _con.execute("PRAGMA table_info(trades)").fetchall()}
-                            _seed_run_fp = str(os.getenv("AI_QUANT_RUN_FINGERPRINT", "") or "").strip() or "startup"
-                            if "run_fingerprint" in _cols:
-                                _con.execute(
-                                    "INSERT INTO trades (timestamp, symbol, type, action, price, size, notional, balance, run_fingerprint)"
-                                    " VALUES (datetime('now'), '__SEED__', 'SYSTEM', 'SYSTEM', 0, 0, 0, ?, ?)",
-                                    (_snap.withdrawable_usd, _seed_run_fp),
-                                )
-                            else:
-                                _con.execute(
-                                    "INSERT INTO trades (timestamp, symbol, type, action, price, size, notional, balance)"
-                                    " VALUES (datetime('now'), '__SEED__', 'SYSTEM', 'SYSTEM', 0, 0, 0, ?)",
-                                    (_snap.withdrawable_usd,),
-                                )
-                            _con.commit()
+                        _cols = {row[1] for row in _con.execute("PRAGMA table_info(trades)").fetchall()}
+                        _seed_run_fp = str(os.getenv("AI_QUANT_RUN_FINGERPRINT", "") or "").strip() or "startup"
+                        if "run_fingerprint" in _cols:
+                            _con.execute(
+                                "INSERT INTO trades (timestamp, symbol, type, action, price, size, notional, balance, run_fingerprint)"
+                                " VALUES (datetime('now'), '__SEED__', 'SYSTEM', 'SYSTEM', 0, 0, 0, ?, ?)",
+                                (_snap.withdrawable_usd, _seed_run_fp),
+                            )
+                        else:
+                            _con.execute(
+                                "INSERT INTO trades (timestamp, symbol, type, action, price, size, notional, balance)"
+                                " VALUES (datetime('now'), '__SEED__', 'SYSTEM', 'SYSTEM', 0, 0, 0, ?)",
+                                (_snap.withdrawable_usd,),
+                            )
+                        _con.commit()
                         _con.close()
                     except Exception:
                         pass
