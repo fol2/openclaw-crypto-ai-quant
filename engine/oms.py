@@ -2021,12 +2021,6 @@ class LiveOms:
         # Buffer notifications until AFTER the sqlite commit succeeds.
         notify_rows: list[dict[str, Any]] = []
 
-        # Snapshot kernel equity for notifications only (may be stale in paper mode).
-        try:
-            _notify_equity = float(getattr(trader, "get_live_balance", lambda: 0.0)() or 0.0)
-        except Exception:
-            _notify_equity = 0.0
-
         # Snapshot positions once for leverage fallback.
         try:
             pos_snap = trader.executor.get_positions(force=False) or {}
@@ -2544,7 +2538,7 @@ class LiveOms:
                             "pnl": float(pnl),
                             "reason": reason,
                             "confidence": conf,
-                            "account_value": float(_notify_equity or _db_balance),
+                            "account_value": float(_db_balance),
                             "withdrawable": float(_db_balance),
                         }
                     )
