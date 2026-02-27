@@ -256,6 +256,79 @@ def _db_path() -> str:
     return str(os.getenv("AI_QUANT_DB_PATH", _default_db_path()) or _default_db_path())
 
 
+def _config_file_sha1() -> str:
+    """SHA-1 of the active strategy YAML (after promoted_config merge)."""
+    import hashlib
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    yaml_path = os.getenv("AI_QUANT_STRATEGY_YAML", os.path.join(here, "..", "config", "strategy_overrides.yaml"))
+    try:
+        with open(yaml_path, "rb") as f:
+            return hashlib.sha1(f.read()).hexdigest()
+    except Exception:
+        return ""
+
+
+def _has_config_changed(paper_db_path: str) -> bool:
+    """Return True if the strategy config has changed since the last mirror."""
+    import sqlite3 as _sql
+
+    current_sha = _config_file_sha1()
+    if not current_sha:
+        return True  # Can't read config — treat as changed to be safe.
+    try:
+        con = _sql.connect(paper_db_path, timeout=5)
+        con.execute("CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT)")
+        row = con.execute("SELECT value FROM _meta WHERE key = 'last_mirror_config_sha1'").fetchone()
+        con.close()
+        if row and row[0] == current_sha:
+            print(f"config unchanged (sha1={current_sha[:12]}…), continuing with existing dataset")
+            return False
+    except Exception:
+        return True
+    return True
+
+
+def _save_config_hash(paper_db_path: str) -> None:
+    """Persist current config hash after a successful mirror."""
+    import sqlite3 as _sql
+
+    current_sha = _config_file_sha1()
+    if not current_sha:
+        return
+    try:
+        con = _sql.connect(paper_db_path, timeout=5)
+        con.execute("CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT)")
+        con.execute("INSERT OR REPLACE INTO _meta (key, value) VALUES ('last_mirror_config_sha1', ?)", (current_sha,))
+        con.commit()
+        con.close()
+    except Exception:
+        pass
+
+
+def _seed_balance_only(balance: float, paper_db_path: str) -> None:
+    """Insert a balance-only seed record (no position mirror)."""
+    import sqlite3 as _sql
+
+    run_fp = str(os.getenv("AI_QUANT_RUN_FINGERPRINT", "") or "").strip() or "startup"
+    con = _sql.connect(paper_db_path, timeout=5)
+    cols = {row[1] for row in con.execute("PRAGMA table_info(trades)").fetchall()}
+    if "run_fingerprint" in cols:
+        con.execute(
+            "INSERT INTO trades (timestamp, symbol, type, action, price, size, notional, balance, run_fingerprint)"
+            " VALUES (datetime('now'), '__SEED__', 'SYSTEM', 'SYSTEM', 0, 0, 0, ?, ?)",
+            (balance, run_fp),
+        )
+    else:
+        con.execute(
+            "INSERT INTO trades (timestamp, symbol, type, action, price, size, notional, balance)"
+            " VALUES (datetime('now'), '__SEED__', 'SYSTEM', 'SYSTEM', 0, 0, 0, ?)",
+            (balance,),
+        )
+    con.commit()
+    con.close()
+
+
 def _mirror_live_state_to_paper(executor: "HyperliquidLiveExecutor", snap: "LiveAccountSnapshot", paper_db_path: str) -> None:  # type: ignore[name-defined]  # noqa: F821
     """Mirror balance + positions from live exchange into paper DB on every restart.
 
@@ -380,6 +453,8 @@ def _mirror_live_state_to_paper(executor: "HyperliquidLiveExecutor", snap: "Live
         print(f"state mirror: balance=${balance:,.2f}, {n_live} live positions synced")
     finally:
         con.close()
+
+    _save_config_hash(paper_db_path)
 
 
 def _safe_name_fragment(value: str) -> str:
@@ -1384,12 +1459,21 @@ def main() -> None:
             if _snap.withdrawable_usd and _snap.withdrawable_usd > 0:
                 os.environ["AI_QUANT_PAPER_BALANCE"] = str(_snap.withdrawable_usd)
                 print(f"balance synced from live: ${_snap.withdrawable_usd:,.2f}")
-                # Mirror full state from live into paper DB on every restart.
+                # Mirror full state from live when config has changed;
+                # otherwise just seed the balance so running balance continues.
                 if mode == "paper":
-                    try:
-                        _mirror_live_state_to_paper(_exec, _snap, _db_path())
-                    except Exception as _mirror_exc:
-                        logger.warning("state mirror failed (balance-only fallback): %s", _mirror_exc)
+                    _config_changed = _has_config_changed(_db_path())
+                    if _config_changed:
+                        try:
+                            _mirror_live_state_to_paper(_exec, _snap, _db_path())
+                        except Exception as _mirror_exc:
+                            logger.warning("state mirror failed (balance-only fallback): %s", _mirror_exc)
+                    else:
+                        # Config unchanged — just seed balance for running balance.
+                        try:
+                            _seed_balance_only(_snap.withdrawable_usd, _db_path())
+                        except Exception:
+                            pass
         except Exception as exc:
             print(f"balance sync failed (using default): {exc}")
 
