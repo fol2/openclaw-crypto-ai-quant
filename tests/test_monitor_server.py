@@ -127,3 +127,33 @@ def test_mids_stream_emits_sse_frame(monitor_http_server) -> None:
         assert payload == {"BTC": 100_000.0}
     finally:
         conn.close()
+
+
+def test_find_kernel_state_path_prefers_tagged_paper_state_in_db_dir(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AI_QUANT_INSTANCE_TAG", "v8-paper1")
+    monkeypatch.setattr(monitor_server, "_KERNEL_STATE_HOME_DIR", tmp_path / "missing-home")
+
+    db_path = tmp_path / "trading_engine_v8_paper1.db"
+    db_path.write_text("")
+    legacy_state = tmp_path / "kernel_state_v8-paper1.json"
+    legacy_state.write_text("{}")
+    paper_state = tmp_path / "paper_kernel_state_v8-paper1.json"
+    paper_state.write_text("{}")
+
+    got = monitor_server._find_kernel_state_path(db_path)
+    assert got == paper_state
+
+
+def test_find_kernel_state_path_uses_home_paper_state_fallback(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AI_QUANT_INSTANCE_TAG", "v8-paper2")
+    home_dir = tmp_path / "home-mei"
+    home_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(monitor_server, "_KERNEL_STATE_HOME_DIR", home_dir)
+
+    db_path = tmp_path / "trading_engine_v8_paper2.db"
+    db_path.write_text("")
+    home_state = home_dir / "paper_kernel_state_v8-paper2.json"
+    home_state.write_text("{}")
+
+    got = monitor_server._find_kernel_state_path(db_path)
+    assert got == home_state
