@@ -3611,6 +3611,13 @@ class PaperTrader:
             logger.critical("[kernel] Failed to initialize kernel state: %s — CANNOT operate", e)
             self._kernel_available = False
 
+    def _kernel_bootstrap_balance(self) -> float:
+        """Resolve kernel bootstrap balance from DB seed with env fallback."""
+        try:
+            return float(self._seed_balance)
+        except Exception:
+            return float(PAPER_BALANCE)
+
     def _kernel_sync_event(
         self,
         *,
@@ -3867,28 +3874,35 @@ class PaperTrader:
             if not restored:
                 # No persisted kernel state (e.g. first run after migration
                 # or after switching to per-instance state paths).
-                # Re-init with the authoritative balance (live-synced).
-                self._seed_balance = PAPER_BALANCE
+                # Re-init using DB-restored realised balance when available.
+                # This preserves paper continuity when config is unchanged.
+                self._seed_balance = self._kernel_bootstrap_balance()
                 logger.info("[kernel] No state file found — re-initializing with seed balance %.2f", self._seed_balance)
                 self._init_kernel()
+                # Persist immediately so subsequent restarts do not repeatedly
+                # fall into the no-state bootstrap path.
+                self._kernel_persist()
 
-            # AQC-FIX: Reconcile kernel cash_usd with the authoritative
-            # paper balance.  Use the module-level PAPER_BALANCE which
-            # reflects the live-synced value (daemon sets AI_QUANT_PAPER_BALANCE
-            # from the Hyperliquid account before strategy import when
-            # PAPER_BALANCE_FROM_LIVE=1).  This takes precedence over
-            # _seed_balance which load_state() may have overwritten with a
-            # stale DB value from a previous buggy session.
-            _auth_balance = PAPER_BALANCE
+            # Reconcile kernel cash_usd with the DB-restored realised balance.
+            # This preserves paper continuity across daemon restarts.
+            # One-off live→paper resets are handled by promote/deploy state
+            # mirror workflows, not by unconditional startup reconciliation.
+            _auth_balance = self._kernel_bootstrap_balance()
+            try:
+                float(self._seed_balance)
+                _auth_balance_note = "db balance"
+            except Exception:
+                _auth_balance_note = "seed fallback"
             if self._kernel_available and self._kernel_state_json:
                 try:
                     _st = json.loads(self._kernel_state_json)
                     disk_cash = float(_st.get("cash_usd", 0.0))
                     if abs(disk_cash - _auth_balance) > 0.01:
                         logger.info(
-                            "[kernel] Reconciling cash_usd: %.2f → %.2f (live balance)",
+                            "[kernel] Reconciling cash_usd: %.2f → %.2f (%s)",
                             disk_cash,
                             _auth_balance,
+                            _auth_balance_note,
                         )
                         _st["cash_usd"] = _auth_balance
                         self._kernel_state_json = json.dumps(
