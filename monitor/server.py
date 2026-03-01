@@ -341,16 +341,49 @@ def _parse_iso_ts_ms(ts: str | None) -> int | None:
         return None
 
 
-_KERNEL_STATE_HOME = Path("~/.mei/kernel_state.json").expanduser()
+_KERNEL_STATE_HOME_DIR = Path("~/.mei").expanduser()
+
+
+def _kernel_state_candidate_names() -> list[str]:
+    """Return ordered kernel state candidate basenames (new + legacy)."""
+    tag = _env_str("AI_QUANT_INSTANCE_TAG", "")
+    if tag:
+        return [
+            f"paper_kernel_state_{tag}.json",
+            f"kernel_state_{tag}.json",
+        ]
+
+    out: list[str] = []
+    # Prefer paper-specific files first to avoid stale legacy state collisions.
+    for stem in ("paper_kernel_state", "kernel_state"):
+        out.append(f"{stem}.json")
+    return out
+
+
+def _resolve_kernel_state_dir(db_path: Path) -> Path:
+    """Resolve runtime kernel state dir using the same env semantics as trader."""
+    base_raw = _env_str("AI_QUANT_KERNEL_STATE_DIR", str(_KERNEL_STATE_HOME_DIR))
+    base = Path(base_raw).expanduser()
+    if base.is_absolute():
+        return base
+    return (db_path.parent / base).resolve()
 
 
 def _find_kernel_state_path(db_path: Path) -> Path | None:
-    """Locate the kernel state JSON — next to the trading DB, or ~/.mei fallback."""
-    beside_db = db_path.parent / "kernel_state.json"
-    if beside_db.exists():
-        return beside_db
-    if _KERNEL_STATE_HOME.exists():
-        return _KERNEL_STATE_HOME
+    """Locate kernel state JSON using trader-consistent precedence."""
+    names = _kernel_state_candidate_names()
+    state_dir = _resolve_kernel_state_dir(db_path)
+    candidates: list[Path] = []
+    # Mirror PaperTrader restore order: state-dir first, DB-dir legacy fallback last.
+    for base_dir in (state_dir, db_path.parent):
+        for name in names:
+            p = base_dir / name
+            if p not in candidates:
+                candidates.append(p)
+
+    for p in candidates:
+        if p.exists():
+            return p
     return None
 
 
