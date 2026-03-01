@@ -356,11 +356,22 @@ def _kernel_state_candidate_names() -> list[str]:
     return out
 
 
+def _resolve_kernel_state_dir(db_path: Path) -> Path:
+    """Resolve runtime kernel state dir using the same env semantics as trader."""
+    base_raw = _env_str("AI_QUANT_KERNEL_STATE_DIR", str(_KERNEL_STATE_HOME_DIR))
+    base = Path(base_raw).expanduser()
+    if base.is_absolute():
+        return base
+    return (db_path.parent / base).resolve()
+
+
 def _find_kernel_state_path(db_path: Path) -> Path | None:
-    """Locate kernel state JSON (paper + legacy names, DB-dir first then ~/.mei)."""
+    """Locate kernel state JSON using trader-consistent precedence."""
     names = _kernel_state_candidate_names()
+    state_dir = _resolve_kernel_state_dir(db_path)
     candidates: list[Path] = []
-    for base_dir in (db_path.parent, _KERNEL_STATE_HOME_DIR):
+    # Mirror PaperTrader restore order: state-dir first, DB-dir legacy fallback last.
+    for base_dir in (state_dir, db_path.parent):
         for name in names:
             p = base_dir / name
             if p not in candidates:

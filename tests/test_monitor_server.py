@@ -157,3 +157,24 @@ def test_find_kernel_state_path_uses_home_paper_state_fallback(tmp_path, monkeyp
 
     got = monitor_server._find_kernel_state_path(db_path)
     assert got == home_state
+
+
+def test_find_kernel_state_path_prefers_home_paper_over_stale_db_legacy(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AI_QUANT_INSTANCE_TAG", "v8-paper3")
+    home_dir = tmp_path / "home-mei"
+    home_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(monitor_server, "_KERNEL_STATE_HOME_DIR", home_dir)
+
+    db_path = tmp_path / "trading_engine_v8_paper3.db"
+    db_path.write_text("")
+
+    # Simulate stale legacy artifact beside DB.
+    db_legacy_state = tmp_path / "kernel_state_v8-paper3.json"
+    db_legacy_state.write_text("{\"cash_usd\":1}")
+
+    # Fresh state in runtime state dir should win.
+    home_paper_state = home_dir / "paper_kernel_state_v8-paper3.json"
+    home_paper_state.write_text("{\"cash_usd\":2}")
+
+    got = monitor_server._find_kernel_state_path(db_path)
+    assert got == home_paper_state
