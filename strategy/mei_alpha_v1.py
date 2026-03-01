@@ -3558,6 +3558,11 @@ def log_audit_event(
 
 
 class PaperTrader:
+    _PAPER_KERNEL_STATE_BASENAME = "paper_kernel_state.json"
+    _PAPER_SHADOW_REPORT_BASENAME = "paper_kernel_shadow_report.json"
+    _LEGACY_KERNEL_STATE_BASENAME = "kernel_state.json"
+    _LEGACY_SHADOW_REPORT_BASENAME = "kernel_shadow_report.json"
+
     def __init__(self):
         self._seed_balance: float = PAPER_BALANCE  # only for kernel init seeding
         self.positions = {}  # symbol -> position_dict
@@ -3615,34 +3620,93 @@ class PaperTrader:
         size: float,
         timestamp_ms: int,
         funding_rate: float | None = None,
+        action: str | None = None,
+        leverage: float | None = None,
+        close_fraction: float | None = None,
     ) -> None:
         """Feed an event to the Rust kernel — kernel is sole accounting authority (AQC-755)."""
         if not self._kernel_available or self._kernel_state_json is None:
             return
         try:
+            params_json = self._kernel_params_json
+            if not params_json:
+                params_json = _bt_runtime.default_kernel_params_json()
+                self._kernel_params_json = params_json
+
+            action_u = str(action or "").strip().upper()
+            if action_u:
+                try:
+                    params_obj = json.loads(params_json)
+                    if not isinstance(params_obj, dict):
+                        params_obj = {}
+                except Exception:
+                    params_obj = {}
+
+                if leverage is not None:
+                    try:
+                        lev = max(1.0, float(leverage))
+                        params_obj["leverage"] = lev
+                    except Exception:
+                        pass
+
+                # Paper sync events should never open reverse legs implicitly.
+                params_obj["allow_reverse"] = False
+                if action_u == "ADD":
+                    params_obj["allow_pyramid"] = True
+                elif action_u in {"OPEN", "CLOSE", "REDUCE"}:
+                    params_obj["allow_pyramid"] = False
+
+                params_json = json.dumps(params_obj, separators=(",", ":"), sort_keys=True)
+
             if funding_rate is not None:
                 new_state_json = _bt_runtime.apply_funding(
                     self._kernel_state_json,
                     symbol,
                     float(funding_rate),
                     float(price),
-                    self._kernel_params_json,
+                    params_json,
                 )
                 self._kernel_state_json = new_state_json
             else:
+                signal_map = {
+                    "BUY": "buy",
+                    "SELL": "sell",
+                    "LONG": "buy",
+                    "SHORT": "sell",
+                    "NEUTRAL": "neutral",
+                }
+                signal_txt = signal_map.get(str(signal or "").strip().upper(), "")
+                if not signal_txt:
+                    logger.debug("[kernel] sync skipped: unsupported signal=%r", signal)
+                    return
+
                 event = {
                     "schema_version": 1,
                     "event_id": int(timestamp_ms),
                     "timestamp_ms": int(timestamp_ms),
                     "symbol": str(symbol).upper(),
-                    "signal": str(signal).upper(),
+                    "signal": signal_txt,
                     "price": float(price),
                 }
-                result_json = _bt_runtime.step_full(
+
+                notional_hint = abs(float(size or 0.0)) * abs(float(price or 0.0))
+                if notional_hint > 0:
+                    event["notional_hint_usd"] = float(notional_hint)
+
+                if action_u == "CLOSE":
+                    event["close_fraction"] = 1.0
+                elif action_u == "REDUCE":
+                    try:
+                        cf = None if close_fraction is None else float(close_fraction)
+                    except Exception:
+                        cf = None
+                    if cf is not None:
+                        event["close_fraction"] = max(0.0, min(1.0, cf))
+
+                result_json = _bt_runtime.step_decision(
                     self._kernel_state_json,
-                    json.dumps(event),
-                    self._kernel_params_json,
-                    "{}",
+                    json.dumps(event, separators=(",", ":"), sort_keys=True),
+                    params_json,
                 )
                 result = json.loads(result_json)
                 if result.get("ok") and "decision" in result:
@@ -3653,7 +3717,14 @@ class PaperTrader:
                         )
                 else:
                     err = result.get("error", {})
-                    logger.debug("[kernel] step rejected: %s", err.get("message", result_json[:200]))
+                    details = err.get("details") if isinstance(err, dict) else None
+                    logger.debug(
+                        "[kernel] step rejected: %s | details=%s | action=%s symbol=%s",
+                        err.get("message", result_json[:200]) if isinstance(err, dict) else result_json[:200],
+                        details,
+                        action_u or "n/a",
+                        str(symbol).upper(),
+                    )
                     return
 
             # --- Shadow report: log kernel balance for audit (AQC-755) ---
@@ -3712,8 +3783,9 @@ class PaperTrader:
         """Save kernel state to disk."""
         if not self._kernel_available or self._kernel_state_json is None:
             return
-        state_path = self._instance_state_path("kernel_state.json")
-        legacy_state_path = self._instance_state_path("kernel_state.json", legacy_db_dir=True)
+        state_path = self._instance_state_path(self._PAPER_KERNEL_STATE_BASENAME)
+        legacy_state_path = self._instance_state_path(self._LEGACY_KERNEL_STATE_BASENAME)
+        legacy_db_state_path = self._instance_state_path(self._LEGACY_KERNEL_STATE_BASENAME, legacy_db_dir=True)
         try:
             os.makedirs(os.path.dirname(state_path), exist_ok=True)
             _bt_runtime.save_state(self._kernel_state_json, state_path)
@@ -3725,10 +3797,18 @@ class PaperTrader:
                     _bt_runtime.save_state(self._kernel_state_json, legacy_state_path)
                     logger.info("[kernel] persisted runtime state via legacy fallback %s", legacy_state_path)
                 except Exception as e2:
-                    logger.warning("[kernel] legacy persist fallback failed: %s", e2)
+                    logger.warning("[kernel] legacy persist fallback failed at %s: %s", legacy_state_path, e2)
+                    if legacy_db_state_path != legacy_state_path:
+                        try:
+                            os.makedirs(os.path.dirname(legacy_db_state_path), exist_ok=True)
+                            _bt_runtime.save_state(self._kernel_state_json, legacy_db_state_path)
+                            logger.info("[kernel] persisted runtime state via DB-dir fallback %s", legacy_db_state_path)
+                        except Exception as e3:
+                            logger.warning("[kernel] DB-dir persist fallback failed: %s", e3)
         # Persist shadow report alongside kernel state (AQC-752)
-        report_path = self._instance_state_path("kernel_shadow_report.json")
-        legacy_report_path = self._instance_state_path("kernel_shadow_report.json", legacy_db_dir=True)
+        report_path = self._instance_state_path(self._PAPER_SHADOW_REPORT_BASENAME)
+        legacy_report_path = self._instance_state_path(self._LEGACY_SHADOW_REPORT_BASENAME)
+        legacy_db_report_path = self._instance_state_path(self._LEGACY_SHADOW_REPORT_BASENAME, legacy_db_dir=True)
         try:
             os.makedirs(os.path.dirname(report_path), exist_ok=True)
             self._shadow_report.to_json(report_path)
@@ -3740,20 +3820,30 @@ class PaperTrader:
                     self._shadow_report.to_json(legacy_report_path)
                     logger.info("[shadow] persisted report via legacy fallback %s", legacy_report_path)
                 except Exception as e2:
-                    logger.warning("[shadow] legacy persist fallback failed: %s", e2)
+                    logger.warning("[shadow] legacy persist fallback failed at %s: %s", legacy_report_path, e2)
+                    if legacy_db_report_path != legacy_report_path:
+                        try:
+                            os.makedirs(os.path.dirname(legacy_db_report_path), exist_ok=True)
+                            self._shadow_report.to_json(legacy_db_report_path)
+                            logger.info("[shadow] persisted report via DB-dir fallback %s", legacy_db_report_path)
+                        except Exception as e3:
+                            logger.warning("[shadow] DB-dir persist fallback failed: %s", e3)
 
     def _kernel_restore(self) -> None:
         """Attempt to restore kernel state from disk; re-init with DB balance if missing."""
         if not _BT_RUNTIME_AVAILABLE:
             return
         try:
-            state_path = self._instance_state_path("kernel_state.json")
-            legacy_state_path = self._instance_state_path("kernel_state.json", legacy_db_dir=True)
+            state_path = self._instance_state_path(self._PAPER_KERNEL_STATE_BASENAME)
+            legacy_state_path = self._instance_state_path(self._LEGACY_KERNEL_STATE_BASENAME)
+            legacy_db_state_path = self._instance_state_path(self._LEGACY_KERNEL_STATE_BASENAME, legacy_db_dir=True)
             load_candidates: list[str] = []
             if os.path.isfile(state_path):
                 load_candidates.append(state_path)
             if legacy_state_path != state_path and os.path.isfile(legacy_state_path):
                 load_candidates.append(legacy_state_path)
+            if legacy_db_state_path not in load_candidates and os.path.isfile(legacy_db_state_path):
+                load_candidates.append(legacy_db_state_path)
 
             restored = False
             for load_path in load_candidates:
@@ -3812,14 +3902,49 @@ class PaperTrader:
                 except Exception as e:
                     logger.warning("[kernel] cash_usd reconciliation failed: %s", e)
 
+            # Reconcile positions from DB-backed Python state to prevent stale
+            # cross-component kernel state contamination.
+            if self._kernel_available and self._kernel_state_json:
+                try:
+                    _st = json.loads(self._kernel_state_json)
+                    disk_positions = _st.get("positions") if isinstance(_st, dict) else {}
+                    if not isinstance(disk_positions, dict):
+                        disk_positions = {}
+
+                    db_positions: dict[str, dict] = {}
+                    for sym_raw, py_pos in (self.positions or {}).items():
+                        sym = str(sym_raw or "").strip().upper()
+                        if not sym or not isinstance(py_pos, dict):
+                            continue
+                        db_positions[sym] = python_position_to_kernel(sym, py_pos)
+
+                    if db_positions != disk_positions:
+                        logger.warning(
+                            "[kernel] Reconciling positions from DB state: kernel=%d -> db=%d",
+                            len(disk_positions),
+                            len(db_positions),
+                        )
+                        _st["positions"] = db_positions
+                        _st["timestamp_ms"] = int(time.time() * 1000)
+                        self._kernel_state_json = json.dumps(
+                            _st,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        )
+                except Exception as e:
+                    logger.warning("[kernel] position reconciliation failed: %s", e)
+
             # Restore shadow report (AQC-752)
-            report_path = self._instance_state_path("kernel_shadow_report.json")
-            legacy_report_path = self._instance_state_path("kernel_shadow_report.json", legacy_db_dir=True)
+            report_path = self._instance_state_path(self._PAPER_SHADOW_REPORT_BASENAME)
+            legacy_report_path = self._instance_state_path(self._LEGACY_SHADOW_REPORT_BASENAME)
+            legacy_db_report_path = self._instance_state_path(self._LEGACY_SHADOW_REPORT_BASENAME, legacy_db_dir=True)
             report_load_candidates: list[str] = []
             if os.path.isfile(report_path):
                 report_load_candidates.append(report_path)
             if legacy_report_path != report_path and os.path.isfile(legacy_report_path):
                 report_load_candidates.append(legacy_report_path)
+            if legacy_db_report_path not in report_load_candidates and os.path.isfile(legacy_db_report_path):
+                report_load_candidates.append(legacy_db_report_path)
 
             for report_load_path in report_load_candidates:
                 try:
@@ -4569,6 +4694,8 @@ class PaperTrader:
                     size=size,
                     timestamp_ms=int(ev_time),
                     funding_rate=rate,
+                    action="FUNDING",
+                    leverage=pos.get("leverage"),
                 )
                 total_delta += delta
                 applied_any = True
@@ -5102,6 +5229,8 @@ class PaperTrader:
             price=fill_price,
             size=add_size,
             timestamp_ms=now_ms,
+            action="ADD",
+            leverage=leverage,
         )
         self.log_trade(
             symbol,
@@ -5228,12 +5357,16 @@ class PaperTrader:
 
         # AQC-755: sync kernel BEFORE log so self.balance reads post-trade value.
         close_signal = "SELL" if pos_type == "LONG" else "BUY"
+        close_fraction = 1.0 if size <= 0 else max(0.0, min(1.0, float(reduce_size) / float(size)))
         self._kernel_sync_event(
             symbol=symbol,
             signal=close_signal,
             price=fill_price,
             size=reduce_size,
             timestamp_ms=int(time.time() * 1000),
+            action="CLOSE" if is_final else "REDUCE",
+            leverage=leverage,
+            close_fraction=close_fraction,
         )
 
         # Log fill
@@ -5969,6 +6102,8 @@ class PaperTrader:
                 price=fill_price,
                 size=size,
                 timestamp_ms=int(time.time() * 1000),
+                action="OPEN",
+                leverage=leverage,
             )
             audit = None
             if indicators is not None:
