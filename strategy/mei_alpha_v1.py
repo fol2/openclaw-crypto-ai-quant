@@ -3872,23 +3872,26 @@ class PaperTrader:
                 logger.info("[kernel] No state file found — re-initializing with seed balance %.2f", self._seed_balance)
                 self._init_kernel()
 
-            # AQC-FIX: Reconcile kernel cash_usd with the authoritative
-            # paper balance.  Use the module-level PAPER_BALANCE which
-            # reflects the live-synced value (daemon sets AI_QUANT_PAPER_BALANCE
-            # from the Hyperliquid account before strategy import when
-            # PAPER_BALANCE_FROM_LIVE=1).  This takes precedence over
-            # _seed_balance which load_state() may have overwritten with a
-            # stale DB value from a previous buggy session.
-            _auth_balance = PAPER_BALANCE
+            # Reconcile kernel cash_usd with the DB-restored realised balance.
+            # This preserves paper continuity across daemon restarts.
+            # One-off live→paper resets are handled by promote/deploy state
+            # mirror workflows, not by unconditional startup reconciliation.
+            try:
+                _auth_balance = float(self._seed_balance)
+                _auth_balance_note = "db balance"
+            except Exception:
+                _auth_balance = float(PAPER_BALANCE)
+                _auth_balance_note = "seed fallback"
             if self._kernel_available and self._kernel_state_json:
                 try:
                     _st = json.loads(self._kernel_state_json)
                     disk_cash = float(_st.get("cash_usd", 0.0))
                     if abs(disk_cash - _auth_balance) > 0.01:
                         logger.info(
-                            "[kernel] Reconciling cash_usd: %.2f → %.2f (live balance)",
+                            "[kernel] Reconciling cash_usd: %.2f → %.2f (%s)",
                             disk_cash,
                             _auth_balance,
+                            _auth_balance_note,
                         )
                         _st["cash_usd"] = _auth_balance
                         self._kernel_state_json = json.dumps(

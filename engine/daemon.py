@@ -1431,10 +1431,8 @@ def main() -> None:
     # Live mode: always sync so the inherited PaperTrader kernel and
     # any code that reads PAPER_BALANCE uses the real account balance
     # instead of the $10,000 default.
-    _should_sync_balance = (mode == "paper" and os.getenv("AI_QUANT_PAPER_BALANCE_FROM_LIVE", "0") == "1") or mode in {
-        "live",
-        "dry_live",
-    }
+    _paper_sync_from_live = mode == "paper" and os.getenv("AI_QUANT_PAPER_BALANCE_FROM_LIVE", "0") == "1"
+    _should_sync_balance = _paper_sync_from_live or mode in {"live", "dry_live"}
     if _should_sync_balance:
         try:
             from exchange.executor import load_live_secrets, HyperliquidLiveExecutor
@@ -1456,27 +1454,39 @@ def main() -> None:
                 raise RuntimeError("Executor init failed — check secrets and network") from None
             _snap = _exec.account_snapshot(force=True)
             if _snap.withdrawable_usd and _snap.withdrawable_usd > 0:
-                os.environ["AI_QUANT_PAPER_BALANCE"] = str(_snap.withdrawable_usd)
-                print(f"balance synced from live: ${_snap.withdrawable_usd:,.2f}")
-                # Mirror full state from live when config has changed;
-                # otherwise just seed the balance so running balance continues.
-                if mode == "paper":
+                if mode in {"live", "dry_live"}:
+                    os.environ["AI_QUANT_PAPER_BALANCE"] = str(_snap.withdrawable_usd)
+                    print(f"balance synced from live: ${_snap.withdrawable_usd:,.2f}")
+                elif mode == "paper":
                     _config_changed = _has_config_changed(_db_path())
-                    if _config_changed:
-                        try:
-                            _mirror_live_state_to_paper(_exec, _snap, _db_path())
-                        except Exception as _mirror_exc:
-                            logger.warning("state mirror failed (balance-only fallback): %s", _mirror_exc)
+                    _mirror_on_promote = str(os.getenv("AI_QUANT_MIRROR_LIVE_ON_PROMOTE", "0") or "").strip().lower() in {
+                        "1",
+                        "true",
+                        "yes",
+                        "on",
+                    }
+                    if _mirror_on_promote and not _config_changed:
+                        logger.info(
+                            "paper live-balance sync skipped: config unchanged and mirror-on-promote enabled"
+                        )
+                    else:
+                        os.environ["AI_QUANT_PAPER_BALANCE"] = str(_snap.withdrawable_usd)
+                        print(f"balance synced from live: ${_snap.withdrawable_usd:,.2f}")
+                        if _config_changed:
+                            try:
+                                _mirror_live_state_to_paper(_exec, _snap, _db_path())
+                            except Exception as _mirror_exc:
+                                logger.warning("state mirror failed (balance-only fallback): %s", _mirror_exc)
+                                try:
+                                    _seed_balance_only(_snap.withdrawable_usd, _db_path())
+                                except Exception:
+                                    pass
+                        else:
+                            # Legacy path for non-promote workflows.
                             try:
                                 _seed_balance_only(_snap.withdrawable_usd, _db_path())
                             except Exception:
                                 pass
-                    else:
-                        # Config unchanged — just seed balance for running balance.
-                        try:
-                            _seed_balance_only(_snap.withdrawable_usd, _db_path())
-                        except Exception:
-                            pass
         except Exception as exc:
             print(f"balance sync failed (using default): {exc}")
 
