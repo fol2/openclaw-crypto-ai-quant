@@ -27,3 +27,19 @@ def test_instance_state_path_legacy_db_dir_fallback(monkeypatch):
 
     got = mei_alpha_v1.PaperTrader._instance_state_path("kernel_state.json", legacy_db_dir=True)
     assert got == "/tmp/kernel_state_v8-paper3.json"
+
+
+def test_kernel_bootstrap_balance_prefers_db_seed(monkeypatch):
+    monkeypatch.setattr(mei_alpha_v1, "PAPER_BALANCE", 10000.0, raising=False)
+    trader = object.__new__(mei_alpha_v1.PaperTrader)
+    trader._seed_balance = 23456.78
+
+    assert trader._kernel_bootstrap_balance() == 23456.78
+
+
+def test_kernel_bootstrap_balance_falls_back_to_seed_env(monkeypatch):
+    monkeypatch.setattr(mei_alpha_v1, "PAPER_BALANCE", 9876.54, raising=False)
+    trader = object.__new__(mei_alpha_v1.PaperTrader)
+    trader._seed_balance = "invalid"
+
+    assert trader._kernel_bootstrap_balance() == 9876.54

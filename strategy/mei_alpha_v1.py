@@ -3611,6 +3611,13 @@ class PaperTrader:
             logger.critical("[kernel] Failed to initialize kernel state: %s — CANNOT operate", e)
             self._kernel_available = False
 
+    def _kernel_bootstrap_balance(self) -> float:
+        """Resolve kernel bootstrap balance from DB seed with env fallback."""
+        try:
+            return float(self._seed_balance)
+        except Exception:
+            return float(PAPER_BALANCE)
+
     def _kernel_sync_event(
         self,
         *,
@@ -3867,20 +3874,24 @@ class PaperTrader:
             if not restored:
                 # No persisted kernel state (e.g. first run after migration
                 # or after switching to per-instance state paths).
-                # Re-init with the authoritative balance (live-synced).
-                self._seed_balance = PAPER_BALANCE
+                # Re-init using DB-restored realised balance when available.
+                # This preserves paper continuity when config is unchanged.
+                self._seed_balance = self._kernel_bootstrap_balance()
                 logger.info("[kernel] No state file found — re-initializing with seed balance %.2f", self._seed_balance)
                 self._init_kernel()
+                # Persist immediately so subsequent restarts do not repeatedly
+                # fall into the no-state bootstrap path.
+                self._kernel_persist()
 
             # Reconcile kernel cash_usd with the DB-restored realised balance.
             # This preserves paper continuity across daemon restarts.
             # One-off live→paper resets are handled by promote/deploy state
             # mirror workflows, not by unconditional startup reconciliation.
+            _auth_balance = self._kernel_bootstrap_balance()
             try:
-                _auth_balance = float(self._seed_balance)
+                float(self._seed_balance)
                 _auth_balance_note = "db balance"
             except Exception:
-                _auth_balance = float(PAPER_BALANCE)
                 _auth_balance_note = "seed fallback"
             if self._kernel_available and self._kernel_state_json:
                 try:

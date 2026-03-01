@@ -1466,9 +1466,35 @@ def main() -> None:
                         "on",
                     }
                     if _mirror_on_promote and not _config_changed:
-                        logger.info(
-                            "paper live-balance sync skipped: config unchanged and mirror-on-promote enabled"
-                        )
+                        _db_balance = None
+                        try:
+                            import sqlite3 as _sql
+
+                            con = _sql.connect(_db_path(), timeout=5.0)
+                            try:
+                                row = con.execute("SELECT balance FROM trades ORDER BY id DESC LIMIT 1").fetchone()
+                                if row and row[0] is not None:
+                                    _db_balance = float(row[0])
+                            finally:
+                                con.close()
+                        except Exception:
+                            _db_balance = None
+                        if _db_balance is not None:
+                            os.environ["AI_QUANT_PAPER_BALANCE"] = str(_db_balance)
+                            logger.info(
+                                "paper live-balance sync skipped: config unchanged and mirror-on-promote enabled "
+                                "(baseline from DB: %.2f)",
+                                _db_balance,
+                            )
+                        else:
+                            # No DB history yet: keep startup baseline stable without
+                            # mutating paper trades/state.
+                            os.environ["AI_QUANT_PAPER_BALANCE"] = str(_snap.withdrawable_usd)
+                            logger.info(
+                                "paper live-balance sync skipped: config unchanged and mirror-on-promote enabled "
+                                "(no DB balance; baseline from live snapshot: %.2f)",
+                                _snap.withdrawable_usd,
+                            )
                     else:
                         os.environ["AI_QUANT_PAPER_BALANCE"] = str(_snap.withdrawable_usd)
                         print(f"balance synced from live: ${_snap.withdrawable_usd:,.2f}")
