@@ -347,11 +347,15 @@ _KERNEL_STATE_HOME_DIR = Path("~/.mei").expanduser()
 def _kernel_state_candidate_names() -> list[str]:
     """Return ordered kernel state candidate basenames (new + legacy)."""
     tag = _env_str("AI_QUANT_INSTANCE_TAG", "")
+    if tag:
+        return [
+            f"paper_kernel_state_{tag}.json",
+            f"kernel_state_{tag}.json",
+        ]
+
     out: list[str] = []
     # Prefer paper-specific files first to avoid stale legacy state collisions.
     for stem in ("paper_kernel_state", "kernel_state"):
-        if tag:
-            out.append(f"{stem}_{tag}.json")
         out.append(f"{stem}.json")
     return out
 
