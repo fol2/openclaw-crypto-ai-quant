@@ -1480,7 +1480,7 @@ def build_position_state_for_db(state_json: str) -> list[dict]:
 #
 # Balances (paper) — AQC-755: kernel is sole accounting authority
 # - `self.balance` = property delegating to Rust kernel `cash_usd` (via bt_runtime)
-# - `get_live_balance()` = equity from kernel + fee estimate
+# - `get_live_balance()` = equity from kernel - estimated close fees
 #
 # Perps-style positions
 # - One NET position per symbol (like real perps), but multiple fills/tranches are supported:
@@ -4492,7 +4492,8 @@ class PaperTrader:
         if not notify:
             return trade_id
 
-        # Calculate equity + realised/unrealised breakdown for notification display.
+        # Notification accounting contract:
+        # Equity (est.) = Cash (realised) + Unrealised (est., net of close-fee estimate)
         equity = self.get_live_balance()
         cash_realised = float(self.balance or 0.0)
         unrealised = float(equity or 0.0) - cash_realised
@@ -4574,8 +4575,14 @@ class PaperTrader:
         if action in {"CLOSE", "REDUCE"}:
             msg += f"• 損益 (PnL): **${pnl:,.2f}**\n"
 
-        msg += f"• **淨值 (Equity, est.):** `${equity:,.2f}` ({_pct(float(equity or 0.0), is_return=True)})\n"
-        msg += f"• **未實現 (Unrealised):** `${unrealised:,.2f}` ({_pct(float(unrealised), is_return=False)})\n"
+        msg += (
+            f"• **淨值 (Equity, est. = Cash + Unrealised, net est. close fees):** "
+            f"`${equity:,.2f}` ({_pct(float(equity or 0.0), is_return=True)})\n"
+        )
+        msg += (
+            f"• **未實現 (Unrealised, net est. close fees):** "
+            f"`${unrealised:,.2f}` ({_pct(float(unrealised), is_return=False)})\n"
+        )
         msg += f"• **現金 (Cash, realised):** `${cash_realised:,.2f}` ({_pct(float(cash_realised), is_return=True)})"
 
         try:
