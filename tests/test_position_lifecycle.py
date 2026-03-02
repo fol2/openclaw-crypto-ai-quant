@@ -18,6 +18,7 @@ import pytest
 
 from strategy.mei_alpha_v1 import (
     _BT_RUNTIME_AVAILABLE,
+    estimate_locked_margin_usd,
     get_kernel_positions,
     kernel_position_to_python,
     python_position_to_kernel,
@@ -337,6 +338,47 @@ class TestSyncPositionsFromKernel:
         assert len(result) == 2
         assert result["ETH"]["type"] == "LONG"
         assert result["BTC"]["type"] == "SHORT"
+
+
+# ---------------------------------------------------------------------------
+# TestEstimateLockedMarginUsd
+# ---------------------------------------------------------------------------
+
+
+class TestEstimateLockedMarginUsd:
+    """Tests for estimate_locked_margin_usd()."""
+
+    def test_prefers_kernel_margin_when_available(self):
+        state_json = _make_kernel_state(
+            positions={
+                "ETH": _make_kernel_position("ETH", margin_usd=25.0),
+                "BTC": _make_kernel_position("BTC", margin_usd=15.5),
+            }
+        )
+        # Deliberately different Python values: kernel SSOT should win.
+        py_positions = {"ETH": {"margin_used": 999.0}}
+
+        got = estimate_locked_margin_usd(kernel_state_json=state_json, py_positions=py_positions)
+
+        assert got == pytest.approx(40.5)
+
+    def test_kernel_empty_returns_zero_without_python_fallback(self):
+        state_json = _make_kernel_state(positions={})
+        py_positions = {"ETH": {"margin_used": 88.0}}
+
+        got = estimate_locked_margin_usd(kernel_state_json=state_json, py_positions=py_positions)
+
+        assert got == pytest.approx(0.0)
+
+    def test_falls_back_to_python_positions_when_kernel_state_invalid(self):
+        py_positions = {
+            "ETH": {"margin_used": 30.0},
+            "BTC": {"margin_used": 12.5},
+        }
+
+        got = estimate_locked_margin_usd(kernel_state_json="not valid json", py_positions=py_positions)
+
+        assert got == pytest.approx(42.5)
 
 
 # ---------------------------------------------------------------------------
