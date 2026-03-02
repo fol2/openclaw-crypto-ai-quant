@@ -1465,19 +1465,23 @@ def estimate_locked_margin_usd(
     """
     kernel_positions: dict | None = None
     state_json_valid = False
+    kernel_schema_valid = False
     if isinstance(kernel_state_json, str) and kernel_state_json.strip():
         try:
             state_obj = json.loads(kernel_state_json)
             state_json_valid = isinstance(state_obj, dict)
+            if state_json_valid:
+                kernel_schema_valid = isinstance((state_obj or {}).get("positions"), dict)
         except Exception:
             state_json_valid = False
-        if state_json_valid:
+            kernel_schema_valid = False
+        if state_json_valid and kernel_schema_valid:
             try:
                 parsed = get_kernel_positions(kernel_state_json)
                 if isinstance(parsed, dict):
                     kernel_positions = parsed
             except Exception:
-                kernel_positions = {}
+                kernel_positions = None
 
     if kernel_positions is not None:
         total = 0.0
