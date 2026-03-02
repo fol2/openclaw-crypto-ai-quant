@@ -4493,10 +4493,21 @@ class PaperTrader:
             return trade_id
 
         # Notification accounting contract:
-        # Equity (est.) = Cash (realised) + Unrealised (est., net of close-fee estimate)
-        equity = self.get_live_balance()
+        # Equity (est.) = Cash (realised) + Locked Margin + Unrealised (net of close-fee estimate)
+        equity_ex_margin = self.get_live_balance()
         cash_realised = float(self.balance or 0.0)
-        unrealised = float(equity or 0.0) - cash_realised
+        unrealised = float(equity_ex_margin or 0.0) - cash_realised
+        locked_margin = 0.0
+        for pos in (self.positions or {}).values():
+            if not isinstance(pos, dict):
+                continue
+            try:
+                m = float(pos.get("margin_used") or 0.0)
+            except Exception:
+                m = 0.0
+            if m > 0:
+                locked_margin += m
+        equity = cash_realised + locked_margin + unrealised
         try:
             baseline_usd = float(PAPER_BALANCE)
         except Exception:
@@ -4576,9 +4587,10 @@ class PaperTrader:
             msg += f"• 損益 (PnL): **${pnl:,.2f}**\n"
 
         msg += (
-            f"• **淨值 (Equity, est. = Cash + Unrealised, net est. close fees):** "
+            f"• **淨值 (Equity, est. = Cash + Locked Margin + Unrealised, net est. close fees):** "
             f"`${equity:,.2f}` ({_pct(float(equity or 0.0), is_return=True)})\n"
         )
+        msg += f"• **已鎖定保證金 (Locked Margin est.):** `${locked_margin:,.2f}`\n"
         msg += (
             f"• **未實現 (Unrealised, net est. close fees):** "
             f"`${unrealised:,.2f}` ({_pct(float(unrealised), is_return=False)})\n"
