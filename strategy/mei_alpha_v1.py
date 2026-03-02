@@ -4493,7 +4493,7 @@ class PaperTrader:
             return trade_id
 
         # Notification accounting contract:
-        # Equity (est.) = Cash (realised) + Unrealised (est.)
+        # Equity (est.) = Cash (realised) + Unrealised (est., net of close-fee estimate)
         equity = self.get_live_balance()
         cash_realised = float(self.balance or 0.0)
         unrealised = float(equity or 0.0) - cash_realised
@@ -4576,10 +4576,13 @@ class PaperTrader:
             msg += f"• 損益 (PnL): **${pnl:,.2f}**\n"
 
         msg += (
-            f"• **淨值 (Equity, est. = Cash + Unrealised):** "
+            f"• **淨值 (Equity, est. = Cash + Unrealised, net est. close fees):** "
             f"`${equity:,.2f}` ({_pct(float(equity or 0.0), is_return=True)})\n"
         )
-        msg += f"• **未實現 (Unrealised):** `${unrealised:,.2f}` ({_pct(float(unrealised), is_return=False)})\n"
+        msg += (
+            f"• **未實現 (Unrealised, net est. close fees):** "
+            f"`${unrealised:,.2f}` ({_pct(float(unrealised), is_return=False)})\n"
+        )
         msg += f"• **現金 (Cash, realised):** `${cash_realised:,.2f}` ({_pct(float(cash_realised), is_return=True)})"
 
         try:
