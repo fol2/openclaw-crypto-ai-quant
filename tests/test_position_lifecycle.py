@@ -396,6 +396,22 @@ class TestEstimateLockedMarginUsd:
 
         assert got == pytest.approx(88.0)
 
+    def test_falls_back_when_kernel_position_entry_is_malformed(self):
+        malformed_state_json = json.dumps(
+            {
+                "schema_version": 1,
+                "timestamp_ms": 1700000000000,
+                "step": 0,
+                "cash_usd": 1000.0,
+                "positions": {"ETH": []},  # malformed: each position must be a dict
+            }
+        )
+        py_positions = {"ETH": {"margin_used": 77.0}}
+
+        got = estimate_locked_margin_usd(kernel_state_json=malformed_state_json, py_positions=py_positions)
+
+        assert got == pytest.approx(77.0)
+
 
 # ---------------------------------------------------------------------------
 # TestBuildPositionStateForDb

@@ -1485,16 +1485,19 @@ def estimate_locked_margin_usd(
 
     if kernel_positions is not None:
         total = 0.0
+        malformed_entry = False
         for kp in kernel_positions.values():
             if not isinstance(kp, dict):
-                continue
+                malformed_entry = True
+                break
             try:
                 margin = float(kp.get("margin_usd") or 0.0)
             except Exception:
                 margin = 0.0
             if margin > 0.0:
                 total += margin
-        return max(0.0, total)
+        if not malformed_entry:
+            return max(0.0, total)
 
     total = 0.0
     for pos in (py_positions or {}).values():
