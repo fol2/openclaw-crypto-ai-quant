@@ -1480,7 +1480,7 @@ def build_position_state_for_db(state_json: str) -> list[dict]:
 #
 # Balances (paper) — AQC-755: kernel is sole accounting authority
 # - `self.balance` = property delegating to Rust kernel `cash_usd` (via bt_runtime)
-# - `get_live_balance()` = equity from kernel + fee estimate
+# - `get_live_balance()` = equity from kernel - estimated close fees
 #
 # Perps-style positions
 # - One NET position per symbol (like real perps), but multiple fills/tranches are supported:
