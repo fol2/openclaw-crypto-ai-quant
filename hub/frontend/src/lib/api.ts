@@ -89,6 +89,15 @@ export async function getJourneys(mode = 'paper', limit = 50, offset = 0, symbol
   return apiFetch(`/api/journeys?${params}`);
 }
 
+export async function getTrades(mode = 'paper', limit = 100, offset = 0, symbol?: string, action?: string, fromTs?: string, toTs?: string) {
+  const params = new URLSearchParams({ mode, limit: String(limit), offset: String(offset) });
+  if (symbol) params.set('symbol', symbol);
+  if (action) params.set('action', action);
+  if (fromTs) params.set('from_ts', fromTs);
+  if (toTs) params.set('to_ts', toTs);
+  return apiFetch(`/api/trades?${params}`);
+}
+
 export async function getCandlesRange(symbol: string, interval: string, fromTs?: number, toTs?: number, limit = 500) {
   const params = new URLSearchParams({ symbol, interval, limit: String(limit) });
   if (fromTs != null) params.set('from_ts', String(fromTs));

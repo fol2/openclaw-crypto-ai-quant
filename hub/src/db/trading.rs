@@ -37,6 +37,32 @@ pub struct RecentTrade {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct PaginatedTrade {
+    pub id: i64,
+    pub timestamp: Option<String>,
+    pub symbol: String,
+    #[serde(rename = "type")]
+    pub trade_type: Option<String>,
+    pub action: Option<String>,
+    pub price: Option<f64>,
+    pub size: Option<f64>,
+    pub notional: Option<f64>,
+    pub pnl: Option<f64>,
+    pub fee_usd: Option<f64>,
+    pub reason: Option<String>,
+    pub confidence: Option<String>,
+    pub balance: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PaginatedTradesResult {
+    pub trades: Vec<PaginatedTrade>,
+    pub total: i64,
+    pub summary_pnl: f64,
+    pub summary_fees: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct RecentSignal {
     pub timestamp: Option<String>,
     pub symbol: String,
@@ -277,6 +303,97 @@ pub fn recent_trades(conn: &Connection, limit: u32) -> Result<Vec<RecentTrade>, 
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+/// Fetch trades with filtering and pagination.
+pub fn paginated_trades(
+    conn: &Connection,
+    limit: u32,
+    offset: u32,
+    symbol: Option<&str>,
+    action: Option<&str>,
+    from_ts: Option<&str>,
+    to_ts: Option<&str>,
+) -> Result<PaginatedTradesResult, HubError> {
+    // Collect owned string values so both queries can borrow them.
+    let mut where_clauses: Vec<&str> = Vec::new();
+    let mut values: Vec<String> = Vec::new();
+
+    if let Some(s) = symbol {
+        where_clauses.push("symbol = ?");
+        values.push(s.to_uppercase());
+    }
+    if let Some(a) = action {
+        where_clauses.push("action = ?");
+        values.push(a.to_uppercase());
+    }
+    if let Some(f) = from_ts {
+        where_clauses.push("timestamp >= ?");
+        values.push(f.to_string());
+    }
+    if let Some(t) = to_ts {
+        where_clauses.push("timestamp <= ?");
+        values.push(t.to_string());
+    }
+
+    let where_sql = if where_clauses.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", where_clauses.join(" AND "))
+    };
+
+    let filter_refs: Vec<&dyn rusqlite::types::ToSql> =
+        values.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
+
+    // Summary query (total count + aggregates)
+    let summary_sql = format!(
+        "SELECT COUNT(*), COALESCE(SUM(pnl), 0), COALESCE(SUM(ABS(fee_usd)), 0) FROM trades {where_sql}"
+    );
+    let mut stmt = conn.prepare(&summary_sql)?;
+    let (total, summary_pnl, summary_fees): (i64, f64, f64) =
+        stmt.query_row(filter_refs.as_slice(), |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+
+    // Data query — append limit + offset to filter params
+    let data_sql = format!(
+        "SELECT id, timestamp, symbol, type, action, price, size, notional, pnl, fee_usd, reason, confidence, balance
+         FROM trades {where_sql}
+         ORDER BY id DESC
+         LIMIT ? OFFSET ?"
+    );
+    let mut data_refs: Vec<&dyn rusqlite::types::ToSql> =
+        values.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
+    data_refs.push(&limit);
+    data_refs.push(&offset);
+
+    let mut data_stmt = conn.prepare(&data_sql)?;
+    let rows = data_stmt
+        .query_map(data_refs.as_slice(), |row| {
+            Ok(PaginatedTrade {
+                id: row.get(0)?,
+                timestamp: row.get(1)?,
+                symbol: row.get::<_, String>(2).unwrap_or_default(),
+                trade_type: row.get(3)?,
+                action: row.get(4)?,
+                price: row.get(5)?,
+                size: row.get(6)?,
+                notional: row.get(7)?,
+                pnl: row.get(8)?,
+                fee_usd: row.get(9)?,
+                reason: row.get(10)?,
+                confidence: row.get(11)?,
+                balance: row.get(12)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(PaginatedTradesResult {
+        trades: rows,
+        total,
+        summary_pnl,
+        summary_fees,
+    })
 }
 
 /// Fetch recent signals.

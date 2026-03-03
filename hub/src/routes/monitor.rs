@@ -83,6 +83,27 @@ fn default_journey_limit() -> u32 {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct TradesQuery {
+    #[serde(default = "default_mode")]
+    mode: String,
+    #[serde(default = "default_trades_limit")]
+    limit: u32,
+    #[serde(default)]
+    offset: u32,
+    #[serde(default)]
+    symbol: Option<String>,
+    #[serde(default)]
+    action: Option<String>,
+    #[serde(default)]
+    from_ts: Option<String>,
+    #[serde(default)]
+    to_ts: Option<String>,
+}
+fn default_trades_limit() -> u32 {
+    100
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CandleRangeQuery {
     #[serde(default = "default_mode")]
     mode: String,
@@ -156,6 +177,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/volumes", get(api_volumes))
         .route("/api/metrics", get(api_metrics))
         .route("/api/tunnel", get(api_tunnel))
+        .route("/api/trades", get(api_trades))
         .route("/metrics", get(api_prometheus))
 }
 
@@ -588,6 +610,40 @@ async fn api_journeys(
         "count": journeys.len(),
         "offset": offset,
         "journeys": journeys,
+    })))
+}
+
+async fn api_trades(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<TradesQuery>,
+) -> Result<Json<Value>, HubError> {
+    let mode = normalize_mode(&q.mode);
+    let limit = q.limit.clamp(1, 500);
+    let offset = q.offset;
+
+    let pool = state
+        .db_pool(&mode)
+        .ok_or_else(|| HubError::Db("db not available".to_string()))?;
+    let conn = pool.get()?;
+
+    let result = trading::paginated_trades(
+        &conn,
+        limit,
+        offset,
+        q.symbol.as_deref(),
+        q.action.as_deref(),
+        q.from_ts.as_deref(),
+        q.to_ts.as_deref(),
+    )?;
+
+    Ok(Json(json!({
+        "ok": true,
+        "mode": mode,
+        "total": result.total,
+        "offset": offset,
+        "summary_pnl": result.summary_pnl,
+        "summary_fees": result.summary_fees,
+        "trades": result.trades,
     })))
 }
 
