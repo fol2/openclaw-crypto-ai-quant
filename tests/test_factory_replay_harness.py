@@ -221,9 +221,11 @@ def _write_run_metadata(
 ) -> None:
     (run_dir / "replays").mkdir(parents=True, exist_ok=True)
     (run_dir / "replays" / replay_report).write_text("{}\n", encoding="utf-8")
+    cfg_sha = factory_run._sha256_file_optional(Path(config_path))
     candidate = {
         "config_id": candidate_id,
         "path": str(config_path),
+        "config_sha256": cfg_sha,
         "replay_report_path": str(run_dir / "replays" / replay_report),
         "pipeline_stage": "candidate_validation",
         "sweep_stage": "gpu",
@@ -242,7 +244,7 @@ def _write_run_metadata(
         run_meta["generated_at_ms"] = int(generated_at_ms)
     if contract_fingerprint:
         run_meta["replay_equivalence_contract"] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "mode": "backtest",
             "fingerprint": str(contract_fingerprint),
             "payload": {},
@@ -257,6 +259,7 @@ def test_factory_run_resolve_baseline_aligns_to_candidate_run_metadata(tmp_path:
     right_run = tmp_path / "right_run"
     baseline_run.mkdir()
     right_run.mkdir()
+    (tmp_path / "candidate_alpha.yaml").write_text("candidate: alpha\n", encoding="utf-8")
 
     _write_run_metadata(
         run_dir=baseline_run,
@@ -264,7 +267,6 @@ def test_factory_run_resolve_baseline_aligns_to_candidate_run_metadata(tmp_path:
         config_path=str(tmp_path / "candidate_alpha.yaml"),
         replay_report="candidate_alpha.replay.json",
     )
-    (tmp_path / "candidate_alpha.yaml").write_text("candidate: alpha\n", encoding="utf-8")
 
     right_report = right_run / "candidate_alpha.replay.json"
     right_report.write_text("{}", encoding="utf-8")
@@ -299,11 +301,39 @@ def test_factory_run_resolve_baseline_aligns_by_filename_fallback(tmp_path: Path
     assert resolved == baseline_dir / "candidate_beta.replay.json"
 
 
+def test_factory_run_resolve_baseline_strong_identity_miss_returns_missing_sentinel(tmp_path: Path) -> None:
+    baseline_run = tmp_path / "baseline_run"
+    right_run = tmp_path / "right_run"
+    baseline_run.mkdir()
+    right_run.mkdir()
+
+    _write_run_metadata(
+        run_dir=baseline_run,
+        candidate_id="cfg-alpha",
+        config_path=str(tmp_path / "candidate_alpha.yaml"),
+        replay_report="candidate_alpha.replay.json",
+    )
+    (tmp_path / "candidate_alpha.yaml").write_text("candidate: alpha\n", encoding="utf-8")
+
+    right_report = right_run / "candidate_beta.replay.json"
+    right_report.write_text("{}", encoding="utf-8")
+
+    resolved = factory_run._resolve_replay_equivalence_baseline_path(
+        "backtest",
+        baseline_path=baseline_run / "replays" / "candidate_alpha.replay.json",
+        right_report=right_report,
+        summary={"config_id": "cfg-beta", "config_path": str(tmp_path / "candidate_beta.yaml")},
+    )
+    assert resolved.name == "__missing_replay_equivalence_baseline__.json"
+    assert resolved.parent == baseline_run
+
+
 def test_factory_run_resolve_baseline_run_dir_uses_metadata_match(tmp_path: Path) -> None:
     baseline_run = tmp_path / "baseline_run"
     right_dir = tmp_path / "right"
     baseline_run.mkdir()
     right_dir.mkdir()
+    (tmp_path / "candidate_beta.yaml").write_text("candidate: beta\n", encoding="utf-8")
 
     _write_run_metadata(
         run_dir=baseline_run,
@@ -314,8 +344,6 @@ def test_factory_run_resolve_baseline_run_dir_uses_metadata_match(tmp_path: Path
     (baseline_run / "replays" / "candidate_beta.replay.json").write_text("{}", encoding="utf-8")
     right_report = right_dir / "candidate_beta.replay.json"
     right_report.write_text("{}", encoding="utf-8")
-
-    (tmp_path / "candidate_beta.yaml").write_text("candidate: beta\n", encoding="utf-8")
 
     resolved = factory_run._resolve_replay_equivalence_baseline_path(
         "backtest",
@@ -506,3 +534,126 @@ def test_factory_run_replay_equivalence_auto_fallback_recovers_stale_pinned_base
     assert summary["replay_equivalence_status"] == "pass"
     assert summary["replay_equivalence_baseline_source"] == "auto_fallback"
     assert summary["replay_equivalence_baseline_path"] == str(good_run / "replays" / "candidate_alpha.replay.json")
+
+
+def test_factory_run_replay_equivalence_strong_identity_miss_seeds_in_strict_mode(
+    monkeypatch, tmp_path: Path
+) -> None:
+    baseline_run = tmp_path / "baseline_run"
+    right_run = tmp_path / "right_run"
+    baseline_run.mkdir(parents=True, exist_ok=True)
+    right_run.mkdir(parents=True, exist_ok=True)
+
+    cfg_alpha = tmp_path / "candidate_alpha.yaml"
+    cfg_alpha.write_text("candidate: alpha\n", encoding="utf-8")
+    _write_run_metadata(
+        run_dir=baseline_run,
+        candidate_id="cfg-alpha",
+        config_path=str(cfg_alpha),
+        replay_report="candidate_alpha.replay.json",
+    )
+    _write_trace(baseline_run / "replays" / "candidate_alpha.replay.json", TRACE)
+
+    right_report = right_run / "candidate_beta.replay.json"
+    _write_trace(right_report, TRACE)
+
+    monkeypatch.setenv(
+        "AI_QUANT_REPLAY_EQUIVALENCE_BASELINE",
+        str(baseline_run / "replays" / "candidate_alpha.replay.json"),
+    )
+    monkeypatch.setenv("AI_QUANT_REPLAY_EQUIVALENCE_STRICT", "1")
+    monkeypatch.setenv("AI_QUANT_REPLAY_EQUIVALENCE_AUTO_SEED", "1")
+    monkeypatch.setenv("AI_QUANT_REPLAY_EQUIVALENCE_BASELINE_POLICY", "pinned_only")
+    _force_mode(monkeypatch, "backtest")
+
+    summary = {
+        "config_id": "cfg-beta",
+        "config_path": str(tmp_path / "candidate_beta.yaml"),
+    }
+    ok = _run_replay_equivalence_check(right_report=right_report, summary=summary)
+
+    assert ok
+    assert summary["replay_equivalence_status"] == "missing_baseline"
+    assert summary["replay_equivalence_seed_mode"] is True
+    assert summary["replay_equivalence_seed_reason"] == "baseline_missing"
+
+
+def test_factory_run_replay_equivalence_strong_identity_match_still_fails_on_mismatch(
+    monkeypatch, tmp_path: Path
+) -> None:
+    baseline_run = tmp_path / "baseline_run"
+    right_run = tmp_path / "right_run"
+    baseline_run.mkdir(parents=True, exist_ok=True)
+    right_run.mkdir(parents=True, exist_ok=True)
+
+    cfg_alpha = tmp_path / "candidate_alpha.yaml"
+    cfg_alpha.write_text("candidate: alpha\n", encoding="utf-8")
+    _write_run_metadata(
+        run_dir=baseline_run,
+        candidate_id="cfg-alpha",
+        config_path=str(cfg_alpha),
+        replay_report="candidate_alpha.replay.json",
+    )
+    _write_trace(baseline_run / "replays" / "candidate_alpha.replay.json", TRACE)
+
+    changed = json.loads(json.dumps(TRACE))
+    changed["decision_diagnostics"][0]["event_id"] = 99
+    right_report = right_run / "candidate_alpha.replay.json"
+    _write_trace(right_report, changed)
+
+    monkeypatch.setenv(
+        "AI_QUANT_REPLAY_EQUIVALENCE_BASELINE",
+        str(baseline_run / "replays" / "candidate_alpha.replay.json"),
+    )
+    monkeypatch.setenv("AI_QUANT_REPLAY_EQUIVALENCE_STRICT", "1")
+    monkeypatch.setenv("AI_QUANT_REPLAY_EQUIVALENCE_AUTO_SEED", "1")
+    monkeypatch.setenv("AI_QUANT_REPLAY_EQUIVALENCE_BASELINE_POLICY", "pinned_only")
+    _force_mode(monkeypatch, "backtest")
+
+    summary = {"config_id": "cfg-alpha", "config_path": str(cfg_alpha)}
+    ok = _run_replay_equivalence_check(right_report=right_report, summary=summary)
+
+    assert not ok
+    assert summary["replay_equivalence_status"] == "fail"
+    assert summary["replay_equivalence_failure_code"] == "mismatch"
+
+
+def test_factory_run_replay_contract_v2_fingerprint_tracks_input_and_range() -> None:
+    args_obj = {
+        "profile": "daily",
+        "interval": "30m",
+        "sweep_spec": "",
+        "shortlist_modes": "growth,balanced",
+    }
+    contract_base = factory_run._build_replay_equivalence_contract(
+        args_obj=args_obj,
+        mode="backtest",
+        input_fingerprints={
+            "candles_db": {"fingerprint": "candles-a", "count": 3},
+            "funding_db": {"fingerprint": "funding-a", "count": 1},
+        },
+        sweep_effective_time_range_ms={"from_ts_ms": 1000, "to_ts_ms": 2000},
+    )
+    contract_input_drift = factory_run._build_replay_equivalence_contract(
+        args_obj=args_obj,
+        mode="backtest",
+        input_fingerprints={
+            "candles_db": {"fingerprint": "candles-b", "count": 3},
+            "funding_db": {"fingerprint": "funding-a", "count": 1},
+        },
+        sweep_effective_time_range_ms={"from_ts_ms": 1000, "to_ts_ms": 2000},
+    )
+    contract_range_drift = factory_run._build_replay_equivalence_contract(
+        args_obj=args_obj,
+        mode="backtest",
+        input_fingerprints={
+            "candles_db": {"fingerprint": "candles-a", "count": 3},
+            "funding_db": {"fingerprint": "funding-a", "count": 1},
+        },
+        sweep_effective_time_range_ms={"from_ts_ms": 1000, "to_ts_ms": 2500},
+    )
+
+    assert contract_base["schema_version"] == 2
+    assert contract_base["payload"]["schema_version"] == 2
+    assert contract_base["fingerprint"] != contract_input_drift["fingerprint"]
+    assert contract_base["fingerprint"] != contract_range_drift["fingerprint"]

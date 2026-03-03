@@ -1527,7 +1527,7 @@ def _replay_equivalence_env_var(env_name: str, mode: str) -> str | None:
     return raw or None
 
 
-_REPLAY_EQUIVALENCE_CONTRACT_SCHEMA_VERSION = 1
+_REPLAY_EQUIVALENCE_CONTRACT_SCHEMA_VERSION = 2
 
 
 def _replay_equivalence_auto_seed(*, mode: str) -> bool:
@@ -1585,7 +1585,31 @@ def _normalise_shortlist_modes_list(raw: Any) -> list[str]:
     return out
 
 
-def _build_replay_equivalence_contract_payload(*, args_obj: dict[str, Any], mode: str) -> dict[str, Any]:
+def _normalise_replay_contract_input_fp(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"fingerprint": "", "count": 0}
+    return {
+        "fingerprint": str(value.get("fingerprint", "") or ""),
+        "count": int(_coerce_int(value.get("count"), 0) or 0),
+    }
+
+
+def _normalise_replay_contract_sweep_range(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"from_ts_ms": 0, "to_ts_ms": 0}
+    return {
+        "from_ts_ms": int(_coerce_int(value.get("from_ts_ms"), 0) or 0),
+        "to_ts_ms": int(_coerce_int(value.get("to_ts_ms"), 0) or 0),
+    }
+
+
+def _build_replay_equivalence_contract_payload(
+    *,
+    args_obj: dict[str, Any],
+    mode: str,
+    input_fingerprints: dict[str, Any] | None = None,
+    sweep_effective_time_range_ms: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     raw_sweep_spec = str(args_obj.get("sweep_spec", "") or "").strip()
     if raw_sweep_spec:
         resolved = _resolve_path_for_backtester(raw_sweep_spec)
@@ -1615,6 +1639,8 @@ def _build_replay_equivalence_contract_payload(*, args_obj: dict[str, Any], mode
                 break
     except Exception:
         pass
+    inputs = input_fingerprints if isinstance(input_fingerprints, dict) else {}
+    sweep_range = _normalise_replay_contract_sweep_range(sweep_effective_time_range_ms)
     return {
         "schema_version": int(_REPLAY_EQUIVALENCE_CONTRACT_SCHEMA_VERSION),
         "mode": _normalise_replay_equivalence_mode(mode),
@@ -1646,11 +1672,27 @@ def _build_replay_equivalence_contract_payload(*, args_obj: dict[str, Any], mode
         "factory_run_sha256": str(factory_fp.get("sha256", "") if bool(factory_fp.get("exists", False)) else ""),
         "backtester_bin_sha256": bt_bin_sha256,
         "version": version_text,
+        "input_fingerprints": {
+            "candles_db": _normalise_replay_contract_input_fp(inputs.get("candles_db")),
+            "funding_db": _normalise_replay_contract_input_fp(inputs.get("funding_db")),
+        },
+        "sweep_effective_time_range_ms": sweep_range,
     }
 
 
-def _build_replay_equivalence_contract(*, args_obj: dict[str, Any], mode: str) -> dict[str, Any]:
-    payload = _build_replay_equivalence_contract_payload(args_obj=args_obj, mode=mode)
+def _build_replay_equivalence_contract(
+    *,
+    args_obj: dict[str, Any],
+    mode: str,
+    input_fingerprints: dict[str, Any] | None = None,
+    sweep_effective_time_range_ms: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = _build_replay_equivalence_contract_payload(
+        args_obj=args_obj,
+        mode=mode,
+        input_fingerprints=input_fingerprints,
+        sweep_effective_time_range_ms=sweep_effective_time_range_ms,
+    )
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
     return {
         "schema_version": int(_REPLAY_EQUIVALENCE_CONTRACT_SCHEMA_VERSION),
@@ -1661,13 +1703,24 @@ def _build_replay_equivalence_contract(*, args_obj: dict[str, Any], mode: str) -
 
 
 def _replay_equivalence_contract_from_meta(meta: dict[str, Any], *, mode: str) -> dict[str, Any] | None:
+    args_obj = meta.get("args")
+    if isinstance(args_obj, dict):
+        input_fingerprints = meta.get("input_fingerprints") if isinstance(meta.get("input_fingerprints"), dict) else {}
+        sweep_effective_time_range_ms = (
+            meta.get("sweep_effective_time_range_ms")
+            if isinstance(meta.get("sweep_effective_time_range_ms"), dict)
+            else {}
+        )
+        return _build_replay_equivalence_contract(
+            args_obj=args_obj,
+            mode=mode,
+            input_fingerprints=input_fingerprints,
+            sweep_effective_time_range_ms=sweep_effective_time_range_ms,
+        )
     existing = meta.get("replay_equivalence_contract")
     if isinstance(existing, dict) and str(existing.get("fingerprint", "")).strip():
         return existing
-    args_obj = meta.get("args")
-    if not isinstance(args_obj, dict):
-        return None
-    return _build_replay_equivalence_contract(args_obj=args_obj, mode=mode)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1806,6 +1859,50 @@ def _summary_config_sha256(summary: dict[str, Any]) -> str:
     return _sha256_file_optional(p)
 
 
+_IDENTITY_EMPTY_TOKENS = {"", "unknown", "none", "null", "n/a", "na", "n\\a", "-"}
+
+
+def _normalise_identity_value(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if raw.lower() in _IDENTITY_EMPTY_TOKENS:
+        return ""
+    return raw
+
+
+def _replay_identity_from_summary(summary: dict[str, Any]) -> dict[str, str]:
+    return {
+        "config_id": _normalise_identity_value(summary.get("config_id")),
+        "config_sha256": _normalise_identity_value(_summary_config_sha256(summary)),
+        "overrides_key": _normalise_identity_value(summary.get("overrides_key")),
+    }
+
+
+def _replay_identity_from_row(row: dict[str, Any]) -> dict[str, str]:
+    return {
+        "config_id": _normalise_identity_value(row.get("config_id")),
+        "config_sha256": _normalise_identity_value(row.get("config_sha256")),
+        "overrides_key": _normalise_identity_value(row.get("overrides_key")),
+    }
+
+
+def _summary_requires_strong_identity(summary: dict[str, Any]) -> bool:
+    ident = _replay_identity_from_summary(summary)
+    return any(bool(v) for v in ident.values())
+
+
+def _row_matches_strong_identity(*, summary_identity: dict[str, str], row_identity: dict[str, str]) -> bool:
+    compared = 0
+    for key, wanted in summary_identity.items():
+        if not wanted:
+            continue
+        compared += 1
+        if row_identity.get(key, "") != wanted:
+            return False
+    return compared > 0
+
+
 def _candidate_baseline_match_score(
     *,
     row: dict[str, Any],
@@ -1814,16 +1911,17 @@ def _candidate_baseline_match_score(
 ) -> int:
     score = 0
 
-    wanted_config_id = str(summary.get("config_id", "") or "").strip()
+    summary_identity = _replay_identity_from_summary(summary)
+    wanted_config_id = summary_identity.get("config_id", "")
     if wanted_config_id and str(row.get("config_id", "") or "").strip() == wanted_config_id:
         score += 100
 
-    wanted_cfg_sha = _summary_config_sha256(summary)
+    wanted_cfg_sha = summary_identity.get("config_sha256", "")
     row_cfg_sha = str(row.get("config_sha256", "") or "").strip()
     if wanted_cfg_sha and row_cfg_sha and wanted_cfg_sha == row_cfg_sha:
         score += 90
 
-    wanted_overrides = str(summary.get("overrides_key", "") or "").strip()
+    wanted_overrides = summary_identity.get("overrides_key", "")
     row_overrides = str(row.get("overrides_key", "") or "").strip()
     if wanted_overrides and row_overrides and wanted_overrides == row_overrides:
         score += 60
@@ -1858,6 +1956,11 @@ def _resolve_candidate_replay_baseline_from_rows(
     summary: dict[str, Any],
     right_report: Path,
 ) -> Path | None:
+    summary_identity = _replay_identity_from_summary(summary)
+    strong_identity_required = any(bool(v) for v in summary_identity.values())
+    summary["replay_equivalence_identity_mode"] = "strong" if strong_identity_required else "weak"
+    summary["replay_equivalence_identity_keys"] = [k for k, v in summary_identity.items() if v]
+
     scored: list[tuple[int, int, Path]] = []
     for idx, row in enumerate(rows):
         if not isinstance(row, dict):
@@ -1865,6 +1968,10 @@ def _resolve_candidate_replay_baseline_from_rows(
         baseline_path = _coerce_replay_report_path(row.get("replay_report_path"), run_dir=run_dir)
         if baseline_path is None or not baseline_path.is_file():
             continue
+        if strong_identity_required:
+            row_identity = _replay_identity_from_row(row)
+            if not _row_matches_strong_identity(summary_identity=summary_identity, row_identity=row_identity):
+                continue
         score = _candidate_baseline_match_score(row=row, summary=summary, right_report=right_report)
         scored.append((int(score), -int(idx), baseline_path))
 
@@ -1874,7 +1981,12 @@ def _resolve_candidate_replay_baseline_from_rows(
         if int(top_score) > 0:
             return top_path
 
-    # Backward-compatible final fallback by replay file name.
+    # Strong identity mode is fail-closed: do not compare against a weak fallback candidate.
+    if strong_identity_required:
+        summary["replay_equivalence_identity_miss_reason"] = "no_strong_identity_match"
+        return None
+
+    # Backward-compatible fallback by replay file name.
     return _candidate_baseline_in_directory(run_dir / "replays", right_report=right_report)
 
 
@@ -2145,6 +2257,7 @@ def _resolve_replay_equivalence_baseline_path(
     """
 
     if baseline_path.is_file():
+        strong_identity_required = _summary_requires_strong_identity(summary)
         # 1) Use same-baseline file when the caller explicitly passes one file.
         # 2) When this file belongs to a factory run, prefer run-level match by config.
         # 3) Fall back to a sibling replay file with the same candidate name.
@@ -2157,8 +2270,15 @@ def _resolve_replay_equivalence_baseline_path(
             )
             if resolved is not None:
                 return resolved
+            if strong_identity_required:
+                summary.setdefault("replay_equivalence_identity_miss_reason", "no_strong_identity_match")
+                return run_dir / "__missing_replay_equivalence_baseline__.json"
 
-        if baseline_path.name.endswith(".replay.json") and baseline_path.name != right_report.name:
+        if (
+            not strong_identity_required
+            and baseline_path.name.endswith(".replay.json")
+            and baseline_path.name != right_report.name
+        ):
             sibling = _candidate_baseline_in_directory(baseline_path.parent, right_report=right_report)
             if sibling is not None:
                 return sibling
@@ -2168,16 +2288,21 @@ def _resolve_replay_equivalence_baseline_path(
     if not baseline_path.is_dir():
         return baseline_path
 
+    strong_identity_required = _summary_requires_strong_identity(summary)
     run_dir = _find_run_dir(baseline_path) or baseline_path
     if (run_dir / "run_metadata.json").is_file():
         resolved = _candidate_baseline_from_run_metadata(run_dir, summary=summary, right_report=right_report)
         if resolved is not None:
             return resolved
+        if strong_identity_required:
+            summary.setdefault("replay_equivalence_identity_miss_reason", "no_strong_identity_match")
+            return run_dir / "__missing_replay_equivalence_baseline__.json"
 
     replay_dir = run_dir / "replays"
-    sibling = _candidate_baseline_in_directory(replay_dir, right_report=right_report)
-    if sibling is not None:
-        return sibling
+    if not strong_identity_required:
+        sibling = _candidate_baseline_in_directory(replay_dir, right_report=right_report)
+        if sibling is not None:
+            return sibling
 
     return baseline_path / "__missing_replay_equivalence_baseline__.json"
 
@@ -3286,6 +3411,13 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
         "reproduce_source_run_dir": str(source_run_dir),
         "reproduce_source_git_head": str(source_meta.get("git_head", "")).strip(),
     }
+    source_sweep_range = (
+        source_meta.get("sweep_effective_time_range_ms")
+        if isinstance(source_meta.get("sweep_effective_time_range_ms"), dict)
+        else {}
+    )
+    if source_sweep_range:
+        meta["sweep_effective_time_range_ms"] = dict(source_sweep_range)
     if funding_db_bt:
         meta["funding_model"] = {
             "funding_db_path": str(funding_db_bt),
@@ -3293,6 +3425,10 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
             "applied_to_replay": bool(replay_uses_funding),
             "reason": "enabled_cpu_and_gpu_settlement_model",
         }
+    meta["input_fingerprints"] = {
+        "candles_db": _fingerprint_db_arg(str(candles_db_bt) if candles_db_bt else ""),
+        "funding_db": _fingerprint_db_arg(str(funding_db_bt) if funding_db_bt else ""),
+    }
     replay_mode = _replay_equivalence_mode()
     replay_contract = _replay_equivalence_contract_from_meta(meta, mode=replay_mode)
     if replay_contract is not None:
@@ -3388,6 +3524,25 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
             "--output",
             str(out_json),
         ]
+        try:
+            sweep_range = (
+                meta.get("sweep_effective_time_range_ms")
+                if isinstance(meta.get("sweep_effective_time_range_ms"), dict)
+                else {}
+            )
+            from_ms = _coerce_int(sweep_range.get("from_ts_ms"), 0)
+            to_ms = _coerce_int(sweep_range.get("to_ts_ms"), 0)
+            if from_ms and to_ms:
+                replay_argv += ["--start-ts", str(int(from_ms)), "--end-ts", str(int(to_ms))]
+            else:
+                start_ts = str(source_args.get("start_ts", "") or "").strip()
+                end_ts = str(source_args.get("end_ts", "") or "").strip()
+                if start_ts:
+                    replay_argv += ["--start-ts", start_ts]
+                if end_ts:
+                    replay_argv += ["--end-ts", end_ts]
+        except Exception:
+            pass
         if candles_db_bt:
             replay_argv += [
                 "--candles-db",
@@ -3721,6 +3876,9 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(meta.get("input_fingerprints"), dict):
             meta["input_fingerprints"] = {}
         meta["input_fingerprints"].update(current_inputs)
+        replay_contract = _replay_equivalence_contract_from_meta(meta, mode=replay_mode)
+        if replay_contract is not None:
+            meta["replay_equivalence_contract"] = replay_contract
         gpu_path_requested = bool(args.gpu) or bool(getattr(args, "tpe", False))
         funding_for_pairing = bool(bt_funding_db)
         if bt_funding_db:
@@ -4255,6 +4413,9 @@ def main(argv: list[str] | None = None) -> int:
 
         # Update / (re)compute Step-4 parity contract once sweep inputs are known.
         try:
+            replay_contract = _replay_equivalence_contract_from_meta(meta, mode=replay_mode)
+            if replay_contract is not None:
+                meta["replay_equivalence_contract"] = replay_contract
             meta["step4_parity_contract"] = _build_step4_parity_contract(meta)
         except Exception:
             pass
