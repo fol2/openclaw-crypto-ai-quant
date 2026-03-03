@@ -1,4 +1,5 @@
 pub mod backtester;
+pub mod factory;
 pub mod manual_trade;
 
 use serde::{Deserialize, Serialize};
