@@ -328,6 +328,33 @@ def test_factory_run_resolve_baseline_strong_identity_miss_returns_missing_senti
     assert resolved.parent == baseline_run
 
 
+def test_factory_run_resolve_baseline_strong_identity_accepts_legacy_row_without_config_sha(tmp_path: Path) -> None:
+    baseline_run = tmp_path / "baseline_run"
+    right_run = tmp_path / "right_run"
+    baseline_run.mkdir()
+    right_run.mkdir()
+    cfg_alpha = tmp_path / "candidate_alpha.yaml"
+    cfg_alpha.write_text("candidate: alpha\n", encoding="utf-8")
+
+    _write_run_metadata(
+        run_dir=baseline_run,
+        candidate_id="cfg-alpha",
+        config_path=str(cfg_alpha),
+        replay_report="candidate_alpha.replay.json",
+        candidate_extra={"config_sha256": ""},
+    )
+    right_report = right_run / "candidate_alpha.replay.json"
+    right_report.write_text("{}", encoding="utf-8")
+
+    resolved = factory_run._resolve_replay_equivalence_baseline_path(
+        "backtest",
+        baseline_path=baseline_run / "replays" / "candidate_alpha.replay.json",
+        right_report=right_report,
+        summary={"config_id": "cfg-alpha", "config_path": str(cfg_alpha)},
+    )
+    assert resolved == baseline_run / "replays" / "candidate_alpha.replay.json"
+
+
 def test_factory_run_resolve_baseline_run_dir_uses_metadata_match(tmp_path: Path) -> None:
     baseline_run = tmp_path / "baseline_run"
     right_dir = tmp_path / "right"
@@ -657,3 +684,28 @@ def test_factory_run_replay_contract_v2_fingerprint_tracks_input_and_range() -> 
     assert contract_base["payload"]["schema_version"] == 2
     assert contract_base["fingerprint"] != contract_input_drift["fingerprint"]
     assert contract_base["fingerprint"] != contract_range_drift["fingerprint"]
+
+
+def test_factory_run_replay_contract_from_meta_prefers_existing_contract() -> None:
+    meta = {
+        "args": {"profile": "daily", "interval": "30m", "sweep_spec": ""},
+        "input_fingerprints": {
+            "candles_db": {"fingerprint": "candles-a", "count": 2},
+            "funding_db": {"fingerprint": "funding-a", "count": 1},
+        },
+        "sweep_effective_time_range_ms": {"from_ts_ms": 1000, "to_ts_ms": 2000},
+        "replay_equivalence_contract": {
+            "schema_version": 2,
+            "mode": "backtest",
+            "fingerprint": "persisted-fingerprint",
+            "payload": {"schema_version": 2},
+        },
+    }
+
+    kept = factory_run._replay_equivalence_contract_from_meta(meta, mode="backtest")
+    rebuilt = factory_run._replay_equivalence_contract_from_meta(meta, mode="backtest", prefer_existing=False)
+
+    assert kept is not None
+    assert rebuilt is not None
+    assert kept["fingerprint"] == "persisted-fingerprint"
+    assert rebuilt["fingerprint"] != "persisted-fingerprint"

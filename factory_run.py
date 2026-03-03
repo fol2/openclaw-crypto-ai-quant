@@ -1702,7 +1702,15 @@ def _build_replay_equivalence_contract(
     }
 
 
-def _replay_equivalence_contract_from_meta(meta: dict[str, Any], *, mode: str) -> dict[str, Any] | None:
+def _replay_equivalence_contract_from_meta(
+    meta: dict[str, Any],
+    *,
+    mode: str,
+    prefer_existing: bool = True,
+) -> dict[str, Any] | None:
+    existing = meta.get("replay_equivalence_contract")
+    if prefer_existing and isinstance(existing, dict) and str(existing.get("fingerprint", "")).strip():
+        return existing
     args_obj = meta.get("args")
     if isinstance(args_obj, dict):
         input_fingerprints = meta.get("input_fingerprints") if isinstance(meta.get("input_fingerprints"), dict) else {}
@@ -1717,7 +1725,6 @@ def _replay_equivalence_contract_from_meta(meta: dict[str, Any], *, mode: str) -
             input_fingerprints=input_fingerprints,
             sweep_effective_time_range_ms=sweep_effective_time_range_ms,
         )
-    existing = meta.get("replay_equivalence_contract")
     if isinstance(existing, dict) and str(existing.get("fingerprint", "")).strip():
         return existing
     return None
@@ -1897,8 +1904,11 @@ def _row_matches_strong_identity(*, summary_identity: dict[str, str], row_identi
     for key, wanted in summary_identity.items():
         if not wanted:
             continue
+        actual = row_identity.get(key, "")
+        if not actual:
+            continue
         compared += 1
-        if row_identity.get(key, "") != wanted:
+        if actual != wanted:
             return False
     return compared > 0
 
@@ -3792,7 +3802,7 @@ def main(argv: list[str] | None = None) -> int:
             }
 
         replay_mode = _replay_equivalence_mode()
-        replay_contract = _replay_equivalence_contract_from_meta(meta, mode=replay_mode)
+        replay_contract = _replay_equivalence_contract_from_meta(meta, mode=replay_mode, prefer_existing=False)
         if replay_contract is not None:
             meta["replay_equivalence_contract"] = replay_contract
 
@@ -3876,7 +3886,7 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(meta.get("input_fingerprints"), dict):
             meta["input_fingerprints"] = {}
         meta["input_fingerprints"].update(current_inputs)
-        replay_contract = _replay_equivalence_contract_from_meta(meta, mode=replay_mode)
+        replay_contract = _replay_equivalence_contract_from_meta(meta, mode=replay_mode, prefer_existing=False)
         if replay_contract is not None:
             meta["replay_equivalence_contract"] = replay_contract
         gpu_path_requested = bool(args.gpu) or bool(getattr(args, "tpe", False))
@@ -4413,7 +4423,7 @@ def main(argv: list[str] | None = None) -> int:
 
         # Update / (re)compute Step-4 parity contract once sweep inputs are known.
         try:
-            replay_contract = _replay_equivalence_contract_from_meta(meta, mode=replay_mode)
+            replay_contract = _replay_equivalence_contract_from_meta(meta, mode=replay_mode, prefer_existing=False)
             if replay_contract is not None:
                 meta["replay_equivalence_contract"] = replay_contract
             meta["step4_parity_contract"] = _build_step4_parity_contract(meta)
