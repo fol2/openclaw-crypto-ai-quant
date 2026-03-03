@@ -26,6 +26,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Decision event match bucket in milliseconds (1 = exact millisecond match)",
     )
     parser.add_argument("--fail-on-mismatch", action="store_true", default=False, help="Return exit code 1 on strict mismatch")
+    parser.add_argument(
+        "--include-runtime-only-blocked",
+        action="store_true",
+        default=False,
+        help=(
+            "Include runtime-only blocked decisions (reason_code=execution_would) in parity comparison. "
+            "Default excludes them because backtester has no equivalent."
+        ),
+    )
     return parser
 
 
@@ -71,6 +80,7 @@ def _load_decision_rows(
     source_name: str,
     from_ts: int | None,
     to_ts: int | None,
+    include_runtime_only_blocked: bool,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
     conn = _connect_ro(db_path)
     try:
@@ -88,6 +98,11 @@ def _load_decision_rows(
             if _column_exists(conn, "decision_events", "config_fingerprint")
             else "NULL AS config_fingerprint"
         )
+        reason_code_col = (
+            "reason_code"
+            if _column_exists(conn, "decision_events", "reason_code")
+            else "NULL AS reason_code"
+        )
 
         clauses: list[str] = []
         params: list[Any] = []
@@ -101,7 +116,7 @@ def _load_decision_rows(
 
         sql = (
             "SELECT id, timestamp_ms, symbol, event_type, status, decision_phase, "
-            f"triggered_by, action_taken, rejection_reason, {config_col}, trade_id "
+            f"triggered_by, action_taken, rejection_reason, {reason_code_col}, {config_col}, trade_id "
             f"FROM decision_events {where_sql} ORDER BY timestamp_ms ASC, id ASC"
         )
         rows = conn.execute(sql, tuple(params)).fetchall()
@@ -109,10 +124,29 @@ def _load_decision_rows(
         conn.close()
 
     out: list[dict[str, Any]] = []
+    runtime_only_excluded = 0
     for row in rows:
         ts_ms = int(row["timestamp_ms"] or 0)
         symbol = _norm_text(row["symbol"], lower=False).upper()
         if ts_ms <= 0 or not symbol:
+            continue
+
+        status = _norm_text(row["status"])
+        reason_code = _norm_text(row["reason_code"])
+        rejection_reason = _norm_text(row["rejection_reason"], lower=False)
+        rejection_reason_l = _norm_text(rejection_reason)
+        runtime_only_blocked = bool(
+            status == "blocked"
+            and (
+                reason_code == "execution_would"
+                or (not reason_code and rejection_reason_l.startswith("would_send:"))
+            )
+        )
+        if (
+            not include_runtime_only_blocked
+            and runtime_only_blocked
+        ):
+            runtime_only_excluded += 1
             continue
 
         out.append(
@@ -122,11 +156,12 @@ def _load_decision_rows(
                 "timestamp_ms": ts_ms,
                 "symbol": symbol,
                 "event_type": _norm_text(row["event_type"]),
-                "status": _norm_text(row["status"]),
+                "status": status,
                 "decision_phase": _norm_text(row["decision_phase"]),
                 "triggered_by": _norm_text(row["triggered_by"]),
                 "action_taken": _norm_text(row["action_taken"]),
-                "rejection_reason": _norm_text(row["rejection_reason"], lower=False),
+                "rejection_reason": rejection_reason,
+                "reason_code": reason_code,
                 "config_fingerprint": _norm_text(row["config_fingerprint"]),
                 "trade_linked": row["trade_id"] is not None,
             }
@@ -135,6 +170,7 @@ def _load_decision_rows(
     counts = {
         "table_present": True,
         "row_count": len(out),
+        "runtime_only_excluded": int(runtime_only_excluded),
     }
     return out, counts, []
 
@@ -343,6 +379,7 @@ def main() -> int:
     from_ts = int(args.from_ts) if args.from_ts is not None else None
     to_ts = int(args.to_ts) if args.to_ts is not None else None
     timestamp_bucket_ms = max(1, int(args.timestamp_bucket_ms))
+    include_runtime_only_blocked = bool(args.include_runtime_only_blocked)
 
     if not live_db.exists():
         parser.error(f"live DB not found: {live_db}")
@@ -356,12 +393,14 @@ def main() -> int:
         source_name="live",
         from_ts=from_ts,
         to_ts=to_ts,
+        include_runtime_only_blocked=include_runtime_only_blocked,
     )
     paper_rows, paper_counts, paper_load_issues = _load_decision_rows(
         paper_db,
         source_name="paper",
         from_ts=from_ts,
         to_ts=to_ts,
+        include_runtime_only_blocked=include_runtime_only_blocked,
     )
 
     mismatches: list[dict[str, Any]] = []
@@ -435,10 +474,13 @@ def main() -> int:
             "from_ts": from_ts,
             "to_ts": to_ts,
             "timestamp_bucket_ms": timestamp_bucket_ms,
+            "include_runtime_only_blocked": include_runtime_only_blocked,
         },
         "counts": {
             "live_decision_rows": int(live_counts.get("row_count") or 0),
             "paper_decision_rows": int(paper_counts.get("row_count") or 0),
+            "live_runtime_only_excluded": int(live_counts.get("runtime_only_excluded") or 0),
+            "paper_runtime_only_excluded": int(paper_counts.get("runtime_only_excluded") or 0),
             **compare_summary,
             "mismatch_total": len(mismatches),
         },

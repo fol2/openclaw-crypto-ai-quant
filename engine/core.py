@@ -1698,6 +1698,9 @@ class UnifiedEngine:
         self._last_analyze_ts: dict[str, int] = {}  # symbol → wall-clock bucket
         self._exit_reanalyze_interval_s: float = 0.0
         self._last_exit_ts: dict[str, int] = {}  # symbol → wall-clock bucket (exit)
+        # Runtime kernel event cadence keys by symbol.
+        self._runtime_kernel_last_entry_key: dict[str, int] = {}
+        self._runtime_kernel_last_exit_key: dict[str, int] = {}
         self._refresh_engine_config()  # populate from initial YAML
 
         # Optional: audit sampling for NEUTRAL signals (helps debug "why no entries" regimes).
@@ -1904,12 +1907,79 @@ class UnifiedEngine:
             logger.debug("failed to get candle key for %s", symbol, exc_info=True)
             return None
 
+    def _runtime_interval_key_hint(self, symbol: str, *, interval: str) -> int | None:
+        """Runtime event key for an arbitrary interval."""
+        iv = str(interval or "").strip().lower()
+        if not iv or iv == "mid":
+            iv = self.interval
+        try:
+            if self._signal_on_candle_close:
+                return self.market.get_last_closed_candle_key(
+                    symbol,
+                    interval=iv,
+                    grace_ms=int(self._candle_close_grace_ms),
+                )
+            return self.market.get_latest_candle_open_key(symbol, interval=iv)
+        except Exception:
+            logger.debug("failed to get runtime candle key for %s@%s", symbol, iv, exc_info=True)
+            return None
+
+    def _runtime_interval_price(
+        self,
+        *,
+        symbol: str,
+        interval: str,
+        key_hint: int | None,
+        fallback_price: float,
+        fallback_ts_ms: int,
+    ) -> tuple[float, int]:
+        """Best-effort close price/timestamp aligned to the runtime interval."""
+        iv = str(interval or "").strip().lower()
+        if not iv or iv == "mid":
+            iv = self.interval
+
+        try:
+            df_iv = self.market.get_candles_df(symbol, interval=iv, min_rows=2)
+        except Exception:
+            df_iv = None
+        if df_iv is None or df_iv.empty:
+            return float(fallback_price), int(fallback_ts_ms)
+
+        row = df_iv.iloc[-1]
+        key_col = "T" if self._signal_on_candle_close and "T" in df_iv.columns else "timestamp"
+        if key_hint is not None and key_col in df_iv.columns:
+            try:
+                series = pd.to_numeric(df_iv[key_col], errors="coerce")
+                matches = df_iv.loc[series == int(key_hint)]
+                if matches is not None and not matches.empty:
+                    row = matches.iloc[-1]
+            except Exception:
+                logger.debug("runtime interval key match failed for %s@%s", symbol, iv, exc_info=True)
+
+        price = _finite_float_or_default(row.get("Close"), float(fallback_price))
+        if price <= 0.0:
+            price = float(fallback_price)
+
+        ts_source = row.get("T" if self._signal_on_candle_close else "timestamp")
+        ts_ms = None
+        try:
+            if ts_source is not None:
+                ts_ms = int(float(ts_source))
+        except (TypeError, ValueError, OverflowError):
+            ts_ms = None
+        if ts_ms is None or ts_ms <= 0:
+            ts_ms = int(key_hint if key_hint is not None else fallback_ts_ms)
+
+        return float(price), int(ts_ms)
+
     def _refresh_engine_config(self) -> None:
         """Re-read hot-reloadable engine params from YAML (entry_interval, exit_interval).
 
         Called at init and after every strategy.maybe_reload() in the main loop.
         """
         ecfg = self._ecfg((self.strategy.get_config("__GLOBAL__") or {}))
+        prev_entry_iv = str(self._entry_interval or "")
+        prev_exit_iv = str(self._exit_interval or "")
 
         # entry_interval — determines reanalyze cadence
         entry_iv = self._cfg_str(ecfg, "entry_interval", "ENTRY_INTERVAL", "")
@@ -1934,6 +2004,12 @@ class UnifiedEngine:
         else:
             # No sub-bar exit interval — fall back to entry cadence
             self._exit_reanalyze_interval_s = self._reanalyze_interval_s
+
+        # Interval changes invalidate previously emitted runtime event keys.
+        if prev_entry_iv != str(self._entry_interval or ""):
+            self._runtime_kernel_last_entry_key.clear()
+        if prev_exit_iv != str(self._exit_interval or ""):
+            self._runtime_kernel_last_exit_key.clear()
 
     def _reanalyze_due(self, symbol: str) -> bool:
         """Return True when the wall-clock interval bucket has changed for *symbol*.
@@ -1996,14 +2072,21 @@ class UnifiedEngine:
     ) -> list[dict[str, Any]]:
         """Materialise canonical Rust MarketEvent payloads for kernel-only mode.
 
-        Events are generated from runtime candles and include full evaluate payloads
-        (indicator snapshot + gate result + EMA-slow slope). For open positions where
-        candles are temporarily unavailable, a price_update fallback is emitted so
-        exit checks can still advance on price movement.
+        Events are generated at entry/exit interval key boundaries and include full
+        evaluate payloads (indicator snapshot + gate result + EMA-slow slope).
+        For open positions where candles are temporarily unavailable, a price_update
+        fallback is emitted so exit checks can still advance on price movement.
         """
         events: list[dict[str, Any]] = []
         btc_bullish = self._btc_ctx.get("btc_bullish")
         event_id_seed = int(max(1, int(now_ts_ms))) * 1000
+        entry_iv = str(self._entry_interval or self.interval or "").strip().lower() or self.interval
+        exit_iv_raw = str(self._exit_interval or "").strip().lower()
+        exit_iv = (
+            str(self.interval)
+            if (not exit_iv_raw or exit_iv_raw == "mid")
+            else exit_iv_raw
+        )
 
         for idx, sym in enumerate(symbols):
             sym_u = str(sym or "").strip().upper()
@@ -2012,23 +2095,63 @@ class UnifiedEngine:
             if sym_u in not_ready_symbols and sym_u not in open_symbols:
                 continue
 
+            has_open = sym_u in open_symbols
+            entry_key = self._runtime_interval_key_hint(sym_u, interval=entry_iv)
+            exit_key = self._runtime_interval_key_hint(sym_u, interval=exit_iv)
+            due_entry = entry_key is not None and int(entry_key) != int(
+                self._runtime_kernel_last_entry_key.get(sym_u, -1)
+            )
+            # Safety net: when an exit candle key cannot be resolved (for example transient
+            # candle fetch lag), keep open positions eligible for evaluation instead of stalling
+            # exit checks until the next successful candle fetch.
+            due_exit = bool(
+                has_open
+                and (
+                    exit_key is None
+                    or int(exit_key) != int(self._runtime_kernel_last_exit_key.get(sym_u, -1))
+                )
+            )
+
+            # Closed symbols only re-evaluate on entry interval key advances.
+            if (not has_open) and (not due_entry):
+                continue
+            # Open symbols evaluate when either entry or exit cadence advances.
+            if has_open and (not due_entry) and (not due_exit):
+                continue
+
+            trigger_iv = entry_iv
+            trigger_key = entry_key
+            if has_open and due_exit:
+                use_exit = True
+                if due_entry and entry_key is not None and exit_key is not None:
+                    use_exit = int(exit_key) >= int(entry_key)
+                if use_exit:
+                    trigger_iv = exit_iv
+                    trigger_key = exit_key
+
             df = self.market.get_candles_df(sym_u, interval=self.interval, min_rows=self.lookback_bars)
             if df is None or df.empty or len(df) < 20:
                 # Fallback path for open symbols: emit a price_update so exits can keep evaluating.
-                if sym_u in open_symbols:
+                if has_open:
                     quote = self.market.get_mid_price(sym_u, max_age_s=10.0, interval=self.interval)
                     px = _finite_float_or_default(getattr(quote, "price", 0.0) if quote is not None else 0.0, 0.0)
                     if px > 0.0:
+                        ts_ms = int(trigger_key if trigger_key is not None else now_ts_ms)
                         events.append(
                             {
                                 "schema_version": 1,
                                 "event_id": event_id_seed + idx + 1,
-                                "timestamp_ms": int(now_ts_ms),
+                                "timestamp_ms": ts_ms,
                                 "symbol": sym_u,
                                 "signal": "price_update",
                                 "price": px,
+                                "entry_key": int(trigger_key) if trigger_key is not None else None,
                             }
                         )
+                        if entry_key is not None and due_entry:
+                            self._runtime_kernel_last_entry_key[sym_u] = int(entry_key)
+                        if exit_key is not None and due_exit:
+                            self._runtime_kernel_last_exit_key[sym_u] = int(exit_key)
                 continue
 
             try:
@@ -2051,6 +2174,16 @@ class UnifiedEngine:
             if close_px <= 0.0:
                 continue
 
+            event_px, event_ts_ms = self._runtime_interval_price(
+                symbol=sym_u,
+                interval=trigger_iv,
+                key_hint=trigger_key,
+                fallback_price=float(close_px),
+                fallback_ts_ms=int(ts_ms),
+            )
+            if event_px <= 0.0:
+                continue
+
             ema_slow_slope_pct = _finite_float_or_default(
                 mei_alpha_v1.compute_ema_slow_slope(df, cfg=cfg),
                 0.0,
@@ -2069,15 +2202,20 @@ class UnifiedEngine:
                 {
                     "schema_version": 1,
                     "event_id": event_id_seed + idx + 1,
-                    "timestamp_ms": ts_ms,
+                    "timestamp_ms": int(event_ts_ms),
                     "symbol": sym_u,
                     "signal": "evaluate",
-                    "price": float(close_px),
+                    "price": float(event_px),
                     "indicators": snap,
                     "gate_result": gate_result,
                     "ema_slow_slope_pct": float(ema_slow_slope_pct),
+                    "entry_key": int(trigger_key) if trigger_key is not None else None,
                 }
             )
+            if entry_key is not None and due_entry:
+                self._runtime_kernel_last_entry_key[sym_u] = int(entry_key)
+            if exit_key is not None and due_exit:
+                self._runtime_kernel_last_exit_key[sym_u] = int(exit_key)
 
         return events
 
@@ -2953,36 +3091,75 @@ class UnifiedEngine:
                             _cde = _get_decision_event_fn()
                             if _cde:
                                 try:
+                                    _decision_status = "executed" if str(self.mode).lower() == "paper" else "hold"
+                                    _dispatch_state = "executed_sync" if _decision_status == "executed" else "pending_fill"
                                     _did = _cde(
                                         sym_u,
                                         "entry_signal",
-                                        "executed",
+                                        _decision_status,
                                         "execution",
                                         action_taken=act.lower(),
                                         context={
                                             "confidence": dec.confidence,
                                             "action": act,
                                             "source": "kernel_candle",
+                                            "dispatch_state": _dispatch_state,
                                         },
                                     )
                                 except Exception:
                                     logger.debug("decision event (entry_signal) failed for %s", sym_u, exc_info=True)
 
-                            self._decision_execute_trade(
-                                sym_u,
-                                signal,
-                                current_price,
-                                int(entry_key or now_ms()),
-                                conf,
-                                atr=float(now_series.get("ATR") or 0.0),
-                                indicators=now_series,
-                                action=act,
-                                target_size=dec.target_size,
-                                reason=dec.reason,
-                            )
+                            if _did and isinstance(now_series, dict):
+                                now_series["_decision_event_id"] = str(_did)
+                                now_series["_decision_action"] = str(act).strip().lower()
+                                _audit = now_series.get("audit")
+                                if isinstance(_audit, dict):
+                                    _audit2 = dict(_audit)
+                                    _audit2.setdefault("decision_event_id", str(_did))
+                                    _audit2.setdefault("decision_action", str(act).strip().lower())
+                                    now_series["audit"] = _audit2
 
-                            # TODO(AQC-801): link_decision_to_trade requires trade_id
-                            # from _record_trade(); needs _record_trade to return id first.
+                            _exec_result = None
+                            try:
+                                _exec_result = self._decision_execute_trade(
+                                    sym_u,
+                                    signal,
+                                    current_price,
+                                    int(entry_key or now_ms()),
+                                    conf,
+                                    atr=float(now_series.get("ATR") or 0.0),
+                                    indicators=now_series,
+                                    action=act,
+                                    target_size=dec.target_size,
+                                    reason=dec.reason,
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "⚠️ Engine decision execution dispatch error (entry): %s\n%s",
+                                    str(sym_u),
+                                    traceback.format_exc(),
+                                )
+
+                            if _did and str(self.mode).lower() != "paper" and (_exec_result is False or _exec_result is None):
+                                _cde_rej = _get_decision_event_fn()
+                                if _cde_rej:
+                                    try:
+                                        _cde_rej(
+                                            sym_u,
+                                            "entry_signal",
+                                            "rejected",
+                                            "execution",
+                                            parent_decision_id=str(_did),
+                                            action_taken=act.lower(),
+                                            rejection_reason="execution_dispatch_failed",
+                                            context={"action": act, "source": "kernel_candle"},
+                                        )
+                                    except Exception:
+                                        logger.debug(
+                                            "decision event (entry_signal rejected) failed for %s",
+                                            sym_u,
+                                            exc_info=True,
+                                        )
 
                             # BUG-E1: Set dedup key AFTER trade execution so a
                             # gate-blocked entry can retry on the next tick.
@@ -2995,36 +3172,75 @@ class UnifiedEngine:
                             _cde = _get_decision_event_fn()
                             if _cde:
                                 try:
+                                    _decision_status = "executed" if str(self.mode).lower() == "paper" else "hold"
+                                    _dispatch_state = "executed_sync" if _decision_status == "executed" else "pending_fill"
                                     _did = _cde(
                                         sym_u,
                                         "exit_check",
-                                        "executed",
+                                        _decision_status,
                                         "execution",
                                         action_taken=act.lower(),
                                         context={
                                             "confidence": dec.confidence,
                                             "action": act,
                                             "source": "kernel_candle",
+                                            "dispatch_state": _dispatch_state,
                                         },
                                     )
                                 except Exception:
                                     logger.debug("decision event (exit_check) failed for %s", sym_u, exc_info=True)
 
-                            self._decision_execute_trade(
-                                sym_u,
-                                signal,
-                                current_price,
-                                now_ms(),
-                                conf,
-                                atr=float(now_series.get("ATR") or 0.0),
-                                indicators=now_series,
-                                action=act,
-                                target_size=dec.target_size,
-                                reason=dec.reason,
-                            )
+                            if _did and isinstance(now_series, dict):
+                                now_series["_decision_event_id"] = str(_did)
+                                now_series["_decision_action"] = str(act).strip().lower()
+                                _audit = now_series.get("audit")
+                                if isinstance(_audit, dict):
+                                    _audit2 = dict(_audit)
+                                    _audit2.setdefault("decision_event_id", str(_did))
+                                    _audit2.setdefault("decision_action", str(act).strip().lower())
+                                    now_series["audit"] = _audit2
 
-                            # TODO(AQC-801): link_decision_to_trade requires trade_id
-                            # from _record_trade(); needs _record_trade to return id first.
+                            _exec_result = None
+                            try:
+                                _exec_result = self._decision_execute_trade(
+                                    sym_u,
+                                    signal,
+                                    current_price,
+                                    now_ms(),
+                                    conf,
+                                    atr=float(now_series.get("ATR") or 0.0),
+                                    indicators=now_series,
+                                    action=act,
+                                    target_size=dec.target_size,
+                                    reason=dec.reason,
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "⚠️ Engine decision execution dispatch error (exit): %s\n%s",
+                                    str(sym_u),
+                                    traceback.format_exc(),
+                                )
+
+                            if _did and str(self.mode).lower() != "paper" and (_exec_result is False or _exec_result is None):
+                                _cde_rej = _get_decision_event_fn()
+                                if _cde_rej:
+                                    try:
+                                        _cde_rej(
+                                            sym_u,
+                                            "exit_check",
+                                            "rejected",
+                                            "execution",
+                                            parent_decision_id=str(_did),
+                                            action_taken=act.lower(),
+                                            rejection_reason="execution_dispatch_failed",
+                                            context={"action": act, "source": "kernel_candle"},
+                                        )
+                                    except Exception:
+                                        logger.debug(
+                                            "decision event (exit_check rejected) failed for %s",
+                                            sym_u,
+                                            exc_info=True,
+                                        )
                     except SystemExit:
                         raise
                     except Exception:
