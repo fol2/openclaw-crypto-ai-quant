@@ -7,6 +7,7 @@
   import Sweep from './pages/Sweep.svelte';
   import Factory from './pages/Factory.svelte';
   import GridView from './pages/GridView.svelte';
+  import Statements from './pages/Statements.svelte';
   import System from './pages/System.svelte';
 
   let currentPage = $state(window.location.hash.slice(1) || 'dashboard');
@@ -55,6 +56,8 @@
     <Factory />
   {:else if currentPage === 'grid'}
     <GridView />
+  {:else if currentPage === 'statements'}
+    <Statements />
   {:else if currentPage === 'system'}
     <System />
   {:else}
