@@ -3119,18 +3119,26 @@ class UnifiedEngine:
                                     _audit2.setdefault("decision_action", str(act).strip().lower())
                                     now_series["audit"] = _audit2
 
-                            _exec_result = self._decision_execute_trade(
-                                sym_u,
-                                signal,
-                                current_price,
-                                int(entry_key or now_ms()),
-                                conf,
-                                atr=float(now_series.get("ATR") or 0.0),
-                                indicators=now_series,
-                                action=act,
-                                target_size=dec.target_size,
-                                reason=dec.reason,
-                            )
+                            _exec_result = None
+                            try:
+                                _exec_result = self._decision_execute_trade(
+                                    sym_u,
+                                    signal,
+                                    current_price,
+                                    int(entry_key or now_ms()),
+                                    conf,
+                                    atr=float(now_series.get("ATR") or 0.0),
+                                    indicators=now_series,
+                                    action=act,
+                                    target_size=dec.target_size,
+                                    reason=dec.reason,
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "⚠️ Engine decision execution dispatch error (entry): %s\n%s",
+                                    str(sym_u),
+                                    traceback.format_exc(),
+                                )
 
                             if _did and str(self.mode).lower() != "paper" and (_exec_result is False or _exec_result is None):
                                 _cde_rej = _get_decision_event_fn()
@@ -3192,18 +3200,26 @@ class UnifiedEngine:
                                     _audit2.setdefault("decision_action", str(act).strip().lower())
                                     now_series["audit"] = _audit2
 
-                            _exec_result = self._decision_execute_trade(
-                                sym_u,
-                                signal,
-                                current_price,
-                                now_ms(),
-                                conf,
-                                atr=float(now_series.get("ATR") or 0.0),
-                                indicators=now_series,
-                                action=act,
-                                target_size=dec.target_size,
-                                reason=dec.reason,
-                            )
+                            _exec_result = None
+                            try:
+                                _exec_result = self._decision_execute_trade(
+                                    sym_u,
+                                    signal,
+                                    current_price,
+                                    now_ms(),
+                                    conf,
+                                    atr=float(now_series.get("ATR") or 0.0),
+                                    indicators=now_series,
+                                    action=act,
+                                    target_size=dec.target_size,
+                                    reason=dec.reason,
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "⚠️ Engine decision execution dispatch error (exit): %s\n%s",
+                                    str(sym_u),
+                                    traceback.format_exc(),
+                                )
 
                             if _did and str(self.mode).lower() != "paper" and (_exec_result is False or _exec_result is None):
                                 _cde_rej = _get_decision_event_fn()
