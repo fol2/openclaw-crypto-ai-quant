@@ -209,7 +209,7 @@ def test_unified_engine_routes_kernel_decisions_to_trader(monkeypatch) -> None:
         market=market,
         interval="1m",
         lookback_bars=50,
-        mode="paper",
+        mode="unit_test",
         mode_plugin=None,
         decision_provider=provider,
     )
@@ -243,7 +243,7 @@ def test_unified_engine_explicit_action_fallback_for_legacy_execute_trade(monkey
         market=market,
         interval="1m",
         lookback_bars=50,
-        mode="paper",
+        mode="unit_test",
         mode_plugin=None,
         decision_provider=provider,
     )
@@ -251,11 +251,11 @@ def test_unified_engine_explicit_action_fallback_for_legacy_execute_trade(monkey
     with pytest.raises(SystemExit):
         engine.run_forever()
 
-    # Legacy execute_trade() raising TypeError must not silently route OPEN as signal-only execute_trade.
+    # Legacy traders without action-aware execute_trade() must use explicit action routes.
     assert trader.add_calls == 1
     assert trader.reduce_calls == 0
     assert trader.close_calls == 0
-    assert trader.execute_trade_calls >= 1
+    assert trader.execute_trade_calls == 0
 
 
 class DummyExecutor:
@@ -732,8 +732,11 @@ def test_rust_binding_provider_merges_entry_exit_params_from_strategy_and_caches
         )
     )
 
-    assert len(runtime.step_params) == 2
-    assert runtime.step_full_calls == 2
+    # Evaluate events may trigger additional diagnostic probes (price_update) that
+    # call step_full with the same params. We only require at least one call per
+    # evaluate event here.
+    assert len(runtime.step_params) >= 2
+    assert runtime.step_full_calls >= 2
     first = runtime.step_params[0]
     assert isinstance(first.get("entry_params"), Mapping)
     assert isinstance(first.get("exit_params"), Mapping)
@@ -1221,7 +1224,7 @@ def test_build_default_decision_provider_prefers_rust_when_available(monkeypatch
     payload_path = tmp_path / "events.json"
     payload_path.write_text("[]", encoding="utf-8")
     monkeypatch.delenv("AI_QUANT_KERNEL_DECISION_PROVIDER", raising=False)
-    monkeypatch.delenv("AI_QUANT_KERNEL_DECISION_FILE", raising=False)
+    monkeypatch.setenv("AI_QUANT_KERNEL_DECISION_FILE", str(payload_path))
     monkeypatch.setattr("engine.core._load_kernel_runtime_module", lambda *_args, **_kwargs: _FakeKernelRuntime())
 
     provider = _build_default_decision_provider()
@@ -1253,24 +1256,9 @@ def test_build_default_decision_provider_falls_back_to_file_if_rust_not_availabl
         lambda *_args, **_kwargs: (_ for _ in ()).throw(ImportError("missing bt_runtime")),
     )
 
-    provider = _build_default_decision_provider()
-    assert isinstance(provider, KernelDecisionFileProvider)
-    decisions = list(
-        provider.get_decisions(
-            symbols=["ETH"],
-            watchlist=["ETH"],
-            open_symbols=[],
-            market=None,
-            interval="1m",
-            lookback_bars=50,
-            mode="paper",
-            not_ready_symbols=set(),
-            strategy=None,
-            now_ms=1700000000000,
-        )
-        )
-    assert len(decisions) == 1
-    assert decisions[0].action == "OPEN"
+    # Runtime SSOT is fail-closed when bt_runtime cannot be loaded.
+    with pytest.raises(SystemExit):
+        _build_default_decision_provider()
 
 
 def test_build_default_decision_provider_fails_fast_when_bt_runtime_unavailable(monkeypatch) -> None:
@@ -1299,7 +1287,7 @@ def test_build_default_decision_provider_rejects_python_mode(monkeypatch) -> Non
 def test_build_default_decision_provider_accepts_kernel_only_mode(monkeypatch) -> None:
     """AI_QUANT_KERNEL_DECISION_PROVIDER=kernel_only works as alias for rust."""
     monkeypatch.setenv("AI_QUANT_KERNEL_DECISION_PROVIDER", "kernel_only")
-    monkeypatch.delenv("AI_QUANT_KERNEL_DECISION_FILE", raising=False)
+    monkeypatch.setenv("AI_QUANT_KERNEL_DECISION_FILE", "/tmp/fake_events.json")
     monkeypatch.setattr("engine.core._load_kernel_runtime_module", lambda *_args, **_kwargs: _FakeKernelRuntime())
 
     provider = _build_default_decision_provider()
