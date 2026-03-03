@@ -54,6 +54,18 @@ pub struct HubConfig {
     pub manual_trade_enabled: bool,
     /// Path to secrets file (for exchange credentials).
     pub secrets_path: Option<String>,
+
+    // ── Config action controls ────────────────────────────────────
+    /// Enable config mutating actions exposed by Hub UI/API.
+    pub admin_actions_enabled: bool,
+    /// Timeout for promote/rollback subprocess actions.
+    pub admin_action_timeout_s: u64,
+    /// Artifacts root used by promote/rollback workflows.
+    pub artifacts_dir: PathBuf,
+    /// Live strategy YAML path used by promote/rollback actions.
+    pub live_yaml_path: PathBuf,
+    /// Live service name used for rollback auto-restart.
+    pub live_service: String,
 }
 
 fn env_str(name: &str, default: &str) -> String {
@@ -239,7 +251,7 @@ impl HubConfig {
             paper3_log,
             candles_db_dir,
             sidecar_sock,
-            aiq_root,
+            aiq_root: aiq_root.clone(),
             config_dir,
             trader_interval,
             monitor_interval,
@@ -259,6 +271,23 @@ impl HubConfig {
                 .ok()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
+            admin_actions_enabled: env_bool("AIQ_MONITOR_ADMIN_ACTIONS_ENABLE", false),
+            admin_action_timeout_s: env_f64("AIQ_MONITOR_ACTION_TIMEOUT_S", 180.0)
+                .clamp(1.0, 1800.0)
+                .round() as u64,
+            artifacts_dir: env_path(
+                "AIQ_MONITOR_ARTIFACTS_DIR",
+                aiq_root.join("artifacts").to_str().unwrap_or("artifacts"),
+            ),
+            live_yaml_path: env_path(
+                "AIQ_MONITOR_LIVE_YAML_PATH",
+                aiq_root
+                    .join("config")
+                    .join("strategy_overrides.yaml")
+                    .to_str()
+                    .unwrap_or("config/strategy_overrides.yaml"),
+            ),
+            live_service: env_str("AIQ_MONITOR_LIVE_SERVICE", "openclaw-ai-quant-live-v8"),
         }
     }
 
