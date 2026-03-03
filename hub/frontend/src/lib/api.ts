@@ -214,6 +214,38 @@ export async function getFactoryCandidates(date: string, runId: string) {
   return apiFetch(`/api/factory/runs/${encodeURIComponent(date)}/${encodeURIComponent(runId)}/candidates`);
 }
 
+export async function runFactory(opts: Record<string, any>) {
+  return apiFetch('/api/factory/run', { method: 'POST', body: JSON.stringify(opts) });
+}
+
+export async function getFactoryJobs() {
+  return apiFetch('/api/factory/jobs');
+}
+
+export async function getFactoryJobStatus(id: string) {
+  return apiFetch(`/api/factory/jobs/${encodeURIComponent(id)}/status`);
+}
+
+export async function cancelFactory(id: string) {
+  return apiFetch(`/api/factory/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export async function getFactorySettings() {
+  return apiFetch('/api/factory/settings');
+}
+
+export async function putFactorySettings(settings: Record<string, any>) {
+  return apiFetch('/api/factory/settings', { method: 'PUT', body: JSON.stringify(settings) });
+}
+
+export async function getFactoryTimer() {
+  return apiFetch('/api/factory/timer');
+}
+
+export async function factoryTimerAction(action: string) {
+  return apiFetch(`/api/factory/timer/${encodeURIComponent(action)}`, { method: 'POST' });
+}
+
 // ── System API ──────────────────────────────────────────────────────
 
 export async function getSystemServices() {
