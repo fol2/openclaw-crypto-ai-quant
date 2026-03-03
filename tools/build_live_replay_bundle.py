@@ -372,8 +372,13 @@ def _build_parser() -> argparse.ArgumentParser:
 def _load_live_baseline_trades(live_db: Path, *, from_ts: int, to_ts: int) -> list[dict[str, Any]]:
     conn = _connect_ro(live_db)
     try:
+        cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(trades)").fetchall()}
+        run_fingerprint_col = "run_fingerprint" if "run_fingerprint" in cols else "NULL AS run_fingerprint"
+        fill_hash_col = "fill_hash" if "fill_hash" in cols else "NULL AS fill_hash"
+        fill_tid_col = "fill_tid" if "fill_tid" in cols else "NULL AS fill_tid"
         rows = conn.execute(
-            "SELECT id, timestamp, symbol, action, type, price, size, pnl, balance, reason, confidence, fee_usd, leverage, margin_used, run_fingerprint "
+            "SELECT id, timestamp, symbol, action, type, price, size, pnl, balance, reason, confidence, "
+            f"fee_usd, leverage, margin_used, {run_fingerprint_col}, {fill_hash_col}, {fill_tid_col} "
             "FROM trades ORDER BY id ASC"
         ).fetchall()
     finally:
@@ -388,6 +393,14 @@ def _load_live_baseline_trades(live_db: Path, *, from_ts: int, to_ts: int) -> li
         ts_ms = _parse_timestamp_ms(row["timestamp"])
         if ts_ms < from_ts or ts_ms > to_ts:
             continue
+
+        fill_tid_value: int | None = None
+        raw_fill_tid = row["fill_tid"]
+        if raw_fill_tid is not None:
+            try:
+                fill_tid_value = int(raw_fill_tid)
+            except Exception:
+                fill_tid_value = None
 
         out.append(
             {
@@ -407,6 +420,8 @@ def _load_live_baseline_trades(live_db: Path, *, from_ts: int, to_ts: int) -> li
                 "leverage": float(row["leverage"] or 0.0),
                 "margin_used": float(row["margin_used"] or 0.0),
                 "run_fingerprint": str(row["run_fingerprint"] or "").strip(),
+                "fill_hash": str(row["fill_hash"] or "").strip().lower(),
+                "fill_tid": fill_tid_value,
             }
         )
 
@@ -1032,6 +1047,11 @@ def main() -> int:
         if args.paper_filter_post_seed
         else ""
     )
+    run_fingerprint_guard_arg = (
+        f"--bundle-manifest \"$BUNDLE_DIR/{manifest_path.name}\" "
+        "--require-single-run-fingerprint "
+        "--max-live-run-fingerprint-distinct 1 "
+    )
 
     cmd_live_paper_action_reconcile = (
         "set -euo pipefail\n"
@@ -1043,6 +1063,7 @@ def main() -> int:
         "--live-db \"$LIVE_DB\" "
         "--paper-db \"$PAPER_DB\" "
         f"{paper_seed_filter_arg}"
+        f"{run_fingerprint_guard_arg}"
         f"--from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
         f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
         f"--output \"$BUNDLE_DIR/{live_paper_action_reconcile_path.name}\""
@@ -1057,6 +1078,8 @@ def main() -> int:
         "python3 \"$REPO_ROOT/tools/audit_live_paper_decision_trace.py\" "
         "--live-db \"$LIVE_DB\" "
         "--paper-db \"$PAPER_DB\" "
+        f"{paper_seed_filter_arg}"
+        f"{run_fingerprint_guard_arg}"
         f"--from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
         f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
         f"--output \"$BUNDLE_DIR/{live_paper_decision_trace_reconcile_path.name}\""
@@ -1071,6 +1094,7 @@ def main() -> int:
         f"--live-baseline \"$BUNDLE_DIR/{live_trades_path.name}\" "
         "--paper-db \"$PAPER_DB\" "
         f"{paper_seed_filter_arg}"
+        f"{run_fingerprint_guard_arg}"
         f"--from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
         f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
         "--fail-on-mismatch "

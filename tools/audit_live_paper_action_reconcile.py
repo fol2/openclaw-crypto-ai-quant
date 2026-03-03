@@ -39,6 +39,26 @@ def _build_parser() -> argparse.ArgumentParser:
             "(expects key pre_seed_max_trade_id)."
         ),
     )
+    parser.add_argument(
+        "--bundle-manifest",
+        help=(
+            "Optional replay bundle manifest. When set with "
+            "--require-single-run-fingerprint, enforce one live run_fingerprint "
+            "within the audited window."
+        ),
+    )
+    parser.add_argument(
+        "--require-single-run-fingerprint",
+        action="store_true",
+        default=False,
+        help="Fail-closed when manifest.live_run_fingerprint_provenance reports drift within the window.",
+    )
+    parser.add_argument(
+        "--max-live-run-fingerprint-distinct",
+        type=int,
+        default=1,
+        help="Maximum allowed distinct live run_fingerprint in manifest provenance window.",
+    )
     parser.add_argument("--output", required=True, help="Path to output JSON report")
     parser.add_argument("--from-ts", type=int, help="Filter start timestamp (ms, inclusive)")
     parser.add_argument("--to-ts", type=int, help="Filter end timestamp (ms, inclusive)")
@@ -144,6 +164,151 @@ def _canonical_action(action: Any, side: Any) -> str:
     return ""
 
 
+def _is_exit_action_code(action_code: str) -> bool:
+    code = str(action_code or "").strip().upper()
+    return code.startswith("CLOSE_") or code.startswith("REDUCE_")
+
+
+def _collapse_split_fill_actions(
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    passthrough: list[dict[str, Any]] = []
+    for row in rows:
+        fill_hash = str(row.get("fill_hash") or "").strip().lower()
+        action_code = str(row.get("action_code") or "").strip().upper()
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if fill_hash and symbol and _is_exit_action_code(action_code):
+            grouped[(symbol, action_code, fill_hash)].append(row)
+        else:
+            passthrough.append(dict(row))
+
+    out: list[dict[str, Any]] = list(passthrough)
+    collapsed_groups = 0
+    collapsed_member_rows = 0
+    for (_symbol, _action_code, fill_hash), group in grouped.items():
+        if len(group) <= 1:
+            out.append(dict(group[0]))
+            continue
+        sorted_group = sorted(
+            group,
+            key=lambda r: (
+                int(r.get("timestamp_ms") or 0),
+                int(r.get("source_id") or 0),
+            ),
+        )
+        collapsed_groups += 1
+        collapsed_member_rows += len(sorted_group)
+        total_size = sum(float(item.get("size") or 0.0) for item in sorted_group)
+        total_pnl = sum(float(item.get("pnl_usd") or 0.0) for item in sorted_group)
+        total_fee = sum(float(item.get("fee_usd") or 0.0) for item in sorted_group)
+        total_abs_size = sum(abs(float(item.get("size") or 0.0)) for item in sorted_group)
+        if total_abs_size > 0.0:
+            weighted_price = sum(
+                float(item.get("price") or 0.0) * abs(float(item.get("size") or 0.0))
+                for item in sorted_group
+            ) / total_abs_size
+        else:
+            weighted_price = float(sorted_group[-1].get("price") or 0.0)
+
+        merged = dict(sorted_group[-1])
+        merged["timestamp_ms"] = max(int(item.get("timestamp_ms") or 0) for item in sorted_group)
+        merged["source_id"] = max(int(item.get("source_id") or 0) for item in sorted_group)
+        merged["price"] = float(weighted_price)
+        merged["size"] = float(total_size)
+        merged["pnl_usd"] = float(total_pnl)
+        merged["fee_usd"] = float(total_fee)
+        merged["fill_hash"] = fill_hash
+        merged["split_fill_collapsed"] = True
+        merged["split_fill_member_count"] = len(sorted_group)
+        merged["split_fill_member_source_ids"] = [int(item.get("source_id") or 0) for item in sorted_group]
+        out.append(merged)
+
+    out.sort(
+        key=lambda r: (
+            int(r.get("timestamp_ms") or 0),
+            str(r.get("symbol") or ""),
+            str(r.get("action_code") or ""),
+            int(r.get("source_id") or 0),
+        )
+    )
+    return out, {
+        "split_fill_groups_collapsed": int(collapsed_groups),
+        "split_fill_rows_collapsed": int(max(0, collapsed_member_rows - collapsed_groups)),
+    }
+
+
+def _load_manifest_run_fingerprint_provenance(manifest_path: Path) -> dict[str, Any]:
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("bundle manifest must be a JSON object")
+    provenance = payload.get("live_run_fingerprint_provenance")
+    if not isinstance(provenance, dict):
+        raise ValueError("manifest.live_run_fingerprint_provenance is missing")
+    return provenance
+
+
+def _run_fingerprint_guard_issue(
+    *,
+    detail: str,
+    run_fingerprint_distinct: int | None = None,
+    max_allowed: int | None = None,
+    rows_sampled: int | None = None,
+) -> dict[str, Any]:
+    issue: dict[str, Any] = {
+        "classification": "state_initialisation_gap",
+        "kind": "live_run_fingerprint_drift_within_window",
+        "detail": detail,
+    }
+    if run_fingerprint_distinct is not None:
+        issue["run_fingerprint_distinct"] = int(run_fingerprint_distinct)
+    if max_allowed is not None:
+        issue["max_live_run_fingerprint_distinct"] = int(max_allowed)
+    if rows_sampled is not None:
+        issue["rows_sampled"] = int(rows_sampled)
+    return issue
+
+
+def _summarise_funding_evidence(mismatches: list[dict[str, Any]]) -> dict[str, Any]:
+    per_symbol: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {
+            "symbol": "",
+            "matched_pairs": 0,
+            "unmatched_live": 0,
+            "unmatched_paper": 0,
+            "matched_live_pnl_usd": 0.0,
+            "matched_paper_pnl_usd": 0.0,
+        }
+    )
+
+    for row in mismatches:
+        if str(row.get("action_code") or "").strip().upper() != FUNDING_ACTION:
+            continue
+        symbol = str(row.get("symbol") or "").strip().upper()
+        bucket = per_symbol[symbol]
+        bucket["symbol"] = symbol
+        kind = str(row.get("kind") or "").strip().lower()
+        if kind == "matched_funding_pair":
+            bucket["matched_pairs"] += 1
+            live_obj = row.get("live") if isinstance(row.get("live"), dict) else {}
+            paper_obj = row.get("paper") if isinstance(row.get("paper"), dict) else {}
+            bucket["matched_live_pnl_usd"] += float(live_obj.get("pnl_usd") or 0.0)
+            bucket["matched_paper_pnl_usd"] += float(paper_obj.get("pnl_usd") or 0.0)
+        elif kind == "missing_paper_funding_action":
+            bucket["unmatched_live"] += 1
+        elif kind == "missing_live_funding_action":
+            bucket["unmatched_paper"] += 1
+
+    rows = sorted(per_symbol.values(), key=lambda item: item["symbol"])
+    return {
+        "matched_pairs": int(sum(int(item["matched_pairs"]) for item in rows)),
+        "unmatched_live": int(sum(int(item["unmatched_live"]) for item in rows)),
+        "unmatched_paper": int(sum(int(item["unmatched_paper"]) for item in rows)),
+        "symbols": [str(item["symbol"]) for item in rows if str(item["symbol"])],
+        "by_symbol": rows,
+    }
+
+
 def _resolve_paper_min_id_exclusive(
     *,
     raw_min_id: int | None,
@@ -193,14 +358,18 @@ def _load_actions(
     try:
         cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(trades)").fetchall()}
         has_reason_code = "reason_code" in cols
+        has_fill_hash = "fill_hash" in cols
+        fill_hash_col = "fill_hash" if has_fill_hash else "NULL AS fill_hash"
         if has_reason_code:
             rows = conn.execute(
-                "SELECT id, timestamp, symbol, action, type, price, size, pnl, balance, reason, reason_code, confidence, fee_usd "
+                "SELECT id, timestamp, symbol, action, type, price, size, pnl, balance, reason, reason_code, confidence, "
+                f"fee_usd, {fill_hash_col} "
                 "FROM trades ORDER BY id ASC"
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT id, timestamp, symbol, action, type, price, size, pnl, balance, reason, confidence, fee_usd "
+                "SELECT id, timestamp, symbol, action, type, price, size, pnl, balance, reason, confidence, "
+                f"fee_usd, {fill_hash_col} "
                 "FROM trades ORDER BY id ASC"
             ).fetchall()
     finally:
@@ -254,6 +423,7 @@ def _load_actions(
                     else classify_reason_code(action_code, str(row["reason"] or ""))
                 )
                 or classify_reason_code(action_code, str(row["reason"] or "")),
+                "fill_hash": str(row["fill_hash"] or "").strip().lower(),
             }
         )
 
@@ -308,6 +478,9 @@ def _compare_actions(
     unmatched_live = 0
     unmatched_paper = 0
     non_simulatable_residuals = 0
+    funding_matched_pairs = 0
+    funding_unmatched_live = 0
+    funding_unmatched_paper = 0
 
     per_symbol: dict[str, dict[str, Any]] = defaultdict(
         lambda: {
@@ -351,6 +524,42 @@ def _compare_actions(
             prow = paper_rows[idx]
             per_symbol[symbol]["matched_pairs"] += 1
             matched_pairs += 1
+
+            if action_code == FUNDING_ACTION:
+                funding_matched_pairs += 1
+                non_simulatable_residuals += 1
+                mismatches.append(
+                    {
+                        "classification": "non-simulatable_exchange_oms_effect",
+                        "kind": "matched_funding_pair",
+                        "symbol": symbol,
+                        "action_code": action_code,
+                        "match_key_timestamp_ms": ts_ms,
+                        "live_timestamp_ms": lrow["timestamp_ms"],
+                        "paper_timestamp_ms": prow["timestamp_ms"],
+                        "live_ref": {"id": lrow["source_id"]},
+                        "paper_ref": {"id": prow["source_id"]},
+                        "live": {
+                            "size": lrow["size"],
+                            "pnl_usd": lrow["pnl_usd"],
+                            "fee_usd": lrow["fee_usd"],
+                            "reason": lrow["reason"],
+                        },
+                        "paper": {
+                            "size": prow["size"],
+                            "pnl_usd": prow["pnl_usd"],
+                            "fee_usd": prow["fee_usd"],
+                            "reason_code": prow["reason_code"],
+                            "reason": prow["reason"],
+                        },
+                        "delta": {
+                            "size": lrow["size"] - prow["size"],
+                            "pnl_usd": lrow["pnl_usd"] - prow["pnl_usd"],
+                            "fee_usd": lrow["fee_usd"] - prow["fee_usd"],
+                        },
+                    }
+                )
+                continue
 
             numeric_checks = {
                 "price": _almost_equal(lrow["price"], prow["price"], price_tol),
@@ -418,10 +627,11 @@ def _compare_actions(
         if len(live_rows) > pair_count:
             for lrow in live_rows[pair_count:]:
                 if action_code == FUNDING_ACTION:
-                    non_simulatable_residuals += 1
+                    funding_unmatched_live += 1
+                    unmatched_live += 1
                     mismatches.append(
                         {
-                            "classification": "non-simulatable_exchange_oms_effect",
+                            "classification": "deterministic_logic_divergence",
                             "kind": "missing_paper_funding_action",
                             "symbol": symbol,
                             "action_code": action_code,
@@ -447,10 +657,11 @@ def _compare_actions(
         if len(paper_rows) > pair_count:
             for prow in paper_rows[pair_count:]:
                 if action_code == FUNDING_ACTION:
-                    non_simulatable_residuals += 1
+                    funding_unmatched_paper += 1
+                    unmatched_paper += 1
                     mismatches.append(
                         {
-                            "classification": "non-simulatable_exchange_oms_effect",
+                            "classification": "deterministic_logic_divergence",
                             "kind": "missing_live_funding_action",
                             "symbol": symbol,
                             "action_code": action_code,
@@ -493,6 +704,9 @@ def _compare_actions(
         "unmatched_live": unmatched_live,
         "unmatched_paper": unmatched_paper,
         "non_simulatable_residuals": non_simulatable_residuals,
+        "funding_matched_pairs": funding_matched_pairs,
+        "funding_unmatched_live": funding_unmatched_live,
+        "funding_unmatched_paper": funding_unmatched_paper,
     }
     return mismatches, summary, per_symbol_rows
 
@@ -503,6 +717,7 @@ def main() -> int:
 
     live_db = Path(args.live_db).expanduser().resolve()
     paper_db = Path(args.paper_db).expanduser().resolve()
+    bundle_manifest = Path(args.bundle_manifest).expanduser().resolve() if args.bundle_manifest else None
     output = Path(args.output).expanduser().resolve()
     from_ts = int(args.from_ts) if args.from_ts is not None else None
     to_ts = int(args.to_ts) if args.to_ts is not None else None
@@ -522,6 +737,8 @@ def main() -> int:
         parser.error(f"live DB not found: {live_db}")
     if not paper_db.exists():
         parser.error(f"paper DB not found: {paper_db}")
+    if bundle_manifest is not None and not bundle_manifest.exists():
+        parser.error(f"bundle manifest not found: {bundle_manifest}")
     if from_ts is not None and to_ts is not None and from_ts > to_ts:
         parser.error("from-ts must be <= to-ts")
 
@@ -539,6 +756,8 @@ def main() -> int:
         from_ts=from_ts,
         to_ts=to_ts,
     )
+    live_actions, live_split_fill_stats = _collapse_split_fill_actions(live_actions)
+    paper_actions, paper_split_fill_stats = _collapse_split_fill_actions(paper_actions)
 
     mismatches, compare_summary, per_symbol_rows = _compare_actions(
         live_actions,
@@ -550,10 +769,51 @@ def main() -> int:
         fee_tol=float(args.fee_tol),
         balance_tol=float(args.balance_tol),
     )
-
-    mismatch_counts: dict[str, int] = defaultdict(int)
-    for item in mismatches:
-        mismatch_counts[str(item.get("classification") or "unknown")] += 1
+    run_fingerprint_guard_issues: list[dict[str, Any]] = []
+    run_fingerprint_guard_detail: dict[str, Any] = {
+        "enabled": bool(args.require_single_run_fingerprint),
+        "bundle_manifest": str(bundle_manifest) if bundle_manifest is not None else None,
+        "max_live_run_fingerprint_distinct": max(1, int(args.max_live_run_fingerprint_distinct)),
+        "ok": True,
+        "live_run_fingerprint_provenance": None,
+    }
+    if bool(args.require_single_run_fingerprint):
+        if bundle_manifest is None:
+            run_fingerprint_guard_issues.append(
+                _run_fingerprint_guard_issue(
+                    detail="run_fingerprint guard requested but --bundle-manifest is missing",
+                )
+            )
+            run_fingerprint_guard_detail["ok"] = False
+        else:
+            try:
+                provenance = _load_manifest_run_fingerprint_provenance(bundle_manifest)
+            except Exception as exc:
+                run_fingerprint_guard_issues.append(
+                    _run_fingerprint_guard_issue(
+                        detail=f"unable to read manifest live_run_fingerprint_provenance: {exc}",
+                    )
+                )
+                run_fingerprint_guard_detail["ok"] = False
+            else:
+                run_fingerprint_guard_detail["live_run_fingerprint_provenance"] = provenance
+                run_fp_distinct = int(provenance.get("run_fingerprint_distinct") or 0)
+                rows_sampled = int(provenance.get("rows_sampled") or 0)
+                max_allowed = max(1, int(args.max_live_run_fingerprint_distinct))
+                if run_fp_distinct > max_allowed:
+                    run_fingerprint_guard_issues.append(
+                        _run_fingerprint_guard_issue(
+                            detail=(
+                                f"manifest live run_fingerprint drift exceeded limit: "
+                                f"distinct={run_fp_distinct} max={max_allowed}"
+                            ),
+                            run_fingerprint_distinct=run_fp_distinct,
+                            max_allowed=max_allowed,
+                            rows_sampled=rows_sampled,
+                        )
+                    )
+                    run_fingerprint_guard_detail["ok"] = False
+    mismatches.extend(run_fingerprint_guard_issues)
 
     accepted_residuals = [m for m in mismatches if m.get("classification") == "non-simulatable_exchange_oms_effect"]
     strict_alignment_pass = (
@@ -562,6 +822,7 @@ def main() -> int:
         and compare_summary["reason_code_mismatch"] == 0
         and compare_summary["unmatched_live"] == 0
         and compare_summary["unmatched_paper"] == 0
+        and not run_fingerprint_guard_issues
     )
     live_simulatable_actions = sum(1 for row in live_actions if str(row.get("action_code") or "") != FUNDING_ACTION)
     paper_window_not_replayed = (
@@ -583,7 +844,11 @@ def main() -> int:
                 "paper_simulatable_actions": int(len(paper_actions)),
             }
         )
-        strict_alignment_pass = True
+        strict_alignment_pass = not run_fingerprint_guard_issues
+
+    mismatch_counts: dict[str, int] = defaultdict(int)
+    for item in mismatches:
+        mismatch_counts[str(item.get("classification") or "unknown")] += 1
 
     report = {
         "schema_version": 1,
@@ -602,10 +867,20 @@ def main() -> int:
             "pnl_tol": float(args.pnl_tol),
             "fee_tol": float(args.fee_tol),
             "balance_tol": float(args.balance_tol),
+            "bundle_manifest": str(bundle_manifest) if bundle_manifest is not None else None,
+            "require_single_run_fingerprint": bool(args.require_single_run_fingerprint),
+            "max_live_run_fingerprint_distinct": max(1, int(args.max_live_run_fingerprint_distinct)),
         },
         "counts": {
             **live_counts,
             **paper_counts,
+            "live_canonical_actions_pre_split_fill_collapse": int(live_counts.get("live_canonical_actions") or 0),
+            "paper_canonical_actions_pre_split_fill_collapse": int(paper_counts.get("paper_canonical_actions") or 0),
+            "live_canonical_actions": len(live_actions),
+            "paper_canonical_actions": len(paper_actions),
+            **live_split_fill_stats,
+            "paper_split_fill_groups_collapsed": int(paper_split_fill_stats.get("split_fill_groups_collapsed") or 0),
+            "paper_split_fill_rows_collapsed": int(paper_split_fill_stats.get("split_fill_rows_collapsed") or 0),
             **compare_summary,
             "mismatch_total": len(mismatches),
         },
@@ -614,6 +889,8 @@ def main() -> int:
             "accepted_residuals_only": strict_alignment_pass and bool(accepted_residuals),
         },
         "mismatch_counts_by_classification": dict(sorted(mismatch_counts.items(), key=lambda x: x[0])),
+        "run_fingerprint_guard": run_fingerprint_guard_detail,
+        "funding_pair_evidence": _summarise_funding_evidence(mismatches),
         "accepted_residuals": accepted_residuals,
         "per_symbol": per_symbol_rows,
         "mismatches": mismatches,
