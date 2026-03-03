@@ -1457,6 +1457,19 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             ).strip().lower()
         except Exception:
             kernel_reason_code = ""
+        decision_event_id = ""
+        try:
+            decision_event_id = str(
+                (indicators if indicators is not None else {}).get("_decision_event_id") or ""
+            ).strip()
+        except Exception:
+            decision_event_id = ""
+        decision_meta: dict[str, str] | None = None
+        if decision_event_id:
+            decision_meta = {
+                "event_id": decision_event_id,
+                "action": "add",
+            }
 
         _add_reason = str(reason or "Pyramid Add")
         oms = getattr(self, "oms", None)
@@ -1485,6 +1498,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 }
                 if kernel_reason_code:
                     add_meta["reason_code"] = kernel_reason_code
+                if decision_meta is not None:
+                    add_meta["decision"] = dict(decision_meta)
                 oms_intent = oms.create_intent(
                     symbol=sym,
                     action="ADD",
@@ -1818,6 +1833,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     "audit": audit if isinstance(audit, dict) else None,
                     "breadth_pct": _breadth_pct_add,
                     "reason_code": kernel_reason_code or None,
+                    "decision": dict(decision_meta) if decision_meta is not None else None,
                     "oms": (
                         {
                             "intent_id": getattr(oms_intent, "intent_id", None),
@@ -2323,6 +2339,20 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
             )
             return
 
+        decision_event_id = ""
+        try:
+            decision_event_id = str(
+                (indicators if indicators is not None else {}).get("_decision_event_id") or ""
+            ).strip()
+        except Exception:
+            decision_event_id = ""
+        decision_meta: dict[str, str] | None = None
+        if decision_event_id:
+            decision_meta = {
+                "event_id": decision_event_id,
+                "action": str(act or "").strip().lower(),
+            }
+
         if act == "OPEN":
             if sym in (self.positions or {}):
                 # OPEN action only maps to new-entry flow when no position exists.
@@ -2339,13 +2369,17 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 reason=reason,
             )
         elif act == "CLOSE":
-            close_meta = {"reason_code": kernel_reason_code} if kernel_reason_code else None
+            close_meta: dict[str, object] = {}
+            if kernel_reason_code:
+                close_meta["reason_code"] = kernel_reason_code
+            if decision_meta is not None:
+                close_meta["decision"] = dict(decision_meta)
             return self.close_position(
                 sym,
                 price,
                 timestamp,
                 reason=str(reason or "Kernel CLOSE"),
-                meta=close_meta,
+                meta=(close_meta or None),
             )
         elif act == "REDUCE":
             if sym not in (self.positions or {}):
@@ -2362,7 +2396,11 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     reduce_size = float((self.positions or {}).get(sym, {}).get("size") or 0.0)
                 except Exception:
                     reduce_size = 0.0
-            reduce_meta = {"reason_code": kernel_reason_code} if kernel_reason_code else None
+            reduce_meta: dict[str, object] = {}
+            if kernel_reason_code:
+                reduce_meta["reason_code"] = kernel_reason_code
+            if decision_meta is not None:
+                reduce_meta["decision"] = dict(decision_meta)
             return self.reduce_position(
                 sym,
                 reduce_size,
@@ -2370,7 +2408,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 timestamp,
                 reason=str(reason or "Kernel REDUCE"),
                 confidence=confidence,
-                meta=reduce_meta,
+                meta=(reduce_meta or None),
             )
 
         # OPEN path is kernel-action driven; do not run legacy signal flip/add logic.
@@ -2739,6 +2777,8 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 }
                 if kernel_reason_code:
                     open_meta["reason_code"] = kernel_reason_code
+                if decision_meta is not None:
+                    open_meta["decision"] = dict(decision_meta)
                 oms_intent = oms.create_intent(
                     symbol=sym,
                     action="OPEN",
@@ -3101,6 +3141,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                     "audit": audit if isinstance(audit, dict) else None,
                     "breadth_pct": _breadth_pct,
                     "reason_code": kernel_reason_code or None,
+                    "decision": dict(decision_meta) if decision_meta is not None else None,
                     "oms": (
                         {
                             "intent_id": getattr(oms_intent, "intent_id", None),
