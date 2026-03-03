@@ -118,7 +118,7 @@
       const sym = filterSymbol.trim().toUpperCase() || undefined;
       const act = filterAction || undefined;
       const from = filterFrom || undefined;
-      const to = filterTo || undefined;
+      const to = filterTo ? filterTo + 'T23:59:59' : undefined;
       const res = await getTrades(mode, TRADE_PAGE_SIZE, off, sym, act, from, to);
       const batch = res.trades || [];
       if (reset) {
@@ -180,7 +180,7 @@
   function clearJourneyFilter() { journeySymFilter = ''; fetchJourneys(true); }
 
   // ── Init ─────────────────────────────────────────────────────────
-  $effect(() => { loadCurrentView(); });
+  loadCurrentView();
 </script>
 
 <!-- ── Mode selector ──────────────────────────────────────────────── -->
