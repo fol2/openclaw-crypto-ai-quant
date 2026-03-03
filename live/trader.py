@@ -2269,17 +2269,17 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         )
         return True
 
-    def close_position(self, symbol, price, timestamp, reason, *, meta: dict | None = None):
+    def close_position(self, symbol, price, timestamp, reason, *, meta: dict | None = None) -> bool:
         sym = str(symbol or "").strip().upper()
         if sym not in (self.positions or {}):
-            return
+            return False
         try:
             sz = float(((self.positions or {}).get(sym) or {}).get("size") or 0.0)
         except Exception:
-            return
+            return False
         if sz <= 0:
-            return
-        self.reduce_position(sym, sz, price, timestamp, reason, confidence="N/A", meta=meta)
+            return False
+        return bool(self.reduce_position(sym, sz, price, timestamp, reason, confidence="N/A", meta=meta))
 
     def execute_trade(
         self,
@@ -3172,6 +3172,7 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
                 self._pending_open_sent_at_s[sym] = time.time()
         except Exception as e:
             logger.debug("failed to record pending open timestamp for %s: %s", sym, e, exc_info=True)
+        return True
 
 
 _LIVE_TABLES_ENSURED = False

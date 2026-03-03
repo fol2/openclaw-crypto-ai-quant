@@ -133,10 +133,18 @@ def _load_decision_rows(
 
         status = _norm_text(row["status"])
         reason_code = _norm_text(row["reason_code"])
+        rejection_reason = _norm_text(row["rejection_reason"], lower=False)
+        rejection_reason_l = _norm_text(rejection_reason)
+        runtime_only_blocked = bool(
+            status == "blocked"
+            and (
+                reason_code == "execution_would"
+                or (not reason_code and rejection_reason_l.startswith("would_send:"))
+            )
+        )
         if (
             not include_runtime_only_blocked
-            and status == "blocked"
-            and reason_code == "execution_would"
+            and runtime_only_blocked
         ):
             runtime_only_excluded += 1
             continue
@@ -152,7 +160,7 @@ def _load_decision_rows(
                 "decision_phase": _norm_text(row["decision_phase"]),
                 "triggered_by": _norm_text(row["triggered_by"]),
                 "action_taken": _norm_text(row["action_taken"]),
-                "rejection_reason": _norm_text(row["rejection_reason"], lower=False),
+                "rejection_reason": rejection_reason,
                 "reason_code": reason_code,
                 "config_fingerprint": _norm_text(row["config_fingerprint"]),
                 "trade_linked": row["trade_id"] is not None,

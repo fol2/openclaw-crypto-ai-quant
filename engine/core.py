@@ -2101,6 +2101,9 @@ class UnifiedEngine:
             due_entry = entry_key is not None and int(entry_key) != int(
                 self._runtime_kernel_last_entry_key.get(sym_u, -1)
             )
+            # Safety net: when an exit candle key cannot be resolved (for example transient
+            # candle fetch lag), keep open positions eligible for evaluation instead of stalling
+            # exit checks until the next successful candle fetch.
             due_exit = bool(
                 has_open
                 and (
@@ -3129,7 +3132,7 @@ class UnifiedEngine:
                                 reason=dec.reason,
                             )
 
-                            if _did and (_exec_result is False):
+                            if _did and str(self.mode).lower() != "paper" and (_exec_result is False or _exec_result is None):
                                 _cde_rej = _get_decision_event_fn()
                                 if _cde_rej:
                                     try:
@@ -3202,7 +3205,7 @@ class UnifiedEngine:
                                 reason=dec.reason,
                             )
 
-                            if _did and (_exec_result is False):
+                            if _did and str(self.mode).lower() != "paper" and (_exec_result is False or _exec_result is None):
                                 _cde_rej = _get_decision_event_fn()
                                 if _cde_rej:
                                     try:

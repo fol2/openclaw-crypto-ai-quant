@@ -2381,12 +2381,27 @@ class LiveOms:
                     prev_status = None
 
                 try:
+                    # Fill-time truth is authoritative: if a real fill arrives, execution must
+                    # win over any earlier pending/rejected transport state.
                     cur.execute(
                         """
                         UPDATE decision_events
                         SET trade_id = COALESCE(trade_id, ?),
                             status = 'executed',
-                            decision_phase = 'execution'
+                            decision_phase = 'execution',
+                            rejection_reason = NULL,
+                            reason_code = CASE
+                                WHEN reason_code IN (
+                                    'execution_would',
+                                    'execution_rejected',
+                                    'execution_timeout',
+                                    'execution_submit_unknown',
+                                    'execution_submit_unknown_expired',
+                                    'execution_partial_expired'
+                                )
+                                THEN NULL
+                                ELSE reason_code
+                            END
                         WHERE id = ?
                         """,
                         (int(trade_id), str(decision_id)),
@@ -2903,11 +2918,24 @@ class LiveOms:
                     )
                 if decision_id and trade_id_value is not None:
                     try:
+                        da = str(decision_action or "").strip().upper()
+                    except Exception:
+                        da = ""
+                    if da and da != str(action):
+                        logger.warning(
+                            "decision action differs from fill action; using fill action for trace sync "
+                            "(decision_id=%s decision_action=%s fill_action=%s symbol=%s)",
+                            str(decision_id),
+                            da,
+                            str(action),
+                            str(sym),
+                        )
+                    try:
                         _sync_decision_trace(
                             decision_id=str(decision_id),
                             trade_id=int(trade_id_value),
                             symbol_value=sym,
-                            action_value=str(decision_action or action),
+                            action_value=str(action),
                             fill_ts_ms=int(t_ms),
                             exit_reason_value=reason,
                         )
