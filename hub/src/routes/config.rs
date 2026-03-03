@@ -4,10 +4,14 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::process::Command;
+use uuid::Uuid;
 
 use crate::error::HubError;
 use crate::state::AppState;
@@ -37,6 +41,21 @@ pub struct DiffQuery {
     pub file: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PromoteLiveBody {
+    pub paper_mode: Option<String>,
+    pub config_id: Option<String>,
+    pub dry_run: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RollbackLiveBody {
+    pub steps: Option<u32>,
+    pub reason: Option<String>,
+    pub restart: Option<String>,
+    pub dry_run: Option<bool>,
+}
+
 /// A single backup entry.
 #[derive(Serialize)]
 pub struct BackupEntry {
@@ -55,6 +74,11 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/config/history", get(get_config_history))
         .route("/api/config/diff", get(get_config_diff))
         .route("/api/config/files", get(get_config_files))
+        .route("/api/config/actions/promote-live", post(post_promote_live))
+        .route(
+            "/api/config/actions/rollback-live",
+            post(post_rollback_live),
+        )
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -92,6 +116,177 @@ fn backups_dir(config_dir: &Path) -> Result<PathBuf, HubError> {
         fs::create_dir_all(&dir)?;
     }
     Ok(dir)
+}
+
+fn ensure_admin_actions_enabled(state: &AppState) -> Result<(), HubError> {
+    if state.config.admin_actions_enabled {
+        Ok(())
+    } else {
+        Err(HubError::Forbidden(
+            "admin actions disabled (set AIQ_MONITOR_ADMIN_ACTIONS_ENABLE=1)".to_string(),
+        ))
+    }
+}
+
+fn normalize_paper_mode(raw: &str) -> Option<String> {
+    match raw.trim().to_lowercase().as_str() {
+        "paper" | "paper1" => Some("paper1".to_string()),
+        "paper2" => Some("paper2".to_string()),
+        "paper3" => Some("paper3".to_string()),
+        _ => None,
+    }
+}
+
+fn parse_json_object_from_output(text: &str) -> Option<Value> {
+    let raw = text.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Ok(v) = serde_json::from_str::<Value>(raw) {
+        if v.is_object() {
+            return Some(v);
+        }
+    }
+    for line in raw.lines().rev() {
+        let s = line.trim();
+        if s.is_empty() {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<Value>(s) {
+            if v.is_object() {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+async fn run_action_command(command: Vec<String>, cwd: &Path, timeout_s: u64) -> Value {
+    let started_ms = chrono::Utc::now().timestamp_millis();
+    if command.is_empty() {
+        return json!({
+            "ok": false,
+            "error": "empty_command",
+            "command": [],
+            "exit_code": Value::Null,
+            "stdout": "",
+            "stderr": "",
+            "timeout": false,
+        });
+    }
+
+    let mut cmd = Command::new(&command[0]);
+    for arg in command.iter().skip(1) {
+        cmd.arg(arg);
+    }
+    cmd.current_dir(cwd);
+
+    match tokio::time::timeout(Duration::from_secs(timeout_s.max(1)), cmd.output()).await {
+        Err(_) => json!({
+            "ok": false,
+            "error": "command_timeout",
+            "command": command,
+            "exit_code": Value::Null,
+            "stdout": "",
+            "stderr": "",
+            "timeout": true,
+            "elapsed_ms": chrono::Utc::now().timestamp_millis() - started_ms,
+            "timeout_s": timeout_s,
+        }),
+        Ok(Err(e)) => json!({
+            "ok": false,
+            "error": format!("command_failed:{e}"),
+            "command": command,
+            "exit_code": Value::Null,
+            "stdout": "",
+            "stderr": "",
+            "timeout": false,
+            "elapsed_ms": chrono::Utc::now().timestamp_millis() - started_ms,
+            "timeout_s": timeout_s,
+        }),
+        Ok(Ok(output)) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let parsed = parse_json_object_from_output(&stdout);
+            let parsed_ok = parsed
+                .as_ref()
+                .and_then(|v| v.get("ok"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            json!({
+                "ok": output.status.success() && parsed_ok,
+                "command": command,
+                "exit_code": output.status.code(),
+                "stdout": stdout,
+                "stderr": stderr,
+                "timeout": false,
+                "elapsed_ms": chrono::Utc::now().timestamp_millis() - started_ms,
+                "timeout_s": timeout_s,
+                "parsed": parsed,
+            })
+        }
+    }
+}
+
+fn sorted_subdirs_desc(root: &Path) -> Result<Vec<PathBuf>, HubError> {
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            dirs.push(entry.path());
+        }
+    }
+    dirs.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+    Ok(dirs)
+}
+
+fn atomic_write_text(path: &Path, text: &str) -> Result<(), HubError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| HubError::Internal("invalid target path".to_string()))?;
+    fs::create_dir_all(parent)?;
+    let stem = path
+        .file_name()
+        .and_then(|x| x.to_str())
+        .unwrap_or("config");
+    let tmp = parent.join(format!(".{stem}.tmp.{}", Uuid::new_v4().simple()));
+    fs::write(&tmp, text)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+fn load_yaml_engine_interval(yaml_text: &str) -> String {
+    let parsed: serde_yaml::Value = match serde_yaml::from_str(yaml_text) {
+        Ok(v) => v,
+        Err(_) => return String::new(),
+    };
+    parsed
+        .get("global")
+        .and_then(|v| v.get("engine"))
+        .and_then(|v| v.get("interval"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+fn compact_utc_now() -> String {
+    chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string()
+}
+
+fn iso_utc_now() -> String {
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+fn service_unit_name(service: &str) -> String {
+    let s = service.trim();
+    if s.ends_with(".service") {
+        s.to_string()
+    } else {
+        format!("{s}.service")
+    }
 }
 
 // ── Handlers ────────────────────────────────────────────────────────
@@ -362,4 +557,247 @@ async fn get_config_files(
     }
 
     Ok(Json(files))
+}
+
+/// POST /api/config/actions/promote-live — Promote a selected paper config to live.
+async fn post_promote_live(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PromoteLiveBody>,
+) -> Result<Json<Value>, HubError> {
+    ensure_admin_actions_enabled(&state)?;
+
+    let mode_raw = body.paper_mode.unwrap_or_else(|| "paper1".to_string());
+    let paper_mode = normalize_paper_mode(&mode_raw).ok_or_else(|| {
+        HubError::BadRequest(format!(
+            "invalid paper_mode '{mode_raw}' (expected paper1/paper2/paper3)"
+        ))
+    })?;
+    let (paper_db, _) = state.config.mode_paths(&paper_mode);
+    let dry_run = body.dry_run.unwrap_or(false);
+
+    let mut command = vec![
+        "python3".to_string(),
+        state
+            .config
+            .aiq_root
+            .join("tools")
+            .join("promote_to_live.py")
+            .to_string_lossy()
+            .to_string(),
+        "--paper-db".to_string(),
+        paper_db.to_string_lossy().to_string(),
+        "--artifacts-dir".to_string(),
+        state.config.artifacts_dir.to_string_lossy().to_string(),
+        "--live-yaml-path".to_string(),
+        state.config.live_yaml_path.to_string_lossy().to_string(),
+    ];
+
+    if let Some(config_id) = body
+        .config_id
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        command.push("--config-id".to_string());
+        command.push(config_id.to_string());
+    }
+    if dry_run {
+        command.push("--dry-run".to_string());
+    } else {
+        command.push("--apply".to_string());
+    }
+
+    let mut result = run_action_command(
+        command,
+        &state.config.aiq_root,
+        state.config.admin_action_timeout_s,
+    )
+    .await;
+    if let Some(obj) = result.as_object_mut() {
+        obj.insert("action".to_string(), json!("promote_live"));
+        obj.insert("paper_mode".to_string(), json!(paper_mode));
+        obj.insert(
+            "paper_db".to_string(),
+            json!(paper_db.to_string_lossy().to_string()),
+        );
+        obj.insert("dry_run".to_string(), json!(dry_run));
+    }
+    Ok(Json(result))
+}
+
+/// POST /api/config/actions/rollback-live — Roll back live config to previous deployment version.
+async fn post_rollback_live(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<RollbackLiveBody>,
+) -> Result<Json<Value>, HubError> {
+    ensure_admin_actions_enabled(&state)?;
+
+    let steps = body.steps.unwrap_or(1).max(1) as usize;
+    let restart_mode = body
+        .restart
+        .unwrap_or_else(|| "auto".to_string())
+        .trim()
+        .to_lowercase();
+    if !matches!(restart_mode.as_str(), "auto" | "always" | "never") {
+        return Err(HubError::BadRequest(
+            "invalid restart mode (expected auto/always/never)".to_string(),
+        ));
+    }
+    let reason = body.reason.unwrap_or_default().trim().to_string();
+    let dry_run = body.dry_run.unwrap_or(false);
+
+    let deploy_root = state.config.artifacts_dir.join("deployments").join("live");
+    let deploy_dirs = sorted_subdirs_desc(&deploy_root)?;
+    if deploy_dirs.len() < steps {
+        return Ok(Json(json!({
+            "ok": false,
+            "action": "rollback_live",
+            "error": "insufficient_live_deployments",
+            "steps": steps,
+            "available": deploy_dirs.len(),
+            "deploy_root": deploy_root.to_string_lossy().to_string(),
+        })));
+    }
+
+    let src_dir = deploy_dirs[steps - 1].clone();
+    let mut restored_from = src_dir.join("prev_config.yaml");
+    let mut restored_text = fs::read_to_string(&restored_from).unwrap_or_default();
+
+    if restored_text.trim().is_empty() {
+        if let Some(alt_dir) = deploy_dirs.get(steps) {
+            for name in ["promoted_config.yaml", "prev_config.yaml"] {
+                let candidate = alt_dir.join(name);
+                let txt = fs::read_to_string(&candidate).unwrap_or_default();
+                if !txt.trim().is_empty() {
+                    restored_text = txt;
+                    restored_from = candidate;
+                    break;
+                }
+            }
+        }
+    }
+
+    if restored_text.trim().is_empty() {
+        return Ok(Json(json!({
+            "ok": false,
+            "action": "rollback_live",
+            "error": "missing_rollback_config",
+            "source_deploy_dir": src_dir.to_string_lossy().to_string(),
+        })));
+    }
+
+    if let Err(e) = serde_yaml::from_str::<serde_yaml::Value>(&restored_text) {
+        return Ok(Json(json!({
+            "ok": false,
+            "action": "rollback_live",
+            "error": "rollback_config_invalid_yaml",
+            "detail": e.to_string(),
+            "restored_from": restored_from.to_string_lossy().to_string(),
+        })));
+    }
+
+    let current_text = fs::read_to_string(&state.config.live_yaml_path).unwrap_or_default();
+    let current_interval = load_yaml_engine_interval(&current_text);
+    let restored_interval = load_yaml_engine_interval(&restored_text);
+    let restart_required = !current_interval.is_empty()
+        && !restored_interval.is_empty()
+        && current_interval != restored_interval;
+
+    let ts_compact = compact_utc_now();
+    let rollback_root = state.config.artifacts_dir.join("rollbacks").join("live");
+    fs::create_dir_all(&rollback_root)?;
+    let mut rollback_dir = rollback_root.join(&ts_compact);
+    if rollback_dir.exists() {
+        rollback_dir = rollback_root.join(format!("{ts_compact}-{}", Uuid::new_v4().simple()));
+    }
+    fs::create_dir_all(&rollback_dir)?;
+
+    let restored_payload = format!("{}\n", restored_text.trim_end());
+    atomic_write_text(
+        &rollback_dir.join("restored_config.yaml"),
+        &restored_payload,
+    )?;
+    if !dry_run {
+        atomic_write_text(&state.config.live_yaml_path, &restored_payload)?;
+    }
+
+    let do_restart = restart_mode == "always" || (restart_mode == "auto" && restart_required);
+    let mut restart_result: Value = Value::Null;
+    if do_restart && !dry_run {
+        let unit = service_unit_name(&state.config.live_service);
+        restart_result = run_action_command(
+            vec![
+                "systemctl".to_string(),
+                "--user".to_string(),
+                "restart".to_string(),
+                unit,
+            ],
+            &state.config.aiq_root,
+            state.config.admin_action_timeout_s,
+        )
+        .await;
+    }
+
+    let event = json!({
+        "version": "rollback_event_v1",
+        "ts_utc": iso_utc_now(),
+        "ts_compact_utc": ts_compact,
+        "who": {
+            "user": env::var("USER").unwrap_or_default(),
+            "hostname": env::var("HOSTNAME").unwrap_or_default(),
+        },
+        "what": {
+            "mode": "live",
+            "yaml_path": state.config.live_yaml_path.to_string_lossy().to_string(),
+            "source_deploy_dir": src_dir.to_string_lossy().to_string(),
+            "restored_from": restored_from.to_string_lossy().to_string(),
+            "current_engine_interval": current_interval,
+            "restored_engine_interval": restored_interval,
+            "restart_required": restart_required,
+            "steps": steps,
+        },
+        "why": { "reason": reason },
+        "dry_run": dry_run,
+        "restart": {
+            "mode": restart_mode,
+            "service": state.config.live_service,
+            "result": restart_result,
+        }
+    });
+
+    let event_text = serde_json::to_string_pretty(&event)? + "\n";
+    atomic_write_text(&rollback_dir.join("rollback_event.json"), &event_text)?;
+
+    let restart_failed = event
+        .get("restart")
+        .and_then(|v| v.get("result"))
+        .and_then(|v| v.get("ok"))
+        .and_then(|v| v.as_bool())
+        .map(|ok| !ok)
+        .unwrap_or(false);
+
+    if restart_failed {
+        return Ok(Json(json!({
+            "ok": false,
+            "action": "rollback_live",
+            "error": "service_restart_failed",
+            "rollback_dir": rollback_dir.to_string_lossy().to_string(),
+            "source_deploy_dir": src_dir.to_string_lossy().to_string(),
+            "restored_from": restored_from.to_string_lossy().to_string(),
+            "restart_required": restart_required,
+            "restart": event.get("restart"),
+        })));
+    }
+
+    Ok(Json(json!({
+        "ok": true,
+        "action": "rollback_live",
+        "rollback_dir": rollback_dir.to_string_lossy().to_string(),
+        "source_deploy_dir": src_dir.to_string_lossy().to_string(),
+        "restored_from": restored_from.to_string_lossy().to_string(),
+        "steps": steps,
+        "restart_required": restart_required,
+        "restart": event.get("restart"),
+        "dry_run": dry_run,
+    })))
 }

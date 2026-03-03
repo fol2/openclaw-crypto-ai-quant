@@ -161,6 +161,33 @@ export async function getConfigFiles() {
   return apiFetch('/api/config/files');
 }
 
+export interface PromoteLiveRequest {
+  paper_mode?: 'paper' | 'paper1' | 'paper2' | 'paper3';
+  config_id?: string;
+  dry_run?: boolean;
+}
+
+export interface RollbackLiveRequest {
+  steps?: number;
+  reason?: string;
+  restart?: 'auto' | 'always' | 'never';
+  dry_run?: boolean;
+}
+
+export async function promoteLiveConfig(body: PromoteLiveRequest = {}) {
+  return apiFetch('/api/config/actions/promote-live', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function rollbackLiveConfig(body: RollbackLiveRequest = {}) {
+  return apiFetch('/api/config/actions/rollback-live', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
 // ── Backtest API ────────────────────────────────────────────────────
 
 export async function runBacktest(opts: { config?: string; initial_balance?: number; symbol?: string }) {

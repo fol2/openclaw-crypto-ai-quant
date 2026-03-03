@@ -1,6 +1,6 @@
 <script lang="ts">
   import { appState } from '../lib/stores.svelte';
-  import { getSnapshot, getCandles, getMarks, postFlashDebug, tradeEnabled, getSystemServices, getJourneys, getCandlesRange, getVolumes, getTunnel } from '../lib/api';
+  import { getSnapshot, getCandles, getMarks, postFlashDebug, tradeEnabled, getSystemServices, getJourneys, getCandlesRange, getVolumes, getTunnel, promoteLiveConfig, rollbackLiveConfig } from '../lib/api';
   import { hubWs } from '../lib/ws';
   import { CANDIDATE_FAMILY_ORDER, getModeLabel, LIVE_MODE } from '../lib/mode-labels';
 
@@ -17,6 +17,7 @@
   const SERVICE_STATUS_REFRESH_MS = 30_000;
 
   type ModeRuntimeState = 'on' | 'off' | 'error' | 'unknown';
+  type PromotePaperMode = 'paper1' | 'paper2' | 'paper3';
 
   let snap: any = $state(null);
   let volumes: Record<string, number> = $state({});
@@ -41,6 +42,10 @@
   let chartHeight = $state(240);
   let chartDragging = $state(false);
   let chartPrefsLoaded = $state(false);
+  let promoteSourceMode = $state<PromotePaperMode>('paper1');
+  let configActionBusy = $state('');
+  let configActionNotice = $state('');
+  let configActionError = $state('');
   const CHART_MIN = 120;
   const CHART_MAX = 600;
 
@@ -1101,6 +1106,97 @@
   let selectedLivePromotedFamily = $derived(
     promotedFamilyLabel(selectedLiveStrategyMode)
   );
+  let adminActionsEnabled = $derived(Boolean(snap?.config?.admin_actions_enabled));
+  let liveServiceName = $derived(
+    String(snap?.config?.live_service || MODE_SERVICE_MAP.live)
+  );
+
+  function normalisePromoteMode(raw: string): PromotePaperMode | '' {
+    const mode = String(raw || '').trim().toLowerCase();
+    if (mode === 'paper' || mode === 'paper1') return 'paper1';
+    if (mode === 'paper2') return 'paper2';
+    if (mode === 'paper3') return 'paper3';
+    return '';
+  }
+
+  function actionErrorMessage(payload: any, fallback: string): string {
+    const direct = String(payload?.error || '').trim();
+    if (direct) return direct;
+    const parsedError = String(payload?.parsed?.error || payload?.parsed?.detail || '').trim();
+    if (parsedError) return parsedError;
+    const stderr = String(payload?.stderr || '').trim();
+    if (stderr) {
+      const line = stderr.split('\n').map((x) => x.trim()).filter(Boolean).at(-1);
+      if (line) return line;
+    }
+    return fallback;
+  }
+
+  async function onPromoteToLive() {
+    if (!adminActionsEnabled || configActionBusy) return;
+    const sourceMode: PromotePaperMode = normalisePromoteMode(promoteSourceMode) || 'paper1';
+    const sourceLabel = getModeLabel(sourceMode);
+    const confirmText = `Promote ${sourceLabel} to live now?\n\nThis updates the live YAML used by ${liveServiceName}.`;
+    if (typeof window !== 'undefined' && !window.confirm(confirmText)) return;
+
+    configActionBusy = 'promote';
+    configActionNotice = '';
+    configActionError = '';
+    try {
+      const res = await promoteLiveConfig({ paper_mode: sourceMode, dry_run: false });
+      if (!res?.ok) {
+        throw new Error(actionErrorMessage(res, `Promote failed for ${sourceLabel}.`));
+      }
+      const configId = String(res?.parsed?.config_id || '').trim();
+      configActionNotice = configId
+        ? `Promote complete: ${sourceLabel} -> live (${configId}).`
+        : `Promote complete: ${sourceLabel} -> live.`;
+      await refresh();
+    } catch (e: any) {
+      configActionError = e?.message || 'Promote failed.';
+    } finally {
+      configActionBusy = '';
+    }
+  }
+
+  async function onRollbackLive() {
+    if (!adminActionsEnabled || configActionBusy) return;
+
+    let reason = '';
+    if (typeof window !== 'undefined') {
+      const input = window.prompt('Rollback reason (optional):', 'dashboard rollback');
+      if (input === null) return;
+      reason = input.trim();
+    }
+
+    const confirmText = `Rollback live config to the previous version now?\n\nService: ${liveServiceName}\nRestart policy: auto`;
+    if (typeof window !== 'undefined' && !window.confirm(confirmText)) return;
+
+    configActionBusy = 'rollback';
+    configActionNotice = '';
+    configActionError = '';
+    try {
+      const res = await rollbackLiveConfig({ steps: 1, restart: 'auto', reason, dry_run: false });
+      if (!res?.ok) {
+        throw new Error(actionErrorMessage(res, 'Rollback failed.'));
+      }
+      const restarted = Boolean(res?.restart?.result?.ok);
+      const restartNote = restarted
+        ? ` ${liveServiceName} restarted.`
+        : (res?.restart_required ? ` Restart required for ${liveServiceName}.` : '');
+      configActionNotice = `Rollback complete: live config restored to previous version.${restartNote}`;
+      await refresh();
+    } catch (e: any) {
+      configActionError = e?.message || 'Rollback failed.';
+    } finally {
+      configActionBusy = '';
+    }
+  }
+
+  $effect(() => {
+    const mode = normalisePromoteMode(appState.mode);
+    if (mode) promoteSourceMode = mode;
+  });
 
   // ── Range selector for PnL / DD ───────────────────────────────────────
   let metricsRange = $state<'today' | 'since' | 'all'>('today');
@@ -1218,6 +1314,44 @@
     {/if}
   </div>
 
+  {#if adminActionsEnabled}
+    <div class="config-actions-bar">
+      <div class="config-actions-left">
+        <label class="config-actions-label" for="promote-source-mode">Promote Source</label>
+        <select
+          id="promote-source-mode"
+          class="config-actions-select"
+          bind:value={promoteSourceMode}
+          disabled={Boolean(configActionBusy)}
+        >
+          <option value="paper1">{getModeLabel('paper1')}</option>
+          <option value="paper2">{getModeLabel('paper2')}</option>
+          <option value="paper3">{getModeLabel('paper3')}</option>
+        </select>
+
+        <button
+          class="config-action-btn promote"
+          onclick={onPromoteToLive}
+          disabled={Boolean(configActionBusy)}
+        >
+          {configActionBusy === 'promote' ? 'Promoting...' : 'Promote To Live'}
+        </button>
+
+        <button
+          class="config-action-btn rollback"
+          onclick={onRollbackLive}
+          disabled={Boolean(configActionBusy)}
+        >
+          {configActionBusy === 'rollback' ? 'Rolling Back...' : 'Rollback Live'}
+        </button>
+      </div>
+
+      <div class="config-actions-meta">
+        Target service: <span>{liveServiceName}</span>
+      </div>
+    </div>
+  {/if}
+
   <div class="metrics-bar">
     {#if health.kill_mode && health.kill_mode !== 'off'}
       <span class="metric-pill danger">
@@ -1278,6 +1412,12 @@
 
   {#if error}
     <div class="error-banner">{error}</div>
+  {/if}
+  {#if configActionNotice}
+    <div class="action-banner ok">{configActionNotice}</div>
+  {/if}
+  {#if configActionError}
+    <div class="action-banner bad">{configActionError}</div>
   {/if}
 </div>
 
@@ -1635,6 +1775,83 @@
     align-items: center;
     gap: 12px;
   }
+  .config-actions-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: rgba(77,171,247,0.06);
+  }
+  .config-actions-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .config-actions-label {
+    font-size: 10px;
+    color: var(--text-dim);
+    font-family: 'IBM Plex Mono', monospace;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .config-actions-select {
+    height: 28px;
+    min-width: 120px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    background: #0f1722;
+    color: var(--text);
+    font-size: 11px;
+    padding: 0 8px;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .config-action-btn {
+    height: 28px;
+    padding: 0 10px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    font-family: 'IBM Plex Mono', monospace;
+    transition: all var(--t-fast);
+    color: var(--text);
+    background: var(--surface);
+    white-space: nowrap;
+  }
+  .config-action-btn.promote {
+    border-color: rgba(81,207,102,0.35);
+    color: #b2f2bb;
+  }
+  .config-action-btn.promote:hover:not(:disabled) {
+    background: rgba(81,207,102,0.15);
+  }
+  .config-action-btn.rollback {
+    border-color: rgba(255,107,107,0.35);
+    color: #ffc9c9;
+  }
+  .config-action-btn.rollback:hover:not(:disabled) {
+    background: rgba(255,107,107,0.15);
+  }
+  .config-action-btn:disabled,
+  .config-actions-select:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+  .config-actions-meta {
+    font-size: 10px;
+    color: var(--text-dim);
+    font-family: 'IBM Plex Mono', monospace;
+    text-align: right;
+  }
+  .config-actions-meta span {
+    color: var(--text);
+  }
   .mode-tabs {
     display: flex;
     align-items: center;
@@ -1918,6 +2135,22 @@
     background: var(--red-bg);
     color: var(--red);
     border: 1px solid rgba(255,107,107,0.2);
+  }
+  .action-banner {
+    padding: 6px 12px;
+    border-radius: var(--radius-md);
+    font-size: 12px;
+    border: 1px solid transparent;
+  }
+  .action-banner.ok {
+    color: var(--green);
+    background: rgba(81,207,102,0.12);
+    border-color: rgba(81,207,102,0.28);
+  }
+  .action-banner.bad {
+    color: var(--red);
+    background: var(--red-bg);
+    border-color: rgba(255,107,107,0.25);
   }
 
   /* ─── Mobile tabs ─── */
@@ -2593,6 +2826,21 @@
   @media (max-width: 768px) {
     .topbar-row {
       flex-wrap: wrap;
+    }
+    .config-actions-bar {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+    .config-actions-left {
+      width: 100%;
+    }
+    .config-actions-select {
+      flex: 1;
+      min-width: 0;
+    }
+    .config-actions-meta {
+      width: 100%;
+      text-align: left;
     }
     .mode-tabs {
       width: 100%;

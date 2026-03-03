@@ -144,8 +144,12 @@ pub struct TrendClosesQuery {
     #[serde(default = "default_trend_limit")]
     limit: u32,
 }
-fn default_trend_interval() -> String { "5m".to_string() }
-fn default_trend_limit() -> u32 { 60 }
+fn default_trend_interval() -> String {
+    "5m".to_string()
+}
+fn default_trend_limit() -> u32 {
+    60
+}
 
 #[derive(Debug, Deserialize)]
 pub struct TunnelQuery {
@@ -157,7 +161,9 @@ pub struct TunnelQuery {
     #[serde(default = "default_tunnel_limit")]
     limit: u32,
 }
-fn default_tunnel_limit() -> u32 { 2000 }
+fn default_tunnel_limit() -> u32 {
+    2000
+}
 
 // ── Route definitions ────────────────────────────────────────────────────
 
@@ -422,6 +428,8 @@ async fn api_snapshot(
         "config": {
             "trader_interval": state.config.trader_interval,
             "candle_intervals": intervals,
+            "admin_actions_enabled": state.config.admin_actions_enabled,
+            "live_service": state.config.live_service,
         },
         "balances": {
             "balance_source": if mode == "live" { "db_snapshot" } else { "paper_estimate" },
@@ -601,8 +609,7 @@ async fn api_journeys(
     let conn = pool.get()?;
 
     let sym_filter = q.symbol.as_deref().map(|s| s.to_uppercase());
-    let journeys =
-        trading::trade_journeys(&conn, limit, offset, sym_filter.as_deref())?;
+    let journeys = trading::trade_journeys(&conn, limit, offset, sym_filter.as_deref())?;
 
     Ok(Json(json!({
         "ok": true,
@@ -664,9 +671,8 @@ async fn api_candles_range(
 
     if let Some(pool) = &candle_pool {
         if let Ok(conn) = pool.get() {
-            let data = candles::fetch_candles_range(
-                &conn, &sym, interval, q.from_ts, q.to_ts, limit,
-            )?;
+            let data =
+                candles::fetch_candles_range(&conn, &sym, interval, q.from_ts, q.to_ts, limit)?;
             if !data.is_empty() {
                 return Ok(Json(json!({
                     "ok": true,
@@ -684,9 +690,7 @@ async fn api_candles_range(
         .db_pool(&mode)
         .ok_or_else(|| HubError::Db("db not available".to_string()))?;
     let conn = pool.get()?;
-    let data = candles::fetch_candles_range(
-        &conn, &sym, interval, q.from_ts, q.to_ts, limit,
-    )?;
+    let data = candles::fetch_candles_range(&conn, &sym, interval, q.from_ts, q.to_ts, limit)?;
     Ok(Json(json!({
         "ok": true,
         "symbol": sym,
@@ -713,7 +717,9 @@ async fn api_trend_closes(
     let conn = pool.get()?;
 
     let data = candles::fetch_recent_closes_batch(&conn, &symbols, &interval, limit)?;
-    Ok(Json(json!({ "interval": interval, "limit": limit, "closes": data })))
+    Ok(Json(
+        json!({ "interval": interval, "limit": limit, "closes": data }),
+    ))
 }
 
 async fn api_trend_candles(
@@ -733,12 +739,12 @@ async fn api_trend_candles(
     let conn = pool.get()?;
 
     let data = candles::fetch_recent_candles_batch(&conn, &symbols, &interval, limit)?;
-    Ok(Json(json!({ "interval": interval, "limit": limit, "candles": data })))
+    Ok(Json(
+        json!({ "interval": interval, "limit": limit, "candles": data }),
+    ))
 }
 
-async fn api_volumes(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, HubError> {
+async fn api_volumes(State(state): State<Arc<AppState>>) -> Result<Json<Value>, HubError> {
     let interval = "1h";
     let cutoff_ms = now_ms() - 24 * 60 * 60 * 1000;
 
