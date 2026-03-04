@@ -681,7 +681,6 @@ def main() -> int:
                 "paper_min_trade_id_exclusive": int(paper_min_id_exclusive),
             }
         )
-        strict_alignment_pass = not run_fingerprint_guard_issues
 
     decision_table_unavailable_but_empty = (
         len(missing_table_issues) > 0

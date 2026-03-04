@@ -326,8 +326,8 @@ def test_decision_trace_main_accepts_preseed_paper_only_unlinked_rows(
     assert exit_code == 0
     assert report["counts"]["mismatch_total"] == 1
     assert report["counts"]["unmatched_paper"] == 1
-    assert report["status"]["strict_alignment_pass"] is True
-    assert report["status"]["accepted_residuals_only"] is True
+    assert report["status"]["strict_alignment_pass"] is False
+    assert report["status"]["accepted_residuals_only"] is False
     assert any(
         str(row.get("kind") or "") == "paper_preseed_decision_rows_out_of_scope"
         for row in report["accepted_residuals"]

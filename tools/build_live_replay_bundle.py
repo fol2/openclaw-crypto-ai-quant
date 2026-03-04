@@ -435,6 +435,8 @@ def _summarise_live_run_fingerprint_provenance(
         ts_ms = int(row.get("timestamp_ms") or 0)
         if ts_ms <= 0:
             continue
+        if ts_ms < int(from_ts) or ts_ms > int(to_ts):
+            continue
         sampled_rows += 1
         fp = str(row.get("run_fingerprint") or "").strip().lower() or "unknown"
         bucket = per_fp.get(fp)

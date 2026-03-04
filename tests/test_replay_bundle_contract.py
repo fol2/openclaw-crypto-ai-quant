@@ -6,6 +6,7 @@ import stat
 import sys
 
 from tools import assert_replay_bundle_alignment as alignment_gate
+from tools import build_live_replay_bundle as replay_bundle_builder
 from tools import run_paper_deterministic_replay as paper_harness
 
 
@@ -53,6 +54,25 @@ def _write_base_gate_bundle(
     if isinstance(manifest_extra, dict):
         manifest.update(manifest_extra)
     _write_json(bundle_dir / "replay_bundle_manifest.json", manifest)
+
+
+def test_live_run_fingerprint_provenance_summariser_respects_declared_window() -> None:
+    payload = replay_bundle_builder._summarise_live_run_fingerprint_provenance(
+        [
+            {"timestamp_ms": 999, "run_fingerprint": "fp-before"},
+            {"timestamp_ms": 1_000, "run_fingerprint": "fp-main"},
+            {"timestamp_ms": 1_500, "run_fingerprint": "fp-main"},
+            {"timestamp_ms": 2_000, "run_fingerprint": "fp-end"},
+            {"timestamp_ms": 2_001, "run_fingerprint": "fp-after"},
+        ],
+        from_ts=1_000,
+        to_ts=2_000,
+    )
+
+    assert payload["window_from_ts"] == 1_000
+    assert payload["window_to_ts"] == 2_000
+    assert payload["rows_sampled"] == 3
+    assert payload["run_fingerprint_distinct"] == 2
 
 
 def test_alignment_gate_fails_on_seed_strict_replace_contract_mismatch(
