@@ -1484,9 +1484,7 @@ def main() -> int:
             "trade_gate_ok": bool(axis_gate_status.get("trade")),
             "trade_policy_mismatch_opt_in_applied": bool(trade_policy_mismatch_opt_in_applied),
             "trade_policy_mismatch_opt_in_proof": trade_policy_mismatch_opt_in_proof,
-            "action_ok": bool((action_report.get("status") or {}).get("strict_alignment_pass"))
-            if action_report
-            else False,
+            "action_ok": bool(action_selected_status) if action_report else False,
             "action_gate_ok": bool(axis_gate_status.get("action")),
             "action_gate_mode": action_gate_mode,
             "action_strict_ok": bool(action_strict_status),
