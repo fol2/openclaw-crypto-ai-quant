@@ -3476,7 +3476,7 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                         reason=reason,
                         confidence=conf,
                         account_value_usd=float(account_value or 0.0),
-                        withdrawable_usd=float(trader.balance or 0.0),
+                        withdrawable_usd=float(getattr(trader, '_withdrawable_usd', None) or trader.balance or 0.0),
                         breadth_pct=_ctx_breadth_pct,
                     )
                     # Best-effort risk update (daily loss tracking, etc).
@@ -3620,7 +3620,7 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                     reason=reason,
                     confidence=conf,
                     account_value_usd=float(account_value or 0.0),
-                    withdrawable_usd=float(trader.balance or 0.0),
+                    withdrawable_usd=float(getattr(trader, '_withdrawable_usd', None) or trader.balance or 0.0),
                     breadth_pct=_ctx_breadth_pct,
                 )
                 # Best-effort risk update (daily loss tracking, etc).
