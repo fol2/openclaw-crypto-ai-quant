@@ -244,6 +244,126 @@ def test_trade_reconcile_classifies_entry_confidence_policy_mismatch_residual(
     assert report["mismatches"][0]["classification"] == "policy_mismatch_residual"
 
 
+def test_trade_reconcile_does_not_attribute_policy_mismatch_when_entry_policy_provenance_is_missing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+
+    live_baseline = bundle_dir / "live_baseline_trades.jsonl"
+    live_baseline.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "id": 1,
+                        "timestamp_ms": 1_000,
+                        "symbol": "ETH",
+                        "action": "OPEN",
+                        "type": "SHORT",
+                        "confidence": "medium",
+                        "size": 1.0,
+                        "pnl": 0.0,
+                        "fee_usd": 0.0,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "id": 2,
+                        "timestamp_ms": 2_000,
+                        "symbol": "ETH",
+                        "action": "CLOSE",
+                        "type": "SHORT",
+                        "confidence": "medium",
+                        "size": 1.0,
+                        "pnl": 1.0,
+                        "fee_usd": 0.0,
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    backtester_trades = bundle_dir / "backtester_trades.csv"
+    backtester_trades.write_text(
+        "trade_id,position_id,entry_ts_ms,exit_ts_ms,symbol,side,entry_price,exit_price,exit_size,pnl_usd,fee_usd,mae_pct,mfe_pct,reason_code,reason\n",
+        encoding="utf-8",
+    )
+
+    replay_report = bundle_dir / "backtester_replay_report.json"
+    replay_report.write_text(
+        json.dumps(
+            {
+                "config_fingerprint": "a" * 64,
+                "trades": [
+                    {
+                        "action": "OPEN_LONG",
+                        "symbol": "ETH",
+                        "confidence": "high",
+                        "timestamp": 1_200,
+                        "reason_code": "entry_signal_sub_bar",
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    strategy_snapshot = bundle_dir / "strategy_overrides.locked.yaml"
+    strategy_snapshot.write_text("trade:\n  leverage: 5\n", encoding="utf-8")
+
+    manifest = bundle_dir / "replay_bundle_manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "artefacts": {
+                    "backtester_replay_report_json": replay_report.name,
+                    "strategy_config_snapshot_file": strategy_snapshot.name,
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    output = bundle_dir / "trade_reconcile_report.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "audit_live_backtester_trade_reconcile.py",
+            "--live-baseline",
+            str(live_baseline),
+            "--backtester-trades",
+            str(backtester_trades),
+            "--bundle-manifest",
+            str(manifest),
+            "--output",
+            str(output),
+        ],
+    )
+
+    exit_code = live_bt_trade.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert report["counts"]["mismatch_total"] == 1
+    assert report["counts"]["policy_mismatch_residuals"] == 0
+    assert report["counts"]["deterministic_unexplained"] == 1
+    assert report["status"]["policy_mismatch_residual_only"] is False
+    assert report["policy_mismatch_analysis"]["detected"] is False
+    assert report["policy_mismatch_analysis"]["evidence_complete"] is False
+    locked_policy = report["policy_mismatch_analysis"]["locked_entry_policy"]
+    assert locked_policy["policy_available"] is False
+    assert locked_policy["provenance_contract_ok"] is False
+    assert locked_policy["policy_source"] == "strategy_snapshot_missing_entry_min_confidence"
+    assert report["mismatches"][0]["classification"] == "deterministic_logic_divergence"
+
+
 def test_decision_trace_filters_paper_rows_by_trade_id_watermark(tmp_path: Path) -> None:
     db = tmp_path / "paper.db"
     conn = sqlite3.connect(db)

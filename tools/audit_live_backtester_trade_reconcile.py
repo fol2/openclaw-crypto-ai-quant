@@ -27,7 +27,6 @@ END_OF_BACKTEST_REASON_CODES = {"exit_end_of_backtest"}
 LIVE_ENTRY_ACTIONS = {"OPEN", "ADD"}
 BACKTESTER_ENTRY_ACTIONS = {"OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT"}
 CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
-DEFAULT_ENTRY_MIN_CONFIDENCE = "high"
 DEFAULT_TOL = 1e-9
 
 
@@ -351,10 +350,10 @@ def _load_locked_entry_confidence_policy(path: Path | None) -> dict[str, Any]:
         return {
             "strategy_config_snapshot": str(path) if path is not None else None,
             "policy_available": False,
+            "provenance_contract_ok": False,
             "global_min_confidence": "",
             "symbol_min_confidence": {},
             "policy_source": "unavailable",
-            "used_runtime_default": False,
             "error": None,
         }
 
@@ -364,10 +363,10 @@ def _load_locked_entry_confidence_policy(path: Path | None) -> dict[str, Any]:
         return {
             "strategy_config_snapshot": str(path),
             "policy_available": False,
+            "provenance_contract_ok": False,
             "global_min_confidence": "",
             "symbol_min_confidence": {},
             "policy_source": "yaml_parse_error",
-            "used_runtime_default": False,
             "error": str(exc),
         }
 
@@ -385,20 +384,20 @@ def _load_locked_entry_confidence_policy(path: Path | None) -> dict[str, Any]:
             if symbol_conf:
                 symbol_min_confidence[symbol] = symbol_conf
 
-    used_runtime_default = False
-    policy_source = "strategy_snapshot"
-    if not global_min_confidence and not symbol_min_confidence:
-        global_min_confidence = DEFAULT_ENTRY_MIN_CONFIDENCE
-        used_runtime_default = True
-        policy_source = "runtime_default"
+    policy_source = (
+        "strategy_snapshot_explicit"
+        if (global_min_confidence or symbol_min_confidence)
+        else "strategy_snapshot_missing_entry_min_confidence"
+    )
+    provenance_contract_ok = bool(global_min_confidence or symbol_min_confidence)
 
     return {
         "strategy_config_snapshot": str(path),
         "policy_available": bool(global_min_confidence or symbol_min_confidence),
+        "provenance_contract_ok": bool(provenance_contract_ok),
         "global_min_confidence": global_min_confidence,
         "symbol_min_confidence": dict(sorted(symbol_min_confidence.items(), key=lambda kv: kv[0])),
         "policy_source": policy_source,
-        "used_runtime_default": bool(used_runtime_default),
         "error": None,
     }
 
@@ -432,6 +431,7 @@ def _apply_entry_confidence_policy_residual_classification(
     global_min_conf = _normalise_confidence((locked_entry_policy or {}).get("global_min_confidence"))
     symbol_min_conf = dict((locked_entry_policy or {}).get("symbol_min_confidence") or {})
     policy_available = bool((locked_entry_policy or {}).get("policy_available"))
+    provenance_contract_ok = bool((locked_entry_policy or {}).get("provenance_contract_ok"))
 
     reclassified_count = 0
     sample_rows: list[dict[str, Any]] = []
@@ -456,7 +456,7 @@ def _apply_entry_confidence_policy_residual_classification(
         backtester_symbol_side_entries = backtester_entries_by_symbol_side.get((symbol, side), [])
         if backtester_symbol_side_entries:
             continue
-        if not policy_available:
+        if not policy_available or not provenance_contract_ok:
             continue
 
         required_min_conf = _normalise_confidence(symbol_min_conf.get(symbol) or global_min_conf)
@@ -512,6 +512,7 @@ def _apply_entry_confidence_policy_residual_classification(
     evidence_complete = bool(
         reclassified_count > 0
         and policy_available
+        and provenance_contract_ok
         and bool(global_min_conf or symbol_min_conf)
         and bool(backtester_entry_rows)
         and bool(sample_rows)
@@ -526,10 +527,10 @@ def _apply_entry_confidence_policy_residual_classification(
         "locked_entry_policy": {
             "strategy_config_snapshot": (locked_entry_policy or {}).get("strategy_config_snapshot"),
             "policy_available": bool(policy_available),
+            "provenance_contract_ok": bool(provenance_contract_ok),
             "global_min_confidence": global_min_conf,
             "symbol_min_confidence": dict(sorted(symbol_min_conf.items(), key=lambda kv: kv[0])),
             "policy_source": (locked_entry_policy or {}).get("policy_source"),
-            "used_runtime_default": bool((locked_entry_policy or {}).get("used_runtime_default")),
             "error": (locked_entry_policy or {}).get("error"),
         },
         "live_entry_confidence_counts": _confidence_counts(live_entry_rows),

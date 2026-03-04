@@ -308,6 +308,7 @@ def _trade_policy_mismatch_opt_in_proof(report: dict[str, Any]) -> tuple[bool, d
     status = report.get("status") or {}
     counts = report.get("counts") or {}
     analysis = report.get("policy_mismatch_analysis") or {}
+    locked_policy = analysis.get("locked_entry_policy") or {}
     policy_rows = report.get("policy_mismatch_residuals")
     policy_rows_count = len(policy_rows) if isinstance(policy_rows, list) else _as_int(counts.get("policy_mismatch_residuals"), 0)
     reclassified_count = _as_int(analysis.get("reclassified_mismatch_count"), 0)
@@ -317,14 +318,17 @@ def _trade_policy_mismatch_opt_in_proof(report: dict[str, Any]) -> tuple[bool, d
     evidence_complete = bool(analysis.get("evidence_complete"))
     analysis_kind = str(analysis.get("kind") or "").strip().lower()
     required_min_conf = str(
-        (((analysis.get("locked_entry_policy") or {}).get("global_min_confidence")) or "").strip().lower()
+        ((locked_policy.get("global_min_confidence")) or "").strip().lower()
     )
-    has_symbol_policy = bool(((analysis.get("locked_entry_policy") or {}).get("symbol_min_confidence") or {}))
+    has_symbol_policy = bool((locked_policy.get("symbol_min_confidence") or {}))
+    provenance_contract_ok = bool(locked_policy.get("provenance_contract_ok"))
+    policy_source = str(locked_policy.get("policy_source") or "").strip().lower()
     ok = (
         (not strict_pass)
         and policy_only
         and analysis_detected
         and evidence_complete
+        and provenance_contract_ok
         and analysis_kind == "entry_confidence_gate"
         and policy_rows_count > 0
         and reclassified_count > 0
@@ -335,11 +339,13 @@ def _trade_policy_mismatch_opt_in_proof(report: dict[str, Any]) -> tuple[bool, d
         "policy_mismatch_residual_only": policy_only,
         "policy_mismatch_detected": analysis_detected,
         "policy_mismatch_evidence_complete": evidence_complete,
+        "policy_mismatch_provenance_contract_ok": provenance_contract_ok,
+        "policy_mismatch_policy_source": policy_source or None,
         "policy_mismatch_kind": analysis_kind,
         "policy_mismatch_residual_count": int(policy_rows_count),
         "policy_mismatch_reclassified_count": int(reclassified_count),
         "locked_global_min_confidence": required_min_conf or None,
-        "locked_symbol_policy_count": len((analysis.get("locked_entry_policy") or {}).get("symbol_min_confidence") or {}),
+        "locked_symbol_policy_count": len(locked_policy.get("symbol_min_confidence") or {}),
     }
     return ok, proof
 
