@@ -658,7 +658,6 @@ def _action_artefact_report(
             "paper_window_not_replayed": bool(paper_window_not_replayed),
         },
         "accepted_residuals": [],
-        "counts": {"mismatch_total": mismatch_total},
         "counts": {
             "mismatch_total": mismatch_total,
             "live_simulatable_actions": 12,
