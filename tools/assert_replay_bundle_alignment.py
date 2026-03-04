@@ -52,9 +52,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--candles-db",
         help="Optional candles DB override path for provenance validation",
     )
-    parser.add_argument("--state-report", default="state_alignment_report.json", help="State alignment report filename/path")
-    parser.add_argument("--trade-report", default="trade_reconcile_report.json", help="Trade reconcile report filename/path")
-    parser.add_argument("--action-report", default="action_reconcile_report.json", help="Action reconcile report filename/path")
+    parser.add_argument(
+        "--state-report", default="state_alignment_report.json", help="State alignment report filename/path"
+    )
+    parser.add_argument(
+        "--trade-report", default="trade_reconcile_report.json", help="Trade reconcile report filename/path"
+    )
+    parser.add_argument(
+        "--action-report", default="action_reconcile_report.json", help="Action reconcile report filename/path"
+    )
     parser.add_argument(
         "--live-paper-report",
         default="live_paper_action_reconcile_report.json",
@@ -356,7 +362,7 @@ def main() -> int:
     if snapshot_init_state_path is not None and snapshot_init_state_path.exists():
         loaded_snapshot = _load_json(snapshot_init_state_path)
         if isinstance(loaded_snapshot, dict):
-            raw_pos_prov = ((loaded_snapshot.get("canonical") or {}).get("position_state_provenance"))
+            raw_pos_prov = (loaded_snapshot.get("canonical") or {}).get("position_state_provenance")
             if isinstance(raw_pos_prov, dict):
                 snapshot_position_state_provenance = raw_pos_prov
                 snapshot_trades_only_positions = _as_int(
@@ -410,6 +416,14 @@ def main() -> int:
     locked_strategy_match_ok = True
     live_run_fingerprint_provenance: dict[str, Any] | None = None
     if manifest is not None:
+        manifest_inputs_obj = manifest.get("inputs") or {}
+        expected_window_from_ts = _as_int(manifest_inputs_obj.get("from_ts"), -1)
+        expected_window_to_ts = _as_int(manifest_inputs_obj.get("to_ts"), -1)
+        has_expected_window = (
+            expected_window_from_ts >= 0
+            and expected_window_to_ts >= 0
+            and expected_window_from_ts <= expected_window_to_ts
+        )
         runtime_strategy = manifest.get("runtime_strategy_provenance")
         oms_strategy = manifest.get("oms_strategy_provenance")
         run_fingerprint_provenance = manifest.get("live_run_fingerprint_provenance")
@@ -462,6 +476,27 @@ def main() -> int:
                         },
                     }
                 )
+            runtime_from_ts = _as_int(runtime_strategy.get("window_from_ts"), -1)
+            runtime_to_ts = _as_int(runtime_strategy.get("window_to_ts"), -1)
+            if has_expected_window and (
+                runtime_from_ts != expected_window_from_ts or runtime_to_ts != expected_window_to_ts
+            ):
+                strategy_runtime_stability_ok = False
+                failures.append(
+                    {
+                        "code": "runtime_strategy_provenance_window_mismatch",
+                        "classification": "state_initialisation_gap",
+                        "detail": ("runtime strategy provenance window does not match manifest inputs replay window"),
+                        "expected": {
+                            "from_ts": int(expected_window_from_ts),
+                            "to_ts": int(expected_window_to_ts),
+                        },
+                        "actual": {
+                            "from_ts": int(runtime_from_ts),
+                            "to_ts": int(runtime_to_ts),
+                        },
+                    }
+                )
 
         if not isinstance(oms_strategy, dict):
             strategy_oms_stability_ok = False
@@ -480,9 +515,7 @@ def main() -> int:
             oms_rows_sampled = _as_int(oms_strategy.get("oms_rows_sampled"), 0)
             oms_timeline = oms_strategy.get("strategy_sha1_timeline")
             oms_timeline_count = len(oms_timeline) if isinstance(oms_timeline, list) else 0
-            enforce_non_empty_oms_provenance = (
-                (oms_rows_in_window > 0) if has_oms_rows_in_window else True
-            )
+            enforce_non_empty_oms_provenance = (oms_rows_in_window > 0) if has_oms_rows_in_window else True
             if (
                 args.require_oms_strategy_provenance
                 and enforce_non_empty_oms_provenance
@@ -520,6 +553,25 @@ def main() -> int:
                         },
                     }
                 )
+            oms_from_ts = _as_int(oms_strategy.get("window_from_ts"), -1)
+            oms_to_ts = _as_int(oms_strategy.get("window_to_ts"), -1)
+            if has_expected_window and (oms_from_ts != expected_window_from_ts or oms_to_ts != expected_window_to_ts):
+                strategy_oms_stability_ok = False
+                failures.append(
+                    {
+                        "code": "oms_strategy_provenance_window_mismatch",
+                        "classification": "state_initialisation_gap",
+                        "detail": ("OMS strategy provenance window does not match manifest inputs replay window"),
+                        "expected": {
+                            "from_ts": int(expected_window_from_ts),
+                            "to_ts": int(expected_window_to_ts),
+                        },
+                        "actual": {
+                            "from_ts": int(oms_from_ts),
+                            "to_ts": int(oms_to_ts),
+                        },
+                    }
+                )
 
         if not isinstance(run_fingerprint_provenance, dict):
             live_run_fingerprint_stability_ok = False
@@ -537,19 +589,14 @@ def main() -> int:
             run_fp_rows_sampled = _as_int(run_fingerprint_provenance.get("rows_sampled"), 0)
             run_fp_timeline = run_fingerprint_provenance.get("run_fingerprint_timeline")
             run_fp_timeline_count = len(run_fp_timeline) if isinstance(run_fp_timeline, list) else 0
-            if (
-                args.require_live_run_fingerprint_provenance
-                and run_fp_rows_sampled > 0
-                and run_fp_timeline_count <= 0
-            ):
+            if args.require_live_run_fingerprint_provenance and run_fp_rows_sampled > 0 and run_fp_timeline_count <= 0:
                 live_run_fingerprint_stability_ok = False
                 failures.append(
                     {
                         "code": "empty_live_run_fingerprint_provenance",
                         "classification": "state_initialisation_gap",
                         "detail": (
-                            "live run fingerprint provenance is present but contains no sampled "
-                            "run_fingerprint rows"
+                            "live run fingerprint provenance is present but contains no sampled run_fingerprint rows"
                         ),
                         "counts": {
                             "rows_sampled": run_fp_rows_sampled,
@@ -558,10 +605,7 @@ def main() -> int:
                     }
                 )
             max_live_run_fp_distinct = args.max_live_run_fingerprint_distinct
-            if (
-                max_live_run_fp_distinct is not None
-                and run_fp_distinct > int(max_live_run_fp_distinct)
-            ):
+            if max_live_run_fp_distinct is not None and run_fp_distinct > int(max_live_run_fp_distinct):
                 live_run_fingerprint_stability_ok = False
                 failures.append(
                     {
@@ -575,6 +619,29 @@ def main() -> int:
                             "run_fingerprint_distinct": run_fp_distinct,
                             "rows_sampled": run_fp_rows_sampled,
                             "run_fingerprint_timeline_count": run_fp_timeline_count,
+                        },
+                    }
+                )
+            run_fp_from_ts = _as_int(run_fingerprint_provenance.get("window_from_ts"), -1)
+            run_fp_to_ts = _as_int(run_fingerprint_provenance.get("window_to_ts"), -1)
+            if has_expected_window and (
+                run_fp_from_ts != expected_window_from_ts or run_fp_to_ts != expected_window_to_ts
+            ):
+                live_run_fingerprint_stability_ok = False
+                failures.append(
+                    {
+                        "code": "live_run_fingerprint_provenance_window_mismatch",
+                        "classification": "state_initialisation_gap",
+                        "detail": (
+                            "live run fingerprint provenance window does not match manifest inputs replay window"
+                        ),
+                        "expected": {
+                            "from_ts": int(expected_window_from_ts),
+                            "to_ts": int(expected_window_to_ts),
+                        },
+                        "actual": {
+                            "from_ts": int(run_fp_from_ts),
+                            "to_ts": int(run_fp_to_ts),
                         },
                     }
                 )
@@ -592,10 +659,12 @@ def main() -> int:
             else:
                 locked_sha256 = str(locked_strategy.get("strategy_overrides_sha1") or "").strip().lower()
                 locked_sha1_legacy = str(locked_strategy.get("strategy_overrides_sha1_legacy") or "").strip().lower()
-                locked_snapshot_sha256 = str(locked_strategy.get("strategy_overrides_snapshot_sha1") or "").strip().lower()
-                locked_snapshot_sha1_legacy = str(
-                    locked_strategy.get("strategy_overrides_snapshot_sha1_legacy") or ""
-                ).strip().lower()
+                locked_snapshot_sha256 = (
+                    str(locked_strategy.get("strategy_overrides_snapshot_sha1") or "").strip().lower()
+                )
+                locked_snapshot_sha1_legacy = (
+                    str(locked_strategy.get("strategy_overrides_snapshot_sha1_legacy") or "").strip().lower()
+                )
                 if len(locked_sha256) < 8 and len(locked_sha1_legacy) < 8:
                     locked_strategy_match_ok = False
                     failures.append(
@@ -606,8 +675,8 @@ def main() -> int:
                         }
                     )
                 else:
-                    computed_locked_sha256, computed_locked_sha1_legacy, snapshot_path = _compute_locked_strategy_hashes(
-                        bundle_dir, manifest
+                    computed_locked_sha256, computed_locked_sha1_legacy, snapshot_path = (
+                        _compute_locked_strategy_hashes(bundle_dir, manifest)
                     )
                     if len(computed_locked_sha256) < 8 and len(computed_locked_sha1_legacy) < 8:
                         locked_strategy_match_ok = False
@@ -624,9 +693,7 @@ def main() -> int:
                         locked_snapshot_sha256 if len(locked_snapshot_sha256) >= 8 else locked_sha256
                     )
                     expected_snapshot_sha1_legacy = (
-                        locked_snapshot_sha1_legacy
-                        if len(locked_snapshot_sha1_legacy) >= 8
-                        else locked_sha1_legacy
+                        locked_snapshot_sha1_legacy if len(locked_snapshot_sha1_legacy) >= 8 else locked_sha1_legacy
                     )
 
                     if len(expected_snapshot_sha256) >= 8 and computed_locked_sha256 != expected_snapshot_sha256:
@@ -666,9 +733,7 @@ def main() -> int:
                     effective_locked_hashes.discard("")
 
                     runtime_timeline = (
-                        runtime_strategy.get("strategy_sha1_timeline")
-                        if isinstance(runtime_strategy, dict)
-                        else []
+                        runtime_strategy.get("strategy_sha1_timeline") if isinstance(runtime_strategy, dict) else []
                     )
                     runtime_rows = runtime_timeline if isinstance(runtime_timeline, list) else []
                     runtime_prefix_match = any(
@@ -693,12 +758,10 @@ def main() -> int:
                             }
                         )
 
-                    oms_rows_sampled = _as_int(oms_strategy.get("oms_rows_sampled"), 0) if isinstance(oms_strategy, dict) else 0
-                    oms_timeline = (
-                        oms_strategy.get("strategy_sha1_timeline")
-                        if isinstance(oms_strategy, dict)
-                        else []
+                    oms_rows_sampled = (
+                        _as_int(oms_strategy.get("oms_rows_sampled"), 0) if isinstance(oms_strategy, dict) else 0
                     )
+                    oms_timeline = oms_strategy.get("strategy_sha1_timeline") if isinstance(oms_strategy, dict) else []
                     oms_rows = oms_timeline if isinstance(oms_timeline, list) else []
                     oms_rows_available = bool(oms_rows_sampled > 0 and len(oms_rows) > 0)
                     if oms_rows_available:
@@ -928,15 +991,9 @@ def main() -> int:
         and snapshot_position_state_history_count <= 0
     )
 
-    if (
-        snapshot_trades_only_gate
-        and (
-            (trade_report is not None and not bool(((trade_report.get("status") or {}).get("strict_alignment_pass"))))
-            or (
-                action_report is not None
-                and not bool(((action_report.get("status") or {}).get("strict_alignment_pass")))
-            )
-        )
+    if snapshot_trades_only_gate and (
+        (trade_report is not None and not bool(((trade_report.get("status") or {}).get("strict_alignment_pass"))))
+        or (action_report is not None and not bool(((action_report.get("status") or {}).get("strict_alignment_pass"))))
     ):
         failures.append(
             {
@@ -994,11 +1051,55 @@ def main() -> int:
     manifest_snapshot_strict_replace = _as_bool(manifest_inputs.get("snapshot_strict_replace"), False)
     paper_seed_apply_report: dict[str, Any] | None = None
     if paper_seed_apply_path.exists():
-        paper_seed_apply_report = _load_json(paper_seed_apply_path)
+        loaded_seed_apply = _load_json(paper_seed_apply_path)
+        if isinstance(loaded_seed_apply, dict):
+            paper_seed_apply_report = loaded_seed_apply
+        else:
+            failures.append(
+                {
+                    "code": "invalid_paper_seed_apply_report",
+                    "classification": "state_initialisation_gap",
+                    "detail": "paper seed apply report is not a JSON object",
+                }
+            )
+    elif isinstance(manifest, dict) and "snapshot_strict_replace" in manifest_inputs:
+        failures.append(
+            {
+                "code": "missing_paper_seed_apply_report",
+                "classification": "state_initialisation_gap",
+                "detail": str(paper_seed_apply_path),
+            }
+        )
     seed_apply_strict_replace = _as_bool(
         (paper_seed_apply_report or {}).get("strict_replace"),
         False,
     )
+    if isinstance(manifest, dict) and "snapshot_strict_replace" in manifest_inputs:
+        if paper_seed_apply_report is not None:
+            if "strict_replace" not in paper_seed_apply_report:
+                failures.append(
+                    {
+                        "code": "missing_seed_apply_strict_replace_field",
+                        "classification": "state_initialisation_gap",
+                        "detail": (
+                            "paper seed apply report is missing strict_replace; "
+                            "cannot validate seed contract deterministically"
+                        ),
+                    }
+                )
+            elif manifest_snapshot_strict_replace != seed_apply_strict_replace:
+                failures.append(
+                    {
+                        "code": "snapshot_strict_replace_contract_mismatch",
+                        "classification": "state_initialisation_gap",
+                        "detail": (
+                            "manifest inputs snapshot_strict_replace does not match "
+                            "paper seed apply report strict_replace"
+                        ),
+                        "expected": bool(manifest_snapshot_strict_replace),
+                        "actual": bool(seed_apply_strict_replace),
+                    }
+                )
     live_paper_decision_trace_report: dict[str, Any] | None = None
     live_paper_decision_trace_skipped_empty_paper = False
     if not live_paper_decision_trace_path.exists():
@@ -1188,8 +1289,12 @@ def main() -> int:
             "candles_provenance_checked": candles_provenance_checked,
             "candles_provenance_ok": candles_provenance_ok,
             "state_ok": bool(state_report.get("ok")) if state_report is not None else False,
-            "trade_ok": bool((trade_report.get("status") or {}).get("strict_alignment_pass")) if trade_report else False,
-            "action_ok": bool((action_report.get("status") or {}).get("strict_alignment_pass")) if action_report else False,
+            "trade_ok": bool((trade_report.get("status") or {}).get("strict_alignment_pass"))
+            if trade_report
+            else False,
+            "action_ok": bool((action_report.get("status") or {}).get("strict_alignment_pass"))
+            if action_report
+            else False,
             "live_paper_ok": bool((live_paper_report.get("status") or {}).get("strict_alignment_pass"))
             if live_paper_report
             else (not bool(args.require_live_paper)),
@@ -1202,9 +1307,7 @@ def main() -> int:
                 (not bool(args.require_live_paper_decision_trace))
                 or bool(live_paper_decision_trace_skipped_empty_paper)
             ),
-            "live_paper_decision_trace_skipped_empty_paper": bool(
-                live_paper_decision_trace_skipped_empty_paper
-            ),
+            "live_paper_decision_trace_skipped_empty_paper": bool(live_paper_decision_trace_skipped_empty_paper),
             "manifest_snapshot_strict_replace": bool(manifest_snapshot_strict_replace),
             "seed_apply_strict_replace": bool(seed_apply_strict_replace),
             "event_order_ok": bool((event_order_report.get("status") or {}).get("order_parity_pass"))
@@ -1233,7 +1336,9 @@ def main() -> int:
     }
 
     payload = json.dumps(report, indent=2, sort_keys=True) + "\n"
-    output_path = Path(args.output).expanduser().resolve() if args.output else (bundle_dir / "alignment_gate_report.json")
+    output_path = (
+        Path(args.output).expanduser().resolve() if args.output else (bundle_dir / "alignment_gate_report.json")
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(payload, encoding="utf-8")
     print(output_path.as_posix())

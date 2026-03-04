@@ -153,9 +153,7 @@ def _normalise_macd_modes_inplace(
             if str(key) == "macd_hist_entry_mode":
                 norm = _normalise_macd_mode(value)
                 if norm is None:
-                    errors.append(
-                        f"{child_path}={value!r} (expected accel|sign|none or numeric 0/1/2)"
-                    )
+                    errors.append(f"{child_path}={value!r} (expected accel|sign|none or numeric 0/1/2)")
                 else:
                     node[key] = norm
                 continue
@@ -330,16 +328,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--allow-interval-override",
         action="store_true",
-        help=(
-            "Allow replay interval override when it differs from locked strategy "
-            "global.engine.interval."
-        ),
+        help=("Allow replay interval override when it differs from locked strategy global.engine.interval."),
     )
     parser.add_argument(
         "--strategy-config",
         help=(
-            "Path to strategy YAML used for deterministic replay. "
-            "Default: <live-db-dir>/config/strategy_overrides.yaml"
+            "Path to strategy YAML used for deterministic replay. Default: <live-db-dir>/config/strategy_overrides.yaml"
         ),
     )
     parser.add_argument("--from-ts", type=int, required=True, help="Replay start timestamp (ms, inclusive)")
@@ -717,9 +711,7 @@ def main() -> int:
 
     loaded_strategy_cfg = _load_yaml_mapping(strategy_config_source)
     if loaded_strategy_cfg is None:
-        parser.error(
-            f"strategy config YAML parse failed: {strategy_config_source}"
-        )
+        parser.error(f"strategy config YAML parse failed: {strategy_config_source}")
     # Keep lock hashes from the original source object so runtime/OMS provenance
     # matching remains consistent with StrategyManager hashing semantics.
     locked_strategy_sha256 = _hash_json_canonical(loaded_strategy_cfg)
@@ -733,8 +725,7 @@ def main() -> int:
     )
     if mode_errors:
         parser.error(
-            "invalid strategy config: macd_hist_entry_mode contains unsupported values: "
-            + "; ".join(mode_errors)
+            "invalid strategy config: macd_hist_entry_mode contains unsupported values: " + "; ".join(mode_errors)
         )
 
     bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -768,9 +759,7 @@ def main() -> int:
     snapshot_locked_sha256 = _strategy_overrides_sha1(strategy_config_snapshot_path)
     snapshot_locked_sha1_legacy = _strategy_overrides_sha1_legacy(strategy_config_snapshot_path)
 
-    cfg_interval, cfg_entry_interval, cfg_exit_interval = _load_config_engine_intervals(
-        strategy_config_snapshot_path
-    )
+    cfg_interval, cfg_entry_interval, cfg_exit_interval = _load_config_engine_intervals(strategy_config_snapshot_path)
     replay_entry_candles_db = _derive_interval_db(candles_db, cfg_entry_interval)
     replay_exit_candles_db = _derive_interval_db(candles_db, cfg_exit_interval)
     requested_interval = str(args.interval or "").strip()
@@ -817,7 +806,7 @@ def main() -> int:
     live_run_fingerprint_provenance = _summarise_live_run_fingerprint_provenance(
         baseline_trades,
         from_ts=int(args.from_ts),
-        to_ts=int(live_window_to_ts),
+        to_ts=int(args.to_ts),
     )
     live_order_fail_events = _load_live_order_fail_events(
         live_db,
@@ -827,12 +816,12 @@ def main() -> int:
     runtime_strategy_provenance = _load_runtime_strategy_provenance(
         live_db,
         from_ts=int(args.from_ts),
-        to_ts=int(live_window_to_ts),
+        to_ts=int(args.to_ts),
     )
     oms_strategy_provenance = _load_oms_strategy_provenance(
         live_db,
         from_ts=int(args.from_ts),
-        to_ts=int(live_window_to_ts),
+        to_ts=int(args.to_ts),
     )
     runtime_timeline = runtime_strategy_provenance.get("strategy_sha1_timeline")
     runtime_rows = runtime_timeline if isinstance(runtime_timeline, list) else []
@@ -898,12 +887,12 @@ def main() -> int:
 
     cmd_export_seed = (
         "set -euo pipefail\n"
-        "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
-        "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
-        f"LIVE_DB=\"${{LIVE_DB:-{shlex.quote(str(live_db))}}}\"\n"
-        f"PAPER_DB=\"${{PAPER_DB:-{shlex.quote(str(paper_db))}}}\"\n"
-        f"PAPER_WATERMARK_PATH=\"$BUNDLE_DIR/{paper_seed_watermark_path.name}\"\n"
-        "python3 - \"$PAPER_DB\" \"$PAPER_WATERMARK_PATH\" <<'PY'\n"
+        'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+        'REPO_ROOT="${REPO_ROOT:-$(pwd)}"\n'
+        f'LIVE_DB="${{LIVE_DB:-{shlex.quote(str(live_db))}}}"\n'
+        f'PAPER_DB="${{PAPER_DB:-{shlex.quote(str(paper_db))}}}"\n'
+        f'PAPER_WATERMARK_PATH="$BUNDLE_DIR/{paper_seed_watermark_path.name}"\n'
+        'python3 - "$PAPER_DB" "$PAPER_WATERMARK_PATH" <<\'PY\'\n'
         "import datetime as dt\n"
         "import json\n"
         "import sqlite3\n"
@@ -911,94 +900,94 @@ def main() -> int:
         "\n"
         "paper_db = sys.argv[1]\n"
         "output_path = sys.argv[2]\n"
-        "conn = sqlite3.connect(f\"file:{paper_db}?mode=ro\", uri=True, timeout=10)\n"
+        'conn = sqlite3.connect(f"file:{paper_db}?mode=ro", uri=True, timeout=10)\n'
         "try:\n"
-        "    row = conn.execute(\"SELECT COALESCE(MAX(id), 0) AS max_id FROM trades\").fetchone()\n"
+        '    row = conn.execute("SELECT COALESCE(MAX(id), 0) AS max_id FROM trades").fetchone()\n'
         "finally:\n"
         "    conn.close()\n"
         "max_id = int((row[0] if row else 0) or 0)\n"
         "payload = {\n"
-        "    \"schema_version\": 1,\n"
-        "    \"generated_at_ms\": int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000),\n"
-        "    \"paper_db\": paper_db,\n"
-        "    \"pre_seed_max_trade_id\": max_id,\n"
+        '    "schema_version": 1,\n'
+        '    "generated_at_ms": int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000),\n'
+        '    "paper_db": paper_db,\n'
+        '    "pre_seed_max_trade_id": max_id,\n'
         "}\n"
-        "with open(output_path, \"w\", encoding=\"utf-8\") as fp:\n"
+        'with open(output_path, "w", encoding="utf-8") as fp:\n'
         "    fp.write(json.dumps(payload, indent=2, sort_keys=True))\n"
-        "    fp.write(\"\\n\")\n"
+        '    fp.write("\\n")\n'
         "print(output_path)\n"
         "PY\n"
-        f"SNAPSHOT_PATH=\"$BUNDLE_DIR/{snapshot_name}\"\n"
-        f"PAPER_SEED_APPLY_REPORT=\"$BUNDLE_DIR/{paper_seed_apply_report_path.name}\"\n"
-        "STRICT_REPLACE_FLAG=\"\"\n"
-        "if [ \"${AQC_SNAPSHOT_STRICT_REPLACE:-0}\" = \"1\" ]; then STRICT_REPLACE_FLAG=\"--strict-replace\"; fi\n"
-        f"python3 \"$REPO_ROOT/tools/export_live_canonical_snapshot.py\" --source live --db-path \"$LIVE_DB\" --as-of-ts {seed_as_of_ts} --output \"$SNAPSHOT_PATH\"\n"
-        "python3 \"$REPO_ROOT/tools/apply_canonical_snapshot_to_paper.py\" --snapshot \"$SNAPSHOT_PATH\" --target-db \"$PAPER_DB\" $STRICT_REPLACE_FLAG > \"$PAPER_SEED_APPLY_REPORT\""
+        f'SNAPSHOT_PATH="$BUNDLE_DIR/{snapshot_name}"\n'
+        f'PAPER_SEED_APPLY_REPORT="$BUNDLE_DIR/{paper_seed_apply_report_path.name}"\n'
+        'STRICT_REPLACE_FLAG=""\n'
+        'if [ "${AQC_SNAPSHOT_STRICT_REPLACE:-0}" = "1" ]; then STRICT_REPLACE_FLAG="--strict-replace"; fi\n'
+        f'python3 "$REPO_ROOT/tools/export_live_canonical_snapshot.py" --source live --db-path "$LIVE_DB" --as-of-ts {seed_as_of_ts} --output "$SNAPSHOT_PATH"\n'
+        'python3 "$REPO_ROOT/tools/apply_canonical_snapshot_to_paper.py" --snapshot "$SNAPSHOT_PATH" --target-db "$PAPER_DB" $STRICT_REPLACE_FLAG > "$PAPER_SEED_APPLY_REPORT"'
     )
 
     if funding_db is not None:
-        funding_env = f"FUNDING_DB=\"${{FUNDING_DB:-{shlex.quote(str(funding_db))}}}\"\n"
-        funding_arg = " --funding-db \"$FUNDING_DB\""
+        funding_env = f'FUNDING_DB="${{FUNDING_DB:-{shlex.quote(str(funding_db))}}}"\n'
+        funding_arg = ' --funding-db "$FUNDING_DB"'
     else:
         funding_env = ""
         funding_arg = ""
 
     cmd_replay = (
         "set -euo pipefail\n"
-        "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
-        "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
-        f"CANDLES_DB=\"${{CANDLES_DB:-{shlex.quote(str(candles_db))}}}\"\n"
+        'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+        'REPO_ROOT="${REPO_ROOT:-$(pwd)}"\n'
+        f'CANDLES_DB="${{CANDLES_DB:-{shlex.quote(str(candles_db))}}}"\n'
         f"{funding_env}"
-        f"SNAPSHOT_PATH=\"$BUNDLE_DIR/{snapshot_name}\"\n"
-        "cd \"$REPO_ROOT/backtester\"\n"
+        f'SNAPSHOT_PATH="$BUNDLE_DIR/{snapshot_name}"\n'
+        'cd "$REPO_ROOT/backtester"\n'
         "BACKTESTER_REPLAY_BIN='./target/release/mei-backtester replay'\n"
         "BACKTESTER_REPLAY_CARGO='cargo run -q --release --package bt-cli -- replay'\n"
-        "BACKTESTER_REPLAY_CMD=\"$BACKTESTER_REPLAY_CARGO\"\n"
-        "EXPECTED_GIT_SHA=\"$(git rev-parse --short=7 HEAD 2>/dev/null || true)\"\n"
-        "if [ \"${AQC_REPLAY_PREFER_RELEASE_BIN:-1}\" = \"1\" ] && [ -x \"./target/release/mei-backtester\" ]; then\n"
+        'BACKTESTER_REPLAY_CMD="$BACKTESTER_REPLAY_CARGO"\n'
+        'EXPECTED_GIT_SHA="$(git rev-parse --short=7 HEAD 2>/dev/null || true)"\n'
+        'if [ "${AQC_REPLAY_PREFER_RELEASE_BIN:-1}" = "1" ] && [ -x "./target/release/mei-backtester" ]; then\n'
         "  BIN_GIT_SHA=\"$(./target/release/mei-backtester --version 2>/dev/null | sed -n 's/.*git:\\([0-9a-fA-F]\\{7,40\\}\\).*/\\1/p' | head -n1 | tr 'A-F' 'a-f')\"\n"
         "  EXPECTED_GIT_SHA=\"$(printf '%s' \"$EXPECTED_GIT_SHA\" | tr 'A-F' 'a-f')\"\n"
-        "  if [ -n \"$EXPECTED_GIT_SHA\" ] && [ -n \"$BIN_GIT_SHA\" ] && [ \"${BIN_GIT_SHA#$EXPECTED_GIT_SHA}\" != \"$BIN_GIT_SHA\" ]; then\n"
-        "    BACKTESTER_REPLAY_CMD=\"$BACKTESTER_REPLAY_BIN\"\n"
+        '  if [ -n "$EXPECTED_GIT_SHA" ] && [ -n "$BIN_GIT_SHA" ] && [ "${BIN_GIT_SHA#$EXPECTED_GIT_SHA}" != "$BIN_GIT_SHA" ]; then\n'
+        '    BACKTESTER_REPLAY_CMD="$BACKTESTER_REPLAY_BIN"\n'
         "  else\n"
-        "    echo \"[replay] release binary git sha mismatch (bin=${BIN_GIT_SHA:-unknown}, expected=${EXPECTED_GIT_SHA:-unknown}); using cargo\" >&2\n"
+        '    echo "[replay] release binary git sha mismatch (bin=${BIN_GIT_SHA:-unknown}, expected=${EXPECTED_GIT_SHA:-unknown}); using cargo" >&2\n'
         "  fi\n"
         "fi\n"
-        f"$BACKTESTER_REPLAY_CMD --live --config \"$BUNDLE_DIR/{strategy_config_snapshot_path.name}\" --candles-db \"$CANDLES_DB\" "
+        f'$BACKTESTER_REPLAY_CMD --live --config "$BUNDLE_DIR/{strategy_config_snapshot_path.name}" --candles-db "$CANDLES_DB" '
         f"--interval {shlex.quote(base_interval)} --from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
-        f"--init-state \"$SNAPSHOT_PATH\" --export-trades \"$BUNDLE_DIR/{replay_trades_csv.name}\" "
-        f"--output \"$BUNDLE_DIR/{replay_report_path.name}\" --trades{funding_arg}{replay_sub_bar_args}\n"
+        f'--init-state "$SNAPSHOT_PATH" --export-trades "$BUNDLE_DIR/{replay_trades_csv.name}" '
+        f'--output "$BUNDLE_DIR/{replay_report_path.name}" --trades{funding_arg}{replay_sub_bar_args}\n'
         f"if ! python3 - \"$BUNDLE_DIR/{replay_report_path.name}\" <<'PY'\n"
         "import json\n"
         "import sys\n"
         "\n"
         "path = sys.argv[1]\n"
-        "with open(path, \"r\", encoding=\"utf-8\") as fp:\n"
+        'with open(path, "r", encoding="utf-8") as fp:\n'
         "    obj = json.load(fp)\n"
-        "fingerprint = str(obj.get(\"config_fingerprint\") or \"\").strip().lower()\n"
-        "ok = len(fingerprint) == 64 and all(ch in \"0123456789abcdef\" for ch in fingerprint)\n"
+        'fingerprint = str(obj.get("config_fingerprint") or "").strip().lower()\n'
+        'ok = len(fingerprint) == 64 and all(ch in "0123456789abcdef" for ch in fingerprint)\n'
         "raise SystemExit(0 if ok else 1)\n"
         "PY\n"
         "then\n"
-        "  if [ \"$BACKTESTER_REPLAY_CMD\" = \"$BACKTESTER_REPLAY_BIN\" ]; then\n"
-        "    echo \"[replay] release binary missing config_fingerprint; retry with cargo\" >&2\n"
-        f"    $BACKTESTER_REPLAY_CARGO --live --config \"$BUNDLE_DIR/{strategy_config_snapshot_path.name}\" --candles-db \"$CANDLES_DB\" "
+        '  if [ "$BACKTESTER_REPLAY_CMD" = "$BACKTESTER_REPLAY_BIN" ]; then\n'
+        '    echo "[replay] release binary missing config_fingerprint; retry with cargo" >&2\n'
+        f'    $BACKTESTER_REPLAY_CARGO --live --config "$BUNDLE_DIR/{strategy_config_snapshot_path.name}" --candles-db "$CANDLES_DB" '
         f"--interval {shlex.quote(base_interval)} --from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
-        f"--init-state \"$SNAPSHOT_PATH\" --export-trades \"$BUNDLE_DIR/{replay_trades_csv.name}\" "
-        f"--output \"$BUNDLE_DIR/{replay_report_path.name}\" --trades{funding_arg}{replay_sub_bar_args}\n"
+        f'--init-state "$SNAPSHOT_PATH" --export-trades "$BUNDLE_DIR/{replay_trades_csv.name}" '
+        f'--output "$BUNDLE_DIR/{replay_report_path.name}" --trades{funding_arg}{replay_sub_bar_args}\n'
         f"    python3 - \"$BUNDLE_DIR/{replay_report_path.name}\" <<'PY'\n"
         "import json\n"
         "import sys\n"
         "\n"
         "path = sys.argv[1]\n"
-        "with open(path, \"r\", encoding=\"utf-8\") as fp:\n"
+        'with open(path, "r", encoding="utf-8") as fp:\n'
         "    obj = json.load(fp)\n"
-        "fingerprint = str(obj.get(\"config_fingerprint\") or \"\").strip().lower()\n"
-        "ok = len(fingerprint) == 64 and all(ch in \"0123456789abcdef\" for ch in fingerprint)\n"
+        'fingerprint = str(obj.get("config_fingerprint") or "").strip().lower()\n'
+        'ok = len(fingerprint) == 64 and all(ch in "0123456789abcdef" for ch in fingerprint)\n'
         "raise SystemExit(0 if ok else 1)\n"
         "PY\n"
         "  else\n"
-        "    echo \"[replay] missing config_fingerprint in replay report\" >&2\n"
+        '    echo "[replay] missing config_fingerprint in replay report" >&2\n'
         "    exit 1\n"
         "  fi\n"
         "fi"
@@ -1006,153 +995,160 @@ def main() -> int:
 
     cmd_audit = (
         "set -euo pipefail\n"
-        "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
-        "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
-        f"LIVE_DB=\"${{LIVE_DB:-{shlex.quote(str(live_db))}}}\"\n"
-        f"PAPER_DB=\"${{PAPER_DB:-{shlex.quote(str(paper_db))}}}\"\n"
-        f"SNAPSHOT_PATH=\"$BUNDLE_DIR/{snapshot_name}\"\n"
-        "python3 \"$REPO_ROOT/tools/audit_state_sync_alignment.py\" --live-db \"$LIVE_DB\" "
-        f"--paper-db \"$PAPER_DB\" --snapshot \"$SNAPSHOT_PATH\" --as-of-ts {seed_as_of_ts} "
-        f"--output \"$BUNDLE_DIR/{audit_report_path.name}\""
+        'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+        'REPO_ROOT="${REPO_ROOT:-$(pwd)}"\n'
+        f'LIVE_DB="${{LIVE_DB:-{shlex.quote(str(live_db))}}}"\n'
+        f'PAPER_DB="${{PAPER_DB:-{shlex.quote(str(paper_db))}}}"\n'
+        f'SNAPSHOT_PATH="$BUNDLE_DIR/{snapshot_name}"\n'
+        'python3 "$REPO_ROOT/tools/audit_state_sync_alignment.py" --live-db "$LIVE_DB" '
+        f'--paper-db "$PAPER_DB" --snapshot "$SNAPSHOT_PATH" --as-of-ts {seed_as_of_ts} '
+        f'--output "$BUNDLE_DIR/{audit_report_path.name}"'
     )
 
     cmd_trade_reconcile = (
         "set -euo pipefail\n"
-        "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
-        "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
-        "python3 \"$REPO_ROOT/tools/audit_live_backtester_trade_reconcile.py\" "
-        f"--live-baseline \"$BUNDLE_DIR/{live_trades_path.name}\" "
-        f"--backtester-trades \"$BUNDLE_DIR/{replay_trades_csv.name}\" "
-        f"--bundle-manifest \"$BUNDLE_DIR/{manifest_path.name}\" "
+        'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+        'REPO_ROOT="${REPO_ROOT:-$(pwd)}"\n'
+        'python3 "$REPO_ROOT/tools/audit_live_backtester_trade_reconcile.py" '
+        f'--live-baseline "$BUNDLE_DIR/{live_trades_path.name}" '
+        f'--backtester-trades "$BUNDLE_DIR/{replay_trades_csv.name}" '
+        f'--bundle-manifest "$BUNDLE_DIR/{manifest_path.name}" '
         f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
         "--timestamp-bucket-anchor ceil "
-        f"--output \"$BUNDLE_DIR/{trade_reconcile_path.name}\""
+        f'--output "$BUNDLE_DIR/{trade_reconcile_path.name}"'
     )
 
     cmd_action_reconcile = (
         "set -euo pipefail\n"
-        "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
-        "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
-        "python3 \"$REPO_ROOT/tools/audit_live_backtester_action_reconcile.py\" "
-        f"--live-baseline \"$BUNDLE_DIR/{live_trades_path.name}\" "
-        f"--backtester-replay-report \"$BUNDLE_DIR/{replay_report_path.name}\" "
-        f"--live-order-fail-events \"$BUNDLE_DIR/{live_order_fail_events_path.name}\" "
+        'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+        'REPO_ROOT="${REPO_ROOT:-$(pwd)}"\n'
+        'python3 "$REPO_ROOT/tools/audit_live_backtester_action_reconcile.py" '
+        f'--live-baseline "$BUNDLE_DIR/{live_trades_path.name}" '
+        f'--backtester-replay-report "$BUNDLE_DIR/{replay_report_path.name}" '
+        f'--live-order-fail-events "$BUNDLE_DIR/{live_order_fail_events_path.name}" '
         f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
         "--timestamp-bucket-anchor floor "
-        f"--output \"$BUNDLE_DIR/{action_reconcile_path.name}\""
+        f'--output "$BUNDLE_DIR/{action_reconcile_path.name}"'
     )
 
     paper_seed_filter_arg = (
-        f"--paper-seed-watermark \"$BUNDLE_DIR/{paper_seed_watermark_path.name}\" "
-        if args.paper_filter_post_seed
-        else ""
+        f'--paper-seed-watermark "$BUNDLE_DIR/{paper_seed_watermark_path.name}" ' if args.paper_filter_post_seed else ""
     )
     run_fingerprint_guard_arg = (
-        f"--bundle-manifest \"$BUNDLE_DIR/{manifest_path.name}\" "
+        f'--bundle-manifest "$BUNDLE_DIR/{manifest_path.name}" '
         "--require-single-run-fingerprint "
         "--max-live-run-fingerprint-distinct 1 "
     )
 
     cmd_live_paper_action_reconcile = (
         "set -euo pipefail\n"
-        "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
-        "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
-        f"LIVE_DB=\"${{LIVE_DB:-{shlex.quote(str(live_db))}}}\"\n"
-        f"PAPER_DB=\"${{PAPER_DB:-{shlex.quote(str(paper_db))}}}\"\n"
-        "python3 \"$REPO_ROOT/tools/audit_live_paper_action_reconcile.py\" "
-        "--live-db \"$LIVE_DB\" "
-        "--paper-db \"$PAPER_DB\" "
+        'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+        'REPO_ROOT="${REPO_ROOT:-$(pwd)}"\n'
+        f'LIVE_DB="${{LIVE_DB:-{shlex.quote(str(live_db))}}}"\n'
+        f'PAPER_DB="${{PAPER_DB:-{shlex.quote(str(paper_db))}}}"\n'
+        'python3 "$REPO_ROOT/tools/audit_live_paper_action_reconcile.py" '
+        '--live-db "$LIVE_DB" '
+        '--paper-db "$PAPER_DB" '
         f"{paper_seed_filter_arg}"
         f"{run_fingerprint_guard_arg}"
         f"--from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
         f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
-        f"--output \"$BUNDLE_DIR/{live_paper_action_reconcile_path.name}\""
+        f'--output "$BUNDLE_DIR/{live_paper_action_reconcile_path.name}"'
     )
 
     cmd_live_paper_decision_trace_reconcile = (
         "set -euo pipefail\n"
-        "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
-        "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
-        f"LIVE_DB=\"${{LIVE_DB:-{shlex.quote(str(live_db))}}}\"\n"
-        f"PAPER_DB=\"${{PAPER_DB:-{shlex.quote(str(paper_db))}}}\"\n"
-        "python3 \"$REPO_ROOT/tools/audit_live_paper_decision_trace.py\" "
-        "--live-db \"$LIVE_DB\" "
-        "--paper-db \"$PAPER_DB\" "
+        'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+        'REPO_ROOT="${REPO_ROOT:-$(pwd)}"\n'
+        f'LIVE_DB="${{LIVE_DB:-{shlex.quote(str(live_db))}}}"\n'
+        f'PAPER_DB="${{PAPER_DB:-{shlex.quote(str(paper_db))}}}"\n'
+        'python3 "$REPO_ROOT/tools/audit_live_paper_decision_trace.py" '
+        '--live-db "$LIVE_DB" '
+        '--paper-db "$PAPER_DB" '
         f"{paper_seed_filter_arg}"
         f"{run_fingerprint_guard_arg}"
         f"--from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
         f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
-        f"--output \"$BUNDLE_DIR/{live_paper_decision_trace_reconcile_path.name}\""
+        f'--output "$BUNDLE_DIR/{live_paper_decision_trace_reconcile_path.name}"'
     )
 
     cmd_event_order_parity = (
         "set -euo pipefail\n"
-        "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
-        "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
-        f"PAPER_DB=\"${{PAPER_DB:-{shlex.quote(str(paper_db))}}}\"\n"
-        "python3 \"$REPO_ROOT/tools/audit_live_baseline_paper_order_parity.py\" "
-        f"--live-baseline \"$BUNDLE_DIR/{live_trades_path.name}\" "
-        "--paper-db \"$PAPER_DB\" "
+        'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+        'REPO_ROOT="${REPO_ROOT:-$(pwd)}"\n'
+        f'PAPER_DB="${{PAPER_DB:-{shlex.quote(str(paper_db))}}}"\n'
+        'python3 "$REPO_ROOT/tools/audit_live_baseline_paper_order_parity.py" '
+        f'--live-baseline "$BUNDLE_DIR/{live_trades_path.name}" '
+        '--paper-db "$PAPER_DB" '
         f"{paper_seed_filter_arg}"
         f"{run_fingerprint_guard_arg}"
         f"--from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
         f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
         "--fail-on-mismatch "
-        f"--output \"$BUNDLE_DIR/{event_order_parity_path.name}\""
+        f'--output "$BUNDLE_DIR/{event_order_parity_path.name}"'
     )
 
     cmd_gpu_parity = (
         "set -euo pipefail\n"
-        "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
-        "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
-        f"CANDLES_DB=\"${{CANDLES_DB:-{shlex.quote(str(candles_db))}}}\"\n"
-        f"export AQC_PARITY_CONFIG_PATH=\"${{AQC_PARITY_CONFIG_PATH:-$BUNDLE_DIR/{strategy_config_snapshot_path.name}}}\"\n"
+        'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+        'REPO_ROOT="${REPO_ROOT:-$(pwd)}"\n'
+        f'CANDLES_DB="${{CANDLES_DB:-{shlex.quote(str(candles_db))}}}"\n'
+        f'export AQC_PARITY_CONFIG_PATH="${{AQC_PARITY_CONFIG_PATH:-$BUNDLE_DIR/{strategy_config_snapshot_path.name}}}"\n'
         f"{funding_env}"
-        "python3 \"$REPO_ROOT/tools/run_bundle_gpu_parity.py\" "
-        "--bundle-dir \"$BUNDLE_DIR\" "
-        "--repo-root \"$REPO_ROOT\" "
-        "--candles-db \"$CANDLES_DB\" "
+        'python3 "$REPO_ROOT/tools/run_bundle_gpu_parity.py" '
+        '--bundle-dir "$BUNDLE_DIR" '
+        '--repo-root "$REPO_ROOT" '
+        '--candles-db "$CANDLES_DB" '
         f"{funding_arg} "
-        f"--output \"$BUNDLE_DIR/{gpu_parity_report_path.name}\""
+        f'--output "$BUNDLE_DIR/{gpu_parity_report_path.name}"'
     )
 
     cmd_alignment_gate = (
         "set -euo pipefail\n"
-        "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
-        "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
-        f"CANDLES_DB=\"${{CANDLES_DB:-{shlex.quote(str(candles_db))}}}\"\n"
-        "python3 \"$REPO_ROOT/tools/assert_replay_bundle_alignment.py\" "
-        "--bundle-dir \"$BUNDLE_DIR\" "
-        "--candles-db \"$CANDLES_DB\" "
-        f"--live-paper-report \"$BUNDLE_DIR/{live_paper_action_reconcile_path.name}\" "
-        "--require-live-paper "
-        f"--live-paper-decision-trace-report \"$BUNDLE_DIR/{live_paper_decision_trace_reconcile_path.name}\" "
-        "--require-live-paper-decision-trace "
-        f"--event-order-report \"$BUNDLE_DIR/{event_order_parity_path.name}\" "
-        "--require-event-order "
-        f"--gpu-parity-report \"$BUNDLE_DIR/{gpu_parity_report_path.name}\" "
-        "--require-gpu-parity "
-        "--require-runtime-strategy-provenance "
-        "--max-strategy-sha1-distinct 1 "
-        "--require-oms-strategy-provenance "
-        "--max-oms-strategy-sha1-distinct 1 "
-        "--require-live-run-fingerprint-provenance "
-        "--max-live-run-fingerprint-distinct 1 "
-        "--require-locked-strategy-match "
-        f"--output \"$BUNDLE_DIR/{alignment_gate_path.name}\""
+        'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+        'REPO_ROOT="${REPO_ROOT:-$(pwd)}"\n'
+        f'CANDLES_DB="${{CANDLES_DB:-{shlex.quote(str(candles_db))}}}"\n'
+        'MAX_STRATEGY_SHA1_DISTINCT="${AQC_MAX_STRATEGY_SHA1_DISTINCT:-1}"\n'
+        'MAX_OMS_STRATEGY_SHA1_DISTINCT="${AQC_MAX_OMS_STRATEGY_SHA1_DISTINCT:-$MAX_STRATEGY_SHA1_DISTINCT}"\n'
+        'MAX_LIVE_RUN_FINGERPRINT_DISTINCT="${AQC_MAX_LIVE_RUN_FINGERPRINT_DISTINCT:-1}"\n'
+        "GATE_ARGS=(\n"
+        '  --bundle-dir "$BUNDLE_DIR"\n'
+        '  --candles-db "$CANDLES_DB"\n'
+        f'  --live-paper-report "$BUNDLE_DIR/{live_paper_action_reconcile_path.name}"\n'
+        "  --require-live-paper\n"
+        f'  --live-paper-decision-trace-report "$BUNDLE_DIR/{live_paper_decision_trace_reconcile_path.name}"\n'
+        "  --require-live-paper-decision-trace\n"
+        f'  --event-order-report "$BUNDLE_DIR/{event_order_parity_path.name}"\n'
+        "  --require-event-order\n"
+        f'  --gpu-parity-report "$BUNDLE_DIR/{gpu_parity_report_path.name}"\n'
+        "  --require-gpu-parity\n"
+        "  --require-runtime-strategy-provenance\n"
+        '  --max-strategy-sha1-distinct "$MAX_STRATEGY_SHA1_DISTINCT"\n'
+        "  --require-live-run-fingerprint-provenance\n"
+        '  --max-live-run-fingerprint-distinct "$MAX_LIVE_RUN_FINGERPRINT_DISTINCT"\n'
+        "  --require-locked-strategy-match\n"
+        ")\n"
+        'if [ "${AQC_REQUIRE_OMS_STRATEGY_PROVENANCE:-1}" = "1" ]; then\n'
+        '  GATE_ARGS+=(--require-oms-strategy-provenance --max-oms-strategy-sha1-distinct "$MAX_OMS_STRATEGY_SHA1_DISTINCT")\n'
+        "fi\n"
+        'if [ "${STRICT_NO_RESIDUALS:-0}" = "1" ]; then\n'
+        "  GATE_ARGS+=(--strict-no-residuals)\n"
+        "fi\n"
+        'python3 "$REPO_ROOT/tools/assert_replay_bundle_alignment.py" "${GATE_ARGS[@]}" '
+        f'--output "$BUNDLE_DIR/{alignment_gate_path.name}"'
     )
 
     cmd_paper_harness = (
         "set -euo pipefail\n"
-        "BUNDLE_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
-        "REPO_ROOT=\"${REPO_ROOT:-$(pwd)}\"\n"
-        "STRICT_FLAG=\"\"\n"
-        "if [ \"${STRICT_NO_RESIDUALS:-0}\" = \"1\" ]; then STRICT_FLAG=\"--strict-no-residuals\"; fi\n"
-        "python3 \"$REPO_ROOT/tools/run_paper_deterministic_replay.py\" "
-        "--bundle-dir \"$BUNDLE_DIR\" "
-        "--repo-root \"$REPO_ROOT\" "
+        'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+        'REPO_ROOT="${REPO_ROOT:-$(pwd)}"\n'
+        'STRICT_FLAG=""\n'
+        'if [ "${STRICT_NO_RESIDUALS:-0}" = "1" ]; then STRICT_FLAG="--strict-no-residuals"; fi\n'
+        'python3 "$REPO_ROOT/tools/run_paper_deterministic_replay.py" '
+        '--bundle-dir "$BUNDLE_DIR" '
+        '--repo-root "$REPO_ROOT" '
         "$STRICT_FLAG "
-        f"--output \"$BUNDLE_DIR/{paper_harness_report_path.name}\""
+        f'--output "$BUNDLE_DIR/{paper_harness_report_path.name}"'
     )
 
     (bundle_dir / "run_01_export_and_seed.sh").write_text(cmd_export_seed + "\n", encoding="utf-8")
@@ -1160,7 +1156,9 @@ def main() -> int:
     (bundle_dir / "run_03_audit.sh").write_text(cmd_audit + "\n", encoding="utf-8")
     (bundle_dir / "run_04_trade_reconcile.sh").write_text(cmd_trade_reconcile + "\n", encoding="utf-8")
     (bundle_dir / "run_05_action_reconcile.sh").write_text(cmd_action_reconcile + "\n", encoding="utf-8")
-    (bundle_dir / "run_06_live_paper_action_reconcile.sh").write_text(cmd_live_paper_action_reconcile + "\n", encoding="utf-8")
+    (bundle_dir / "run_06_live_paper_action_reconcile.sh").write_text(
+        cmd_live_paper_action_reconcile + "\n", encoding="utf-8"
+    )
     (bundle_dir / "run_07_live_paper_decision_trace_reconcile.sh").write_text(
         cmd_live_paper_decision_trace_reconcile + "\n",
         encoding="utf-8",

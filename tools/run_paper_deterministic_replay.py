@@ -38,13 +38,6 @@ def _now_ms() -> int:
     return int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    raw = str(os.getenv(name, "") or "").strip().lower()
-    if not raw:
-        return bool(default)
-    return raw in {"1", "true", "yes", "on"}
-
-
 def _run_step(
     *,
     step_name: str,
@@ -158,79 +151,37 @@ def main() -> int:
             break
 
     if overall_ok:
-        gate_report = bundle_dir / "alignment_gate_report.json"
-        max_strategy_sha1_distinct_raw = str(env.get("AQC_MAX_STRATEGY_SHA1_DISTINCT") or "1").strip()
-        try:
-            max_strategy_sha1_distinct = max(1, int(max_strategy_sha1_distinct_raw))
-        except Exception:
-            max_strategy_sha1_distinct = 1
-        max_oms_strategy_sha1_distinct_raw = str(
-            env.get("AQC_MAX_OMS_STRATEGY_SHA1_DISTINCT") or str(max_strategy_sha1_distinct)
-        ).strip()
-        try:
-            max_oms_strategy_sha1_distinct = max(1, int(max_oms_strategy_sha1_distinct_raw))
-        except Exception:
-            max_oms_strategy_sha1_distinct = max_strategy_sha1_distinct
-        max_live_run_fingerprint_distinct_raw = str(
-            env.get("AQC_MAX_LIVE_RUN_FINGERPRINT_DISTINCT") or "1"
-        ).strip()
-        try:
-            max_live_run_fingerprint_distinct = max(1, int(max_live_run_fingerprint_distinct_raw))
-        except Exception:
-            max_live_run_fingerprint_distinct = 1
-        require_oms_strategy_provenance = _env_bool("AQC_REQUIRE_OMS_STRATEGY_PROVENANCE", True)
-        gate_cmd = [
-            "python3",
-            str((repo_root / "tools" / "assert_replay_bundle_alignment.py").resolve()),
-            "--bundle-dir",
-            str(bundle_dir),
-            "--live-paper-report",
-            str((bundle_dir / "live_paper_action_reconcile_report.json").resolve()),
-            "--require-live-paper",
-            "--live-paper-decision-trace-report",
-            str((bundle_dir / "live_paper_decision_trace_reconcile_report.json").resolve()),
-            "--require-live-paper-decision-trace",
-            "--event-order-report",
-            str((bundle_dir / "event_order_parity_report.json").resolve()),
-            "--require-event-order",
-            "--gpu-parity-report",
-            str((bundle_dir / "gpu_smoke_parity_report.json").resolve()),
-            "--require-gpu-parity",
-            "--require-runtime-strategy-provenance",
-            "--max-strategy-sha1-distinct",
-            str(max_strategy_sha1_distinct),
-            "--require-live-run-fingerprint-provenance",
-            "--max-live-run-fingerprint-distinct",
-            str(max_live_run_fingerprint_distinct),
-            "--require-locked-strategy-match",
-            "--output",
-            str(gate_report),
-        ]
-        if require_oms_strategy_provenance:
-            gate_cmd.extend(
-                [
-                    "--require-oms-strategy-provenance",
-                    "--max-oms-strategy-sha1-distinct",
-                    str(max_oms_strategy_sha1_distinct),
-                ]
+        gate_script = (bundle_dir / "run_08_assert_alignment.sh").resolve()
+        if not gate_script.exists():
+            steps.append(
+                {
+                    "step": "alignment_gate",
+                    "command": str(gate_script),
+                    "exit_code": 127,
+                    "start_ms": _now_ms(),
+                    "end_ms": _now_ms(),
+                    "duration_ms": 0,
+                    "stdout_log": "",
+                    "stderr_log": "",
+                    "error": f"missing script: {gate_script}",
+                }
             )
-        if args.strict_no_residuals:
-            gate_cmd.append("--strict-no-residuals")
-        candles_db_for_gate = str(env.get("CANDLES_DB") or "").strip()
-        if candles_db_for_gate:
-            gate_cmd.extend(["--candles-db", candles_db_for_gate])
-
-        gate_result = _run_step(
-            step_name="alignment_gate",
-            command=gate_cmd,
-            env=env,
-            cwd=repo_root,
-            logs_dir=logs_dir,
-        )
-        steps.append(gate_result)
-        if int(gate_result["exit_code"]) != 0:
             overall_ok = False
             failed_step = "alignment_gate"
+        else:
+            gate_env = env.copy()
+            gate_env["STRICT_NO_RESIDUALS"] = "1" if bool(args.strict_no_residuals) else "0"
+            gate_result = _run_step(
+                step_name="alignment_gate",
+                command=["bash", str(gate_script)],
+                env=gate_env,
+                cwd=repo_root,
+                logs_dir=logs_dir,
+            )
+            steps.append(gate_result)
+            if int(gate_result["exit_code"]) != 0:
+                overall_ok = False
+                failed_step = "alignment_gate"
 
     report = {
         "schema_version": 1,
