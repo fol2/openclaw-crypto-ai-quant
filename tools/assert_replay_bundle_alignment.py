@@ -309,6 +309,7 @@ def _trade_policy_mismatch_opt_in_proof(report: dict[str, Any]) -> tuple[bool, d
     counts = report.get("counts") or {}
     analysis = report.get("policy_mismatch_analysis") or {}
     locked_policy = analysis.get("locked_entry_policy") or {}
+    runtime_policy = analysis.get("runtime_entry_policy") or {}
     policy_rows = report.get("policy_mismatch_residuals")
     policy_rows_count = len(policy_rows) if isinstance(policy_rows, list) else _as_int(counts.get("policy_mismatch_residuals"), 0)
     reclassified_count = _as_int(analysis.get("reclassified_mismatch_count"), 0)
@@ -323,15 +324,28 @@ def _trade_policy_mismatch_opt_in_proof(report: dict[str, Any]) -> tuple[bool, d
     has_symbol_policy = bool((locked_policy.get("symbol_min_confidence") or {}))
     provenance_contract_ok = bool(locked_policy.get("provenance_contract_ok"))
     policy_source = str(locked_policy.get("policy_source") or "").strip().lower()
+    runtime_provenance_contract_ok = bool(runtime_policy.get("provenance_contract_ok"))
+    runtime_source_contract_ok = bool(runtime_policy.get("source_contract_ok"))
+    runtime_policy_source = str(runtime_policy.get("policy_source") or "").strip().lower()
+    runtime_rows_non_fallback = _as_int(runtime_policy.get("rows_with_non_fallback_confidence_source"), 0)
+    runtime_rows_with_policy = _as_int(runtime_policy.get("rows_with_policy"), 0)
+    runtime_match_verified = _as_int(runtime_policy.get("match_verified"), 0)
+    runtime_match_fallback = _as_int(runtime_policy.get("match_fallback"), 0)
     ok = (
         (not strict_pass)
         and policy_only
         and analysis_detected
         and evidence_complete
         and provenance_contract_ok
+        and runtime_provenance_contract_ok
+        and runtime_source_contract_ok
         and analysis_kind == "entry_confidence_gate"
         and policy_rows_count > 0
         and reclassified_count > 0
+        and runtime_rows_non_fallback > 0
+        and runtime_rows_with_policy > 0
+        and runtime_match_verified > 0
+        and runtime_match_fallback == 0
         and (required_min_conf in {"low", "medium", "high"} or has_symbol_policy)
     )
     proof = {
@@ -346,6 +360,13 @@ def _trade_policy_mismatch_opt_in_proof(report: dict[str, Any]) -> tuple[bool, d
         "policy_mismatch_reclassified_count": int(reclassified_count),
         "locked_global_min_confidence": required_min_conf or None,
         "locked_symbol_policy_count": len(locked_policy.get("symbol_min_confidence") or {}),
+        "runtime_policy_mismatch_provenance_contract_ok": runtime_provenance_contract_ok,
+        "runtime_policy_source_contract_ok": runtime_source_contract_ok,
+        "runtime_policy_source": runtime_policy_source or None,
+        "runtime_rows_non_fallback_confidence_source": int(runtime_rows_non_fallback),
+        "runtime_rows_with_policy": int(runtime_rows_with_policy),
+        "runtime_match_verified": int(runtime_match_verified),
+        "runtime_match_fallback": int(runtime_match_fallback),
     }
     return ok, proof
 

@@ -157,11 +157,16 @@ class KernelDecision:
             raw_side=raw.get("side"),
         )
         confidence = str(raw.get("confidence", "N/A"))
+        confidence_source = _normalise_confidence_source(raw.get("confidence_source"))
         # Kernel decisions have confidence="N/A" (Rust kernel events lack a
         # confidence field).  Normalise to "medium" — a safer default that
         # still passes the confidence gate without granting max leverage/sizing.
         if confidence.strip().upper() == "N/A":
             confidence = "medium"
+            if not confidence_source:
+                confidence_source = "fallback_na_medium"
+        elif not confidence_source:
+            confidence_source = "event_payload"
 
         try:
             score = float(raw.get("score", 0.0) or 0.0)
@@ -174,6 +179,14 @@ class KernelDecision:
                 now_series = dict(now_series)
             except (TypeError, ValueError):
                 now_series = {}
+        if not isinstance(now_series, dict):
+            now_series = {}
+
+        entry_min_confidence_policy = _normalise_confidence_label(raw.get("entry_min_confidence_policy"))
+        if confidence_source:
+            now_series.setdefault("_confidence_source", confidence_source)
+        if entry_min_confidence_policy:
+            now_series.setdefault("_entry_min_confidence_policy", entry_min_confidence_policy)
 
         target_size = _normalise_kernel_target_size(raw.get("quantity"), raw.get("notional_usd"), raw.get("price"))
         if target_size is None:
@@ -370,6 +383,17 @@ def _normalise_kernel_signal(raw_signal: Any) -> str:
     if sig == "SHORT":
         return "SELL"
     return sig
+
+
+def _normalise_confidence_label(raw_confidence: Any) -> str:
+    confidence = str(raw_confidence or "").strip().lower()
+    if confidence in {"low", "medium", "high"}:
+        return confidence
+    return ""
+
+
+def _normalise_confidence_source(raw_source: Any) -> str:
+    return str(raw_source or "").strip().lower()
 
 
 def _normalise_kernel_side(raw_side: Any) -> str:
@@ -1199,6 +1223,15 @@ class KernelDecisionRustBindingProvider:
                 "signal": signal_text,
                 "price": price,
             }
+            confidence = _normalise_confidence_label(raw.get("confidence"))
+            if confidence:
+                payload["confidence"] = confidence
+            confidence_source = _normalise_confidence_source(raw.get("confidence_source"))
+            if confidence_source:
+                payload["confidence_source"] = confidence_source
+            entry_min_confidence_policy = _normalise_confidence_label(raw.get("entry_min_confidence_policy"))
+            if entry_min_confidence_policy:
+                payload["entry_min_confidence_policy"] = entry_min_confidence_policy
 
             notional_hint = _normalise_kernel_notional(
                 raw.get("notional_hint_usd"),
@@ -1294,6 +1327,8 @@ class KernelDecisionRustBindingProvider:
                 "intent_id": decision.get("intent_id"),
                 "signal": event_raw.get("signal"),
                 "confidence": event_raw.get("confidence", "N/A"),
+                "confidence_source": event_raw.get("confidence_source"),
+                "entry_min_confidence_policy": event_raw.get("entry_min_confidence_policy"),
                 "now_series": event_now_series,
                 "entry_key": event_raw.get("entry_key", event_raw.get("event_id")),
                 "reason": decision.get("reason"),
@@ -2129,6 +2164,15 @@ class UnifiedEngine:
                     trigger_iv = exit_iv
                     trigger_key = exit_key
 
+            try:
+                cfg = self.strategy.get_config(sym_u) or self.strategy.get_config("__GLOBAL__") or {}
+            except Exception:
+                cfg = {}
+            trade_cfg = cfg.get("trade") if isinstance(cfg, dict) else None
+            entry_min_confidence_policy = ""
+            if isinstance(trade_cfg, Mapping):
+                entry_min_confidence_policy = _normalise_confidence_label(trade_cfg.get("entry_min_confidence"))
+
             df = self.market.get_candles_df(sym_u, interval=self.interval, min_rows=self.lookback_bars)
             if df is None or df.empty or len(df) < 20:
                 # Fallback path for open symbols: emit a price_update so exits can keep evaluating.
@@ -2145,6 +2189,11 @@ class UnifiedEngine:
                                 "symbol": sym_u,
                                 "signal": "price_update",
                                 "price": px,
+                                "confidence": "N/A",
+                                "confidence_source": "fallback_na_medium",
+                                "entry_min_confidence_policy": (
+                                    entry_min_confidence_policy if entry_min_confidence_policy else None
+                                ),
                                 "entry_key": int(trigger_key) if trigger_key is not None else None,
                             }
                         )
@@ -2153,11 +2202,6 @@ class UnifiedEngine:
                         if exit_key is not None and due_exit:
                             self._runtime_kernel_last_exit_key[sym_u] = int(exit_key)
                 continue
-
-            try:
-                cfg = self.strategy.get_config(sym_u) or self.strategy.get_config("__GLOBAL__") or {}
-            except Exception:
-                cfg = {}
 
             snap = mei_alpha_v1.build_indicator_snapshot(df, symbol=sym_u, config=cfg)
             if not isinstance(snap, dict):
@@ -2206,6 +2250,11 @@ class UnifiedEngine:
                     "symbol": sym_u,
                     "signal": "evaluate",
                     "price": float(event_px),
+                    "confidence": "N/A",
+                    "confidence_source": "fallback_na_medium",
+                    "entry_min_confidence_policy": (
+                        entry_min_confidence_policy if entry_min_confidence_policy else None
+                    ),
                     "indicators": snap,
                     "gate_result": gate_result,
                     "ema_slow_slope_pct": float(ema_slow_slope_pct),
@@ -3093,18 +3142,29 @@ class UnifiedEngine:
                                 try:
                                     _decision_status = "executed" if str(self.mode).lower() == "paper" else "hold"
                                     _dispatch_state = "executed_sync" if _decision_status == "executed" else "pending_fill"
+                                    _entry_context = {
+                                        "confidence": dec.confidence,
+                                        "action": act,
+                                        "source": "kernel_candle",
+                                        "dispatch_state": _dispatch_state,
+                                    }
+                                    _confidence_source = _normalise_confidence_source(
+                                        now_series.get("_confidence_source")
+                                    )
+                                    if _confidence_source:
+                                        _entry_context["confidence_source"] = _confidence_source
+                                    _entry_min_confidence_policy = _normalise_confidence_label(
+                                        now_series.get("_entry_min_confidence_policy")
+                                    )
+                                    if _entry_min_confidence_policy:
+                                        _entry_context["entry_min_confidence_policy"] = _entry_min_confidence_policy
                                     _did = _cde(
                                         sym_u,
                                         "entry_signal",
                                         _decision_status,
                                         "execution",
                                         action_taken=act.lower(),
-                                        context={
-                                            "confidence": dec.confidence,
-                                            "action": act,
-                                            "source": "kernel_candle",
-                                            "dispatch_state": _dispatch_state,
-                                        },
+                                        context=_entry_context,
                                     )
                                 except Exception:
                                     logger.debug("decision event (entry_signal) failed for %s", sym_u, exc_info=True)

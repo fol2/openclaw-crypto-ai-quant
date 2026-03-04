@@ -624,6 +624,109 @@ def test_kernel_decision_from_raw_supports_legacy_and_canonical_input_schemas(
     assert dec.entry_key == expected_entry_key
 
 
+def test_kernel_decision_from_raw_records_confidence_provenance_for_na_fallback() -> None:
+    dec = KernelDecision.from_raw(
+        {
+            "symbol": "ETH",
+            "action": "OPEN",
+            "signal": "BUY",
+            "confidence": "N/A",
+            "entry_min_confidence_policy": "high",
+        }
+    )
+
+    assert dec is not None
+    assert dec.confidence == "medium"
+    assert isinstance(dec.now_series, dict)
+    assert dec.now_series.get("_confidence_source") == "fallback_na_medium"
+    assert dec.now_series.get("_entry_min_confidence_policy") == "high"
+
+
+def test_runtime_kernel_events_include_entry_confidence_policy_from_strategy_config() -> None:
+    class _FakeDf:
+        empty = False
+
+        def __len__(self) -> int:
+            return 40
+
+        def __getitem__(self, key: str):
+            assert key == "Close"
+
+            class _CloseCol:
+                @property
+                def iloc(self):
+                    return self
+
+                def __getitem__(self, _idx: int) -> float:
+                    return 100.0
+
+            return _CloseCol()
+
+    class _Strategy(FakeStrategyManager):
+        def get_config(self, scope: str) -> dict[str, Any]:
+            key = str(scope or "").strip().upper()
+            if key == "__GLOBAL__":
+                return {"engine": {"entry_interval": "1m"}}
+            if key == "ETH":
+                return {"trade": {"entry_min_confidence": "high"}}
+            return {}
+
+    class _Market(FakeMarket):
+        def get_candles_df(self, symbol, *, interval, min_rows):
+            del symbol, interval
+            if int(min_rows) <= 2:
+                return None
+            return _FakeDf()
+
+    class _Mei:
+        @staticmethod
+        def build_indicator_snapshot(df, symbol: str, config: dict[str, Any]) -> dict[str, Any]:
+            del df, symbol, config
+            return {"t": 1_700_000_000_000, "close": 100.0}
+
+        @staticmethod
+        def compute_ema_slow_slope(df, cfg: dict[str, Any]) -> float:
+            del df, cfg
+            return 0.001
+
+        @staticmethod
+        def build_gate_result(
+            snap: dict[str, Any],
+            symbol: str,
+            *,
+            cfg: dict[str, Any],
+            btc_bullish: bool | None,
+            ema_slow_slope_pct: float,
+        ) -> dict[str, Any]:
+            del snap, symbol, cfg, btc_bullish, ema_slow_slope_pct
+            return {"allow_trade": True, "confidence": "high", "reasons": []}
+
+    engine = UnifiedEngine(
+        trader=FakeTrader(),
+        strategy=_Strategy(),
+        market=_Market(),
+        interval="1m",
+        lookback_bars=50,
+        mode="unit_test",
+        mode_plugin=None,
+        decision_provider=NoopDecisionProvider(),
+    )
+    events = engine._build_runtime_kernel_events(
+        mei_alpha_v1=_Mei(),
+        symbols=["ETH"],
+        open_symbols=set(),
+        not_ready_symbols=set(),
+        now_ts_ms=1_700_000_000_000,
+    )
+
+    assert len(events) == 1
+    event = events[0]
+    assert event["signal"] == "evaluate"
+    assert event["entry_min_confidence_policy"] == "high"
+    assert event["confidence"] == "N/A"
+    assert event["confidence_source"] == "fallback_na_medium"
+
+
 def test_rust_binding_provider_converts_kernel_intents(monkeypatch, tmp_path) -> None:
     payload_path = tmp_path / "events.json"
     payload_path.write_text(

@@ -605,6 +605,8 @@ def _write_trade_policy_mismatch_report(
     evidence_complete: bool = True,
     policy_only: bool = True,
     provenance_contract_ok: bool = True,
+    runtime_provenance_contract_ok: bool = True,
+    runtime_source_contract_ok: bool = True,
 ) -> None:
     _write_json(
         bundle_dir / "trade_reconcile_report.json",
@@ -628,6 +630,15 @@ def _write_trade_policy_mismatch_report(
                     "symbol_min_confidence": {},
                     "policy_source": "strategy_snapshot_explicit",
                     "provenance_contract_ok": bool(provenance_contract_ok),
+                },
+                "runtime_entry_policy": {
+                    "policy_source": "decision_events_context_json",
+                    "provenance_contract_ok": bool(runtime_provenance_contract_ok),
+                    "source_contract_ok": bool(runtime_source_contract_ok),
+                    "rows_with_non_fallback_confidence_source": 2,
+                    "rows_with_policy": 2,
+                    "match_verified": 2,
+                    "match_fallback": 0,
                 },
             },
             "policy_mismatch_residuals": [
@@ -827,6 +838,42 @@ def test_alignment_gate_trade_policy_mismatch_opt_in_requires_provenance_contrac
     bundle_dir = tmp_path / "bundle"
     _write_base_gate_bundle(bundle_dir, seed_apply_report={"strict_replace": False})
     _write_trade_policy_mismatch_report(bundle_dir, evidence_complete=True, provenance_contract_ok=False)
+    output = bundle_dir / "alignment_gate_report.json"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "assert_replay_bundle_alignment.py",
+            "--bundle-dir",
+            str(bundle_dir),
+            "--skip-candles-provenance-check",
+            "--allow-trade-policy-mismatch-residual",
+            "--output",
+            str(output),
+        ],
+    )
+
+    exit_code = alignment_gate.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+    failure_codes = {str(row.get("code") or "") for row in report.get("failures") or []}
+
+    assert exit_code == 1
+    assert "trade_policy_mismatch_opt_in_unproven" in failure_codes
+
+
+def test_alignment_gate_trade_policy_mismatch_opt_in_requires_runtime_provenance_contract(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    _write_base_gate_bundle(bundle_dir, seed_apply_report={"strict_replace": False})
+    _write_trade_policy_mismatch_report(
+        bundle_dir,
+        evidence_complete=True,
+        provenance_contract_ok=True,
+        runtime_provenance_contract_ok=False,
+    )
     output = bundle_dir / "alignment_gate_report.json"
 
     monkeypatch.setattr(
