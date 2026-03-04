@@ -372,7 +372,6 @@ def main() -> int:
         "mirror_source": mirror_tag,
         "mirror_window_from_ts": int(from_ts),
         "mirror_window_to_ts": int(to_ts),
-        "mirror_generated_at_ms": int(generated_at_ms),
     }
 
     deleted_trade_rows = 0
