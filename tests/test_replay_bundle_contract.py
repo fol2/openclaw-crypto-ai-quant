@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -16,6 +18,61 @@ from tools import run_paper_deterministic_replay as paper_harness
 
 def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _init_live_db_for_resolution(path: Path) -> None:
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE trades (
+                id INTEGER PRIMARY KEY,
+                timestamp TEXT,
+                action TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE runtime_logs (
+                id INTEGER PRIMARY KEY,
+                ts_ms INTEGER,
+                message TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE decision_events (
+                id TEXT PRIMARY KEY,
+                timestamp_ms INTEGER
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE oms_intents (
+                intent_id TEXT PRIMARY KEY,
+                created_ts_ms INTEGER,
+                decision_ts_ms INTEGER
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _insert_trade_row(path: Path, *, trade_id: int, timestamp: str, action: str = "OPEN") -> None:
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            "INSERT INTO trades (id, timestamp, action) VALUES (?, ?, ?)",
+            (int(trade_id), str(timestamp), str(action)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _write_base_gate_bundle(
@@ -99,6 +156,53 @@ def test_live_replay_scope_summariser_tracks_symbol_side_pairs() -> None:
     assert payload["symbol_sides"] == ["NEAR:LONG", "POL:SHORT"]
 
 
+def test_live_db_window_resolver_auto_switches_to_single_covered_candidate(tmp_path: Path) -> None:
+    requested = tmp_path / "trading_engine_v8_live.db"
+    alternate = tmp_path / "trading_engine_live.db"
+    _init_live_db_for_resolution(requested)
+    _init_live_db_for_resolution(alternate)
+    _insert_trade_row(alternate, trade_id=1, timestamp="2026-03-03T12:00:00+00:00", action="OPEN")
+
+    resolved, resolution = replay_bundle_builder._resolve_live_db_for_window(
+        requested_live_db=requested.resolve(),
+        from_ts=1772535600000,
+        to_ts=1772542800000,
+        live_window_to_ts=1772544599999,
+        strict_live_db_path=False,
+        allow_empty_live_window=False,
+    )
+
+    assert resolved == alternate.resolve()
+    assert resolution["auto_switched"] is True
+    assert resolution["resolution_reason"] == "auto_switched_higher_window_coverage_candidate"
+    requested_cov = resolution["coverage_by_db"][str(requested.resolve())]
+    alternate_cov = resolution["coverage_by_db"][str(alternate.resolve())]
+    assert requested_cov["has_any_rows"] is False
+    assert alternate_cov["has_any_rows"] is True
+    assert alternate_cov["live_baseline_trades"] == 1
+
+
+def test_live_db_window_resolver_fails_when_multiple_alternates_have_coverage(tmp_path: Path) -> None:
+    requested = tmp_path / "custom_live.db"
+    candidate_live = tmp_path / "trading_engine_live.db"
+    candidate_v8 = tmp_path / "trading_engine_v8_live.db"
+    _init_live_db_for_resolution(requested)
+    _init_live_db_for_resolution(candidate_live)
+    _init_live_db_for_resolution(candidate_v8)
+    _insert_trade_row(candidate_live, trade_id=1, timestamp="2026-03-03T12:00:00+00:00", action="OPEN")
+    _insert_trade_row(candidate_v8, trade_id=2, timestamp="2026-03-03T12:30:00+00:00", action="OPEN")
+
+    with pytest.raises(ValueError, match="multiple live DB candidates share the best replay-window coverage"):
+        replay_bundle_builder._resolve_live_db_for_window(
+            requested_live_db=requested.resolve(),
+            from_ts=1772535600000,
+            to_ts=1772542800000,
+            live_window_to_ts=1772544599999,
+            strict_live_db_path=False,
+            allow_empty_live_window=False,
+        )
+
+
 def test_alignment_gate_fails_on_seed_strict_replace_contract_mismatch(
     tmp_path: Path,
     monkeypatch,
@@ -169,6 +273,78 @@ def test_alignment_gate_fails_on_live_run_fingerprint_provenance_window_mismatch
 
     assert exit_code == 1
     assert "live_run_fingerprint_provenance_window_mismatch" in failure_codes
+
+
+def test_alignment_gate_runtime_window_empty_does_not_emit_locked_runtime_prefix_mismatch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    _write_base_gate_bundle(
+        bundle_dir,
+        seed_apply_report={"strict_replace": False},
+    )
+
+    snapshot_path = bundle_dir / "strategy_overrides.locked.yaml"
+    snapshot_path.write_text("global:\n  engine:\n    interval: 30m\n", encoding="utf-8")
+    obj = {"global": {"engine": {"interval": "30m"}}}
+    payload = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    sha256 = hashlib.sha256(payload).hexdigest()
+    sha1_legacy = hashlib.sha1(payload).hexdigest()
+
+    manifest = json.loads((bundle_dir / "replay_bundle_manifest.json").read_text(encoding="utf-8"))
+    manifest["artefacts"]["strategy_config_snapshot_file"] = snapshot_path.name
+    manifest["runtime_strategy_provenance"] = {
+        "window_from_ts": 1_000,
+        "window_to_ts": 2_000,
+        "runtime_rows_in_window": 0,
+        "strategy_rows_sampled": 0,
+        "strategy_sha1_distinct": 0,
+        "strategy_version_distinct": 0,
+        "strategy_sha1_timeline": [],
+    }
+    manifest["oms_strategy_provenance"] = {
+        "window_from_ts": 1_000,
+        "window_to_ts": 2_000,
+        "oms_rows_in_window": 0,
+        "oms_rows_sampled": 0,
+        "strategy_sha1_distinct": 0,
+        "strategy_version_distinct": 0,
+        "strategy_sha1_timeline": [],
+    }
+    manifest["locked_strategy_provenance"] = {
+        "strategy_overrides_sha1": sha256,
+        "strategy_overrides_sha1_legacy": sha1_legacy,
+        "strategy_overrides_snapshot_sha1": sha256,
+        "strategy_overrides_snapshot_sha1_legacy": sha1_legacy,
+    }
+    (bundle_dir / "replay_bundle_manifest.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+
+    output = bundle_dir / "alignment_gate_report.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "assert_replay_bundle_alignment.py",
+            "--bundle-dir",
+            str(bundle_dir),
+            "--require-runtime-strategy-provenance",
+            "--require-locked-strategy-match",
+            "--skip-candles-provenance-check",
+            "--output",
+            str(output),
+        ],
+    )
+    exit_code = alignment_gate.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+    failure_codes = {str(row.get("code") or "") for row in report.get("failures") or []}
+
+    assert exit_code == 1
+    assert "runtime_strategy_provenance_window_empty" in failure_codes
+    assert "locked_strategy_runtime_prefix_mismatch" not in failure_codes
 
 
 def test_alignment_gate_action_artefact_only_residuals_fail_closed_by_default(
@@ -1274,3 +1450,131 @@ def test_paper_harness_wires_db_overrides_into_steps_and_report(
         "candles_db": str(candles_db.resolve()),
         "funding_db": str(funding_db.resolve()),
     }
+
+
+def test_build_bundle_mirror_script_enables_replace_id_collisions_and_persists_live_db_resolution(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    requested_live_db = tmp_path / "trading_engine_v8_live.db"
+    resolved_live_db = tmp_path / "trading_engine_live.db"
+    paper_db = tmp_path / "paper.db"
+    candles_db = tmp_path / "candles_30m.db"
+    strategy_cfg = tmp_path / "strategy_overrides.live.yaml"
+    bundle_dir = tmp_path / "bundle"
+
+    for path in (requested_live_db, resolved_live_db, paper_db, candles_db):
+        path.write_bytes(b"")
+    strategy_cfg.write_text(
+        (
+            "global:\n"
+            "  engine:\n"
+            "    interval: 30m\n"
+            "    entry_interval: 30m\n"
+            "    exit_interval: 30m\n"
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        replay_bundle_builder,
+        "_resolve_live_db_for_window",
+        lambda **_: (
+            resolved_live_db.resolve(),
+            {
+                "requested_live_db": str(requested_live_db.resolve()),
+                "resolved_live_db": str(resolved_live_db.resolve()),
+                "resolution_reason": "auto_switched_single_window_coverage_candidate",
+                "auto_switched": True,
+                "strict_live_db_path": False,
+                "allow_empty_live_window": False,
+                "window_from_ts": 0,
+                "window_to_ts": 0,
+                "window_live_to_ts": 1_799_999,
+                "coverage_by_db": {
+                    str(requested_live_db.resolve()): {"has_any_rows": False},
+                    str(resolved_live_db.resolve()): {"has_any_rows": True, "live_baseline_trades": 1},
+                },
+            },
+        ),
+    )
+    monkeypatch.setattr(replay_bundle_builder, "_load_live_baseline_trades", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(replay_bundle_builder, "_load_live_order_fail_events", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        replay_bundle_builder,
+        "_load_runtime_strategy_provenance",
+        lambda *_args, **_kwargs: {
+            "window_from_ts": 0,
+            "window_to_ts": 0,
+            "runtime_rows_in_window": 0,
+            "strategy_rows_sampled": 0,
+            "strategy_sha1_distinct": 0,
+            "strategy_version_distinct": 0,
+            "strategy_sha1_timeline": [],
+        },
+    )
+    monkeypatch.setattr(
+        replay_bundle_builder,
+        "_load_oms_strategy_provenance",
+        lambda *_args, **_kwargs: {
+            "window_from_ts": 0,
+            "window_to_ts": 0,
+            "oms_rows_in_window": 0,
+            "oms_rows_sampled": 0,
+            "strategy_sha1_distinct": 0,
+            "strategy_version_distinct": 0,
+            "strategy_sha1_timeline": [],
+        },
+    )
+    monkeypatch.setattr(
+        replay_bundle_builder,
+        "build_candles_window_provenance",
+        lambda *_args, **_kwargs: {
+            "interval": "30m",
+            "from_ts": 0,
+            "to_ts": 0,
+            "row_count": 0,
+            "symbol_count": 0,
+            "symbols": [],
+            "window_hash_sha256": "0" * 64,
+            "universe_hash_sha256": "1" * 64,
+        },
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "build_live_replay_bundle.py",
+            "--live-db",
+            str(requested_live_db),
+            "--paper-db",
+            str(paper_db),
+            "--candles-db",
+            str(candles_db),
+            "--strategy-config",
+            str(strategy_cfg),
+            "--interval",
+            "30m",
+            "--from-ts",
+            "0",
+            "--to-ts",
+            "0",
+            "--bundle-dir",
+            str(bundle_dir),
+            "--allow-empty-live-window",
+            "--enable-live-paper-mirror",
+        ],
+    )
+
+    rc = replay_bundle_builder.main()
+    assert rc == 0
+
+    mirror_script = (bundle_dir / "run_03b_mirror_live_window_to_paper.sh").read_text(encoding="utf-8")
+    manifest = json.loads((bundle_dir / "replay_bundle_manifest.json").read_text(encoding="utf-8"))
+
+    assert "--replace-id-collisions" in mirror_script
+    assert manifest["inputs"]["requested_live_db"] == str(requested_live_db.resolve())
+    assert manifest["inputs"]["live_db"] == str(resolved_live_db.resolve())
+    assert manifest["inputs"]["mirror_replace_id_collisions"] is True
+    assert manifest["live_db_resolution"]["auto_switched"] is True

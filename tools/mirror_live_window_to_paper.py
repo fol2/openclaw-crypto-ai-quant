@@ -57,6 +57,15 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--replace-id-collisions",
+        action="store_true",
+        default=False,
+        help=(
+            "Delete colliding paper ids before mirroring, even when they are outside "
+            "the requested window. Intended for deterministic reruns."
+        ),
+    )
+    parser.add_argument(
         "--mirror-tag",
         default="live_window_replay",
         help="Mirror tag written into meta/context payloads (default: live_window_replay)",
@@ -291,6 +300,26 @@ def _delete_trade_ids(conn: sqlite3.Connection, ids: list[int]) -> int:
     return int(deleted)
 
 
+def _delete_rows_by_ids(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    id_column: str,
+    ids: list[Any],
+) -> int:
+    if not ids:
+        return 0
+    deleted = 0
+    for chunk in _chunked(list(ids)):
+        placeholders = ",".join("?" for _ in chunk)
+        cur = conn.execute(
+            f"DELETE FROM {table} WHERE {id_column} IN ({placeholders})",
+            tuple(chunk),
+        )
+        deleted += int(cur.rowcount or 0)
+    return int(deleted)
+
+
 def _fetch_existing_json_by_id(
     conn: sqlite3.Connection,
     *,
@@ -380,6 +409,8 @@ def main() -> int:
     decision_id_collisions = 0
     trade_collision_non_marker = 0
     decision_collision_non_marker = 0
+    trade_id_collisions_purged = 0
+    decision_id_collisions_purged = 0
     mirrored_trade_rows = 0
     mirrored_decision_rows = 0
 
@@ -434,13 +465,32 @@ def main() -> int:
             1 for raw in existing_decision_json.values() if not _has_marker(raw, mirror_tag=mirror_tag)
         )
 
+        if bool(args.replace_id_collisions):
+            trade_collision_ids = [int(v) for v in trade_ids]
+            if trade_collision_ids:
+                trade_id_collisions_purged = _delete_rows_by_ids(
+                    paper_conn,
+                    table="trades",
+                    id_column="id",
+                    ids=trade_collision_ids,
+                )
+            if has_decision_table and decision_ids:
+                decision_id_collisions_purged = _delete_rows_by_ids(
+                    paper_conn,
+                    table="decision_events",
+                    id_column="id",
+                    ids=decision_ids,
+                )
+            trade_collision_non_marker = 0
+            decision_collision_non_marker = 0
+
         if (
             not bool(args.allow_overwrite_existing)
             and (trade_collision_non_marker > 0 or decision_collision_non_marker > 0)
         ):
             raise RuntimeError(
                 "detected colliding paper ids without mirror marker; "
-                "rerun with --replace-window or --allow-overwrite-existing"
+                "rerun with --replace-window, --replace-id-collisions, or --allow-overwrite-existing"
             )
 
         trade_payload: list[dict[str, Any]] = []
@@ -485,6 +535,7 @@ def main() -> int:
                 "skip_decision_events": bool(args.skip_decision_events),
                 "exclude_funding_events": bool(args.exclude_funding_events),
                 "allow_overwrite_existing": bool(args.allow_overwrite_existing),
+                "replace_id_collisions": bool(args.replace_id_collisions),
                 "mirror_tag": mirror_tag,
             },
             "counts": {
@@ -496,6 +547,8 @@ def main() -> int:
                 "decision_id_collisions": int(decision_id_collisions),
                 "trade_collision_non_marker": int(trade_collision_non_marker),
                 "decision_collision_non_marker": int(decision_collision_non_marker),
+                "trade_id_collisions_purged": int(trade_id_collisions_purged),
+                "decision_id_collisions_purged": int(decision_id_collisions_purged),
                 "mirrored_trade_rows": int(mirrored_trade_rows),
                 "mirrored_decision_rows": int(mirrored_decision_rows),
             },
@@ -524,6 +577,7 @@ def main() -> int:
             "skip_decision_events": bool(args.skip_decision_events),
             "exclude_funding_events": bool(args.exclude_funding_events),
             "allow_overwrite_existing": bool(args.allow_overwrite_existing),
+            "replace_id_collisions": bool(args.replace_id_collisions),
             "mirror_tag": mirror_tag,
         },
         "counts": {
@@ -535,6 +589,8 @@ def main() -> int:
             "decision_id_collisions": int(decision_id_collisions),
             "trade_collision_non_marker": int(trade_collision_non_marker),
             "decision_collision_non_marker": int(decision_collision_non_marker),
+            "trade_id_collisions_purged": int(trade_id_collisions_purged),
+            "decision_id_collisions_purged": int(decision_id_collisions_purged),
             "mirrored_trade_rows": int(mirrored_trade_rows),
             "mirrored_decision_rows": int(mirrored_decision_rows),
         },

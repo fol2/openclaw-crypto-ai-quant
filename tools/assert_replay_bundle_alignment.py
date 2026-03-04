@@ -602,23 +602,41 @@ def main() -> int:
                 )
         else:
             distinct_sha = _as_int(runtime_strategy.get("strategy_sha1_distinct"), 0)
+            runtime_rows_in_window = _as_int(runtime_strategy.get("runtime_rows_in_window"), 0)
             strategy_rows_sampled = _as_int(runtime_strategy.get("strategy_rows_sampled"), 0)
             timeline = runtime_strategy.get("strategy_sha1_timeline")
             timeline_count = len(timeline) if isinstance(timeline, list) else 0
-            if args.require_runtime_strategy_provenance and (strategy_rows_sampled <= 0 or timeline_count <= 0):
-                strategy_runtime_stability_ok = False
-                failures.append(
-                    {
-                        "code": "empty_runtime_strategy_provenance",
-                        "classification": "state_initialisation_gap",
-                        "detail": "runtime strategy provenance is present but contains no sampled strategy_sha1 rows",
-                        "counts": {
-                            "strategy_rows_sampled": strategy_rows_sampled,
-                            "strategy_sha1_timeline_count": timeline_count,
-                            "runtime_rows_in_window": _as_int(runtime_strategy.get("runtime_rows_in_window"), 0),
-                        },
-                    }
-                )
+            if args.require_runtime_strategy_provenance:
+                if runtime_rows_in_window <= 0:
+                    strategy_runtime_stability_ok = False
+                    failures.append(
+                        {
+                            "code": "runtime_strategy_provenance_window_empty",
+                            "classification": "state_initialisation_gap",
+                            "detail": (
+                                "runtime strategy provenance cannot be verified because runtime_rows_in_window=0"
+                            ),
+                            "counts": {
+                                "runtime_rows_in_window": runtime_rows_in_window,
+                                "strategy_rows_sampled": strategy_rows_sampled,
+                                "strategy_sha1_timeline_count": timeline_count,
+                            },
+                        }
+                    )
+                elif strategy_rows_sampled <= 0 or timeline_count <= 0:
+                    strategy_runtime_stability_ok = False
+                    failures.append(
+                        {
+                            "code": "empty_runtime_strategy_provenance",
+                            "classification": "state_initialisation_gap",
+                            "detail": "runtime strategy provenance is present but contains no sampled strategy_sha1 rows",
+                            "counts": {
+                                "strategy_rows_sampled": strategy_rows_sampled,
+                                "strategy_sha1_timeline_count": timeline_count,
+                                "runtime_rows_in_window": runtime_rows_in_window,
+                            },
+                        }
+                    )
             max_distinct = args.max_strategy_sha1_distinct
             if max_distinct is not None and distinct_sha > int(max_distinct):
                 strategy_runtime_stability_ok = False
@@ -634,7 +652,7 @@ def main() -> int:
                             "strategy_sha1_distinct": distinct_sha,
                             "strategy_version_distinct": _as_int(runtime_strategy.get("strategy_version_distinct"), 0),
                             "strategy_rows_sampled": strategy_rows_sampled,
-                            "runtime_rows_in_window": _as_int(runtime_strategy.get("runtime_rows_in_window"), 0),
+                            "runtime_rows_in_window": runtime_rows_in_window,
                         },
                     }
                 )
@@ -897,16 +915,43 @@ def main() -> int:
                     runtime_timeline = (
                         runtime_strategy.get("strategy_sha1_timeline") if isinstance(runtime_strategy, dict) else []
                     )
-                    runtime_rows = runtime_timeline if isinstance(runtime_timeline, list) else []
-                    runtime_prefix_match = any(
-                        any(
-                            candidate.startswith(str(row.get("strategy_sha1") or "").strip().lower())
-                            for candidate in effective_locked_hashes
-                        )
-                        for row in runtime_rows
-                        if str(row.get("strategy_sha1") or "").strip()
+                    runtime_rows_in_window = (
+                        _as_int(runtime_strategy.get("runtime_rows_in_window"), 0)
+                        if isinstance(runtime_strategy, dict)
+                        else 0
                     )
-                    if not runtime_prefix_match:
+                    runtime_rows = runtime_timeline if isinstance(runtime_timeline, list) else []
+                    runtime_rows_available = bool(runtime_rows_in_window > 0 and len(runtime_rows) > 0)
+                    runtime_prefix_match = (
+                        any(
+                            any(
+                                candidate.startswith(str(row.get("strategy_sha1") or "").strip().lower())
+                                for candidate in effective_locked_hashes
+                            )
+                            for row in runtime_rows
+                            if str(row.get("strategy_sha1") or "").strip()
+                        )
+                        if runtime_rows_available
+                        else False
+                    )
+                    if not runtime_rows_available:
+                        if not args.require_runtime_strategy_provenance:
+                            locked_strategy_match_ok = False
+                            failures.append(
+                                {
+                                    "code": "locked_strategy_runtime_prefix_unverifiable",
+                                    "classification": "state_initialisation_gap",
+                                    "detail": (
+                                        "locked strategy runtime prefix match is unverifiable because "
+                                        "runtime_rows_in_window=0"
+                                    ),
+                                    "counts": {
+                                        "runtime_rows_in_window": int(runtime_rows_in_window),
+                                        "runtime_timeline_count": len(runtime_rows),
+                                    },
+                                }
+                            )
+                    elif not runtime_prefix_match:
                         locked_strategy_match_ok = False
                         failures.append(
                             {
