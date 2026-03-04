@@ -369,11 +369,51 @@ async fn api_snapshot(
         }));
     }
 
-    // Balance
+    // Balance — prefer HL API snapshot for live mode, fall back to DB.
     let bal = trading::latest_balance(&conn)?;
-    let realised_usd = bal.as_ref().map(|(b, _)| *b);
+    let db_realised_usd = bal.as_ref().map(|(b, _)| *b);
     let realised_asof = bal.as_ref().and_then(|(_, ts)| ts.clone());
-    let equity_est = realised_usd.map(|r| r + unreal_total - close_fee_total);
+
+    // Staleness threshold: if HL snapshot is older than 60s, consider it stale.
+    const HL_STALE_SECS: u64 = 60;
+
+    let hl_snap = if mode == "live" {
+        let guard = state.hl_snapshot.read().await;
+        guard.as_ref().and_then(|cached| {
+            if cached.fetched_at.elapsed().as_secs() <= HL_STALE_SECS {
+                Some(cached.snapshot.clone())
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    };
+
+    let (realised_usd, equity_est, unreal_pnl_out, margin_used_out, balance_source) =
+        if let Some(ref hl) = hl_snap {
+            // HL account_value is equity (includes unrealised PnL).
+            let unreal = hl.account_value - hl.withdrawable;
+            (
+                Some(hl.account_value),
+                Some(hl.account_value),
+                unreal,
+                hl.total_margin_used,
+                "hyperliquid",
+            )
+        } else {
+            (
+                db_realised_usd,
+                db_realised_usd.map(|r| r + unreal_total - close_fee_total),
+                unreal_total,
+                margin_used_total,
+                if mode == "live" {
+                    "db_snapshot"
+                } else {
+                    "paper_estimate"
+                },
+            )
+        };
 
     // Recent data
     let recent_trades = trading::recent_trades(&conn, 60)?;
@@ -432,13 +472,14 @@ async fn api_snapshot(
             "live_service": state.config.live_service,
         },
         "balances": {
-            "balance_source": if mode == "live" { "db_snapshot" } else { "paper_estimate" },
+            "balance_source": balance_source,
             "realised_usd": realised_usd,
             "realised_asof": realised_asof,
             "equity_est_usd": equity_est,
-            "unreal_pnl_est_usd": unreal_total,
+            "unreal_pnl_est_usd": unreal_pnl_out,
             "est_close_fees_usd": close_fee_total,
-            "margin_used_est_usd": if mode == "live" { Some(margin_used_total) } else { None::<f64> },
+            "margin_used_est_usd": if mode == "live" { Some(margin_used_out) } else { None::<f64> },
+            "db_realised_usd": db_realised_usd,
             "fee_rate": fee_rate,
         },
         "daily": daily,

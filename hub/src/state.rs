@@ -6,9 +6,16 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::config::HubConfig;
 use crate::db::pool::{open_ro_pool, DbPool};
+use crate::hyperliquid::HlAccountSnapshot;
 use crate::sidecar::SidecarClient;
 use crate::subprocess::JobStore;
 use crate::ws::broadcast::BroadcastHub;
+
+/// Cached HL snapshot with fetch timestamp.
+pub struct CachedHlSnapshot {
+    pub snapshot: HlAccountSnapshot,
+    pub fetched_at: Instant,
+}
 
 /// Shared application state, passed to all route handlers via `axum::extract::State`.
 pub struct AppState {
@@ -32,6 +39,11 @@ pub struct AppState {
     pub paper1_pool: Option<DbPool>,
     pub paper2_pool: Option<DbPool>,
     pub paper3_pool: Option<DbPool>,
+
+    /// Cached Hyperliquid account snapshot (polled in background).
+    pub hl_snapshot: Arc<RwLock<Option<CachedHlSnapshot>>>,
+    /// Shared reqwest client for HL API calls.
+    pub hl_client: reqwest::Client,
 }
 
 impl AppState {
@@ -45,6 +57,8 @@ impl AppState {
         let paper2_pool = open_ro_pool(&config.paper2_db, 2);
         let paper3_pool = open_ro_pool(&config.paper3_db, 2);
 
+        let hl_client = reqwest::Client::new();
+
         Arc::new(Self {
             config,
             broadcast,
@@ -57,6 +71,8 @@ impl AppState {
             paper1_pool,
             paper2_pool,
             paper3_pool,
+            hl_snapshot: Arc::new(RwLock::new(None)),
+            hl_client,
         })
     }
 

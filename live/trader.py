@@ -128,6 +128,17 @@ def _env_str(name: str, default: str = "") -> str:
     return default if raw is None else str(raw)
 
 
+def _hl_withdrawable(trader) -> float:
+    """Return the HL withdrawable USD, handling 0.0 as a valid value (not falsy)."""
+    w = getattr(trader, "_withdrawable_usd", None)
+    if w is not None:
+        return float(w)
+    try:
+        return float(trader.balance or 0.0)
+    except Exception:
+        return 0.0
+
+
 def _pct_str_from_baseline(value_usd: float, *, baseline_usd: float, is_return: bool) -> str:
     try:
         b = float(baseline_usd)
@@ -674,7 +685,10 @@ class LiveTrader(mei_alpha_v1.PaperTrader):
         # In live mode, "equity" is exchange accountValue. Avoid REST calls in hot paths:
         # `LivePlugin.before_iteration()` syncs periodically and after fills.
         try:
-            return float(self._account_value_usd or self.balance or 0.0)
+            av = self._account_value_usd
+            if av is not None and av > 0:
+                return float(av)
+            return float(self.balance or 0.0)
         except Exception:
             return 0.0
 
@@ -3231,6 +3245,13 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
     try:
         cur = conn.cursor()
 
+        # Best-effort: force-sync from exchange so balance/positions reflect the fill
+        # that just executed on HL (WS fills arrive after HL processes them).
+        try:
+            trader.sync_from_exchange(force=True)
+        except Exception:
+            pass
+
         # Best-effort: snapshot account value once to avoid repeated REST calls per fill.
         try:
             account_value = float(trader.get_live_balance() or 0.0)
@@ -3476,7 +3497,7 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                         reason=reason,
                         confidence=conf,
                         account_value_usd=float(account_value or 0.0),
-                        withdrawable_usd=float(getattr(trader, '_withdrawable_usd', None) or trader.balance or 0.0),
+                        withdrawable_usd=_hl_withdrawable(trader),
                         breadth_pct=_ctx_breadth_pct,
                     )
                     # Best-effort risk update (daily loss tracking, etc).
@@ -3620,7 +3641,7 @@ def process_user_fills(trader: LiveTrader, fills: list[dict]) -> int:
                     reason=reason,
                     confidence=conf,
                     account_value_usd=float(account_value or 0.0),
-                    withdrawable_usd=float(getattr(trader, '_withdrawable_usd', None) or trader.balance or 0.0),
+                    withdrawable_usd=_hl_withdrawable(trader),
                     breadth_pct=_ctx_breadth_pct,
                 )
                 # Best-effort risk update (daily loss tracking, etc).
