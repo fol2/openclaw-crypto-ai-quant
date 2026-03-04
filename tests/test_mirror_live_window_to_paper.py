@@ -412,3 +412,131 @@ def test_mirror_fails_on_non_marker_id_collision_without_override(
     assert rc == 1
     assert report["status"]["ok"] is False
     assert report["counts"]["trade_collision_non_marker"] == 1
+
+
+def test_mirror_replace_id_collisions_allows_non_marker_collision_without_override(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    live_db = tmp_path / "live.db"
+    paper_db = tmp_path / "paper.db"
+    output = tmp_path / "mirror_collision_replace_ids.json"
+    _init_db(live_db)
+    _init_db(paper_db)
+
+    live_conn = sqlite3.connect(live_db)
+    try:
+        live_conn.execute(
+            """
+            INSERT INTO trades (
+                id, timestamp, symbol, type, action, price, size, notional, reason, confidence,
+                pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
+                meta_json, fill_hash, fill_tid, run_fingerprint, reason_code
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                9,
+                "2026-03-03T12:00:00+00:00",
+                "ADA",
+                "LONG",
+                "OPEN",
+                1.0,
+                1.0,
+                1.0,
+                "entry",
+                "high",
+                0.0,
+                0.0,
+                "USDC",
+                0.0,
+                1000.0,
+                0.0,
+                1.0,
+                1.0,
+                "{}",
+                "",
+                None,
+                "fp-live",
+                "entry_signal",
+            ),
+        )
+        live_conn.commit()
+    finally:
+        live_conn.close()
+
+    paper_conn = sqlite3.connect(paper_db)
+    try:
+        paper_conn.execute(
+            """
+            INSERT INTO trades (
+                id, timestamp, symbol, type, action, price, size, notional, reason, confidence,
+                pnl, fee_usd, fee_token, fee_rate, balance, entry_atr, leverage, margin_used,
+                meta_json, fill_hash, fill_tid, run_fingerprint, reason_code
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                9,
+                "2026-03-01T00:00:00+00:00",
+                "BTC",
+                "SHORT",
+                "OPEN",
+                0.0,
+                0.0,
+                0.0,
+                "paper-row",
+                "low",
+                0.0,
+                0.0,
+                "USDC",
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+                '{"source":"paper_live"}',
+                "",
+                None,
+                "fp-paper",
+                "entry_signal",
+            ),
+        )
+        paper_conn.commit()
+    finally:
+        paper_conn.close()
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "mirror_live_window_to_paper.py",
+            "--live-db",
+            str(live_db),
+            "--paper-db",
+            str(paper_db),
+            "--from-ts",
+            "1772539100000",
+            "--to-ts",
+            "1772540000000",
+            "--replace-id-collisions",
+            "--output",
+            str(output),
+        ],
+    )
+    rc = mirror_tool.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+
+    assert rc == 0
+    assert report["status"]["ok"] is True
+    assert report["inputs"]["replace_id_collisions"] is True
+    assert report["counts"]["trade_id_collisions_purged"] == 1
+    assert report["counts"]["trade_collision_non_marker"] == 0
+
+    verify = sqlite3.connect(paper_db)
+    try:
+        row = verify.execute("SELECT symbol, meta_json FROM trades WHERE id = 9").fetchone()
+        assert row is not None
+        assert str(row[0]) == "ADA"
+        payload = json.loads(str(row[1]))
+        assert payload["mirror_source"] == "live_window_replay"
+    finally:
+        verify.close()

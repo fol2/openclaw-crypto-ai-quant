@@ -36,6 +36,10 @@ TRADE_ACTIONS = {"OPEN", "ADD", "REDUCE", "CLOSE", "FUNDING"}
 SIDE_ACTIONS = {"OPEN", "ADD", "REDUCE", "CLOSE"}
 _STRATEGY_SHA1_RE = re.compile(r"strategy_sha1=([0-9a-fA-F]{7,40})")
 _STRATEGY_VERSION_RE = re.compile(r"version=([A-Za-z0-9._-]+)")
+_LIVE_DB_RESOLUTION_CANDIDATE_NAMES: tuple[str, ...] = (
+    "trading_engine_live.db",
+    "trading_engine_v8_live.db",
+)
 
 
 def _connect_ro(path: Path) -> sqlite3.Connection:
@@ -43,6 +47,260 @@ def _connect_ro(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(uri, uri=True, timeout=10)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ? LIMIT 1",
+        (str(table_name),),
+    ).fetchone()
+    return row is not None
+
+
+def _safe_count(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...] = ()) -> int:
+    try:
+        row = conn.execute(sql, params).fetchone()
+    except Exception:
+        return 0
+    if row is None:
+        return 0
+    try:
+        return int(row[0] or 0)
+    except Exception:
+        return 0
+
+
+def _window_trade_count(
+    conn: sqlite3.Connection,
+    *,
+    from_ts: int,
+    to_ts: int,
+) -> int:
+    if not _table_exists(conn, "trades"):
+        return 0
+    ts_expr = "CAST(strftime('%s', timestamp) AS INTEGER) * 1000"
+    action_values = sorted(str(v) for v in TRADE_ACTIONS)
+    action_ph = ",".join("?" for _ in action_values)
+    sql = (
+        f"SELECT COUNT(*) FROM trades "
+        f"WHERE action IN ({action_ph}) "
+        f"AND {ts_expr} >= ? AND {ts_expr} <= ?"
+    )
+    params: tuple[Any, ...] = tuple(action_values + [int(from_ts), int(to_ts)])
+    return _safe_count(conn, sql, params)
+
+
+def _window_runtime_count(
+    conn: sqlite3.Connection,
+    *,
+    from_ts: int,
+    to_ts: int,
+) -> int:
+    if not _table_exists(conn, "runtime_logs"):
+        return 0
+    return _safe_count(
+        conn,
+        "SELECT COUNT(*) FROM runtime_logs WHERE ts_ms >= ? AND ts_ms <= ?",
+        (int(from_ts), int(to_ts)),
+    )
+
+
+def _window_decision_count(
+    conn: sqlite3.Connection,
+    *,
+    from_ts: int,
+    to_ts: int,
+) -> int:
+    if not _table_exists(conn, "decision_events"):
+        return 0
+    return _safe_count(
+        conn,
+        "SELECT COUNT(*) FROM decision_events WHERE timestamp_ms >= ? AND timestamp_ms <= ?",
+        (int(from_ts), int(to_ts)),
+    )
+
+
+def _window_oms_intent_count(
+    conn: sqlite3.Connection,
+    *,
+    from_ts: int,
+    to_ts: int,
+) -> int:
+    if not _table_exists(conn, "oms_intents"):
+        return 0
+    return _safe_count(
+        conn,
+        (
+            "SELECT COUNT(*) FROM oms_intents "
+            "WHERE COALESCE(decision_ts_ms, created_ts_ms) >= ? "
+            "AND COALESCE(decision_ts_ms, created_ts_ms) <= ?"
+        ),
+        (int(from_ts), int(to_ts)),
+    )
+
+
+def _nearest_trade_ts_ms(
+    conn: sqlite3.Connection,
+    *,
+    pivot_ts: int,
+    direction: str,
+) -> int | None:
+    if not _table_exists(conn, "trades"):
+        return None
+    if direction not in {"before", "after"}:
+        return None
+    ts_expr = "CAST(strftime('%s', timestamp) AS INTEGER) * 1000"
+    action_values = sorted(str(v) for v in TRADE_ACTIONS)
+    action_ph = ",".join("?" for _ in action_values)
+    op = "<" if direction == "before" else ">"
+    order = "DESC" if direction == "before" else "ASC"
+    sql = (
+        f"SELECT {ts_expr} AS ts_ms FROM trades "
+        f"WHERE action IN ({action_ph}) AND {ts_expr} {op} ? "
+        f"ORDER BY ts_ms {order} LIMIT 1"
+    )
+    row = conn.execute(sql, tuple(action_values + [int(pivot_ts)])).fetchone()
+    if row is None:
+        return None
+    try:
+        ts_ms = int(row["ts_ms"] if isinstance(row, sqlite3.Row) else row[0])
+    except Exception:
+        return None
+    return ts_ms if ts_ms > 0 else None
+
+
+def _probe_live_db_window_coverage(
+    live_db: Path,
+    *,
+    from_ts: int,
+    to_ts: int,
+    live_window_to_ts: int,
+) -> dict[str, Any]:
+    conn = _connect_ro(live_db)
+    try:
+        baseline_trades = _window_trade_count(conn, from_ts=int(from_ts), to_ts=int(live_window_to_ts))
+        runtime_rows = _window_runtime_count(conn, from_ts=int(from_ts), to_ts=int(to_ts))
+        decision_rows = _window_decision_count(conn, from_ts=int(from_ts), to_ts=int(to_ts))
+        oms_rows = _window_oms_intent_count(conn, from_ts=int(from_ts), to_ts=int(to_ts))
+        nearest_before = _nearest_trade_ts_ms(conn, pivot_ts=int(from_ts), direction="before")
+        nearest_after = _nearest_trade_ts_ms(conn, pivot_ts=int(live_window_to_ts), direction="after")
+    finally:
+        conn.close()
+
+    has_any_rows = any(v > 0 for v in (baseline_trades, runtime_rows, decision_rows, oms_rows))
+    coverage_score = int(
+        (1000 if baseline_trades > 0 else 0)
+        + (100 if runtime_rows > 0 else 0)
+        + (10 if decision_rows > 0 else 0)
+        + (1 if oms_rows > 0 else 0)
+    )
+    return {
+        "live_baseline_trades": int(baseline_trades),
+        "runtime_rows_in_window": int(runtime_rows),
+        "decision_events_rows_in_window": int(decision_rows),
+        "oms_intents_rows_in_window": int(oms_rows),
+        "nearest_trade_before_ts_ms": int(nearest_before) if nearest_before is not None else None,
+        "nearest_trade_after_ts_ms": int(nearest_after) if nearest_after is not None else None,
+        "has_any_rows": bool(has_any_rows),
+        "coverage_score": int(coverage_score),
+    }
+
+
+def _candidate_live_db_paths(requested_live_db: Path) -> list[Path]:
+    out: list[Path] = []
+
+    def _append_if_exists(path: Path) -> None:
+        p = path.expanduser().resolve()
+        if not p.exists():
+            return
+        if any(existing == p for existing in out):
+            return
+        out.append(p)
+
+    _append_if_exists(requested_live_db)
+    parent = requested_live_db.parent
+    for name in _LIVE_DB_RESOLUTION_CANDIDATE_NAMES:
+        _append_if_exists(parent / name)
+    return out
+
+
+def _resolve_live_db_for_window(
+    *,
+    requested_live_db: Path,
+    from_ts: int,
+    to_ts: int,
+    live_window_to_ts: int,
+    strict_live_db_path: bool,
+    allow_empty_live_window: bool,
+) -> tuple[Path, dict[str, Any]]:
+    candidates = _candidate_live_db_paths(requested_live_db)
+    if not candidates:
+        raise ValueError(f"no existing live DB candidates found beside requested path: {requested_live_db}")
+
+    coverage_by_db: dict[str, dict[str, Any]] = {}
+    positive_candidates: list[Path] = []
+    score_by_candidate: dict[Path, int] = {}
+    for candidate in candidates:
+        coverage = _probe_live_db_window_coverage(
+            candidate,
+            from_ts=int(from_ts),
+            to_ts=int(to_ts),
+            live_window_to_ts=int(live_window_to_ts),
+        )
+        coverage_by_db[str(candidate)] = coverage
+        score_by_candidate[candidate] = int(coverage.get("coverage_score") or 0)
+        if bool(coverage.get("has_any_rows")):
+            positive_candidates.append(candidate)
+
+    requested_cov = coverage_by_db.get(str(requested_live_db), {})
+    requested_score = int(requested_cov.get("coverage_score") or 0)
+    resolved_live_db = requested_live_db
+    resolution_reason = "requested_live_db_has_best_window_coverage"
+    auto_switched = False
+
+    best_score = max((score_by_candidate.get(p, 0) for p in positive_candidates), default=0)
+    best_candidates = [p for p in positive_candidates if score_by_candidate.get(p, 0) == best_score]
+
+    if best_score > 0:
+        if requested_score == best_score:
+            resolved_live_db = requested_live_db
+            resolution_reason = "requested_live_db_has_best_window_coverage"
+        else:
+            if strict_live_db_path:
+                raise ValueError(
+                    "requested live DB does not have the best replay-window coverage and strict live-db path is "
+                    "enabled; retry with the best candidate explicitly"
+                )
+            if len(best_candidates) == 1:
+                resolved_live_db = best_candidates[0]
+                resolution_reason = "auto_switched_higher_window_coverage_candidate"
+                auto_switched = True
+            else:
+                raise ValueError(
+                    "multiple live DB candidates share the best replay-window coverage; "
+                    "resolve ambiguity by passing explicit --live-db"
+                )
+    elif allow_empty_live_window:
+        resolution_reason = "requested_live_db_empty_window_allowed"
+    else:
+        raise ValueError(
+            "requested live DB has no rows in replay window and no alternate live DB candidate has coverage; "
+            "use --allow-empty-live-window for diagnostics-only bundles"
+        )
+
+    resolution = {
+        "requested_live_db": str(requested_live_db),
+        "resolved_live_db": str(resolved_live_db),
+        "resolution_reason": str(resolution_reason),
+        "auto_switched": bool(auto_switched),
+        "strict_live_db_path": bool(strict_live_db_path),
+        "allow_empty_live_window": bool(allow_empty_live_window),
+        "window_from_ts": int(from_ts),
+        "window_to_ts": int(to_ts),
+        "window_live_to_ts": int(live_window_to_ts),
+        "coverage_by_db": coverage_by_db,
+    }
+    return resolved_live_db, resolution
 
 
 def _parse_timestamp_ms(value: Any) -> int:
@@ -322,6 +580,22 @@ def _extract_alignment_assumptions(strategy_cfg: dict[str, Any]) -> dict[str, An
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build a live replay bundle with deterministic artefacts.")
     parser.add_argument("--live-db", default="./trading_engine_live.db", help="Path to live SQLite DB")
+    parser.add_argument(
+        "--strict-live-db-path",
+        action="store_true",
+        help=(
+            "Disable live DB auto-resolution by replay window coverage. "
+            "When enabled, requested --live-db must contain window rows."
+        ),
+    )
+    parser.add_argument(
+        "--allow-empty-live-window",
+        action="store_true",
+        help=(
+            "Allow bundle generation even when no live DB candidate has window coverage. "
+            "Default is fail-closed."
+        ),
+    )
     parser.add_argument("--paper-db", default="./trading_engine.db", help="Path to paper SQLite DB")
     parser.add_argument("--candles-db", required=True, help="Path to candles SQLite DB used for replay")
     parser.add_argument("--funding-db", default=None, help="Optional funding SQLite DB used for replay funding events")
@@ -743,15 +1017,15 @@ def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
 
-    live_db = Path(args.live_db).expanduser().resolve()
+    requested_live_db = Path(args.live_db).expanduser().resolve()
     paper_db = Path(args.paper_db).expanduser().resolve()
     candles_db = Path(args.candles_db).expanduser().resolve()
     funding_db = Path(args.funding_db).expanduser().resolve() if args.funding_db else None
     bundle_dir = Path(args.bundle_dir).expanduser().resolve()
     snapshot_name = Path(args.snapshot_name).name
 
-    if not live_db.exists():
-        parser.error(f"live DB not found: {live_db}")
+    if not requested_live_db.exists():
+        parser.error(f"live DB not found: {requested_live_db}")
     if not paper_db.exists():
         parser.error(f"paper DB not found: {paper_db}")
     if not candles_db.exists():
@@ -764,7 +1038,7 @@ def main() -> int:
     strategy_config_source = (
         Path(args.strategy_config).expanduser().resolve()
         if args.strategy_config
-        else (live_db.parent / "config" / "strategy_overrides.yaml").resolve()
+        else (requested_live_db.parent / "config" / "strategy_overrides.yaml").resolve()
     )
     if not strategy_config_source.exists():
         parser.error(
@@ -860,6 +1134,19 @@ def main() -> int:
         )
 
     live_window_to_ts = int(args.to_ts) + int(timestamp_bucket_ms) - 1
+
+    try:
+        live_db, live_db_resolution = _resolve_live_db_for_window(
+            requested_live_db=requested_live_db,
+            from_ts=int(args.from_ts),
+            to_ts=int(args.to_ts),
+            live_window_to_ts=int(live_window_to_ts),
+            strict_live_db_path=bool(args.strict_live_db_path),
+            allow_empty_live_window=bool(args.allow_empty_live_window),
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+
     baseline_trades = _load_live_baseline_trades(
         live_db,
         from_ts=int(args.from_ts),
@@ -1082,6 +1369,7 @@ def main() -> int:
             '--paper-db "$PAPER_DB" '
             f"--from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
             "--replace-window "
+            "--replace-id-collisions "
             f'--output "$BUNDLE_DIR/{paper_mirror_apply_report_path.name}"'
         )
     else:
@@ -1298,6 +1586,7 @@ def main() -> int:
         "bundle_dir": str(bundle_dir),
         "inputs": {
             "live_db": str(live_db),
+            "requested_live_db": str(requested_live_db),
             "paper_db": str(paper_db),
             "candles_db": str(candles_db),
             "funding_db": str(funding_db) if funding_db is not None else None,
@@ -1309,6 +1598,9 @@ def main() -> int:
             "allow_partial_first_bar": bool(args.allow_partial_first_bar),
             "paper_filter_post_seed": bool(args.paper_filter_post_seed),
             "enable_live_paper_mirror": bool(args.enable_live_paper_mirror),
+            "mirror_replace_id_collisions": bool(args.enable_live_paper_mirror),
+            "strict_live_db_path": bool(args.strict_live_db_path),
+            "allow_empty_live_window": bool(args.allow_empty_live_window),
             "from_ts_aligned_to_interval": bool(from_ts_aligned_to_interval),
             "timestamp_bucket_ms": int(timestamp_bucket_ms),
             "entry_interval": cfg_entry_interval or None,
@@ -1330,6 +1622,7 @@ def main() -> int:
         "runtime_strategy_provenance": runtime_strategy_provenance,
         "oms_strategy_provenance": oms_strategy_provenance,
         "live_run_fingerprint_provenance": live_run_fingerprint_provenance,
+        "live_db_resolution": live_db_resolution,
         "live_replay_scope": live_replay_scope,
         "locked_strategy_provenance": {
             "strategy_overrides_source_sha1": str(locked_strategy_sha256),
