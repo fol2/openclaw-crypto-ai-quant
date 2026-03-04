@@ -9,6 +9,7 @@ import pytest
 
 from tools import audit_live_backtester_action_reconcile as live_bt_action
 from tools import audit_live_baseline_paper_order_parity as event_order_parity
+from tools import audit_live_paper_action_reconcile as live_paper_action
 from tools import audit_live_paper_decision_trace as live_paper_decision
 
 
@@ -333,5 +334,240 @@ def test_event_order_funding_contract_marks_unmatched_as_mismatch(tmp_path: Path
     assert report["status"]["strict_alignment_pass"] is False
     assert any(
         str(row.get("kind") or "") == "funding_unmatched_across_surfaces"
+        for row in report["mismatches"]
+    )
+
+
+def test_event_order_paper_window_not_replayed_with_unmatched_funding_is_fail_closed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    live_baseline = tmp_path / "live_baseline.jsonl"
+    live_baseline.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "id": 1,
+                        "timestamp_ms": 1000,
+                        "symbol": "ETH",
+                        "action": "OPEN",
+                        "type": "SHORT",
+                        "pnl": 0.0,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "id": 2,
+                        "timestamp_ms": 1100,
+                        "symbol": "ETH",
+                        "action": "FUNDING",
+                        "type": "SHORT",
+                        "pnl": 0.1,
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    paper_db = tmp_path / "paper.db"
+    conn = sqlite3.connect(paper_db)
+    conn.execute(
+        """
+        CREATE TABLE trades (
+            id INTEGER PRIMARY KEY,
+            timestamp TEXT,
+            symbol TEXT,
+            action TEXT,
+            type TEXT,
+            reason TEXT,
+            pnl REAL
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    output = tmp_path / "event_order_report.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "audit_live_baseline_paper_order_parity.py",
+            "--live-baseline",
+            str(live_baseline),
+            "--paper-db",
+            str(paper_db),
+            "--output",
+            str(output),
+        ],
+    )
+
+    exit_code = event_order_parity.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert report["status"]["strict_alignment_pass"] is False
+    assert any(
+        str(row.get("kind") or "") == "paper_window_not_replayed"
+        for row in report["accepted_residuals"]
+    )
+    assert any(
+        str(row.get("kind") or "") == "funding_unmatched_across_surfaces"
+        for row in report["mismatches"]
+    )
+    assert report["counts"]["funding_unmatched_live"] == 1
+
+
+def test_live_paper_action_main_collapses_split_fills(tmp_path: Path, monkeypatch) -> None:
+    live_db = tmp_path / "live.db"
+    paper_db = tmp_path / "paper.db"
+    schema = """
+        CREATE TABLE trades (
+            id INTEGER PRIMARY KEY,
+            timestamp TEXT,
+            symbol TEXT,
+            action TEXT,
+            type TEXT,
+            price REAL,
+            size REAL,
+            pnl REAL,
+            balance REAL,
+            reason TEXT,
+            reason_code TEXT,
+            confidence TEXT,
+            fee_usd REAL,
+            fill_hash TEXT
+        )
+    """
+    for path in (live_db, paper_db):
+        conn = sqlite3.connect(path)
+        conn.execute(schema)
+        conn.commit()
+        conn.close()
+
+    conn = sqlite3.connect(live_db)
+    conn.execute(
+        """
+        INSERT INTO trades
+        (id, timestamp, symbol, action, type, price, size, pnl, balance, reason, reason_code, confidence, fee_usd, fill_hash)
+        VALUES
+        (1, '1970-01-01T00:00:01.000+00:00', 'ETH', 'CLOSE', 'SHORT', 100.0, 1.0, 1.0, 100.0, 'exit', 'exit_signal', 'medium', 0.0, 'fhx'),
+        (2, '1970-01-01T00:00:01.100+00:00', 'ETH', 'CLOSE', 'SHORT', 100.0, 2.0, 2.0, 100.0, 'exit', 'exit_signal', 'medium', 0.0, 'fhx')
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    conn = sqlite3.connect(paper_db)
+    conn.execute(
+        """
+        INSERT INTO trades
+        (id, timestamp, symbol, action, type, price, size, pnl, balance, reason, reason_code, confidence, fee_usd, fill_hash)
+        VALUES
+        (11, '1970-01-01T00:00:01.100+00:00', 'ETH', 'CLOSE', 'SHORT', 100.0, 3.0, 3.0, 100.0, 'exit', 'exit_signal', 'medium', 0.0, 'fhx')
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    output = tmp_path / "live_paper_action_report.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "audit_live_paper_action_reconcile.py",
+            "--live-db",
+            str(live_db),
+            "--paper-db",
+            str(paper_db),
+            "--output",
+            str(output),
+        ],
+    )
+
+    exit_code = live_paper_action.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert report["counts"]["split_fill_groups_collapsed"] == 1
+    assert report["counts"]["split_fill_rows_collapsed"] == 1
+    assert report["status"]["strict_alignment_pass"] is True
+
+
+def test_live_paper_action_main_run_fingerprint_drift_is_fail_closed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    live_db = tmp_path / "live.db"
+    paper_db = tmp_path / "paper.db"
+    schema = """
+        CREATE TABLE trades (
+            id INTEGER PRIMARY KEY,
+            timestamp TEXT,
+            symbol TEXT,
+            action TEXT,
+            type TEXT,
+            price REAL,
+            size REAL,
+            pnl REAL,
+            balance REAL,
+            reason TEXT,
+            reason_code TEXT,
+            confidence TEXT,
+            fee_usd REAL,
+            fill_hash TEXT
+        )
+    """
+    for path in (live_db, paper_db):
+        conn = sqlite3.connect(path)
+        conn.execute(schema)
+        conn.commit()
+        conn.close()
+
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "live_run_fingerprint_provenance": {
+                    "rows_sampled": 5,
+                    "run_fingerprint_distinct": 2,
+                    "run_fingerprint_timeline": [],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    output = tmp_path / "live_paper_action_report.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "audit_live_paper_action_reconcile.py",
+            "--live-db",
+            str(live_db),
+            "--paper-db",
+            str(paper_db),
+            "--bundle-manifest",
+            str(manifest),
+            "--require-single-run-fingerprint",
+            "--max-live-run-fingerprint-distinct",
+            "1",
+            "--output",
+            str(output),
+        ],
+    )
+
+    exit_code = live_paper_action.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert report["status"]["strict_alignment_pass"] is False
+    assert report["run_fingerprint_guard"]["ok"] is False
+    assert any(
+        str(row.get("kind") or "") == "live_run_fingerprint_drift_within_window"
         for row in report["mismatches"]
     )
