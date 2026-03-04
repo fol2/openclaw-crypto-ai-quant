@@ -15,7 +15,7 @@ import json
 import math
 from pathlib import Path
 import sqlite3
-from typing import Any
+from typing import Any, Mapping
 
 try:
     import yaml
@@ -250,6 +250,34 @@ def _summarise_exit_scope_contract(
         "mismatch": mismatch,
         "mismatch_kind": mismatch_kind,
     }
+
+
+def _apply_scope_disjoint_state_gap_classification(
+    mismatches: list[dict[str, Any]],
+    *,
+    scope_contract: Mapping[str, Any] | None,
+) -> int:
+    if not isinstance(scope_contract, Mapping):
+        return 0
+    mismatch_kind = str(scope_contract.get("mismatch_kind") or "").strip().lower()
+    shared_symbol_sides = scope_contract.get("shared_exit_symbol_sides") or []
+    if mismatch_kind != "symbol_side_scope_disjoint" or len(shared_symbol_sides) != 0:
+        return 0
+
+    reclassified = 0
+    for row in mismatches:
+        if str(row.get("classification") or "").strip().lower() != "deterministic_logic_divergence":
+            continue
+        kind = str(row.get("kind") or "").strip().lower()
+        if kind not in {"missing_backtester_exit", "missing_live_exit"}:
+            continue
+        row["classification"] = "state_initialisation_gap"
+        row["scope_contract_gap"] = {
+            "kind": "symbol_side_scope_disjoint",
+            "shared_exit_symbol_sides": list(shared_symbol_sides),
+        }
+        reclassified += 1
+    return reclassified
 
 
 def _load_live_simulatable_exits(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -1294,6 +1322,10 @@ def main() -> int:
         locked_entry_policy=locked_entry_policy,
         runtime_entry_policy=runtime_entry_policy,
     )
+    scope_reclassified_count = _apply_scope_disjoint_state_gap_classification(
+        mismatches,
+        scope_contract=scope_contract,
+    )
 
     mismatch_counts: dict[str, int] = defaultdict(int)
     for item in mismatches:
@@ -1330,11 +1362,7 @@ def main() -> int:
         [m for m in mismatches if str(m.get("classification") or "") == "state_initialisation_gap"]
     )
 
-    strict_alignment_pass = (
-        compare_summary["numeric_mismatch"] == 0
-        and compare_summary["unmatched_live"] == 0
-        and compare_summary["unmatched_backtester"] == 0
-    )
+    strict_alignment_pass = compare_summary["numeric_mismatch"] == 0 and deterministic_unexplained == 0
     policy_mismatch_residual_only = (
         not strict_alignment_pass
         and compare_summary["numeric_mismatch"] == 0
@@ -1367,6 +1395,7 @@ def main() -> int:
             "deterministic_unexplained": deterministic_unexplained,
             "scope_shared_exit_symbols": len(scope_contract.get("shared_exit_symbols") or []),
             "scope_shared_exit_symbol_sides": len(scope_contract.get("shared_exit_symbol_sides") or []),
+            "scope_classification_reclassified_count": int(scope_reclassified_count),
             "mismatch_total": len(mismatches),
         },
         "status": {

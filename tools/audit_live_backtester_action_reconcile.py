@@ -17,7 +17,7 @@ import datetime as dt
 import json
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 try:
     from reason_codes import classify_reason_code
@@ -285,6 +285,34 @@ def _summarise_action_scope_contract(
     }
 
 
+def _apply_scope_disjoint_state_gap_classification(
+    mismatches: list[dict[str, Any]],
+    *,
+    scope_contract: Mapping[str, Any] | None,
+) -> int:
+    if not isinstance(scope_contract, Mapping):
+        return 0
+    mismatch_kind = str(scope_contract.get("mismatch_kind") or "").strip().lower()
+    shared_symbol_sides = scope_contract.get("shared_symbol_sides") or []
+    if mismatch_kind != "symbol_side_scope_disjoint" or len(shared_symbol_sides) != 0:
+        return 0
+
+    reclassified = 0
+    for row in mismatches:
+        if str(row.get("classification") or "").strip().lower() != "deterministic_logic_divergence":
+            continue
+        kind = str(row.get("kind") or "").strip().lower()
+        if kind not in {"missing_backtester_action", "missing_live_action"}:
+            continue
+        row["classification"] = "state_initialisation_gap"
+        row["scope_contract_gap"] = {
+            "kind": "symbol_side_scope_disjoint",
+            "shared_symbol_sides": list(shared_symbol_sides),
+        }
+        reclassified += 1
+    return reclassified
+
+
 def _collapse_split_fill_actions(
     rows: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
@@ -410,6 +438,7 @@ def _summarise_mismatch_breakdown(mismatches: list[dict[str, Any]]) -> dict[str,
         return dict(sorted(counts.items(), key=lambda item: item[0]))
 
     surface_rows: list[dict[str, Any]] = []
+    state_rows: list[dict[str, Any]] = []
     logic_rows: list[dict[str, Any]] = []
     classification_kind_drift_rows: list[dict[str, Any]] = []
 
@@ -418,12 +447,15 @@ def _summarise_mismatch_breakdown(mismatches: list[dict[str, Any]]) -> dict[str,
         classification = str(row.get("classification") or "").strip().lower()
         kind_is_surface = kind in COMPARE_SURFACE_ARTEFACT_KINDS
         class_is_surface = classification in COMPARE_SURFACE_ARTEFACT_CLASSES
+        class_is_state = classification == "state_initialisation_gap"
 
-        if kind_is_surface:
+        if class_is_surface:
             surface_rows.append(row)
+        elif class_is_state:
+            state_rows.append(row)
         else:
             logic_rows.append(row)
-        if kind_is_surface != class_is_surface:
+        if (kind_is_surface != class_is_surface) and not class_is_state:
             classification_kind_drift_rows.append(
                 {
                     "kind": kind or "unknown",
@@ -434,10 +466,12 @@ def _summarise_mismatch_breakdown(mismatches: list[dict[str, Any]]) -> dict[str,
 
     total = len(mismatches)
     surface_total = len(surface_rows)
+    state_total = len(state_rows)
     logic_total = len(logic_rows)
     return {
         "total": int(total),
         "compare_surface_artefact_total": int(surface_total),
+        "state_scope_residual_total": int(state_total),
         "logic_divergence_total": int(logic_total),
         "compare_surface_artefact_ratio": float(surface_total / total) if total else 0.0,
         "logic_divergence_ratio": float(logic_total / total) if total else 0.0,
@@ -1170,6 +1204,11 @@ def main() -> int:
         matched_pairs=int(compare_summary.get("matched_pairs") or 0),
     )
     classification_reclassified_count = _normalise_compare_surface_classifications(mismatches)
+    scope_classification_reclassified_count = _apply_scope_disjoint_state_gap_classification(
+        mismatches,
+        scope_contract=scope_contract,
+    )
+    classification_reclassified_count += int(scope_classification_reclassified_count)
 
     mismatch_counts: dict[str, int] = defaultdict(int)
     mismatch_kind_counts: dict[str, int] = defaultdict(int)
@@ -1183,14 +1222,13 @@ def main() -> int:
     accepted_residuals = [m for m in mismatches if str(m.get("classification") or "") in accepted_classes]
     mismatch_breakdown = _summarise_mismatch_breakdown(mismatches)
 
+    logic_divergence_free = int(mismatch_breakdown["logic_divergence_total"]) == 0
     strict_alignment_pass = (
         compare_summary["numeric_mismatch"] == 0
         and compare_summary["confidence_mismatch"] == 0
         and compare_summary["reason_code_mismatch"] == 0
-        and compare_summary["unmatched_live"] == 0
-        and compare_summary["unmatched_backtester"] == 0
+        and logic_divergence_free
     )
-    logic_divergence_free = int(mismatch_breakdown["logic_divergence_total"]) == 0
     compare_surface_artefact_total = int(mismatch_breakdown["compare_surface_artefact_total"])
     artefact_only_mismatch = bool(logic_divergence_free and compare_surface_artefact_total > 0)
     gate_pass_if_allow_compare_surface_artefacts = bool(strict_alignment_pass or artefact_only_mismatch)

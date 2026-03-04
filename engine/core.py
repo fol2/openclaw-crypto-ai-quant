@@ -392,6 +392,14 @@ def _normalise_confidence_label(raw_confidence: Any) -> str:
     return ""
 
 
+def _confidence_rank_to_label(raw_rank: Any) -> str:
+    try:
+        rank = int(raw_rank)
+    except (TypeError, ValueError):
+        return ""
+    return {0: "low", 1: "medium", 2: "high"}.get(rank, "")
+
+
 def _normalise_confidence_source(raw_source: Any) -> str:
     return str(raw_source or "").strip().lower()
 
@@ -1305,6 +1313,8 @@ class KernelDecisionRustBindingProvider:
         self,
         decision: Mapping[str, Any],
         event_raw: Mapping[str, Any],
+        *,
+        diagnostics: Mapping[str, Any] | None = None,
     ) -> KernelDecision | None:
         symbol = str(decision.get("symbol", "")).strip().upper()
         if not symbol:
@@ -1313,6 +1323,15 @@ class KernelDecisionRustBindingProvider:
         event_now_series = event_raw.get("now_series")
         if not isinstance(event_now_series, Mapping):
             event_now_series = event_raw.get("indicators")
+
+        confidence = _normalise_confidence_label(event_raw.get("confidence"))
+        confidence_source = _normalise_confidence_source(event_raw.get("confidence_source"))
+        if not confidence and isinstance(diagnostics, Mapping):
+            diagnostics_confidence = _confidence_rank_to_label(diagnostics.get("entry_confidence"))
+            if diagnostics_confidence:
+                confidence = diagnostics_confidence
+                if not confidence_source:
+                    confidence_source = "kernel_diagnostics"
 
         result = KernelDecision.from_raw(
             {
@@ -1326,8 +1345,8 @@ class KernelDecisionRustBindingProvider:
                 "notional_hint_usd": decision.get("notional_hint_usd"),
                 "intent_id": decision.get("intent_id"),
                 "signal": event_raw.get("signal"),
-                "confidence": event_raw.get("confidence", "N/A"),
-                "confidence_source": event_raw.get("confidence_source"),
+                "confidence": confidence if confidence else event_raw.get("confidence", "N/A"),
+                "confidence_source": confidence_source or event_raw.get("confidence_source"),
                 "entry_min_confidence_policy": event_raw.get("entry_min_confidence_policy"),
                 "now_series": event_now_series,
                 "entry_key": event_raw.get("entry_key", event_raw.get("event_id")),
@@ -1471,7 +1490,11 @@ class KernelDecisionRustBindingProvider:
             for raw_intent in intents:
                 if not isinstance(raw_intent, Mapping):
                     continue
-                dec = self._intent_to_decision(raw_intent, raw)
+                dec = self._intent_to_decision(
+                    raw_intent,
+                    raw,
+                    diagnostics=diag if isinstance(diag, Mapping) else None,
+                )
                 if dec is not None:
                     decisions.append(dec)
 

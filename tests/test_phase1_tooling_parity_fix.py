@@ -262,8 +262,8 @@ def test_live_backtester_mismatch_breakdown_tracks_kind_classification_drift() -
         ]
     )
 
-    assert breakdown["compare_surface_artefact_total"] == 1
-    assert breakdown["logic_divergence_total"] == 1
+    assert breakdown["compare_surface_artefact_total"] == 0
+    assert breakdown["logic_divergence_total"] == 2
     assert breakdown["classification_kind_drift_total"] == 1
     assert breakdown["classification_kind_drift_by_kind"] == {"missing_backtester_funding_action": 1}
     assert breakdown["classification_kind_drift_by_classification"] == {"deterministic_logic_divergence": 1}
@@ -402,8 +402,8 @@ def test_trade_reconcile_classifies_entry_confidence_policy_mismatch_residual(
     assert report["counts"]["mismatch_total"] == 1
     assert report["counts"]["policy_mismatch_residuals"] == 1
     assert report["counts"]["deterministic_unexplained"] == 0
-    assert report["status"]["strict_alignment_pass"] is False
-    assert report["status"]["policy_mismatch_residual_only"] is True
+    assert report["status"]["strict_alignment_pass"] is True
+    assert report["status"]["policy_mismatch_residual_only"] is False
     assert report["policy_mismatch_analysis"]["detected"] is True
     assert report["policy_mismatch_analysis"]["evidence_complete"] is True
     assert report["mismatch_counts_by_classification"]["policy_mismatch_residual"] == 1

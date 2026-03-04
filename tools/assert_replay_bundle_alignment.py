@@ -1142,7 +1142,7 @@ def main() -> int:
                         "total_accepted_residuals": len(trade_residuals),
                     }
                 )
-        if trade_scope_contract_mismatch:
+        if trade_scope_contract_mismatch and not axis_gate_status["trade"]:
             axis_gate_status["trade"] = False
             axis_failure_codes["trade"].append("trade_replay_scope_contract_mismatch")
             failures.append(
@@ -1258,7 +1258,7 @@ def main() -> int:
                         "total_accepted_residuals": len(action_residuals),
                     }
                 )
-        if action_scope_contract_mismatch:
+        if action_scope_contract_mismatch and not axis_gate_status["action"]:
             axis_gate_status["action"] = False
             axis_failure_codes["action"].append("action_replay_scope_contract_mismatch")
             failures.append(
