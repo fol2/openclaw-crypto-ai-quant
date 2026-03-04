@@ -38,6 +38,17 @@ _STRICT_ALLOWED_RESIDUAL_CLASSIFICATIONS = {
     "non-simulatable_exchange_oms_effect",
     "state_initialisation_gap",
 }
+_CONTRACT_AXES = (
+    "trade",
+    "action",
+    "live_paper",
+    "live_paper_decision_trace",
+)
+_STRICT_RESIDUAL_CONTRACT_AXES = {
+    "trade",
+    "action",
+    "live_paper",
+}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -116,6 +127,24 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Fail if accepted residuals are present in trade/action reports",
+    )
+    parser.add_argument(
+        "--allow-trade-policy-mismatch-residual",
+        action="store_true",
+        default=False,
+        help=(
+            "Allow trade strict-alignment failure only when report proves entry-confidence policy mismatch residuals. "
+            "Default is fail-closed."
+        ),
+    )
+    parser.add_argument(
+        "--allow-action-artefact-residuals",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in: allow action-axis gate pass when action report signals "
+            "artefact-only mismatches. Default remains strict fail-closed."
+        ),
     )
     parser.add_argument(
         "--skip-candles-provenance-check",
@@ -275,6 +304,89 @@ def _blocking_residuals_for_strict_mode(
     return blocking
 
 
+def _trade_policy_mismatch_opt_in_proof(report: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+    status = report.get("status") or {}
+    counts = report.get("counts") or {}
+    analysis = report.get("policy_mismatch_analysis") or {}
+    policy_rows = report.get("policy_mismatch_residuals")
+    policy_rows_count = len(policy_rows) if isinstance(policy_rows, list) else _as_int(counts.get("policy_mismatch_residuals"), 0)
+    reclassified_count = _as_int(analysis.get("reclassified_mismatch_count"), 0)
+    strict_pass = bool(status.get("strict_alignment_pass"))
+    policy_only = bool(status.get("policy_mismatch_residual_only"))
+    analysis_detected = bool(analysis.get("detected"))
+    evidence_complete = bool(analysis.get("evidence_complete"))
+    analysis_kind = str(analysis.get("kind") or "").strip().lower()
+    required_min_conf = str(
+        (((analysis.get("locked_entry_policy") or {}).get("global_min_confidence")) or "").strip().lower()
+    )
+    has_symbol_policy = bool(((analysis.get("locked_entry_policy") or {}).get("symbol_min_confidence") or {}))
+    ok = (
+        (not strict_pass)
+        and policy_only
+        and analysis_detected
+        and evidence_complete
+        and analysis_kind == "entry_confidence_gate"
+        and policy_rows_count > 0
+        and reclassified_count > 0
+        and (required_min_conf in {"low", "medium", "high"} or has_symbol_policy)
+    )
+    proof = {
+        "strict_alignment_pass": strict_pass,
+        "policy_mismatch_residual_only": policy_only,
+        "policy_mismatch_detected": analysis_detected,
+        "policy_mismatch_evidence_complete": evidence_complete,
+        "policy_mismatch_kind": analysis_kind,
+        "policy_mismatch_residual_count": int(policy_rows_count),
+        "policy_mismatch_reclassified_count": int(reclassified_count),
+        "locked_global_min_confidence": required_min_conf or None,
+        "locked_symbol_policy_count": len((analysis.get("locked_entry_policy") or {}).get("symbol_min_confidence") or {}),
+    }
+    return ok, proof
+
+
+def _action_artefact_opt_in_proof(report: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+    status = report.get("status") or {}
+    breakdown = report.get("mismatch_breakdown") or {}
+    class_counts = report.get("mismatch_counts_by_classification") or {}
+
+    strict_pass = bool(status.get("strict_alignment_pass"))
+    report_opt_in_flag = bool(status.get("gate_pass_if_allow_compare_surface_artefacts"))
+    artefact_only = bool(status.get("artefact_only_mismatch"))
+    logic_divergence_free = bool(status.get("logic_divergence_free"))
+    compare_surface_artefact_total = _as_int(breakdown.get("compare_surface_artefact_total"), -1)
+    logic_divergence_total = _as_int(breakdown.get("logic_divergence_total"), -1)
+    total = _as_int(breakdown.get("total"), -1)
+    deterministic_logic_divergence = _as_int(class_counts.get("deterministic_logic_divergence"), 0)
+    expected_logic_total = (
+        total - compare_surface_artefact_total
+        if (total >= 0 and compare_surface_artefact_total >= 0)
+        else -1
+    )
+
+    ok = (
+        (not strict_pass)
+        and report_opt_in_flag
+        and artefact_only
+        and logic_divergence_free
+        and compare_surface_artefact_total > 0
+        and logic_divergence_total == 0
+        and deterministic_logic_divergence == 0
+        and (expected_logic_total < 0 or expected_logic_total == logic_divergence_total)
+    )
+    proof = {
+        "strict_alignment_pass": strict_pass,
+        "gate_pass_if_allow_compare_surface_artefacts": report_opt_in_flag,
+        "artefact_only_mismatch": artefact_only,
+        "logic_divergence_free": logic_divergence_free,
+        "compare_surface_artefact_total": int(compare_surface_artefact_total),
+        "logic_divergence_total": int(logic_divergence_total),
+        "mismatch_total": int(total),
+        "deterministic_logic_divergence_class_count": int(deterministic_logic_divergence),
+        "expected_logic_divergence_total": int(expected_logic_total),
+    }
+    return ok, proof
+
+
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
@@ -294,6 +406,26 @@ def main() -> int:
     gpu_parity_path = _resolve_report_path(bundle_dir, args.gpu_parity_report)
 
     failures: list[dict[str, Any]] = []
+    axis_required: dict[str, bool] = {
+        "trade": True,
+        "action": True,
+        "live_paper": bool(args.require_live_paper),
+        "live_paper_decision_trace": bool(args.require_live_paper_decision_trace),
+    }
+    axis_report_present: dict[str, bool] = {axis: False for axis in _CONTRACT_AXES}
+    axis_tool_status: dict[str, bool | None] = {axis: None for axis in _CONTRACT_AXES}
+    axis_gate_status: dict[str, bool] = {
+        "trade": False,
+        "action": False,
+        "live_paper": not bool(args.require_live_paper),
+        "live_paper_decision_trace": not bool(args.require_live_paper_decision_trace),
+    }
+    axis_residual_count: dict[str, int] = {axis: 0 for axis in _CONTRACT_AXES}
+    axis_blocking_residual_count: dict[str, int] = {axis: 0 for axis in _CONTRACT_AXES}
+    axis_strict_no_residuals_checked: dict[str, bool] = {
+        axis: bool(args.strict_no_residuals and axis in _STRICT_RESIDUAL_CONTRACT_AXES) for axis in _CONTRACT_AXES
+    }
+    axis_failure_codes: dict[str, list[str]] = {axis: [] for axis in _CONTRACT_AXES}
     candles_provenance_checked = not bool(args.skip_candles_provenance_check)
     candles_provenance_ok = not candles_provenance_checked
     manifest_candles_provenance: dict[str, Any] | None = None
@@ -908,7 +1040,11 @@ def main() -> int:
             )
 
     trade_report: dict[str, Any] | None = None
+    trade_policy_mismatch_opt_in_applied = False
+    trade_policy_mismatch_opt_in_proof: dict[str, Any] = {}
     if not trade_path.exists():
+        axis_gate_status["trade"] = False
+        axis_failure_codes["trade"].append("missing_trade_report")
         failures.append(
             {
                 "code": "missing_trade_report",
@@ -918,20 +1054,48 @@ def main() -> int:
         )
     else:
         trade_report = _load_json(trade_path)
+        axis_report_present["trade"] = True
         trade_status = bool(((trade_report.get("status") or {}).get("strict_alignment_pass")))
+        axis_tool_status["trade"] = trade_status
+        axis_gate_status["trade"] = trade_status
         if not trade_status:
-            failures.append(
-                {
-                    "code": "trade_alignment_failed",
-                    "classification": "deterministic_logic_divergence",
-                    "detail": "trade reconciliation strict alignment failed",
-                    "counts": trade_report.get("counts") or {},
-                }
-            )
+            trade_policy_opt_in_ok = False
+            if args.allow_trade_policy_mismatch_residual:
+                trade_policy_opt_in_ok, trade_policy_mismatch_opt_in_proof = _trade_policy_mismatch_opt_in_proof(
+                    trade_report
+                )
+                if trade_policy_opt_in_ok:
+                    trade_policy_mismatch_opt_in_applied = True
+                    axis_gate_status["trade"] = True
+                else:
+                    axis_failure_codes["trade"].append("trade_policy_mismatch_opt_in_unproven")
+                    failures.append(
+                        {
+                            "code": "trade_policy_mismatch_opt_in_unproven",
+                            "classification": "deterministic_logic_divergence",
+                            "detail": "trade policy-mismatch opt-in was requested but hard evidence is incomplete",
+                            "proof": trade_policy_mismatch_opt_in_proof,
+                        }
+                    )
+            if not trade_policy_opt_in_ok:
+                axis_gate_status["trade"] = False
+                axis_failure_codes["trade"].append("trade_alignment_failed")
+                failures.append(
+                    {
+                        "code": "trade_alignment_failed",
+                        "classification": "deterministic_logic_divergence",
+                        "detail": "trade reconciliation strict alignment failed",
+                        "counts": trade_report.get("counts") or {},
+                    }
+                )
         if args.strict_no_residuals:
             trade_residuals = list(trade_report.get("accepted_residuals") or [])
             blocking_trade_residuals = _blocking_residuals_for_strict_mode(trade_residuals)
+            axis_residual_count["trade"] = len(trade_residuals)
+            axis_blocking_residual_count["trade"] = len(blocking_trade_residuals)
             if blocking_trade_residuals:
+                axis_gate_status["trade"] = False
+                axis_failure_codes["trade"].append("trade_residuals_present")
                 failures.append(
                     {
                         "code": "trade_residuals_present",
@@ -943,7 +1107,17 @@ def main() -> int:
                 )
 
     action_report: dict[str, Any] | None = None
+    action_strict_status = False
+    action_opt_in_status = False
+    action_opt_in_proof: dict[str, Any] = {}
+    action_selected_status = False
+    action_artefact_only_mismatch = False
+    action_gate_mode = (
+        "allow_action_artefact_residuals" if bool(args.allow_action_artefact_residuals) else "strict_fail_closed"
+    )
     if not action_path.exists():
+        axis_gate_status["action"] = False
+        axis_failure_codes["action"].append("missing_action_report")
         failures.append(
             {
                 "code": "missing_action_report",
@@ -953,20 +1127,50 @@ def main() -> int:
         )
     else:
         action_report = _load_json(action_path)
-        action_status = bool(((action_report.get("status") or {}).get("strict_alignment_pass")))
-        if not action_status:
+        axis_report_present["action"] = True
+        action_status_obj = (action_report.get("status") or {}) if isinstance(action_report, dict) else {}
+        action_strict_status = bool(action_status_obj.get("strict_alignment_pass"))
+        action_artefact_only_mismatch = bool(action_status_obj.get("artefact_only_mismatch"))
+        if action_strict_status:
+            action_opt_in_status = True
+        else:
+            action_opt_in_status, action_opt_in_proof = _action_artefact_opt_in_proof(action_report)
+            if bool(args.allow_action_artefact_residuals) and not action_opt_in_status:
+                axis_failure_codes["action"].append("action_artefact_opt_in_unproven")
+                failures.append(
+                    {
+                        "code": "action_artefact_opt_in_unproven",
+                        "classification": "deterministic_logic_divergence",
+                        "detail": "action artefact opt-in was requested but hard evidence is incomplete",
+                        "proof": action_opt_in_proof,
+                    }
+                )
+        action_selected_status = action_opt_in_status if bool(args.allow_action_artefact_residuals) else action_strict_status
+        axis_tool_status["action"] = action_strict_status
+        axis_gate_status["action"] = action_selected_status
+        if not action_selected_status:
+            axis_failure_codes["action"].append("action_alignment_failed")
             failures.append(
                 {
                     "code": "action_alignment_failed",
                     "classification": "deterministic_logic_divergence",
                     "detail": "action reconciliation strict alignment failed",
                     "counts": action_report.get("counts") or {},
+                    "gate_mode": action_gate_mode,
+                    "strict_alignment_pass": action_strict_status,
+                    "opt_in_alignment_pass": action_opt_in_status,
+                    "artefact_only_mismatch": action_artefact_only_mismatch,
+                    "opt_in_proof": action_opt_in_proof,
                 }
             )
         if args.strict_no_residuals:
             action_residuals = list(action_report.get("accepted_residuals") or [])
             blocking_action_residuals = _blocking_residuals_for_strict_mode(action_residuals)
+            axis_residual_count["action"] = len(action_residuals)
+            axis_blocking_residual_count["action"] = len(blocking_action_residuals)
             if blocking_action_residuals:
+                axis_gate_status["action"] = False
+                axis_failure_codes["action"].append("action_residuals_present")
                 failures.append(
                     {
                         "code": "action_residuals_present",
@@ -992,8 +1196,8 @@ def main() -> int:
     )
 
     if snapshot_trades_only_gate and (
-        (trade_report is not None and not bool(((trade_report.get("status") or {}).get("strict_alignment_pass"))))
-        or (action_report is not None and not bool(((action_report.get("status") or {}).get("strict_alignment_pass"))))
+        (trade_report is not None and not bool(axis_gate_status.get("trade")))
+        or (action_report is not None and not bool(axis_gate_status.get("action")))
     ):
         failures.append(
             {
@@ -1014,6 +1218,8 @@ def main() -> int:
     live_paper_report: dict[str, Any] | None = None
     if not live_paper_path.exists():
         if args.require_live_paper:
+            axis_gate_status["live_paper"] = False
+            axis_failure_codes["live_paper"].append("missing_live_paper_report")
             failures.append(
                 {
                     "code": "missing_live_paper_report",
@@ -1023,8 +1229,12 @@ def main() -> int:
             )
     else:
         live_paper_report = _load_json(live_paper_path)
+        axis_report_present["live_paper"] = True
         live_paper_status = bool(((live_paper_report.get("status") or {}).get("strict_alignment_pass")))
+        axis_tool_status["live_paper"] = live_paper_status
+        axis_gate_status["live_paper"] = live_paper_status
         if not live_paper_status:
+            axis_failure_codes["live_paper"].append("live_paper_alignment_failed")
             failures.append(
                 {
                     "code": "live_paper_alignment_failed",
@@ -1036,7 +1246,11 @@ def main() -> int:
         if args.strict_no_residuals:
             live_paper_residuals = list(live_paper_report.get("accepted_residuals") or [])
             blocking_live_paper_residuals = _blocking_residuals_for_strict_mode(live_paper_residuals)
+            axis_residual_count["live_paper"] = len(live_paper_residuals)
+            axis_blocking_residual_count["live_paper"] = len(blocking_live_paper_residuals)
             if blocking_live_paper_residuals:
+                axis_gate_status["live_paper"] = False
+                axis_failure_codes["live_paper"].append("live_paper_residuals_present")
                 failures.append(
                     {
                         "code": "live_paper_residuals_present",
@@ -1104,6 +1318,8 @@ def main() -> int:
     live_paper_decision_trace_skipped_empty_paper = False
     if not live_paper_decision_trace_path.exists():
         if args.require_live_paper_decision_trace:
+            axis_gate_status["live_paper_decision_trace"] = False
+            axis_failure_codes["live_paper_decision_trace"].append("missing_live_paper_decision_trace_report")
             failures.append(
                 {
                     "code": "missing_live_paper_decision_trace_report",
@@ -1113,9 +1329,11 @@ def main() -> int:
             )
     else:
         live_paper_decision_trace_report = _load_json(live_paper_decision_trace_path)
+        axis_report_present["live_paper_decision_trace"] = True
         decision_trace_status = bool(
             ((live_paper_decision_trace_report.get("status") or {}).get("strict_alignment_pass"))
         )
+        axis_tool_status["live_paper_decision_trace"] = decision_trace_status
         decision_counts = live_paper_decision_trace_report.get("counts") or {}
         live_decision_rows = _as_int(decision_counts.get("live_decision_rows"), -1)
         paper_decision_rows = _as_int(decision_counts.get("paper_decision_rows"), -1)
@@ -1127,7 +1345,10 @@ def main() -> int:
                 and live_decision_rows > 0
             ):
                 live_paper_decision_trace_skipped_empty_paper = True
+                axis_gate_status["live_paper_decision_trace"] = True
             else:
+                axis_gate_status["live_paper_decision_trace"] = False
+                axis_failure_codes["live_paper_decision_trace"].append("live_paper_decision_trace_alignment_failed")
                 failures.append(
                     {
                         "code": "live_paper_decision_trace_alignment_failed",
@@ -1136,6 +1357,26 @@ def main() -> int:
                         "counts": live_paper_decision_trace_report.get("counts") or {},
                     }
                 )
+        else:
+            axis_gate_status["live_paper_decision_trace"] = True
+
+    contract_fail_codes = [axis for axis in _CONTRACT_AXES if not bool(axis_gate_status.get(axis, False))]
+    axis_contract: dict[str, Any] = {
+        axis: {
+            "required": bool(axis_required.get(axis)),
+            "report_present": bool(axis_report_present.get(axis)),
+            "tool_strict_pass": axis_tool_status.get(axis),
+            "gate_ok": bool(axis_gate_status.get(axis)),
+            "strict_no_residuals_checked": bool(axis_strict_no_residuals_checked.get(axis)),
+            "accepted_residual_count": int(axis_residual_count.get(axis) or 0),
+            "blocking_residual_count": int(axis_blocking_residual_count.get(axis) or 0),
+            "failure_codes": list(axis_failure_codes.get(axis) or []),
+        }
+        for axis in _CONTRACT_AXES
+    }
+    axis_contract["live_paper_decision_trace"]["skipped_empty_paper_strict_replace"] = bool(
+        live_paper_decision_trace_skipped_empty_paper
+    )
 
     event_order_report: dict[str, Any] | None = None
     if not event_order_path.exists():
@@ -1273,6 +1514,8 @@ def main() -> int:
             "gpu_parity_report": str(gpu_parity_path),
             "require_gpu_parity": bool(args.require_gpu_parity),
             "strict_no_residuals": bool(args.strict_no_residuals),
+            "allow_trade_policy_mismatch_residual": bool(args.allow_trade_policy_mismatch_residual),
+            "allow_action_artefact_residuals": bool(args.allow_action_artefact_residuals),
         },
         "checks": {
             "manifest_present": manifest is not None,
@@ -1292,12 +1535,20 @@ def main() -> int:
             "trade_ok": bool((trade_report.get("status") or {}).get("strict_alignment_pass"))
             if trade_report
             else False,
-            "action_ok": bool((action_report.get("status") or {}).get("strict_alignment_pass"))
-            if action_report
-            else False,
+            "trade_gate_ok": bool(axis_gate_status.get("trade")),
+            "trade_policy_mismatch_opt_in_applied": bool(trade_policy_mismatch_opt_in_applied),
+            "trade_policy_mismatch_opt_in_proof": trade_policy_mismatch_opt_in_proof,
+            "action_ok": bool(action_selected_status) if action_report else False,
+            "action_gate_ok": bool(axis_gate_status.get("action")),
+            "action_gate_mode": action_gate_mode,
+            "action_strict_ok": bool(action_strict_status),
+            "action_opt_in_ok": bool(action_opt_in_status),
+            "action_opt_in_proof": action_opt_in_proof,
+            "action_artefact_only_mismatch": bool(action_artefact_only_mismatch),
             "live_paper_ok": bool((live_paper_report.get("status") or {}).get("strict_alignment_pass"))
             if live_paper_report
             else (not bool(args.require_live_paper)),
+            "live_paper_gate_ok": bool(axis_gate_status.get("live_paper")),
             "live_paper_decision_trace_ok": (
                 bool((live_paper_decision_trace_report.get("status") or {}).get("strict_alignment_pass"))
                 or bool(live_paper_decision_trace_skipped_empty_paper)
@@ -1307,6 +1558,7 @@ def main() -> int:
                 (not bool(args.require_live_paper_decision_trace))
                 or bool(live_paper_decision_trace_skipped_empty_paper)
             ),
+            "live_paper_decision_trace_gate_ok": bool(axis_gate_status.get("live_paper_decision_trace")),
             "live_paper_decision_trace_skipped_empty_paper": bool(live_paper_decision_trace_skipped_empty_paper),
             "manifest_snapshot_strict_replace": bool(manifest_snapshot_strict_replace),
             "seed_apply_strict_replace": bool(seed_apply_strict_replace),
@@ -1318,6 +1570,15 @@ def main() -> int:
             "trade_residual_count": len((trade_report or {}).get("accepted_residuals") or []),
             "action_residual_count": len((action_report or {}).get("accepted_residuals") or []),
             "live_paper_residual_count": len((live_paper_report or {}).get("accepted_residuals") or []),
+        },
+        "contract": {
+            "strict_no_residuals_enabled": bool(args.strict_no_residuals),
+            "strict_allowed_residual_classifications": sorted(_STRICT_ALLOWED_RESIDUAL_CLASSIFICATIONS),
+            "fail_codes": contract_fail_codes,
+            "axes": axis_contract,
+            "axis_gate_status": axis_gate_status,
+            "axis_tool_status": axis_tool_status,
+            "axis_failure_codes": axis_failure_codes,
         },
         "market_data_provenance": {
             "candles_provenance_checked": candles_provenance_checked,

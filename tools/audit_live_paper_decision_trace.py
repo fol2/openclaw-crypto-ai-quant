@@ -59,6 +59,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--fail-on-mismatch", action="store_true", default=False, help="Return exit code 1 on strict mismatch")
     parser.add_argument(
+        "--allow-paper-preseed-unlinked-residuals",
+        action="store_true",
+        default=False,
+        help=(
+            "Treat paper_preseed_decision_rows_out_of_scope residuals as non-blocking. "
+            "Default is fail-closed."
+        ),
+    )
+    parser.add_argument(
         "--include-runtime-only-blocked",
         action="store_true",
         default=False,
@@ -520,6 +529,7 @@ def main() -> int:
     timestamp_bucket_ms = max(1, int(args.timestamp_bucket_ms))
     include_runtime_only_blocked = bool(args.include_runtime_only_blocked)
     include_funding_events = bool(args.include_funding_events)
+    allow_paper_preseed_unlinked_residuals = bool(args.allow_paper_preseed_unlinked_residuals)
     try:
         paper_min_id_exclusive = _resolve_paper_min_id_exclusive(
             raw_min_id=int(args.paper_min_id_exclusive)
@@ -681,6 +691,8 @@ def main() -> int:
                 "paper_min_trade_id_exclusive": int(paper_min_id_exclusive),
             }
         )
+        if allow_paper_preseed_unlinked_residuals:
+            strict_alignment_pass = not run_fingerprint_guard_issues
 
     decision_table_unavailable_but_empty = (
         len(missing_table_issues) > 0
@@ -713,6 +725,7 @@ def main() -> int:
             "timestamp_bucket_ms": timestamp_bucket_ms,
             "include_runtime_only_blocked": include_runtime_only_blocked,
             "include_funding_events": include_funding_events,
+            "allow_paper_preseed_unlinked_residuals": allow_paper_preseed_unlinked_residuals,
             "require_single_run_fingerprint": bool(args.require_single_run_fingerprint),
             "max_live_run_fingerprint_distinct": max(1, int(args.max_live_run_fingerprint_distinct)),
         },

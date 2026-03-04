@@ -668,6 +668,25 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Allow accepted residuals from alignment reports.",
     )
     ap.set_defaults(strict_no_residuals=_env_bool("AI_QUANT_REPLAY_GATE_STRICT_NO_RESIDUALS", True))
+    action_residual_group = ap.add_mutually_exclusive_group()
+    action_residual_group.add_argument(
+        "--allow-action-artefact-residuals",
+        dest="allow_action_artefact_residuals",
+        action="store_true",
+        help=(
+            "Opt-in: allow action-axis artefact-only residuals in the final gate. "
+            "Default remains strict fail-closed."
+        ),
+    )
+    action_residual_group.add_argument(
+        "--strict-action-alignment",
+        dest="allow_action_artefact_residuals",
+        action="store_false",
+        help="Disable action artefact residual opt-in (strict fail-closed).",
+    )
+    ap.set_defaults(
+        allow_action_artefact_residuals=_env_bool("AI_QUANT_REPLAY_GATE_ALLOW_ACTION_ARTEFACT_RESIDUALS", False)
+    )
     ap.add_argument(
         "--min-live-trades",
         type=int,
@@ -1305,8 +1324,6 @@ def main() -> int:
             )
 
     harness_rc: int | None = None
-    harness_report: dict[str, Any] | None = None
-    gate_report: dict[str, Any] | None = None
     require_oms_strategy_provenance = True
     market_data_provenance: dict[str, Any] = {
         "manifest_candles_provenance": None,
@@ -1349,6 +1366,8 @@ def main() -> int:
             harness_cmd.extend(["--funding-db", str(funding_db)])
         if bool(args.strict_no_residuals):
             harness_cmd.append("--strict-no-residuals")
+        if bool(args.allow_action_artefact_residuals):
+            harness_cmd.append("--allow-action-artefact-residuals")
 
         harness_rc = _run_to_log(harness_cmd, cwd=repo_root, env=env, log_path=harness_log)
         if harness_rc != 0:
@@ -1373,7 +1392,6 @@ def main() -> int:
                 )
             else:
                 if isinstance(loaded, dict):
-                    harness_report = loaded
                     if not bool(loaded.get("ok")):
                         failures.append(
                             {
@@ -1412,7 +1430,6 @@ def main() -> int:
                 )
             else:
                 if isinstance(loaded, dict):
-                    gate_report = loaded
                     gate_market_data_provenance = loaded.get("market_data_provenance")
                     if isinstance(gate_market_data_provenance, dict):
                         market_data_provenance["alignment_gate_market_data_provenance"] = gate_market_data_provenance
@@ -1491,6 +1508,7 @@ def main() -> int:
         "min_live_trades": min_live_trades,
         "live_baseline_trades": int(live_baseline_trades),
         "strict_no_residuals": bool(args.strict_no_residuals),
+        "allow_action_artefact_residuals": bool(args.allow_action_artefact_residuals),
         "build_exit_code": None if build_rc is None else int(build_rc),
         "harness_exit_code": None if harness_rc is None else int(harness_rc),
         "market_data_provenance": market_data_provenance,

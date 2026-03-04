@@ -28,6 +28,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Run final alignment gate with --strict-no-residuals",
     )
     parser.add_argument(
+        "--allow-action-artefact-residuals",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in: allow action-axis artefact-only residuals when running "
+            "the final alignment gate. Default remains strict fail-closed."
+        ),
+    )
+    parser.add_argument(
         "--output",
         help="Optional output report path (default: <bundle-dir>/paper_deterministic_replay_run.json)",
     )
@@ -171,6 +180,9 @@ def main() -> int:
         else:
             gate_env = env.copy()
             gate_env["STRICT_NO_RESIDUALS"] = "1" if bool(args.strict_no_residuals) else "0"
+            gate_env["AQC_ALLOW_ACTION_ARTEFACT_RESIDUALS"] = (
+                "1" if bool(args.allow_action_artefact_residuals) else "0"
+            )
             gate_result = _run_step(
                 step_name="alignment_gate",
                 command=["bash", str(gate_script)],
@@ -189,6 +201,7 @@ def main() -> int:
         "bundle_dir": str(bundle_dir),
         "repo_root": str(repo_root),
         "strict_no_residuals": bool(args.strict_no_residuals),
+        "allow_action_artefact_residuals": bool(args.allow_action_artefact_residuals),
         "ok": bool(overall_ok),
         "failed_step": failed_step,
         "step_count": len(steps),

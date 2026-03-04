@@ -34,6 +34,14 @@ ORDER_FAIL_EVENTS = {
 }
 DEFAULT_TOL = 1e-9
 DEFAULT_ORDER_FAIL_MATCH_WINDOW_MS = 300_000
+COMPARE_SURFACE_ARTEFACT_KINDS = {
+    "matched_funding_pair",
+    "missing_backtester_funding_action",
+    "missing_live_funding_action",
+    "missing_live_action_end_of_backtest",
+    "missing_live_action_live_order_fail",
+}
+COMPARE_SURFACE_ARTEFACT_CLASSES = {"non-simulatable_exchange_oms_effect", "state_initialisation_gap"}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -65,6 +73,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pnl-tol", type=float, default=DEFAULT_TOL, help="Absolute tolerance for pnl comparison")
     parser.add_argument("--fee-tol", type=float, default=DEFAULT_TOL, help="Absolute tolerance for fee comparison")
     parser.add_argument("--balance-tol", type=float, default=DEFAULT_TOL, help="Absolute tolerance for balance comparison")
+    parser.add_argument(
+        "--allow-compare-surface-artefacts",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in: expose gate pass for artefact-only mismatch windows "
+            "(strict fail-closed remains the default signal)."
+        ),
+    )
     parser.add_argument(
         "--order-fail-match-window-ms",
         type=int,
@@ -292,6 +309,42 @@ def _summarise_funding_evidence(mismatches: list[dict[str, Any]]) -> dict[str, A
         "unmatched_backtester": int(sum(int(item["unmatched_backtester"]) for item in rows)),
         "symbols": [str(item["symbol"]) for item in rows if str(item["symbol"])],
         "by_symbol": rows,
+    }
+
+
+def _summarise_mismatch_breakdown(mismatches: list[dict[str, Any]]) -> dict[str, Any]:
+    def _count(rows: list[dict[str, Any]], field: str) -> dict[str, int]:
+        counts: dict[str, int] = defaultdict(int)
+        for row in rows:
+            key = str(row.get(field) or "unknown")
+            counts[key] += 1
+        return dict(sorted(counts.items(), key=lambda item: item[0]))
+
+    surface_rows: list[dict[str, Any]] = []
+    logic_rows: list[dict[str, Any]] = []
+
+    for row in mismatches:
+        kind = str(row.get("kind") or "").strip().lower()
+        classification = str(row.get("classification") or "").strip().lower()
+        if kind in COMPARE_SURFACE_ARTEFACT_KINDS or classification in COMPARE_SURFACE_ARTEFACT_CLASSES:
+            surface_rows.append(row)
+        else:
+            logic_rows.append(row)
+
+    total = len(mismatches)
+    surface_total = len(surface_rows)
+    logic_total = len(logic_rows)
+    return {
+        "total": int(total),
+        "compare_surface_artefact_total": int(surface_total),
+        "logic_divergence_total": int(logic_total),
+        "compare_surface_artefact_ratio": float(surface_total / total) if total else 0.0,
+        "logic_divergence_ratio": float(logic_total / total) if total else 0.0,
+        "compare_surface_artefact_by_kind": _count(surface_rows, "kind"),
+        "compare_surface_artefact_by_symbol": _count(surface_rows, "symbol"),
+        "logic_divergence_by_kind": _count(logic_rows, "kind"),
+        "logic_divergence_by_action_code": _count(logic_rows, "action_code"),
+        "logic_divergence_by_symbol": _count(logic_rows, "symbol"),
     }
 
 
@@ -992,11 +1045,16 @@ def main() -> int:
     )
 
     mismatch_counts: dict[str, int] = defaultdict(int)
+    mismatch_kind_counts: dict[str, int] = defaultdict(int)
+    mismatch_action_code_counts: dict[str, int] = defaultdict(int)
     for item in mismatches:
         mismatch_counts[str(item.get("classification") or "unknown")] += 1
+        mismatch_kind_counts[str(item.get("kind") or "unknown")] += 1
+        mismatch_action_code_counts[str(item.get("action_code") or "unknown")] += 1
 
     accepted_classes = {"non-simulatable_exchange_oms_effect", "state_initialisation_gap"}
     accepted_residuals = [m for m in mismatches if str(m.get("classification") or "") in accepted_classes]
+    mismatch_breakdown = _summarise_mismatch_breakdown(mismatches)
 
     strict_alignment_pass = (
         compare_summary["numeric_mismatch"] == 0
@@ -1005,6 +1063,16 @@ def main() -> int:
         and compare_summary["unmatched_live"] == 0
         and compare_summary["unmatched_backtester"] == 0
     )
+    logic_divergence_free = int(mismatch_breakdown["logic_divergence_total"]) == 0
+    compare_surface_artefact_total = int(mismatch_breakdown["compare_surface_artefact_total"])
+    artefact_only_mismatch = bool(logic_divergence_free and compare_surface_artefact_total > 0)
+    gate_pass_if_allow_compare_surface_artefacts = bool(strict_alignment_pass or artefact_only_mismatch)
+    selected_gate_pass = bool(
+        gate_pass_if_allow_compare_surface_artefacts
+        if args.allow_compare_surface_artefacts
+        else strict_alignment_pass
+    )
+    selected_gate_mode = "allow_compare_surface_artefacts" if args.allow_compare_surface_artefacts else "strict_fail_closed"
 
     report = {
         "schema_version": 1,
@@ -1021,6 +1089,7 @@ def main() -> int:
             "fee_tol": float(args.fee_tol),
             "balance_tol": float(args.balance_tol),
             "order_fail_match_window_ms": max(1, int(args.order_fail_match_window_ms)),
+            "allow_compare_surface_artefacts": bool(args.allow_compare_surface_artefacts),
         },
         "counts": {
             **live_counts,
@@ -1030,13 +1099,25 @@ def main() -> int:
             **backtester_counts,
             **order_fail_counts,
             **compare_summary,
+            "compare_surface_artefact_total": int(mismatch_breakdown["compare_surface_artefact_total"]),
+            "logic_divergence_total": int(mismatch_breakdown["logic_divergence_total"]),
             "mismatch_total": len(mismatches),
         },
         "status": {
             "strict_alignment_pass": strict_alignment_pass,
             "accepted_residuals_only": strict_alignment_pass and bool(accepted_residuals),
+            "logic_divergence_free": bool(logic_divergence_free),
+            "artefact_only_mismatch": bool(artefact_only_mismatch),
+            "gate_pass_strict_fail_closed": bool(strict_alignment_pass),
+            "gate_pass_if_allow_compare_surface_artefacts": bool(gate_pass_if_allow_compare_surface_artefacts),
+            "selected_gate_mode": selected_gate_mode,
+            "selected_gate_pass": bool(selected_gate_pass),
+            "allow_compare_surface_artefacts_enabled": bool(args.allow_compare_surface_artefacts),
         },
         "mismatch_counts_by_classification": dict(sorted(mismatch_counts.items(), key=lambda x: x[0])),
+        "mismatch_counts_by_kind": dict(sorted(mismatch_kind_counts.items(), key=lambda x: x[0])),
+        "mismatch_counts_by_action_code": dict(sorted(mismatch_action_code_counts.items(), key=lambda x: x[0])),
+        "mismatch_breakdown": mismatch_breakdown,
         "funding_pair_evidence": _summarise_funding_evidence(mismatches),
         "accepted_residuals": accepted_residuals,
         "per_symbol": per_symbol_rows,

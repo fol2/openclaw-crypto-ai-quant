@@ -59,6 +59,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=1,
         help="Maximum allowed distinct live run_fingerprint in manifest provenance window.",
     )
+    parser.add_argument(
+        "--allow-paper-window-not-replayed",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in: treat paper_window_not_replayed as non-blocking while preserving "
+            "full mismatch evidence in the report."
+        ),
+    )
     parser.add_argument("--output", required=True, help="Path to output JSON report")
     parser.add_argument("--from-ts", type=int, help="Filter start timestamp (ms, inclusive)")
     parser.add_argument("--to-ts", type=int, help="Filter end timestamp (ms, inclusive)")
@@ -819,10 +828,7 @@ def main() -> int:
     live_simulatable_actions = sum(1 for row in live_actions if str(row.get("action_code") or "") != FUNDING_ACTION)
     paper_simulatable_actions = sum(1 for row in paper_actions if str(row.get("action_code") or "") != FUNDING_ACTION)
     unmatched_live_simulatable = sum(1 for item in mismatches if str(item.get("kind") or "") == "missing_paper_action")
-    funding_contract_clean = (
-        compare_summary["funding_unmatched_live"] == 0
-        and compare_summary["funding_unmatched_paper"] == 0
-    )
+    paper_window_not_replayed_artefact_mismatch_total = 0
     strict_alignment_pass = (
         compare_summary["numeric_mismatch"] == 0
         and compare_summary["confidence_mismatch"] == 0
@@ -842,6 +848,10 @@ def main() -> int:
         and compare_summary["unmatched_paper"] == 0
     )
     if paper_window_not_replayed:
+        artefact_kinds = {"missing_paper_action", "missing_paper_funding_action"}
+        paper_window_not_replayed_artefact_mismatch_total = sum(
+            1 for item in mismatches if str(item.get("kind") or "") in artefact_kinds
+        )
         accepted_residuals.append(
             {
                 "classification": "state_initialisation_gap",
@@ -850,9 +860,25 @@ def main() -> int:
                 "paper_simulatable_actions": int(paper_simulatable_actions),
                 "live_unmatched_funding_actions": int(compare_summary["funding_unmatched_live"]),
                 "paper_unmatched_funding_actions": int(compare_summary["funding_unmatched_paper"]),
+                "artefact_mismatch_total": int(paper_window_not_replayed_artefact_mismatch_total),
+                "non_blocking_opt_in_enabled": bool(args.allow_paper_window_not_replayed),
             }
         )
-        strict_alignment_pass = funding_contract_clean and not run_fingerprint_guard_issues
+        if bool(args.allow_paper_window_not_replayed):
+            # Keep mismatch evidence in the report, but allow a deliberate opt-in
+            # for windows that were not replayed on paper.
+            strict_alignment_pass = not run_fingerprint_guard_issues
+    non_blocking_evidence_total = sum(
+        1 for item in mismatches if str(item.get("classification") or "") == "non-simulatable_exchange_oms_effect"
+    )
+    true_mismatch_total = int(
+        max(
+            0,
+            len(mismatches) - paper_window_not_replayed_artefact_mismatch_total - non_blocking_evidence_total,
+        )
+    )
+    if paper_window_not_replayed and bool(args.allow_paper_window_not_replayed):
+        strict_alignment_pass = bool(true_mismatch_total == 0 and not run_fingerprint_guard_issues)
 
     mismatch_counts: dict[str, int] = defaultdict(int)
     for item in mismatches:
@@ -878,6 +904,7 @@ def main() -> int:
             "bundle_manifest": str(bundle_manifest) if bundle_manifest is not None else None,
             "require_single_run_fingerprint": bool(args.require_single_run_fingerprint),
             "max_live_run_fingerprint_distinct": max(1, int(args.max_live_run_fingerprint_distinct)),
+            "allow_paper_window_not_replayed": bool(args.allow_paper_window_not_replayed),
         },
         "counts": {
             **live_counts,
@@ -892,12 +919,16 @@ def main() -> int:
             "live_simulatable_actions": int(live_simulatable_actions),
             "paper_simulatable_actions": int(paper_simulatable_actions),
             "unmatched_live_simulatable": int(unmatched_live_simulatable),
+            "paper_window_not_replayed_artefact_mismatch_total": int(paper_window_not_replayed_artefact_mismatch_total),
+            "non_blocking_evidence_total": int(non_blocking_evidence_total),
+            "true_mismatch_total": int(true_mismatch_total),
             **compare_summary,
             "mismatch_total": len(mismatches),
         },
         "status": {
             "strict_alignment_pass": strict_alignment_pass,
             "accepted_residuals_only": strict_alignment_pass and bool(accepted_residuals),
+            "paper_window_not_replayed": bool(paper_window_not_replayed),
         },
         "mismatch_counts_by_classification": dict(sorted(mismatch_counts.items(), key=lambda x: x[0])),
         "run_fingerprint_guard": run_fingerprint_guard_detail,
