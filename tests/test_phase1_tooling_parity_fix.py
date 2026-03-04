@@ -125,6 +125,60 @@ def test_live_backtester_split_fill_collapse_by_fill_hash() -> None:
     assert collapsed_close[0]["fee_usd"] == pytest.approx(0.30)
 
 
+def test_action_scope_contract_flags_symbol_side_disjoint() -> None:
+    live_rows = [
+        _mk_action(symbol="POL", action_code="OPEN_SHORT", ts_ms=1000, source_id=1, size=1.0),
+        _mk_action(symbol="POL", action_code="CLOSE_SHORT", ts_ms=2000, source_id=2, size=1.0, pnl_usd=1.0),
+    ]
+    bt_rows = [
+        _mk_action(symbol="POL", action_code="OPEN_LONG", ts_ms=1000, source_id=10, size=1.0),
+        _mk_action(symbol="POL", action_code="CLOSE_LONG", ts_ms=2000, source_id=11, size=1.0, pnl_usd=1.0),
+    ]
+
+    scope = live_bt_action._summarise_action_scope_contract(live_rows, bt_rows, matched_pairs=0)
+
+    assert scope["mismatch"] is True
+    assert scope["mismatch_kind"] == "symbol_side_scope_disjoint"
+    assert scope["shared_symbols"] == ["POL"]
+    assert scope["shared_symbol_sides"] == []
+
+
+def test_trade_scope_contract_flags_symbol_side_disjoint() -> None:
+    live_rows = [
+        {
+            "symbol": "POL",
+            "side": "SHORT",
+            "exit_ts_ms": 2000,
+            "exit_size": 1.0,
+            "pnl_usd": 1.0,
+            "fee_usd": 0.0,
+            "source_id": "l1",
+            "row_no": 1,
+            "action": "CLOSE",
+        }
+    ]
+    bt_rows = [
+        {
+            "symbol": "POL",
+            "side": "LONG",
+            "exit_ts_ms": 2000,
+            "exit_size": 1.0,
+            "pnl_usd": 1.0,
+            "fee_usd": 0.0,
+            "source_id": "b1",
+            "row_no": 1,
+            "reason_code": "exit_filter",
+        }
+    ]
+
+    scope = live_bt_trade._summarise_exit_scope_contract(live_rows, bt_rows, matched_pairs=0)
+
+    assert scope["mismatch"] is True
+    assert scope["mismatch_kind"] == "symbol_side_scope_disjoint"
+    assert scope["shared_exit_symbols"] == ["POL"]
+    assert scope["shared_exit_symbol_sides"] == []
+
+
 def test_live_backtester_funding_only_matched_pairs_are_residuals() -> None:
     live_rows = [
         _mk_action(symbol="ETH", action_code="FUNDING", ts_ms=1000, source_id=1, size=1.0, pnl_usd=0.2),
@@ -620,6 +674,30 @@ def test_trade_reconcile_does_not_attribute_policy_mismatch_when_runtime_confide
     assert runtime_policy["provenance_contract_ok"] is False
     assert runtime_policy["match_fallback"] == 1
     assert report["mismatches"][0]["classification"] == "deterministic_logic_divergence"
+
+
+def test_trade_policy_loader_reads_global_strategy_schema(tmp_path: Path) -> None:
+    strategy_snapshot = tmp_path / "strategy_overrides.locked.yaml"
+    strategy_snapshot.write_text(
+        (
+            "global:\n"
+            "  trade:\n"
+            "    entry_min_confidence: high\n"
+            "symbols:\n"
+            "  ETH:\n"
+            "    trade:\n"
+            "      entry_min_confidence: medium\n"
+        ),
+        encoding="utf-8",
+    )
+
+    policy = live_bt_trade._load_locked_entry_confidence_policy(strategy_snapshot)
+
+    assert policy["policy_available"] is True
+    assert policy["provenance_contract_ok"] is True
+    assert policy["global_min_confidence"] == "high"
+    assert policy["symbol_min_confidence"]["ETH"] == "medium"
+    assert policy["policy_source"] == "strategy_snapshot_explicit"
 
 
 def test_decision_trace_filters_paper_rows_by_trade_id_watermark(tmp_path: Path) -> None:

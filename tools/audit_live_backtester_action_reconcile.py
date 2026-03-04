@@ -203,6 +203,88 @@ def _is_exit_action_code(action_code: str) -> bool:
     return code.startswith("CLOSE_") or code.startswith("REDUCE_")
 
 
+def _extract_side_from_action_code(action_code: str) -> str:
+    code = str(action_code or "").strip().upper()
+    if code.endswith("_LONG"):
+        return "LONG"
+    if code.endswith("_SHORT"):
+        return "SHORT"
+    return ""
+
+
+def _summarise_action_scope_contract(
+    live_actions: list[dict[str, Any]],
+    backtester_actions: list[dict[str, Any]],
+    *,
+    matched_pairs: int,
+) -> dict[str, Any]:
+    def _collect(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        symbols: set[str] = set()
+        sides: set[str] = set()
+        action_codes: set[str] = set()
+        symbol_sides: set[str] = set()
+        non_funding_rows = 0
+        for row in rows:
+            action_code = str(row.get("action_code") or "").strip().upper()
+            if not action_code or action_code == FUNDING_ACTION:
+                continue
+            symbol = _normalise_symbol(row.get("symbol"))
+            if not symbol:
+                continue
+            non_funding_rows += 1
+            action_codes.add(action_code)
+            symbols.add(symbol)
+            side = _extract_side_from_action_code(action_code)
+            if side:
+                sides.add(side)
+                symbol_sides.add(f"{symbol}:{side}")
+        return {
+            "non_funding_rows": int(non_funding_rows),
+            "symbols": sorted(symbols),
+            "sides": sorted(sides),
+            "action_codes": sorted(action_codes),
+            "symbol_sides": sorted(symbol_sides),
+        }
+
+    live_scope = _collect(live_actions)
+    backtester_scope = _collect(backtester_actions)
+    shared_symbols = sorted(set(live_scope["symbols"]) & set(backtester_scope["symbols"]))
+    shared_sides = sorted(set(live_scope["sides"]) & set(backtester_scope["sides"]))
+    shared_action_codes = sorted(set(live_scope["action_codes"]) & set(backtester_scope["action_codes"]))
+    shared_symbol_sides = sorted(set(live_scope["symbol_sides"]) & set(backtester_scope["symbol_sides"]))
+    mismatch = bool(
+        int(matched_pairs) == 0
+        and int(live_scope["non_funding_rows"]) > 0
+        and int(backtester_scope["non_funding_rows"]) > 0
+        and len(shared_symbol_sides) == 0
+    )
+    if not mismatch:
+        mismatch_kind = ""
+    elif len(shared_symbols) == 0:
+        mismatch_kind = "symbol_scope_disjoint"
+    else:
+        mismatch_kind = "symbol_side_scope_disjoint"
+    return {
+        "matched_pairs": int(matched_pairs),
+        "live_non_funding_rows": int(live_scope["non_funding_rows"]),
+        "backtester_non_funding_rows": int(backtester_scope["non_funding_rows"]),
+        "live_symbols": live_scope["symbols"],
+        "backtester_symbols": backtester_scope["symbols"],
+        "shared_symbols": shared_symbols,
+        "live_sides": live_scope["sides"],
+        "backtester_sides": backtester_scope["sides"],
+        "shared_sides": shared_sides,
+        "live_action_codes": live_scope["action_codes"],
+        "backtester_action_codes": backtester_scope["action_codes"],
+        "shared_action_codes": shared_action_codes,
+        "live_symbol_sides": live_scope["symbol_sides"],
+        "backtester_symbol_sides": backtester_scope["symbol_sides"],
+        "shared_symbol_sides": shared_symbol_sides,
+        "mismatch": mismatch,
+        "mismatch_kind": mismatch_kind,
+    }
+
+
 def _collapse_split_fill_actions(
     rows: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
@@ -1082,6 +1164,11 @@ def main() -> int:
         balance_tol=float(args.balance_tol),
         order_fail_match_window_ms=max(1, int(args.order_fail_match_window_ms)),
     )
+    scope_contract = _summarise_action_scope_contract(
+        live_actions,
+        backtester_actions,
+        matched_pairs=int(compare_summary.get("matched_pairs") or 0),
+    )
     classification_reclassified_count = _normalise_compare_surface_classifications(mismatches)
 
     mismatch_counts: dict[str, int] = defaultdict(int)
@@ -1142,6 +1229,8 @@ def main() -> int:
             "compare_surface_artefact_total": int(mismatch_breakdown["compare_surface_artefact_total"]),
             "logic_divergence_total": int(mismatch_breakdown["logic_divergence_total"]),
             "classification_reclassified_count": int(classification_reclassified_count),
+            "scope_shared_symbols": len(scope_contract.get("shared_symbols") or []),
+            "scope_shared_symbol_sides": len(scope_contract.get("shared_symbol_sides") or []),
             "mismatch_total": len(mismatches),
         },
         "status": {
@@ -1149,6 +1238,7 @@ def main() -> int:
             "accepted_residuals_only": strict_alignment_pass and bool(accepted_residuals),
             "logic_divergence_free": bool(logic_divergence_free),
             "artefact_only_mismatch": bool(artefact_only_mismatch),
+            "scope_contract_mismatch": bool(scope_contract.get("mismatch")),
             "gate_pass_strict_fail_closed": bool(strict_alignment_pass),
             "gate_pass_if_allow_compare_surface_artefacts": bool(gate_pass_if_allow_compare_surface_artefacts),
             "selected_gate_mode": selected_gate_mode,
@@ -1160,6 +1250,7 @@ def main() -> int:
         "mismatch_counts_by_action_code": dict(sorted(mismatch_action_code_counts.items(), key=lambda x: x[0])),
         "mismatch_breakdown": mismatch_breakdown,
         "funding_pair_evidence": _summarise_funding_evidence(mismatches),
+        "scope_contract": scope_contract,
         "accepted_residuals": accepted_residuals,
         "per_symbol": per_symbol_rows,
         "mismatches": mismatches,

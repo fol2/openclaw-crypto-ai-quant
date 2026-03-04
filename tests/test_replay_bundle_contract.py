@@ -80,6 +80,25 @@ def test_live_run_fingerprint_provenance_summariser_respects_declared_window() -
     assert payload["run_fingerprint_distinct"] == 2
 
 
+def test_live_replay_scope_summariser_tracks_symbol_side_pairs() -> None:
+    payload = replay_bundle_builder._summarise_live_replay_scope(
+        [
+            {"symbol": "POL", "action": "OPEN", "type": "SHORT"},
+            {"symbol": "POL", "action": "CLOSE", "type": "SHORT"},
+            {"symbol": "NEAR", "action": "OPEN", "type": "LONG"},
+            {"symbol": "POL", "action": "FUNDING", "type": ""},
+            {"symbol": "BAD", "action": "UNKNOWN", "type": "LONG"},
+        ]
+    )
+
+    assert payload["live_total_rows"] == 5
+    assert payload["live_canonical_side_action_rows"] == 3
+    assert payload["live_funding_rows"] == 1
+    assert payload["symbols"] == ["NEAR", "POL"]
+    assert payload["sides"] == ["LONG", "SHORT"]
+    assert payload["symbol_sides"] == ["NEAR:LONG", "POL:SHORT"]
+
+
 def test_alignment_gate_fails_on_seed_strict_replace_contract_mismatch(
     tmp_path: Path,
     monkeypatch,
@@ -798,6 +817,63 @@ def test_alignment_gate_trade_policy_mismatch_stays_fail_closed_without_opt_in(
     assert report.get("checks", {}).get("trade_strict_ok") is False
     assert report.get("checks", {}).get("trade_ok") is False
     assert report.get("checks", {}).get("trade_gate_ok") is False
+
+
+def test_alignment_gate_emits_scope_contract_failures_for_trade_and_action(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    _write_base_gate_bundle(bundle_dir, seed_apply_report={"strict_replace": False})
+    _write_json(
+        bundle_dir / "trade_reconcile_report.json",
+        {
+            "status": {"strict_alignment_pass": False, "scope_contract_mismatch": True},
+            "accepted_residuals": [],
+            "counts": {"matched_pairs": 0},
+            "scope_contract": {"mismatch": True, "mismatch_kind": "symbol_side_scope_disjoint"},
+        },
+    )
+    _write_json(
+        bundle_dir / "action_reconcile_report.json",
+        {
+            "status": {"strict_alignment_pass": False, "scope_contract_mismatch": True},
+            "accepted_residuals": [],
+            "counts": {"matched_pairs": 0},
+            "scope_contract": {"mismatch": True, "mismatch_kind": "symbol_side_scope_disjoint"},
+            "mismatch_breakdown": {
+                "total": 1,
+                "compare_surface_artefact_total": 0,
+                "logic_divergence_total": 1,
+                "classification_kind_drift_total": 0,
+            },
+            "mismatch_counts_by_classification": {"deterministic_logic_divergence": 1},
+        },
+    )
+    output = bundle_dir / "alignment_gate_report.json"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "assert_replay_bundle_alignment.py",
+            "--bundle-dir",
+            str(bundle_dir),
+            "--skip-candles-provenance-check",
+            "--output",
+            str(output),
+        ],
+    )
+
+    exit_code = alignment_gate.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+    failure_codes = {str(row.get("code") or "") for row in report.get("failures") or []}
+
+    assert exit_code == 1
+    assert "trade_replay_scope_contract_mismatch" in failure_codes
+    assert "action_replay_scope_contract_mismatch" in failure_codes
+    assert report.get("checks", {}).get("trade_scope_contract_mismatch") is True
+    assert report.get("checks", {}).get("action_scope_contract_mismatch") is True
 
 
 def test_alignment_gate_trade_policy_mismatch_requires_hard_evidence_on_opt_in(

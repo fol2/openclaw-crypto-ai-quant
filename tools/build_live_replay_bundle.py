@@ -33,6 +33,7 @@ except Exception:  # pragma: no cover - optional runtime dependency
     yaml = None
 
 TRADE_ACTIONS = {"OPEN", "ADD", "REDUCE", "CLOSE", "FUNDING"}
+SIDE_ACTIONS = {"OPEN", "ADD", "REDUCE", "CLOSE"}
 _STRATEGY_SHA1_RE = re.compile(r"strategy_sha1=([0-9a-fA-F]{7,40})")
 _STRATEGY_VERSION_RE = re.compile(r"version=([A-Za-z0-9._-]+)")
 
@@ -478,6 +479,45 @@ def _summarise_live_run_fingerprint_provenance(
     }
 
 
+def _summarise_live_replay_scope(baseline_trades: list[dict[str, Any]]) -> dict[str, Any]:
+    symbols: set[str] = set()
+    sides: set[str] = set()
+    action_codes: set[str] = set()
+    symbol_sides: set[str] = set()
+    funding_rows = 0
+    canonical_rows = 0
+
+    for row in baseline_trades:
+        action = str(row.get("action") or "").strip().upper()
+        symbol = str(row.get("symbol") or "").strip().upper()
+        side = str(row.get("type") or "").strip().upper()
+        if not symbol:
+            continue
+        if action == "FUNDING":
+            funding_rows += 1
+            action_codes.add("FUNDING")
+            symbols.add(symbol)
+            continue
+        if action not in SIDE_ACTIONS or side not in {"LONG", "SHORT"}:
+            continue
+        canonical_rows += 1
+        code = f"{action}_{side}"
+        action_codes.add(code)
+        symbols.add(symbol)
+        sides.add(side)
+        symbol_sides.add(f"{symbol}:{side}")
+
+    return {
+        "live_total_rows": int(len(baseline_trades)),
+        "live_canonical_side_action_rows": int(canonical_rows),
+        "live_funding_rows": int(funding_rows),
+        "symbols": sorted(symbols),
+        "sides": sorted(sides),
+        "action_codes": sorted(action_codes),
+        "symbol_sides": sorted(symbol_sides),
+    }
+
+
 def _load_live_order_fail_events(live_db: Path, *, from_ts: int, to_ts: int) -> list[dict[str, Any]]:
     conn = _connect_ro(live_db)
     try:
@@ -827,6 +867,7 @@ def main() -> int:
     )
     baseline_trade_exit_count = sum(1 for row in baseline_trades if row.get("action") in {"CLOSE", "REDUCE"})
     baseline_trade_funding_count = sum(1 for row in baseline_trades if row.get("action") == "FUNDING")
+    live_replay_scope = _summarise_live_replay_scope(baseline_trades)
     live_run_fingerprint_provenance = _summarise_live_run_fingerprint_provenance(
         baseline_trades,
         from_ts=int(args.from_ts),
@@ -1288,6 +1329,7 @@ def main() -> int:
         "runtime_strategy_provenance": runtime_strategy_provenance,
         "oms_strategy_provenance": oms_strategy_provenance,
         "live_run_fingerprint_provenance": live_run_fingerprint_provenance,
+        "live_replay_scope": live_replay_scope,
         "locked_strategy_provenance": {
             "strategy_overrides_source_sha1": str(locked_strategy_sha256),
             "strategy_overrides_source_sha1_prefix8": str(locked_strategy_sha256)[:8],

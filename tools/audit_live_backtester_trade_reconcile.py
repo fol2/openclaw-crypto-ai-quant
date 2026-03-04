@@ -195,6 +195,63 @@ def _extract_side_from_backtester_action(action: Any) -> str:
     return ""
 
 
+def _summarise_exit_scope_contract(
+    live_exits: list[dict[str, Any]],
+    backtester_exits: list[dict[str, Any]],
+    *,
+    matched_pairs: int,
+) -> dict[str, Any]:
+    live_symbol_sides = sorted(
+        {
+            f"{str(row.get('symbol') or '').strip().upper()}:{str(row.get('side') or '').strip().upper()}"
+            for row in live_exits
+            if str(row.get("symbol") or "").strip() and str(row.get("side") or "").strip()
+        }
+    )
+    backtester_symbol_sides = sorted(
+        {
+            f"{str(row.get('symbol') or '').strip().upper()}:{str(row.get('side') or '').strip().upper()}"
+            for row in backtester_exits
+            if str(row.get("symbol") or "").strip() and str(row.get("side") or "").strip()
+        }
+    )
+    live_symbols = sorted({item.split(":", 1)[0] for item in live_symbol_sides})
+    backtester_symbols = sorted({item.split(":", 1)[0] for item in backtester_symbol_sides})
+    live_sides = sorted({item.split(":", 1)[1] for item in live_symbol_sides})
+    backtester_sides = sorted({item.split(":", 1)[1] for item in backtester_symbol_sides})
+    shared_symbol_sides = sorted(set(live_symbol_sides) & set(backtester_symbol_sides))
+    shared_symbols = sorted(set(live_symbols) & set(backtester_symbols))
+    shared_sides = sorted(set(live_sides) & set(backtester_sides))
+    mismatch = bool(
+        int(matched_pairs) == 0
+        and len(live_symbol_sides) > 0
+        and len(backtester_symbol_sides) > 0
+        and len(shared_symbol_sides) == 0
+    )
+    if not mismatch:
+        mismatch_kind = ""
+    elif len(shared_symbols) == 0:
+        mismatch_kind = "symbol_scope_disjoint"
+    else:
+        mismatch_kind = "symbol_side_scope_disjoint"
+    return {
+        "matched_pairs": int(matched_pairs),
+        "live_exit_rows": len(live_exits),
+        "backtester_exit_rows": len(backtester_exits),
+        "live_exit_symbols": live_symbols,
+        "backtester_exit_symbols": backtester_symbols,
+        "shared_exit_symbols": shared_symbols,
+        "live_exit_sides": live_sides,
+        "backtester_exit_sides": backtester_sides,
+        "shared_exit_sides": shared_sides,
+        "live_exit_symbol_sides": live_symbol_sides,
+        "backtester_exit_symbol_sides": backtester_symbol_sides,
+        "shared_exit_symbol_sides": shared_symbol_sides,
+        "mismatch": mismatch,
+        "mismatch_kind": mismatch_kind,
+    }
+
+
 def _load_live_simulatable_exits(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     exits: list[dict[str, Any]] = []
 
@@ -395,12 +452,20 @@ def _load_locked_entry_confidence_policy(path: Path | None) -> dict[str, Any]:
         }
 
     cfg = loaded if isinstance(loaded, dict) else {}
-    global_min_confidence = _extract_entry_min_confidence_from_cfg_block(cfg)
+    global_cfg = cfg.get("global") if isinstance(cfg.get("global"), dict) else {}
+    global_min_confidence = (
+        _extract_entry_min_confidence_from_cfg_block(global_cfg)
+        or _extract_entry_min_confidence_from_cfg_block(cfg)
+    )
 
     symbol_min_confidence: dict[str, str] = {}
-    symbols_obj = cfg.get("symbols")
-    if isinstance(symbols_obj, dict):
-        for raw_symbol, symbol_cfg in symbols_obj.items():
+    merged_symbols_obj: dict[str, Any] = {}
+    if isinstance(global_cfg.get("symbols"), dict):
+        merged_symbols_obj.update(global_cfg.get("symbols") or {})
+    if isinstance(cfg.get("symbols"), dict):
+        merged_symbols_obj.update(cfg.get("symbols") or {})
+    if merged_symbols_obj:
+        for raw_symbol, symbol_cfg in merged_symbols_obj.items():
             symbol = _normalise_symbol(raw_symbol)
             if not symbol:
                 continue
@@ -1216,6 +1281,11 @@ def main() -> int:
         pnl_tol=float(args.pnl_tol),
         fee_tol=float(args.fee_tol),
     )
+    scope_contract = _summarise_exit_scope_contract(
+        live_exits,
+        backtester_exits,
+        matched_pairs=int(compare_summary.get("matched_pairs") or 0),
+    )
 
     policy_mismatch_analysis = _apply_entry_confidence_policy_residual_classification(
         mismatches,
@@ -1295,12 +1365,15 @@ def main() -> int:
             **compare_summary,
             "policy_mismatch_residuals": len(policy_mismatch_residuals),
             "deterministic_unexplained": deterministic_unexplained,
+            "scope_shared_exit_symbols": len(scope_contract.get("shared_exit_symbols") or []),
+            "scope_shared_exit_symbol_sides": len(scope_contract.get("shared_exit_symbol_sides") or []),
             "mismatch_total": len(mismatches),
         },
         "status": {
             "strict_alignment_pass": strict_alignment_pass,
             "policy_mismatch_residual_only": bool(policy_mismatch_residual_only),
             "accepted_residuals_only": strict_alignment_pass and bool(accepted_residuals),
+            "scope_contract_mismatch": bool(scope_contract.get("mismatch")),
         },
         "execution_model_assumptions": {
             "bundle_manifest_present": bundle_manifest is not None,
@@ -1308,6 +1381,7 @@ def main() -> int:
             "alignment_assumptions": alignment_assumptions,
         },
         "policy_mismatch_analysis": policy_mismatch_analysis,
+        "scope_contract": scope_contract,
         "mismatch_counts_by_classification": dict(sorted(mismatch_counts.items(), key=lambda x: x[0])),
         "policy_mismatch_residuals": policy_mismatch_residuals,
         "accepted_residuals": accepted_residuals,
