@@ -3,6 +3,7 @@ mod config;
 mod db;
 mod error;
 mod heartbeat;
+mod hyperliquid;
 mod routes;
 mod sidecar;
 mod state;
@@ -41,6 +42,9 @@ async fn main() {
 
     // Start background mids poller.
     spawn_mids_poller(Arc::clone(&state));
+
+    // Start background HL balance poller (live mode only).
+    spawn_hl_poller(Arc::clone(&state));
 
     // Build router.
     let api = routes::api_router();
@@ -221,6 +225,55 @@ fn spawn_mids_poller(state: Arc<AppState>) {
                     tokio::time::sleep(std::time::Duration::from_millis(poll_ms)).await;
                 }
             }
+        }
+    });
+}
+
+/// Background task: poll Hyperliquid clearinghouse API for live account balance.
+///
+/// Only runs when `hl_balance_enable` is true and `hl_main_address` is configured.
+/// Caches the result in `AppState::hl_snapshot` for `/api/snapshot?mode=live`.
+fn spawn_hl_poller(state: Arc<AppState>) {
+    let enabled = state.config.hl_balance_enable;
+    let address = match &state.config.hl_main_address {
+        Some(addr) if enabled => addr.clone(),
+        _ => {
+            if enabled {
+                tracing::warn!(
+                    "HL balance polling enabled but no address configured \
+                     (set AIQ_MONITOR_HL_MAIN_ADDRESS or main_address in secrets.json)"
+                );
+            }
+            return;
+        }
+    };
+
+    tracing::info!("HL balance poller starting (address={}…)", &address[..8.min(address.len())]);
+
+    tokio::spawn(async move {
+        let poll_interval = std::time::Duration::from_secs(10);
+        loop {
+            match hyperliquid::fetch_account_snapshot(&state.hl_client, &address).await {
+                Some(snap) => {
+                    tracing::debug!(
+                        account_value = snap.account_value,
+                        withdrawable = snap.withdrawable,
+                        margin_used = snap.total_margin_used,
+                        "HL snapshot updated"
+                    );
+                    let mut guard = state.hl_snapshot.write().await;
+                    *guard = Some(state::CachedHlSnapshot {
+                        snapshot: snap,
+                        fetched_at: std::time::Instant::now(),
+                    });
+                }
+                None => {
+                    // Keep stale data rather than clearing — better to show slightly
+                    // old values than nothing.
+                    tracing::debug!("HL snapshot fetch failed, keeping previous value");
+                }
+            }
+            tokio::time::sleep(poll_interval).await;
         }
     });
 }

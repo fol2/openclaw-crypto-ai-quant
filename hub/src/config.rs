@@ -113,6 +113,22 @@ fn env_path(name: &str, default: &str) -> PathBuf {
     PathBuf::from(env_str(name, default))
 }
 
+/// Read `main_address` from secrets.json (path from `AI_QUANT_SECRETS_PATH`).
+fn read_main_address_from_secrets() -> Option<String> {
+    let path = env::var("AI_QUANT_SECRETS_PATH").ok()?;
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+    let data = std::fs::read_to_string(path).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&data).ok()?;
+    parsed
+        .get("main_address")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 fn default_sock_path() -> PathBuf {
     if let Ok(xdg) = env::var("XDG_RUNTIME_DIR") {
         let xdg = xdg.trim();
@@ -261,7 +277,8 @@ impl HubConfig {
                 .ok()
                 .or_else(|| env::var("AIQ_MONITOR_MAIN_ADDRESS").ok())
                 .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty()),
+                .filter(|s| !s.is_empty())
+                .or_else(|| read_main_address_from_secrets()),
             mids_poll_ms: env_u64("AIQ_MONITOR_MIDS_POLL_MS", 100),
             mids_wait_timeout_ms: env_u64("AIQ_MONITOR_MIDS_WAIT_TIMEOUT_MS", 25_000),
             mids_debug_log: env_bool("AIQ_MONITOR_MIDS_DEBUG_LOG", false),
