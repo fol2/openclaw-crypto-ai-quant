@@ -123,7 +123,63 @@ def test_live_backtester_funding_only_matched_pairs_are_residuals() -> None:
     unmatched = [m for m in mismatches if m.get("kind") == "missing_backtester_funding_action"]
     assert len(matched) == 1
     assert len(unmatched) == 1
-    assert unmatched[0]["classification"] == "deterministic_logic_divergence"
+    assert unmatched[0]["classification"] == "non-simulatable_exchange_oms_effect"
+
+
+def test_live_backtester_missing_live_funding_is_classified_as_surface_artefact() -> None:
+    live_rows = [
+        _mk_action(symbol="ETH", action_code="FUNDING", ts_ms=1000, source_id=1, size=1.0, pnl_usd=0.2),
+    ]
+    bt_rows = [
+        _mk_action(symbol="ETH", action_code="FUNDING", ts_ms=1000, source_id=1, size=1.0, pnl_usd=0.1),
+        _mk_action(symbol="BTC", action_code="FUNDING", ts_ms=2000, source_id=2, size=1.0, pnl_usd=0.3),
+    ]
+
+    mismatches, summary, _ = live_bt_action._compare_actions(
+        live_rows,
+        bt_rows,
+        [],
+        timestamp_bucket_ms=1,
+        timestamp_bucket_anchor="floor",
+        price_tol=1e-9,
+        size_tol=1e-9,
+        pnl_tol=1e-9,
+        fee_tol=1e-9,
+        balance_tol=1e-9,
+        order_fail_match_window_ms=60_000,
+    )
+
+    assert summary["funding_matched_pairs"] == 1
+    assert summary["funding_unmatched_backtester"] == 1
+    assert summary["unmatched_backtester"] == 1
+    unmatched = [m for m in mismatches if m.get("kind") == "missing_live_funding_action"]
+    assert len(unmatched) == 1
+    assert unmatched[0]["classification"] == "non-simulatable_exchange_oms_effect"
+
+
+def test_live_backtester_mismatch_breakdown_tracks_kind_classification_drift() -> None:
+    breakdown = live_bt_action._summarise_mismatch_breakdown(
+        [
+            {
+                "classification": "deterministic_logic_divergence",
+                "kind": "missing_backtester_funding_action",
+                "symbol": "ETH",
+                "action_code": "FUNDING",
+            },
+            {
+                "classification": "deterministic_logic_divergence",
+                "kind": "missing_backtester_action",
+                "symbol": "ETH",
+                "action_code": "OPEN_SHORT",
+            },
+        ]
+    )
+
+    assert breakdown["compare_surface_artefact_total"] == 1
+    assert breakdown["logic_divergence_total"] == 1
+    assert breakdown["classification_kind_drift_total"] == 1
+    assert breakdown["classification_kind_drift_by_kind"] == {"missing_backtester_funding_action": 1}
+    assert breakdown["classification_kind_drift_by_classification"] == {"deterministic_logic_divergence": 1}
 
 
 def test_trade_reconcile_classifies_entry_confidence_policy_mismatch_residual(

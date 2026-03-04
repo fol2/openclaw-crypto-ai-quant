@@ -361,6 +361,7 @@ def _action_artefact_opt_in_proof(report: dict[str, Any]) -> tuple[bool, dict[st
     logic_divergence_free = bool(status.get("logic_divergence_free"))
     compare_surface_artefact_total = _as_int(breakdown.get("compare_surface_artefact_total"), -1)
     logic_divergence_total = _as_int(breakdown.get("logic_divergence_total"), -1)
+    classification_kind_drift_total = _as_int(breakdown.get("classification_kind_drift_total"), -1)
     total = _as_int(breakdown.get("total"), -1)
     deterministic_logic_divergence = _as_int(class_counts.get("deterministic_logic_divergence"), 0)
     expected_logic_total = (
@@ -376,6 +377,7 @@ def _action_artefact_opt_in_proof(report: dict[str, Any]) -> tuple[bool, dict[st
         and logic_divergence_free
         and compare_surface_artefact_total > 0
         and logic_divergence_total == 0
+        and classification_kind_drift_total == 0
         and deterministic_logic_divergence == 0
         and (expected_logic_total < 0 or expected_logic_total == logic_divergence_total)
     )
@@ -386,6 +388,7 @@ def _action_artefact_opt_in_proof(report: dict[str, Any]) -> tuple[bool, dict[st
         "logic_divergence_free": logic_divergence_free,
         "compare_surface_artefact_total": int(compare_surface_artefact_total),
         "logic_divergence_total": int(logic_divergence_total),
+        "classification_kind_drift_total": int(classification_kind_drift_total),
         "mismatch_total": int(total),
         "deterministic_logic_divergence_class_count": int(deterministic_logic_divergence),
         "expected_logic_divergence_total": int(expected_logic_total),

@@ -264,6 +264,76 @@ def test_alignment_gate_action_artefact_opt_in_requires_hard_evidence(
     assert report["checks"]["action_opt_in_ok"] is False
 
 
+def test_alignment_gate_action_artefact_opt_in_rejects_deterministic_classification_signal(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    _write_base_gate_bundle(
+        bundle_dir,
+        seed_apply_report={"strict_replace": False},
+        action_report=_action_artefact_report(deterministic_class_count=1),
+    )
+    output = bundle_dir / "alignment_gate_report.json"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "assert_replay_bundle_alignment.py",
+            "--bundle-dir",
+            str(bundle_dir),
+            "--allow-action-artefact-residuals",
+            "--skip-candles-provenance-check",
+            "--output",
+            str(output),
+        ],
+    )
+
+    exit_code = alignment_gate.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+    failure_codes = {str(row.get("code") or "") for row in report.get("failures") or []}
+
+    assert exit_code == 1
+    assert "action_artefact_opt_in_unproven" in failure_codes
+    assert report["checks"]["action_opt_in_ok"] is False
+
+
+def test_alignment_gate_action_artefact_opt_in_rejects_kind_classification_drift(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    _write_base_gate_bundle(
+        bundle_dir,
+        seed_apply_report={"strict_replace": False},
+        action_report=_action_artefact_report(classification_kind_drift_total=1),
+    )
+    output = bundle_dir / "alignment_gate_report.json"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "assert_replay_bundle_alignment.py",
+            "--bundle-dir",
+            str(bundle_dir),
+            "--allow-action-artefact-residuals",
+            "--skip-candles-provenance-check",
+            "--output",
+            str(output),
+        ],
+    )
+
+    exit_code = alignment_gate.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+    failure_codes = {str(row.get("code") or "") for row in report.get("failures") or []}
+
+    assert exit_code == 1
+    assert "action_artefact_opt_in_unproven" in failure_codes
+    assert report["checks"]["action_opt_in_ok"] is False
+
+
 @pytest.mark.parametrize(
     ("axis", "report_name", "residual_failure_code", "extra_args"),
     [
@@ -405,7 +475,15 @@ def _write_trade_policy_mismatch_report(
     )
 
 
-def _action_artefact_report(*, include_hard_evidence: bool = True) -> dict:
+def _action_artefact_report(
+    *,
+    include_hard_evidence: bool = True,
+    deterministic_class_count: int = 0,
+    classification_kind_drift_total: int = 0,
+) -> dict:
+    mismatch_total = 109
+    deterministic_class_count = max(0, int(deterministic_class_count))
+    non_sim_class_count = max(0, mismatch_total - deterministic_class_count)
     report = {
         "status": {
             "strict_alignment_pass": False,
@@ -414,17 +492,18 @@ def _action_artefact_report(*, include_hard_evidence: bool = True) -> dict:
             "logic_divergence_free": True,
         },
         "accepted_residuals": [],
-        "counts": {"mismatch_total": 109},
+        "counts": {"mismatch_total": mismatch_total},
         "mismatch_counts_by_classification": {
-            "non-simulatable_exchange_oms_effect": 109,
-            "deterministic_logic_divergence": 0,
+            "non-simulatable_exchange_oms_effect": non_sim_class_count,
+            "deterministic_logic_divergence": deterministic_class_count,
         },
     }
     if include_hard_evidence:
         report["mismatch_breakdown"] = {
-            "total": 109,
-            "compare_surface_artefact_total": 109,
+            "total": mismatch_total,
+            "compare_surface_artefact_total": mismatch_total,
             "logic_divergence_total": 0,
+            "classification_kind_drift_total": max(0, int(classification_kind_drift_total)),
         }
     return report
 

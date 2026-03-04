@@ -42,6 +42,13 @@ COMPARE_SURFACE_ARTEFACT_KINDS = {
     "missing_live_action_live_order_fail",
 }
 COMPARE_SURFACE_ARTEFACT_CLASSES = {"non-simulatable_exchange_oms_effect", "state_initialisation_gap"}
+COMPARE_SURFACE_ARTEFACT_CLASS_BY_KIND = {
+    "matched_funding_pair": "non-simulatable_exchange_oms_effect",
+    "missing_backtester_funding_action": "non-simulatable_exchange_oms_effect",
+    "missing_live_funding_action": "non-simulatable_exchange_oms_effect",
+    "missing_live_action_end_of_backtest": "state_initialisation_gap",
+    "missing_live_action_live_order_fail": "non-simulatable_exchange_oms_effect",
+}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -322,14 +329,26 @@ def _summarise_mismatch_breakdown(mismatches: list[dict[str, Any]]) -> dict[str,
 
     surface_rows: list[dict[str, Any]] = []
     logic_rows: list[dict[str, Any]] = []
+    classification_kind_drift_rows: list[dict[str, Any]] = []
 
     for row in mismatches:
         kind = str(row.get("kind") or "").strip().lower()
         classification = str(row.get("classification") or "").strip().lower()
-        if kind in COMPARE_SURFACE_ARTEFACT_KINDS or classification in COMPARE_SURFACE_ARTEFACT_CLASSES:
+        kind_is_surface = kind in COMPARE_SURFACE_ARTEFACT_KINDS
+        class_is_surface = classification in COMPARE_SURFACE_ARTEFACT_CLASSES
+
+        if kind_is_surface:
             surface_rows.append(row)
         else:
             logic_rows.append(row)
+        if kind_is_surface != class_is_surface:
+            classification_kind_drift_rows.append(
+                {
+                    "kind": kind or "unknown",
+                    "classification": classification or "unknown",
+                    "symbol": str(row.get("symbol") or "unknown"),
+                }
+            )
 
     total = len(mismatches)
     surface_total = len(surface_rows)
@@ -345,7 +364,27 @@ def _summarise_mismatch_breakdown(mismatches: list[dict[str, Any]]) -> dict[str,
         "logic_divergence_by_kind": _count(logic_rows, "kind"),
         "logic_divergence_by_action_code": _count(logic_rows, "action_code"),
         "logic_divergence_by_symbol": _count(logic_rows, "symbol"),
+        "classification_kind_drift_total": int(len(classification_kind_drift_rows)),
+        "classification_kind_drift_by_kind": _count(classification_kind_drift_rows, "kind"),
+        "classification_kind_drift_by_classification": _count(classification_kind_drift_rows, "classification"),
     }
+
+
+def _normalise_compare_surface_classifications(mismatches: list[dict[str, Any]]) -> int:
+    reclassified = 0
+    for row in mismatches:
+        kind = str(row.get("kind") or "").strip().lower()
+        canonical = COMPARE_SURFACE_ARTEFACT_CLASS_BY_KIND.get(kind)
+        if not canonical:
+            continue
+        current = str(row.get("classification") or "").strip().lower()
+        if current == canonical:
+            continue
+        if current:
+            row["classification_original"] = current
+        row["classification"] = canonical
+        reclassified += 1
+    return reclassified
 
 
 def _load_live_actions(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -693,7 +732,7 @@ def _compare_actions(
                 non_simulatable_residuals += 1
                 mismatches.append(
                     {
-                        "classification": "non-simulatable_exchange_oms_effect",
+                        "classification": COMPARE_SURFACE_ARTEFACT_CLASS_BY_KIND["matched_funding_pair"],
                         "kind": "matched_funding_pair",
                         "symbol": symbol,
                         "action_code": action_code,
@@ -818,7 +857,7 @@ def _compare_actions(
                     unmatched_live += 1
                     mismatches.append(
                         {
-                            "classification": "deterministic_logic_divergence",
+                            "classification": COMPARE_SURFACE_ARTEFACT_CLASS_BY_KIND["missing_backtester_funding_action"],
                             "kind": "missing_backtester_funding_action",
                             "symbol": symbol,
                             "action_code": action_code,
@@ -863,7 +902,7 @@ def _compare_actions(
                     unmatched_backtester += 1
                     mismatches.append(
                         {
-                            "classification": "deterministic_logic_divergence",
+                            "classification": COMPARE_SURFACE_ARTEFACT_CLASS_BY_KIND["missing_live_funding_action"],
                             "kind": "missing_live_funding_action",
                             "symbol": symbol,
                             "action_code": action_code,
@@ -1043,6 +1082,7 @@ def main() -> int:
         balance_tol=float(args.balance_tol),
         order_fail_match_window_ms=max(1, int(args.order_fail_match_window_ms)),
     )
+    classification_reclassified_count = _normalise_compare_surface_classifications(mismatches)
 
     mismatch_counts: dict[str, int] = defaultdict(int)
     mismatch_kind_counts: dict[str, int] = defaultdict(int)
@@ -1101,6 +1141,7 @@ def main() -> int:
             **compare_summary,
             "compare_surface_artefact_total": int(mismatch_breakdown["compare_surface_artefact_total"]),
             "logic_divergence_total": int(mismatch_breakdown["logic_divergence_total"]),
+            "classification_reclassified_count": int(classification_reclassified_count),
             "mismatch_total": len(mismatches),
         },
         "status": {
