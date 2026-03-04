@@ -428,6 +428,81 @@ def test_alignment_gate_axis_contract_marks_optional_live_paper_missing_as_green
     assert axis_contract.get("tool_strict_pass") is None
     assert axis_contract.get("gate_ok") is True
     assert axis_contract.get("strict_no_residuals_checked") is False
+    assert report["checks"]["live_paper_required"] is False
+    assert report["checks"]["live_paper_report_present"] is False
+    assert report["checks"]["live_paper_tool_strict_ok"] is None
+    assert report["checks"]["live_paper_ok"] is True
+    assert report["checks"]["live_paper_gate_ok"] is True
+    assert report["checks"]["live_paper_decision_trace_required"] is False
+    assert report["checks"]["live_paper_decision_trace_report_present"] is False
+    assert report["checks"]["live_paper_decision_trace_tool_strict_ok"] is None
+    assert report["checks"]["live_paper_decision_trace_ok"] is True
+    assert report["checks"]["live_paper_decision_trace_gate_ok"] is True
+
+
+def test_alignment_gate_axis_contract_tracks_residual_counts_without_strict_mode(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    _write_base_gate_bundle(bundle_dir, seed_apply_report={"strict_replace": False})
+    _write_json(
+        bundle_dir / "trade_reconcile_report.json",
+        {
+            "status": {"strict_alignment_pass": True},
+            "accepted_residuals": [{"classification": "deterministic_logic_divergence", "kind": "trade_residual"}],
+            "counts": {},
+        },
+    )
+    _write_json(
+        bundle_dir / "action_reconcile_report.json",
+        {
+            "status": {"strict_alignment_pass": True},
+            "accepted_residuals": [{"classification": "state_initialisation_gap", "kind": "action_residual"}],
+            "counts": {},
+        },
+    )
+    _write_json(
+        bundle_dir / "live_paper_action_reconcile_report.json",
+        {
+            "status": {"strict_alignment_pass": True},
+            "accepted_residuals": [{"classification": "deterministic_logic_divergence", "kind": "live_paper_residual"}],
+            "counts": {},
+        },
+    )
+    output = bundle_dir / "alignment_gate_report.json"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "assert_replay_bundle_alignment.py",
+            "--bundle-dir",
+            str(bundle_dir),
+            "--require-live-paper",
+            "--skip-candles-provenance-check",
+            "--output",
+            str(output),
+        ],
+    )
+    exit_code = alignment_gate.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+    axes = ((report.get("contract") or {}).get("axes") or {})
+
+    assert exit_code == 0
+    assert report["ok"] is True
+    assert report["checks"]["trade_residual_count"] == 1
+    assert report["checks"]["action_residual_count"] == 1
+    assert report["checks"]["live_paper_residual_count"] == 1
+    assert int((axes.get("trade") or {}).get("accepted_residual_count") or 0) == 1
+    assert int((axes.get("trade") or {}).get("blocking_residual_count") or 0) == 1
+    assert int((axes.get("action") or {}).get("accepted_residual_count") or 0) == 1
+    assert int((axes.get("action") or {}).get("blocking_residual_count") or 0) == 0
+    assert int((axes.get("live_paper") or {}).get("accepted_residual_count") or 0) == 1
+    assert int((axes.get("live_paper") or {}).get("blocking_residual_count") or 0) == 1
+    assert (axes.get("trade") or {}).get("strict_no_residuals_checked") is False
+    assert (axes.get("action") or {}).get("strict_no_residuals_checked") is False
+    assert (axes.get("live_paper") or {}).get("strict_no_residuals_checked") is False
 
 
 def _write_script(path: Path, body: str) -> None:
@@ -536,6 +611,9 @@ def test_alignment_gate_trade_policy_mismatch_stays_fail_closed_without_opt_in(
 
     assert exit_code == 1
     assert "trade_alignment_failed" in failure_codes
+    assert report.get("checks", {}).get("trade_strict_ok") is False
+    assert report.get("checks", {}).get("trade_ok") is False
+    assert report.get("checks", {}).get("trade_gate_ok") is False
 
 
 def test_alignment_gate_trade_policy_mismatch_requires_hard_evidence_on_opt_in(
@@ -629,6 +707,10 @@ def test_alignment_gate_allows_trade_policy_mismatch_when_opted_in_and_proven(
     assert exit_code == 0
     assert report.get("ok") is True
     assert report.get("checks", {}).get("trade_policy_mismatch_opt_in_applied") is True
+    assert report.get("checks", {}).get("trade_strict_ok") is False
+    assert report.get("checks", {}).get("trade_ok") is True
+    assert report.get("checks", {}).get("trade_gate_ok") is True
+    assert report.get("checks", {}).get("trade_tool_strict_ok") is False
 
 
 def test_paper_harness_runs_bundle_gate_script_and_sets_strict_flag(
