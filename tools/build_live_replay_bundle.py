@@ -1133,6 +1133,9 @@ def main() -> int:
         'if [ "${AQC_REQUIRE_OMS_STRATEGY_PROVENANCE:-1}" = "1" ]; then\n'
         '  GATE_ARGS+=(--require-oms-strategy-provenance --max-oms-strategy-sha1-distinct "$MAX_OMS_STRATEGY_SHA1_DISTINCT")\n'
         "fi\n"
+        'if [ "${AQC_ALLOW_TRADE_POLICY_MISMATCH_RESIDUAL:-0}" = "1" ]; then\n'
+        "  GATE_ARGS+=(--allow-trade-policy-mismatch-residual)\n"
+        "fi\n"
         'if [ "${STRICT_NO_RESIDUALS:-0}" = "1" ]; then\n'
         "  GATE_ARGS+=(--strict-no-residuals)\n"
         "fi\n"

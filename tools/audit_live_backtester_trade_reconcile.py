@@ -16,9 +16,18 @@ import math
 from pathlib import Path
 from typing import Any
 
+try:
+    import yaml
+except Exception:  # pragma: no cover - optional runtime dependency
+    yaml = None
+
 SIMULATABLE_EXIT_ACTIONS = {"CLOSE", "REDUCE"}
 NON_SIMULATABLE_ACTIONS = {"FUNDING"}
 END_OF_BACKTEST_REASON_CODES = {"exit_end_of_backtest"}
+LIVE_ENTRY_ACTIONS = {"OPEN", "ADD"}
+BACKTESTER_ENTRY_ACTIONS = {"OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT"}
+CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
+DEFAULT_ENTRY_MIN_CONFIDENCE = "high"
 DEFAULT_TOL = 1e-9
 
 
@@ -30,6 +39,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--bundle-manifest",
         default=None,
         help="Optional replay_bundle_manifest.json path for execution-model assumptions.",
+    )
+    parser.add_argument(
+        "--backtester-replay-report",
+        default=None,
+        help="Optional backtester replay JSON for policy-mismatch evidence (auto-discovered from manifest when omitted).",
+    )
+    parser.add_argument(
+        "--strategy-config-snapshot",
+        default=None,
+        help="Optional locked strategy config YAML for entry confidence policy evidence (auto-discovered from manifest when omitted).",
     )
     parser.add_argument("--output", required=True, help="Path to output JSON report")
     parser.add_argument(
@@ -107,6 +126,20 @@ def _normalise_side(value: Any) -> str:
     return ""
 
 
+def _normalise_confidence(value: Any) -> str:
+    confidence = str(value or "").strip().lower()
+    if confidence in CONFIDENCE_RANK:
+        return confidence
+    return ""
+
+
+def _confidence_rank(value: Any) -> int:
+    confidence = _normalise_confidence(value)
+    if not confidence:
+        return -1
+    return int(CONFIDENCE_RANK[confidence])
+
+
 def _almost_equal(left: float, right: float, tol: float) -> bool:
     return math.isclose(float(left), float(right), rel_tol=0.0, abs_tol=tol)
 
@@ -121,6 +154,27 @@ def _bucket_timestamp_ms(ts_ms: int, bucket_ms: int, anchor: str) -> int:
     if ts_ms >= 0:
         return int((ts_ms // bucket_ms) * bucket_ms)
     return int(-(((-ts_ms) // bucket_ms) * bucket_ms))
+
+
+def _resolve_optional_path(raw: str | None, *, base_dir: Path) -> Path | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        path = (base_dir / path).resolve()
+    else:
+        path = path.resolve()
+    return path
+
+
+def _extract_side_from_backtester_action(action: Any) -> str:
+    action_s = str(action or "").strip().upper()
+    if action_s.endswith("_LONG"):
+        return "LONG"
+    if action_s.endswith("_SHORT"):
+        return "SHORT"
+    return ""
 
 
 def _load_live_simulatable_exits(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -185,6 +239,39 @@ def _load_live_simulatable_exits(path: Path) -> tuple[list[dict[str, Any]], dict
     return exits, counts
 
 
+def _load_live_entry_rows(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as fp:
+        for line_no, raw in enumerate(fp, start=1):
+            line = raw.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            action = str(row.get("action") or "").strip().upper()
+            if action not in LIVE_ENTRY_ACTIONS:
+                continue
+            symbol = _normalise_symbol(row.get("symbol"))
+            side = _normalise_side(row.get("type"))
+            ts_ms = _parse_timestamp_ms(row.get("timestamp_ms"))
+            if ts_ms <= 0:
+                ts_ms = _parse_timestamp_ms(row.get("timestamp"))
+            if not symbol or not side or ts_ms <= 0:
+                continue
+            rows.append(
+                {
+                    "source_id": int(row.get("id") or 0),
+                    "line_no": line_no,
+                    "symbol": symbol,
+                    "side": side,
+                    "timestamp_ms": ts_ms,
+                    "action": action,
+                    "confidence": _normalise_confidence(row.get("confidence")),
+                }
+            )
+    rows.sort(key=lambda r: (int(r["timestamp_ms"]), str(r["symbol"]), int(r["source_id"]), int(r["line_no"])))
+    return rows
+
+
 def _load_backtester_exits(path: Path) -> list[dict[str, Any]]:
     exits: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8", newline="") as fp:
@@ -212,6 +299,243 @@ def _load_backtester_exits(path: Path) -> list[dict[str, Any]]:
             )
     exits.sort(key=lambda r: (r["exit_ts_ms"], r["symbol"], str(r["source_id"]), r["row_no"]))
     return exits
+
+
+def _load_backtester_entry_rows(path: Path) -> list[dict[str, Any]]:
+    payload = _load_json_object(path)
+    raw_rows = payload.get("trades")
+    if not isinstance(raw_rows, list):
+        return []
+
+    rows: list[dict[str, Any]] = []
+    for idx, row in enumerate(raw_rows, start=1):
+        if not isinstance(row, dict):
+            continue
+        action = str(row.get("action") or "").strip().upper()
+        if action not in BACKTESTER_ENTRY_ACTIONS:
+            continue
+        symbol = _normalise_symbol(row.get("symbol"))
+        side = _extract_side_from_backtester_action(action)
+        ts_ms = _parse_timestamp_ms(row.get("timestamp"))
+        if not symbol or not side or ts_ms <= 0:
+            continue
+        rows.append(
+            {
+                "row_no": idx,
+                "symbol": symbol,
+                "side": side,
+                "timestamp_ms": ts_ms,
+                "action": action,
+                "confidence": _normalise_confidence(row.get("confidence")),
+                "reason_code": str(row.get("reason_code") or ""),
+            }
+        )
+
+    rows.sort(key=lambda r: (int(r["timestamp_ms"]), str(r["symbol"]), int(r["row_no"])))
+    return rows
+
+
+def _extract_entry_min_confidence_from_cfg_block(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    trade_obj = payload.get("trade")
+    if isinstance(trade_obj, dict):
+        conf = _normalise_confidence(trade_obj.get("entry_min_confidence"))
+        if conf:
+            return conf
+    return _normalise_confidence(payload.get("entry_min_confidence"))
+
+
+def _load_locked_entry_confidence_policy(path: Path | None) -> dict[str, Any]:
+    if path is None or not path.exists() or yaml is None:
+        return {
+            "strategy_config_snapshot": str(path) if path is not None else None,
+            "policy_available": False,
+            "global_min_confidence": "",
+            "symbol_min_confidence": {},
+            "policy_source": "unavailable",
+            "used_runtime_default": False,
+            "error": None,
+        }
+
+    try:
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # pragma: no cover - malformed YAML path
+        return {
+            "strategy_config_snapshot": str(path),
+            "policy_available": False,
+            "global_min_confidence": "",
+            "symbol_min_confidence": {},
+            "policy_source": "yaml_parse_error",
+            "used_runtime_default": False,
+            "error": str(exc),
+        }
+
+    cfg = loaded if isinstance(loaded, dict) else {}
+    global_min_confidence = _extract_entry_min_confidence_from_cfg_block(cfg)
+
+    symbol_min_confidence: dict[str, str] = {}
+    symbols_obj = cfg.get("symbols")
+    if isinstance(symbols_obj, dict):
+        for raw_symbol, symbol_cfg in symbols_obj.items():
+            symbol = _normalise_symbol(raw_symbol)
+            if not symbol:
+                continue
+            symbol_conf = _extract_entry_min_confidence_from_cfg_block(symbol_cfg)
+            if symbol_conf:
+                symbol_min_confidence[symbol] = symbol_conf
+
+    used_runtime_default = False
+    policy_source = "strategy_snapshot"
+    if not global_min_confidence and not symbol_min_confidence:
+        global_min_confidence = DEFAULT_ENTRY_MIN_CONFIDENCE
+        used_runtime_default = True
+        policy_source = "runtime_default"
+
+    return {
+        "strategy_config_snapshot": str(path),
+        "policy_available": bool(global_min_confidence or symbol_min_confidence),
+        "global_min_confidence": global_min_confidence,
+        "symbol_min_confidence": dict(sorted(symbol_min_confidence.items(), key=lambda kv: kv[0])),
+        "policy_source": policy_source,
+        "used_runtime_default": bool(used_runtime_default),
+        "error": None,
+    }
+
+
+def _confidence_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = defaultdict(int)
+    for row in rows:
+        conf = _normalise_confidence(row.get("confidence"))
+        if conf:
+            counts[conf] += 1
+        else:
+            counts["unknown"] += 1
+    return dict(sorted(counts.items(), key=lambda kv: kv[0]))
+
+
+def _apply_entry_confidence_policy_residual_classification(
+    mismatches: list[dict[str, Any]],
+    *,
+    live_entry_rows: list[dict[str, Any]],
+    backtester_entry_rows: list[dict[str, Any]],
+    locked_entry_policy: dict[str, Any],
+) -> dict[str, Any]:
+    live_entries_by_symbol_side: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in live_entry_rows:
+        live_entries_by_symbol_side[(str(row["symbol"]), str(row["side"]))].append(row)
+
+    backtester_entries_by_symbol_side: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in backtester_entry_rows:
+        backtester_entries_by_symbol_side[(str(row["symbol"]), str(row["side"]))].append(row)
+
+    global_min_conf = _normalise_confidence((locked_entry_policy or {}).get("global_min_confidence"))
+    symbol_min_conf = dict((locked_entry_policy or {}).get("symbol_min_confidence") or {})
+    policy_available = bool((locked_entry_policy or {}).get("policy_available"))
+
+    reclassified_count = 0
+    sample_rows: list[dict[str, Any]] = []
+    unresolved_missing_backtester_exit = 0
+
+    for mismatch in mismatches:
+        cls = str(mismatch.get("classification") or "").strip().lower()
+        kind = str(mismatch.get("kind") or "").strip().lower()
+        if cls != "deterministic_logic_divergence" or kind != "missing_backtester_exit":
+            continue
+
+        unresolved_missing_backtester_exit += 1
+
+        symbol = _normalise_symbol(mismatch.get("symbol"))
+        side = _normalise_side(mismatch.get("side"))
+        if not symbol or not side:
+            continue
+
+        live_symbol_side_entries = live_entries_by_symbol_side.get((symbol, side), [])
+        if not live_symbol_side_entries:
+            continue
+        backtester_symbol_side_entries = backtester_entries_by_symbol_side.get((symbol, side), [])
+        if backtester_symbol_side_entries:
+            continue
+        if not policy_available:
+            continue
+
+        required_min_conf = _normalise_confidence(symbol_min_conf.get(symbol) or global_min_conf)
+        required_min_rank = _confidence_rank(required_min_conf)
+        if required_min_rank < 0:
+            continue
+
+        live_below_threshold = [
+            row
+            for row in live_symbol_side_entries
+            if 0 <= _confidence_rank(row.get("confidence")) < required_min_rank
+        ]
+        if not live_below_threshold:
+            continue
+
+        backtester_below_threshold = [
+            row
+            for row in backtester_entry_rows
+            if 0 <= _confidence_rank(row.get("confidence")) < required_min_rank
+        ]
+        if backtester_below_threshold:
+            continue
+
+        mismatch["classification"] = "policy_mismatch_residual"
+        mismatch["policy_mismatch"] = {
+            "kind": "entry_confidence_gate",
+            "required_min_confidence": required_min_conf,
+            "live_entries_below_threshold": len(live_below_threshold),
+            "live_entry_confidences": sorted(
+                {str(row.get("confidence") or "") for row in live_symbol_side_entries if str(row.get("confidence") or "")}
+            ),
+            "backtester_entries_symbol_side": len(backtester_symbol_side_entries),
+            "backtester_global_entries_below_threshold": len(backtester_below_threshold),
+            "evidence": {
+                "live_entry_ids": [int(row.get("source_id") or 0) for row in live_below_threshold[:3]],
+                "live_entry_lines": [int(row.get("line_no") or 0) for row in live_below_threshold[:3]],
+            },
+        }
+        reclassified_count += 1
+        unresolved_missing_backtester_exit -= 1
+        if len(sample_rows) < 10:
+            sample_rows.append(
+                {
+                    "symbol": symbol,
+                    "side": side,
+                    "live_exit_ts_ms": int(mismatch.get("live_exit_ts_ms") or 0),
+                    "required_min_confidence": required_min_conf,
+                    "live_entry_confidences": mismatch["policy_mismatch"]["live_entry_confidences"],
+                    "live_entry_ids": mismatch["policy_mismatch"]["evidence"]["live_entry_ids"],
+                }
+            )
+
+    evidence_complete = bool(
+        reclassified_count > 0
+        and policy_available
+        and bool(global_min_conf or symbol_min_conf)
+        and bool(backtester_entry_rows)
+        and bool(sample_rows)
+    )
+
+    return {
+        "detected": bool(reclassified_count > 0),
+        "kind": "entry_confidence_gate",
+        "evidence_complete": bool(evidence_complete),
+        "reclassified_mismatch_count": int(reclassified_count),
+        "unresolved_missing_backtester_exit_count": int(max(0, unresolved_missing_backtester_exit)),
+        "locked_entry_policy": {
+            "strategy_config_snapshot": (locked_entry_policy or {}).get("strategy_config_snapshot"),
+            "policy_available": bool(policy_available),
+            "global_min_confidence": global_min_conf,
+            "symbol_min_confidence": dict(sorted(symbol_min_conf.items(), key=lambda kv: kv[0])),
+            "policy_source": (locked_entry_policy or {}).get("policy_source"),
+            "used_runtime_default": bool((locked_entry_policy or {}).get("used_runtime_default")),
+            "error": (locked_entry_policy or {}).get("error"),
+        },
+        "live_entry_confidence_counts": _confidence_counts(live_entry_rows),
+        "backtester_entry_confidence_counts": _confidence_counts(backtester_entry_rows),
+        "samples": sample_rows,
+    }
 
 
 def _build_event_groups(
@@ -446,6 +770,12 @@ def main() -> int:
 
     live_baseline = Path(args.live_baseline).expanduser().resolve()
     backtester_trades = Path(args.backtester_trades).expanduser().resolve()
+    backtester_replay_report_override = (
+        Path(args.backtester_replay_report).expanduser().resolve() if args.backtester_replay_report else None
+    )
+    strategy_config_snapshot_override = (
+        Path(args.strategy_config_snapshot).expanduser().resolve() if args.strategy_config_snapshot else None
+    )
     bundle_manifest = Path(args.bundle_manifest).expanduser().resolve() if args.bundle_manifest else None
     output = Path(args.output).expanduser().resolve()
 
@@ -453,11 +783,18 @@ def main() -> int:
         parser.error(f"live baseline not found: {live_baseline}")
     if not backtester_trades.exists():
         parser.error(f"backtester trades not found: {backtester_trades}")
+    if backtester_replay_report_override is not None and not backtester_replay_report_override.exists():
+        parser.error(f"backtester replay report not found: {backtester_replay_report_override}")
+    if strategy_config_snapshot_override is not None and not strategy_config_snapshot_override.exists():
+        parser.error(f"strategy config snapshot not found: {strategy_config_snapshot_override}")
     if bundle_manifest is not None and not bundle_manifest.exists():
         parser.error(f"bundle manifest not found: {bundle_manifest}")
 
+    manifest_obj: dict[str, Any] = {}
     alignment_assumptions: dict[str, Any] = {}
     bbo_fill_model_enabled = False
+    backtester_replay_report_path = backtester_replay_report_override
+    strategy_config_snapshot_path = strategy_config_snapshot_override
     if bundle_manifest is not None:
         manifest_obj = _load_json_object(bundle_manifest)
         raw_assumptions = manifest_obj.get("alignment_assumptions")
@@ -466,9 +803,31 @@ def main() -> int:
             bbo_obj = raw_assumptions.get("bbo_fill_model")
             if isinstance(bbo_obj, dict):
                 bbo_fill_model_enabled = bool(bbo_obj.get("enabled_any"))
+        artefacts = manifest_obj.get("artefacts")
+        if isinstance(artefacts, dict):
+            if backtester_replay_report_path is None:
+                backtester_replay_report_path = _resolve_optional_path(
+                    artefacts.get("backtester_replay_report_json"),
+                    base_dir=bundle_manifest.parent,
+                )
+            if strategy_config_snapshot_path is None:
+                strategy_config_snapshot_path = _resolve_optional_path(
+                    artefacts.get("strategy_config_snapshot_file"),
+                    base_dir=bundle_manifest.parent,
+                )
+
+    if backtester_replay_report_path is not None and not backtester_replay_report_path.exists():
+        parser.error(f"backtester replay report not found: {backtester_replay_report_path}")
+    if strategy_config_snapshot_path is not None and not strategy_config_snapshot_path.exists():
+        parser.error(f"strategy config snapshot not found: {strategy_config_snapshot_path}")
 
     live_exits, live_counts = _load_live_simulatable_exits(live_baseline)
+    live_entry_rows = _load_live_entry_rows(live_baseline)
     backtester_exits = _load_backtester_exits(backtester_trades)
+    backtester_entry_rows = (
+        _load_backtester_entry_rows(backtester_replay_report_path) if backtester_replay_report_path is not None else []
+    )
+    locked_entry_policy = _load_locked_entry_confidence_policy(strategy_config_snapshot_path)
 
     mismatches, compare_summary, per_symbol_rows = _compare_exits(
         live_exits,
@@ -480,9 +839,20 @@ def main() -> int:
         fee_tol=float(args.fee_tol),
     )
 
+    policy_mismatch_analysis = _apply_entry_confidence_policy_residual_classification(
+        mismatches,
+        live_entry_rows=live_entry_rows,
+        backtester_entry_rows=backtester_entry_rows,
+        locked_entry_policy=locked_entry_policy,
+    )
+
     mismatch_counts: dict[str, int] = defaultdict(int)
     for item in mismatches:
         mismatch_counts[str(item.get("classification") or "unknown")] += 1
+    policy_mismatch_residuals = [
+        row for row in mismatches if str(row.get("classification") or "").strip().lower() == "policy_mismatch_residual"
+    ]
+    deterministic_unexplained = int(mismatch_counts.get("deterministic_logic_divergence", 0))
 
     non_simulatable_residuals: list[dict[str, Any]] = []
     if live_counts["live_non_simulatable_actions"] > 0:
@@ -516,6 +886,13 @@ def main() -> int:
         and compare_summary["unmatched_live"] == 0
         and compare_summary["unmatched_backtester"] == 0
     )
+    policy_mismatch_residual_only = (
+        not strict_alignment_pass
+        and compare_summary["numeric_mismatch"] == 0
+        and deterministic_unexplained == 0
+        and len(policy_mismatch_residuals) > 0
+        and (len(policy_mismatch_residuals) + int(compare_summary["state_scope_residuals"]) == len(mismatches))
+    )
 
     report = {
         "schema_version": 1,
@@ -523,6 +900,8 @@ def main() -> int:
         "inputs": {
             "live_baseline": str(live_baseline),
             "backtester_trades": str(backtester_trades),
+            "backtester_replay_report": str(backtester_replay_report_path) if backtester_replay_report_path else None,
+            "strategy_config_snapshot": str(strategy_config_snapshot_path) if strategy_config_snapshot_path else None,
             "bundle_manifest": str(bundle_manifest) if bundle_manifest is not None else None,
             "timestamp_bucket_ms": max(1, int(args.timestamp_bucket_ms)),
             "timestamp_bucket_anchor": str(args.timestamp_bucket_anchor or "floor"),
@@ -534,10 +913,13 @@ def main() -> int:
             **live_counts,
             "backtester_exit_rows": len(backtester_exits),
             **compare_summary,
+            "policy_mismatch_residuals": len(policy_mismatch_residuals),
+            "deterministic_unexplained": deterministic_unexplained,
             "mismatch_total": len(mismatches),
         },
         "status": {
             "strict_alignment_pass": strict_alignment_pass,
+            "policy_mismatch_residual_only": bool(policy_mismatch_residual_only),
             "accepted_residuals_only": strict_alignment_pass and bool(accepted_residuals),
         },
         "execution_model_assumptions": {
@@ -545,7 +927,9 @@ def main() -> int:
             "bbo_fill_model_enabled": bool(bbo_fill_model_enabled),
             "alignment_assumptions": alignment_assumptions,
         },
+        "policy_mismatch_analysis": policy_mismatch_analysis,
         "mismatch_counts_by_classification": dict(sorted(mismatch_counts.items(), key=lambda x: x[0])),
+        "policy_mismatch_residuals": policy_mismatch_residuals,
         "accepted_residuals": accepted_residuals,
         "per_symbol": per_symbol_rows,
         "mismatches": mismatches,

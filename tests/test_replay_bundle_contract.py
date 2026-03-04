@@ -152,6 +152,135 @@ def _write_script(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
+def _write_trade_policy_mismatch_report(
+    bundle_dir: Path,
+    *,
+    evidence_complete: bool = True,
+    policy_only: bool = True,
+) -> None:
+    _write_json(
+        bundle_dir / "trade_reconcile_report.json",
+        {
+            "status": {
+                "strict_alignment_pass": False,
+                "policy_mismatch_residual_only": bool(policy_only),
+            },
+            "counts": {
+                "mismatch_total": 2,
+                "policy_mismatch_residuals": 2,
+                "deterministic_unexplained": 0,
+            },
+            "policy_mismatch_analysis": {
+                "detected": True,
+                "kind": "entry_confidence_gate",
+                "evidence_complete": bool(evidence_complete),
+                "reclassified_mismatch_count": 2,
+                "locked_entry_policy": {
+                    "global_min_confidence": "high",
+                    "symbol_min_confidence": {},
+                },
+            },
+            "policy_mismatch_residuals": [
+                {"classification": "policy_mismatch_residual", "kind": "missing_backtester_exit"},
+                {"classification": "policy_mismatch_residual", "kind": "missing_backtester_exit"},
+            ],
+            "accepted_residuals": [],
+        },
+    )
+
+
+def test_alignment_gate_trade_policy_mismatch_stays_fail_closed_without_opt_in(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    _write_base_gate_bundle(bundle_dir, seed_apply_report={"strict_replace": False})
+    _write_trade_policy_mismatch_report(bundle_dir)
+    output = bundle_dir / "alignment_gate_report.json"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "assert_replay_bundle_alignment.py",
+            "--bundle-dir",
+            str(bundle_dir),
+            "--skip-candles-provenance-check",
+            "--output",
+            str(output),
+        ],
+    )
+
+    exit_code = alignment_gate.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+    failure_codes = {str(row.get("code") or "") for row in report.get("failures") or []}
+
+    assert exit_code == 1
+    assert "trade_alignment_failed" in failure_codes
+
+
+def test_alignment_gate_trade_policy_mismatch_requires_hard_evidence_on_opt_in(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    _write_base_gate_bundle(bundle_dir, seed_apply_report={"strict_replace": False})
+    _write_trade_policy_mismatch_report(bundle_dir, evidence_complete=False)
+    output = bundle_dir / "alignment_gate_report.json"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "assert_replay_bundle_alignment.py",
+            "--bundle-dir",
+            str(bundle_dir),
+            "--skip-candles-provenance-check",
+            "--allow-trade-policy-mismatch-residual",
+            "--output",
+            str(output),
+        ],
+    )
+
+    exit_code = alignment_gate.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+    failure_codes = {str(row.get("code") or "") for row in report.get("failures") or []}
+
+    assert exit_code == 1
+    assert "trade_policy_mismatch_opt_in_unproven" in failure_codes
+
+
+def test_alignment_gate_allows_trade_policy_mismatch_when_opted_in_and_proven(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    _write_base_gate_bundle(bundle_dir, seed_apply_report={"strict_replace": False})
+    _write_trade_policy_mismatch_report(bundle_dir, evidence_complete=True, policy_only=True)
+    output = bundle_dir / "alignment_gate_report.json"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "assert_replay_bundle_alignment.py",
+            "--bundle-dir",
+            str(bundle_dir),
+            "--skip-candles-provenance-check",
+            "--allow-trade-policy-mismatch-residual",
+            "--output",
+            str(output),
+        ],
+    )
+
+    exit_code = alignment_gate.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert report.get("ok") is True
+    assert report.get("checks", {}).get("trade_policy_mismatch_opt_in_applied") is True
+
+
 def test_paper_harness_runs_bundle_gate_script_and_sets_strict_flag(
     tmp_path: Path,
     monkeypatch,

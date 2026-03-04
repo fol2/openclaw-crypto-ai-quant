@@ -118,6 +118,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Fail if accepted residuals are present in trade/action reports",
     )
     parser.add_argument(
+        "--allow-trade-policy-mismatch-residual",
+        action="store_true",
+        default=False,
+        help=(
+            "Allow trade strict-alignment failure only when report proves entry-confidence policy mismatch residuals. "
+            "Default is fail-closed."
+        ),
+    )
+    parser.add_argument(
         "--skip-candles-provenance-check",
         action="store_true",
         default=False,
@@ -273,6 +282,46 @@ def _blocking_residuals_for_strict_mode(
             continue
         blocking.append(row)
     return blocking
+
+
+def _trade_policy_mismatch_opt_in_proof(report: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+    status = report.get("status") or {}
+    counts = report.get("counts") or {}
+    analysis = report.get("policy_mismatch_analysis") or {}
+    policy_rows = report.get("policy_mismatch_residuals")
+    policy_rows_count = len(policy_rows) if isinstance(policy_rows, list) else _as_int(counts.get("policy_mismatch_residuals"), 0)
+    reclassified_count = _as_int(analysis.get("reclassified_mismatch_count"), 0)
+    strict_pass = bool(status.get("strict_alignment_pass"))
+    policy_only = bool(status.get("policy_mismatch_residual_only"))
+    analysis_detected = bool(analysis.get("detected"))
+    evidence_complete = bool(analysis.get("evidence_complete"))
+    analysis_kind = str(analysis.get("kind") or "").strip().lower()
+    required_min_conf = str(
+        (((analysis.get("locked_entry_policy") or {}).get("global_min_confidence")) or "").strip().lower()
+    )
+    has_symbol_policy = bool(((analysis.get("locked_entry_policy") or {}).get("symbol_min_confidence") or {}))
+    ok = (
+        (not strict_pass)
+        and policy_only
+        and analysis_detected
+        and evidence_complete
+        and analysis_kind == "entry_confidence_gate"
+        and policy_rows_count > 0
+        and reclassified_count > 0
+        and (required_min_conf in {"low", "medium", "high"} or has_symbol_policy)
+    )
+    proof = {
+        "strict_alignment_pass": strict_pass,
+        "policy_mismatch_residual_only": policy_only,
+        "policy_mismatch_detected": analysis_detected,
+        "policy_mismatch_evidence_complete": evidence_complete,
+        "policy_mismatch_kind": analysis_kind,
+        "policy_mismatch_residual_count": int(policy_rows_count),
+        "policy_mismatch_reclassified_count": int(reclassified_count),
+        "locked_global_min_confidence": required_min_conf or None,
+        "locked_symbol_policy_count": len((analysis.get("locked_entry_policy") or {}).get("symbol_min_confidence") or {}),
+    }
+    return ok, proof
 
 
 def main() -> int:
@@ -908,6 +957,8 @@ def main() -> int:
             )
 
     trade_report: dict[str, Any] | None = None
+    trade_policy_mismatch_opt_in_applied = False
+    trade_policy_mismatch_opt_in_proof: dict[str, Any] = {}
     if not trade_path.exists():
         failures.append(
             {
@@ -920,14 +971,31 @@ def main() -> int:
         trade_report = _load_json(trade_path)
         trade_status = bool(((trade_report.get("status") or {}).get("strict_alignment_pass")))
         if not trade_status:
-            failures.append(
-                {
-                    "code": "trade_alignment_failed",
-                    "classification": "deterministic_logic_divergence",
-                    "detail": "trade reconciliation strict alignment failed",
-                    "counts": trade_report.get("counts") or {},
-                }
-            )
+            trade_policy_opt_in_ok = False
+            if args.allow_trade_policy_mismatch_residual:
+                trade_policy_opt_in_ok, trade_policy_mismatch_opt_in_proof = _trade_policy_mismatch_opt_in_proof(
+                    trade_report
+                )
+                if trade_policy_opt_in_ok:
+                    trade_policy_mismatch_opt_in_applied = True
+                else:
+                    failures.append(
+                        {
+                            "code": "trade_policy_mismatch_opt_in_unproven",
+                            "classification": "deterministic_logic_divergence",
+                            "detail": "trade policy-mismatch opt-in was requested but hard evidence is incomplete",
+                            "proof": trade_policy_mismatch_opt_in_proof,
+                        }
+                    )
+            if not trade_policy_opt_in_ok:
+                failures.append(
+                    {
+                        "code": "trade_alignment_failed",
+                        "classification": "deterministic_logic_divergence",
+                        "detail": "trade reconciliation strict alignment failed",
+                        "counts": trade_report.get("counts") or {},
+                    }
+                )
         if args.strict_no_residuals:
             trade_residuals = list(trade_report.get("accepted_residuals") or [])
             blocking_trade_residuals = _blocking_residuals_for_strict_mode(trade_residuals)
@@ -1273,6 +1341,7 @@ def main() -> int:
             "gpu_parity_report": str(gpu_parity_path),
             "require_gpu_parity": bool(args.require_gpu_parity),
             "strict_no_residuals": bool(args.strict_no_residuals),
+            "allow_trade_policy_mismatch_residual": bool(args.allow_trade_policy_mismatch_residual),
         },
         "checks": {
             "manifest_present": manifest is not None,
@@ -1292,6 +1361,8 @@ def main() -> int:
             "trade_ok": bool((trade_report.get("status") or {}).get("strict_alignment_pass"))
             if trade_report
             else False,
+            "trade_policy_mismatch_opt_in_applied": bool(trade_policy_mismatch_opt_in_applied),
+            "trade_policy_mismatch_opt_in_proof": trade_policy_mismatch_opt_in_proof,
             "action_ok": bool((action_report.get("status") or {}).get("strict_alignment_pass"))
             if action_report
             else False,
