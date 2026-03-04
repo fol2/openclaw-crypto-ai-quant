@@ -309,6 +309,7 @@ def _trade_policy_mismatch_opt_in_proof(report: dict[str, Any]) -> tuple[bool, d
     counts = report.get("counts") or {}
     analysis = report.get("policy_mismatch_analysis") or {}
     locked_policy = analysis.get("locked_entry_policy") or {}
+    runtime_policy = analysis.get("runtime_entry_policy") or {}
     policy_rows = report.get("policy_mismatch_residuals")
     policy_rows_count = len(policy_rows) if isinstance(policy_rows, list) else _as_int(counts.get("policy_mismatch_residuals"), 0)
     reclassified_count = _as_int(analysis.get("reclassified_mismatch_count"), 0)
@@ -323,15 +324,28 @@ def _trade_policy_mismatch_opt_in_proof(report: dict[str, Any]) -> tuple[bool, d
     has_symbol_policy = bool((locked_policy.get("symbol_min_confidence") or {}))
     provenance_contract_ok = bool(locked_policy.get("provenance_contract_ok"))
     policy_source = str(locked_policy.get("policy_source") or "").strip().lower()
+    runtime_provenance_contract_ok = bool(runtime_policy.get("provenance_contract_ok"))
+    runtime_source_contract_ok = bool(runtime_policy.get("source_contract_ok"))
+    runtime_policy_source = str(runtime_policy.get("policy_source") or "").strip().lower()
+    runtime_rows_non_fallback = _as_int(runtime_policy.get("rows_with_non_fallback_confidence_source"), 0)
+    runtime_rows_with_policy = _as_int(runtime_policy.get("rows_with_policy"), 0)
+    runtime_match_verified = _as_int(runtime_policy.get("match_verified"), 0)
+    runtime_match_fallback = _as_int(runtime_policy.get("match_fallback"), 0)
     ok = (
         (not strict_pass)
         and policy_only
         and analysis_detected
         and evidence_complete
         and provenance_contract_ok
+        and runtime_provenance_contract_ok
+        and runtime_source_contract_ok
         and analysis_kind == "entry_confidence_gate"
         and policy_rows_count > 0
         and reclassified_count > 0
+        and runtime_rows_non_fallback > 0
+        and runtime_rows_with_policy > 0
+        and runtime_match_verified > 0
+        and runtime_match_fallback == 0
         and (required_min_conf in {"low", "medium", "high"} or has_symbol_policy)
     )
     proof = {
@@ -346,6 +360,13 @@ def _trade_policy_mismatch_opt_in_proof(report: dict[str, Any]) -> tuple[bool, d
         "policy_mismatch_reclassified_count": int(reclassified_count),
         "locked_global_min_confidence": required_min_conf or None,
         "locked_symbol_policy_count": len(locked_policy.get("symbol_min_confidence") or {}),
+        "runtime_policy_mismatch_provenance_contract_ok": runtime_provenance_contract_ok,
+        "runtime_policy_source_contract_ok": runtime_source_contract_ok,
+        "runtime_policy_source": runtime_policy_source or None,
+        "runtime_rows_non_fallback_confidence_source": int(runtime_rows_non_fallback),
+        "runtime_rows_with_policy": int(runtime_rows_with_policy),
+        "runtime_match_verified": int(runtime_match_verified),
+        "runtime_match_fallback": int(runtime_match_fallback),
     }
     return ok, proof
 
@@ -1051,6 +1072,8 @@ def main() -> int:
     trade_report: dict[str, Any] | None = None
     trade_policy_mismatch_opt_in_applied = False
     trade_policy_mismatch_opt_in_proof: dict[str, Any] = {}
+    trade_scope_contract_mismatch = False
+    trade_scope_contract_proof_ok = False
     if not trade_path.exists():
         axis_gate_status["trade"] = False
         axis_failure_codes["trade"].append("missing_trade_report")
@@ -1064,7 +1087,17 @@ def main() -> int:
     else:
         trade_report = _load_json(trade_path)
         axis_report_present["trade"] = True
-        trade_status = bool(((trade_report.get("status") or {}).get("strict_alignment_pass")))
+        trade_status_obj = (trade_report.get("status") or {}) if isinstance(trade_report, dict) else {}
+        trade_scope_contract = (trade_report.get("scope_contract") or {}) if isinstance(trade_report, dict) else {}
+        trade_scope_contract_mismatch = bool(
+            trade_status_obj.get("scope_contract_mismatch")
+            or (trade_scope_contract.get("mismatch") if isinstance(trade_scope_contract, dict) else False)
+        )
+        if isinstance(trade_scope_contract, dict):
+            trade_scope_proof = trade_scope_contract.get("proof")
+            if isinstance(trade_scope_proof, dict):
+                trade_scope_contract_proof_ok = bool(trade_scope_proof.get("evidence_complete"))
+        trade_status = bool(trade_status_obj.get("strict_alignment_pass"))
         axis_tool_status["trade"] = trade_status
         axis_gate_status["trade"] = trade_status
         trade_residuals = list(trade_report.get("accepted_residuals") or [])
@@ -1114,6 +1147,20 @@ def main() -> int:
                         "total_accepted_residuals": len(trade_residuals),
                     }
                 )
+        if trade_scope_contract_mismatch and not trade_scope_contract_proof_ok:
+            axis_gate_status["trade"] = False
+            axis_failure_codes["trade"].append("trade_replay_scope_contract_mismatch")
+            failures.append(
+                {
+                    "code": "trade_replay_scope_contract_mismatch",
+                    "classification": "deterministic_logic_divergence",
+                    "detail": (
+                        "trade reconciliation scope contract mismatch: "
+                        "live/backtester exit symbol-side sets are disjoint"
+                    ),
+                    "scope_contract": trade_scope_contract if isinstance(trade_scope_contract, dict) else {},
+                }
+            )
 
     action_report: dict[str, Any] | None = None
     action_strict_status = False
@@ -1122,6 +1169,8 @@ def main() -> int:
     action_selected_status = False
     action_artefact_only_mismatch = False
     action_paper_window_not_replayed = False
+    action_scope_contract_mismatch = False
+    action_scope_contract_proof_ok = False
     action_gate_mode = (
         "allow_action_artefact_residuals" if bool(args.allow_action_artefact_residuals) else "strict_fail_closed"
     )
@@ -1140,6 +1189,15 @@ def main() -> int:
         axis_report_present["action"] = True
         action_status_obj = (action_report.get("status") or {}) if isinstance(action_report, dict) else {}
         action_counts_obj = (action_report.get("counts") or {}) if isinstance(action_report, dict) else {}
+        action_scope_contract = (action_report.get("scope_contract") or {}) if isinstance(action_report, dict) else {}
+        action_scope_contract_mismatch = bool(
+            action_status_obj.get("scope_contract_mismatch")
+            or (action_scope_contract.get("mismatch") if isinstance(action_scope_contract, dict) else False)
+        )
+        if isinstance(action_scope_contract, dict):
+            action_scope_proof = action_scope_contract.get("proof")
+            if isinstance(action_scope_proof, dict):
+                action_scope_contract_proof_ok = bool(action_scope_proof.get("evidence_complete"))
         action_strict_status = bool(action_status_obj.get("strict_alignment_pass"))
         action_artefact_only_mismatch = bool(action_status_obj.get("artefact_only_mismatch"))
         action_residuals = list(action_report.get("accepted_residuals") or [])
@@ -1210,6 +1268,20 @@ def main() -> int:
                         "total_accepted_residuals": len(action_residuals),
                     }
                 )
+        if action_scope_contract_mismatch and not action_scope_contract_proof_ok:
+            axis_gate_status["action"] = False
+            axis_failure_codes["action"].append("action_replay_scope_contract_mismatch")
+            failures.append(
+                {
+                    "code": "action_replay_scope_contract_mismatch",
+                    "classification": "deterministic_logic_divergence",
+                    "detail": (
+                        "action reconciliation scope contract mismatch: "
+                        "live/backtester action symbol-side sets are disjoint"
+                    ),
+                    "scope_contract": action_scope_contract if isinstance(action_scope_contract, dict) else {},
+                }
+            )
 
     snapshot_position_state_count = _as_int(
         ((snapshot_position_state_provenance or {}).get("counts") or {}).get("position_state"),
@@ -1581,6 +1653,8 @@ def main() -> int:
             "trade_strict_ok": bool(axis_tool_status.get("trade")) if axis_tool_status.get("trade") is not None else False,
             "trade_ok": bool(axis_gate_status.get("trade")),
             "trade_gate_ok": bool(axis_gate_status.get("trade")),
+            "trade_scope_contract_mismatch": bool(trade_scope_contract_mismatch),
+            "trade_scope_contract_proof_ok": bool(trade_scope_contract_proof_ok),
             "trade_policy_mismatch_opt_in_applied": bool(trade_policy_mismatch_opt_in_applied),
             "trade_policy_mismatch_opt_in_proof": trade_policy_mismatch_opt_in_proof,
             "action_required": bool(axis_required.get("action")),
@@ -1593,6 +1667,8 @@ def main() -> int:
             "action_opt_in_ok": bool(action_opt_in_status),
             "action_opt_in_proof": action_opt_in_proof,
             "action_artefact_only_mismatch": bool(action_artefact_only_mismatch),
+            "action_scope_contract_mismatch": bool(action_scope_contract_mismatch),
+            "action_scope_contract_proof_ok": bool(action_scope_contract_proof_ok),
             "action_paper_window_not_replayed": bool(action_paper_window_not_replayed),
             "live_paper_required": bool(axis_required.get("live_paper")),
             "live_paper_report_present": bool(axis_report_present.get("live_paper")),

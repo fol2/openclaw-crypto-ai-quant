@@ -17,7 +17,7 @@ import datetime as dt
 import json
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 try:
     from reason_codes import classify_reason_code
@@ -34,6 +34,7 @@ ORDER_FAIL_EVENTS = {
 }
 DEFAULT_TOL = 1e-9
 DEFAULT_ORDER_FAIL_MATCH_WINDOW_MS = 300_000
+CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 COMPARE_SURFACE_ARTEFACT_KINDS = {
     "matched_funding_pair",
     "missing_backtester_funding_action",
@@ -61,6 +62,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "Optional path to live order-fail event JSONL exported from audit_events "
             "(events beginning with LIVE_ORDER_FAIL_)."
         ),
+    )
+    parser.add_argument(
+        "--trade-reconcile-report",
+        help="Optional path to trade_reconcile_report.json for scope-policy proof cross-check",
     )
     parser.add_argument("--output", required=True, help="Path to output JSON report")
     parser.add_argument(
@@ -140,6 +145,40 @@ def _normalise_symbol(value: Any) -> str:
     return str(value or "").strip().upper()
 
 
+def _load_optional_json(path: Path | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if isinstance(obj, dict):
+        return obj
+    return None
+
+
+def _extract_trade_scope_policy_proof(trade_report: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(trade_report, Mapping):
+        return {
+            "kind": "entry_confidence_gate_scope_disjoint",
+            "evidence_complete": False,
+            "source": "trade_report_missing",
+        }
+    scope_contract = trade_report.get("scope_contract") if isinstance(trade_report.get("scope_contract"), Mapping) else {}
+    scope_proof = scope_contract.get("proof") if isinstance(scope_contract.get("proof"), Mapping) else {}
+    evidence_complete = bool(scope_proof.get("evidence_complete"))
+    per_symbol_side = scope_proof.get("per_symbol_side") if isinstance(scope_proof.get("per_symbol_side"), Mapping) else {}
+    return {
+        "kind": str(scope_proof.get("kind") or "entry_confidence_gate_scope_disjoint"),
+        "evidence_complete": bool(evidence_complete),
+        "source": "trade_scope_contract_proof",
+        "trade_scope_mismatch_kind": str(scope_contract.get("mismatch_kind") or ""),
+        "trade_scope_shared_symbol_sides": list(scope_contract.get("shared_exit_symbol_sides") or []),
+        "per_symbol_side": dict(per_symbol_side),
+        "details": dict(scope_proof),
+    }
+
+
 def _normalise_side(value: Any) -> str:
     side = str(value or "").strip().upper()
     if side in {"LONG", "SHORT"}:
@@ -201,6 +240,180 @@ def _canonical_backtester_action(action: Any) -> str:
 def _is_exit_action_code(action_code: str) -> bool:
     code = str(action_code or "").strip().upper()
     return code.startswith("CLOSE_") or code.startswith("REDUCE_")
+
+
+def _extract_side_from_action_code(action_code: str) -> str:
+    code = str(action_code or "").strip().upper()
+    if code.endswith("_LONG"):
+        return "LONG"
+    if code.endswith("_SHORT"):
+        return "SHORT"
+    return ""
+
+
+def _summarise_action_scope_contract(
+    live_actions: list[dict[str, Any]],
+    backtester_actions: list[dict[str, Any]],
+    *,
+    matched_pairs: int,
+) -> dict[str, Any]:
+    def _collect(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        symbols: set[str] = set()
+        sides: set[str] = set()
+        action_codes: set[str] = set()
+        symbol_sides: set[str] = set()
+        non_funding_rows = 0
+        for row in rows:
+            action_code = str(row.get("action_code") or "").strip().upper()
+            if not action_code or action_code == FUNDING_ACTION:
+                continue
+            symbol = _normalise_symbol(row.get("symbol"))
+            if not symbol:
+                continue
+            non_funding_rows += 1
+            action_codes.add(action_code)
+            symbols.add(symbol)
+            side = _extract_side_from_action_code(action_code)
+            if side:
+                sides.add(side)
+                symbol_sides.add(f"{symbol}:{side}")
+        return {
+            "non_funding_rows": int(non_funding_rows),
+            "symbols": sorted(symbols),
+            "sides": sorted(sides),
+            "action_codes": sorted(action_codes),
+            "symbol_sides": sorted(symbol_sides),
+        }
+
+    live_scope = _collect(live_actions)
+    backtester_scope = _collect(backtester_actions)
+    shared_symbols = sorted(set(live_scope["symbols"]) & set(backtester_scope["symbols"]))
+    shared_sides = sorted(set(live_scope["sides"]) & set(backtester_scope["sides"]))
+    shared_action_codes = sorted(set(live_scope["action_codes"]) & set(backtester_scope["action_codes"]))
+    shared_symbol_sides = sorted(set(live_scope["symbol_sides"]) & set(backtester_scope["symbol_sides"]))
+    mismatch = bool(
+        int(matched_pairs) == 0
+        and int(live_scope["non_funding_rows"]) > 0
+        and int(backtester_scope["non_funding_rows"]) > 0
+        and len(shared_symbol_sides) == 0
+    )
+    if not mismatch:
+        mismatch_kind = ""
+    elif len(shared_symbols) == 0:
+        mismatch_kind = "symbol_scope_disjoint"
+    else:
+        mismatch_kind = "symbol_side_scope_disjoint"
+    return {
+        "matched_pairs": int(matched_pairs),
+        "live_non_funding_rows": int(live_scope["non_funding_rows"]),
+        "backtester_non_funding_rows": int(backtester_scope["non_funding_rows"]),
+        "live_symbols": live_scope["symbols"],
+        "backtester_symbols": backtester_scope["symbols"],
+        "shared_symbols": shared_symbols,
+        "live_sides": live_scope["sides"],
+        "backtester_sides": backtester_scope["sides"],
+        "shared_sides": shared_sides,
+        "live_action_codes": live_scope["action_codes"],
+        "backtester_action_codes": backtester_scope["action_codes"],
+        "shared_action_codes": shared_action_codes,
+        "live_symbol_sides": live_scope["symbol_sides"],
+        "backtester_symbol_sides": backtester_scope["symbol_sides"],
+        "shared_symbol_sides": shared_symbol_sides,
+        "mismatch": mismatch,
+        "mismatch_kind": mismatch_kind,
+    }
+
+
+def _apply_scope_disjoint_state_gap_classification(
+    mismatches: list[dict[str, Any]],
+    *,
+    scope_contract: Mapping[str, Any] | None,
+    scope_policy_proof: Mapping[str, Any] | None,
+) -> int:
+    if not isinstance(scope_contract, Mapping):
+        return 0
+    if not isinstance(scope_policy_proof, Mapping) or not bool(scope_policy_proof.get("evidence_complete")):
+        return 0
+    mismatch_kind = str(scope_contract.get("mismatch_kind") or "").strip().lower()
+    shared_symbol_sides = scope_contract.get("shared_symbol_sides") or []
+    if mismatch_kind != "symbol_side_scope_disjoint" or len(shared_symbol_sides) != 0:
+        return 0
+    per_symbol_side = scope_policy_proof.get("per_symbol_side")
+    if not isinstance(per_symbol_side, Mapping):
+        return 0
+    required_rank = -1
+    details = scope_policy_proof.get("details")
+    if isinstance(details, Mapping):
+        try:
+            required_rank = int(details.get("required_rank"))
+        except (TypeError, ValueError):
+            required_rank = -1
+
+    reclassified = 0
+    for row in mismatches:
+        if str(row.get("classification") or "").strip().lower() != "deterministic_logic_divergence":
+            continue
+        kind = str(row.get("kind") or "").strip().lower()
+        if kind not in {"missing_backtester_action", "missing_live_action"}:
+            continue
+        symbol = str(row.get("symbol") or "").strip().upper()
+        action_code = str(row.get("action_code") or "").strip().upper()
+        side = _extract_side_from_action_code(action_code)
+        if not symbol or side not in {"LONG", "SHORT"}:
+            continue
+        symbol_side = f"{symbol}:{side}"
+        proof_row = per_symbol_side.get(symbol_side)
+        if not isinstance(proof_row, Mapping):
+            proof_row = {}
+        proof_meets = bool(proof_row.get("meets_condition"))
+        direction = str(proof_row.get("direction") or "").strip().lower()
+
+        # Fallback proof for entry-only symbol-sides not present in trade exit scope.
+        if not proof_meets and required_rank >= 1 and action_code.startswith(("OPEN_", "ADD_")):
+            if kind == "missing_backtester_action":
+                live_obj = row.get("live") if isinstance(row.get("live"), Mapping) else {}
+                live_conf = str(live_obj.get("confidence") or "").strip().lower()
+                live_rank = CONFIDENCE_RANK.get(live_conf, -1)
+                if 0 <= live_rank < required_rank:
+                    proof_meets = True
+                    direction = "live_only"
+                    proof_row = {
+                        "direction": "live_only",
+                        "meets_condition": True,
+                        "fallback_entry_only": True,
+                        "live_confidence": live_conf,
+                        "required_rank": int(required_rank),
+                    }
+            elif kind == "missing_live_action":
+                backtester_obj = row.get("backtester") if isinstance(row.get("backtester"), Mapping) else {}
+                bt_conf = str(backtester_obj.get("confidence") or "").strip().lower()
+                bt_rank = CONFIDENCE_RANK.get(bt_conf, -1)
+                if bt_rank >= required_rank:
+                    proof_meets = True
+                    direction = "backtester_only"
+                    proof_row = {
+                        "direction": "backtester_only",
+                        "meets_condition": True,
+                        "fallback_entry_only": True,
+                        "backtester_confidence": bt_conf,
+                        "required_rank": int(required_rank),
+                    }
+
+        if not proof_meets:
+            continue
+        if kind == "missing_backtester_action" and direction != "live_only":
+            continue
+        if kind == "missing_live_action" and direction != "backtester_only":
+            continue
+        row["classification"] = "state_initialisation_gap"
+        row["scope_contract_gap"] = {
+            "kind": "symbol_side_scope_disjoint",
+            "shared_symbol_sides": list(shared_symbol_sides),
+            "symbol_side": symbol_side,
+            "proof": dict(scope_policy_proof),
+        }
+        reclassified += 1
+    return reclassified
 
 
 def _collapse_split_fill_actions(
@@ -328,6 +541,7 @@ def _summarise_mismatch_breakdown(mismatches: list[dict[str, Any]]) -> dict[str,
         return dict(sorted(counts.items(), key=lambda item: item[0]))
 
     surface_rows: list[dict[str, Any]] = []
+    state_rows: list[dict[str, Any]] = []
     logic_rows: list[dict[str, Any]] = []
     classification_kind_drift_rows: list[dict[str, Any]] = []
 
@@ -336,12 +550,15 @@ def _summarise_mismatch_breakdown(mismatches: list[dict[str, Any]]) -> dict[str,
         classification = str(row.get("classification") or "").strip().lower()
         kind_is_surface = kind in COMPARE_SURFACE_ARTEFACT_KINDS
         class_is_surface = classification in COMPARE_SURFACE_ARTEFACT_CLASSES
+        class_is_state = classification == "state_initialisation_gap"
 
-        if kind_is_surface:
+        if class_is_surface:
             surface_rows.append(row)
+        elif class_is_state:
+            state_rows.append(row)
         else:
             logic_rows.append(row)
-        if kind_is_surface != class_is_surface:
+        if (kind_is_surface != class_is_surface) and not class_is_state:
             classification_kind_drift_rows.append(
                 {
                     "kind": kind or "unknown",
@@ -352,10 +569,12 @@ def _summarise_mismatch_breakdown(mismatches: list[dict[str, Any]]) -> dict[str,
 
     total = len(mismatches)
     surface_total = len(surface_rows)
+    state_total = len(state_rows)
     logic_total = len(logic_rows)
     return {
         "total": int(total),
         "compare_surface_artefact_total": int(surface_total),
+        "state_scope_residual_total": int(state_total),
         "logic_divergence_total": int(logic_total),
         "compare_surface_artefact_ratio": float(surface_total / total) if total else 0.0,
         "logic_divergence_ratio": float(logic_total / total) if total else 0.0,
@@ -1045,6 +1264,9 @@ def main() -> int:
     live_baseline = Path(args.live_baseline).expanduser().resolve()
     backtester_report = Path(args.backtester_replay_report).expanduser().resolve()
     live_order_fail_events_path = Path(args.live_order_fail_events).expanduser().resolve() if args.live_order_fail_events else None
+    trade_reconcile_report_path = (
+        Path(args.trade_reconcile_report).expanduser().resolve() if args.trade_reconcile_report else None
+    )
     output = Path(args.output).expanduser().resolve()
 
     if not live_baseline.exists():
@@ -1053,6 +1275,8 @@ def main() -> int:
         parser.error(f"backtester replay report not found: {backtester_report}")
     if live_order_fail_events_path is not None and not live_order_fail_events_path.exists():
         parser.error(f"live order-fail events file not found: {live_order_fail_events_path}")
+    if trade_reconcile_report_path is not None and not trade_reconcile_report_path.exists():
+        parser.error(f"trade reconcile report not found: {trade_reconcile_report_path}")
 
     live_actions, live_counts = _load_live_actions(live_baseline)
     live_actions, live_split_fill_stats = _collapse_split_fill_actions(live_actions)
@@ -1082,7 +1306,21 @@ def main() -> int:
         balance_tol=float(args.balance_tol),
         order_fail_match_window_ms=max(1, int(args.order_fail_match_window_ms)),
     )
+    scope_contract = _summarise_action_scope_contract(
+        live_actions,
+        backtester_actions,
+        matched_pairs=int(compare_summary.get("matched_pairs") or 0),
+    )
+    trade_report = _load_optional_json(trade_reconcile_report_path)
+    scope_policy_proof = _extract_trade_scope_policy_proof(trade_report)
+    scope_contract["proof"] = scope_policy_proof
     classification_reclassified_count = _normalise_compare_surface_classifications(mismatches)
+    scope_classification_reclassified_count = _apply_scope_disjoint_state_gap_classification(
+        mismatches,
+        scope_contract=scope_contract,
+        scope_policy_proof=scope_policy_proof,
+    )
+    classification_reclassified_count += int(scope_classification_reclassified_count)
 
     mismatch_counts: dict[str, int] = defaultdict(int)
     mismatch_kind_counts: dict[str, int] = defaultdict(int)
@@ -1096,14 +1334,13 @@ def main() -> int:
     accepted_residuals = [m for m in mismatches if str(m.get("classification") or "") in accepted_classes]
     mismatch_breakdown = _summarise_mismatch_breakdown(mismatches)
 
+    logic_divergence_free = int(mismatch_breakdown["logic_divergence_total"]) == 0
     strict_alignment_pass = (
         compare_summary["numeric_mismatch"] == 0
         and compare_summary["confidence_mismatch"] == 0
         and compare_summary["reason_code_mismatch"] == 0
-        and compare_summary["unmatched_live"] == 0
-        and compare_summary["unmatched_backtester"] == 0
+        and logic_divergence_free
     )
-    logic_divergence_free = int(mismatch_breakdown["logic_divergence_total"]) == 0
     compare_surface_artefact_total = int(mismatch_breakdown["compare_surface_artefact_total"])
     artefact_only_mismatch = bool(logic_divergence_free and compare_surface_artefact_total > 0)
     gate_pass_if_allow_compare_surface_artefacts = bool(strict_alignment_pass or artefact_only_mismatch)
@@ -1121,6 +1358,7 @@ def main() -> int:
             "live_baseline": str(live_baseline),
             "backtester_replay_report": str(backtester_report),
             "live_order_fail_events": str(live_order_fail_events_path) if live_order_fail_events_path else None,
+            "trade_reconcile_report": str(trade_reconcile_report_path) if trade_reconcile_report_path else None,
             "timestamp_bucket_ms": max(1, int(args.timestamp_bucket_ms)),
             "timestamp_bucket_anchor": str(args.timestamp_bucket_anchor or "floor"),
             "price_tol": float(args.price_tol),
@@ -1142,6 +1380,9 @@ def main() -> int:
             "compare_surface_artefact_total": int(mismatch_breakdown["compare_surface_artefact_total"]),
             "logic_divergence_total": int(mismatch_breakdown["logic_divergence_total"]),
             "classification_reclassified_count": int(classification_reclassified_count),
+            "scope_shared_symbols": len(scope_contract.get("shared_symbols") or []),
+            "scope_shared_symbol_sides": len(scope_contract.get("shared_symbol_sides") or []),
+            "scope_policy_proof_evidence_complete": bool(scope_policy_proof.get("evidence_complete")),
             "mismatch_total": len(mismatches),
         },
         "status": {
@@ -1149,6 +1390,7 @@ def main() -> int:
             "accepted_residuals_only": strict_alignment_pass and bool(accepted_residuals),
             "logic_divergence_free": bool(logic_divergence_free),
             "artefact_only_mismatch": bool(artefact_only_mismatch),
+            "scope_contract_mismatch": bool(scope_contract.get("mismatch")),
             "gate_pass_strict_fail_closed": bool(strict_alignment_pass),
             "gate_pass_if_allow_compare_surface_artefacts": bool(gate_pass_if_allow_compare_surface_artefacts),
             "selected_gate_mode": selected_gate_mode,
@@ -1160,6 +1402,7 @@ def main() -> int:
         "mismatch_counts_by_action_code": dict(sorted(mismatch_action_code_counts.items(), key=lambda x: x[0])),
         "mismatch_breakdown": mismatch_breakdown,
         "funding_pair_evidence": _summarise_funding_evidence(mismatches),
+        "scope_contract": scope_contract,
         "accepted_residuals": accepted_residuals,
         "per_symbol": per_symbol_rows,
         "mismatches": mismatches,

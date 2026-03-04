@@ -1356,6 +1356,143 @@ class LiveOms:
         finally:
             self.store._close(conn)
 
+    def _sync_decision_trace_with_fill(
+        self,
+        *,
+        cur: sqlite3.Cursor,
+        decision_id: str,
+        trade_id: int,
+        symbol_value: str,
+        action_value: str,
+        fill_ts_ms: int,
+        exit_reason_value: str,
+    ) -> None:
+        prev_status = None
+        try:
+            cur.execute("SELECT status FROM decision_events WHERE id = ? LIMIT 1", (str(decision_id),))
+            row_prev = cur.fetchone()
+            if row_prev and row_prev[0] is not None:
+                prev_status = str(row_prev[0]).strip().lower()
+        except Exception:
+            prev_status = None
+
+        try:
+            # Fill-time truth is authoritative: if a real fill arrives, execution must
+            # win over any earlier pending/rejected transport state.
+            cur.execute(
+                """
+                UPDATE decision_events
+                SET trade_id = COALESCE(trade_id, ?),
+                    status = 'executed',
+                    decision_phase = 'execution',
+                    rejection_reason = NULL,
+                    reason_code = CASE
+                        WHEN reason_code IN (
+                            'execution_would',
+                            'execution_rejected',
+                            'execution_timeout',
+                            'execution_submit_unknown',
+                            'execution_submit_unknown_expired',
+                            'execution_partial_expired'
+                        )
+                        THEN NULL
+                        ELSE reason_code
+                    END
+                WHERE id = ?
+                """,
+                (int(trade_id), str(decision_id)),
+            )
+        except Exception:
+            logger.debug("decision event link/update failed for %s", decision_id, exc_info=True)
+
+        if prev_status in {"rejected", "blocked"}:
+            logger.warning(
+                "late fill promoted decision to executed (decision_id=%s symbol=%s action=%s prev_status=%s)",
+                str(decision_id),
+                str(symbol_value or "").strip().upper(),
+                str(action_value or "").strip().upper(),
+                prev_status,
+            )
+
+        action_u = str(action_value or "").strip().upper()
+        symbol_u = str(symbol_value or "").strip().upper()
+        if action_u == "OPEN":
+            try:
+                cur.execute(
+                    "SELECT 1 FROM decision_lineage WHERE entry_trade_id = ? LIMIT 1",
+                    (int(trade_id),),
+                )
+                if cur.fetchone() is None:
+                    cur.execute(
+                        """
+                        INSERT INTO decision_lineage (signal_decision_id, entry_trade_id)
+                        VALUES (?, ?)
+                        """,
+                        (str(decision_id), int(trade_id)),
+                    )
+            except Exception:
+                logger.debug("decision lineage insert failed for %s", decision_id, exc_info=True)
+            return
+
+        if action_u != "CLOSE":
+            return
+
+        try:
+            cur.execute(
+                """
+                SELECT dl.entry_trade_id
+                FROM decision_lineage dl
+                JOIN trades t ON t.id = dl.entry_trade_id
+                WHERE dl.exit_decision_id IS NULL
+                  AND t.symbol = ?
+                ORDER BY dl.id DESC
+                LIMIT 1
+                """,
+                (symbol_u,),
+            )
+            row = cur.fetchone()
+            if not row or row[0] is None:
+                return
+            entry_trade_id = int(row[0])
+        except Exception:
+            logger.debug("decision lineage entry lookup failed for %s", symbol_u, exc_info=True)
+            return
+
+        duration_ms: int | None = None
+        try:
+            cur.execute("SELECT timestamp FROM trades WHERE id = ? LIMIT 1", (int(entry_trade_id),))
+            row_ts = cur.fetchone()
+            if row_ts and row_ts[0]:
+                dt = datetime.datetime.fromisoformat(str(row_ts[0]))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=datetime.timezone.utc)
+                entry_ts_ms = int(dt.timestamp() * 1000.0)
+                duration_ms = max(0, int(fill_ts_ms) - int(entry_ts_ms))
+        except Exception:
+            duration_ms = None
+
+        try:
+            cur.execute(
+                """
+                UPDATE decision_lineage
+                SET exit_decision_id = ?,
+                    exit_trade_id = ?,
+                    exit_reason = ?,
+                    duration_ms = ?
+                WHERE entry_trade_id = ?
+                  AND exit_decision_id IS NULL
+                """,
+                (
+                    str(decision_id),
+                    int(trade_id),
+                    str(exit_reason_value or ""),
+                    duration_ms,
+                    int(entry_trade_id),
+                ),
+            )
+        except Exception:
+            logger.debug("decision lineage completion failed for %s", decision_id, exc_info=True)
+
     def mark_would(self, intent: IntentHandle, *, note: str | None = None) -> None:
         # Used for dry_live mode.
         msg = str(note or "dry_live")
@@ -1615,7 +1752,7 @@ class LiveOms:
 
         Strategy:
         1) Try to match by exchange_order_id (oid) against existing intents.
-        2) Try to match by time-proximity against any intent for the same symbol/action/side.
+        2) Try to match by time-proximity against in-flight or recently-expired intents.
         3) If still unmatched, create a synthetic "manual" intent and attach the fill to it.
         """
         now_ms_i = now_ms()
@@ -1708,7 +1845,7 @@ class LiveOms:
                     except Exception:
                         intent_id = None
 
-                # 2) Match by time proximity against any intent (not just SENT/PARTIAL)
+                # 2) Match by time proximity against in-flight/recently-expired intents.
                 if not intent_id:
                     try:
                         ttl = int(self.match_ttl_ms)
@@ -1719,6 +1856,7 @@ class LiveOms:
                             SELECT intent_id
                             FROM oms_intents
                             WHERE symbol = ? AND action = ? AND side = ?
+                              AND status IN ('SENT', 'PARTIAL', 'UNKNOWN', 'EXPIRED')
                               AND sent_ts_ms IS NOT NULL AND sent_ts_ms BETWEEN ? AND ?
                             ORDER BY ABS(sent_ts_ms - ?) ASC
                             LIMIT 1
@@ -1822,38 +1960,149 @@ class LiveOms:
                 except Exception:
                     logger.debug("failed to update OMS fill row for reconcile", exc_info=True)
 
-                # Best-effort update corresponding trades.meta_json.
-                if has_trade_meta:
+                decision_id: str | None = None
+                decision_action: str | None = None
+                if intent_id:
                     try:
+                        cur.execute("SELECT meta_json FROM oms_intents WHERE intent_id = ? LIMIT 1", (str(intent_id),))
+                        row_intent = cur.fetchone()
+                        if row_intent and row_intent[0]:
+                            parsed = json.loads(str(row_intent[0]))
+                            if isinstance(parsed, dict):
+                                decision_id, decision_action = _extract_decision_ref_from_meta(parsed)
+                    except Exception:
+                        logger.debug("failed to resolve decision reference for reconciled fill intent", exc_info=True)
+
+                trade_id: int | None = None
+                trade_reason: str = ""
+                trade_meta_json: str | None = None
+                try:
+                    if fill_hash is not None and fill_tid is not None:
                         cur.execute(
-                            "SELECT id, meta_json FROM trades WHERE fill_hash = ? AND fill_tid = ? ORDER BY id DESC LIMIT 1",
+                            "SELECT id, reason, meta_json FROM trades WHERE fill_hash = ? AND fill_tid = ? ORDER BY id DESC LIMIT 1",
                             (str(fill_hash), int(fill_tid)),
                         )
                         tr = cur.fetchone()
                         if tr and tr[0]:
                             trade_id = int(tr[0])
-                            mj = tr[1]
-                            obj = None
-                            try:
-                                obj = json.loads(mj) if mj else {}
-                            except Exception:
-                                obj = {}
-                            if not isinstance(obj, dict):
-                                obj = {}
-                            obj.setdefault("oms", {})
-                            if isinstance(obj.get("oms"), dict):
-                                obj["oms"].update(
-                                    {"intent_id": intent_id, "matched_via": matched_via, "exchange_order_id": oid}
-                                )
-                            obj.setdefault("reconcile", {})
-                            if isinstance(obj.get("reconcile"), dict):
-                                obj["reconcile"].update({"unmatched_fill": True})
-                            cur.execute(
-                                "UPDATE trades SET meta_json = ? WHERE id = ?",
-                                (json_dumps_safe(obj), int(trade_id)),
-                            )
+                            trade_reason = str(tr[1] or "")
+                            trade_meta_json = tr[2]
+                except Exception:
+                    logger.debug("failed to resolve trade row for reconciled fill by hash/tid", exc_info=True)
+
+                if trade_id is None:
+                    try:
+                        ts_iso = datetime.datetime.fromtimestamp(
+                            int(ts_ms) / 1000.0, tz=datetime.timezone.utc
+                        ).isoformat()
+                        cur.execute(
+                            """
+                            SELECT id, reason, meta_json
+                            FROM trades
+                            WHERE symbol = ? AND action = ?
+                              AND timestamp = ?
+                              AND ABS(price - ?) < 1e-8
+                              AND ABS(size - ?) < 1e-12
+                            ORDER BY id DESC
+                            LIMIT 1
+                            """,
+                            (
+                                str(sym_u),
+                                str(action_u),
+                                str(ts_iso),
+                                float(px),
+                                float(sz),
+                            ),
+                        )
+                        tr2 = cur.fetchone()
+                        if tr2 and tr2[0]:
+                            trade_id = int(tr2[0])
+                            trade_reason = str(tr2[1] or "")
+                            trade_meta_json = tr2[2]
+                    except Exception:
+                        logger.debug("failed to resolve trade row for reconciled fill by trade fields", exc_info=True)
+
+                # Best-effort update corresponding trades.meta_json.
+                if has_trade_meta and trade_id is not None:
+                    try:
+                        obj = None
+                        try:
+                            obj = json.loads(trade_meta_json) if trade_meta_json else {}
+                        except Exception:
+                            obj = {}
+                        if not isinstance(obj, dict):
+                            obj = {}
+                        obj.setdefault("oms", {})
+                        if isinstance(obj.get("oms"), dict):
+                            obj["oms"].update({"intent_id": intent_id, "matched_via": matched_via, "exchange_order_id": oid})
+                        obj.setdefault("reconcile", {})
+                        if isinstance(obj.get("reconcile"), dict):
+                            obj["reconcile"].update({"unmatched_fill": True})
+                        cur.execute(
+                            "UPDATE trades SET meta_json = ? WHERE id = ?",
+                            (json_dumps_safe(obj), int(trade_id)),
+                        )
                     except Exception:
                         logger.debug("failed to update trades.meta_json for reconcile", exc_info=True)
+
+                # If we matched a real intent, repair its status from attached fills.
+                if intent_id and matched_via != "manual_orphan":
+                    try:
+                        cur.execute(
+                            "SELECT requested_size, action FROM oms_intents WHERE intent_id = ? LIMIT 1",
+                            (str(intent_id),),
+                        )
+                        row_intent = cur.fetchone()
+                        req_sz = _safe_float(row_intent[0], None) if row_intent else None
+                        action_for_status = str((row_intent[1] if row_intent else action_u) or "").strip().upper()
+                        cur.execute(
+                            "SELECT COALESCE(SUM(size), 0) FROM oms_fills WHERE intent_id = ?",
+                            (str(intent_id),),
+                        )
+                        row_fill = cur.fetchone()
+                        filled_total = float(row_fill[0] or 0.0) if row_fill else 0.0
+                        status_value: str | None = None
+                        if action_for_status == "CLOSE":
+                            status_value = "FILLED"
+                        elif req_sz is not None and req_sz > 0 and filled_total >= (req_sz * 0.999):
+                            status_value = "FILLED"
+                        elif filled_total > 0:
+                            status_value = "PARTIAL"
+                        if status_value:
+                            cur.execute(
+                                "UPDATE oms_intents SET status = ?, last_error = '' WHERE intent_id = ?",
+                                (str(status_value), str(intent_id)),
+                            )
+                    except Exception:
+                        logger.debug("failed to repair reconciled OMS intent status", exc_info=True)
+
+                # Late-fill parity repair: if this fill maps to a known decision, promote it to executed.
+                if decision_id and trade_id is not None:
+                    try:
+                        da = str(decision_action or "").strip().upper()
+                    except Exception:
+                        da = ""
+                    if da and da != str(action_u):
+                        logger.warning(
+                            "decision action differs from reconciled fill action; using fill action for trace sync "
+                            "(decision_id=%s decision_action=%s fill_action=%s symbol=%s)",
+                            str(decision_id),
+                            da,
+                            str(action_u),
+                            str(sym_u),
+                        )
+                    try:
+                        self._sync_decision_trace_with_fill(
+                            cur=cur,
+                            decision_id=str(decision_id),
+                            trade_id=int(trade_id),
+                            symbol_value=str(sym_u),
+                            action_value=str(action_u),
+                            fill_ts_ms=int(ts_ms),
+                            exit_reason_value=str(trade_reason or "reconcile_unmatched_fill"),
+                        )
+                    except Exception:
+                        logger.debug("failed to promote decision from reconciled fill", exc_info=True)
 
                 if len(samples) < 5:
                     try:
@@ -2371,131 +2620,15 @@ class LiveOms:
                 fill_ts_ms: int,
                 exit_reason_value: str,
             ) -> None:
-                prev_status = None
-                try:
-                    cur.execute("SELECT status FROM decision_events WHERE id = ? LIMIT 1", (str(decision_id),))
-                    row_prev = cur.fetchone()
-                    if row_prev and row_prev[0] is not None:
-                        prev_status = str(row_prev[0]).strip().lower()
-                except Exception:
-                    prev_status = None
-
-                try:
-                    # Fill-time truth is authoritative: if a real fill arrives, execution must
-                    # win over any earlier pending/rejected transport state.
-                    cur.execute(
-                        """
-                        UPDATE decision_events
-                        SET trade_id = COALESCE(trade_id, ?),
-                            status = 'executed',
-                            decision_phase = 'execution',
-                            rejection_reason = NULL,
-                            reason_code = CASE
-                                WHEN reason_code IN (
-                                    'execution_would',
-                                    'execution_rejected',
-                                    'execution_timeout',
-                                    'execution_submit_unknown',
-                                    'execution_submit_unknown_expired',
-                                    'execution_partial_expired'
-                                )
-                                THEN NULL
-                                ELSE reason_code
-                            END
-                        WHERE id = ?
-                        """,
-                        (int(trade_id), str(decision_id)),
-                    )
-                except Exception:
-                    logger.debug("decision event link/update failed for %s", decision_id, exc_info=True)
-
-                if prev_status in {"rejected", "blocked"}:
-                    logger.warning(
-                        "late fill promoted decision to executed (decision_id=%s symbol=%s action=%s prev_status=%s)",
-                        decision_id,
-                        str(symbol_value or "").strip().upper(),
-                        str(action_value or "").strip().upper(),
-                        prev_status,
-                    )
-
-                action_u = str(action_value or "").strip().upper()
-                symbol_u = str(symbol_value or "").strip().upper()
-                if action_u == "OPEN":
-                    try:
-                        cur.execute(
-                            "SELECT 1 FROM decision_lineage WHERE entry_trade_id = ? LIMIT 1",
-                            (int(trade_id),),
-                        )
-                        if cur.fetchone() is None:
-                            cur.execute(
-                                """
-                                INSERT INTO decision_lineage (signal_decision_id, entry_trade_id)
-                                VALUES (?, ?)
-                                """,
-                                (str(decision_id), int(trade_id)),
-                            )
-                    except Exception:
-                        logger.debug("decision lineage insert failed for %s", decision_id, exc_info=True)
-                    return
-
-                if action_u != "CLOSE":
-                    return
-
-                try:
-                    cur.execute(
-                        """
-                        SELECT dl.entry_trade_id
-                        FROM decision_lineage dl
-                        JOIN trades t ON t.id = dl.entry_trade_id
-                        WHERE dl.exit_decision_id IS NULL
-                          AND t.symbol = ?
-                        ORDER BY dl.id DESC
-                        LIMIT 1
-                        """,
-                        (symbol_u,),
-                    )
-                    row = cur.fetchone()
-                    if not row or row[0] is None:
-                        return
-                    entry_trade_id = int(row[0])
-                except Exception:
-                    logger.debug("decision lineage entry lookup failed for %s", symbol_u, exc_info=True)
-                    return
-
-                duration_ms: int | None = None
-                try:
-                    cur.execute("SELECT timestamp FROM trades WHERE id = ? LIMIT 1", (int(entry_trade_id),))
-                    row_ts = cur.fetchone()
-                    if row_ts and row_ts[0]:
-                        dt = datetime.datetime.fromisoformat(str(row_ts[0]))
-                        if dt.tzinfo is None:
-                            dt = dt.replace(tzinfo=datetime.timezone.utc)
-                        entry_ts_ms = int(dt.timestamp() * 1000.0)
-                        duration_ms = max(0, int(fill_ts_ms) - int(entry_ts_ms))
-                except Exception:
-                    duration_ms = None
-
-                try:
-                    cur.execute(
-                        """
-                        UPDATE decision_lineage
-                        SET exit_decision_id = ?,
-                            exit_trade_id = ?,
-                            exit_reason = ?,
-                            duration_ms = ?
-                        WHERE entry_trade_id = ?
-                          AND exit_decision_id IS NULL
-                        """,
-                        (
-                            str(decision_id),
-                            int(trade_id),
-                            str(exit_reason_value or ""),
-                            duration_ms,
-                            int(entry_trade_id),
-                        ),
-                    )
-                except Exception:
-                    logger.debug("decision lineage completion failed for %s", decision_id, exc_info=True)
+                self._sync_decision_trace_with_fill(
+                    cur=cur,
+                    decision_id=decision_id,
+                    trade_id=trade_id,
+                    symbol_value=symbol_value,
+                    action_value=action_value,
+                    fill_ts_ms=fill_ts_ms,
+                    exit_reason_value=exit_reason_value,
+                )
 
             # --- Running balance from DB (authoritative cash accounting) ---
             # Each trade's balance = previous balance + pnl - fee.
