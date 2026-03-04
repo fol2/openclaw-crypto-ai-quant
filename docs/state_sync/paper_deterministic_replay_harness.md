@@ -13,8 +13,8 @@ The harness executes:
 5. live/backtester action reconcile
 6. live/paper action reconcile
 7. live/paper decision-trace reconcile
-8. bundle-scoped CPU/GPU parity
-9. live-baseline vs paper event-order parity
+8. live-baseline vs paper event-order parity
+9. bundle-scoped CPU/GPU parity
 10. strict alignment gate
 
 ## Command
@@ -46,6 +46,12 @@ Strict shortcut:
 
 ```bash
 STRICT_NO_RESIDUALS=1 /tmp/live_replay_bundle_1h/run_09_paper_deterministic_replay.sh
+```
+
+Action artefact opt-in shortcut (keeps strict fail-closed as default):
+
+```bash
+AQC_ALLOW_ACTION_ARTEFACT_RESIDUALS=1 /tmp/live_replay_bundle_1h/run_09_paper_deterministic_replay.sh
 ```
 
 ## Standalone Event-Order Audit

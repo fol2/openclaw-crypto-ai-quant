@@ -119,18 +119,20 @@ def main() -> int:
         ("action_reconcile", bundle_dir / "run_05_action_reconcile.sh"),
         ("live_paper_action_reconcile", bundle_dir / "run_06_live_paper_action_reconcile.sh"),
         ("live_paper_decision_trace_reconcile", bundle_dir / "run_07_live_paper_decision_trace_reconcile.sh"),
-        ("gpu_parity", bundle_dir / "run_07c_gpu_parity.sh"),
         ("event_order_parity", bundle_dir / "run_07b_event_order_parity.sh"),
+        ("gpu_parity", bundle_dir / "run_07c_gpu_parity.sh"),
     ]
+    planned_steps = [step_name for step_name, _ in script_steps] + ["alignment_gate"]
 
     steps: list[dict[str, Any]] = []
     overall_ok = True
     failed_step: str | None = None
 
-    for step_name, script_path in script_steps:
+    for step_index, (step_name, script_path) in enumerate(script_steps, start=1):
         if not script_path.exists():
             steps.append(
                 {
+                    "step_index": int(step_index),
                     "step": step_name,
                     "command": str(script_path),
                     "exit_code": 127,
@@ -153,6 +155,7 @@ def main() -> int:
             cwd=repo_root,
             logs_dir=logs_dir,
         )
+        result["step_index"] = int(step_index)
         steps.append(result)
         if int(result["exit_code"]) != 0:
             overall_ok = False
@@ -165,6 +168,7 @@ def main() -> int:
             steps.append(
                 {
                     "step": "alignment_gate",
+                    "step_index": len(script_steps) + 1,
                     "command": str(gate_script),
                     "exit_code": 127,
                     "start_ms": _now_ms(),
@@ -190,6 +194,7 @@ def main() -> int:
                 cwd=repo_root,
                 logs_dir=logs_dir,
             )
+            gate_result["step_index"] = len(script_steps) + 1
             steps.append(gate_result)
             if int(gate_result["exit_code"]) != 0:
                 overall_ok = False
@@ -200,6 +205,13 @@ def main() -> int:
         "generated_at_ms": _now_ms(),
         "bundle_dir": str(bundle_dir),
         "repo_root": str(repo_root),
+        "planned_steps": planned_steps,
+        "effective_inputs": {
+            "live_db": env.get("LIVE_DB") or None,
+            "paper_db": env.get("PAPER_DB") or None,
+            "candles_db": env.get("CANDLES_DB") or None,
+            "funding_db": env.get("FUNDING_DB") or None,
+        },
         "strict_no_residuals": bool(args.strict_no_residuals),
         "allow_action_artefact_residuals": bool(args.allow_action_artefact_residuals),
         "ok": bool(overall_ok),

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
 
 import pytest
@@ -583,6 +585,84 @@ def _action_artefact_report(
     return report
 
 
+@pytest.mark.parametrize(
+    ("strict_env", "allow_action_env", "expected_flags"),
+    [
+        (None, None, []),
+        ("1", "1", ["--strict-no-residuals", "--allow-action-artefact-residuals"]),
+    ],
+)
+def test_bundle_run_09_script_wires_harness_flags_without_blank_args(
+    tmp_path: Path,
+    strict_env: str | None,
+    allow_action_env: str | None,
+    expected_flags: list[str],
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    repo_root = tmp_path / "repo"
+    tools_dir = repo_root / "tools"
+    tools_dir.mkdir(parents=True, exist_ok=True)
+
+    stub_harness = tools_dir / "run_paper_deterministic_replay.py"
+    _write_script(
+        stub_harness,
+        (
+            "#!/usr/bin/env python3\n"
+            "import json\n"
+            "import sys\n"
+            "from pathlib import Path\n"
+            "args = list(sys.argv[1:])\n"
+            "out_path = ''\n"
+            "for idx, token in enumerate(args):\n"
+            "    if token == '--output' and idx + 1 < len(args):\n"
+            "        out_path = args[idx + 1]\n"
+            "        break\n"
+            "if not out_path:\n"
+            "    raise SystemExit('missing --output')\n"
+            "Path(out_path).write_text(json.dumps({'argv': args}), encoding='utf-8')\n"
+        ),
+    )
+
+    run_09 = bundle_dir / "run_09_paper_deterministic_replay.sh"
+    _write_script(
+        run_09,
+        replay_bundle_builder._render_run_09_paper_harness_script(
+            paper_harness_report_name="paper_deterministic_replay_run.json"
+        ),
+    )
+
+    env = os.environ.copy()
+    env["REPO_ROOT"] = str(repo_root)
+    if strict_env is not None:
+        env["STRICT_NO_RESIDUALS"] = strict_env
+    if allow_action_env is not None:
+        env["AQC_ALLOW_ACTION_ARTEFACT_RESIDUALS"] = allow_action_env
+
+    proc = subprocess.run(
+        ["bash", str(run_09)],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    report = json.loads((bundle_dir / "paper_deterministic_replay_run.json").read_text(encoding="utf-8"))
+    argv = [str(v) for v in (report.get("argv") or [])]
+
+    assert argv[:4] == [
+        "--bundle-dir",
+        str(bundle_dir),
+        "--repo-root",
+        str(repo_root),
+    ]
+    assert argv[-2:] == ["--output", str(bundle_dir / "paper_deterministic_replay_run.json")]
+    assert all(arg != "" and arg.strip() != "" for arg in argv)
+    for flag in expected_flags:
+        assert flag in argv
+
+
 def test_alignment_gate_trade_policy_mismatch_stays_fail_closed_without_opt_in(
     tmp_path: Path,
     monkeypatch,
@@ -771,13 +851,46 @@ def test_paper_harness_runs_bundle_gate_script_and_sets_strict_flag(
     exit_code = paper_harness.main()
     report = json.loads(output.read_text(encoding="utf-8"))
     gate_env = (bundle_dir / "gate_env.txt").read_text(encoding="utf-8").strip()
+    executed_scripts = [
+        line.strip()
+        for line in (bundle_dir / "steps.log").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     steps = report.get("steps") or []
     alignment_step = next((row for row in steps if row.get("step") == "alignment_gate"), {})
+    step_names = [str(row.get("step") or "") for row in steps]
+    step_indices = [int(row.get("step_index") or 0) for row in steps]
 
     assert exit_code == 0
     assert report.get("ok") is True
     assert gate_env == "strict=1 allow_action_artefacts=0"
     assert report.get("allow_action_artefact_residuals") is False
+    assert report.get("planned_steps") == [
+        "export_and_seed",
+        "replay",
+        "state_audit",
+        "trade_reconcile",
+        "action_reconcile",
+        "live_paper_action_reconcile",
+        "live_paper_decision_trace_reconcile",
+        "event_order_parity",
+        "gpu_parity",
+        "alignment_gate",
+    ]
+    assert step_names == report.get("planned_steps")
+    assert step_indices == list(range(1, len(step_indices) + 1))
+    assert executed_scripts == [
+        "run_01_export_and_seed.sh",
+        "run_02_replay.sh",
+        "run_03_audit.sh",
+        "run_04_trade_reconcile.sh",
+        "run_05_action_reconcile.sh",
+        "run_06_live_paper_action_reconcile.sh",
+        "run_07_live_paper_decision_trace_reconcile.sh",
+        "run_07b_event_order_parity.sh",
+        "run_07c_gpu_parity.sh",
+        "run_08_assert_alignment.sh",
+    ]
     assert "run_08_assert_alignment.sh" in str(alignment_step.get("command") or "")
 
 
@@ -847,3 +960,96 @@ def test_paper_harness_sets_action_artefact_opt_in_when_enabled(
     assert report.get("allow_action_artefact_residuals") is True
     assert gate_env == "strict=0 allow_action_artefacts=1"
     assert "run_08_assert_alignment.sh" in str(alignment_step.get("command") or "")
+
+
+def test_paper_harness_wires_db_overrides_into_steps_and_report(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    output = bundle_dir / "paper_deterministic_replay_run.json"
+
+    live_db = tmp_path / "live.sqlite"
+    paper_db = tmp_path / "paper.sqlite"
+    candles_db = tmp_path / "candles.sqlite"
+    funding_db = tmp_path / "funding.sqlite"
+    live_db.write_text("", encoding="utf-8")
+    paper_db.write_text("", encoding="utf-8")
+    candles_db.write_text("", encoding="utf-8")
+    funding_db.write_text("", encoding="utf-8")
+
+    for script_name in (
+        "run_01_export_and_seed.sh",
+        "run_02_replay.sh",
+        "run_03_audit.sh",
+        "run_04_trade_reconcile.sh",
+        "run_05_action_reconcile.sh",
+        "run_06_live_paper_action_reconcile.sh",
+        "run_07_live_paper_decision_trace_reconcile.sh",
+        "run_07b_event_order_parity.sh",
+        "run_07c_gpu_parity.sh",
+    ):
+        _write_script(
+            bundle_dir / script_name,
+            (
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+                'echo "live=${LIVE_DB:-} paper=${PAPER_DB:-} candles=${CANDLES_DB:-} funding=${FUNDING_DB:-}" > "$BUNDLE_DIR/pre_gate_env.txt"\n'
+            ),
+        )
+
+    _write_script(
+        bundle_dir / "run_08_assert_alignment.sh",
+        (
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+            'echo "live=${LIVE_DB:-} paper=${PAPER_DB:-} candles=${CANDLES_DB:-} funding=${FUNDING_DB:-} strict=${STRICT_NO_RESIDUALS:-} action=${AQC_ALLOW_ACTION_ARTEFACT_RESIDUALS:-}" > "$BUNDLE_DIR/gate_env.txt"\n'
+        ),
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_paper_deterministic_replay.py",
+            "--bundle-dir",
+            str(bundle_dir),
+            "--repo-root",
+            str(tmp_path),
+            "--live-db",
+            str(live_db),
+            "--paper-db",
+            str(paper_db),
+            "--candles-db",
+            str(candles_db),
+            "--funding-db",
+            str(funding_db),
+            "--allow-action-artefact-residuals",
+            "--output",
+            str(output),
+        ],
+    )
+
+    exit_code = paper_harness.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+    pre_gate_env = (bundle_dir / "pre_gate_env.txt").read_text(encoding="utf-8").strip()
+    gate_env = (bundle_dir / "gate_env.txt").read_text(encoding="utf-8").strip()
+
+    expected_env_prefix = (
+        f"live={live_db.resolve()} paper={paper_db.resolve()} "
+        f"candles={candles_db.resolve()} funding={funding_db.resolve()}"
+    )
+
+    assert exit_code == 0
+    assert report.get("ok") is True
+    assert pre_gate_env == expected_env_prefix
+    assert gate_env == f"{expected_env_prefix} strict=0 action=1"
+    assert report.get("effective_inputs") == {
+        "live_db": str(live_db.resolve()),
+        "paper_db": str(paper_db.resolve()),
+        "candles_db": str(candles_db.resolve()),
+        "funding_db": str(funding_db.resolve()),
+    }
