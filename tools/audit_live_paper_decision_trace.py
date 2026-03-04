@@ -67,6 +67,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "Default excludes them because backtester has no equivalent."
         ),
     )
+    parser.add_argument(
+        "--include-funding-events",
+        action="store_true",
+        default=False,
+        help=(
+            "Include funding decision events in parity comparison. Default excludes them because "
+            "live decision_events currently does not emit funding rows."
+        ),
+    )
     return parser
 
 
@@ -181,6 +190,7 @@ def _load_decision_rows(
     from_ts: int | None,
     to_ts: int | None,
     include_runtime_only_blocked: bool,
+    include_funding_events: bool,
     paper_min_trade_id_exclusive: int | None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
     conn = _connect_ro(db_path)
@@ -225,12 +235,17 @@ def _load_decision_rows(
         conn.close()
 
     out: list[dict[str, Any]] = []
+    funding_excluded = 0
     runtime_only_excluded = 0
     filtered_by_trade_id = 0
     for row in rows:
         ts_ms = int(row["timestamp_ms"] or 0)
         symbol = _norm_text(row["symbol"], lower=False).upper()
+        event_type = _norm_text(row["event_type"])
         if ts_ms <= 0 or not symbol:
+            continue
+        if not include_funding_events and event_type == "funding":
+            funding_excluded += 1
             continue
 
         trade_id_raw = row["trade_id"]
@@ -273,7 +288,7 @@ def _load_decision_rows(
                 "source_id": _norm_text(row["id"], lower=False),
                 "timestamp_ms": ts_ms,
                 "symbol": symbol,
-                "event_type": _norm_text(row["event_type"]),
+                "event_type": event_type,
                 "status": status,
                 "decision_phase": _norm_text(row["decision_phase"]),
                 "triggered_by": _norm_text(row["triggered_by"]),
@@ -289,6 +304,7 @@ def _load_decision_rows(
     counts = {
         "table_present": True,
         "row_count": len(out),
+        "funding_excluded": int(funding_excluded),
         "runtime_only_excluded": int(runtime_only_excluded),
         "filtered_by_trade_id": int(filtered_by_trade_id),
     }
@@ -474,6 +490,8 @@ def _compare_rows(
                         "match_key_timestamp_ms": match_ts,
                         "paper_timestamp_ms": prow["timestamp_ms"],
                         "paper_ref": {"id": prow["source_id"]},
+                        "paper_trade_linked": bool(prow.get("trade_linked")),
+                        "paper_trade_id": prow.get("trade_id"),
                     }
                 )
 
@@ -501,6 +519,7 @@ def main() -> int:
     to_ts = int(args.to_ts) if args.to_ts is not None else None
     timestamp_bucket_ms = max(1, int(args.timestamp_bucket_ms))
     include_runtime_only_blocked = bool(args.include_runtime_only_blocked)
+    include_funding_events = bool(args.include_funding_events)
     try:
         paper_min_id_exclusive = _resolve_paper_min_id_exclusive(
             raw_min_id=int(args.paper_min_id_exclusive)
@@ -528,6 +547,7 @@ def main() -> int:
         from_ts=from_ts,
         to_ts=to_ts,
         include_runtime_only_blocked=include_runtime_only_blocked,
+        include_funding_events=include_funding_events,
         paper_min_trade_id_exclusive=None,
     )
     paper_rows, paper_counts, paper_load_issues = _load_decision_rows(
@@ -536,6 +556,7 @@ def main() -> int:
         from_ts=from_ts,
         to_ts=to_ts,
         include_runtime_only_blocked=include_runtime_only_blocked,
+        include_funding_events=include_funding_events,
         paper_min_trade_id_exclusive=paper_min_id_exclusive,
     )
 
@@ -632,6 +653,35 @@ def main() -> int:
         for row in mismatches
         if str(row.get("kind") or "").strip().lower() != "missing_decision_events_table"
     ]
+    paper_preseed_scope_only = (
+        paper_min_id_exclusive is not None
+        and int(paper_counts.get("filtered_by_trade_id") or 0) > 0
+        and compare_summary["rejection_reason_mismatch"] == 0
+        and compare_summary["config_fingerprint_mismatch"] == 0
+        and compare_summary["trade_linkage_mismatch"] == 0
+        and compare_summary["unmatched_live"] == 0
+        and compare_summary["unmatched_paper"] > 0
+        and len(non_missing_table_mismatches) == int(compare_summary["unmatched_paper"])
+        and all(
+            str(row.get("kind") or "").strip().lower() == "missing_live_decision_event"
+            for row in non_missing_table_mismatches
+        )
+        and all(
+            not bool(row.get("paper_trade_linked"))
+            for row in non_missing_table_mismatches
+        )
+    )
+    if paper_preseed_scope_only:
+        accepted_residuals.append(
+            {
+                "classification": "state_initialisation_gap",
+                "kind": "paper_preseed_decision_rows_out_of_scope",
+                "paper_unmatched_rows": int(compare_summary["unmatched_paper"]),
+                "paper_rows_excluded_by_trade_id": int(paper_counts.get("filtered_by_trade_id") or 0),
+                "paper_min_trade_id_exclusive": int(paper_min_id_exclusive),
+            }
+        )
+
     decision_table_unavailable_but_empty = (
         len(missing_table_issues) > 0
         and len(non_missing_table_mismatches) == 0
@@ -662,12 +712,15 @@ def main() -> int:
             "to_ts": to_ts,
             "timestamp_bucket_ms": timestamp_bucket_ms,
             "include_runtime_only_blocked": include_runtime_only_blocked,
+            "include_funding_events": include_funding_events,
             "require_single_run_fingerprint": bool(args.require_single_run_fingerprint),
             "max_live_run_fingerprint_distinct": max(1, int(args.max_live_run_fingerprint_distinct)),
         },
         "counts": {
             "live_decision_rows": int(live_counts.get("row_count") or 0),
             "paper_decision_rows": int(paper_counts.get("row_count") or 0),
+            "live_funding_events_excluded": int(live_counts.get("funding_excluded") or 0),
+            "paper_funding_events_excluded": int(paper_counts.get("funding_excluded") or 0),
             "live_runtime_only_excluded": int(live_counts.get("runtime_only_excluded") or 0),
             "paper_runtime_only_excluded": int(paper_counts.get("runtime_only_excluded") or 0),
             "paper_filtered_by_trade_id": int(paper_counts.get("filtered_by_trade_id") or 0),

@@ -173,12 +173,165 @@ def test_decision_trace_filters_paper_rows_by_trade_id_watermark(tmp_path: Path)
         from_ts=None,
         to_ts=None,
         include_runtime_only_blocked=False,
+        include_funding_events=True,
         paper_min_trade_id_exclusive=100,
     )
     assert issues == []
     assert counts["filtered_by_trade_id"] == 1
     assert counts["row_count"] == 1
     assert rows[0]["source_id"] == "D2"
+
+
+def test_decision_trace_excludes_funding_events_by_default(tmp_path: Path) -> None:
+    db = tmp_path / "paper.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """
+        CREATE TABLE decision_events (
+            id TEXT PRIMARY KEY,
+            timestamp_ms INTEGER,
+            symbol TEXT,
+            event_type TEXT,
+            status TEXT,
+            decision_phase TEXT,
+            triggered_by TEXT,
+            action_taken TEXT,
+            rejection_reason TEXT,
+            reason_code TEXT,
+            config_fingerprint TEXT,
+            trade_id INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO decision_events
+        (id, timestamp_ms, symbol, event_type, status, decision_phase, triggered_by,
+         action_taken, rejection_reason, reason_code, config_fingerprint, trade_id)
+        VALUES ('F1', 1000, 'ETH', 'funding', 'executed', 'execution', 'schedule',
+                'apply_funding', '', 'funding_payment', 'abc', NULL)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    rows, counts, issues = live_paper_decision._load_decision_rows(
+        db,
+        source_name="paper",
+        from_ts=None,
+        to_ts=None,
+        include_runtime_only_blocked=False,
+        include_funding_events=False,
+        paper_min_trade_id_exclusive=None,
+    )
+    assert issues == []
+    assert counts["funding_excluded"] == 1
+    assert counts["row_count"] == 0
+    assert rows == []
+
+
+def test_decision_trace_main_accepts_preseed_paper_only_unlinked_rows(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    live_db = tmp_path / "live.db"
+    paper_db = tmp_path / "paper.db"
+    for path in (live_db, paper_db):
+        conn = sqlite3.connect(path)
+        conn.execute(
+            """
+            CREATE TABLE decision_events (
+                id TEXT PRIMARY KEY,
+                timestamp_ms INTEGER,
+                symbol TEXT,
+                event_type TEXT,
+                status TEXT,
+                decision_phase TEXT,
+                triggered_by TEXT,
+                action_taken TEXT,
+                rejection_reason TEXT,
+                reason_code TEXT,
+                config_fingerprint TEXT,
+                trade_id INTEGER
+            )
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    conn = sqlite3.connect(live_db)
+    conn.execute(
+        """
+        INSERT INTO decision_events
+        (id, timestamp_ms, symbol, event_type, status, decision_phase, triggered_by,
+         action_taken, rejection_reason, reason_code, config_fingerprint, trade_id)
+        VALUES ('L1', 1000, 'ETH', 'entry_signal', 'executed', 'execution', 'schedule',
+                'open', '', 'entry_signal', 'abc', NULL)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    conn = sqlite3.connect(paper_db)
+    conn.execute(
+        """
+        INSERT INTO decision_events
+        (id, timestamp_ms, symbol, event_type, status, decision_phase, triggered_by,
+         action_taken, rejection_reason, reason_code, config_fingerprint, trade_id)
+        VALUES ('P1', 1000, 'ETH', 'entry_signal', 'executed', 'execution', 'schedule',
+                'open', '', 'entry_signal', 'abc', NULL)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO decision_events
+        (id, timestamp_ms, symbol, event_type, status, decision_phase, triggered_by,
+         action_taken, rejection_reason, reason_code, config_fingerprint, trade_id)
+        VALUES ('P2', 1001, 'ETH', 'gate_block', 'blocked', 'risk_check', 'schedule',
+                'blocked', 'margin cap', 'exit_filter', 'abc', NULL)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO decision_events
+        (id, timestamp_ms, symbol, event_type, status, decision_phase, triggered_by,
+         action_taken, rejection_reason, reason_code, config_fingerprint, trade_id)
+        VALUES ('P3', 999, 'ETH', 'entry_signal', 'executed', 'execution', 'schedule',
+                'open', '', 'entry_signal', 'abc', 10)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    output = tmp_path / "report.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "audit_live_paper_decision_trace.py",
+            "--live-db",
+            str(live_db),
+            "--paper-db",
+            str(paper_db),
+            "--paper-min-id-exclusive",
+            "100",
+            "--output",
+            str(output),
+        ],
+    )
+
+    exit_code = live_paper_decision.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert report["counts"]["mismatch_total"] == 1
+    assert report["counts"]["unmatched_paper"] == 1
+    assert report["status"]["strict_alignment_pass"] is False
+    assert report["status"]["accepted_residuals_only"] is False
+    assert any(
+        str(row.get("kind") or "") == "paper_preseed_decision_rows_out_of_scope"
+        for row in report["accepted_residuals"]
+    )
 
 
 def test_decision_trace_main_fails_strict_when_run_fingerprint_guard_drifts(
@@ -338,7 +491,7 @@ def test_event_order_funding_contract_marks_unmatched_as_mismatch(tmp_path: Path
     )
 
 
-def test_event_order_paper_window_not_replayed_with_unmatched_funding_is_fail_closed(
+def test_event_order_paper_window_not_replayed_with_unmatched_funding_is_non_blocking_with_evidence(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -400,6 +553,7 @@ def test_event_order_paper_window_not_replayed_with_unmatched_funding_is_fail_cl
             str(live_baseline),
             "--paper-db",
             str(paper_db),
+            "--fail-on-mismatch",
             "--output",
             str(output),
         ],
@@ -409,7 +563,7 @@ def test_event_order_paper_window_not_replayed_with_unmatched_funding_is_fail_cl
     report = json.loads(output.read_text(encoding="utf-8"))
 
     assert exit_code == 0
-    assert report["status"]["strict_alignment_pass"] is False
+    assert report["status"]["strict_alignment_pass"] is True
     assert any(
         str(row.get("kind") or "") == "paper_window_not_replayed"
         for row in report["accepted_residuals"]
@@ -419,6 +573,7 @@ def test_event_order_paper_window_not_replayed_with_unmatched_funding_is_fail_cl
         for row in report["mismatches"]
     )
     assert report["counts"]["funding_unmatched_live"] == 1
+    assert report["counts"]["mismatch_count"] >= 1
 
 
 def test_live_paper_action_main_collapses_split_fills(tmp_path: Path, monkeypatch) -> None:
@@ -570,4 +725,77 @@ def test_live_paper_action_main_run_fingerprint_drift_is_fail_closed(
     assert any(
         str(row.get("kind") or "") == "live_run_fingerprint_drift_within_window"
         for row in report["mismatches"]
+    )
+
+
+def test_live_paper_action_detects_window_not_replayed_with_funding_gaps(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    live_db = tmp_path / "live.db"
+    paper_db = tmp_path / "paper.db"
+    schema = """
+        CREATE TABLE trades (
+            id INTEGER PRIMARY KEY,
+            timestamp TEXT,
+            symbol TEXT,
+            action TEXT,
+            type TEXT,
+            price REAL,
+            size REAL,
+            pnl REAL,
+            balance REAL,
+            reason TEXT,
+            reason_code TEXT,
+            confidence TEXT,
+            fee_usd REAL,
+            fill_hash TEXT
+        )
+    """
+    for path in (live_db, paper_db):
+        conn = sqlite3.connect(path)
+        conn.execute(schema)
+        conn.commit()
+        conn.close()
+
+    conn = sqlite3.connect(live_db)
+    conn.execute(
+        """
+        INSERT INTO trades
+        (id, timestamp, symbol, action, type, price, size, pnl, balance, reason, reason_code, confidence, fee_usd, fill_hash)
+        VALUES
+        (1, '1970-01-01T00:00:01.000+00:00', 'ETH', 'OPEN', 'SHORT', 100.0, 1.0, 0.0, 100.0, 'entry', 'signal_trigger', 'medium', 0.0, ''),
+        (2, '1970-01-01T00:00:01.100+00:00', 'ETH', 'FUNDING', 'SHORT', 100.0, 1.0, 0.1, 100.1, 'funding', 'funding', 'medium', 0.0, '')
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    output = tmp_path / "live_paper_action_report.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "audit_live_paper_action_reconcile.py",
+            "--live-db",
+            str(live_db),
+            "--paper-db",
+            str(paper_db),
+            "--output",
+            str(output),
+        ],
+    )
+
+    exit_code = live_paper_action.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert report["status"]["strict_alignment_pass"] is False
+    assert report["counts"]["live_simulatable_actions"] == 1
+    assert report["counts"]["paper_simulatable_actions"] == 0
+    assert report["counts"]["unmatched_live_simulatable"] == 1
+    assert report["counts"]["funding_unmatched_live"] == 1
+    assert any(
+        str(row.get("kind") or "") == "paper_window_not_replayed"
+        for row in report["accepted_residuals"]
     )

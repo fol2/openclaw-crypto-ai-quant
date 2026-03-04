@@ -52,6 +52,14 @@ def _iso_from_ms(ms: int) -> str:
     return dt.datetime.fromtimestamp(ms / 1000.0, tz=dt.timezone.utc).isoformat()
 
 
+def _sqlite_ts_ms_expr(column_name: str = "timestamp") -> str:
+    # Keep epoch arithmetic integer-based to avoid float boundary drift.
+    return (
+        f"(CAST(strftime('%s', {column_name}) AS INTEGER) * 1000 + "
+        f"CAST(substr(strftime('%f', {column_name}), 4, 3) AS INTEGER))"
+    )
+
+
 def _load_snapshot(path: Path) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -176,20 +184,23 @@ def _seed_trades_and_positions(
             "DELETE FROM trades WHERE reason IN ('state_sync_seed', 'state_sync_balance_seed', 'state_sync_seed_close')"
         )
 
+        cutoff_expr = _sqlite_ts_ms_expr("timestamp")
         open_rows = conn.execute(
             """
             SELECT t.symbol, t.type AS pos_type
             FROM trades t
             INNER JOIN (
                 SELECT symbol, MAX(id) AS open_id
-                FROM trades WHERE action = 'OPEN' GROUP BY symbol
+                FROM trades WHERE action = 'OPEN' AND {cutoff_expr} <= ? GROUP BY symbol
             ) lo ON t.id = lo.open_id
             LEFT JOIN (
                 SELECT symbol, MAX(id) AS close_id
-                FROM trades WHERE action = 'CLOSE' GROUP BY symbol
+                FROM trades WHERE action = 'CLOSE' AND {cutoff_expr} <= ? GROUP BY symbol
             ) lc ON t.symbol = lc.symbol
             WHERE lc.close_id IS NULL OR lo.open_id > lc.close_id
             """
+            .format(cutoff_expr=cutoff_expr),
+            (int(seed_ts_ms), int(seed_ts_ms)),
         ).fetchall()
         for row in open_rows:
             symbol = str(row["symbol"] or "").strip().upper()
