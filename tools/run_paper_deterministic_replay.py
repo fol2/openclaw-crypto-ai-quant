@@ -171,6 +171,13 @@ def main() -> int:
             max_oms_strategy_sha1_distinct = max(1, int(max_oms_strategy_sha1_distinct_raw))
         except Exception:
             max_oms_strategy_sha1_distinct = max_strategy_sha1_distinct
+        max_live_run_fingerprint_distinct_raw = str(
+            env.get("AQC_MAX_LIVE_RUN_FINGERPRINT_DISTINCT") or "1"
+        ).strip()
+        try:
+            max_live_run_fingerprint_distinct = max(1, int(max_live_run_fingerprint_distinct_raw))
+        except Exception:
+            max_live_run_fingerprint_distinct = 1
         require_oms_strategy_provenance = _env_bool("AQC_REQUIRE_OMS_STRATEGY_PROVENANCE", True)
         gate_cmd = [
             "python3",
@@ -192,6 +199,9 @@ def main() -> int:
             "--require-runtime-strategy-provenance",
             "--max-strategy-sha1-distinct",
             str(max_strategy_sha1_distinct),
+            "--require-live-run-fingerprint-provenance",
+            "--max-live-run-fingerprint-distinct",
+            str(max_live_run_fingerprint_distinct),
             "--require-locked-strategy-match",
             "--output",
             str(gate_report),

@@ -16,6 +16,38 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Audit live-vs-paper decision_events trace parity.")
     parser.add_argument("--live-db", required=True, help="Path to live SQLite DB")
     parser.add_argument("--paper-db", required=True, help="Path to paper SQLite DB")
+    parser.add_argument(
+        "--paper-min-id-exclusive",
+        type=int,
+        help="Optional lower-bound filter: include only paper decision rows with trade_id > this value.",
+    )
+    parser.add_argument(
+        "--paper-seed-watermark",
+        help=(
+            "Optional JSON watermark file generated during seed step "
+            "(expects key pre_seed_max_trade_id)."
+        ),
+    )
+    parser.add_argument(
+        "--bundle-manifest",
+        help=(
+            "Optional replay bundle manifest. When set with "
+            "--require-single-run-fingerprint, enforce one live run_fingerprint "
+            "within the audited window."
+        ),
+    )
+    parser.add_argument(
+        "--require-single-run-fingerprint",
+        action="store_true",
+        default=False,
+        help="Fail-closed when manifest.live_run_fingerprint_provenance reports drift within the window.",
+    )
+    parser.add_argument(
+        "--max-live-run-fingerprint-distinct",
+        type=int,
+        default=1,
+        help="Maximum allowed distinct live run_fingerprint in manifest provenance window.",
+    )
     parser.add_argument("--output", required=True, help="Path to output JSON report")
     parser.add_argument("--from-ts", type=int, help="Filter start timestamp (ms, inclusive)")
     parser.add_argument("--to-ts", type=int, help="Filter end timestamp (ms, inclusive)")
@@ -74,6 +106,74 @@ def _norm_text(value: Any, *, lower: bool = True) -> str:
     return text.lower() if lower else text
 
 
+def _resolve_paper_min_id_exclusive(
+    *,
+    raw_min_id: int | None,
+    watermark_path_raw: str | None,
+) -> int | None:
+    resolved: int | None = int(raw_min_id) if raw_min_id is not None else None
+    if not watermark_path_raw:
+        return resolved
+
+    watermark_path = Path(str(watermark_path_raw)).expanduser().resolve()
+    if not watermark_path.exists():
+        raise ValueError(f"paper seed watermark file not found: {watermark_path}")
+
+    try:
+        payload = json.loads(watermark_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"invalid paper seed watermark JSON: {watermark_path}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"invalid paper seed watermark payload: {watermark_path}")
+
+    raw_watermark = payload.get("pre_seed_max_trade_id")
+    if raw_watermark is None:
+        raise ValueError(
+            f"paper seed watermark missing pre_seed_max_trade_id: {watermark_path}"
+        )
+    try:
+        watermark_value = int(raw_watermark)
+    except Exception as exc:
+        raise ValueError(
+            f"invalid pre_seed_max_trade_id in paper seed watermark: {watermark_path}"
+        ) from exc
+
+    if resolved is None:
+        return int(watermark_value)
+    return max(int(resolved), int(watermark_value))
+
+
+def _load_manifest_run_fingerprint_provenance(manifest_path: Path) -> dict[str, Any]:
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("bundle manifest must be a JSON object")
+    provenance = payload.get("live_run_fingerprint_provenance")
+    if not isinstance(provenance, dict):
+        raise ValueError("manifest.live_run_fingerprint_provenance is missing")
+    return provenance
+
+
+def _run_fingerprint_guard_issue(
+    *,
+    detail: str,
+    run_fingerprint_distinct: int | None = None,
+    max_allowed: int | None = None,
+    rows_sampled: int | None = None,
+) -> dict[str, Any]:
+    issue: dict[str, Any] = {
+        "classification": "state_initialisation_gap",
+        "kind": "live_run_fingerprint_drift_within_window",
+        "detail": detail,
+    }
+    if run_fingerprint_distinct is not None:
+        issue["run_fingerprint_distinct"] = int(run_fingerprint_distinct)
+    if max_allowed is not None:
+        issue["max_live_run_fingerprint_distinct"] = int(max_allowed)
+    if rows_sampled is not None:
+        issue["rows_sampled"] = int(rows_sampled)
+    return issue
+
+
 def _load_decision_rows(
     db_path: Path,
     *,
@@ -81,6 +181,7 @@ def _load_decision_rows(
     from_ts: int | None,
     to_ts: int | None,
     include_runtime_only_blocked: bool,
+    paper_min_trade_id_exclusive: int | None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
     conn = _connect_ro(db_path)
     try:
@@ -125,10 +226,27 @@ def _load_decision_rows(
 
     out: list[dict[str, Any]] = []
     runtime_only_excluded = 0
+    filtered_by_trade_id = 0
     for row in rows:
         ts_ms = int(row["timestamp_ms"] or 0)
         symbol = _norm_text(row["symbol"], lower=False).upper()
         if ts_ms <= 0 or not symbol:
+            continue
+
+        trade_id_raw = row["trade_id"]
+        trade_id_value: int | None = None
+        if trade_id_raw is not None:
+            try:
+                trade_id_value = int(trade_id_raw)
+            except Exception:
+                trade_id_value = None
+        if (
+            source_name == "paper"
+            and paper_min_trade_id_exclusive is not None
+            and trade_id_value is not None
+            and trade_id_value <= int(paper_min_trade_id_exclusive)
+        ):
+            filtered_by_trade_id += 1
             continue
 
         status = _norm_text(row["status"])
@@ -163,7 +281,8 @@ def _load_decision_rows(
                 "rejection_reason": rejection_reason,
                 "reason_code": reason_code,
                 "config_fingerprint": _norm_text(row["config_fingerprint"]),
-                "trade_linked": row["trade_id"] is not None,
+                "trade_linked": trade_id_value is not None,
+                "trade_id": trade_id_value,
             }
         )
 
@@ -171,6 +290,7 @@ def _load_decision_rows(
         "table_present": True,
         "row_count": len(out),
         "runtime_only_excluded": int(runtime_only_excluded),
+        "filtered_by_trade_id": int(filtered_by_trade_id),
     }
     return out, counts, []
 
@@ -375,16 +495,30 @@ def main() -> int:
 
     live_db = Path(args.live_db).expanduser().resolve()
     paper_db = Path(args.paper_db).expanduser().resolve()
+    bundle_manifest = Path(args.bundle_manifest).expanduser().resolve() if args.bundle_manifest else None
     output = Path(args.output).expanduser().resolve()
     from_ts = int(args.from_ts) if args.from_ts is not None else None
     to_ts = int(args.to_ts) if args.to_ts is not None else None
     timestamp_bucket_ms = max(1, int(args.timestamp_bucket_ms))
     include_runtime_only_blocked = bool(args.include_runtime_only_blocked)
+    try:
+        paper_min_id_exclusive = _resolve_paper_min_id_exclusive(
+            raw_min_id=int(args.paper_min_id_exclusive)
+            if args.paper_min_id_exclusive is not None
+            else None,
+            watermark_path_raw=str(args.paper_seed_watermark).strip()
+            if args.paper_seed_watermark
+            else None,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     if not live_db.exists():
         parser.error(f"live DB not found: {live_db}")
     if not paper_db.exists():
         parser.error(f"paper DB not found: {paper_db}")
+    if bundle_manifest is not None and not bundle_manifest.exists():
+        parser.error(f"bundle manifest not found: {bundle_manifest}")
     if from_ts is not None and to_ts is not None and from_ts > to_ts:
         parser.error("from-ts must be <= to-ts")
 
@@ -394,6 +528,7 @@ def main() -> int:
         from_ts=from_ts,
         to_ts=to_ts,
         include_runtime_only_blocked=include_runtime_only_blocked,
+        paper_min_trade_id_exclusive=None,
     )
     paper_rows, paper_counts, paper_load_issues = _load_decision_rows(
         paper_db,
@@ -401,6 +536,7 @@ def main() -> int:
         from_ts=from_ts,
         to_ts=to_ts,
         include_runtime_only_blocked=include_runtime_only_blocked,
+        paper_min_trade_id_exclusive=paper_min_id_exclusive,
     )
 
     mismatches: list[dict[str, Any]] = []
@@ -425,6 +561,52 @@ def main() -> int:
         )
         mismatches.extend(cmp_mismatches)
 
+    run_fingerprint_guard_issues: list[dict[str, Any]] = []
+    run_fingerprint_guard_detail: dict[str, Any] = {
+        "enabled": bool(args.require_single_run_fingerprint),
+        "bundle_manifest": str(bundle_manifest) if bundle_manifest is not None else None,
+        "max_live_run_fingerprint_distinct": max(1, int(args.max_live_run_fingerprint_distinct)),
+        "ok": True,
+        "live_run_fingerprint_provenance": None,
+    }
+    if bool(args.require_single_run_fingerprint):
+        if bundle_manifest is None:
+            run_fingerprint_guard_issues.append(
+                _run_fingerprint_guard_issue(
+                    detail="run_fingerprint guard requested but --bundle-manifest is missing",
+                )
+            )
+            run_fingerprint_guard_detail["ok"] = False
+        else:
+            try:
+                provenance = _load_manifest_run_fingerprint_provenance(bundle_manifest)
+            except Exception as exc:
+                run_fingerprint_guard_issues.append(
+                    _run_fingerprint_guard_issue(
+                        detail=f"unable to read manifest live_run_fingerprint_provenance: {exc}",
+                    )
+                )
+                run_fingerprint_guard_detail["ok"] = False
+            else:
+                run_fingerprint_guard_detail["live_run_fingerprint_provenance"] = provenance
+                run_fp_distinct = int(provenance.get("run_fingerprint_distinct") or 0)
+                rows_sampled = int(provenance.get("rows_sampled") or 0)
+                max_allowed = max(1, int(args.max_live_run_fingerprint_distinct))
+                if run_fp_distinct > max_allowed:
+                    run_fingerprint_guard_issues.append(
+                        _run_fingerprint_guard_issue(
+                            detail=(
+                                f"manifest live run_fingerprint drift exceeded limit: "
+                                f"distinct={run_fp_distinct} max={max_allowed}"
+                            ),
+                            run_fingerprint_distinct=run_fp_distinct,
+                            max_allowed=max_allowed,
+                            rows_sampled=rows_sampled,
+                        )
+                    )
+                    run_fingerprint_guard_detail["ok"] = False
+    mismatches.extend(run_fingerprint_guard_issues)
+
     mismatch_counts: dict[str, int] = defaultdict(int)
     for item in mismatches:
         mismatch_counts[str(item.get("classification") or "unknown")] += 1
@@ -437,6 +619,7 @@ def main() -> int:
         and compare_summary["unmatched_paper"] == 0
         and not live_load_issues
         and not paper_load_issues
+        and not run_fingerprint_guard_issues
     )
     accepted_residuals: list[dict[str, Any]] = []
     missing_table_issues = [
@@ -463,7 +646,7 @@ def main() -> int:
     )
     if decision_table_unavailable_but_empty:
         accepted_residuals = list(missing_table_issues)
-        strict_alignment_pass = True
+        strict_alignment_pass = not run_fingerprint_guard_issues
 
     report = {
         "schema_version": 2,
@@ -471,16 +654,23 @@ def main() -> int:
         "inputs": {
             "live_db": str(live_db),
             "paper_db": str(paper_db),
+            "bundle_manifest": str(bundle_manifest) if bundle_manifest is not None else None,
+            "paper_min_id_exclusive": int(paper_min_id_exclusive)
+            if paper_min_id_exclusive is not None
+            else None,
             "from_ts": from_ts,
             "to_ts": to_ts,
             "timestamp_bucket_ms": timestamp_bucket_ms,
             "include_runtime_only_blocked": include_runtime_only_blocked,
+            "require_single_run_fingerprint": bool(args.require_single_run_fingerprint),
+            "max_live_run_fingerprint_distinct": max(1, int(args.max_live_run_fingerprint_distinct)),
         },
         "counts": {
             "live_decision_rows": int(live_counts.get("row_count") or 0),
             "paper_decision_rows": int(paper_counts.get("row_count") or 0),
             "live_runtime_only_excluded": int(live_counts.get("runtime_only_excluded") or 0),
             "paper_runtime_only_excluded": int(paper_counts.get("runtime_only_excluded") or 0),
+            "paper_filtered_by_trade_id": int(paper_counts.get("filtered_by_trade_id") or 0),
             **compare_summary,
             "mismatch_total": len(mismatches),
         },
@@ -489,6 +679,7 @@ def main() -> int:
             "accepted_residuals_only": strict_alignment_pass and bool(accepted_residuals),
         },
         "mismatch_counts_by_classification": dict(sorted(mismatch_counts.items(), key=lambda x: x[0])),
+        "run_fingerprint_guard": run_fingerprint_guard_detail,
         "accepted_residuals": accepted_residuals,
         "per_symbol": per_symbol_rows,
         "mismatches": mismatches,

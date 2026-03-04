@@ -174,6 +174,127 @@ def _canonical_backtester_action(action: Any) -> str:
     return ""
 
 
+def _is_exit_action_code(action_code: str) -> bool:
+    code = str(action_code or "").strip().upper()
+    return code.startswith("CLOSE_") or code.startswith("REDUCE_")
+
+
+def _collapse_split_fill_actions(
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    by_fill_hash: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    passthrough: list[dict[str, Any]] = []
+    for row in rows:
+        fill_hash = str(row.get("fill_hash") or "").strip().lower()
+        action_code = str(row.get("action_code") or "").strip().upper()
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if fill_hash and symbol and _is_exit_action_code(action_code):
+            by_fill_hash[(symbol, action_code, fill_hash)].append(row)
+        else:
+            passthrough.append(dict(row))
+
+    collapsed_rows: list[dict[str, Any]] = list(passthrough)
+    collapsed_groups = 0
+    collapsed_member_rows = 0
+
+    for (_symbol, _action_code, fill_hash), group in by_fill_hash.items():
+        if len(group) <= 1:
+            collapsed_rows.append(dict(group[0]))
+            continue
+
+        sorted_group = sorted(
+            group,
+            key=lambda r: (
+                int(r.get("timestamp_ms") or 0),
+                int(r.get("source_id") or 0),
+                int(r.get("line_no") or 0),
+            ),
+        )
+        collapsed_groups += 1
+        collapsed_member_rows += len(sorted_group)
+
+        total_size = sum(float(item.get("size") or 0.0) for item in sorted_group)
+        total_pnl = sum(float(item.get("pnl_usd") or 0.0) for item in sorted_group)
+        total_fee = sum(float(item.get("fee_usd") or 0.0) for item in sorted_group)
+        total_abs_size = sum(abs(float(item.get("size") or 0.0)) for item in sorted_group)
+        if total_abs_size > 0.0:
+            weighted_price = sum(
+                float(item.get("price") or 0.0) * abs(float(item.get("size") or 0.0))
+                for item in sorted_group
+            ) / total_abs_size
+        else:
+            weighted_price = float(sorted_group[-1].get("price") or 0.0)
+
+        merged = dict(sorted_group[-1])
+        merged["timestamp_ms"] = max(int(item.get("timestamp_ms") or 0) for item in sorted_group)
+        merged["source_id"] = max(int(item.get("source_id") or 0) for item in sorted_group)
+        merged["line_no"] = max(int(item.get("line_no") or 0) for item in sorted_group)
+        merged["price"] = float(weighted_price)
+        merged["size"] = float(total_size)
+        merged["pnl_usd"] = float(total_pnl)
+        merged["fee_usd"] = float(total_fee)
+        merged["fill_hash"] = fill_hash
+        merged["split_fill_collapsed"] = True
+        merged["split_fill_member_count"] = len(sorted_group)
+        merged["split_fill_member_source_ids"] = [int(item.get("source_id") or 0) for item in sorted_group]
+        collapsed_rows.append(merged)
+
+    collapsed_rows.sort(
+        key=lambda r: (
+            int(r.get("timestamp_ms") or 0),
+            str(r.get("symbol") or ""),
+            str(r.get("action_code") or ""),
+            int(r.get("source_id") or 0),
+            int(r.get("line_no") or 0),
+        )
+    )
+    stats = {
+        "split_fill_groups_collapsed": int(collapsed_groups),
+        "split_fill_rows_collapsed": int(max(0, collapsed_member_rows - collapsed_groups)),
+    }
+    return collapsed_rows, stats
+
+
+def _summarise_funding_evidence(mismatches: list[dict[str, Any]]) -> dict[str, Any]:
+    per_symbol: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {
+            "symbol": "",
+            "matched_pairs": 0,
+            "unmatched_live": 0,
+            "unmatched_backtester": 0,
+            "matched_live_pnl_usd": 0.0,
+            "matched_backtester_pnl_usd": 0.0,
+        }
+    )
+
+    for row in mismatches:
+        if str(row.get("action_code") or "").strip().upper() != FUNDING_ACTION:
+            continue
+        symbol = str(row.get("symbol") or "").strip().upper()
+        bucket = per_symbol[symbol]
+        bucket["symbol"] = symbol
+        kind = str(row.get("kind") or "").strip().lower()
+        if kind == "matched_funding_pair":
+            bucket["matched_pairs"] += 1
+            live_obj = row.get("live") if isinstance(row.get("live"), dict) else {}
+            backtester_obj = row.get("backtester") if isinstance(row.get("backtester"), dict) else {}
+            bucket["matched_live_pnl_usd"] += float(live_obj.get("pnl_usd") or 0.0)
+            bucket["matched_backtester_pnl_usd"] += float(backtester_obj.get("pnl_usd") or 0.0)
+        elif kind == "missing_backtester_funding_action":
+            bucket["unmatched_live"] += 1
+        elif kind == "missing_live_funding_action":
+            bucket["unmatched_backtester"] += 1
+
+    rows = sorted(per_symbol.values(), key=lambda item: item["symbol"])
+    return {
+        "matched_pairs": int(sum(int(item["matched_pairs"]) for item in rows)),
+        "unmatched_live": int(sum(int(item["unmatched_live"]) for item in rows)),
+        "unmatched_backtester": int(sum(int(item["unmatched_backtester"]) for item in rows)),
+        "symbols": [str(item["symbol"]) for item in rows if str(item["symbol"])],
+        "by_symbol": rows,
+    }
+
+
 def _load_live_actions(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     total_actions = 0
@@ -218,6 +339,7 @@ def _load_live_actions(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]
                         str(row.get("reason_code") or "").strip().lower()
                         or classify_reason_code(action_code, str(row.get("reason") or ""))
                     ),
+                    "fill_hash": str(row.get("fill_hash") or "").strip().lower(),
                 }
             )
 
@@ -454,6 +576,9 @@ def _compare_actions(
     non_simulatable_residuals = 0
     state_scope_residuals = 0
     order_fail_residuals = 0
+    funding_matched_pairs = 0
+    funding_unmatched_live = 0
+    funding_unmatched_backtester = 0
     consumed_order_fail_event_ids: set[int] = set()
     live_order_fail_by_symbol: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in live_order_fail_events:
@@ -509,6 +634,42 @@ def _compare_actions(
             brow = bt_rows[idx]
             per_symbol[symbol]["matched_pairs"] += 1
             matched_pairs += 1
+
+            if action_code == FUNDING_ACTION:
+                funding_matched_pairs += 1
+                non_simulatable_residuals += 1
+                mismatches.append(
+                    {
+                        "classification": "non-simulatable_exchange_oms_effect",
+                        "kind": "matched_funding_pair",
+                        "symbol": symbol,
+                        "action_code": action_code,
+                        "match_key_timestamp_ms": ts_ms,
+                        "live_timestamp_ms": lrow["timestamp_ms"],
+                        "backtester_timestamp_ms": brow["timestamp_ms"],
+                        "live_ref": {"id": lrow["source_id"], "line_no": lrow["line_no"]},
+                        "backtester_ref": {"row_no": brow["row_no"]},
+                        "live": {
+                            "size": lrow["size"],
+                            "pnl_usd": lrow["pnl_usd"],
+                            "fee_usd": lrow["fee_usd"],
+                            "reason": lrow["reason"],
+                        },
+                        "backtester": {
+                            "size": brow["size"],
+                            "pnl_usd": brow["pnl_usd"],
+                            "fee_usd": brow["fee_usd"],
+                            "reason_code": brow["reason_code"],
+                            "reason": brow["reason"],
+                        },
+                        "delta": {
+                            "size": lrow["size"] - brow["size"],
+                            "pnl_usd": lrow["pnl_usd"] - brow["pnl_usd"],
+                            "fee_usd": lrow["fee_usd"] - brow["fee_usd"],
+                        },
+                    }
+                )
+                continue
 
             numeric_checks = {
                 "price": _almost_equal(lrow["price"], brow["price"], price_tol),
@@ -600,10 +761,11 @@ def _compare_actions(
         if len(live_rows) > pair_count:
             for lrow in live_rows[pair_count:]:
                 if action_code == FUNDING_ACTION:
-                    non_simulatable_residuals += 1
+                    funding_unmatched_live += 1
+                    unmatched_live += 1
                     mismatches.append(
                         {
-                            "classification": "non-simulatable_exchange_oms_effect",
+                            "classification": "deterministic_logic_divergence",
                             "kind": "missing_backtester_funding_action",
                             "symbol": symbol,
                             "action_code": action_code,
@@ -644,10 +806,11 @@ def _compare_actions(
         if len(bt_rows) > pair_count:
             for brow in bt_rows[pair_count:]:
                 if action_code == FUNDING_ACTION:
-                    non_simulatable_residuals += 1
+                    funding_unmatched_backtester += 1
+                    unmatched_backtester += 1
                     mismatches.append(
                         {
-                            "classification": "non-simulatable_exchange_oms_effect",
+                            "classification": "deterministic_logic_divergence",
                             "kind": "missing_live_funding_action",
                             "symbol": symbol,
                             "action_code": action_code,
@@ -776,6 +939,9 @@ def _compare_actions(
         "non_simulatable_residuals": non_simulatable_residuals,
         "state_scope_residuals": state_scope_residuals,
         "order_fail_residuals": order_fail_residuals,
+        "funding_matched_pairs": funding_matched_pairs,
+        "funding_unmatched_live": funding_unmatched_live,
+        "funding_unmatched_backtester": funding_unmatched_backtester,
     }
     return mismatches, summary, per_symbol_rows
 
@@ -797,6 +963,7 @@ def main() -> int:
         parser.error(f"live order-fail events file not found: {live_order_fail_events_path}")
 
     live_actions, live_counts = _load_live_actions(live_baseline)
+    live_actions, live_split_fill_stats = _collapse_split_fill_actions(live_actions)
     try:
         backtester_actions, backtester_counts = _load_backtester_actions(backtester_report)
     except ValueError as exc:
@@ -857,6 +1024,9 @@ def main() -> int:
         },
         "counts": {
             **live_counts,
+            "live_canonical_actions_pre_split_fill_collapse": int(live_counts.get("live_canonical_actions") or 0),
+            "live_canonical_actions": len(live_actions),
+            **live_split_fill_stats,
             **backtester_counts,
             **order_fail_counts,
             **compare_summary,
@@ -867,6 +1037,7 @@ def main() -> int:
             "accepted_residuals_only": strict_alignment_pass and bool(accepted_residuals),
         },
         "mismatch_counts_by_classification": dict(sorted(mismatch_counts.items(), key=lambda x: x[0])),
+        "funding_pair_evidence": _summarise_funding_evidence(mismatches),
         "accepted_residuals": accepted_residuals,
         "per_symbol": per_symbol_rows,
         "mismatches": mismatches,
