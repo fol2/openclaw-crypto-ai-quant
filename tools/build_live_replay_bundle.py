@@ -354,6 +354,14 @@ def _build_parser() -> argparse.ArgumentParser:
             "and event-order reconcile steps. Default is disabled."
         ),
     )
+    parser.add_argument(
+        "--enable-live-paper-mirror",
+        action="store_true",
+        help=(
+            "Enable live-window mirror into paper DB before live-paper audits. "
+            "Default is disabled."
+        ),
+    )
     parser.add_argument("--bundle-dir", required=True, help="Output bundle directory")
     parser.add_argument(
         "--snapshot-name",
@@ -762,6 +770,7 @@ def main() -> int:
     paper_harness_report_path = bundle_dir / "paper_deterministic_replay_run.json"
     paper_seed_watermark_path = bundle_dir / "paper_seed_watermark.json"
     paper_seed_apply_report_path = bundle_dir / "paper_seed_apply_report.json"
+    paper_mirror_apply_report_path = bundle_dir / "paper_mirror_apply_report.json"
     manifest_path = bundle_dir / "replay_bundle_manifest.json"
 
     if yaml is None:
@@ -1020,6 +1029,42 @@ def main() -> int:
         f'--output "$BUNDLE_DIR/{audit_report_path.name}"'
     )
 
+    if bool(args.enable_live_paper_mirror):
+        cmd_mirror_live_window_to_paper = (
+            "set -euo pipefail\n"
+            'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+            'REPO_ROOT="${REPO_ROOT:-$(pwd)}"\n'
+            f'LIVE_DB="${{LIVE_DB:-{shlex.quote(str(live_db))}}}"\n'
+            f'PAPER_DB="${{PAPER_DB:-{shlex.quote(str(paper_db))}}}"\n'
+            'python3 "$REPO_ROOT/tools/mirror_live_window_to_paper.py" '
+            '--live-db "$LIVE_DB" '
+            '--paper-db "$PAPER_DB" '
+            f"--from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
+            "--replace-window "
+            f'--output "$BUNDLE_DIR/{paper_mirror_apply_report_path.name}"'
+        )
+    else:
+        cmd_mirror_live_window_to_paper = (
+            "set -euo pipefail\n"
+            'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+            f'python3 - "$BUNDLE_DIR/{paper_mirror_apply_report_path.name}" <<\'PY\'\n'
+            "import datetime as dt\n"
+            "import json\n"
+            "import sys\n"
+            "\n"
+            "output_path = sys.argv[1]\n"
+            "payload = {\n"
+            '    "schema_version": 1,\n'
+            '    "generated_at_ms": int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000),\n'
+            '    "status": {"ok": True, "skipped": True, "reason": "live-paper mirror disabled"},\n'
+            "}\n"
+            'with open(output_path, "w", encoding="utf-8") as fp:\n'
+            "    fp.write(json.dumps(payload, indent=2, sort_keys=True))\n"
+            '    fp.write("\\n")\n'
+            "print(output_path)\n"
+            "PY"
+        )
+
     cmd_trade_reconcile = (
         "set -euo pipefail\n"
         'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
@@ -1168,6 +1213,10 @@ def main() -> int:
     (bundle_dir / "run_01_export_and_seed.sh").write_text(cmd_export_seed + "\n", encoding="utf-8")
     (bundle_dir / "run_02_replay.sh").write_text(cmd_replay + "\n", encoding="utf-8")
     (bundle_dir / "run_03_audit.sh").write_text(cmd_audit + "\n", encoding="utf-8")
+    (bundle_dir / "run_03b_mirror_live_window_to_paper.sh").write_text(
+        cmd_mirror_live_window_to_paper + "\n",
+        encoding="utf-8",
+    )
     (bundle_dir / "run_04_trade_reconcile.sh").write_text(cmd_trade_reconcile + "\n", encoding="utf-8")
     (bundle_dir / "run_05_action_reconcile.sh").write_text(cmd_action_reconcile + "\n", encoding="utf-8")
     (bundle_dir / "run_06_live_paper_action_reconcile.sh").write_text(
@@ -1186,6 +1235,7 @@ def main() -> int:
         "run_01_export_and_seed.sh",
         "run_02_replay.sh",
         "run_03_audit.sh",
+        "run_03b_mirror_live_window_to_paper.sh",
         "run_04_trade_reconcile.sh",
         "run_05_action_reconcile.sh",
         "run_06_live_paper_action_reconcile.sh",
@@ -1216,6 +1266,7 @@ def main() -> int:
             "allow_interval_override": bool(args.allow_interval_override),
             "allow_partial_first_bar": bool(args.allow_partial_first_bar),
             "paper_filter_post_seed": bool(args.paper_filter_post_seed),
+            "enable_live_paper_mirror": bool(args.enable_live_paper_mirror),
             "from_ts_aligned_to_interval": bool(from_ts_aligned_to_interval),
             "timestamp_bucket_ms": int(timestamp_bucket_ms),
             "entry_interval": cfg_entry_interval or None,
@@ -1278,6 +1329,10 @@ def main() -> int:
             "paper_seed_apply_report_sha256": _hash_file(paper_seed_apply_report_path)
             if paper_seed_apply_report_path.exists()
             else None,
+            "paper_mirror_apply_report_file": paper_mirror_apply_report_path.name,
+            "paper_mirror_apply_report_sha256": _hash_file(paper_mirror_apply_report_path)
+            if paper_mirror_apply_report_path.exists()
+            else None,
         },
         "counts": {
             "live_baseline_trades": len(baseline_trades),
@@ -1289,6 +1344,7 @@ def main() -> int:
             "export_and_seed": cmd_export_seed,
             "replay": cmd_replay,
             "audit": cmd_audit,
+            "mirror_live_window_to_paper": cmd_mirror_live_window_to_paper,
             "trade_reconcile": cmd_trade_reconcile,
             "action_reconcile": cmd_action_reconcile,
             "live_paper_action_reconcile": cmd_live_paper_action_reconcile,
