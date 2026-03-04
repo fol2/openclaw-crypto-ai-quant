@@ -110,11 +110,13 @@ Systemd user service templates in `systemd/`:
 
 | Service | Purpose |
 |---------|---------|
-| `openclaw-ai-quant-trader` | Paper trading daemon |
-| `openclaw-ai-quant-live` | Live trading daemon |
+| `openclaw-ai-quant-trader-v8-paper1` | Primary paper trading daemon |
+| `openclaw-ai-quant-trader-v8-paper2` | Candidate paper trading daemon |
+| `openclaw-ai-quant-trader-v8-paper3` | Candidate paper trading daemon |
+| `openclaw-ai-quant-live-v8` | Live trading daemon |
 | `openclaw-ai-quant-ws-sidecar` | Market data WebSocket sidecar |
 | `openclaw-ai-quant-monitor` | Real-time monitoring dashboard |
-| `openclaw-ai-quant-factory` | Nightly strategy sweep (timer) |
+| `openclaw-ai-quant-factory-v8` | Nightly strategy sweep (timer) |
 
 ```bash
 cp systemd/<template>.example ~/.config/systemd/user/<unit-name>

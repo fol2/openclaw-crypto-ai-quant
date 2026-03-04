@@ -6,8 +6,10 @@ Procedures for common operational scenarios. When the bot misbehaves, follow the
 
 | Service | Unit name | Purpose |
 |---------|-----------|---------|
-| Paper trader | `openclaw-ai-quant-trader` | Paper trading daemon |
-| Live trader | `openclaw-ai-quant-live` | Live trading daemon |
+| Paper trader (primary) | `openclaw-ai-quant-trader-v8-paper1` | Primary paper trading daemon |
+| Paper trader (candidate #2) | `openclaw-ai-quant-trader-v8-paper2` | Candidate paper trading daemon |
+| Paper trader (candidate #3) | `openclaw-ai-quant-trader-v8-paper3` | Candidate paper trading daemon |
+| Live trader | `openclaw-ai-quant-live-v8` | Live trading daemon |
 | WS sidecar | `openclaw-ai-quant-ws-sidecar` | Market data WebSocket |
 | Monitor | `openclaw-ai-quant-monitor` | Real-time dashboard |
 
@@ -17,29 +19,29 @@ All services are systemd user units. Manage with `systemctl --user <action> <uni
 
 Example service/timer templates live under `systemd/`:
 
-- `openclaw-ai-quant-factory.{service,timer}.example` runs `factory_run.py` nightly.
-- `openclaw-ai-quant-prune-runtime-logs.{service,timer}.example` prunes SQLite `runtime_logs` daily.
+- `openclaw-ai-quant-factory-v8.{service,timer}.example` runs `factory_run.py` nightly.
+- `openclaw-ai-quant-prune-runtime-logs-v8.{service,timer}.example` prunes SQLite `runtime_logs` daily.
 - `openclaw-ai-quant-replay-alignment-gate.{service,timer}.example` runs deterministic replay alignment checks and writes a release-blocker status file.
 
 Install (example):
 
 ```bash
 mkdir -p ~/.config/systemd/user
-install -m 0644 systemd/openclaw-ai-quant-factory.service.example \
-  ~/.config/systemd/user/openclaw-ai-quant-factory.service
-install -m 0644 systemd/openclaw-ai-quant-factory.timer.example \
-  ~/.config/systemd/user/openclaw-ai-quant-factory.timer
-install -m 0644 systemd/openclaw-ai-quant-prune-runtime-logs.service.example \
-  ~/.config/systemd/user/openclaw-ai-quant-prune-runtime-logs.service
-install -m 0644 systemd/openclaw-ai-quant-prune-runtime-logs.timer.example \
-  ~/.config/systemd/user/openclaw-ai-quant-prune-runtime-logs.timer
+install -m 0644 systemd/openclaw-ai-quant-factory-v8.service.example \
+  ~/.config/systemd/user/openclaw-ai-quant-factory-v8.service
+install -m 0644 systemd/openclaw-ai-quant-factory-v8.timer.example \
+  ~/.config/systemd/user/openclaw-ai-quant-factory-v8.timer
+install -m 0644 systemd/openclaw-ai-quant-prune-runtime-logs-v8.service.example \
+  ~/.config/systemd/user/openclaw-ai-quant-prune-runtime-logs-v8.service
+install -m 0644 systemd/openclaw-ai-quant-prune-runtime-logs-v8.timer.example \
+  ~/.config/systemd/user/openclaw-ai-quant-prune-runtime-logs-v8.timer
 install -m 0644 systemd/openclaw-ai-quant-replay-alignment-gate.service.example \
   ~/.config/systemd/user/openclaw-ai-quant-replay-alignment-gate.service
 install -m 0644 systemd/openclaw-ai-quant-replay-alignment-gate.timer.example \
   ~/.config/systemd/user/openclaw-ai-quant-replay-alignment-gate.timer
 systemctl --user daemon-reload
-systemctl --user enable --now openclaw-ai-quant-factory.timer
-systemctl --user enable --now openclaw-ai-quant-prune-runtime-logs.timer
+systemctl --user enable --now openclaw-ai-quant-factory-v8.timer
+systemctl --user enable --now openclaw-ai-quant-prune-runtime-logs-v8.timer
 systemctl --user enable --now openclaw-ai-quant-replay-alignment-gate.timer
 ```
 
@@ -94,7 +96,7 @@ python tools/promote_to_live.py --apply ... --ignore-replay-gate
 Do not store secrets in the repo. Recommended locations:
 
 - Hyperliquid key material: `~/.config/openclaw/ai-quant-secrets.json` (chmod 600)
-- Service environment: `~/.config/openclaw/ai-quant-live.env`
+- Service environment: `~/.config/openclaw/ai-quant-live-v8.env`
   - Put alerting targets (e.g. `AI_QUANT_ALERT_TARGETS`) here, especially if using webhook URLs.
 
 ---
@@ -110,11 +112,11 @@ Blocks new entries but allows exits to close positions.
 ```bash
 # Close-only mode (recommended default)
 export AI_QUANT_KILL_SWITCH=close_only
-systemctl --user restart openclaw-ai-quant-live
+systemctl --user restart openclaw-ai-quant-live-v8
 
 # Full halt — blocks ALL orders including exits
 export AI_QUANT_KILL_SWITCH=halt_all
-systemctl --user restart openclaw-ai-quant-live
+systemctl --user restart openclaw-ai-quant-live-v8
 ```
 
 ### Option B: Kill-switch via file (no restart needed)
@@ -138,10 +140,10 @@ AI_QUANT_KILL_SWITCH_FILE=/tmp/ai-quant-kill
 
 ```bash
 # Stop live trading
-systemctl --user stop openclaw-ai-quant-live
+systemctl --user stop openclaw-ai-quant-live-v8
 
 # Stop paper trading
-systemctl --user stop openclaw-ai-quant-trader
+systemctl --user stop openclaw-ai-quant-trader-v8-paper1
 ```
 
 ### Clearing the kill-switch
@@ -152,17 +154,17 @@ rm /tmp/ai-quant-kill
 
 # Clear env-based kill — unset and restart
 unset AI_QUANT_KILL_SWITCH
-systemctl --user restart openclaw-ai-quant-live
+systemctl --user restart openclaw-ai-quant-live-v8
 ```
 
 ### Verification
 
 ```bash
 # Check service status
-systemctl --user status openclaw-ai-quant-live
+systemctl --user status openclaw-ai-quant-live-v8
 
 # Check logs for kill-switch activation
-journalctl --user -u openclaw-ai-quant-live --since "10 min ago" | grep -i kill
+journalctl --user -u openclaw-ai-quant-live-v8 --since "10 min ago" | grep -i kill
 ```
 
 ---
@@ -234,7 +236,7 @@ Mode overlays are defined under `modes:` in `config/strategy_overrides.yaml`.
 export AI_QUANT_STRATEGY_MODE=fallback
 
 # Restart is required if the mode changes global.engine.interval.
-systemctl --user restart openclaw-ai-quant-live
+systemctl --user restart openclaw-ai-quant-live-v8
 ```
 
 ### Automatic step-down on kill events
@@ -318,13 +320,13 @@ YAML config changes hot-reload automatically via mtime polling. No restart is ne
 
 ```bash
 # Confirm hot-reload happened (look for "Config reloaded" in logs)
-journalctl --user -u openclaw-ai-quant-live --since "2 min ago" | grep -i reload
+journalctl --user -u openclaw-ai-quant-live-v8 --since "2 min ago" | grep -i reload
 ```
 
 If `engine.interval` changed, a restart is required:
 
 ```bash
-systemctl --user restart openclaw-ai-quant-live
+systemctl --user restart openclaw-ai-quant-live-v8
 ```
 
 ---
@@ -606,7 +608,7 @@ sleep 5
 journalctl --user -u openclaw-ai-quant-ws-sidecar --since "10 sec ago" | tail -3
 
 # 3. Trading daemon
-systemctl --user restart openclaw-ai-quant-live    # or openclaw-ai-quant-trader for paper
+systemctl --user restart openclaw-ai-quant-live-v8    # or openclaw-ai-quant-trader-v8-paper1 for paper
 
 # 4. Monitor (optional, non-critical)
 systemctl --user restart openclaw-ai-quant-monitor
@@ -615,8 +617,8 @@ systemctl --user restart openclaw-ai-quant-monitor
 ### Full stop (all services)
 
 ```bash
-systemctl --user stop openclaw-ai-quant-live
-systemctl --user stop openclaw-ai-quant-trader
+systemctl --user stop openclaw-ai-quant-live-v8
+systemctl --user stop openclaw-ai-quant-trader-v8-paper1
 systemctl --user stop openclaw-ai-quant-monitor
 systemctl --user stop openclaw-ai-quant-ws-sidecar
 ```
@@ -626,8 +628,8 @@ systemctl --user stop openclaw-ai-quant-ws-sidecar
 ```bash
 systemctl --user start openclaw-ai-quant-ws-sidecar
 sleep 5
-systemctl --user start openclaw-ai-quant-trader     # paper
-# systemctl --user start openclaw-ai-quant-live     # live (uncomment when ready)
+systemctl --user start openclaw-ai-quant-trader-v8-paper1     # paper
+# systemctl --user start openclaw-ai-quant-live-v8     # live (uncomment when ready)
 systemctl --user start openclaw-ai-quant-monitor
 ```
 
@@ -635,13 +637,13 @@ systemctl --user start openclaw-ai-quant-monitor
 
 ```bash
 # Verify all services are active
-systemctl --user status openclaw-ai-quant-ws-sidecar openclaw-ai-quant-live openclaw-ai-quant-monitor
+systemctl --user status openclaw-ai-quant-ws-sidecar openclaw-ai-quant-live-v8 openclaw-ai-quant-monitor
 
 # Check for errors in the last minute
-journalctl --user -u openclaw-ai-quant-live --since "1 min ago" | grep -iE "error|exception|traceback"
+journalctl --user -u openclaw-ai-quant-live-v8 --since "1 min ago" | grep -iE "error|exception|traceback"
 
 # Confirm config was loaded
-journalctl --user -u openclaw-ai-quant-live --since "1 min ago" | grep -i "config"
+journalctl --user -u openclaw-ai-quant-live-v8 --since "1 min ago" | grep -i "config"
 ```
 
 ---

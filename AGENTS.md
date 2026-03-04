@@ -282,12 +282,14 @@ Kill-switch modes: `close_only` (no new entries, exits allowed) or `halt_all` (n
 
 ### Service Management
 
-- **Paper trader**: `systemctl --user restart openclaw-ai-quant-trader`
-- **Live trader**: `systemctl --user restart openclaw-ai-quant-live`
+- **Paper trader (primary)**: `systemctl --user restart openclaw-ai-quant-trader-v8-paper1`
+- **Paper trader (candidate #2)**: `systemctl --user restart openclaw-ai-quant-trader-v8-paper2`
+- **Paper trader (candidate #3)**: `systemctl --user restart openclaw-ai-quant-trader-v8-paper3`
+- **Live trader**: `systemctl --user restart openclaw-ai-quant-live-v8`
 - **WebSocket sidecar**: `systemctl --user restart openclaw-ai-quant-ws-sidecar`
 - **Monitor**: `systemctl --user restart openclaw-ai-quant-monitor`
-- **Factory timer**: `systemctl --user restart openclaw-ai-quant-factory.timer`
-- **Log pruning timer**: `systemctl --user restart openclaw-ai-quant-prune-runtime-logs.timer`
+- **Factory timer**: `systemctl --user restart openclaw-ai-quant-factory-v8.timer`
+- **Log pruning timer**: `systemctl --user restart openclaw-ai-quant-prune-runtime-logs-v8.timer`
 - **Replay gate timer**: `systemctl --user restart openclaw-ai-quant-replay-alignment-gate.timer`
 
 ### Hot-reload Behaviour
@@ -473,7 +475,7 @@ python tools/flat_now.py --kill-file /tmp/ai-quant-kill --pause-mode close_only 
 
 ### Common Issues
 
-1. **Service won't start**: Check systemd logs with `journalctl --user -u openclaw-ai-quant-trader -f`
+1. **Service won't start**: Check systemd logs with `journalctl --user -u openclaw-ai-quant-trader-v8-paper1 -f`
 
 2. **YAML changes not taking effect**: Verify mtime polling is working. Check engine logs for "Config reloaded" messages.
 

@@ -1,0 +1,55 @@
+[Unit]
+Description=OpenClaw AI Quant Paper Trader Daemon (v8 paper1)
+After=network-online.target openclaw-ai-quant-ws-sidecar.service
+Wants=network-online.target
+Requires=openclaw-ai-quant-ws-sidecar.service
+
+[Service]
+Type=simple
+WorkingDirectory=$PROJECT_DIR
+EnvironmentFile=-%h/.config/openclaw/ai-quant-universe-v8.env
+EnvironmentFile=-%h/.config/openclaw/ai-quant-v8.env
+EnvironmentFile=-%h/.config/openclaw/ai-quant-trader-v8-paper1.env
+ExecStart=$PROJECT_DIR/.venv/bin/python3 -u -m engine.daemon
+Restart=always
+RestartSec=5
+KillMode=process
+
+# Safety: paper only.
+Environment=AI_QUANT_MODE=paper
+Environment=AI_QUANT_INSTANCE_TAG=v8-paper1
+
+# Per-instance state.
+Environment=AI_QUANT_LOCK_PATH=$PROJECT_DIR/ai_quant_paper_v8_paper1.lock
+Environment=AI_QUANT_DB_PATH=$PROJECT_DIR/trading_engine_v8_paper1.db
+Environment=AI_QUANT_MARKET_DB_PATH=$PROJECT_DIR/market_data_v8_paper1.db
+Environment=AI_QUANT_KERNEL_CANDLE_STATE_PATH=%h/.mei/kernel_candle_state_paper1.json
+Environment=AI_QUANT_STRATEGY_MODE_FILE=$PROJECT_DIR/artifacts/state/strategy_mode_v8_paper1.txt
+Environment=AI_QUANT_EVENT_LOG_DIR=$PROJECT_DIR/artifacts/events/v8_paper1
+Environment=AI_QUANT_STRATEGY_YAML=$PROJECT_DIR/config/strategy_overrides.paper1.yaml
+
+# Strategy-mode overlay + promoted role.
+Environment=AI_QUANT_STRATEGY_MODE=primary
+Environment=AI_QUANT_PROMOTED_ROLE=primary
+
+# Keep interval consistent for modules that still read the env var.
+Environment=AI_QUANT_INTERVAL=30m
+Environment=AI_QUANT_LOOKBACK_BARS=200
+
+# Sidecar integration.
+Environment=AI_QUANT_WS_SOURCE=sidecar
+Environment=AI_QUANT_WS_SIDECAR_SOCK=%t/openclaw-ai-quant-ws.sock
+Environment=AI_QUANT_CANDLES_SOURCE=sidecar
+Environment=AI_QUANT_CANDLES_DB_DIR=$PROJECT_DIR/candles_dbs
+
+# Sidecar-only: do not fetch HL REST meta in the engine loop.
+Environment=AI_QUANT_REST_ENABLE=0
+Environment=AI_QUANT_REST_CANDLE_BACKFILL=0
+
+# Paper startup parity behaviour.
+Environment=AI_QUANT_PAPER_BALANCE_FROM_LIVE=1
+
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

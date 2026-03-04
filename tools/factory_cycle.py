@@ -1581,7 +1581,11 @@ def main(argv: list[str] | None = None) -> int:
         choices=["auto", "always", "never"],
         help="Restart policy for deployment (default: auto).",
     )
-    ap.add_argument("--service", default="openclaw-ai-quant-trader", help="systemd user service name for paper trader.")
+    ap.add_argument(
+        "--service",
+        default="openclaw-ai-quant-trader-v8-paper1",
+        help="systemd user service name for the primary paper trader.",
+    )
     ap.add_argument(
         "--ws-service", default="openclaw-ai-quant-ws-sidecar", help="systemd user service name for WS sidecar."
     )

@@ -427,7 +427,7 @@ def test_service_environment_filters_secret_like_keys(monkeypatch) -> None:
         ),
     )
 
-    env = factory_cycle._service_environment("openclaw-ai-quant-trader")
+    env = factory_cycle._service_environment("openclaw-ai-quant-trader-v8-paper1")
 
     assert env["SAFE_ENV"] == "ok"
     assert env["AI_QUANT_DISCORD_CHANNEL"] == "12345"

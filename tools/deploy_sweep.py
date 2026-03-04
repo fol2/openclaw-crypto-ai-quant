@@ -472,7 +472,7 @@ def update_changelog(overrides: dict[str, Any], metrics: dict, version: str):
 
 def restart_services():
     """Restart paper + live trading services."""
-    for svc in ["openclaw-ai-quant-trader", "openclaw-ai-quant-live"]:
+    for svc in ["openclaw-ai-quant-trader-v8-paper1", "openclaw-ai-quant-live-v8"]:
         print(f"[deploy] Restarting {svc}...", file=sys.stderr)
         result = subprocess.run(
             ["systemctl", "--user", "restart", svc],
