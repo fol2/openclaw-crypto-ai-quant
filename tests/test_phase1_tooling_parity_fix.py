@@ -900,6 +900,87 @@ def test_live_paper_action_detects_window_not_replayed_with_funding_gaps(
             str(live_db),
             "--paper-db",
             str(paper_db),
+            "--fail-on-mismatch",
+            "--output",
+            str(output),
+        ],
+    )
+
+    exit_code = live_paper_action.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+
+    assert exit_code == 1
+    assert report["status"]["strict_alignment_pass"] is False
+    assert report["status"]["paper_window_not_replayed"] is True
+    assert report["counts"]["mismatch_total"] == 2
+    assert report["counts"]["paper_window_not_replayed_artefact_mismatch_total"] == 2
+    assert report["counts"]["non_blocking_evidence_total"] == 0
+    assert report["counts"]["true_mismatch_total"] == 0
+    assert report["counts"]["live_simulatable_actions"] == 1
+    assert report["counts"]["paper_simulatable_actions"] == 0
+    assert report["counts"]["unmatched_live_simulatable"] == 1
+    assert report["counts"]["funding_unmatched_live"] == 1
+    assert any(
+        str(row.get("kind") or "") == "paper_window_not_replayed"
+        for row in report["accepted_residuals"]
+    )
+
+
+def test_live_paper_action_window_not_replayed_opt_in_non_blocking(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    live_db = tmp_path / "live.db"
+    paper_db = tmp_path / "paper.db"
+    schema = """
+        CREATE TABLE trades (
+            id INTEGER PRIMARY KEY,
+            timestamp TEXT,
+            symbol TEXT,
+            action TEXT,
+            type TEXT,
+            price REAL,
+            size REAL,
+            pnl REAL,
+            balance REAL,
+            reason TEXT,
+            reason_code TEXT,
+            confidence TEXT,
+            fee_usd REAL,
+            fill_hash TEXT
+        )
+    """
+    for path in (live_db, paper_db):
+        conn = sqlite3.connect(path)
+        conn.execute(schema)
+        conn.commit()
+        conn.close()
+
+    conn = sqlite3.connect(live_db)
+    conn.execute(
+        """
+        INSERT INTO trades
+        (id, timestamp, symbol, action, type, price, size, pnl, balance, reason, reason_code, confidence, fee_usd, fill_hash)
+        VALUES
+        (1, '1970-01-01T00:00:01.000+00:00', 'ETH', 'OPEN', 'SHORT', 100.0, 1.0, 0.0, 100.0, 'entry', 'signal_trigger', 'medium', 0.0, ''),
+        (2, '1970-01-01T00:00:01.100+00:00', 'ETH', 'FUNDING', 'SHORT', 100.0, 1.0, 0.1, 100.1, 'funding', 'funding', 'medium', 0.0, '')
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    output = tmp_path / "live_paper_action_report.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "audit_live_paper_action_reconcile.py",
+            "--live-db",
+            str(live_db),
+            "--paper-db",
+            str(paper_db),
+            "--allow-paper-window-not-replayed",
+            "--fail-on-mismatch",
             "--output",
             str(output),
         ],
@@ -909,12 +990,16 @@ def test_live_paper_action_detects_window_not_replayed_with_funding_gaps(
     report = json.loads(output.read_text(encoding="utf-8"))
 
     assert exit_code == 0
-    assert report["status"]["strict_alignment_pass"] is False
-    assert report["counts"]["live_simulatable_actions"] == 1
-    assert report["counts"]["paper_simulatable_actions"] == 0
-    assert report["counts"]["unmatched_live_simulatable"] == 1
+    assert report["status"]["strict_alignment_pass"] is True
+    assert report["status"]["paper_window_not_replayed"] is True
+    assert report["inputs"]["allow_paper_window_not_replayed"] is True
+    assert report["counts"]["mismatch_total"] == 2
+    assert report["counts"]["paper_window_not_replayed_artefact_mismatch_total"] == 2
+    assert report["counts"]["non_blocking_evidence_total"] == 0
+    assert report["counts"]["true_mismatch_total"] == 0
     assert report["counts"]["funding_unmatched_live"] == 1
     assert any(
         str(row.get("kind") or "") == "paper_window_not_replayed"
+        and bool(row.get("non_blocking_opt_in_enabled")) is True
         for row in report["accepted_residuals"]
     )

@@ -10,7 +10,7 @@ Compared canonical actions:
 - `ADD_LONG`, `ADD_SHORT`
 - `REDUCE_LONG`, `REDUCE_SHORT`
 - `CLOSE_LONG`, `CLOSE_SHORT`
-- `FUNDING` (tracked as accepted residual when one side is missing)
+- `FUNDING` (matched pairs are preserved as non-blocking evidence; one-sided rows remain mismatch evidence)
 
 ## Command
 
@@ -41,6 +41,19 @@ python tools/audit_live_paper_action_reconcile.py \
   --output /tmp/live_paper_action_reconcile.json
 ```
 
+To explicitly allow a paper window that was not replayed:
+
+```bash
+python tools/audit_live_paper_action_reconcile.py \
+  --live-db ./trading_engine_live.db \
+  --paper-db ./trading_engine.db \
+  --from-ts 1770700000000 \
+  --to-ts 1771200000000 \
+  --allow-paper-window-not-replayed \
+  --fail-on-mismatch \
+  --output /tmp/live_paper_action_reconcile.json
+```
+
 ## Pass Criteria
 
 `status.strict_alignment_pass = true` only when there are no:
@@ -51,6 +64,15 @@ python tools/audit_live_paper_action_reconcile.py \
 - reason-code mismatches
 - unmatched non-funding actions on either side
 
-Funding-only one-sided events are captured under `accepted_residuals`.
+Default behaviour is fail-closed.
+
+When `paper_window_not_replayed` is detected, strict pass remains false unless
+`--allow-paper-window-not-replayed` is explicitly set.
+
+All mismatch evidence remains in `mismatches`, while the report exposes:
+
+- `counts.paper_window_not_replayed_artefact_mismatch_total`
+- `counts.non_blocking_evidence_total`
+- `counts.true_mismatch_total`
 
 `status.accepted_residuals_only = true` means strict alignment passed and only accepted residual classes remain.
