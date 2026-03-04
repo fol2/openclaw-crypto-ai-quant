@@ -582,8 +582,6 @@ def main() -> int:
                 "by_symbol": funding_by_symbol,
             }
         )
-    funding_contract_clean = funding_unmatched_live == 0 and funding_unmatched_paper == 0
-
     run_fingerprint_guard_issues: list[dict[str, Any]] = []
     run_fingerprint_guard_detail: dict[str, Any] = {
         "enabled": bool(args.require_single_run_fingerprint),
@@ -655,7 +653,8 @@ def main() -> int:
                 "paper_simulatable_events": paper_counts["paper_simulatable_events"],
             }
         )
-        strict_pass = funding_contract_clean and not run_fingerprint_guard_issues
+        # Preserve funding mismatch evidence, but do not hard-fail a window that was never replayed on paper.
+        strict_pass = not run_fingerprint_guard_issues
 
     # When live baseline has no simulatable events but paper contains only
     # snapshot seed-close rows, treat as expected state-initialisation residual.
@@ -680,7 +679,8 @@ def main() -> int:
                 "paper_simulatable_events": paper_counts["paper_simulatable_events"],
             }
         )
-        strict_pass = funding_contract_clean and not run_fingerprint_guard_issues
+        # Preserve funding mismatch evidence, but do not hard-fail a seed-close-only paper window.
+        strict_pass = not run_fingerprint_guard_issues
 
     report = {
         "schema_version": 1,

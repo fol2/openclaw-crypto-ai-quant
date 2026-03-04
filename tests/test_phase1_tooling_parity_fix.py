@@ -338,7 +338,7 @@ def test_event_order_funding_contract_marks_unmatched_as_mismatch(tmp_path: Path
     )
 
 
-def test_event_order_paper_window_not_replayed_with_unmatched_funding_is_fail_closed(
+def test_event_order_paper_window_not_replayed_with_unmatched_funding_is_non_blocking_with_evidence(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -400,6 +400,7 @@ def test_event_order_paper_window_not_replayed_with_unmatched_funding_is_fail_cl
             str(live_baseline),
             "--paper-db",
             str(paper_db),
+            "--fail-on-mismatch",
             "--output",
             str(output),
         ],
@@ -409,7 +410,7 @@ def test_event_order_paper_window_not_replayed_with_unmatched_funding_is_fail_cl
     report = json.loads(output.read_text(encoding="utf-8"))
 
     assert exit_code == 0
-    assert report["status"]["strict_alignment_pass"] is False
+    assert report["status"]["strict_alignment_pass"] is True
     assert any(
         str(row.get("kind") or "") == "paper_window_not_replayed"
         for row in report["accepted_residuals"]
@@ -419,6 +420,7 @@ def test_event_order_paper_window_not_replayed_with_unmatched_funding_is_fail_cl
         for row in report["mismatches"]
     )
     assert report["counts"]["funding_unmatched_live"] == 1
+    assert report["counts"]["mismatch_count"] >= 1
 
 
 def test_live_paper_action_main_collapses_split_fills(tmp_path: Path, monkeypatch) -> None:
