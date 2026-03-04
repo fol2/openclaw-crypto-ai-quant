@@ -816,6 +816,13 @@ def main() -> int:
     mismatches.extend(run_fingerprint_guard_issues)
 
     accepted_residuals = [m for m in mismatches if m.get("classification") == "non-simulatable_exchange_oms_effect"]
+    live_simulatable_actions = sum(1 for row in live_actions if str(row.get("action_code") or "") != FUNDING_ACTION)
+    paper_simulatable_actions = sum(1 for row in paper_actions if str(row.get("action_code") or "") != FUNDING_ACTION)
+    unmatched_live_simulatable = sum(1 for item in mismatches if str(item.get("kind") or "") == "missing_paper_action")
+    funding_contract_clean = (
+        compare_summary["funding_unmatched_live"] == 0
+        and compare_summary["funding_unmatched_paper"] == 0
+    )
     strict_alignment_pass = (
         compare_summary["numeric_mismatch"] == 0
         and compare_summary["confidence_mismatch"] == 0
@@ -824,15 +831,14 @@ def main() -> int:
         and compare_summary["unmatched_paper"] == 0
         and not run_fingerprint_guard_issues
     )
-    live_simulatable_actions = sum(1 for row in live_actions if str(row.get("action_code") or "") != FUNDING_ACTION)
     paper_window_not_replayed = (
-        len(paper_actions) == 0
+        paper_simulatable_actions == 0
         and live_simulatable_actions > 0
-        and compare_summary["matched_pairs"] == 0
+        and compare_summary["matched_pairs"] == compare_summary["funding_matched_pairs"]
         and compare_summary["numeric_mismatch"] == 0
         and compare_summary["confidence_mismatch"] == 0
         and compare_summary["reason_code_mismatch"] == 0
-        and compare_summary["unmatched_live"] == live_simulatable_actions
+        and unmatched_live_simulatable == live_simulatable_actions
         and compare_summary["unmatched_paper"] == 0
     )
     if paper_window_not_replayed:
@@ -841,10 +847,12 @@ def main() -> int:
                 "classification": "state_initialisation_gap",
                 "kind": "paper_window_not_replayed",
                 "live_simulatable_actions": int(live_simulatable_actions),
-                "paper_simulatable_actions": int(len(paper_actions)),
+                "paper_simulatable_actions": int(paper_simulatable_actions),
+                "live_unmatched_funding_actions": int(compare_summary["funding_unmatched_live"]),
+                "paper_unmatched_funding_actions": int(compare_summary["funding_unmatched_paper"]),
             }
         )
-        strict_alignment_pass = not run_fingerprint_guard_issues
+        strict_alignment_pass = funding_contract_clean and not run_fingerprint_guard_issues
 
     mismatch_counts: dict[str, int] = defaultdict(int)
     for item in mismatches:
@@ -881,6 +889,9 @@ def main() -> int:
             **live_split_fill_stats,
             "paper_split_fill_groups_collapsed": int(paper_split_fill_stats.get("split_fill_groups_collapsed") or 0),
             "paper_split_fill_rows_collapsed": int(paper_split_fill_stats.get("split_fill_rows_collapsed") or 0),
+            "live_simulatable_actions": int(live_simulatable_actions),
+            "paper_simulatable_actions": int(paper_simulatable_actions),
+            "unmatched_live_simulatable": int(unmatched_live_simulatable),
             **compare_summary,
             "mismatch_total": len(mismatches),
         },
