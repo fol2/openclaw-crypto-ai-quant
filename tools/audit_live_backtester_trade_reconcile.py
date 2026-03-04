@@ -266,6 +266,9 @@ def _apply_scope_disjoint_state_gap_classification(
     shared_symbol_sides = scope_contract.get("shared_exit_symbol_sides") or []
     if mismatch_kind != "symbol_side_scope_disjoint" or len(shared_symbol_sides) != 0:
         return 0
+    per_symbol_side = scope_policy_proof.get("per_symbol_side")
+    if not isinstance(per_symbol_side, Mapping):
+        return 0
 
     reclassified = 0
     for row in mismatches:
@@ -274,10 +277,26 @@ def _apply_scope_disjoint_state_gap_classification(
         kind = str(row.get("kind") or "").strip().lower()
         if kind not in {"missing_backtester_exit", "missing_live_exit"}:
             continue
+        symbol = str(row.get("symbol") or "").strip().upper()
+        side = str(row.get("side") or "").strip().upper()
+        if not symbol or side not in {"LONG", "SHORT"}:
+            continue
+        symbol_side = f"{symbol}:{side}"
+        proof_row = per_symbol_side.get(symbol_side)
+        if not isinstance(proof_row, Mapping):
+            continue
+        if not bool(proof_row.get("meets_condition")):
+            continue
+        direction = str(proof_row.get("direction") or "").strip().lower()
+        if kind == "missing_backtester_exit" and direction != "live_only":
+            continue
+        if kind == "missing_live_exit" and direction != "backtester_only":
+            continue
         row["classification"] = "state_initialisation_gap"
         row["scope_contract_gap"] = {
             "kind": "symbol_side_scope_disjoint",
             "shared_exit_symbol_sides": list(shared_symbol_sides),
+            "symbol_side": symbol_side,
             "proof": dict(scope_policy_proof),
         }
         reclassified += 1
@@ -297,16 +316,87 @@ def _build_scope_disjoint_policy_proof(
     required_min_conf = str(policy.get("global_min_confidence") or "").strip().lower()
     required_rank = CONFIDENCE_RANK.get(required_min_conf, -1)
 
-    live_below_threshold = [
-        row
-        for row in live_entry_rows
-        if 0 <= CONFIDENCE_RANK.get(str(row.get("confidence") or "").strip().lower(), -1) < required_rank
-    ]
-    backtester_below_threshold = [
-        row
-        for row in backtester_entry_rows
-        if 0 <= CONFIDENCE_RANK.get(str(row.get("confidence") or "").strip().lower(), -1) < required_rank
-    ]
+    def _by_symbol_side(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            symbol = str(row.get("symbol") or "").strip().upper()
+            side = str(row.get("side") or "").strip().upper()
+            if not symbol or side not in {"LONG", "SHORT"}:
+                continue
+            grouped[f"{symbol}:{side}"].append(row)
+        return grouped
+
+    live_entries_by_symbol_side = _by_symbol_side(live_entry_rows)
+    backtester_entries_by_symbol_side = _by_symbol_side(backtester_entry_rows)
+    live_only_symbol_sides = sorted(
+        set(scope_contract.get("live_exit_symbol_sides") or []) - set(scope_contract.get("backtester_exit_symbol_sides") or [])
+    )
+    backtester_only_symbol_sides = sorted(
+        set(scope_contract.get("backtester_exit_symbol_sides") or []) - set(scope_contract.get("live_exit_symbol_sides") or [])
+    )
+
+    per_symbol_side: dict[str, dict[str, Any]] = {}
+    proof_ok = True
+
+    for symbol_side in live_only_symbol_sides:
+        live_rows = list(live_entries_by_symbol_side.get(symbol_side, []))
+        backtester_rows = list(backtester_entries_by_symbol_side.get(symbol_side, []))
+        live_below = [
+            row
+            for row in live_rows
+            if 0 <= CONFIDENCE_RANK.get(str(row.get("confidence") or "").strip().lower(), -1) < required_rank
+        ]
+        backtester_below = [
+            row
+            for row in backtester_rows
+            if 0 <= CONFIDENCE_RANK.get(str(row.get("confidence") or "").strip().lower(), -1) < required_rank
+        ]
+        meets_condition = bool(len(live_below) > 0 and len(backtester_rows) == 0 and len(backtester_below) == 0)
+        proof_ok = bool(proof_ok and meets_condition)
+        per_symbol_side[symbol_side] = {
+            "direction": "live_only",
+            "meets_condition": bool(meets_condition),
+            "live_entry_rows": int(len(live_rows)),
+            "backtester_entry_rows": int(len(backtester_rows)),
+            "live_entries_below_threshold": int(len(live_below)),
+            "backtester_entries_below_threshold": int(len(backtester_below)),
+        }
+
+    for symbol_side in backtester_only_symbol_sides:
+        live_rows = list(live_entries_by_symbol_side.get(symbol_side, []))
+        backtester_rows = list(backtester_entries_by_symbol_side.get(symbol_side, []))
+        backtester_below = [
+            row
+            for row in backtester_rows
+            if 0 <= CONFIDENCE_RANK.get(str(row.get("confidence") or "").strip().lower(), -1) < required_rank
+        ]
+        backtester_at_or_above = [
+            row
+            for row in backtester_rows
+            if CONFIDENCE_RANK.get(str(row.get("confidence") or "").strip().lower(), -1) >= required_rank
+        ]
+        meets_condition = bool(
+            len(backtester_at_or_above) > 0 and len(backtester_below) == 0 and len(live_rows) == 0
+        )
+        proof_ok = bool(proof_ok and meets_condition)
+        per_symbol_side[symbol_side] = {
+            "direction": "backtester_only",
+            "meets_condition": bool(meets_condition),
+            "live_entry_rows": int(len(live_rows)),
+            "backtester_entry_rows": int(len(backtester_rows)),
+            "live_entries_below_threshold": 0,
+            "backtester_entries_below_threshold": int(len(backtester_below)),
+            "backtester_entries_at_or_above_threshold": int(len(backtester_at_or_above)),
+        }
+
+    live_below_threshold_total = sum(
+        int(item.get("live_entries_below_threshold") or 0)
+        for item in per_symbol_side.values()
+        if str(item.get("direction") or "") == "live_only"
+    )
+    backtester_below_threshold_total = sum(
+        int(item.get("backtester_entries_below_threshold") or 0) for item in per_symbol_side.values()
+    )
 
     evidence_complete = bool(
         str(scope_contract.get("mismatch_kind") or "").strip().lower() == "symbol_side_scope_disjoint"
@@ -314,10 +404,8 @@ def _build_scope_disjoint_policy_proof(
         and bool(policy.get("policy_available"))
         and bool(policy.get("provenance_contract_ok"))
         and required_rank >= 1
-        and len(live_entry_rows) > 0
-        and len(backtester_entry_rows) > 0
-        and len(live_below_threshold) > 0
-        and len(backtester_below_threshold) == 0
+        and len(per_symbol_side) > 0
+        and bool(proof_ok)
     )
     return {
         "kind": "entry_confidence_gate_scope_disjoint",
@@ -326,8 +414,11 @@ def _build_scope_disjoint_policy_proof(
         "required_rank": int(required_rank),
         "live_entry_rows": int(len(live_entry_rows)),
         "backtester_entry_rows": int(len(backtester_entry_rows)),
-        "live_entries_below_threshold": int(len(live_below_threshold)),
-        "backtester_entries_below_threshold": int(len(backtester_below_threshold)),
+        "live_entries_below_threshold": int(live_below_threshold_total),
+        "backtester_entries_below_threshold": int(backtester_below_threshold_total),
+        "live_only_symbol_sides": live_only_symbol_sides,
+        "backtester_only_symbol_sides": backtester_only_symbol_sides,
+        "per_symbol_side": dict(sorted(per_symbol_side.items(), key=lambda kv: kv[0])),
         "live_confidence_counts": _confidence_counts(live_entry_rows),
         "backtester_confidence_counts": _confidence_counts(backtester_entry_rows),
     }

@@ -34,6 +34,7 @@ ORDER_FAIL_EVENTS = {
 }
 DEFAULT_TOL = 1e-9
 DEFAULT_ORDER_FAIL_MATCH_WINDOW_MS = 300_000
+CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 COMPARE_SURFACE_ARTEFACT_KINDS = {
     "matched_funding_pair",
     "missing_backtester_funding_action",
@@ -166,12 +167,14 @@ def _extract_trade_scope_policy_proof(trade_report: Mapping[str, Any] | None) ->
     scope_contract = trade_report.get("scope_contract") if isinstance(trade_report.get("scope_contract"), Mapping) else {}
     scope_proof = scope_contract.get("proof") if isinstance(scope_contract.get("proof"), Mapping) else {}
     evidence_complete = bool(scope_proof.get("evidence_complete"))
+    per_symbol_side = scope_proof.get("per_symbol_side") if isinstance(scope_proof.get("per_symbol_side"), Mapping) else {}
     return {
         "kind": str(scope_proof.get("kind") or "entry_confidence_gate_scope_disjoint"),
         "evidence_complete": bool(evidence_complete),
         "source": "trade_scope_contract_proof",
         "trade_scope_mismatch_kind": str(scope_contract.get("mismatch_kind") or ""),
         "trade_scope_shared_symbol_sides": list(scope_contract.get("shared_exit_symbol_sides") or []),
+        "per_symbol_side": dict(per_symbol_side),
         "details": dict(scope_proof),
     }
 
@@ -335,6 +338,16 @@ def _apply_scope_disjoint_state_gap_classification(
     shared_symbol_sides = scope_contract.get("shared_symbol_sides") or []
     if mismatch_kind != "symbol_side_scope_disjoint" or len(shared_symbol_sides) != 0:
         return 0
+    per_symbol_side = scope_policy_proof.get("per_symbol_side")
+    if not isinstance(per_symbol_side, Mapping):
+        return 0
+    required_rank = -1
+    details = scope_policy_proof.get("details")
+    if isinstance(details, Mapping):
+        try:
+            required_rank = int(details.get("required_rank"))
+        except (TypeError, ValueError):
+            required_rank = -1
 
     reclassified = 0
     for row in mismatches:
@@ -343,10 +356,60 @@ def _apply_scope_disjoint_state_gap_classification(
         kind = str(row.get("kind") or "").strip().lower()
         if kind not in {"missing_backtester_action", "missing_live_action"}:
             continue
+        symbol = str(row.get("symbol") or "").strip().upper()
+        action_code = str(row.get("action_code") or "").strip().upper()
+        side = _extract_side_from_action_code(action_code)
+        if not symbol or side not in {"LONG", "SHORT"}:
+            continue
+        symbol_side = f"{symbol}:{side}"
+        proof_row = per_symbol_side.get(symbol_side)
+        if not isinstance(proof_row, Mapping):
+            proof_row = {}
+        proof_meets = bool(proof_row.get("meets_condition"))
+        direction = str(proof_row.get("direction") or "").strip().lower()
+
+        # Fallback proof for entry-only symbol-sides not present in trade exit scope.
+        if not proof_meets and required_rank >= 1 and action_code.startswith(("OPEN_", "ADD_")):
+            if kind == "missing_backtester_action":
+                live_obj = row.get("live") if isinstance(row.get("live"), Mapping) else {}
+                live_conf = str(live_obj.get("confidence") or "").strip().lower()
+                live_rank = CONFIDENCE_RANK.get(live_conf, -1)
+                if 0 <= live_rank < required_rank:
+                    proof_meets = True
+                    direction = "live_only"
+                    proof_row = {
+                        "direction": "live_only",
+                        "meets_condition": True,
+                        "fallback_entry_only": True,
+                        "live_confidence": live_conf,
+                        "required_rank": int(required_rank),
+                    }
+            elif kind == "missing_live_action":
+                backtester_obj = row.get("backtester") if isinstance(row.get("backtester"), Mapping) else {}
+                bt_conf = str(backtester_obj.get("confidence") or "").strip().lower()
+                bt_rank = CONFIDENCE_RANK.get(bt_conf, -1)
+                if bt_rank >= required_rank:
+                    proof_meets = True
+                    direction = "backtester_only"
+                    proof_row = {
+                        "direction": "backtester_only",
+                        "meets_condition": True,
+                        "fallback_entry_only": True,
+                        "backtester_confidence": bt_conf,
+                        "required_rank": int(required_rank),
+                    }
+
+        if not proof_meets:
+            continue
+        if kind == "missing_backtester_action" and direction != "live_only":
+            continue
+        if kind == "missing_live_action" and direction != "backtester_only":
+            continue
         row["classification"] = "state_initialisation_gap"
         row["scope_contract_gap"] = {
             "kind": "symbol_side_scope_disjoint",
             "shared_symbol_sides": list(shared_symbol_sides),
+            "symbol_side": symbol_side,
             "proof": dict(scope_policy_proof),
         }
         reclassified += 1
