@@ -256,6 +256,43 @@ def _db_path() -> str:
     return str(os.getenv("AI_QUANT_DB_PATH", _default_db_path()) or _default_db_path())
 
 
+def _enforce_v8_only_runtime(mode: str) -> None:
+    """Fail fast when a daemon is started with legacy (non-v8) runtime identity."""
+    if mode not in {"paper", "live", "dry_live"}:
+        return
+    if not _env_bool("AI_QUANT_ENFORCE_V8_ONLY", True):
+        return
+    if _env_bool("AI_QUANT_ALLOW_LEGACY_ENGINE", False):
+        return
+
+    instance_tag = str(os.getenv("AI_QUANT_INSTANCE_TAG", "") or "").strip()
+    db_path = str(_db_path() or "").strip()
+    db_name = Path(db_path).name.lower() if db_path else ""
+
+    tag_ok = instance_tag.lower().startswith("v8-")
+    db_ok = bool(db_name and "v8" in db_name)
+    if tag_ok and db_ok:
+        return
+
+    problems: list[str] = []
+    if not tag_ok:
+        problems.append(
+            f"AI_QUANT_INSTANCE_TAG='{instance_tag or '<unset>'}' must start with 'v8-' "
+            "(for example: v8-LIVE, v8-paper1)"
+        )
+    if not db_ok:
+        problems.append(
+            f"AI_QUANT_DB_PATH='{db_path or '<unset>'}' must point to a v8 DB file "
+            "(expected basename containing 'v8')"
+        )
+    detail = "; ".join(problems)
+    raise SystemExit(
+        "Legacy engine runtime blocked by v8-only guard. "
+        f"{detail}. "
+        "Set AI_QUANT_ALLOW_LEGACY_ENGINE=1 only for one-off recovery/debug workflows."
+    )
+
+
 def _config_file_sha1() -> str:
     """SHA-1 of the active strategy YAML (after promoted_config merge)."""
     import hashlib
@@ -1399,6 +1436,7 @@ def main() -> None:
     import sys
 
     mode = _mode()
+    _enforce_v8_only_runtime(mode)
     try:
         from .sqlite_logger import install_sqlite_stdio_logger
 

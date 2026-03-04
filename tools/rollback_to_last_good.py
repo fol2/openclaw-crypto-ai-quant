@@ -241,8 +241,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument(
         "--service",
-        default="openclaw-ai-quant-trader",
-        help="systemd user service name for paper trader (default: openclaw-ai-quant-trader).",
+        default="openclaw-ai-quant-trader-v8-paper1",
+        help="systemd user service name for paper trader (default: openclaw-ai-quant-trader-v8-paper1).",
     )
     ap.add_argument("--dry-run", action="store_true", help="Write artefacts but do not modify YAML or restart.")
     args = ap.parse_args(argv)

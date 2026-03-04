@@ -968,7 +968,7 @@ def main() -> None:
             rules.setdefault("local_strategy_files", []).append({"path": str(sp), "sha1": _sha1_file(sp)})
 
     # Live env (non-sensitive subset).
-    env_path = Path.home() / ".config" / "openclaw" / "ai-quant-live.env"
+    env_path = Path.home() / ".config" / "openclaw" / "ai-quant-live-v8.env"
     if env_path.exists():
         keep = {
             "AI_QUANT_MODE",

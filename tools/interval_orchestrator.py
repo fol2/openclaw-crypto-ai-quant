@@ -127,7 +127,11 @@ def orchestrate_interval_restart(
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Orchestrate restarts for an interval change (AQC-705).")
     ap.add_argument("--ws-service", default="openclaw-ai-quant-ws-sidecar", help="WS sidecar service name.")
-    ap.add_argument("--trader-service", default="openclaw-ai-quant-trader", help="Trader service name.")
+    ap.add_argument(
+        "--trader-service",
+        default="openclaw-ai-quant-trader-v8-paper1",
+        help="Trader service name.",
+    )
     ap.add_argument("--pause-file", default="", help="Optional kill-switch file path to pause trading.")
     ap.add_argument(
         "--pause-mode",
