@@ -31,14 +31,27 @@ Default behaviour:
 - when `--require-live-paper` is set, requires live/paper report `status.strict_alignment_pass = true`
 - when `--require-live-paper-decision-trace` is set, requires live/paper decision-trace report `status.strict_alignment_pass = true`
 - allows accepted residuals unless explicitly disabled
+- emits canonical axis contract under `contract.fail_codes` using:
+  - `trade`
+  - `action`
+  - `live_paper`
+  - `live_paper_decision_trace`
+- emits per-axis operator fields under `contract.axes.<axis>`:
+  - `required`, `report_present`
+  - `tool_strict_pass`, `gate_ok`
+  - `strict_no_residuals_checked`
+  - `accepted_residual_count`, `blocking_residual_count`
+  - `failure_codes`
 
-To fail on any accepted residuals:
+To fail on strict-blocking accepted residuals:
 
 ```bash
 python tools/assert_replay_bundle_alignment.py \
   --bundle-dir /tmp/live_replay_bundle_1h \
   --strict-no-residuals
 ```
+
+`--strict-no-residuals` still allows residual classes listed in `contract.strict_allowed_residual_classifications` (currently `non-simulatable_exchange_oms_effect` and `state_initialisation_gap`).
 
 ## Exit Code Contract
 

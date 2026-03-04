@@ -5,6 +5,8 @@ from pathlib import Path
 import stat
 import sys
 
+import pytest
+
 from tools import assert_replay_bundle_alignment as alignment_gate
 from tools import build_live_replay_bundle as replay_bundle_builder
 from tools import run_paper_deterministic_replay as paper_harness
@@ -241,6 +243,102 @@ def test_alignment_gate_action_artefact_only_residuals_pass_with_opt_in(
     assert report["checks"]["action_strict_ok"] is False
     assert report["checks"]["action_opt_in_ok"] is True
     assert report["checks"]["action_artefact_only_mismatch"] is True
+
+
+@pytest.mark.parametrize(
+    ("axis", "report_name", "residual_failure_code", "extra_args"),
+    [
+        ("trade", "trade_reconcile_report.json", "trade_residuals_present", []),
+        ("action", "action_reconcile_report.json", "action_residuals_present", []),
+        (
+            "live_paper",
+            "live_paper_action_reconcile_report.json",
+            "live_paper_residuals_present",
+            ["--require-live-paper"],
+        ),
+    ],
+)
+def test_alignment_gate_axis_contract_marks_blocking_residuals_per_axis(
+    tmp_path: Path,
+    monkeypatch,
+    axis: str,
+    report_name: str,
+    residual_failure_code: str,
+    extra_args: list[str],
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    _write_base_gate_bundle(bundle_dir, seed_apply_report={"strict_replace": False})
+    _write_json(
+        bundle_dir / report_name,
+        {
+            "status": {"strict_alignment_pass": True},
+            "accepted_residuals": [
+                {"classification": "deterministic_logic_divergence", "kind": f"blocking_{axis}_residual"}
+            ],
+            "counts": {},
+        },
+    )
+    output = bundle_dir / "alignment_gate_report.json"
+    argv = [
+        "assert_replay_bundle_alignment.py",
+        "--bundle-dir",
+        str(bundle_dir),
+        "--skip-candles-provenance-check",
+        "--strict-no-residuals",
+        "--output",
+        str(output),
+    ]
+    argv.extend(extra_args)
+
+    monkeypatch.setattr(sys, "argv", argv)
+    exit_code = alignment_gate.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+    failure_codes = {str(row.get("code") or "") for row in report.get("failures") or []}
+    axis_contract = (report.get("contract") or {}).get("axes", {}).get(axis, {})
+
+    assert exit_code == 1
+    assert residual_failure_code in failure_codes
+    assert report["contract"]["fail_codes"] == [axis]
+    assert axis_contract.get("report_present") is True
+    assert axis_contract.get("tool_strict_pass") is True
+    assert axis_contract.get("gate_ok") is False
+    assert axis_contract.get("strict_no_residuals_checked") is True
+    assert int(axis_contract.get("accepted_residual_count") or 0) == 1
+    assert int(axis_contract.get("blocking_residual_count") or 0) == 1
+    assert residual_failure_code in set(axis_contract.get("failure_codes") or [])
+
+
+def test_alignment_gate_axis_contract_marks_optional_live_paper_missing_as_green(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    _write_base_gate_bundle(bundle_dir, seed_apply_report={"strict_replace": False})
+    output = bundle_dir / "alignment_gate_report.json"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "assert_replay_bundle_alignment.py",
+            "--bundle-dir",
+            str(bundle_dir),
+            "--skip-candles-provenance-check",
+            "--output",
+            str(output),
+        ],
+    )
+    exit_code = alignment_gate.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+    axis_contract = (report.get("contract") or {}).get("axes", {}).get("live_paper", {})
+
+    assert exit_code == 0
+    assert report["contract"]["fail_codes"] == []
+    assert axis_contract.get("required") is False
+    assert axis_contract.get("report_present") is False
+    assert axis_contract.get("tool_strict_pass") is None
+    assert axis_contract.get("gate_ok") is True
+    assert axis_contract.get("strict_no_residuals_checked") is False
 
 
 def _write_script(path: Path, body: str) -> None:
