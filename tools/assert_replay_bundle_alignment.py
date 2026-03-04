@@ -127,6 +127,15 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--allow-action-artefact-residuals",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in: allow action-axis gate pass when action report signals "
+            "artefact-only mismatches. Default remains strict fail-closed."
+        ),
+    )
+    parser.add_argument(
         "--skip-candles-provenance-check",
         action="store_true",
         default=False,
@@ -1011,6 +1020,11 @@ def main() -> int:
                 )
 
     action_report: dict[str, Any] | None = None
+    action_strict_status = False
+    action_opt_in_status = False
+    action_selected_status = False
+    action_artefact_only_mismatch = False
+    action_gate_mode = "allow_action_artefact_residuals" if bool(args.allow_action_artefact_residuals) else "strict_fail_closed"
     if not action_path.exists():
         failures.append(
             {
@@ -1021,14 +1035,26 @@ def main() -> int:
         )
     else:
         action_report = _load_json(action_path)
-        action_status = bool(((action_report.get("status") or {}).get("strict_alignment_pass")))
-        if not action_status:
+        action_status_obj = (action_report.get("status") or {}) if isinstance(action_report, dict) else {}
+        action_strict_status = bool(action_status_obj.get("strict_alignment_pass"))
+        raw_action_opt_in_status = action_status_obj.get("gate_pass_if_allow_compare_surface_artefacts")
+        if isinstance(raw_action_opt_in_status, bool):
+            action_opt_in_status = raw_action_opt_in_status
+        else:
+            action_opt_in_status = action_strict_status
+        action_artefact_only_mismatch = bool(action_status_obj.get("artefact_only_mismatch"))
+        action_selected_status = action_opt_in_status if bool(args.allow_action_artefact_residuals) else action_strict_status
+        if not action_selected_status:
             failures.append(
                 {
                     "code": "action_alignment_failed",
                     "classification": "deterministic_logic_divergence",
                     "detail": "action reconciliation strict alignment failed",
                     "counts": action_report.get("counts") or {},
+                    "gate_mode": action_gate_mode,
+                    "strict_alignment_pass": action_strict_status,
+                    "opt_in_alignment_pass": action_opt_in_status,
+                    "artefact_only_mismatch": action_artefact_only_mismatch,
                 }
             )
         if args.strict_no_residuals:
@@ -1061,7 +1087,7 @@ def main() -> int:
 
     if snapshot_trades_only_gate and (
         (trade_report is not None and not bool(((trade_report.get("status") or {}).get("strict_alignment_pass"))))
-        or (action_report is not None and not bool(((action_report.get("status") or {}).get("strict_alignment_pass"))))
+        or (action_report is not None and not bool(action_selected_status))
     ):
         failures.append(
             {
@@ -1342,6 +1368,7 @@ def main() -> int:
             "require_gpu_parity": bool(args.require_gpu_parity),
             "strict_no_residuals": bool(args.strict_no_residuals),
             "allow_trade_policy_mismatch_residual": bool(args.allow_trade_policy_mismatch_residual),
+            "allow_action_artefact_residuals": bool(args.allow_action_artefact_residuals),
         },
         "checks": {
             "manifest_present": manifest is not None,
@@ -1366,6 +1393,11 @@ def main() -> int:
             "action_ok": bool((action_report.get("status") or {}).get("strict_alignment_pass"))
             if action_report
             else False,
+            "action_ok": bool(action_selected_status) if action_report else False,
+            "action_gate_mode": action_gate_mode,
+            "action_strict_ok": bool(action_strict_status),
+            "action_opt_in_ok": bool(action_opt_in_status),
+            "action_artefact_only_mismatch": bool(action_artefact_only_mismatch),
             "live_paper_ok": bool((live_paper_report.get("status") or {}).get("strict_alignment_pass"))
             if live_paper_report
             else (not bool(args.require_live_paper)),

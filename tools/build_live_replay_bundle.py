@@ -1139,6 +1139,9 @@ def main() -> int:
         'if [ "${STRICT_NO_RESIDUALS:-0}" = "1" ]; then\n'
         "  GATE_ARGS+=(--strict-no-residuals)\n"
         "fi\n"
+        'if [ "${AQC_ALLOW_ACTION_ARTEFACT_RESIDUALS:-0}" = "1" ]; then\n'
+        "  GATE_ARGS+=(--allow-action-artefact-residuals)\n"
+        "fi\n"
         'python3 "$REPO_ROOT/tools/assert_replay_bundle_alignment.py" "${GATE_ARGS[@]}" '
         f'--output "$BUNDLE_DIR/{alignment_gate_path.name}"'
     )
@@ -1149,10 +1152,13 @@ def main() -> int:
         'REPO_ROOT="${REPO_ROOT:-$(pwd)}"\n'
         'STRICT_FLAG=""\n'
         'if [ "${STRICT_NO_RESIDUALS:-0}" = "1" ]; then STRICT_FLAG="--strict-no-residuals"; fi\n'
+        'ALLOW_ACTION_ARTEFACT_FLAG=""\n'
+        'if [ "${AQC_ALLOW_ACTION_ARTEFACT_RESIDUALS:-0}" = "1" ]; then ALLOW_ACTION_ARTEFACT_FLAG="--allow-action-artefact-residuals"; fi\n'
         'python3 "$REPO_ROOT/tools/run_paper_deterministic_replay.py" '
         '--bundle-dir "$BUNDLE_DIR" '
         '--repo-root "$REPO_ROOT" '
         "$STRICT_FLAG "
+        "$ALLOW_ACTION_ARTEFACT_FLAG "
         f'--output "$BUNDLE_DIR/{paper_harness_report_path.name}"'
     )
 

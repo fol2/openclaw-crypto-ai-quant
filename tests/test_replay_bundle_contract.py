@@ -20,6 +20,7 @@ def _write_base_gate_bundle(
     manifest_inputs: dict | None = None,
     manifest_extra: dict | None = None,
     seed_apply_report: dict | None = None,
+    action_report: dict | None = None,
 ) -> None:
     bundle_dir.mkdir(parents=True, exist_ok=True)
     _write_json(bundle_dir / "state_alignment_report.json", {"ok": True, "summary": {"diff_count": 0}})
@@ -29,7 +30,7 @@ def _write_base_gate_bundle(
     )
     _write_json(
         bundle_dir / "action_reconcile_report.json",
-        {"status": {"strict_alignment_pass": True}, "accepted_residuals": [], "counts": {}},
+        action_report or {"status": {"strict_alignment_pass": True}, "accepted_residuals": [], "counts": {}},
     )
     _write_json(
         bundle_dir / "backtester_replay_report.json",
@@ -145,6 +146,101 @@ def test_alignment_gate_fails_on_live_run_fingerprint_provenance_window_mismatch
 
     assert exit_code == 1
     assert "live_run_fingerprint_provenance_window_mismatch" in failure_codes
+
+
+def test_alignment_gate_action_artefact_only_residuals_fail_closed_by_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    _write_base_gate_bundle(
+        bundle_dir,
+        seed_apply_report={"strict_replace": False},
+        action_report={
+            "status": {
+                "strict_alignment_pass": False,
+                "gate_pass_if_allow_compare_surface_artefacts": True,
+                "artefact_only_mismatch": True,
+            },
+            "accepted_residuals": [],
+            "counts": {"mismatch_total": 109},
+        },
+    )
+    output = bundle_dir / "alignment_gate_report.json"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "assert_replay_bundle_alignment.py",
+            "--bundle-dir",
+            str(bundle_dir),
+            "--skip-candles-provenance-check",
+            "--output",
+            str(output),
+        ],
+    )
+    exit_code = alignment_gate.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+    failure_codes = {str(row.get("code") or "") for row in report.get("failures") or []}
+    action_failure = next(
+        (row for row in report.get("failures") or [] if str(row.get("code") or "") == "action_alignment_failed"),
+        {},
+    )
+
+    assert exit_code == 1
+    assert "action_alignment_failed" in failure_codes
+    assert report["checks"]["action_gate_mode"] == "strict_fail_closed"
+    assert report["checks"]["action_ok"] is False
+    assert report["checks"]["action_strict_ok"] is False
+    assert report["checks"]["action_opt_in_ok"] is True
+    assert report["checks"]["action_artefact_only_mismatch"] is True
+    assert action_failure.get("gate_mode") == "strict_fail_closed"
+
+
+def test_alignment_gate_action_artefact_only_residuals_pass_with_opt_in(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    _write_base_gate_bundle(
+        bundle_dir,
+        seed_apply_report={"strict_replace": False},
+        action_report={
+            "status": {
+                "strict_alignment_pass": False,
+                "gate_pass_if_allow_compare_surface_artefacts": True,
+                "artefact_only_mismatch": True,
+            },
+            "accepted_residuals": [],
+            "counts": {"mismatch_total": 109},
+        },
+    )
+    output = bundle_dir / "alignment_gate_report.json"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "assert_replay_bundle_alignment.py",
+            "--bundle-dir",
+            str(bundle_dir),
+            "--allow-action-artefact-residuals",
+            "--skip-candles-provenance-check",
+            "--output",
+            str(output),
+        ],
+    )
+    exit_code = alignment_gate.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert report["ok"] is True
+    assert report["checks"]["action_gate_mode"] == "allow_action_artefact_residuals"
+    assert report["checks"]["action_ok"] is True
+    assert report["checks"]["action_strict_ok"] is False
+    assert report["checks"]["action_opt_in_ok"] is True
+    assert report["checks"]["action_artefact_only_mismatch"] is True
 
 
 def _write_script(path: Path, body: str) -> None:
@@ -316,7 +412,7 @@ def test_paper_harness_runs_bundle_gate_script_and_sets_strict_flag(
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
             'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
-            'echo "strict=${STRICT_NO_RESIDUALS:-}" > "$BUNDLE_DIR/gate_env.txt"\n'
+            'echo "strict=${STRICT_NO_RESIDUALS:-} allow_action_artefacts=${AQC_ALLOW_ACTION_ARTEFACT_RESIDUALS:-}" > "$BUNDLE_DIR/gate_env.txt"\n'
             'echo "$(basename "$0")" >> "$BUNDLE_DIR/steps.log"\n'
         ),
     )
@@ -344,5 +440,74 @@ def test_paper_harness_runs_bundle_gate_script_and_sets_strict_flag(
 
     assert exit_code == 0
     assert report.get("ok") is True
-    assert gate_env == "strict=1"
+    assert gate_env == "strict=1 allow_action_artefacts=0"
+    assert report.get("allow_action_artefact_residuals") is False
+    assert "run_08_assert_alignment.sh" in str(alignment_step.get("command") or "")
+
+
+def test_paper_harness_sets_action_artefact_opt_in_when_enabled(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    output = bundle_dir / "paper_deterministic_replay_run.json"
+
+    for script_name in (
+        "run_01_export_and_seed.sh",
+        "run_02_replay.sh",
+        "run_03_audit.sh",
+        "run_04_trade_reconcile.sh",
+        "run_05_action_reconcile.sh",
+        "run_06_live_paper_action_reconcile.sh",
+        "run_07_live_paper_decision_trace_reconcile.sh",
+        "run_07c_gpu_parity.sh",
+        "run_07b_event_order_parity.sh",
+    ):
+        _write_script(
+            bundle_dir / script_name,
+            (
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+                'echo "$(basename "$0")" >> "$BUNDLE_DIR/steps.log"\n'
+            ),
+        )
+
+    _write_script(
+        bundle_dir / "run_08_assert_alignment.sh",
+        (
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+            'echo "strict=${STRICT_NO_RESIDUALS:-} allow_action_artefacts=${AQC_ALLOW_ACTION_ARTEFACT_RESIDUALS:-}" > "$BUNDLE_DIR/gate_env.txt"\n'
+            'echo "$(basename "$0")" >> "$BUNDLE_DIR/steps.log"\n'
+        ),
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_paper_deterministic_replay.py",
+            "--bundle-dir",
+            str(bundle_dir),
+            "--repo-root",
+            str(tmp_path),
+            "--allow-action-artefact-residuals",
+            "--output",
+            str(output),
+        ],
+    )
+
+    exit_code = paper_harness.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+    gate_env = (bundle_dir / "gate_env.txt").read_text(encoding="utf-8").strip()
+    steps = report.get("steps") or []
+    alignment_step = next((row for row in steps if row.get("step") == "alignment_gate"), {})
+
+    assert exit_code == 0
+    assert report.get("ok") is True
+    assert report.get("allow_action_artefact_residuals") is True
+    assert gate_env == "strict=0 allow_action_artefacts=1"
     assert "run_08_assert_alignment.sh" in str(alignment_step.get("command") or "")

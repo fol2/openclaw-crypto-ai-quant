@@ -66,6 +66,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fee-tol", type=float, default=DEFAULT_TOL, help="Absolute tolerance for fee comparison")
     parser.add_argument("--balance-tol", type=float, default=DEFAULT_TOL, help="Absolute tolerance for balance comparison")
     parser.add_argument(
+        "--allow-compare-surface-artefacts",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in: expose gate pass for artefact-only mismatch windows "
+            "(strict fail-closed remains the default signal)."
+        ),
+    )
+    parser.add_argument(
         "--order-fail-match-window-ms",
         type=int,
         default=DEFAULT_ORDER_FAIL_MATCH_WINDOW_MS,
@@ -1005,6 +1014,16 @@ def main() -> int:
         and compare_summary["unmatched_live"] == 0
         and compare_summary["unmatched_backtester"] == 0
     )
+    logic_divergence_free = int(mismatch_breakdown["logic_divergence_total"]) == 0
+    compare_surface_artefact_total = int(mismatch_breakdown["compare_surface_artefact_total"])
+    artefact_only_mismatch = bool(logic_divergence_free and compare_surface_artefact_total > 0)
+    gate_pass_if_allow_compare_surface_artefacts = bool(strict_alignment_pass or artefact_only_mismatch)
+    selected_gate_pass = bool(
+        gate_pass_if_allow_compare_surface_artefacts
+        if args.allow_compare_surface_artefacts
+        else strict_alignment_pass
+    )
+    selected_gate_mode = "allow_compare_surface_artefacts" if args.allow_compare_surface_artefacts else "strict_fail_closed"
 
     report = {
         "schema_version": 1,
@@ -1021,6 +1040,7 @@ def main() -> int:
             "fee_tol": float(args.fee_tol),
             "balance_tol": float(args.balance_tol),
             "order_fail_match_window_ms": max(1, int(args.order_fail_match_window_ms)),
+            "allow_compare_surface_artefacts": bool(args.allow_compare_surface_artefacts),
         },
         "counts": {
             **live_counts,
@@ -1035,6 +1055,13 @@ def main() -> int:
         "status": {
             "strict_alignment_pass": strict_alignment_pass,
             "accepted_residuals_only": strict_alignment_pass and bool(accepted_residuals),
+            "logic_divergence_free": bool(logic_divergence_free),
+            "artefact_only_mismatch": bool(artefact_only_mismatch),
+            "gate_pass_strict_fail_closed": bool(strict_alignment_pass),
+            "gate_pass_if_allow_compare_surface_artefacts": bool(gate_pass_if_allow_compare_surface_artefacts),
+            "selected_gate_mode": selected_gate_mode,
+            "selected_gate_pass": bool(selected_gate_pass),
+            "allow_compare_surface_artefacts_enabled": bool(args.allow_compare_surface_artefacts),
         },
         "mismatch_counts_by_classification": dict(sorted(mismatch_counts.items(), key=lambda x: x[0])),
         "funding_pair_evidence": _summarise_funding_evidence(mismatches),
