@@ -62,6 +62,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "(events beginning with LIVE_ORDER_FAIL_)."
         ),
     )
+    parser.add_argument(
+        "--trade-reconcile-report",
+        help="Optional path to trade_reconcile_report.json for scope-policy proof cross-check",
+    )
     parser.add_argument("--output", required=True, help="Path to output JSON report")
     parser.add_argument(
         "--timestamp-bucket-ms",
@@ -138,6 +142,38 @@ def _parse_timestamp_ms(value: Any) -> int:
 
 def _normalise_symbol(value: Any) -> str:
     return str(value or "").strip().upper()
+
+
+def _load_optional_json(path: Path | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if isinstance(obj, dict):
+        return obj
+    return None
+
+
+def _extract_trade_scope_policy_proof(trade_report: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(trade_report, Mapping):
+        return {
+            "kind": "entry_confidence_gate_scope_disjoint",
+            "evidence_complete": False,
+            "source": "trade_report_missing",
+        }
+    scope_contract = trade_report.get("scope_contract") if isinstance(trade_report.get("scope_contract"), Mapping) else {}
+    scope_proof = scope_contract.get("proof") if isinstance(scope_contract.get("proof"), Mapping) else {}
+    evidence_complete = bool(scope_proof.get("evidence_complete"))
+    return {
+        "kind": str(scope_proof.get("kind") or "entry_confidence_gate_scope_disjoint"),
+        "evidence_complete": bool(evidence_complete),
+        "source": "trade_scope_contract_proof",
+        "trade_scope_mismatch_kind": str(scope_contract.get("mismatch_kind") or ""),
+        "trade_scope_shared_symbol_sides": list(scope_contract.get("shared_exit_symbol_sides") or []),
+        "details": dict(scope_proof),
+    }
 
 
 def _normalise_side(value: Any) -> str:
@@ -289,8 +325,11 @@ def _apply_scope_disjoint_state_gap_classification(
     mismatches: list[dict[str, Any]],
     *,
     scope_contract: Mapping[str, Any] | None,
+    scope_policy_proof: Mapping[str, Any] | None,
 ) -> int:
     if not isinstance(scope_contract, Mapping):
+        return 0
+    if not isinstance(scope_policy_proof, Mapping) or not bool(scope_policy_proof.get("evidence_complete")):
         return 0
     mismatch_kind = str(scope_contract.get("mismatch_kind") or "").strip().lower()
     shared_symbol_sides = scope_contract.get("shared_symbol_sides") or []
@@ -308,6 +347,7 @@ def _apply_scope_disjoint_state_gap_classification(
         row["scope_contract_gap"] = {
             "kind": "symbol_side_scope_disjoint",
             "shared_symbol_sides": list(shared_symbol_sides),
+            "proof": dict(scope_policy_proof),
         }
         reclassified += 1
     return reclassified
@@ -1161,6 +1201,9 @@ def main() -> int:
     live_baseline = Path(args.live_baseline).expanduser().resolve()
     backtester_report = Path(args.backtester_replay_report).expanduser().resolve()
     live_order_fail_events_path = Path(args.live_order_fail_events).expanduser().resolve() if args.live_order_fail_events else None
+    trade_reconcile_report_path = (
+        Path(args.trade_reconcile_report).expanduser().resolve() if args.trade_reconcile_report else None
+    )
     output = Path(args.output).expanduser().resolve()
 
     if not live_baseline.exists():
@@ -1169,6 +1212,8 @@ def main() -> int:
         parser.error(f"backtester replay report not found: {backtester_report}")
     if live_order_fail_events_path is not None and not live_order_fail_events_path.exists():
         parser.error(f"live order-fail events file not found: {live_order_fail_events_path}")
+    if trade_reconcile_report_path is not None and not trade_reconcile_report_path.exists():
+        parser.error(f"trade reconcile report not found: {trade_reconcile_report_path}")
 
     live_actions, live_counts = _load_live_actions(live_baseline)
     live_actions, live_split_fill_stats = _collapse_split_fill_actions(live_actions)
@@ -1203,10 +1248,14 @@ def main() -> int:
         backtester_actions,
         matched_pairs=int(compare_summary.get("matched_pairs") or 0),
     )
+    trade_report = _load_optional_json(trade_reconcile_report_path)
+    scope_policy_proof = _extract_trade_scope_policy_proof(trade_report)
+    scope_contract["proof"] = scope_policy_proof
     classification_reclassified_count = _normalise_compare_surface_classifications(mismatches)
     scope_classification_reclassified_count = _apply_scope_disjoint_state_gap_classification(
         mismatches,
         scope_contract=scope_contract,
+        scope_policy_proof=scope_policy_proof,
     )
     classification_reclassified_count += int(scope_classification_reclassified_count)
 
@@ -1246,6 +1295,7 @@ def main() -> int:
             "live_baseline": str(live_baseline),
             "backtester_replay_report": str(backtester_report),
             "live_order_fail_events": str(live_order_fail_events_path) if live_order_fail_events_path else None,
+            "trade_reconcile_report": str(trade_reconcile_report_path) if trade_reconcile_report_path else None,
             "timestamp_bucket_ms": max(1, int(args.timestamp_bucket_ms)),
             "timestamp_bucket_anchor": str(args.timestamp_bucket_anchor or "floor"),
             "price_tol": float(args.price_tol),
@@ -1269,6 +1319,7 @@ def main() -> int:
             "classification_reclassified_count": int(classification_reclassified_count),
             "scope_shared_symbols": len(scope_contract.get("shared_symbols") or []),
             "scope_shared_symbol_sides": len(scope_contract.get("shared_symbol_sides") or []),
+            "scope_policy_proof_evidence_complete": bool(scope_policy_proof.get("evidence_complete")),
             "mismatch_total": len(mismatches),
         },
         "status": {

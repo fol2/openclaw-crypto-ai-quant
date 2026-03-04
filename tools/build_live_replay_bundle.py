@@ -1126,6 +1126,7 @@ def main() -> int:
         'python3 "$REPO_ROOT/tools/audit_live_backtester_action_reconcile.py" '
         f'--live-baseline "$BUNDLE_DIR/{live_trades_path.name}" '
         f'--backtester-replay-report "$BUNDLE_DIR/{replay_report_path.name}" '
+        f'--trade-reconcile-report "$BUNDLE_DIR/{trade_reconcile_path.name}" '
         f'--live-order-fail-events "$BUNDLE_DIR/{live_order_fail_events_path.name}" '
         f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
         "--timestamp-bucket-anchor floor "

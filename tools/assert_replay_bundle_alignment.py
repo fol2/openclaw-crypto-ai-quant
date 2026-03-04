@@ -1073,6 +1073,7 @@ def main() -> int:
     trade_policy_mismatch_opt_in_applied = False
     trade_policy_mismatch_opt_in_proof: dict[str, Any] = {}
     trade_scope_contract_mismatch = False
+    trade_scope_contract_proof_ok = False
     if not trade_path.exists():
         axis_gate_status["trade"] = False
         axis_failure_codes["trade"].append("missing_trade_report")
@@ -1092,6 +1093,10 @@ def main() -> int:
             trade_status_obj.get("scope_contract_mismatch")
             or (trade_scope_contract.get("mismatch") if isinstance(trade_scope_contract, dict) else False)
         )
+        if isinstance(trade_scope_contract, dict):
+            trade_scope_proof = trade_scope_contract.get("proof")
+            if isinstance(trade_scope_proof, dict):
+                trade_scope_contract_proof_ok = bool(trade_scope_proof.get("evidence_complete"))
         trade_status = bool(trade_status_obj.get("strict_alignment_pass"))
         axis_tool_status["trade"] = trade_status
         axis_gate_status["trade"] = trade_status
@@ -1142,7 +1147,7 @@ def main() -> int:
                         "total_accepted_residuals": len(trade_residuals),
                     }
                 )
-        if trade_scope_contract_mismatch and not axis_gate_status["trade"]:
+        if trade_scope_contract_mismatch and not trade_scope_contract_proof_ok:
             axis_gate_status["trade"] = False
             axis_failure_codes["trade"].append("trade_replay_scope_contract_mismatch")
             failures.append(
@@ -1165,6 +1170,7 @@ def main() -> int:
     action_artefact_only_mismatch = False
     action_paper_window_not_replayed = False
     action_scope_contract_mismatch = False
+    action_scope_contract_proof_ok = False
     action_gate_mode = (
         "allow_action_artefact_residuals" if bool(args.allow_action_artefact_residuals) else "strict_fail_closed"
     )
@@ -1188,6 +1194,10 @@ def main() -> int:
             action_status_obj.get("scope_contract_mismatch")
             or (action_scope_contract.get("mismatch") if isinstance(action_scope_contract, dict) else False)
         )
+        if isinstance(action_scope_contract, dict):
+            action_scope_proof = action_scope_contract.get("proof")
+            if isinstance(action_scope_proof, dict):
+                action_scope_contract_proof_ok = bool(action_scope_proof.get("evidence_complete"))
         action_strict_status = bool(action_status_obj.get("strict_alignment_pass"))
         action_artefact_only_mismatch = bool(action_status_obj.get("artefact_only_mismatch"))
         action_residuals = list(action_report.get("accepted_residuals") or [])
@@ -1258,7 +1268,7 @@ def main() -> int:
                         "total_accepted_residuals": len(action_residuals),
                     }
                 )
-        if action_scope_contract_mismatch and not axis_gate_status["action"]:
+        if action_scope_contract_mismatch and not action_scope_contract_proof_ok:
             axis_gate_status["action"] = False
             axis_failure_codes["action"].append("action_replay_scope_contract_mismatch")
             failures.append(
@@ -1644,6 +1654,7 @@ def main() -> int:
             "trade_ok": bool(axis_gate_status.get("trade")),
             "trade_gate_ok": bool(axis_gate_status.get("trade")),
             "trade_scope_contract_mismatch": bool(trade_scope_contract_mismatch),
+            "trade_scope_contract_proof_ok": bool(trade_scope_contract_proof_ok),
             "trade_policy_mismatch_opt_in_applied": bool(trade_policy_mismatch_opt_in_applied),
             "trade_policy_mismatch_opt_in_proof": trade_policy_mismatch_opt_in_proof,
             "action_required": bool(axis_required.get("action")),
@@ -1657,6 +1668,7 @@ def main() -> int:
             "action_opt_in_proof": action_opt_in_proof,
             "action_artefact_only_mismatch": bool(action_artefact_only_mismatch),
             "action_scope_contract_mismatch": bool(action_scope_contract_mismatch),
+            "action_scope_contract_proof_ok": bool(action_scope_contract_proof_ok),
             "action_paper_window_not_replayed": bool(action_paper_window_not_replayed),
             "live_paper_required": bool(axis_required.get("live_paper")),
             "live_paper_report_present": bool(axis_report_present.get("live_paper")),

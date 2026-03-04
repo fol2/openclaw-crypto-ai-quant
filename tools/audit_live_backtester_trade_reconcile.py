@@ -256,8 +256,11 @@ def _apply_scope_disjoint_state_gap_classification(
     mismatches: list[dict[str, Any]],
     *,
     scope_contract: Mapping[str, Any] | None,
+    scope_policy_proof: Mapping[str, Any] | None,
 ) -> int:
     if not isinstance(scope_contract, Mapping):
+        return 0
+    if not isinstance(scope_policy_proof, Mapping) or not bool(scope_policy_proof.get("evidence_complete")):
         return 0
     mismatch_kind = str(scope_contract.get("mismatch_kind") or "").strip().lower()
     shared_symbol_sides = scope_contract.get("shared_exit_symbol_sides") or []
@@ -275,9 +278,59 @@ def _apply_scope_disjoint_state_gap_classification(
         row["scope_contract_gap"] = {
             "kind": "symbol_side_scope_disjoint",
             "shared_exit_symbol_sides": list(shared_symbol_sides),
+            "proof": dict(scope_policy_proof),
         }
         reclassified += 1
     return reclassified
+
+
+def _build_scope_disjoint_policy_proof(
+    *,
+    scope_contract: Mapping[str, Any] | None,
+    locked_entry_policy: Mapping[str, Any] | None,
+    live_entry_rows: list[dict[str, Any]],
+    backtester_entry_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not isinstance(scope_contract, Mapping):
+        return {"kind": "entry_confidence_gate_scope_disjoint", "evidence_complete": False}
+    policy = locked_entry_policy if isinstance(locked_entry_policy, Mapping) else {}
+    required_min_conf = str(policy.get("global_min_confidence") or "").strip().lower()
+    required_rank = CONFIDENCE_RANK.get(required_min_conf, -1)
+
+    live_below_threshold = [
+        row
+        for row in live_entry_rows
+        if 0 <= CONFIDENCE_RANK.get(str(row.get("confidence") or "").strip().lower(), -1) < required_rank
+    ]
+    backtester_below_threshold = [
+        row
+        for row in backtester_entry_rows
+        if 0 <= CONFIDENCE_RANK.get(str(row.get("confidence") or "").strip().lower(), -1) < required_rank
+    ]
+
+    evidence_complete = bool(
+        str(scope_contract.get("mismatch_kind") or "").strip().lower() == "symbol_side_scope_disjoint"
+        and len(scope_contract.get("shared_exit_symbol_sides") or []) == 0
+        and bool(policy.get("policy_available"))
+        and bool(policy.get("provenance_contract_ok"))
+        and required_rank >= 1
+        and len(live_entry_rows) > 0
+        and len(backtester_entry_rows) > 0
+        and len(live_below_threshold) > 0
+        and len(backtester_below_threshold) == 0
+    )
+    return {
+        "kind": "entry_confidence_gate_scope_disjoint",
+        "evidence_complete": bool(evidence_complete),
+        "required_min_confidence": required_min_conf or None,
+        "required_rank": int(required_rank),
+        "live_entry_rows": int(len(live_entry_rows)),
+        "backtester_entry_rows": int(len(backtester_entry_rows)),
+        "live_entries_below_threshold": int(len(live_below_threshold)),
+        "backtester_entries_below_threshold": int(len(backtester_below_threshold)),
+        "live_confidence_counts": _confidence_counts(live_entry_rows),
+        "backtester_confidence_counts": _confidence_counts(backtester_entry_rows),
+    }
 
 
 def _load_live_simulatable_exits(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -1322,9 +1375,17 @@ def main() -> int:
         locked_entry_policy=locked_entry_policy,
         runtime_entry_policy=runtime_entry_policy,
     )
+    scope_policy_proof = _build_scope_disjoint_policy_proof(
+        scope_contract=scope_contract,
+        locked_entry_policy=locked_entry_policy,
+        live_entry_rows=live_entry_rows,
+        backtester_entry_rows=backtester_entry_rows,
+    )
+    scope_contract["proof"] = scope_policy_proof
     scope_reclassified_count = _apply_scope_disjoint_state_gap_classification(
         mismatches,
         scope_contract=scope_contract,
+        scope_policy_proof=scope_policy_proof,
     )
 
     mismatch_counts: dict[str, int] = defaultdict(int)
@@ -1395,6 +1456,7 @@ def main() -> int:
             "deterministic_unexplained": deterministic_unexplained,
             "scope_shared_exit_symbols": len(scope_contract.get("shared_exit_symbols") or []),
             "scope_shared_exit_symbol_sides": len(scope_contract.get("shared_exit_symbol_sides") or []),
+            "scope_policy_proof_evidence_complete": bool(scope_policy_proof.get("evidence_complete")),
             "scope_classification_reclassified_count": int(scope_reclassified_count),
             "mismatch_total": len(mismatches),
         },
