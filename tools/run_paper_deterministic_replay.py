@@ -115,6 +115,7 @@ def main() -> int:
         ("export_and_seed", bundle_dir / "run_01_export_and_seed.sh"),
         ("replay", bundle_dir / "run_02_replay.sh"),
         ("state_audit", bundle_dir / "run_03_audit.sh"),
+        ("paper_window_mirror", bundle_dir / "run_03b_mirror_live_window_to_paper.sh"),
         ("trade_reconcile", bundle_dir / "run_04_trade_reconcile.sh"),
         ("action_reconcile", bundle_dir / "run_05_action_reconcile.sh"),
         ("live_paper_action_reconcile", bundle_dir / "run_06_live_paper_action_reconcile.sh"),

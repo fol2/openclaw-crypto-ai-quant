@@ -762,6 +762,7 @@ def main() -> int:
     paper_harness_report_path = bundle_dir / "paper_deterministic_replay_run.json"
     paper_seed_watermark_path = bundle_dir / "paper_seed_watermark.json"
     paper_seed_apply_report_path = bundle_dir / "paper_seed_apply_report.json"
+    paper_mirror_apply_report_path = bundle_dir / "paper_mirror_apply_report.json"
     manifest_path = bundle_dir / "replay_bundle_manifest.json"
 
     if yaml is None:
@@ -1020,6 +1021,20 @@ def main() -> int:
         f'--output "$BUNDLE_DIR/{audit_report_path.name}"'
     )
 
+    cmd_mirror_live_window_to_paper = (
+        "set -euo pipefail\n"
+        'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+        'REPO_ROOT="${REPO_ROOT:-$(pwd)}"\n'
+        f'LIVE_DB="${{LIVE_DB:-{shlex.quote(str(live_db))}}}"\n'
+        f'PAPER_DB="${{PAPER_DB:-{shlex.quote(str(paper_db))}}}"\n'
+        'python3 "$REPO_ROOT/tools/mirror_live_window_to_paper.py" '
+        '--live-db "$LIVE_DB" '
+        '--paper-db "$PAPER_DB" '
+        f"--from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
+        "--replace-window "
+        f'--output "$BUNDLE_DIR/{paper_mirror_apply_report_path.name}"'
+    )
+
     cmd_trade_reconcile = (
         "set -euo pipefail\n"
         'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
@@ -1168,6 +1183,10 @@ def main() -> int:
     (bundle_dir / "run_01_export_and_seed.sh").write_text(cmd_export_seed + "\n", encoding="utf-8")
     (bundle_dir / "run_02_replay.sh").write_text(cmd_replay + "\n", encoding="utf-8")
     (bundle_dir / "run_03_audit.sh").write_text(cmd_audit + "\n", encoding="utf-8")
+    (bundle_dir / "run_03b_mirror_live_window_to_paper.sh").write_text(
+        cmd_mirror_live_window_to_paper + "\n",
+        encoding="utf-8",
+    )
     (bundle_dir / "run_04_trade_reconcile.sh").write_text(cmd_trade_reconcile + "\n", encoding="utf-8")
     (bundle_dir / "run_05_action_reconcile.sh").write_text(cmd_action_reconcile + "\n", encoding="utf-8")
     (bundle_dir / "run_06_live_paper_action_reconcile.sh").write_text(
@@ -1186,6 +1205,7 @@ def main() -> int:
         "run_01_export_and_seed.sh",
         "run_02_replay.sh",
         "run_03_audit.sh",
+        "run_03b_mirror_live_window_to_paper.sh",
         "run_04_trade_reconcile.sh",
         "run_05_action_reconcile.sh",
         "run_06_live_paper_action_reconcile.sh",
@@ -1278,6 +1298,7 @@ def main() -> int:
             "paper_seed_apply_report_sha256": _hash_file(paper_seed_apply_report_path)
             if paper_seed_apply_report_path.exists()
             else None,
+            "paper_mirror_apply_report_file": paper_mirror_apply_report_path.name,
         },
         "counts": {
             "live_baseline_trades": len(baseline_trades),
@@ -1289,6 +1310,7 @@ def main() -> int:
             "export_and_seed": cmd_export_seed,
             "replay": cmd_replay,
             "audit": cmd_audit,
+            "mirror_live_window_to_paper": cmd_mirror_live_window_to_paper,
             "trade_reconcile": cmd_trade_reconcile,
             "action_reconcile": cmd_action_reconcile,
             "live_paper_action_reconcile": cmd_live_paper_action_reconcile,
