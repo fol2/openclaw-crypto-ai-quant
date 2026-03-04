@@ -41,7 +41,7 @@ python tools/audit_live_paper_action_reconcile.py \
   --output /tmp/live_paper_action_reconcile.json
 ```
 
-To explicitly allow a paper window that was not replayed:
+Legacy diagnostic flag (does not bypass strict failure for coverage gaps):
 
 ```bash
 python tools/audit_live_paper_action_reconcile.py \
@@ -50,7 +50,6 @@ python tools/audit_live_paper_action_reconcile.py \
   --from-ts 1770700000000 \
   --to-ts 1771200000000 \
   --allow-paper-window-not-replayed \
-  --fail-on-mismatch \
   --output /tmp/live_paper_action_reconcile.json
 ```
 
@@ -66,8 +65,8 @@ python tools/audit_live_paper_action_reconcile.py \
 
 Default behaviour is fail-closed.
 
-When `paper_window_not_replayed` is detected, strict pass remains false unless
-`--allow-paper-window-not-replayed` is explicitly set.
+When `paper_window_not_replayed` is detected, strict pass is always false
+(fail-closed replay-window coverage contract).
 
 All mismatch evidence remains in `mismatches`, while the report exposes:
 

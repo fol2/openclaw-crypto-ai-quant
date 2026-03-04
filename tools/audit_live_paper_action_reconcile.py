@@ -64,8 +64,8 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help=(
-            "Opt-in: treat paper_window_not_replayed as non-blocking while preserving "
-            "full mismatch evidence in the report."
+            "Legacy diagnostic flag. paper_window_not_replayed remains strict blocking "
+            "for replay-window coverage safety."
         ),
     )
     parser.add_argument("--output", required=True, help="Path to output JSON report")
@@ -829,6 +829,7 @@ def main() -> int:
     paper_simulatable_actions = sum(1 for row in paper_actions if str(row.get("action_code") or "") != FUNDING_ACTION)
     unmatched_live_simulatable = sum(1 for item in mismatches if str(item.get("kind") or "") == "missing_paper_action")
     paper_window_not_replayed_artefact_mismatch_total = 0
+    paper_window_not_replayed_opt_in_ignored = False
     strict_alignment_pass = (
         compare_summary["numeric_mismatch"] == 0
         and compare_summary["confidence_mismatch"] == 0
@@ -862,12 +863,13 @@ def main() -> int:
                 "paper_unmatched_funding_actions": int(compare_summary["funding_unmatched_paper"]),
                 "artefact_mismatch_total": int(paper_window_not_replayed_artefact_mismatch_total),
                 "non_blocking_opt_in_enabled": bool(args.allow_paper_window_not_replayed),
+                "blocking": True,
             }
         )
         if bool(args.allow_paper_window_not_replayed):
-            # Keep mismatch evidence in the report, but allow a deliberate opt-in
-            # for windows that were not replayed on paper.
-            strict_alignment_pass = not run_fingerprint_guard_issues
+            paper_window_not_replayed_opt_in_ignored = True
+        # Fail closed: replay-window coverage gaps must remain blocking.
+        strict_alignment_pass = False
     non_blocking_evidence_total = sum(
         1 for item in mismatches if str(item.get("classification") or "") == "non-simulatable_exchange_oms_effect"
     )
@@ -877,9 +879,6 @@ def main() -> int:
             len(mismatches) - paper_window_not_replayed_artefact_mismatch_total - non_blocking_evidence_total,
         )
     )
-    if paper_window_not_replayed and bool(args.allow_paper_window_not_replayed):
-        strict_alignment_pass = bool(true_mismatch_total == 0 and not run_fingerprint_guard_issues)
-
     mismatch_counts: dict[str, int] = defaultdict(int)
     for item in mismatches:
         mismatch_counts[str(item.get("classification") or "unknown")] += 1
@@ -929,6 +928,7 @@ def main() -> int:
             "strict_alignment_pass": strict_alignment_pass,
             "accepted_residuals_only": strict_alignment_pass and bool(accepted_residuals),
             "paper_window_not_replayed": bool(paper_window_not_replayed),
+            "paper_window_not_replayed_opt_in_ignored": bool(paper_window_not_replayed_opt_in_ignored),
         },
         "mismatch_counts_by_classification": dict(sorted(mismatch_counts.items(), key=lambda x: x[0])),
         "run_fingerprint_guard": run_fingerprint_guard_detail,

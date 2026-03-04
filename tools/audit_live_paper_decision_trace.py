@@ -652,6 +652,18 @@ def main() -> int:
         and not paper_load_issues
         and not run_fingerprint_guard_issues
     )
+    paper_window_not_replayed = (
+        int(live_counts.get("row_count") or 0) > 0
+        and int(paper_counts.get("row_count") or 0) == 0
+        and compare_summary["matched_pairs"] == 0
+        and compare_summary["unmatched_live"] == int(live_counts.get("row_count") or 0)
+        and compare_summary["unmatched_paper"] == 0
+        and not live_load_issues
+        and not paper_load_issues
+    )
+    if paper_window_not_replayed:
+        strict_alignment_pass = False
+
     accepted_residuals: list[dict[str, Any]] = []
     missing_table_issues = [
         row
@@ -743,6 +755,7 @@ def main() -> int:
         "status": {
             "strict_alignment_pass": strict_alignment_pass,
             "accepted_residuals_only": strict_alignment_pass and bool(accepted_residuals),
+            "paper_window_not_replayed": bool(paper_window_not_replayed),
         },
         "mismatch_counts_by_classification": dict(sorted(mismatch_counts.items(), key=lambda x: x[0])),
         "run_fingerprint_guard": run_fingerprint_guard_detail,

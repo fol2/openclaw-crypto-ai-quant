@@ -301,6 +301,42 @@ def test_alignment_gate_action_artefact_opt_in_rejects_deterministic_classificat
     assert report["checks"]["action_opt_in_ok"] is False
 
 
+def test_alignment_gate_action_paper_window_not_replayed_is_blocking_even_with_opt_in(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    _write_base_gate_bundle(
+        bundle_dir,
+        seed_apply_report={"strict_replace": False},
+        action_report=_action_artefact_report(paper_window_not_replayed=True),
+    )
+    output = bundle_dir / "alignment_gate_report.json"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "assert_replay_bundle_alignment.py",
+            "--bundle-dir",
+            str(bundle_dir),
+            "--allow-action-artefact-residuals",
+            "--skip-candles-provenance-check",
+            "--output",
+            str(output),
+        ],
+    )
+
+    exit_code = alignment_gate.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+    failure_codes = {str(row.get("code") or "") for row in report.get("failures") or []}
+
+    assert exit_code == 1
+    assert "action_paper_window_not_replayed" in failure_codes
+    assert report["checks"]["action_paper_window_not_replayed"] is True
+    assert report["checks"]["action_ok"] is False
+
+
 def test_alignment_gate_action_artefact_opt_in_rejects_kind_classification_drift(
     tmp_path: Path,
     monkeypatch,
@@ -334,6 +370,57 @@ def test_alignment_gate_action_artefact_opt_in_rejects_kind_classification_drift
     assert exit_code == 1
     assert "action_artefact_opt_in_unproven" in failure_codes
     assert report["checks"]["action_opt_in_ok"] is False
+
+
+def test_alignment_gate_decision_trace_empty_paper_window_stays_blocking_under_strict_replace(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    _write_base_gate_bundle(
+        bundle_dir,
+        manifest_inputs={"snapshot_strict_replace": True},
+        seed_apply_report={"strict_replace": True},
+    )
+    _write_json(
+        bundle_dir / "live_paper_decision_trace_reconcile_report.json",
+        {
+            "status": {
+                "strict_alignment_pass": False,
+                "paper_window_not_replayed": True,
+            },
+            "counts": {
+                "live_decision_rows": 12,
+                "paper_decision_rows": 0,
+            },
+            "accepted_residuals": [],
+            "mismatches": [],
+        },
+    )
+    output = bundle_dir / "alignment_gate_report.json"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "assert_replay_bundle_alignment.py",
+            "--bundle-dir",
+            str(bundle_dir),
+            "--require-live-paper-decision-trace",
+            "--skip-candles-provenance-check",
+            "--output",
+            str(output),
+        ],
+    )
+
+    exit_code = alignment_gate.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+    failure_codes = {str(row.get("code") or "") for row in report.get("failures") or []}
+
+    assert exit_code == 1
+    assert "live_paper_decision_trace_paper_window_not_replayed" in failure_codes
+    assert report["checks"]["live_paper_decision_trace_paper_window_not_replayed"] is True
+    assert report["checks"]["live_paper_decision_trace_gate_ok"] is False
 
 
 @pytest.mark.parametrize(
@@ -557,6 +644,7 @@ def _action_artefact_report(
     include_hard_evidence: bool = True,
     deterministic_class_count: int = 0,
     classification_kind_drift_total: int = 0,
+    paper_window_not_replayed: bool = False,
 ) -> dict:
     mismatch_total = 109
     deterministic_class_count = max(0, int(deterministic_class_count))
@@ -567,9 +655,15 @@ def _action_artefact_report(
             "gate_pass_if_allow_compare_surface_artefacts": True,
             "artefact_only_mismatch": True,
             "logic_divergence_free": True,
+            "paper_window_not_replayed": bool(paper_window_not_replayed),
         },
         "accepted_residuals": [],
         "counts": {"mismatch_total": mismatch_total},
+        "counts": {
+            "mismatch_total": mismatch_total,
+            "live_simulatable_actions": 12,
+            "paper_simulatable_actions": 0 if paper_window_not_replayed else 12,
+        },
         "mismatch_counts_by_classification": {
             "non-simulatable_exchange_oms_effect": non_sim_class_count,
             "deterministic_logic_divergence": deterministic_class_count,

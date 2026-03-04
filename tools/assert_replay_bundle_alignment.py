@@ -1121,6 +1121,7 @@ def main() -> int:
     action_opt_in_proof: dict[str, Any] = {}
     action_selected_status = False
     action_artefact_only_mismatch = False
+    action_paper_window_not_replayed = False
     action_gate_mode = (
         "allow_action_artefact_residuals" if bool(args.allow_action_artefact_residuals) else "strict_fail_closed"
     )
@@ -1138,12 +1139,18 @@ def main() -> int:
         action_report = _load_json(action_path)
         axis_report_present["action"] = True
         action_status_obj = (action_report.get("status") or {}) if isinstance(action_report, dict) else {}
+        action_counts_obj = (action_report.get("counts") or {}) if isinstance(action_report, dict) else {}
         action_strict_status = bool(action_status_obj.get("strict_alignment_pass"))
         action_artefact_only_mismatch = bool(action_status_obj.get("artefact_only_mismatch"))
         action_residuals = list(action_report.get("accepted_residuals") or [])
         blocking_action_residuals = _blocking_residuals_for_strict_mode(action_residuals)
         axis_residual_count["action"] = len(action_residuals)
         axis_blocking_residual_count["action"] = len(blocking_action_residuals)
+        action_live_simulatable = _as_int(action_counts_obj.get("live_simulatable_actions"), -1)
+        action_paper_simulatable = _as_int(action_counts_obj.get("paper_simulatable_actions"), -1)
+        action_paper_window_not_replayed = bool(action_status_obj.get("paper_window_not_replayed")) or (
+            action_live_simulatable > 0 and action_paper_simulatable == 0
+        )
         if action_strict_status:
             action_opt_in_status = True
         else:
@@ -1161,7 +1168,21 @@ def main() -> int:
         action_selected_status = action_opt_in_status if bool(args.allow_action_artefact_residuals) else action_strict_status
         axis_tool_status["action"] = action_strict_status
         axis_gate_status["action"] = action_selected_status
-        if not action_selected_status:
+        if action_paper_window_not_replayed:
+            action_selected_status = False
+            axis_gate_status["action"] = False
+            axis_failure_codes["action"].append("action_paper_window_not_replayed")
+            failures.append(
+                {
+                    "code": "action_paper_window_not_replayed",
+                    "classification": "state_initialisation_gap",
+                    "detail": "live/paper action compare window has no replayed paper simulatable actions",
+                    "counts": action_counts_obj,
+                    "live_simulatable_actions": int(action_live_simulatable),
+                    "paper_simulatable_actions": int(action_paper_simulatable),
+                }
+            )
+        elif not action_selected_status:
             axis_failure_codes["action"].append("action_alignment_failed")
             failures.append(
                 {
@@ -1325,6 +1346,7 @@ def main() -> int:
                 )
     live_paper_decision_trace_report: dict[str, Any] | None = None
     live_paper_decision_trace_skipped_empty_paper = False
+    live_paper_decision_trace_paper_window_not_replayed = False
     if not live_paper_decision_trace_path.exists():
         if args.require_live_paper_decision_trace:
             axis_gate_status["live_paper_decision_trace"] = False
@@ -1339,9 +1361,12 @@ def main() -> int:
     else:
         live_paper_decision_trace_report = _load_json(live_paper_decision_trace_path)
         axis_report_present["live_paper_decision_trace"] = True
-        decision_trace_status = bool(
-            ((live_paper_decision_trace_report.get("status") or {}).get("strict_alignment_pass"))
+        decision_trace_status_obj = (
+            (live_paper_decision_trace_report.get("status") or {})
+            if isinstance(live_paper_decision_trace_report, dict)
+            else {}
         )
+        decision_trace_status = bool(decision_trace_status_obj.get("strict_alignment_pass"))
         axis_tool_status["live_paper_decision_trace"] = decision_trace_status
         decision_trace_residuals = list(live_paper_decision_trace_report.get("accepted_residuals") or [])
         blocking_decision_trace_residuals = _blocking_residuals_for_strict_mode(decision_trace_residuals)
@@ -1350,26 +1375,31 @@ def main() -> int:
         decision_counts = live_paper_decision_trace_report.get("counts") or {}
         live_decision_rows = _as_int(decision_counts.get("live_decision_rows"), -1)
         paper_decision_rows = _as_int(decision_counts.get("paper_decision_rows"), -1)
-        if not decision_trace_status:
-            if (
-                manifest_snapshot_strict_replace
-                and seed_apply_strict_replace
-                and paper_decision_rows == 0
-                and live_decision_rows > 0
-            ):
-                live_paper_decision_trace_skipped_empty_paper = True
-                axis_gate_status["live_paper_decision_trace"] = True
-            else:
-                axis_gate_status["live_paper_decision_trace"] = False
-                axis_failure_codes["live_paper_decision_trace"].append("live_paper_decision_trace_alignment_failed")
-                failures.append(
-                    {
-                        "code": "live_paper_decision_trace_alignment_failed",
-                        "classification": "deterministic_logic_divergence",
-                        "detail": "live/paper decision trace strict alignment failed",
-                        "counts": live_paper_decision_trace_report.get("counts") or {},
-                    }
-                )
+        live_paper_decision_trace_paper_window_not_replayed = bool(
+            decision_trace_status_obj.get("paper_window_not_replayed")
+        ) or (live_decision_rows > 0 and paper_decision_rows == 0)
+        if live_paper_decision_trace_paper_window_not_replayed:
+            axis_gate_status["live_paper_decision_trace"] = False
+            axis_failure_codes["live_paper_decision_trace"].append("live_paper_decision_trace_paper_window_not_replayed")
+            failures.append(
+                {
+                    "code": "live_paper_decision_trace_paper_window_not_replayed",
+                    "classification": "state_initialisation_gap",
+                    "detail": "live/paper decision trace compare window has no replayed paper decision rows",
+                    "counts": live_paper_decision_trace_report.get("counts") or {},
+                }
+            )
+        elif not decision_trace_status:
+            axis_gate_status["live_paper_decision_trace"] = False
+            axis_failure_codes["live_paper_decision_trace"].append("live_paper_decision_trace_alignment_failed")
+            failures.append(
+                {
+                    "code": "live_paper_decision_trace_alignment_failed",
+                    "classification": "deterministic_logic_divergence",
+                    "detail": "live/paper decision trace strict alignment failed",
+                    "counts": live_paper_decision_trace_report.get("counts") or {},
+                }
+            )
         else:
             axis_gate_status["live_paper_decision_trace"] = True
 
@@ -1563,6 +1593,7 @@ def main() -> int:
             "action_opt_in_ok": bool(action_opt_in_status),
             "action_opt_in_proof": action_opt_in_proof,
             "action_artefact_only_mismatch": bool(action_artefact_only_mismatch),
+            "action_paper_window_not_replayed": bool(action_paper_window_not_replayed),
             "live_paper_required": bool(axis_required.get("live_paper")),
             "live_paper_report_present": bool(axis_report_present.get("live_paper")),
             "live_paper_tool_strict_ok": axis_tool_status.get("live_paper"),
@@ -1573,6 +1604,9 @@ def main() -> int:
             "live_paper_decision_trace_tool_strict_ok": axis_tool_status.get("live_paper_decision_trace"),
             "live_paper_decision_trace_ok": bool(axis_gate_status.get("live_paper_decision_trace")),
             "live_paper_decision_trace_gate_ok": bool(axis_gate_status.get("live_paper_decision_trace")),
+            "live_paper_decision_trace_paper_window_not_replayed": bool(
+                live_paper_decision_trace_paper_window_not_replayed
+            ),
             "live_paper_decision_trace_skipped_empty_paper": bool(live_paper_decision_trace_skipped_empty_paper),
             "manifest_snapshot_strict_replace": bool(manifest_snapshot_strict_replace),
             "seed_apply_strict_replace": bool(seed_apply_strict_replace),

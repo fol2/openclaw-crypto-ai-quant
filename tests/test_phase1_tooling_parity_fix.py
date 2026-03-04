@@ -915,6 +915,74 @@ def test_decision_trace_opt_in_does_not_mask_deterministic_mismatch(
     )
 
 
+def test_decision_trace_window_not_replayed_stays_blocking(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    live_db = tmp_path / "live.db"
+    paper_db = tmp_path / "paper.db"
+    for path in (live_db, paper_db):
+        conn = sqlite3.connect(path)
+        conn.execute(
+            """
+            CREATE TABLE decision_events (
+                id TEXT PRIMARY KEY,
+                timestamp_ms INTEGER,
+                symbol TEXT,
+                event_type TEXT,
+                status TEXT,
+                decision_phase TEXT,
+                triggered_by TEXT,
+                action_taken TEXT,
+                rejection_reason TEXT,
+                reason_code TEXT,
+                config_fingerprint TEXT,
+                trade_id INTEGER
+            )
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    conn = sqlite3.connect(live_db)
+    conn.execute(
+        """
+        INSERT INTO decision_events
+        (id, timestamp_ms, symbol, event_type, status, decision_phase, triggered_by,
+         action_taken, rejection_reason, reason_code, config_fingerprint, trade_id)
+        VALUES ('L1', 1000, 'ETH', 'entry_signal', 'executed', 'execution', 'schedule',
+                'open_short', '', 'entry_signal', 'abc', 101)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    output = tmp_path / "report.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "audit_live_paper_decision_trace.py",
+            "--live-db",
+            str(live_db),
+            "--paper-db",
+            str(paper_db),
+            "--fail-on-mismatch",
+            "--output",
+            str(output),
+        ],
+    )
+
+    exit_code = live_paper_decision.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+
+    assert exit_code == 1
+    assert report["counts"]["live_decision_rows"] == 1
+    assert report["counts"]["paper_decision_rows"] == 0
+    assert report["status"]["paper_window_not_replayed"] is True
+    assert report["status"]["strict_alignment_pass"] is False
+
+
 def test_event_order_funding_contract_marks_unmatched_as_mismatch(tmp_path: Path, monkeypatch) -> None:
     live_baseline = tmp_path / "live_baseline.jsonl"
     live_baseline.write_text(
@@ -1314,7 +1382,7 @@ def test_live_paper_action_detects_window_not_replayed_with_funding_gaps(
     )
 
 
-def test_live_paper_action_window_not_replayed_opt_in_non_blocking(
+def test_live_paper_action_window_not_replayed_opt_in_is_ignored_fail_closed(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1377,9 +1445,10 @@ def test_live_paper_action_window_not_replayed_opt_in_non_blocking(
     exit_code = live_paper_action.main()
     report = json.loads(output.read_text(encoding="utf-8"))
 
-    assert exit_code == 0
-    assert report["status"]["strict_alignment_pass"] is True
+    assert exit_code == 1
+    assert report["status"]["strict_alignment_pass"] is False
     assert report["status"]["paper_window_not_replayed"] is True
+    assert report["status"]["paper_window_not_replayed_opt_in_ignored"] is True
     assert report["inputs"]["allow_paper_window_not_replayed"] is True
     assert report["counts"]["mismatch_total"] == 2
     assert report["counts"]["paper_window_not_replayed_artefact_mismatch_total"] == 2

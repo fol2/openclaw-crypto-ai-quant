@@ -1068,6 +1068,7 @@ def main() -> int:
         f"{run_fingerprint_guard_arg}"
         f"--from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
         f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
+        "--fail-on-mismatch "
         f'--output "$BUNDLE_DIR/{live_paper_action_reconcile_path.name}"'
     )
 
@@ -1084,6 +1085,7 @@ def main() -> int:
         f"{run_fingerprint_guard_arg}"
         f"--from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
         f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
+        "--fail-on-mismatch "
         f'--output "$BUNDLE_DIR/{live_paper_decision_trace_reconcile_path.name}"'
     )
 
