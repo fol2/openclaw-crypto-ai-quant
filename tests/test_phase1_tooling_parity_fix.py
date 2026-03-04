@@ -123,7 +123,63 @@ def test_live_backtester_funding_only_matched_pairs_are_residuals() -> None:
     unmatched = [m for m in mismatches if m.get("kind") == "missing_backtester_funding_action"]
     assert len(matched) == 1
     assert len(unmatched) == 1
-    assert unmatched[0]["classification"] == "deterministic_logic_divergence"
+    assert unmatched[0]["classification"] == "non-simulatable_exchange_oms_effect"
+
+
+def test_live_backtester_missing_live_funding_is_classified_as_surface_artefact() -> None:
+    live_rows = [
+        _mk_action(symbol="ETH", action_code="FUNDING", ts_ms=1000, source_id=1, size=1.0, pnl_usd=0.2),
+    ]
+    bt_rows = [
+        _mk_action(symbol="ETH", action_code="FUNDING", ts_ms=1000, source_id=1, size=1.0, pnl_usd=0.1),
+        _mk_action(symbol="BTC", action_code="FUNDING", ts_ms=2000, source_id=2, size=1.0, pnl_usd=0.3),
+    ]
+
+    mismatches, summary, _ = live_bt_action._compare_actions(
+        live_rows,
+        bt_rows,
+        [],
+        timestamp_bucket_ms=1,
+        timestamp_bucket_anchor="floor",
+        price_tol=1e-9,
+        size_tol=1e-9,
+        pnl_tol=1e-9,
+        fee_tol=1e-9,
+        balance_tol=1e-9,
+        order_fail_match_window_ms=60_000,
+    )
+
+    assert summary["funding_matched_pairs"] == 1
+    assert summary["funding_unmatched_backtester"] == 1
+    assert summary["unmatched_backtester"] == 1
+    unmatched = [m for m in mismatches if m.get("kind") == "missing_live_funding_action"]
+    assert len(unmatched) == 1
+    assert unmatched[0]["classification"] == "non-simulatable_exchange_oms_effect"
+
+
+def test_live_backtester_mismatch_breakdown_tracks_kind_classification_drift() -> None:
+    breakdown = live_bt_action._summarise_mismatch_breakdown(
+        [
+            {
+                "classification": "deterministic_logic_divergence",
+                "kind": "missing_backtester_funding_action",
+                "symbol": "ETH",
+                "action_code": "FUNDING",
+            },
+            {
+                "classification": "deterministic_logic_divergence",
+                "kind": "missing_backtester_action",
+                "symbol": "ETH",
+                "action_code": "OPEN_SHORT",
+            },
+        ]
+    )
+
+    assert breakdown["compare_surface_artefact_total"] == 1
+    assert breakdown["logic_divergence_total"] == 1
+    assert breakdown["classification_kind_drift_total"] == 1
+    assert breakdown["classification_kind_drift_by_kind"] == {"missing_backtester_funding_action": 1}
+    assert breakdown["classification_kind_drift_by_classification"] == {"deterministic_logic_divergence": 1}
 
 
 def test_trade_reconcile_classifies_entry_confidence_policy_mismatch_residual(
@@ -242,6 +298,126 @@ def test_trade_reconcile_classifies_entry_confidence_policy_mismatch_residual(
     assert report["policy_mismatch_analysis"]["evidence_complete"] is True
     assert report["mismatch_counts_by_classification"]["policy_mismatch_residual"] == 1
     assert report["mismatches"][0]["classification"] == "policy_mismatch_residual"
+
+
+def test_trade_reconcile_does_not_attribute_policy_mismatch_when_entry_policy_provenance_is_missing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+
+    live_baseline = bundle_dir / "live_baseline_trades.jsonl"
+    live_baseline.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "id": 1,
+                        "timestamp_ms": 1_000,
+                        "symbol": "ETH",
+                        "action": "OPEN",
+                        "type": "SHORT",
+                        "confidence": "medium",
+                        "size": 1.0,
+                        "pnl": 0.0,
+                        "fee_usd": 0.0,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "id": 2,
+                        "timestamp_ms": 2_000,
+                        "symbol": "ETH",
+                        "action": "CLOSE",
+                        "type": "SHORT",
+                        "confidence": "medium",
+                        "size": 1.0,
+                        "pnl": 1.0,
+                        "fee_usd": 0.0,
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    backtester_trades = bundle_dir / "backtester_trades.csv"
+    backtester_trades.write_text(
+        "trade_id,position_id,entry_ts_ms,exit_ts_ms,symbol,side,entry_price,exit_price,exit_size,pnl_usd,fee_usd,mae_pct,mfe_pct,reason_code,reason\n",
+        encoding="utf-8",
+    )
+
+    replay_report = bundle_dir / "backtester_replay_report.json"
+    replay_report.write_text(
+        json.dumps(
+            {
+                "config_fingerprint": "a" * 64,
+                "trades": [
+                    {
+                        "action": "OPEN_LONG",
+                        "symbol": "ETH",
+                        "confidence": "high",
+                        "timestamp": 1_200,
+                        "reason_code": "entry_signal_sub_bar",
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    strategy_snapshot = bundle_dir / "strategy_overrides.locked.yaml"
+    strategy_snapshot.write_text("trade:\n  leverage: 5\n", encoding="utf-8")
+
+    manifest = bundle_dir / "replay_bundle_manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "artefacts": {
+                    "backtester_replay_report_json": replay_report.name,
+                    "strategy_config_snapshot_file": strategy_snapshot.name,
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    output = bundle_dir / "trade_reconcile_report.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "audit_live_backtester_trade_reconcile.py",
+            "--live-baseline",
+            str(live_baseline),
+            "--backtester-trades",
+            str(backtester_trades),
+            "--bundle-manifest",
+            str(manifest),
+            "--output",
+            str(output),
+        ],
+    )
+
+    exit_code = live_bt_trade.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert report["counts"]["mismatch_total"] == 1
+    assert report["counts"]["policy_mismatch_residuals"] == 0
+    assert report["counts"]["deterministic_unexplained"] == 1
+    assert report["status"]["policy_mismatch_residual_only"] is False
+    assert report["policy_mismatch_analysis"]["detected"] is False
+    assert report["policy_mismatch_analysis"]["evidence_complete"] is False
+    locked_policy = report["policy_mismatch_analysis"]["locked_entry_policy"]
+    assert locked_policy["policy_available"] is False
+    assert locked_policy["provenance_contract_ok"] is False
+    assert locked_policy["policy_source"] == "strategy_snapshot_missing_entry_min_confidence"
+    assert report["mismatches"][0]["classification"] == "deterministic_logic_divergence"
 
 
 def test_decision_trace_filters_paper_rows_by_trade_id_watermark(tmp_path: Path) -> None:
@@ -739,6 +915,74 @@ def test_decision_trace_opt_in_does_not_mask_deterministic_mismatch(
     )
 
 
+def test_decision_trace_window_not_replayed_stays_blocking(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    live_db = tmp_path / "live.db"
+    paper_db = tmp_path / "paper.db"
+    for path in (live_db, paper_db):
+        conn = sqlite3.connect(path)
+        conn.execute(
+            """
+            CREATE TABLE decision_events (
+                id TEXT PRIMARY KEY,
+                timestamp_ms INTEGER,
+                symbol TEXT,
+                event_type TEXT,
+                status TEXT,
+                decision_phase TEXT,
+                triggered_by TEXT,
+                action_taken TEXT,
+                rejection_reason TEXT,
+                reason_code TEXT,
+                config_fingerprint TEXT,
+                trade_id INTEGER
+            )
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    conn = sqlite3.connect(live_db)
+    conn.execute(
+        """
+        INSERT INTO decision_events
+        (id, timestamp_ms, symbol, event_type, status, decision_phase, triggered_by,
+         action_taken, rejection_reason, reason_code, config_fingerprint, trade_id)
+        VALUES ('L1', 1000, 'ETH', 'entry_signal', 'executed', 'execution', 'schedule',
+                'open_short', '', 'entry_signal', 'abc', 101)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    output = tmp_path / "report.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "audit_live_paper_decision_trace.py",
+            "--live-db",
+            str(live_db),
+            "--paper-db",
+            str(paper_db),
+            "--fail-on-mismatch",
+            "--output",
+            str(output),
+        ],
+    )
+
+    exit_code = live_paper_decision.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+
+    assert exit_code == 1
+    assert report["counts"]["live_decision_rows"] == 1
+    assert report["counts"]["paper_decision_rows"] == 0
+    assert report["status"]["paper_window_not_replayed"] is True
+    assert report["status"]["strict_alignment_pass"] is False
+
+
 def test_event_order_funding_contract_marks_unmatched_as_mismatch(tmp_path: Path, monkeypatch) -> None:
     live_baseline = tmp_path / "live_baseline.jsonl"
     live_baseline.write_text(
@@ -1138,7 +1382,7 @@ def test_live_paper_action_detects_window_not_replayed_with_funding_gaps(
     )
 
 
-def test_live_paper_action_window_not_replayed_opt_in_non_blocking(
+def test_live_paper_action_window_not_replayed_opt_in_is_ignored_fail_closed(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1201,9 +1445,10 @@ def test_live_paper_action_window_not_replayed_opt_in_non_blocking(
     exit_code = live_paper_action.main()
     report = json.loads(output.read_text(encoding="utf-8"))
 
-    assert exit_code == 0
-    assert report["status"]["strict_alignment_pass"] is True
+    assert exit_code == 1
+    assert report["status"]["strict_alignment_pass"] is False
     assert report["status"]["paper_window_not_replayed"] is True
+    assert report["status"]["paper_window_not_replayed_opt_in_ignored"] is True
     assert report["inputs"]["allow_paper_window_not_replayed"] is True
     assert report["counts"]["mismatch_total"] == 2
     assert report["counts"]["paper_window_not_replayed_artefact_mismatch_total"] == 2

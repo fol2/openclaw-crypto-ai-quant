@@ -308,6 +308,7 @@ def _trade_policy_mismatch_opt_in_proof(report: dict[str, Any]) -> tuple[bool, d
     status = report.get("status") or {}
     counts = report.get("counts") or {}
     analysis = report.get("policy_mismatch_analysis") or {}
+    locked_policy = analysis.get("locked_entry_policy") or {}
     policy_rows = report.get("policy_mismatch_residuals")
     policy_rows_count = len(policy_rows) if isinstance(policy_rows, list) else _as_int(counts.get("policy_mismatch_residuals"), 0)
     reclassified_count = _as_int(analysis.get("reclassified_mismatch_count"), 0)
@@ -317,14 +318,17 @@ def _trade_policy_mismatch_opt_in_proof(report: dict[str, Any]) -> tuple[bool, d
     evidence_complete = bool(analysis.get("evidence_complete"))
     analysis_kind = str(analysis.get("kind") or "").strip().lower()
     required_min_conf = str(
-        (((analysis.get("locked_entry_policy") or {}).get("global_min_confidence")) or "").strip().lower()
+        ((locked_policy.get("global_min_confidence")) or "").strip().lower()
     )
-    has_symbol_policy = bool(((analysis.get("locked_entry_policy") or {}).get("symbol_min_confidence") or {}))
+    has_symbol_policy = bool((locked_policy.get("symbol_min_confidence") or {}))
+    provenance_contract_ok = bool(locked_policy.get("provenance_contract_ok"))
+    policy_source = str(locked_policy.get("policy_source") or "").strip().lower()
     ok = (
         (not strict_pass)
         and policy_only
         and analysis_detected
         and evidence_complete
+        and provenance_contract_ok
         and analysis_kind == "entry_confidence_gate"
         and policy_rows_count > 0
         and reclassified_count > 0
@@ -335,11 +339,13 @@ def _trade_policy_mismatch_opt_in_proof(report: dict[str, Any]) -> tuple[bool, d
         "policy_mismatch_residual_only": policy_only,
         "policy_mismatch_detected": analysis_detected,
         "policy_mismatch_evidence_complete": evidence_complete,
+        "policy_mismatch_provenance_contract_ok": provenance_contract_ok,
+        "policy_mismatch_policy_source": policy_source or None,
         "policy_mismatch_kind": analysis_kind,
         "policy_mismatch_residual_count": int(policy_rows_count),
         "policy_mismatch_reclassified_count": int(reclassified_count),
         "locked_global_min_confidence": required_min_conf or None,
-        "locked_symbol_policy_count": len((analysis.get("locked_entry_policy") or {}).get("symbol_min_confidence") or {}),
+        "locked_symbol_policy_count": len(locked_policy.get("symbol_min_confidence") or {}),
     }
     return ok, proof
 
@@ -355,6 +361,7 @@ def _action_artefact_opt_in_proof(report: dict[str, Any]) -> tuple[bool, dict[st
     logic_divergence_free = bool(status.get("logic_divergence_free"))
     compare_surface_artefact_total = _as_int(breakdown.get("compare_surface_artefact_total"), -1)
     logic_divergence_total = _as_int(breakdown.get("logic_divergence_total"), -1)
+    classification_kind_drift_total = _as_int(breakdown.get("classification_kind_drift_total"), -1)
     total = _as_int(breakdown.get("total"), -1)
     deterministic_logic_divergence = _as_int(class_counts.get("deterministic_logic_divergence"), 0)
     expected_logic_total = (
@@ -370,6 +377,7 @@ def _action_artefact_opt_in_proof(report: dict[str, Any]) -> tuple[bool, dict[st
         and logic_divergence_free
         and compare_surface_artefact_total > 0
         and logic_divergence_total == 0
+        and classification_kind_drift_total == 0
         and deterministic_logic_divergence == 0
         and (expected_logic_total < 0 or expected_logic_total == logic_divergence_total)
     )
@@ -380,6 +388,7 @@ def _action_artefact_opt_in_proof(report: dict[str, Any]) -> tuple[bool, dict[st
         "logic_divergence_free": logic_divergence_free,
         "compare_surface_artefact_total": int(compare_surface_artefact_total),
         "logic_divergence_total": int(logic_divergence_total),
+        "classification_kind_drift_total": int(classification_kind_drift_total),
         "mismatch_total": int(total),
         "deterministic_logic_divergence_class_count": int(deterministic_logic_divergence),
         "expected_logic_divergence_total": int(expected_logic_total),
@@ -1058,6 +1067,10 @@ def main() -> int:
         trade_status = bool(((trade_report.get("status") or {}).get("strict_alignment_pass")))
         axis_tool_status["trade"] = trade_status
         axis_gate_status["trade"] = trade_status
+        trade_residuals = list(trade_report.get("accepted_residuals") or [])
+        blocking_trade_residuals = _blocking_residuals_for_strict_mode(trade_residuals)
+        axis_residual_count["trade"] = len(trade_residuals)
+        axis_blocking_residual_count["trade"] = len(blocking_trade_residuals)
         if not trade_status:
             trade_policy_opt_in_ok = False
             if args.allow_trade_policy_mismatch_residual:
@@ -1089,10 +1102,6 @@ def main() -> int:
                     }
                 )
         if args.strict_no_residuals:
-            trade_residuals = list(trade_report.get("accepted_residuals") or [])
-            blocking_trade_residuals = _blocking_residuals_for_strict_mode(trade_residuals)
-            axis_residual_count["trade"] = len(trade_residuals)
-            axis_blocking_residual_count["trade"] = len(blocking_trade_residuals)
             if blocking_trade_residuals:
                 axis_gate_status["trade"] = False
                 axis_failure_codes["trade"].append("trade_residuals_present")
@@ -1112,6 +1121,7 @@ def main() -> int:
     action_opt_in_proof: dict[str, Any] = {}
     action_selected_status = False
     action_artefact_only_mismatch = False
+    action_paper_window_not_replayed = False
     action_gate_mode = (
         "allow_action_artefact_residuals" if bool(args.allow_action_artefact_residuals) else "strict_fail_closed"
     )
@@ -1129,8 +1139,18 @@ def main() -> int:
         action_report = _load_json(action_path)
         axis_report_present["action"] = True
         action_status_obj = (action_report.get("status") or {}) if isinstance(action_report, dict) else {}
+        action_counts_obj = (action_report.get("counts") or {}) if isinstance(action_report, dict) else {}
         action_strict_status = bool(action_status_obj.get("strict_alignment_pass"))
         action_artefact_only_mismatch = bool(action_status_obj.get("artefact_only_mismatch"))
+        action_residuals = list(action_report.get("accepted_residuals") or [])
+        blocking_action_residuals = _blocking_residuals_for_strict_mode(action_residuals)
+        axis_residual_count["action"] = len(action_residuals)
+        axis_blocking_residual_count["action"] = len(blocking_action_residuals)
+        action_live_simulatable = _as_int(action_counts_obj.get("live_simulatable_actions"), -1)
+        action_paper_simulatable = _as_int(action_counts_obj.get("paper_simulatable_actions"), -1)
+        action_paper_window_not_replayed = bool(action_status_obj.get("paper_window_not_replayed")) or (
+            action_live_simulatable > 0 and action_paper_simulatable == 0
+        )
         if action_strict_status:
             action_opt_in_status = True
         else:
@@ -1148,7 +1168,21 @@ def main() -> int:
         action_selected_status = action_opt_in_status if bool(args.allow_action_artefact_residuals) else action_strict_status
         axis_tool_status["action"] = action_strict_status
         axis_gate_status["action"] = action_selected_status
-        if not action_selected_status:
+        if action_paper_window_not_replayed:
+            action_selected_status = False
+            axis_gate_status["action"] = False
+            axis_failure_codes["action"].append("action_paper_window_not_replayed")
+            failures.append(
+                {
+                    "code": "action_paper_window_not_replayed",
+                    "classification": "state_initialisation_gap",
+                    "detail": "live/paper action compare window has no replayed paper simulatable actions",
+                    "counts": action_counts_obj,
+                    "live_simulatable_actions": int(action_live_simulatable),
+                    "paper_simulatable_actions": int(action_paper_simulatable),
+                }
+            )
+        elif not action_selected_status:
             axis_failure_codes["action"].append("action_alignment_failed")
             failures.append(
                 {
@@ -1164,10 +1198,6 @@ def main() -> int:
                 }
             )
         if args.strict_no_residuals:
-            action_residuals = list(action_report.get("accepted_residuals") or [])
-            blocking_action_residuals = _blocking_residuals_for_strict_mode(action_residuals)
-            axis_residual_count["action"] = len(action_residuals)
-            axis_blocking_residual_count["action"] = len(blocking_action_residuals)
             if blocking_action_residuals:
                 axis_gate_status["action"] = False
                 axis_failure_codes["action"].append("action_residuals_present")
@@ -1233,6 +1263,10 @@ def main() -> int:
         live_paper_status = bool(((live_paper_report.get("status") or {}).get("strict_alignment_pass")))
         axis_tool_status["live_paper"] = live_paper_status
         axis_gate_status["live_paper"] = live_paper_status
+        live_paper_residuals = list(live_paper_report.get("accepted_residuals") or [])
+        blocking_live_paper_residuals = _blocking_residuals_for_strict_mode(live_paper_residuals)
+        axis_residual_count["live_paper"] = len(live_paper_residuals)
+        axis_blocking_residual_count["live_paper"] = len(blocking_live_paper_residuals)
         if not live_paper_status:
             axis_failure_codes["live_paper"].append("live_paper_alignment_failed")
             failures.append(
@@ -1244,10 +1278,6 @@ def main() -> int:
                 }
             )
         if args.strict_no_residuals:
-            live_paper_residuals = list(live_paper_report.get("accepted_residuals") or [])
-            blocking_live_paper_residuals = _blocking_residuals_for_strict_mode(live_paper_residuals)
-            axis_residual_count["live_paper"] = len(live_paper_residuals)
-            axis_blocking_residual_count["live_paper"] = len(blocking_live_paper_residuals)
             if blocking_live_paper_residuals:
                 axis_gate_status["live_paper"] = False
                 axis_failure_codes["live_paper"].append("live_paper_residuals_present")
@@ -1316,6 +1346,7 @@ def main() -> int:
                 )
     live_paper_decision_trace_report: dict[str, Any] | None = None
     live_paper_decision_trace_skipped_empty_paper = False
+    live_paper_decision_trace_paper_window_not_replayed = False
     if not live_paper_decision_trace_path.exists():
         if args.require_live_paper_decision_trace:
             axis_gate_status["live_paper_decision_trace"] = False
@@ -1330,33 +1361,45 @@ def main() -> int:
     else:
         live_paper_decision_trace_report = _load_json(live_paper_decision_trace_path)
         axis_report_present["live_paper_decision_trace"] = True
-        decision_trace_status = bool(
-            ((live_paper_decision_trace_report.get("status") or {}).get("strict_alignment_pass"))
+        decision_trace_status_obj = (
+            (live_paper_decision_trace_report.get("status") or {})
+            if isinstance(live_paper_decision_trace_report, dict)
+            else {}
         )
+        decision_trace_status = bool(decision_trace_status_obj.get("strict_alignment_pass"))
         axis_tool_status["live_paper_decision_trace"] = decision_trace_status
+        decision_trace_residuals = list(live_paper_decision_trace_report.get("accepted_residuals") or [])
+        blocking_decision_trace_residuals = _blocking_residuals_for_strict_mode(decision_trace_residuals)
+        axis_residual_count["live_paper_decision_trace"] = len(decision_trace_residuals)
+        axis_blocking_residual_count["live_paper_decision_trace"] = len(blocking_decision_trace_residuals)
         decision_counts = live_paper_decision_trace_report.get("counts") or {}
         live_decision_rows = _as_int(decision_counts.get("live_decision_rows"), -1)
         paper_decision_rows = _as_int(decision_counts.get("paper_decision_rows"), -1)
-        if not decision_trace_status:
-            if (
-                manifest_snapshot_strict_replace
-                and seed_apply_strict_replace
-                and paper_decision_rows == 0
-                and live_decision_rows > 0
-            ):
-                live_paper_decision_trace_skipped_empty_paper = True
-                axis_gate_status["live_paper_decision_trace"] = True
-            else:
-                axis_gate_status["live_paper_decision_trace"] = False
-                axis_failure_codes["live_paper_decision_trace"].append("live_paper_decision_trace_alignment_failed")
-                failures.append(
-                    {
-                        "code": "live_paper_decision_trace_alignment_failed",
-                        "classification": "deterministic_logic_divergence",
-                        "detail": "live/paper decision trace strict alignment failed",
-                        "counts": live_paper_decision_trace_report.get("counts") or {},
-                    }
-                )
+        live_paper_decision_trace_paper_window_not_replayed = bool(
+            decision_trace_status_obj.get("paper_window_not_replayed")
+        ) or (live_decision_rows > 0 and paper_decision_rows == 0)
+        if live_paper_decision_trace_paper_window_not_replayed:
+            axis_gate_status["live_paper_decision_trace"] = False
+            axis_failure_codes["live_paper_decision_trace"].append("live_paper_decision_trace_paper_window_not_replayed")
+            failures.append(
+                {
+                    "code": "live_paper_decision_trace_paper_window_not_replayed",
+                    "classification": "state_initialisation_gap",
+                    "detail": "live/paper decision trace compare window has no replayed paper decision rows",
+                    "counts": live_paper_decision_trace_report.get("counts") or {},
+                }
+            )
+        elif not decision_trace_status:
+            axis_gate_status["live_paper_decision_trace"] = False
+            axis_failure_codes["live_paper_decision_trace"].append("live_paper_decision_trace_alignment_failed")
+            failures.append(
+                {
+                    "code": "live_paper_decision_trace_alignment_failed",
+                    "classification": "deterministic_logic_divergence",
+                    "detail": "live/paper decision trace strict alignment failed",
+                    "counts": live_paper_decision_trace_report.get("counts") or {},
+                }
+            )
         else:
             axis_gate_status["live_paper_decision_trace"] = True
 
@@ -1532,12 +1575,17 @@ def main() -> int:
             "candles_provenance_checked": candles_provenance_checked,
             "candles_provenance_ok": candles_provenance_ok,
             "state_ok": bool(state_report.get("ok")) if state_report is not None else False,
-            "trade_ok": bool((trade_report.get("status") or {}).get("strict_alignment_pass"))
-            if trade_report
-            else False,
+            "trade_required": bool(axis_required.get("trade")),
+            "trade_report_present": bool(axis_report_present.get("trade")),
+            "trade_tool_strict_ok": axis_tool_status.get("trade"),
+            "trade_strict_ok": bool(axis_tool_status.get("trade")) if axis_tool_status.get("trade") is not None else False,
+            "trade_ok": bool(axis_gate_status.get("trade")),
             "trade_gate_ok": bool(axis_gate_status.get("trade")),
             "trade_policy_mismatch_opt_in_applied": bool(trade_policy_mismatch_opt_in_applied),
             "trade_policy_mismatch_opt_in_proof": trade_policy_mismatch_opt_in_proof,
+            "action_required": bool(axis_required.get("action")),
+            "action_report_present": bool(axis_report_present.get("action")),
+            "action_tool_strict_ok": axis_tool_status.get("action"),
             "action_ok": bool(action_selected_status) if action_report else False,
             "action_gate_ok": bool(axis_gate_status.get("action")),
             "action_gate_mode": action_gate_mode,
@@ -1545,20 +1593,20 @@ def main() -> int:
             "action_opt_in_ok": bool(action_opt_in_status),
             "action_opt_in_proof": action_opt_in_proof,
             "action_artefact_only_mismatch": bool(action_artefact_only_mismatch),
-            "live_paper_ok": bool((live_paper_report.get("status") or {}).get("strict_alignment_pass"))
-            if live_paper_report
-            else (not bool(args.require_live_paper)),
+            "action_paper_window_not_replayed": bool(action_paper_window_not_replayed),
+            "live_paper_required": bool(axis_required.get("live_paper")),
+            "live_paper_report_present": bool(axis_report_present.get("live_paper")),
+            "live_paper_tool_strict_ok": axis_tool_status.get("live_paper"),
+            "live_paper_ok": bool(axis_gate_status.get("live_paper")),
             "live_paper_gate_ok": bool(axis_gate_status.get("live_paper")),
-            "live_paper_decision_trace_ok": (
-                bool((live_paper_decision_trace_report.get("status") or {}).get("strict_alignment_pass"))
-                or bool(live_paper_decision_trace_skipped_empty_paper)
-            )
-            if live_paper_decision_trace_report
-            else (
-                (not bool(args.require_live_paper_decision_trace))
-                or bool(live_paper_decision_trace_skipped_empty_paper)
-            ),
+            "live_paper_decision_trace_required": bool(axis_required.get("live_paper_decision_trace")),
+            "live_paper_decision_trace_report_present": bool(axis_report_present.get("live_paper_decision_trace")),
+            "live_paper_decision_trace_tool_strict_ok": axis_tool_status.get("live_paper_decision_trace"),
+            "live_paper_decision_trace_ok": bool(axis_gate_status.get("live_paper_decision_trace")),
             "live_paper_decision_trace_gate_ok": bool(axis_gate_status.get("live_paper_decision_trace")),
+            "live_paper_decision_trace_paper_window_not_replayed": bool(
+                live_paper_decision_trace_paper_window_not_replayed
+            ),
             "live_paper_decision_trace_skipped_empty_paper": bool(live_paper_decision_trace_skipped_empty_paper),
             "manifest_snapshot_strict_replace": bool(manifest_snapshot_strict_replace),
             "seed_apply_strict_replace": bool(seed_apply_strict_replace),

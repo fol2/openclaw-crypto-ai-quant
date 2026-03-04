@@ -678,6 +678,19 @@ def _load_oms_strategy_provenance(
     }
 
 
+def _render_run_09_paper_harness_script(*, paper_harness_report_name: str) -> str:
+    return (
+        "set -euo pipefail\n"
+        'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+        'REPO_ROOT="${REPO_ROOT:-$(pwd)}"\n'
+        'HARNESS_ARGS=(--bundle-dir "$BUNDLE_DIR" --repo-root "$REPO_ROOT")\n'
+        'if [ "${STRICT_NO_RESIDUALS:-0}" = "1" ]; then HARNESS_ARGS+=(--strict-no-residuals); fi\n'
+        'if [ "${AQC_ALLOW_ACTION_ARTEFACT_RESIDUALS:-0}" = "1" ]; then HARNESS_ARGS+=(--allow-action-artefact-residuals); fi\n'
+        f'HARNESS_ARGS+=(--output "$BUNDLE_DIR/{paper_harness_report_name}")\n'
+        'python3 "$REPO_ROOT/tools/run_paper_deterministic_replay.py" "${HARNESS_ARGS[@]}"'
+    )
+
+
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
@@ -1055,6 +1068,7 @@ def main() -> int:
         f"{run_fingerprint_guard_arg}"
         f"--from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
         f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
+        "--fail-on-mismatch "
         f'--output "$BUNDLE_DIR/{live_paper_action_reconcile_path.name}"'
     )
 
@@ -1071,6 +1085,7 @@ def main() -> int:
         f"{run_fingerprint_guard_arg}"
         f"--from-ts {int(args.from_ts)} --to-ts {int(args.to_ts)} "
         f"--timestamp-bucket-ms {int(timestamp_bucket_ms)} "
+        "--fail-on-mismatch "
         f'--output "$BUNDLE_DIR/{live_paper_decision_trace_reconcile_path.name}"'
     )
 
@@ -1146,20 +1161,8 @@ def main() -> int:
         f'--output "$BUNDLE_DIR/{alignment_gate_path.name}"'
     )
 
-    cmd_paper_harness = (
-        "set -euo pipefail\n"
-        'BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"\n'
-        'REPO_ROOT="${REPO_ROOT:-$(pwd)}"\n'
-        'STRICT_FLAG=""\n'
-        'if [ "${STRICT_NO_RESIDUALS:-0}" = "1" ]; then STRICT_FLAG="--strict-no-residuals"; fi\n'
-        'ALLOW_ACTION_ARTEFACT_FLAG=""\n'
-        'if [ "${AQC_ALLOW_ACTION_ARTEFACT_RESIDUALS:-0}" = "1" ]; then ALLOW_ACTION_ARTEFACT_FLAG="--allow-action-artefact-residuals"; fi\n'
-        'python3 "$REPO_ROOT/tools/run_paper_deterministic_replay.py" '
-        '--bundle-dir "$BUNDLE_DIR" '
-        '--repo-root "$REPO_ROOT" '
-        "$STRICT_FLAG "
-        "$ALLOW_ACTION_ARTEFACT_FLAG "
-        f'--output "$BUNDLE_DIR/{paper_harness_report_path.name}"'
+    cmd_paper_harness = _render_run_09_paper_harness_script(
+        paper_harness_report_name=paper_harness_report_path.name,
     )
 
     (bundle_dir / "run_01_export_and_seed.sh").write_text(cmd_export_seed + "\n", encoding="utf-8")

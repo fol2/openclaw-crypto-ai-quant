@@ -61,6 +61,12 @@ For strict shortcut mode:
 STRICT_NO_RESIDUALS=1 /tmp/live_replay_bundle_1h/run_09_paper_deterministic_replay.sh
 ```
 
+For action artefact residual opt-in (default remains strict fail-closed):
+
+```bash
+AQC_ALLOW_ACTION_ARTEFACT_RESIDUALS=1 /tmp/live_replay_bundle_1h/run_09_paper_deterministic_replay.sh
+```
+
 This keeps snapshot seeding, replay execution, state alignment audit, backtester trade/action reconciliation, live/paper action reconciliation, live/paper decision-trace reconciliation, live-baseline/paper event-order parity, bundle-scoped CPU/GPU parity, and final strict alignment gate tied to one immutable bundle manifest.
 
 The manifest records both file-level and window-level market-data provenance:
