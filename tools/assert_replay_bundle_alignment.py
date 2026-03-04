@@ -344,6 +344,49 @@ def _trade_policy_mismatch_opt_in_proof(report: dict[str, Any]) -> tuple[bool, d
     return ok, proof
 
 
+def _action_artefact_opt_in_proof(report: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+    status = report.get("status") or {}
+    breakdown = report.get("mismatch_breakdown") or {}
+    class_counts = report.get("mismatch_counts_by_classification") or {}
+
+    strict_pass = bool(status.get("strict_alignment_pass"))
+    report_opt_in_flag = bool(status.get("gate_pass_if_allow_compare_surface_artefacts"))
+    artefact_only = bool(status.get("artefact_only_mismatch"))
+    logic_divergence_free = bool(status.get("logic_divergence_free"))
+    compare_surface_artefact_total = _as_int(breakdown.get("compare_surface_artefact_total"), -1)
+    logic_divergence_total = _as_int(breakdown.get("logic_divergence_total"), -1)
+    total = _as_int(breakdown.get("total"), -1)
+    deterministic_logic_divergence = _as_int(class_counts.get("deterministic_logic_divergence"), 0)
+    expected_logic_total = (
+        total - compare_surface_artefact_total
+        if (total >= 0 and compare_surface_artefact_total >= 0)
+        else -1
+    )
+
+    ok = (
+        (not strict_pass)
+        and report_opt_in_flag
+        and artefact_only
+        and logic_divergence_free
+        and compare_surface_artefact_total > 0
+        and logic_divergence_total == 0
+        and deterministic_logic_divergence == 0
+        and (expected_logic_total < 0 or expected_logic_total == logic_divergence_total)
+    )
+    proof = {
+        "strict_alignment_pass": strict_pass,
+        "gate_pass_if_allow_compare_surface_artefacts": report_opt_in_flag,
+        "artefact_only_mismatch": artefact_only,
+        "logic_divergence_free": logic_divergence_free,
+        "compare_surface_artefact_total": int(compare_surface_artefact_total),
+        "logic_divergence_total": int(logic_divergence_total),
+        "mismatch_total": int(total),
+        "deterministic_logic_divergence_class_count": int(deterministic_logic_divergence),
+        "expected_logic_divergence_total": int(expected_logic_total),
+    }
+    return ok, proof
+
+
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
@@ -1066,6 +1109,7 @@ def main() -> int:
     action_report: dict[str, Any] | None = None
     action_strict_status = False
     action_opt_in_status = False
+    action_opt_in_proof: dict[str, Any] = {}
     action_selected_status = False
     action_artefact_only_mismatch = False
     action_gate_mode = (
@@ -1086,12 +1130,21 @@ def main() -> int:
         axis_report_present["action"] = True
         action_status_obj = (action_report.get("status") or {}) if isinstance(action_report, dict) else {}
         action_strict_status = bool(action_status_obj.get("strict_alignment_pass"))
-        raw_action_opt_in_status = action_status_obj.get("gate_pass_if_allow_compare_surface_artefacts")
-        if isinstance(raw_action_opt_in_status, bool):
-            action_opt_in_status = raw_action_opt_in_status
-        else:
-            action_opt_in_status = action_strict_status
         action_artefact_only_mismatch = bool(action_status_obj.get("artefact_only_mismatch"))
+        if action_strict_status:
+            action_opt_in_status = True
+        else:
+            action_opt_in_status, action_opt_in_proof = _action_artefact_opt_in_proof(action_report)
+            if bool(args.allow_action_artefact_residuals) and not action_opt_in_status:
+                axis_failure_codes["action"].append("action_artefact_opt_in_unproven")
+                failures.append(
+                    {
+                        "code": "action_artefact_opt_in_unproven",
+                        "classification": "deterministic_logic_divergence",
+                        "detail": "action artefact opt-in was requested but hard evidence is incomplete",
+                        "proof": action_opt_in_proof,
+                    }
+                )
         action_selected_status = action_opt_in_status if bool(args.allow_action_artefact_residuals) else action_strict_status
         axis_tool_status["action"] = action_strict_status
         axis_gate_status["action"] = action_selected_status
@@ -1107,6 +1160,7 @@ def main() -> int:
                     "strict_alignment_pass": action_strict_status,
                     "opt_in_alignment_pass": action_opt_in_status,
                     "artefact_only_mismatch": action_artefact_only_mismatch,
+                    "opt_in_proof": action_opt_in_proof,
                 }
             )
         if args.strict_no_residuals:
@@ -1489,6 +1543,7 @@ def main() -> int:
             "action_gate_mode": action_gate_mode,
             "action_strict_ok": bool(action_strict_status),
             "action_opt_in_ok": bool(action_opt_in_status),
+            "action_opt_in_proof": action_opt_in_proof,
             "action_artefact_only_mismatch": bool(action_artefact_only_mismatch),
             "live_paper_ok": bool((live_paper_report.get("status") or {}).get("strict_alignment_pass"))
             if live_paper_report

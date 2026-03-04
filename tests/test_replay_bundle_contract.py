@@ -158,15 +158,7 @@ def test_alignment_gate_action_artefact_only_residuals_fail_closed_by_default(
     _write_base_gate_bundle(
         bundle_dir,
         seed_apply_report={"strict_replace": False},
-        action_report={
-            "status": {
-                "strict_alignment_pass": False,
-                "gate_pass_if_allow_compare_surface_artefacts": True,
-                "artefact_only_mismatch": True,
-            },
-            "accepted_residuals": [],
-            "counts": {"mismatch_total": 109},
-        },
+        action_report=_action_artefact_report(),
     )
     output = bundle_dir / "alignment_gate_report.json"
 
@@ -208,15 +200,7 @@ def test_alignment_gate_action_artefact_only_residuals_pass_with_opt_in(
     _write_base_gate_bundle(
         bundle_dir,
         seed_apply_report={"strict_replace": False},
-        action_report={
-            "status": {
-                "strict_alignment_pass": False,
-                "gate_pass_if_allow_compare_surface_artefacts": True,
-                "artefact_only_mismatch": True,
-            },
-            "accepted_residuals": [],
-            "counts": {"mismatch_total": 109},
-        },
+        action_report=_action_artefact_report(),
     )
     output = bundle_dir / "alignment_gate_report.json"
 
@@ -243,6 +227,41 @@ def test_alignment_gate_action_artefact_only_residuals_pass_with_opt_in(
     assert report["checks"]["action_strict_ok"] is False
     assert report["checks"]["action_opt_in_ok"] is True
     assert report["checks"]["action_artefact_only_mismatch"] is True
+
+
+def test_alignment_gate_action_artefact_opt_in_requires_hard_evidence(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    _write_base_gate_bundle(
+        bundle_dir,
+        seed_apply_report={"strict_replace": False},
+        action_report=_action_artefact_report(include_hard_evidence=False),
+    )
+    output = bundle_dir / "alignment_gate_report.json"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "assert_replay_bundle_alignment.py",
+            "--bundle-dir",
+            str(bundle_dir),
+            "--allow-action-artefact-residuals",
+            "--skip-candles-provenance-check",
+            "--output",
+            str(output),
+        ],
+    )
+
+    exit_code = alignment_gate.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+    failure_codes = {str(row.get("code") or "") for row in report.get("failures") or []}
+
+    assert exit_code == 1
+    assert "action_artefact_opt_in_unproven" in failure_codes
+    assert report["checks"]["action_opt_in_ok"] is False
 
 
 @pytest.mark.parametrize(
@@ -381,6 +400,30 @@ def _write_trade_policy_mismatch_report(
             "accepted_residuals": [],
         },
     )
+
+
+def _action_artefact_report(*, include_hard_evidence: bool = True) -> dict:
+    report = {
+        "status": {
+            "strict_alignment_pass": False,
+            "gate_pass_if_allow_compare_surface_artefacts": True,
+            "artefact_only_mismatch": True,
+            "logic_divergence_free": True,
+        },
+        "accepted_residuals": [],
+        "counts": {"mismatch_total": 109},
+        "mismatch_counts_by_classification": {
+            "non-simulatable_exchange_oms_effect": 109,
+            "deterministic_logic_divergence": 0,
+        },
+    }
+    if include_hard_evidence:
+        report["mismatch_breakdown"] = {
+            "total": 109,
+            "compare_surface_artefact_total": 109,
+            "logic_divergence_total": 0,
+        }
+    return report
 
 
 def test_alignment_gate_trade_policy_mismatch_stays_fail_closed_without_opt_in(
