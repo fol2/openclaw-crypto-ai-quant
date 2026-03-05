@@ -518,8 +518,26 @@ export class TradePanel extends LitElement {
     this.openBusy = true;
     this.openErr = '';
     try {
-      const res = await tradeExecute({ ...this._openBody(), confirm_token: this.openTok });
-      // Poll for execution result
+      let res: any;
+      try {
+        res = await tradeExecute({ ...this._openBody(), confirm_token: this.openTok });
+      } catch (e: any) {
+        const msg: string = e?.message ?? '';
+        // If the confirm token was lost (hub restart), auto re-preview and retry once.
+        if (msg.includes('confirm token') || msg.includes('expired')) {
+          const preview = await tradePreview(this._openBody());
+          this.openTok = preview?.confirm_token || '';
+          if (!this.openTok) throw e;
+          // Wait for preview job to complete before retrying execute.
+          if (preview?.job_id) {
+            const prevResult = await this._awaitJobResult(preview.job_id);
+            if (!prevResult?.ok) throw e;
+          }
+          res = await tradeExecute({ ...this._openBody(), confirm_token: this.openTok });
+        } else {
+          throw e;
+        }
+      }
       if (res?.job_id) {
         const result = await this._awaitJobResult(res.job_id, 15_000);
         if (result && result.ok) {
@@ -572,7 +590,21 @@ export class TradePanel extends LitElement {
     this.closeBusy = true;
     this.closeErr = '';
     try {
-      const res = await tradeClose({ ...this._closeBody(), confirm_token: this.closeTok });
+      let res: any;
+      try {
+        res = await tradeClose({ ...this._closeBody(), confirm_token: this.closeTok });
+      } catch (e: any) {
+        const msg: string = e?.message ?? '';
+        // If the confirm token was lost (hub restart), auto-refresh and retry once.
+        if (msg.includes('confirm token') || msg.includes('expired')) {
+          const preview = await tradeClose(this._closeBody());
+          this.closeTok = preview?.confirm_token || '';
+          if (!this.closeTok) throw e;
+          res = await tradeClose({ ...this._closeBody(), confirm_token: this.closeTok });
+        } else {
+          throw e;
+        }
+      }
       if (res?.job_id) {
         const result = await this._awaitJobResult(res.job_id, 15_000);
         if (result && result.ok) {

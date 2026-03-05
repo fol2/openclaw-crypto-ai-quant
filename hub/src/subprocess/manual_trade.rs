@@ -47,12 +47,19 @@ pub struct ManualTradeArgs {
 ///
 /// Runs `uv run tools/manual_trade.py --action ...` in the project root
 /// directory. Stdout captures JSON result, stderr streams progress lines.
+///
+/// `kind` controls the job-store key used for slot-contention checks.
+/// Write operations (execute, close) use `"manual_trade"` so they are
+/// mutually exclusive via `acquire_trade_slot`.  Read-only helpers
+/// (preview, open-orders, cancel) use `"manual_trade_ro"` so they never
+/// block write operations.
 pub async fn spawn_manual_trade(
     job_id: JobId,
     args: ManualTradeArgs,
     aiq_root: String,
     store: Arc<JobStore>,
     broadcast: BroadcastHub,
+    kind: &'static str,
 ) {
     let mut cmd = Command::new("uv");
     cmd.arg("run")
@@ -99,7 +106,8 @@ pub async fn spawn_manual_trade(
         .stderr(Stdio::piped());
 
     let jid = job_id.clone();
+    let kind_owned = kind.to_string();
     tokio::spawn(async move {
-        run_subprocess(jid, "manual_trade", cmd, store, broadcast).await;
+        run_subprocess(jid, &kind_owned, cmd, store, broadcast).await;
     });
 }
