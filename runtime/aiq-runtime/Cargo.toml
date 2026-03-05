@@ -1,0 +1,21 @@
+[package]
+name = "aiq-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "aiq-runtime"
+path = "src/main.rs"
+
+[dependencies]
+aiq-runtime-core = { path = "../aiq-runtime-core" }
+anyhow = { workspace = true }
+bt-core = { path = "../../backtester/crates/bt-core" }
+chrono = { version = "0.4", features = ["clock"] }
+clap = { workspace = true }
+rusqlite = { version = "0.33", features = ["bundled"] }
+serde_json = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

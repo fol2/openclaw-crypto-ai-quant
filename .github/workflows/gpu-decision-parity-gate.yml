@@ -22,9 +22,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: backtester
+      - name: Detect CUDA toolkit
+        id: cuda
+        run: |
+          if command -v nvcc >/dev/null 2>&1; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::[gpu-decision-parity] nvcc not found on this runner; skipping decision parity gate."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Run decision parity tests
+        if: steps.cuda.outputs.available == 'true'
         working-directory: backtester
         run: cargo test -p bt-gpu --features codegen --test gpu_decision_parity --test gpu_sweep_full_parity
       - name: Run unit tests
+        if: steps.cuda.outputs.available == 'true'
         working-directory: backtester
         run: cargo test -p bt-gpu --features codegen --lib
+      - name: Skip on non-CUDA runners
+        if: steps.cuda.outputs.available != 'true'
+        run: echo "[gpu-decision-parity] Warning-only skip on runner without nvcc."

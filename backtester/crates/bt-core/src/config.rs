@@ -5,6 +5,7 @@
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -547,6 +548,73 @@ impl Default for EngineConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Runtime + pipeline config (Rust runtime foundation)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct RuntimeConfig {
+    /// Active runtime profile name. Empty = follow `pipeline.default_profile`.
+    pub profile: String,
+    /// Persistence backend identifier.
+    pub state_backend: String,
+    /// Audit sink identifier.
+    pub audit_sink: String,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            profile: String::new(),
+            state_backend: "sqlite".to_string(),
+            audit_sink: "sqlite".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct PipelineProfileConfig {
+    /// Stable ranker identifier used by the Rust runtime registry.
+    pub ranker: String,
+    /// Optional full stage order override. Empty = registry default order.
+    pub stage_order: Vec<String>,
+    /// Optional explicit stage allow-list additions.
+    pub enabled_stages: Vec<String>,
+    /// Optional explicit stage block-list removals.
+    pub disabled_stages: Vec<String>,
+}
+
+impl Default for PipelineProfileConfig {
+    fn default() -> Self {
+        Self {
+            ranker: String::new(),
+            stage_order: Vec::new(),
+            enabled_stages: Vec::new(),
+            disabled_stages: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct PipelineConfig {
+    /// Active profile when `runtime.profile` is unset.
+    pub default_profile: String,
+    /// Per-profile runtime overrides keyed by profile name.
+    pub profiles: BTreeMap<String, PipelineProfileConfig>,
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        Self {
+            default_profile: "production".to_string(),
+            profiles: BTreeMap::new(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Top-level strategy config
 // ---------------------------------------------------------------------------
 
@@ -559,6 +627,8 @@ pub struct StrategyConfig {
     pub market_regime: MarketRegimeConfig,
     pub thresholds: ThresholdsConfig,
     pub engine: EngineConfig,
+    pub runtime: RuntimeConfig,
+    pub pipeline: PipelineConfig,
 }
 
 impl Default for StrategyConfig {
@@ -570,6 +640,8 @@ impl Default for StrategyConfig {
             market_regime: MarketRegimeConfig::default(),
             thresholds: ThresholdsConfig::default(),
             engine: EngineConfig::default(),
+            runtime: RuntimeConfig::default(),
+            pipeline: PipelineConfig::default(),
         }
     }
 }
@@ -594,6 +666,8 @@ impl StrategyConfig {
 //   filters: { ... }
 //   market_regime: { ... }
 //   thresholds: { ... }
+//   runtime: { ... }      # additive, Rust-only runtime settings
+//   pipeline: { ... }     # additive, stage graph / ranker settings
 // symbols:
 //   BTC:
 //     trade: { ... }
@@ -698,6 +772,8 @@ struct SerializableConfig {
     market_regime: serde_json::Value,
     thresholds: serde_json::Value,
     engine: serde_json::Value,
+    runtime: serde_json::Value,
+    pipeline: serde_json::Value,
 }
 
 impl From<StrategyConfig> for SerializableConfig {
@@ -709,6 +785,8 @@ impl From<StrategyConfig> for SerializableConfig {
             market_regime: market_regime_to_json(&cfg.market_regime),
             thresholds: thresholds_to_json(&cfg.thresholds),
             engine: engine_to_json(&cfg.engine),
+            runtime: runtime_to_json(&cfg.runtime),
+            pipeline: pipeline_to_json(&cfg.pipeline),
         }
     }
 }
@@ -900,6 +978,34 @@ fn engine_to_json(e: &EngineConfig) -> serde_json::Value {
     })
 }
 
+fn runtime_to_json(r: &RuntimeConfig) -> serde_json::Value {
+    serde_json::json!({
+        "profile": r.profile,
+        "state_backend": r.state_backend,
+        "audit_sink": r.audit_sink,
+    })
+}
+
+fn pipeline_to_json(p: &PipelineConfig) -> serde_json::Value {
+    let mut profiles = serde_json::Map::new();
+    for (name, profile) in &p.profiles {
+        profiles.insert(
+            name.clone(),
+            serde_json::json!({
+                "ranker": profile.ranker,
+                "stage_order": profile.stage_order,
+                "enabled_stages": profile.enabled_stages,
+                "disabled_stages": profile.disabled_stages,
+            }),
+        );
+    }
+
+    serde_json::json!({
+        "default_profile": p.default_profile,
+        "profiles": profiles,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Public loader
 // ---------------------------------------------------------------------------
@@ -1021,6 +1127,8 @@ mod tests {
         assert!((cfg.thresholds.entry.min_adx - 22.0).abs() < f64::EPSILON);
         assert_eq!(cfg.thresholds.entry.macd_hist_entry_mode, MacdMode::Accel);
         assert!((cfg.thresholds.stoch_rsi.block_long_if_k_gt - 0.85).abs() < f64::EPSILON);
+        assert_eq!(cfg.runtime.state_backend, "sqlite");
+        assert_eq!(cfg.pipeline.default_profile, "production");
     }
 
     #[test]
@@ -1225,6 +1333,46 @@ global:
         std::fs::write(&tmp, yaml).unwrap();
         let cfg = load_config(tmp.to_str().unwrap(), None, false);
         assert_eq!(cfg.indicators.bb_width_avg_window, 1);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn test_load_yaml_runtime_pipeline_overrides() {
+        let yaml = r#"
+global:
+  runtime:
+    profile: parity_baseline
+  pipeline:
+    default_profile: parity_baseline
+    profiles:
+      parity_baseline:
+        ranker: confidence_adx
+        disabled_stages: ["broker_execution"]
+symbols:
+  BTC:
+    pipeline:
+      profiles:
+        parity_baseline:
+          disabled_stages: ["broker_execution", "oms_transition"]
+live:
+  runtime:
+    profile: production_live
+"#;
+        let tmp = std::env::temp_dir().join("bt_config_test_runtime_pipeline.yaml");
+        std::fs::write(&tmp, yaml).unwrap();
+
+        let cfg = load_config(tmp.to_str().unwrap(), Some("BTC"), false);
+        assert_eq!(cfg.runtime.profile, "parity_baseline");
+        assert_eq!(cfg.pipeline.default_profile, "parity_baseline");
+        let profile = cfg.pipeline.profiles.get("parity_baseline").unwrap();
+        assert_eq!(profile.ranker, "confidence_adx");
+        assert_eq!(
+            profile.disabled_stages,
+            vec!["broker_execution", "oms_transition"]
+        );
+
+        let cfg_live = load_config(tmp.to_str().unwrap(), Some("BTC"), true);
+        assert_eq!(cfg_live.runtime.profile, "production_live");
         std::fs::remove_file(&tmp).ok();
     }
 }

@@ -1,0 +1,10 @@
+[package]
+name = "aiq-runtime-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bt-core = { path = "../../backtester/crates/bt-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

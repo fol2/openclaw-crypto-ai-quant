@@ -49,6 +49,7 @@ analyst_state.json
 .pytest_cache/
 
 # Rust build artifacts
+target/
 backtester/target/
 ws_sidecar/target/
 
