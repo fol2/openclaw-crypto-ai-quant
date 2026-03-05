@@ -2244,11 +2244,12 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
+        let completed_trials = args.tpe_trials;
         eprintln!(
             "\n[sweep] {} TPE trials completed via GPU in {:.2}s ({:.1} trials/s)",
-            results.len(),
+            completed_trials,
             gpu_elapsed.as_secs_f64(),
-            results.len() as f64 / gpu_elapsed.as_secs_f64(),
+            completed_trials as f64 / gpu_elapsed.as_secs_f64(),
         );
 
         // Print top 5 summary
