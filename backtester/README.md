@@ -295,7 +295,7 @@ mei-backtester replay --init-state /tmp/paper_state.json --trades
 | `crates/bt-runtime/` | PyO3 bridge to Python |
 | `crates/risk-core/` | Shared risk primitives (entry sizing, confidence) |
 | `crates/bt-cli/src/main.rs` | CLI entry point (clap) |
-| `../tools/export_state.py` | Export live/paper state to JSON |
+| `../runtime/aiq-runtime/` | Rust runtime CLI for snapshot export / validate / seed-paper |
 | `../tools/deploy_sweep.py` | Deploy sweep results to YAML config |
 
 ## GPU Decision Codegen
@@ -308,4 +308,5 @@ GPU sweep decision logic is generated from Rust kernel source via template-based
 - **Borrow-safe pattern**: EMA slow history push and bar_count increment use scoped borrows that end before `apply_exit(&mut state)` is called.
 - **init_state.rs**: serde Deserialize structs, `load(path)` validates version=1, `into_sim_state()` converts to `(f64, FxHashMap<String, Position>)` with optional symbol filtering.
 - **deploy_sweep.py**: uses PyYAML `safe_load`/`safe_dump`; YAML comments are not preserved.
-- **export_state.py paper mode**: 4-stage reconstruction — latest balance → identify open positions (OPEN without matching CLOSE) → replay ADD/REDUCE fills → load position_state metadata.
+- **aiq-runtime snapshot export-paper**: Rust reconstructs paper positions from `trades`, enriches from `position_state`, and carries forward `runtime_cooldowns` into `init-state v2`.
+- **aiq-runtime snapshot seed-paper**: Rust can now project the same `init-state v2` snapshot back into `trades`, `position_state`, `position_state_history`, and `runtime_cooldowns` for deterministic paper bootstrap.

@@ -181,7 +181,8 @@ Tiebreaker: symbol name alphabetical order. Pyramid ADD orders execute immediate
 │   └── secrets.json.example   # Secrets template
 ├── tools/                     # Operational tools (60+ scripts)
 │   ├── deploy_sweep.py        # Deploy sweep results to YAML
-│   ├── export_state.py        # Export paper/live state to JSON
+│   ├── export_state.py        # Legacy Python export path (frozen migration reference)
+│   ├── ../runtime/aiq-runtime # Rust runtime CLI for snapshot export/validate/seed
 │   ├── factory_cycle.py       # Strategy factory automation
 │   ├── promote_to_live.py     # Paper → live promotion
 │   ├── paper_deploy.py        # Paper deployment
