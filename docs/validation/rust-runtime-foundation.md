@@ -12,6 +12,7 @@ green:
 - pipeline bootstrap and profile resolution
 - snapshot schema validation
 - paper snapshot export
+- paper snapshot seed
 - bt-core init-state compatibility
 
 ## Commands
@@ -30,6 +31,8 @@ cargo test --manifest-path backtester/Cargo.toml -p bt-core test_into_sim_state_
 # Runtime CLI smoke
 cargo run -q -p aiq-runtime -- doctor --json
 cargo run -q -p aiq-runtime -- pipeline --json
+cargo run -q -p aiq-runtime -- snapshot validate --path <snapshot_v2_valid.json> --json
+cargo run -q -p aiq-runtime -- snapshot seed-paper --snapshot <snapshot_v2_valid.json> --target-db <paper_fixture.db> --strict-replace --json
 ```
 
 ## Acceptance Checks
@@ -41,6 +44,7 @@ cargo run -q -p aiq-runtime -- pipeline --json
 - `pipeline --json` resolves `production` cleanly against the example YAML when the tracked live YAML is absent.
 - `bt-core` accepts snapshots with `version = 2` and runtime cooldown markers.
 - `aiq-runtime` can export a v2 paper snapshot from SQLite and re-validate it through the same Rust snapshot contract.
+- `aiq-runtime` can seed a paper DB from a v2 snapshot and report deterministic write counts for `trades`, `position_state`, and `runtime_cooldowns`.
 
 ## Fixture Guidance
 

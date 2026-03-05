@@ -194,6 +194,10 @@ cargo run --manifest-path ../Cargo.toml -p aiq-runtime -- \
 # Validate snapshot compatibility with bt-core before replay
 cargo run --manifest-path ../Cargo.toml -p aiq-runtime -- \
   snapshot validate --path state.json --json
+
+# Seed a paper DB from the same snapshot when you need paper/replay parity
+cargo run --manifest-path ../Cargo.toml -p aiq-runtime -- \
+  snapshot seed-paper --snapshot state.json --target-db ../trading_engine.db --strict-replace --json
 ```
 
 **Output format (v2 JSON schema):**
@@ -231,6 +235,8 @@ cargo run --manifest-path ../Cargo.toml -p aiq-runtime -- \
 ```
 
 **Paper export:** Rust reconstructs positions from `trades`, enriches with `position_state`, and carries forward `runtime_cooldowns` markers when present.
+
+**Paper seed:** Rust can now project the same v2 snapshot back into `trades`, `position_state`, `position_state_history`, and `runtime_cooldowns` for deterministic paper bootstrap.
 
 **Live export:** keep using the live-canonical snapshot workflow until the Rust live adapter owns exchange truth.
 

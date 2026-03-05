@@ -67,6 +67,24 @@ cargo run --manifest-path Cargo.toml -p aiq-runtime -- \
   snapshot validate --path /tmp/paper_init_state_v2.json --json
 ```
 
+Paper seed:
+
+```bash
+cargo run --manifest-path Cargo.toml -p aiq-runtime -- \
+  snapshot seed-paper --snapshot /tmp/paper_init_state_v2.json --target-db trading_engine.db --strict-replace --json
+```
+
+## Paper Seed Rules
+
+- `snapshot seed-paper` is a write path and must validate the snapshot before writing.
+- The Rust seed path currently rewrites these paper DB projection targets:
+  - `trades`
+  - `position_state`
+  - `position_state_history`
+  - `runtime_cooldowns`
+- `--strict-replace` is the deterministic bootstrap mode.
+- Without `--strict-replace`, the command fails closed if stale open paper positions would remain outside the snapshot.
+
 ## Backward Compatibility
 
 - `bt-core` continues to read v1 and v2
