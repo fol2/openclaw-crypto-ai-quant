@@ -128,6 +128,28 @@ async fn acquire_trade_slot(state: &AppState, job_id: &str) -> Result<(), HubErr
         }
     }
 
+    // Auto-expire stuck manual_trade jobs older than 3 minutes (belt-and-suspenders
+    // safety net — the primary fix is the subprocess timeout in run_subprocess).
+    const MAX_RUN_SECS: i64 = 180;
+    let now_utc = chrono::Utc::now();
+    let stuck_ids: Vec<String> = jobs
+        .iter()
+        .filter(|(_, j)| j.kind == "manual_trade" && j.status == JobStatus::Running)
+        .filter(|(_, j)| {
+            chrono::DateTime::parse_from_rfc3339(&j.created_at)
+                .map(|created| (now_utc - created.with_timezone(&chrono::Utc)).num_seconds() > MAX_RUN_SECS)
+                .unwrap_or(true) // if we can't parse, treat as stuck
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in &stuck_ids {
+        if let Some(j) = jobs.get_mut(id) {
+            j.status = JobStatus::Failed;
+            j.error = Some("auto-expired: exceeded max run time".into());
+            j.finished_at = Some(now_utc.to_rfc3339());
+        }
+    }
+
     let running = jobs
         .values()
         .any(|j| j.kind == "manual_trade" && j.status == JobStatus::Running);
