@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 import json
 import sqlite3
 import stat
@@ -166,10 +167,8 @@ if __name__ == "__main__":
     path.chmod(st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def test_factory_smoke_run_produces_artifacts(tmp_path, monkeypatch) -> None:
-    artifacts_root = tmp_path / "artifacts"
-    cfg = tmp_path / "base.yaml"
-    cfg.write_text(
+def _write_base_config(path: Path) -> None:
+    path.write_text(
         "\n".join(
             [
                 "global:",
@@ -199,6 +198,12 @@ def test_factory_smoke_run_produces_artifacts(tmp_path, monkeypatch) -> None:
         encoding="utf-8",
     )
 
+
+def _prepare_factory_inputs(tmp_path: Path, monkeypatch) -> tuple[Path, Path, Path, Path]:
+    artifacts_root = tmp_path / "artifacts"
+    cfg = tmp_path / "base.yaml"
+    _write_base_config(cfg)
+
     candles_db = tmp_path / "candles_1h.db"
     _mk_candles_db(candles_db, symbol="BTC", interval="1h")
 
@@ -207,8 +212,94 @@ def test_factory_smoke_run_produces_artifacts(tmp_path, monkeypatch) -> None:
 
     bt_stub = tmp_path / "mei-backtester-stub.py"
     _mk_stub_backtester(bt_stub)
-
     monkeypatch.setenv("MEI_BACKTESTER_BIN", str(bt_stub))
+
+    return artifacts_root, cfg, candles_db, funding_db
+
+
+def _shortlist_stub_identity(mode: str, rank: int) -> str | None:
+    if mode == "efficient" and 1 <= rank <= 10:
+        return f"shared_{rank:02d}"
+    if mode == "growth" and 1 <= rank <= 20:
+        return f"shared_{rank:02d}"
+    if mode == "conservative" and 1 <= rank <= 25:
+        return f"shared_{rank:02d}"
+    return None
+
+
+def _make_shortlist_generate_config_stub(real_run_cmd, *, exhaustion_is_graceful: bool):
+    def _fake_run_cmd(argv, **kwargs):
+        argv_list = [str(part) for part in argv]
+        if argv_list[:2] != ["python3", "tools/generate_config.py"]:
+            return real_run_cmd(argv, **kwargs)
+
+        mode = argv_list[argv_list.index("--sort-by") + 1]
+        rank = int(argv_list[argv_list.index("--rank") + 1])
+        out_path = Path(argv_list[argv_list.index("-o") + 1])
+        stdout_path = Path(str(kwargs["stdout_path"]))
+        stderr_path = Path(str(kwargs["stderr_path"]))
+        cwd = str(kwargs["cwd"])
+
+        stdout_path.parent.mkdir(parents=True, exist_ok=True)
+        stderr_path.parent.mkdir(parents=True, exist_ok=True)
+
+        cfg_identity = _shortlist_stub_identity(mode, rank)
+        if cfg_identity is None:
+            if mode == "conservative" and rank == 26 and exhaustion_is_graceful:
+                stderr_path.write_text(
+                    "[generate] Loaded 25 results, sorted by conservative\n[generate] Rank 26 out of range (1..25).\n",
+                    encoding="utf-8",
+                )
+                stdout_path.write_text("", encoding="utf-8")
+                return factory_run.CmdResult(
+                    argv=argv_list,
+                    cwd=cwd,
+                    exit_code=1,
+                    elapsed_s=0.01,
+                    stdout_path=str(stdout_path),
+                    stderr_path=str(stderr_path),
+                )
+
+            stderr_path.write_text("ValueError: malformed shortlist row\n", encoding="utf-8")
+            stdout_path.write_text("", encoding="utf-8")
+            return factory_run.CmdResult(
+                argv=argv_list,
+                cwd=cwd,
+                exit_code=2,
+                elapsed_s=0.01,
+                stdout_path=str(stdout_path),
+                stderr_path=str(stderr_path),
+            )
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(
+            "\n".join(
+                [
+                    "global:",
+                    "  engine:",
+                    "    interval: 1h",
+                    f"  candidate_marker: {cfg_identity}",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        stdout_path.write_text("", encoding="utf-8")
+        stderr_path.write_text("", encoding="utf-8")
+        return factory_run.CmdResult(
+            argv=argv_list,
+            cwd=cwd,
+            exit_code=0,
+            elapsed_s=0.01,
+            stdout_path=str(stdout_path),
+            stderr_path=str(stderr_path),
+        )
+
+    return _fake_run_cmd
+
+
+def test_factory_smoke_run_produces_artifacts(tmp_path, monkeypatch) -> None:
+    artifacts_root, cfg, candles_db, funding_db = _prepare_factory_inputs(tmp_path, monkeypatch)
 
     run_id = "test_smoke"
     rc = factory_run.main(
@@ -267,3 +358,109 @@ def test_factory_smoke_run_produces_artifacts(tmp_path, monkeypatch) -> None:
     assert "sweep_stage" in items[0]
     assert "replay_stage" in items[0]
     assert "canonical_cpu_verified" in items[0]
+
+
+def test_factory_smoke_shortlist_out_of_range_exhaustion_is_graceful(tmp_path, monkeypatch) -> None:
+    artifacts_root, cfg, candles_db, funding_db = _prepare_factory_inputs(tmp_path, monkeypatch)
+    real_run_cmd = factory_run._run_cmd
+    monkeypatch.setattr(
+        factory_run,
+        "_run_cmd",
+        _make_shortlist_generate_config_stub(real_run_cmd, exhaustion_is_graceful=True),
+    )
+
+    run_id = "test_shortlist_exhaustion"
+    rc = factory_run.main(
+        [
+            "--run-id",
+            run_id,
+            "--profile",
+            "smoke",
+            "--artifacts-dir",
+            str(artifacts_root),
+            "--config",
+            str(cfg),
+            "--interval",
+            "1h",
+            "--candles-db",
+            str(candles_db),
+            "--funding-db",
+            str(funding_db),
+            "--sweep-spec",
+            str(tmp_path / "sweep.yaml"),
+            "--shortlist-modes",
+            "efficient,growth,conservative",
+            "--shortlist-per-mode",
+            "10",
+            "--shortlist-max-rank",
+            "1000",
+            "--shortlist-top-pnl",
+            "1000",
+        ]
+    )
+
+    assert rc == 0
+
+    metas = list(artifacts_root.rglob("run_metadata.json"))
+    assert len(metas) == 1
+    meta = json.loads(metas[0].read_text(encoding="utf-8"))
+    assert meta["run_id"] == run_id
+
+    selected = [entry for entry in meta.get("candidate_configs", []) if entry.get("selected")]
+    assert Counter(entry["sort_by"] for entry in selected) == {
+        "efficient": 10,
+        "growth": 10,
+        "conservative": 5,
+    }
+
+    run_dir = Path(meta["run_dir"])
+    assert (run_dir / "reports" / "report.json").exists()
+
+
+def test_factory_smoke_shortlist_non_exhaustion_generate_error_still_fails(tmp_path, monkeypatch) -> None:
+    artifacts_root, cfg, candles_db, funding_db = _prepare_factory_inputs(tmp_path, monkeypatch)
+    real_run_cmd = factory_run._run_cmd
+    monkeypatch.setattr(
+        factory_run,
+        "_run_cmd",
+        _make_shortlist_generate_config_stub(real_run_cmd, exhaustion_is_graceful=False),
+    )
+
+    rc = factory_run.main(
+        [
+            "--run-id",
+            "test_shortlist_genuine_error",
+            "--profile",
+            "smoke",
+            "--artifacts-dir",
+            str(artifacts_root),
+            "--config",
+            str(cfg),
+            "--interval",
+            "1h",
+            "--candles-db",
+            str(candles_db),
+            "--funding-db",
+            str(funding_db),
+            "--sweep-spec",
+            str(tmp_path / "sweep.yaml"),
+            "--shortlist-modes",
+            "efficient,growth,conservative",
+            "--shortlist-per-mode",
+            "10",
+            "--shortlist-max-rank",
+            "1000",
+            "--shortlist-top-pnl",
+            "1000",
+        ]
+    )
+
+    assert rc == 2
+
+    meta_path = next(artifacts_root.rglob("run_metadata.json"))
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert any(
+        step.get("name") == "generate_config_conservative_rank26" and int(step.get("exit_code", 0)) == 2
+        for step in meta.get("steps", [])
+    )
+    assert "candidate_configs" not in meta
