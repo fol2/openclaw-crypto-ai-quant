@@ -152,6 +152,22 @@ def main() -> int:
             "profit_factor": 1.20,
             "max_drawdown_pct": 0.02,
             "total_fees": 1.0,
+            "decision_diagnostics": [
+                {
+                    "event_id": 1,
+                    "source": "stub",
+                    "timestamp_ms": 1700000000000,
+                    "symbol": "BTC",
+                    "signal": "BUY",
+                    "requested_notional_usd": 1000.0,
+                    "schema_version": 1,
+                    "intents": [],
+                    "fills": [],
+                    "warnings": [],
+                    "errors": [],
+                    "applied_to_kernel_state": True,
+                }
+            ],
         }
         with open(out, "w", encoding="utf-8") as f:
             json.dump(rep, f)
@@ -464,3 +480,57 @@ def test_factory_smoke_shortlist_non_exhaustion_generate_error_still_fails(tmp_p
         for step in meta.get("steps", [])
     )
     assert "candidate_configs" not in meta
+
+
+def test_factory_smoke_replay_equivalence_self_seed_second_pass_promotes_pass(tmp_path, monkeypatch) -> None:
+    artifacts_root, cfg, candles_db, funding_db = _prepare_factory_inputs(tmp_path, monkeypatch)
+    monkeypatch.setenv("AI_QUANT_REPLAY_EQUIVALENCE_MODE", "backtest")
+    monkeypatch.setenv("AI_QUANT_REPLAY_EQUIVALENCE_STRICT", "1")
+    monkeypatch.setenv("AI_QUANT_REPLAY_EQUIVALENCE_AUTO_SEED", "1")
+    monkeypatch.setenv("AI_QUANT_REPLAY_EQUIVALENCE_AUTO_FALLBACK", "1")
+    monkeypatch.setenv("AI_QUANT_REPLAY_EQUIVALENCE_BASELINE_POLICY", "pinned_or_auto")
+    monkeypatch.setenv("AI_QUANT_REPLAY_EQUIVALENCE_BASELINE", str(tmp_path / "missing-baseline.json"))
+
+    run_id = "test_replay_eq_self_seed_second_pass"
+    rc = factory_run.main(
+        [
+            "--run-id",
+            run_id,
+            "--profile",
+            "smoke",
+            "--artifacts-dir",
+            str(artifacts_root),
+            "--config",
+            str(cfg),
+            "--interval",
+            "1h",
+            "--candles-db",
+            str(candles_db),
+            "--funding-db",
+            str(funding_db),
+            "--sweep-spec",
+            str(tmp_path / "sweep.yaml"),
+            "--shortlist-per-mode",
+            "0",
+            "--num-candidates",
+            "2",
+        ]
+    )
+
+    assert rc == 0
+
+    meta_path = next(artifacts_root.rglob("run_metadata.json"))
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    run_dir = Path(meta["run_dir"])
+    report = json.loads((run_dir / "reports" / "report.json").read_text(encoding="utf-8"))
+    items = report.get("items", []) if isinstance(report, dict) else []
+
+    assert len(items) == 2
+    assert all(item.get("replay_equivalence_status") == "pass" for item in items)
+    assert all(bool(item.get("replay_equivalence_report_path")) for item in items)
+    assert all(Path(str(item["replay_equivalence_report_path"])).is_file() for item in items)
+    assert all(item.get("replay_equivalence_seed_mode") is False for item in items)
+
+    manifest = json.loads((run_dir / "replay_equivalence_baseline_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["candidate_count"] == 2
+    assert manifest["seed_mode_count"] == 0
