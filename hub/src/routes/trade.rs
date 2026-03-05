@@ -271,6 +271,7 @@ async fn trade_preview(
         state.config.aiq_root.display().to_string(),
         Arc::clone(&state.jobs),
         state.broadcast.clone(),
+        "manual_trade_ro",
     )
     .await;
 
@@ -332,6 +333,7 @@ async fn trade_execute(
         state.config.aiq_root.display().to_string(),
         Arc::clone(&state.jobs),
         state.broadcast.clone(),
+        "manual_trade",
     )
     .await;
 
@@ -403,6 +405,7 @@ async fn trade_close(
         state.config.aiq_root.display().to_string(),
         Arc::clone(&state.jobs),
         state.broadcast.clone(),
+        "manual_trade",
     )
     .await;
 
@@ -452,6 +455,7 @@ async fn trade_cancel(
         state.config.aiq_root.display().to_string(),
         Arc::clone(&state.jobs),
         state.broadcast.clone(),
+        "manual_trade_ro",
     )
     .await;
 
@@ -494,6 +498,7 @@ async fn trade_open_orders(
         state.config.aiq_root.display().to_string(),
         Arc::clone(&state.jobs),
         state.broadcast.clone(),
+        "manual_trade_ro",
     )
     .await;
 
