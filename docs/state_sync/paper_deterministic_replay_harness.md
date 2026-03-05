@@ -6,7 +6,7 @@ Run the full deterministic replay workflow for the paper axis with one command.
 
 The harness executes:
 
-1. snapshot export + paper seed
+1. Rust paper snapshot export + init-state v2 validation + paper seed
 2. backtester replay
 3. state audit
 4. live/backtester trade reconcile
@@ -74,3 +74,18 @@ python tools/audit_live_baseline_paper_order_parity.py \
 `ok = true` means all steps (including event-order parity and final strict gate) passed.
 
 `gpu_parity` step requires CUDA because it executes GPU sweep lanes inside the bundle scope.
+
+## Snapshot Contract
+
+The first harness step should now be treated as:
+
+1. `aiq-runtime snapshot export-paper`
+2. `aiq-runtime snapshot validate --json`
+3. seed paper/backtester only if validation passes
+
+Validation must fail closed on:
+
+- unsupported snapshot schema version
+- invalid position side / confidence / leverage values
+- missing runtime markers when the selected continuation profile requires them
+- bt-core init-state incompatibility

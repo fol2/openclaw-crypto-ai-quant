@@ -184,20 +184,22 @@ python tools/deploy_sweep.py --sweep-results sweep_results.jsonl --rank 1 \
 - `--close-live` requires explicit flag — never closes live positions by default
 - YAML backup created before every write
 
-### Step 3: Export current state (`export_state.py`)
+### Step 3: Export current state (`aiq-runtime snapshot`)
 
 ```bash
-# Export paper trader state
-python tools/export_state.py --source paper --output state.json
+# Export paper trader state as init-state v2
+cargo run --manifest-path ../Cargo.toml -p aiq-runtime -- \
+  snapshot export-paper --db ../trading_engine.db --output state.json
 
-# Export live trader state (requires a secrets file; set AI_QUANT_SECRETS_PATH for non-default locations)
-python tools/export_state.py --source live --output state.json
+# Validate snapshot compatibility with bt-core before replay
+cargo run --manifest-path ../Cargo.toml -p aiq-runtime -- \
+  snapshot validate --path state.json --json
 ```
 
-**Output format (v1 JSON schema):**
+**Output format (v2 JSON schema):**
 ```json
 {
-  "version": 1,
+  "version": 2,
   "source": "paper",
   "exported_at_ms": 1770563327601,
   "balance": 8745.93,
@@ -215,15 +217,22 @@ python tools/export_state.py --source live --output state.json
       "adds_count": 0,
       "tp1_taken": false,
       "open_time_ms": 1770400000000,
-      "last_add_time_ms": 0
+      "last_add_time_ms": 0,
+      "entry_adx_threshold": 22.0
     }
-  ]
+  ],
+  "runtime": {
+    "entry_attempt_ms_by_symbol": {
+      "BTC": 1770563200000
+    },
+    "exit_attempt_ms_by_symbol": {}
+  }
 }
 ```
 
-**Paper export:** reconstructs positions from SQLite trades table (mirrors `PaperTrader.load_state()` logic) + position_state metadata.
+**Paper export:** Rust reconstructs positions from `trades`, enriches with `position_state`, and carries forward `runtime_cooldowns` markers when present.
 
-**Live export:** uses `HyperliquidLiveExecutor` API for exchange positions + live DB for metadata enrichment (entry_atr, trailing_sl, confidence, adds_count, tp1_taken).
+**Live export:** keep using the live-canonical snapshot workflow until the Rust live adapter owns exchange truth.
 
 ### Step 4: Replay with init-state
 
@@ -257,7 +266,8 @@ python tools/deploy_sweep.py --sweep-results sweep_results.jsonl --rank 1 \
 # 3. Wait for paper trader to accumulate positions...
 
 # 4. Export state and validate via backtest
-python tools/export_state.py --source paper --output /tmp/paper_state.json
+cargo run --manifest-path ../Cargo.toml -p aiq-runtime -- \
+  snapshot export-paper --db ../trading_engine.db --output /tmp/paper_state.json
 mei-backtester replay --init-state /tmp/paper_state.json --trades
 
 # 5. Compare expected vs actual PnL trajectory

@@ -2,6 +2,11 @@
 
 AI-powered crypto perpetual futures trading engine for [Hyperliquid DEX](https://hyperliquid.xyz), with a high-performance Rust backtester featuring CPU and CUDA GPU acceleration.
 
+The repository is now also shipping the first `aiq-runtime` foundation slice for
+the long-term Rust-only daemon migration. See
+[docs/programmes/rust-runtime-foundation.md](docs/programmes/rust-runtime-foundation.md)
+for the active programme contract.
+
 ## Screenshots
 
 ### Trade Dashboard
@@ -135,9 +140,18 @@ uv run pytest
 uv run ruff check engine strategy exchange live tools tests monitor
 uv run ruff format engine strategy exchange live tools tests monitor
 
-# Rust (backtester / ws_sidecar / hub)
-cargo build --release
-cargo test && cargo fmt --check && cargo clippy -- -D warnings
+# Rust (backtester workspace)
+cargo build --release --manifest-path backtester/Cargo.toml
+cargo test --manifest-path backtester/Cargo.toml
+
+# Rust (root workspace: runtime foundation)
+cargo build --workspace
+cargo test --workspace
+
+# Rust runtime foundation
+cargo test -p aiq-runtime-core
+cargo run -p aiq-runtime -- pipeline --json
+cargo run -p aiq-runtime -- snapshot validate --path /tmp/paper_init_state_v2.json --json
 ```
 
 Version is governed by `VERSION` (single source of truth). See [docs/release_process.md](docs/release_process.md).
@@ -153,6 +167,12 @@ Version is governed by `VERSION` (single source of truth). See [docs/release_pro
 | [docs/strategy_lifecycle.md](docs/strategy_lifecycle.md) | Config state machine (candidate → live) |
 | [docs/success_metrics.md](docs/success_metrics.md) | Risk limits and promotion criteria |
 | [docs/release_process.md](docs/release_process.md) | Version governance and tag-driven releases |
+| [docs/adr/ADR-0001-rust-runtime-foundation.md](docs/adr/ADR-0001-rust-runtime-foundation.md) | Rust runtime foundation decision record |
+| [docs/programmes/rust-runtime-foundation.md](docs/programmes/rust-runtime-foundation.md) | Rust runtime foundation programme and phase order |
+| [docs/teams/docs-team-charter.md](docs/teams/docs-team-charter.md) | Standing documentation team contract for migration waves |
+| [docs/housekeeping/legacy-runtime-ledger.md](docs/housekeeping/legacy-runtime-ledger.md) | Legacy runtime surfaces queued for quarantine and removal |
+| [docs/state_sync/init_state_v2_contract.md](docs/state_sync/init_state_v2_contract.md) | Canonical continuation contract for Rust-owned snapshots |
+| [docs/validation/rust-runtime-foundation.md](docs/validation/rust-runtime-foundation.md) | Validation matrix for the runtime foundation slice |
 | [backtester/README.md](backtester/README.md) | Backtester documentation |
 | [monitor/README.md](monitor/README.md) | Dashboard documentation |
 | [engine/README.md](engine/README.md) | Engine internals |
