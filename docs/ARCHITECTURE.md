@@ -28,7 +28,7 @@ File lock prevents duplicate daemons: `ai_quant_paper.lock` or `ai_quant_live.lo
 
 ### 2. Strategy Layer (`strategy/`)
 
-- **Mei Alpha v1** (`strategy/mei_alpha_v1.py`): Signal generation (`analyze()`), exit condition checking, `PaperTrader` class. Multi-indicator with confidence tiers (low/medium/high), ATR-based SL/TP, trailing stops, pyramiding, partial TP.
+- **Mei Alpha v1** (`strategy/mei_alpha_v1.py`): Legacy Python strategy and paper execution surface. Still owns the active Python paper runtime, but bootstrap/restore is now being mirrored by `aiq-runtime` for migration.
 - **Kernel Orchestrator** (`strategy/kernel_orchestrator.py`): Feeds candle data and prices to the Rust decision kernel via `bt-runtime` (PyO3 bridge), routes resulting `OrderIntent` to the broker adapter. Supports `KERNEL_ONLY` and `SHADOW` modes.
 - **Broker Adapter** (`strategy/broker_adapter.py`): Translates kernel `OrderIntent` dicts to Hyperliquid exchange operations (`market_open`, `market_close`). Handles szDecimals rounding, slippage, rate limiting.
 - **Shadow Mode** (`strategy/shadow_mode.py`): Parallel Python + Rust kernel decision tracking. `ShadowDecisionTracker` records agreement rates over a rolling window and raises alerts when agreement drops below threshold.
@@ -46,6 +46,7 @@ File lock prevents duplicate daemons: `ai_quant_paper.lock` or `ai_quant_live.lo
 ### 4. Live Trader (`live/`)
 
 - **LiveTrader** (`live/trader.py`): Wraps strategy logic with real order execution. Uses the same `mei_alpha_v1.analyze()` and `PaperTrader.check_exit_conditions()` as paper mode. Places real perps orders via SDK. Reconciles positions/equity from `Info.user_state()` periodically.
+- **aiq-runtime** (`runtime/aiq-runtime/`): Rust runtime CLI. Currently owns pipeline/bootstrap planning, snapshot export/validate/seed, and paper bootstrap/restore diagnostics via `paper doctor`.
 
 Safety gates for live mode:
 - `AI_QUANT_LIVE_ENABLE=1` + `AI_QUANT_LIVE_CONFIRM=I_UNDERSTAND_THIS_CAN_LOSE_MONEY`

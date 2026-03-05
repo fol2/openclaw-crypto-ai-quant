@@ -20,6 +20,16 @@ This programme does not finish the migration. It creates the shared contracts, c
 - Additive YAML support for `runtime` and `pipeline`.
 - ADR, team charter, and legacy ledger to guide later subagent work.
 
+## Delivered Follow-on Slice
+
+The next delivered slice extends the foundation with Rust-owned paper bootstrap tooling:
+
+- `snapshot seed-paper`
+- stricter snapshot validation
+- `paper doctor` restore shell for Rust-owned paper bootstrap reports
+
+Python paper execution is still the active runtime path, but Python paper bootstrap is no longer the only continuity surface.
+
 ## Runtime Contract
 
 - Existing YAML merge order remains unchanged.

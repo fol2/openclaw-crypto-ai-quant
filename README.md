@@ -7,6 +7,10 @@ the long-term Rust-only daemon migration. See
 [docs/programmes/rust-runtime-foundation.md](docs/programmes/rust-runtime-foundation.md)
 for the active programme contract.
 
+Rust now also has a first paper bootstrap/restore shell via
+`aiq-runtime paper doctor`, while Python paper execution remains frozen as the
+legacy runtime path until full Rust paper execution lands.
+
 ## Screenshots
 
 ### Trade Dashboard
@@ -153,6 +157,7 @@ cargo test -p aiq-runtime-core
 cargo run -p aiq-runtime -- pipeline --json
 cargo run -p aiq-runtime -- snapshot validate --path /tmp/paper_init_state_v2.json --json
 cargo run -p aiq-runtime -- snapshot seed-paper --snapshot /tmp/paper_init_state_v2.json --target-db trading_engine.db --strict-replace --json
+cargo run -p aiq-runtime -- paper doctor --db trading_engine.db --json
 ```
 
 Version is governed by `VERSION` (single source of truth). See [docs/release_process.md](docs/release_process.md).

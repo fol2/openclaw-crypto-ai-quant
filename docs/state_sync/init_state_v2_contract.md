@@ -85,6 +85,19 @@ cargo run --manifest-path Cargo.toml -p aiq-runtime -- \
 - `--strict-replace` is the deterministic bootstrap mode.
 - Without `--strict-replace`, the command fails closed if stale open paper positions would remain outside the snapshot.
 
+## Paper Runtime Restore Rules
+
+- `aiq-runtime paper doctor` is the current Rust-owned bootstrap/restore shell.
+- The paper shell restores state from the paper DB through the same continuation contract:
+  - `trades`
+  - `position_state`
+  - `runtime_cooldowns`
+- A healthy paper restore requires:
+  - valid `init-state v2` semantics
+  - deterministic symbol normalisation
+  - no duplicate restored symbols
+  - runtime cooldown markers carried into the Rust-owned in-memory state
+
 ## Backward Compatibility
 
 - `bt-core` continues to read v1 and v2
