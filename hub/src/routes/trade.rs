@@ -290,19 +290,26 @@ async fn trade_execute(
 ) -> Result<Json<Value>, HubError> {
     require_trade_enabled(&state)?;
 
-    // Validate token + rate limit BEFORE acquiring trade slot to avoid
-    // leaving an orphaned Running job entry on validation failure.
     let token = body
         .confirm_token
         .as_deref()
         .ok_or_else(|| HubError::BadRequest("confirm_token required".into()))?;
-    let hash = open_param_hash(&body);
-    validate_confirm_token(&state, token, &hash).await?;
 
+    // Check rate limit and trade slot BEFORE consuming the confirm token.
+    // This way, if either fails the token is still available for retry
+    // (the frontend keeps openTok set on error so the user can re-click).
     check_rate_limit(&state, &body.symbol).await?;
 
     let job_id = uuid::Uuid::new_v4().to_string();
     acquire_trade_slot(&state, &job_id).await?;
+
+    // Now consume the token — all pre-checks passed.
+    let hash = open_param_hash(&body);
+    if let Err(e) = validate_confirm_token(&state, token, &hash).await {
+        // Release the trade slot so it doesn't block future trades.
+        state.jobs.jobs.lock().await.remove(&job_id);
+        return Err(e);
+    }
 
     let args = ManualTradeArgs {
         action: ManualTradeAction::Execute,
@@ -362,12 +369,18 @@ async fn trade_close(
 
     // Token present → validate and execute the close.
     let token = body.confirm_token.as_deref().unwrap();
-    validate_confirm_token(&state, token, &hash).await?;
 
     // No rate limit for close — allow emergency close immediately.
 
+    // Acquire trade slot BEFORE consuming the token, so the token
+    // survives if another trade is already running (user can retry).
     let job_id = uuid::Uuid::new_v4().to_string();
     acquire_trade_slot(&state, &job_id).await?;
+
+    if let Err(e) = validate_confirm_token(&state, token, &hash).await {
+        state.jobs.jobs.lock().await.remove(&job_id);
+        return Err(e);
+    }
 
     let args = ManualTradeArgs {
         action: ManualTradeAction::Close,
