@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -2186,7 +2186,7 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
             batch_size: args.tpe_batch,
             seed: args.tpe_seed,
         };
-        let results = bt_gpu::tpe_sweep::run_tpe_sweep(
+        let outcome = bt_gpu::tpe_sweep::run_tpe_sweep(
             &candles,
             &base_cfg,
             &spec,
@@ -2198,6 +2198,8 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
             args.sweep_top_k,
         );
         let gpu_elapsed = gpu_start.elapsed();
+        let completed_trials = outcome.completed_trials;
+        let results = outcome.results;
 
         // Write JSONL output
         {
@@ -2244,13 +2246,7 @@ fn cmd_sweep(args: SweepArgs) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        let completed_trials = args.tpe_trials;
-        eprintln!(
-            "\n[sweep] {} TPE trials completed via GPU in {:.2}s ({:.1} trials/s)",
-            completed_trials,
-            gpu_elapsed.as_secs_f64(),
-            completed_trials as f64 / gpu_elapsed.as_secs_f64(),
-        );
+        eprintln!("{}", format_tpe_gpu_completion_summary(completed_trials, gpu_elapsed));
 
         // Print top 5 summary
         eprintln!("\n[TPE] Top 5 results:");
@@ -2662,6 +2658,16 @@ fn print_summary(r: &bt_core::report::SimReport, initial_balance: f64) {
     }
 }
 
+#[cfg(feature = "gpu")]
+fn format_tpe_gpu_completion_summary(completed_trials: usize, gpu_elapsed: Duration) -> String {
+    format!(
+        "\n[sweep] {} TPE trials completed via GPU in {:.2}s ({:.1} trials/s)",
+        completed_trials,
+        gpu_elapsed.as_secs_f64(),
+        completed_trials as f64 / gpu_elapsed.as_secs_f64(),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -2816,6 +2822,22 @@ mod tests {
     use bt_core::position::TradeRecord;
     use std::collections::HashSet;
 
+    #[cfg(feature = "gpu")]
+    fn dummy_gpu_sweep_result() -> bt_gpu::GpuSweepResult {
+        bt_gpu::GpuSweepResult {
+            config_id: "cfg".to_string(),
+            output_mode: "summary".to_string(),
+            total_pnl: 1.0,
+            final_balance: 1.0,
+            total_trades: 1,
+            total_wins: 1,
+            win_rate: 1.0,
+            profit_factor: 1.0,
+            max_drawdown_pct: 0.0,
+            overrides: Vec::new(),
+        }
+    }
+
     fn one_bar() -> Vec<OhlcvBar> {
         vec![OhlcvBar {
             t: 0,
@@ -2835,6 +2857,20 @@ mod tests {
             .expect("clock before unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("{prefix}_{}_{}.json", std::process::id(), nanos))
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn format_tpe_gpu_completion_summary_uses_completed_trials() {
+        let outcome = bt_gpu::tpe_sweep::TpeSweepOutcome {
+            results: vec![dummy_gpu_sweep_result()],
+            completed_trials: 1_000_000,
+        };
+
+        let summary = format_tpe_gpu_completion_summary(outcome.completed_trials, Duration::from_secs(10));
+
+        assert!(summary.contains("1000000 TPE trials completed via GPU"));
+        assert!(!summary.contains("1 TPE trials completed via GPU"));
     }
 
     #[test]
