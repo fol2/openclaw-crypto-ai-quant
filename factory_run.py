@@ -2964,6 +2964,90 @@ def _write_replay_equivalence_baseline_manifest(
     return out_path
 
 
+def _second_pass_replay_equivalence_seeded_reports(
+    *,
+    run_dir: Path,
+    meta: dict[str, Any],
+    replay_reports: list[dict[str, Any]],
+    args: Any,
+) -> Path | None:
+    manifest_path = _write_replay_equivalence_baseline_manifest(
+        run_dir=run_dir,
+        meta=meta,
+        replay_reports=replay_reports,
+    )
+    if manifest_path is None:
+        return None
+
+    current_contract = meta.get("replay_equivalence_contract")
+    if not isinstance(current_contract, dict):
+        return manifest_path
+
+    entry_by_config_path: dict[str, dict[str, Any]] = {}
+    candidate_entries = meta.get("candidate_configs")
+    if isinstance(candidate_entries, list):
+        for entry in candidate_entries:
+            if not isinstance(entry, dict):
+                continue
+            cfg_path = str(entry.get("config_path", "") or entry.get("path", "")).strip()
+            if cfg_path and cfg_path not in entry_by_config_path:
+                entry_by_config_path[cfg_path] = entry
+
+    retriable_statuses = {"missing_baseline", "baseline_stale", "not_run"}
+    recomputed = False
+    for summary in replay_reports:
+        if not isinstance(summary, dict):
+            continue
+        status = str(summary.get("replay_equivalence_status", "") or "").strip().lower()
+        if status not in retriable_statuses:
+            continue
+        if not bool(summary.get("replay_equivalence_seed_mode", False)):
+            continue
+
+        right_report = _coerce_replay_report_path(
+            summary.get("path") or summary.get("replay_report_path"),
+            run_dir=run_dir,
+        )
+        if right_report is None or not right_report.is_file():
+            continue
+
+        # Recompute replay-equivalence after the run has emitted a self-seeded
+        # manifest. This lets the same run promote seed-mode placeholders into
+        # a real comparator verdict without relaxing any deploy gates.
+        for transient_key in (
+            "replay_equivalence_report_path",
+            "replay_equivalence_seed_reason",
+            "replay_equivalence_error",
+            "replay_equivalence_failure_code",
+            "replay_equivalence_diffs",
+            "replay_equivalence_count",
+            "replay_equivalence_baseline_path",
+            "replay_equivalence_baseline_source",
+            "replay_equivalence_baseline_fallback_reason",
+            "replay_equivalence_baseline_contract_fingerprint",
+            "replay_equivalence_auto_baseline_lookup",
+            "replay_equivalence_identity_miss_reason",
+        ):
+            summary.pop(transient_key, None)
+
+        _run_replay_equivalence_check(
+            right_report=right_report,
+            summary=summary,
+            current_contract=current_contract,
+        )
+        replay_entry = entry_by_config_path.get(str(summary.get("config_path", "") or "").strip())
+        _attach_replay_metadata(summary=summary, entry=replay_entry, args=args)
+        recomputed = True
+
+    if recomputed:
+        manifest_path = _write_replay_equivalence_baseline_manifest(
+            run_dir=run_dir,
+            meta=meta,
+            replay_reports=replay_reports,
+        )
+    return manifest_path
+
+
 def _render_ranked_report_md(items: list[dict[str, Any]]) -> str:
     lines: list[str] = []
     lines.append("# Factory Run Report")
@@ -3628,10 +3712,11 @@ def _reproduce_run(*, artifacts_root: Path, source_run_id: str) -> int:
             replay_entry["replay_stdout_path"] = str(replay_res.stdout_path or "")
             replay_entry["replay_stderr_path"] = str(replay_res.stderr_path or "")
 
-    _write_replay_equivalence_baseline_manifest(
+    _second_pass_replay_equivalence_seeded_reports(
         run_dir=run_dir,
         meta=meta,
         replay_reports=replay_reports,
+        args=source_args_obj,
     )
 
     # ------------------------------------------------------------------
@@ -5376,10 +5461,11 @@ def main(argv: list[str] | None = None) -> int:
 
             replay_reports.append(summary)
 
-        _write_replay_equivalence_baseline_manifest(
+        _second_pass_replay_equivalence_seeded_reports(
             run_dir=run_dir,
             meta=meta,
             replay_reports=replay_reports,
+            args=args,
         )
 
         # ------------------------------------------------------------------
