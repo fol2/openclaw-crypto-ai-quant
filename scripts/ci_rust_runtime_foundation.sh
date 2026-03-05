@@ -138,5 +138,6 @@ PY
 
 cargo run -q -p aiq-runtime -- snapshot validate --path /tmp/aiq-runtime-seed-snapshot.json --json >/tmp/aiq-runtime-snapshot-validate.json
 cargo run -q -p aiq-runtime -- snapshot seed-paper --snapshot /tmp/aiq-runtime-seed-snapshot.json --target-db /tmp/aiq-runtime-paper.db --strict-replace --json >/tmp/aiq-runtime-seed-paper.json
+cargo run -q -p aiq-runtime -- paper doctor --db /tmp/aiq-runtime-paper.db --json >/tmp/aiq-runtime-paper-doctor.json
 
 echo "[runtime-foundation] ok"

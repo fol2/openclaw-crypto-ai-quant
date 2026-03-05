@@ -1,3 +1,4 @@
+use aiq_runtime_core::paper::restore_paper_state;
 use aiq_runtime_core::runtime::{build_bootstrap, RuntimeMode};
 use aiq_runtime_core::snapshot::{load_snapshot, snapshot_to_pretty_json};
 use anyhow::{Context, Result};
@@ -25,6 +26,11 @@ enum Command {
     Snapshot {
         #[command(subcommand)]
         command: SnapshotCommand,
+    },
+    /// Bootstrap and inspect Rust-owned paper runtime state without executing orders.
+    Paper {
+        #[command(subcommand)]
+        command: PaperCommand,
     },
 }
 
@@ -94,6 +100,24 @@ enum SnapshotCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum PaperCommand {
+    /// Restore paper state from the DB through the Rust snapshot/bootstrap path.
+    Doctor(PaperDoctorArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+struct PaperDoctorArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+    /// Paper DB path to inspect and restore.
+    #[arg(long, default_value = "trading_engine.db")]
+    db: PathBuf,
+    /// Override exported_at_ms for deterministic bootstrap reports.
+    #[arg(long)]
+    exported_at_ms: Option<i64>,
+}
+
 impl From<ModeArg> for RuntimeMode {
     fn from(value: ModeArg) -> Self {
         match value {
@@ -114,6 +138,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Pipeline(args) | Command::Doctor(args) => run_bootstrap(args),
         Command::Snapshot { command } => run_snapshot(command),
+        Command::Paper { command } => run_paper(command),
     }
 }
 
@@ -243,6 +268,55 @@ fn run_snapshot(command: SnapshotCommand) -> Result<()> {
                     report.seeded_runtime_cooldowns,
                     report.target_db,
                     report.strict_replace,
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn run_paper(command: PaperCommand) -> Result<()> {
+    match command {
+        PaperCommand::Doctor(args) => {
+            let config_path = resolve_config_path(&args.common.config);
+            let config = bt_core::config::load_config_checked(
+                config_path
+                    .to_str()
+                    .context("config path must be valid UTF-8")?,
+                args.common.symbol.as_deref(),
+                args.common.live,
+            )
+            .map_err(anyhow::Error::msg)?;
+            let runtime_bootstrap = build_bootstrap(
+                &config,
+                RuntimeMode::Paper,
+                args.common.profile.as_deref(),
+            )
+            .map_err(anyhow::Error::msg)?;
+            let snapshot = paper_export::export_paper_snapshot(
+                &args.db,
+                args.exported_at_ms
+                    .unwrap_or_else(|| Utc::now().timestamp_millis()),
+            )?;
+            let (_state, report) = restore_paper_state(&snapshot).map_err(anyhow::Error::msg)?;
+
+            if args.common.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "runtime_bootstrap": runtime_bootstrap,
+                        "paper_bootstrap": report,
+                    }))?
+                );
+            } else {
+                println!(
+                    "paper doctor ok: profile={} positions={} runtime_entry_markers={} runtime_exit_markers={}",
+                    runtime_bootstrap.pipeline.profile,
+                    report.position_count,
+                    report.runtime_entry_markers,
+                    report.runtime_exit_markers,
                 );
             }
         }

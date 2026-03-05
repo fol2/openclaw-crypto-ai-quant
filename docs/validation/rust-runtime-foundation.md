@@ -13,6 +13,7 @@ green:
 - snapshot schema validation
 - paper snapshot export
 - paper snapshot seed
+- paper runtime bootstrap shell
 - bt-core init-state compatibility
 
 ## Commands
@@ -33,6 +34,7 @@ cargo run -q -p aiq-runtime -- doctor --json
 cargo run -q -p aiq-runtime -- pipeline --json
 cargo run -q -p aiq-runtime -- snapshot validate --path <snapshot_v2_valid.json> --json
 cargo run -q -p aiq-runtime -- snapshot seed-paper --snapshot <snapshot_v2_valid.json> --target-db <paper_fixture.db> --strict-replace --json
+cargo run -q -p aiq-runtime -- paper doctor --db <paper_fixture.db> --json
 ```
 
 ## Acceptance Checks
@@ -45,6 +47,7 @@ cargo run -q -p aiq-runtime -- snapshot seed-paper --snapshot <snapshot_v2_valid
 - `bt-core` accepts snapshots with `version = 2` and runtime cooldown markers.
 - `aiq-runtime` can export a v2 paper snapshot from SQLite and re-validate it through the same Rust snapshot contract.
 - `aiq-runtime` can seed a paper DB from a v2 snapshot and report deterministic write counts for `trades`, `position_state`, and `runtime_cooldowns`.
+- `aiq-runtime paper doctor` can restore Rust-owned paper state from the paper DB and emit a deterministic bootstrap report.
 
 ## Fixture Guidance
 

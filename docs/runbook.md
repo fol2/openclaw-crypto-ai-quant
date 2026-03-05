@@ -688,6 +688,24 @@ Safe operator expectations:
 - the current Rust seed path rewrites `trades`, `position_state`, `position_state_history`, and `runtime_cooldowns`
 - if `--strict-replace` is omitted and stale open paper positions would remain, the command fails closed
 
+### Inspect Rust paper bootstrap state
+
+Use when: you need to prove that Rust can restore paper balance, positions, and cooldown markers from the current paper DB before replacing the Python bootstrap path.
+
+```bash
+cargo run -p aiq-runtime -- \
+  paper doctor \
+  --db ./trading_engine.db \
+  --json
+```
+
+Expected operator signals:
+
+- `runtime_bootstrap.mode = "paper"`
+- a resolved pipeline profile is present
+- `paper_bootstrap.position_count` matches the DB-backed paper positions
+- `paper_bootstrap.runtime_entry_markers` / `runtime_exit_markers` match `runtime_cooldowns`
+
 ---
 
 ## 7. Factory Stage Gate (dry -> smoke -> real)
