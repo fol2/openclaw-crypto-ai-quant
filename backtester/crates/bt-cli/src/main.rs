@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -2659,7 +2659,10 @@ fn print_summary(r: &bt_core::report::SimReport, initial_balance: f64) {
 }
 
 #[cfg(feature = "gpu")]
-fn format_tpe_gpu_completion_summary(completed_trials: usize, gpu_elapsed: Duration) -> String {
+fn format_tpe_gpu_completion_summary(
+    completed_trials: usize,
+    gpu_elapsed: std::time::Duration,
+) -> String {
     format!(
         "\n[sweep] {} TPE trials completed via GPU in {:.2}s ({:.1} trials/s)",
         completed_trials,
@@ -2867,7 +2870,10 @@ mod tests {
             completed_trials: 1_000_000,
         };
 
-        let summary = format_tpe_gpu_completion_summary(outcome.completed_trials, Duration::from_secs(10));
+        let summary = format_tpe_gpu_completion_summary(
+            outcome.completed_trials,
+            std::time::Duration::from_secs(10),
+        );
 
         assert!(summary.contains("1000000 TPE trials completed via GPU"));
         assert!(!summary.contains("1 TPE trials completed via GPU"));
