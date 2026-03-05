@@ -7,6 +7,7 @@ Seed `paper` and `backtester` from one canonical continuation contract so replay
 The continuation surface is moving toward a Rust-owned model:
 
 - `aiq-runtime snapshot export-paper` is now the preferred paper export path
+- `aiq-runtime snapshot seed-paper` is now the preferred paper bootstrap path
 - live canonical export remains valid until the Rust live adapter owns exchange truth
 - `init-state v2` is the canonical contract because it carries runtime cooldown markers
 
@@ -20,6 +21,9 @@ cargo run --manifest-path Cargo.toml -p aiq-runtime -- \
 
 cargo run --manifest-path Cargo.toml -p aiq-runtime -- \
   snapshot validate --path /tmp/paper_init_state_v2.json --json
+
+cargo run --manifest-path Cargo.toml -p aiq-runtime -- \
+  snapshot seed-paper --snapshot /tmp/paper_init_state_v2.json --target-db trading_engine.db --strict-replace --json
 ```
 
 Live canonical export remains:
@@ -61,7 +65,7 @@ cd backtester
 
 This snapshot is the canonical seed artefact for paper/backtester alignment. For paper DB mirroring, continue using `tools/mirror_live_state.py` where needed for OMS table projection.
 
-For paper-only continuation, prefer the Rust snapshot path so the Python export surface can be retired mode by mode.
+For paper-only continuation, prefer the Rust snapshot + `seed-paper` path so the Python export and seed surfaces can be retired mode by mode.
 
 ## Audit Expectations
 

@@ -21,6 +21,7 @@ dependencies = [
  "chrono",
  "clap",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "tracing-subscriber",

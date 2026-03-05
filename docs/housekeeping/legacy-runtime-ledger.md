@@ -14,6 +14,7 @@ Rust runtime replaces them.
 | Python live execution | `live/trader.py`, `exchange/executor.py` | Active, frozen | Rust live adapter |
 | Python OMS / risk runtime | `engine/oms.py`, `engine/risk.py` | Active, frozen | Rust persistence + risk layers |
 | Python parity orchestration | `tools/*parity*`, `tools/*replay*` | Active, frozen | Rust parity harness |
+| Python paper seed tool | `tools/apply_canonical_snapshot_to_paper.py` | Legacy, frozen | `aiq-runtime snapshot seed-paper` |
 | PyO3 runtime bridge | `backtester/crates/bt-runtime` | Transitional | Remove after Python retirement |
 
 ## Deletion Gate

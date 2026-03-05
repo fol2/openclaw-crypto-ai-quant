@@ -15,9 +15,12 @@ python tools/export_live_canonical_snapshot.py \
 ## Apply Snapshot to Paper DB
 
 ```bash
-python tools/apply_canonical_snapshot_to_paper.py \
+cargo run -p aiq-runtime -- \
+  snapshot seed-paper \
   --snapshot /tmp/live_init_state_v2.json \
-  --target-db ./trading_engine.db
+  --target-db ./trading_engine.db \
+  --strict-replace \
+  --json
 ```
 
 This performs:
@@ -25,8 +28,11 @@ This performs:
 - synthetic `trades` seed rows (`reason=state_sync_seed`)
 - balance seed row (`reason=state_sync_balance_seed`)
 - `position_state` refresh aligned to seeded open trade IDs
+- `position_state_history` seed rows for bootstrap provenance
 - `runtime_cooldowns` seed (entry/exit cooldown maps from snapshot runtime state)
-- optional `oms_open_orders` replacement from snapshot canonical metadata
+
+`--strict-replace` is the deterministic mode and clears existing seed targets before writing.  
+Without `--strict-replace`, the Rust command fails closed when the paper DB still has open positions outside the snapshot surface.
 
 ## Deterministic Replay Pairing
 
@@ -40,3 +46,8 @@ cd backtester
 ```
 
 With this pairing, paper and backtester start from the same canonical seed artefact.
+
+## Legacy Tooling
+
+`tools/apply_canonical_snapshot_to_paper.py` is now a legacy/frozen reference path.  
+New paper bootstrap workflows should use `aiq-runtime snapshot seed-paper`.

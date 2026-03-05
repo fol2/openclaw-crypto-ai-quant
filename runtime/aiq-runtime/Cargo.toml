@@ -14,6 +14,7 @@ bt-core = { path = "../../backtester/crates/bt-core" }
 chrono = { version = "0.4", features = ["clock"] }
 clap = { workspace = true }
 rusqlite = { version = "0.33", features = ["bundled"] }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tracing-subscriber = { workspace = true }
 

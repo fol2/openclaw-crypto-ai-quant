@@ -6,7 +6,7 @@ Run the full deterministic replay workflow for the paper axis with one command.
 
 The harness executes:
 
-1. Rust paper snapshot export + init-state v2 validation + paper seed
+1. Rust paper snapshot export + init-state v2 validation + Rust paper seed
 2. backtester replay
 3. state audit
 4. live/backtester trade reconcile
@@ -81,7 +81,8 @@ The first harness step should now be treated as:
 
 1. `aiq-runtime snapshot export-paper`
 2. `aiq-runtime snapshot validate --json`
-3. seed paper/backtester only if validation passes
+3. `aiq-runtime snapshot seed-paper`
+4. seed replay/backtester only if validation passes
 
 Validation must fail closed on:
 
@@ -89,3 +90,4 @@ Validation must fail closed on:
 - invalid position side / confidence / leverage values
 - missing runtime markers when the selected continuation profile requires them
 - bt-core init-state incompatibility
+- paper DB seed conflicts when `--strict-replace` is not set and stale open paper positions remain

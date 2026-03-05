@@ -152,6 +152,7 @@ cargo test --workspace
 cargo test -p aiq-runtime-core
 cargo run -p aiq-runtime -- pipeline --json
 cargo run -p aiq-runtime -- snapshot validate --path /tmp/paper_init_state_v2.json --json
+cargo run -p aiq-runtime -- snapshot seed-paper --snapshot /tmp/paper_init_state_v2.json --target-db trading_engine.db --strict-replace --json
 ```
 
 Version is governed by `VERSION` (single source of truth). See [docs/release_process.md](docs/release_process.md).

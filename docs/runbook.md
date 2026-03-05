@@ -650,11 +650,16 @@ journalctl --user -u openclaw-ai-quant-live-v8 --since "1 min ago" | grep -i "co
 
 ## 6. Export State for Debugging
 
-Use when: you need a snapshot of the current trader state for analysis or to seed a backtest.
+Use when: you need a snapshot of the current trader state for analysis, replay, or deterministic paper seeding.
 
 ```bash
-# Export paper state
-uv run python tools/export_state.py --source paper --output /tmp/paper_state.json
+# Export paper state with the Rust continuation path
+cargo run -p aiq-runtime -- \
+  snapshot export-paper --db ./trading_engine.db --output /tmp/paper_state.json
+
+# Validate the exported snapshot before replay or seeding
+cargo run -p aiq-runtime -- \
+  snapshot validate --path /tmp/paper_state.json --json
 
 # Export live state
 uv run python tools/export_state.py --source live --output /tmp/live_state.json
@@ -662,6 +667,26 @@ uv run python tools/export_state.py --source live --output /tmp/live_state.json
 # Export trade history to CSV
 uv run python tools/export_csv.py
 ```
+
+### Seed paper from a validated snapshot
+
+Use when: you need deterministic paper/bootstrap parity from a known `init-state v2` artefact.
+
+```bash
+cargo run -p aiq-runtime -- \
+  snapshot seed-paper \
+  --snapshot /tmp/paper_state.json \
+  --target-db ./trading_engine.db \
+  --strict-replace \
+  --json
+```
+
+Safe operator expectations:
+
+- `snapshot validate` must succeed before `snapshot seed-paper`
+- `--strict-replace` is the deterministic bootstrap mode
+- the current Rust seed path rewrites `trades`, `position_state`, `position_state_history`, and `runtime_cooldowns`
+- if `--strict-replace` is omitted and stale open paper positions would remain, the command fails closed
 
 ---
 

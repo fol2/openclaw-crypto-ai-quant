@@ -6,6 +6,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 
 mod paper_export;
+mod paper_seed;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "Rust runtime foundation for AI Quant")]
@@ -77,6 +78,17 @@ enum SnapshotCommand {
         output: Option<PathBuf>,
         #[arg(long)]
         exported_at_ms: Option<i64>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Seed a paper DB from a v2 snapshot using the Rust continuation path.
+    SeedPaper {
+        #[arg(long)]
+        snapshot: PathBuf,
+        #[arg(long, default_value = "trading_engine.db")]
+        target_db: PathBuf,
+        #[arg(long)]
+        strict_replace: bool,
         #[arg(long)]
         json: bool,
     },
@@ -205,6 +217,32 @@ fn run_snapshot(command: SnapshotCommand) -> Result<()> {
                     "paper snapshot exported: positions={} output={}",
                     snapshot.positions.len(),
                     output.as_ref().unwrap().display(),
+                );
+            }
+        }
+        SnapshotCommand::SeedPaper {
+            snapshot,
+            target_db,
+            strict_replace,
+            json,
+        } => {
+            let snapshot = load_snapshot(&snapshot)?;
+            let report = paper_seed::seed_paper_db(
+                &snapshot,
+                &target_db,
+                paper_seed::SeedOptions { strict_replace },
+            )?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "paper snapshot seeded: trades={} positions={} runtime_cooldowns={} target_db={} strict_replace={}",
+                    report.seeded_trades,
+                    report.seeded_positions,
+                    report.seeded_runtime_cooldowns,
+                    report.target_db,
+                    report.strict_replace,
                 );
             }
         }
