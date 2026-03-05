@@ -7,6 +7,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 
 mod paper_export;
+mod paper_run_once;
 mod paper_seed;
 
 #[derive(Debug, Parser)]
@@ -104,6 +105,8 @@ enum SnapshotCommand {
 enum PaperCommand {
     /// Restore paper state from the DB through the Rust snapshot/bootstrap path.
     Doctor(PaperDoctorArgs),
+    /// Execute one deterministic Rust paper step for a single symbol.
+    RunOnce(PaperRunOnceArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -116,6 +119,30 @@ struct PaperDoctorArgs {
     /// Override exported_at_ms for deterministic bootstrap reports.
     #[arg(long)]
     exported_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct PaperRunOnceArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+    /// Paper DB path to restore from and project back into.
+    #[arg(long, default_value = "trading_engine.db")]
+    db: PathBuf,
+    /// Candle SQLite DB path used for this one-shot step.
+    #[arg(long)]
+    candles_db: PathBuf,
+    /// Target symbol for the one-shot decision/execution step.
+    #[arg(long)]
+    target_symbol: String,
+    /// BTC anchor symbol for alignment context.
+    #[arg(long, default_value = "BTC")]
+    btc_symbol: String,
+    /// Number of bars to load for indicator warm-up.
+    #[arg(long, default_value_t = 400)]
+    lookback_bars: usize,
+    /// Resolve the step but do not write any DB projections.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 impl From<ModeArg> for RuntimeMode {
@@ -288,12 +315,9 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 args.common.live,
             )
             .map_err(anyhow::Error::msg)?;
-            let runtime_bootstrap = build_bootstrap(
-                &config,
-                RuntimeMode::Paper,
-                args.common.profile.as_deref(),
-            )
-            .map_err(anyhow::Error::msg)?;
+            let runtime_bootstrap =
+                build_bootstrap(&config, RuntimeMode::Paper, args.common.profile.as_deref())
+                    .map_err(anyhow::Error::msg)?;
             let snapshot = paper_export::export_paper_snapshot(
                 &args.db,
                 args.exported_at_ms
@@ -317,6 +341,43 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                     report.position_count,
                     report.runtime_entry_markers,
                     report.runtime_exit_markers,
+                );
+            }
+        }
+        PaperCommand::RunOnce(args) => {
+            let config_path = resolve_config_path(&args.common.config);
+            let config = bt_core::config::load_config_checked(
+                config_path
+                    .to_str()
+                    .context("config path must be valid UTF-8")?,
+                Some(args.target_symbol.as_str()),
+                false,
+            )
+            .map_err(anyhow::Error::msg)?;
+            let runtime_bootstrap =
+                build_bootstrap(&config, RuntimeMode::Paper, args.common.profile.as_deref())
+                    .map_err(anyhow::Error::msg)?;
+            let report = paper_run_once::run_once(paper_run_once::PaperRunOnceInput {
+                config: &config,
+                runtime_bootstrap,
+                paper_db: &args.db,
+                candles_db: &args.candles_db,
+                symbol: &args.target_symbol,
+                btc_symbol: &args.btc_symbol,
+                lookback_bars: args.lookback_bars,
+                dry_run: args.dry_run,
+            })?;
+
+            if args.common.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "paper run-once ok: symbol={} intents={} fills={} trades_written={} dry_run={}",
+                    report.symbol,
+                    report.intent_count,
+                    report.fill_count,
+                    report.trades_written,
+                    report.dry_run,
                 );
             }
         }

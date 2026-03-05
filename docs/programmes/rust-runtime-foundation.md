@@ -28,6 +28,12 @@ The next delivered slice extends the foundation with Rust-owned paper bootstrap 
 - stricter snapshot validation
 - `paper doctor` restore shell for Rust-owned paper bootstrap reports
 
+The current delivered slice extends that again with the first Rust-owned paper execution shell:
+
+- `paper run-once`
+- deterministic single-step paper execution reporting
+- Rust-owned write-back of the paper projection surface for one execution cycle
+
 Python paper execution is still the active runtime path, but Python paper bootstrap is no longer the only continuity surface.
 
 ## Runtime Contract

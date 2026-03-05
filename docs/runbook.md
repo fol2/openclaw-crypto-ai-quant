@@ -706,6 +706,26 @@ Expected operator signals:
 - `paper_bootstrap.position_count` matches the DB-backed paper positions
 - `paper_bootstrap.runtime_entry_markers` / `runtime_exit_markers` match `runtime_cooldowns`
 
+### Execute one Rust paper step
+
+Use when: you want to prove that Rust can restore paper state, make one decision from local candle data, and project the resulting paper writes back into SQLite without starting a daemon.
+
+```bash
+cargo run -p aiq-runtime -- \
+  paper run-once \
+  --db ./trading_engine.db \
+  --candles-db ./candles_dbs/candles_30m.db \
+  --target-symbol ETH \
+  --dry-run \
+  --json
+```
+
+Operational expectations:
+
+- `paper run-once` is single-shot and deterministic, not a continuous loop
+- `--dry-run` should be the default diagnostic path during bring-up
+- a healthy report shows restored paper state, decision/fill counts, projected action codes, and whether DB writes were skipped or applied
+
 ---
 
 ## 7. Factory Stage Gate (dry -> smoke -> real)
