@@ -54,6 +54,13 @@ pub async fn spawn_manual_trade(
     store: Arc<JobStore>,
     broadcast: BroadcastHub,
 ) {
+    let timeout_secs = match args.action {
+        ManualTradeAction::Preview => Some(60),
+        ManualTradeAction::Execute | ManualTradeAction::Close => Some(120),
+        ManualTradeAction::Cancel => Some(60),
+        ManualTradeAction::OpenOrders => Some(30),
+    };
+
     let mut cmd = Command::new("uv");
     cmd.arg("run")
         .arg("tools/manual_trade.py")
@@ -96,10 +103,11 @@ pub async fn spawn_manual_trade(
 
     cmd.current_dir(&aiq_root)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
 
     let jid = job_id.clone();
     tokio::spawn(async move {
-        run_subprocess(jid, "manual_trade", cmd, store, broadcast).await;
+        run_subprocess(jid, "manual_trade", cmd, store, broadcast, timeout_secs).await;
     });
 }

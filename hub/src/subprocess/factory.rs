@@ -101,6 +101,6 @@ pub async fn spawn_factory(
 
     let jid = job_id.clone();
     tokio::spawn(async move {
-        run_subprocess(jid, "factory", cmd, store, broadcast).await;
+        run_subprocess(jid, "factory", cmd, store, broadcast, None).await;
     });
 }

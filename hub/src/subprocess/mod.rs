@@ -5,6 +5,7 @@ pub mod manual_trade;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -53,12 +54,16 @@ impl JobStore {
 }
 
 /// Generic subprocess runner: captures stdout + stderr, updates job store.
+///
+/// `timeout_secs`: if `Some(n)`, the child process is killed after `n` seconds.
+/// Use `None` for long-running jobs (backtest, factory) that may run for hours.
 pub(crate) async fn run_subprocess(
     job_id: JobId,
     kind: &str,
     mut cmd: Command,
     store: Arc<JobStore>,
     broadcast: BroadcastHub,
+    timeout_secs: Option<u64>,
 ) {
     let now = chrono::Utc::now().to_rfc3339();
     let info = JobInfo {
@@ -148,8 +153,39 @@ pub(crate) async fn run_subprocess(
         }
     });
 
-    // Wait for process to exit.
-    let exit_status = child.wait().await;
+    // Wait for process to exit (with optional timeout).
+    let exit_status = if let Some(secs) = timeout_secs {
+        match tokio::time::timeout(Duration::from_secs(secs), child.wait()).await {
+            Ok(result) => result,
+            Err(_) => {
+                // Timeout — kill the child process.
+                let _ = child.kill().await;
+                // Drain remaining output so the reader tasks can finish.
+                let _ = child.wait().await;
+                let _ = stderr_handle.await;
+                let _ = stdout_handle.await;
+                // Mark job as failed.
+                let mut jobs = store.jobs.lock().await;
+                if let Some(j) = jobs.get_mut(&job_id) {
+                    j.status = JobStatus::Failed;
+                    j.error = Some(format!("subprocess timed out after {secs}s"));
+                    j.finished_at = Some(chrono::Utc::now().to_rfc3339());
+                }
+                if let Ok(msg) = serde_json::to_string(&serde_json::json!({
+                    "type": "job_done",
+                    "job_id": job_id,
+                    "status": "failed",
+                })) {
+                    broadcast.publish(&format!("job:{job_id}"), msg);
+                }
+                // Clean up child handle.
+                store.handles.lock().await.remove(&job_id);
+                return;
+            }
+        }
+    } else {
+        child.wait().await
+    };
 
     let _ = stderr_handle.await;
     let stdout_output = stdout_handle.await.unwrap_or_default();
@@ -194,4 +230,8 @@ pub(crate) async fn run_subprocess(
             broadcast.publish(&format!("job:{job_id}"), msg);
         }
     }
+    drop(jobs);
+
+    // Clean up child handle to prevent memory leak.
+    store.handles.lock().await.remove(&job_id);
 }

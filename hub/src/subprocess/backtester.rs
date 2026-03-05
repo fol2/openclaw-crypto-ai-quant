@@ -60,7 +60,7 @@ pub async fn spawn_replay(
 
     let jid = job_id.clone();
     tokio::spawn(async move {
-        run_subprocess(jid, "backtest", cmd, store, broadcast).await;
+        run_subprocess(jid, "backtest", cmd, store, broadcast, None).await;
     });
 }
 
@@ -96,6 +96,6 @@ pub async fn spawn_sweep(
 
     let jid = job_id.clone();
     tokio::spawn(async move {
-        run_subprocess(jid, "sweep", cmd, store, broadcast).await;
+        run_subprocess(jid, "sweep", cmd, store, broadcast, None).await;
     });
 }
