@@ -704,6 +704,12 @@ class CmdResult:
     timeout_s: float | None = None
 
 
+_GENERATE_CONFIG_RANK_EXHAUSTED_RE = re.compile(
+    r"\[generate\]\s+Rank\s+\d+\s+out of range\s+\(1\.\.\d+\)\.",
+    re.IGNORECASE,
+)
+
+
 def _default_cmd_timeout_s() -> float | None:
     """Return default subprocess timeout for factory commands.
 
@@ -884,6 +890,25 @@ def _run_cmd(
         interrupted=bool(interrupted),
         timeout_s=effective_timeout_s,
     )
+
+
+def _read_cmd_output_text(path_raw: str | None, *, max_chars: int = 8192) -> str:
+    if not path_raw:
+        return ""
+    try:
+        return Path(path_raw).read_text(encoding="utf-8", errors="replace")[:max_chars]
+    except Exception:
+        return ""
+
+
+def _is_generate_config_rank_exhausted(res: CmdResult) -> bool:
+    if res.exit_code == 0 or res.timed_out or res.interrupted:
+        return False
+    for path_raw in (res.stderr_path, res.stdout_path):
+        text = _read_cmd_output_text(path_raw)
+        if text and _GENERATE_CONFIG_RANK_EXHAUSTED_RE.search(text):
+            return True
+    return False
 
 
 def _gpu_compute_processes(*, stdout_path: Path, stderr_path: Path) -> tuple[CmdResult, list[str]]:
@@ -4591,8 +4616,16 @@ def main(argv: list[str] | None = None) -> int:
                         stdout_path=run_dir / "configs" / f"generate_config_{mode}_rank{rank}.stdout.txt",
                         stderr_path=run_dir / "configs" / f"generate_config_{mode}_rank{rank}.stderr.txt",
                     )
-                    meta["steps"].append({"name": f"generate_config_{mode}_rank{rank}", **gen_res.__dict__})
+                    rank_exhausted = _is_generate_config_rank_exhausted(gen_res)
+                    gen_step = {"name": f"generate_config_{mode}_rank{rank}", **gen_res.__dict__}
+                    if rank_exhausted:
+                        gen_step["soft_exhausted"] = True
+                        gen_step["soft_exhausted_reason"] = "rank_out_of_range"
+                    meta["steps"].append(gen_step)
                     if gen_res.exit_code != 0:
+                        # A mode can run out of unseen ranked configs after dedupe; keep prior picks and move on.
+                        if rank_exhausted:
+                            break
                         _write_json(run_dir / "run_metadata.json", meta)
                         return int(gen_res.exit_code)
 
