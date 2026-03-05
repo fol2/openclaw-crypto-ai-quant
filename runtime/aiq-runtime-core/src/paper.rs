@@ -30,12 +30,12 @@ pub struct PaperBootstrapState {
     pub runtime: SnapshotRuntimeState,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PaperBootstrapReport {
     pub ok: bool,
     pub snapshot_source: String,
     pub snapshot_exported_at_ms: i64,
-    pub balance: i64,
+    pub balance: f64,
     pub position_count: usize,
     pub runtime_entry_markers: usize,
     pub runtime_exit_markers: usize,
@@ -99,7 +99,7 @@ pub fn restore_paper_state(
         ok: true,
         snapshot_source: snapshot.source.clone(),
         snapshot_exported_at_ms: snapshot.exported_at_ms,
-        balance: snapshot.balance.round() as i64,
+        balance: snapshot.balance,
         position_count: state.positions.len(),
         runtime_entry_markers: runtime.entry_attempt_ms_by_symbol.len(),
         runtime_exit_markers: runtime.exit_attempt_ms_by_symbol.len(),
@@ -151,6 +151,7 @@ mod tests {
         assert_eq!(report.position_count, 1);
         assert_eq!(report.restored_symbols, vec!["BTC".to_string()]);
         assert_eq!(state.runtime.entry_attempt_ms_by_symbol["BTC"], 1_772_676_500_000);
+        assert!((report.balance - 1000.0).abs() < 1e-9);
     }
 
     #[test]
@@ -163,5 +164,14 @@ mod tests {
 
         let err = restore_paper_state(&snapshot).unwrap_err();
         assert!(matches!(err, PaperBootstrapError::DuplicateSymbol(_)));
+    }
+
+    #[test]
+    fn preserves_balance_precision_in_report() {
+        let mut snapshot = sample_snapshot();
+        snapshot.balance = 1000.42;
+
+        let (_state, report) = restore_paper_state(&snapshot).unwrap();
+        assert!((report.balance - 1000.42).abs() < 1e-9);
     }
 }
