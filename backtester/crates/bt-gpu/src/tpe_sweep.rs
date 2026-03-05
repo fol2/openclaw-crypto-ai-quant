@@ -92,6 +92,21 @@ impl Default for TpeConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct TpeSweepOutcome {
+    pub results: Vec<GpuSweepResult>,
+    pub completed_trials: usize,
+}
+
+impl TpeSweepOutcome {
+    fn empty() -> Self {
+        Self {
+            results: Vec::new(),
+            completed_trials: 0,
+        }
+    }
+}
+
 // =============================================================================
 // Double-buffer pipeline messages
 // =============================================================================
@@ -624,7 +639,7 @@ pub fn run_tpe_sweep(
     from_ts: Option<i64>,
     to_ts: Option<i64>,
     top_k: usize,
-) -> Vec<GpuSweepResult> {
+) -> TpeSweepOutcome {
     let rng = StdRng::seed_from_u64(tpe_cfg.seed);
     let axis_idx_by_path: HashMap<&str, usize> = spec
         .axes
@@ -755,7 +770,7 @@ pub fn run_tpe_sweep(
         Ok(v) => v,
         Err(e) => {
             eprintln!("[TPE] {e} — returning empty results");
-            return Vec::new();
+            return TpeSweepOutcome::empty();
         }
     };
 
@@ -777,14 +792,14 @@ pub fn run_tpe_sweep(
         Ok(ds) => ds,
         Err(e) => {
             eprintln!("[TPE] {e} — GPU sweep unavailable, returning empty results");
-            return Vec::new();
+            return TpeSweepOutcome::empty();
         }
     };
     let candles_gpu = match device_state.dev.htod_sync_copy(&raw.candles) {
         Ok(buf) => buf,
         Err(e) => {
             eprintln!("[TPE] GPU candle upload failed: {e} — returning empty results");
-            return Vec::new();
+            return TpeSweepOutcome::empty();
         }
     };
     let (funding_spans_gpu, funding_rates_gpu): (
@@ -798,20 +813,20 @@ pub fn run_tpe_sweep(
             );
             (None, None)
         } else {
-            let spans_gpu = match device_state.dev.htod_sync_copy(&funding_events.spans) {
-                Ok(buf) => buf,
-                Err(e) => {
-                    eprintln!("[TPE] Funding span upload failed: {e} — returning empty results");
-                    return Vec::new();
-                }
-            };
-            let rates_gpu = match device_state.dev.htod_sync_copy(&funding_events.rates) {
-                Ok(buf) => buf,
-                Err(e) => {
-                    eprintln!("[TPE] Funding rate upload failed: {e} — returning empty results");
-                    return Vec::new();
-                }
-            };
+                let spans_gpu = match device_state.dev.htod_sync_copy(&funding_events.spans) {
+                    Ok(buf) => buf,
+                    Err(e) => {
+                        eprintln!("[TPE] Funding span upload failed: {e} — returning empty results");
+                        return TpeSweepOutcome::empty();
+                    }
+                };
+                let rates_gpu = match device_state.dev.htod_sync_copy(&funding_events.rates) {
+                    Ok(buf) => buf,
+                    Err(e) => {
+                        eprintln!("[TPE] Funding rate upload failed: {e} — returning empty results");
+                        return TpeSweepOutcome::empty();
+                    }
+                };
             eprintln!(
                 "[TPE] Funding settlements prepared: {} events across {} active bar-symbol slots",
                 funding_events.rates.len(),
@@ -883,7 +898,7 @@ pub fn run_tpe_sweep(
         Ok(v) => v,
         Err(_) => {
             eprintln!("[TPE] num_symbols {num_symbols} exceeds u32::MAX — returning empty results");
-            return Vec::new();
+            return TpeSweepOutcome::empty();
         }
     };
     let total_vram = device_state.total_vram_bytes();
@@ -925,7 +940,7 @@ pub fn run_tpe_sweep(
         Ok(buf) => buf,
         Err(e) => {
             eprintln!("[TPE] GPU arena alloc (snapshots) failed: {e} — returning empty results");
-            return Vec::new();
+            return TpeSweepOutcome::empty();
         }
     };
     let mut breadth_arena: CudaSlice<f32> = match device_state
@@ -935,7 +950,7 @@ pub fn run_tpe_sweep(
         Ok(buf) => buf,
         Err(e) => {
             eprintln!("[TPE] GPU arena alloc (breadth) failed: {e} — returning empty results");
-            return Vec::new();
+            return TpeSweepOutcome::empty();
         }
     };
     let mut btc_arena: CudaSlice<u32> = match device_state
@@ -945,7 +960,7 @@ pub fn run_tpe_sweep(
         Ok(buf) => buf,
         Err(e) => {
             eprintln!("[TPE] GPU arena alloc (btc) failed: {e} — returning empty results");
-            return Vec::new();
+            return TpeSweepOutcome::empty();
         }
     };
 
@@ -975,7 +990,7 @@ pub fn run_tpe_sweep(
         Ok(handle) => handle,
         Err(e) => {
             eprintln!("[TPE] Failed to spawn TPE thread: {e} — returning empty results");
-            return Vec::new();
+            return TpeSweepOutcome::empty();
         }
     };
 
@@ -1113,7 +1128,10 @@ pub fn run_tpe_sweep(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    results
+    TpeSweepOutcome {
+        results,
+        completed_trials: trials_done,
+    }
 }
 
 // =============================================================================
