@@ -74,10 +74,14 @@ pub enum SnapshotError {
     UnsupportedVersion(u32),
     #[error("snapshot balance must be >= 0")]
     NegativeBalance,
+    #[error("position symbol must be non-empty")]
+    EmptySymbol,
     #[error("position `{symbol}` has invalid side `{side}`")]
     InvalidSide { symbol: String, side: String },
     #[error("position `{symbol}` must have positive size")]
     InvalidSize { symbol: String },
+    #[error("position `{symbol}` must have positive entry price")]
+    InvalidEntryPrice { symbol: String },
     #[error("position `{symbol}` must have positive leverage")]
     InvalidLeverage { symbol: String },
     #[error("position `{symbol}` has invalid confidence `{confidence}`")]
@@ -99,21 +103,26 @@ impl SnapshotFile {
         }
 
         for position in &self.positions {
+            let symbol = position.symbol.trim().to_ascii_uppercase();
+            if symbol.is_empty() {
+                return Err(SnapshotError::EmptySymbol);
+            }
             let side = position.side.trim().to_ascii_lowercase();
             if side != "long" && side != "short" {
                 return Err(SnapshotError::InvalidSide {
-                    symbol: position.symbol.clone(),
+                    symbol: symbol.clone(),
                     side: position.side.clone(),
                 });
             }
             if position.size <= 0.0 {
-                return Err(SnapshotError::InvalidSize {
-                    symbol: position.symbol.clone(),
-                });
+                return Err(SnapshotError::InvalidSize { symbol: symbol.clone() });
+            }
+            if position.entry_price <= 0.0 {
+                return Err(SnapshotError::InvalidEntryPrice { symbol: symbol.clone() });
             }
             if position.leverage <= 0.0 {
                 return Err(SnapshotError::InvalidLeverage {
-                    symbol: position.symbol.clone(),
+                    symbol: symbol.clone(),
                 });
             }
             let confidence = position.confidence.trim().to_ascii_lowercase();
@@ -121,7 +130,7 @@ impl SnapshotFile {
                 confidence.is_empty() || matches!(confidence.as_str(), "low" | "medium" | "high");
             if !valid_conf {
                 return Err(SnapshotError::InvalidConfidence {
-                    symbol: position.symbol.clone(),
+                    symbol,
                     confidence: position.confidence.clone(),
                 });
             }
@@ -221,5 +230,18 @@ mod tests {
         snapshot.positions[0].confidence = "urgent".to_string();
         let err = snapshot.validate().unwrap_err();
         assert!(matches!(err, SnapshotError::InvalidConfidence { .. }));
+    }
+
+    #[test]
+    fn rejects_empty_symbol_and_non_positive_entry_price() {
+        let mut snapshot = sample_snapshot(SNAPSHOT_V2);
+        snapshot.positions[0].symbol = "   ".to_string();
+        let err = snapshot.validate().unwrap_err();
+        assert!(matches!(err, SnapshotError::EmptySymbol));
+
+        let mut snapshot = sample_snapshot(SNAPSHOT_V2);
+        snapshot.positions[0].entry_price = 0.0;
+        let err = snapshot.validate().unwrap_err();
+        assert!(matches!(err, SnapshotError::InvalidEntryPrice { .. }));
     }
 }

@@ -33,6 +33,9 @@ pub fn seed_paper_db(
     if snapshot.version != SNAPSHOT_V2 {
         anyhow::bail!("snapshot seed-paper requires init-state v2");
     }
+    if !target_db.exists() {
+        anyhow::bail!("target paper db not found: {}", target_db.display());
+    }
 
     let seed_ts_ms = snapshot.exported_at_ms;
     let seed_iso = iso_from_ms(seed_ts_ms);
@@ -233,6 +236,12 @@ fn seed_trades_and_positions(
     seeded_trades += 1;
 
     for (idx, position) in snapshot.positions.iter().enumerate() {
+        let position_ts_ms = if position.open_time_ms > 0 {
+            position.open_time_ms
+        } else {
+            snapshot.exported_at_ms
+        };
+        let position_iso = iso_from_ms(position_ts_ms);
         let pos_type = if position.side.eq_ignore_ascii_case("long") {
             "LONG"
         } else {
@@ -243,7 +252,7 @@ fn seed_trades_and_positions(
             "INSERT INTO trades (timestamp, symbol, action, type, price, size, notional, reason, confidence, balance, pnl, fee_usd, fee_rate, entry_atr, leverage, margin_used, meta_json)
              VALUES (?1, ?2, 'OPEN', ?3, ?4, ?5, ?6, 'state_sync_seed', ?7, ?8, 0.0, 0.0, 0.0, ?9, ?10, ?11, ?12)",
             (
-                seed_iso,
+                position_iso,
                 position.symbol.as_str(),
                 pos_type,
                 position.entry_price,
@@ -261,11 +270,12 @@ fn seed_trades_and_positions(
         conn.execute(
             "INSERT OR REPLACE INTO position_state
              (symbol, open_trade_id, trailing_sl, last_funding_time, adds_count, tp1_taken, last_add_time, entry_adx_threshold, updated_at)
-             VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             (
                 position.symbol.as_str(),
                 open_trade_id,
                 position.trailing_sl,
+                position_ts_ms,
                 i64::from(position.adds_count),
                 if position.tp1_taken { 1_i64 } else { 0_i64 },
                 position.last_add_time_ms,
@@ -276,13 +286,14 @@ fn seed_trades_and_positions(
         conn.execute(
             "INSERT INTO position_state_history
              (event_ts_ms, updated_at, symbol, open_trade_id, trailing_sl, last_funding_time, adds_count, tp1_taken, last_add_time, entry_adx_threshold, event_type, run_fingerprint)
-             VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, ?9, 'seed', 'snapshot_seed')",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'seed', 'snapshot_seed')",
             (
-                snapshot.exported_at_ms,
+                position_ts_ms,
                 seed_iso,
                 position.symbol.as_str(),
                 open_trade_id,
                 position.trailing_sl,
+                position_ts_ms,
                 i64::from(position.adds_count),
                 if position.tp1_taken { 1_i64 } else { 0_i64 },
                 position.last_add_time_ms,
@@ -500,6 +511,20 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
+        let open_ts: String = conn
+            .query_row(
+                "SELECT timestamp FROM trades WHERE action='OPEN' AND symbol='BTC' LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let last_funding_time: i64 = conn
+            .query_row(
+                "SELECT last_funding_time FROM position_state WHERE symbol='BTC' LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
         assert_eq!(report.seeded_trades, 2);
         assert_eq!(report.seeded_positions, 1);
@@ -507,6 +532,8 @@ mod tests {
         assert_eq!(trade_count, 2);
         assert_eq!(state_count, 1);
         assert_eq!(cooldown_count, 1);
+        assert_eq!(open_ts, iso_from_ms(1_772_676_500_000));
+        assert_eq!(last_funding_time, 1_772_676_500_000);
     }
 
     #[test]
@@ -534,5 +561,20 @@ mod tests {
         assert!(err.to_string().contains(
             "non-strict seed would leave existing open paper positions outside snapshot"
         ));
+    }
+
+    #[test]
+    fn seed_paper_db_requires_existing_target_db() {
+        let dir = tempdir().unwrap();
+        let missing_db = dir.path().join("missing-paper.db");
+        let err = seed_paper_db(
+            &sample_snapshot(),
+            &missing_db,
+            SeedOptions {
+                strict_replace: true,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("target paper db not found"));
     }
 }

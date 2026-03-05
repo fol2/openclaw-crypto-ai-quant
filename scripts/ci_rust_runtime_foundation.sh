@@ -30,6 +30,16 @@ from pathlib import Path
 
 snap_path = Path("/tmp/aiq-runtime-seed-snapshot.json")
 db_path = Path("/tmp/aiq-runtime-paper.db")
+for path in (
+    snap_path,
+    db_path,
+    Path("/tmp/aiq-runtime-doctor.json"),
+    Path("/tmp/aiq-runtime-pipeline.json"),
+    Path("/tmp/aiq-runtime-snapshot-validate.json"),
+    Path("/tmp/aiq-runtime-seed-paper.json"),
+):
+    if path.exists():
+        path.unlink()
 
 payload = {
     "version": 2,
