@@ -112,7 +112,7 @@ fn paper_daemon_idle_follow_poll_does_not_write_when_caught_up() {
             .is_some_and(|warnings| warnings.iter().any(|warning| {
                 warning
                     .as_str()
-                    .is_some_and(|text| text.contains("paper loop idle:"))
+                    .is_some_and(|text| text.contains("paper daemon idle:"))
             })),
         "idle exit should carry forward the paper loop idle warning",
     );
@@ -184,145 +184,6 @@ fn paper_daemon_sigterm_while_idle_stops_gracefully_without_writes() {
     );
 }
 
-#[test]
-fn paper_daemon_reloads_symbols_file_between_idle_polls() {
-    let fixture = prepare_idle_fixture();
-    let symbols_file = fixture._dir.path().join("symbols.txt");
-    fs::write(&symbols_file, "ETH\n").expect("initial symbols file should be written");
-
-    let child = daemon_command_with_symbols_file(&fixture, &symbols_file)
-        .arg("--idle-sleep-ms")
-        .arg("50")
-        .arg("--max-idle-polls")
-        .arg("2")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("paper daemon symbols-file reload smoke should spawn");
-
-    let child = wait_for_lock_file(child, &fixture.lock_path, Duration::from_secs(5));
-    thread::sleep(Duration::from_millis(25));
-    fs::write(&symbols_file, "ETH\nBTC\n").expect("updated symbols file should be written");
-
-    let output = wait_with_timeout(child, Duration::from_secs(5));
-    assert!(
-        output.status.success(),
-        "paper daemon should exit cleanly after reloading a symbols file between idle polls; output:\n{}",
-        combined_output(&output)
-    );
-
-    let report = parse_json_output(&output);
-    assert_eq!(
-        report
-            .pointer("/loop_report/symbols_file_reload_count")
-            .and_then(Value::as_u64),
-        Some(1),
-        "paper daemon should report exactly one symbols-file reload",
-    );
-    assert_eq!(
-        report
-            .pointer("/loop_report/latest_explicit_symbols")
-            .and_then(Value::as_array)
-            .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>()),
-        Some(vec!["BTC", "ETH"]),
-        "paper daemon should surface the refreshed explicit symbol set",
-    );
-    assert!(
-        report
-            .pointer("/loop_report/warnings")
-            .and_then(Value::as_array)
-            .is_some_and(|warnings| warnings.iter().any(|warning| {
-                warning
-                    .as_str()
-                    .is_some_and(|text| text.contains("reloaded symbols file"))
-            })),
-        "paper daemon should surface the symbols-file reload warning",
-    );
-}
-
-#[test]
-fn paper_daemon_can_idle_on_empty_symbols_file_until_a_due_step_becomes_runnable() {
-    let dir = tempdir().expect("fixture tempdir should be created");
-    let paper_db = dir.path().join("paper.db");
-    let candles_db = dir.path().join("candles.db");
-    let lock_path = dir.path().join("paper-daemon.lock");
-    seed_empty_paper_db(&paper_db);
-    seed_candles_db(&candles_db);
-    let fixture = Fixture {
-        _dir: dir,
-        paper_db,
-        candles_db,
-        lock_path,
-    };
-    let symbols_file = fixture._dir.path().join("symbols-empty-then-eth.txt");
-    fs::write(&symbols_file, "").expect("empty symbols file should be written");
-    let before = snapshot_db(&fixture.paper_db);
-
-    let child = daemon_command_with_symbols_file(&fixture, &symbols_file)
-        .arg("--start-step-close-ts-ms")
-        .arg(LAST_STEP_CLOSE_TS_MS.to_string())
-        .arg("--idle-sleep-ms")
-        .arg("25")
-        .arg("--max-idle-polls")
-        .arg("4")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("paper daemon empty-watchlist follow smoke should spawn");
-
-    let child = wait_for_lock_file(child, &fixture.lock_path, Duration::from_secs(5));
-    thread::sleep(Duration::from_millis(50));
-    fs::write(&symbols_file, "ETH\n").expect("symbols file should update to ETH");
-
-    let output = wait_with_timeout(child, Duration::from_secs(5));
-    assert!(
-        output.status.success(),
-        "paper daemon should pick up a later symbols-file update and execute a due step; output:\n{}",
-        combined_output(&output)
-    );
-
-    let report = parse_json_output(&output);
-    assert_eq!(
-        report
-            .pointer("/loop_report/executed_steps")
-            .and_then(Value::as_u64),
-        Some(1),
-        "a later symbols-file update should let the daemon execute one due step without restart",
-    );
-    assert!(
-        report
-            .pointer("/loop_report/warnings")
-            .and_then(Value::as_array)
-            .is_some_and(|warnings| warnings.iter().any(|warning| {
-                warning
-                    .as_str()
-                    .is_some_and(|text| text.contains("no active symbols available yet"))
-            })),
-        "daemon should report the initial empty-watchlist idle state before the symbols-file update arrives",
-    );
-    assert!(
-        report
-            .pointer("/loop_report/steps/0/active_symbols")
-            .and_then(Value::as_array)
-            .is_some_and(|symbols| {
-                symbols
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .any(|symbol| symbol == "ETH")
-            }),
-        "the executed step should reflect the symbol loaded from the updated symbols file",
-    );
-    assert_ne!(
-        before,
-        snapshot_db(&fixture.paper_db),
-        "once the symbols file becomes runnable, the daemon should advance the paper DB",
-    );
-    assert!(
-        try_exclusive_lock(&fixture.lock_path).is_some(),
-        "paper daemon should release its lock after the empty-watchlist follow run completes",
-    );
-}
-
 fn prepare_idle_fixture() -> Fixture {
     let fixture = seed_fixture();
     let output = loop_command(&fixture)
@@ -356,12 +217,249 @@ fn prepare_idle_fixture() -> Fixture {
     fixture
 }
 
+#[test]
+fn paper_daemon_reloads_symbols_file_after_empty_watchlist() {
+    let fixture = seed_empty_fixture();
+    let before = snapshot_db(&fixture.paper_db);
+    let symbols_file = fixture._dir.path().join("symbols.txt");
+    fs::write(&symbols_file, "").expect("empty symbols file should be created");
+
+    let child = watchlist_daemon_command(&fixture, &symbols_file)
+        .arg("--start-step-close-ts-ms")
+        .arg(START_STEP_CLOSE_TS_MS.to_string())
+        .arg("--idle-sleep-ms")
+        .arg("20")
+        .arg("--max-idle-polls")
+        .arg("20")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("paper daemon watchlist reload smoke should spawn");
+
+    let child = wait_for_lock_file(child, &fixture.lock_path, Duration::from_secs(5));
+    thread::sleep(Duration::from_millis(80));
+    fs::write(&symbols_file, "ETH\n").expect("symbols file should update");
+
+    let output = wait_with_timeout(child, Duration::from_secs(5));
+    assert!(
+        output.status.success(),
+        "paper daemon should reload an empty symbols file and catch up cleanly; output:\n{}",
+        combined_output(&output)
+    );
+
+    let report = parse_json_output(&output);
+    assert_eq!(
+        report.pointer("/lock_path").and_then(Value::as_str),
+        Some(fixture.lock_path.to_string_lossy().as_ref()),
+        "paper daemon should report the acquired lock path",
+    );
+    assert_eq!(
+        report
+            .pointer("/loop_report/executed_steps")
+            .and_then(Value::as_u64),
+        Some(3),
+        "daemon should execute all due steps once the watchlist file becomes active",
+    );
+    assert!(
+        report
+            .pointer("/loop_report/idle_polls")
+            .and_then(Value::as_u64)
+            .is_some_and(|idle_polls| idle_polls >= 1),
+        "watchlist bootstrap should include at least one idle poll before symbols appear",
+    );
+    assert!(
+        report
+            .pointer("/watch_symbols_file")
+            .and_then(Value::as_bool)
+            == Some(true),
+        "watchlist daemon smoke should enable daemon-owned file watching",
+    );
+    assert!(
+        report
+            .pointer("/loop_report/warnings")
+            .and_then(Value::as_array)
+            .is_some_and(|warnings| warnings.iter().any(|warning| {
+                warning
+                    .as_str()
+                    .is_some_and(|text| text.contains("no active symbols available yet"))
+            })),
+        "daemon should surface the empty-watchlist idle warning",
+    );
+    assert!(
+        report
+            .pointer("/loop_report/warnings")
+            .and_then(Value::as_array)
+            .is_some_and(|warnings| warnings.iter().any(|warning| {
+                warning
+                    .as_str()
+                    .is_some_and(|text| text.contains("paper daemon reloaded symbols: ETH"))
+            })),
+        "daemon should surface the watchlist reload warning",
+    );
+    assert_eq!(
+        report
+            .pointer("/manifest_reload_count")
+            .and_then(Value::as_u64),
+        Some(1),
+        "daemon should record one accepted manifest reload",
+    );
+    assert_eq!(
+        report
+            .pointer("/loop_report/steps/0/active_symbols/0")
+            .and_then(Value::as_str),
+        Some("ETH"),
+        "the first executed step should use the symbols loaded from the watchlist file",
+    );
+    assert_ne!(
+        before,
+        snapshot_db(&fixture.paper_db),
+        "watchlist bootstrap should mutate the paper DB once due steps execute",
+    );
+    assert!(
+        try_exclusive_lock(&fixture.lock_path).is_some(),
+        "paper daemon should release its lock after a watchlist-driven exit",
+    );
+}
+
+#[test]
+fn paper_daemon_retains_last_good_manifest_on_invalid_reload() {
+    let fixture = prepare_idle_fixture();
+    let symbols_file = fixture._dir.path().join("symbols.txt");
+    fs::write(&symbols_file, "BTC\n").expect("initial symbols file should be created");
+
+    let child = watchlist_daemon_command(&fixture, &symbols_file)
+        .arg("--idle-sleep-ms")
+        .arg("20")
+        .arg("--max-idle-polls")
+        .arg("0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("paper daemon invalid-reload smoke should spawn");
+
+    let child = wait_for_lock_file(child, &fixture.lock_path, Duration::from_secs(5));
+    thread::sleep(Duration::from_millis(80));
+    fs::write(&symbols_file, [0xff, 0xfe, 0x00]).expect("symbols file should become invalid");
+    thread::sleep(Duration::from_millis(80));
+    send_sigterm(&child);
+
+    let output = wait_with_timeout(child, Duration::from_secs(5));
+    assert!(
+        output.status.success(),
+        "paper daemon should stop cleanly after an invalid watchlist reload; output:\n{}",
+        combined_output(&output)
+    );
+
+    let report = parse_json_output(&output);
+    assert_eq!(
+        report
+            .pointer("/manifest_reload_failure_count")
+            .and_then(Value::as_u64),
+        Some(1),
+        "daemon should count the failed manifest reload",
+    );
+    assert_eq!(
+        report
+            .pointer("/manifest_symbols")
+            .and_then(Value::as_array),
+        Some(&vec![Value::String("BTC".to_string())]),
+        "daemon should retain the last good manifest after an invalid reload",
+    );
+    assert!(
+        report
+            .pointer("/loop_report/warnings")
+            .and_then(Value::as_array)
+            .is_some_and(|warnings| warnings.iter().any(|warning| {
+                warning.as_str().is_some_and(|text| {
+                    text.contains("ignored symbols file reload")
+                        && text.contains("retaining last good manifest")
+                })
+            })),
+        "daemon should surface the invalid-reload retention warning",
+    );
+}
+
+#[test]
+fn paper_daemon_keeps_open_positions_in_active_symbols_after_manifest_reload() {
+    let fixture = prepare_idle_fixture();
+    let before = snapshot_db(&fixture.paper_db);
+    let symbols_file = fixture._dir.path().join("symbols.txt");
+    fs::write(&symbols_file, "ETH\n").expect("initial symbols file should be created");
+
+    let child = watchlist_daemon_command(&fixture, &symbols_file)
+        .arg("--idle-sleep-ms")
+        .arg("20")
+        .arg("--max-idle-polls")
+        .arg("10")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("paper daemon open-position union smoke should spawn");
+
+    let child = wait_for_lock_file(child, &fixture.lock_path, Duration::from_secs(5));
+    thread::sleep(Duration::from_millis(80));
+    fs::write(&symbols_file, "BTC\n").expect("symbols file should reload to BTC");
+
+    let output = wait_with_timeout(child, Duration::from_secs(5));
+    assert!(
+        output.status.success(),
+        "paper daemon should exit cleanly after a manifest reload while caught up; output:\n{}",
+        combined_output(&output)
+    );
+
+    let report = parse_json_output(&output);
+    assert_eq!(
+        report
+            .pointer("/manifest_reload_count")
+            .and_then(Value::as_u64),
+        Some(1),
+        "daemon should accept the BTC reload",
+    );
+    assert_eq!(
+        report
+            .pointer("/manifest_symbols")
+            .and_then(Value::as_array),
+        Some(&vec![Value::String("BTC".to_string())]),
+        "final manifest should reflect the reloaded file contents",
+    );
+    assert_eq!(
+        report
+            .pointer("/last_active_symbols")
+            .and_then(Value::as_array),
+        Some(&vec![
+            Value::String("BTC".to_string()),
+            Value::String("ETH".to_string()),
+        ]),
+        "active symbols should union the reloaded manifest with open paper positions",
+    );
+    assert_eq!(
+        before,
+        snapshot_db(&fixture.paper_db),
+        "idle manifest reload must not mutate the paper DB",
+    );
+}
+
 fn seed_fixture() -> Fixture {
     let dir = tempdir().expect("fixture tempdir should be created");
     let paper_db = dir.path().join("paper.db");
     let candles_db = dir.path().join("candles.db");
     let lock_path = dir.path().join("paper-daemon.lock");
     seed_paper_db(&paper_db);
+    seed_candles_db(&candles_db);
+    Fixture {
+        _dir: dir,
+        paper_db,
+        candles_db,
+        lock_path,
+    }
+}
+
+fn seed_empty_fixture() -> Fixture {
+    let dir = tempdir().expect("fixture tempdir should be created");
+    let paper_db = dir.path().join("paper.db");
+    let candles_db = dir.path().join("candles.db");
+    let lock_path = dir.path().join("paper-daemon.lock");
+    seed_empty_paper_db(&paper_db);
     seed_candles_db(&candles_db);
     Fixture {
         _dir: dir,
@@ -413,7 +511,7 @@ fn daemon_command(fixture: &Fixture) -> Command {
     command
 }
 
-fn daemon_command_with_symbols_file(fixture: &Fixture, symbols_file: &Path) -> Command {
+fn watchlist_daemon_command(fixture: &Fixture, symbols_file: &Path) -> Command {
     let mut command = runtime_command();
     command
         .arg("paper")
@@ -426,6 +524,7 @@ fn daemon_command_with_symbols_file(fixture: &Fixture, symbols_file: &Path) -> C
         .arg(&fixture.candles_db)
         .arg("--symbols-file")
         .arg(symbols_file)
+        .arg("--watch-symbols-file")
         .arg("--lock-path")
         .arg(&fixture.lock_path)
         .arg("--json");
@@ -595,7 +694,7 @@ fn wait_with_timeout(mut child: Child, timeout: Duration) -> Output {
     );
 }
 
-fn create_paper_db_schema(path: &Path) {
+fn seed_paper_db(path: &Path) {
     let conn = Connection::open(path).expect("paper db should open");
     conn.execute_batch(
         r#"
@@ -651,15 +750,6 @@ fn create_paper_db_schema(path: &Path) {
         "#,
     )
     .expect("paper schema should be created");
-}
-
-fn seed_empty_paper_db(path: &Path) {
-    create_paper_db_schema(path);
-}
-
-fn seed_paper_db(path: &Path) {
-    create_paper_db_schema(path);
-    let conn = Connection::open(path).expect("paper db should open");
     conn.execute(
         "INSERT INTO trades (timestamp,symbol,action,type,price,size,notional,reason,confidence,balance,pnl,fee_usd,fee_rate,entry_atr,leverage,margin_used,meta_json)
          VALUES ('2026-03-05T10:00:00+00:00','ETH','OPEN','LONG',100.0,1.0,100.0,'seed','medium',1000.0,0.0,0.0,0.0,5.0,3.0,33.3,'{}')",
@@ -676,6 +766,64 @@ fn seed_paper_db(path: &Path) {
         [],
     )
     .expect("seed cooldown should be inserted");
+}
+
+fn seed_empty_paper_db(path: &Path) {
+    let conn = Connection::open(path).expect("paper db should open");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            symbol TEXT,
+            type TEXT,
+            action TEXT,
+            price REAL,
+            size REAL,
+            notional REAL,
+            reason TEXT,
+            reason_code TEXT,
+            confidence TEXT,
+            pnl REAL,
+            fee_usd REAL,
+            fee_token TEXT,
+            fee_rate REAL,
+            balance REAL,
+            entry_atr REAL,
+            leverage REAL,
+            margin_used REAL,
+            meta_json TEXT,
+            run_fingerprint TEXT,
+            fill_hash TEXT,
+            fill_tid INTEGER
+        );
+        CREATE TABLE position_state (
+            symbol TEXT PRIMARY KEY,
+            open_trade_id INTEGER,
+            trailing_sl REAL,
+            last_funding_time INTEGER,
+            adds_count INTEGER,
+            tp1_taken INTEGER,
+            last_add_time INTEGER,
+            entry_adx_threshold REAL,
+            updated_at TEXT
+        );
+        CREATE TABLE runtime_cooldowns (
+            symbol TEXT PRIMARY KEY,
+            last_entry_attempt_s REAL,
+            last_exit_attempt_s REAL,
+            updated_at TEXT
+        );
+        CREATE TABLE runtime_last_closes (
+            symbol TEXT PRIMARY KEY,
+            close_ts_ms INTEGER NOT NULL,
+            side TEXT NOT NULL,
+            reason TEXT,
+            updated_at TEXT NOT NULL
+        );
+        "#,
+    )
+    .expect("empty paper schema should be created");
 }
 
 fn seed_candles_db(path: &Path) {

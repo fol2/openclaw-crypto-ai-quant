@@ -9,8 +9,10 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::UNIX_EPOCH;
 
-use crate::paper_loop::{self, PaperLoopInput, PaperLoopReport};
+use crate::paper_cycle::{self, PaperCycleInput};
+use crate::paper_loop::{self, PaperLoopReport, PaperLoopStepReport};
 
 pub struct PaperDaemonInput<'a> {
     pub runtime_bootstrap: RuntimeBootstrap,
@@ -28,6 +30,7 @@ pub struct PaperDaemonInput<'a> {
     pub exported_at_ms: Option<i64>,
     pub dry_run: bool,
     pub lock_path: Option<&'a Path>,
+    pub watch_symbols_file: bool,
     pub emit_progress: bool,
 }
 
@@ -41,55 +44,342 @@ pub struct PaperDaemonReport {
     pub stop_requested: bool,
     pub dry_run: bool,
     pub runtime_bootstrap: RuntimeBootstrap,
+    pub watch_symbols_file: bool,
+    pub symbols_file: Option<String>,
+    pub manifest_symbols: Vec<String>,
+    pub last_active_symbols: Vec<String>,
+    pub manifest_reload_count: usize,
+    pub manifest_reload_failure_count: usize,
     pub loop_report: PaperLoopReport,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileStamp {
+    modified_ms: Option<u128>,
+    len: u64,
+}
+
+#[derive(Debug, Clone)]
+struct SymbolManifestState {
+    base_symbols: Vec<String>,
+    symbols_file: Option<PathBuf>,
+    watch_symbols_file: bool,
+    file_symbols: Vec<String>,
+    last_seen_stamp: Option<FileStamp>,
+    reload_count: usize,
+    reload_failure_count: usize,
+}
+
+impl SymbolManifestState {
+    fn new(
+        explicit_symbols: &[String],
+        symbols_file: Option<&Path>,
+        watch_symbols_file: bool,
+    ) -> Result<Self> {
+        if watch_symbols_file && symbols_file.is_none() {
+            anyhow::bail!("paper daemon --watch-symbols-file requires --symbols-file");
+        }
+
+        let base_symbols = paper_loop::normalise_symbols(explicit_symbols);
+        let mut state = Self {
+            base_symbols,
+            symbols_file: symbols_file.map(Path::to_path_buf),
+            watch_symbols_file,
+            file_symbols: Vec::new(),
+            last_seen_stamp: None,
+            reload_count: 0,
+            reload_failure_count: 0,
+        };
+        if let Some(path) = state.symbols_file.clone() {
+            let stamp = file_stamp(&path)?;
+            let file_symbols = load_symbols_file(&path)?;
+            state.file_symbols = file_symbols;
+            state.last_seen_stamp = Some(stamp);
+        }
+        Ok(state)
+    }
+
+    fn current_symbols(&self) -> Vec<String> {
+        let mut merged = self.base_symbols.clone();
+        merged.extend(self.file_symbols.iter().cloned());
+        paper_loop::normalise_symbols(&merged)
+    }
+
+    fn symbols_file_display(&self) -> Option<String> {
+        self.symbols_file
+            .as_ref()
+            .map(|path| path.display().to_string())
+    }
+
+    fn refresh_if_needed(&mut self) -> Result<Vec<String>> {
+        if !self.watch_symbols_file {
+            return Ok(Vec::new());
+        }
+        let Some(symbols_file) = self.symbols_file.clone() else {
+            return Ok(Vec::new());
+        };
+
+        let current_stamp = file_stamp(&symbols_file)?;
+        if self.last_seen_stamp.as_ref() == Some(&current_stamp) {
+            return Ok(Vec::new());
+        }
+        self.last_seen_stamp = Some(current_stamp);
+
+        match load_symbols_file(&symbols_file) {
+            Ok(file_symbols) => {
+                if file_symbols.is_empty() && !self.file_symbols.is_empty() {
+                    self.reload_failure_count = self.reload_failure_count.saturating_add(1);
+                    return Ok(vec![format!(
+                        "paper daemon ignored empty symbols file reload; retaining last good manifest: {}",
+                        self.file_symbols.join(",")
+                    )]);
+                }
+                if file_symbols != self.file_symbols {
+                    self.file_symbols = file_symbols;
+                    self.reload_count = self.reload_count.saturating_add(1);
+                    return Ok(vec![format!(
+                        "paper daemon reloaded symbols: {}",
+                        self.current_symbols().join(",")
+                    )]);
+                }
+                Ok(Vec::new())
+            }
+            Err(err) => {
+                self.reload_failure_count = self.reload_failure_count.saturating_add(1);
+                Ok(vec![format!(
+                    "paper daemon ignored symbols file reload; retaining last good manifest: {err}"
+                )])
+            }
+        }
+    }
+}
+
 pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
+    if !input.paper_db.exists() {
+        anyhow::bail!("paper db not found: {}", input.paper_db.display());
+    }
+    if !input.candles_db.exists() {
+        anyhow::bail!("candles db not found: {}", input.candles_db.display());
+    }
+
     let lock_path = resolve_lock_path(input.lock_path, input.live);
     let _lock_file = acquire_lock(&lock_path)?;
     let started_at_ms = Utc::now().timestamp_millis();
     let stop_flag = Arc::new(AtomicBool::new(false));
     let _signal_guard = install_signal_handlers(&stop_flag)?;
+    let working_paper_db = paper_loop::prepare_working_paper_db(input.paper_db, input.dry_run)?;
+    let mut manifest_state = SymbolManifestState::new(
+        input.explicit_symbols,
+        input.symbols_file,
+        input.watch_symbols_file,
+    )?;
+
     if input.emit_progress {
         eprintln!(
-            "paper daemon started: pid={} lock={} dry_run={} profile={}",
+            "paper daemon started: pid={} lock={} dry_run={} profile={} watch_symbols_file={}",
             std::process::id(),
             lock_path.display(),
             input.dry_run,
             input.runtime_bootstrap.pipeline.profile,
+            input.watch_symbols_file,
         );
     }
 
-    let loop_report = paper_loop::run_loop(PaperLoopInput {
-        runtime_bootstrap: input.runtime_bootstrap.clone(),
-        config_path: input.config_path,
-        live: input.live,
-        paper_db: input.paper_db,
-        candles_db: input.candles_db,
-        explicit_symbols: input.explicit_symbols,
-        symbols_file: input.symbols_file,
-        btc_symbol: input.btc_symbol,
-        lookback_bars: input.lookback_bars,
-        start_step_close_ts_ms: input.start_step_close_ts_ms,
-        max_steps: usize::MAX,
-        follow: true,
-        idle_sleep_ms: input.idle_sleep_ms,
-        max_idle_polls: input.max_idle_polls,
-        exported_at_ms: input.exported_at_ms,
+    let mut warnings = Vec::new();
+    let mut errors = Vec::new();
+    let mut steps = Vec::new();
+    let mut stop_requested = false;
+    let mut initial_last_applied_step_close_ts_ms = None;
+    let mut interval = None;
+    let mut latest_common_close_ts_ms = None;
+    let mut next_due_step_close_ts_ms = None;
+    let mut idle_polls = 0usize;
+    let mut last_active_symbols = Vec::new();
+    let mut emitted_empty_idle_warning = false;
+    let mut emitted_due_idle_warning = false;
+
+    loop {
+        if paper_loop::is_stop_requested(Some(stop_flag.as_ref())) {
+            stop_requested = true;
+            warnings.push("paper daemon stop requested".to_string());
+            break;
+        }
+
+        warnings.extend(manifest_state.refresh_if_needed()?);
+        let manifest_symbols = manifest_state.current_symbols();
+        let maybe_context = paper_loop::inspect_loop_context(
+            &input.runtime_bootstrap,
+            input.config_path,
+            input.live,
+            working_paper_db.path(),
+            input.candles_db,
+            &manifest_symbols,
+            input.btc_symbol,
+        )?;
+        let Some(context) = maybe_context else {
+            last_active_symbols.clear();
+            if !input.watch_symbols_file {
+                if steps.is_empty() {
+                    anyhow::bail!("paper daemon requires explicit symbols or open paper positions");
+                }
+                warnings.push("paper daemon stopped: no active symbols remain".to_string());
+                break;
+            }
+            if !emitted_empty_idle_warning {
+                warnings.push("paper daemon idle: no active symbols available yet".to_string());
+                emitted_empty_idle_warning = true;
+            }
+            idle_polls = idle_polls.saturating_add(1);
+            if input.max_idle_polls > 0 && idle_polls >= input.max_idle_polls {
+                warnings.push(format!(
+                    "paper daemon follow exhausted after {} idle poll(s)",
+                    input.max_idle_polls
+                ));
+                break;
+            }
+            paper_loop::sleep_with_stop_flag(input.idle_sleep_ms, Some(stop_flag.as_ref()));
+            continue;
+        };
+
+        emitted_empty_idle_warning = false;
+        last_active_symbols = context.active_symbols.clone();
+        if initial_last_applied_step_close_ts_ms.is_none() {
+            initial_last_applied_step_close_ts_ms = context.last_applied_step_close_ts_ms;
+        }
+        interval = Some(context.interval.clone());
+        latest_common_close_ts_ms = Some(context.latest_common_close_ts_ms);
+
+        let interval_ms = paper_loop::interval_to_ms(&context.interval).with_context(|| {
+            format!(
+                "unsupported interval for paper daemon: {}",
+                context.interval
+            )
+        })?;
+        let candidate_next_due = match context.last_applied_step_close_ts_ms {
+            Some(last_applied_step_close_ts_ms) => {
+                let expected_next = last_applied_step_close_ts_ms
+                    .checked_add(interval_ms)
+                    .context("paper daemon interval overflow")?;
+                if steps.is_empty() {
+                    if let Some(start_step_close_ts_ms) = input.start_step_close_ts_ms {
+                        if start_step_close_ts_ms != expected_next {
+                            anyhow::bail!(
+                                "paper daemon start_step_close_ts_ms {} does not match next unapplied step {}",
+                                start_step_close_ts_ms,
+                                expected_next
+                            );
+                        }
+                    }
+                }
+                expected_next
+            }
+            None => input.start_step_close_ts_ms.context(
+                "paper daemon requires --start-step-close-ts-ms when no prior runtime_cycle_steps exist",
+            )?,
+        };
+        next_due_step_close_ts_ms = Some(candidate_next_due);
+
+        if candidate_next_due > context.latest_common_close_ts_ms {
+            if !emitted_due_idle_warning {
+                warnings.push(format!(
+                    "paper daemon idle: next due step {} is newer than latest common close {}",
+                    candidate_next_due, context.latest_common_close_ts_ms
+                ));
+                emitted_due_idle_warning = true;
+            }
+            idle_polls = idle_polls.saturating_add(1);
+            if input.max_idle_polls > 0 && idle_polls >= input.max_idle_polls {
+                warnings.push(format!(
+                    "paper daemon follow exhausted after {} idle poll(s)",
+                    input.max_idle_polls
+                ));
+                break;
+            }
+            paper_loop::sleep_with_stop_flag(input.idle_sleep_ms, Some(stop_flag.as_ref()));
+            continue;
+        }
+
+        let cycle_report = paper_cycle::run_cycle(PaperCycleInput {
+            runtime_bootstrap: input.runtime_bootstrap.clone(),
+            config_path: input.config_path,
+            live: input.live,
+            paper_db: working_paper_db.path(),
+            candles_db: input.candles_db,
+            explicit_symbols: &manifest_symbols,
+            btc_symbol: input.btc_symbol,
+            lookback_bars: input.lookback_bars,
+            step_close_ts_ms: candidate_next_due,
+            exported_at_ms: Some(input.exported_at_ms.unwrap_or(candidate_next_due)),
+            dry_run: false,
+        })?;
+        warnings.extend(cycle_report.warnings.iter().cloned());
+        errors.extend(cycle_report.errors.iter().cloned());
+        steps.push(PaperLoopStepReport::from_cycle_report(
+            cycle_report,
+            input.dry_run,
+        ));
+        idle_polls = 0;
+        emitted_due_idle_warning = false;
+    }
+
+    let manifest_symbols = manifest_state.current_symbols();
+    let final_context = paper_loop::inspect_loop_context(
+        &input.runtime_bootstrap,
+        input.config_path,
+        input.live,
+        working_paper_db.path(),
+        input.candles_db,
+        &manifest_symbols,
+        input.btc_symbol,
+    )?;
+    if let Some(context) = final_context.as_ref() {
+        interval = Some(context.interval.clone());
+        latest_common_close_ts_ms = Some(context.latest_common_close_ts_ms);
+        last_active_symbols = context.active_symbols.clone();
+        let interval_ms = paper_loop::interval_to_ms(&context.interval).with_context(|| {
+            format!(
+                "unsupported interval for paper daemon: {}",
+                context.interval
+            )
+        })?;
+        next_due_step_close_ts_ms = context
+            .last_applied_step_close_ts_ms
+            .and_then(|last_applied_step_close_ts_ms| {
+                last_applied_step_close_ts_ms.checked_add(interval_ms)
+            })
+            .or(input.start_step_close_ts_ms);
+    }
+
+    let loop_report = PaperLoopReport {
+        ok: errors.is_empty(),
         dry_run: input.dry_run,
-        stop_flag: Some(stop_flag.as_ref()),
-    })?;
+        interval,
+        explicit_symbols: manifest_symbols.clone(),
+        initial_last_applied_step_close_ts_ms,
+        latest_common_close_ts_ms,
+        next_due_step_close_ts_ms,
+        executed_steps: steps.len(),
+        follow: true,
+        idle_polls,
+        runtime_bootstrap: input.runtime_bootstrap.clone(),
+        steps,
+        stop_requested,
+        warnings,
+        errors,
+    };
 
     let stopped_at_ms = Utc::now().timestamp_millis();
     let stop_requested = loop_report.stop_requested || stop_flag.load(Ordering::SeqCst);
     if input.emit_progress {
         eprintln!(
-            "paper daemon stopped: pid={} steps={} stop_requested={} latest_common={:?} next_due={:?}",
+            "paper daemon stopped: pid={} steps={} stop_requested={} latest_common={:?} next_due={:?} reloads={} reload_failures={}",
             std::process::id(),
             loop_report.executed_steps,
             stop_requested,
             loop_report.latest_common_close_ts_ms,
             loop_report.next_due_step_close_ts_ms,
+            manifest_state.reload_count,
+            manifest_state.reload_failure_count,
         );
     }
     Ok(PaperDaemonReport {
@@ -101,7 +391,45 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
         stop_requested,
         dry_run: input.dry_run,
         runtime_bootstrap: input.runtime_bootstrap,
+        watch_symbols_file: input.watch_symbols_file,
+        symbols_file: manifest_state.symbols_file_display(),
+        manifest_symbols,
+        last_active_symbols,
+        manifest_reload_count: manifest_state.reload_count,
+        manifest_reload_failure_count: manifest_state.reload_failure_count,
         loop_report,
+    })
+}
+
+fn load_symbols_file(symbols_file: &Path) -> Result<Vec<String>> {
+    let bytes = std::fs::read(symbols_file)
+        .with_context(|| format!("failed to read symbols file: {}", symbols_file.display()))?;
+    let raw = String::from_utf8(bytes).with_context(|| {
+        format!(
+            "symbols file must be valid UTF-8: {}",
+            symbols_file.display()
+        )
+    })?;
+    let symbols = raw
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    Ok(paper_loop::normalise_symbols(&symbols))
+}
+
+fn file_stamp(path: &Path) -> Result<FileStamp> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("failed to stat symbols file: {}", path.display()))?;
+    let modified_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis());
+    Ok(FileStamp {
+        modified_ms,
+        len: metadata.len(),
     })
 }
 
