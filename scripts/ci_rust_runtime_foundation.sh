@@ -46,6 +46,7 @@ for path in (
     Path("/tmp/aiq-runtime-paper-loop.json"),
     Path("/tmp/aiq-runtime-paper-loop-resume.json"),
     Path("/tmp/aiq-runtime-paper-loop-idle.json"),
+    Path("/tmp/aiq-runtime-paper-loop-follow.json"),
 ):
     if path.exists():
         path.unlink()
@@ -198,6 +199,7 @@ cargo run -q -p aiq-runtime -- paper cycle --db /tmp/aiq-runtime-paper.db --cand
 cargo run -q -p aiq-runtime -- paper loop --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --start-step-close-ts-ms 1773422400000 --max-steps 2 --json >/tmp/aiq-runtime-paper-loop.json
 cargo run -q -p aiq-runtime -- paper loop --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --max-steps 2 --json >/tmp/aiq-runtime-paper-loop-resume.json
 cargo run -q -p aiq-runtime -- paper loop --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --max-steps 1 --json >/tmp/aiq-runtime-paper-loop-idle.json
+cargo run -q -p aiq-runtime -- paper loop --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --follow --idle-sleep-ms 1 --max-idle-polls 1 --max-steps 1 --json >/tmp/aiq-runtime-paper-loop-follow.json
 cargo run -q -p aiq-runtime -- paper doctor --db /tmp/aiq-runtime-paper.db --live --json >/tmp/aiq-runtime-paper-doctor-live.json
 cargo run -q -p aiq-runtime -- paper run-once --db /tmp/aiq-runtime-paper.db --candles-db /tmp/aiq-runtime-candles.db --target-symbol ETH --exported-at-ms 1772676900000 --live --dry-run --json >/tmp/aiq-runtime-paper-run-once-live.json
 if cargo run -q -p aiq-runtime -- paper cycle --db /tmp/aiq-runtime-paper.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --step-close-ts-ms 1773426000000 --exported-at-ms 1772676900000 --json >/tmp/aiq-runtime-paper-cycle-rerun.json 2>/tmp/aiq-runtime-paper-cycle-rerun.stderr; then
@@ -225,6 +227,11 @@ assert [step["step_close_ts_ms"] for step in loop_resume["steps"]] == [177342600
 loop_idle = json.loads(Path("/tmp/aiq-runtime-paper-loop-idle.json").read_text(encoding="utf-8"))
 assert loop_idle["executed_steps"] == 0
 assert loop_idle["latest_common_close_ts_ms"] == 1773426000000
+loop_follow = json.loads(Path("/tmp/aiq-runtime-paper-loop-follow.json").read_text(encoding="utf-8"))
+assert loop_follow["executed_steps"] == 0
+assert loop_follow["follow"] is True
+assert loop_follow["idle_polls"] == 2
+assert any("follow exhausted" in warning for warning in loop_follow["warnings"])
 doctor = json.loads(Path("/tmp/aiq-runtime-paper-doctor.json").read_text(encoding="utf-8"))
 assert doctor["paper_bootstrap"]["runtime_close_markers"] == 1
 PY

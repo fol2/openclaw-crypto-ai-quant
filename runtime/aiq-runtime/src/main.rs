@@ -215,6 +215,15 @@ struct PaperLoopArgs {
     /// Maximum number of unapplied cycle steps to execute before exiting.
     #[arg(long, default_value_t = 1)]
     max_steps: usize,
+    /// Keep polling for the next due step instead of exiting idle after catch-up.
+    #[arg(long)]
+    follow: bool,
+    /// Sleep duration between follow-mode idle polls.
+    #[arg(long, default_value_t = 5_000)]
+    idle_sleep_ms: u64,
+    /// Maximum number of follow-mode idle polls before exiting. Zero means unlimited.
+    #[arg(long, default_value_t = 0)]
+    max_idle_polls: usize,
     /// Override exported_at_ms for reproducible artefacts; defaults to each step close.
     #[arg(long)]
     exported_at_ms: Option<i64>,
@@ -549,6 +558,9 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 lookback_bars: args.lookback_bars,
                 start_step_close_ts_ms: args.start_step_close_ts_ms,
                 max_steps: args.max_steps,
+                follow: args.follow,
+                idle_sleep_ms: args.idle_sleep_ms,
+                max_idle_polls: args.max_idle_polls,
                 exported_at_ms: args.exported_at_ms,
                 dry_run: args.dry_run,
             })?;

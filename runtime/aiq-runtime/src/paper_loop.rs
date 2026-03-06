@@ -6,6 +6,8 @@ use rusqlite::{params, Connection};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::thread;
+use std::time::Duration;
 
 use crate::paper_cycle::{self, PaperCycleInput};
 use crate::paper_export;
@@ -21,6 +23,9 @@ pub struct PaperLoopInput<'a> {
     pub lookback_bars: usize,
     pub start_step_close_ts_ms: Option<i64>,
     pub max_steps: usize,
+    pub follow: bool,
+    pub idle_sleep_ms: u64,
+    pub max_idle_polls: usize,
     pub exported_at_ms: Option<i64>,
     pub dry_run: bool,
 }
@@ -49,6 +54,8 @@ pub struct PaperLoopReport {
     pub latest_common_close_ts_ms: Option<i64>,
     pub next_due_step_close_ts_ms: Option<i64>,
     pub executed_steps: usize,
+    pub follow: bool,
+    pub idle_polls: usize,
     pub runtime_bootstrap: RuntimeBootstrap,
     pub steps: Vec<PaperLoopStepReport>,
     pub warnings: Vec<String>,
@@ -83,6 +90,7 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
     let mut interval = None;
     let mut latest_common_close_ts_ms = None;
     let mut next_due_step_close_ts_ms = None;
+    let mut idle_polls = 0usize;
 
     loop {
         if steps.len() >= input.max_steps {
@@ -152,7 +160,21 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
                     candidate_next_due, context.latest_common_close_ts_ms
                 ));
             }
-            break;
+            if !input.follow {
+                break;
+            }
+
+            idle_polls = idle_polls.saturating_add(1);
+            if input.max_idle_polls > 0 && idle_polls > input.max_idle_polls {
+                warnings.push(format!(
+                    "paper loop follow exhausted after {} idle poll(s)",
+                    input.max_idle_polls
+                ));
+                break;
+            }
+
+            thread::sleep(Duration::from_millis(input.idle_sleep_ms));
+            continue;
         }
 
         let cycle_report = paper_cycle::run_cycle(PaperCycleInput {
@@ -172,6 +194,7 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
         errors.extend(cycle_report.errors.iter().cloned());
         planned_last_step_close_ts_ms = Some(cycle_report.step_close_ts_ms);
         steps.push(PaperLoopStepReport::from(cycle_report));
+        idle_polls = 0;
     }
 
     let final_context = if input.dry_run {
@@ -216,6 +239,8 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
         latest_common_close_ts_ms,
         next_due_step_close_ts_ms,
         executed_steps: steps.len(),
+        follow: input.follow,
+        idle_polls,
         runtime_bootstrap: input.runtime_bootstrap,
         steps,
         warnings,
@@ -571,6 +596,9 @@ mod tests {
             lookback_bars: 400,
             start_step_close_ts_ms: None,
             max_steps: 1,
+            follow: false,
+            idle_sleep_ms: 0,
+            max_idle_polls: 0,
             exported_at_ms: None,
             dry_run: false,
         })
@@ -600,6 +628,9 @@ mod tests {
             lookback_bars: 400,
             start_step_close_ts_ms: Some(START_STEP_CLOSE_TS_MS),
             max_steps: 2,
+            follow: false,
+            idle_sleep_ms: 0,
+            max_idle_polls: 0,
             exported_at_ms: None,
             dry_run: false,
         })
@@ -634,6 +665,9 @@ mod tests {
             lookback_bars: 400,
             start_step_close_ts_ms: None,
             max_steps: 2,
+            follow: false,
+            idle_sleep_ms: 0,
+            max_idle_polls: 0,
             exported_at_ms: None,
             dry_run: false,
         })
@@ -660,6 +694,9 @@ mod tests {
             lookback_bars: 400,
             start_step_close_ts_ms: None,
             max_steps: 1,
+            follow: false,
+            idle_sleep_ms: 0,
+            max_idle_polls: 0,
             exported_at_ms: None,
             dry_run: false,
         })
@@ -692,6 +729,9 @@ mod tests {
             lookback_bars: 400,
             start_step_close_ts_ms: Some(START_STEP_CLOSE_TS_MS),
             max_steps: 2,
+            follow: false,
+            idle_sleep_ms: 0,
+            max_idle_polls: 0,
             exported_at_ms: None,
             dry_run: true,
         })
@@ -717,5 +757,63 @@ mod tests {
             )
             .unwrap();
         assert_eq!(step_table_count, 0);
+    }
+
+    #[test]
+    fn loop_follow_mode_exits_after_idle_poll_budget() {
+        let dir = tempdir().unwrap();
+        let paper_db = dir.path().join("paper.db");
+        let candles_db = dir.path().join("candles.db");
+        seed_paper_db(&paper_db);
+        seed_candles_db(&candles_db);
+
+        let bootstrap = runtime_bootstrap();
+        let cfg_path = base_cfg_path();
+        let caught_up = run_loop(PaperLoopInput {
+            runtime_bootstrap: bootstrap.clone(),
+            config_path: &cfg_path,
+            live: false,
+            paper_db: &paper_db,
+            candles_db: &candles_db,
+            explicit_symbols: &["ETH".to_string()],
+            btc_symbol: "BTC",
+            lookback_bars: 400,
+            start_step_close_ts_ms: Some(START_STEP_CLOSE_TS_MS),
+            max_steps: 3,
+            follow: false,
+            idle_sleep_ms: 0,
+            max_idle_polls: 0,
+            exported_at_ms: None,
+            dry_run: false,
+        })
+        .unwrap();
+        assert_eq!(caught_up.executed_steps, 3);
+
+        let report = run_loop(PaperLoopInput {
+            runtime_bootstrap: bootstrap,
+            config_path: &cfg_path,
+            live: false,
+            paper_db: &paper_db,
+            candles_db: &candles_db,
+            explicit_symbols: &["ETH".to_string()],
+            btc_symbol: "BTC",
+            lookback_bars: 400,
+            start_step_close_ts_ms: None,
+            max_steps: 1,
+            follow: true,
+            idle_sleep_ms: 1,
+            max_idle_polls: 1,
+            exported_at_ms: None,
+            dry_run: false,
+        })
+        .unwrap();
+
+        assert_eq!(report.executed_steps, 0);
+        assert_eq!(report.idle_polls, 2);
+        assert!(report.follow);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("follow exhausted")));
     }
 }
