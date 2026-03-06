@@ -228,9 +228,12 @@ struct PaperLoopArgs {
     /// Explicit symbol list (comma-delimited). Open paper positions are always included.
     #[arg(long, value_delimiter = ',')]
     symbols: Vec<String>,
-    /// Optional file containing one symbol per line. Re-read on each loop iteration.
+    /// Optional file containing one symbol per line. Loaded once at startup unless watch mode is enabled.
     #[arg(long)]
     symbols_file: Option<PathBuf>,
+    /// Reload the symbols file when it changes without restarting the daemon.
+    #[arg(long)]
+    watch_symbols_file: bool,
     /// BTC anchor symbol for alignment context.
     #[arg(long, default_value = "BTC")]
     btc_symbol: String,
@@ -273,9 +276,12 @@ struct PaperDaemonArgs {
     /// Explicit symbol list (comma-delimited). Open paper positions are always included.
     #[arg(long, value_delimiter = ',')]
     symbols: Vec<String>,
-    /// Optional file containing one symbol per line. Re-read on each loop iteration.
+    /// Optional file containing one symbol per line. Loaded once at startup unless watch mode is enabled.
     #[arg(long)]
     symbols_file: Option<PathBuf>,
+    /// Reload the symbols file when it changes without restarting the daemon.
+    #[arg(long)]
+    watch_symbols_file: bool,
     /// BTC anchor symbol for alignment context.
     #[arg(long, default_value = "BTC")]
     btc_symbol: String,
@@ -615,14 +621,14 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 args.common.profile.as_deref(),
             )
             .map_err(anyhow::Error::msg)?;
+            let symbols = load_symbols(args.symbols, args.symbols_file.as_deref())?;
             let report = paper_loop::run_loop(paper_loop::PaperLoopInput {
                 runtime_bootstrap,
                 config_path: &config_path,
                 live: args.common.live,
                 paper_db: &args.db,
                 candles_db: &args.candles_db,
-                explicit_symbols: &args.symbols,
-                symbols_file: args.symbols_file.as_deref(),
+                explicit_symbols: &symbols,
                 btc_symbol: &args.btc_symbol,
                 lookback_bars: args.lookback_bars,
                 start_step_close_ts_ms: args.start_step_close_ts_ms,
@@ -639,11 +645,10 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!(
-                    "paper loop ok: steps={} next_due={:?} latest_common={:?} symbol_reloads={} dry_run={}",
+                    "paper loop ok: steps={} next_due={:?} latest_common={:?} dry_run={}",
                     report.executed_steps,
                     report.next_due_step_close_ts_ms,
                     report.latest_common_close_ts_ms,
-                    report.symbols_file_reload_count,
                     report.dry_run,
                 );
             }
@@ -672,6 +677,7 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 candles_db: &args.candles_db,
                 explicit_symbols: &args.symbols,
                 symbols_file: args.symbols_file.as_deref(),
+                watch_symbols_file: args.watch_symbols_file,
                 btc_symbol: &args.btc_symbol,
                 lookback_bars: args.lookback_bars,
                 start_step_close_ts_ms: args.start_step_close_ts_ms,
@@ -687,11 +693,10 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!(
-                    "paper daemon ok: pid={} lock={} steps={} symbol_reloads={} stop_requested={} dry_run={}",
+                    "paper daemon ok: pid={} lock={} steps={} stop_requested={} dry_run={}",
                     report.pid,
                     report.lock_path,
                     report.loop_report.executed_steps,
-                    report.loop_report.symbols_file_reload_count,
                     report.stop_requested,
                     report.dry_run,
                 );

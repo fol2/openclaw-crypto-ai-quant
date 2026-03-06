@@ -54,9 +54,9 @@ The current delivered slice extends that again with an opt-in Rust paper
 daemon orchestration surface:
 
 - `paper daemon`
-- wraps `paper loop --follow` instead of introducing a new paper write contract
+- keeps `paper loop --follow` / `paper cycle` contracts but now owns the outer scheduler
 - reuses the same `paper cycle` step identity and rerun guard through `runtime_cycle_steps`
-- re-reads an optional `--symbols-file` between scheduling inspections so the Rust lane can wait on an empty watchlist and pick up later watchlist refreshes
+- owns watched `--symbols-file` reloads via `--watch-symbols-file` so the Rust lane can wait on an empty watchlist and pick up later refreshes
 - long-running orchestration only; still no paper/systemd cutover
 
 The current delivered slice extends that again with a small daemon/watchlist

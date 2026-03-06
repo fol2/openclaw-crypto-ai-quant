@@ -40,11 +40,10 @@ cargo run -q -p aiq-runtime -- paper doctor --db <paper_fixture.db> --json
 cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-db <candles_fixture.db> --target-symbol ETH --exported-at-ms 1772676900000 --dry-run --json
 cargo run -q -p aiq-runtime -- paper loop --db <paper_fixture.db> --candles-db <candles_fixture.db> --symbols ETH --start-step-close-ts-ms 1773424200000 --max-steps 2 --dry-run --json
 cargo run -q -p aiq-runtime -- paper loop --db <paper_fixture.db> --candles-db <candles_fixture.db> --symbols ETH --follow --idle-sleep-ms 1 --max-idle-polls 1 --max-steps 1 --json
+cargo run -q -p aiq-runtime -- paper daemon --db <empty_paper_fixture.db> --candles-db <candles_fixture.db> --symbols-file <watchlist_symbols.txt> --watch-symbols-file --start-step-close-ts-ms 1773424200000 --idle-sleep-ms 20 --max-idle-polls 10 --dry-run --json
 # Opt-in daemon wrapper smoke (paired CLI surface)
 cargo run -q -p aiq-runtime -- paper daemon --db <paper_fixture.db> --candles-db <candles_fixture.db> --symbols ETH --start-step-close-ts-ms 1773424200000 --idle-sleep-ms 1 --max-idle-polls 1 --dry-run --json
-# Follow-mode symbols-file refresh smoke
-cargo test -p aiq-runtime loop_follow_mode_reloads_symbols_file_between_idle_polls
-cargo test -p aiq-runtime --test paper_daemon_smoke paper_daemon_reloads_symbols_file_between_idle_polls
+cargo test -p aiq-runtime --test paper_daemon_smoke paper_daemon_reloads_symbols_file_after_empty_watchlist
 cargo run -q -p aiq-runtime -- paper doctor --db <paper_fixture.db> --live --json
 cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-db <candles_fixture.db> --target-symbol ETH --exported-at-ms 1772676900000 --live --dry-run --json
 ```
@@ -65,11 +64,9 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
 - `aiq-runtime paper cycle` can execute one explicit multi-symbol cycle with `--step-close-ts-ms`, record a rerun guard in `runtime_cycle_steps`, and fail closed on duplicate re-apply.
 - `aiq-runtime paper loop` can resume from prior `runtime_cycle_steps`, execute up to `--max-steps` unapplied cycle steps, and stop cleanly when the next due step exceeds the latest common candle close.
 - `paper loop --follow` can keep polling after catch-up and exit only when its idle poll budget is exhausted or a new due step becomes available.
-- `paper loop` must also re-read `--symbols-file` on each loop iteration and surface the refreshed explicit symbol set in its JSON report without widening DB projections.
-- `paper loop --follow` must treat an initially empty `--symbols-file` as an idle watchlist state, not as a hard startup failure, and may begin executing later once the file receives symbols.
+- `paper loop --follow` keeps a fixed symbol set for the life of the shell; long-running watchlist refresh belongs to `paper daemon --watch-symbols-file`.
 - the opt-in `aiq-runtime paper daemon` wrapper must reuse the same `paper loop --follow` / `paper cycle` contracts, expose lock metadata, and avoid claiming Python daemon cutover or widening DB projections.
-- the opt-in `paper daemon` wrapper must inherit that same per-iteration symbols-file refresh behaviour so operators can refresh the Rust symbol lane without restarting the wrapper.
-- the opt-in `paper daemon` wrapper must also stay alive across an initially empty `--symbols-file`, then execute the next due step once a later watchlist update makes work available.
+- `paper daemon --watch-symbols-file` must preserve the last good manifest if a later reload is invalid or torn, while still keeping open positions inside the active symbol set.
 - multi-step `paper loop --dry-run` previews must carry forward the projected Rust paper state between iterations even though the real paper DB remains untouched.
 
 ## Fixture Guidance
@@ -80,8 +77,8 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
 - `paper cycle` validation should include one write run plus one duplicate-step rerun that hard-fails without changing `trades`, `position_state`, `runtime_cooldowns`, `runtime_last_closes`, or `runtime_cycle_steps`.
 - `paper loop` validation should include one bootstrap run on a fresh DB with `--start-step-close-ts-ms`, one follow-up resume run without the bootstrap flag, and one idle run that exits with `executed_steps == 0` because the next due step is newer than the latest common candle close.
 - follow-mode validation should prove idle polling does not mutate the DB and that `max_idle_polls` counts idle polls directly (`1` means exit on the first no-work poll) so CI catches off-by-one regressions.
-- symbols-file refresh validation should prove a loop or daemon can pick up a changed `--symbols-file` on a later iteration, record exactly one reload in the JSON report, and keep the same DB write contract.
-- empty-watchlist validation should prove a follow-mode loop or daemon can idle on an initially empty `--symbols-file`, report that idle state, and then either exhaust its idle budget cleanly or execute once later symbols arrive.
+- watchlist-refresh validation should include one empty `--symbols-file` fixture that becomes non-empty during daemon watch mode; the daemon must not require a restart to pick up the new symbol set.
+- watchlist-refresh validation should also include one invalid reload after a good manifest; the daemon must keep the last good manifest and continue to include open paper positions in the active symbol set.
 - the opt-in daemon wrapper smoke may reuse that same follow-mode fixture with a dedicated `--lock-path`; it should prove the wrapper reports the chosen lock file and still exits cleanly after the configured idle poll budget.
 - `paper loop` validation should also include one gap fixture where a due `step_close_ts_ms` is missing from the candle DB; the command must fail closed instead of backfilling from an older bar and marking the gap as applied.
 - Keep fixtures deterministic: one open position, one add, one last-close marker, and one runtime cooldown marker is enough for the foundation slice.

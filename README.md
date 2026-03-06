@@ -16,9 +16,10 @@ them: `paper daemon`. `paper cycle` still runs one explicit multi-symbol cycle
 with `--step-close-ts-ms` and a rerun guard, `paper loop` still resumes from
 `runtime_cycle_steps` to catch up unapplied bar-close steps, and `paper daemon`
 is only a long-running wrapper around the same `paper loop --follow` /
-`paper cycle` contracts. `paper loop` / `paper daemon` now also re-read an
-optional `--symbols-file` between scheduling inspections so Rust can wait on an
-empty watchlist and pick up later watchlist refreshes without restarting.
+`paper cycle` contracts. `paper loop` only consumes any optional
+`--symbols-file` once at startup, while `paper daemon --watch-symbols-file`
+owns the long-running manifest reload path so Rust can wait on an empty
+watchlist and pick up later refreshes without restarting.
 Python paper execution remains the active production path, so this does not
 claim paper cutover.
 

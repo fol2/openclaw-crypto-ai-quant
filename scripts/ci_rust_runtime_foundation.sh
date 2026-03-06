@@ -53,6 +53,7 @@ for path in (
     Path("/tmp/aiq-runtime-paper-loop-resume.json"),
     Path("/tmp/aiq-runtime-paper-loop-idle.json"),
     Path("/tmp/aiq-runtime-paper-loop-follow.json"),
+    Path("/tmp/aiq-runtime-paper-daemon-help.txt"),
     Path("/tmp/aiq-runtime-paper-loop-gap.stderr"),
 ):
     if path.exists():
@@ -234,6 +235,8 @@ conn.commit()
 conn.close()
 PY
 
+cargo run -q -p aiq-runtime -- paper daemon --help >/tmp/aiq-runtime-paper-daemon-help.txt 2>&1
+
 cargo run -q -p aiq-runtime -- snapshot validate --path /tmp/aiq-runtime-seed-snapshot.json --json >/tmp/aiq-runtime-snapshot-validate.json
 cargo run -q -p aiq-runtime -- snapshot seed-paper --snapshot /tmp/aiq-runtime-seed-snapshot.json --target-db /tmp/aiq-runtime-paper.db --strict-replace --json >/tmp/aiq-runtime-seed-paper.json
 cargo run -q -p aiq-runtime -- snapshot seed-paper --snapshot /tmp/aiq-runtime-seed-snapshot.json --target-db /tmp/aiq-runtime-paper-loop.db --strict-replace --json >/tmp/aiq-runtime-seed-paper-loop.json
@@ -292,6 +295,8 @@ finally:
 assert recorded_steps == 3
 doctor = json.loads(Path("/tmp/aiq-runtime-paper-doctor.json").read_text(encoding="utf-8"))
 assert doctor["paper_bootstrap"]["runtime_close_markers"] == 1
+daemon_help = Path("/tmp/aiq-runtime-paper-daemon-help.txt").read_text(encoding="utf-8")
+assert "--watch-symbols-file" in daemon_help
 PY
 
 echo "[runtime-foundation] ok"
