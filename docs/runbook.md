@@ -781,6 +781,26 @@ Operational expectations:
 - when `--exported-at-ms` is omitted, each planned step uses its own `step_close_ts_ms` as the snapshot export timestamp for deterministic catch-up artefacts
 - the loop stops cleanly when the next due step is newer than the latest common candle close across the explicit symbols, open paper positions, and BTC anchor
 
+Follow-mode example:
+
+```bash
+cargo run -p aiq-runtime -- \
+  paper loop \
+  --db ./trading_engine.db \
+  --candles-db ./candles_dbs/candles_30m.db \
+  --symbols ETH,SOL \
+  --follow \
+  --idle-sleep-ms 5000 \
+  --max-idle-polls 12 \
+  --json
+```
+
+Follow-mode expectations:
+
+- `--follow` keeps the shell alive after catch-up and polls for the next due step instead of returning immediately idle
+- `--idle-sleep-ms` controls how long the shell sleeps between no-work polls
+- `--max-idle-polls 0` means unbounded follow mode; any positive value caps the number of idle waits before the shell exits with a warning
+
 ---
 
 ## 7. Factory Stage Gate (dry -> smoke -> real)

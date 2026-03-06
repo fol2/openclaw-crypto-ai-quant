@@ -46,7 +46,7 @@ File lock prevents duplicate daemons: `ai_quant_paper.lock` or `ai_quant_live.lo
 ### 4. Live Trader (`live/`)
 
 - **LiveTrader** (`live/trader.py`): Wraps strategy logic with real order execution. Uses the same `mei_alpha_v1.analyze()` and `PaperTrader.check_exit_conditions()` as paper mode. Places real perps orders via SDK. Reconciles positions/equity from `Info.user_state()` periodically.
-- **aiq-runtime** (`runtime/aiq-runtime/`): Rust runtime CLI. Currently owns pipeline/bootstrap planning, snapshot export/validate/seed, paper bootstrap/restore diagnostics via `paper doctor`, single-symbol execution via `paper run-once`, a repeatable multi-symbol `paper cycle` shell with explicit step identity, and a bounded `paper loop` catch-up shell that resumes from `runtime_cycle_steps`.
+- **aiq-runtime** (`runtime/aiq-runtime/`): Rust runtime CLI. Currently owns pipeline/bootstrap planning, snapshot export/validate/seed, paper bootstrap/restore diagnostics via `paper doctor`, single-symbol execution via `paper run-once`, a repeatable multi-symbol `paper cycle` shell with explicit step identity, and a bounded `paper loop` catch-up shell that can optionally keep polling after catch-up instead of exiting idle.
 
 Safety gates for live mode:
 - `AI_QUANT_LIVE_ENABLE=1` + `AI_QUANT_LIVE_CONFIRM=I_UNDERSTAND_THIS_CAN_LOSE_MONEY`
