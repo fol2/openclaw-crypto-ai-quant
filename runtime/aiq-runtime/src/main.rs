@@ -139,7 +139,7 @@ enum PaperCommand {
     Cycle(PaperCycleArgs),
     /// Execute a bounded Rust paper catch-up loop across unapplied cycle steps.
     Loop(PaperLoopArgs),
-    /// Execute an opt-in long-running Rust paper daemon wrapper around paper loop follow mode.
+    /// Execute an opt-in long-running Rust paper daemon with scheduler-owned watchlist orchestration.
     Daemon(PaperDaemonArgs),
 }
 
@@ -228,7 +228,7 @@ struct PaperLoopArgs {
     /// Explicit symbol list (comma-delimited). Open paper positions are always included.
     #[arg(long, value_delimiter = ',')]
     symbols: Vec<String>,
-    /// Optional file containing one symbol per line. Re-read on each loop iteration.
+    /// Optional file containing one symbol per line. Loaded once at start-up.
     #[arg(long)]
     symbols_file: Option<PathBuf>,
     /// BTC anchor symbol for alignment context.
@@ -273,9 +273,12 @@ struct PaperDaemonArgs {
     /// Explicit symbol list (comma-delimited). Open paper positions are always included.
     #[arg(long, value_delimiter = ',')]
     symbols: Vec<String>,
-    /// Optional file containing one symbol per line. Re-read on each loop iteration.
+    /// Optional file containing one symbol per line. Loaded once at start-up unless watch mode is enabled.
     #[arg(long)]
     symbols_file: Option<PathBuf>,
+    /// Reload the symbols file when its metadata changes, without restarting the daemon.
+    #[arg(long, requires = "symbols_file")]
+    watch_symbols_file: bool,
     /// BTC anchor symbol for alignment context.
     #[arg(long, default_value = "BTC")]
     btc_symbol: String,
@@ -639,11 +642,10 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!(
-                    "paper loop ok: steps={} next_due={:?} latest_common={:?} symbol_reloads={} dry_run={}",
+                    "paper loop ok: steps={} next_due={:?} latest_common={:?} dry_run={}",
                     report.executed_steps,
                     report.next_due_step_close_ts_ms,
                     report.latest_common_close_ts_ms,
-                    report.symbols_file_reload_count,
                     report.dry_run,
                 );
             }
@@ -680,6 +682,7 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 exported_at_ms: args.exported_at_ms,
                 dry_run: args.dry_run,
                 lock_path: args.lock_path.as_deref(),
+                watch_symbols_file: args.watch_symbols_file,
                 emit_progress: !args.common.json,
             })?;
 
@@ -687,13 +690,13 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!(
-                    "paper daemon ok: pid={} lock={} steps={} symbol_reloads={} stop_requested={} dry_run={}",
+                    "paper daemon ok: pid={} lock={} steps={} stop_requested={} dry_run={} reloads={}",
                     report.pid,
                     report.lock_path,
                     report.loop_report.executed_steps,
-                    report.loop_report.symbols_file_reload_count,
                     report.stop_requested,
                     report.dry_run,
+                    report.manifest_reload_count,
                 );
             }
         }

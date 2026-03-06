@@ -19,14 +19,15 @@ Current runtime-owned paper surfaces and the paired opt-in wrapper:
 | `paper doctor` | Restore Rust-owned paper state and inspect bootstrap markers | Non-mutating |
 | `paper run-once` | Execute one single-symbol Rust paper step | Single-shot shell |
 | `paper cycle` | Execute one repeatable multi-symbol Rust paper cycle | Explicit `--step-close-ts-ms`, not a daemon |
-| `paper loop` | Execute a bounded Rust paper catch-up loop | Resumes from `runtime_cycle_steps`, optional follow polling, and can re-read `--symbols-file` between inspections |
-| `paper daemon` | Execute an opt-in long-running Rust paper orchestration wrapper | Wraps `paper loop --follow`, can wait on an empty watchlist file, and keeps the same `paper cycle` write contract; not cutover |
+| `paper loop` | Execute a bounded Rust paper catch-up loop | Resumes from `runtime_cycle_steps`, optional follow polling, and only loads `--symbols-file` once at start-up |
+| `paper daemon` | Execute an opt-in long-running Rust paper orchestration wrapper | Owns the outer scheduler, can optionally watch `--symbols-file` for reloads, and keeps the same `paper cycle` write contract; not cutover |
 
 The runtime slice is still intentionally narrow. It does not yet own any live
 execution path, and Python paper execution is still the active production
-daemon. The paired opt-in `paper daemon` surface is only a long-running wrapper
-around the existing follow-mode loop / cycle contracts, but it already
-establishes the contracts that later slices will build on:
+daemon. The paired opt-in `paper daemon` surface now owns the Rust-side outer
+scheduler for the existing paper cycle contract, but it still does not claim
+paper daemon cutover. Even so, it already establishes the contracts that later
+slices will build on:
 
 - backward-compatible YAML loading through Rust
 - stable stage identifiers for parity debugging
@@ -35,5 +36,5 @@ establishes the contracts that later slices will build on:
 - a single Rust-owned entry binary that future modes will converge on
 - repeatable paper step / cycle / loop contracts with explicit step identity
 - optional follow polling so Rust can stay alive after catch-up and wait for the next due step
-- refreshable `--symbols-file` discovery between follow-mode scheduling inspections
-- an opt-in daemon wrapper that keeps the same follow-mode loop / cycle contracts alive without claiming service cutover
+- one-shot `--symbols-file` loading for bounded loop shells
+- an opt-in daemon wrapper that owns scheduler/watchlist reload orchestration without claiming service cutover
