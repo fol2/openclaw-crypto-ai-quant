@@ -143,15 +143,41 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
             Some(input.step_close_ts_ms),
         )?;
         let pre_state = current_state.clone();
-        let (decision, execution_plan) =
-            crate::paper_run_once::execute_prepared_symbol_step(&pre_state, &prepared, input.step_close_ts_ms);
+        let (decision, execution_plan) = crate::paper_run_once::execute_prepared_symbol_step(
+            &pre_state,
+            &prepared,
+            input.step_close_ts_ms,
+        );
 
         if pre_state.positions.contains_key(symbol) {
             if decision_consumes_entry_budget(&decision) && used_entry_budget >= max_entries {
-                warnings.push(format!(
+                let (budgeted_decision, mut budgeted_plan) =
+                    crate::paper_run_once::execute_prepared_symbol_step_with_allow_pyramid_override(
+                        &pre_state,
+                        &prepared,
+                        input.step_close_ts_ms,
+                        Some(false),
+                    );
+                let budget_warning = format!(
                     "skip open-position entry for {}: max_entry_orders_per_loop {} exhausted",
                     symbol, max_entries
-                ));
+                );
+                warnings.push(budget_warning.clone());
+                budgeted_plan.warnings.push(budget_warning);
+                errors.extend(budgeted_decision.diagnostics.errors.clone());
+                warnings.extend(budgeted_plan.warnings.clone());
+                if !budgeted_decision.intents.is_empty() || !budgeted_decision.fills.is_empty() {
+                    current_state = budgeted_decision.state.clone();
+                    executed_steps.push(ExecutedStep {
+                        symbol: symbol.clone(),
+                        phase: "open_position",
+                        score: None,
+                        prepared,
+                        pre_state,
+                        decision: budgeted_decision,
+                        warnings: budgeted_plan.warnings,
+                    });
+                }
                 continue;
             }
             warnings.extend(execution_plan.warnings.clone());

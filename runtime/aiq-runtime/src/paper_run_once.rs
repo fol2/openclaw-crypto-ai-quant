@@ -331,6 +331,20 @@ pub(crate) fn execute_prepared_symbol_step(
     prepared: &PreparedSymbolStep,
     decision_ts_ms: i64,
 ) -> (decision_kernel::DecisionResult, ExecutionPlan) {
+    execute_prepared_symbol_step_with_allow_pyramid_override(
+        pre_state,
+        prepared,
+        decision_ts_ms,
+        None,
+    )
+}
+
+pub(crate) fn execute_prepared_symbol_step_with_allow_pyramid_override(
+    pre_state: &StrategyState,
+    prepared: &PreparedSymbolStep,
+    decision_ts_ms: i64,
+    allow_pyramid_override: Option<bool>,
+) -> (decision_kernel::DecisionResult, ExecutionPlan) {
     let execution_plan = build_execution_plan(
         &prepared.config,
         pre_state,
@@ -343,7 +357,7 @@ pub(crate) fn execute_prepared_symbol_step(
     let params = build_kernel_params(
         &prepared.config,
         execution_plan.leverage,
-        execution_plan.allow_pyramid,
+        allow_pyramid_override.unwrap_or(execution_plan.allow_pyramid),
     );
     let event = MarketEvent {
         schema_version: 1,
