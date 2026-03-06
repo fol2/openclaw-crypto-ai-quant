@@ -751,7 +751,9 @@ Operational expectations:
 - `--step-close-ts-ms` is the repeatable cycle identity and drives decision/cooldown timestamps
 - write mode records a rerun guard in `runtime_cycle_steps`; reapplying the same step fails closed
 - explicit `--symbols` are unioned with any open paper positions so exits are never skipped
+- `BTC` may still be part of the active cycle even when it is also the anchor symbol
 - `--candles-db` must contain target bars plus the BTC anchor symbol at the resolved `engine.interval`
+- all resolved cycle symbols must share the same `engine.interval`; mixed per-symbol interval overrides fail closed
 - the write path refreshes `trades`, `position_state`, `runtime_cooldowns`, and `runtime_last_closes` inside one immediate transaction
 
 ---
