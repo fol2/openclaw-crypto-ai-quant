@@ -380,6 +380,125 @@ fn paper_daemon_retains_last_good_manifest_on_invalid_reload() {
 }
 
 #[test]
+fn paper_daemon_retains_last_good_manifest_on_semantically_torn_reload() {
+    let fixture = prepare_idle_fixture();
+    let symbols_file = fixture._dir.path().join("symbols-semantic-tear.txt");
+    fs::write(&symbols_file, "BTC\n").expect("initial symbols file should be created");
+
+    let child = watchlist_daemon_command(&fixture, &symbols_file)
+        .arg("--idle-sleep-ms")
+        .arg("20")
+        .arg("--max-idle-polls")
+        .arg("0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("paper daemon semantically-torn reload smoke should spawn");
+
+    let child = wait_for_lock_file(child, &fixture.lock_path, Duration::from_secs(5));
+    thread::sleep(Duration::from_millis(80));
+    fs::write(&symbols_file, "ET\n").expect("symbols file should become semantically torn");
+    thread::sleep(Duration::from_millis(80));
+    send_sigterm(&child);
+
+    let output = wait_with_timeout(child, Duration::from_secs(5));
+    assert!(
+        output.status.success(),
+        "paper daemon should stop cleanly after a semantically torn watchlist reload; output:\n{}",
+        combined_output(&output)
+    );
+
+    let report = parse_json_output(&output);
+    assert_eq!(
+        report
+            .pointer("/manifest_reload_failure_count")
+            .and_then(Value::as_u64),
+        Some(1),
+        "daemon should count a semantically torn reload as a manifest reload failure",
+    );
+    assert_eq!(
+        report
+            .pointer("/manifest_reload_count")
+            .and_then(Value::as_u64),
+        Some(0),
+        "daemon should not count a rejected semantically torn reload as a successful manifest refresh",
+    );
+    assert_eq!(
+        report
+            .pointer("/manifest_symbols")
+            .and_then(Value::as_array),
+        Some(&vec![Value::String("BTC".to_string())]),
+        "daemon should retain the last good manifest after a semantically torn reload",
+    );
+    assert!(
+        report
+            .pointer("/loop_report/warnings")
+            .and_then(Value::as_array)
+            .is_some_and(|warnings| warnings.iter().any(|warning| {
+                warning.as_str().is_some_and(|text| {
+                    text.contains("ignored symbols file reload")
+                        && text.contains("retaining last good manifest")
+                })
+            })),
+        "daemon should surface the semantically torn reload retention warning",
+    );
+}
+
+#[test]
+fn paper_daemon_noop_symbols_file_rewrite_does_not_increment_reload_count() {
+    let fixture = prepare_idle_fixture();
+    let before = snapshot_db(&fixture.paper_db);
+    let symbols_file = fixture._dir.path().join("symbols-noop-rewrite.txt");
+    fs::write(&symbols_file, "BTC\n").expect("initial symbols file should be created");
+
+    let child = watchlist_daemon_command(&fixture, &symbols_file)
+        .arg("--idle-sleep-ms")
+        .arg("20")
+        .arg("--max-idle-polls")
+        .arg("2")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("paper daemon noop-rewrite smoke should spawn");
+
+    let child = wait_for_lock_file(child, &fixture.lock_path, Duration::from_secs(5));
+    thread::sleep(Duration::from_millis(80));
+    fs::write(&symbols_file, "BTC\n").expect("symbols file should be rewritten with identical contents");
+
+    let output = wait_with_timeout(child, Duration::from_secs(5));
+    assert!(
+        output.status.success(),
+        "paper daemon should stay clean across a no-op symbols-file rewrite; output:\n{}",
+        combined_output(&output)
+    );
+
+    let report = parse_json_output(&output);
+    assert_eq!(
+        report
+            .pointer("/manifest_reload_count")
+            .and_then(Value::as_u64),
+        Some(0),
+        "a no-op rewrite should not count as a successful manifest reload",
+    );
+    assert!(
+        report
+            .pointer("/loop_report/warnings")
+            .and_then(Value::as_array)
+            .is_some_and(|warnings| warnings.iter().all(|warning| {
+                warning
+                    .as_str()
+                    .is_some_and(|text| !text.contains("paper daemon reloaded symbols:"))
+            })),
+        "a no-op rewrite should not emit a reload warning",
+    );
+    assert_eq!(
+        before,
+        snapshot_db(&fixture.paper_db),
+        "a no-op rewrite must not mutate the paper DB",
+    );
+}
+
+#[test]
 fn paper_daemon_keeps_open_positions_in_active_symbols_after_manifest_reload() {
     let fixture = prepare_idle_fixture();
     let before = snapshot_db(&fixture.paper_db);

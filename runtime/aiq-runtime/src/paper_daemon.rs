@@ -70,6 +70,12 @@ struct SymbolManifestState {
     reload_failure_count: usize,
 }
 
+enum ManifestRefresh {
+    NoChange,
+    Candidate(Vec<String>),
+    Warning(String),
+}
+
 impl SymbolManifestState {
     fn new(
         explicit_symbols: &[String],
@@ -111,17 +117,17 @@ impl SymbolManifestState {
             .map(|path| path.display().to_string())
     }
 
-    fn refresh_if_needed(&mut self) -> Result<Vec<String>> {
+    fn refresh_if_needed(&mut self) -> Result<ManifestRefresh> {
         if !self.watch_symbols_file {
-            return Ok(Vec::new());
+            return Ok(ManifestRefresh::NoChange);
         }
         let Some(symbols_file) = self.symbols_file.clone() else {
-            return Ok(Vec::new());
+            return Ok(ManifestRefresh::NoChange);
         };
 
         let current_stamp = file_stamp(&symbols_file)?;
         if self.last_seen_stamp.as_ref() == Some(&current_stamp) {
-            return Ok(Vec::new());
+            return Ok(ManifestRefresh::NoChange);
         }
         self.last_seen_stamp = Some(current_stamp);
 
@@ -129,28 +135,42 @@ impl SymbolManifestState {
             Ok(file_symbols) => {
                 if file_symbols.is_empty() && !self.file_symbols.is_empty() {
                     self.reload_failure_count = self.reload_failure_count.saturating_add(1);
-                    return Ok(vec![format!(
+                    return Ok(ManifestRefresh::Warning(format!(
                         "paper daemon ignored empty symbols file reload; retaining last good manifest: {}",
                         self.file_symbols.join(",")
-                    )]);
+                    )));
                 }
                 if file_symbols != self.file_symbols {
-                    self.file_symbols = file_symbols;
-                    self.reload_count = self.reload_count.saturating_add(1);
-                    return Ok(vec![format!(
-                        "paper daemon reloaded symbols: {}",
-                        self.current_symbols().join(",")
-                    )]);
+                    return Ok(ManifestRefresh::Candidate(file_symbols));
                 }
-                Ok(Vec::new())
+                Ok(ManifestRefresh::NoChange)
             }
             Err(err) => {
                 self.reload_failure_count = self.reload_failure_count.saturating_add(1);
-                Ok(vec![format!(
+                Ok(ManifestRefresh::Warning(format!(
                     "paper daemon ignored symbols file reload; retaining last good manifest: {err}"
-                )])
+                )))
             }
         }
+    }
+
+    fn candidate_symbols(&self, file_symbols: &[String]) -> Vec<String> {
+        let mut merged = self.base_symbols.clone();
+        merged.extend(file_symbols.iter().cloned());
+        paper_loop::normalise_symbols(&merged)
+    }
+
+    fn accept_candidate(&mut self, file_symbols: Vec<String>) -> String {
+        self.file_symbols = file_symbols;
+        self.reload_count = self.reload_count.saturating_add(1);
+        format!("paper daemon reloaded symbols: {}", self.current_symbols().join(","))
+    }
+
+    fn reject_candidate(&mut self, err: &anyhow::Error) -> String {
+        self.reload_failure_count = self.reload_failure_count.saturating_add(1);
+        format!(
+            "paper daemon ignored symbols file reload; retaining last good manifest: {err:#}"
+        )
     }
 }
 
@@ -205,7 +225,25 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
             break;
         }
 
-        warnings.extend(manifest_state.refresh_if_needed()?);
+        match manifest_state.refresh_if_needed()? {
+            ManifestRefresh::NoChange => {}
+            ManifestRefresh::Warning(warning) => warnings.push(warning),
+            ManifestRefresh::Candidate(file_symbols) => {
+                let candidate_symbols = manifest_state.candidate_symbols(&file_symbols);
+                match paper_loop::inspect_loop_context(
+                    &input.runtime_bootstrap,
+                    input.config_path,
+                    input.live,
+                    working_paper_db.path(),
+                    input.candles_db,
+                    &candidate_symbols,
+                    input.btc_symbol,
+                ) {
+                    Ok(_) => warnings.push(manifest_state.accept_candidate(file_symbols)),
+                    Err(err) => warnings.push(manifest_state.reject_candidate(&err)),
+                }
+            }
+        }
         let manifest_symbols = manifest_state.current_symbols();
         let maybe_context = paper_loop::inspect_loop_context(
             &input.runtime_bootstrap,

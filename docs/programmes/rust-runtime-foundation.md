@@ -56,7 +56,7 @@ daemon orchestration surface:
 - `paper daemon`
 - owns the outer scheduler instead of delegating long-running follow behaviour back to `paper loop`
 - reuses the same `paper cycle` step identity and rerun guard through `runtime_cycle_steps`
-- optional `--watch-symbols-file` reloads a symbols manifest without restarting, while retaining the last good manifest on invalid reloads
+- optional `--watch-symbols-file` reloads a symbols manifest without restarting, while retaining the last good manifest on invalid or semantically torn reloads
 - active symbols remain `manifest ∪ open paper positions`, so exit lanes are not dropped during watchlist changes
 - long-running orchestration only; still no paper/systemd cutover
 

@@ -68,11 +68,12 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
 - `aiq-runtime paper cycle` can execute one explicit multi-symbol cycle with `--step-close-ts-ms`, record a rerun guard in `runtime_cycle_steps`, and fail closed on duplicate re-apply.
 - `aiq-runtime paper loop` can resume from prior `runtime_cycle_steps`, execute up to `--max-steps` unapplied cycle steps, and stop cleanly when the next due step exceeds the latest common candle close.
 - `paper loop --follow` can keep polling after catch-up and exit only when its idle poll budget is exhausted or a new due step becomes available.
-- `paper loop` must also re-read `--symbols-file` on each loop iteration and surface the refreshed explicit symbol set in its JSON report without widening DB projections.
-- `paper loop --follow` must treat an initially empty `--symbols-file` as an idle watchlist state, not as a hard startup failure, and may begin executing later once the file receives symbols.
+- `paper loop` only loads `--symbols-file` once at start-up in the current contract; it must not silently drift back into daemon-owned watchlist reload behaviour.
+- `paper loop --follow` must continue to honour that one-shot symbols-file load while still treating an initially empty `--symbols-file` as an idle watchlist state when the shell starts from an empty manifest.
 - the opt-in `aiq-runtime paper daemon` wrapper must reuse the same `paper loop --follow` / `paper cycle` contracts, expose lock metadata, and avoid claiming Python daemon cutover or widening DB projections.
-- the opt-in `paper daemon` wrapper must inherit that same per-iteration symbols-file refresh behaviour so operators can refresh the Rust symbol lane without restarting the wrapper.
+- the opt-in `paper daemon` wrapper must own per-iteration `--watch-symbols-file` refresh behaviour so operators can refresh the Rust symbol lane without restarting the daemon.
 - the opt-in `paper daemon` wrapper must also stay alive across an initially empty `--symbols-file`, then execute the next due step once a later watchlist update makes work available.
+- the opt-in `paper daemon` wrapper must retain the last good manifest when a later `--watch-symbols-file` payload is invalid or semantically torn, and must report that failure without incrementing the successful reload count.
 - multi-step `paper loop --dry-run` previews must carry forward the projected Rust paper state between iterations even though the real paper DB remains untouched.
 
 ## Fixture Guidance
@@ -84,8 +85,9 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
 - `paper cycle` validation should include one write run plus one duplicate-step rerun that hard-fails without changing `trades`, `position_state`, `runtime_cooldowns`, `runtime_last_closes`, or `runtime_cycle_steps`.
 - `paper loop` validation should include one bootstrap run on a fresh DB with `--start-step-close-ts-ms`, one follow-up resume run without the bootstrap flag, and one idle run that exits with `executed_steps == 0` because the next due step is newer than the latest common candle close.
 - follow-mode validation should prove idle polling does not mutate the DB and that `max_idle_polls` counts idle polls directly (`1` means exit on the first no-work poll) so CI catches off-by-one regressions.
-- symbols-file refresh validation should prove a loop or daemon can pick up a changed `--symbols-file` on a later iteration, record exactly one reload in the JSON report, and keep the same DB write contract.
+- symbols-file refresh validation should prove `paper daemon --watch-symbols-file` can pick up a changed `--symbols-file` on a later iteration, record exactly one successful reload in the JSON report, and keep the same DB write contract.
 - empty-watchlist validation should prove a follow-mode loop or daemon can idle on an initially empty `--symbols-file`, report that idle state, and then either exhaust its idle budget cleanly or execute once later symbols arrive.
 - the opt-in daemon wrapper smoke may reuse that same follow-mode fixture with a dedicated `--lock-path`; it should prove the wrapper reports the chosen lock file and still exits cleanly after the configured idle poll budget.
+- manifest-retention validation should include both invalid UTF-8 payloads and semantically torn-but-UTF-8-clean payloads, and it should also prove that no-op rewrites do not increment the successful reload count.
 - `paper loop` validation should also include one gap fixture where a due `step_close_ts_ms` is missing from the candle DB; the command must fail closed instead of backfilling from an older bar and marking the gap as applied.
 - Keep fixtures deterministic: one open position, one add, one last-close marker, and one runtime cooldown marker is enough for the foundation slice.
