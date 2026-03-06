@@ -17,6 +17,7 @@ green:
 - paper runtime bootstrap shell
 - paper runtime one-shot execution shell
 - paired opt-in paper daemon orchestration wrapper
+- daemon lane lifecycle status contract
 - bt-core init-state compatibility
 
 ## Commands
@@ -59,7 +60,7 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
   - a resolved pipeline profile
   - explicit stage entries with enabled/disabled state
 - `pipeline --json` resolves `production` cleanly against the example YAML when the tracked live YAML is absent.
-- `paper manifest --json` resolves the current daemon service/env contract without executing any paper steps, derives a candle DB path when only `AI_QUANT_CANDLES_DB_DIR` is present, emits a deterministic `daemon_command`, and reports whether the current lane is blocked, bootstrap-ready, resumable, or merely idle caught up.
+- `paper manifest --json` resolves the current daemon service/env contract without executing any paper steps, derives a candle DB path when only `AI_QUANT_CANDLES_DB_DIR` is present, emits a deterministic `daemon_command`, reports whether the current lane is blocked, bootstrap-ready, resumable, or merely idle caught up, and resolves the daemon `status_path`.
 - `bt-core` accepts snapshots with `version = 2` and runtime cooldown markers.
 - `aiq-runtime` can export a v2 paper snapshot from SQLite and re-validate it through the same Rust snapshot contract.
 - `aiq-runtime` can seed a paper DB from a v2 snapshot and report deterministic write counts for `trades`, `position_state`, `runtime_cooldowns`, and `runtime_last_closes`.
@@ -75,6 +76,7 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
 - the opt-in `paper daemon` wrapper must own per-iteration `--watch-symbols-file` refresh behaviour so operators can refresh the Rust symbol lane without restarting the daemon.
 - the opt-in `paper daemon` wrapper must also stay alive across an initially empty `--symbols-file`, then execute the next due step once a later watchlist update makes work available.
 - the opt-in `paper daemon` wrapper must retain the last good manifest when a later `--watch-symbols-file` payload is invalid or runtime-invalid malformed, and must report that failure without incrementing the successful reload count.
+- the opt-in `paper daemon` wrapper must write a durable lifecycle status JSON that shows `running=true` while the daemon holds the lane and flips to `running=false` with a `stopped_at_ms` timestamp on exit.
 - multi-step `paper loop --dry-run` previews must carry forward the projected Rust paper state between iterations even though the real paper DB remains untouched.
 
 ## Fixture Guidance
@@ -90,6 +92,7 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
 - symbols-file refresh validation should prove `paper daemon --watch-symbols-file` can pick up a changed `--symbols-file` on a later iteration, record exactly one successful reload in the JSON report, and keep the same DB write contract.
 - empty-watchlist validation should prove a follow-mode daemon can idle on an initially empty watched `--symbols-file`, report that idle state, and then either exhaust its idle budget cleanly or execute once later symbols arrive.
 - the opt-in daemon wrapper smoke may reuse that same follow-mode fixture with a dedicated `--lock-path`; it should prove the wrapper reports the chosen lock file and still exits cleanly after the configured idle poll budget.
+- lifecycle-status validation should use a dedicated `--status-path`, prove the daemon materialises the JSON while it is still running, and confirm the same file flips to a stopped state after SIGTERM.
 - manifest-retention validation should include both invalid UTF-8 payloads and runtime-invalid but UTF-8-clean payloads, and it should also prove that no-op rewrites do not increment the successful reload count.
 - `paper loop` validation should also include one gap fixture where a due `step_close_ts_ms` is missing from the candle DB; the command must fail closed instead of backfilling from an older bar and marking the gap as applied.
 - Keep fixtures deterministic: one open position, one add, one last-close marker, and one runtime cooldown marker is enough for the foundation slice.

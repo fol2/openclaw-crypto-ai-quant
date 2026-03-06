@@ -24,6 +24,7 @@ pub struct PaperManifestInput<'a> {
     pub lookback_bars: Option<usize>,
     pub start_step_close_ts_ms: Option<i64>,
     pub lock_path: Option<&'a Path>,
+    pub status_path: Option<&'a Path>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -64,6 +65,7 @@ pub struct PaperManifestReport {
     pub btc_symbol: String,
     pub start_step_close_ts_ms: Option<i64>,
     pub lock_path: String,
+    pub status_path: String,
     pub instance_tag: Option<String>,
     pub promoted_role: Option<String>,
     pub strategy_mode: Option<String>,
@@ -124,6 +126,7 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
         .start_step_close_ts_ms
         .or_else(|| env_i64("AI_QUANT_PAPER_START_STEP_CLOSE_TS_MS"));
     let lock_path = paper_daemon::resolve_lock_path(input.lock_path, input.live);
+    let status_path = paper_daemon::resolve_status_path(input.status_path, &lock_path);
 
     if symbols.is_empty() && symbols_file.is_none() {
         warnings.push(
@@ -189,6 +192,8 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
         lookback_bars.to_string(),
         "--lock-path".to_string(),
         lock_path.display().to_string(),
+        "--status-path".to_string(),
+        status_path.display().to_string(),
     ];
     if input.live {
         daemon_command.push("--live".to_string());
@@ -233,6 +238,7 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
         btc_symbol,
         start_step_close_ts_ms,
         lock_path: lock_path.display().to_string(),
+        status_path: status_path.display().to_string(),
         instance_tag: env_string("AI_QUANT_INSTANCE_TAG"),
         promoted_role: env_string("AI_QUANT_PROMOTED_ROLE"),
         strategy_mode: env_string("AI_QUANT_STRATEGY_MODE"),
@@ -635,6 +641,7 @@ mod tests {
         let paper_db = dir.path().join("paper.db");
         let candles_dir = dir.path().join("candles");
         let lock_path = dir.path().join("paper.lock");
+        let status_path = dir.path().join("paper.status.json");
         fs::create_dir_all(&candles_dir).unwrap();
         fs::write(candles_dir.join("candles_30m.db"), b"").unwrap();
         write_config(&config_path, "30m");
@@ -652,6 +659,7 @@ mod tests {
             ("AI_QUANT_SYMBOLS", Some("btc,eth")),
             ("AI_QUANT_LOOKBACK_BARS", Some("200")),
             ("AI_QUANT_LOCK_PATH", Some(lock_path.to_str().unwrap())),
+            ("AI_QUANT_STATUS_PATH", Some(status_path.to_str().unwrap())),
             ("AI_QUANT_INSTANCE_TAG", Some("v8-paper1")),
             ("AI_QUANT_PROMOTED_ROLE", Some("primary")),
             ("AI_QUANT_STRATEGY_MODE", Some("primary")),
@@ -673,6 +681,7 @@ mod tests {
             lookback_bars: None,
             start_step_close_ts_ms: None,
             lock_path: None,
+            status_path: None,
         })
         .unwrap();
 
@@ -686,6 +695,7 @@ mod tests {
             candles_dir.join("candles_30m.db").display().to_string()
         );
         assert_eq!(report.lock_path, lock_path.display().to_string());
+        assert_eq!(report.status_path, status_path.display().to_string());
         assert_eq!(report.instance_tag.as_deref(), Some("v8-paper1"));
         assert_eq!(report.promoted_role.as_deref(), Some("primary"));
         assert_eq!(report.strategy_mode.as_deref(), Some("primary"));
@@ -693,6 +703,10 @@ mod tests {
             .daemon_command
             .windows(2)
             .any(|window| window == ["--symbols", "BTC,ETH"]));
+        assert!(report
+            .daemon_command
+            .windows(2)
+            .any(|window| window == ["--status-path", status_path.to_str().unwrap()]));
     }
 
     #[test]
@@ -719,6 +733,7 @@ mod tests {
             ("AI_QUANT_SYMBOLS_FILE", None),
             ("AI_QUANT_LOOKBACK_BARS", None),
             ("AI_QUANT_LOCK_PATH", None),
+            ("AI_QUANT_STATUS_PATH", None),
             ("AI_QUANT_CANDLES_DB_PATH", None),
         ]);
 
@@ -735,6 +750,7 @@ mod tests {
             lookback_bars: None,
             start_step_close_ts_ms: None,
             lock_path: None,
+            status_path: None,
         })
         .unwrap();
 
@@ -777,6 +793,7 @@ mod tests {
             ("AI_QUANT_SYMBOLS_FILE", None),
             ("AI_QUANT_LOOKBACK_BARS", None),
             ("AI_QUANT_LOCK_PATH", None),
+            ("AI_QUANT_STATUS_PATH", None),
             ("AI_QUANT_CANDLES_DB_PATH", None),
             ("AI_QUANT_INTERVAL", None),
         ]);
@@ -794,6 +811,7 @@ mod tests {
             lookback_bars: None,
             start_step_close_ts_ms: None,
             lock_path: None,
+            status_path: None,
         })
         .unwrap();
 
@@ -841,6 +859,7 @@ mod tests {
             lookback_bars: Some(200),
             start_step_close_ts_ms: None,
             lock_path: None,
+            status_path: None,
         })
         .unwrap();
 
@@ -891,6 +910,7 @@ mod tests {
             lookback_bars: None,
             start_step_close_ts_ms: Some(1_773_422_400_000),
             lock_path: None,
+            status_path: None,
         })
         .unwrap();
 
@@ -959,6 +979,7 @@ mod tests {
             lookback_bars: None,
             start_step_close_ts_ms: None,
             lock_path: None,
+            status_path: None,
         })
         .unwrap();
 
@@ -1007,6 +1028,7 @@ mod tests {
             lookback_bars: None,
             start_step_close_ts_ms: None,
             lock_path: None,
+            status_path: None,
         })
         .unwrap();
 
@@ -1023,5 +1045,62 @@ mod tests {
             .daemon_command
             .iter()
             .any(|arg| arg == "--watch-symbols-file"));
+    }
+
+    #[test]
+    fn manifest_derives_default_status_path_from_lock_path() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("strategy.yaml");
+        let candles_dir = dir.path().join("candles");
+        let lock_path = dir.path().join("paper-daemon.lock");
+        fs::create_dir_all(&candles_dir).unwrap();
+        fs::write(candles_dir.join("candles_30m.db"), b"").unwrap();
+        write_config(&config_path, "30m");
+
+        let _env = EnvGuard::set(&[
+            (
+                "AI_QUANT_STRATEGY_YAML",
+                Some(config_path.to_str().unwrap()),
+            ),
+            (
+                "AI_QUANT_CANDLES_DB_DIR",
+                Some(candles_dir.to_str().unwrap()),
+            ),
+            ("AI_QUANT_LOCK_PATH", Some(lock_path.to_str().unwrap())),
+            ("AI_QUANT_DB_PATH", None),
+            ("AI_QUANT_SYMBOLS", None),
+            ("AI_QUANT_SYMBOLS_FILE", None),
+            ("AI_QUANT_LOOKBACK_BARS", None),
+            ("AI_QUANT_STATUS_PATH", None),
+            ("AI_QUANT_CANDLES_DB_PATH", None),
+            ("AI_QUANT_INTERVAL", None),
+        ]);
+
+        let report = build_manifest(PaperManifestInput {
+            config: None,
+            live: false,
+            profile: None,
+            db: None,
+            candles_db: None,
+            symbols: &[],
+            symbols_file: None,
+            watch_symbols_file: false,
+            btc_symbol: "BTC",
+            lookback_bars: None,
+            start_step_close_ts_ms: None,
+            lock_path: None,
+            status_path: None,
+        })
+        .unwrap();
+
+        assert_eq!(report.lock_path, lock_path.display().to_string());
+        assert_eq!(
+            report.status_path,
+            dir.path()
+                .join("paper-daemon.status.json")
+                .display()
+                .to_string()
+        );
     }
 }

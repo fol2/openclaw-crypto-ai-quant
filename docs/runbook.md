@@ -823,6 +823,7 @@ cargo run -p aiq-runtime -- \
   --candles-db ./candles_dbs/candles_30m.db \
   --symbols-file ./tmp/paper-watchlist.txt \
   --watch-symbols-file \
+  --status-path ./artifacts/state/paper-daemon.status.json \
   --idle-sleep-ms 5000 \
   --max-idle-polls 0 \
   --json
@@ -837,6 +838,7 @@ Operational expectations:
 - reload failures do not clear the lane: the daemon retains the last good manifest and emits a warning instead, including runtime-invalid but still UTF-8-clean payloads that fail daemon preflight
 - active symbols remain `manifest ∪ open paper positions`, so exit coverage is preserved while the manifest changes
 - `--lock-path` may be supplied when the Rust daemon lane needs an isolated lock namespace; changing the lock path does not widen DB projections
+- `--status-path` may be supplied when operators want the daemon lifecycle JSON in a specific location; otherwise the daemon derives it from the resolved lock path or `AI_QUANT_STATUS_PATH`
 - `--dry-run` remains the safest bring-up path while the surface is still opt-in
 - if you only need bounded catch-up or a short follow poll budget, use `paper loop` directly instead of `paper daemon`
 
@@ -861,9 +863,10 @@ cargo run -p aiq-runtime -- \
 Manifest expectations:
 
 - `paper manifest` is read-only; it never writes the paper DB or starts follow-mode polling
-- `--config`, `--db`, `--candles-db`, `--symbols`, `--symbols-file`, `--watch-symbols-file`, `--lookback-bars`, `--start-step-close-ts-ms`, and `--lock-path` may override the corresponding env-derived values
+- `--config`, `--db`, `--candles-db`, `--symbols`, `--symbols-file`, `--watch-symbols-file`, `--lookback-bars`, `--start-step-close-ts-ms`, `--lock-path`, and `--status-path` may override the corresponding env-derived values
 - if `AI_QUANT_CANDLES_DB_PATH` is unset, the manifest derives the candle DB path from `AI_QUANT_CANDLES_DB_DIR` plus the resolved config interval
 - if `AI_QUANT_INTERVAL` disagrees with the resolved config interval, the manifest returns a warning instead of silently changing the Rust runtime interval
+- the resolved `status_path` is the daemon lifecycle JSON path for the current launch contract; when unset explicitly, it is derived from the resolved lock path
 - the emitted `daemon_command` is the exact Rust paper daemon launch contract for the current env/CLI combination; it is intended for operator review, not as evidence of cutover
 - `resume.launch_state` tells you whether the lane would fail closed (`blocked` / `bootstrap_required`), launch idle without symbols, start a fresh bootstrap, resume a due step, or simply stay caught up waiting for the next bar close
 - `resume.last_applied_step_close_ts_ms`, `resume.next_due_step_close_ts_ms`, and `resume.latest_common_close_ts_ms` expose the restart/resume cursor when the paper DB and candle DB are both inspectable

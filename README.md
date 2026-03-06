@@ -24,7 +24,8 @@ Rust also now ships a read-only `paper manifest` surface that resolves the
 current daemon service/env contract into a deterministic Rust launch plan
 before any systemd cutover. The manifest now also reports whether the current
 lane would cold-bootstrap, resume from prior `runtime_cycle_steps`, idle
-caught up, or fail closed until a bootstrap step is supplied. Python paper
+caught up, or fail closed until a bootstrap step is supplied, and it resolves
+the daemon `status_path` that later service supervision can watch. Python paper
 execution remains the active production path, so this does not claim paper
 cutover.
 
