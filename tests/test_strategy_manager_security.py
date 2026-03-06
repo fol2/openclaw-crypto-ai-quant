@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import time
 
+import pytest
+
 from engine.strategy_manager import StrategyManager
 
 
@@ -49,3 +51,25 @@ def test_world_writable_reload_keeps_last_known_good_config(tmp_path) -> None:
     os.utime(yaml_path, (future_ts, future_ts))
     manager.maybe_reload()
     assert float(manager.get_config("BTC").get("trade", {}).get("leverage", 0.0)) == 9.0
+
+
+def test_snapshot_uses_resolver_owned_effective_config_identity(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    yaml_path = tmp_path / "effective.yaml"
+    yaml_path.write_text("global:\n  engine:\n    interval: 5m\n", encoding="utf-8")
+
+    monkeypatch.setenv("AI_QUANT_EFFECTIVE_CONFIG_OWNER", "rust")
+    monkeypatch.setenv("AI_QUANT_EFFECTIVE_CONFIG_MATERIALISED", "1")
+    monkeypatch.setenv("AI_QUANT_EFFECTIVE_CONFIG_ID", "a" * 64)
+    monkeypatch.setenv("AI_QUANT_EFFECTIVE_STRATEGY_SHA", "b" * 64)
+    monkeypatch.setenv("AI_QUANT_STRATEGY_MODE", "primary")
+
+    manager = StrategyManager.bootstrap(
+        defaults={"trade": {}, "indicators": {}, "filters": {}, "thresholds": {}, "engine": {}},
+        yaml_path=str(yaml_path),
+        changelog_path=None,
+    )
+
+    snap = manager.snapshot
+    assert snap.config_id == "a" * 64
+    assert snap.overrides_sha1 == "b" * 64
+    assert (manager.get_config("BTC").get("engine") or {}).get("interval") == "5m"

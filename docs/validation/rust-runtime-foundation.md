@@ -39,6 +39,7 @@ cargo test --manifest-path backtester/Cargo.toml -p bt-core test_into_sim_state_
 # Runtime CLI smoke
 cargo run -q -p aiq-runtime -- doctor --json
 cargo run -q -p aiq-runtime -- pipeline --json
+AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example cargo run -q -p aiq-runtime -- paper effective-config --json
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example AI_QUANT_DB_PATH=<paper_fixture.db> AI_QUANT_CANDLES_DB_PATH=<candles_fixture.db> AI_QUANT_SYMBOLS=ETH,SOL AI_QUANT_LOOKBACK_BARS=200 cargo run -q -p aiq-runtime -- paper manifest --json
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example AI_QUANT_PROMOTED_ROLE=primary AI_QUANT_STRATEGY_MODE_FILE=<strategy_mode.txt> AI_QUANT_DB_PATH=<paper_fixture.db> AI_QUANT_CANDLES_DB_PATH=<candles_fixture.db> AI_QUANT_SYMBOLS=ETH cargo run -q -p aiq-runtime -- paper manifest --json
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example AI_QUANT_DB_PATH=<paper_fixture.db> AI_QUANT_CANDLES_DB_PATH=<candles_fixture.db> AI_QUANT_SYMBOLS=ETH AI_QUANT_PAPER_START_STEP_CLOSE_TS_MS=1773424200000 cargo run -q -p aiq-runtime -- paper manifest --json
@@ -67,6 +68,7 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
   - explicit stage entries with enabled/disabled state
 - `pipeline --json` resolves `production` cleanly against the example YAML when the tracked live YAML is absent.
 - `paper manifest --json` resolves the current daemon service/env contract without executing any paper steps, derives a candle DB path when only `AI_QUANT_CANDLES_DB_DIR` is present, emits a deterministic `daemon_command`, reports whether the current lane is blocked, bootstrap-ready, resumable, or merely idle caught up, and resolves the daemon `status_path`.
+- `paper effective-config --json` is the narrow read-only control-plane surface for Python paper start-up and factory materialisation, and it must emit the same `active_yaml_path`, `effective_yaml_path`, interval, `strategy_overrides_sha1`, and `config_id` that the broader paper surfaces later consume.
 - `paper manifest --json` also applies the same promoted-role / strategy-mode effective config contract used by the Rust paper surfaces, carries `base_config_path`, `active_yaml_path`, `effective_yaml_path`, `strategy_mode_source`, `strategy_overrides_sha1`, and `config_id`, and resolves the interval from that effective config instead of raw env assumptions.
 - `paper status --json` combines that same launch contract with the persisted daemon lifecycle JSON and reports whether the lane is running, stale, stopped, restart-required, or merely launch-ready when no daemon status exists yet. Running lanes must now fail closed when the daemon reports unhealthy runtime errors or when the launch identity drifts (`profile`, DB paths, BTC anchor, lookback, explicit symbols, the bootstrap step while the lane is still fresh, or path wiring).
 - `paper service --json` reuses the same read-only status view and reports whether later supervision should hold, start, restart, or merely monitor the lane, together with an operator-facing `action_reason`. Idle watchlist-owned lanes that are launch-ready should now map to `start` instead of a permanent `hold`.
@@ -82,6 +84,7 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
 - `paper loop` only loads `--symbols-file` once at start-up in the current contract; it must not silently drift back into daemon-owned watchlist reload behaviour.
 - `paper loop --follow` must continue to honour that one-shot symbols-file load; an empty start-up manifest without open positions is still a fail-closed configuration for the bounded loop surface.
 - `paper manifest`, `paper doctor`, `paper cycle`, `paper loop`, and `paper daemon` must all resolve the same effective config when `AI_QUANT_PROMOTED_ROLE` and `AI_QUANT_STRATEGY_MODE` / `AI_QUANT_STRATEGY_MODE_FILE` are present.
+- Python paper start-up and factory deployment must resolve the same `config_id`, interval, promoted-config path, and strategy-mode source as `aiq-runtime paper effective-config` / `paper manifest` for the same env.
 - the opt-in `aiq-runtime paper daemon` wrapper must reuse the same `paper loop --follow` / `paper cycle` contracts, expose lock metadata, and avoid claiming Python daemon cutover or widening DB projections.
 - the opt-in `paper daemon` wrapper must own per-iteration `--watch-symbols-file` refresh behaviour so operators can refresh the Rust symbol lane without restarting the daemon.
 - the opt-in `paper daemon` wrapper must also stay alive across an initially empty `--symbols-file`, then execute the next due step once a later watchlist update makes work available.

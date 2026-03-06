@@ -1,9 +1,10 @@
-"""Promoted config loader for paper trading daemons.
+"""Compatibility helpers around paper effective-config selection.
 
-Factory runs produce `promoted_configs/{primary,fallback,conservative}.yaml` inside
-their run directory.  This module locates the most recent promoted config for a given
-role and merges it on top of the base `strategy_overrides.yaml` so that paper daemons
-can automatically pick up factory-optimised parameters.
+Rust now owns the authoritative effective-config contract for paper control-plane
+consumers. This module keeps the older Python promoted-config helpers for
+backward-compatible tests, while also exposing thin wrappers that shell out to
+`aiq-runtime paper effective-config` for the active paper start-up and factory
+materialisation paths.
 
 Mapping (conventional):
     paper1  → AI_QUANT_PROMOTED_ROLE=primary
@@ -14,16 +15,21 @@ Mapping (conventional):
 Environment variables:
     AI_QUANT_PROMOTED_ROLE      primary | fallback | conservative
     AI_QUANT_ARTIFACTS_DIR      Root of the artifacts tree (default: <project>/artifacts)
-    AI_QUANT_STRATEGY_YAML      Base config path (set by StrategyManager if unset)
+    AI_QUANT_STRATEGY_YAML      Base config path input for the Rust resolver
+    AI_QUANT_RUNTIME_BIN        Optional absolute path to `aiq-runtime`
 """
 
 from __future__ import annotations
 
 import os
 import re
+import shutil
+import subprocess
 import tempfile
+from dataclasses import dataclass
+import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import yaml
 
@@ -201,8 +207,10 @@ def load_promoted_config(
     # Find promoted config.
     promoted_path = _find_latest_promoted_config(artifacts_dir, role)
     if promoted_path is None:
-        print(f"⚠️ promoted_config: no promoted config found for role='{role}' "
-              f"under {artifacts_dir}; falling back to base config")
+        print(
+            f"⚠️ promoted_config: no promoted config found for role='{role}' "
+            f"under {artifacts_dir}; falling back to base config"
+        )
         return None, None
 
     # Resolve base config path.
@@ -219,8 +227,7 @@ def load_promoted_config(
     promoted = _load_yaml(promoted_path)
 
     if not promoted:
-        print(f"⚠️ promoted_config: promoted file is empty or invalid: {promoted_path}; "
-              f"falling back to base config")
+        print(f"⚠️ promoted_config: promoted file is empty or invalid: {promoted_path}; falling back to base config")
         return None, None
 
     # Deep-merge: promoted takes precedence over base.
@@ -231,11 +238,12 @@ def load_promoted_config(
 
 
 def maybe_apply_promoted_config() -> str | None:
-    """Check AI_QUANT_PROMOTED_ROLE and, if set, write a merged config for StrategyManager.
+    """Legacy compatibility helper for the original Python-only merge path.
 
-    This should be called early in daemon startup, **before** ``StrategyManager.get()``.
-    If a promoted config is found, this writes the merged YAML to a deterministic path
-    and sets ``AI_QUANT_STRATEGY_YAML`` so that StrategyManager picks it up transparently.
+    Active paper start-up now calls the Rust resolver via
+    :func:`apply_paper_effective_config`. This helper is retained for older tests
+    and compatibility-only workflows that still expect the historical Python
+    merge behaviour.
 
     Returns
     -------
@@ -271,3 +279,170 @@ def maybe_apply_promoted_config() -> str | None:
     os.environ["AI_QUANT_STRATEGY_YAML"] = str(active_path)
     print(f"📋 promoted_config: AI_QUANT_STRATEGY_YAML → {active_path}")
     return role
+
+
+@dataclass(frozen=True)
+class ResolvedEffectiveConfig:
+    """Resolved Rust-owned effective-config contract for paper consumers."""
+
+    base_config_path: str
+    config_path: str
+    active_yaml_path: str
+    effective_yaml_path: str
+    interval: str
+    promoted_role: str | None
+    promoted_config_path: str | None
+    strategy_mode: str | None
+    strategy_mode_source: str | None
+    strategy_overrides_sha1: str
+    config_id: str
+    warnings: tuple[str, ...]
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _runtime_command() -> list[str]:
+    explicit = str(os.getenv("AI_QUANT_RUNTIME_BIN", "") or "").strip()
+    if explicit:
+        return [str(Path(explicit).expanduser().resolve())]
+
+    root = _repo_root()
+    candidates = (
+        root / "target" / "release" / "aiq-runtime",
+        root / "target" / "debug" / "aiq-runtime",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return [str(candidate)]
+
+    which = shutil.which("aiq-runtime")
+    if which:
+        return [which]
+
+    cargo = shutil.which("cargo")
+    if cargo:
+        return [cargo, "run", "-q", "-p", "aiq-runtime", "--"]
+
+    raise RuntimeError("could not locate aiq-runtime; set AI_QUANT_RUNTIME_BIN or install cargo")
+
+
+def _effective_config_command(
+    *,
+    config_path: str | Path | None,
+    live: bool,
+    symbol: str | None,
+) -> list[str]:
+    cmd = list(_runtime_command())
+    cmd += ["paper", "effective-config", "--json"]
+    if config_path is not None:
+        cmd += ["--config", str(Path(config_path).expanduser().resolve())]
+    if live:
+        cmd.append("--live")
+    if symbol:
+        cmd += ["--symbol", str(symbol).strip().upper()]
+    return cmd
+
+
+def _resolved_effective_config_from_json(payload: Mapping[str, Any]) -> ResolvedEffectiveConfig:
+    warnings = payload.get("warnings")
+    if not isinstance(warnings, list):
+        warnings = []
+    return ResolvedEffectiveConfig(
+        base_config_path=str(payload.get("base_config_path", "") or ""),
+        config_path=str(payload.get("config_path", "") or ""),
+        active_yaml_path=str(payload.get("active_yaml_path", "") or ""),
+        effective_yaml_path=str(payload.get("effective_yaml_path", "") or ""),
+        interval=str(payload.get("interval", "") or ""),
+        promoted_role=None if payload.get("promoted_role") in {None, ""} else str(payload.get("promoted_role")),
+        promoted_config_path=None
+        if payload.get("promoted_config_path") in {None, ""}
+        else str(payload.get("promoted_config_path")),
+        strategy_mode=None if payload.get("strategy_mode") in {None, ""} else str(payload.get("strategy_mode")),
+        strategy_mode_source=None
+        if payload.get("strategy_mode_source") in {None, ""}
+        else str(payload.get("strategy_mode_source")),
+        strategy_overrides_sha1=str(payload.get("strategy_overrides_sha1", "") or ""),
+        config_id=str(payload.get("config_id", "") or ""),
+        warnings=tuple(str(item) for item in warnings if str(item).strip()),
+    )
+
+
+def resolve_effective_config(
+    *,
+    config_path: str | Path | None = None,
+    live: bool = False,
+    symbol: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> ResolvedEffectiveConfig:
+    """Resolve the active Rust-owned effective config for paper consumers."""
+
+    command = _effective_config_command(config_path=config_path, live=live, symbol=symbol)
+    runtime_env = dict(os.environ if env is None else env)
+    proc = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=str(_repo_root()),
+        env=runtime_env,
+    )
+    if int(proc.returncode) != 0:
+        stderr = (proc.stderr or "").strip()
+        stdout = (proc.stdout or "").strip()
+        detail = stderr or stdout or f"exit code {proc.returncode}"
+        raise RuntimeError(f"Rust effective-config resolver failed: {detail}")
+    try:
+        payload = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Rust effective-config resolver returned invalid JSON: {exc}") from exc
+    return _resolved_effective_config_from_json(payload)
+
+
+def apply_paper_effective_config(
+    *,
+    config_path: str | Path | None = None,
+    symbol: str | None = None,
+) -> ResolvedEffectiveConfig:
+    """Resolve the paper effective config via Rust and apply it to the process env."""
+
+    resolved = resolve_effective_config(config_path=config_path, live=False, symbol=symbol)
+    os.environ["AI_QUANT_STRATEGY_YAML"] = str(resolved.config_path)
+    os.environ["AI_QUANT_ACTIVE_STRATEGY_YAML"] = str(resolved.active_yaml_path)
+    os.environ["AI_QUANT_EFFECTIVE_STRATEGY_YAML"] = str(resolved.effective_yaml_path)
+    os.environ["AI_QUANT_BASE_STRATEGY_YAML"] = str(resolved.base_config_path)
+    os.environ["AI_QUANT_EFFECTIVE_CONFIG_ID"] = str(resolved.config_id)
+    os.environ["AI_QUANT_EFFECTIVE_CONFIG_OWNER"] = "rust"
+    os.environ["AI_QUANT_EFFECTIVE_CONFIG_MATERIALISED"] = (
+        "1" if resolved.effective_yaml_path != resolved.active_yaml_path else "0"
+    )
+    if resolved.strategy_overrides_sha1:
+        os.environ["AI_QUANT_EFFECTIVE_STRATEGY_SHA"] = str(resolved.strategy_overrides_sha1)
+    if resolved.interval:
+        os.environ["AI_QUANT_INTERVAL"] = str(resolved.interval)
+    if resolved.promoted_role:
+        os.environ["AI_QUANT_PROMOTED_ROLE"] = str(resolved.promoted_role)
+    else:
+        os.environ.pop("AI_QUANT_PROMOTED_ROLE", None)
+    if resolved.promoted_config_path:
+        os.environ["AI_QUANT_PROMOTED_CONFIG_PATH"] = str(resolved.promoted_config_path)
+    else:
+        os.environ.pop("AI_QUANT_PROMOTED_CONFIG_PATH", None)
+    if resolved.strategy_mode:
+        os.environ["AI_QUANT_STRATEGY_MODE"] = str(resolved.strategy_mode)
+    else:
+        os.environ.pop("AI_QUANT_STRATEGY_MODE", None)
+    if resolved.strategy_mode_source:
+        os.environ["AI_QUANT_STRATEGY_MODE_SOURCE"] = str(resolved.strategy_mode_source)
+    else:
+        os.environ.pop("AI_QUANT_STRATEGY_MODE_SOURCE", None)
+    for warning in resolved.warnings:
+        print(f"⚠️ promoted_config: {warning}")
+    if resolved.promoted_role and resolved.promoted_config_path:
+        print(f"📋 promoted_config: role='{resolved.promoted_role}' source={resolved.promoted_config_path}")
+    if resolved.strategy_mode:
+        mode_source = resolved.strategy_mode_source or "env"
+        print(f"📋 promoted_config: strategy_mode='{resolved.strategy_mode}' source={mode_source}")
+    print(f"📋 promoted_config: AI_QUANT_STRATEGY_YAML → {resolved.config_path}")
+    return resolved

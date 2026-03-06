@@ -1,5 +1,10 @@
 # Phase C — Paper Daemon Promoted Config Integration
 
+> Historical note: this document records the original Python-only promoted-config
+> loader. Active paper start-up and factory config resolution now use the Rust
+> effective-config resolver; `engine/promoted_config.py` remains as a
+> compatibility shim.
+
 **Date:** 2026-02-14  
 **Task:** C1-daemon-integration  
 **Status:** ✅ Complete

@@ -105,6 +105,12 @@ def _build_run_fingerprint(
         "strategy_yaml_path": str(getattr(snap, "yaml_path", "") or ""),
         "strategy_yaml_mtime": getattr(snap, "yaml_mtime", None),
         "strategy_overrides_sha1": str(getattr(snap, "overrides_sha1", "") or ""),
+        "config_id": str(getattr(snap, "config_id", "") or ""),
+        "active_yaml_path": str(os.getenv("AI_QUANT_ACTIVE_STRATEGY_YAML", "") or ""),
+        "effective_yaml_path": str(os.getenv("AI_QUANT_EFFECTIVE_STRATEGY_YAML", "") or ""),
+        "promoted_role": str(os.getenv("AI_QUANT_PROMOTED_ROLE", "") or ""),
+        "strategy_mode": str(os.getenv("AI_QUANT_STRATEGY_MODE", "") or ""),
+        "strategy_mode_source": str(os.getenv("AI_QUANT_STRATEGY_MODE_SOURCE", "") or ""),
         "strategy_version": str(getattr(snap, "version", "") or ""),
         "watchlist": watchlist,
     }
@@ -1452,17 +1458,21 @@ def main() -> None:
         stream=sys.stdout,
     )
 
-    # Apply promoted config from factory runs (paper daemons only).
-    # Must run BEFORE StrategyManager.get() so AI_QUANT_STRATEGY_YAML is set.
+    # Rust now owns the paper effective-config resolver contract. Resolve it
+    # before StrategyManager/bootstrap consumers import strategy defaults.
     promoted_role: str | None = None
-    try:
-        from .promoted_config import maybe_apply_promoted_config
+    if mode == "paper":
+        try:
+            from .promoted_config import apply_paper_effective_config
 
-        promoted_role = maybe_apply_promoted_config()
-    except Exception:
-        import traceback
+            resolved = apply_paper_effective_config()
+            promoted_role = resolved.promoted_role
+        except Exception:
+            import traceback
 
-        print(f"⚠️ promoted_config: failed to apply\n{traceback.format_exc()}")
+            raise RuntimeError(
+                f"paper effective-config resolution failed before daemon bootstrap\n{traceback.format_exc()}"
+            ) from None
 
     # Sync balance from live Hyperliquid account on startup.
     # Paper mode: opt-in via AI_QUANT_PAPER_BALANCE_FROM_LIVE=1.
@@ -1566,9 +1576,9 @@ def main() -> None:
     _lock = acquire_lock_or_exit(lock_path)
     _register_lock_cleanup(_lock)
 
-    # If a strategy mode is persisted locally, load it on startup (only when env is unset).
+    # Non-paper runtimes still honour the persisted mode file when env is unset.
     try:
-        if not str(os.getenv("AI_QUANT_STRATEGY_MODE", "") or "").strip():
+        if mode != "paper" and not str(os.getenv("AI_QUANT_STRATEGY_MODE", "") or "").strip():
             m = _read_strategy_mode_file(_strategy_mode_file())
             if m:
                 os.environ["AI_QUANT_STRATEGY_MODE"] = str(m)
@@ -1658,6 +1668,7 @@ def main() -> None:
             run_fp_payload = {
                 "code_version": _read_code_version(),
                 "strategy_overrides_sha1": str(getattr(strategy.snapshot, "overrides_sha1", "") or ""),
+                "config_id": str(getattr(strategy.snapshot, "config_id", "") or ""),
                 "watchlist": [],
                 "source": "env",
             }
@@ -1674,10 +1685,11 @@ def main() -> None:
         except Exception:
             pass
         logger.info(
-            "run_fingerprint=%s code=%s strategy_sha=%s watchlist_n=%d interval=%s lookback=%d",
+            "run_fingerprint=%s code=%s strategy_sha=%s config_id=%s watchlist_n=%d interval=%s lookback=%d",
             str(run_fingerprint),
             str(run_fp_payload.get("code_version", "")),
             str(run_fp_payload.get("strategy_overrides_sha1", "")),
+            str(run_fp_payload.get("config_id", "")),
             len(run_fp_payload.get("watchlist", []) if isinstance(run_fp_payload.get("watchlist"), list) else []),
             interval,
             lookback_bars,

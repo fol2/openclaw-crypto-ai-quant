@@ -5,10 +5,12 @@ import json
 
 import pytest
 
+from engine.promoted_config import ResolvedEffectiveConfig
 import tools.factory_cycle as factory_cycle
 from tools.factory_cycle import (
     _apply_strategy_mode_overlay,
     _build_step5_gate_report,
+    _materialise_effective_config_via_rust,
     _parse_candidate,
     _select_deployable_candidates,
     _stable_promotion_since_s,
@@ -54,6 +56,80 @@ def test_apply_strategy_mode_overlay_raises_on_unknown_mode() -> None:
     base = {"global": {"engine": {"interval": "1h"}}, "modes": {"primary": {"global": {"engine": {"interval": "30m"}}}}}
     with pytest.raises(KeyError):
         _apply_strategy_mode_overlay(base=base, strategy_mode="does_not_exist")
+
+
+def test_materialise_effective_config_via_rust_copies_run_scoped_yaml(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = tmp_path / "base.yaml"
+    source = tmp_path / "resolved.yaml"
+    output = tmp_path / "run" / "effective.yaml"
+    base.write_text("global:\n  engine:\n    interval: 30m\n", encoding="utf-8")
+    source.write_text("global:\n  engine:\n    interval: 5m\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        factory_cycle,
+        "resolve_effective_config",
+        lambda **kwargs: ResolvedEffectiveConfig(
+            base_config_path=str(base),
+            config_path=str(source),
+            active_yaml_path=str(base),
+            effective_yaml_path=str(source),
+            interval="5m",
+            promoted_role=None,
+            promoted_config_path=None,
+            strategy_mode="primary",
+            strategy_mode_source="env",
+            strategy_overrides_sha1="a" * 64,
+            config_id="b" * 64,
+            warnings=(),
+        ),
+    )
+
+    path, resolved = _materialise_effective_config_via_rust(
+        base_config_path=base,
+        output_path=output,
+        strategy_mode="primary",
+    )
+
+    assert path == output
+    assert output.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+    assert resolved.config_id == "b" * 64
+
+
+def test_materialise_effective_config_via_rust_fails_closed_on_unknown_mode(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = tmp_path / "base.yaml"
+    source = tmp_path / "resolved.yaml"
+    base.write_text("global:\n  engine:\n    interval: 30m\n", encoding="utf-8")
+    source.write_text("global:\n  engine:\n    interval: 30m\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        factory_cycle,
+        "resolve_effective_config",
+        lambda **kwargs: ResolvedEffectiveConfig(
+            base_config_path=str(base),
+            config_path=str(source),
+            active_yaml_path=str(base),
+            effective_yaml_path=str(source),
+            interval="30m",
+            promoted_role=None,
+            promoted_config_path=None,
+            strategy_mode=None,
+            strategy_mode_source=None,
+            strategy_overrides_sha1="a" * 64,
+            config_id="b" * 64,
+            warnings=("strategy mode missing",),
+        ),
+    )
+
+    with pytest.raises(KeyError, match="strategy mode not found"):
+        _materialise_effective_config_via_rust(
+            base_config_path=base,
+            output_path=tmp_path / "run" / "effective.yaml",
+            strategy_mode="primary",
+        )
 
 
 def test_stable_promotion_since_tracks_oldest_timestamp_for_contiguous_config_segment(tmp_path) -> None:

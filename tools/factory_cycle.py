@@ -111,6 +111,7 @@ if str(AIQ_ROOT) not in sys.path:
 
 import factory_run  # noqa: E402  (needs sys.path fix above)
 from engine.alerting import send_openclaw_message  # noqa: E402
+from engine.promoted_config import resolve_effective_config  # noqa: E402
 
 try:
     from tools.paper_deploy import deploy_paper_config
@@ -163,11 +164,9 @@ def _norm_mode_key(raw: str) -> str:
 
 
 def _apply_strategy_mode_overlay(*, base: dict[str, Any], strategy_mode: str) -> dict[str, Any]:
-    """Return an effective YAML dict with modes.<strategy_mode> merged into global/symbols.
+    """Legacy compatibility mirror for mode materialisation.
 
-    Rust backtester ignores `modes:` currently, so the overlay must be materialised into
-    the effective `global:` section before sweeps/replays to keep "what you replay" in
-    sync with "what you trade".
+    Active factory flows now use the shared Rust effective-config resolver instead.
     """
     mode_key = _norm_mode_key(strategy_mode)
     if not mode_key:
@@ -219,6 +218,37 @@ def _yaml_engine_interval(yaml_obj: dict[str, Any]) -> str:
     eng = glob.get("engine") if isinstance(glob.get("engine"), dict) else {}
     v = str(eng.get("interval", "") or "").strip()
     return v
+
+
+def _materialise_effective_config_via_rust(
+    *,
+    base_config_path: Path,
+    output_path: Path,
+    strategy_mode: str | None,
+) -> tuple[Path, Any]:
+    """Materialise a run-scoped effective YAML via the shared Rust resolver."""
+
+    env = dict(os.environ)
+    for key in (
+        "AI_QUANT_PROMOTED_ROLE",
+        "AI_QUANT_STRATEGY_MODE",
+        "AI_QUANT_STRATEGY_MODE_FILE",
+    ):
+        env.pop(key, None)
+
+    requested_mode = _norm_mode_key(str(strategy_mode or ""))
+    if requested_mode:
+        env["AI_QUANT_STRATEGY_MODE"] = requested_mode
+
+    resolved = resolve_effective_config(config_path=base_config_path, live=False, env=env)
+    if requested_mode and resolved.strategy_mode != requested_mode:
+        raise KeyError(f"strategy mode not found in YAML: {requested_mode}")
+
+    source_path = Path(str(resolved.effective_yaml_path)).expanduser().resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    text = source_path.read_text(encoding="utf-8")
+    output_path.write_text(text if text.endswith("\n") else f"{text}\n", encoding="utf-8")
+    return output_path, resolved
 
 
 @dataclass(frozen=True)
@@ -1713,24 +1743,34 @@ def main(argv: list[str] | None = None) -> int:
         candidate_count=int(args.candidate_count),
     )
 
-    # Materialise strategy-mode overlay into an effective base YAML (required for Rust backtester parity).
+    # Resolve the effective control-plane YAML through Rust, while keeping a run-scoped
+    # artefact copy when the factory explicitly requests a strategy mode.
+    resolver_env = dict(os.environ)
+    for key in (
+        "AI_QUANT_PROMOTED_ROLE",
+        "AI_QUANT_STRATEGY_MODE",
+        "AI_QUANT_STRATEGY_MODE_FILE",
+    ):
+        resolver_env.pop(key, None)
+
+    requested_mode = _norm_mode_key(str(args.strategy_mode or ""))
+    if requested_mode:
+        resolver_env["AI_QUANT_STRATEGY_MODE"] = requested_mode
+    resolved_cfg = resolve_effective_config(config_path=base_cfg_path, live=False, env=resolver_env)
+
     effective_cfg_path = base_cfg_path
-    if str(args.strategy_mode or "").strip():
-        base_obj = _read_yaml(base_cfg_path)
-        eff_obj = _apply_strategy_mode_overlay(base=base_obj, strategy_mode=str(args.strategy_mode))
+    if requested_mode:
         out_dir = (artifacts_dir / "_effective_configs").resolve()
-        out_dir.mkdir(parents=True, exist_ok=True)
-        effective_cfg_path = (out_dir / f"{run_id}.yaml").resolve()
-        effective_cfg_path.write_text(yaml.safe_dump(eff_obj, sort_keys=False) + "\n", encoding="utf-8")
+        effective_cfg_path, resolved_cfg = _materialise_effective_config_via_rust(
+            base_config_path=base_cfg_path,
+            output_path=(out_dir / f"{run_id}.yaml").resolve(),
+            strategy_mode=requested_mode,
+        )
 
     # Default interval comes from YAML if not provided explicitly.
     interval = str(args.interval).strip()
     if not interval:
-        try:
-            eff_obj2 = _read_yaml(effective_cfg_path)
-            interval = _yaml_engine_interval(eff_obj2) or "30m"
-        except Exception:
-            interval = "30m"
+        interval = str(resolved_cfg.interval or "").strip() or "30m"
 
     run_with_gpu = bool(args.gpu)
     run_with_tpe = bool(args.tpe)
@@ -2030,6 +2070,7 @@ def main(argv: list[str] | None = None) -> int:
         "step5_gate_status": "blocked" if blocked_reason else "passed",
         "step5_gate_block_reason": blocked_reason,
         "effective_config_path": str(effective_cfg_path),
+        "effective_config_id": str(resolved_cfg.config_id),
         "interval": str(interval),
         "deployed": False,
         "deployments": [],

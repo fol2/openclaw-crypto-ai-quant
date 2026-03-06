@@ -135,6 +135,8 @@ enum SnapshotCommand {
 
 #[derive(Debug, Subcommand)]
 enum PaperCommand {
+    /// Resolve the shared Rust effective-config contract for paper control-plane consumers.
+    EffectiveConfig(PaperDoctorCommonArgs),
     /// Resolve the Rust paper daemon service/env contract without executing any steps.
     Manifest(PaperManifestArgs),
     /// Resolve the current Rust paper daemon service state from the launch contract plus status file.
@@ -557,6 +559,45 @@ fn run_snapshot(command: SnapshotCommand) -> Result<()> {
 
 fn run_paper(command: PaperCommand) -> Result<()> {
     match command {
+        PaperCommand::EffectiveConfig(args) => {
+            let effective_config =
+                paper_config::PaperEffectiveConfig::resolve(Some(&args.paper.config))?;
+            let report = effective_config.build_report(args.symbol.as_deref(), args.paper.live)?;
+
+            if args.paper.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("paper effective-config ok");
+                println!("base_config_path: {}", report.base_config_path);
+                println!("config_path: {}", report.config_path);
+                println!("active_yaml_path: {}", report.active_yaml_path);
+                println!("effective_yaml_path: {}", report.effective_yaml_path);
+                println!("interval: {}", report.interval);
+                println!(
+                    "strategy_overrides_sha1: {}",
+                    report.strategy_overrides_sha1
+                );
+                println!("config_id: {}", report.config_id);
+                if let Some(promoted_role) = report.promoted_role.as_deref() {
+                    println!("promoted_role: {}", promoted_role);
+                }
+                if let Some(promoted_config_path) = report.promoted_config_path.as_deref() {
+                    println!("promoted_config_path: {}", promoted_config_path);
+                }
+                if let Some(strategy_mode) = report.strategy_mode.as_deref() {
+                    println!("strategy_mode: {}", strategy_mode);
+                }
+                if let Some(strategy_mode_source) = report.strategy_mode_source.as_deref() {
+                    println!("strategy_mode_source: {}", strategy_mode_source);
+                }
+                if !report.warnings.is_empty() {
+                    println!("warnings:");
+                    for warning in &report.warnings {
+                        println!("  - {}", warning);
+                    }
+                }
+            }
+        }
         PaperCommand::Manifest(args) => {
             let report = paper_manifest::build_manifest(paper_manifest::PaperManifestInput {
                 config: args.config.as_deref(),

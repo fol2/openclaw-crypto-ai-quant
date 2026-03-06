@@ -44,6 +44,9 @@ for path in (
     Path("/tmp/aiq-runtime-doctor.json"),
     Path("/tmp/aiq-runtime-pipeline.json"),
     Path("/tmp/aiq-runtime-paper-manifest.json"),
+    Path("/tmp/aiq-runtime-paper-effective-config-base.json"),
+    Path("/tmp/aiq-runtime-paper-effective-config-primary.json"),
+    Path("/tmp/aiq-runtime-paper-effective-config-fallback.json"),
     Path("/tmp/aiq-runtime-paper-manifest-resume.json"),
     Path("/tmp/aiq-runtime-paper-status-bootstrap.json"),
     Path("/tmp/aiq-runtime-paper-service-bootstrap.json"),
@@ -63,6 +66,7 @@ for path in (
     Path("/tmp/aiq-runtime-paper-loop-idle.json"),
     Path("/tmp/aiq-runtime-paper-loop-follow.json"),
     Path("/tmp/aiq-runtime-paper-loop-gap.stderr"),
+    Path("/tmp/aiq-runtime-effective-config.yaml"),
 ):
     if path.exists():
         path.unlink()
@@ -241,6 +245,49 @@ for symbol, start, drift in (("ETH", 100.0, 0.25), ("BTC", 50000.0, 20.0)):
         price = close
 conn.commit()
 conn.close()
+
+Path("/tmp/aiq-runtime-effective-config.yaml").write_text(
+    "\n".join(
+        [
+            "global:",
+            "  engine:",
+            "    interval: 30m",
+            "modes:",
+            "  primary:",
+            "    global:",
+            "      engine:",
+            "        interval: 5m",
+            "  fallback:",
+            "    global:",
+            "      engine:",
+            "        interval: 1h",
+            "",
+        ]
+    ),
+    encoding="utf-8",
+)
+PY
+
+AI_QUANT_STRATEGY_MODE= \
+cargo run -q -p aiq-runtime -- paper effective-config --config /tmp/aiq-runtime-effective-config.yaml --json >/tmp/aiq-runtime-paper-effective-config-base.json
+AI_QUANT_STRATEGY_MODE=primary \
+cargo run -q -p aiq-runtime -- paper effective-config --config /tmp/aiq-runtime-effective-config.yaml --json >/tmp/aiq-runtime-paper-effective-config-primary.json
+AI_QUANT_STRATEGY_MODE=fallback \
+cargo run -q -p aiq-runtime -- paper effective-config --config /tmp/aiq-runtime-effective-config.yaml --json >/tmp/aiq-runtime-paper-effective-config-fallback.json
+
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+base = json.loads(Path("/tmp/aiq-runtime-paper-effective-config-base.json").read_text(encoding="utf-8"))
+primary = json.loads(Path("/tmp/aiq-runtime-paper-effective-config-primary.json").read_text(encoding="utf-8"))
+fallback = json.loads(Path("/tmp/aiq-runtime-paper-effective-config-fallback.json").read_text(encoding="utf-8"))
+
+assert base["interval"] == "30m"
+assert primary["interval"] == "5m"
+assert fallback["interval"] == "1h"
+assert base["config_id"] != primary["config_id"]
+assert primary["config_id"] != fallback["config_id"]
 PY
 
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example \

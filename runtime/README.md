@@ -16,6 +16,7 @@ Current runtime-owned paper surfaces and the paired opt-in wrapper:
 |---|---|---|
 | `snapshot export-paper` | Export a v2 Rust paper continuation snapshot | Bootstrap/export only |
 | `snapshot seed-paper` | Seed a paper DB from a v2 snapshot | Deterministic bootstrap path |
+| `paper effective-config` | Resolve the shared paper control-plane config contract | Read-only config surface for Python paper start-up and factory materialisation; emits `active_yaml_path`, `effective_yaml_path`, interval, `strategy_overrides_sha1`, and `config_id` |
 | `paper doctor` | Restore Rust-owned paper state and inspect bootstrap markers | Non-mutating |
 | `paper run-once` | Execute one single-symbol Rust paper step | Single-shot shell |
 | `paper cycle` | Execute one repeatable multi-symbol Rust paper cycle | Explicit `--step-close-ts-ms`, not a daemon |
@@ -41,6 +42,7 @@ slices will build on:
 - optional follow polling so Rust can stay alive after catch-up and wait for the next due step
 - one-shot `--symbols-file` loading for bounded loop shells
 - a read-only service manifest so operators can inspect the resolved Rust daemon launch contract, bootstrap requirement, restart/resume state, lifecycle `status_path`, promoted config selection, and strategy-mode file fallback before cutover
+- a read-only effective-config surface that Python paper start-up and factory materialisation now share with the Rust paper shells
 - a read-only service status surface so operators can compare the current launch contract against the persisted daemon lifecycle JSON, including daemon health and launch-identity drift, without parsing files by hand
 - a read-only supervisor action surface so later service orchestration can decide whether to hold, start, restart, or simply monitor the lane, while still failing closed on unhealthy daemon status
 - an opt-in daemon wrapper that owns scheduler/watchlist reload orchestration without claiming service cutover

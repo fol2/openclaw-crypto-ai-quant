@@ -111,6 +111,14 @@ service action surface:
 - fails closed when the running daemon reports an unhealthy status or drifts from the current launch identity (`profile`, DB paths, BTC anchor, lookback, explicit symbols, watch wiring, or the bootstrap step while the lane is still fresh)
 - keeps the service action contract read-only with respect to daemon control; it does not perform real start/stop side effects or claim systemd cutover
 
+The current delivered slice extends that again with shared effective-config
+ownership for Python paper start-up and factory deployment flows:
+
+- `paper effective-config`
+- emits the same `active_yaml_path`, `effective_yaml_path`, interval, promoted-config path, strategy-mode source, `strategy_overrides_sha1`, and `config_id` that paper control-plane consumers must now share
+- now drives Python paper start-up and factory materialisation through the same Rust resolver contract
+- keeps paper execution itself on Python; this slice only moves config/control-plane ownership
+
 Python paper execution is still the active runtime path, and the opt-in Rust
 paper daemon wrapper does not change that. Python paper bootstrap is no longer
 the only continuity surface.

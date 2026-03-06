@@ -30,6 +30,10 @@ with the effective config selected by `AI_QUANT_PROMOTED_ROLE` and
 `AI_QUANT_STRATEGY_MODE` / `AI_QUANT_STRATEGY_MODE_FILE`. Python paper
 execution remains the active production path, so this does not claim paper
 cutover.
+The shared Rust effective-config resolver now also drives Python paper
+start-up and factory paper-config materialisation through
+`aiq-runtime paper effective-config`, so promoted-role and strategy-mode
+selection no longer depend on Python merge ownership.
 Rust now also ships a read-only `paper status` surface that combines that
 launch contract with the persisted daemon status JSON so operators can see
 whether the current Rust lane is merely launch-ready, actively running, stale,
