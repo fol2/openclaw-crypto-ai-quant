@@ -30,13 +30,16 @@ from pathlib import Path
 
 snap_path = Path("/tmp/aiq-runtime-seed-snapshot.json")
 db_path = Path("/tmp/aiq-runtime-paper.db")
+bars_path = Path("/tmp/aiq-runtime-candles.db")
 for path in (
     snap_path,
     db_path,
+    bars_path,
     Path("/tmp/aiq-runtime-doctor.json"),
     Path("/tmp/aiq-runtime-pipeline.json"),
     Path("/tmp/aiq-runtime-snapshot-validate.json"),
     Path("/tmp/aiq-runtime-seed-paper.json"),
+    Path("/tmp/aiq-runtime-paper-run-once.json"),
 ):
     if path.exists():
         path.unlink()
@@ -60,6 +63,7 @@ payload = {
             "adds_count": 1,
             "tp1_taken": False,
             "open_time_ms": 1772676500000,
+            "last_funding_time_ms": 1772676580000,
             "last_add_time_ms": 1772676600000,
             "entry_adx_threshold": 23.5,
         }
@@ -67,6 +71,13 @@ payload = {
     "runtime": {
         "entry_attempt_ms_by_symbol": {"BTC": 1772676500000},
         "exit_attempt_ms_by_symbol": {"BTC": 1772676550000},
+        "last_close_info_by_symbol": {
+            "ETH": {
+                "timestamp_ms": 1772676400000,
+                "side": "short",
+                "reason": "Signal Trigger"
+            }
+        },
     },
 }
 snap_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -134,10 +145,59 @@ conn.executescript(
     """
 )
 conn.close()
+
+conn = sqlite3.connect(bars_path)
+conn.executescript(
+    """
+    CREATE TABLE candles (
+        symbol TEXT,
+        interval TEXT,
+        t INTEGER,
+        t_close INTEGER,
+        o REAL,
+        h REAL,
+        l REAL,
+        c REAL,
+        v REAL,
+        n INTEGER
+    );
+    """
+)
+base = 1772670000000
+for symbol, start, drift in (("ETH", 100.0, 0.25), ("BTC", 50000.0, 20.0)):
+    price = start
+    for idx in range(420):
+        t = base + idx * 1800000
+        open_ = price
+        close = price + drift
+        high = max(open_, close) + 0.5
+        low = min(open_, close) - 0.5
+        volume = 1000.0 + idx
+        conn.execute(
+            "INSERT INTO candles VALUES (?, '30m', ?, ?, ?, ?, ?, ?, ?, 1)",
+            (symbol, t, t + 1800000, open_, high, low, close, volume),
+        )
+        price = close
+conn.commit()
+conn.close()
 PY
 
 cargo run -q -p aiq-runtime -- snapshot validate --path /tmp/aiq-runtime-seed-snapshot.json --json >/tmp/aiq-runtime-snapshot-validate.json
 cargo run -q -p aiq-runtime -- snapshot seed-paper --snapshot /tmp/aiq-runtime-seed-snapshot.json --target-db /tmp/aiq-runtime-paper.db --strict-replace --json >/tmp/aiq-runtime-seed-paper.json
 cargo run -q -p aiq-runtime -- paper doctor --db /tmp/aiq-runtime-paper.db --json >/tmp/aiq-runtime-paper-doctor.json
+cargo run -q -p aiq-runtime -- paper run-once --db /tmp/aiq-runtime-paper.db --candles-db /tmp/aiq-runtime-candles.db --target-symbol ETH --exported-at-ms 1772676900000 --dry-run --json >/tmp/aiq-runtime-paper-run-once.json
+cargo run -q -p aiq-runtime -- paper doctor --db /tmp/aiq-runtime-paper.db --live --json >/tmp/aiq-runtime-paper-doctor-live.json
+cargo run -q -p aiq-runtime -- paper run-once --db /tmp/aiq-runtime-paper.db --candles-db /tmp/aiq-runtime-candles.db --target-symbol ETH --exported-at-ms 1772676900000 --live --dry-run --json >/tmp/aiq-runtime-paper-run-once-live.json
+
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+report = json.loads(Path("/tmp/aiq-runtime-paper-run-once.json").read_text(encoding="utf-8"))
+assert report["snapshot_exported_at_ms"] == 1772676900000
+assert report["symbol"] == "ETH"
+doctor = json.loads(Path("/tmp/aiq-runtime-paper-doctor.json").read_text(encoding="utf-8"))
+assert doctor["paper_bootstrap"]["runtime_close_markers"] == 1
+PY
 
 echo "[runtime-foundation] ok"

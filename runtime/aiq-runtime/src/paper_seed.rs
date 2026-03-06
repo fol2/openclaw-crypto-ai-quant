@@ -21,6 +21,7 @@ pub struct SeedReport {
     pub seeded_trades: usize,
     pub seeded_positions: usize,
     pub seeded_runtime_cooldowns: usize,
+    pub seeded_runtime_last_closes: usize,
     pub seed_timestamp_ms: i64,
 }
 
@@ -45,6 +46,18 @@ pub fn seed_paper_db(
         .map(|position| position.symbol.trim().to_ascii_uppercase())
         .filter(|symbol| !symbol.is_empty())
         .collect();
+    let mut seed_symbols = snapshot_symbols.clone();
+    if let Some(runtime) = snapshot.runtime.as_ref() {
+        seed_symbols.extend(
+            runtime
+                .entry_attempt_ms_by_symbol
+                .keys()
+                .chain(runtime.exit_attempt_ms_by_symbol.keys())
+                .chain(runtime.last_close_info_by_symbol.keys())
+                .map(|symbol| symbol.trim().to_ascii_uppercase())
+                .filter(|symbol| !symbol.is_empty()),
+        );
+    }
 
     let conn = Connection::open(target_db)?;
     ensure_seed_tables(&conn)?;
@@ -54,11 +67,12 @@ pub fn seed_paper_db(
             reset_seed_targets(&conn)?;
         } else {
             reject_untracked_open_positions(&conn, &snapshot_symbols)?;
-            clear_previous_seed_rows(&conn, &snapshot_symbols)?;
+            clear_previous_seed_rows(&conn, &seed_symbols)?;
         }
 
         let seeded_trades = seed_trades_and_positions(&conn, snapshot, &seed_iso)?;
-        let seeded_runtime_cooldowns = seed_runtime_cooldowns(&conn, snapshot, &seed_iso)?;
+        let (seeded_runtime_cooldowns, seeded_runtime_last_closes) =
+            seed_runtime_state(&conn, snapshot, &seed_iso)?;
 
         Ok(SeedReport {
             ok: true,
@@ -69,6 +83,7 @@ pub fn seed_paper_db(
             seeded_trades,
             seeded_positions: snapshot.positions.len(),
             seeded_runtime_cooldowns,
+            seeded_runtime_last_closes,
             seed_timestamp_ms: seed_ts_ms,
         })
     })();
@@ -145,6 +160,13 @@ fn ensure_seed_tables(conn: &Connection) -> anyhow::Result<()> {
             last_exit_attempt_s REAL,
             updated_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS runtime_last_closes (
+            symbol TEXT PRIMARY KEY,
+            close_ts_ms INTEGER NOT NULL,
+            side TEXT NOT NULL,
+            reason TEXT,
+            updated_at TEXT NOT NULL
+        );
         "#,
     )?;
     Ok(())
@@ -155,6 +177,7 @@ fn reset_seed_targets(conn: &Connection) -> anyhow::Result<()> {
     conn.execute("DELETE FROM position_state", [])?;
     conn.execute("DELETE FROM position_state_history", [])?;
     conn.execute("DELETE FROM runtime_cooldowns", [])?;
+    conn.execute("DELETE FROM runtime_last_closes", [])?;
     Ok(())
 }
 
@@ -200,16 +223,17 @@ fn reject_untracked_open_positions(
 
 fn clear_previous_seed_rows(
     conn: &Connection,
-    snapshot_symbols: &BTreeSet<String>,
+    seed_symbols: &BTreeSet<String>,
 ) -> anyhow::Result<()> {
     conn.execute(
         "DELETE FROM trades WHERE reason IN ('state_sync_seed', 'state_sync_balance_seed')",
         [],
     )?;
 
-    for symbol in snapshot_symbols {
+    for symbol in seed_symbols {
         conn.execute("DELETE FROM position_state WHERE symbol = ?", [symbol])?;
         conn.execute("DELETE FROM runtime_cooldowns WHERE symbol = ?", [symbol])?;
+        conn.execute("DELETE FROM runtime_last_closes WHERE symbol = ?", [symbol])?;
         conn.execute(
             "DELETE FROM position_state_history WHERE symbol = ? AND event_type = 'seed'",
             [symbol],
@@ -267,6 +291,11 @@ fn seed_trades_and_positions(
             ),
         )?;
         let open_trade_id = conn.last_insert_rowid();
+        let last_funding_time_ms = if position.last_funding_time_ms > 0 {
+            position.last_funding_time_ms
+        } else {
+            position_ts_ms
+        };
         conn.execute(
             "INSERT OR REPLACE INTO position_state
              (symbol, open_trade_id, trailing_sl, last_funding_time, adds_count, tp1_taken, last_add_time, entry_adx_threshold, updated_at)
@@ -275,7 +304,7 @@ fn seed_trades_and_positions(
                 position.symbol.as_str(),
                 open_trade_id,
                 position.trailing_sl,
-                position_ts_ms,
+                last_funding_time_ms,
                 i64::from(position.adds_count),
                 if position.tp1_taken { 1_i64 } else { 0_i64 },
                 position.last_add_time_ms,
@@ -293,7 +322,7 @@ fn seed_trades_and_positions(
                 position.symbol.as_str(),
                 open_trade_id,
                 position.trailing_sl,
-                position_ts_ms,
+                last_funding_time_ms,
                 i64::from(position.adds_count),
                 if position.tp1_taken { 1_i64 } else { 0_i64 },
                 position.last_add_time_ms,
@@ -306,13 +335,13 @@ fn seed_trades_and_positions(
     Ok(seeded_trades)
 }
 
-fn seed_runtime_cooldowns(
+fn seed_runtime_state(
     conn: &Connection,
     snapshot: &SnapshotFile,
     seed_iso: &str,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<(usize, usize)> {
     let Some(runtime) = snapshot.runtime.as_ref() else {
-        return Ok(0);
+        return Ok((0, 0));
     };
 
     let mut symbols = BTreeSet::new();
@@ -347,7 +376,27 @@ fn seed_runtime_cooldowns(
         )?;
         inserted += 1;
     }
-    Ok(inserted)
+    let mut inserted_last_closes = 0usize;
+    for (symbol, close) in &runtime.last_close_info_by_symbol {
+        let symbol = symbol.trim().to_ascii_uppercase();
+        let side = close.side.trim().to_ascii_lowercase();
+        if symbol.is_empty() || close.timestamp_ms <= 0 || (side != "long" && side != "short") {
+            continue;
+        }
+        conn.execute(
+            "INSERT OR REPLACE INTO runtime_last_closes (symbol, close_ts_ms, side, reason, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            (
+                symbol.as_str(),
+                close.timestamp_ms,
+                side.as_str(),
+                close.reason.as_str(),
+                seed_iso,
+            ),
+        )?;
+        inserted_last_closes += 1;
+    }
+    Ok((inserted, inserted_last_closes))
 }
 
 fn iso_from_ms(ms: i64) -> String {
@@ -385,12 +434,22 @@ mod tests {
                 adds_count: 1,
                 tp1_taken: false,
                 open_time_ms: 1_772_676_500_000,
+                last_funding_time_ms: 1_772_676_580_000,
                 last_add_time_ms: 1_772_676_600_000,
                 entry_adx_threshold: 23.5,
             }],
             runtime: Some(SnapshotRuntimeState {
                 entry_attempt_ms_by_symbol: [("BTC".to_string(), 1_772_676_500_000)].into(),
                 exit_attempt_ms_by_symbol: [("BTC".to_string(), 1_772_676_550_000)].into(),
+                last_close_info_by_symbol: [(
+                    "ETH".to_string(),
+                    aiq_runtime_core::snapshot::SnapshotLastCloseInfo {
+                        timestamp_ms: 1_772_676_400_000,
+                        side: "short".to_string(),
+                        reason: "Signal Trigger".to_string(),
+                    },
+                )]
+                .into(),
             }),
         }
     }
@@ -477,6 +536,13 @@ mod tests {
                 last_exit_attempt_s REAL,
                 updated_at TEXT
             );
+            CREATE TABLE runtime_last_closes (
+                symbol TEXT PRIMARY KEY,
+                close_ts_ms INTEGER NOT NULL,
+                side TEXT NOT NULL,
+                reason TEXT,
+                updated_at TEXT NOT NULL
+            );
             "#,
         )
         .unwrap();
@@ -511,6 +577,9 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
+        let close_count: i64 = conn
+            .query_row("SELECT COUNT(1) FROM runtime_last_closes", [], |row| row.get(0))
+            .unwrap();
         let open_ts: String = conn
             .query_row(
                 "SELECT timestamp FROM trades WHERE action='OPEN' AND symbol='BTC' LIMIT 1",
@@ -529,11 +598,27 @@ mod tests {
         assert_eq!(report.seeded_trades, 2);
         assert_eq!(report.seeded_positions, 1);
         assert_eq!(report.seeded_runtime_cooldowns, 1);
+        assert_eq!(report.seeded_runtime_last_closes, 1);
         assert_eq!(trade_count, 2);
         assert_eq!(state_count, 1);
         assert_eq!(cooldown_count, 1);
+        assert_eq!(close_count, 1);
         assert_eq!(open_ts, iso_from_ms(1_772_676_500_000));
-        assert_eq!(last_funding_time, 1_772_676_500_000);
+        assert_eq!(last_funding_time, 1_772_676_580_000);
+        let seeded_snapshot =
+            crate::paper_export::export_paper_snapshot(&db_path, sample_snapshot().exported_at_ms)
+                .unwrap();
+        assert_eq!(
+            seeded_snapshot
+                .runtime
+                .as_ref()
+                .unwrap()
+                .last_close_info_by_symbol
+                .get("ETH")
+                .unwrap()
+                .timestamp_ms,
+            1_772_676_400_000
+        );
     }
 
     #[test]

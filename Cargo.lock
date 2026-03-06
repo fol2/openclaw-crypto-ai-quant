@@ -20,6 +20,7 @@ dependencies = [
  "bt-core",
  "chrono",
  "clap",
+ "risk-core",
  "rusqlite",
  "serde",
  "serde_json",

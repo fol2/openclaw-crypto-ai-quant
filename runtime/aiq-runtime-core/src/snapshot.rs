@@ -8,11 +8,21 @@ pub const SNAPSHOT_V1: u32 = 1;
 pub const SNAPSHOT_V2: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SnapshotLastCloseInfo {
+    pub timestamp_ms: i64,
+    pub side: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SnapshotRuntimeState {
     #[serde(default)]
     pub entry_attempt_ms_by_symbol: BTreeMap<String, i64>,
     #[serde(default)]
     pub exit_attempt_ms_by_symbol: BTreeMap<String, i64>,
+    #[serde(default)]
+    pub last_close_info_by_symbol: BTreeMap<String, SnapshotLastCloseInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -33,6 +43,8 @@ pub struct SnapshotPosition {
     pub tp1_taken: bool,
     #[serde(default)]
     pub open_time_ms: i64,
+    #[serde(default)]
+    pub last_funding_time_ms: i64,
     #[serde(default)]
     pub last_add_time_ms: i64,
     #[serde(default)]
@@ -58,6 +70,7 @@ pub struct SnapshotSummary {
     pub position_count: usize,
     pub runtime_entry_markers: usize,
     pub runtime_exit_markers: usize,
+    pub runtime_close_markers: usize,
 }
 
 #[derive(Debug, Error)]
@@ -115,10 +128,14 @@ impl SnapshotFile {
                 });
             }
             if position.size <= 0.0 {
-                return Err(SnapshotError::InvalidSize { symbol: symbol.clone() });
+                return Err(SnapshotError::InvalidSize {
+                    symbol: symbol.clone(),
+                });
             }
             if position.entry_price <= 0.0 {
-                return Err(SnapshotError::InvalidEntryPrice { symbol: symbol.clone() });
+                return Err(SnapshotError::InvalidEntryPrice {
+                    symbol: symbol.clone(),
+                });
             }
             if position.leverage <= 0.0 {
                 return Err(SnapshotError::InvalidLeverage {
@@ -150,6 +167,9 @@ impl SnapshotFile {
                 .unwrap_or(0),
             runtime_exit_markers: runtime
                 .map(|runtime| runtime.exit_attempt_ms_by_symbol.len())
+                .unwrap_or(0),
+            runtime_close_markers: runtime
+                .map(|runtime| runtime.last_close_info_by_symbol.len())
                 .unwrap_or(0),
         }
     }
@@ -192,6 +212,7 @@ mod tests {
                 adds_count: 0,
                 tp1_taken: false,
                 open_time_ms: 1_770_500_000_000,
+                last_funding_time_ms: 1_770_500_100_000,
                 last_add_time_ms: 0,
                 entry_adx_threshold: 22.0,
             }],
@@ -199,6 +220,14 @@ mod tests {
                 Some(SnapshotRuntimeState {
                     entry_attempt_ms_by_symbol: BTreeMap::from([("BTC".to_string(), 123)]),
                     exit_attempt_ms_by_symbol: BTreeMap::from([("ETH".to_string(), 456)]),
+                    last_close_info_by_symbol: BTreeMap::from([(
+                        "SOL".to_string(),
+                        SnapshotLastCloseInfo {
+                            timestamp_ms: 789,
+                            side: "short".to_string(),
+                            reason: "Signal Trigger".to_string(),
+                        },
+                    )]),
                 })
             } else {
                 None
@@ -214,6 +243,7 @@ mod tests {
         assert_eq!(summary.position_count, 1);
         assert_eq!(summary.runtime_entry_markers, 1);
         assert_eq!(summary.runtime_exit_markers, 1);
+        assert_eq!(summary.runtime_close_markers, 1);
     }
 
     #[test]
