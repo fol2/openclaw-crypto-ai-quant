@@ -2,7 +2,7 @@ use aiq_runtime_core::paper::restore_paper_state;
 use aiq_runtime_core::runtime::RuntimeBootstrap;
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{backup::Backup, params, Connection};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -445,13 +445,27 @@ fn prepare_working_paper_db(paper_db: &Path, dry_run: bool) -> Result<WorkingPap
             .unwrap_or_else(|| Utc::now().timestamp_micros() * 1_000)
     );
     let temp_path = std::env::temp_dir().join(temp_name);
-    std::fs::copy(paper_db, &temp_path).with_context(|| {
+    let source = Connection::open(paper_db).with_context(|| {
+        format!("failed to open source paper db for dry-run: {}", paper_db.display())
+    })?;
+    let mut dest = Connection::open(&temp_path).with_context(|| {
         format!(
-            "failed to copy paper db {} to temporary dry-run db {}",
-            paper_db.display(),
+            "failed to create temporary dry-run paper db: {}",
             temp_path.display()
         )
     })?;
+    {
+        let backup = Backup::new(&source, &mut dest).with_context(|| {
+            format!(
+                "failed to initialise dry-run backup from {} to {}",
+                paper_db.display(),
+                temp_path.display()
+            )
+        })?;
+        backup
+            .step(-1)
+            .with_context(|| format!("failed to copy paper db into {}", temp_path.display()))?;
+    }
     Ok(WorkingPaperDb {
         path: temp_path,
         cleanup: true,
