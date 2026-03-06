@@ -122,6 +122,7 @@ cargo run --manifest-path Cargo.toml -p aiq-runtime -- \
 - `paper run-once` must start from the same restored state that `paper doctor` reports.
 - `paper cycle` must also start from the same restored state, but it executes one explicit multi-symbol cycle with a required `--step-close-ts-ms`.
 - `paper loop` must also start from the same restored state, but it derives each next due `step_close_ts_ms` from `runtime_cycle_steps` or the bootstrap `--start-step-close-ts-ms` on the first run, can optionally remain in follow mode while waiting for the next due step, and repeatedly reuses the `paper cycle` write path.
+- `--follow` never replaces the bootstrap requirement on a fresh DB; it only changes how the shell behaves when the next due step is currently idle.
 - All three commands remain shell surfaces only in this phase; long-running daemon/systemd ownership remains out of scope.
 - Default write timestamps follow execution time for DB parity; pass `--exported-at-ms` when you need reproducible artefacts.
 - DB projection after a successful `paper run-once`, `paper cycle`, or `paper loop` step is limited to the Rust-owned paper projection surface for this phase:
@@ -131,7 +132,7 @@ cargo run --manifest-path Cargo.toml -p aiq-runtime -- \
   - `runtime_last_closes`
 - `paper cycle` also records a rerun guard row in `runtime_cycle_steps` and fails closed if the same step identity is applied twice.
 - `paper loop` never bypasses that guard; it simply discovers the next unapplied step and calls the same `paper cycle` contract repeatedly.
-- follow-mode idle waits must not mutate the DB; they only re-check `runtime_cycle_steps` plus latest common candle closes before the next step becomes eligible.
+- follow-mode idle polls must not mutate the DB; they only re-check `runtime_cycle_steps` plus latest common candle closes before the next step becomes eligible.
 
 ## Backward Compatibility
 

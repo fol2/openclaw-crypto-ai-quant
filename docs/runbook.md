@@ -798,8 +798,9 @@ cargo run -p aiq-runtime -- \
 Follow-mode expectations:
 
 - `--follow` keeps the shell alive after catch-up and polls for the next due step instead of returning immediately idle
+- on a fresh DB, `paper loop --follow` still needs `--start-step-close-ts-ms`; follow mode only changes the idle behaviour after the next due step has been derived
 - `--idle-sleep-ms` controls how long the shell sleeps between no-work polls
-- `--max-idle-polls 0` means unbounded follow mode; any positive value caps the number of idle waits before the shell exits with a warning
+- `--max-idle-polls 0` means unbounded follow mode; any positive value caps the number of idle polls before the shell exits with a warning
 
 ---
 

@@ -165,7 +165,7 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
             }
 
             idle_polls = idle_polls.saturating_add(1);
-            if input.max_idle_polls > 0 && idle_polls > input.max_idle_polls {
+            if input.max_idle_polls > 0 && idle_polls >= input.max_idle_polls {
                 warnings.push(format!(
                     "paper loop follow exhausted after {} idle poll(s)",
                     input.max_idle_polls
@@ -809,11 +809,19 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.executed_steps, 0);
-        assert_eq!(report.idle_polls, 2);
+        assert_eq!(report.idle_polls, 1);
         assert!(report.follow);
         assert!(report
             .warnings
             .iter()
             .any(|warning| warning.contains("follow exhausted")));
+
+        let conn = Connection::open(&paper_db).unwrap();
+        let recorded_steps: i64 = conn
+            .query_row("SELECT COUNT(*) FROM runtime_cycle_steps", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(recorded_steps, 3);
     }
 }
