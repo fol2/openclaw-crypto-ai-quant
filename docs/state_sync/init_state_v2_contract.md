@@ -104,6 +104,7 @@ cargo run --manifest-path Cargo.toml -p aiq-runtime -- \
 
 - `aiq-runtime paper doctor` is the current Rust-owned bootstrap/restore shell.
 - `aiq-runtime paper run-once` extends the same restored state into one single-shot execution step.
+- `aiq-runtime paper loop` extends the same restored state into a bounded catch-up shell that repeatedly applies `paper cycle` steps until it reaches the latest common candle close or `--max-steps`.
 - The paper shell restores state from the paper DB through the same continuation contract:
   - `trades`
   - `position_state`
@@ -120,14 +121,16 @@ cargo run --manifest-path Cargo.toml -p aiq-runtime -- \
 
 - `paper run-once` must start from the same restored state that `paper doctor` reports.
 - `paper cycle` must also start from the same restored state, but it executes one explicit multi-symbol cycle with a required `--step-close-ts-ms`.
-- Both commands remain shell surfaces only in this phase; long-running paper loops remain out of scope.
+- `paper loop` must also start from the same restored state, but it derives each next due `step_close_ts_ms` from `runtime_cycle_steps` or the bootstrap `--start-step-close-ts-ms` on the first run and repeatedly reuses the `paper cycle` write path.
+- All three commands remain shell surfaces only in this phase; long-running daemon/systemd ownership remains out of scope.
 - Default write timestamps follow execution time for DB parity; pass `--exported-at-ms` when you need reproducible artefacts.
-- DB projection after a successful `paper run-once` or `paper cycle` step is limited to the Rust-owned paper projection surface for this phase:
+- DB projection after a successful `paper run-once`, `paper cycle`, or `paper loop` step is limited to the Rust-owned paper projection surface for this phase:
   - `trades`
   - `position_state`
   - `runtime_cooldowns`
   - `runtime_last_closes`
 - `paper cycle` also records a rerun guard row in `runtime_cycle_steps` and fails closed if the same step identity is applied twice.
+- `paper loop` never bypasses that guard; it simply discovers the next unapplied step and calls the same `paper cycle` contract repeatedly.
 
 ## Backward Compatibility
 
