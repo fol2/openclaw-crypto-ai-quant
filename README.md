@@ -35,8 +35,9 @@ stopped, or in need of a restart because the live daemon contract drifted from
 the current config/env plan.
 Rust now also ships a read-only `paper service` surface that builds on top of
 that status view and tells later supervision whether the lane should be held,
-started, restarted, or simply monitored, still without claiming any systemd or
-production cutover.
+started, restarted, or simply monitored. It now also fail-closes when the
+running daemon reports an unhealthy status or no longer matches the current
+launch identity, still without claiming any systemd or production cutover.
 
 ## Screenshots
 

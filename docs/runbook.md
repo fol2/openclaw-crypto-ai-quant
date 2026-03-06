@@ -895,7 +895,8 @@ Status expectations:
 - when no daemon lifecycle JSON exists yet, `service_state` falls back to the current launch contract (`blocked`, `bootstrap_required`, `bootstrap_ready`, `resume_ready`, or `caught_up_idle`)
 - when a matching daemon status JSON exists and still reports `running=true`, `service_state` becomes `running`
 - when the running status JSON is older than the configured staleness threshold, `service_state` becomes `status_stale`
-- when the running daemon status no longer matches the current launch contract (for example config fingerprint, lock path, or symbols-file wiring drifted), `service_state` becomes `restart_required`
+- when the running daemon status reports `ok=false` or carries runtime errors, `service_state` becomes `restart_required` so later supervision can fail closed instead of silently monitoring an unhealthy lane
+- when the running daemon status no longer matches the current launch contract (for example config fingerprint, profile, DB paths, BTC anchor, lookback, explicit symbols, the bootstrap step while the lane is still fresh, lock path, or symbols-file wiring drifted), `service_state` becomes `restart_required`
 - when the persisted daemon lifecycle JSON reports `running=false`, `service_state` becomes `stopped`
 
 ### Inspect the Rust paper daemon service action
@@ -918,7 +919,7 @@ Service-action expectations:
 
 - `paper service` is read-only; it never starts, stops, or restarts the daemon
 - `desired_action = hold` means the current lane should stay unsupervised until the launch contract becomes valid
-- `desired_action = start` means the current lane is launch-ready but no healthy Rust daemon is supervising it right now
+- `desired_action = start` means the current lane is launch-ready but no healthy Rust daemon is supervising it right now; this also covers watchlist-owned idle lanes that are allowed to start and wait for symbols later
 - `desired_action = restart` means the lane is supervised by a stale or drifted daemon contract and later orchestration should recycle it
 - `desired_action = monitor` means the current daemon status still matches the live launch contract and supervision can keep watching it
 - `action_reason` gives the operator-facing explanation for that recommendation without requiring manual JSON diffing

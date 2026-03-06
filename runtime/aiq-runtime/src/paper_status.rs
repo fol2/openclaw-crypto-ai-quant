@@ -81,10 +81,24 @@ pub fn build_status(input: PaperStatusInput<'_>) -> Result<PaperStatusReport> {
     let mut mismatch_reasons = Vec::new();
     let mut contract_matches_status = true;
     let mut service_state = launch_state_to_service_state(&manifest.resume.launch_state);
+    let mut daemon_health_ok = true;
 
     if let Some(status) = daemon_status.as_ref() {
         status_age_ms = Some((Utc::now().timestamp_millis() - status.updated_at_ms).max(0));
         mismatch_reasons = compare_manifest_and_status(&manifest, status);
+        daemon_health_ok = status.ok && status.errors.is_empty();
+        if !daemon_health_ok {
+            mismatch_reasons.push(match status.errors.as_slice() {
+                [] => {
+                    "daemon reported an unhealthy status without explicit error entries".to_string()
+                }
+                [single] => format!("daemon reported an unhealthy status: {single}"),
+                many => format!(
+                    "daemon reported unhealthy status errors: {}",
+                    many.join("; ")
+                ),
+            });
+        }
         contract_matches_status = mismatch_reasons.is_empty();
 
         if status.running {
@@ -101,7 +115,7 @@ pub fn build_status(input: PaperStatusInput<'_>) -> Result<PaperStatusReport> {
             } else if !contract_matches_status {
                 service_state = PaperServiceState::RestartRequired;
                 warnings.push(format!(
-                    "paper status detected a running daemon that no longer matches the current launch contract: {}",
+                    "paper status detected a running daemon that no longer matches the current launch contract or health gate: {}",
                     mismatch_reasons.join("; ")
                 ));
             } else {
@@ -118,7 +132,7 @@ pub fn build_status(input: PaperStatusInput<'_>) -> Result<PaperStatusReport> {
     }
 
     Ok(PaperStatusReport {
-        ok: manifest.ok,
+        ok: manifest.ok && daemon_health_ok,
         service_state,
         status_file_present,
         status_age_ms,
@@ -148,12 +162,55 @@ fn compare_manifest_and_status(
 ) -> Vec<String> {
     let mut mismatches = Vec::new();
 
+    if status.config_path != manifest.config_path {
+        mismatches.push(format!(
+            "config path mismatch (status={} current={})",
+            status.config_path, manifest.config_path
+        ));
+    }
     if status.runtime_bootstrap.config_fingerprint != manifest.runtime_bootstrap.config_fingerprint
     {
         mismatches.push(format!(
             "config fingerprint mismatch (status={} current={})",
             status.runtime_bootstrap.config_fingerprint,
             manifest.runtime_bootstrap.config_fingerprint
+        ));
+    }
+    if status.runtime_bootstrap.pipeline.profile != manifest.runtime_bootstrap.pipeline.profile {
+        mismatches.push(format!(
+            "runtime profile mismatch (status={} current={})",
+            status.runtime_bootstrap.pipeline.profile, manifest.runtime_bootstrap.pipeline.profile
+        ));
+    }
+    if status.paper_db != manifest.paper_db {
+        mismatches.push(format!(
+            "paper db mismatch (status={} current={})",
+            status.paper_db, manifest.paper_db
+        ));
+    }
+    if status.candles_db != manifest.candles_db {
+        mismatches.push(format!(
+            "candles db mismatch (status={} current={})",
+            status.candles_db, manifest.candles_db
+        ));
+    }
+    if canonical_btc_symbol(&status.btc_symbol) != canonical_btc_symbol(&manifest.btc_symbol) {
+        mismatches.push(format!(
+            "btc symbol mismatch (status={} current={})",
+            status.btc_symbol, manifest.btc_symbol
+        ));
+    }
+    if status.lookback_bars != manifest.lookback_bars {
+        mismatches.push(format!(
+            "lookback bars mismatch (status={} current={})",
+            status.lookback_bars, manifest.lookback_bars
+        ));
+    }
+    if status.explicit_symbols != manifest.symbols {
+        mismatches.push(format!(
+            "explicit symbols mismatch (status={} current={})",
+            status.explicit_symbols.join(","),
+            manifest.symbols.join(",")
         ));
     }
     if status.lock_path != manifest.lock_path {
@@ -180,6 +237,14 @@ fn compare_manifest_and_status(
             status.symbols_file, manifest.symbols_file
         ));
     }
+    if bootstrap_step_is_contract(manifest, status)
+        && status.start_step_close_ts_ms != manifest.start_step_close_ts_ms
+    {
+        mismatches.push(format!(
+            "start-step-close-ts-ms mismatch (status={:?} current={:?})",
+            status.start_step_close_ts_ms, manifest.start_step_close_ts_ms
+        ));
+    }
 
     mismatches
 }
@@ -192,6 +257,24 @@ fn env_i64(name: &str) -> Option<i64> {
         .and_then(|value| value.parse::<i64>().ok())
 }
 
+fn canonical_btc_symbol(value: &str) -> String {
+    value.trim().to_ascii_uppercase()
+}
+
+fn bootstrap_step_is_contract(
+    manifest: &PaperManifestReport,
+    status: &PaperDaemonStatusSnapshot,
+) -> bool {
+    manifest.start_step_close_ts_ms.is_some()
+        || status.start_step_close_ts_ms.is_some()
+            && status.initial_last_applied_step_close_ts_ms.is_none()
+            && status.executed_steps == 0
+            && status
+                .next_due_step_close_ts_ms
+                .map(|next_due_step_close_ts_ms| Some(next_due_step_close_ts_ms) == status.start_step_close_ts_ms)
+                .unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,7 +285,7 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
 
-    use crate::paper_daemon::PaperDaemonStatus;
+    use crate::paper_daemon::{PaperDaemonStatus, PaperDaemonStatusSnapshot};
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -409,6 +492,9 @@ mod tests {
             ok: true,
             running,
             pid: 1234,
+            config_path: manifest.config_path.clone(),
+            paper_db: manifest.paper_db.clone(),
+            candles_db: manifest.candles_db.clone(),
             lock_path: manifest.lock_path.clone(),
             status_path: manifest.status_path.clone(),
             started_at_ms: updated_at_ms - 500,
@@ -417,12 +503,17 @@ mod tests {
             stop_requested: !running,
             dry_run: false,
             runtime_bootstrap: manifest.runtime_bootstrap.clone(),
+            btc_symbol: manifest.btc_symbol.clone(),
+            lookback_bars: manifest.lookback_bars,
+            explicit_symbols: manifest.symbols.clone(),
             watch_symbols_file: manifest.watch_symbols_file,
             symbols_file: manifest.symbols_file.clone(),
+            start_step_close_ts_ms: manifest.start_step_close_ts_ms,
             manifest_symbols: manifest.resume.active_symbols.clone(),
             last_active_symbols: manifest.resume.active_symbols.clone(),
             manifest_reload_count: 0,
             manifest_reload_failure_count: 0,
+            initial_last_applied_step_close_ts_ms: manifest.resume.last_applied_step_close_ts_ms,
             latest_common_close_ts_ms: manifest.resume.latest_common_close_ts_ms,
             next_due_step_close_ts_ms: manifest.resume.next_due_step_close_ts_ms,
             executed_steps: 0,
@@ -540,6 +631,286 @@ mod tests {
             .mismatch_reasons
             .iter()
             .any(|reason| reason.contains("config fingerprint mismatch")));
+    }
+
+    #[test]
+    fn status_reports_restart_required_for_profile_mismatch() {
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let (_dir, config_path, paper_db, candles_db, lock_path, status_path, manifest) =
+            status_fixture("30m", true);
+        let mut mismatched = manifest.clone();
+        mismatched.runtime_bootstrap.pipeline.profile = "parity_baseline".to_string();
+        write_status(
+            Path::new(&manifest.status_path),
+            &mismatched,
+            true,
+            Utc::now().timestamp_millis(),
+        );
+
+        let report = build_status(PaperStatusInput {
+            config: Some(&config_path),
+            live: false,
+            profile: Some("production"),
+            db: Some(&paper_db),
+            candles_db: Some(&candles_db),
+            symbols: &["ETH".to_string()],
+            symbols_file: None,
+            watch_symbols_file: false,
+            btc_symbol: "BTC",
+            lookback_bars: Some(200),
+            start_step_close_ts_ms: None,
+            lock_path: Some(&lock_path),
+            status_path: Some(&status_path),
+            stale_after_ms: Some(60_000),
+        })
+        .unwrap();
+
+        assert_eq!(report.service_state, PaperServiceState::RestartRequired);
+        assert!(!report.contract_matches_status);
+        assert!(report
+            .mismatch_reasons
+            .iter()
+            .any(|reason| reason.contains("runtime profile mismatch")));
+    }
+
+    #[test]
+    fn status_reports_restart_required_for_launch_input_mismatch() {
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let (_dir, config_path, paper_db, candles_db, lock_path, status_path, manifest) =
+            status_fixture("30m", true);
+        let mut mismatched = manifest.clone();
+        mismatched.paper_db = "/tmp/other-paper.db".to_string();
+        mismatched.candles_db = "/tmp/other-candles.db".to_string();
+        mismatched.btc_symbol = "ETH".to_string();
+        mismatched.lookback_bars = 123;
+        mismatched.symbols = vec!["BTC".to_string()];
+        mismatched.start_step_close_ts_ms = Some(1_773_426_000_000);
+        write_status(
+            Path::new(&manifest.status_path),
+            &mismatched,
+            true,
+            Utc::now().timestamp_millis(),
+        );
+
+        let report = build_status(PaperStatusInput {
+            config: Some(&config_path),
+            live: false,
+            profile: Some("production"),
+            db: Some(&paper_db),
+            candles_db: Some(&candles_db),
+            symbols: &["ETH".to_string()],
+            symbols_file: None,
+            watch_symbols_file: false,
+            btc_symbol: "BTC",
+            lookback_bars: Some(200),
+            start_step_close_ts_ms: Some(1_773_422_400_000),
+            lock_path: Some(&lock_path),
+            status_path: Some(&status_path),
+            stale_after_ms: Some(60_000),
+        })
+        .unwrap();
+
+        assert_eq!(report.service_state, PaperServiceState::RestartRequired);
+        assert!(report
+            .mismatch_reasons
+            .iter()
+            .any(|reason| reason.contains("paper db mismatch")));
+        assert!(report
+            .mismatch_reasons
+            .iter()
+            .any(|reason| reason.contains("candles db mismatch")));
+        assert!(report
+            .mismatch_reasons
+            .iter()
+            .any(|reason| reason.contains("btc symbol mismatch")));
+        assert!(report
+            .mismatch_reasons
+            .iter()
+            .any(|reason| reason.contains("lookback bars mismatch")));
+        assert!(report
+            .mismatch_reasons
+            .iter()
+            .any(|reason| reason.contains("explicit symbols mismatch")));
+        assert!(report
+            .mismatch_reasons
+            .iter()
+            .any(|reason| reason.contains("start-step-close-ts-ms mismatch")));
+    }
+
+    #[test]
+    fn status_reports_restart_required_for_unhealthy_running_status() {
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let (_dir, config_path, paper_db, candles_db, lock_path, status_path, manifest) =
+            status_fixture("30m", true);
+        write_status(
+            Path::new(&manifest.status_path),
+            &manifest,
+            true,
+            Utc::now().timestamp_millis(),
+        );
+
+        let mut status: PaperDaemonStatusSnapshot =
+            serde_json::from_slice(&fs::read(&status_path).unwrap()).unwrap();
+        status.ok = false;
+        status.errors = vec!["daemon step failed".to_string()];
+        fs::write(&status_path, serde_json::to_vec_pretty(&status).unwrap()).unwrap();
+
+        let report = build_status(PaperStatusInput {
+            config: Some(&config_path),
+            live: false,
+            profile: Some("production"),
+            db: Some(&paper_db),
+            candles_db: Some(&candles_db),
+            symbols: &["ETH".to_string()],
+            symbols_file: None,
+            watch_symbols_file: false,
+            btc_symbol: "BTC",
+            lookback_bars: Some(200),
+            start_step_close_ts_ms: None,
+            lock_path: Some(&lock_path),
+            status_path: Some(&status_path),
+            stale_after_ms: Some(60_000),
+        })
+        .unwrap();
+
+        assert_eq!(report.service_state, PaperServiceState::RestartRequired);
+        assert!(!report.ok);
+        assert!(!report.contract_matches_status);
+        assert!(!report.mismatch_reasons.is_empty());
+    }
+
+    #[test]
+    fn status_ignores_bootstrap_step_after_resume_handoff() {
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let (_dir, config_path, paper_db, candles_db, lock_path, status_path, manifest) =
+            status_fixture("30m", true);
+        write_status(
+            Path::new(&manifest.status_path),
+            &manifest,
+            true,
+            Utc::now().timestamp_millis(),
+        );
+
+        let mut status: PaperDaemonStatusSnapshot =
+            serde_json::from_slice(&fs::read(&status_path).unwrap()).unwrap();
+        status.start_step_close_ts_ms = Some(1_773_426_000_000);
+        status.next_due_step_close_ts_ms = Some(1_773_426_000_000);
+        status.initial_last_applied_step_close_ts_ms = Some(1_773_424_200_000);
+        status.executed_steps = 0;
+        fs::write(&status_path, serde_json::to_vec_pretty(&status).unwrap()).unwrap();
+
+        let report = build_status(PaperStatusInput {
+            config: Some(&config_path),
+            live: false,
+            profile: Some("production"),
+            db: Some(&paper_db),
+            candles_db: Some(&candles_db),
+            symbols: &["ETH".to_string()],
+            symbols_file: None,
+            watch_symbols_file: false,
+            btc_symbol: "BTC",
+            lookback_bars: Some(200),
+            start_step_close_ts_ms: None,
+            lock_path: Some(&lock_path),
+            status_path: Some(&status_path),
+            stale_after_ms: Some(60_000),
+        })
+        .unwrap();
+
+        assert_eq!(report.service_state, PaperServiceState::Running);
+        assert!(report.contract_matches_status);
+        assert!(report
+            .mismatch_reasons
+            .iter()
+            .all(|reason| !reason.contains("start-step-close-ts-ms mismatch")));
+    }
+
+    #[test]
+    fn status_requires_bootstrap_step_during_fresh_lane_handoff() {
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let (_dir, config_path, paper_db, candles_db, lock_path, status_path, manifest) =
+            status_fixture("30m", false);
+        write_status(
+            Path::new(&manifest.status_path),
+            &manifest,
+            true,
+            Utc::now().timestamp_millis(),
+        );
+
+        let mut status: PaperDaemonStatusSnapshot =
+            serde_json::from_slice(&fs::read(&status_path).unwrap()).unwrap();
+        status.start_step_close_ts_ms = Some(1_773_422_400_000);
+        status.next_due_step_close_ts_ms = Some(1_773_422_400_000);
+        status.executed_steps = 0;
+        fs::write(&status_path, serde_json::to_vec_pretty(&status).unwrap()).unwrap();
+
+        let report = build_status(PaperStatusInput {
+            config: Some(&config_path),
+            live: false,
+            profile: Some("production"),
+            db: Some(&paper_db),
+            candles_db: Some(&candles_db),
+            symbols: &["ETH".to_string()],
+            symbols_file: None,
+            watch_symbols_file: false,
+            btc_symbol: "BTC",
+            lookback_bars: Some(200),
+            start_step_close_ts_ms: None,
+            lock_path: Some(&lock_path),
+            status_path: Some(&status_path),
+            stale_after_ms: Some(60_000),
+        })
+        .unwrap();
+
+        assert_eq!(report.service_state, PaperServiceState::RestartRequired);
+        assert!(!report.contract_matches_status);
+        assert!(report
+            .mismatch_reasons
+            .iter()
+            .any(|reason| reason.contains("start-step-close-ts-ms mismatch")));
+    }
+
+    #[test]
+    fn status_treats_btc_symbol_case_insensitively() {
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let (_dir, config_path, paper_db, candles_db, lock_path, status_path, manifest) =
+            status_fixture("30m", true);
+        write_status(
+            Path::new(&manifest.status_path),
+            &manifest,
+            true,
+            Utc::now().timestamp_millis(),
+        );
+
+        let mut status: PaperDaemonStatusSnapshot =
+            serde_json::from_slice(&fs::read(&status_path).unwrap()).unwrap();
+        status.btc_symbol = "btc".to_string();
+        fs::write(&status_path, serde_json::to_vec_pretty(&status).unwrap()).unwrap();
+
+        let report = build_status(PaperStatusInput {
+            config: Some(&config_path),
+            live: false,
+            profile: Some("production"),
+            db: Some(&paper_db),
+            candles_db: Some(&candles_db),
+            symbols: &["ETH".to_string()],
+            symbols_file: None,
+            watch_symbols_file: false,
+            btc_symbol: "BTC",
+            lookback_bars: Some(200),
+            start_step_close_ts_ms: None,
+            lock_path: Some(&lock_path),
+            status_path: Some(&status_path),
+            stale_after_ms: Some(60_000),
+        })
+        .unwrap();
+
+        assert_eq!(report.service_state, PaperServiceState::Running);
+        assert!(report.contract_matches_status);
+        assert!(report
+            .mismatch_reasons
+            .iter()
+            .all(|reason| !reason.contains("btc symbol mismatch")));
     }
 
     #[test]
