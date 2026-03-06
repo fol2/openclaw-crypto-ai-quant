@@ -716,14 +716,17 @@ cargo run -p aiq-runtime -- \
   --db ./trading_engine.db \
   --candles-db ./candles_dbs/candles_30m.db \
   --target-symbol ETH \
+  --exported-at-ms 1772676900000 \
   --dry-run \
   --json
 ```
 
 Operational expectations:
 
-- `paper run-once` is single-shot and deterministic, not a continuous loop
+- `paper run-once` is single-shot, not a continuous loop
 - `--dry-run` should be the default diagnostic path during bring-up
+- `--candles-db` must contain both the target symbol and the BTC anchor symbol at the resolved `engine.interval`
+- default write timestamps follow execution time; pass `--exported-at-ms` when you need reproducible report/write artefacts for parity debugging
 - a healthy report shows restored paper state, decision/fill counts, projected action codes, and whether DB writes were skipped or applied
 
 ---

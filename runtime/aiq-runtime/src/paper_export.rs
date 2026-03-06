@@ -1,5 +1,5 @@
 use aiq_runtime_core::snapshot::{
-    SnapshotFile, SnapshotPosition, SnapshotRuntimeState, SNAPSHOT_V2,
+    SnapshotFile, SnapshotLastCloseInfo, SnapshotPosition, SnapshotRuntimeState, SNAPSHOT_V2,
 };
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension};
@@ -18,6 +18,7 @@ struct OpenPositionSeed {
     confidence: String,
     leverage: f64,
     margin_used: f64,
+    last_add_time_ms: i64,
 }
 
 pub fn export_paper_snapshot(db_path: &Path, exported_at_ms: i64) -> anyhow::Result<SnapshotFile> {
@@ -78,10 +79,13 @@ fn reconstruct_open_positions(conn: &Connection) -> anyhow::Result<Vec<SnapshotP
             entry_atr: row.get::<_, Option<f64>>(7)?.unwrap_or(0.0),
             leverage: row.get::<_, Option<f64>>(8)?.unwrap_or(1.0),
             margin_used: row.get::<_, Option<f64>>(9)?.unwrap_or(0.0),
+            last_add_time_ms: 0,
         })
     })?;
 
     let has_position_state = table_exists(conn, "position_state")?;
+    let has_last_funding_time =
+        has_position_state && table_column_exists(conn, "position_state", "last_funding_time")?;
     let mut positions = Vec::new();
 
     for seed in open_rows {
@@ -92,48 +96,93 @@ fn reconstruct_open_positions(conn: &Connection) -> anyhow::Result<Vec<SnapshotP
         }
 
         let mut trailing_sl = None;
+        let mut last_funding_time_ms = parse_timestamp_ms(seed.open_ts.as_deref());
         let mut adds_count = 0_u32;
         let mut tp1_taken = false;
-        let mut last_add_time_ms = 0_i64;
+        let mut last_add_time_ms = seed.last_add_time_ms;
         let mut entry_adx_threshold = 0.0;
 
         if has_position_state {
-            let state_row = conn
-                .query_row(
-                    r#"
-                    SELECT open_trade_id, trailing_sl, adds_count, tp1_taken, last_add_time, entry_adx_threshold
-                    FROM position_state
-                    WHERE symbol = ?
-                    "#,
-                    [&seed.symbol],
-                    |row| {
-                        Ok((
-                            row.get::<_, Option<i64>>(0)?,
-                            row.get::<_, Option<f64>>(1)?,
-                            row.get::<_, Option<i64>>(2)?,
-                            row.get::<_, Option<i64>>(3)?,
-                            row.get::<_, Option<i64>>(4)?,
-                            row.get::<_, Option<f64>>(5)?,
-                        ))
-                    },
-                )
-                .optional()?;
+            if has_last_funding_time {
+                let state_row = conn
+                    .query_row(
+                        r#"
+                        SELECT open_trade_id, trailing_sl, last_funding_time, adds_count, tp1_taken, last_add_time, entry_adx_threshold
+                        FROM position_state
+                        WHERE symbol = ?
+                        "#,
+                        [&seed.symbol],
+                        |row| {
+                            Ok((
+                                row.get::<_, Option<i64>>(0)?,
+                                row.get::<_, Option<f64>>(1)?,
+                                row.get::<_, Option<i64>>(2)?,
+                                row.get::<_, Option<i64>>(3)?,
+                                row.get::<_, Option<i64>>(4)?,
+                                row.get::<_, Option<i64>>(5)?,
+                                row.get::<_, Option<f64>>(6)?,
+                            ))
+                        },
+                    )
+                    .optional()?;
 
-            if let Some((
-                Some(open_trade_id),
-                db_trailing_sl,
-                db_adds,
-                db_tp1,
-                db_last_add,
-                db_adx,
-            )) = state_row
-            {
-                if open_trade_id == seed.open_id {
-                    trailing_sl = db_trailing_sl;
-                    adds_count = db_adds.unwrap_or(0).max(0) as u32;
-                    tp1_taken = db_tp1.unwrap_or(0) != 0;
-                    last_add_time_ms = db_last_add.unwrap_or(0);
-                    entry_adx_threshold = db_adx.unwrap_or(0.0);
+                if let Some((
+                    Some(open_trade_id),
+                    db_trailing_sl,
+                    db_last_funding,
+                    db_adds,
+                    db_tp1,
+                    db_last_add,
+                    db_adx,
+                )) = state_row
+                {
+                    if open_trade_id == seed.open_id {
+                        trailing_sl = db_trailing_sl;
+                        last_funding_time_ms = db_last_funding.unwrap_or(last_funding_time_ms);
+                        adds_count = db_adds.unwrap_or(0).max(0) as u32;
+                        tp1_taken = db_tp1.unwrap_or(0) != 0;
+                        last_add_time_ms = db_last_add.unwrap_or(0);
+                        entry_adx_threshold = db_adx.unwrap_or(0.0);
+                    }
+                }
+            } else {
+                let state_row = conn
+                    .query_row(
+                        r#"
+                        SELECT open_trade_id, trailing_sl, adds_count, tp1_taken, last_add_time, entry_adx_threshold
+                        FROM position_state
+                        WHERE symbol = ?
+                        "#,
+                        [&seed.symbol],
+                        |row| {
+                            Ok((
+                                row.get::<_, Option<i64>>(0)?,
+                                row.get::<_, Option<f64>>(1)?,
+                                row.get::<_, Option<i64>>(2)?,
+                                row.get::<_, Option<i64>>(3)?,
+                                row.get::<_, Option<i64>>(4)?,
+                                row.get::<_, Option<f64>>(5)?,
+                            ))
+                        },
+                    )
+                    .optional()?;
+
+                if let Some((
+                    Some(open_trade_id),
+                    db_trailing_sl,
+                    db_adds,
+                    db_tp1,
+                    db_last_add,
+                    db_adx,
+                )) = state_row
+                {
+                    if open_trade_id == seed.open_id {
+                        trailing_sl = db_trailing_sl;
+                        adds_count = db_adds.unwrap_or(0).max(0) as u32;
+                        tp1_taken = db_tp1.unwrap_or(0) != 0;
+                        last_add_time_ms = db_last_add.unwrap_or(0);
+                        entry_adx_threshold = db_adx.unwrap_or(0.0);
+                    }
                 }
             }
         }
@@ -155,6 +204,7 @@ fn reconstruct_open_positions(conn: &Connection) -> anyhow::Result<Vec<SnapshotP
             adds_count,
             tp1_taken,
             open_time_ms: parse_timestamp_ms(seed.open_ts.as_deref()),
+            last_funding_time_ms,
             last_add_time_ms,
             entry_adx_threshold,
         });
@@ -167,7 +217,7 @@ fn replay_add_reduce_fills(conn: &Connection, seed: &mut OpenPositionSeed) -> an
     let fallback_atr = seed.entry_atr;
     let mut stmt = conn.prepare(
         r#"
-        SELECT action, price, size, entry_atr
+        SELECT action, price, size, entry_atr, timestamp
         FROM trades
         WHERE symbol = ? AND id > ? AND action IN ('ADD', 'REDUCE')
         ORDER BY id ASC
@@ -180,11 +230,12 @@ fn replay_add_reduce_fills(conn: &Connection, seed: &mut OpenPositionSeed) -> an
             row.get::<_, f64>(1)?,
             row.get::<_, f64>(2)?,
             row.get::<_, Option<f64>>(3)?.unwrap_or(fallback_atr),
+            row.get::<_, Option<String>>(4)?,
         ))
     })?;
 
     for row in rows {
-        let (action, price, size, fill_atr) = row?;
+        let (action, price, size, fill_atr, timestamp) = row?;
         if action == "ADD" {
             let new_total = seed.net_size + size;
             if new_total > 0.0 {
@@ -192,6 +243,10 @@ fn replay_add_reduce_fills(conn: &Connection, seed: &mut OpenPositionSeed) -> an
                 seed.entry_atr = ((seed.entry_atr * seed.net_size) + (fill_atr * size)) / new_total;
             }
             seed.net_size = new_total;
+            let add_ts_ms = parse_timestamp_ms(timestamp.as_deref());
+            if add_ts_ms > 0 {
+                seed.last_add_time_ms = add_ts_ms;
+            }
         } else if action == "REDUCE" {
             seed.net_size -= size;
             if seed.net_size <= 0.0 {
@@ -232,10 +287,53 @@ fn load_runtime_markers(conn: &Connection) -> anyhow::Result<SnapshotRuntimeStat
         }
     }
 
+    let last_close_info_by_symbol = load_last_close_info(conn)?;
+
     Ok(SnapshotRuntimeState {
         entry_attempt_ms_by_symbol,
         exit_attempt_ms_by_symbol,
+        last_close_info_by_symbol,
     })
+}
+
+fn load_last_close_info(
+    conn: &Connection,
+) -> anyhow::Result<BTreeMap<String, SnapshotLastCloseInfo>> {
+    let mut last_close_info_by_symbol = BTreeMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT symbol, timestamp, type, reason FROM trades WHERE action = 'CLOSE' ORDER BY id DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+
+    for row in rows {
+        let (symbol, timestamp, side, reason) = row?;
+        let symbol = symbol.trim().to_ascii_uppercase();
+        if symbol.is_empty() || last_close_info_by_symbol.contains_key(&symbol) {
+            continue;
+        }
+        let timestamp_ms = parse_timestamp_ms(timestamp.as_deref());
+        let side = side.unwrap_or_default().trim().to_ascii_lowercase();
+        if timestamp_ms <= 0 || (side != "long" && side != "short") {
+            continue;
+        }
+        last_close_info_by_symbol.insert(
+            symbol,
+            SnapshotLastCloseInfo {
+                timestamp_ms,
+                side,
+                reason: reason.unwrap_or_default(),
+            },
+        );
+    }
+
+    Ok(last_close_info_by_symbol)
 }
 
 fn normalise_runtime_marker_ms(raw: Option<f64>, now_s: f64) -> Option<i64> {
@@ -269,6 +367,22 @@ fn table_exists(conn: &Connection, table_name: &str) -> anyhow::Result<bool> {
     Ok(row.is_some())
 }
 
+fn table_column_exists(
+    conn: &Connection,
+    table_name: &str,
+    column_name: &str,
+) -> anyhow::Result<bool> {
+    let pragma = format!("PRAGMA table_info({table_name})");
+    let mut stmt = conn.prepare(&pragma)?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for row in rows {
+        if row?.eq_ignore_ascii_case(column_name) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,6 +403,7 @@ mod tests {
                 type TEXT,
                 price REAL,
                 size REAL,
+                reason TEXT,
                 confidence TEXT,
                 entry_atr REAL,
                 leverage REAL,
@@ -299,6 +414,7 @@ mod tests {
                 symbol TEXT PRIMARY KEY,
                 open_trade_id INTEGER,
                 trailing_sl REAL,
+                last_funding_time INTEGER,
                 adds_count INTEGER,
                 tp1_taken INTEGER,
                 last_add_time INTEGER,
@@ -314,17 +430,22 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO trades VALUES (1, '2026-03-05T10:00:00+00:00', 'BTC', 'OPEN', 'LONG', 100.0, 2.0, 'high', 5.0, 4.0, 50.0, 1000.0)",
+            "INSERT INTO trades VALUES (1, '2026-03-05T10:00:00+00:00', 'BTC', 'OPEN', 'LONG', 100.0, 2.0, 'Signal Trigger', 'high', 5.0, 4.0, 50.0, 1000.0)",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO trades VALUES (2, '2026-03-05T10:10:00+00:00', 'BTC', 'ADD', 'LONG', 110.0, 1.0, 'high', 6.0, 4.0, 25.0, 1010.0)",
+            "INSERT INTO trades VALUES (2, '2026-03-05T10:10:00+00:00', 'BTC', 'ADD', 'LONG', 110.0, 1.0, 'Pyramid Add', 'high', 6.0, 4.0, 25.0, 1010.0)",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO position_state VALUES ('BTC', 1, 95.0, 1, 0, 1772676600000, 23.5)",
+            "INSERT INTO trades VALUES (3, '2026-03-05T09:55:00+00:00', 'ETH', 'CLOSE', 'SHORT', 200.0, 1.0, 'Signal Trigger', 'medium', 4.0, 3.0, 0.0, 995.0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO position_state VALUES ('BTC', 1, 95.0, 1772676555000, 1, 0, 1772676600000, 23.5)",
             [],
         )
         .unwrap();
@@ -343,6 +464,10 @@ mod tests {
         assert!((snapshot.positions[0].size - 3.0).abs() < 1e-9);
         assert!((snapshot.positions[0].entry_price - 103.33333333333333).abs() < 1e-9);
         assert_eq!(
+            snapshot.positions[0].last_funding_time_ms,
+            1_772_676_555_000
+        );
+        assert_eq!(
             snapshot
                 .runtime
                 .as_ref()
@@ -351,6 +476,17 @@ mod tests {
                 .get("BTC")
                 .copied(),
             Some(1_772_676_500_000)
+        );
+        assert_eq!(
+            snapshot
+                .runtime
+                .as_ref()
+                .unwrap()
+                .last_close_info_by_symbol
+                .get("ETH")
+                .unwrap()
+                .timestamp_ms,
+            1_772_704_500_000
         );
     }
 }

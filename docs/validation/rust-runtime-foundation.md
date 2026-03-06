@@ -36,7 +36,7 @@ cargo run -q -p aiq-runtime -- pipeline --json
 cargo run -q -p aiq-runtime -- snapshot validate --path <snapshot_v2_valid.json> --json
 cargo run -q -p aiq-runtime -- snapshot seed-paper --snapshot <snapshot_v2_valid.json> --target-db <paper_fixture.db> --strict-replace --json
 cargo run -q -p aiq-runtime -- paper doctor --db <paper_fixture.db> --json
-cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-db <candles_fixture.db> --target-symbol ETH --dry-run --json
+cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-db <candles_fixture.db> --target-symbol ETH --exported-at-ms 1772676900000 --dry-run --json
 ```
 
 ## Acceptance Checks
@@ -50,10 +50,11 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
 - `aiq-runtime` can export a v2 paper snapshot from SQLite and re-validate it through the same Rust snapshot contract.
 - `aiq-runtime` can seed a paper DB from a v2 snapshot and report deterministic write counts for `trades`, `position_state`, and `runtime_cooldowns`.
 - `aiq-runtime paper doctor` can restore Rust-owned paper state from the paper DB and emit a deterministic bootstrap report.
-- `aiq-runtime paper run-once` can restore paper state, execute one deterministic step, and report projected action codes and write-back counts.
+- `aiq-runtime paper run-once` can restore paper state, execute one single-shot step, and report projected action codes and write-back counts.
+- `paper run-once` reproducibility requires a fixed `--exported-at-ms`; otherwise write timestamps follow execution time for current DB parity.
 
 ## Fixture Guidance
 
 - Use a temporary SQLite DB with minimal `trades`, `position_state`, and `runtime_cooldowns` tables for paper export tests.
 - Use v2 JSON fixtures with `runtime.entry_attempt_ms_by_symbol` and `runtime.exit_attempt_ms_by_symbol` for init-state compatibility checks.
-- Keep fixtures deterministic: one open position, one add, and one runtime cooldown marker is enough for the foundation slice.
+- Keep fixtures deterministic: one open position, one add, one last-close marker, and one runtime cooldown marker is enough for the foundation slice.

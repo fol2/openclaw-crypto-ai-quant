@@ -34,6 +34,7 @@ Position fields:
 - `adds_count`
 - `tp1_taken`
 - `open_time_ms`
+- `last_funding_time_ms`
 - `last_add_time_ms`
 - `entry_adx_threshold`
 
@@ -41,6 +42,7 @@ Runtime fields:
 
 - `entry_attempt_ms_by_symbol`
 - `exit_attempt_ms_by_symbol`
+- `last_close_info_by_symbol`
 
 ## Validation Rules
 
@@ -88,7 +90,7 @@ cargo run --manifest-path Cargo.toml -p aiq-runtime -- \
 ## Paper Runtime Restore Rules
 
 - `aiq-runtime paper doctor` is the current Rust-owned bootstrap/restore shell.
-- `aiq-runtime paper run-once` extends the same restored state into one deterministic execution step.
+- `aiq-runtime paper run-once` extends the same restored state into one single-shot execution step.
 - The paper shell restores state from the paper DB through the same continuation contract:
   - `trades`
   - `position_state`
@@ -98,11 +100,13 @@ cargo run --manifest-path Cargo.toml -p aiq-runtime -- \
   - deterministic symbol normalisation
   - no duplicate restored symbols
   - runtime cooldown markers carried into the Rust-owned in-memory state
+  - last close metadata carried into kernel PESC state when present
 
 ## Paper Runtime Execution Rules
 
 - `paper run-once` must start from the same restored state that `paper doctor` reports.
 - The command is single-shot only in this phase; long-running paper loops remain out of scope.
+- Default write timestamps follow execution time for DB parity; pass `--exported-at-ms` when you need reproducible artefacts.
 - DB projection after a successful run-once step is limited to the Rust-owned paper projection surface for this phase.
 
 ## Backward Compatibility

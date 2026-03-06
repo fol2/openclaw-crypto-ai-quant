@@ -267,6 +267,11 @@ fn seed_trades_and_positions(
             ),
         )?;
         let open_trade_id = conn.last_insert_rowid();
+        let last_funding_time_ms = if position.last_funding_time_ms > 0 {
+            position.last_funding_time_ms
+        } else {
+            position_ts_ms
+        };
         conn.execute(
             "INSERT OR REPLACE INTO position_state
              (symbol, open_trade_id, trailing_sl, last_funding_time, adds_count, tp1_taken, last_add_time, entry_adx_threshold, updated_at)
@@ -275,7 +280,7 @@ fn seed_trades_and_positions(
                 position.symbol.as_str(),
                 open_trade_id,
                 position.trailing_sl,
-                position_ts_ms,
+                last_funding_time_ms,
                 i64::from(position.adds_count),
                 if position.tp1_taken { 1_i64 } else { 0_i64 },
                 position.last_add_time_ms,
@@ -293,7 +298,7 @@ fn seed_trades_and_positions(
                 position.symbol.as_str(),
                 open_trade_id,
                 position.trailing_sl,
-                position_ts_ms,
+                last_funding_time_ms,
                 i64::from(position.adds_count),
                 if position.tp1_taken { 1_i64 } else { 0_i64 },
                 position.last_add_time_ms,
@@ -385,12 +390,14 @@ mod tests {
                 adds_count: 1,
                 tp1_taken: false,
                 open_time_ms: 1_772_676_500_000,
+                last_funding_time_ms: 1_772_676_580_000,
                 last_add_time_ms: 1_772_676_600_000,
                 entry_adx_threshold: 23.5,
             }],
             runtime: Some(SnapshotRuntimeState {
                 entry_attempt_ms_by_symbol: [("BTC".to_string(), 1_772_676_500_000)].into(),
                 exit_attempt_ms_by_symbol: [("BTC".to_string(), 1_772_676_550_000)].into(),
+                last_close_info_by_symbol: Default::default(),
             }),
         }
     }
@@ -533,7 +540,7 @@ mod tests {
         assert_eq!(state_count, 1);
         assert_eq!(cooldown_count, 1);
         assert_eq!(open_ts, iso_from_ms(1_772_676_500_000));
-        assert_eq!(last_funding_time, 1_772_676_500_000);
+        assert_eq!(last_funding_time, 1_772_676_580_000);
     }
 
     #[test]

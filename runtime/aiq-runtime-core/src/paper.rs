@@ -18,6 +18,7 @@ pub struct PaperPositionState {
     pub adds_count: u32,
     pub tp1_taken: bool,
     pub open_time_ms: i64,
+    pub last_funding_time_ms: i64,
     pub last_add_time_ms: i64,
     pub entry_adx_threshold: f64,
 }
@@ -45,6 +46,24 @@ impl PaperBootstrapState {
             .exit_attempt_ms_by_symbol
             .iter()
             .map(|(symbol, ts)| (symbol.clone(), *ts))
+            .collect();
+        state.last_close_info = self
+            .runtime
+            .last_close_info_by_symbol
+            .iter()
+            .filter_map(|(symbol, close)| {
+                let side = close.side.trim().to_ascii_lowercase();
+                if symbol.trim().is_empty() || close.timestamp_ms <= 0 {
+                    return None;
+                }
+                if side != "long" && side != "short" {
+                    return None;
+                }
+                Some((
+                    symbol.clone(),
+                    (close.timestamp_ms, side, close.reason.clone()),
+                ))
+            })
             .collect();
 
         for (symbol, position) in self.positions {
@@ -75,7 +94,12 @@ impl PaperBootstrapState {
                     trailing_sl: position.trailing_sl,
                     mae_usd: 0.0,
                     mfe_usd: 0.0,
-                    last_funding_ms: Some(position.open_time_ms),
+                    last_funding_ms: Some(if position.last_funding_time_ms > 0 {
+                        position.last_funding_time_ms
+                    } else {
+                        position.open_time_ms
+                    })
+                    .filter(|timestamp_ms| *timestamp_ms > 0),
                 },
             );
         }
@@ -93,6 +117,7 @@ pub struct PaperBootstrapReport {
     pub position_count: usize,
     pub runtime_entry_markers: usize,
     pub runtime_exit_markers: usize,
+    pub runtime_close_markers: usize,
     pub restored_symbols: Vec<String>,
 }
 
@@ -135,6 +160,7 @@ pub fn restore_paper_state(
                 adds_count: position.adds_count,
                 tp1_taken: position.tp1_taken,
                 open_time_ms: position.open_time_ms,
+                last_funding_time_ms: position.last_funding_time_ms,
                 last_add_time_ms: position.last_add_time_ms,
                 entry_adx_threshold: position.entry_adx_threshold,
             },
@@ -157,6 +183,7 @@ pub fn restore_paper_state(
         position_count: state.positions.len(),
         runtime_entry_markers: runtime.entry_attempt_ms_by_symbol.len(),
         runtime_exit_markers: runtime.exit_attempt_ms_by_symbol.len(),
+        runtime_close_markers: runtime.last_close_info_by_symbol.len(),
         restored_symbols,
     };
 
@@ -166,7 +193,9 @@ pub fn restore_paper_state(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::{SnapshotFile, SnapshotPosition, SnapshotRuntimeState, SNAPSHOT_V2};
+    use crate::snapshot::{
+        SnapshotFile, SnapshotLastCloseInfo, SnapshotPosition, SnapshotRuntimeState, SNAPSHOT_V2,
+    };
     use std::collections::BTreeMap;
 
     fn sample_snapshot() -> SnapshotFile {
@@ -188,6 +217,7 @@ mod tests {
                 adds_count: 1,
                 tp1_taken: false,
                 open_time_ms: 1_772_676_500_000,
+                last_funding_time_ms: 1_772_676_580_000,
                 last_add_time_ms: 1_772_676_600_000,
                 entry_adx_threshold: 23.5,
             }],
@@ -197,6 +227,14 @@ mod tests {
                     1_772_676_500_000,
                 )]),
                 exit_attempt_ms_by_symbol: BTreeMap::from([("BTC".to_string(), 1_772_676_550_000)]),
+                last_close_info_by_symbol: BTreeMap::from([(
+                    "ETH".to_string(),
+                    SnapshotLastCloseInfo {
+                        timestamp_ms: 1_772_676_400_000,
+                        side: "short".to_string(),
+                        reason: "Signal Trigger".to_string(),
+                    },
+                )]),
             }),
         }
     }
@@ -211,6 +249,7 @@ mod tests {
             state.runtime.entry_attempt_ms_by_symbol["BTC"],
             1_772_676_500_000
         );
+        assert_eq!(report.runtime_close_markers, 1);
         assert!((report.balance - 1000.0).abs() < 1e-9);
     }
 
@@ -244,5 +283,17 @@ mod tests {
         assert_eq!(strategy_state.positions.len(), 1);
         assert_eq!(strategy_state.last_entry_ms["BTC"], 1_772_676_500_000);
         assert_eq!(strategy_state.last_exit_ms["BTC"], 1_772_676_550_000);
+        assert_eq!(
+            strategy_state.positions["BTC"].last_funding_ms,
+            Some(1_772_676_580_000)
+        );
+        assert_eq!(
+            strategy_state.last_close_info["ETH"],
+            (
+                1_772_676_400_000,
+                "short".to_string(),
+                "Signal Trigger".to_string(),
+            )
+        );
     }
 }

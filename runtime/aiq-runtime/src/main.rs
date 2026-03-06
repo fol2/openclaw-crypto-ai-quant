@@ -105,7 +105,7 @@ enum SnapshotCommand {
 enum PaperCommand {
     /// Restore paper state from the DB through the Rust snapshot/bootstrap path.
     Doctor(PaperDoctorArgs),
-    /// Execute one deterministic Rust paper step for a single symbol.
+    /// Execute one Rust paper step for a single symbol.
     RunOnce(PaperRunOnceArgs),
 }
 
@@ -116,7 +116,7 @@ struct PaperDoctorArgs {
     /// Paper DB path to inspect and restore.
     #[arg(long, default_value = "trading_engine.db")]
     db: PathBuf,
-    /// Override exported_at_ms for deterministic bootstrap reports.
+    /// Override exported_at_ms for reproducible bootstrap reports.
     #[arg(long)]
     exported_at_ms: Option<i64>,
 }
@@ -140,6 +140,9 @@ struct PaperRunOnceArgs {
     /// Number of bars to load for indicator warm-up.
     #[arg(long, default_value_t = 400)]
     lookback_bars: usize,
+    /// Override exported_at_ms for reproducible reports and write timestamps.
+    #[arg(long)]
+    exported_at_ms: Option<i64>,
     /// Resolve the step but do not write any DB projections.
     #[arg(long)]
     dry_run: bool,
@@ -351,7 +354,7 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                     .to_str()
                     .context("config path must be valid UTF-8")?,
                 Some(args.target_symbol.as_str()),
-                false,
+                args.common.live,
             )
             .map_err(anyhow::Error::msg)?;
             let runtime_bootstrap =
@@ -365,6 +368,7 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 symbol: &args.target_symbol,
                 btc_symbol: &args.btc_symbol,
                 lookback_bars: args.lookback_bars,
+                exported_at_ms: args.exported_at_ms,
                 dry_run: args.dry_run,
             })?;
 

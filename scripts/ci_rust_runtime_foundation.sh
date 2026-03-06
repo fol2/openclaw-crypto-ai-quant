@@ -63,6 +63,7 @@ payload = {
             "adds_count": 1,
             "tp1_taken": False,
             "open_time_ms": 1772676500000,
+            "last_funding_time_ms": 1772676580000,
             "last_add_time_ms": 1772676600000,
             "entry_adx_threshold": 23.5,
         }
@@ -70,6 +71,13 @@ payload = {
     "runtime": {
         "entry_attempt_ms_by_symbol": {"BTC": 1772676500000},
         "exit_attempt_ms_by_symbol": {"BTC": 1772676550000},
+        "last_close_info_by_symbol": {
+            "ETH": {
+                "timestamp_ms": 1772676400000,
+                "side": "short",
+                "reason": "Signal Trigger"
+            }
+        },
     },
 }
 snap_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -177,6 +185,15 @@ PY
 cargo run -q -p aiq-runtime -- snapshot validate --path /tmp/aiq-runtime-seed-snapshot.json --json >/tmp/aiq-runtime-snapshot-validate.json
 cargo run -q -p aiq-runtime -- snapshot seed-paper --snapshot /tmp/aiq-runtime-seed-snapshot.json --target-db /tmp/aiq-runtime-paper.db --strict-replace --json >/tmp/aiq-runtime-seed-paper.json
 cargo run -q -p aiq-runtime -- paper doctor --db /tmp/aiq-runtime-paper.db --json >/tmp/aiq-runtime-paper-doctor.json
-cargo run -q -p aiq-runtime -- paper run-once --db /tmp/aiq-runtime-paper.db --candles-db /tmp/aiq-runtime-candles.db --target-symbol ETH --dry-run --json >/tmp/aiq-runtime-paper-run-once.json
+cargo run -q -p aiq-runtime -- paper run-once --db /tmp/aiq-runtime-paper.db --candles-db /tmp/aiq-runtime-candles.db --target-symbol ETH --exported-at-ms 1772676900000 --dry-run --json >/tmp/aiq-runtime-paper-run-once.json
+
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+report = json.loads(Path("/tmp/aiq-runtime-paper-run-once.json").read_text(encoding="utf-8"))
+assert report["snapshot_exported_at_ms"] == 1772676900000
+assert report["symbol"] == "ETH"
+PY
 
 echo "[runtime-foundation] ok"
