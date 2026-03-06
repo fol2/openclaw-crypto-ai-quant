@@ -814,7 +814,7 @@ existing `paper cycle` contract alive between due steps, without claiming
 Python daemon cutover. This is also the first Rust lane that can optionally
 watch a symbols manifest file, pick up later watchlist refreshes without
 restarting, and retain the last good manifest if a reload is invalid or
-semantically torn.
+runtime-invalid malformed.
 
 ```bash
 cargo run -p aiq-runtime -- \
@@ -834,7 +834,7 @@ Operational expectations:
 - the daemon reuses the same restored state contract as `paper doctor` and the same rerun guard / DB write contract as `paper cycle`
 - `--start-step-close-ts-ms` is required only when no prior matching `runtime_cycle_steps` rows exist for the current config fingerprint / interval / live lane
 - `--symbols-file` loads the daemon manifest once at start-up; add `--watch-symbols-file` when that manifest should reload on file changes without restarting the process
-- reload failures do not clear the lane: the daemon retains the last good manifest and emits a warning instead, including semantically torn but still UTF-8-clean payloads that fail runtime validation
+- reload failures do not clear the lane: the daemon retains the last good manifest and emits a warning instead, including runtime-invalid but still UTF-8-clean payloads that fail daemon preflight
 - active symbols remain `manifest ∪ open paper positions`, so exit coverage is preserved while the manifest changes
 - `--lock-path` may be supplied when the Rust daemon lane needs an isolated lock namespace; changing the lock path does not widen DB projections
 - `--dry-run` remains the safest bring-up path while the surface is still opt-in

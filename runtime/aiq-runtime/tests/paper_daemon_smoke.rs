@@ -499,6 +499,74 @@ fn paper_daemon_noop_symbols_file_rewrite_does_not_increment_reload_count() {
 }
 
 #[test]
+fn paper_daemon_merged_manifest_noop_does_not_increment_reload_count() {
+    let fixture = prepare_idle_fixture();
+    let before = snapshot_db(&fixture.paper_db);
+    let symbols_file = fixture._dir.path().join("symbols-merged-noop.txt");
+    fs::write(&symbols_file, "").expect("initial symbols file should be created");
+
+    let mut command = runtime_command();
+    command
+        .arg("paper")
+        .arg("daemon")
+        .arg("--config")
+        .arg(config_path())
+        .arg("--db")
+        .arg(&fixture.paper_db)
+        .arg("--candles-db")
+        .arg(&fixture.candles_db)
+        .arg("--symbols")
+        .arg("BTC")
+        .arg("--symbols-file")
+        .arg(&symbols_file)
+        .arg("--watch-symbols-file")
+        .arg("--lock-path")
+        .arg(&fixture.lock_path)
+        .arg("--idle-sleep-ms")
+        .arg("20")
+        .arg("--max-idle-polls")
+        .arg("2")
+        .arg("--json")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let child = command
+        .spawn()
+        .expect("paper daemon merged-manifest noop smoke should spawn");
+    let child = wait_for_lock_file(child, &fixture.lock_path, Duration::from_secs(5));
+    thread::sleep(Duration::from_millis(80));
+    fs::write(&symbols_file, "BTC\n").expect("symbols file should rewrite to the explicit symbol");
+
+    let output = wait_with_timeout(child, Duration::from_secs(5));
+    assert!(
+        output.status.success(),
+        "paper daemon should stay clean across a merged-manifest no-op rewrite; output:\n{}",
+        combined_output(&output)
+    );
+
+    let report = parse_json_output(&output);
+    assert_eq!(
+        report
+            .pointer("/manifest_reload_count")
+            .and_then(Value::as_u64),
+        Some(0),
+        "a merged-manifest no-op rewrite should not count as a successful manifest reload",
+    );
+    assert_eq!(
+        report
+            .pointer("/manifest_symbols")
+            .and_then(Value::as_array),
+        Some(&vec![Value::String("BTC".to_string())]),
+        "effective manifest should remain unchanged across a merged-manifest no-op rewrite",
+    );
+    assert_eq!(
+        before,
+        snapshot_db(&fixture.paper_db),
+        "a merged-manifest no-op rewrite must not mutate the paper DB",
+    );
+}
+
+#[test]
 fn paper_daemon_keeps_open_positions_in_active_symbols_after_manifest_reload() {
     let fixture = prepare_idle_fixture();
     let before = snapshot_db(&fixture.paper_db);

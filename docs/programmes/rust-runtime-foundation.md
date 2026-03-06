@@ -56,17 +56,18 @@ daemon orchestration surface:
 - `paper daemon`
 - owns the outer scheduler instead of delegating long-running follow behaviour back to `paper loop`
 - reuses the same `paper cycle` step identity and rerun guard through `runtime_cycle_steps`
-- optional `--watch-symbols-file` reloads a symbols manifest without restarting, while retaining the last good manifest on invalid or semantically torn reloads
+- optional `--watch-symbols-file` reloads a symbols manifest without restarting, while retaining the last good manifest on invalid or runtime-invalid malformed reloads
 - active symbols remain `manifest ∪ open paper positions`, so exit lanes are not dropped during watchlist changes
 - long-running orchestration only; still no paper/systemd cutover
 
 The current delivered slice extends that again with a small daemon/watchlist
 ownership step:
 
-- `paper loop` and `paper daemon` re-read `--symbols-file` on each loop iteration
-- refreshed symbols affect the next eligible Rust cycle step without changing step identity
-- an initially empty symbols file is treated as an idle watchlist lane in follow mode rather than a hard startup failure
-- explicit `--symbols` are still unioned with the refreshed file contents
+- `paper loop` only loads `--symbols-file` once at start-up and stays a bounded shell
+- `paper daemon --watch-symbols-file` owns the later file-refresh path without changing step identity
+- an initially empty daemon watchlist is treated as an idle lane in follow mode rather than a hard startup failure
+- explicit `--symbols` are still unioned with the watched file contents
+- still no paper/systemd cutover
 
 The current delivered slice extends that again with a read-only Rust paper
 service manifest surface:
@@ -75,7 +76,6 @@ service manifest surface:
 - resolves the current daemon service contract from existing `AI_QUANT_*` env vars plus optional CLI overrides
 - derives the candle DB path from `AI_QUANT_CANDLES_DB_DIR` + resolved interval when needed
 - emits the resolved Rust daemon command, warnings, and runtime bootstrap metadata without executing any paper steps
-- still no paper/systemd cutover
 
 Python paper execution is still the active runtime path, and the opt-in Rust
 paper daemon wrapper does not change that. Python paper bootstrap is no longer

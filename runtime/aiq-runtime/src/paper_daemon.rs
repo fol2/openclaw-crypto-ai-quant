@@ -160,10 +160,18 @@ impl SymbolManifestState {
         paper_loop::normalise_symbols(&merged)
     }
 
-    fn accept_candidate(&mut self, file_symbols: Vec<String>) -> String {
+    fn accept_candidate(&mut self, file_symbols: Vec<String>) -> Option<String> {
+        let prior_manifest = self.current_symbols();
         self.file_symbols = file_symbols;
+        let next_manifest = self.current_symbols();
+        if next_manifest == prior_manifest {
+            return None;
+        }
         self.reload_count = self.reload_count.saturating_add(1);
-        format!("paper daemon reloaded symbols: {}", self.current_symbols().join(","))
+        Some(format!(
+            "paper daemon reloaded symbols: {}",
+            next_manifest.join(",")
+        ))
     }
 
     fn reject_candidate(&mut self, err: &anyhow::Error) -> String {
@@ -239,7 +247,11 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
                     &candidate_symbols,
                     input.btc_symbol,
                 ) {
-                    Ok(_) => warnings.push(manifest_state.accept_candidate(file_symbols)),
+                    Ok(_) => {
+                        if let Some(message) = manifest_state.accept_candidate(file_symbols) {
+                            warnings.push(message);
+                        }
+                    }
                     Err(err) => warnings.push(manifest_state.reject_candidate(&err)),
                 }
             }
