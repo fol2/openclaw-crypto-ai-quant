@@ -105,6 +105,7 @@ cargo run --manifest-path Cargo.toml -p aiq-runtime -- \
 - `aiq-runtime paper doctor` is the current Rust-owned bootstrap/restore shell.
 - `aiq-runtime paper run-once` extends the same restored state into one single-shot execution step.
 - `aiq-runtime paper loop` extends the same restored state into a bounded catch-up shell that repeatedly applies `paper cycle` steps until it reaches the latest common candle close or `--max-steps`.
+- `aiq-runtime paper daemon` keeps the same restored state alive across repeated follow polls, but it does not widen the continuation contract beyond the existing `paper loop` / `paper cycle` surfaces.
 - The paper shell restores state from the paper DB through the same continuation contract:
   - `trades`
   - `position_state`
@@ -122,15 +123,18 @@ cargo run --manifest-path Cargo.toml -p aiq-runtime -- \
 - `paper run-once` must start from the same restored state that `paper doctor` reports.
 - `paper cycle` must also start from the same restored state, but it executes one explicit multi-symbol cycle with a required `--step-close-ts-ms`.
 - `paper loop` must also start from the same restored state, but it derives each next due `step_close_ts_ms` from `runtime_cycle_steps` or the bootstrap `--start-step-close-ts-ms` on the first run, can optionally remain in follow mode while waiting for the next due step, and repeatedly reuses the `paper cycle` write path.
-- All three commands remain shell surfaces only in this phase; long-running daemon/systemd ownership remains out of scope.
+- `paper daemon` must also start from the same restored state, but it runs the same follow-mode `paper loop` discovery path as a long-running wrapper and keeps reusing the same `paper cycle` write path between idle polls.
+- `paper daemon` may take an explicit `--lock-path` to isolate an opt-in lane, but lock acquisition does not alter step identity, projection scope, or snapshot semantics.
+- All four commands remain additive Rust paper surfaces only in this phase; Python daemon/systemd ownership remains the active runtime path.
 - Default write timestamps follow execution time for DB parity; pass `--exported-at-ms` when you need reproducible artefacts.
-- DB projection after a successful `paper run-once`, `paper cycle`, or `paper loop` step is limited to the Rust-owned paper projection surface for this phase:
+- DB projection after a successful `paper run-once`, `paper cycle`, `paper loop`, or `paper daemon` step is limited to the Rust-owned paper projection surface for this phase:
   - `trades`
   - `position_state`
   - `runtime_cooldowns`
   - `runtime_last_closes`
 - `paper cycle` also records a rerun guard row in `runtime_cycle_steps` and fails closed if the same step identity is applied twice.
 - `paper loop` never bypasses that guard; it simply discovers the next unapplied step and calls the same `paper cycle` contract repeatedly.
+- `paper daemon` never bypasses that guard either; it simply keeps the same follow-mode loop alive between eligible steps.
 - follow-mode idle polls must not mutate the DB; they only re-check `runtime_cycle_steps` plus latest common candle closes before the next step becomes eligible.
 
 ## Backward Compatibility

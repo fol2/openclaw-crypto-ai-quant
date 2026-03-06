@@ -6,6 +6,7 @@ use rusqlite::{backup::Backup, params, Connection};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -28,6 +29,7 @@ pub struct PaperLoopInput<'a> {
     pub max_idle_polls: usize,
     pub exported_at_ms: Option<i64>,
     pub dry_run: bool,
+    pub stop_flag: Option<&'a AtomicBool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -58,6 +60,7 @@ pub struct PaperLoopReport {
     pub idle_polls: usize,
     pub runtime_bootstrap: RuntimeBootstrap,
     pub steps: Vec<PaperLoopStepReport>,
+    pub stop_requested: bool,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
 }
@@ -91,6 +94,7 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
     let mut warnings = Vec::new();
     let mut errors = Vec::new();
     let mut steps = Vec::new();
+    let mut stop_requested = false;
     let mut initial_last_applied_step_close_ts_ms = None;
     let mut interval = None;
     let mut latest_common_close_ts_ms = None;
@@ -98,6 +102,12 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
     let mut idle_polls = 0usize;
 
     loop {
+        if is_stop_requested(input.stop_flag) {
+            stop_requested = true;
+            warnings.push("paper loop stop requested".to_string());
+            break;
+        }
+
         if steps.len() >= input.max_steps {
             break;
         }
@@ -171,7 +181,7 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
                 break;
             }
 
-            thread::sleep(Duration::from_millis(input.idle_sleep_ms));
+            sleep_with_stop_flag(input.idle_sleep_ms, input.stop_flag);
             continue;
         }
         ensure_exact_step_candle_coverage(
@@ -240,6 +250,7 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
         idle_polls,
         runtime_bootstrap: input.runtime_bootstrap,
         steps,
+        stop_requested,
         warnings,
         errors,
     })
@@ -446,7 +457,10 @@ fn prepare_working_paper_db(paper_db: &Path, dry_run: bool) -> Result<WorkingPap
     );
     let temp_path = std::env::temp_dir().join(temp_name);
     let source = Connection::open(paper_db).with_context(|| {
-        format!("failed to open source paper db for dry-run: {}", paper_db.display())
+        format!(
+            "failed to open source paper db for dry-run: {}",
+            paper_db.display()
+        )
     })?;
     let mut dest = Connection::open(&temp_path).with_context(|| {
         format!(
@@ -525,6 +539,27 @@ fn interval_to_ms(interval: &str) -> Result<i64> {
     Ok(ms)
 }
 
+fn is_stop_requested(stop_flag: Option<&AtomicBool>) -> bool {
+    stop_flag
+        .map(|flag| flag.load(Ordering::SeqCst))
+        .unwrap_or(false)
+}
+
+fn sleep_with_stop_flag(duration_ms: u64, stop_flag: Option<&AtomicBool>) {
+    if duration_ms == 0 {
+        return;
+    }
+    let mut remaining_ms = duration_ms;
+    while remaining_ms > 0 {
+        if is_stop_requested(stop_flag) {
+            return;
+        }
+        let slice_ms = remaining_ms.min(100);
+        thread::sleep(Duration::from_millis(slice_ms));
+        remaining_ms -= slice_ms;
+    }
+}
+
 fn normalise_symbols(raw: &[String]) -> Vec<String> {
     let mut symbols = raw
         .iter()
@@ -541,6 +576,7 @@ mod tests {
     use super::*;
     use aiq_runtime_core::runtime::{build_bootstrap, RuntimeMode};
     use rusqlite::Connection;
+    use std::sync::atomic::AtomicBool;
     use tempfile::tempdir;
 
     const START_STEP_CLOSE_TS_MS: i64 = 1_773_422_400_000;
@@ -742,6 +778,7 @@ mod tests {
             max_idle_polls: 0,
             exported_at_ms: None,
             dry_run: false,
+            stop_flag: None,
         })
         .unwrap_err();
 
@@ -774,6 +811,7 @@ mod tests {
             max_idle_polls: 0,
             exported_at_ms: None,
             dry_run: false,
+            stop_flag: None,
         })
         .unwrap();
 
@@ -811,6 +849,7 @@ mod tests {
             max_idle_polls: 0,
             exported_at_ms: None,
             dry_run: false,
+            stop_flag: None,
         })
         .unwrap();
 
@@ -840,6 +879,7 @@ mod tests {
             max_idle_polls: 0,
             exported_at_ms: None,
             dry_run: false,
+            stop_flag: None,
         })
         .unwrap();
 
@@ -875,6 +915,7 @@ mod tests {
             max_idle_polls: 0,
             exported_at_ms: None,
             dry_run: true,
+            stop_flag: None,
         })
         .unwrap();
 
@@ -892,12 +933,10 @@ mod tests {
         assert_eq!(report.steps[1].trades_written, 0);
         assert!(!report.steps[0].runtime_step_recorded);
         assert!(!report.steps[1].runtime_step_recorded);
-        assert!(
-            report.steps[1]
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("tp1_taken blocks same-direction pyramiding"))
-        );
+        assert!(report.steps[1]
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("tp1_taken blocks same-direction pyramiding")));
 
         let conn = Connection::open(&paper_db).unwrap();
         let step_table_count: i64 = conn
@@ -934,13 +973,13 @@ mod tests {
             max_idle_polls: 0,
             exported_at_ms: None,
             dry_run: false,
+            stop_flag: None,
         })
         .unwrap_err();
 
-        assert!(
-            err.to_string()
-                .contains("requires an exact candle close at 1772833800000")
-        );
+        assert!(err
+            .to_string()
+            .contains("requires an exact candle close at 1772833800000"));
     }
 
     #[test]
@@ -969,6 +1008,7 @@ mod tests {
             max_idle_polls: 0,
             exported_at_ms: None,
             dry_run: false,
+            stop_flag: None,
         })
         .unwrap();
         assert_eq!(caught_up.executed_steps, 3);
@@ -989,6 +1029,7 @@ mod tests {
             max_idle_polls: 1,
             exported_at_ms: None,
             dry_run: false,
+            stop_flag: None,
         })
         .unwrap();
 
@@ -1007,5 +1048,65 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("follow exhausted")));
+    }
+
+    #[test]
+    fn loop_respects_stop_flag_before_follow_idle_sleep() {
+        let dir = tempdir().unwrap();
+        let paper_db = dir.path().join("paper.db");
+        let candles_db = dir.path().join("candles.db");
+        seed_paper_db(&paper_db);
+        seed_candles_db(&candles_db);
+
+        let bootstrap = runtime_bootstrap();
+        let cfg_path = base_cfg_path();
+        let caught_up = run_loop(PaperLoopInput {
+            runtime_bootstrap: bootstrap.clone(),
+            config_path: &cfg_path,
+            live: false,
+            paper_db: &paper_db,
+            candles_db: &candles_db,
+            explicit_symbols: &["ETH".to_string()],
+            btc_symbol: "BTC",
+            lookback_bars: 400,
+            start_step_close_ts_ms: Some(START_STEP_CLOSE_TS_MS),
+            max_steps: 3,
+            follow: false,
+            idle_sleep_ms: 0,
+            max_idle_polls: 0,
+            exported_at_ms: None,
+            dry_run: false,
+            stop_flag: None,
+        })
+        .unwrap();
+        assert_eq!(caught_up.executed_steps, 3);
+
+        let stop_flag = AtomicBool::new(true);
+        let report = run_loop(PaperLoopInput {
+            runtime_bootstrap: bootstrap,
+            config_path: &cfg_path,
+            live: false,
+            paper_db: &paper_db,
+            candles_db: &candles_db,
+            explicit_symbols: &["ETH".to_string()],
+            btc_symbol: "BTC",
+            lookback_bars: 400,
+            start_step_close_ts_ms: None,
+            max_steps: usize::MAX,
+            follow: true,
+            idle_sleep_ms: 1,
+            max_idle_polls: 0,
+            exported_at_ms: None,
+            dry_run: false,
+            stop_flag: Some(&stop_flag),
+        })
+        .unwrap();
+
+        assert_eq!(report.executed_steps, 0);
+        assert!(report.stop_requested);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("stop requested")));
     }
 }

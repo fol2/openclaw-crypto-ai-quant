@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Apply a canonical snapshot JSON to a paper database.
 
+Legacy/frozen compatibility path for Python paper seeding. Prefer
+`aiq-runtime snapshot seed-paper` for new bootstrap workflows.
+
 This creates synthetic seed rows so `PaperTrader.load_state()` reconstructs positions
 from the target DB in the same shape as live-canonical state.
 """

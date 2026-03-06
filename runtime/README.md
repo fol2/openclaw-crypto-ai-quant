@@ -10,7 +10,7 @@ Current contents:
 - `aiq-runtime`: foundation CLI for config loading, pipeline inspection, and
   runtime migration entrypoints
 
-Current runtime-owned paper surfaces:
+Current runtime-owned paper surfaces and the paired opt-in wrapper:
 
 | Command | Purpose | Notes |
 |---|---|---|
@@ -20,10 +20,13 @@ Current runtime-owned paper surfaces:
 | `paper run-once` | Execute one single-symbol Rust paper step | Single-shot shell |
 | `paper cycle` | Execute one repeatable multi-symbol Rust paper cycle | Explicit `--step-close-ts-ms`, not a daemon |
 | `paper loop` | Execute a bounded Rust paper catch-up loop | Resumes from `runtime_cycle_steps`, optional follow polling, still not a daemon |
+| `paper daemon` | Execute an opt-in long-running Rust paper orchestration wrapper | Wraps `paper loop --follow` and the same `paper cycle` write contract; not cutover |
 
-The runtime slice is still intentionally narrow. It does not yet own a long-running
-paper daemon or any live execution path, but it already establishes the contracts
-that later slices will build on:
+The runtime slice is still intentionally narrow. It does not yet own any live
+execution path, and Python paper execution is still the active production
+daemon. The paired opt-in `paper daemon` surface is only a long-running wrapper
+around the existing follow-mode loop / cycle contracts, but it already
+establishes the contracts that later slices will build on:
 
 - backward-compatible YAML loading through Rust
 - stable stage identifiers for parity debugging
@@ -32,3 +35,4 @@ that later slices will build on:
 - a single Rust-owned entry binary that future modes will converge on
 - repeatable paper step / cycle / loop contracts with explicit step identity
 - optional follow polling so Rust can stay alive after catch-up and wait for the next due step
+- an opt-in daemon wrapper that keeps the same follow-mode loop / cycle contracts alive without claiming service cutover

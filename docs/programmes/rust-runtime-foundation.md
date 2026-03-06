@@ -50,7 +50,17 @@ The current delivered slice extends that again with a bounded Rust paper catch-u
 - optional `--follow` mode keeps polling after catch-up instead of exiting immediately idle
 - still no daemon/systemd cutover
 
-Python paper execution is still the active runtime path, but Python paper bootstrap is no longer the only continuity surface.
+The current delivered slice extends that again with an opt-in Rust paper
+daemon orchestration surface:
+
+- `paper daemon`
+- wraps `paper loop --follow` instead of introducing a new paper write contract
+- reuses the same `paper cycle` step identity and rerun guard through `runtime_cycle_steps`
+- long-running orchestration only; still no paper/systemd cutover
+
+Python paper execution is still the active runtime path, and the opt-in Rust
+paper daemon wrapper does not change that. Python paper bootstrap is no longer
+the only continuity surface.
 
 ## Runtime Contract
 

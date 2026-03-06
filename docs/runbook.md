@@ -803,6 +803,34 @@ Follow-mode expectations:
 - `--idle-sleep-ms` controls how long the shell sleeps between no-work polls
 - `--max-idle-polls 0` means unbounded follow mode; any positive value caps the number of idle polls before the shell exits with a warning
 - `--max-idle-polls 1` exits on the first no-work poll, so `idle_polls` reports `1` and the shell does not sleep again before returning
+- this exact follow-mode contract is what the opt-in `paper daemon` wrapper reuses; it does not create a new step identity or write surface
+
+### Run the opt-in Rust paper daemon wrapper
+
+Use when: you want a long-running Rust paper orchestration lane that keeps the
+existing `paper loop --follow` / `paper cycle` contracts alive between due
+steps, without claiming Python daemon cutover.
+
+```bash
+cargo run -p aiq-runtime -- \
+  paper daemon \
+  --db ./trading_engine.db \
+  --candles-db ./candles_dbs/candles_30m.db \
+  --symbols ETH,SOL \
+  --start-step-close-ts-ms 1773424200000 \
+  --idle-sleep-ms 5000 \
+  --max-idle-polls 0 \
+  --json
+```
+
+Operational expectations:
+
+- `paper daemon` is opt-in orchestration only; Python `engine.daemon` remains the active paper runtime path in this phase
+- the wrapper reuses the same restored state contract as `paper doctor`, the same step discovery rules as `paper loop`, and the same rerun guard / DB write contract as `paper cycle`
+- `--start-step-close-ts-ms` is required only when no prior matching `runtime_cycle_steps` rows exist for the current config fingerprint / interval / live lane
+- `--lock-path` may be supplied when the Rust daemon lane needs an isolated lock namespace; changing the lock path does not widen DB projections
+- `--dry-run` remains the safest bring-up path while the surface is still opt-in
+- if you only need bounded catch-up or a short follow poll budget, use `paper loop` directly instead of `paper daemon`
 
 ---
 
