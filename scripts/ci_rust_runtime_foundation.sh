@@ -43,6 +43,7 @@ for path in (
     gap_bars_path,
     Path("/tmp/aiq-runtime-doctor.json"),
     Path("/tmp/aiq-runtime-pipeline.json"),
+    Path("/tmp/aiq-runtime-paper-manifest.json"),
     Path("/tmp/aiq-runtime-snapshot-validate.json"),
     Path("/tmp/aiq-runtime-seed-paper.json"),
     Path("/tmp/aiq-runtime-seed-paper-loop.json"),
@@ -234,6 +235,12 @@ conn.commit()
 conn.close()
 PY
 
+AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example \
+AI_QUANT_DB_PATH=/tmp/aiq-runtime-paper.db \
+AI_QUANT_CANDLES_DB_PATH=/tmp/aiq-runtime-candles.db \
+AI_QUANT_SYMBOLS=ETH,SOL \
+AI_QUANT_LOOKBACK_BARS=200 \
+cargo run -q -p aiq-runtime -- paper manifest --json >/tmp/aiq-runtime-paper-manifest.json
 cargo run -q -p aiq-runtime -- snapshot validate --path /tmp/aiq-runtime-seed-snapshot.json --json >/tmp/aiq-runtime-snapshot-validate.json
 cargo run -q -p aiq-runtime -- snapshot seed-paper --snapshot /tmp/aiq-runtime-seed-snapshot.json --target-db /tmp/aiq-runtime-paper.db --strict-replace --json >/tmp/aiq-runtime-seed-paper.json
 cargo run -q -p aiq-runtime -- snapshot seed-paper --snapshot /tmp/aiq-runtime-seed-snapshot.json --target-db /tmp/aiq-runtime-paper-loop.db --strict-replace --json >/tmp/aiq-runtime-seed-paper-loop.json
@@ -292,6 +299,11 @@ finally:
 assert recorded_steps == 3
 doctor = json.loads(Path("/tmp/aiq-runtime-paper-doctor.json").read_text(encoding="utf-8"))
 assert doctor["paper_bootstrap"]["runtime_close_markers"] == 1
+manifest = json.loads(Path("/tmp/aiq-runtime-paper-manifest.json").read_text(encoding="utf-8"))
+assert manifest["interval"] == "30m"
+assert manifest["lookback_bars"] == 200
+assert manifest["symbols"] == ["ETH", "SOL"]
+assert manifest["candles_db"] == "/tmp/aiq-runtime-candles.db"
 PY
 
 echo "[runtime-foundation] ok"

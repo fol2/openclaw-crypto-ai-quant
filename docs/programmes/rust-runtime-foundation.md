@@ -67,6 +67,14 @@ ownership step:
 - refreshed symbols affect the next eligible Rust cycle step without changing step identity
 - an initially empty symbols file is treated as an idle watchlist lane in follow mode rather than a hard startup failure
 - explicit `--symbols` are still unioned with the refreshed file contents
+
+The current delivered slice extends that again with a read-only Rust paper
+service manifest surface:
+
+- `paper manifest`
+- resolves the current daemon service contract from existing `AI_QUANT_*` env vars plus optional CLI overrides
+- derives the candle DB path from `AI_QUANT_CANDLES_DB_DIR` + resolved interval when needed
+- emits the resolved Rust daemon command, warnings, and runtime bootstrap metadata without executing any paper steps
 - still no paper/systemd cutover
 
 Python paper execution is still the active runtime path, and the opt-in Rust

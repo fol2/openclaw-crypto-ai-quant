@@ -9,7 +9,7 @@ Rust runtime replaces them.
 
 | Surface | Current Owner | Status | Rust Replacement |
 |---|---|---|---|
-| Python daemon orchestration | `engine/daemon.py`, `engine/core.py` | Active, frozen (paired opt-in Rust paper daemon with daemon-owned watchlist reload and outer scheduler; no cutover) | `aiq-runtime paper daemon` |
+| Python daemon orchestration | `engine/daemon.py`, `engine/core.py` | Active, frozen (paired opt-in Rust paper daemon owns the outer scheduler/watchlist reload path, and a read-only Rust service manifest exists, but no cutover) | `aiq-runtime paper daemon`, `aiq-runtime paper manifest` |
 | Python paper execution | `strategy/mei_alpha_v1.py` | Active, frozen (Rust bootstrap + run-once + cycle + loop shells plus paired daemon wrapper) | Rust paper mode |
 | Python live execution | `live/trader.py`, `exchange/executor.py` | Active, frozen | Rust live adapter |
 | Python OMS / risk runtime | `engine/oms.py`, `engine/risk.py` | Active, frozen | Rust persistence + risk layers |

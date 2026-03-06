@@ -20,8 +20,10 @@ contract. `paper loop` only loads an optional `--symbols-file` once at
 start-up; `paper daemon --watch-symbols-file` is the opt-in Rust surface that
 can watch for later symbols-file changes, retain the last good manifest on bad
 reloads, and keep running without a restart.
-Python paper execution remains the active production path, so this does not
-claim paper cutover.
+Rust also now ships a read-only `paper manifest` surface that resolves the
+current daemon service/env contract into a deterministic Rust launch plan
+before any systemd cutover. Python paper execution remains the active
+production path, so this does not claim paper cutover.
 
 ## Screenshots
 

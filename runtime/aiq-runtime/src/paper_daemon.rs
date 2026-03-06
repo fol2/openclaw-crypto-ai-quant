@@ -433,7 +433,7 @@ fn file_stamp(path: &Path) -> Result<FileStamp> {
     })
 }
 
-fn resolve_lock_path(lock_path: Option<&Path>, live: bool) -> PathBuf {
+pub(crate) fn resolve_lock_path(lock_path: Option<&Path>, live: bool) -> PathBuf {
     if let Some(lock_path) = lock_path {
         return lock_path.to_path_buf();
     }
