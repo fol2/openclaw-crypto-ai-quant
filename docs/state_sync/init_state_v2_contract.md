@@ -131,7 +131,7 @@ cargo run --manifest-path Cargo.toml -p aiq-runtime -- \
   - `runtime_last_closes`
 - `paper cycle` also records a rerun guard row in `runtime_cycle_steps` and fails closed if the same step identity is applied twice.
 - `paper loop` never bypasses that guard; it simply discovers the next unapplied step and calls the same `paper cycle` contract repeatedly.
-- follow-mode idle waits must not mutate the DB; they only re-check `runtime_cycle_steps` plus latest common candle closes before the next step becomes eligible.
+- follow-mode idle polls must not mutate the DB; they only re-check `runtime_cycle_steps` plus latest common candle closes before the next step becomes eligible.
 
 ## Backward Compatibility
 

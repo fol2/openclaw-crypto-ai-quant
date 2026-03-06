@@ -279,7 +279,8 @@ assert loop_idle["latest_common_close_ts_ms"] == 1773426000000
 loop_follow = json.loads(Path("/tmp/aiq-runtime-paper-loop-follow.json").read_text(encoding="utf-8"))
 assert loop_follow["executed_steps"] == 0
 assert loop_follow["follow"] is True
-assert loop_follow["idle_polls"] == 2
+assert loop_follow["idle_polls"] == 1
+assert sum(1 for warning in loop_follow["warnings"] if "paper loop idle:" in warning) == 1
 assert any("follow exhausted" in warning for warning in loop_follow["warnings"])
 assert "exact candle close" in Path("/tmp/aiq-runtime-paper-loop-gap.stderr").read_text(encoding="utf-8")
 doctor = json.loads(Path("/tmp/aiq-runtime-paper-doctor.json").read_text(encoding="utf-8"))
