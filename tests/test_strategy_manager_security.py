@@ -4,8 +4,11 @@ import os
 import time
 
 import pytest
+import yaml
 
 from engine.strategy_manager import StrategyManager
+from engine.utils import sha1_json
+from tools.config_id import config_id_from_yaml_text
 
 
 def test_check_yaml_path_rejects_world_writable_file(tmp_path) -> None:
@@ -53,9 +56,12 @@ def test_world_writable_reload_keeps_last_known_good_config(tmp_path) -> None:
     assert float(manager.get_config("BTC").get("trade", {}).get("leverage", 0.0)) == 9.0
 
 
-def test_snapshot_uses_resolver_owned_effective_config_identity(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_snapshot_recomputes_resolver_owned_identity_from_loaded_yaml(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     yaml_path = tmp_path / "effective.yaml"
-    yaml_path.write_text("global:\n  engine:\n    interval: 5m\n", encoding="utf-8")
+    yaml_text = "global:\n  engine:\n    interval: 5m\n"
+    yaml_path.write_text(yaml_text, encoding="utf-8")
 
     monkeypatch.setenv("AI_QUANT_EFFECTIVE_CONFIG_OWNER", "rust")
     monkeypatch.setenv("AI_QUANT_EFFECTIVE_CONFIG_MATERIALISED", "1")
@@ -70,6 +76,31 @@ def test_snapshot_uses_resolver_owned_effective_config_identity(tmp_path, monkey
     )
 
     snap = manager.snapshot
-    assert snap.config_id == "a" * 64
-    assert snap.overrides_sha1 == "b" * 64
+    assert snap.config_id == config_id_from_yaml_text(yaml_text)
+    assert snap.overrides_sha1 == sha1_json(yaml.safe_load(yaml_text))
     assert (manager.get_config("BTC").get("engine") or {}).get("interval") == "5m"
+
+
+def test_snapshot_identity_tracks_reloaded_yaml_contents(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    yaml_path = tmp_path / "effective.yaml"
+    yaml_path.write_text("global:\n  engine:\n    interval: 30m\n", encoding="utf-8")
+
+    monkeypatch.setenv("AI_QUANT_EFFECTIVE_CONFIG_OWNER", "rust")
+    monkeypatch.setenv("AI_QUANT_EFFECTIVE_CONFIG_MATERIALISED", "1")
+    monkeypatch.setenv("AI_QUANT_EFFECTIVE_CONFIG_ID", "a" * 64)
+    monkeypatch.setenv("AI_QUANT_EFFECTIVE_STRATEGY_SHA", "b" * 64)
+
+    manager = StrategyManager.bootstrap(
+        defaults={"trade": {}, "indicators": {}, "filters": {}, "thresholds": {}, "engine": {}},
+        yaml_path=str(yaml_path),
+        changelog_path=None,
+    )
+    first_config_id = manager.snapshot.config_id
+
+    yaml_path.write_text("global:\n  engine:\n    interval: 5m\n", encoding="utf-8")
+    future_ts = time.time() + 1.0
+    os.utime(yaml_path, (future_ts, future_ts))
+    manager.maybe_reload()
+
+    assert (manager.get_config("BTC").get("engine") or {}).get("interval") == "5m"
+    assert manager.snapshot.config_id != first_config_id

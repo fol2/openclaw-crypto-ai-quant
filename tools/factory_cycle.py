@@ -228,6 +228,9 @@ def _materialise_effective_config_via_rust(
 ) -> tuple[Path, Any]:
     """Materialise a run-scoped effective YAML via the shared Rust resolver."""
 
+    if not base_config_path.is_file():
+        raise FileNotFoundError(f"strategy config not found: {base_config_path}")
+
     env = dict(os.environ)
     for key in (
         "AI_QUANT_PROMOTED_ROLE",
@@ -241,7 +244,11 @@ def _materialise_effective_config_via_rust(
         env["AI_QUANT_STRATEGY_MODE"] = requested_mode
 
     resolved = resolve_effective_config(config_path=base_config_path, live=False, env=env)
-    if requested_mode and resolved.strategy_mode != requested_mode:
+    if requested_mode and (
+        resolved.strategy_mode != requested_mode
+        or Path(str(resolved.effective_yaml_path)).expanduser().resolve()
+        == Path(str(resolved.active_yaml_path)).expanduser().resolve()
+    ):
         raise KeyError(f"strategy mode not found in YAML: {requested_mode}")
 
     source_path = Path(str(resolved.effective_yaml_path)).expanduser().resolve()
@@ -1735,6 +1742,8 @@ def main(argv: list[str] | None = None) -> int:
             pass
 
     base_cfg_path = Path(str(args.config)).expanduser().resolve()
+    if not base_cfg_path.is_file():
+        raise FileNotFoundError(f"strategy config not found: {base_cfg_path}")
     deploy_targets = _resolve_deploy_targets(
         service=str(args.service),
         yaml_path=str(args.yaml_path),

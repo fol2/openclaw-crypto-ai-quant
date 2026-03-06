@@ -112,11 +112,11 @@ def test_materialise_effective_config_via_rust_fails_closed_on_unknown_mode(
             base_config_path=str(base),
             config_path=str(source),
             active_yaml_path=str(base),
-            effective_yaml_path=str(source),
+            effective_yaml_path=str(base),
             interval="30m",
             promoted_role=None,
             promoted_config_path=None,
-            strategy_mode=None,
+            strategy_mode="does_not_exist",
             strategy_mode_source=None,
             strategy_overrides_sha1="a" * 64,
             config_id="b" * 64,
@@ -127,6 +127,15 @@ def test_materialise_effective_config_via_rust_fails_closed_on_unknown_mode(
     with pytest.raises(KeyError, match="strategy mode not found"):
         _materialise_effective_config_via_rust(
             base_config_path=base,
+            output_path=tmp_path / "run" / "effective.yaml",
+            strategy_mode="primary",
+        )
+
+
+def test_materialise_effective_config_via_rust_rejects_missing_base_config(tmp_path) -> None:
+    with pytest.raises(FileNotFoundError, match="strategy config not found"):
+        _materialise_effective_config_via_rust(
+            base_config_path=tmp_path / "missing.yaml",
             output_path=tmp_path / "run" / "effective.yaml",
             strategy_mode="primary",
         )

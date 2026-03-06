@@ -89,6 +89,22 @@ struct PaperDoctorCommonArgs {
     symbol: Option<String>,
 }
 
+#[derive(Debug, Clone, Args)]
+struct PaperEffectiveConfigArgs {
+    /// Optional YAML config path override. Falls back to AI_QUANT_STRATEGY_YAML or strategy_overrides.yaml.
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Apply the live overlay when loading config.
+    #[arg(long)]
+    live: bool,
+    /// Optional symbol override for per-symbol config resolution.
+    #[arg(long)]
+    symbol: Option<String>,
+    /// Emit machine-readable JSON instead of a human summary.
+    #[arg(long)]
+    json: bool,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ModeArg {
     Live,
@@ -136,7 +152,7 @@ enum SnapshotCommand {
 #[derive(Debug, Subcommand)]
 enum PaperCommand {
     /// Resolve the shared Rust effective-config contract for paper control-plane consumers.
-    EffectiveConfig(PaperDoctorCommonArgs),
+    EffectiveConfig(PaperEffectiveConfigArgs),
     /// Resolve the Rust paper daemon service/env contract without executing any steps.
     Manifest(PaperManifestArgs),
     /// Resolve the current Rust paper daemon service state from the launch contract plus status file.
@@ -561,10 +577,10 @@ fn run_paper(command: PaperCommand) -> Result<()> {
     match command {
         PaperCommand::EffectiveConfig(args) => {
             let effective_config =
-                paper_config::PaperEffectiveConfig::resolve(Some(&args.paper.config))?;
-            let report = effective_config.build_report(args.symbol.as_deref(), args.paper.live)?;
+                paper_config::PaperEffectiveConfig::resolve(args.config.as_deref())?;
+            let report = effective_config.build_report(args.symbol.as_deref(), args.live)?;
 
-            if args.paper.json {
+            if args.json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!("paper effective-config ok");

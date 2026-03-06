@@ -281,10 +281,8 @@ class StrategyManager:
                 if overrides is not None:
                     self._yaml_mtime = yaml_mtime
                     self._overrides = overrides
-                    env_sha = _env_str("AI_QUANT_EFFECTIVE_STRATEGY_SHA", "").strip()
-                    env_cfg = _env_str("AI_QUANT_EFFECTIVE_CONFIG_ID", "").strip()
-                    self._overrides_sha1 = str(env_sha or overrides_sha1)
-                    self._config_id = str(env_cfg or config_id or "")
+                    self._overrides_sha1 = str(overrides_sha1)
+                    self._config_id = str(config_id or "")
                 elif not changelog_needs_reload:
                     return
 
@@ -301,6 +299,14 @@ class StrategyManager:
 
     def maybe_reload(self) -> None:
         self._load_if_needed(force=False)
+
+    def replace_yaml_path(self, yaml_path: str) -> None:
+        """Switch the watched YAML path and force an immediate reload."""
+        with self._lock:
+            self._yaml_path = str(yaml_path)
+            self._yaml_mtime = None
+            self._snapshot = None
+        self._load_if_needed(force=True)
 
     def get_config(self, symbol: str) -> dict[str, Any]:
         """Returns merged config for symbol."""

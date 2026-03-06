@@ -333,11 +333,15 @@ def _effective_config_command(
     config_path: str | Path | None,
     live: bool,
     symbol: str | None,
+    env: Mapping[str, str],
 ) -> list[str]:
     cmd = list(_runtime_command())
     cmd += ["paper", "effective-config", "--json"]
-    if config_path is not None:
-        cmd += ["--config", str(Path(config_path).expanduser().resolve())]
+    selected_config = config_path
+    if selected_config is None:
+        selected_config = str(env.get("AI_QUANT_STRATEGY_YAML", "") or "").strip() or None
+    if selected_config is not None:
+        cmd += ["--config", str(Path(selected_config).expanduser().resolve())]
     if live:
         cmd.append("--live")
     if symbol:
@@ -378,8 +382,13 @@ def resolve_effective_config(
 ) -> ResolvedEffectiveConfig:
     """Resolve the active Rust-owned effective config for paper consumers."""
 
-    command = _effective_config_command(config_path=config_path, live=live, symbol=symbol)
     runtime_env = dict(os.environ if env is None else env)
+    command = _effective_config_command(
+        config_path=config_path,
+        live=live,
+        symbol=symbol,
+        env=runtime_env,
+    )
     proc = subprocess.run(
         command,
         check=False,
