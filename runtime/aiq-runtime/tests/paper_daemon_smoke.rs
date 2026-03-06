@@ -436,6 +436,136 @@ symbols:
     );
 }
 
+#[test]
+fn paper_daemon_reloaded_single_symbol_updates_status_contract() {
+    let fixture = seed_empty_fixture();
+    let config_path = fixture._dir.path().join("strategy.yaml");
+    let symbols_file = fixture._dir.path().join("symbols.txt");
+    fs::write(
+        &config_path,
+        r#"
+global:
+  engine:
+    interval: 30m
+  runtime:
+    profile: production
+symbols:
+  ETH:
+    runtime:
+      profile: parity_baseline
+"#,
+    )
+    .unwrap();
+    fs::write(&symbols_file, "").unwrap();
+
+    let child = runtime_command()
+        .arg("paper")
+        .arg("daemon")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--db")
+        .arg(&fixture.paper_db)
+        .arg("--candles-db")
+        .arg(&fixture.candles_db)
+        .arg("--symbols-file")
+        .arg(&symbols_file)
+        .arg("--watch-symbols-file")
+        .arg("--lock-path")
+        .arg(&fixture.lock_path)
+        .arg("--status-path")
+        .arg(&fixture.status_path)
+        .arg("--start-step-close-ts-ms")
+        .arg(START_STEP_CLOSE_TS_MS.to_string())
+        .arg("--idle-sleep-ms")
+        .arg("20")
+        .arg("--max-idle-polls")
+        .arg("20")
+        .arg("--json")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("paper daemon empty-watchlist reload contract smoke should spawn");
+
+    let child = wait_for_lock_file(child, &fixture.lock_path, Duration::from_secs(5));
+    let _running_status = wait_for_status_file(&fixture.status_path, Duration::from_secs(5));
+    thread::sleep(Duration::from_millis(100));
+    fs::write(&symbols_file, "ETH\n").unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let status = read_json_file(&fixture.status_path);
+        let active_symbols = status
+            .pointer("/last_active_symbols")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if active_symbols == vec![Value::String("ETH".to_string())] {
+            break;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "paper daemon did not refresh to ETH before timeout; status={status}",
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let output = runtime_command()
+        .arg("paper")
+        .arg("status")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--db")
+        .arg(&fixture.paper_db)
+        .arg("--candles-db")
+        .arg(&fixture.candles_db)
+        .arg("--symbols-file")
+        .arg(&symbols_file)
+        .arg("--watch-symbols-file")
+        .arg("--lock-path")
+        .arg(&fixture.lock_path)
+        .arg("--status-path")
+        .arg(&fixture.status_path)
+        .arg("--stale-after-ms")
+        .arg("60000")
+        .arg("--json")
+        .output()
+        .expect("paper status empty-watchlist reload smoke should spawn");
+    assert!(
+        output.status.success(),
+        "paper status smoke should exit successfully after a symbols-file reload; output:\n{}",
+        combined_output(&output)
+    );
+
+    let report = parse_json_output(&output);
+    assert_eq!(
+        report.pointer("/service_state").and_then(Value::as_str),
+        Some("running"),
+        "reloaded single-symbol lanes should remain running once the daemon refreshes its bootstrap contract",
+    );
+    assert_eq!(
+        report
+            .pointer("/contract_matches_status")
+            .and_then(Value::as_bool),
+        Some(true),
+        "reloaded single-symbol lanes should not be marked drifted after the daemon recomputes the bootstrap contract",
+    );
+    assert_eq!(
+        report
+            .pointer("/manifest/runtime_bootstrap/pipeline/profile")
+            .and_then(Value::as_str),
+        Some("parity_baseline"),
+        "reloaded single-symbol lanes should expose the symbol-effective runtime profile",
+    );
+
+    send_sigterm(&child);
+    let stopped = wait_with_timeout(child, Duration::from_secs(5));
+    assert!(
+        stopped.status.success(),
+        "paper daemon should exit cleanly after the empty-watchlist reload smoke; output:\n{}",
+        combined_output(&stopped)
+    );
+}
+
 fn prepare_idle_fixture() -> Fixture {
     let fixture = seed_fixture();
     let output = loop_command(&fixture)

@@ -426,11 +426,8 @@ fn write_yaml_document(path: &Path, header: String, document: &serde_yaml::Value
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    let tmp_path = path.with_extension(format!(
-        "yaml.tmp.{}.{}",
-        std::process::id(),
-        unique_suffix
-    ));
+    let tmp_path =
+        path.with_extension(format!("yaml.tmp.{}.{}", std::process::id(), unique_suffix));
     fs::write(&tmp_path, payload)
         .with_context(|| format!("failed to write YAML: {}", tmp_path.display()))?;
     fs::rename(&tmp_path, path)

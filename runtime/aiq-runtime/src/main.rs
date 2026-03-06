@@ -848,7 +848,8 @@ fn run_paper(command: PaperCommand) -> Result<()> {
         PaperCommand::Loop(args) => {
             let effective_config =
                 paper_config::PaperEffectiveConfig::resolve(Some(&args.common.config))?;
-            let bootstrap_symbols = load_symbols(args.symbols.clone(), args.symbols_file.as_deref())?;
+            let bootstrap_symbols =
+                load_symbols(args.symbols.clone(), args.symbols_file.as_deref())?;
             let runtime_bootstrap = effective_config.build_runtime_bootstrap(
                 bootstrap_symbol_hint(&bootstrap_symbols),
                 args.common.live,
@@ -889,7 +890,8 @@ fn run_paper(command: PaperCommand) -> Result<()> {
         PaperCommand::Daemon(args) => {
             let effective_config =
                 paper_config::PaperEffectiveConfig::resolve(Some(&args.common.config))?;
-            let bootstrap_symbols = load_symbols(args.symbols.clone(), args.symbols_file.as_deref())?;
+            let bootstrap_symbols =
+                load_symbols(args.symbols.clone(), args.symbols_file.as_deref())?;
             let runtime_bootstrap = effective_config.build_runtime_bootstrap(
                 bootstrap_symbol_hint(&bootstrap_symbols),
                 args.common.live,
@@ -898,6 +900,7 @@ fn run_paper(command: PaperCommand) -> Result<()> {
             let report = paper_daemon::run_daemon(paper_daemon::PaperDaemonInput {
                 effective_config,
                 runtime_bootstrap,
+                profile_override: args.common.profile.as_deref(),
                 live: args.common.live,
                 paper_db: &args.db,
                 candles_db: &args.candles_db,
