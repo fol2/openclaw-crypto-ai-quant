@@ -19,7 +19,7 @@ now owns the long-running outer scheduler for the same `paper cycle` write
 contract. `paper loop` only loads an optional `--symbols-file` once at
 start-up; `paper daemon --watch-symbols-file` is the opt-in Rust surface that
 can watch for later symbols-file changes, retain the last good manifest on bad
-reloads, and keep running without a restart.
+or runtime-invalid malformed reloads, and keep running without a restart.
 Rust also now ships a read-only `paper manifest` surface that resolves the
 current daemon service/env contract into a deterministic Rust launch plan
 before any systemd cutover. Python paper execution remains the active
