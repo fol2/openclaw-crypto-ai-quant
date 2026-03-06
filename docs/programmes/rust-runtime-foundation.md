@@ -56,6 +56,7 @@ daemon orchestration surface:
 - `paper daemon`
 - wraps `paper loop --follow` instead of introducing a new paper write contract
 - reuses the same `paper cycle` step identity and rerun guard through `runtime_cycle_steps`
+- re-reads an optional `--symbols-file` between scheduling inspections so the Rust lane can wait on an empty watchlist and pick up later watchlist refreshes
 - long-running orchestration only; still no paper/systemd cutover
 
 Python paper execution is still the active runtime path, and the opt-in Rust

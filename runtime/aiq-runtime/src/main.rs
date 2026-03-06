@@ -228,7 +228,7 @@ struct PaperLoopArgs {
     /// Explicit symbol list (comma-delimited). Open paper positions are always included.
     #[arg(long, value_delimiter = ',')]
     symbols: Vec<String>,
-    /// Optional file containing one symbol per line.
+    /// Optional file containing one symbol per line. Reloaded before each scheduling inspection.
     #[arg(long)]
     symbols_file: Option<PathBuf>,
     /// BTC anchor symbol for alignment context.
@@ -273,7 +273,7 @@ struct PaperDaemonArgs {
     /// Explicit symbol list (comma-delimited). Open paper positions are always included.
     #[arg(long, value_delimiter = ',')]
     symbols: Vec<String>,
-    /// Optional file containing one symbol per line. Loaded once at startup.
+    /// Optional file containing one symbol per line. Reloaded before each scheduling inspection.
     #[arg(long)]
     symbols_file: Option<PathBuf>,
     /// BTC anchor symbol for alignment context.
@@ -486,9 +486,12 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 args.common.paper.live,
             )
             .map_err(anyhow::Error::msg)?;
-            let runtime_bootstrap =
-                build_bootstrap(&config, RuntimeMode::Paper, args.common.paper.profile.as_deref())
-                    .map_err(anyhow::Error::msg)?;
+            let runtime_bootstrap = build_bootstrap(
+                &config,
+                RuntimeMode::Paper,
+                args.common.paper.profile.as_deref(),
+            )
+            .map_err(anyhow::Error::msg)?;
             let snapshot = paper_export::export_paper_snapshot(
                 &args.db,
                 args.exported_at_ms
@@ -612,14 +615,14 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 args.common.profile.as_deref(),
             )
             .map_err(anyhow::Error::msg)?;
-            let symbols = load_symbols(args.symbols, args.symbols_file.as_deref())?;
             let report = paper_loop::run_loop(paper_loop::PaperLoopInput {
                 runtime_bootstrap,
                 config_path: &config_path,
                 live: args.common.live,
                 paper_db: &args.db,
                 candles_db: &args.candles_db,
-                explicit_symbols: &symbols,
+                explicit_symbols: &args.symbols,
+                symbols_file: args.symbols_file.as_deref(),
                 btc_symbol: &args.btc_symbol,
                 lookback_bars: args.lookback_bars,
                 start_step_close_ts_ms: args.start_step_close_ts_ms,
@@ -660,14 +663,14 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 args.common.profile.as_deref(),
             )
             .map_err(anyhow::Error::msg)?;
-            let symbols = load_symbols(args.symbols, args.symbols_file.as_deref())?;
             let report = paper_daemon::run_daemon(paper_daemon::PaperDaemonInput {
                 runtime_bootstrap,
                 config_path: &config_path,
                 live: args.common.live,
                 paper_db: &args.db,
                 candles_db: &args.candles_db,
-                explicit_symbols: &symbols,
+                explicit_symbols: &args.symbols,
+                symbols_file: args.symbols_file.as_deref(),
                 btc_symbol: &args.btc_symbol,
                 lookback_bars: args.lookback_bars,
                 start_step_close_ts_ms: args.start_step_close_ts_ms,
