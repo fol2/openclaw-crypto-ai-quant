@@ -10,12 +10,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use crate::paper_config::PaperEffectiveConfig;
 use crate::paper_cycle::{self, PaperCycleInput};
 use crate::paper_export;
 
 pub struct PaperLoopInput<'a> {
+    pub effective_config: PaperEffectiveConfig,
     pub runtime_bootstrap: RuntimeBootstrap,
-    pub config_path: &'a Path,
     pub live: bool,
     pub paper_db: &'a Path,
     pub candles_db: &'a Path,
@@ -116,7 +117,7 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
 
         let maybe_context = inspect_loop_context(
             &input.runtime_bootstrap,
-            input.config_path,
+            &input.effective_config,
             input.live,
             working_paper_db.path(),
             input.candles_db,
@@ -195,8 +196,8 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
         )?;
 
         let cycle_report = paper_cycle::run_cycle(PaperCycleInput {
+            effective_config: input.effective_config.clone(),
             runtime_bootstrap: input.runtime_bootstrap.clone(),
-            config_path: input.config_path,
             live: input.live,
             paper_db: working_paper_db.path(),
             candles_db: input.candles_db,
@@ -218,7 +219,7 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
 
     let final_context = inspect_loop_context(
         &input.runtime_bootstrap,
-        input.config_path,
+        &input.effective_config,
         input.live,
         working_paper_db.path(),
         input.candles_db,
@@ -298,7 +299,7 @@ impl Drop for WorkingPaperDb {
 
 pub(crate) fn inspect_loop_context(
     runtime_bootstrap: &RuntimeBootstrap,
-    config_path: &Path,
+    effective_config: &PaperEffectiveConfig,
     live: bool,
     paper_db: &Path,
     candles_db: &Path,
@@ -316,7 +317,7 @@ pub(crate) fn inspect_loop_context(
         return Ok(None);
     }
 
-    let interval = resolve_shared_interval(config_path, &active_symbols, live)?;
+    let interval = resolve_shared_interval(effective_config, &active_symbols, live)?;
     let latest_common_close_ts_ms =
         latest_common_close_ts_ms(candles_db, &interval, &active_symbols, btc_symbol)?;
     let last_applied_step_close_ts_ms = load_last_applied_step_close_ts_ms(
@@ -353,34 +354,11 @@ pub(crate) fn resolve_symbols_for_inspection(
 }
 
 pub(crate) fn resolve_shared_interval(
-    config_path: &Path,
+    effective_config: &PaperEffectiveConfig,
     active_symbols: &[String],
     live: bool,
 ) -> Result<String> {
-    let mut interval = None;
-    for symbol in active_symbols {
-        let config = bt_core::config::load_config_checked(
-            config_path
-                .to_str()
-                .context("config path must be valid UTF-8")?,
-            Some(symbol),
-            live,
-        )
-        .map_err(anyhow::Error::msg)?;
-        match interval.as_deref() {
-            Some(current_interval) if current_interval != config.engine.interval => {
-                anyhow::bail!(
-                    "paper loop requires a shared interval; {} resolved to {} but prior symbols use {}",
-                    symbol,
-                    config.engine.interval,
-                    current_interval
-                );
-            }
-            None => interval = Some(config.engine.interval.clone()),
-            _ => {}
-        }
-    }
-    interval.context("paper loop requires at least one active symbol interval")
+    effective_config.resolve_shared_interval(active_symbols, live)
 }
 
 fn latest_common_close_ts_ms(
@@ -832,6 +810,10 @@ mod tests {
         build_bootstrap(&cfg, RuntimeMode::Paper, None).unwrap()
     }
 
+    fn effective_config(path: &Path) -> PaperEffectiveConfig {
+        PaperEffectiveConfig::resolve(Some(path)).unwrap()
+    }
+
     #[test]
     fn loop_requires_bootstrap_start_when_no_prior_step_exists() {
         let dir = tempdir().unwrap();
@@ -841,8 +823,8 @@ mod tests {
         seed_candles_db(&candles_db);
 
         let err = run_loop(PaperLoopInput {
+            effective_config: effective_config(&base_cfg_path()),
             runtime_bootstrap: runtime_bootstrap(),
-            config_path: &base_cfg_path(),
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -875,8 +857,8 @@ mod tests {
         seed_candles_db(&candles_db);
 
         let first = run_loop(PaperLoopInput {
+            effective_config: effective_config(&base_cfg_path()),
             runtime_bootstrap: runtime_bootstrap(),
-            config_path: &base_cfg_path(),
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -914,8 +896,8 @@ mod tests {
         conn.close().unwrap();
 
         let second = run_loop(PaperLoopInput {
+            effective_config: effective_config(&base_cfg_path()),
             runtime_bootstrap: runtime_bootstrap(),
-            config_path: &base_cfg_path(),
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -945,8 +927,8 @@ mod tests {
         );
 
         let third = run_loop(PaperLoopInput {
+            effective_config: effective_config(&base_cfg_path()),
             runtime_bootstrap: runtime_bootstrap(),
-            config_path: &base_cfg_path(),
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -982,8 +964,8 @@ mod tests {
         seed_candles_db(&candles_db);
 
         let report = run_loop(PaperLoopInput {
+            effective_config: effective_config(&base_cfg_path()),
             runtime_bootstrap: runtime_bootstrap(),
-            config_path: &base_cfg_path(),
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -1041,8 +1023,8 @@ mod tests {
         seed_gapped_candles_db(&candles_db);
 
         let err = run_loop(PaperLoopInput {
+            effective_config: effective_config(&base_cfg_path()),
             runtime_bootstrap: runtime_bootstrap(),
-            config_path: &base_cfg_path(),
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -1077,8 +1059,8 @@ mod tests {
         let bootstrap = runtime_bootstrap();
         let cfg_path = base_cfg_path();
         let caught_up = run_loop(PaperLoopInput {
+            effective_config: effective_config(&cfg_path),
             runtime_bootstrap: bootstrap.clone(),
-            config_path: &cfg_path,
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -1099,8 +1081,8 @@ mod tests {
         assert_eq!(caught_up.executed_steps, 3);
 
         let report = run_loop(PaperLoopInput {
+            effective_config: effective_config(&cfg_path),
             runtime_bootstrap: bootstrap,
-            config_path: &cfg_path,
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -1147,8 +1129,8 @@ mod tests {
         std::fs::write(&symbols_file, "ETH\n").unwrap();
 
         let report = run_loop(PaperLoopInput {
+            effective_config: effective_config(&base_cfg_path()),
             runtime_bootstrap: runtime_bootstrap(),
-            config_path: &base_cfg_path(),
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -1183,8 +1165,8 @@ mod tests {
         let bootstrap = runtime_bootstrap();
         let cfg_path = base_cfg_path();
         let caught_up = run_loop(PaperLoopInput {
+            effective_config: effective_config(&cfg_path),
             runtime_bootstrap: bootstrap.clone(),
-            config_path: &cfg_path,
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -1206,8 +1188,8 @@ mod tests {
 
         let stop_flag = AtomicBool::new(true);
         let report = run_loop(PaperLoopInput {
+            effective_config: effective_config(&cfg_path),
             runtime_bootstrap: bootstrap,
-            config_path: &cfg_path,
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,

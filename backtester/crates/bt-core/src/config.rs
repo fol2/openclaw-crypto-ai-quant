@@ -1,7 +1,7 @@
 //! Strategy configuration for the backtesting simulator.
 //!
 //! Mirrors the Python `_DEFAULT_STRATEGY_CONFIG` dict from `mei_alpha_v1.py` (lines 226-408).
-//! YAML merge hierarchy: defaults <- global <- per-symbol <- live.
+//! YAML merge hierarchy: defaults <- global <- per-symbol <- live <- modes.<mode>.
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -694,6 +694,8 @@ struct YamlRoot {
     symbols: serde_yaml::Value,
     #[serde(default)]
     live: serde_yaml::Value,
+    #[serde(default)]
+    modes: serde_yaml::Value,
 }
 
 // ---------------------------------------------------------------------------
@@ -724,6 +726,12 @@ fn deep_merge(base: &mut serde_yaml::Value, overlay: &serde_yaml::Value) {
     }
 }
 
+/// Public wrapper for runtime-owned config composition that needs the same
+/// merge semantics as the file-backed loader.
+pub fn deep_merge_yaml_value(base: &mut serde_yaml::Value, overlay: &serde_yaml::Value) {
+    deep_merge(base, overlay);
+}
+
 /// Serialize `StrategyConfig::default()` to a `serde_yaml::Value` so we have a
 /// base document with every key present for merging.
 fn defaults_as_value() -> serde_yaml::Value {
@@ -732,6 +740,22 @@ fn defaults_as_value() -> serde_yaml::Value {
     let json_str = serde_json::to_string(&SerializableConfig::from(StrategyConfig::default()))
         .expect("default config serialises to JSON");
     serde_yaml::from_str(&json_str).expect("JSON round-trip to YAML Value")
+}
+
+pub fn normalise_strategy_mode_key(raw: &str) -> Option<String> {
+    let mode = raw.trim().to_ascii_lowercase();
+    if mode.is_empty() {
+        return None;
+    }
+
+    let normalised = match mode.as_str() {
+        "mode1" | "m1" => "primary",
+        "mode2" | "m2" => "fallback",
+        "mode3" | "m3" | "safety" | "safe" => "conservative",
+        "halt" | "pause" | "paused" => "flat",
+        _ => mode.as_str(),
+    };
+    Some(normalised.to_string())
 }
 
 /// Deterministic config fingerprint for audit/reporting.
@@ -1014,15 +1038,11 @@ fn pipeline_to_json(p: &PipelineConfig) -> serde_json::Value {
 ///
 /// Merge hierarchy:
 ///
-///   defaults <- global <- symbols.<symbol> <- live (if `is_live`)
+///   defaults <- global <- symbols.<symbol> <- live (if `is_live`) <- modes.<mode>
 ///
 /// Returns a descriptive error when the file is missing, unreadable, invalid YAML,
 /// or fails typed deserialization after merge.
-pub fn load_config_checked(
-    yaml_path: &str,
-    symbol: Option<&str>,
-    is_live: bool,
-) -> Result<StrategyConfig, String> {
+pub fn load_yaml_document_checked(yaml_path: &str) -> Result<serde_yaml::Value, String> {
     let path = Path::new(yaml_path);
     match std::fs::metadata(path) {
         Ok(_) => {}
@@ -1046,12 +1066,75 @@ pub fn load_config_checked(
         }
     };
 
-    let root: YamlRoot = match serde_yaml::from_str(&raw) {
-        Ok(r) => r,
-        Err(e) => {
-            return Err(format!("failed to parse YAML {yaml_path}: {e}"));
-        }
+    serde_yaml::from_str(&raw).map_err(|e| format!("failed to parse YAML {yaml_path}: {e}"))
+}
+
+fn symbol_overrides<'a>(
+    symbols: &'a serde_yaml::Value,
+    symbol: &str,
+) -> Option<&'a serde_yaml::Value> {
+    let serde_yaml::Value::Mapping(symbols_map) = symbols else {
+        return None;
     };
+    let sym_key = serde_yaml::Value::String(symbol.to_string());
+    let sym_key_upper = serde_yaml::Value::String(symbol.to_uppercase());
+    symbols_map
+        .get(&sym_key)
+        .or_else(|| symbols_map.get(&sym_key_upper))
+}
+
+fn apply_mode_overrides(
+    merged: &mut serde_yaml::Value,
+    root: &YamlRoot,
+    symbol: Option<&str>,
+    strategy_mode: Option<&str>,
+) {
+    let Some(mode_key) = strategy_mode.and_then(normalise_strategy_mode_key) else {
+        return;
+    };
+    let serde_yaml::Value::Mapping(modes_map) = &root.modes else {
+        return;
+    };
+
+    let mode_value = modes_map
+        .get(serde_yaml::Value::String(mode_key.clone()))
+        .or_else(|| modes_map.get(serde_yaml::Value::String(mode_key.to_uppercase())))
+        .or_else(|| modes_map.get(serde_yaml::Value::String(mode_key.to_ascii_lowercase())));
+    let Some(mode_value) = mode_value else {
+        return;
+    };
+
+    if let serde_yaml::Value::Mapping(mode_map) = mode_value {
+        let global_key = serde_yaml::Value::String("global".to_string());
+        let symbols_key = serde_yaml::Value::String("symbols".to_string());
+        let has_structured_overrides =
+            mode_map.contains_key(&global_key) || mode_map.contains_key(&symbols_key);
+        if has_structured_overrides {
+            if let Some(global_overrides) = mode_map.get(&global_key) {
+                deep_merge(merged, global_overrides);
+            }
+            if let Some(symbol) = symbol {
+                if let Some(symbols_value) = mode_map.get(&symbols_key) {
+                    if let Some(symbol_overrides) = symbol_overrides(symbols_value, symbol) {
+                        deep_merge(merged, symbol_overrides);
+                    }
+                }
+            }
+            return;
+        }
+    }
+
+    deep_merge(merged, mode_value);
+}
+
+pub fn load_config_document_checked(
+    document: &serde_yaml::Value,
+    symbol: Option<&str>,
+    is_live: bool,
+    strategy_mode: Option<&str>,
+) -> Result<StrategyConfig, String> {
+    let root: YamlRoot = serde_yaml::from_value(document.clone())
+        .map_err(|e| format!("failed to parse YAML document: {e}"))?;
 
     // Start with full defaults as a Value tree.
     let mut merged = defaults_as_value();
@@ -1063,16 +1146,8 @@ pub fn load_config_checked(
 
     // Layer 2: per-symbol overrides.
     if let Some(sym) = symbol {
-        if let serde_yaml::Value::Mapping(ref symbols_map) = root.symbols {
-            // Try exact match first, then uppercase.
-            let sym_key = serde_yaml::Value::String(sym.to_string());
-            let sym_key_upper = serde_yaml::Value::String(sym.to_uppercase());
-            let sym_val = symbols_map
-                .get(&sym_key)
-                .or_else(|| symbols_map.get(&sym_key_upper));
-            if let Some(sym_overrides) = sym_val {
-                deep_merge(&mut merged, sym_overrides);
-            }
+        if let Some(sym_overrides) = symbol_overrides(&root.symbols, sym) {
+            deep_merge(&mut merged, sym_overrides);
         }
     }
 
@@ -1081,7 +1156,9 @@ pub fn load_config_checked(
         deep_merge(&mut merged, &root.live);
     }
 
-    // Deserialize the merged Value into the typed config.
+    // Layer 4: optional strategy-mode overlays.
+    apply_mode_overrides(&mut merged, &root, symbol, strategy_mode);
+
     match serde_yaml::from_value(merged) {
         Ok(mut cfg) => {
             validate_loaded_config(&mut cfg);
@@ -1089,6 +1166,24 @@ pub fn load_config_checked(
         }
         Err(e) => Err(format!("failed to deserialize merged config: {e}")),
     }
+}
+
+pub fn load_config_with_mode_checked(
+    yaml_path: &str,
+    symbol: Option<&str>,
+    is_live: bool,
+    strategy_mode: Option<&str>,
+) -> Result<StrategyConfig, String> {
+    let document = load_yaml_document_checked(yaml_path)?;
+    load_config_document_checked(&document, symbol, is_live, strategy_mode)
+}
+
+pub fn load_config_checked(
+    yaml_path: &str,
+    symbol: Option<&str>,
+    is_live: bool,
+) -> Result<StrategyConfig, String> {
+    load_config_with_mode_checked(yaml_path, symbol, is_live, None)
 }
 
 /// Backwards-compatible permissive loader.
@@ -1296,6 +1391,72 @@ live:
         assert!((cfg_live.trade.leverage - 1.0).abs() < f64::EPSILON);
         assert_eq!(cfg_live.trade.max_open_positions, 5);
         std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn test_load_yaml_mode_override_after_live_layer() {
+        let yaml = r#"
+global:
+  trade:
+    leverage: 2.0
+  engine:
+    interval: 30m
+live:
+  trade:
+    leverage: 1.0
+modes:
+  fallback:
+    global:
+      trade:
+        leverage: 4.0
+      engine:
+        interval: 1h
+    symbols:
+      BTC:
+        trade:
+          allocation_pct: 0.08
+"#;
+        let tmp = std::env::temp_dir().join("bt_config_test_mode.yaml");
+        std::fs::write(&tmp, yaml).unwrap();
+
+        let cfg = load_config_with_mode_checked(
+            tmp.to_str().unwrap(),
+            Some("BTC"),
+            true,
+            Some("fallback"),
+        )
+        .unwrap();
+        assert!((cfg.trade.leverage - 4.0).abs() < f64::EPSILON);
+        assert!((cfg.trade.allocation_pct - 0.08).abs() < f64::EPSILON);
+        assert_eq!(cfg.engine.interval, "1h");
+
+        let alias_cfg =
+            load_config_with_mode_checked(tmp.to_str().unwrap(), None, false, Some("mode2"))
+                .unwrap();
+        assert!((alias_cfg.trade.leverage - 4.0).abs() < f64::EPSILON);
+
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn test_load_config_document_checked_merges_mode_shorthand() {
+        let document = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+global:
+  trade:
+    leverage: 3.0
+modes:
+  flat:
+    trade:
+      leverage: 0.5
+      max_open_positions: 0
+"#,
+        )
+        .unwrap();
+
+        let cfg = load_config_document_checked(&document, None, false, Some("pause")).unwrap();
+        assert!((cfg.trade.leverage - 0.5).abs() < f64::EPSILON);
+        assert_eq!(cfg.trade.max_open_positions, 0);
     }
 
     #[test]

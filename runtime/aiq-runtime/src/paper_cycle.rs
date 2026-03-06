@@ -1,7 +1,7 @@
 use aiq_runtime_core::paper::{restore_paper_state, PaperBootstrapReport};
 use aiq_runtime_core::runtime::RuntimeBootstrap;
-use anyhow::{Context, Result};
-use bt_core::config::{Confidence, StrategyConfig};
+use anyhow::Result;
+use bt_core::config::Confidence;
 use bt_core::decision_kernel::{self, OrderIntentKind, StrategyState};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -9,6 +9,7 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use crate::paper_config::PaperEffectiveConfig;
 use crate::paper_export;
 use crate::paper_run_once::{
     action_codes_for_symbol, apply_decision_projection_with_tx, iso_from_ms, prepare_symbol_step,
@@ -16,8 +17,8 @@ use crate::paper_run_once::{
 };
 
 pub struct PaperCycleInput<'a> {
+    pub effective_config: PaperEffectiveConfig,
     pub runtime_bootstrap: RuntimeBootstrap,
-    pub config_path: &'a Path,
     pub live: bool,
     pub paper_db: &'a Path,
     pub candles_db: &'a Path,
@@ -109,7 +110,7 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
     }
     explicit_symbols.sort();
     let active_symbols = active_symbols.into_iter().collect::<Vec<_>>();
-    let base_cfg = load_symbol_config(input.config_path, "__GLOBAL__", input.live)?;
+    let base_cfg = input.effective_config.load_config(None, input.live)?;
     let max_entries = base_cfg.trade.max_entry_orders_per_loop;
     let mut used_entry_budget = 0usize;
 
@@ -120,7 +121,9 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
     let mut errors = Vec::new();
 
     for symbol in &active_symbols {
-        let config = load_symbol_config(input.config_path, symbol, input.live)?;
+        let config = input
+            .effective_config
+            .load_config(Some(symbol), input.live)?;
         match &interval {
             Some(current_interval) if current_interval != &config.engine.interval => {
                 anyhow::bail!(
@@ -358,21 +361,6 @@ fn normalise_symbols(raw: &[String]) -> Vec<String> {
     symbols
 }
 
-fn load_symbol_config(config_path: &Path, symbol: &str, live: bool) -> Result<StrategyConfig> {
-    bt_core::config::load_config_checked(
-        config_path
-            .to_str()
-            .context("config path must be valid UTF-8")?,
-        if symbol == "__GLOBAL__" {
-            None
-        } else {
-            Some(symbol)
-        },
-        live,
-    )
-    .map_err(anyhow::Error::msg)
-}
-
 fn entry_score(confidence: Confidence, adx: f64) -> i32 {
     let conf_rank = match confidence {
         Confidence::Low => 0,
@@ -464,6 +452,7 @@ fn record_cycle_step(
 mod tests {
     use super::*;
     use aiq_runtime_core::runtime::{build_bootstrap, RuntimeMode};
+    use bt_core::config::StrategyConfig;
     use rusqlite::Connection;
     use tempfile::tempdir;
 
@@ -680,6 +669,10 @@ mod tests {
             .join("config/strategy_overrides.yaml.example")
     }
 
+    fn effective_config(path: &Path) -> PaperEffectiveConfig {
+        PaperEffectiveConfig::resolve(Some(path)).unwrap()
+    }
+
     #[test]
     fn cycle_rejects_duplicate_step_replay() {
         let dir = tempdir().unwrap();
@@ -692,8 +685,8 @@ mod tests {
         let runtime_bootstrap = build_bootstrap(&base_cfg, RuntimeMode::Paper, None).unwrap();
         let cfg_path = config_path();
         let input = PaperCycleInput {
+            effective_config: effective_config(&cfg_path),
             runtime_bootstrap,
-            config_path: &cfg_path,
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -724,8 +717,8 @@ mod tests {
         let runtime_bootstrap = build_bootstrap(&base_cfg, RuntimeMode::Paper, None).unwrap();
         let cfg_path = config_path();
         let err = run_cycle(PaperCycleInput {
+            effective_config: effective_config(&cfg_path),
             runtime_bootstrap,
-            config_path: &cfg_path,
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -764,8 +757,8 @@ mod tests {
         let runtime_bootstrap = build_bootstrap(&base_cfg, RuntimeMode::Paper, None).unwrap();
         let cfg_path = config_path();
         let report = run_cycle(PaperCycleInput {
+            effective_config: effective_config(&cfg_path),
             runtime_bootstrap,
-            config_path: &cfg_path,
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -819,8 +812,8 @@ mod tests {
         let runtime_bootstrap = build_bootstrap(&base_cfg, RuntimeMode::Paper, None).unwrap();
         let cfg_path = config_path();
         let report = run_cycle(PaperCycleInput {
+            effective_config: effective_config(&cfg_path),
             runtime_bootstrap,
-            config_path: &cfg_path,
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -862,8 +855,8 @@ mod tests {
         let runtime_bootstrap = build_bootstrap(&base_cfg, RuntimeMode::Paper, None).unwrap();
         let cfg_path = config_path();
         let report = run_cycle(PaperCycleInput {
+            effective_config: effective_config(&cfg_path),
             runtime_bootstrap,
-            config_path: &cfg_path,
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,

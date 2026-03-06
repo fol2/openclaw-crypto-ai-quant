@@ -6,6 +6,7 @@ use chrono::Utc;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 
+mod paper_config;
 mod paper_cycle;
 mod paper_daemon;
 mod paper_export;
@@ -13,6 +14,8 @@ mod paper_loop;
 mod paper_manifest;
 mod paper_run_once;
 mod paper_seed;
+#[cfg(test)]
+mod test_support;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "Rust runtime foundation for AI Quant")]
@@ -568,6 +571,18 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 if let Some(start_step_close_ts_ms) = report.start_step_close_ts_ms {
                     println!("start_step_close_ts_ms: {}", start_step_close_ts_ms);
                 }
+                if let Some(promoted_role) = report.promoted_role.as_deref() {
+                    println!("promoted_role: {}", promoted_role);
+                }
+                if let Some(promoted_config_path) = report.promoted_config_path.as_deref() {
+                    println!("promoted_config_path: {}", promoted_config_path);
+                }
+                if let Some(strategy_mode) = report.strategy_mode.as_deref() {
+                    println!("strategy_mode: {}", strategy_mode);
+                }
+                if let Some(strategy_mode_source) = report.strategy_mode_source.as_deref() {
+                    println!("strategy_mode_source: {}", strategy_mode_source);
+                }
                 println!("lock_path: {}", report.lock_path);
                 println!("status_path: {}", report.status_path);
                 println!("launch_state: {:?}", report.resume.launch_state);
@@ -596,21 +611,12 @@ fn run_paper(command: PaperCommand) -> Result<()> {
             }
         }
         PaperCommand::Doctor(args) => {
-            let config_path = resolve_config_path(&args.common.paper.config);
-            let config = bt_core::config::load_config_checked(
-                config_path
-                    .to_str()
-                    .context("config path must be valid UTF-8")?,
-                args.common.symbol.as_deref(),
+            let effective_config =
+                paper_config::PaperEffectiveConfig::resolve(Some(&args.common.paper.config))?;
+            let runtime_bootstrap = effective_config.build_runtime_bootstrap(
                 args.common.paper.live,
-            )
-            .map_err(anyhow::Error::msg)?;
-            let runtime_bootstrap = build_bootstrap(
-                &config,
-                RuntimeMode::Paper,
                 args.common.paper.profile.as_deref(),
-            )
-            .map_err(anyhow::Error::msg)?;
+            )?;
             let snapshot = paper_export::export_paper_snapshot(
                 &args.db,
                 args.exported_at_ms
@@ -638,18 +644,12 @@ fn run_paper(command: PaperCommand) -> Result<()> {
             }
         }
         PaperCommand::RunOnce(args) => {
-            let config_path = resolve_config_path(&args.common.config);
-            let config = bt_core::config::load_config_checked(
-                config_path
-                    .to_str()
-                    .context("config path must be valid UTF-8")?,
-                Some(args.target_symbol.as_str()),
-                args.common.live,
-            )
-            .map_err(anyhow::Error::msg)?;
-            let runtime_bootstrap =
-                build_bootstrap(&config, RuntimeMode::Paper, args.common.profile.as_deref())
-                    .map_err(anyhow::Error::msg)?;
+            let effective_config =
+                paper_config::PaperEffectiveConfig::resolve(Some(&args.common.config))?;
+            let config = effective_config
+                .load_config(Some(args.target_symbol.as_str()), args.common.live)?;
+            let runtime_bootstrap = effective_config
+                .build_runtime_bootstrap(args.common.live, args.common.profile.as_deref())?;
             let report = paper_run_once::run_once(paper_run_once::PaperRunOnceInput {
                 config: &config,
                 runtime_bootstrap,
@@ -676,25 +676,14 @@ fn run_paper(command: PaperCommand) -> Result<()> {
             }
         }
         PaperCommand::Cycle(args) => {
-            let config_path = resolve_config_path(&args.common.config);
-            let base_cfg = bt_core::config::load_config_checked(
-                config_path
-                    .to_str()
-                    .context("config path must be valid UTF-8")?,
-                None,
-                args.common.live,
-            )
-            .map_err(anyhow::Error::msg)?;
-            let runtime_bootstrap = build_bootstrap(
-                &base_cfg,
-                RuntimeMode::Paper,
-                args.common.profile.as_deref(),
-            )
-            .map_err(anyhow::Error::msg)?;
+            let effective_config =
+                paper_config::PaperEffectiveConfig::resolve(Some(&args.common.config))?;
+            let runtime_bootstrap = effective_config
+                .build_runtime_bootstrap(args.common.live, args.common.profile.as_deref())?;
             let symbols = load_symbols(args.symbols, args.symbols_file.as_deref())?;
             let report = paper_cycle::run_cycle(paper_cycle::PaperCycleInput {
+                effective_config,
                 runtime_bootstrap,
-                config_path: &config_path,
                 live: args.common.live,
                 paper_db: &args.db,
                 candles_db: &args.candles_db,
@@ -719,24 +708,13 @@ fn run_paper(command: PaperCommand) -> Result<()> {
             }
         }
         PaperCommand::Loop(args) => {
-            let config_path = resolve_config_path(&args.common.config);
-            let base_cfg = bt_core::config::load_config_checked(
-                config_path
-                    .to_str()
-                    .context("config path must be valid UTF-8")?,
-                None,
-                args.common.live,
-            )
-            .map_err(anyhow::Error::msg)?;
-            let runtime_bootstrap = build_bootstrap(
-                &base_cfg,
-                RuntimeMode::Paper,
-                args.common.profile.as_deref(),
-            )
-            .map_err(anyhow::Error::msg)?;
+            let effective_config =
+                paper_config::PaperEffectiveConfig::resolve(Some(&args.common.config))?;
+            let runtime_bootstrap = effective_config
+                .build_runtime_bootstrap(args.common.live, args.common.profile.as_deref())?;
             let report = paper_loop::run_loop(paper_loop::PaperLoopInput {
+                effective_config,
                 runtime_bootstrap,
-                config_path: &config_path,
                 live: args.common.live,
                 paper_db: &args.db,
                 candles_db: &args.candles_db,
@@ -767,24 +745,13 @@ fn run_paper(command: PaperCommand) -> Result<()> {
             }
         }
         PaperCommand::Daemon(args) => {
-            let config_path = resolve_config_path(&args.common.config);
-            let base_cfg = bt_core::config::load_config_checked(
-                config_path
-                    .to_str()
-                    .context("config path must be valid UTF-8")?,
-                None,
-                args.common.live,
-            )
-            .map_err(anyhow::Error::msg)?;
-            let runtime_bootstrap = build_bootstrap(
-                &base_cfg,
-                RuntimeMode::Paper,
-                args.common.profile.as_deref(),
-            )
-            .map_err(anyhow::Error::msg)?;
+            let effective_config =
+                paper_config::PaperEffectiveConfig::resolve(Some(&args.common.config))?;
+            let runtime_bootstrap = effective_config
+                .build_runtime_bootstrap(args.common.live, args.common.profile.as_deref())?;
             let report = paper_daemon::run_daemon(paper_daemon::PaperDaemonInput {
+                effective_config,
                 runtime_bootstrap,
-                config_path: &config_path,
                 live: args.common.live,
                 paper_db: &args.db,
                 candles_db: &args.candles_db,
