@@ -510,6 +510,46 @@ class TestRustEffectiveConfigWrapper:
 
         assert resolved.base_config_path == str(cfg)
 
+    def test_resolve_effective_config_prefers_base_yaml_env_over_materialised_yaml(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        base = tmp_path / "base.yaml"
+        materialised = tmp_path / "effective.yaml"
+        base.write_text("global:\n  engine:\n    interval: 30m\n", encoding="utf-8")
+        materialised.write_text("global:\n  engine:\n    interval: 5m\n", encoding="utf-8")
+
+        monkeypatch.setattr("engine.promoted_config._runtime_command", lambda: ["/tmp/aiq-runtime"])
+
+        def _fake_run(cmd, **kwargs):  # noqa: ANN001
+            idx = cmd.index("--config")
+            assert Path(cmd[idx + 1]) == base
+            payload = {
+                "base_config_path": str(base),
+                "config_path": str(materialised),
+                "active_yaml_path": str(base),
+                "effective_yaml_path": str(materialised),
+                "interval": "5m",
+                "promoted_role": None,
+                "promoted_config_path": None,
+                "strategy_mode": "primary",
+                "strategy_mode_source": "env",
+                "strategy_overrides_sha1": "a" * 64,
+                "config_id": "b" * 64,
+                "warnings": [],
+            }
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload), stderr="")
+
+        monkeypatch.setattr("engine.promoted_config.subprocess.run", _fake_run)
+
+        resolved = resolve_effective_config(
+            env={
+                "AI_QUANT_BASE_STRATEGY_YAML": str(base),
+                "AI_QUANT_STRATEGY_YAML": str(materialised),
+            }
+        )
+
+        assert resolved.base_config_path == str(base)
+
     def test_apply_paper_effective_config_exports_runtime_env(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

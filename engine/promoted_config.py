@@ -339,7 +339,11 @@ def _effective_config_command(
     cmd += ["paper", "effective-config", "--json"]
     selected_config = config_path
     if selected_config is None:
-        selected_config = str(env.get("AI_QUANT_STRATEGY_YAML", "") or "").strip() or None
+        selected_config = (
+            str(env.get("AI_QUANT_BASE_STRATEGY_YAML", "") or "").strip()
+            or str(env.get("AI_QUANT_STRATEGY_YAML", "") or "").strip()
+            or None
+        )
     if selected_config is not None:
         cmd += ["--config", str(Path(selected_config).expanduser().resolve())]
     if live:
