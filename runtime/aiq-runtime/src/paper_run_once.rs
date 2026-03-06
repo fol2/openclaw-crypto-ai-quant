@@ -10,7 +10,7 @@ use bt_core::decision_kernel::{
 use bt_core::indicators::{IndicatorBank, IndicatorSnapshot};
 use bt_core::kernel_entries::{evaluate_entry, EntryParams};
 use bt_core::kernel_exits::ExitParams;
-use bt_core::signals::gates;
+use bt_core::signals::gates::{self, GateResult};
 use chrono::{DateTime, TimeZone, Utc};
 use risk_core::{
     compute_entry_sizing, compute_pyramid_sizing, evaluate_exposure_guard, ConfidenceTier,
@@ -35,18 +35,29 @@ pub struct PaperRunOnceInput<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct ExecutionPlan {
-    requested_notional_usd: Option<f64>,
-    leverage: f64,
-    allow_pyramid: bool,
-    warnings: Vec<String>,
+pub(crate) struct ExecutionPlan {
+    pub(crate) requested_notional_usd: Option<f64>,
+    pub(crate) leverage: f64,
+    pub(crate) allow_pyramid: bool,
+    pub(crate) warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct ExecutionMetadata {
-    signal: Signal,
-    confidence: Confidence,
-    entry_adx_threshold: f64,
+pub(crate) struct ExecutionMetadata {
+    pub(crate) signal: Signal,
+    pub(crate) confidence: Confidence,
+    pub(crate) entry_adx_threshold: f64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedSymbolStep {
+    pub symbol: String,
+    pub snap: IndicatorSnapshot,
+    pub gate_result: GateResult,
+    pub ema_slow_slope_pct: f64,
+    pub execution_metadata: ExecutionMetadata,
+    pub config: StrategyConfig,
+    pub prior_position: Option<PaperPositionState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -70,6 +81,50 @@ pub struct PaperRunOnceReport {
     pub runtime_cooldowns_written: bool,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
+}
+
+pub(crate) fn action_codes_for_symbol(
+    symbol: &str,
+    pre_state: &StrategyState,
+    intents: &[OrderIntent],
+    fills: &[FillEvent],
+) -> Vec<String> {
+    let mut codes = Vec::new();
+    let mut current_qty = pre_state
+        .positions
+        .get(symbol)
+        .map(|position| position.quantity)
+        .unwrap_or(0.0);
+
+    for (intent, fill) in intents.iter().zip(fills.iter()) {
+        if intent.symbol != symbol {
+            continue;
+        }
+        let code = match intent.kind {
+            OrderIntentKind::Open => {
+                current_qty = fill.quantity;
+                "OPEN"
+            }
+            OrderIntentKind::Add => {
+                current_qty += fill.quantity;
+                "ADD"
+            }
+            OrderIntentKind::Close => {
+                if fill.quantity < current_qty {
+                    current_qty = (current_qty - fill.quantity).max(0.0);
+                    "REDUCE"
+                } else {
+                    current_qty = 0.0;
+                    "CLOSE"
+                }
+            }
+            OrderIntentKind::Hold => continue,
+            OrderIntentKind::Reverse => "REVERSE",
+        };
+        codes.push(code.to_string());
+    }
+
+    codes
 }
 
 pub fn run_once(input: PaperRunOnceInput<'_>) -> Result<PaperRunOnceReport> {
@@ -185,7 +240,7 @@ pub fn run_once(input: PaperRunOnceInput<'_>) -> Result<PaperRunOnceReport> {
     Ok(PaperRunOnceReport {
         ok: decision.diagnostics.errors.is_empty(),
         dry_run: input.dry_run,
-        symbol,
+        symbol: symbol.clone(),
         interval,
         runtime_bootstrap: input.runtime_bootstrap,
         paper_bootstrap,
@@ -196,7 +251,7 @@ pub fn run_once(input: PaperRunOnceInput<'_>) -> Result<PaperRunOnceReport> {
         ema_slow_slope_pct,
         intent_count: decision.intents.len(),
         fill_count: decision.fills.len(),
-        action_codes: project_action_codes(&pre_state, &decision.intents, &decision.fills),
+        action_codes: action_codes_for_symbol(&symbol, &pre_state, &decision.intents, &decision.fills),
         trades_written,
         position_state_written,
         runtime_cooldowns_written,
@@ -209,22 +264,139 @@ pub fn run_once(input: PaperRunOnceInput<'_>) -> Result<PaperRunOnceReport> {
     })
 }
 
-fn load_recent_bars(
+pub(crate) fn prepare_symbol_step(
+    config: &StrategyConfig,
+    prior_position: Option<&PaperPositionState>,
+    candles_db: &Path,
+    symbol: &str,
+    btc_symbol: &str,
+    lookback_bars: usize,
+    step_close_ts_ms: Option<i64>,
+) -> Result<PreparedSymbolStep> {
+    let interval = config.engine.interval.trim().to_string();
+    let symbol_bars = load_recent_bars_as_of(
+        candles_db,
+        symbol,
+        &interval,
+        lookback_bars.max(64),
+        step_close_ts_ms,
+    )?;
+    let (snap, ema_history) = build_latest_snapshot(config, &symbol_bars)?;
+
+    let btc_bullish = if btc_symbol != symbol {
+        let btc_bars = load_recent_bars_as_of(
+            candles_db,
+            btc_symbol,
+            &interval,
+            lookback_bars.max(64),
+            step_close_ts_ms,
+        )?;
+        let (btc_snap, _) = build_latest_snapshot(config, &btc_bars)?;
+        Some(btc_snap.close > btc_snap.ema_slow)
+    } else {
+        Some(snap.close > snap.ema_slow)
+    };
+
+    let slope_window = config.thresholds.entry.slow_drift_slope_window.max(1);
+    let ema_slow_slope_pct = compute_ema_slow_slope(&ema_history, slope_window, snap.close);
+    let gate_result = gates::check_gates(
+        &snap,
+        config,
+        symbol,
+        btc_bullish,
+        ema_slow_slope_pct,
+    );
+
+    let entry_params = build_entry_params(config);
+    let entry_result = evaluate_entry(&snap, &gate_result, &entry_params, ema_slow_slope_pct);
+    let execution_metadata = ExecutionMetadata {
+        signal: entry_result.signal,
+        confidence: to_bt_confidence(entry_result.confidence),
+        entry_adx_threshold: entry_result.entry_adx_threshold,
+    };
+
+    Ok(PreparedSymbolStep {
+        symbol: symbol.to_string(),
+        snap,
+        gate_result,
+        ema_slow_slope_pct,
+        execution_metadata,
+        config: config.clone(),
+        prior_position: prior_position.cloned(),
+    })
+}
+
+pub(crate) fn execute_prepared_symbol_step(
+    pre_state: &StrategyState,
+    prepared: &PreparedSymbolStep,
+    decision_ts_ms: i64,
+) -> (decision_kernel::DecisionResult, ExecutionPlan) {
+    let execution_plan = build_execution_plan(
+        &prepared.config,
+        pre_state,
+        &prepared.symbol,
+        decision_ts_ms,
+        prepared.prior_position.as_ref(),
+        &prepared.snap,
+        prepared.execution_metadata,
+    );
+    let params = build_kernel_params(
+        &prepared.config,
+        execution_plan.leverage,
+        execution_plan.allow_pyramid,
+    );
+    let event = MarketEvent {
+        schema_version: 1,
+        event_id: decision_ts_ms.max(0) as u64,
+        timestamp_ms: decision_ts_ms,
+        symbol: prepared.symbol.clone(),
+        signal: MarketSignal::Evaluate,
+        price: prepared.snap.close,
+        notional_hint_usd: execution_plan.requested_notional_usd,
+        close_fraction: None,
+        fee_role: None,
+        funding_rate: None,
+        indicators: Some(prepared.snap.clone()),
+        gate_result: Some(prepared.gate_result.clone()),
+        ema_slow_slope_pct: Some(prepared.ema_slow_slope_pct),
+    };
+    let decision = decision_kernel::step(pre_state, &event, &params);
+    (decision, execution_plan)
+}
+
+pub(crate) fn load_recent_bars(
     db_path: &Path,
     symbol: &str,
     interval: &str,
     limit: usize,
 ) -> Result<Vec<OhlcvBar>> {
+    load_recent_bars_as_of(db_path, symbol, interval, limit, None)
+}
+
+pub(crate) fn load_recent_bars_as_of(
+    db_path: &Path,
+    symbol: &str,
+    interval: &str,
+    limit: usize,
+    max_close_ts_ms: Option<i64>,
+) -> Result<Vec<OhlcvBar>> {
     let conn = Connection::open(db_path)?;
-    let mut stmt = conn.prepare(
+    let sql = if max_close_ts_ms.is_some() {
+        "SELECT t, COALESCE(t_close, t), o, h, l, c, v, COALESCE(n, 0)
+         FROM candles
+         WHERE symbol = ?1 AND interval = ?2 AND COALESCE(t_close, t) <= ?3
+         ORDER BY COALESCE(t_close, t) DESC, t DESC
+         LIMIT ?4"
+    } else {
         "SELECT t, COALESCE(t_close, t), o, h, l, c, v, COALESCE(n, 0)
          FROM candles
          WHERE symbol = ?1 AND interval = ?2
-         ORDER BY t DESC
-         LIMIT ?3",
-    )?;
-    let mut bars = stmt
-        .query_map((symbol, interval, limit as i64), |row| {
+         ORDER BY COALESCE(t_close, t) DESC, t DESC
+         LIMIT ?3"
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let mut bars = if let Some(max_close_ts_ms) = max_close_ts_ms {
+        stmt.query_map((symbol, interval, max_close_ts_ms, limit as i64), |row| {
             Ok(OhlcvBar {
                 t: row.get(0)?,
                 t_close: row.get(1)?,
@@ -236,7 +408,22 @@ fn load_recent_bars(
                 n: row.get(7)?,
             })
         })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    } else {
+        stmt.query_map((symbol, interval, limit as i64), |row| {
+            Ok(OhlcvBar {
+                t: row.get(0)?,
+                t_close: row.get(1)?,
+                o: row.get(2)?,
+                h: row.get(3)?,
+                l: row.get(4)?,
+                c: row.get(5)?,
+                v: row.get(6)?,
+                n: row.get(7)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
     bars.reverse();
     if bars.len() < 2 {
         anyhow::bail!("not enough bars for {} {}", symbol, interval);
@@ -244,7 +431,7 @@ fn load_recent_bars(
     Ok(bars)
 }
 
-fn build_latest_snapshot(
+pub(crate) fn build_latest_snapshot(
     cfg: &StrategyConfig,
     bars: &[OhlcvBar],
 ) -> Result<(IndicatorSnapshot, Vec<f64>)> {
@@ -264,7 +451,7 @@ fn build_latest_snapshot(
     Ok((latest, ema_history))
 }
 
-fn compute_ema_slow_slope(history: &[f64], window: usize, current_close: f64) -> f64 {
+pub(crate) fn compute_ema_slow_slope(history: &[f64], window: usize, current_close: f64) -> f64 {
     if history.len() < window || current_close <= 0.0 {
         return 0.0;
     }
@@ -273,7 +460,11 @@ fn compute_ema_slow_slope(history: &[f64], window: usize, current_close: f64) ->
     (current - past) / current_close
 }
 
-fn build_kernel_params(cfg: &StrategyConfig, leverage: f64, allow_pyramid: bool) -> KernelParams {
+pub(crate) fn build_kernel_params(
+    cfg: &StrategyConfig,
+    leverage: f64,
+    allow_pyramid: bool,
+) -> KernelParams {
     let mut params = KernelParams::default();
     params.default_notional_usd = 0.0;
     params.min_notional_usd = 0.0;
@@ -287,7 +478,7 @@ fn build_kernel_params(cfg: &StrategyConfig, leverage: f64, allow_pyramid: bool)
     params
 }
 
-fn build_exit_params(cfg: &StrategyConfig) -> ExitParams {
+pub(crate) fn build_exit_params(cfg: &StrategyConfig) -> ExitParams {
     let t = &cfg.trade;
     ExitParams {
         sl_atr_mult: t.sl_atr_mult,
@@ -325,7 +516,7 @@ fn build_exit_params(cfg: &StrategyConfig) -> ExitParams {
     }
 }
 
-fn build_entry_params(cfg: &StrategyConfig) -> EntryParams {
+pub(crate) fn build_entry_params(cfg: &StrategyConfig) -> EntryParams {
     let entry = &cfg.thresholds.entry;
     let stoch = &cfg.thresholds.stoch_rsi;
     EntryParams {
@@ -356,7 +547,7 @@ fn build_entry_params(cfg: &StrategyConfig) -> EntryParams {
     }
 }
 
-fn build_cooldown_params(cfg: &StrategyConfig) -> CooldownParams {
+pub(crate) fn build_cooldown_params(cfg: &StrategyConfig) -> CooldownParams {
     CooldownParams {
         entry_cooldown_s: cfg.trade.entry_cooldown_s as u32,
         exit_cooldown_s: cfg.trade.exit_cooldown_s as u32,
@@ -366,7 +557,7 @@ fn build_cooldown_params(cfg: &StrategyConfig) -> CooldownParams {
     }
 }
 
-fn build_execution_plan(
+pub(crate) fn build_execution_plan(
     cfg: &StrategyConfig,
     pre_state: &StrategyState,
     symbol: &str,
@@ -587,7 +778,7 @@ fn build_execution_plan(
     plan
 }
 
-fn signal_to_side(signal: Signal) -> Option<PositionSide> {
+pub(crate) fn signal_to_side(signal: Signal) -> Option<PositionSide> {
     match signal {
         Signal::Buy => Some(PositionSide::Long),
         Signal::Sell => Some(PositionSide::Short),
@@ -595,7 +786,7 @@ fn signal_to_side(signal: Signal) -> Option<PositionSide> {
     }
 }
 
-fn to_bt_confidence(raw: u8) -> Confidence {
+pub(crate) fn to_bt_confidence(raw: u8) -> Confidence {
     match raw {
         2 => Confidence::High,
         1 => Confidence::Medium,
@@ -603,7 +794,7 @@ fn to_bt_confidence(raw: u8) -> Confidence {
     }
 }
 
-fn to_confidence_tier(confidence: Confidence) -> ConfidenceTier {
+pub(crate) fn to_confidence_tier(confidence: Confidence) -> ConfidenceTier {
     match confidence {
         Confidence::High => ConfidenceTier::High,
         Confidence::Medium => ConfidenceTier::Medium,
@@ -611,7 +802,7 @@ fn to_confidence_tier(confidence: Confidence) -> ConfidenceTier {
     }
 }
 
-fn total_margin_used(state: &StrategyState) -> f64 {
+pub(crate) fn total_margin_used(state: &StrategyState) -> f64 {
     state
         .positions
         .values()
@@ -619,48 +810,7 @@ fn total_margin_used(state: &StrategyState) -> f64 {
         .sum()
 }
 
-fn project_action_codes(
-    pre_state: &StrategyState,
-    intents: &[OrderIntent],
-    fills: &[FillEvent],
-) -> Vec<String> {
-    let mut codes = Vec::new();
-    let mut current_qty = pre_state
-        .positions
-        .values()
-        .next()
-        .map(|position| position.quantity)
-        .unwrap_or(0.0);
-
-    for (intent, fill) in intents.iter().zip(fills.iter()) {
-        let code = match intent.kind {
-            OrderIntentKind::Open => {
-                current_qty = fill.quantity;
-                "OPEN"
-            }
-            OrderIntentKind::Add => {
-                current_qty += fill.quantity;
-                "ADD"
-            }
-            OrderIntentKind::Close => {
-                if fill.quantity < current_qty {
-                    current_qty = (current_qty - fill.quantity).max(0.0);
-                    "REDUCE"
-                } else {
-                    current_qty = 0.0;
-                    "CLOSE"
-                }
-            }
-            OrderIntentKind::Hold => continue,
-            OrderIntentKind::Reverse => "REVERSE",
-        };
-        codes.push(code.to_string());
-    }
-
-    codes
-}
-
-fn apply_decision_projection(
+pub(crate) fn apply_decision_projection(
     db_path: &Path,
     symbol: &str,
     pre_state: &StrategyState,
@@ -674,6 +824,34 @@ fn apply_decision_projection(
 ) -> Result<(usize, bool, bool)> {
     let mut conn = Connection::open(db_path)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let result = apply_decision_projection_with_tx(
+        &tx,
+        symbol,
+        pre_state,
+        prior_position,
+        post_state,
+        intents,
+        fills,
+        snap,
+        execution_metadata,
+        ts_ms,
+    )?;
+    tx.commit()?;
+    Ok(result)
+}
+
+pub(crate) fn apply_decision_projection_with_tx(
+    tx: &rusqlite::Transaction<'_>,
+    symbol: &str,
+    pre_state: &StrategyState,
+    prior_position: Option<&PaperPositionState>,
+    post_state: &StrategyState,
+    intents: &[OrderIntent],
+    fills: &[FillEvent],
+    snap: &IndicatorSnapshot,
+    execution_metadata: ExecutionMetadata,
+    ts_ms: i64,
+) -> Result<(usize, bool, bool)> {
     let ts_iso = iso_from_ms(ts_ms);
     let existing_open_trade_id = tx
         .query_row(
@@ -845,12 +1023,10 @@ fn apply_decision_projection(
         }
     }
 
-    tx.commit()?;
-
     Ok((trades_written, position_state_written, true))
 }
 
-fn projected_confidence_label(
+pub(crate) fn projected_confidence_label(
     intent: &OrderIntent,
     pre_state: &StrategyState,
     execution_metadata: ExecutionMetadata,
@@ -872,7 +1048,11 @@ fn projected_confidence_label(
     "medium"
 }
 
-fn infer_leverage(post_state: &StrategyState, intent: &OrderIntent, fill: &FillEvent) -> f64 {
+pub(crate) fn infer_leverage(
+    post_state: &StrategyState,
+    intent: &OrderIntent,
+    fill: &FillEvent,
+) -> f64 {
     if let Some(position) = post_state.positions.get(&intent.symbol) {
         if position.margin_usd > 0.0 {
             return position.notional_usd / position.margin_usd;
@@ -881,24 +1061,31 @@ fn infer_leverage(post_state: &StrategyState, intent: &OrderIntent, fill: &FillE
     (fill.notional_usd / fill.quantity.max(1e-12)) / fill.price.max(1e-12)
 }
 
-fn infer_margin_used(post_state: &StrategyState, intent: &OrderIntent, fill: &FillEvent) -> f64 {
+pub(crate) fn infer_margin_used(
+    post_state: &StrategyState,
+    intent: &OrderIntent,
+    fill: &FillEvent,
+) -> f64 {
     if let Some(position) = post_state.positions.get(&intent.symbol) {
         return position.margin_usd;
     }
     fill.notional_usd
 }
 
-fn iso_from_ms(ms: i64) -> String {
+pub(crate) fn iso_from_ms(ms: i64) -> String {
     DateTime::from_timestamp_millis(ms)
         .map(|dt| dt.with_timezone(&Utc).to_rfc3339())
         .unwrap_or_else(|| Utc.timestamp_millis_opt(0).single().unwrap().to_rfc3339())
 }
 
-fn ms_to_secs(value: i64) -> f64 {
+pub(crate) fn ms_to_secs(value: i64) -> f64 {
     (value as f64) / 1000.0
 }
 
-fn table_exists_in_tx(tx: &rusqlite::Transaction<'_>, table_name: &str) -> Result<bool> {
+pub(crate) fn table_exists_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    table_name: &str,
+) -> Result<bool> {
     let row = tx
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",

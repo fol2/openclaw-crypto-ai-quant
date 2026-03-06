@@ -7,6 +7,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 
 mod paper_export;
+mod paper_cycle;
 mod paper_run_once;
 mod paper_seed;
 
@@ -107,6 +108,8 @@ enum PaperCommand {
     Doctor(PaperDoctorArgs),
     /// Execute one Rust paper step for a single symbol.
     RunOnce(PaperRunOnceArgs),
+    /// Execute one repeatable Rust paper cycle across explicit symbols plus open paper positions.
+    Cycle(PaperCycleArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -144,6 +147,39 @@ struct PaperRunOnceArgs {
     #[arg(long)]
     exported_at_ms: Option<i64>,
     /// Resolve the step but do not write any DB projections.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+struct PaperCycleArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+    /// Paper DB path to restore from and project back into.
+    #[arg(long, default_value = "trading_engine.db")]
+    db: PathBuf,
+    /// Candle SQLite DB path used for this cycle.
+    #[arg(long)]
+    candles_db: PathBuf,
+    /// Explicit symbol list (comma-delimited). Open paper positions are always included.
+    #[arg(long, value_delimiter = ',')]
+    symbols: Vec<String>,
+    /// Optional file containing one symbol per line.
+    #[arg(long)]
+    symbols_file: Option<PathBuf>,
+    /// BTC anchor symbol for alignment context.
+    #[arg(long, default_value = "BTC")]
+    btc_symbol: String,
+    /// Number of bars to load for indicator warm-up.
+    #[arg(long, default_value_t = 400)]
+    lookback_bars: usize,
+    /// Explicit repeatable cycle step identity (bar close timestamp in ms).
+    #[arg(long)]
+    step_close_ts_ms: i64,
+    /// Override exported_at_ms for reproducible artefacts.
+    #[arg(long)]
+    exported_at_ms: Option<i64>,
+    /// Resolve the cycle but do not write any DB projections.
     #[arg(long)]
     dry_run: bool,
 }
@@ -380,6 +416,55 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                     report.symbol,
                     report.intent_count,
                     report.fill_count,
+                    report.trades_written,
+                    report.dry_run,
+                );
+            }
+        }
+        PaperCommand::Cycle(args) => {
+            let config_path = resolve_config_path(&args.common.config);
+            let base_cfg = bt_core::config::load_config_checked(
+                config_path
+                    .to_str()
+                    .context("config path must be valid UTF-8")?,
+                None,
+                args.common.live,
+            )
+            .map_err(anyhow::Error::msg)?;
+            let runtime_bootstrap =
+                build_bootstrap(&base_cfg, RuntimeMode::Paper, args.common.profile.as_deref())
+                    .map_err(anyhow::Error::msg)?;
+            let mut symbols = args.symbols;
+            if let Some(symbols_file) = args.symbols_file.as_ref() {
+                let file_symbols = std::fs::read_to_string(symbols_file)?
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>();
+                symbols.extend(file_symbols);
+            }
+            let report = paper_cycle::run_cycle(paper_cycle::PaperCycleInput {
+                runtime_bootstrap,
+                config_path: &config_path,
+                live: args.common.live,
+                paper_db: &args.db,
+                candles_db: &args.candles_db,
+                explicit_symbols: &symbols,
+                btc_symbol: &args.btc_symbol,
+                lookback_bars: args.lookback_bars,
+                step_close_ts_ms: args.step_close_ts_ms,
+                exported_at_ms: args.exported_at_ms,
+                dry_run: args.dry_run,
+            })?;
+
+            if args.common.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "paper cycle ok: step_id={} symbols={} trades_written={} dry_run={}",
+                    report.step_id,
+                    report.active_symbols.len(),
                     report.trades_written,
                     report.dry_run,
                 );

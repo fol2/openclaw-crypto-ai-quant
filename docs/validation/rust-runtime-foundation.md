@@ -54,10 +54,12 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
 - `aiq-runtime paper doctor` can restore Rust-owned paper state from the paper DB and emit a deterministic bootstrap report.
 - `aiq-runtime paper run-once` can restore paper state, execute one single-shot step, and report projected action codes and write-back counts.
 - `paper run-once` reproducibility requires a fixed `--exported-at-ms`; otherwise write timestamps follow execution time for current DB parity.
+- `aiq-runtime paper cycle` can execute one explicit multi-symbol cycle with `--step-close-ts-ms`, record a rerun guard in `runtime_cycle_steps`, and fail closed on duplicate re-apply.
 
 ## Fixture Guidance
 
 - Use a temporary SQLite DB with minimal `trades`, `position_state`, `runtime_cooldowns`, and `runtime_last_closes` tables for paper export tests.
 - Use v2 JSON fixtures with `runtime.entry_attempt_ms_by_symbol` and `runtime.exit_attempt_ms_by_symbol` for init-state compatibility checks.
 - `paper run-once` fixtures must provide bars for both the target symbol and the BTC anchor symbol at the resolved `engine.interval`.
+- `paper cycle` validation should include one write run plus one duplicate-step rerun that hard-fails without changing DB state.
 - Keep fixtures deterministic: one open position, one add, one last-close marker, and one runtime cooldown marker is enough for the foundation slice.

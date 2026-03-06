@@ -9,10 +9,10 @@ for the active programme contract.
 
 Rust now also has a first paper bootstrap/restore shell via
 `aiq-runtime paper doctor`, while Python paper execution remains frozen as the
-legacy runtime path until full Rust paper execution lands. The next Rust-owned
-execution step is `aiq-runtime paper run-once`, which executes one single-shot
-paper cycle without starting a long-running daemon. Pass `--exported-at-ms` when
-you need reproducible report/write timestamps for parity debugging.
+legacy runtime path until full Rust paper execution lands. Rust currently owns
+three paper-facing shells: `paper doctor`, `paper run-once`, and the new
+repeatable `paper cycle`. `paper cycle` runs one explicit multi-symbol cycle
+with `--step-close-ts-ms` and a rerun guard, but it is still not a daemon.
 
 ## Screenshots
 
@@ -162,6 +162,7 @@ cargo run -p aiq-runtime -- snapshot validate --path /tmp/paper_init_state_v2.js
 cargo run -p aiq-runtime -- snapshot seed-paper --snapshot /tmp/paper_init_state_v2.json --target-db trading_engine.db --strict-replace --json
 cargo run -p aiq-runtime -- paper doctor --db trading_engine.db --json
 cargo run -p aiq-runtime -- paper run-once --db trading_engine.db --candles-db candles_dbs/candles_30m.db --target-symbol ETH --exported-at-ms 1772676900000 --dry-run --json
+cargo run -p aiq-runtime -- paper cycle --db trading_engine.db --candles-db candles_dbs/candles_30m.db --symbols ETH,SOL --step-close-ts-ms 1773426000000 --exported-at-ms 1772676900000 --dry-run --json
 ```
 
 Version is governed by `VERSION` (single source of truth). See [docs/release_process.md](docs/release_process.md).
