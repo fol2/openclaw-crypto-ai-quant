@@ -152,7 +152,7 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
         };
         next_due_step_close_ts_ms = Some(candidate_next_due);
         if candidate_next_due > context.latest_common_close_ts_ms {
-            if steps.is_empty() {
+            if steps.is_empty() && idle_polls == 0 {
                 warnings.push(format!(
                     "paper loop idle: next due step {} is newer than latest common close {}",
                     candidate_next_due, context.latest_common_close_ts_ms
