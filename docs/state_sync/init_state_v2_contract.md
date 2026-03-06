@@ -96,6 +96,7 @@ cargo run --manifest-path Cargo.toml -p aiq-runtime -- \
   - `position_state`
   - `position_state_history`
   - `runtime_cooldowns`
+  - `runtime_last_closes`
 - `--strict-replace` is the deterministic bootstrap mode.
 - Without `--strict-replace`, the command fails closed if stale open paper positions would remain outside the snapshot.
 
@@ -107,6 +108,7 @@ cargo run --manifest-path Cargo.toml -p aiq-runtime -- \
   - `trades`
   - `position_state`
   - `runtime_cooldowns`
+  - `runtime_last_closes`
 - A healthy paper restore requires:
   - valid `init-state v2` semantics
   - deterministic symbol normalisation

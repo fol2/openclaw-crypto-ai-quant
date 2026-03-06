@@ -41,7 +41,12 @@ The output includes:
 - `balance`
 - `positions`
   - for `--as-of-ts` snapshots, position runtime fields (`adds_count`, `tp1_taken`, `last_add_time_ms`) are reconstructed from historical `ADD`/`REDUCE` fills
+  - `last_funding_time_ms` is carried from persisted position state when available
   - `margin_used` is recalculated from reconstructed `size * entry_price / leverage` so reduced positions carry correct margin headroom
+- `runtime`
+  - `entry_attempt_ms_by_symbol`
+  - `exit_attempt_ms_by_symbol`
+  - `last_close_info_by_symbol`
 - `runtime.entry_attempt_ms_by_symbol`
 - `runtime.exit_attempt_ms_by_symbol`
 - canonical metadata (`open_orders`, `cursors`, warnings)

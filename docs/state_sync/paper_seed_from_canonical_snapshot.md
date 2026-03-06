@@ -30,6 +30,7 @@ This performs:
 - `position_state` refresh aligned to seeded open trade IDs
 - `position_state_history` seed rows for bootstrap provenance
 - `runtime_cooldowns` seed (entry/exit cooldown maps from snapshot runtime state)
+- `runtime_last_closes` seed (latest close metadata for Rust PESC restore)
 
 `--strict-replace` is the deterministic mode and clears existing seed targets before writing.  
 Without `--strict-replace`, the Rust command fails closed when the paper DB still has open positions outside the snapshot surface.

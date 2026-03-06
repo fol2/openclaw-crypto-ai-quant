@@ -352,7 +352,7 @@ fn load_last_close_info(
     for row in rows {
         let (symbol, timestamp, side, reason) = row?;
         let symbol = symbol.trim().to_ascii_uppercase();
-        if symbol.is_empty() || last_close_info_by_symbol.contains_key(&symbol) {
+        if symbol.is_empty() {
             continue;
         }
         let timestamp_ms = parse_timestamp_ms(timestamp.as_deref());
@@ -360,14 +360,20 @@ fn load_last_close_info(
         if timestamp_ms <= 0 || (side != "long" && side != "short") {
             continue;
         }
-        last_close_info_by_symbol.insert(
-            symbol,
-            SnapshotLastCloseInfo {
-                timestamp_ms,
-                side,
-                reason: reason.unwrap_or_default(),
-            },
-        );
+        let replace_existing = last_close_info_by_symbol
+            .get(&symbol)
+            .map(|existing| timestamp_ms >= existing.timestamp_ms)
+            .unwrap_or(true);
+        if replace_existing {
+            last_close_info_by_symbol.insert(
+                symbol,
+                SnapshotLastCloseInfo {
+                    timestamp_ms,
+                    side,
+                    reason: reason.unwrap_or_default(),
+                },
+            );
+        }
     }
 
     Ok(last_close_info_by_symbol)

@@ -50,7 +50,7 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
 - `pipeline --json` resolves `production` cleanly against the example YAML when the tracked live YAML is absent.
 - `bt-core` accepts snapshots with `version = 2` and runtime cooldown markers.
 - `aiq-runtime` can export a v2 paper snapshot from SQLite and re-validate it through the same Rust snapshot contract.
-- `aiq-runtime` can seed a paper DB from a v2 snapshot and report deterministic write counts for `trades`, `position_state`, and `runtime_cooldowns`.
+- `aiq-runtime` can seed a paper DB from a v2 snapshot and report deterministic write counts for `trades`, `position_state`, `runtime_cooldowns`, and `runtime_last_closes`.
 - `aiq-runtime paper doctor` can restore Rust-owned paper state from the paper DB and emit a deterministic bootstrap report.
 - `aiq-runtime paper run-once` can restore paper state, execute one single-shot step, and report projected action codes and write-back counts.
 - `paper run-once` reproducibility requires a fixed `--exported-at-ms`; otherwise write timestamps follow execution time for current DB parity.

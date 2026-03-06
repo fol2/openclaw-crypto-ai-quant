@@ -685,7 +685,7 @@ Safe operator expectations:
 
 - `snapshot validate` must succeed before `snapshot seed-paper`
 - `--strict-replace` is the deterministic bootstrap mode
-- the current Rust seed path rewrites `trades`, `position_state`, `position_state_history`, and `runtime_cooldowns`
+- the current Rust seed path rewrites `trades`, `position_state`, `position_state_history`, `runtime_cooldowns`, and `runtime_last_closes`
 - if `--strict-replace` is omitted and stale open paper positions would remain, the command fails closed
 
 ### Inspect Rust paper bootstrap state

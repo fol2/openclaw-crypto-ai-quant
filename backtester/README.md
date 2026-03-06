@@ -221,6 +221,7 @@ cargo run --manifest-path ../Cargo.toml -p aiq-runtime -- \
       "adds_count": 0,
       "tp1_taken": false,
       "open_time_ms": 1770400000000,
+      "last_funding_time_ms": 1770400300000,
       "last_add_time_ms": 0,
       "entry_adx_threshold": 22.0
     }
@@ -229,14 +230,21 @@ cargo run --manifest-path ../Cargo.toml -p aiq-runtime -- \
     "entry_attempt_ms_by_symbol": {
       "BTC": 1770563200000
     },
-    "exit_attempt_ms_by_symbol": {}
+    "exit_attempt_ms_by_symbol": {},
+    "last_close_info_by_symbol": {
+      "ETH": {
+        "timestamp_ms": 1770563000000,
+        "side": "short",
+        "reason": "Signal Trigger"
+      }
+    }
   }
 }
 ```
 
-**Paper export:** Rust reconstructs positions from `trades`, enriches with `position_state`, and carries forward `runtime_cooldowns` markers when present.
+**Paper export:** Rust reconstructs positions from `trades`, enriches with `position_state`, recalculates `margin_used`, and carries forward `runtime_cooldowns` plus `runtime_last_closes` metadata when present.
 
-**Paper seed:** Rust can now project the same v2 snapshot back into `trades`, `position_state`, `position_state_history`, and `runtime_cooldowns` for deterministic paper bootstrap.
+**Paper seed:** Rust can now project the same v2 snapshot back into `trades`, `position_state`, `position_state_history`, `runtime_cooldowns`, and `runtime_last_closes` for deterministic paper bootstrap.
 
 **Live export:** keep using the live-canonical snapshot workflow until the Rust live adapter owns exchange truth.
 

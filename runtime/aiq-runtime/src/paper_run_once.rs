@@ -692,6 +692,7 @@ fn apply_decision_projection(
     let mut trades_written = 0usize;
     let mut saw_open = false;
     let mut saw_add = false;
+    let mut latest_full_close: Option<(String, String)> = None;
 
     for (idx, (intent, fill)) in intents.iter().zip(fills.iter()).enumerate() {
         let action = match intent.kind {
@@ -749,6 +750,18 @@ fn apply_decision_projection(
         }
         if action == "CLOSE" {
             active_open_trade_id = None;
+            latest_full_close = Some((
+                if intent.side == PositionSide::Long {
+                    "long".to_string()
+                } else {
+                    "short".to_string()
+                },
+                if intent.reason.is_empty() {
+                    "rust_paper_run_once".to_string()
+                } else {
+                    intent.reason.clone()
+                },
+            ));
         }
     }
 
@@ -822,6 +835,16 @@ fn apply_decision_projection(
         ),
     )?;
 
+    if let Some((close_side, close_reason)) = latest_full_close {
+        if table_exists_in_tx(&tx, "runtime_last_closes")? {
+            tx.execute(
+                "INSERT OR REPLACE INTO runtime_last_closes (symbol, close_ts_ms, side, reason, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                (symbol, ts_ms, close_side, close_reason, &ts_iso),
+            )?;
+        }
+    }
+
     tx.commit()?;
 
     Ok((trades_written, position_state_written, true))
@@ -873,6 +896,17 @@ fn iso_from_ms(ms: i64) -> String {
 
 fn ms_to_secs(value: i64) -> f64 {
     (value as f64) / 1000.0
+}
+
+fn table_exists_in_tx(tx: &rusqlite::Transaction<'_>, table_name: &str) -> Result<bool> {
+    let row = tx
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            [table_name],
+            |_| Ok(()),
+        )
+        .optional()?;
+    Ok(row.is_some())
 }
 
 #[cfg(test)]
@@ -935,6 +969,13 @@ mod tests {
                 last_add_time INTEGER,
                 entry_adx_threshold REAL,
                 updated_at TEXT
+            );
+            CREATE TABLE runtime_last_closes (
+                symbol TEXT PRIMARY KEY,
+                close_ts_ms INTEGER NOT NULL,
+                side TEXT NOT NULL,
+                reason TEXT,
+                updated_at TEXT NOT NULL
             );
             {runtime_cooldowns_sql}
             "#,
@@ -1480,6 +1521,116 @@ mod tests {
         assert_eq!(state_row.0, 1);
         assert_eq!(state_row.1, FIXED_TS_MS);
         assert_eq!(state_row.2, Some(ms_to_secs(FIXED_TS_MS)));
+    }
+
+    #[test]
+    fn full_close_projection_refreshes_runtime_last_closes() {
+        let dir = tempdir().unwrap();
+        let paper_db = dir.path().join("paper.db");
+        seed_paper_db(&paper_db);
+
+        let conn = Connection::open(&paper_db).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO runtime_last_closes (symbol, close_ts_ms, side, reason, updated_at)
+             VALUES ('ETH', ?1, 'long', 'stale-close', '2026-03-05T10:00:00+00:00')",
+            [FIXED_TS_MS - 60_000],
+        )
+        .unwrap();
+        conn.close().unwrap();
+
+        let mut pre_state = StrategyState::new(1_000.0, FIXED_TS_MS - 60_000);
+        pre_state.positions.insert(
+            "ETH".to_string(),
+            bt_core::decision_kernel::Position {
+                symbol: "ETH".to_string(),
+                side: PositionSide::Long,
+                quantity: 1.0,
+                avg_entry_price: 100.0,
+                opened_at_ms: FIXED_TS_MS - 3_600_000,
+                updated_at_ms: FIXED_TS_MS - 60_000,
+                notional_usd: 100.0,
+                margin_usd: 33.3,
+                confidence: Some(2),
+                entry_atr: Some(5.0),
+                entry_adx_threshold: Some(22.0),
+                adds_count: 0,
+                tp1_taken: false,
+                trailing_sl: Some(95.0),
+                mae_usd: 0.0,
+                mfe_usd: 0.0,
+                last_funding_ms: Some(FIXED_TS_MS - 3_600_000),
+            },
+        );
+        let post_state = StrategyState::new(1_050.0, FIXED_TS_MS);
+        let intent = OrderIntent {
+            schema_version: 1,
+            intent_id: 3,
+            symbol: "ETH".to_string(),
+            kind: OrderIntentKind::Close,
+            side: PositionSide::Long,
+            quantity: 1.0,
+            price: 105.0,
+            notional_usd: 105.0,
+            fee_rate: 0.0,
+            reason: "Signal Trigger".to_string(),
+            reason_code: "exit_signal".to_string(),
+        };
+        let fill = FillEvent {
+            schema_version: 1,
+            intent_id: 3,
+            symbol: "ETH".to_string(),
+            side: PositionSide::Long,
+            price: 105.0,
+            quantity: 1.0,
+            notional_usd: 105.0,
+            fee_usd: 0.0,
+            pnl_usd: 5.0,
+        };
+
+        apply_decision_projection(
+            &paper_db,
+            "ETH",
+            &pre_state,
+            Some(&PaperPositionState {
+                symbol: "ETH".to_string(),
+                side: "long".to_string(),
+                size: 1.0,
+                entry_price: 100.0,
+                entry_atr: 5.0,
+                trailing_sl: Some(95.0),
+                confidence: "high".to_string(),
+                leverage: 3.0,
+                margin_used: 33.3,
+                adds_count: 0,
+                tp1_taken: false,
+                open_time_ms: FIXED_TS_MS - 3_600_000,
+                last_funding_time_ms: FIXED_TS_MS - 3_600_000,
+                last_add_time_ms: 0,
+                entry_adx_threshold: 22.0,
+            }),
+            &post_state,
+            &[intent],
+            &[fill],
+            &sample_snap(),
+            ExecutionMetadata {
+                signal: Signal::Sell,
+                confidence: Confidence::High,
+                entry_adx_threshold: 22.0,
+            },
+            FIXED_TS_MS,
+        )
+        .unwrap();
+
+        let snapshot = crate::paper_export::export_paper_snapshot(&paper_db, FIXED_TS_MS).unwrap();
+        let close_info = snapshot
+            .runtime
+            .as_ref()
+            .unwrap()
+            .last_close_info_by_symbol
+            .get("ETH")
+            .unwrap();
+        assert_eq!(close_info.timestamp_ms, FIXED_TS_MS);
+        assert_eq!(close_info.reason, "Signal Trigger");
     }
 
     #[test]
