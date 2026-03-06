@@ -10,11 +10,14 @@ for the active programme contract.
 Rust now also has a first paper bootstrap/restore shell via
 `aiq-runtime paper doctor`, while Python paper execution remains frozen as the
 legacy runtime path until full Rust paper execution lands. Rust currently owns
-four paper-facing shells: `paper doctor`, `paper run-once`, `paper cycle`, and
-the new bounded `paper loop`. `paper cycle` still runs one explicit
-multi-symbol cycle with `--step-close-ts-ms` and a rerun guard, while
-`paper loop` resumes from `runtime_cycle_steps` to catch up unapplied bar-close
-steps without becoming a daemon.
+four paper-facing shells (`paper doctor`, `paper run-once`, `paper cycle`, and
+`paper loop`), with one paired opt-in orchestration wrapper tracked alongside
+them: `paper daemon`. `paper cycle` still runs one explicit multi-symbol cycle
+with `--step-close-ts-ms` and a rerun guard, `paper loop` still resumes from
+`runtime_cycle_steps` to catch up unapplied bar-close steps, and `paper daemon`
+is only a long-running wrapper around the same `paper loop --follow` /
+`paper cycle` contracts. Python paper execution remains the active production
+path, so this does not claim paper cutover.
 
 ## Screenshots
 

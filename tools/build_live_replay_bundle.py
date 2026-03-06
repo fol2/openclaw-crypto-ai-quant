@@ -1274,6 +1274,7 @@ def main() -> int:
         'STRICT_REPLACE_FLAG=""\n'
         'if [ "${AQC_SNAPSHOT_STRICT_REPLACE:-0}" = "1" ]; then STRICT_REPLACE_FLAG="--strict-replace"; fi\n'
         f'python3 "$REPO_ROOT/tools/export_live_canonical_snapshot.py" --source live --db-path "$LIVE_DB" --as-of-ts {seed_as_of_ts} --output "$SNAPSHOT_PATH"\n'
+        '# Legacy compatibility bridge: replay bundles still seed paper through the frozen Python helper here.\n'
         'python3 "$REPO_ROOT/tools/apply_canonical_snapshot_to_paper.py" --snapshot "$SNAPSHOT_PATH" --target-db "$PAPER_DB" $STRICT_REPLACE_FLAG > "$PAPER_SEED_APPLY_REPORT"'
     )
 

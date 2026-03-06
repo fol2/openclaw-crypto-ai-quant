@@ -7,6 +7,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 
 mod paper_cycle;
+mod paper_daemon;
 mod paper_export;
 mod paper_loop;
 mod paper_run_once;
@@ -57,6 +58,31 @@ struct CommonArgs {
     /// Emit machine-readable JSON instead of a human summary.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+struct PaperCommonArgs {
+    /// YAML config path. Backward-compatible with strategy_overrides.yaml.
+    #[arg(long, default_value = "config/strategy_overrides.yaml")]
+    config: PathBuf,
+    /// Apply the live overlay when loading config.
+    #[arg(long)]
+    live: bool,
+    /// Override the runtime pipeline profile.
+    #[arg(long)]
+    profile: Option<String>,
+    /// Emit machine-readable JSON instead of a human summary.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+struct PaperDoctorCommonArgs {
+    #[command(flatten)]
+    paper: PaperCommonArgs,
+    /// Optional symbol override for per-symbol config resolution.
+    #[arg(long)]
+    symbol: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -113,12 +139,14 @@ enum PaperCommand {
     Cycle(PaperCycleArgs),
     /// Execute a bounded Rust paper catch-up loop across unapplied cycle steps.
     Loop(PaperLoopArgs),
+    /// Execute an opt-in long-running Rust paper daemon wrapper around paper loop follow mode.
+    Daemon(PaperDaemonArgs),
 }
 
 #[derive(Debug, Clone, Args)]
 struct PaperDoctorArgs {
     #[command(flatten)]
-    common: CommonArgs,
+    common: PaperDoctorCommonArgs,
     /// Paper DB path to inspect and restore.
     #[arg(long, default_value = "trading_engine.db")]
     db: PathBuf,
@@ -130,7 +158,7 @@ struct PaperDoctorArgs {
 #[derive(Debug, Clone, Args)]
 struct PaperRunOnceArgs {
     #[command(flatten)]
-    common: CommonArgs,
+    common: PaperCommonArgs,
     /// Paper DB path to restore from and project back into.
     #[arg(long, default_value = "trading_engine.db")]
     db: PathBuf,
@@ -157,7 +185,7 @@ struct PaperRunOnceArgs {
 #[derive(Debug, Clone, Args)]
 struct PaperCycleArgs {
     #[command(flatten)]
-    common: CommonArgs,
+    common: PaperCommonArgs,
     /// Paper DB path to restore from and project back into.
     #[arg(long, default_value = "trading_engine.db")]
     db: PathBuf,
@@ -190,7 +218,7 @@ struct PaperCycleArgs {
 #[derive(Debug, Clone, Args)]
 struct PaperLoopArgs {
     #[command(flatten)]
-    common: CommonArgs,
+    common: PaperCommonArgs,
     /// Paper DB path to restore from and project back into.
     #[arg(long, default_value = "trading_engine.db")]
     db: PathBuf,
@@ -230,6 +258,48 @@ struct PaperLoopArgs {
     /// Resolve the loop but do not write any DB projections.
     #[arg(long)]
     dry_run: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+struct PaperDaemonArgs {
+    #[command(flatten)]
+    common: PaperCommonArgs,
+    /// Paper DB path to restore from and project back into.
+    #[arg(long, default_value = "trading_engine.db")]
+    db: PathBuf,
+    /// Candle SQLite DB path used for this daemon lane.
+    #[arg(long)]
+    candles_db: PathBuf,
+    /// Explicit symbol list (comma-delimited). Open paper positions are always included.
+    #[arg(long, value_delimiter = ',')]
+    symbols: Vec<String>,
+    /// Optional file containing one symbol per line. Loaded once at startup.
+    #[arg(long)]
+    symbols_file: Option<PathBuf>,
+    /// BTC anchor symbol for alignment context.
+    #[arg(long, default_value = "BTC")]
+    btc_symbol: String,
+    /// Number of bars to load for indicator warm-up.
+    #[arg(long, default_value_t = 400)]
+    lookback_bars: usize,
+    /// Required bootstrap step identity when no prior runtime_cycle_steps exist.
+    #[arg(long)]
+    start_step_close_ts_ms: Option<i64>,
+    /// Sleep duration between idle follow polls.
+    #[arg(long, default_value_t = 5_000)]
+    idle_sleep_ms: u64,
+    /// Maximum number of idle polls before exiting. Zero means unbounded.
+    #[arg(long, default_value_t = 0)]
+    max_idle_polls: usize,
+    /// Override exported_at_ms for reproducible artefacts; defaults to each step close.
+    #[arg(long)]
+    exported_at_ms: Option<i64>,
+    /// Resolve the daemon lane but do not write any DB projections.
+    #[arg(long)]
+    dry_run: bool,
+    /// Optional daemon lock path. Defaults to AI_QUANT_LOCK_PATH or the project paper/live lock file.
+    #[arg(long)]
+    lock_path: Option<PathBuf>,
 }
 
 impl From<ModeArg> for RuntimeMode {
@@ -303,6 +373,20 @@ fn resolve_config_path(path: &Path) -> PathBuf {
     }
 
     path.to_path_buf()
+}
+
+fn load_symbols(symbols: Vec<String>, symbols_file: Option<&Path>) -> Result<Vec<String>> {
+    let mut merged = symbols;
+    if let Some(symbols_file) = symbols_file {
+        let file_symbols = std::fs::read_to_string(symbols_file)?
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        merged.extend(file_symbols);
+    }
+    Ok(merged)
 }
 
 fn run_snapshot(command: SnapshotCommand) -> Result<()> {
@@ -393,17 +477,17 @@ fn run_snapshot(command: SnapshotCommand) -> Result<()> {
 fn run_paper(command: PaperCommand) -> Result<()> {
     match command {
         PaperCommand::Doctor(args) => {
-            let config_path = resolve_config_path(&args.common.config);
+            let config_path = resolve_config_path(&args.common.paper.config);
             let config = bt_core::config::load_config_checked(
                 config_path
                     .to_str()
                     .context("config path must be valid UTF-8")?,
                 args.common.symbol.as_deref(),
-                args.common.live,
+                args.common.paper.live,
             )
             .map_err(anyhow::Error::msg)?;
             let runtime_bootstrap =
-                build_bootstrap(&config, RuntimeMode::Paper, args.common.profile.as_deref())
+                build_bootstrap(&config, RuntimeMode::Paper, args.common.paper.profile.as_deref())
                     .map_err(anyhow::Error::msg)?;
             let snapshot = paper_export::export_paper_snapshot(
                 &args.db,
@@ -412,7 +496,7 @@ fn run_paper(command: PaperCommand) -> Result<()> {
             )?;
             let (_state, report) = restore_paper_state(&snapshot).map_err(anyhow::Error::msg)?;
 
-            if args.common.json {
+            if args.common.paper.json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
@@ -485,16 +569,7 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 args.common.profile.as_deref(),
             )
             .map_err(anyhow::Error::msg)?;
-            let mut symbols = args.symbols;
-            if let Some(symbols_file) = args.symbols_file.as_ref() {
-                let file_symbols = std::fs::read_to_string(symbols_file)?
-                    .lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                    .map(ToOwned::to_owned)
-                    .collect::<Vec<_>>();
-                symbols.extend(file_symbols);
-            }
+            let symbols = load_symbols(args.symbols, args.symbols_file.as_deref())?;
             let report = paper_cycle::run_cycle(paper_cycle::PaperCycleInput {
                 runtime_bootstrap,
                 config_path: &config_path,
@@ -537,16 +612,7 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 args.common.profile.as_deref(),
             )
             .map_err(anyhow::Error::msg)?;
-            let mut symbols = args.symbols;
-            if let Some(symbols_file) = args.symbols_file.as_ref() {
-                let file_symbols = std::fs::read_to_string(symbols_file)?
-                    .lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                    .map(ToOwned::to_owned)
-                    .collect::<Vec<_>>();
-                symbols.extend(file_symbols);
-            }
+            let symbols = load_symbols(args.symbols, args.symbols_file.as_deref())?;
             let report = paper_loop::run_loop(paper_loop::PaperLoopInput {
                 runtime_bootstrap,
                 config_path: &config_path,
@@ -563,6 +629,7 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 max_idle_polls: args.max_idle_polls,
                 exported_at_ms: args.exported_at_ms,
                 dry_run: args.dry_run,
+                stop_flag: None,
             })?;
 
             if args.common.json {
@@ -573,6 +640,54 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                     report.executed_steps,
                     report.next_due_step_close_ts_ms,
                     report.latest_common_close_ts_ms,
+                    report.dry_run,
+                );
+            }
+        }
+        PaperCommand::Daemon(args) => {
+            let config_path = resolve_config_path(&args.common.config);
+            let base_cfg = bt_core::config::load_config_checked(
+                config_path
+                    .to_str()
+                    .context("config path must be valid UTF-8")?,
+                None,
+                args.common.live,
+            )
+            .map_err(anyhow::Error::msg)?;
+            let runtime_bootstrap = build_bootstrap(
+                &base_cfg,
+                RuntimeMode::Paper,
+                args.common.profile.as_deref(),
+            )
+            .map_err(anyhow::Error::msg)?;
+            let symbols = load_symbols(args.symbols, args.symbols_file.as_deref())?;
+            let report = paper_daemon::run_daemon(paper_daemon::PaperDaemonInput {
+                runtime_bootstrap,
+                config_path: &config_path,
+                live: args.common.live,
+                paper_db: &args.db,
+                candles_db: &args.candles_db,
+                explicit_symbols: &symbols,
+                btc_symbol: &args.btc_symbol,
+                lookback_bars: args.lookback_bars,
+                start_step_close_ts_ms: args.start_step_close_ts_ms,
+                idle_sleep_ms: args.idle_sleep_ms,
+                max_idle_polls: args.max_idle_polls,
+                exported_at_ms: args.exported_at_ms,
+                dry_run: args.dry_run,
+                lock_path: args.lock_path.as_deref(),
+                emit_progress: !args.common.json,
+            })?;
+
+            if args.common.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "paper daemon ok: pid={} lock={} steps={} stop_requested={} dry_run={}",
+                    report.pid,
+                    report.lock_path,
+                    report.loop_report.executed_steps,
+                    report.stop_requested,
                     report.dry_run,
                 );
             }
