@@ -851,18 +851,22 @@ AI_QUANT_DB_PATH=./trading_engine_v8_paper1.db \
 AI_QUANT_CANDLES_DB_DIR=./candles_dbs \
 AI_QUANT_SYMBOLS=BTC,ETH,SOL \
 AI_QUANT_LOOKBACK_BARS=200 \
+AI_QUANT_PAPER_START_STEP_CLOSE_TS_MS=1773424200000 \
 cargo run -p aiq-runtime -- \
   paper manifest \
+  --watch-symbols-file \
   --json
 ```
 
 Manifest expectations:
 
 - `paper manifest` is read-only; it never writes the paper DB or starts follow-mode polling
-- `--config`, `--db`, `--candles-db`, `--symbols`, `--symbols-file`, `--lookback-bars`, and `--lock-path` may override the corresponding env-derived values
+- `--config`, `--db`, `--candles-db`, `--symbols`, `--symbols-file`, `--watch-symbols-file`, `--lookback-bars`, `--start-step-close-ts-ms`, and `--lock-path` may override the corresponding env-derived values
 - if `AI_QUANT_CANDLES_DB_PATH` is unset, the manifest derives the candle DB path from `AI_QUANT_CANDLES_DB_DIR` plus the resolved config interval
 - if `AI_QUANT_INTERVAL` disagrees with the resolved config interval, the manifest returns a warning instead of silently changing the Rust runtime interval
 - the emitted `daemon_command` is the exact Rust paper daemon launch contract for the current env/CLI combination; it is intended for operator review, not as evidence of cutover
+- `resume.launch_state` tells you whether the lane would fail closed (`blocked` / `bootstrap_required`), launch idle without symbols, start a fresh bootstrap, resume a due step, or simply stay caught up waiting for the next bar close
+- `resume.last_applied_step_close_ts_ms`, `resume.next_due_step_close_ts_ms`, and `resume.latest_common_close_ts_ms` expose the restart/resume cursor when the paper DB and candle DB are both inspectable
 
 ---
 

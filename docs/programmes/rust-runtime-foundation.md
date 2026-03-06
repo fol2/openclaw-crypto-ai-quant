@@ -77,6 +77,14 @@ service manifest surface:
 - derives the candle DB path from `AI_QUANT_CANDLES_DB_DIR` + resolved interval when needed
 - emits the resolved Rust daemon command, warnings, and runtime bootstrap metadata without executing any paper steps
 
+The current delivered slice extends that again with a service-grade launch and
+resume contract for the same manifest surface:
+
+- `paper manifest`
+- accepts opt-in watchlist/bootstrap launch inputs (`--watch-symbols-file`, `--start-step-close-ts-ms`) as part of the deterministic daemon plan
+- reports whether the lane is blocked, idle with no symbols, bootstrap-ready, bootstrap-blocked, resumable, or merely caught up and waiting
+- exposes the current active symbols plus `last_applied_step_close_ts_ms`, `next_due_step_close_ts_ms`, and `latest_common_close_ts_ms` when the paper DB and candles DB are inspectable
+
 Python paper execution is still the active runtime path, and the opt-in Rust
 paper daemon wrapper does not change that. Python paper bootstrap is no longer
 the only continuity surface.

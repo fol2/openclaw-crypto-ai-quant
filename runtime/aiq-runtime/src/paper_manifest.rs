@@ -19,9 +19,32 @@ pub struct PaperManifestInput<'a> {
     pub candles_db: Option<&'a Path>,
     pub symbols: &'a [String],
     pub symbols_file: Option<&'a Path>,
+    pub watch_symbols_file: bool,
     pub btc_symbol: &'a str,
     pub lookback_bars: Option<usize>,
+    pub start_step_close_ts_ms: Option<i64>,
     pub lock_path: Option<&'a Path>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaperManifestLaunchState {
+    Blocked,
+    IdleNoSymbols,
+    BootstrapRequired,
+    BootstrapReady,
+    ResumeReady,
+    CaughtUpIdle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PaperManifestResumeState {
+    pub launch_ready: bool,
+    pub launch_state: PaperManifestLaunchState,
+    pub active_symbols: Vec<String>,
+    pub last_applied_step_close_ts_ms: Option<i64>,
+    pub latest_common_close_ts_ms: Option<i64>,
+    pub next_due_step_close_ts_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -37,11 +60,14 @@ pub struct PaperManifestReport {
     pub lookback_bars: usize,
     pub symbols: Vec<String>,
     pub symbols_file: Option<String>,
+    pub watch_symbols_file: bool,
     pub btc_symbol: String,
+    pub start_step_close_ts_ms: Option<i64>,
     pub lock_path: String,
     pub instance_tag: Option<String>,
     pub promoted_role: Option<String>,
     pub strategy_mode: Option<String>,
+    pub resume: PaperManifestResumeState,
     pub warnings: Vec<String>,
     pub daemon_command: Vec<String>,
 }
@@ -65,6 +91,7 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
         .symbols_file
         .map(Path::to_path_buf)
         .or_else(|| env_path("AI_QUANT_SYMBOLS_FILE"));
+    let watch_symbols_file = input.watch_symbols_file || env_bool("AI_QUANT_WATCH_SYMBOLS_FILE");
     let interval_symbols = resolve_interval_symbols(&symbols, symbols_file.as_deref())?;
     let interval = if interval_symbols.is_empty() {
         config.engine.interval.trim().to_string()
@@ -93,11 +120,21 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
         .or_else(|| env_usize("AI_QUANT_LOOKBACK_BARS"))
         .unwrap_or(DEFAULT_LOOKBACK_BARS);
     let btc_symbol = normalise_symbol(input.btc_symbol).unwrap_or_else(|| "BTC".to_string());
+    let start_step_close_ts_ms = input
+        .start_step_close_ts_ms
+        .or_else(|| env_i64("AI_QUANT_PAPER_START_STEP_CLOSE_TS_MS"));
     let lock_path = paper_daemon::resolve_lock_path(input.lock_path, input.live);
 
     if symbols.is_empty() && symbols_file.is_none() {
         warnings.push(
             "no explicit symbol source resolved; daemon will rely on open paper positions only"
+                .to_string(),
+        );
+    }
+    let watch_symbols_file_configured = !(watch_symbols_file && symbols_file.is_none());
+    if !watch_symbols_file_configured {
+        warnings.push(
+            "watch-symbols-file is enabled but no symbols-file source resolved; the daemon would fail closed until a symbols file is configured"
                 .to_string(),
         );
     }
@@ -121,6 +158,20 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
             candles_db.display()
         ));
     }
+
+    let resume = resolve_resume_state(
+        &mut warnings,
+        &runtime_bootstrap,
+        &config_path,
+        input.live,
+        &paper_db,
+        &candles_db,
+        &interval_symbols,
+        watch_symbols_file_configured,
+        watch_symbols_file,
+        &btc_symbol,
+        start_step_close_ts_ms,
+    );
 
     let mut daemon_command = vec![
         "aiq-runtime".to_string(),
@@ -158,6 +209,13 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
         daemon_command.push("--symbols-file".to_string());
         daemon_command.push(symbols_file.display().to_string());
     }
+    if watch_symbols_file {
+        daemon_command.push("--watch-symbols-file".to_string());
+    }
+    if let Some(start_step_close_ts_ms) = start_step_close_ts_ms {
+        daemon_command.push("--start-step-close-ts-ms".to_string());
+        daemon_command.push(start_step_close_ts_ms.to_string());
+    }
 
     Ok(PaperManifestReport {
         ok: true,
@@ -171,14 +229,134 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
         lookback_bars,
         symbols,
         symbols_file: symbols_file.map(|path| path.display().to_string()),
+        watch_symbols_file,
         btc_symbol,
+        start_step_close_ts_ms,
         lock_path: lock_path.display().to_string(),
         instance_tag: env_string("AI_QUANT_INSTANCE_TAG"),
         promoted_role: env_string("AI_QUANT_PROMOTED_ROLE"),
         strategy_mode: env_string("AI_QUANT_STRATEGY_MODE"),
+        resume,
         warnings,
         daemon_command,
     })
+}
+
+fn resolve_resume_state(
+    warnings: &mut Vec<String>,
+    runtime_bootstrap: &RuntimeBootstrap,
+    config_path: &Path,
+    live: bool,
+    paper_db: &Path,
+    candles_db: &Path,
+    explicit_symbols: &[String],
+    watch_symbols_file_configured: bool,
+    watch_symbols_file: bool,
+    btc_symbol: &str,
+    start_step_close_ts_ms: Option<i64>,
+) -> PaperManifestResumeState {
+    let mut resume = PaperManifestResumeState {
+        launch_ready: false,
+        launch_state: PaperManifestLaunchState::Blocked,
+        active_symbols: Vec::new(),
+        last_applied_step_close_ts_ms: None,
+        latest_common_close_ts_ms: None,
+        next_due_step_close_ts_ms: None,
+    };
+
+    if !paper_db.exists() || !candles_db.exists() {
+        return resume;
+    }
+    if !watch_symbols_file_configured {
+        return resume;
+    }
+
+    let Some(context) = (match paper_loop::inspect_loop_context(
+        runtime_bootstrap,
+        config_path,
+        live,
+        paper_db,
+        candles_db,
+        explicit_symbols,
+        btc_symbol,
+    ) {
+        Ok(context) => context,
+        Err(err) => {
+            warnings.push(format!(
+                "paper manifest could not inspect daemon resume state: {err:#}"
+            ));
+            return resume;
+        }
+    }) else {
+        resume.launch_ready = watch_symbols_file;
+        resume.launch_state = PaperManifestLaunchState::IdleNoSymbols;
+        if !watch_symbols_file {
+            warnings.push(
+                "paper manifest resolved no active symbols or open paper positions; launch would fail closed without watch-symbols-file"
+                    .to_string(),
+            );
+        }
+        return resume;
+    };
+
+    resume.active_symbols = context.active_symbols.clone();
+    resume.last_applied_step_close_ts_ms = context.last_applied_step_close_ts_ms;
+    resume.latest_common_close_ts_ms = Some(context.latest_common_close_ts_ms);
+
+    let interval_ms = match paper_loop::interval_to_ms(&context.interval) {
+        Ok(interval_ms) => interval_ms,
+        Err(err) => {
+            warnings.push(format!(
+                "paper manifest could not derive resume interval width: {err:#}"
+            ));
+            return resume;
+        }
+    };
+
+    match context.last_applied_step_close_ts_ms {
+        Some(last_applied_step_close_ts_ms) => {
+            let Some(next_due_step_close_ts_ms) =
+                last_applied_step_close_ts_ms.checked_add(interval_ms)
+            else {
+                warnings.push(
+                    "paper manifest detected interval overflow while deriving the next due step"
+                        .to_string(),
+                );
+                return resume;
+            };
+            resume.next_due_step_close_ts_ms = Some(next_due_step_close_ts_ms);
+            if let Some(start_step_close_ts_ms) = start_step_close_ts_ms {
+                if start_step_close_ts_ms != next_due_step_close_ts_ms {
+                    warnings.push(format!(
+                        "paper manifest start-step-close-ts-ms {} does not match the next resumable step {}",
+                        start_step_close_ts_ms, next_due_step_close_ts_ms
+                    ));
+                    return resume;
+                }
+            }
+            resume.launch_ready = true;
+            resume.launch_state = if next_due_step_close_ts_ms > context.latest_common_close_ts_ms {
+                PaperManifestLaunchState::CaughtUpIdle
+            } else {
+                PaperManifestLaunchState::ResumeReady
+            };
+        }
+        None => {
+            resume.next_due_step_close_ts_ms = start_step_close_ts_ms;
+            if start_step_close_ts_ms.is_some() {
+                resume.launch_ready = true;
+                resume.launch_state = PaperManifestLaunchState::BootstrapReady;
+            } else {
+                resume.launch_state = PaperManifestLaunchState::BootstrapRequired;
+                warnings.push(
+                    "paper manifest found no prior runtime_cycle_steps for this config fingerprint and interval; provide --start-step-close-ts-ms or AI_QUANT_PAPER_START_STEP_CLOSE_TS_MS for the first launch"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    resume
 }
 
 fn resolve_config_path(config: Option<&Path>) -> PathBuf {
@@ -230,7 +408,10 @@ fn resolve_symbols(cli_symbols: &[String]) -> Vec<String> {
     symbols
 }
 
-fn resolve_interval_symbols(symbols: &[String], symbols_file: Option<&Path>) -> Result<Vec<String>> {
+fn resolve_interval_symbols(
+    symbols: &[String],
+    symbols_file: Option<&Path>,
+) -> Result<Vec<String>> {
     let mut merged = symbols.to_vec();
     if let Some(symbols_file) = symbols_file {
         let file_symbols = std::fs::read_to_string(symbols_file).with_context(|| {
@@ -279,9 +460,23 @@ fn env_usize(name: &str) -> Option<usize> {
     env_string(name).and_then(|value| value.parse::<usize>().ok())
 }
 
+fn env_i64(name: &str) -> Option<i64> {
+    env_string(name).and_then(|value| value.parse::<i64>().ok())
+}
+
+fn env_bool(name: &str) -> bool {
+    env_string(name)
+        .map(|value| value.to_ascii_lowercase())
+        .map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aiq_runtime_core::runtime::{build_bootstrap, RuntimeMode};
+    use chrono::Utc;
+    use rusqlite::{params, Connection};
     use std::fs;
     use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
@@ -329,6 +524,109 @@ mod tests {
         .unwrap();
     }
 
+    fn init_paper_db(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                symbol TEXT,
+                type TEXT,
+                action TEXT,
+                price REAL,
+                size REAL,
+                notional REAL,
+                reason TEXT,
+                reason_code TEXT,
+                confidence TEXT,
+                pnl REAL,
+                fee_usd REAL,
+                fee_token TEXT,
+                fee_rate REAL,
+                balance REAL,
+                entry_atr REAL,
+                leverage REAL,
+                margin_used REAL,
+                meta_json TEXT,
+                run_fingerprint TEXT,
+                fill_hash TEXT,
+                fill_tid INTEGER
+            );
+            CREATE TABLE position_state (
+                symbol TEXT PRIMARY KEY,
+                open_trade_id INTEGER,
+                trailing_sl REAL,
+                last_funding_time INTEGER,
+                adds_count INTEGER,
+                tp1_taken INTEGER,
+                last_add_time INTEGER,
+                entry_adx_threshold REAL,
+                updated_at TEXT
+            );
+            CREATE TABLE runtime_cooldowns (
+                symbol TEXT PRIMARY KEY,
+                last_entry_attempt_s REAL,
+                last_exit_attempt_s REAL,
+                updated_at TEXT
+            );
+            CREATE TABLE runtime_cycle_steps (
+                step_id TEXT PRIMARY KEY,
+                step_close_ts_ms INTEGER NOT NULL,
+                interval TEXT NOT NULL,
+                symbols_json TEXT NOT NULL,
+                snapshot_exported_at_ms INTEGER NOT NULL,
+                execution_count INTEGER NOT NULL,
+                trades_written INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+    }
+
+    fn init_candles_db(path: &Path, symbols: &[&str], interval: &str, closes: &[i64]) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE candles (
+                symbol TEXT,
+                interval TEXT,
+                t INTEGER,
+                t_close INTEGER,
+                o REAL,
+                h REAL,
+                l REAL,
+                c REAL,
+                v REAL,
+                n INTEGER
+            );
+            "#,
+        )
+        .unwrap();
+        for symbol in symbols {
+            let mut price = 100.0;
+            for close in closes {
+                conn.execute(
+                    "INSERT INTO candles VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1)",
+                    params![
+                        symbol,
+                        interval,
+                        close - 1_800_000_i64,
+                        close,
+                        price,
+                        price + 1.0,
+                        price - 1.0,
+                        price + 0.5,
+                        1_000.0,
+                    ],
+                )
+                .unwrap();
+                price += 1.0;
+            }
+        }
+    }
+
     #[test]
     fn manifest_uses_env_defaults_and_derives_candles_db() {
         let _guard = env_lock().lock().unwrap();
@@ -370,8 +668,10 @@ mod tests {
             candles_db: None,
             symbols: &[],
             symbols_file: None,
+            watch_symbols_file: false,
             btc_symbol: "btc",
             lookback_bars: None,
+            start_step_close_ts_ms: None,
             lock_path: None,
         })
         .unwrap();
@@ -430,8 +730,10 @@ mod tests {
             candles_db: None,
             symbols: &[],
             symbols_file: None,
+            watch_symbols_file: false,
             btc_symbol: "BTC",
             lookback_bars: None,
+            start_step_close_ts_ms: None,
             lock_path: None,
         })
         .unwrap();
@@ -462,7 +764,10 @@ mod tests {
         .unwrap();
 
         let _env = EnvGuard::set(&[
-            ("AI_QUANT_STRATEGY_YAML", Some(config_path.to_str().unwrap())),
+            (
+                "AI_QUANT_STRATEGY_YAML",
+                Some(config_path.to_str().unwrap()),
+            ),
             (
                 "AI_QUANT_CANDLES_DB_DIR",
                 Some(candles_dir.to_str().unwrap()),
@@ -484,8 +789,10 @@ mod tests {
             candles_db: None,
             symbols: &[],
             symbols_file: None,
+            watch_symbols_file: false,
             btc_symbol: "BTC",
             lookback_bars: None,
+            start_step_close_ts_ms: None,
             lock_path: None,
         })
         .unwrap();
@@ -503,5 +810,218 @@ mod tests {
         let _env = EnvGuard::set(&[("AI_QUANT_DB_PATH", Some(""))]);
 
         assert_eq!(env_path("AI_QUANT_DB_PATH"), None);
+    }
+
+    #[test]
+    fn manifest_reports_bootstrap_required_without_prior_runtime_steps() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("strategy.yaml");
+        let paper_db = dir.path().join("paper.db");
+        let candles_db = dir.path().join("candles_30m.db");
+        write_config(&config_path, "30m");
+        init_paper_db(&paper_db);
+        init_candles_db(
+            &candles_db,
+            &["BTC", "ETH"],
+            "30m",
+            &[1_773_422_400_000, 1_773_424_200_000],
+        );
+
+        let report = build_manifest(PaperManifestInput {
+            config: Some(&config_path),
+            live: false,
+            profile: Some("production"),
+            db: Some(&paper_db),
+            candles_db: Some(&candles_db),
+            symbols: &["eth".to_string()],
+            symbols_file: None,
+            watch_symbols_file: false,
+            btc_symbol: "BTC",
+            lookback_bars: Some(200),
+            start_step_close_ts_ms: None,
+            lock_path: None,
+        })
+        .unwrap();
+
+        assert_eq!(
+            report.resume.launch_state,
+            PaperManifestLaunchState::BootstrapRequired
+        );
+        assert!(!report.resume.launch_ready);
+        assert_eq!(report.resume.active_symbols, vec!["ETH"]);
+        assert_eq!(report.resume.last_applied_step_close_ts_ms, None);
+        assert_eq!(
+            report.resume.latest_common_close_ts_ms,
+            Some(1_773_424_200_000)
+        );
+        assert_eq!(report.resume.next_due_step_close_ts_ms, None);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| { warning.contains("provide --start-step-close-ts-ms") }));
+    }
+
+    #[test]
+    fn manifest_reports_bootstrap_ready_and_emits_start_step() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("strategy.yaml");
+        let paper_db = dir.path().join("paper.db");
+        let candles_db = dir.path().join("candles_30m.db");
+        write_config(&config_path, "30m");
+        init_paper_db(&paper_db);
+        init_candles_db(
+            &candles_db,
+            &["BTC", "ETH"],
+            "30m",
+            &[1_773_422_400_000, 1_773_424_200_000],
+        );
+
+        let report = build_manifest(PaperManifestInput {
+            config: Some(&config_path),
+            live: false,
+            profile: None,
+            db: Some(&paper_db),
+            candles_db: Some(&candles_db),
+            symbols: &["ETH".to_string()],
+            symbols_file: None,
+            watch_symbols_file: false,
+            btc_symbol: "BTC",
+            lookback_bars: None,
+            start_step_close_ts_ms: Some(1_773_422_400_000),
+            lock_path: None,
+        })
+        .unwrap();
+
+        assert_eq!(report.start_step_close_ts_ms, Some(1_773_422_400_000));
+        assert_eq!(
+            report.resume.launch_state,
+            PaperManifestLaunchState::BootstrapReady
+        );
+        assert!(report.resume.launch_ready);
+        assert!(report
+            .daemon_command
+            .windows(2)
+            .any(|window| { window == ["--start-step-close-ts-ms", "1773422400000"] }));
+    }
+
+    #[test]
+    fn manifest_reports_resume_ready_from_runtime_cycle_steps() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("strategy.yaml");
+        let paper_db = dir.path().join("paper.db");
+        let candles_db = dir.path().join("candles_30m.db");
+        write_config(&config_path, "30m");
+        init_paper_db(&paper_db);
+        init_candles_db(
+            &candles_db,
+            &["BTC", "ETH"],
+            "30m",
+            &[1_773_422_400_000, 1_773_424_200_000, 1_773_426_000_000],
+        );
+
+        let config =
+            bt_core::config::load_config_checked(config_path.to_str().unwrap(), None, false)
+                .unwrap();
+        let runtime_bootstrap =
+            build_bootstrap(&config, RuntimeMode::Paper, Some("production")).unwrap();
+        let step_id = crate::paper_cycle::derive_step_id(
+            &runtime_bootstrap.config_fingerprint,
+            "30m",
+            1_773_422_400_000,
+            false,
+        );
+        let conn = Connection::open(&paper_db).unwrap();
+        conn.execute(
+            "INSERT INTO runtime_cycle_steps (step_id, step_close_ts_ms, interval, symbols_json, snapshot_exported_at_ms, execution_count, trades_written, created_at)
+             VALUES (?1, ?2, '30m', '[\"ETH\"]', ?3, 1, 0, ?4)",
+            params![
+                step_id,
+                1_773_422_400_000_i64,
+                1_773_422_400_000_i64,
+                Utc::now().to_rfc3339(),
+            ],
+        )
+        .unwrap();
+
+        let report = build_manifest(PaperManifestInput {
+            config: Some(&config_path),
+            live: false,
+            profile: Some("production"),
+            db: Some(&paper_db),
+            candles_db: Some(&candles_db),
+            symbols: &["ETH".to_string()],
+            symbols_file: None,
+            watch_symbols_file: false,
+            btc_symbol: "BTC",
+            lookback_bars: None,
+            start_step_close_ts_ms: None,
+            lock_path: None,
+        })
+        .unwrap();
+
+        assert_eq!(
+            report.resume.launch_state,
+            PaperManifestLaunchState::ResumeReady
+        );
+        assert!(report.resume.launch_ready);
+        assert_eq!(
+            report.resume.last_applied_step_close_ts_ms,
+            Some(1_773_422_400_000)
+        );
+        assert_eq!(
+            report.resume.next_due_step_close_ts_ms,
+            Some(1_773_424_200_000)
+        );
+        assert_eq!(report.resume.active_symbols, vec!["ETH"]);
+    }
+
+    #[test]
+    fn manifest_blocks_watch_mode_without_symbols_file_source() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("strategy.yaml");
+        let paper_db = dir.path().join("paper.db");
+        let candles_db = dir.path().join("candles_30m.db");
+        write_config(&config_path, "30m");
+        init_paper_db(&paper_db);
+        init_candles_db(
+            &candles_db,
+            &["BTC", "ETH"],
+            "30m",
+            &[1_773_422_400_000, 1_773_424_200_000],
+        );
+
+        let report = build_manifest(PaperManifestInput {
+            config: Some(&config_path),
+            live: false,
+            profile: None,
+            db: Some(&paper_db),
+            candles_db: Some(&candles_db),
+            symbols: &["ETH".to_string()],
+            symbols_file: None,
+            watch_symbols_file: true,
+            btc_symbol: "BTC",
+            lookback_bars: None,
+            start_step_close_ts_ms: None,
+            lock_path: None,
+        })
+        .unwrap();
+
+        assert_eq!(
+            report.resume.launch_state,
+            PaperManifestLaunchState::Blocked
+        );
+        assert!(!report.resume.launch_ready);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| { warning.contains("watch-symbols-file is enabled") }));
+        assert!(report
+            .daemon_command
+            .iter()
+            .any(|arg| arg == "--watch-symbols-file"));
     }
 }

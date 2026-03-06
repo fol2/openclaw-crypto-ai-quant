@@ -44,6 +44,7 @@ for path in (
     Path("/tmp/aiq-runtime-doctor.json"),
     Path("/tmp/aiq-runtime-pipeline.json"),
     Path("/tmp/aiq-runtime-paper-manifest.json"),
+    Path("/tmp/aiq-runtime-paper-manifest-resume.json"),
     Path("/tmp/aiq-runtime-snapshot-validate.json"),
     Path("/tmp/aiq-runtime-seed-paper.json"),
     Path("/tmp/aiq-runtime-seed-paper-loop.json"),
@@ -180,7 +181,7 @@ conn.executescript(
     """
 )
 base = 1772670000000
-for symbol, start, drift in (("ETH", 100.0, 0.25), ("BTC", 50000.0, 20.0)):
+for symbol, start, drift in (("ETH", 100.0, 0.25), ("SOL", 150.0, 0.4), ("BTC", 50000.0, 20.0)):
     price = start
     for idx in range(420):
         t = base + idx * 1800000
@@ -252,6 +253,11 @@ cargo run -q -p aiq-runtime -- paper loop --db /tmp/aiq-runtime-paper-loop.db --
 cargo run -q -p aiq-runtime -- paper loop --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --max-steps 2 --json >/tmp/aiq-runtime-paper-loop-resume.json
 cargo run -q -p aiq-runtime -- paper loop --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --max-steps 1 --json >/tmp/aiq-runtime-paper-loop-idle.json
 cargo run -q -p aiq-runtime -- paper loop --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --follow --idle-sleep-ms 1 --max-idle-polls 1 --max-steps 1 --json >/tmp/aiq-runtime-paper-loop-follow.json
+AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example \
+AI_QUANT_DB_PATH=/tmp/aiq-runtime-paper-loop.db \
+AI_QUANT_CANDLES_DB_PATH=/tmp/aiq-runtime-candles.db \
+AI_QUANT_SYMBOLS=ETH \
+cargo run -q -p aiq-runtime -- paper manifest --json >/tmp/aiq-runtime-paper-manifest-resume.json
 cargo run -q -p aiq-runtime -- paper doctor --db /tmp/aiq-runtime-paper.db --live --json >/tmp/aiq-runtime-paper-doctor-live.json
 cargo run -q -p aiq-runtime -- paper run-once --db /tmp/aiq-runtime-paper.db --candles-db /tmp/aiq-runtime-candles.db --target-symbol ETH --exported-at-ms 1772676900000 --live --dry-run --json >/tmp/aiq-runtime-paper-run-once-live.json
 if cargo run -q -p aiq-runtime -- paper cycle --db /tmp/aiq-runtime-paper.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --step-close-ts-ms 1773426000000 --exported-at-ms 1772676900000 --json >/tmp/aiq-runtime-paper-cycle-rerun.json 2>/tmp/aiq-runtime-paper-cycle-rerun.stderr; then
@@ -304,6 +310,14 @@ assert manifest["interval"] == "30m"
 assert manifest["lookback_bars"] == 200
 assert manifest["symbols"] == ["ETH", "SOL"]
 assert manifest["candles_db"] == "/tmp/aiq-runtime-candles.db"
+assert manifest["watch_symbols_file"] is False
+assert manifest["resume"]["launch_state"] == "bootstrap_required"
+assert manifest["resume"]["launch_ready"] is False
+manifest_resume = json.loads(Path("/tmp/aiq-runtime-paper-manifest-resume.json").read_text(encoding="utf-8"))
+assert manifest_resume["resume"]["launch_state"] == "caught_up_idle"
+assert manifest_resume["resume"]["launch_ready"] is True
+assert manifest_resume["resume"]["last_applied_step_close_ts_ms"] == 1773426000000
+assert manifest_resume["resume"]["next_due_step_close_ts_ms"] == 1773427800000
 PY
 
 echo "[runtime-foundation] ok"

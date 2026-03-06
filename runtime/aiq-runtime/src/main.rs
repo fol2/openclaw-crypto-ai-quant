@@ -169,12 +169,18 @@ struct PaperManifestArgs {
     /// Optional file containing one symbol per line. Falls back to AI_QUANT_SYMBOLS_FILE.
     #[arg(long)]
     symbols_file: Option<PathBuf>,
+    /// Reload the symbols file when its metadata changes, without restarting the daemon.
+    #[arg(long, requires = "symbols_file")]
+    watch_symbols_file: bool,
     /// BTC anchor symbol for alignment context.
     #[arg(long, default_value = "BTC")]
     btc_symbol: String,
     /// Optional lookback override. Falls back to AI_QUANT_LOOKBACK_BARS or 400.
     #[arg(long)]
     lookback_bars: Option<usize>,
+    /// Optional bootstrap step identity override. Falls back to AI_QUANT_PAPER_START_STEP_CLOSE_TS_MS.
+    #[arg(long)]
+    start_step_close_ts_ms: Option<i64>,
     /// Optional daemon lock path override. Falls back to AI_QUANT_LOCK_PATH or the default paper lock.
     #[arg(long)]
     lock_path: Option<PathBuf>,
@@ -528,8 +534,10 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 candles_db: args.candles_db.as_deref(),
                 symbols: &args.symbols,
                 symbols_file: args.symbols_file.as_deref(),
+                watch_symbols_file: args.watch_symbols_file,
                 btc_symbol: &args.btc_symbol,
                 lookback_bars: args.lookback_bars,
+                start_step_close_ts_ms: args.start_step_close_ts_ms,
                 lock_path: args.lock_path.as_deref(),
             })?;
 
@@ -549,7 +557,28 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 if let Some(symbols_file) = report.symbols_file.as_deref() {
                     println!("symbols_file: {}", symbols_file);
                 }
+                println!("watch_symbols_file: {}", report.watch_symbols_file);
+                if let Some(start_step_close_ts_ms) = report.start_step_close_ts_ms {
+                    println!("start_step_close_ts_ms: {}", start_step_close_ts_ms);
+                }
                 println!("lock_path: {}", report.lock_path);
+                println!("launch_state: {:?}", report.resume.launch_state);
+                println!("launch_ready: {}", report.resume.launch_ready);
+                println!("active_symbols: {}", report.resume.active_symbols.join(","));
+                if let Some(last_applied_step_close_ts_ms) =
+                    report.resume.last_applied_step_close_ts_ms
+                {
+                    println!(
+                        "last_applied_step_close_ts_ms: {}",
+                        last_applied_step_close_ts_ms
+                    );
+                }
+                if let Some(next_due_step_close_ts_ms) = report.resume.next_due_step_close_ts_ms {
+                    println!("next_due_step_close_ts_ms: {}", next_due_step_close_ts_ms);
+                }
+                if let Some(latest_common_close_ts_ms) = report.resume.latest_common_close_ts_ms {
+                    println!("latest_common_close_ts_ms: {}", latest_common_close_ts_ms);
+                }
                 if !report.warnings.is_empty() {
                     println!("warnings:");
                     for warning in &report.warnings {
