@@ -458,22 +458,23 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
             ManifestRefresh::Warning(warning) => warnings.push(warning),
             ManifestRefresh::Candidate(file_symbols) => {
                 let candidate_symbols = manifest_state.candidate_symbols(&file_symbols);
-                let candidate_runtime_bootstrap =
-                    resolve_runtime_bootstrap_for_symbols(&input, &candidate_symbols)?;
-                match paper_loop::inspect_loop_context(
-                    &candidate_runtime_bootstrap,
-                    &input.effective_config,
-                    input.live,
-                    working_paper_db.path(),
-                    input.candles_db,
-                    &candidate_symbols,
-                    input.btc_symbol,
-                ) {
-                    Ok(_) => {
-                        if let Some(message) = manifest_state.accept_candidate(file_symbols) {
-                            warnings.push(message);
+                match resolve_runtime_bootstrap_for_symbols(&input, &candidate_symbols) {
+                    Ok(candidate_runtime_bootstrap) => match paper_loop::inspect_loop_context(
+                        &candidate_runtime_bootstrap,
+                        &input.effective_config,
+                        input.live,
+                        working_paper_db.path(),
+                        input.candles_db,
+                        &candidate_symbols,
+                        input.btc_symbol,
+                    ) {
+                        Ok(_) => {
+                            if let Some(message) = manifest_state.accept_candidate(file_symbols) {
+                                warnings.push(message);
+                            }
                         }
-                    }
+                        Err(err) => warnings.push(manifest_state.reject_candidate(&err)),
+                    },
                     Err(err) => warnings.push(manifest_state.reject_candidate(&err)),
                 }
             }

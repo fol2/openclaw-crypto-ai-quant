@@ -470,12 +470,12 @@ symbols:
         .arg("--symbols-file")
         .arg(&symbols_file)
         .arg("--watch-symbols-file")
+        .arg("--start-step-close-ts-ms")
+        .arg(START_STEP_CLOSE_TS_MS.to_string())
         .arg("--lock-path")
         .arg(&fixture.lock_path)
         .arg("--status-path")
         .arg(&fixture.status_path)
-        .arg("--start-step-close-ts-ms")
-        .arg(START_STEP_CLOSE_TS_MS.to_string())
         .arg("--idle-sleep-ms")
         .arg("20")
         .arg("--max-idle-polls")
@@ -521,6 +521,8 @@ symbols:
         .arg("--symbols-file")
         .arg(&symbols_file)
         .arg("--watch-symbols-file")
+        .arg("--start-step-close-ts-ms")
+        .arg(START_STEP_CLOSE_TS_MS.to_string())
         .arg("--lock-path")
         .arg(&fixture.lock_path)
         .arg("--status-path")
@@ -823,6 +825,103 @@ fn paper_daemon_retains_last_good_manifest_on_semantically_torn_reload() {
                 })
             })),
         "daemon should surface the semantically torn reload retention warning",
+    );
+}
+
+#[test]
+fn paper_daemon_retains_last_good_manifest_on_runtime_invalid_reload() {
+    let fixture = prepare_idle_fixture();
+    let config_path = fixture._dir.path().join("strategy-invalid-reload.yaml");
+    let symbols_file = fixture._dir.path().join("symbols-runtime-invalid.txt");
+    fs::write(
+        &config_path,
+        r#"
+global:
+  engine:
+    interval: 30m
+  runtime:
+    profile: production
+symbols:
+  ETH:
+    runtime:
+      profile: production
+    pipeline:
+      profiles:
+        production:
+          enabled_stages: [ranking]
+          disabled_stages: [ranking]
+"#,
+    )
+    .unwrap();
+    fs::write(&symbols_file, "BTC\n").expect("initial symbols file should be created");
+
+    let child = runtime_command()
+        .arg("paper")
+        .arg("daemon")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--db")
+        .arg(&fixture.paper_db)
+        .arg("--candles-db")
+        .arg(&fixture.candles_db)
+        .arg("--symbols-file")
+        .arg(&symbols_file)
+        .arg("--watch-symbols-file")
+        .arg("--start-step-close-ts-ms")
+        .arg(START_STEP_CLOSE_TS_MS.to_string())
+        .arg("--lock-path")
+        .arg(&fixture.lock_path)
+        .arg("--status-path")
+        .arg(&fixture.status_path)
+        .arg("--idle-sleep-ms")
+        .arg("20")
+        .arg("--max-idle-polls")
+        .arg("0")
+        .arg("--json")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("paper daemon runtime-invalid reload smoke should spawn");
+
+    let child = wait_for_lock_file(child, &fixture.lock_path, Duration::from_secs(5));
+    thread::sleep(Duration::from_millis(80));
+    fs::write(&symbols_file, "ETH\n").expect("symbols file should become runtime-invalid");
+    thread::sleep(Duration::from_millis(80));
+    send_sigterm(&child);
+
+    let output = wait_with_timeout(child, Duration::from_secs(5));
+    assert!(
+        output.status.success(),
+        "paper daemon should stop cleanly after a runtime-invalid watchlist reload; output:\n{}",
+        combined_output(&output)
+    );
+
+    let report = parse_json_output(&output);
+    assert_eq!(
+        report
+            .pointer("/manifest_reload_failure_count")
+            .and_then(Value::as_u64),
+        Some(1),
+        "daemon should count the runtime-invalid manifest reload",
+    );
+    assert_eq!(
+        report
+            .pointer("/manifest_symbols")
+            .and_then(Value::as_array),
+        Some(&vec![Value::String("BTC".to_string())]),
+        "daemon should retain the last good manifest after a runtime-invalid reload",
+    );
+    assert!(
+        report
+            .pointer("/loop_report/warnings")
+            .and_then(Value::as_array)
+            .is_some_and(|warnings| warnings.iter().any(|warning| {
+                warning.as_str().is_some_and(|text| {
+                    text.contains("ignored symbols file reload")
+                        && text.contains("retaining last good manifest")
+                })
+            })),
+        "daemon should surface the runtime-invalid reload retention warning",
     );
 }
 
