@@ -228,7 +228,7 @@ struct PaperLoopArgs {
     /// Explicit symbol list (comma-delimited). Open paper positions are always included.
     #[arg(long, value_delimiter = ',')]
     symbols: Vec<String>,
-    /// Optional file containing one symbol per line. Reloaded before each scheduling inspection.
+    /// Optional file containing one symbol per line. Re-read on each loop iteration.
     #[arg(long)]
     symbols_file: Option<PathBuf>,
     /// BTC anchor symbol for alignment context.
@@ -273,7 +273,7 @@ struct PaperDaemonArgs {
     /// Explicit symbol list (comma-delimited). Open paper positions are always included.
     #[arg(long, value_delimiter = ',')]
     symbols: Vec<String>,
-    /// Optional file containing one symbol per line. Reloaded before each scheduling inspection.
+    /// Optional file containing one symbol per line. Re-read on each loop iteration.
     #[arg(long)]
     symbols_file: Option<PathBuf>,
     /// BTC anchor symbol for alignment context.
@@ -639,10 +639,11 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!(
-                    "paper loop ok: steps={} next_due={:?} latest_common={:?} dry_run={}",
+                    "paper loop ok: steps={} next_due={:?} latest_common={:?} symbol_reloads={} dry_run={}",
                     report.executed_steps,
                     report.next_due_step_close_ts_ms,
                     report.latest_common_close_ts_ms,
+                    report.symbols_file_reload_count,
                     report.dry_run,
                 );
             }
@@ -686,10 +687,11 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!(
-                    "paper daemon ok: pid={} lock={} steps={} stop_requested={} dry_run={}",
+                    "paper daemon ok: pid={} lock={} steps={} symbol_reloads={} stop_requested={} dry_run={}",
                     report.pid,
                     report.lock_path,
                     report.loop_report.executed_steps,
+                    report.loop_report.symbols_file_reload_count,
                     report.stop_requested,
                     report.dry_run,
                 );

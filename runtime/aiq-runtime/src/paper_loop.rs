@@ -5,6 +5,7 @@ use chrono::Utc;
 use rusqlite::{backup::Backup, params, Connection};
 use serde::Serialize;
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -53,6 +54,9 @@ pub struct PaperLoopReport {
     pub dry_run: bool,
     pub interval: Option<String>,
     pub explicit_symbols: Vec<String>,
+    pub latest_explicit_symbols: Vec<String>,
+    pub symbols_file: Option<String>,
+    pub symbols_file_reload_count: usize,
     pub initial_last_applied_step_close_ts_ms: Option<i64>,
     pub latest_common_close_ts_ms: Option<i64>,
     pub next_due_step_close_ts_ms: Option<i64>,
@@ -79,6 +83,14 @@ struct WorkingPaperDb {
     cleanup: bool,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct SymbolSourceState {
+    base_explicit_symbols: Vec<String>,
+    symbols_file: Option<PathBuf>,
+    current_symbols: Vec<String>,
+    reload_count: usize,
+}
+
 pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
     if !input.paper_db.exists() {
         anyhow::bail!("paper db not found: {}", input.paper_db.display());
@@ -90,7 +102,8 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
         anyhow::bail!("max_steps must be positive");
     }
 
-    let explicit_symbols = normalise_symbols(input.explicit_symbols);
+    let mut symbol_source = SymbolSourceState::new(input.explicit_symbols, input.symbols_file)?;
+    let initial_explicit_symbols = symbol_source.current_symbols.clone();
     let working_paper_db = prepare_working_paper_db(input.paper_db, input.dry_run)?;
     let mut warnings = Vec::new();
     let mut errors = Vec::new();
@@ -101,8 +114,6 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
     let mut latest_common_close_ts_ms = None;
     let mut next_due_step_close_ts_ms = None;
     let mut idle_polls = 0usize;
-    let mut last_resolved_symbols = explicit_symbols.clone();
-    let mut last_empty_symbol_seed = false;
 
     loop {
         if is_stop_requested(input.stop_flag) {
@@ -115,30 +126,29 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
             break;
         }
 
-        let resolved_symbols =
-            resolve_symbols_for_inspection(&explicit_symbols, input.symbols_file)?;
-        if resolved_symbols != last_resolved_symbols {
-            warnings.push(format!(
-                "paper loop reloaded symbols: {}",
-                resolved_symbols.join(",")
-            ));
-            last_resolved_symbols = resolved_symbols.clone();
+        if let Some(message) = symbol_source.refresh()? {
+            warnings.push(message);
         }
-
+        let explicit_symbols = symbol_source.current_symbols();
         let maybe_context = inspect_loop_context(
             &input.runtime_bootstrap,
             input.config_path,
             input.live,
             working_paper_db.path(),
             input.candles_db,
-            &resolved_symbols,
+            explicit_symbols,
             input.btc_symbol,
         )?;
         let Some(context) = maybe_context else {
             if input.follow && input.symbols_file.is_some() {
-                if !last_empty_symbol_seed {
-                    warnings.push("paper loop idle: no active symbols available yet".to_string());
-                    last_empty_symbol_seed = true;
+                if idle_polls == 0 {
+                    warnings.push(format!(
+                        "paper loop idle: no active symbols available yet from {}",
+                        input
+                            .symbols_file
+                            .expect("symbols_file is checked above")
+                            .display()
+                    ));
                 }
                 idle_polls = idle_polls.saturating_add(1);
                 if input.max_idle_polls > 0 && idle_polls >= input.max_idle_polls {
@@ -157,7 +167,6 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
             warnings.push("paper loop stopped: no active symbols remain".to_string());
             break;
         };
-        last_empty_symbol_seed = false;
 
         if initial_last_applied_step_close_ts_ms.is_none() {
             initial_last_applied_step_close_ts_ms = context.last_applied_step_close_ts_ms;
@@ -228,7 +237,7 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
             live: input.live,
             paper_db: working_paper_db.path(),
             candles_db: input.candles_db,
-            explicit_symbols: &resolved_symbols,
+            explicit_symbols,
             btc_symbol: input.btc_symbol,
             lookback_bars: input.lookback_bars,
             step_close_ts_ms: candidate_next_due,
@@ -250,7 +259,7 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
         input.live,
         working_paper_db.path(),
         input.candles_db,
-        &last_resolved_symbols,
+        symbol_source.current_symbols(),
         input.btc_symbol,
     )?;
     if let Some(context) = final_context.as_ref() {
@@ -271,7 +280,13 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
         ok: errors.is_empty(),
         dry_run: input.dry_run,
         interval,
-        explicit_symbols,
+        explicit_symbols: initial_explicit_symbols,
+        latest_explicit_symbols: symbol_source.current_symbols,
+        symbols_file: symbol_source
+            .symbols_file
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        symbols_file_reload_count: symbol_source.reload_count,
         initial_last_applied_step_close_ts_ms,
         latest_common_close_ts_ms,
         next_due_step_close_ts_ms,
@@ -304,6 +319,45 @@ impl PaperLoopStepReport {
             warnings: value.warnings,
             errors: value.errors,
         }
+    }
+}
+
+impl SymbolSourceState {
+    fn new(base_explicit_symbols: &[String], symbols_file: Option<&Path>) -> Result<Self> {
+        let base_explicit_symbols = normalise_symbols(base_explicit_symbols);
+        let symbols_file = symbols_file.map(|path| path.to_path_buf());
+        let current_symbols =
+            resolve_explicit_symbols(&base_explicit_symbols, symbols_file.as_deref())?;
+        Ok(Self {
+            base_explicit_symbols,
+            symbols_file,
+            current_symbols,
+            reload_count: 0,
+        })
+    }
+
+    fn refresh(&mut self) -> Result<Option<String>> {
+        let Some(symbols_file) = self.symbols_file.as_deref() else {
+            return Ok(None);
+        };
+
+        let next_symbols =
+            resolve_explicit_symbols(&self.base_explicit_symbols, Some(symbols_file))?;
+        if next_symbols == self.current_symbols {
+            return Ok(None);
+        }
+
+        self.current_symbols = next_symbols;
+        self.reload_count = self.reload_count.saturating_add(1);
+        Ok(Some(format!(
+            "paper loop reloaded symbols file {}: explicit symbols now [{}]",
+            symbols_file.display(),
+            self.current_symbols.join(", ")
+        )))
+    }
+
+    fn current_symbols(&self) -> &[String] {
+        &self.current_symbols
     }
 }
 
@@ -360,24 +414,6 @@ fn inspect_loop_context(
         latest_common_close_ts_ms,
         last_applied_step_close_ts_ms,
     }))
-}
-
-fn resolve_symbols_for_inspection(
-    explicit_symbols: &[String],
-    symbols_file: Option<&Path>,
-) -> Result<Vec<String>> {
-    let mut merged = explicit_symbols.to_vec();
-    if let Some(symbols_file) = symbols_file {
-        let file_symbols = std::fs::read_to_string(symbols_file)
-            .with_context(|| format!("failed to read symbols file: {}", symbols_file.display()))?
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>();
-        merged.extend(file_symbols);
-    }
-    Ok(normalise_symbols(&merged))
 }
 
 fn resolve_shared_interval(
@@ -486,6 +522,25 @@ fn table_exists(conn: &Connection, table_name: &str) -> Result<bool> {
         |row| row.get(0),
     )?;
     Ok(exists > 0)
+}
+
+fn resolve_explicit_symbols(
+    base_explicit_symbols: &[String],
+    symbols_file: Option<&Path>,
+) -> Result<Vec<String>> {
+    let mut merged = base_explicit_symbols.to_vec();
+    if let Some(symbols_file) = symbols_file {
+        let file_symbols = fs::read_to_string(symbols_file)
+            .with_context(|| format!("failed to read symbols file: {}", symbols_file.display()))?;
+        merged.extend(
+            file_symbols
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(ToOwned::to_owned),
+        );
+    }
+    Ok(normalise_symbols(&merged))
 }
 
 fn prepare_working_paper_db(paper_db: &Path, dry_run: bool) -> Result<WorkingPaperDb> {
@@ -631,7 +686,7 @@ mod tests {
     const NEXT_STEP_CLOSE_TS_MS: i64 = 1_773_424_200_000;
     const LAST_STEP_CLOSE_TS_MS: i64 = 1_773_426_000_000;
 
-    fn seed_paper_db(path: &Path) {
+    fn create_paper_db_schema(path: &Path) {
         let conn = Connection::open(path).unwrap();
         conn.execute_batch(
             r#"
@@ -687,6 +742,15 @@ mod tests {
             "#,
         )
         .unwrap();
+    }
+
+    fn seed_empty_paper_db(path: &Path) {
+        create_paper_db_schema(path);
+    }
+
+    fn seed_paper_db(path: &Path) {
+        create_paper_db_schema(path);
+        let conn = Connection::open(path).unwrap();
         conn.execute(
             "INSERT INTO trades (timestamp,symbol,action,type,price,size,notional,reason,confidence,balance,pnl,fee_usd,fee_rate,entry_atr,leverage,margin_used,meta_json)
              VALUES ('2026-03-05T10:00:00+00:00','ETH','OPEN','LONG',100.0,1.0,100.0,'seed','medium',1000.0,0.0,0.0,0.0,5.0,3.0,33.3,'{}')",
@@ -701,64 +765,6 @@ mod tests {
         conn.execute(
             "INSERT INTO runtime_cooldowns VALUES ('ETH',1772676500.0,1772676550.0,'2026-03-05T10:15:00+00:00')",
             [],
-        )
-        .unwrap();
-    }
-
-    fn seed_empty_paper_db(path: &Path) {
-        let conn = Connection::open(path).unwrap();
-        conn.execute_batch(
-            r#"
-            CREATE TABLE trades (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT,
-                symbol TEXT,
-                type TEXT,
-                action TEXT,
-                price REAL,
-                size REAL,
-                notional REAL,
-                reason TEXT,
-                reason_code TEXT,
-                confidence TEXT,
-                pnl REAL,
-                fee_usd REAL,
-                fee_token TEXT,
-                fee_rate REAL,
-                balance REAL,
-                entry_atr REAL,
-                leverage REAL,
-                margin_used REAL,
-                meta_json TEXT,
-                run_fingerprint TEXT,
-                fill_hash TEXT,
-                fill_tid INTEGER
-            );
-            CREATE TABLE position_state (
-                symbol TEXT PRIMARY KEY,
-                open_trade_id INTEGER,
-                trailing_sl REAL,
-                last_funding_time INTEGER,
-                adds_count INTEGER,
-                tp1_taken INTEGER,
-                last_add_time INTEGER,
-                entry_adx_threshold REAL,
-                updated_at TEXT
-            );
-            CREATE TABLE runtime_cooldowns (
-                symbol TEXT PRIMARY KEY,
-                last_entry_attempt_s REAL,
-                last_exit_attempt_s REAL,
-                updated_at TEXT
-            );
-            CREATE TABLE runtime_last_closes (
-                symbol TEXT PRIMARY KEY,
-                close_ts_ms INTEGER NOT NULL,
-                side TEXT NOT NULL,
-                reason TEXT,
-                updated_at TEXT NOT NULL
-            );
-            "#,
         )
         .unwrap();
     }
@@ -1165,20 +1171,14 @@ mod tests {
     }
 
     #[test]
-    fn loop_follow_mode_reloads_symbols_file_after_empty_watchlist() {
+    fn loop_follow_mode_idles_on_empty_symbols_file_until_budget_exhausts() {
         let dir = tempdir().unwrap();
         let paper_db = dir.path().join("paper.db");
         let candles_db = dir.path().join("candles.db");
         let symbols_file = dir.path().join("symbols.txt");
         seed_empty_paper_db(&paper_db);
         seed_candles_db(&candles_db);
-        std::fs::write(&symbols_file, "").unwrap();
-
-        let writer_path = symbols_file.clone();
-        let writer = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(60));
-            std::fs::write(&writer_path, "ETH\n").unwrap();
-        });
+        fs::write(&symbols_file, "").unwrap();
 
         let report = run_loop(PaperLoopInput {
             runtime_bootstrap: runtime_bootstrap(),
@@ -1190,21 +1190,22 @@ mod tests {
             symbols_file: Some(&symbols_file),
             btc_symbol: "BTC",
             lookback_bars: 400,
-            start_step_close_ts_ms: Some(START_STEP_CLOSE_TS_MS),
+            start_step_close_ts_ms: None,
             max_steps: 1,
             follow: true,
-            idle_sleep_ms: 20,
-            max_idle_polls: 10,
+            idle_sleep_ms: 1,
+            max_idle_polls: 1,
             exported_at_ms: None,
-            dry_run: true,
+            dry_run: false,
             stop_flag: None,
         })
         .unwrap();
 
-        writer.join().unwrap();
-
-        assert_eq!(report.executed_steps, 1);
-        assert_eq!(report.steps[0].active_symbols, vec!["ETH".to_string()]);
+        assert_eq!(report.executed_steps, 0);
+        assert_eq!(report.idle_polls, 1);
+        assert_eq!(report.symbols_file_reload_count, 0);
+        assert_eq!(report.explicit_symbols, Vec::<String>::new());
+        assert_eq!(report.latest_explicit_symbols, Vec::<String>::new());
         assert!(report
             .warnings
             .iter()
@@ -1212,7 +1213,84 @@ mod tests {
         assert!(report
             .warnings
             .iter()
-            .any(|warning| warning.contains("reloaded symbols: ETH")));
+            .any(|warning| warning.contains("follow exhausted")));
+    }
+
+    #[test]
+    fn loop_follow_mode_reloads_symbols_file_between_idle_polls() {
+        let dir = tempdir().unwrap();
+        let paper_db = dir.path().join("paper.db");
+        let candles_db = dir.path().join("candles.db");
+        let symbols_file = dir.path().join("symbols.txt");
+        seed_paper_db(&paper_db);
+        seed_candles_db(&candles_db);
+        fs::write(&symbols_file, "ETH\n").unwrap();
+
+        let bootstrap = runtime_bootstrap();
+        let cfg_path = base_cfg_path();
+        let caught_up = run_loop(PaperLoopInput {
+            runtime_bootstrap: bootstrap.clone(),
+            config_path: &cfg_path,
+            live: false,
+            paper_db: &paper_db,
+            candles_db: &candles_db,
+            explicit_symbols: &[],
+            symbols_file: Some(&symbols_file),
+            btc_symbol: "BTC",
+            lookback_bars: 400,
+            start_step_close_ts_ms: Some(START_STEP_CLOSE_TS_MS),
+            max_steps: 3,
+            follow: false,
+            idle_sleep_ms: 0,
+            max_idle_polls: 0,
+            exported_at_ms: None,
+            dry_run: false,
+            stop_flag: None,
+        })
+        .unwrap();
+        assert_eq!(caught_up.executed_steps, 3);
+
+        let symbols_file_for_thread = symbols_file.clone();
+        let updater = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(25));
+            fs::write(&symbols_file_for_thread, "ETH\nBTC\n").unwrap();
+        });
+
+        let report = run_loop(PaperLoopInput {
+            runtime_bootstrap: bootstrap,
+            config_path: &cfg_path,
+            live: false,
+            paper_db: &paper_db,
+            candles_db: &candles_db,
+            explicit_symbols: &[],
+            symbols_file: Some(&symbols_file),
+            btc_symbol: "BTC",
+            lookback_bars: 400,
+            start_step_close_ts_ms: None,
+            max_steps: 1,
+            follow: true,
+            idle_sleep_ms: 50,
+            max_idle_polls: 2,
+            exported_at_ms: None,
+            dry_run: false,
+            stop_flag: None,
+        })
+        .unwrap();
+        updater.join().unwrap();
+
+        assert_eq!(report.executed_steps, 0);
+        assert_eq!(report.idle_polls, 2);
+        assert_eq!(report.symbols_file_reload_count, 1);
+        assert_eq!(report.explicit_symbols, vec!["ETH"]);
+        assert_eq!(report.latest_explicit_symbols, vec!["BTC", "ETH"]);
+        assert_eq!(
+            report.symbols_file.as_deref(),
+            Some(symbols_file.to_string_lossy().as_ref())
+        );
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("reloaded symbols file")));
     }
 
     #[test]
