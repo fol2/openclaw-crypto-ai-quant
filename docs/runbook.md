@@ -756,6 +756,31 @@ Operational expectations:
 - all resolved cycle symbols must share the same `engine.interval`; mixed per-symbol interval overrides fail closed
 - the write path refreshes `trades`, `position_state`, `runtime_cooldowns`, and `runtime_last_closes` inside one immediate transaction
 
+### Execute one bounded Rust paper loop shell
+
+Use when: you want the Rust runtime to catch up one or more unapplied paper cycle steps and then exit, without starting a daemon.
+
+```bash
+cargo run -p aiq-runtime -- \
+  paper loop \
+  --db ./trading_engine.db \
+  --candles-db ./candles_dbs/candles_30m.db \
+  --symbols ETH,SOL \
+  --start-step-close-ts-ms 1773424200000 \
+  --max-steps 2 \
+  --dry-run \
+  --json
+```
+
+Operational expectations:
+
+- `paper loop` is still a shell, not a long-running daemon
+- the command resumes from `runtime_cycle_steps` when prior Rust cycle state exists
+- `--start-step-close-ts-ms` is required only when no prior matching `runtime_cycle_steps` rows exist for the current config fingerprint / interval / live lane
+- each executed loop step reuses the same `paper cycle` contract and records the same rerun guard rows on write mode
+- when `--exported-at-ms` is omitted, each planned step uses its own `step_close_ts_ms` as the snapshot export timestamp for deterministic catch-up artefacts
+- the loop stops cleanly when the next due step is newer than the latest common candle close across the explicit symbols, open paper positions, and BTC anchor
+
 ---
 
 ## 7. Factory Stage Gate (dry -> smoke -> real)

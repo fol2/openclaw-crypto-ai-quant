@@ -10,7 +10,7 @@ Rust runtime replaces them.
 | Surface | Current Owner | Status | Rust Replacement |
 |---|---|---|---|
 | Python daemon orchestration | `engine/daemon.py`, `engine/core.py` | Active, frozen | `aiq-runtime` |
-| Python paper execution | `strategy/mei_alpha_v1.py` | Active, frozen (Rust bootstrap + run-once + cycle shells exist) | Rust paper mode |
+| Python paper execution | `strategy/mei_alpha_v1.py` | Active, frozen (Rust bootstrap + run-once + cycle + loop shells exist) | Rust paper mode |
 | Python live execution | `live/trader.py`, `exchange/executor.py` | Active, frozen | Rust live adapter |
 | Python OMS / risk runtime | `engine/oms.py`, `engine/risk.py` | Active, frozen | Rust persistence + risk layers |
 | Python parity orchestration | `tools/*parity*`, `tools/*replay*` | Active, frozen | Rust parity harness |

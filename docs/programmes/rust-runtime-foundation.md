@@ -41,6 +41,14 @@ The current delivered slice extends that further with a repeatable Rust paper or
 - multi-symbol cycle execution across explicit symbols plus open paper positions
 - still no daemon/systemd cutover
 
+The current delivered slice extends that again with a bounded Rust paper catch-up shell:
+
+- `paper loop`
+- resumes from `runtime_cycle_steps` when prior Rust cycle state exists
+- requires `--start-step-close-ts-ms` only for the first bootstrap run on a fresh paper DB
+- executes up to `--max-steps` unapplied cycle steps and exits
+- still no daemon/systemd cutover
+
 Python paper execution is still the active runtime path, but Python paper bootstrap is no longer the only continuity surface.
 
 ## Runtime Contract

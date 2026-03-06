@@ -229,8 +229,11 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
             break;
         }
         let pre_state = current_state.clone();
-        let (decision, execution_plan) =
-            crate::paper_run_once::execute_prepared_symbol_step(&pre_state, &candidate.prepared, input.step_close_ts_ms);
+        let (decision, execution_plan) = crate::paper_run_once::execute_prepared_symbol_step(
+            &pre_state,
+            &candidate.prepared,
+            input.step_close_ts_ms,
+        );
         warnings.extend(execution_plan.warnings.clone());
         errors.extend(decision.diagnostics.errors.clone());
         if decision
@@ -360,7 +363,11 @@ fn load_symbol_config(config_path: &Path, symbol: &str, live: bool) -> Result<St
         config_path
             .to_str()
             .context("config path must be valid UTF-8")?,
-        if symbol == "__GLOBAL__" { None } else { Some(symbol) },
+        if symbol == "__GLOBAL__" {
+            None
+        } else {
+            Some(symbol)
+        },
         live,
     )
     .map_err(anyhow::Error::msg)
@@ -375,7 +382,7 @@ fn entry_score(confidence: Confidence, adx: f64) -> i32 {
     conf_rank * 100 + adx as i32
 }
 
-fn derive_step_id(
+pub(crate) fn derive_step_id(
     config_fingerprint: &str,
     interval: &str,
     step_close_ts_ms: i64,
@@ -703,8 +710,10 @@ mod tests {
         assert!(first.trades_written > 0);
         let conn = Connection::open(&paper_db).unwrap();
         let before_counts = (
-            conn.query_row("SELECT COUNT(*) FROM trades", [], |row| row.get::<_, i64>(0))
-                .unwrap(),
+            conn.query_row("SELECT COUNT(*) FROM trades", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
             conn.query_row("SELECT COUNT(*) FROM runtime_cycle_steps", [], |row| {
                 row.get::<_, i64>(0)
             })
@@ -731,8 +740,10 @@ mod tests {
         assert!(err.to_string().contains("already applied"));
         let conn = Connection::open(&paper_db).unwrap();
         let after_counts = (
-            conn.query_row("SELECT COUNT(*) FROM trades", [], |row| row.get::<_, i64>(0))
-                .unwrap(),
+            conn.query_row("SELECT COUNT(*) FROM trades", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
             conn.query_row("SELECT COUNT(*) FROM runtime_cycle_steps", [], |row| {
                 row.get::<_, i64>(0)
             })
@@ -784,7 +795,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(last_exit_attempt_s, Some((FIXED_STEP_CLOSE_TS_MS as f64) / 1000.0));
+        assert_eq!(
+            last_exit_attempt_s,
+            Some((FIXED_STEP_CLOSE_TS_MS as f64) / 1000.0)
+        );
     }
 
     #[test]
