@@ -258,6 +258,7 @@ fi
 
 python3 - <<'PY'
 import json
+import sqlite3
 from pathlib import Path
 
 report = json.loads(Path("/tmp/aiq-runtime-paper-run-once.json").read_text(encoding="utf-8"))
@@ -279,9 +280,15 @@ assert loop_idle["latest_common_close_ts_ms"] == 1773426000000
 loop_follow = json.loads(Path("/tmp/aiq-runtime-paper-loop-follow.json").read_text(encoding="utf-8"))
 assert loop_follow["executed_steps"] == 0
 assert loop_follow["follow"] is True
-assert loop_follow["idle_polls"] == 2
+assert loop_follow["idle_polls"] == 1
 assert any("follow exhausted" in warning for warning in loop_follow["warnings"])
 assert "exact candle close" in Path("/tmp/aiq-runtime-paper-loop-gap.stderr").read_text(encoding="utf-8")
+conn = sqlite3.connect("/tmp/aiq-runtime-paper-loop.db")
+try:
+    recorded_steps = conn.execute("SELECT COUNT(*) FROM runtime_cycle_steps").fetchone()[0]
+finally:
+    conn.close()
+assert recorded_steps == 3
 doctor = json.loads(Path("/tmp/aiq-runtime-paper-doctor.json").read_text(encoding="utf-8"))
 assert doctor["paper_bootstrap"]["runtime_close_markers"] == 1
 PY
