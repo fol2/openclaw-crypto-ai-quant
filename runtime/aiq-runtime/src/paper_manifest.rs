@@ -4,10 +4,10 @@ use serde::Serialize;
 use std::env;
 use std::path::{Path, PathBuf};
 
+use crate::paper_config::PaperEffectiveConfig;
 use crate::paper_daemon;
 use crate::paper_loop;
 
-const DEFAULT_CONFIG_PATH: &str = "config/strategy_overrides.yaml";
 const DEFAULT_PAPER_DB_PATH: &str = "trading_engine.db";
 const DEFAULT_LOOKBACK_BARS: usize = 400;
 
@@ -68,23 +68,18 @@ pub struct PaperManifestReport {
     pub status_path: String,
     pub instance_tag: Option<String>,
     pub promoted_role: Option<String>,
+    pub promoted_config_path: Option<String>,
     pub strategy_mode: Option<String>,
+    pub strategy_mode_source: Option<String>,
     pub resume: PaperManifestResumeState,
     pub warnings: Vec<String>,
     pub daemon_command: Vec<String>,
 }
 
 pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestReport> {
-    let mut warnings = Vec::new();
-    let config_path = resolve_config_path(input.config);
-    let config = bt_core::config::load_config_checked(
-        config_path
-            .to_str()
-            .context("config path must be valid UTF-8")?,
-        None,
-        input.live,
-    )
-    .map_err(anyhow::Error::msg)?;
+    let effective_config = PaperEffectiveConfig::resolve(input.config)?;
+    let mut warnings = effective_config.warnings().to_vec();
+    let config = effective_config.load_config(None, input.live)?;
     let runtime_bootstrap =
         build_bootstrap(&config, RuntimeMode::Paper, input.profile).map_err(anyhow::Error::msg)?;
 
@@ -98,7 +93,7 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
     let interval = if interval_symbols.is_empty() {
         config.engine.interval.trim().to_string()
     } else {
-        paper_loop::resolve_shared_interval(&config_path, &interval_symbols, input.live)?
+        effective_config.resolve_shared_interval(&interval_symbols, input.live)?
     };
     if let Some(env_interval) = env_string("AI_QUANT_INTERVAL") {
         let env_interval = env_interval.trim().to_string();
@@ -165,7 +160,7 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
     let resume = resolve_resume_state(
         &mut warnings,
         &runtime_bootstrap,
-        &config_path,
+        &effective_config,
         input.live,
         &paper_db,
         &candles_db,
@@ -181,7 +176,7 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
         "paper".to_string(),
         "daemon".to_string(),
         "--config".to_string(),
-        config_path.display().to_string(),
+        effective_config.config_path().display().to_string(),
         "--db".to_string(),
         paper_db.display().to_string(),
         "--candles-db".to_string(),
@@ -225,7 +220,7 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
     Ok(PaperManifestReport {
         ok: true,
         runtime_bootstrap,
-        config_path: config_path.display().to_string(),
+        config_path: effective_config.config_path().display().to_string(),
         paper_db: paper_db.display().to_string(),
         paper_db_exists: paper_db.exists(),
         candles_db: candles_db.display().to_string(),
@@ -240,8 +235,14 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
         lock_path: lock_path.display().to_string(),
         status_path: status_path.display().to_string(),
         instance_tag: env_string("AI_QUANT_INSTANCE_TAG"),
-        promoted_role: env_string("AI_QUANT_PROMOTED_ROLE"),
-        strategy_mode: env_string("AI_QUANT_STRATEGY_MODE"),
+        promoted_role: effective_config.promoted_role().map(ToOwned::to_owned),
+        promoted_config_path: effective_config
+            .promoted_config_path()
+            .map(|path| path.display().to_string()),
+        strategy_mode: effective_config.strategy_mode().map(ToOwned::to_owned),
+        strategy_mode_source: effective_config
+            .strategy_mode_source()
+            .map(ToOwned::to_owned),
         resume,
         warnings,
         daemon_command,
@@ -251,7 +252,7 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
 fn resolve_resume_state(
     warnings: &mut Vec<String>,
     runtime_bootstrap: &RuntimeBootstrap,
-    config_path: &Path,
+    effective_config: &PaperEffectiveConfig,
     live: bool,
     paper_db: &Path,
     candles_db: &Path,
@@ -279,7 +280,7 @@ fn resolve_resume_state(
 
     let Some(context) = (match paper_loop::inspect_loop_context(
         runtime_bootstrap,
-        config_path,
+        effective_config,
         live,
         paper_db,
         candles_db,
@@ -321,7 +322,7 @@ fn resolve_resume_state(
 
     match context.last_applied_step_close_ts_ms {
         Some(last_applied_step_close_ts_ms) => {
-            let Some(next_due_step_close_ts_ms) =
+            let Some(next_due_step_close_ts_ms): Option<i64> =
                 last_applied_step_close_ts_ms.checked_add(interval_ms)
             else {
                 warnings.push(
@@ -364,25 +365,6 @@ fn resolve_resume_state(
 
     resume
 }
-
-fn resolve_config_path(config: Option<&Path>) -> PathBuf {
-    let configured = config
-        .map(Path::to_path_buf)
-        .or_else(|| env_path("AI_QUANT_STRATEGY_YAML"))
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
-
-    if configured.exists() {
-        return configured;
-    }
-
-    let fallback = PathBuf::from(format!("{}.example", configured.display()));
-    if fallback.exists() {
-        return fallback;
-    }
-
-    configured
-}
-
 fn resolve_candles_db(candles_db: Option<&Path>, interval: &str) -> Result<PathBuf> {
     if let Some(candles_db) = candles_db {
         return Ok(candles_db.to_path_buf());
@@ -484,10 +466,9 @@ mod tests {
     use chrono::Utc;
     use rusqlite::{params, Connection};
     use std::fs;
-    use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
 
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    use crate::test_support::env_lock;
 
     struct EnvGuard {
         saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
@@ -517,11 +498,6 @@ mod tests {
             }
         }
     }
-
-    fn env_lock() -> &'static Mutex<()> {
-        ENV_LOCK.get_or_init(|| Mutex::new(()))
-    }
-
     fn write_config(path: &Path, interval: &str) {
         fs::write(
             path,
@@ -820,6 +796,95 @@ mod tests {
             report.candles_db,
             candles_dir.join("candles_1h.db").display().to_string()
         );
+    }
+
+    #[test]
+    fn manifest_applies_promoted_role_and_strategy_mode_file_to_effective_interval() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("strategy.yaml");
+        let mode_file = dir.path().join("strategy_mode.txt");
+        let artifacts_dir = dir.path().join("artifacts");
+        let promoted_dir = artifacts_dir.join("2026-03-06/run_nightly/promoted_configs");
+        let candles_dir = dir.path().join("candles");
+        fs::create_dir_all(&promoted_dir).unwrap();
+        fs::create_dir_all(&candles_dir).unwrap();
+        fs::write(candles_dir.join("candles_1h.db"), b"").unwrap();
+        fs::write(
+            &config_path,
+            r#"
+global:
+  engine:
+    interval: 30m
+modes:
+  fallback:
+    global:
+      engine:
+        interval: 1h
+"#,
+        )
+        .unwrap();
+        fs::write(
+            promoted_dir.join("primary.yaml"),
+            "global:\n  trade:\n    leverage: 6.0\n",
+        )
+        .unwrap();
+        fs::write(&mode_file, "fallback\n").unwrap();
+
+        let _env = EnvGuard::set(&[
+            (
+                "AI_QUANT_STRATEGY_YAML",
+                Some(config_path.to_str().unwrap()),
+            ),
+            ("AI_QUANT_PROMOTED_ROLE", Some("primary")),
+            (
+                "AI_QUANT_ARTIFACTS_DIR",
+                Some(artifacts_dir.to_str().unwrap()),
+            ),
+            ("AI_QUANT_STRATEGY_MODE", None),
+            (
+                "AI_QUANT_STRATEGY_MODE_FILE",
+                Some(mode_file.to_str().unwrap()),
+            ),
+            (
+                "AI_QUANT_CANDLES_DB_DIR",
+                Some(candles_dir.to_str().unwrap()),
+            ),
+            ("AI_QUANT_DB_PATH", None),
+            ("AI_QUANT_SYMBOLS", None),
+            ("AI_QUANT_SYMBOLS_FILE", None),
+            ("AI_QUANT_LOOKBACK_BARS", None),
+            ("AI_QUANT_LOCK_PATH", None),
+            ("AI_QUANT_CANDLES_DB_PATH", None),
+            ("AI_QUANT_INTERVAL", None),
+        ]);
+
+        let report = build_manifest(PaperManifestInput {
+            config: None,
+            live: false,
+            profile: None,
+            db: None,
+            candles_db: None,
+            symbols: &[],
+            symbols_file: None,
+            watch_symbols_file: false,
+            btc_symbol: "BTC",
+            lookback_bars: None,
+            start_step_close_ts_ms: None,
+            lock_path: None,
+            status_path: None,
+        })
+        .unwrap();
+
+        assert_eq!(report.interval, "1h");
+        assert_eq!(
+            report.candles_db,
+            candles_dir.join("candles_1h.db").display().to_string()
+        );
+        assert_eq!(report.promoted_role.as_deref(), Some("primary"));
+        assert!(report.promoted_config_path.is_some());
+        assert_eq!(report.strategy_mode.as_deref(), Some("fallback"));
+        assert_eq!(report.strategy_mode_source.as_deref(), Some("file"));
     }
 
     #[test]

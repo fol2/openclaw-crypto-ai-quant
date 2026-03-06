@@ -94,6 +94,14 @@ surface:
 - derives the default `status_path` from the resolved daemon lock path when `AI_QUANT_STATUS_PATH` is unset
 - keeps the lifecycle status contract read-only with respect to trading semantics; it does not widen DB projections or claim systemd cutover
 
+The current delivered slice extends that again with effective paper-service
+config parity:
+
+- Rust paper surfaces now apply `AI_QUANT_PROMOTED_ROLE` against the latest promoted YAML before building the active runtime config
+- `AI_QUANT_STRATEGY_MODE` remains the first strategy-mode selector, with `AI_QUANT_STRATEGY_MODE_FILE` as the same file-backed fallback used by the Python paper service
+- `paper manifest`, `paper doctor`, `paper cycle`, `paper loop`, and `paper daemon` now share the same Rust-owned effective config document instead of reporting those service inputs as metadata only
+- still no paper/systemd cutover
+
 Python paper execution is still the active runtime path, and the opt-in Rust
 paper daemon wrapper does not change that. Python paper bootstrap is no longer
 the only continuity surface.

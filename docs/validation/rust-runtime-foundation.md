@@ -38,6 +38,7 @@ cargo run -q -p aiq-runtime -- doctor --json
 cargo run -q -p aiq-runtime -- pipeline --json
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example AI_QUANT_DB_PATH=<paper_fixture.db> AI_QUANT_CANDLES_DB_PATH=<candles_fixture.db> AI_QUANT_SYMBOLS=ETH,SOL AI_QUANT_LOOKBACK_BARS=200 cargo run -q -p aiq-runtime -- paper manifest --json
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example AI_QUANT_DB_PATH=<paper_fixture.db> AI_QUANT_CANDLES_DB_PATH=<candles_fixture.db> AI_QUANT_SYMBOLS=ETH AI_QUANT_PAPER_START_STEP_CLOSE_TS_MS=1773424200000 cargo run -q -p aiq-runtime -- paper manifest --json
+AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example AI_QUANT_CANDLES_DB_DIR=<candles_fixture_dir> AI_QUANT_ARTIFACTS_DIR=<artifacts_fixture_dir> AI_QUANT_PROMOTED_ROLE=primary AI_QUANT_STRATEGY_MODE_FILE=<strategy_mode_file> cargo run -q -p aiq-runtime -- paper manifest --json
 cargo run -q -p aiq-runtime -- snapshot validate --path <snapshot_v2_valid.json> --json
 cargo run -q -p aiq-runtime -- snapshot seed-paper --snapshot <snapshot_v2_valid.json> --target-db <paper_fixture.db> --strict-replace --json
 cargo run -q -p aiq-runtime -- paper doctor --db <paper_fixture.db> --json
@@ -46,9 +47,9 @@ cargo run -q -p aiq-runtime -- paper loop --db <paper_fixture.db> --candles-db <
 cargo run -q -p aiq-runtime -- paper loop --db <paper_fixture.db> --candles-db <candles_fixture.db> --symbols ETH --follow --idle-sleep-ms 1 --max-idle-polls 1 --max-steps 1 --json
 # Opt-in daemon wrapper smoke (paired CLI surface)
 cargo run -q -p aiq-runtime -- paper daemon --db <paper_fixture.db> --candles-db <candles_fixture.db> --symbols ETH --start-step-close-ts-ms 1773424200000 --idle-sleep-ms 1 --max-idle-polls 1 --dry-run --json
-# Follow-mode symbols-file refresh smoke
-cargo test -p aiq-runtime loop_follow_mode_reloads_symbols_file_between_idle_polls
-cargo test -p aiq-runtime --test paper_daemon_smoke paper_daemon_reloads_symbols_file_between_idle_polls
+# Effective-config and symbols-file refresh smokes
+cargo test -p aiq-runtime paper_manifest::tests::manifest_applies_promoted_role_and_strategy_mode_file_to_effective_interval
+cargo test -p aiq-runtime --test paper_daemon_smoke paper_daemon_reloads_symbols_file_after_empty_watchlist
 cargo run -q -p aiq-runtime -- paper doctor --db <paper_fixture.db> --live --json
 cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-db <candles_fixture.db> --target-symbol ETH --exported-at-ms 1772676900000 --live --dry-run --json
 ```
@@ -60,7 +61,7 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
   - a resolved pipeline profile
   - explicit stage entries with enabled/disabled state
 - `pipeline --json` resolves `production` cleanly against the example YAML when the tracked live YAML is absent.
-- `paper manifest --json` resolves the current daemon service/env contract without executing any paper steps, derives a candle DB path when only `AI_QUANT_CANDLES_DB_DIR` is present, emits a deterministic `daemon_command`, reports whether the current lane is blocked, bootstrap-ready, resumable, or merely idle caught up, and resolves the daemon `status_path`.
+- `paper manifest --json` resolves the current daemon service/env contract without executing any paper steps, derives a candle DB path when only `AI_QUANT_CANDLES_DB_DIR` is present, emits a deterministic `daemon_command`, resolves the daemon `status_path`, reports whether the lane is blocked, bootstrap-ready, resumable, or merely idle caught up, and applies the same promoted-role / strategy-mode effective config contract used by the Rust paper surfaces.
 - `bt-core` accepts snapshots with `version = 2` and runtime cooldown markers.
 - `aiq-runtime` can export a v2 paper snapshot from SQLite and re-validate it through the same Rust snapshot contract.
 - `aiq-runtime` can seed a paper DB from a v2 snapshot and report deterministic write counts for `trades`, `position_state`, `runtime_cooldowns`, and `runtime_last_closes`.
@@ -72,6 +73,7 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
 - `paper loop --follow` can keep polling after catch-up and exit only when its idle poll budget is exhausted or a new due step becomes available.
 - `paper loop` only loads `--symbols-file` once at start-up in the current contract; it must not silently drift back into daemon-owned watchlist reload behaviour.
 - `paper loop --follow` must continue to honour that one-shot symbols-file load; an empty start-up manifest without open positions is still a fail-closed configuration for the bounded loop surface.
+- `paper manifest`, `paper doctor`, `paper cycle`, `paper loop`, and `paper daemon` must all resolve the same effective config when `AI_QUANT_PROMOTED_ROLE` and `AI_QUANT_STRATEGY_MODE` / `AI_QUANT_STRATEGY_MODE_FILE` are present.
 - the opt-in `aiq-runtime paper daemon` wrapper must reuse the same `paper loop --follow` / `paper cycle` contracts, expose lock metadata, and avoid claiming Python daemon cutover or widening DB projections.
 - the opt-in `paper daemon` wrapper must own per-iteration `--watch-symbols-file` refresh behaviour so operators can refresh the Rust symbol lane without restarting the daemon.
 - the opt-in `paper daemon` wrapper must also stay alive across an initially empty `--symbols-file`, then execute the next due step once a later watchlist update makes work available.
@@ -85,6 +87,7 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
 - Use v2 JSON fixtures with `runtime.entry_attempt_ms_by_symbol` and `runtime.exit_attempt_ms_by_symbol` for init-state compatibility checks.
 - manifest validation should include one env-driven fixture that resolves `AI_QUANT_STRATEGY_YAML`, `AI_QUANT_DB_PATH`, `AI_QUANT_CANDLES_DB_PATH`, `AI_QUANT_SYMBOLS`, and `AI_QUANT_LOOKBACK_BARS` into a deterministic report, plus one mismatch warning when `AI_QUANT_INTERVAL` disagrees with the resolved config interval.
 - manifest validation should also include one fresh-lane fixture that reports `bootstrap_required`, one bootstrap-ready fixture with `AI_QUANT_PAPER_START_STEP_CLOSE_TS_MS`, and one resumed fixture whose `next_due_step_close_ts_ms` is derived from existing `runtime_cycle_steps`.
+- manifest validation should also include one service-like fixture that applies `AI_QUANT_PROMOTED_ROLE` and `AI_QUANT_STRATEGY_MODE_FILE`, proves the resolved interval follows the effective config, and emits `promoted_config_path` / `strategy_mode_source` metadata.
 - `paper run-once` fixtures must provide bars for both the target symbol and the BTC anchor symbol at the resolved `engine.interval`.
 - `paper cycle` validation should include one write run plus one duplicate-step rerun that hard-fails without changing `trades`, `position_state`, `runtime_cooldowns`, `runtime_last_closes`, or `runtime_cycle_steps`.
 - `paper loop` validation should include one bootstrap run on a fresh DB with `--start-step-close-ts-ms`, one follow-up resume run without the bootstrap flag, and one idle run that exits with `executed_steps == 0` because the next due step is newer than the latest common candle close.
