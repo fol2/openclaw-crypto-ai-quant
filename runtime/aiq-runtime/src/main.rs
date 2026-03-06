@@ -848,8 +848,9 @@ fn run_paper(command: PaperCommand) -> Result<()> {
         PaperCommand::Loop(args) => {
             let effective_config =
                 paper_config::PaperEffectiveConfig::resolve(Some(&args.common.config))?;
+            let bootstrap_symbols = load_symbols(args.symbols.clone(), args.symbols_file.as_deref())?;
             let runtime_bootstrap = effective_config.build_runtime_bootstrap(
-                bootstrap_symbol_hint(&args.symbols),
+                bootstrap_symbol_hint(&bootstrap_symbols),
                 args.common.live,
                 args.common.profile.as_deref(),
             )?;
@@ -888,8 +889,9 @@ fn run_paper(command: PaperCommand) -> Result<()> {
         PaperCommand::Daemon(args) => {
             let effective_config =
                 paper_config::PaperEffectiveConfig::resolve(Some(&args.common.config))?;
+            let bootstrap_symbols = load_symbols(args.symbols.clone(), args.symbols_file.as_deref())?;
             let runtime_bootstrap = effective_config.build_runtime_bootstrap(
-                bootstrap_symbol_hint(&args.symbols),
+                bootstrap_symbol_hint(&bootstrap_symbols),
                 args.common.live,
                 args.common.profile.as_deref(),
             )?;

@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_CONFIG_PATH: &str = "config/strategy_overrides.yaml";
 const VALID_PROMOTED_ROLES: &[&str] = &["primary", "fallback", "conservative"];
@@ -421,7 +422,15 @@ fn write_yaml_document(path: &Path, header: String, document: &serde_yaml::Value
     }
     let payload =
         header + &serde_yaml::to_string(document).context("failed to serialise YAML document")?;
-    let tmp_path = path.with_extension("yaml.tmp");
+    let unique_suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let tmp_path = path.with_extension(format!(
+        "yaml.tmp.{}.{}",
+        std::process::id(),
+        unique_suffix
+    ));
     fs::write(&tmp_path, payload)
         .with_context(|| format!("failed to write YAML: {}", tmp_path.display()))?;
     fs::rename(&tmp_path, path)
