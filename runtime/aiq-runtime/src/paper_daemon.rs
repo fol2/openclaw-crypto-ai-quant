@@ -11,12 +11,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
+use crate::paper_config::PaperEffectiveConfig;
 use crate::paper_cycle::{self, PaperCycleInput};
 use crate::paper_loop::{self, PaperLoopReport, PaperLoopStepReport};
 
 pub struct PaperDaemonInput<'a> {
+    pub effective_config: PaperEffectiveConfig,
     pub runtime_bootstrap: RuntimeBootstrap,
-    pub config_path: &'a Path,
     pub live: bool,
     pub paper_db: &'a Path,
     pub candles_db: &'a Path,
@@ -297,7 +298,7 @@ fn write_status_snapshot(
         ok: snapshot.errors.is_empty(),
         running: snapshot.stopped_at_ms.is_none(),
         pid: std::process::id(),
-        config_path: input.config_path.display().to_string(),
+        config_path: input.effective_config.config_path().display().to_string(),
         paper_db: input.paper_db.display().to_string(),
         candles_db: input.candles_db.display().to_string(),
         lock_path: lock_path.display().to_string(),
@@ -442,7 +443,7 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
                 let candidate_symbols = manifest_state.candidate_symbols(&file_symbols);
                 match paper_loop::inspect_loop_context(
                     &input.runtime_bootstrap,
-                    input.config_path,
+                    &input.effective_config,
                     input.live,
                     working_paper_db.path(),
                     input.candles_db,
@@ -461,7 +462,7 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
         let manifest_symbols = manifest_state.current_symbols();
         let maybe_context = paper_loop::inspect_loop_context(
             &input.runtime_bootstrap,
-            input.config_path,
+            &input.effective_config,
             input.live,
             working_paper_db.path(),
             input.candles_db,
@@ -628,8 +629,8 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
         }
 
         let cycle_report = paper_cycle::run_cycle(PaperCycleInput {
+            effective_config: input.effective_config.clone(),
             runtime_bootstrap: input.runtime_bootstrap.clone(),
-            config_path: input.config_path,
             live: input.live,
             paper_db: working_paper_db.path(),
             candles_db: input.candles_db,
@@ -672,7 +673,7 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
     let manifest_symbols = manifest_state.current_symbols();
     let final_context = paper_loop::inspect_loop_context(
         &input.runtime_bootstrap,
-        input.config_path,
+        &input.effective_config,
         input.live,
         working_paper_db.path(),
         input.candles_db,

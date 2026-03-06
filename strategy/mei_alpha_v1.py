@@ -1714,6 +1714,8 @@ STRATEGY_TOML_PATH = os.getenv(
     "AI_QUANT_STRATEGY_TOML", os.path.join(_THIS_DIR, "..", "config", "strategy_overrides.toml")
 )
 
+# Legacy compatibility mirror only: Rust now owns the effective-config
+# resolution contract for promoted-role and strategy-mode selection.
 _DEFAULT_STRATEGY_CONFIG = {
     "trade": {
         "allocation_pct": ALLOCATION_PCT,

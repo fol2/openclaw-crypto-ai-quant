@@ -9,6 +9,7 @@ green:
 
 - root runtime workspace resolution
 - shared runtime config extensions
+- Rust paper effective-config parity
 - pipeline bootstrap and profile resolution
 - snapshot schema validation
 - paper snapshot export
@@ -39,6 +40,7 @@ cargo test --manifest-path backtester/Cargo.toml -p bt-core test_into_sim_state_
 cargo run -q -p aiq-runtime -- doctor --json
 cargo run -q -p aiq-runtime -- pipeline --json
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example AI_QUANT_DB_PATH=<paper_fixture.db> AI_QUANT_CANDLES_DB_PATH=<candles_fixture.db> AI_QUANT_SYMBOLS=ETH,SOL AI_QUANT_LOOKBACK_BARS=200 cargo run -q -p aiq-runtime -- paper manifest --json
+AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example AI_QUANT_PROMOTED_ROLE=primary AI_QUANT_STRATEGY_MODE_FILE=<strategy_mode.txt> AI_QUANT_DB_PATH=<paper_fixture.db> AI_QUANT_CANDLES_DB_PATH=<candles_fixture.db> AI_QUANT_SYMBOLS=ETH cargo run -q -p aiq-runtime -- paper manifest --json
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example AI_QUANT_DB_PATH=<paper_fixture.db> AI_QUANT_CANDLES_DB_PATH=<candles_fixture.db> AI_QUANT_SYMBOLS=ETH AI_QUANT_PAPER_START_STEP_CLOSE_TS_MS=1773424200000 cargo run -q -p aiq-runtime -- paper manifest --json
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example AI_QUANT_DB_PATH=<paper_fixture.db> AI_QUANT_CANDLES_DB_PATH=<candles_fixture.db> AI_QUANT_SYMBOLS=ETH AI_QUANT_STATUS_STALE_AFTER_MS=30000 cargo run -q -p aiq-runtime -- paper status --json
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example AI_QUANT_DB_PATH=<paper_fixture.db> AI_QUANT_CANDLES_DB_PATH=<candles_fixture.db> AI_QUANT_SYMBOLS=ETH AI_QUANT_STATUS_STALE_AFTER_MS=30000 cargo run -q -p aiq-runtime -- paper service --json
@@ -65,6 +67,7 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
   - explicit stage entries with enabled/disabled state
 - `pipeline --json` resolves `production` cleanly against the example YAML when the tracked live YAML is absent.
 - `paper manifest --json` resolves the current daemon service/env contract without executing any paper steps, derives a candle DB path when only `AI_QUANT_CANDLES_DB_DIR` is present, emits a deterministic `daemon_command`, reports whether the current lane is blocked, bootstrap-ready, resumable, or merely idle caught up, and resolves the daemon `status_path`.
+- `paper manifest --json` also applies the same promoted-role / strategy-mode effective config contract used by the Rust paper surfaces, carries `base_config_path`, `active_yaml_path`, `effective_yaml_path`, `strategy_mode_source`, `strategy_overrides_sha1`, and `config_id`, and resolves the interval from that effective config instead of raw env assumptions.
 - `paper status --json` combines that same launch contract with the persisted daemon lifecycle JSON and reports whether the lane is running, stale, stopped, restart-required, or merely launch-ready when no daemon status exists yet. Running lanes must now fail closed when the daemon reports unhealthy runtime errors or when the launch identity drifts (`profile`, DB paths, BTC anchor, lookback, explicit symbols, the bootstrap step while the lane is still fresh, or path wiring).
 - `paper service --json` reuses the same read-only status view and reports whether later supervision should hold, start, restart, or merely monitor the lane, together with an operator-facing `action_reason`. Idle watchlist-owned lanes that are launch-ready should now map to `start` instead of a permanent `hold`.
 - `bt-core` accepts snapshots with `version = 2` and runtime cooldown markers.
@@ -78,6 +81,7 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
 - `paper loop --follow` can keep polling after catch-up and exit only when its idle poll budget is exhausted or a new due step becomes available.
 - `paper loop` only loads `--symbols-file` once at start-up in the current contract; it must not silently drift back into daemon-owned watchlist reload behaviour.
 - `paper loop --follow` must continue to honour that one-shot symbols-file load; an empty start-up manifest without open positions is still a fail-closed configuration for the bounded loop surface.
+- `paper manifest`, `paper doctor`, `paper cycle`, `paper loop`, and `paper daemon` must all resolve the same effective config when `AI_QUANT_PROMOTED_ROLE` and `AI_QUANT_STRATEGY_MODE` / `AI_QUANT_STRATEGY_MODE_FILE` are present.
 - the opt-in `aiq-runtime paper daemon` wrapper must reuse the same `paper loop --follow` / `paper cycle` contracts, expose lock metadata, and avoid claiming Python daemon cutover or widening DB projections.
 - the opt-in `paper daemon` wrapper must own per-iteration `--watch-symbols-file` refresh behaviour so operators can refresh the Rust symbol lane without restarting the daemon.
 - the opt-in `paper daemon` wrapper must also stay alive across an initially empty `--symbols-file`, then execute the next due step once a later watchlist update makes work available.
@@ -90,6 +94,7 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
 - Use a temporary SQLite DB with minimal `trades`, `position_state`, `runtime_cooldowns`, and `runtime_last_closes` tables for paper export tests.
 - Use v2 JSON fixtures with `runtime.entry_attempt_ms_by_symbol` and `runtime.exit_attempt_ms_by_symbol` for init-state compatibility checks.
 - manifest validation should include one env-driven fixture that resolves `AI_QUANT_STRATEGY_YAML`, `AI_QUANT_DB_PATH`, `AI_QUANT_CANDLES_DB_PATH`, `AI_QUANT_SYMBOLS`, and `AI_QUANT_LOOKBACK_BARS` into a deterministic report, plus one mismatch warning when `AI_QUANT_INTERVAL` disagrees with the resolved config interval.
+- manifest validation should also include one service-like fixture that applies `AI_QUANT_PROMOTED_ROLE` and `AI_QUANT_STRATEGY_MODE_FILE`, proves the resolved interval follows the effective config, and emits `promoted_config_path` / `strategy_mode_source` metadata.
 - manifest validation should also include one fresh-lane fixture that reports `bootstrap_required`, one bootstrap-ready fixture with `AI_QUANT_PAPER_START_STEP_CLOSE_TS_MS`, and one resumed fixture whose `next_due_step_close_ts_ms` is derived from existing `runtime_cycle_steps`.
 - status validation should include one fixture with no daemon status file yet, one stopped daemon status fixture, one stale running status fixture, one unhealthy running status fixture, and one running-but-mismatched status fixture that reports `restart_required`.
 - service-action validation should map at least one launch-blocked fixture to `hold`, one launch-ready or stopped fixture to `start`, one launch-ready idle watchlist fixture to `start`, one stale / unhealthy / mismatched running fixture to `restart`, and one healthy running fixture to `monitor`.

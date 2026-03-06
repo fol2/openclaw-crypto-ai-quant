@@ -25,7 +25,9 @@ current daemon service/env contract into a deterministic Rust launch plan
 before any systemd cutover. The manifest now also reports whether the current
 lane would cold-bootstrap, resume from prior `runtime_cycle_steps`, idle
 caught up, or fail closed until a bootstrap step is supplied, and it resolves
-the daemon `status_path` that later service supervision can watch. Python paper
+the daemon `status_path` that later service supervision can watch, together
+with the effective config selected by `AI_QUANT_PROMOTED_ROLE` and
+`AI_QUANT_STRATEGY_MODE` / `AI_QUANT_STRATEGY_MODE_FILE`. Python paper
 execution remains the active production path, so this does not claim paper
 cutover.
 Rust now also ships a read-only `paper status` surface that combines that
@@ -134,10 +136,14 @@ See [backtester/README.md](backtester/README.md) for candle DB partitioning, uni
 Strategy parameters live in `config/strategy_overrides.yaml` and **hot-reload at runtime** (no restart needed). Merge order:
 
 ```
-code defaults ← global YAML ← per-symbol YAML ← live YAML
+base YAML document (+ latest promoted YAML for AI_QUANT_PROMOTED_ROLE, if present)
+→ defaults ← global YAML ← per-symbol YAML ← live YAML ← modes.<mode>
 ```
 
 Key sections: `trade` (sizing, SL/TP, pyramiding), `market_regime` (breadth, auto-reverse), `filters` (entry gates), `indicators` (EMA, ADX, BB windows), `engine` (intervals).
+
+For Rust paper surfaces, `AI_QUANT_STRATEGY_MODE` wins; when it is unset,
+`AI_QUANT_STRATEGY_MODE_FILE` is the file-backed fallback.
 
 See `.env.example` for all environment variables and safety controls.
 
