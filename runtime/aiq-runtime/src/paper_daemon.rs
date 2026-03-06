@@ -2,7 +2,7 @@ use aiq_runtime_core::runtime::RuntimeBootstrap;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use fs2::FileExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use signal_hook::{consts::signal::SIGINT, consts::signal::SIGTERM, flag, SigId};
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
@@ -56,7 +56,7 @@ pub struct PaperDaemonReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-struct PaperDaemonStatus {
+pub(crate) struct PaperDaemonStatus {
     pub ok: bool,
     pub running: bool,
     pub pid: u32,
@@ -80,6 +80,44 @@ struct PaperDaemonStatus {
     pub idle_polls: usize,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub(crate) struct PaperDaemonStatusSnapshot {
+    pub ok: bool,
+    pub running: bool,
+    pub pid: u32,
+    pub lock_path: String,
+    pub status_path: String,
+    pub started_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub stopped_at_ms: Option<i64>,
+    pub stop_requested: bool,
+    pub dry_run: bool,
+    pub runtime_bootstrap: PaperDaemonStatusRuntimeBootstrap,
+    pub watch_symbols_file: bool,
+    pub symbols_file: Option<String>,
+    pub manifest_symbols: Vec<String>,
+    pub last_active_symbols: Vec<String>,
+    pub manifest_reload_count: usize,
+    pub manifest_reload_failure_count: usize,
+    pub latest_common_close_ts_ms: Option<i64>,
+    pub next_due_step_close_ts_ms: Option<i64>,
+    pub executed_steps: usize,
+    pub idle_polls: usize,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub(crate) struct PaperDaemonStatusRuntimeBootstrap {
+    pub config_fingerprint: String,
+    pub pipeline: PaperDaemonStatusRuntimePipeline,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub(crate) struct PaperDaemonStatusRuntimePipeline {
+    pub profile: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -289,6 +327,27 @@ fn write_status_file(status_path: &Path, status: &PaperDaemonStatus) -> Result<(
         )
     })?;
     Ok(())
+}
+
+pub(crate) fn load_status_file(status_path: &Path) -> Result<Option<PaperDaemonStatusSnapshot>> {
+    if !status_path.exists() {
+        return Ok(None);
+    }
+
+    let payload = std::fs::read(status_path).with_context(|| {
+        format!(
+            "failed to read paper daemon status file: {}",
+            status_path.display()
+        )
+    })?;
+    let status =
+        serde_json::from_slice::<PaperDaemonStatusSnapshot>(&payload).with_context(|| {
+            format!(
+                "failed to parse paper daemon status file: {}",
+                status_path.display()
+            )
+        })?;
+    Ok(Some(status))
 }
 
 pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {

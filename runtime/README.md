@@ -21,6 +21,7 @@ Current runtime-owned paper surfaces and the paired opt-in wrapper:
 | `paper cycle` | Execute one repeatable multi-symbol Rust paper cycle | Explicit `--step-close-ts-ms`, not a daemon |
 | `paper loop` | Execute a bounded Rust paper catch-up loop | Resumes from `runtime_cycle_steps`, optional follow polling, and only loads `--symbols-file` once at start-up |
 | `paper manifest` | Resolve the current Rust paper daemon service contract | Read-only env/CLI manifest, including launch readiness, restart/resume state, and the resolved lane `status_path` |
+| `paper status` | Resolve the current Rust paper daemon service state | Read-only manifest + status-file view, including restart-required / stale detection for the current lane |
 | `paper daemon` | Execute an opt-in long-running Rust paper orchestration wrapper | Owns the outer scheduler, can optionally watch `--symbols-file` for reloads, writes a lane status JSON, and keeps the same `paper cycle` write contract; not cutover |
 
 The runtime slice is still intentionally narrow. It does not yet own any live
@@ -39,5 +40,6 @@ slices will build on:
 - optional follow polling so Rust can stay alive after catch-up and wait for the next due step
 - one-shot `--symbols-file` loading for bounded loop shells
 - a read-only service manifest so operators can inspect the resolved Rust daemon launch contract, bootstrap requirement, restart/resume state, and lifecycle `status_path` before cutover
+- a read-only service status surface so operators can compare the current launch contract against the persisted daemon lifecycle JSON without parsing files by hand
 - an opt-in daemon wrapper that owns scheduler/watchlist reload orchestration without claiming service cutover
 - a durable daemon `status_path` contract that later service supervision can build on

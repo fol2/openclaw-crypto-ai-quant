@@ -14,6 +14,7 @@ green:
 - paper snapshot export
 - paper snapshot seed
 - paper daemon service manifest resolution
+- paper daemon service status resolution
 - paper runtime bootstrap shell
 - paper runtime one-shot execution shell
 - paired opt-in paper daemon orchestration wrapper
@@ -38,6 +39,7 @@ cargo run -q -p aiq-runtime -- doctor --json
 cargo run -q -p aiq-runtime -- pipeline --json
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example AI_QUANT_DB_PATH=<paper_fixture.db> AI_QUANT_CANDLES_DB_PATH=<candles_fixture.db> AI_QUANT_SYMBOLS=ETH,SOL AI_QUANT_LOOKBACK_BARS=200 cargo run -q -p aiq-runtime -- paper manifest --json
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example AI_QUANT_DB_PATH=<paper_fixture.db> AI_QUANT_CANDLES_DB_PATH=<candles_fixture.db> AI_QUANT_SYMBOLS=ETH AI_QUANT_PAPER_START_STEP_CLOSE_TS_MS=1773424200000 cargo run -q -p aiq-runtime -- paper manifest --json
+AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example AI_QUANT_DB_PATH=<paper_fixture.db> AI_QUANT_CANDLES_DB_PATH=<candles_fixture.db> AI_QUANT_SYMBOLS=ETH AI_QUANT_STATUS_STALE_AFTER_MS=30000 cargo run -q -p aiq-runtime -- paper status --json
 cargo run -q -p aiq-runtime -- snapshot validate --path <snapshot_v2_valid.json> --json
 cargo run -q -p aiq-runtime -- snapshot seed-paper --snapshot <snapshot_v2_valid.json> --target-db <paper_fixture.db> --strict-replace --json
 cargo run -q -p aiq-runtime -- paper doctor --db <paper_fixture.db> --json
@@ -61,6 +63,7 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
   - explicit stage entries with enabled/disabled state
 - `pipeline --json` resolves `production` cleanly against the example YAML when the tracked live YAML is absent.
 - `paper manifest --json` resolves the current daemon service/env contract without executing any paper steps, derives a candle DB path when only `AI_QUANT_CANDLES_DB_DIR` is present, emits a deterministic `daemon_command`, reports whether the current lane is blocked, bootstrap-ready, resumable, or merely idle caught up, and resolves the daemon `status_path`.
+- `paper status --json` combines that same launch contract with the persisted daemon lifecycle JSON and reports whether the lane is running, stale, stopped, restart-required, or merely launch-ready when no daemon status exists yet.
 - `bt-core` accepts snapshots with `version = 2` and runtime cooldown markers.
 - `aiq-runtime` can export a v2 paper snapshot from SQLite and re-validate it through the same Rust snapshot contract.
 - `aiq-runtime` can seed a paper DB from a v2 snapshot and report deterministic write counts for `trades`, `position_state`, `runtime_cooldowns`, and `runtime_last_closes`.
@@ -85,6 +88,7 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
 - Use v2 JSON fixtures with `runtime.entry_attempt_ms_by_symbol` and `runtime.exit_attempt_ms_by_symbol` for init-state compatibility checks.
 - manifest validation should include one env-driven fixture that resolves `AI_QUANT_STRATEGY_YAML`, `AI_QUANT_DB_PATH`, `AI_QUANT_CANDLES_DB_PATH`, `AI_QUANT_SYMBOLS`, and `AI_QUANT_LOOKBACK_BARS` into a deterministic report, plus one mismatch warning when `AI_QUANT_INTERVAL` disagrees with the resolved config interval.
 - manifest validation should also include one fresh-lane fixture that reports `bootstrap_required`, one bootstrap-ready fixture with `AI_QUANT_PAPER_START_STEP_CLOSE_TS_MS`, and one resumed fixture whose `next_due_step_close_ts_ms` is derived from existing `runtime_cycle_steps`.
+- status validation should include one fixture with no daemon status file yet, one stopped daemon status fixture, one stale running status fixture, and one running-but-mismatched status fixture that reports `restart_required`.
 - `paper run-once` fixtures must provide bars for both the target symbol and the BTC anchor symbol at the resolved `engine.interval`.
 - `paper cycle` validation should include one write run plus one duplicate-step rerun that hard-fails without changing `trades`, `position_state`, `runtime_cooldowns`, `runtime_last_closes`, or `runtime_cycle_steps`.
 - `paper loop` validation should include one bootstrap run on a fresh DB with `--start-step-close-ts-ms`, one follow-up resume run without the bootstrap flag, and one idle run that exits with `executed_steps == 0` because the next due step is newer than the latest common candle close.

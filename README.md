@@ -28,6 +28,11 @@ caught up, or fail closed until a bootstrap step is supplied, and it resolves
 the daemon `status_path` that later service supervision can watch. Python paper
 execution remains the active production path, so this does not claim paper
 cutover.
+Rust now also ships a read-only `paper status` surface that combines that
+launch contract with the persisted daemon status JSON so operators can see
+whether the current Rust lane is merely launch-ready, actively running, stale,
+stopped, or in need of a restart because the live daemon contract drifted from
+the current config/env plan.
 
 ## Screenshots
 

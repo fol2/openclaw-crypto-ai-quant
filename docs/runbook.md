@@ -871,6 +871,33 @@ Manifest expectations:
 - `resume.launch_state` tells you whether the lane would fail closed (`blocked` / `bootstrap_required`), launch idle without symbols, start a fresh bootstrap, resume a due step, or simply stay caught up waiting for the next bar close
 - `resume.last_applied_step_close_ts_ms`, `resume.next_due_step_close_ts_ms`, and `resume.latest_common_close_ts_ms` expose the restart/resume cursor when the paper DB and candle DB are both inspectable
 
+### Inspect the Rust paper daemon service status
+
+Use when: you want one read-only view that combines the current Rust launch
+contract with the persisted daemon lifecycle JSON, so you can tell whether the
+lane is running, stale, stopped, or needs a restart because the live daemon
+contract drifted from the current config/env plan.
+
+```bash
+AI_QUANT_STRATEGY_YAML=./config/strategy_overrides.paper1.yaml \
+AI_QUANT_DB_PATH=./trading_engine_v8_paper1.db \
+AI_QUANT_CANDLES_DB_DIR=./candles_dbs \
+AI_QUANT_SYMBOLS=BTC,ETH,SOL \
+AI_QUANT_STATUS_STALE_AFTER_MS=30000 \
+cargo run -p aiq-runtime -- \
+  paper status \
+  --json
+```
+
+Status expectations:
+
+- `paper status` is read-only; it never starts the daemon or writes the paper DB
+- when no daemon lifecycle JSON exists yet, `service_state` falls back to the current launch contract (`blocked`, `bootstrap_required`, `bootstrap_ready`, `resume_ready`, or `caught_up_idle`)
+- when a matching daemon status JSON exists and still reports `running=true`, `service_state` becomes `running`
+- when the running status JSON is older than the configured staleness threshold, `service_state` becomes `status_stale`
+- when the running daemon status no longer matches the current launch contract (for example config fingerprint, lock path, or symbols-file wiring drifted), `service_state` becomes `restart_required`
+- when the persisted daemon lifecycle JSON reports `running=false`, `service_state` becomes `stopped`
+
 ---
 
 ## 7. Factory Stage Gate (dry -> smoke -> real)

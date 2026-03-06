@@ -13,6 +13,7 @@ mod paper_loop;
 mod paper_manifest;
 mod paper_run_once;
 mod paper_seed;
+mod paper_status;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "Rust runtime foundation for AI Quant")]
@@ -134,6 +135,8 @@ enum SnapshotCommand {
 enum PaperCommand {
     /// Resolve the Rust paper daemon service/env contract without executing any steps.
     Manifest(PaperManifestArgs),
+    /// Resolve the current Rust paper daemon service state from the launch contract plus status file.
+    Status(PaperStatusArgs),
     /// Restore paper state from the DB through the Rust snapshot/bootstrap path.
     Doctor(PaperDoctorArgs),
     /// Execute one Rust paper step for a single symbol.
@@ -190,6 +193,15 @@ struct PaperManifestArgs {
     /// Emit machine-readable JSON instead of a human summary.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+struct PaperStatusArgs {
+    #[command(flatten)]
+    manifest: PaperManifestArgs,
+    /// Optional staleness threshold for the daemon status file in milliseconds.
+    #[arg(long)]
+    stale_after_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -586,6 +598,56 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 }
                 if let Some(latest_common_close_ts_ms) = report.resume.latest_common_close_ts_ms {
                     println!("latest_common_close_ts_ms: {}", latest_common_close_ts_ms);
+                }
+                if !report.warnings.is_empty() {
+                    println!("warnings:");
+                    for warning in &report.warnings {
+                        println!("  - {}", warning);
+                    }
+                }
+            }
+        }
+        PaperCommand::Status(args) => {
+            let report = paper_status::build_status(paper_status::PaperStatusInput {
+                config: args.manifest.config.as_deref(),
+                live: args.manifest.live,
+                profile: args.manifest.profile.as_deref(),
+                db: args.manifest.db.as_deref(),
+                candles_db: args.manifest.candles_db.as_deref(),
+                symbols: &args.manifest.symbols,
+                symbols_file: args.manifest.symbols_file.as_deref(),
+                watch_symbols_file: args.manifest.watch_symbols_file,
+                btc_symbol: &args.manifest.btc_symbol,
+                lookback_bars: args.manifest.lookback_bars,
+                start_step_close_ts_ms: args.manifest.start_step_close_ts_ms,
+                lock_path: args.manifest.lock_path.as_deref(),
+                status_path: args.manifest.status_path.as_deref(),
+                stale_after_ms: args.stale_after_ms,
+            })?;
+
+            if args.manifest.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("paper status ok: state={:?}", report.service_state);
+                println!("status_file_present: {}", report.status_file_present);
+                println!(
+                    "contract_matches_status: {}",
+                    report.contract_matches_status
+                );
+                println!("launch_state: {:?}", report.manifest.resume.launch_state);
+                println!("launch_ready: {}", report.manifest.resume.launch_ready);
+                println!("status_path: {}", report.manifest.status_path);
+                if let Some(status_age_ms) = report.status_age_ms {
+                    println!("status_age_ms: {}", status_age_ms);
+                }
+                if let Some(stale_after_ms) = report.stale_after_ms {
+                    println!("stale_after_ms: {}", stale_after_ms);
+                }
+                if !report.mismatch_reasons.is_empty() {
+                    println!("mismatch_reasons:");
+                    for reason in &report.mismatch_reasons {
+                        println!("  - {}", reason);
+                    }
                 }
                 if !report.warnings.is_empty() {
                     println!("warnings:");
