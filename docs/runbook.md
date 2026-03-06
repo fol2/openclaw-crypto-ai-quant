@@ -778,7 +778,9 @@ Operational expectations:
 - the command resumes from `runtime_cycle_steps` when prior Rust cycle state exists
 - `--start-step-close-ts-ms` is required only when no prior matching `runtime_cycle_steps` rows exist for the current config fingerprint / interval / live lane
 - each executed loop step reuses the same `paper cycle` contract and records the same rerun guard rows on write mode
+- dry-run uses an isolated temporary paper DB copy so multi-step previews carry forward projected Rust state without mutating the real paper DB
 - when `--exported-at-ms` is omitted, each planned step uses its own `step_close_ts_ms` as the snapshot export timestamp for deterministic catch-up artefacts
+- every due step must have an exact candle close for each active symbol and the BTC anchor; missing bar closes fail closed instead of being silently marked as applied
 - the loop stops cleanly when the next due step is newer than the latest common candle close across the explicit symbols, open paper positions, and BTC anchor
 
 ---

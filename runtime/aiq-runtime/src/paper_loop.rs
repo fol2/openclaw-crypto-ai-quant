@@ -5,7 +5,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection};
 use serde::Serialize;
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::paper_cycle::{self, PaperCycleInput};
 use crate::paper_export;
@@ -63,6 +63,11 @@ struct LoopContext {
     last_applied_step_close_ts_ms: Option<i64>,
 }
 
+struct WorkingPaperDb {
+    path: PathBuf,
+    cleanup: bool,
+}
+
 pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
     if !input.paper_db.exists() {
         anyhow::bail!("paper db not found: {}", input.paper_db.display());
@@ -75,10 +80,10 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
     }
 
     let explicit_symbols = normalise_symbols(input.explicit_symbols);
+    let working_paper_db = prepare_working_paper_db(input.paper_db, input.dry_run)?;
     let mut warnings = Vec::new();
     let mut errors = Vec::new();
     let mut steps = Vec::new();
-    let mut planned_last_step_close_ts_ms = None;
     let mut initial_last_applied_step_close_ts_ms = None;
     let mut interval = None;
     let mut latest_common_close_ts_ms = None;
@@ -93,7 +98,7 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
             &input.runtime_bootstrap,
             input.config_path,
             input.live,
-            input.paper_db,
+            working_paper_db.path(),
             input.candles_db,
             &explicit_symbols,
             input.btc_symbol,
@@ -115,13 +120,7 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
         let interval_ms = interval_to_ms(&context.interval).with_context(|| {
             format!("unsupported interval for paper loop: {}", context.interval)
         })?;
-        let resume_floor = if input.dry_run {
-            planned_last_step_close_ts_ms.or(context.last_applied_step_close_ts_ms)
-        } else {
-            context.last_applied_step_close_ts_ms
-        };
-
-        let candidate_next_due = match resume_floor {
+        let candidate_next_due = match context.last_applied_step_close_ts_ms {
             Some(last_applied_step_close_ts_ms) => {
                 let expected_next = last_applied_step_close_ts_ms
                     .checked_add(interval_ms)
@@ -143,7 +142,6 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
                 "paper loop requires --start-step-close-ts-ms when no prior runtime_cycle_steps exist",
             )?,
         };
-
         next_due_step_close_ts_ms = Some(candidate_next_due);
         if candidate_next_due > context.latest_common_close_ts_ms {
             if steps.is_empty() {
@@ -154,39 +152,44 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
             }
             break;
         }
+        ensure_exact_step_candle_coverage(
+            input.candles_db,
+            &context.interval,
+            &context.active_symbols,
+            input.btc_symbol,
+            candidate_next_due,
+        )?;
 
         let cycle_report = paper_cycle::run_cycle(PaperCycleInput {
             runtime_bootstrap: input.runtime_bootstrap.clone(),
             config_path: input.config_path,
             live: input.live,
-            paper_db: input.paper_db,
+            paper_db: working_paper_db.path(),
             candles_db: input.candles_db,
             explicit_symbols: &explicit_symbols,
             btc_symbol: input.btc_symbol,
             lookback_bars: input.lookback_bars,
             step_close_ts_ms: candidate_next_due,
             exported_at_ms: Some(input.exported_at_ms.unwrap_or(candidate_next_due)),
-            dry_run: input.dry_run,
+            dry_run: false,
         })?;
         warnings.extend(cycle_report.warnings.iter().cloned());
         errors.extend(cycle_report.errors.iter().cloned());
-        planned_last_step_close_ts_ms = Some(cycle_report.step_close_ts_ms);
-        steps.push(PaperLoopStepReport::from(cycle_report));
+        steps.push(PaperLoopStepReport::from_cycle_report(
+            cycle_report,
+            input.dry_run,
+        ));
     }
 
-    let final_context = if input.dry_run {
-        None
-    } else {
-        inspect_loop_context(
-            &input.runtime_bootstrap,
-            input.config_path,
-            input.live,
-            input.paper_db,
-            input.candles_db,
-            &explicit_symbols,
-            input.btc_symbol,
-        )?
-    };
+    let final_context = inspect_loop_context(
+        &input.runtime_bootstrap,
+        input.config_path,
+        input.live,
+        working_paper_db.path(),
+        input.candles_db,
+        &explicit_symbols,
+        input.btc_symbol,
+    )?;
     if let Some(context) = final_context.as_ref() {
         interval = Some(context.interval.clone());
         latest_common_close_ts_ms = Some(context.latest_common_close_ts_ms);
@@ -199,12 +202,6 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
                 last_applied_step_close_ts_ms.checked_add(interval_ms)
             })
             .or(input.start_step_close_ts_ms);
-    } else if let Some(interval_value) = interval.as_ref() {
-        let interval_ms = interval_to_ms(interval_value)
-            .with_context(|| format!("unsupported interval for paper loop: {}", interval_value))?;
-        next_due_step_close_ts_ms = planned_last_step_close_ts_ms
-            .and_then(|last_planned| last_planned.checked_add(interval_ms))
-            .or(next_due_step_close_ts_ms);
     }
 
     Ok(PaperLoopReport {
@@ -223,8 +220,8 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
     })
 }
 
-impl From<paper_cycle::PaperCycleReport> for PaperLoopStepReport {
-    fn from(value: paper_cycle::PaperCycleReport) -> Self {
+impl PaperLoopStepReport {
+    fn from_cycle_report(value: paper_cycle::PaperCycleReport, dry_run: bool) -> Self {
         Self {
             step_id: value.step_id,
             step_close_ts_ms: value.step_close_ts_ms,
@@ -232,11 +229,32 @@ impl From<paper_cycle::PaperCycleReport> for PaperLoopStepReport {
             active_symbols: value.active_symbols,
             candidate_count: value.candidate_count,
             executed_entry_count: value.executed_entry_count,
-            trades_written: value.trades_written,
-            runtime_step_recorded: value.runtime_step_recorded,
+            trades_written: if dry_run { 0 } else { value.trades_written },
+            runtime_step_recorded: if dry_run {
+                false
+            } else {
+                value.runtime_step_recorded
+            },
             warnings: value.warnings,
             errors: value.errors,
         }
+    }
+}
+
+impl WorkingPaperDb {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for WorkingPaperDb {
+    fn drop(&mut self) {
+        if !self.cleanup {
+            return;
+        }
+        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_file(format!("{}-wal", self.path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", self.path.display()));
     }
 }
 
@@ -386,6 +404,71 @@ fn table_exists(conn: &Connection, table_name: &str) -> Result<bool> {
     Ok(exists > 0)
 }
 
+fn prepare_working_paper_db(paper_db: &Path, dry_run: bool) -> Result<WorkingPaperDb> {
+    if !dry_run {
+        return Ok(WorkingPaperDb {
+            path: paper_db.to_path_buf(),
+            cleanup: false,
+        });
+    }
+
+    let temp_name = format!(
+        "aiq-runtime-paper-loop-{}-{}.db",
+        std::process::id(),
+        Utc::now()
+            .timestamp_nanos_opt()
+            .unwrap_or_else(|| Utc::now().timestamp_micros() * 1_000)
+    );
+    let temp_path = std::env::temp_dir().join(temp_name);
+    std::fs::copy(paper_db, &temp_path).with_context(|| {
+        format!(
+            "failed to copy paper db {} to temporary dry-run db {}",
+            paper_db.display(),
+            temp_path.display()
+        )
+    })?;
+    Ok(WorkingPaperDb {
+        path: temp_path,
+        cleanup: true,
+    })
+}
+
+fn ensure_exact_step_candle_coverage(
+    candles_db: &Path,
+    interval: &str,
+    active_symbols: &[String],
+    btc_symbol: &str,
+    step_close_ts_ms: i64,
+) -> Result<()> {
+    let conn = Connection::open(candles_db)?;
+    let mut symbols = BTreeSet::new();
+    symbols.extend(active_symbols.iter().cloned());
+    let btc_symbol = btc_symbol.trim().to_ascii_uppercase();
+    if !btc_symbol.is_empty() {
+        symbols.insert(btc_symbol);
+    }
+
+    for symbol in symbols {
+        let step_exists: i64 = conn.query_row(
+            "SELECT COUNT(1)
+             FROM candles
+             WHERE symbol = ?1 AND interval = ?2 AND COALESCE(t_close, t) = ?3",
+            params![symbol, interval, step_close_ts_ms],
+            |row| row.get(0),
+        )?;
+        if step_exists == 0 {
+            anyhow::bail!(
+                "paper loop requires an exact candle close at {} for {} on {}",
+                step_close_ts_ms,
+                symbol,
+                interval
+            );
+        }
+    }
+
+    Ok(())
+}
+
 fn interval_to_ms(interval: &str) -> Result<i64> {
     let trimmed = interval.trim();
     if trimmed.len() < 2 {
@@ -523,6 +606,50 @@ mod tests {
         for (symbol, start, drift) in [("ETH", 100.0, 0.25), ("BTC", 50_000.0, 20.0)] {
             let mut price: f64 = start;
             for idx in 0..420_i64 {
+                let t = base + (idx * 1_800_000);
+                let open: f64 = price;
+                let close: f64 = price + drift;
+                let high = open.max(close) + 0.5;
+                let low = open.min(close) - 0.5;
+                let volume = 1000.0 + idx as f64;
+                conn.execute(
+                    "INSERT INTO candles VALUES (?1, '30m', ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)",
+                    (symbol, t, t + 1_800_000, open, high, low, close, volume),
+                )
+                .unwrap();
+                price = close;
+            }
+        }
+    }
+
+    fn seed_gapped_candles_db(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE candles (
+                symbol TEXT,
+                interval TEXT,
+                t INTEGER,
+                t_close INTEGER,
+                o REAL,
+                h REAL,
+                l REAL,
+                c REAL,
+                v REAL,
+                n INTEGER
+            );
+            "#,
+        )
+        .unwrap();
+
+        let base = 1_772_670_000_000_i64;
+        for (symbol, start, drift) in [("ETH", 100.0, 0.25), ("BTC", 50_000.0, 20.0)] {
+            let mut price: f64 = start;
+            for idx in 0..100_i64 {
+                if idx == 90 {
+                    price += drift;
+                    continue;
+                }
                 let t = base + (idx * 1_800_000);
                 let open: f64 = price;
                 let close: f64 = price + drift;
@@ -707,6 +834,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![START_STEP_CLOSE_TS_MS, NEXT_STEP_CLOSE_TS_MS]
         );
+        assert_eq!(report.steps[0].trades_written, 0);
+        assert_eq!(report.steps[1].trades_written, 0);
+        assert!(!report.steps[0].runtime_step_recorded);
+        assert!(!report.steps[1].runtime_step_recorded);
+        assert!(
+            report.steps[1]
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("tp1_taken blocks same-direction pyramiding"))
+        );
 
         let conn = Connection::open(&paper_db).unwrap();
         let step_table_count: i64 = conn
@@ -717,5 +854,35 @@ mod tests {
             )
             .unwrap();
         assert_eq!(step_table_count, 0);
+    }
+
+    #[test]
+    fn loop_rejects_missing_exact_step_close() {
+        let dir = tempdir().unwrap();
+        let paper_db = dir.path().join("paper.db");
+        let candles_db = dir.path().join("candles.db");
+        seed_paper_db(&paper_db);
+        seed_gapped_candles_db(&candles_db);
+
+        let err = run_loop(PaperLoopInput {
+            runtime_bootstrap: runtime_bootstrap(),
+            config_path: &base_cfg_path(),
+            live: false,
+            paper_db: &paper_db,
+            candles_db: &candles_db,
+            explicit_symbols: &["ETH".to_string()],
+            btc_symbol: "BTC",
+            lookback_bars: 400,
+            start_step_close_ts_ms: Some(1_772_832_000_000),
+            max_steps: 2,
+            exported_at_ms: None,
+            dry_run: false,
+        })
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("requires an exact candle close at 1772833800000")
+        );
     }
 }

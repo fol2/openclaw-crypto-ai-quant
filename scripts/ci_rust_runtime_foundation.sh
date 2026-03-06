@@ -32,20 +32,27 @@ snap_path = Path("/tmp/aiq-runtime-seed-snapshot.json")
 db_path = Path("/tmp/aiq-runtime-paper.db")
 loop_db_path = Path("/tmp/aiq-runtime-paper-loop.db")
 bars_path = Path("/tmp/aiq-runtime-candles.db")
+gap_db_path = Path("/tmp/aiq-runtime-paper-loop-gap.db")
+gap_bars_path = Path("/tmp/aiq-runtime-paper-loop-gap-candles.db")
 for path in (
     snap_path,
     db_path,
     loop_db_path,
     bars_path,
+    gap_db_path,
+    gap_bars_path,
     Path("/tmp/aiq-runtime-doctor.json"),
     Path("/tmp/aiq-runtime-pipeline.json"),
     Path("/tmp/aiq-runtime-snapshot-validate.json"),
     Path("/tmp/aiq-runtime-seed-paper.json"),
+    Path("/tmp/aiq-runtime-seed-paper-loop.json"),
+    Path("/tmp/aiq-runtime-seed-paper-loop-gap.json"),
     Path("/tmp/aiq-runtime-paper-run-once.json"),
     Path("/tmp/aiq-runtime-paper-cycle.json"),
     Path("/tmp/aiq-runtime-paper-loop.json"),
     Path("/tmp/aiq-runtime-paper-loop-resume.json"),
     Path("/tmp/aiq-runtime-paper-loop-idle.json"),
+    Path("/tmp/aiq-runtime-paper-loop-gap.stderr"),
 ):
     if path.exists():
         path.unlink()
@@ -88,7 +95,7 @@ payload = {
 }
 snap_path.write_text(json.dumps(payload), encoding="utf-8")
 
-for db in (db_path, loop_db_path):
+for db in (db_path, loop_db_path, gap_db_path):
     conn = sqlite3.connect(db)
     conn.executescript(
         """
@@ -187,11 +194,49 @@ for symbol, start, drift in (("ETH", 100.0, 0.25), ("BTC", 50000.0, 20.0)):
         price = close
 conn.commit()
 conn.close()
+
+conn = sqlite3.connect(gap_bars_path)
+conn.executescript(
+    """
+    CREATE TABLE candles (
+        symbol TEXT,
+        interval TEXT,
+        t INTEGER,
+        t_close INTEGER,
+        o REAL,
+        h REAL,
+        l REAL,
+        c REAL,
+        v REAL,
+        n INTEGER
+    );
+    """
+)
+for symbol, start, drift in (("ETH", 100.0, 0.25), ("BTC", 50000.0, 20.0)):
+    price = start
+    for idx in range(100):
+        if idx == 90:
+            price += drift
+            continue
+        t = base + idx * 1800000
+        open_ = price
+        close = price + drift
+        high = max(open_, close) + 0.5
+        low = min(open_, close) - 0.5
+        volume = 1000.0 + idx
+        conn.execute(
+            "INSERT INTO candles VALUES (?, '30m', ?, ?, ?, ?, ?, ?, ?, 1)",
+            (symbol, t, t + 1800000, open_, high, low, close, volume),
+        )
+        price = close
+conn.commit()
+conn.close()
 PY
 
 cargo run -q -p aiq-runtime -- snapshot validate --path /tmp/aiq-runtime-seed-snapshot.json --json >/tmp/aiq-runtime-snapshot-validate.json
 cargo run -q -p aiq-runtime -- snapshot seed-paper --snapshot /tmp/aiq-runtime-seed-snapshot.json --target-db /tmp/aiq-runtime-paper.db --strict-replace --json >/tmp/aiq-runtime-seed-paper.json
 cargo run -q -p aiq-runtime -- snapshot seed-paper --snapshot /tmp/aiq-runtime-seed-snapshot.json --target-db /tmp/aiq-runtime-paper-loop.db --strict-replace --json >/tmp/aiq-runtime-seed-paper-loop.json
+cargo run -q -p aiq-runtime -- snapshot seed-paper --snapshot /tmp/aiq-runtime-seed-snapshot.json --target-db /tmp/aiq-runtime-paper-loop-gap.db --strict-replace --json >/tmp/aiq-runtime-seed-paper-loop-gap.json
 cargo run -q -p aiq-runtime -- paper doctor --db /tmp/aiq-runtime-paper.db --json >/tmp/aiq-runtime-paper-doctor.json
 cargo run -q -p aiq-runtime -- paper run-once --db /tmp/aiq-runtime-paper.db --candles-db /tmp/aiq-runtime-candles.db --target-symbol ETH --exported-at-ms 1772676900000 --dry-run --json >/tmp/aiq-runtime-paper-run-once.json
 cargo run -q -p aiq-runtime -- paper cycle --db /tmp/aiq-runtime-paper.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --step-close-ts-ms 1773426000000 --exported-at-ms 1772676900000 --json >/tmp/aiq-runtime-paper-cycle.json
@@ -202,6 +247,10 @@ cargo run -q -p aiq-runtime -- paper doctor --db /tmp/aiq-runtime-paper.db --liv
 cargo run -q -p aiq-runtime -- paper run-once --db /tmp/aiq-runtime-paper.db --candles-db /tmp/aiq-runtime-candles.db --target-symbol ETH --exported-at-ms 1772676900000 --live --dry-run --json >/tmp/aiq-runtime-paper-run-once-live.json
 if cargo run -q -p aiq-runtime -- paper cycle --db /tmp/aiq-runtime-paper.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --step-close-ts-ms 1773426000000 --exported-at-ms 1772676900000 --json >/tmp/aiq-runtime-paper-cycle-rerun.json 2>/tmp/aiq-runtime-paper-cycle-rerun.stderr; then
   echo "paper cycle rerun guard did not fail closed" >&2
+  exit 1
+fi
+if cargo run -q -p aiq-runtime -- paper loop --db /tmp/aiq-runtime-paper-loop-gap.db --candles-db /tmp/aiq-runtime-paper-loop-gap-candles.db --symbols ETH --start-step-close-ts-ms 1772832000000 --max-steps 2 --json >/tmp/aiq-runtime-paper-loop-gap.json 2>/tmp/aiq-runtime-paper-loop-gap.stderr; then
+  echo "paper loop gap guard did not fail closed" >&2
   exit 1
 fi
 
@@ -225,6 +274,7 @@ assert [step["step_close_ts_ms"] for step in loop_resume["steps"]] == [177342600
 loop_idle = json.loads(Path("/tmp/aiq-runtime-paper-loop-idle.json").read_text(encoding="utf-8"))
 assert loop_idle["executed_steps"] == 0
 assert loop_idle["latest_common_close_ts_ms"] == 1773426000000
+assert "exact candle close" in Path("/tmp/aiq-runtime-paper-loop-gap.stderr").read_text(encoding="utf-8")
 doctor = json.loads(Path("/tmp/aiq-runtime-paper-doctor.json").read_text(encoding="utf-8"))
 assert doctor["paper_bootstrap"]["runtime_close_markers"] == 1
 PY
