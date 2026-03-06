@@ -37,6 +37,8 @@ cargo run -q -p aiq-runtime -- snapshot validate --path <snapshot_v2_valid.json>
 cargo run -q -p aiq-runtime -- snapshot seed-paper --snapshot <snapshot_v2_valid.json> --target-db <paper_fixture.db> --strict-replace --json
 cargo run -q -p aiq-runtime -- paper doctor --db <paper_fixture.db> --json
 cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-db <candles_fixture.db> --target-symbol ETH --exported-at-ms 1772676900000 --dry-run --json
+cargo run -q -p aiq-runtime -- paper doctor --db <paper_fixture.db> --live --json
+cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-db <candles_fixture.db> --target-symbol ETH --exported-at-ms 1772676900000 --live --dry-run --json
 ```
 
 ## Acceptance Checks
@@ -55,6 +57,7 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
 
 ## Fixture Guidance
 
-- Use a temporary SQLite DB with minimal `trades`, `position_state`, and `runtime_cooldowns` tables for paper export tests.
+- Use a temporary SQLite DB with minimal `trades`, `position_state`, `runtime_cooldowns`, and `runtime_last_closes` tables for paper export tests.
 - Use v2 JSON fixtures with `runtime.entry_attempt_ms_by_symbol` and `runtime.exit_attempt_ms_by_symbol` for init-state compatibility checks.
+- `paper run-once` fixtures must provide bars for both the target symbol and the BTC anchor symbol at the resolved `engine.interval`.
 - Keep fixtures deterministic: one open position, one add, one last-close marker, and one runtime cooldown marker is enough for the foundation slice.

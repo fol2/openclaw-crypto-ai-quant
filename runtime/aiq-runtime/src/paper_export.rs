@@ -94,6 +94,9 @@ fn reconstruct_open_positions(conn: &Connection) -> anyhow::Result<Vec<SnapshotP
         if seed.net_size <= 0.0 {
             continue;
         }
+        if seed.leverage > 0.0 {
+            seed.margin_used = (seed.net_size * seed.avg_entry) / seed.leverage;
+        }
 
         let mut trailing_sl = None;
         let mut last_funding_time_ms = parse_timestamp_ms(seed.open_ts.as_deref());
@@ -300,6 +303,40 @@ fn load_last_close_info(
     conn: &Connection,
 ) -> anyhow::Result<BTreeMap<String, SnapshotLastCloseInfo>> {
     let mut last_close_info_by_symbol = BTreeMap::new();
+    if table_exists(conn, "runtime_last_closes")? {
+        let mut stmt = conn.prepare(
+            "SELECT symbol, close_ts_ms, side, reason FROM runtime_last_closes ORDER BY close_ts_ms DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+
+        for row in rows {
+            let (symbol, timestamp_ms, side, reason) = row?;
+            let symbol = symbol.trim().to_ascii_uppercase();
+            let side = side.trim().to_ascii_lowercase();
+            if symbol.is_empty() || last_close_info_by_symbol.contains_key(&symbol) {
+                continue;
+            }
+            if timestamp_ms <= 0 || (side != "long" && side != "short") {
+                continue;
+            }
+            last_close_info_by_symbol.insert(
+                symbol,
+                SnapshotLastCloseInfo {
+                    timestamp_ms,
+                    side,
+                    reason: reason.unwrap_or_default(),
+                },
+            );
+        }
+    }
+
     let mut stmt = conn.prepare(
         "SELECT symbol, timestamp, type, reason FROM trades WHERE action = 'CLOSE' ORDER BY id DESC",
     )?;
@@ -463,6 +500,7 @@ mod tests {
         assert_eq!(snapshot.positions[0].symbol, "BTC");
         assert!((snapshot.positions[0].size - 3.0).abs() < 1e-9);
         assert!((snapshot.positions[0].entry_price - 103.33333333333333).abs() < 1e-9);
+        assert!((snapshot.positions[0].margin_used - 77.5).abs() < 1e-9);
         assert_eq!(
             snapshot.positions[0].last_funding_time_ms,
             1_772_676_555_000

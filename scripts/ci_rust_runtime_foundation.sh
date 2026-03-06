@@ -186,6 +186,8 @@ cargo run -q -p aiq-runtime -- snapshot validate --path /tmp/aiq-runtime-seed-sn
 cargo run -q -p aiq-runtime -- snapshot seed-paper --snapshot /tmp/aiq-runtime-seed-snapshot.json --target-db /tmp/aiq-runtime-paper.db --strict-replace --json >/tmp/aiq-runtime-seed-paper.json
 cargo run -q -p aiq-runtime -- paper doctor --db /tmp/aiq-runtime-paper.db --json >/tmp/aiq-runtime-paper-doctor.json
 cargo run -q -p aiq-runtime -- paper run-once --db /tmp/aiq-runtime-paper.db --candles-db /tmp/aiq-runtime-candles.db --target-symbol ETH --exported-at-ms 1772676900000 --dry-run --json >/tmp/aiq-runtime-paper-run-once.json
+cargo run -q -p aiq-runtime -- paper doctor --db /tmp/aiq-runtime-paper.db --live --json >/tmp/aiq-runtime-paper-doctor-live.json
+cargo run -q -p aiq-runtime -- paper run-once --db /tmp/aiq-runtime-paper.db --candles-db /tmp/aiq-runtime-candles.db --target-symbol ETH --exported-at-ms 1772676900000 --live --dry-run --json >/tmp/aiq-runtime-paper-run-once-live.json
 
 python3 - <<'PY'
 import json
@@ -194,6 +196,8 @@ from pathlib import Path
 report = json.loads(Path("/tmp/aiq-runtime-paper-run-once.json").read_text(encoding="utf-8"))
 assert report["snapshot_exported_at_ms"] == 1772676900000
 assert report["symbol"] == "ETH"
+doctor = json.loads(Path("/tmp/aiq-runtime-paper-doctor.json").read_text(encoding="utf-8"))
+assert doctor["paper_bootstrap"]["runtime_close_markers"] == 1
 PY
 
 echo "[runtime-foundation] ok"

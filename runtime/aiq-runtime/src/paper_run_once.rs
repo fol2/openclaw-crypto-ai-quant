@@ -8,7 +8,7 @@ use bt_core::decision_kernel::{
     OrderIntentKind, PositionSide, StrategyState,
 };
 use bt_core::indicators::{IndicatorBank, IndicatorSnapshot};
-use bt_core::kernel_entries::{evaluate_entry, EntryParams, KernelEntryResult};
+use bt_core::kernel_entries::{evaluate_entry, EntryParams};
 use bt_core::kernel_exits::ExitParams;
 use bt_core::signals::gates;
 use chrono::{DateTime, TimeZone, Utc};
@@ -40,6 +40,13 @@ struct ExecutionPlan {
     leverage: f64,
     allow_pyramid: bool,
     warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ExecutionMetadata {
+    signal: Signal,
+    confidence: Confidence,
+    entry_adx_threshold: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -122,13 +129,19 @@ pub fn run_once(input: PaperRunOnceInput<'_>) -> Result<PaperRunOnceReport> {
 
     let entry_params = build_entry_params(input.config);
     let entry_result = evaluate_entry(&snap, &gate_result, &entry_params, ema_slow_slope_pct);
+    let execution_metadata = ExecutionMetadata {
+        signal: entry_result.signal,
+        confidence: to_bt_confidence(entry_result.confidence),
+        entry_adx_threshold: entry_result.entry_adx_threshold,
+    };
     let execution_plan = build_execution_plan(
         input.config,
         &pre_state,
         &symbol,
+        exported_at_ms,
         prior_position.as_ref(),
         &snap,
-        &entry_result,
+        execution_metadata,
     );
     let params = build_kernel_params(
         input.config,
@@ -164,6 +177,7 @@ pub fn run_once(input: PaperRunOnceInput<'_>) -> Result<PaperRunOnceReport> {
             &decision.intents,
             &decision.fills,
             &snap,
+            execution_metadata,
             exported_at_ms,
         )?
     };
@@ -356,11 +370,12 @@ fn build_execution_plan(
     cfg: &StrategyConfig,
     pre_state: &StrategyState,
     symbol: &str,
+    execution_ts_ms: i64,
     prior_position: Option<&PaperPositionState>,
     snap: &IndicatorSnapshot,
-    entry_result: &KernelEntryResult,
+    execution_metadata: ExecutionMetadata,
 ) -> ExecutionPlan {
-    let entry_side = signal_to_side(entry_result.signal);
+    let entry_side = signal_to_side(execution_metadata.signal);
     let base_leverage = prior_position
         .map(|position| position.leverage.max(1.0))
         .unwrap_or_else(|| cfg.trade.leverage.max(1.0));
@@ -378,10 +393,58 @@ fn build_execution_plan(
 
     let equity = pre_state.cash_usd.max(0.0);
     let total_margin_used = total_margin_used(pre_state);
-    let confidence = to_confidence_tier(entry_result.confidence);
+    let confidence = to_confidence_tier(execution_metadata.confidence);
 
     match pre_state.positions.get_key_value(symbol) {
         Some((_symbol, position)) if position.side == entry_side => {
+            if !cfg.trade.enable_pyramiding {
+                plan.allow_pyramid = false;
+                return plan;
+            }
+            if position.adds_count >= cfg.trade.max_adds_per_symbol as u32 {
+                plan.allow_pyramid = false;
+                plan.warnings.push(format!(
+                    "skip add for {}: adds_count {} reached max_adds_per_symbol {}",
+                    position.symbol, position.adds_count, cfg.trade.max_adds_per_symbol
+                ));
+                return plan;
+            }
+            if !execution_metadata
+                .confidence
+                .meets_min(cfg.trade.add_min_confidence)
+            {
+                plan.allow_pyramid = false;
+                plan.warnings.push(format!(
+                    "skip add for {}: confidence {:?} below add_min_confidence {:?}",
+                    position.symbol, execution_metadata.confidence, cfg.trade.add_min_confidence
+                ));
+                return plan;
+            }
+            if prior_position
+                .map(|position| position.tp1_taken)
+                .unwrap_or(position.tp1_taken)
+            {
+                plan.allow_pyramid = false;
+                plan.warnings.push(format!(
+                    "skip add for {}: tp1_taken blocks same-direction pyramiding",
+                    position.symbol
+                ));
+                return plan;
+            }
+            let last_add_time_ms = prior_position
+                .map(|position| position.last_add_time_ms)
+                .unwrap_or(0);
+            if last_add_time_ms > 0
+                && execution_ts_ms.saturating_sub(last_add_time_ms)
+                    < (cfg.trade.add_cooldown_minutes as i64 * 60_000)
+            {
+                plan.allow_pyramid = false;
+                plan.warnings.push(format!(
+                    "skip add for {}: add cooldown is still active",
+                    position.symbol
+                ));
+                return plan;
+            }
             match compute_pyramid_sizing(PyramidSizingInput {
                 equity,
                 price: snap.close,
@@ -430,6 +493,17 @@ fn build_execution_plan(
             ));
         }
         None => {
+            if !execution_metadata
+                .confidence
+                .meets_min(cfg.trade.entry_min_confidence)
+            {
+                plan.allow_pyramid = false;
+                plan.warnings.push(format!(
+                    "skip entry for {}: confidence {:?} below entry_min_confidence {:?}",
+                    symbol, execution_metadata.confidence, cfg.trade.entry_min_confidence
+                ));
+                return plan;
+            }
             let exposure = evaluate_exposure_guard(ExposureGuardInput {
                 open_positions: pre_state.positions.len(),
                 max_open_positions: Some(cfg.trade.max_open_positions),
@@ -521,11 +595,19 @@ fn signal_to_side(signal: Signal) -> Option<PositionSide> {
     }
 }
 
-fn to_confidence_tier(raw: u8) -> ConfidenceTier {
+fn to_bt_confidence(raw: u8) -> Confidence {
     match raw {
-        2 => ConfidenceTier::High,
-        1 => ConfidenceTier::Medium,
-        _ => ConfidenceTier::Low,
+        2 => Confidence::High,
+        1 => Confidence::Medium,
+        _ => Confidence::Low,
+    }
+}
+
+fn to_confidence_tier(confidence: Confidence) -> ConfidenceTier {
+    match confidence {
+        Confidence::High => ConfidenceTier::High,
+        Confidence::Medium => ConfidenceTier::Medium,
+        Confidence::Low => ConfidenceTier::Low,
     }
 }
 
@@ -587,6 +669,7 @@ fn apply_decision_projection(
     intents: &[OrderIntent],
     fills: &[FillEvent],
     snap: &IndicatorSnapshot,
+    execution_metadata: ExecutionMetadata,
     ts_ms: i64,
 ) -> Result<(usize, bool, bool)> {
     let mut conn = Connection::open(db_path)?;
@@ -648,7 +731,7 @@ fn apply_decision_projection(
                 fill.notional_usd,
                 if intent.reason.is_empty() { "rust_paper_run_once" } else { intent.reason.as_str() },
                 if intent.reason_code.is_empty() { "entry_signal" } else { intent.reason_code.as_str() },
-                inferred_confidence(intent, pre_state),
+                projected_confidence_label(intent, pre_state, execution_metadata),
                 fill.pnl_usd,
                 fill.fee_usd,
                 fill.fee_usd / fill.notional_usd.max(1e-12),
@@ -703,7 +786,14 @@ fn apply_decision_projection(
                 i64::from(position.adds_count),
                 if position.tp1_taken { 1_i64 } else { 0_i64 },
                 last_add_time_ms,
-                position.entry_adx_threshold.unwrap_or(0.0),
+                if saw_open {
+                    execution_metadata.entry_adx_threshold
+                } else {
+                    position
+                        .entry_adx_threshold
+                        .or_else(|| prior_position.map(|position| position.entry_adx_threshold))
+                        .unwrap_or(0.0)
+                },
                 &ts_iso,
             ),
         )?;
@@ -718,8 +808,16 @@ fn apply_decision_projection(
          VALUES (?1, ?2, ?3, ?4)",
         (
             symbol,
-            post_state.last_entry_ms.get(symbol).map(|value| (*value as f64) / 1000.0),
-            post_state.last_exit_ms.get(symbol).map(|value| (*value as f64) / 1000.0),
+            if saw_open || saw_add {
+                Some(ms_to_secs(ts_ms))
+            } else {
+                post_state.last_entry_ms.get(symbol).map(|value| ms_to_secs(*value))
+            },
+            if intents.iter().any(|intent| intent.kind == OrderIntentKind::Close) {
+                Some(ms_to_secs(ts_ms))
+            } else {
+                post_state.last_exit_ms.get(symbol).map(|value| ms_to_secs(*value))
+            },
             &ts_iso,
         ),
     )?;
@@ -729,12 +827,23 @@ fn apply_decision_projection(
     Ok((trades_written, position_state_written, true))
 }
 
-fn inferred_confidence(intent: &OrderIntent, pre_state: &StrategyState) -> &'static str {
+fn projected_confidence_label(
+    intent: &OrderIntent,
+    pre_state: &StrategyState,
+    execution_metadata: ExecutionMetadata,
+) -> &'static str {
+    if matches!(intent.kind, OrderIntentKind::Open | OrderIntentKind::Add) {
+        return match execution_metadata.confidence {
+            Confidence::High => "high",
+            Confidence::Medium => "medium",
+            Confidence::Low => "low",
+        };
+    }
     if let Some(position) = pre_state.positions.get(&intent.symbol) {
         return match position.confidence {
             Some(2) => "high",
             Some(1) => "medium",
-            _ => "medium",
+            _ => "low",
         };
     }
     "medium"
@@ -760,6 +869,10 @@ fn iso_from_ms(ms: i64) -> String {
     DateTime::from_timestamp_millis(ms)
         .map(|dt| dt.with_timezone(&Utc).to_rfc3339())
         .unwrap_or_else(|| Utc.timestamp_millis_opt(0).single().unwrap().to_rfc3339())
+}
+
+fn ms_to_secs(value: i64) -> f64 {
+    (value as f64) / 1000.0
 }
 
 #[cfg(test)]
@@ -1051,11 +1164,12 @@ mod tests {
             &cfg,
             &pre_state,
             "ETH",
+            FIXED_TS_MS,
             None,
             &sample_snap(),
-            &KernelEntryResult {
+            ExecutionMetadata {
                 signal: Signal::Buy,
-                confidence: 2,
+                confidence: Confidence::High,
                 entry_adx_threshold: 22.0,
             },
         );
@@ -1121,6 +1235,11 @@ mod tests {
             fee_usd: 0.0,
             pnl_usd: 0.0,
         };
+        let metadata = ExecutionMetadata {
+            signal: Signal::Buy,
+            confidence: Confidence::High,
+            entry_adx_threshold: 22.0,
+        };
         let (trades_written, position_state_written, runtime_cooldowns_written) =
             apply_decision_projection(
                 &paper_db,
@@ -1131,6 +1250,7 @@ mod tests {
                 &[intent],
                 &[fill],
                 &sample_snap(),
+                metadata,
                 FIXED_TS_MS,
             )
             .unwrap();
@@ -1141,13 +1261,14 @@ mod tests {
         let conn = Connection::open(&paper_db).unwrap();
         let last_trade = conn
             .query_row(
-                "SELECT action, notional, timestamp FROM trades WHERE symbol = 'ETH' ORDER BY id DESC LIMIT 1",
+                "SELECT action, notional, timestamp, confidence FROM trades WHERE symbol = 'ETH' ORDER BY id DESC LIMIT 1",
                 [],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, f64>(1)?,
                         row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
                     ))
                 },
             )
@@ -1156,16 +1277,209 @@ mod tests {
         assert!(last_trade.1 > 0.0);
         assert!(last_trade.1 < 1_000.0);
         assert_eq!(last_trade.2, iso_from_ms(FIXED_TS_MS));
+        assert_eq!(last_trade.3, "high");
 
         let markers = conn
             .query_row(
-                "SELECT last_funding_time, last_add_time FROM position_state WHERE symbol = 'ETH'",
+                "SELECT last_funding_time, last_add_time, entry_adx_threshold FROM position_state WHERE symbol = 'ETH'",
                 [],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, f64>(2)?,
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(markers.0, FIXED_TS_MS);
         assert_eq!(markers.1, 0);
+        assert_eq!(markers.2, 22.0);
+        let cooldown = conn
+            .query_row(
+                "SELECT last_entry_attempt_s FROM runtime_cooldowns WHERE symbol = 'ETH'",
+                [],
+                |row| row.get::<_, Option<f64>>(0),
+            )
+            .unwrap();
+        assert_eq!(cooldown, Some(ms_to_secs(FIXED_TS_MS)));
+    }
+
+    #[test]
+    fn build_execution_plan_blocks_adds_that_violate_pyramid_gates() {
+        let cfg = load_cfg("ETH");
+        let mut pre_state = StrategyState::new(1_000.0, FIXED_TS_MS);
+        pre_state.positions.insert(
+            "ETH".to_string(),
+            bt_core::decision_kernel::Position {
+                symbol: "ETH".to_string(),
+                side: PositionSide::Long,
+                quantity: 1.0,
+                avg_entry_price: 100.0,
+                opened_at_ms: FIXED_TS_MS - 3_600_000,
+                updated_at_ms: FIXED_TS_MS - 1_800_000,
+                notional_usd: 100.0,
+                margin_usd: 33.3333333333,
+                confidence: Some(2),
+                entry_atr: Some(5.0),
+                entry_adx_threshold: Some(22.0),
+                adds_count: 1,
+                tp1_taken: true,
+                trailing_sl: None,
+                mae_usd: 0.0,
+                mfe_usd: 0.0,
+                last_funding_ms: Some(FIXED_TS_MS - 1_800_000),
+            },
+        );
+        let plan = build_execution_plan(
+            &cfg,
+            &pre_state,
+            "ETH",
+            FIXED_TS_MS,
+            Some(&PaperPositionState {
+                symbol: "ETH".to_string(),
+                side: "long".to_string(),
+                size: 1.0,
+                entry_price: 100.0,
+                entry_atr: 5.0,
+                trailing_sl: None,
+                confidence: "high".to_string(),
+                leverage: 3.0,
+                margin_used: 33.3333333333,
+                adds_count: 1,
+                tp1_taken: true,
+                open_time_ms: FIXED_TS_MS - 3_600_000,
+                last_funding_time_ms: FIXED_TS_MS - 1_800_000,
+                last_add_time_ms: FIXED_TS_MS - 1_000,
+                entry_adx_threshold: 22.0,
+            }),
+            &sample_snap(),
+            ExecutionMetadata {
+                signal: Signal::Buy,
+                confidence: Confidence::High,
+                entry_adx_threshold: 22.0,
+            },
+        );
+
+        assert!(plan.requested_notional_usd.is_none());
+        assert!(!plan.allow_pyramid);
+        assert!(!plan.warnings.is_empty());
+    }
+
+    #[test]
+    fn apply_decision_projection_add_updates_last_add_time() {
+        let dir = tempdir().unwrap();
+        let paper_db = dir.path().join("paper.db");
+        seed_paper_db(&paper_db);
+
+        let mut pre_state = StrategyState::new(1_000.0, FIXED_TS_MS - 60_000);
+        pre_state.positions.insert(
+            "ETH".to_string(),
+            bt_core::decision_kernel::Position {
+                symbol: "ETH".to_string(),
+                side: PositionSide::Long,
+                quantity: 1.0,
+                avg_entry_price: 100.0,
+                opened_at_ms: FIXED_TS_MS - 3_600_000,
+                updated_at_ms: FIXED_TS_MS - 3_600_000,
+                notional_usd: 100.0,
+                margin_usd: 33.3,
+                confidence: Some(2),
+                entry_atr: Some(5.0),
+                entry_adx_threshold: Some(22.0),
+                adds_count: 0,
+                tp1_taken: false,
+                trailing_sl: Some(95.0),
+                mae_usd: 0.0,
+                mfe_usd: 0.0,
+                last_funding_ms: Some(FIXED_TS_MS - 3_600_000),
+            },
+        );
+        let mut post_state = pre_state.clone();
+        if let Some(position) = post_state.positions.get_mut("ETH") {
+            position.quantity = 1.5;
+            position.notional_usd = 150.0;
+            position.margin_usd = 50.0;
+            position.adds_count = 1;
+            position.updated_at_ms = FIXED_TS_MS;
+        }
+        let intent = OrderIntent {
+            schema_version: 1,
+            intent_id: 2,
+            symbol: "ETH".to_string(),
+            kind: OrderIntentKind::Add,
+            side: PositionSide::Long,
+            quantity: 0.5,
+            price: 100.0,
+            notional_usd: 50.0,
+            fee_rate: 0.0,
+            reason: "Pyramid Add".to_string(),
+            reason_code: "entry_signal".to_string(),
+        };
+        let fill = FillEvent {
+            schema_version: 1,
+            intent_id: 2,
+            symbol: "ETH".to_string(),
+            side: PositionSide::Long,
+            price: 100.0,
+            quantity: 0.5,
+            notional_usd: 50.0,
+            fee_usd: 0.0,
+            pnl_usd: 0.0,
+        };
+        let metadata = ExecutionMetadata {
+            signal: Signal::Buy,
+            confidence: Confidence::High,
+            entry_adx_threshold: 22.0,
+        };
+
+        apply_decision_projection(
+            &paper_db,
+            "ETH",
+            &pre_state,
+            Some(&PaperPositionState {
+                symbol: "ETH".to_string(),
+                side: "long".to_string(),
+                size: 1.0,
+                entry_price: 100.0,
+                entry_atr: 5.0,
+                trailing_sl: Some(95.0),
+                confidence: "high".to_string(),
+                leverage: 3.0,
+                margin_used: 33.3,
+                adds_count: 0,
+                tp1_taken: false,
+                open_time_ms: FIXED_TS_MS - 3_600_000,
+                last_funding_time_ms: FIXED_TS_MS - 3_600_000,
+                last_add_time_ms: FIXED_TS_MS - 7_200_000,
+                entry_adx_threshold: 22.0,
+            }),
+            &post_state,
+            &[intent],
+            &[fill],
+            &sample_snap(),
+            metadata,
+            FIXED_TS_MS,
+        )
+        .unwrap();
+
+        let conn = Connection::open(&paper_db).unwrap();
+        let state_row = conn
+            .query_row(
+                "SELECT adds_count, last_add_time, last_entry_attempt_s FROM position_state JOIN runtime_cooldowns USING(symbol) WHERE symbol = 'ETH'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<f64>>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(state_row.0, 1);
+        assert_eq!(state_row.1, FIXED_TS_MS);
+        assert_eq!(state_row.2, Some(ms_to_secs(FIXED_TS_MS)));
     }
 
     #[test]

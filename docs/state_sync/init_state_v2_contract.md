@@ -44,6 +44,18 @@ Runtime fields:
 - `exit_attempt_ms_by_symbol`
 - `last_close_info_by_symbol`
 
+`runtime.last_close_info_by_symbol` value shape:
+
+```json
+{
+  "ETH": {
+    "timestamp_ms": 1772676400000,
+    "side": "short",
+    "reason": "Signal Trigger"
+  }
+}
+```
+
 ## Validation Rules
 
 - `version` must be `2`
