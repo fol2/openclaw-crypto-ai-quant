@@ -23,14 +23,14 @@ File lock prevents duplicate daemons: `ai_quant_paper.lock` / `ai_quant_live.loc
 |--------|---------|
 | `daemon.py` | Entrypoint — mode selection via `AI_QUANT_MODE`, subsystem initialisation |
 | `core.py` | `UnifiedEngine` — main trading loop, two-phase collect-rank-execute |
-| `strategy_manager.py` | Hot-reloads the selected strategy YAML path via mtime polling for the active Python daemon compatibility path |
+| `strategy_manager.py` | Hot-reloads the resolver-selected strategy YAML path via mtime polling for the active Python daemon compatibility path |
 | `market_data.py` | `MarketDataHub` — candle + mid data from WS sidecar / SQLite / REST fallback |
 | `risk.py` | `RiskManager` — rate limits, drawdown kill-switch, exposure caps, slippage guard |
 | `oms.py` | `LiveOms` — durable intent/order/fill ledger for live trading |
 | `oms_reconciler.py` | OMS state reconciliation against exchange positions/fills |
 | `alerting.py` | Discord / Telegram notifications via `openclaw message send` |
 | `event_logger.py` | Decision + trade event logging for audit trail |
-| `promoted_config.py` | Legacy Python promoted-config materialisation for the active paper daemon compatibility path |
+| `promoted_config.py` | Compatibility shim that calls the shared Rust `paper effective-config` resolver for paper start-up and factory materialisation |
 | `sqlite_logger.py` | Trade, candle, and position state persistence |
 | `rest_client.py` | Hyperliquid REST API client |
 | `systemd_watchdog.py` | `sd_notify` integration for systemd services |
@@ -60,13 +60,12 @@ Durable OMS for live trading:
 
 ### Configuration Hot-Reload
 
-`StrategyManager` watches the selected strategy YAML path via mtime polling. In
-the active Python daemon this remains the hot-reload path, but it is no longer
-the owner of promoted-config discovery or strategy-mode selection for Rust
-paper surfaces. Rust resolves `AI_QUANT_PROMOTED_ROLE` at the YAML-document
-layer, then applies `AI_QUANT_STRATEGY_MODE` or
-`AI_QUANT_STRATEGY_MODE_FILE` as the final `modes.<mode>` overlay within the
-typed merge hierarchy `defaults ← global ← symbols.<SYM> ← live ← modes.<mode>`.
+`StrategyManager` watches the resolver-selected strategy YAML path via mtime
+polling. In the active Python daemon this remains the hot-reload path, but the
+effective-config owner is now Rust: `aiq-runtime paper effective-config`
+resolves promoted-role discovery, strategy-mode selection, config identity, and
+the materialised YAML path before Python paper start-up or factory
+materialisation continue.
 The `engine.interval` parameter is NOT hot-reloadable (requires service
 restart).
 
@@ -94,10 +93,11 @@ restart).
 | Variable | Description |
 |----------|-------------|
 | `AI_QUANT_LOCK_PATH` | Custom lock file path |
-| `AI_QUANT_STRATEGY_YAML` | Base strategy YAML path |
+| `AI_QUANT_STRATEGY_YAML` | Base strategy YAML input for the Rust resolver; paper start-up then switches to the resolver-selected materialised path |
 | `AI_QUANT_PROMOTED_ROLE` | Promoted config selector (`primary` / `fallback` / `conservative`) |
 | `AI_QUANT_STRATEGY_MODE` | Strategy-mode selector; env wins over `AI_QUANT_STRATEGY_MODE_FILE` |
 | `AI_QUANT_STRATEGY_MODE_FILE` | File-backed strategy-mode fallback when the env var is unset |
+| `AI_QUANT_RUNTIME_BIN` | Optional absolute path to the `aiq-runtime` binary for paper start-up / factory control-plane resolution |
 | `AI_QUANT_WS_ENABLE_BBO` | Enable BBO subscription (`0` to disable) |
 
 See `.env.example` for the full list.

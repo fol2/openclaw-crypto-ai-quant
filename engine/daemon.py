@@ -105,6 +105,12 @@ def _build_run_fingerprint(
         "strategy_yaml_path": str(getattr(snap, "yaml_path", "") or ""),
         "strategy_yaml_mtime": getattr(snap, "yaml_mtime", None),
         "strategy_overrides_sha1": str(getattr(snap, "overrides_sha1", "") or ""),
+        "config_id": str(getattr(snap, "config_id", "") or ""),
+        "active_yaml_path": str(os.getenv("AI_QUANT_ACTIVE_STRATEGY_YAML", "") or ""),
+        "effective_yaml_path": str(os.getenv("AI_QUANT_EFFECTIVE_STRATEGY_YAML", "") or ""),
+        "promoted_role": str(os.getenv("AI_QUANT_PROMOTED_ROLE", "") or ""),
+        "strategy_mode": str(os.getenv("AI_QUANT_STRATEGY_MODE", "") or ""),
+        "strategy_mode_source": str(os.getenv("AI_QUANT_STRATEGY_MODE_SOURCE", "") or ""),
         "strategy_version": str(getattr(snap, "version", "") or ""),
         "watchlist": watchlist,
     }
@@ -175,6 +181,21 @@ class StrategyModePolicy:
         i = self._ORDER.index(cur)
         return self._ORDER[min(i + 1, len(self._ORDER) - 1)]
 
+    def _refresh_rust_effective_config(self) -> bool:
+        if _mode() != "paper":
+            return True
+        if str(os.getenv("AI_QUANT_EFFECTIVE_CONFIG_OWNER", "") or "").strip().lower() != "rust":
+            return True
+        try:
+            from .promoted_config import apply_paper_effective_config
+
+            resolved = apply_paper_effective_config()
+            StrategyManager.get().replace_yaml_path(str(resolved.config_path))
+            return True
+        except Exception:
+            logger.warning("paper mode switch failed to refresh the Rust effective config", exc_info=True)
+            return False
+
     def maybe_switch(self) -> None:
         if not self._enabled:
             return
@@ -216,6 +237,13 @@ class StrategyModePolicy:
             _atomic_write_text(self._mode_file, str(target) + "\n")
         except Exception:
             pass
+        if not self._refresh_rust_effective_config():
+            os.environ["AI_QUANT_STRATEGY_MODE"] = str(cur)
+            try:
+                _atomic_write_text(self._mode_file, str(cur) + "\n")
+            except Exception:
+                pass
+            return
 
         self._last_switch_s = now_s
 
@@ -282,8 +310,7 @@ def _enforce_v8_only_runtime(mode: str) -> None:
         )
     if not db_ok:
         problems.append(
-            f"AI_QUANT_DB_PATH='{db_path or '<unset>'}' must point to a v8 DB file "
-            "(expected basename containing 'v8')"
+            f"AI_QUANT_DB_PATH='{db_path or '<unset>'}' must point to a v8 DB file (expected basename containing 'v8')"
         )
     detail = "; ".join(problems)
     raise SystemExit(
@@ -366,7 +393,9 @@ def _seed_balance_only(balance: float, paper_db_path: str) -> None:
     con.close()
 
 
-def _mirror_live_state_to_paper(executor: "HyperliquidLiveExecutor", snap: "LiveAccountSnapshot", paper_db_path: str) -> None:  # type: ignore[name-defined]  # noqa: F821
+def _mirror_live_state_to_paper(
+    executor: "HyperliquidLiveExecutor", snap: "LiveAccountSnapshot", paper_db_path: str
+) -> None:  # type: ignore[name-defined]  # noqa: F821
     """Mirror balance + positions from live exchange into paper DB on every restart.
 
     This ensures paper traders start from the exact same state as live,
@@ -411,8 +440,23 @@ def _mirror_live_state_to_paper(executor: "HyperliquidLiveExecutor", snap: "Live
 
         # 1. Insert synthetic CLOSE for paper positions that are NOT in live.
         for sym in sorted(paper_open - set(live_positions.keys())):
-            _vals: list = [now_iso, sym, "SYSTEM", "CLOSE", 0.0, 0.0, 0.0, "live_state_sync_close", "medium", balance, 0.0, 0.0]
-            _col_names = "timestamp, symbol, type, action, price, size, notional, reason, confidence, balance, pnl, fee_usd"
+            _vals: list = [
+                now_iso,
+                sym,
+                "SYSTEM",
+                "CLOSE",
+                0.0,
+                0.0,
+                0.0,
+                "live_state_sync_close",
+                "medium",
+                balance,
+                0.0,
+                0.0,
+            ]
+            _col_names = (
+                "timestamp, symbol, type, action, price, size, notional, reason, confidence, balance, pnl, fee_usd"
+            )
             _placeholders = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
             if has_run_fp:
                 _col_names += ", run_fingerprint"
@@ -450,10 +494,27 @@ def _mirror_live_state_to_paper(executor: "HyperliquidLiveExecutor", snap: "Live
 
             if coin not in paper_open:
                 # New position: insert synthetic OPEN trade.
-                _vals = [now_iso, coin, pos_type, "OPEN", entry_px, size, notional,
-                         "live_state_sync", "medium", balance, 0.0, 0.0, 0.0, leverage, margin_used]
-                _col_names = ("timestamp, symbol, type, action, price, size, notional,"
-                              " reason, confidence, balance, pnl, fee_usd, entry_atr, leverage, margin_used")
+                _vals = [
+                    now_iso,
+                    coin,
+                    pos_type,
+                    "OPEN",
+                    entry_px,
+                    size,
+                    notional,
+                    "live_state_sync",
+                    "medium",
+                    balance,
+                    0.0,
+                    0.0,
+                    0.0,
+                    leverage,
+                    margin_used,
+                ]
+                _col_names = (
+                    "timestamp, symbol, type, action, price, size, notional,"
+                    " reason, confidence, balance, pnl, fee_usd, entry_atr, leverage, margin_used"
+                )
                 _placeholders = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
                 if has_run_fp:
                     _col_names += ", run_fingerprint"
@@ -464,9 +525,7 @@ def _mirror_live_state_to_paper(executor: "HyperliquidLiveExecutor", snap: "Live
                 print(f"  state mirror: opened {coin} {pos_type} size={size} entry={entry_px}")
             else:
                 # Position already exists in paper — get its open_trade_id.
-                row = con.execute(
-                    "SELECT open_trade_id FROM position_state WHERE symbol = ?", (coin,)
-                ).fetchone()
+                row = con.execute("SELECT open_trade_id FROM position_state WHERE symbol = ?", (coin,)).fetchone()
                 trade_id = int(row["open_trade_id"]) if row else None
 
             # Upsert position_state.
@@ -521,11 +580,7 @@ def _resolve_kernel_decision_file_path(*, mode: str, db_path: str) -> str | None
     db_hash8 = hashlib.sha1(db_path_resolved.encode("utf-8")).hexdigest()[:8]
     suffix = f"{mode_part}_{db_part}_{db_hash8}"
 
-    rendered = (
-        raw.replace("{mode}", str(mode))
-        .replace("{db}", str(db_stem))
-        .replace("{db_stem}", str(db_stem))
-    )
+    rendered = raw.replace("{mode}", str(mode)).replace("{db}", str(db_stem)).replace("{db_stem}", str(db_stem))
     if rendered != raw:
         return str(Path(rendered).expanduser().resolve())
 
@@ -1402,19 +1457,13 @@ class LivePlugin:
                     and stale_mid_age_s is not None
                     and float(stale_mid_age_s) <= stale_mid_max_age_s
                 )
-                if stale_mid_ok and (
-                    ws_disconnect_age_s is None or float(ws_disconnect_age_s) <= stale_mid_max_age_s
-                ):
+                if stale_mid_ok and (ws_disconnect_age_s is None or float(ws_disconnect_age_s) <= stale_mid_max_age_s):
                     mid = float(stale_mid)
                     logger.warning(
                         "drawdown close_all using stale WS mid for %s (mid_age=%.1fs, disconnect_age=%s)",
                         sym,
                         float(stale_mid_age_s),
-                        (
-                            f"{float(ws_disconnect_age_s):.1f}s"
-                            if ws_disconnect_age_s is not None
-                            else "n/a"
-                        ),
+                        (f"{float(ws_disconnect_age_s):.1f}s" if ws_disconnect_age_s is not None else "n/a"),
                     )
                 else:
                     logger.warning("drawdown close_all skipped %s due to missing/stale WS mid", sym)
@@ -1452,17 +1501,21 @@ def main() -> None:
         stream=sys.stdout,
     )
 
-    # Apply promoted config from factory runs (paper daemons only).
-    # Must run BEFORE StrategyManager.get() so AI_QUANT_STRATEGY_YAML is set.
+    # Rust now owns the paper effective-config resolver contract. Resolve it
+    # before StrategyManager/bootstrap consumers import strategy defaults.
     promoted_role: str | None = None
-    try:
-        from .promoted_config import maybe_apply_promoted_config
+    if mode == "paper":
+        try:
+            from .promoted_config import apply_paper_effective_config
 
-        promoted_role = maybe_apply_promoted_config()
-    except Exception:
-        import traceback
+            resolved = apply_paper_effective_config()
+            promoted_role = resolved.promoted_role
+        except Exception:
+            import traceback
 
-        print(f"⚠️ promoted_config: failed to apply\n{traceback.format_exc()}")
+            raise RuntimeError(
+                f"paper effective-config resolution failed before daemon bootstrap\n{traceback.format_exc()}"
+            ) from None
 
     # Sync balance from live Hyperliquid account on startup.
     # Paper mode: opt-in via AI_QUANT_PAPER_BALANCE_FROM_LIVE=1.
@@ -1497,7 +1550,9 @@ def main() -> None:
                     print(f"balance synced from live: ${_snap.withdrawable_usd:,.2f}")
                 elif mode == "paper":
                     _config_changed = _has_config_changed(_db_path())
-                    _mirror_on_promote = str(os.getenv("AI_QUANT_MIRROR_LIVE_ON_PROMOTE", "0") or "").strip().lower() in {
+                    _mirror_on_promote = str(
+                        os.getenv("AI_QUANT_MIRROR_LIVE_ON_PROMOTE", "0") or ""
+                    ).strip().lower() in {
                         "1",
                         "true",
                         "yes",
@@ -1566,9 +1621,9 @@ def main() -> None:
     _lock = acquire_lock_or_exit(lock_path)
     _register_lock_cleanup(_lock)
 
-    # If a strategy mode is persisted locally, load it on startup (only when env is unset).
+    # Non-paper runtimes still honour the persisted mode file when env is unset.
     try:
-        if not str(os.getenv("AI_QUANT_STRATEGY_MODE", "") or "").strip():
+        if mode != "paper" and not str(os.getenv("AI_QUANT_STRATEGY_MODE", "") or "").strip():
             m = _read_strategy_mode_file(_strategy_mode_file())
             if m:
                 os.environ["AI_QUANT_STRATEGY_MODE"] = str(m)
@@ -1658,6 +1713,7 @@ def main() -> None:
             run_fp_payload = {
                 "code_version": _read_code_version(),
                 "strategy_overrides_sha1": str(getattr(strategy.snapshot, "overrides_sha1", "") or ""),
+                "config_id": str(getattr(strategy.snapshot, "config_id", "") or ""),
                 "watchlist": [],
                 "source": "env",
             }
@@ -1674,10 +1730,11 @@ def main() -> None:
         except Exception:
             pass
         logger.info(
-            "run_fingerprint=%s code=%s strategy_sha=%s watchlist_n=%d interval=%s lookback=%d",
+            "run_fingerprint=%s code=%s strategy_sha=%s config_id=%s watchlist_n=%d interval=%s lookback=%d",
             str(run_fingerprint),
             str(run_fp_payload.get("code_version", "")),
             str(run_fp_payload.get("strategy_overrides_sha1", "")),
+            str(run_fp_payload.get("config_id", "")),
             len(run_fp_payload.get("watchlist", []) if isinstance(run_fp_payload.get("watchlist"), list) else []),
             interval,
             lookback_bars,

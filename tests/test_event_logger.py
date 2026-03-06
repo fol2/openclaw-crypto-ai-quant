@@ -1,3 +1,4 @@
+import importlib
 import json
 import threading
 from pathlib import Path
@@ -18,10 +19,12 @@ def test_event_logger_writes_jsonl_and_includes_config_id(tmp_path, monkeypatch)
     monkeypatch.setenv("AI_QUANT_RUN_ID", "run_123")
     monkeypatch.setenv("AI_QUANT_MODE", "paper")
 
-    from engine.event_logger import _close_for_tests, emit_event
+    from engine import event_logger as event_logger_mod
 
-    emit_event(kind="unit_test", symbol="btc", data={"x": 1})
-    _close_for_tests()
+    event_logger_mod = importlib.reload(event_logger_mod)
+
+    event_logger_mod.emit_event(kind="unit_test", symbol="btc", data={"x": 1})
+    event_logger_mod._close_for_tests()
 
     lines = out.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1

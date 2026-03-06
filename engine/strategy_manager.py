@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import logging
 import os
 import stat
@@ -63,6 +65,7 @@ class StrategySnapshot:
     yaml_mtime: float | None
     overrides_sha1: str
     version: str | None
+    config_id: str = ""
 
 
 class StrategyManager:
@@ -121,6 +124,7 @@ class StrategyManager:
         self._changelog_mtime: float | None = file_mtime(self._changelog_path) if self._changelog_path else None
         self._overrides: dict[str, Any] = {}
         self._overrides_sha1: str = ""
+        self._config_id: str = ""
         self._version: str | None = None
         self._snapshot: StrategySnapshot | None = None
 
@@ -179,8 +183,16 @@ class StrategyManager:
                     yaml_mtime=self._yaml_mtime,
                     overrides_sha1=self._overrides_sha1,
                     version=self._read_version_no_lock(),
+                    config_id=self._config_id,
                 )
             return self._snapshot
+
+    @staticmethod
+    def _config_id_from_obj(obj: Any) -> str:
+        payload = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str).encode(
+            "utf-8"
+        )
+        return hashlib.sha256(payload).hexdigest()
 
     def _read_version_no_lock(self) -> str | None:
         path = self._changelog_path
@@ -262,6 +274,7 @@ class StrategyManager:
                 try:
                     overrides = self._load_yaml()
                     overrides_sha1 = sha1_json(overrides) if overrides is not None else None
+                    config_id = self._config_id_from_obj(overrides) if overrides is not None else None
                 except (OSError, ValueError):
                     return
 
@@ -269,6 +282,7 @@ class StrategyManager:
                     self._yaml_mtime = yaml_mtime
                     self._overrides = overrides
                     self._overrides_sha1 = str(overrides_sha1)
+                    self._config_id = str(config_id or "")
                 elif not changelog_needs_reload:
                     return
 
@@ -280,10 +294,19 @@ class StrategyManager:
                 yaml_mtime=self._yaml_mtime,
                 overrides_sha1=self._overrides_sha1,
                 version=self._read_version_no_lock(),
+                config_id=self._config_id,
             )
 
     def maybe_reload(self) -> None:
         self._load_if_needed(force=False)
+
+    def replace_yaml_path(self, yaml_path: str) -> None:
+        """Switch the watched YAML path and force an immediate reload."""
+        with self._lock:
+            self._yaml_path = str(yaml_path)
+            self._yaml_mtime = None
+            self._snapshot = None
+        self._load_if_needed(force=True)
 
     def get_config(self, symbol: str) -> dict[str, Any]:
         """Returns merged config for symbol."""
@@ -315,7 +338,10 @@ class StrategyManager:
         #       global: {...}
         #       symbols: { BTC: {...}, ... }
         mode_key = _norm_mode_key(_env_str("AI_QUANT_STRATEGY_MODE", ""))
-        if mode_key:
+        materialised_by_rust = _env_str("AI_QUANT_EFFECTIVE_CONFIG_OWNER", "").strip().lower() == "rust" and _env_bool(
+            "AI_QUANT_EFFECTIVE_CONFIG_MATERIALISED", False
+        )
+        if mode_key and not materialised_by_rust:
             modes = overrides.get("modes") or {}
             if isinstance(modes, dict):
                 mode_over = modes.get(mode_key)

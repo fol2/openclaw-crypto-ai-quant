@@ -1,6 +1,7 @@
 use aiq_runtime_core::runtime::{build_bootstrap, RuntimeBootstrap, RuntimeMode};
 use anyhow::{Context, Result};
 use bt_core::config::{self, StrategyConfig};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::env;
@@ -29,6 +30,22 @@ pub struct PaperEffectiveConfig {
     strategy_overrides_sha1: String,
     config_id: String,
     warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PaperEffectiveConfigReport {
+    pub base_config_path: String,
+    pub config_path: String,
+    pub active_yaml_path: String,
+    pub effective_yaml_path: String,
+    pub interval: String,
+    pub promoted_role: Option<String>,
+    pub promoted_config_path: Option<String>,
+    pub strategy_mode: Option<String>,
+    pub strategy_mode_source: Option<String>,
+    pub strategy_overrides_sha1: String,
+    pub config_id: String,
+    pub warnings: Vec<String>,
 }
 
 impl PaperEffectiveConfig {
@@ -125,7 +142,7 @@ impl PaperEffectiveConfig {
             active_yaml_path.clone()
         };
 
-        let config_id = yaml_document_sha256(&active_document);
+        let config_id = yaml_document_sha256(&effective_document);
 
         Ok(Self {
             base_config_path,
@@ -185,6 +202,30 @@ impl PaperEffectiveConfig {
 
     pub fn warnings(&self) -> &[String] {
         &self.warnings
+    }
+
+    pub fn build_report(
+        &self,
+        symbol: Option<&str>,
+        live: bool,
+    ) -> Result<PaperEffectiveConfigReport> {
+        let config = self.load_config(symbol, live)?;
+        Ok(PaperEffectiveConfigReport {
+            base_config_path: self.base_config_path().display().to_string(),
+            config_path: self.config_path().display().to_string(),
+            active_yaml_path: self.active_yaml_path().display().to_string(),
+            effective_yaml_path: self.effective_yaml_path().display().to_string(),
+            interval: config.engine.interval,
+            promoted_role: self.promoted_role().map(ToOwned::to_owned),
+            promoted_config_path: self
+                .promoted_config_path()
+                .map(|path| path.display().to_string()),
+            strategy_mode: self.strategy_mode().map(ToOwned::to_owned),
+            strategy_mode_source: self.strategy_mode_source().map(ToOwned::to_owned),
+            strategy_overrides_sha1: self.strategy_overrides_sha1().to_string(),
+            config_id: self.config_id().to_string(),
+            warnings: self.warnings().to_vec(),
+        })
     }
 
     pub fn load_config(&self, symbol: Option<&str>, live: bool) -> Result<StrategyConfig> {
@@ -725,5 +766,49 @@ modes:
 
         assert_eq!(yaml_document_sha256(&left), yaml_document_sha256(&right));
         assert_ne!(yaml_document_sha256(&left), yaml_document_sha256(&changed));
+    }
+
+    #[test]
+    fn config_id_tracks_materialised_strategy_mode_overlay() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("strategy.yaml");
+        fs::write(
+            &config_path,
+            r#"
+global:
+  engine:
+    interval: 30m
+modes:
+  primary:
+    global:
+      engine:
+        interval: 5m
+  fallback:
+    global:
+      engine:
+        interval: 1h
+"#,
+        )
+        .unwrap();
+
+        let _base_env = EnvGuard::set(&[
+            ("AI_QUANT_PROMOTED_ROLE", None),
+            ("AI_QUANT_STRATEGY_MODE_FILE", None),
+        ]);
+
+        env::remove_var("AI_QUANT_STRATEGY_MODE");
+        let base = PaperEffectiveConfig::resolve(Some(&config_path)).unwrap();
+        env::set_var("AI_QUANT_STRATEGY_MODE", "primary");
+        let primary = PaperEffectiveConfig::resolve(Some(&config_path)).unwrap();
+        env::set_var("AI_QUANT_STRATEGY_MODE", "fallback");
+        let fallback = PaperEffectiveConfig::resolve(Some(&config_path)).unwrap();
+        env::remove_var("AI_QUANT_STRATEGY_MODE");
+
+        assert_ne!(base.config_id(), primary.config_id());
+        assert_ne!(primary.config_id(), fallback.config_id());
+        assert_eq!(base.build_report(None, false).unwrap().interval, "30m");
+        assert_eq!(primary.build_report(None, false).unwrap().interval, "5m");
+        assert_eq!(fallback.build_report(None, false).unwrap().interval, "1h");
     }
 }

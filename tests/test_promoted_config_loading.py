@@ -7,26 +7,33 @@ Covers:
 - Fallback behavior when no promoted config exists
 - Role validation
 """
+
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+import subprocess
 
 import pytest
 import yaml
 
 from engine.promoted_config import (
+    ResolvedEffectiveConfig,
     VALID_ROLES,
     _find_latest_promoted_config,
     _write_text_atomic,
+    apply_paper_effective_config,
     load_promoted_config,
     maybe_apply_promoted_config,
+    resolve_effective_config,
 )
 
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 def _make_artifacts_tree(
     tmp_path: Path,
@@ -43,7 +50,7 @@ def _make_artifacts_tree(
     """
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
-    for date_str, run_id, roles in (runs or []):
+    for date_str, run_id, roles in runs or []:
         run_dir = artifacts / date_str / f"run_{run_id}"
         promoted = run_dir / "promoted_configs"
         promoted.mkdir(parents=True)
@@ -55,9 +62,7 @@ def _make_artifacts_tree(
                 },
                 "_promoted_meta": {"role": role, "run_id": run_id},
             }
-            (promoted / f"{role}.yaml").write_text(
-                yaml.dump(cfg, default_flow_style=False), encoding="utf-8"
-            )
+            (promoted / f"{role}.yaml").write_text(yaml.dump(cfg, default_flow_style=False), encoding="utf-8")
     return artifacts
 
 
@@ -88,11 +93,14 @@ def _make_base_config(tmp_path: Path) -> Path:
 class TestFindLatestPromotedConfig:
     def test_finds_most_recent_run(self, tmp_path: Path) -> None:
         """Should return the promoted config from the most recent run directory."""
-        artifacts = _make_artifacts_tree(tmp_path, runs=[
-            ("2026-02-12", "nightly_20260212T010000Z", ["primary"]),
-            ("2026-02-13", "nightly_20260213T010000Z", ["primary"]),
-            ("2026-02-14", "nightly_20260214T010000Z", ["primary"]),
-        ])
+        artifacts = _make_artifacts_tree(
+            tmp_path,
+            runs=[
+                ("2026-02-12", "nightly_20260212T010000Z", ["primary"]),
+                ("2026-02-13", "nightly_20260213T010000Z", ["primary"]),
+                ("2026-02-14", "nightly_20260214T010000Z", ["primary"]),
+            ],
+        )
 
         result = _find_latest_promoted_config(artifacts, "primary")
 
@@ -103,9 +111,12 @@ class TestFindLatestPromotedConfig:
 
     def test_finds_correct_role(self, tmp_path: Path) -> None:
         """Should return the config for the requested role only."""
-        artifacts = _make_artifacts_tree(tmp_path, runs=[
-            ("2026-02-14", "nightly_20260214T010000Z", ["primary", "fallback", "conservative"]),
-        ])
+        artifacts = _make_artifacts_tree(
+            tmp_path,
+            runs=[
+                ("2026-02-14", "nightly_20260214T010000Z", ["primary", "fallback", "conservative"]),
+            ],
+        )
 
         for role in VALID_ROLES:
             result = _find_latest_promoted_config(artifacts, role)
@@ -114,18 +125,24 @@ class TestFindLatestPromotedConfig:
 
     def test_returns_none_for_missing_role(self, tmp_path: Path) -> None:
         """Should return None if the role YAML doesn't exist."""
-        artifacts = _make_artifacts_tree(tmp_path, runs=[
-            ("2026-02-14", "nightly_20260214T010000Z", ["primary"]),
-        ])
+        artifacts = _make_artifacts_tree(
+            tmp_path,
+            runs=[
+                ("2026-02-14", "nightly_20260214T010000Z", ["primary"]),
+            ],
+        )
 
         result = _find_latest_promoted_config(artifacts, "conservative")
         assert result is None
 
     def test_returns_none_for_invalid_role(self, tmp_path: Path) -> None:
         """Should return None for roles not in VALID_ROLES."""
-        artifacts = _make_artifacts_tree(tmp_path, runs=[
-            ("2026-02-14", "nightly_20260214T010000Z", ["primary"]),
-        ])
+        artifacts = _make_artifacts_tree(
+            tmp_path,
+            runs=[
+                ("2026-02-14", "nightly_20260214T010000Z", ["primary"]),
+            ],
+        )
 
         assert _find_latest_promoted_config(artifacts, "invalid") is None
         assert _find_latest_promoted_config(artifacts, "") is None
@@ -143,9 +160,12 @@ class TestFindLatestPromotedConfig:
 
     def test_skips_runs_without_promoted_configs(self, tmp_path: Path) -> None:
         """Should skip run directories that lack promoted_configs/ dir."""
-        artifacts = _make_artifacts_tree(tmp_path, runs=[
-            ("2026-02-12", "nightly_20260212T010000Z", ["primary"]),
-        ])
+        artifacts = _make_artifacts_tree(
+            tmp_path,
+            runs=[
+                ("2026-02-12", "nightly_20260212T010000Z", ["primary"]),
+            ],
+        )
         # Create a more recent run WITHOUT promoted_configs
         newer_run = artifacts / "2026-02-14" / "run_nightly_20260214T010000Z"
         newer_run.mkdir(parents=True)
@@ -157,10 +177,13 @@ class TestFindLatestPromotedConfig:
 
     def test_handles_multiple_runs_same_day(self, tmp_path: Path) -> None:
         """Should pick the latest run within the same date directory."""
-        artifacts = _make_artifacts_tree(tmp_path, runs=[
-            ("2026-02-14", "nightly_20260214T010000Z", ["primary"]),
-            ("2026-02-14", "nightly_20260214T230000Z", ["primary"]),
-        ])
+        artifacts = _make_artifacts_tree(
+            tmp_path,
+            runs=[
+                ("2026-02-14", "nightly_20260214T010000Z", ["primary"]),
+                ("2026-02-14", "nightly_20260214T230000Z", ["primary"]),
+            ],
+        )
 
         result = _find_latest_promoted_config(artifacts, "primary")
         assert result is not None
@@ -170,9 +193,12 @@ class TestFindLatestPromotedConfig:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """If bounded scan misses, fallback full scan should still find older configs."""
-        artifacts = _make_artifacts_tree(tmp_path, runs=[
-            ("2026-02-13", "nightly_20260213T010000Z", ["primary"]),
-        ])
+        artifacts = _make_artifacts_tree(
+            tmp_path,
+            runs=[
+                ("2026-02-13", "nightly_20260213T010000Z", ["primary"]),
+            ],
+        )
         # Newest date has no promoted_configs payload.
         (artifacts / "2026-02-14" / "run_nightly_20260214T010000Z").mkdir(parents=True)
 
@@ -185,9 +211,12 @@ class TestFindLatestPromotedConfig:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """If bounded per-date run scan misses, fallback full scan should still find config."""
-        artifacts = _make_artifacts_tree(tmp_path, runs=[
-            ("2026-02-14", "nightly_20260214T010000Z", ["primary"]),
-        ])
+        artifacts = _make_artifacts_tree(
+            tmp_path,
+            runs=[
+                ("2026-02-14", "nightly_20260214T010000Z", ["primary"]),
+            ],
+        )
         # Create a lexicographically newer run without promoted configs.
         (artifacts / "2026-02-14" / "run_nightly_20260214T230000Z").mkdir(parents=True)
 
@@ -198,9 +227,12 @@ class TestFindLatestPromotedConfig:
 
     def test_ignores_non_date_directories(self, tmp_path: Path) -> None:
         """Should ignore directories that don't match YYYY-MM-DD pattern."""
-        artifacts = _make_artifacts_tree(tmp_path, runs=[
-            ("2026-02-14", "nightly_20260214T010000Z", ["primary"]),
-        ])
+        artifacts = _make_artifacts_tree(
+            tmp_path,
+            runs=[
+                ("2026-02-14", "nightly_20260214T010000Z", ["primary"]),
+            ],
+        )
         # Create non-date dirs
         (artifacts / "_effective_configs").mkdir(exist_ok=True)
         (artifacts / "registry").mkdir(exist_ok=True)
@@ -219,9 +251,12 @@ class TestFindLatestPromotedConfig:
 class TestLoadPromotedConfig:
     def test_merges_promoted_on_top_of_base(self, tmp_path: Path) -> None:
         """Promoted config values should override base, base fills gaps."""
-        artifacts = _make_artifacts_tree(tmp_path, runs=[
-            ("2026-02-14", "nightly_20260214T010000Z", ["primary"]),
-        ])
+        artifacts = _make_artifacts_tree(
+            tmp_path,
+            runs=[
+                ("2026-02-14", "nightly_20260214T010000Z", ["primary"]),
+            ],
+        )
         base = _make_base_config(tmp_path)
 
         merged, path = load_promoted_config(
@@ -242,9 +277,12 @@ class TestLoadPromotedConfig:
 
     def test_preserves_base_sections_not_in_promoted(self, tmp_path: Path) -> None:
         """Sections only in base should survive the merge."""
-        artifacts = _make_artifacts_tree(tmp_path, runs=[
-            ("2026-02-14", "nightly_20260214T010000Z", ["primary"]),
-        ])
+        artifacts = _make_artifacts_tree(
+            tmp_path,
+            runs=[
+                ("2026-02-14", "nightly_20260214T010000Z", ["primary"]),
+            ],
+        )
         base = _make_base_config(tmp_path)
 
         merged, _ = load_promoted_config(
@@ -303,9 +341,12 @@ class TestLoadPromotedConfig:
 
     def test_all_three_roles(self, tmp_path: Path) -> None:
         """All three roles should be loadable independently."""
-        artifacts = _make_artifacts_tree(tmp_path, runs=[
-            ("2026-02-14", "nightly_20260214T010000Z", ["primary", "fallback", "conservative"]),
-        ])
+        artifacts = _make_artifacts_tree(
+            tmp_path,
+            runs=[
+                ("2026-02-14", "nightly_20260214T010000Z", ["primary", "fallback", "conservative"]),
+            ],
+        )
         base = _make_base_config(tmp_path)
 
         for role in ("primary", "fallback", "conservative"):
@@ -337,9 +378,12 @@ class TestMaybeApplyPromotedConfig:
 
     def test_applies_promoted_role(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Should set AI_QUANT_STRATEGY_YAML to merged config when role is valid."""
-        artifacts = _make_artifacts_tree(tmp_path, runs=[
-            ("2026-02-14", "nightly_20260214T010000Z", ["primary"]),
-        ])
+        artifacts = _make_artifacts_tree(
+            tmp_path,
+            runs=[
+                ("2026-02-14", "nightly_20260214T010000Z", ["primary"]),
+            ],
+        )
         base = _make_base_config(tmp_path)
 
         monkeypatch.setenv("AI_QUANT_PROMOTED_ROLE", "primary")
@@ -381,9 +425,12 @@ class TestMaybeApplyPromotedConfig:
 
     def test_role_case_insensitive(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Role should be normalised to lowercase."""
-        artifacts = _make_artifacts_tree(tmp_path, runs=[
-            ("2026-02-14", "nightly_20260214T010000Z", ["fallback"]),
-        ])
+        artifacts = _make_artifacts_tree(
+            tmp_path,
+            runs=[
+                ("2026-02-14", "nightly_20260214T010000Z", ["fallback"]),
+            ],
+        )
         base = _make_base_config(tmp_path)
 
         monkeypatch.setenv("AI_QUANT_PROMOTED_ROLE", "FALLBACK")
@@ -392,6 +439,163 @@ class TestMaybeApplyPromotedConfig:
 
         result = maybe_apply_promoted_config()
         assert result == "fallback"
+
+
+class TestRustEffectiveConfigWrapper:
+    def test_resolve_effective_config_parses_rust_json(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        cfg = tmp_path / "strategy.yaml"
+        cfg.write_text("global:\n  engine:\n    interval: 30m\n", encoding="utf-8")
+
+        monkeypatch.setattr("engine.promoted_config._runtime_command", lambda: ["/tmp/aiq-runtime"])
+
+        def _fake_run(cmd, **kwargs):  # noqa: ANN001
+            assert cmd[:3] == ["/tmp/aiq-runtime", "paper", "effective-config"]
+            assert "--json" in cmd
+            assert "--config" in cmd
+            payload = {
+                "base_config_path": str(cfg),
+                "config_path": str(cfg),
+                "active_yaml_path": str(cfg),
+                "effective_yaml_path": str(cfg),
+                "interval": "30m",
+                "promoted_role": None,
+                "promoted_config_path": None,
+                "strategy_mode": "primary",
+                "strategy_mode_source": "env",
+                "strategy_overrides_sha1": "a" * 64,
+                "config_id": "b" * 64,
+                "warnings": ["resolver warning"],
+            }
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload), stderr="")
+
+        monkeypatch.setattr("engine.promoted_config.subprocess.run", _fake_run)
+
+        resolved = resolve_effective_config(config_path=cfg, env={})
+
+        assert isinstance(resolved, ResolvedEffectiveConfig)
+        assert resolved.strategy_mode == "primary"
+        assert resolved.config_id == "b" * 64
+        assert resolved.warnings == ("resolver warning",)
+
+    def test_resolve_effective_config_uses_env_yaml_when_config_arg_is_unset(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = tmp_path / "custom.yaml"
+        cfg.write_text("global:\n  engine:\n    interval: 30m\n", encoding="utf-8")
+
+        monkeypatch.setattr("engine.promoted_config._runtime_command", lambda: ["/tmp/aiq-runtime"])
+
+        def _fake_run(cmd, **kwargs):  # noqa: ANN001
+            idx = cmd.index("--config")
+            assert Path(cmd[idx + 1]) == cfg
+            payload = {
+                "base_config_path": str(cfg),
+                "config_path": str(cfg),
+                "active_yaml_path": str(cfg),
+                "effective_yaml_path": str(cfg),
+                "interval": "30m",
+                "promoted_role": None,
+                "promoted_config_path": None,
+                "strategy_mode": None,
+                "strategy_mode_source": None,
+                "strategy_overrides_sha1": "a" * 64,
+                "config_id": "b" * 64,
+                "warnings": [],
+            }
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload), stderr="")
+
+        monkeypatch.setattr("engine.promoted_config.subprocess.run", _fake_run)
+
+        resolved = resolve_effective_config(env={"AI_QUANT_STRATEGY_YAML": str(cfg)})
+
+        assert resolved.base_config_path == str(cfg)
+
+    def test_resolve_effective_config_prefers_base_yaml_env_over_materialised_yaml(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        base = tmp_path / "base.yaml"
+        materialised = tmp_path / "effective.yaml"
+        base.write_text("global:\n  engine:\n    interval: 30m\n", encoding="utf-8")
+        materialised.write_text("global:\n  engine:\n    interval: 5m\n", encoding="utf-8")
+
+        monkeypatch.setattr("engine.promoted_config._runtime_command", lambda: ["/tmp/aiq-runtime"])
+
+        def _fake_run(cmd, **kwargs):  # noqa: ANN001
+            idx = cmd.index("--config")
+            assert Path(cmd[idx + 1]) == base
+            payload = {
+                "base_config_path": str(base),
+                "config_path": str(materialised),
+                "active_yaml_path": str(base),
+                "effective_yaml_path": str(materialised),
+                "interval": "5m",
+                "promoted_role": None,
+                "promoted_config_path": None,
+                "strategy_mode": "primary",
+                "strategy_mode_source": "env",
+                "strategy_overrides_sha1": "a" * 64,
+                "config_id": "b" * 64,
+                "warnings": [],
+            }
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload), stderr="")
+
+        monkeypatch.setattr("engine.promoted_config.subprocess.run", _fake_run)
+
+        resolved = resolve_effective_config(
+            env={
+                "AI_QUANT_BASE_STRATEGY_YAML": str(base),
+                "AI_QUANT_STRATEGY_YAML": str(materialised),
+            }
+        )
+
+        assert resolved.base_config_path == str(base)
+
+    def test_apply_paper_effective_config_exports_runtime_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = tmp_path / "effective.yaml"
+        cfg.write_text("global:\n  engine:\n    interval: 5m\n", encoding="utf-8")
+
+        monkeypatch.setattr(
+            "engine.promoted_config.resolve_effective_config",
+            lambda **kwargs: ResolvedEffectiveConfig(
+                base_config_path=str(tmp_path / "base.yaml"),
+                config_path=str(cfg),
+                active_yaml_path=str(tmp_path / "active.yaml"),
+                effective_yaml_path=str(cfg),
+                interval="5m",
+                promoted_role="primary",
+                promoted_config_path=str(tmp_path / "promoted.yaml"),
+                strategy_mode="primary",
+                strategy_mode_source="file",
+                strategy_overrides_sha1="c" * 64,
+                config_id="d" * 64,
+                warnings=(),
+            ),
+        )
+
+        tracked = {
+            "AI_QUANT_STRATEGY_YAML": os.environ.get("AI_QUANT_STRATEGY_YAML"),
+            "AI_QUANT_EFFECTIVE_STRATEGY_YAML": os.environ.get("AI_QUANT_EFFECTIVE_STRATEGY_YAML"),
+            "AI_QUANT_EFFECTIVE_CONFIG_ID": os.environ.get("AI_QUANT_EFFECTIVE_CONFIG_ID"),
+            "AI_QUANT_INTERVAL": os.environ.get("AI_QUANT_INTERVAL"),
+            "AI_QUANT_STRATEGY_MODE": os.environ.get("AI_QUANT_STRATEGY_MODE"),
+        }
+        try:
+            resolved = apply_paper_effective_config(config_path=cfg)
+
+            assert resolved.config_path == str(cfg)
+            assert os.environ["AI_QUANT_STRATEGY_YAML"] == str(cfg)
+            assert os.environ["AI_QUANT_EFFECTIVE_STRATEGY_YAML"] == str(cfg)
+            assert os.environ["AI_QUANT_EFFECTIVE_CONFIG_ID"] == "d" * 64
+            assert os.environ["AI_QUANT_INTERVAL"] == "5m"
+            assert os.environ["AI_QUANT_STRATEGY_MODE"] == "primary"
+        finally:
+            for key, value in tracked.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
 
 # ---------------------------------------------------------------------------

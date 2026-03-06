@@ -867,6 +867,7 @@ cargo run -p aiq-runtime -- \
 
 Manifest expectations:
 
+- `paper effective-config` is the narrower read-only control-plane surface for Python paper start-up and factory materialisation; `paper manifest` builds on top of that same resolver contract and adds daemon launch/resume inspection
 - `paper manifest` is read-only; it never writes the paper DB or starts follow-mode polling
 - `--config`, `--db`, `--candles-db`, `--symbols`, `--symbols-file`, `--watch-symbols-file`, `--lookback-bars`, `--start-step-close-ts-ms`, `--lock-path`, and `--status-path` may override the corresponding env-derived values
 - `AI_QUANT_PROMOTED_ROLE` is applied to the effective Rust paper config before the manifest resolves interval, pipeline profile, or daemon command
@@ -874,6 +875,7 @@ Manifest expectations:
 - if `AI_QUANT_CANDLES_DB_PATH` is unset, the manifest derives the candle DB path from `AI_QUANT_CANDLES_DB_DIR` plus the resolved config interval
 - if `AI_QUANT_INTERVAL` disagrees with the resolved config interval, the manifest returns a warning instead of silently changing the Rust runtime interval
 - `base_config_path` is the operator-selected YAML, while `active_yaml_path` and `effective_yaml_path` are the materialised files Rust will actually use after promoted-config resolution and optional mode overlay
+- Python paper start-up and factory deployment metadata must agree with the same resolver-derived `config_id`, interval, promoted-config path, and strategy-mode source for the target lane
 - the resolved `status_path` is the daemon lifecycle JSON path for the current launch contract; when unset explicitly, it is derived from the resolved lock path
 - the emitted `daemon_command` is the exact Rust paper daemon launch contract for the current env/CLI combination; it is intended for operator review, not as evidence of cutover
 - `resume.launch_state` tells you whether the lane would fail closed (`blocked` / `bootstrap_required`), launch idle without symbols, start a fresh bootstrap, resume a due step, or simply stay caught up waiting for the next bar close
