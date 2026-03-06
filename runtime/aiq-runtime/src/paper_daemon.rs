@@ -30,6 +30,7 @@ pub struct PaperDaemonInput<'a> {
     pub exported_at_ms: Option<i64>,
     pub dry_run: bool,
     pub lock_path: Option<&'a Path>,
+    pub status_path: Option<&'a Path>,
     pub watch_symbols_file: bool,
     pub emit_progress: bool,
 }
@@ -39,6 +40,7 @@ pub struct PaperDaemonReport {
     pub ok: bool,
     pub pid: u32,
     pub lock_path: String,
+    pub status_path: String,
     pub started_at_ms: i64,
     pub stopped_at_ms: i64,
     pub stop_requested: bool,
@@ -51,6 +53,33 @@ pub struct PaperDaemonReport {
     pub manifest_reload_count: usize,
     pub manifest_reload_failure_count: usize,
     pub loop_report: PaperLoopReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct PaperDaemonStatus {
+    pub ok: bool,
+    pub running: bool,
+    pub pid: u32,
+    pub lock_path: String,
+    pub status_path: String,
+    pub started_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub stopped_at_ms: Option<i64>,
+    pub stop_requested: bool,
+    pub dry_run: bool,
+    pub runtime_bootstrap: RuntimeBootstrap,
+    pub watch_symbols_file: bool,
+    pub symbols_file: Option<String>,
+    pub manifest_symbols: Vec<String>,
+    pub last_active_symbols: Vec<String>,
+    pub manifest_reload_count: usize,
+    pub manifest_reload_failure_count: usize,
+    pub latest_common_close_ts_ms: Option<i64>,
+    pub next_due_step_close_ts_ms: Option<i64>,
+    pub executed_steps: usize,
+    pub idle_polls: usize,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,10 +205,90 @@ impl SymbolManifestState {
 
     fn reject_candidate(&mut self, err: &anyhow::Error) -> String {
         self.reload_failure_count = self.reload_failure_count.saturating_add(1);
-        format!(
-            "paper daemon ignored symbols file reload; retaining last good manifest: {err:#}"
-        )
+        format!("paper daemon ignored symbols file reload; retaining last good manifest: {err:#}")
     }
+}
+
+#[derive(Debug, Clone)]
+struct StatusSnapshot<'a> {
+    status_path: &'a Path,
+    started_at_ms: i64,
+    stopped_at_ms: Option<i64>,
+    stop_requested: bool,
+    last_active_symbols: &'a [String],
+    latest_common_close_ts_ms: Option<i64>,
+    next_due_step_close_ts_ms: Option<i64>,
+    idle_polls: usize,
+    executed_steps: usize,
+    warnings: &'a [String],
+    errors: &'a [String],
+}
+
+fn write_status_snapshot(
+    input: &PaperDaemonInput<'_>,
+    lock_path: &Path,
+    manifest_state: &SymbolManifestState,
+    snapshot: StatusSnapshot<'_>,
+) -> Result<()> {
+    let status = PaperDaemonStatus {
+        ok: snapshot.errors.is_empty(),
+        running: snapshot.stopped_at_ms.is_none(),
+        pid: std::process::id(),
+        lock_path: lock_path.display().to_string(),
+        status_path: snapshot.status_path.display().to_string(),
+        started_at_ms: snapshot.started_at_ms,
+        updated_at_ms: Utc::now().timestamp_millis(),
+        stopped_at_ms: snapshot.stopped_at_ms,
+        stop_requested: snapshot.stop_requested,
+        dry_run: input.dry_run,
+        runtime_bootstrap: input.runtime_bootstrap.clone(),
+        watch_symbols_file: input.watch_symbols_file,
+        symbols_file: manifest_state.symbols_file_display(),
+        manifest_symbols: manifest_state.current_symbols(),
+        last_active_symbols: snapshot.last_active_symbols.to_vec(),
+        manifest_reload_count: manifest_state.reload_count,
+        manifest_reload_failure_count: manifest_state.reload_failure_count,
+        latest_common_close_ts_ms: snapshot.latest_common_close_ts_ms,
+        next_due_step_close_ts_ms: snapshot.next_due_step_close_ts_ms,
+        executed_steps: snapshot.executed_steps,
+        idle_polls: snapshot.idle_polls,
+        warnings: snapshot.warnings.to_vec(),
+        errors: snapshot.errors.to_vec(),
+    };
+    write_status_file(snapshot.status_path, &status)
+}
+
+fn write_status_file(status_path: &Path, status: &PaperDaemonStatus) -> Result<()> {
+    if let Some(parent) = status_path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create daemon status parent directory: {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let file_name = status_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("paper-daemon.status.json");
+    let tmp_name = format!("{file_name}.tmp-{}", std::process::id());
+    let tmp_path = status_path.with_file_name(tmp_name);
+    let payload =
+        serde_json::to_vec_pretty(status).context("failed to serialise paper daemon status")?;
+    std::fs::write(&tmp_path, payload).with_context(|| {
+        format!(
+            "failed to write paper daemon status tmp file: {}",
+            tmp_path.display()
+        )
+    })?;
+    std::fs::rename(&tmp_path, status_path).with_context(|| {
+        format!(
+            "failed to promote paper daemon status file into place: {}",
+            status_path.display()
+        )
+    })?;
+    Ok(())
 }
 
 pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
@@ -191,6 +300,7 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
     }
 
     let lock_path = resolve_lock_path(input.lock_path, input.live);
+    let status_path = resolve_status_path(input.status_path, &lock_path);
     let _lock_file = acquire_lock(&lock_path)?;
     let started_at_ms = Utc::now().timestamp_millis();
     let stop_flag = Arc::new(AtomicBool::new(false));
@@ -225,6 +335,25 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
     let mut last_active_symbols = Vec::new();
     let mut emitted_empty_idle_warning = false;
     let mut emitted_due_idle_warning = false;
+
+    write_status_snapshot(
+        &input,
+        &lock_path,
+        &manifest_state,
+        StatusSnapshot {
+            status_path: &status_path,
+            started_at_ms,
+            stopped_at_ms: None,
+            stop_requested: false,
+            last_active_symbols: &last_active_symbols,
+            latest_common_close_ts_ms,
+            next_due_step_close_ts_ms,
+            idle_polls,
+            executed_steps: steps.len(),
+            warnings: &warnings,
+            errors: &errors,
+        },
+    )?;
 
     loop {
         if paper_loop::is_stop_requested(Some(stop_flag.as_ref())) {
@@ -280,11 +409,47 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
                 emitted_empty_idle_warning = true;
             }
             idle_polls = idle_polls.saturating_add(1);
+            write_status_snapshot(
+                &input,
+                &lock_path,
+                &manifest_state,
+                StatusSnapshot {
+                    status_path: &status_path,
+                    started_at_ms,
+                    stopped_at_ms: None,
+                    stop_requested: false,
+                    last_active_symbols: &last_active_symbols,
+                    latest_common_close_ts_ms,
+                    next_due_step_close_ts_ms,
+                    idle_polls,
+                    executed_steps: steps.len(),
+                    warnings: &warnings,
+                    errors: &errors,
+                },
+            )?;
             if input.max_idle_polls > 0 && idle_polls >= input.max_idle_polls {
                 warnings.push(format!(
                     "paper daemon follow exhausted after {} idle poll(s)",
                     input.max_idle_polls
                 ));
+                write_status_snapshot(
+                    &input,
+                    &lock_path,
+                    &manifest_state,
+                    StatusSnapshot {
+                        status_path: &status_path,
+                        started_at_ms,
+                        stopped_at_ms: None,
+                        stop_requested: false,
+                        last_active_symbols: &last_active_symbols,
+                        latest_common_close_ts_ms,
+                        next_due_step_close_ts_ms,
+                        idle_polls,
+                        executed_steps: steps.len(),
+                        warnings: &warnings,
+                        errors: &errors,
+                    },
+                )?;
                 break;
             }
             paper_loop::sleep_with_stop_flag(input.idle_sleep_ms, Some(stop_flag.as_ref()));
@@ -338,11 +503,47 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
                 emitted_due_idle_warning = true;
             }
             idle_polls = idle_polls.saturating_add(1);
+            write_status_snapshot(
+                &input,
+                &lock_path,
+                &manifest_state,
+                StatusSnapshot {
+                    status_path: &status_path,
+                    started_at_ms,
+                    stopped_at_ms: None,
+                    stop_requested: false,
+                    last_active_symbols: &last_active_symbols,
+                    latest_common_close_ts_ms,
+                    next_due_step_close_ts_ms,
+                    idle_polls,
+                    executed_steps: steps.len(),
+                    warnings: &warnings,
+                    errors: &errors,
+                },
+            )?;
             if input.max_idle_polls > 0 && idle_polls >= input.max_idle_polls {
                 warnings.push(format!(
                     "paper daemon follow exhausted after {} idle poll(s)",
                     input.max_idle_polls
                 ));
+                write_status_snapshot(
+                    &input,
+                    &lock_path,
+                    &manifest_state,
+                    StatusSnapshot {
+                        status_path: &status_path,
+                        started_at_ms,
+                        stopped_at_ms: None,
+                        stop_requested: false,
+                        last_active_symbols: &last_active_symbols,
+                        latest_common_close_ts_ms,
+                        next_due_step_close_ts_ms,
+                        idle_polls,
+                        executed_steps: steps.len(),
+                        warnings: &warnings,
+                        errors: &errors,
+                    },
+                )?;
                 break;
             }
             paper_loop::sleep_with_stop_flag(input.idle_sleep_ms, Some(stop_flag.as_ref()));
@@ -370,6 +571,24 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
         ));
         idle_polls = 0;
         emitted_due_idle_warning = false;
+        write_status_snapshot(
+            &input,
+            &lock_path,
+            &manifest_state,
+            StatusSnapshot {
+                status_path: &status_path,
+                started_at_ms,
+                stopped_at_ms: None,
+                stop_requested: false,
+                last_active_symbols: &last_active_symbols,
+                latest_common_close_ts_ms,
+                next_due_step_close_ts_ms,
+                idle_polls,
+                executed_steps: steps.len(),
+                warnings: &warnings,
+                errors: &errors,
+            },
+        )?;
     }
 
     let manifest_symbols = manifest_state.current_symbols();
@@ -420,6 +639,24 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
 
     let stopped_at_ms = Utc::now().timestamp_millis();
     let stop_requested = loop_report.stop_requested || stop_flag.load(Ordering::SeqCst);
+    write_status_snapshot(
+        &input,
+        &lock_path,
+        &manifest_state,
+        StatusSnapshot {
+            status_path: &status_path,
+            started_at_ms,
+            stopped_at_ms: Some(stopped_at_ms),
+            stop_requested,
+            last_active_symbols: &last_active_symbols,
+            latest_common_close_ts_ms: loop_report.latest_common_close_ts_ms,
+            next_due_step_close_ts_ms: loop_report.next_due_step_close_ts_ms,
+            idle_polls: loop_report.idle_polls,
+            executed_steps: loop_report.executed_steps,
+            warnings: &loop_report.warnings,
+            errors: &loop_report.errors,
+        },
+    )?;
     if input.emit_progress {
         eprintln!(
             "paper daemon stopped: pid={} steps={} stop_requested={} latest_common={:?} next_due={:?} reloads={} reload_failures={}",
@@ -436,6 +673,7 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
         ok: loop_report.ok,
         pid: std::process::id(),
         lock_path: lock_path.display().to_string(),
+        status_path: status_path.display().to_string(),
         started_at_ms,
         stopped_at_ms,
         stop_requested,
@@ -496,6 +734,28 @@ pub(crate) fn resolve_lock_path(lock_path: Option<&Path>, live: bool) -> PathBuf
     } else {
         "ai_quant_paper.lock"
     })
+}
+
+pub(crate) fn resolve_status_path(status_path: Option<&Path>, lock_path: &Path) -> PathBuf {
+    if let Some(status_path) = status_path {
+        return status_path.to_path_buf();
+    }
+    if let Some(env_status_path) = std::env::var_os("AI_QUANT_STATUS_PATH") {
+        return PathBuf::from(env_status_path);
+    }
+
+    let file_name = lock_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("ai_quant_paper.lock");
+    let status_name = file_name
+        .strip_suffix(".lock")
+        .map(|stem| format!("{stem}.status.json"))
+        .unwrap_or_else(|| format!("{file_name}.status.json"));
+    match lock_path.parent() {
+        Some(parent) => parent.join(status_name),
+        None => PathBuf::from(status_name),
+    }
 }
 
 fn project_root() -> PathBuf {

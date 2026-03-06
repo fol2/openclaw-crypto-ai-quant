@@ -21,6 +21,7 @@ struct Fixture {
     paper_db: PathBuf,
     candles_db: PathBuf,
     lock_path: PathBuf,
+    status_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +86,11 @@ fn paper_daemon_idle_follow_poll_does_not_write_when_caught_up() {
         report.pointer("/lock_path").and_then(Value::as_str),
         Some(fixture.lock_path.to_string_lossy().as_ref()),
         "paper daemon should report the acquired lock path",
+    );
+    assert_eq!(
+        report.pointer("/status_path").and_then(Value::as_str),
+        Some(fixture.status_path.to_string_lossy().as_ref()),
+        "paper daemon should report the configured status path",
     );
     assert_eq!(
         report
@@ -181,6 +187,69 @@ fn paper_daemon_sigterm_while_idle_stops_gracefully_without_writes() {
     assert!(
         try_exclusive_lock(&fixture.lock_path).is_some(),
         "paper daemon should release its lock after a graceful SIGTERM exit",
+    );
+}
+
+#[test]
+fn paper_daemon_writes_status_file_for_running_and_stopped_lifecycle() {
+    let fixture = prepare_idle_fixture();
+    let child = daemon_command(&fixture)
+        .arg("--idle-sleep-ms")
+        .arg("250")
+        .arg("--max-idle-polls")
+        .arg("0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("paper daemon status-path smoke should spawn");
+
+    let child = wait_for_lock_file(child, &fixture.lock_path, Duration::from_secs(5));
+    let running_status = wait_for_status_file(&fixture.status_path, Duration::from_secs(5));
+    assert_eq!(
+        running_status.pointer("/running").and_then(Value::as_bool),
+        Some(true),
+        "daemon should mark the status file as running while follow mode is active",
+    );
+    assert_eq!(
+        running_status
+            .pointer("/status_path")
+            .and_then(Value::as_str),
+        Some(fixture.status_path.to_string_lossy().as_ref()),
+        "daemon should report the configured status path in the live status file",
+    );
+    assert_eq!(
+        running_status.pointer("/lock_path").and_then(Value::as_str),
+        Some(fixture.lock_path.to_string_lossy().as_ref()),
+        "daemon should report the active lock path in the live status file",
+    );
+
+    send_sigterm(&child);
+    let output = wait_with_timeout(child, Duration::from_secs(5));
+    assert!(
+        output.status.success(),
+        "paper daemon should exit cleanly after SIGTERM in the status lifecycle smoke; output:\n{}",
+        combined_output(&output)
+    );
+
+    let stopped_status = read_json_file(&fixture.status_path);
+    assert_eq!(
+        stopped_status.pointer("/running").and_then(Value::as_bool),
+        Some(false),
+        "daemon should mark the persisted status file as stopped after exit",
+    );
+    assert_eq!(
+        stopped_status
+            .pointer("/stop_requested")
+            .and_then(Value::as_bool),
+        Some(true),
+        "SIGTERM exit should be reflected in the persisted status file",
+    );
+    assert!(
+        stopped_status
+            .pointer("/stopped_at_ms")
+            .and_then(Value::as_i64)
+            .is_some(),
+        "persisted status should include a stopped timestamp",
     );
 }
 
@@ -463,7 +532,8 @@ fn paper_daemon_noop_symbols_file_rewrite_does_not_increment_reload_count() {
 
     let child = wait_for_lock_file(child, &fixture.lock_path, Duration::from_secs(5));
     thread::sleep(Duration::from_millis(80));
-    fs::write(&symbols_file, "BTC\n").expect("symbols file should be rewritten with identical contents");
+    fs::write(&symbols_file, "BTC\n")
+        .expect("symbols file should be rewritten with identical contents");
 
     let output = wait_with_timeout(child, Duration::from_secs(5));
     assert!(
@@ -631,6 +701,7 @@ fn seed_fixture() -> Fixture {
     let paper_db = dir.path().join("paper.db");
     let candles_db = dir.path().join("candles.db");
     let lock_path = dir.path().join("paper-daemon.lock");
+    let status_path = dir.path().join("paper-daemon.status.json");
     seed_paper_db(&paper_db);
     seed_candles_db(&candles_db);
     Fixture {
@@ -638,6 +709,7 @@ fn seed_fixture() -> Fixture {
         paper_db,
         candles_db,
         lock_path,
+        status_path,
     }
 }
 
@@ -646,6 +718,7 @@ fn seed_empty_fixture() -> Fixture {
     let paper_db = dir.path().join("paper.db");
     let candles_db = dir.path().join("candles.db");
     let lock_path = dir.path().join("paper-daemon.lock");
+    let status_path = dir.path().join("paper-daemon.status.json");
     seed_empty_paper_db(&paper_db);
     seed_candles_db(&candles_db);
     Fixture {
@@ -653,6 +726,7 @@ fn seed_empty_fixture() -> Fixture {
         paper_db,
         candles_db,
         lock_path,
+        status_path,
     }
 }
 
@@ -694,6 +768,8 @@ fn daemon_command(fixture: &Fixture) -> Command {
         .arg("ETH")
         .arg("--lock-path")
         .arg(&fixture.lock_path)
+        .arg("--status-path")
+        .arg(&fixture.status_path)
         .arg("--json");
     command
 }
@@ -714,6 +790,8 @@ fn watchlist_daemon_command(fixture: &Fixture, symbols_file: &Path) -> Command {
         .arg("--watch-symbols-file")
         .arg("--lock-path")
         .arg(&fixture.lock_path)
+        .arg("--status-path")
+        .arg(&fixture.status_path)
         .arg("--json");
     command
 }
@@ -743,6 +821,32 @@ fn parse_json_output(output: &Output) -> Value {
             String::from_utf8_lossy(&output.stderr),
         )
     })
+}
+
+fn read_json_file(path: &Path) -> Value {
+    serde_json::from_slice(
+        &fs::read(path)
+            .unwrap_or_else(|err| panic!("failed to read JSON file {}: {err}", path.display())),
+    )
+    .unwrap_or_else(|err| panic!("failed to parse JSON file {}: {err}", path.display()))
+}
+
+fn wait_for_status_file(path: &Path, timeout: Duration) -> Value {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if path.exists() {
+            let value = read_json_file(path);
+            if value.pointer("/running").is_some() {
+                return value;
+            }
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "paper daemon did not materialise the status file {} before timeout",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn combined_output(output: &Output) -> String {

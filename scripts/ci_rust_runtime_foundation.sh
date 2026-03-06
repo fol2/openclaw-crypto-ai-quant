@@ -313,6 +313,8 @@ assert manifest["candles_db"] == "/tmp/aiq-runtime-candles.db"
 assert manifest["watch_symbols_file"] is False
 assert manifest["resume"]["launch_state"] == "bootstrap_required"
 assert manifest["resume"]["launch_ready"] is False
+assert manifest["status_path"].endswith(".status.json")
+assert "--status-path" in manifest["daemon_command"]
 manifest_resume = json.loads(Path("/tmp/aiq-runtime-paper-manifest-resume.json").read_text(encoding="utf-8"))
 assert manifest_resume["resume"]["launch_state"] == "caught_up_idle"
 assert manifest_resume["resume"]["launch_ready"] is True

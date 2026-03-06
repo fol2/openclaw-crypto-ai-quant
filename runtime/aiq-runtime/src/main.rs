@@ -184,6 +184,9 @@ struct PaperManifestArgs {
     /// Optional daemon lock path override. Falls back to AI_QUANT_LOCK_PATH or the default paper lock.
     #[arg(long)]
     lock_path: Option<PathBuf>,
+    /// Optional daemon status path override. Falls back to AI_QUANT_STATUS_PATH or the lock-derived default.
+    #[arg(long)]
+    status_path: Option<PathBuf>,
     /// Emit machine-readable JSON instead of a human summary.
     #[arg(long)]
     json: bool,
@@ -349,6 +352,9 @@ struct PaperDaemonArgs {
     /// Optional daemon lock path. Defaults to AI_QUANT_LOCK_PATH or the project paper/live lock file.
     #[arg(long)]
     lock_path: Option<PathBuf>,
+    /// Optional daemon status path. Defaults to AI_QUANT_STATUS_PATH or the resolved lock-derived status file.
+    #[arg(long)]
+    status_path: Option<PathBuf>,
 }
 
 impl From<ModeArg> for RuntimeMode {
@@ -539,6 +545,7 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 lookback_bars: args.lookback_bars,
                 start_step_close_ts_ms: args.start_step_close_ts_ms,
                 lock_path: args.lock_path.as_deref(),
+                status_path: args.status_path.as_deref(),
             })?;
 
             if args.json {
@@ -562,6 +569,7 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                     println!("start_step_close_ts_ms: {}", start_step_close_ts_ms);
                 }
                 println!("lock_path: {}", report.lock_path);
+                println!("status_path: {}", report.status_path);
                 println!("launch_state: {:?}", report.resume.launch_state);
                 println!("launch_ready: {}", report.resume.launch_ready);
                 println!("active_symbols: {}", report.resume.active_symbols.join(","));
@@ -790,6 +798,7 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 exported_at_ms: args.exported_at_ms,
                 dry_run: args.dry_run,
                 lock_path: args.lock_path.as_deref(),
+                status_path: args.status_path.as_deref(),
                 watch_symbols_file: args.watch_symbols_file,
                 emit_progress: !args.common.json,
             })?;
@@ -798,9 +807,10 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!(
-                    "paper daemon ok: pid={} lock={} steps={} stop_requested={} dry_run={} reloads={}",
+                    "paper daemon ok: pid={} lock={} status={} steps={} stop_requested={} dry_run={} reloads={}",
                     report.pid,
                     report.lock_path,
+                    report.status_path,
                     report.loop_report.executed_steps,
                     report.stop_requested,
                     report.dry_run,

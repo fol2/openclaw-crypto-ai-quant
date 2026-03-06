@@ -84,6 +84,15 @@ resume contract for the same manifest surface:
 - accepts opt-in watchlist/bootstrap launch inputs (`--watch-symbols-file`, `--start-step-close-ts-ms`) as part of the deterministic daemon plan
 - reports whether the lane is blocked, idle with no symbols, bootstrap-ready, bootstrap-blocked, resumable, or merely caught up and waiting
 - exposes the current active symbols plus `last_applied_step_close_ts_ms`, `next_due_step_close_ts_ms`, and `latest_common_close_ts_ms` when the paper DB and candles DB are inspectable
+- resolves the daemon `status_path` so later service supervision can observe the same lane lifecycle contract
+
+The current delivered slice extends that again with a daemon lifecycle status
+surface:
+
+- `paper daemon`
+- writes a durable lane status JSON while the daemon is running and after it stops
+- derives the default `status_path` from the resolved daemon lock path when `AI_QUANT_STATUS_PATH` is unset
+- keeps the lifecycle status contract read-only with respect to trading semantics; it does not widen DB projections or claim systemd cutover
 
 Python paper execution is still the active runtime path, and the opt-in Rust
 paper daemon wrapper does not change that. Python paper bootstrap is no longer
