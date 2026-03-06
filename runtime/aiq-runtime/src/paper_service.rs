@@ -187,7 +187,10 @@ mod tests {
         let manifest = PaperManifestReport {
             ok: true,
             runtime_bootstrap,
+            base_config_path: config_path.display().to_string(),
             config_path: config_path.display().to_string(),
+            active_yaml_path: config_path.display().to_string(),
+            effective_yaml_path: config_path.display().to_string(),
             paper_db: dir.path().join("paper.db").display().to_string(),
             paper_db_exists: true,
             candles_db: dir.path().join("candles.db").display().to_string(),
@@ -204,6 +207,10 @@ mod tests {
             instance_tag: None,
             promoted_role: None,
             strategy_mode: None,
+            promoted_config_path: None,
+            strategy_mode_source: None,
+            strategy_overrides_sha1: "a".repeat(64),
+            config_id: "a".repeat(64),
             resume: PaperManifestResumeState {
                 launch_ready,
                 launch_state,

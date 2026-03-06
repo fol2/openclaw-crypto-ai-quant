@@ -1,13 +1,13 @@
-use aiq_runtime_core::runtime::{build_bootstrap, RuntimeBootstrap, RuntimeMode};
+use aiq_runtime_core::runtime::RuntimeBootstrap;
 use anyhow::{Context, Result};
 use serde::Serialize;
 use std::env;
 use std::path::{Path, PathBuf};
 
+use crate::paper_config::PaperEffectiveConfig;
 use crate::paper_daemon;
 use crate::paper_loop;
 
-const DEFAULT_CONFIG_PATH: &str = "config/strategy_overrides.yaml";
 const DEFAULT_PAPER_DB_PATH: &str = "trading_engine.db";
 const DEFAULT_LOOKBACK_BARS: usize = 400;
 
@@ -52,7 +52,10 @@ pub struct PaperManifestResumeState {
 pub struct PaperManifestReport {
     pub ok: bool,
     pub runtime_bootstrap: RuntimeBootstrap,
+    pub base_config_path: String,
     pub config_path: String,
+    pub active_yaml_path: String,
+    pub effective_yaml_path: String,
     pub paper_db: String,
     pub paper_db_exists: bool,
     pub candles_db: String,
@@ -68,26 +71,19 @@ pub struct PaperManifestReport {
     pub status_path: String,
     pub instance_tag: Option<String>,
     pub promoted_role: Option<String>,
+    pub promoted_config_path: Option<String>,
     pub strategy_mode: Option<String>,
+    pub strategy_mode_source: Option<String>,
+    pub strategy_overrides_sha1: String,
+    pub config_id: String,
     pub resume: PaperManifestResumeState,
     pub warnings: Vec<String>,
     pub daemon_command: Vec<String>,
 }
 
 pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestReport> {
-    let mut warnings = Vec::new();
-    let config_path = resolve_config_path(input.config);
-    let config = bt_core::config::load_config_checked(
-        config_path
-            .to_str()
-            .context("config path must be valid UTF-8")?,
-        None,
-        input.live,
-    )
-    .map_err(anyhow::Error::msg)?;
-    let runtime_bootstrap =
-        build_bootstrap(&config, RuntimeMode::Paper, input.profile).map_err(anyhow::Error::msg)?;
-
+    let effective_config = PaperEffectiveConfig::resolve(input.config)?;
+    let mut warnings = effective_config.warnings().to_vec();
     let symbols = resolve_symbols(input.symbols);
     let symbols_file = input
         .symbols_file
@@ -95,10 +91,17 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
         .or_else(|| env_path("AI_QUANT_SYMBOLS_FILE"));
     let watch_symbols_file = input.watch_symbols_file || env_bool("AI_QUANT_WATCH_SYMBOLS_FILE");
     let interval_symbols = resolve_interval_symbols(&symbols, symbols_file.as_deref())?;
+    let runtime_bootstrap = effective_config.build_runtime_bootstrap(
+        bootstrap_symbol_hint(&interval_symbols),
+        input.live,
+        input.profile,
+    )?;
+    let config =
+        effective_config.load_config(bootstrap_symbol_hint(&interval_symbols), input.live)?;
     let interval = if interval_symbols.is_empty() {
         config.engine.interval.trim().to_string()
     } else {
-        paper_loop::resolve_shared_interval(&config_path, &interval_symbols, input.live)?
+        effective_config.resolve_shared_interval(&interval_symbols, input.live)?
     };
     if let Some(env_interval) = env_string("AI_QUANT_INTERVAL") {
         let env_interval = env_interval.trim().to_string();
@@ -165,7 +168,7 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
     let resume = resolve_resume_state(
         &mut warnings,
         &runtime_bootstrap,
-        &config_path,
+        &effective_config,
         input.live,
         &paper_db,
         &candles_db,
@@ -181,7 +184,7 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
         "paper".to_string(),
         "daemon".to_string(),
         "--config".to_string(),
-        config_path.display().to_string(),
+        effective_config.config_path().display().to_string(),
         "--db".to_string(),
         paper_db.display().to_string(),
         "--candles-db".to_string(),
@@ -225,7 +228,10 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
     Ok(PaperManifestReport {
         ok: true,
         runtime_bootstrap,
-        config_path: config_path.display().to_string(),
+        base_config_path: effective_config.base_config_path().display().to_string(),
+        config_path: effective_config.config_path().display().to_string(),
+        active_yaml_path: effective_config.active_yaml_path().display().to_string(),
+        effective_yaml_path: effective_config.effective_yaml_path().display().to_string(),
         paper_db: paper_db.display().to_string(),
         paper_db_exists: paper_db.exists(),
         candles_db: candles_db.display().to_string(),
@@ -240,8 +246,16 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
         lock_path: lock_path.display().to_string(),
         status_path: status_path.display().to_string(),
         instance_tag: env_string("AI_QUANT_INSTANCE_TAG"),
-        promoted_role: env_string("AI_QUANT_PROMOTED_ROLE"),
-        strategy_mode: env_string("AI_QUANT_STRATEGY_MODE"),
+        promoted_role: effective_config.promoted_role().map(ToOwned::to_owned),
+        promoted_config_path: effective_config
+            .promoted_config_path()
+            .map(|path| path.display().to_string()),
+        strategy_mode: effective_config.strategy_mode().map(ToOwned::to_owned),
+        strategy_mode_source: effective_config
+            .strategy_mode_source()
+            .map(ToOwned::to_owned),
+        strategy_overrides_sha1: effective_config.strategy_overrides_sha1().to_string(),
+        config_id: effective_config.config_id().to_string(),
         resume,
         warnings,
         daemon_command,
@@ -251,7 +265,7 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
 fn resolve_resume_state(
     warnings: &mut Vec<String>,
     runtime_bootstrap: &RuntimeBootstrap,
-    config_path: &Path,
+    effective_config: &PaperEffectiveConfig,
     live: bool,
     paper_db: &Path,
     candles_db: &Path,
@@ -279,7 +293,7 @@ fn resolve_resume_state(
 
     let Some(context) = (match paper_loop::inspect_loop_context(
         runtime_bootstrap,
-        config_path,
+        effective_config,
         live,
         paper_db,
         candles_db,
@@ -365,22 +379,8 @@ fn resolve_resume_state(
     resume
 }
 
-fn resolve_config_path(config: Option<&Path>) -> PathBuf {
-    let configured = config
-        .map(Path::to_path_buf)
-        .or_else(|| env_path("AI_QUANT_STRATEGY_YAML"))
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
-
-    if configured.exists() {
-        return configured;
-    }
-
-    let fallback = PathBuf::from(format!("{}.example", configured.display()));
-    if fallback.exists() {
-        return fallback;
-    }
-
-    configured
+fn bootstrap_symbol_hint(symbols: &[String]) -> Option<&str> {
+    (symbols.len() == 1).then(|| symbols[0].as_str())
 }
 
 fn resolve_candles_db(candles_db: Option<&Path>, interval: &str) -> Result<PathBuf> {

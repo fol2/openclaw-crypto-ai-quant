@@ -12,14 +12,14 @@ The core Python daemon that runs paper, dry_live, and live modes from a single e
 
 - **Daemon** (`engine/daemon.py`): Entrypoint — selects mode via `AI_QUANT_MODE` env var, initialises all subsystems.
 - **UnifiedEngine** (`engine/core.py`): Main trading loop — polls candle keys per symbol, runs strategy analysis only when data changes, two-phase collect-rank-execute for entries.
-- **StrategyManager** (`engine/strategy_manager.py`): Hot-reloads `config/strategy_overrides.yaml` via mtime polling. No `importlib.reload` — pure YAML merging.
+- **StrategyManager** (`engine/strategy_manager.py`): Hot-reloads the selected strategy YAML path via mtime polling for the active Python daemon. It does not define the Rust paper effective-config contract.
 - **MarketDataHub** (`engine/market_data.py`): Reads mids and candles from WS sidecar first, falls back to SQLite candles table, then REST `candleSnapshot`.
 - **RiskManager** (`engine/risk.py`): Rate limiting (global + per-symbol entries, exits, cancels), drawdown kill-switch, daily loss limits, notional caps, slippage guard, file-based and env-based kill-switch polling.
 - **LiveOms** (`engine/oms.py`): Durable Order Management System for live trading — intent rows (restart-safe dedupe), orders, fills (deduped by hash+tid), fill-to-intent matching via `client_order_id` with time-proximity fallback.
 - **OMS Reconciler** (`engine/oms_reconciler.py`): Reconciles OMS state against exchange positions/fills.
 - **Alerting** (`engine/alerting.py`): Discord / Telegram notifications via `openclaw message send`.
 - **Event Logger** (`engine/event_logger.py`): Decision + trade event logging for audit trail.
-- **Promoted Config** (`engine/promoted_config.py`): Loading promoted strategy configs from the factory pipeline.
+- **Promoted Config** (`engine/promoted_config.py`): Legacy Python promoted-config materialisation for the active paper daemon compatibility path.
 - **SQLite Logger** (`engine/sqlite_logger.py`): Trade, candle, and position state persistence.
 - **REST Client** (`engine/rest_client.py`): Hyperliquid REST API client.
 - **Systemd Watchdog** (`engine/systemd_watchdog.py`): `sd_notify` integration.
@@ -46,7 +46,7 @@ File lock prevents duplicate daemons: `ai_quant_paper.lock` or `ai_quant_live.lo
 ### 4. Live Trader (`live/`)
 
 - **LiveTrader** (`live/trader.py`): Wraps strategy logic with real order execution. Uses the same `mei_alpha_v1.analyze()` and `PaperTrader.check_exit_conditions()` as paper mode. Places real perps orders via SDK. Reconciles positions/equity from `Info.user_state()` periodically.
-- **aiq-runtime** (`runtime/aiq-runtime/`): Rust runtime CLI. Currently owns pipeline/bootstrap planning, snapshot export/validate/seed, paper bootstrap/restore diagnostics via `paper doctor`, single-symbol execution via `paper run-once`, a repeatable multi-symbol `paper cycle` shell with explicit step identity, a bounded `paper loop` catch-up shell that can optionally keep polling after catch-up instead of exiting idle, a paired opt-in `paper daemon` wrapper that owns the outer scheduler for the same paper cycle contract without claiming paper daemon cutover, a read-only `paper manifest` surface that resolves the current daemon service/env contract into a deterministic Rust launch plan with launch readiness plus restart/resume state, a read-only `paper status` surface that compares the current launch contract against the persisted daemon status JSON to report whether the lane is running, stale, stopped, unhealthy, or restart-required because the launch identity drifted, and a read-only `paper service` surface that converts that status view into a supervision action (`hold`, `start`, `restart`, or `monitor`) without performing daemon control side effects. `paper loop` only loads an optional symbols file once at start-up; `paper daemon --watch-symbols-file` can reload that manifest on file changes, keep the last good manifest when a reload is invalid or runtime-invalid malformed, continue to union open positions into the active symbol set, and persist a daemon lifecycle status JSON at the resolved `status_path`. The active paper daemon remains `engine/daemon.py` in this phase.
+- **aiq-runtime** (`runtime/aiq-runtime/`): Rust runtime CLI. Currently owns pipeline/bootstrap planning, snapshot export/validate/seed, paper bootstrap/restore diagnostics via `paper doctor`, single-symbol execution via `paper run-once`, a repeatable multi-symbol `paper cycle` shell with explicit step identity, a bounded `paper loop` catch-up shell that can optionally keep polling after catch-up instead of exiting idle, a paired opt-in `paper daemon` wrapper that owns the outer scheduler for the same paper cycle contract without claiming paper daemon cutover, a read-only `paper manifest` surface that resolves the current daemon service/env contract into a deterministic Rust launch plan with launch readiness plus restart/resume state, and the same promoted-role / strategy-mode effective-config contract used by the current paper lane, including the resolved `status_path`, `active_yaml_path`, and `effective_yaml_path`. A read-only `paper status` surface compares the current launch contract against the persisted daemon status JSON to report whether the lane is running, stale, stopped, unhealthy, or restart-required because the launch identity drifted, and a read-only `paper service` surface converts that status view into a supervision action (`hold`, `start`, `restart`, or `monitor`) without performing daemon control side effects. `paper loop` only loads an optional symbols file once at start-up; `paper daemon --watch-symbols-file` can reload that manifest on file changes, keep the last good manifest when a reload is invalid or runtime-invalid malformed, continue to union open positions into the active symbol set, and persist a daemon lifecycle status JSON at the resolved `status_path`. The active paper daemon remains `engine/daemon.py` in this phase.
 
 Safety gates for live mode:
 - `AI_QUANT_LIVE_ENABLE=1` + `AI_QUANT_LIVE_CONFIRM=I_UNDERSTAND_THIS_CAN_LOSE_MONEY`
@@ -223,8 +223,14 @@ Tiebreaker: symbol name alphabetical order. Pyramid ADD orders execute immediate
 ## Configuration Merge Order
 
 ```
-_DEFAULT_STRATEGY_CONFIG ← global YAML ← symbols.<SYM> YAML ← live YAML (if live mode)
+base YAML document
+  + promoted config overlay from AI_QUANT_PROMOTED_ROLE (if resolved)
+  → _DEFAULT_STRATEGY_CONFIG ← global YAML ← symbols.<SYM> YAML ← live YAML (if live mode) ← modes.<MODE>
 ```
+
+For Rust paper surfaces, `AI_QUANT_STRATEGY_MODE` is resolved in Rust first;
+`AI_QUANT_STRATEGY_MODE_FILE` is the file-backed fallback when the env var is
+unset.
 
 The `engine.interval` parameter is NOT hot-reloadable — changing it requires a service restart. All other YAML parameters hot-reload via mtime polling.
 

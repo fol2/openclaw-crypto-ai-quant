@@ -306,6 +306,268 @@ fn paper_daemon_resumed_start_step_does_not_trip_status_restart_required() {
     );
 }
 
+#[test]
+fn paper_daemon_symbols_file_single_symbol_keeps_status_contract_aligned() {
+    let fixture = seed_fixture();
+    let config_path = fixture._dir.path().join("strategy.yaml");
+    let symbols_file = fixture._dir.path().join("symbols.txt");
+    fs::write(
+        &config_path,
+        r#"
+global:
+  engine:
+    interval: 30m
+  runtime:
+    profile: production
+symbols:
+  ETH:
+    runtime:
+      profile: parity_baseline
+"#,
+    )
+    .unwrap();
+    fs::write(&symbols_file, "ETH\n").unwrap();
+
+    let bootstrap = runtime_command()
+        .arg("paper")
+        .arg("loop")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--db")
+        .arg(&fixture.paper_db)
+        .arg("--candles-db")
+        .arg(&fixture.candles_db)
+        .arg("--symbols-file")
+        .arg(&symbols_file)
+        .arg("--start-step-close-ts-ms")
+        .arg(START_STEP_CLOSE_TS_MS.to_string())
+        .arg("--max-steps")
+        .arg("3")
+        .arg("--json")
+        .output()
+        .expect("paper loop bootstrap for symbols-file lane should spawn");
+    assert!(
+        bootstrap.status.success(),
+        "paper loop bootstrap should succeed for symbols-file lane; output:\n{}",
+        combined_output(&bootstrap)
+    );
+
+    let child = runtime_command()
+        .arg("paper")
+        .arg("daemon")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--db")
+        .arg(&fixture.paper_db)
+        .arg("--candles-db")
+        .arg(&fixture.candles_db)
+        .arg("--symbols-file")
+        .arg(&symbols_file)
+        .arg("--lock-path")
+        .arg(&fixture.lock_path)
+        .arg("--status-path")
+        .arg(&fixture.status_path)
+        .arg("--idle-sleep-ms")
+        .arg("250")
+        .arg("--max-idle-polls")
+        .arg("0")
+        .arg("--json")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("paper daemon symbols-file smoke should spawn");
+
+    let child = wait_for_lock_file(child, &fixture.lock_path, Duration::from_secs(5));
+    let _running_status = wait_for_status_file(&fixture.status_path, Duration::from_secs(5));
+
+    let output = runtime_command()
+        .arg("paper")
+        .arg("status")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--db")
+        .arg(&fixture.paper_db)
+        .arg("--candles-db")
+        .arg(&fixture.candles_db)
+        .arg("--symbols-file")
+        .arg(&symbols_file)
+        .arg("--lock-path")
+        .arg(&fixture.lock_path)
+        .arg("--status-path")
+        .arg(&fixture.status_path)
+        .arg("--stale-after-ms")
+        .arg("60000")
+        .arg("--json")
+        .output()
+        .expect("paper status symbols-file smoke should spawn");
+    assert!(
+        output.status.success(),
+        "paper status smoke should exit successfully for a symbols-file lane; output:\n{}",
+        combined_output(&output)
+    );
+
+    let report = parse_json_output(&output);
+    assert_eq!(
+        report.pointer("/service_state").and_then(Value::as_str),
+        Some("running"),
+        "symbols-file bootstrap lanes should remain running once the daemon and manifest resolve the same effective config",
+    );
+    assert_eq!(
+        report
+            .pointer("/contract_matches_status")
+            .and_then(Value::as_bool),
+        Some(true),
+        "symbols-file bootstrap lanes should not drift on profile or fingerprint",
+    );
+    assert_eq!(
+        report
+            .pointer("/manifest/runtime_bootstrap/pipeline/profile")
+            .and_then(Value::as_str),
+        Some("parity_baseline"),
+        "single-symbol symbols-file lanes should use the symbol-effective runtime profile",
+    );
+
+    send_sigterm(&child);
+    let stopped = wait_with_timeout(child, Duration::from_secs(5));
+    assert!(
+        stopped.status.success(),
+        "paper daemon should exit cleanly after the symbols-file smoke; output:\n{}",
+        combined_output(&stopped)
+    );
+}
+
+#[test]
+fn paper_daemon_reloaded_single_symbol_updates_status_contract() {
+    let fixture = seed_empty_fixture();
+    let config_path = fixture._dir.path().join("strategy.yaml");
+    let symbols_file = fixture._dir.path().join("symbols.txt");
+    fs::write(
+        &config_path,
+        r#"
+global:
+  engine:
+    interval: 30m
+  runtime:
+    profile: production
+symbols:
+  ETH:
+    runtime:
+      profile: parity_baseline
+"#,
+    )
+    .unwrap();
+    fs::write(&symbols_file, "").unwrap();
+
+    let child = runtime_command()
+        .arg("paper")
+        .arg("daemon")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--db")
+        .arg(&fixture.paper_db)
+        .arg("--candles-db")
+        .arg(&fixture.candles_db)
+        .arg("--symbols-file")
+        .arg(&symbols_file)
+        .arg("--watch-symbols-file")
+        .arg("--start-step-close-ts-ms")
+        .arg(START_STEP_CLOSE_TS_MS.to_string())
+        .arg("--lock-path")
+        .arg(&fixture.lock_path)
+        .arg("--status-path")
+        .arg(&fixture.status_path)
+        .arg("--idle-sleep-ms")
+        .arg("20")
+        .arg("--max-idle-polls")
+        .arg("20")
+        .arg("--json")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("paper daemon empty-watchlist reload contract smoke should spawn");
+
+    let child = wait_for_lock_file(child, &fixture.lock_path, Duration::from_secs(5));
+    let _running_status = wait_for_status_file(&fixture.status_path, Duration::from_secs(5));
+    thread::sleep(Duration::from_millis(100));
+    fs::write(&symbols_file, "ETH\n").unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let status = read_json_file(&fixture.status_path);
+        let active_symbols = status
+            .pointer("/last_active_symbols")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if active_symbols == vec![Value::String("ETH".to_string())] {
+            break;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "paper daemon did not refresh to ETH before timeout; status={status}",
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let output = runtime_command()
+        .arg("paper")
+        .arg("status")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--db")
+        .arg(&fixture.paper_db)
+        .arg("--candles-db")
+        .arg(&fixture.candles_db)
+        .arg("--symbols-file")
+        .arg(&symbols_file)
+        .arg("--watch-symbols-file")
+        .arg("--start-step-close-ts-ms")
+        .arg(START_STEP_CLOSE_TS_MS.to_string())
+        .arg("--lock-path")
+        .arg(&fixture.lock_path)
+        .arg("--status-path")
+        .arg(&fixture.status_path)
+        .arg("--stale-after-ms")
+        .arg("60000")
+        .arg("--json")
+        .output()
+        .expect("paper status empty-watchlist reload smoke should spawn");
+    assert!(
+        output.status.success(),
+        "paper status smoke should exit successfully after a symbols-file reload; output:\n{}",
+        combined_output(&output)
+    );
+
+    let report = parse_json_output(&output);
+    assert_eq!(
+        report.pointer("/service_state").and_then(Value::as_str),
+        Some("running"),
+        "reloaded single-symbol lanes should remain running once the daemon refreshes its bootstrap contract",
+    );
+    assert_eq!(
+        report
+            .pointer("/contract_matches_status")
+            .and_then(Value::as_bool),
+        Some(true),
+        "reloaded single-symbol lanes should not be marked drifted after the daemon recomputes the bootstrap contract",
+    );
+    assert_eq!(
+        report
+            .pointer("/manifest/runtime_bootstrap/pipeline/profile")
+            .and_then(Value::as_str),
+        Some("parity_baseline"),
+        "reloaded single-symbol lanes should expose the symbol-effective runtime profile",
+    );
+
+    send_sigterm(&child);
+    let stopped = wait_with_timeout(child, Duration::from_secs(5));
+    assert!(
+        stopped.status.success(),
+        "paper daemon should exit cleanly after the empty-watchlist reload smoke; output:\n{}",
+        combined_output(&stopped)
+    );
+}
+
 fn prepare_idle_fixture() -> Fixture {
     let fixture = seed_fixture();
     let output = loop_command(&fixture)
@@ -563,6 +825,103 @@ fn paper_daemon_retains_last_good_manifest_on_semantically_torn_reload() {
                 })
             })),
         "daemon should surface the semantically torn reload retention warning",
+    );
+}
+
+#[test]
+fn paper_daemon_retains_last_good_manifest_on_runtime_invalid_reload() {
+    let fixture = prepare_idle_fixture();
+    let config_path = fixture._dir.path().join("strategy-invalid-reload.yaml");
+    let symbols_file = fixture._dir.path().join("symbols-runtime-invalid.txt");
+    fs::write(
+        &config_path,
+        r#"
+global:
+  engine:
+    interval: 30m
+  runtime:
+    profile: production
+symbols:
+  ETH:
+    runtime:
+      profile: production
+    pipeline:
+      profiles:
+        production:
+          enabled_stages: [ranking]
+          disabled_stages: [ranking]
+"#,
+    )
+    .unwrap();
+    fs::write(&symbols_file, "BTC\n").expect("initial symbols file should be created");
+
+    let child = runtime_command()
+        .arg("paper")
+        .arg("daemon")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--db")
+        .arg(&fixture.paper_db)
+        .arg("--candles-db")
+        .arg(&fixture.candles_db)
+        .arg("--symbols-file")
+        .arg(&symbols_file)
+        .arg("--watch-symbols-file")
+        .arg("--start-step-close-ts-ms")
+        .arg(START_STEP_CLOSE_TS_MS.to_string())
+        .arg("--lock-path")
+        .arg(&fixture.lock_path)
+        .arg("--status-path")
+        .arg(&fixture.status_path)
+        .arg("--idle-sleep-ms")
+        .arg("20")
+        .arg("--max-idle-polls")
+        .arg("0")
+        .arg("--json")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("paper daemon runtime-invalid reload smoke should spawn");
+
+    let child = wait_for_lock_file(child, &fixture.lock_path, Duration::from_secs(5));
+    thread::sleep(Duration::from_millis(80));
+    fs::write(&symbols_file, "ETH\n").expect("symbols file should become runtime-invalid");
+    thread::sleep(Duration::from_millis(80));
+    send_sigterm(&child);
+
+    let output = wait_with_timeout(child, Duration::from_secs(5));
+    assert!(
+        output.status.success(),
+        "paper daemon should stop cleanly after a runtime-invalid watchlist reload; output:\n{}",
+        combined_output(&output)
+    );
+
+    let report = parse_json_output(&output);
+    assert_eq!(
+        report
+            .pointer("/manifest_reload_failure_count")
+            .and_then(Value::as_u64),
+        Some(1),
+        "daemon should count the runtime-invalid manifest reload",
+    );
+    assert_eq!(
+        report
+            .pointer("/manifest_symbols")
+            .and_then(Value::as_array),
+        Some(&vec![Value::String("BTC".to_string())]),
+        "daemon should retain the last good manifest after a runtime-invalid reload",
+    );
+    assert!(
+        report
+            .pointer("/loop_report/warnings")
+            .and_then(Value::as_array)
+            .is_some_and(|warnings| warnings.iter().any(|warning| {
+                warning.as_str().is_some_and(|text| {
+                    text.contains("ignored symbols file reload")
+                        && text.contains("retaining last good manifest")
+                })
+            })),
+        "daemon should surface the runtime-invalid reload retention warning",
     );
 }
 

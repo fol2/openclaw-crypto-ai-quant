@@ -11,12 +11,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
+use crate::paper_config::PaperEffectiveConfig;
 use crate::paper_cycle::{self, PaperCycleInput};
 use crate::paper_loop::{self, PaperLoopReport, PaperLoopStepReport};
 
 pub struct PaperDaemonInput<'a> {
+    pub effective_config: PaperEffectiveConfig,
     pub runtime_bootstrap: RuntimeBootstrap,
-    pub config_path: &'a Path,
+    pub profile_override: Option<&'a str>,
     pub live: bool,
     pub paper_db: &'a Path,
     pub candles_db: &'a Path,
@@ -289,6 +291,7 @@ struct StatusSnapshot<'a> {
 
 fn write_status_snapshot(
     input: &PaperDaemonInput<'_>,
+    runtime_bootstrap: &RuntimeBootstrap,
     lock_path: &Path,
     manifest_state: &SymbolManifestState,
     snapshot: StatusSnapshot<'_>,
@@ -297,7 +300,7 @@ fn write_status_snapshot(
         ok: snapshot.errors.is_empty(),
         running: snapshot.stopped_at_ms.is_none(),
         pid: std::process::id(),
-        config_path: input.config_path.display().to_string(),
+        config_path: input.effective_config.config_path().display().to_string(),
         paper_db: input.paper_db.display().to_string(),
         candles_db: input.candles_db.display().to_string(),
         lock_path: lock_path.display().to_string(),
@@ -307,7 +310,7 @@ fn write_status_snapshot(
         stopped_at_ms: snapshot.stopped_at_ms,
         stop_requested: snapshot.stop_requested,
         dry_run: input.dry_run,
-        runtime_bootstrap: input.runtime_bootstrap.clone(),
+        runtime_bootstrap: runtime_bootstrap.clone(),
         btc_symbol: input.btc_symbol.trim().to_ascii_uppercase(),
         lookback_bars: input.lookback_bars,
         explicit_symbols: paper_loop::normalise_symbols(input.explicit_symbols),
@@ -327,6 +330,21 @@ fn write_status_snapshot(
         errors: snapshot.errors.to_vec(),
     };
     write_status_file(snapshot.status_path, &status)
+}
+
+fn bootstrap_symbol_hint(symbols: &[String]) -> Option<&str> {
+    (symbols.len() == 1).then(|| symbols[0].as_str())
+}
+
+fn resolve_runtime_bootstrap_for_symbols(
+    input: &PaperDaemonInput<'_>,
+    symbols: &[String],
+) -> Result<RuntimeBootstrap> {
+    input.effective_config.build_runtime_bootstrap(
+        bootstrap_symbol_hint(symbols),
+        input.live,
+        input.profile_override,
+    )
 }
 
 fn write_status_file(status_path: &Path, status: &PaperDaemonStatus) -> Result<()> {
@@ -440,28 +458,33 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
             ManifestRefresh::Warning(warning) => warnings.push(warning),
             ManifestRefresh::Candidate(file_symbols) => {
                 let candidate_symbols = manifest_state.candidate_symbols(&file_symbols);
-                match paper_loop::inspect_loop_context(
-                    &input.runtime_bootstrap,
-                    input.config_path,
-                    input.live,
-                    working_paper_db.path(),
-                    input.candles_db,
-                    &candidate_symbols,
-                    input.btc_symbol,
-                ) {
-                    Ok(_) => {
-                        if let Some(message) = manifest_state.accept_candidate(file_symbols) {
-                            warnings.push(message);
+                match resolve_runtime_bootstrap_for_symbols(&input, &candidate_symbols) {
+                    Ok(candidate_runtime_bootstrap) => match paper_loop::inspect_loop_context(
+                        &candidate_runtime_bootstrap,
+                        &input.effective_config,
+                        input.live,
+                        working_paper_db.path(),
+                        input.candles_db,
+                        &candidate_symbols,
+                        input.btc_symbol,
+                    ) {
+                        Ok(_) => {
+                            if let Some(message) = manifest_state.accept_candidate(file_symbols) {
+                                warnings.push(message);
+                            }
                         }
-                    }
+                        Err(err) => warnings.push(manifest_state.reject_candidate(&err)),
+                    },
                     Err(err) => warnings.push(manifest_state.reject_candidate(&err)),
                 }
             }
         }
         let manifest_symbols = manifest_state.current_symbols();
+        let current_runtime_bootstrap =
+            resolve_runtime_bootstrap_for_symbols(&input, &manifest_symbols)?;
         let maybe_context = paper_loop::inspect_loop_context(
-            &input.runtime_bootstrap,
-            input.config_path,
+            &current_runtime_bootstrap,
+            &input.effective_config,
             input.live,
             working_paper_db.path(),
             input.candles_db,
@@ -484,6 +507,7 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
             idle_polls = idle_polls.saturating_add(1);
             write_status_snapshot(
                 &input,
+                &current_runtime_bootstrap,
                 &lock_path,
                 &manifest_state,
                 StatusSnapshot {
@@ -508,6 +532,7 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
                 ));
                 write_status_snapshot(
                     &input,
+                    &current_runtime_bootstrap,
                     &lock_path,
                     &manifest_state,
                     StatusSnapshot {
@@ -580,6 +605,7 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
             idle_polls = idle_polls.saturating_add(1);
             write_status_snapshot(
                 &input,
+                &current_runtime_bootstrap,
                 &lock_path,
                 &manifest_state,
                 StatusSnapshot {
@@ -604,6 +630,7 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
                 ));
                 write_status_snapshot(
                     &input,
+                    &current_runtime_bootstrap,
                     &lock_path,
                     &manifest_state,
                     StatusSnapshot {
@@ -628,8 +655,8 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
         }
 
         let cycle_report = paper_cycle::run_cycle(PaperCycleInput {
-            runtime_bootstrap: input.runtime_bootstrap.clone(),
-            config_path: input.config_path,
+            effective_config: input.effective_config.clone(),
+            runtime_bootstrap: current_runtime_bootstrap.clone(),
             live: input.live,
             paper_db: working_paper_db.path(),
             candles_db: input.candles_db,
@@ -650,6 +677,7 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
         emitted_due_idle_warning = false;
         write_status_snapshot(
             &input,
+            &current_runtime_bootstrap,
             &lock_path,
             &manifest_state,
             StatusSnapshot {
@@ -670,9 +698,10 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
     }
 
     let manifest_symbols = manifest_state.current_symbols();
+    let final_runtime_bootstrap = resolve_runtime_bootstrap_for_symbols(&input, &manifest_symbols)?;
     let final_context = paper_loop::inspect_loop_context(
-        &input.runtime_bootstrap,
-        input.config_path,
+        &final_runtime_bootstrap,
+        &input.effective_config,
         input.live,
         working_paper_db.path(),
         input.candles_db,
@@ -708,7 +737,7 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
         executed_steps: steps.len(),
         follow: true,
         idle_polls,
-        runtime_bootstrap: input.runtime_bootstrap.clone(),
+        runtime_bootstrap: final_runtime_bootstrap.clone(),
         steps,
         stop_requested,
         warnings,
@@ -719,6 +748,7 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
     let stop_requested = loop_report.stop_requested || stop_flag.load(Ordering::SeqCst);
     write_status_snapshot(
         &input,
+        &final_runtime_bootstrap,
         &lock_path,
         &manifest_state,
         StatusSnapshot {
@@ -757,7 +787,7 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
         stopped_at_ms,
         stop_requested,
         dry_run: input.dry_run,
-        runtime_bootstrap: input.runtime_bootstrap,
+        runtime_bootstrap: final_runtime_bootstrap,
         watch_symbols_file: input.watch_symbols_file,
         symbols_file: manifest_state.symbols_file_display(),
         manifest_symbols,
