@@ -46,8 +46,10 @@ for path in (
     Path("/tmp/aiq-runtime-paper-manifest.json"),
     Path("/tmp/aiq-runtime-paper-manifest-resume.json"),
     Path("/tmp/aiq-runtime-paper-status-bootstrap.json"),
+    Path("/tmp/aiq-runtime-paper-service-bootstrap.json"),
     Path("/tmp/aiq-runtime-paper-bootstrap.status.json"),
     Path("/tmp/aiq-runtime-paper-status-stopped.json"),
+    Path("/tmp/aiq-runtime-paper-service-stopped.json"),
     Path("/tmp/aiq-runtime-paper-daemon.json"),
     Path("/tmp/aiq-runtime-paper-daemon.status.json"),
     Path("/tmp/aiq-runtime-snapshot-validate.json"),
@@ -252,6 +254,11 @@ AI_QUANT_DB_PATH=/tmp/aiq-runtime-paper.db \
 AI_QUANT_CANDLES_DB_PATH=/tmp/aiq-runtime-candles.db \
 AI_QUANT_SYMBOLS=ETH,SOL \
 cargo run -q -p aiq-runtime -- paper status --status-path /tmp/aiq-runtime-paper-bootstrap.status.json --json >/tmp/aiq-runtime-paper-status-bootstrap.json
+AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example \
+AI_QUANT_DB_PATH=/tmp/aiq-runtime-paper.db \
+AI_QUANT_CANDLES_DB_PATH=/tmp/aiq-runtime-candles.db \
+AI_QUANT_SYMBOLS=ETH,SOL \
+cargo run -q -p aiq-runtime -- paper service --status-path /tmp/aiq-runtime-paper-bootstrap.status.json --json >/tmp/aiq-runtime-paper-service-bootstrap.json
 cargo run -q -p aiq-runtime -- snapshot validate --path /tmp/aiq-runtime-seed-snapshot.json --json >/tmp/aiq-runtime-snapshot-validate.json
 cargo run -q -p aiq-runtime -- snapshot seed-paper --snapshot /tmp/aiq-runtime-seed-snapshot.json --target-db /tmp/aiq-runtime-paper.db --strict-replace --json >/tmp/aiq-runtime-seed-paper.json
 cargo run -q -p aiq-runtime -- snapshot seed-paper --snapshot /tmp/aiq-runtime-seed-snapshot.json --target-db /tmp/aiq-runtime-paper-loop.db --strict-replace --json >/tmp/aiq-runtime-seed-paper-loop.json
@@ -265,6 +272,7 @@ cargo run -q -p aiq-runtime -- paper loop --db /tmp/aiq-runtime-paper-loop.db --
 cargo run -q -p aiq-runtime -- paper loop --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --follow --idle-sleep-ms 1 --max-idle-polls 1 --max-steps 1 --json >/tmp/aiq-runtime-paper-loop-follow.json
 cargo run -q -p aiq-runtime -- paper daemon --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --status-path /tmp/aiq-runtime-paper-daemon.status.json --idle-sleep-ms 1 --max-idle-polls 1 --json >/tmp/aiq-runtime-paper-daemon.json
 cargo run -q -p aiq-runtime -- paper status --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --status-path /tmp/aiq-runtime-paper-daemon.status.json --json >/tmp/aiq-runtime-paper-status-stopped.json
+cargo run -q -p aiq-runtime -- paper service --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --status-path /tmp/aiq-runtime-paper-daemon.status.json --json >/tmp/aiq-runtime-paper-service-stopped.json
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example \
 AI_QUANT_DB_PATH=/tmp/aiq-runtime-paper-loop.db \
 AI_QUANT_CANDLES_DB_PATH=/tmp/aiq-runtime-candles.db \
@@ -330,6 +338,9 @@ assert "--status-path" in manifest["daemon_command"]
 status_bootstrap = json.loads(Path("/tmp/aiq-runtime-paper-status-bootstrap.json").read_text(encoding="utf-8"))
 assert status_bootstrap["service_state"] == "bootstrap_required"
 assert status_bootstrap["status_file_present"] is False
+service_bootstrap = json.loads(Path("/tmp/aiq-runtime-paper-service-bootstrap.json").read_text(encoding="utf-8"))
+assert service_bootstrap["desired_action"] == "hold"
+assert "start-step-close-ts-ms" in service_bootstrap["action_reason"]
 manifest_resume = json.loads(Path("/tmp/aiq-runtime-paper-manifest-resume.json").read_text(encoding="utf-8"))
 assert manifest_resume["resume"]["launch_state"] == "caught_up_idle"
 assert manifest_resume["resume"]["launch_ready"] is True
@@ -339,6 +350,10 @@ status_stopped = json.loads(Path("/tmp/aiq-runtime-paper-status-stopped.json").r
 assert status_stopped["service_state"] == "stopped"
 assert status_stopped["status_file_present"] is True
 assert status_stopped["daemon_status"]["running"] is False
+service_stopped = json.loads(Path("/tmp/aiq-runtime-paper-service-stopped.json").read_text(encoding="utf-8"))
+assert service_stopped["desired_action"] == "start"
+assert service_stopped["status"]["service_state"] == "stopped"
+assert service_stopped["daemon_command"][0:3] == ["aiq-runtime", "paper", "daemon"]
 PY
 
 echo "[runtime-foundation] ok"

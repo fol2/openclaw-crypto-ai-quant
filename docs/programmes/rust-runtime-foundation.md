@@ -102,6 +102,14 @@ surface:
 - derives the default `status_path` from the resolved daemon lock path when `AI_QUANT_STATUS_PATH` is unset
 - keeps the lifecycle status contract read-only with respect to trading semantics; it does not widen DB projections or claim systemd cutover
 
+The current delivered slice extends that again with a read-only Rust paper
+service action surface:
+
+- `paper service`
+- reuses the same read-only status + launch-contract view from `paper status`
+- tells later supervision whether the current lane should be held, started, restarted, or simply monitored
+- keeps the service action contract read-only with respect to daemon control; it does not perform real start/stop side effects or claim systemd cutover
+
 Python paper execution is still the active runtime path, and the opt-in Rust
 paper daemon wrapper does not change that. Python paper bootstrap is no longer
 the only continuity surface.

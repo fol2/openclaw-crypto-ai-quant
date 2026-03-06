@@ -13,6 +13,7 @@ mod paper_loop;
 mod paper_manifest;
 mod paper_run_once;
 mod paper_seed;
+mod paper_service;
 mod paper_status;
 
 #[derive(Debug, Parser)]
@@ -137,6 +138,8 @@ enum PaperCommand {
     Manifest(PaperManifestArgs),
     /// Resolve the current Rust paper daemon service state from the launch contract plus status file.
     Status(PaperStatusArgs),
+    /// Resolve the supervisor action for the current Rust paper daemon lane without mutating runtime state.
+    Service(PaperServiceArgs),
     /// Restore paper state from the DB through the Rust snapshot/bootstrap path.
     Doctor(PaperDoctorArgs),
     /// Execute one Rust paper step for a single symbol.
@@ -202,6 +205,12 @@ struct PaperStatusArgs {
     /// Optional staleness threshold for the daemon status file in milliseconds.
     #[arg(long)]
     stale_after_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct PaperServiceArgs {
+    #[command(flatten)]
+    status: PaperStatusArgs,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -646,6 +655,56 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 if !report.mismatch_reasons.is_empty() {
                     println!("mismatch_reasons:");
                     for reason in &report.mismatch_reasons {
+                        println!("  - {}", reason);
+                    }
+                }
+                if !report.warnings.is_empty() {
+                    println!("warnings:");
+                    for warning in &report.warnings {
+                        println!("  - {}", warning);
+                    }
+                }
+            }
+        }
+        PaperCommand::Service(args) => {
+            let report = paper_service::build_service(paper_service::PaperServiceInput {
+                config: args.status.manifest.config.as_deref(),
+                live: args.status.manifest.live,
+                profile: args.status.manifest.profile.as_deref(),
+                db: args.status.manifest.db.as_deref(),
+                candles_db: args.status.manifest.candles_db.as_deref(),
+                symbols: &args.status.manifest.symbols,
+                symbols_file: args.status.manifest.symbols_file.as_deref(),
+                watch_symbols_file: args.status.manifest.watch_symbols_file,
+                btc_symbol: &args.status.manifest.btc_symbol,
+                lookback_bars: args.status.manifest.lookback_bars,
+                start_step_close_ts_ms: args.status.manifest.start_step_close_ts_ms,
+                lock_path: args.status.manifest.lock_path.as_deref(),
+                status_path: args.status.manifest.status_path.as_deref(),
+                stale_after_ms: args.status.stale_after_ms,
+            })?;
+
+            if args.status.manifest.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "paper service ok: action={:?} state={:?}",
+                    report.desired_action, report.status.service_state
+                );
+                println!("action_reason: {}", report.action_reason);
+                println!("status_path: {}", report.status.manifest.status_path);
+                println!("lock_path: {}", report.status.manifest.lock_path);
+                println!(
+                    "contract_matches_status: {}",
+                    report.status.contract_matches_status
+                );
+                println!(
+                    "launch_ready: {}",
+                    report.status.manifest.resume.launch_ready
+                );
+                if !report.status.mismatch_reasons.is_empty() {
+                    println!("mismatch_reasons:");
+                    for reason in &report.status.mismatch_reasons {
                         println!("  - {}", reason);
                     }
                 }
