@@ -217,12 +217,115 @@ fn prepare_idle_fixture() -> Fixture {
     fixture
 }
 
+#[test]
+fn paper_daemon_reloads_symbols_file_after_empty_watchlist() {
+    let fixture = seed_empty_fixture();
+    let before = snapshot_db(&fixture.paper_db);
+    let symbols_file = fixture._dir.path().join("symbols.txt");
+    fs::write(&symbols_file, "").expect("empty symbols file should be created");
+
+    let child = watchlist_daemon_command(&fixture, &symbols_file)
+        .arg("--idle-sleep-ms")
+        .arg("20")
+        .arg("--max-idle-polls")
+        .arg("20")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("paper daemon watchlist reload smoke should spawn");
+
+    let child = wait_for_lock_file(child, &fixture.lock_path, Duration::from_secs(5));
+    thread::sleep(Duration::from_millis(80));
+    fs::write(&symbols_file, "ETH\n").expect("symbols file should update");
+
+    let output = wait_with_timeout(child, Duration::from_secs(5));
+    assert!(
+        output.status.success(),
+        "paper daemon should reload an empty symbols file and catch up cleanly; output:\n{}",
+        combined_output(&output)
+    );
+
+    let report = parse_json_output(&output);
+    assert_eq!(
+        report.pointer("/lock_path").and_then(Value::as_str),
+        Some(fixture.lock_path.to_string_lossy().as_ref()),
+        "paper daemon should report the acquired lock path",
+    );
+    assert_eq!(
+        report
+            .pointer("/loop_report/executed_steps")
+            .and_then(Value::as_u64),
+        Some(3),
+        "daemon should execute all due steps once the watchlist file becomes active",
+    );
+    assert!(
+        report
+            .pointer("/loop_report/idle_polls")
+            .and_then(Value::as_u64)
+            .is_some_and(|idle_polls| idle_polls >= 1),
+        "watchlist bootstrap should include at least one idle poll before symbols appear",
+    );
+    assert!(
+        report
+            .pointer("/loop_report/warnings")
+            .and_then(Value::as_array)
+            .is_some_and(|warnings| warnings.iter().any(|warning| {
+                warning
+                    .as_str()
+                    .is_some_and(|text| text.contains("no active symbols available yet"))
+            })),
+        "daemon should surface the empty-watchlist idle warning",
+    );
+    assert!(
+        report
+            .pointer("/loop_report/warnings")
+            .and_then(Value::as_array)
+            .is_some_and(|warnings| warnings.iter().any(|warning| {
+                warning
+                    .as_str()
+                    .is_some_and(|text| text.contains("reloaded symbols: ETH"))
+            })),
+        "daemon should surface the watchlist reload warning",
+    );
+    assert_eq!(
+        report
+            .pointer("/loop_report/steps/0/active_symbols/0")
+            .and_then(Value::as_str),
+        Some("ETH"),
+        "the first executed step should use the symbols loaded from the watchlist file",
+    );
+    assert_ne!(
+        before,
+        snapshot_db(&fixture.paper_db),
+        "watchlist bootstrap should mutate the paper DB once due steps execute",
+    );
+    assert!(
+        try_exclusive_lock(&fixture.lock_path).is_some(),
+        "paper daemon should release its lock after a watchlist-driven exit",
+    );
+}
+
 fn seed_fixture() -> Fixture {
     let dir = tempdir().expect("fixture tempdir should be created");
     let paper_db = dir.path().join("paper.db");
     let candles_db = dir.path().join("candles.db");
     let lock_path = dir.path().join("paper-daemon.lock");
     seed_paper_db(&paper_db);
+    seed_candles_db(&candles_db);
+    Fixture {
+        _dir: dir,
+        paper_db,
+        candles_db,
+        lock_path,
+    }
+}
+
+fn seed_empty_fixture() -> Fixture {
+    let dir = tempdir().expect("fixture tempdir should be created");
+    let paper_db = dir.path().join("paper.db");
+    let candles_db = dir.path().join("candles.db");
+    let lock_path = dir.path().join("paper-daemon.lock");
+    seed_empty_paper_db(&paper_db);
     seed_candles_db(&candles_db);
     Fixture {
         _dir: dir,
@@ -268,6 +371,27 @@ fn daemon_command(fixture: &Fixture) -> Command {
         .arg(&fixture.candles_db)
         .arg("--symbols")
         .arg("ETH")
+        .arg("--lock-path")
+        .arg(&fixture.lock_path)
+        .arg("--json");
+    command
+}
+
+fn watchlist_daemon_command(fixture: &Fixture, symbols_file: &Path) -> Command {
+    let mut command = runtime_command();
+    command
+        .arg("paper")
+        .arg("daemon")
+        .arg("--config")
+        .arg(config_path())
+        .arg("--db")
+        .arg(&fixture.paper_db)
+        .arg("--candles-db")
+        .arg(&fixture.candles_db)
+        .arg("--symbols-file")
+        .arg(symbols_file)
+        .arg("--start-step-close-ts-ms")
+        .arg(START_STEP_CLOSE_TS_MS.to_string())
         .arg("--lock-path")
         .arg(&fixture.lock_path)
         .arg("--json");
@@ -509,6 +633,64 @@ fn seed_paper_db(path: &Path) {
         [],
     )
     .expect("seed cooldown should be inserted");
+}
+
+fn seed_empty_paper_db(path: &Path) {
+    let conn = Connection::open(path).expect("paper db should open");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            symbol TEXT,
+            type TEXT,
+            action TEXT,
+            price REAL,
+            size REAL,
+            notional REAL,
+            reason TEXT,
+            reason_code TEXT,
+            confidence TEXT,
+            pnl REAL,
+            fee_usd REAL,
+            fee_token TEXT,
+            fee_rate REAL,
+            balance REAL,
+            entry_atr REAL,
+            leverage REAL,
+            margin_used REAL,
+            meta_json TEXT,
+            run_fingerprint TEXT,
+            fill_hash TEXT,
+            fill_tid INTEGER
+        );
+        CREATE TABLE position_state (
+            symbol TEXT PRIMARY KEY,
+            open_trade_id INTEGER,
+            trailing_sl REAL,
+            last_funding_time INTEGER,
+            adds_count INTEGER,
+            tp1_taken INTEGER,
+            last_add_time INTEGER,
+            entry_adx_threshold REAL,
+            updated_at TEXT
+        );
+        CREATE TABLE runtime_cooldowns (
+            symbol TEXT PRIMARY KEY,
+            last_entry_attempt_s REAL,
+            last_exit_attempt_s REAL,
+            updated_at TEXT
+        );
+        CREATE TABLE runtime_last_closes (
+            symbol TEXT PRIMARY KEY,
+            close_ts_ms INTEGER NOT NULL,
+            side TEXT NOT NULL,
+            reason TEXT,
+            updated_at TEXT NOT NULL
+        );
+        "#,
+    )
+    .expect("empty paper schema should be created");
 }
 
 fn seed_candles_db(path: &Path) {

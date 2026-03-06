@@ -40,8 +40,10 @@ cargo run -q -p aiq-runtime -- paper doctor --db <paper_fixture.db> --json
 cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-db <candles_fixture.db> --target-symbol ETH --exported-at-ms 1772676900000 --dry-run --json
 cargo run -q -p aiq-runtime -- paper loop --db <paper_fixture.db> --candles-db <candles_fixture.db> --symbols ETH --start-step-close-ts-ms 1773424200000 --max-steps 2 --dry-run --json
 cargo run -q -p aiq-runtime -- paper loop --db <paper_fixture.db> --candles-db <candles_fixture.db> --symbols ETH --follow --idle-sleep-ms 1 --max-idle-polls 1 --max-steps 1 --json
+cargo run -q -p aiq-runtime -- paper loop --db <empty_paper_fixture.db> --candles-db <candles_fixture.db> --symbols-file <watchlist_symbols.txt> --start-step-close-ts-ms 1773424200000 --follow --idle-sleep-ms 20 --max-idle-polls 10 --dry-run --json
 # Opt-in daemon wrapper smoke (paired CLI surface)
 cargo run -q -p aiq-runtime -- paper daemon --db <paper_fixture.db> --candles-db <candles_fixture.db> --symbols ETH --start-step-close-ts-ms 1773424200000 --idle-sleep-ms 1 --max-idle-polls 1 --dry-run --json
+cargo test -p aiq-runtime --test paper_daemon_smoke paper_daemon_reloads_symbols_file_after_empty_watchlist
 cargo run -q -p aiq-runtime -- paper doctor --db <paper_fixture.db> --live --json
 cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-db <candles_fixture.db> --target-symbol ETH --exported-at-ms 1772676900000 --live --dry-run --json
 ```
@@ -62,6 +64,7 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
 - `aiq-runtime paper cycle` can execute one explicit multi-symbol cycle with `--step-close-ts-ms`, record a rerun guard in `runtime_cycle_steps`, and fail closed on duplicate re-apply.
 - `aiq-runtime paper loop` can resume from prior `runtime_cycle_steps`, execute up to `--max-steps` unapplied cycle steps, and stop cleanly when the next due step exceeds the latest common candle close.
 - `paper loop --follow` can keep polling after catch-up and exit only when its idle poll budget is exhausted or a new due step becomes available.
+- `paper loop --follow` with `--symbols-file` can wait through an empty watchlist and pick up later watchlist refreshes without restarting the process.
 - the opt-in `aiq-runtime paper daemon` wrapper must reuse the same `paper loop --follow` / `paper cycle` contracts, expose lock metadata, and avoid claiming Python daemon cutover or widening DB projections.
 - multi-step `paper loop --dry-run` previews must carry forward the projected Rust paper state between iterations even though the real paper DB remains untouched.
 
@@ -73,6 +76,7 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
 - `paper cycle` validation should include one write run plus one duplicate-step rerun that hard-fails without changing `trades`, `position_state`, `runtime_cooldowns`, `runtime_last_closes`, or `runtime_cycle_steps`.
 - `paper loop` validation should include one bootstrap run on a fresh DB with `--start-step-close-ts-ms`, one follow-up resume run without the bootstrap flag, and one idle run that exits with `executed_steps == 0` because the next due step is newer than the latest common candle close.
 - follow-mode validation should prove idle polling does not mutate the DB and that `max_idle_polls` counts idle polls directly (`1` means exit on the first no-work poll) so CI catches off-by-one regressions.
+- watchlist-refresh validation should include one empty `--symbols-file` fixture that becomes non-empty during follow mode; the loop/daemon must not require a restart to pick up the new symbol set.
 - the opt-in daemon wrapper smoke may reuse that same follow-mode fixture with a dedicated `--lock-path`; it should prove the wrapper reports the chosen lock file and still exits cleanly after the configured idle poll budget.
 - `paper loop` validation should also include one gap fixture where a due `step_close_ts_ms` is missing from the candle DB; the command must fail closed instead of backfilling from an older bar and marking the gap as applied.
 - Keep fixtures deterministic: one open position, one add, one last-close marker, and one runtime cooldown marker is enough for the foundation slice.
