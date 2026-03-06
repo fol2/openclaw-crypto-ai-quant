@@ -59,6 +59,15 @@ daemon orchestration surface:
 - re-reads an optional `--symbols-file` between scheduling inspections so the Rust lane can wait on an empty watchlist and pick up later watchlist refreshes
 - long-running orchestration only; still no paper/systemd cutover
 
+The current delivered slice extends that again with a small daemon/watchlist
+ownership step:
+
+- `paper loop` and `paper daemon` re-read `--symbols-file` on each loop iteration
+- refreshed symbols affect the next eligible Rust cycle step without changing step identity
+- an initially empty symbols file is treated as an idle watchlist lane in follow mode rather than a hard startup failure
+- explicit `--symbols` are still unioned with the refreshed file contents
+- still no paper/systemd cutover
+
 Python paper execution is still the active runtime path, and the opt-in Rust
 paper daemon wrapper does not change that. Python paper bootstrap is no longer
 the only continuity surface.
