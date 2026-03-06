@@ -34,6 +34,13 @@ The current delivered slice extends that again with the first Rust-owned paper e
 - single-step paper execution reporting with optional `--exported-at-ms` pinning for reproducible artefacts
 - Rust-owned write-back of the paper projection surface for one execution cycle
 
+The current delivered slice extends that further with a repeatable Rust paper orchestration shell:
+
+- `paper cycle`
+- explicit `--step-close-ts-ms` cycle identity and rerun guard
+- multi-symbol cycle execution across explicit symbols plus open paper positions
+- still no daemon/systemd cutover
+
 Python paper execution is still the active runtime path, but Python paper bootstrap is no longer the only continuity surface.
 
 ## Runtime Contract

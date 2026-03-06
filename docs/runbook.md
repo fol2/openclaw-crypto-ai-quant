@@ -729,6 +729,33 @@ Operational expectations:
 - default write timestamps follow execution time; pass `--exported-at-ms` when you need reproducible report/write artefacts for parity debugging
 - a healthy report shows restored paper state, decision/fill counts, projected action codes, and whether DB writes were skipped or applied
 
+### Execute one repeatable Rust paper cycle
+
+Use when: you want one full repeatable Rust paper iteration across an explicit symbol set plus any already-open paper positions, without starting a daemon.
+
+```bash
+cargo run -p aiq-runtime -- \
+  paper cycle \
+  --db ./trading_engine.db \
+  --candles-db ./candles_dbs/candles_30m.db \
+  --symbols ETH,SOL \
+  --step-close-ts-ms 1773426000000 \
+  --exported-at-ms 1772676900000 \
+  --dry-run \
+  --json
+```
+
+Operational expectations:
+
+- `paper cycle` is still a shell, not a long-running daemon
+- `--step-close-ts-ms` is the repeatable cycle identity and drives decision/cooldown timestamps
+- write mode records a rerun guard in `runtime_cycle_steps`; reapplying the same step fails closed
+- explicit `--symbols` are unioned with any open paper positions so exits are never skipped
+- `BTC` may still be part of the active cycle even when it is also the anchor symbol
+- `--candles-db` must contain target bars plus the BTC anchor symbol at the resolved `engine.interval`
+- all resolved cycle symbols must share the same `engine.interval`; mixed per-symbol interval overrides fail closed
+- the write path refreshes `trades`, `position_state`, `runtime_cooldowns`, and `runtime_last_closes` inside one immediate transaction
+
 ---
 
 ## 7. Factory Stage Gate (dry -> smoke -> real)

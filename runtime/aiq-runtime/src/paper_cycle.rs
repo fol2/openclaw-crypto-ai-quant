@@ -1,0 +1,867 @@
+use aiq_runtime_core::paper::{restore_paper_state, PaperBootstrapReport};
+use aiq_runtime_core::runtime::RuntimeBootstrap;
+use anyhow::{Context, Result};
+use bt_core::config::{Confidence, StrategyConfig};
+use bt_core::decision_kernel::{self, OrderIntentKind, StrategyState};
+use chrono::Utc;
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use serde::Serialize;
+use std::collections::BTreeSet;
+use std::path::Path;
+
+use crate::paper_export;
+use crate::paper_run_once::{
+    action_codes_for_symbol, apply_decision_projection_with_tx, iso_from_ms, prepare_symbol_step,
+    PreparedSymbolStep,
+};
+
+pub struct PaperCycleInput<'a> {
+    pub runtime_bootstrap: RuntimeBootstrap,
+    pub config_path: &'a Path,
+    pub live: bool,
+    pub paper_db: &'a Path,
+    pub candles_db: &'a Path,
+    pub explicit_symbols: &'a [String],
+    pub btc_symbol: &'a str,
+    pub lookback_bars: usize,
+    pub step_close_ts_ms: i64,
+    pub exported_at_ms: Option<i64>,
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PaperCycleSymbolReport {
+    pub symbol: String,
+    pub phase: String,
+    pub score: Option<i32>,
+    pub intent_count: usize,
+    pub fill_count: usize,
+    pub action_codes: Vec<String>,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PaperCycleReport {
+    pub ok: bool,
+    pub dry_run: bool,
+    pub step_id: String,
+    pub step_close_ts_ms: i64,
+    pub snapshot_exported_at_ms: i64,
+    pub interval: String,
+    pub runtime_bootstrap: RuntimeBootstrap,
+    pub paper_bootstrap: PaperBootstrapReport,
+    pub explicit_symbols: Vec<String>,
+    pub active_symbols: Vec<String>,
+    pub candidate_count: usize,
+    pub executed_entry_count: usize,
+    pub trades_written: usize,
+    pub runtime_step_recorded: bool,
+    pub executions: Vec<PaperCycleSymbolReport>,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct EntryCandidate {
+    prepared: PreparedSymbolStep,
+    score: i32,
+}
+
+#[derive(Debug, Clone)]
+struct ExecutedStep {
+    symbol: String,
+    phase: &'static str,
+    score: Option<i32>,
+    prepared: PreparedSymbolStep,
+    pre_state: StrategyState,
+    decision: decision_kernel::DecisionResult,
+    warnings: Vec<String>,
+}
+
+pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
+    if !input.paper_db.exists() {
+        anyhow::bail!("paper db not found: {}", input.paper_db.display());
+    }
+    if !input.candles_db.exists() {
+        anyhow::bail!("candles db not found: {}", input.candles_db.display());
+    }
+    if input.step_close_ts_ms <= 0 {
+        anyhow::bail!("step_close_ts_ms must be positive");
+    }
+
+    let exported_at_ms = input
+        .exported_at_ms
+        .unwrap_or_else(|| Utc::now().timestamp_millis());
+    let snapshot = paper_export::export_paper_snapshot(input.paper_db, exported_at_ms)?;
+    let (paper_state, paper_bootstrap) =
+        restore_paper_state(&snapshot).map_err(anyhow::Error::msg)?;
+    let mut current_state = paper_state.clone().into_strategy_state();
+    let initial_positions = paper_state.positions;
+
+    let mut explicit_symbols = normalise_symbols(input.explicit_symbols);
+    let open_symbols = initial_positions.keys().cloned().collect::<Vec<_>>();
+    let mut active_symbols = BTreeSet::new();
+    active_symbols.extend(explicit_symbols.iter().cloned());
+    active_symbols.extend(open_symbols.iter().cloned());
+    if active_symbols.is_empty() {
+        anyhow::bail!("paper cycle requires explicit symbols or open paper positions");
+    }
+    explicit_symbols.sort();
+    let active_symbols = active_symbols.into_iter().collect::<Vec<_>>();
+    let base_cfg = load_symbol_config(input.config_path, "__GLOBAL__", input.live)?;
+    let max_entries = base_cfg.trade.max_entry_orders_per_loop;
+    let mut used_entry_budget = 0usize;
+
+    let mut interval: Option<String> = None;
+    let mut candidate_entries = Vec::new();
+    let mut executed_steps = Vec::new();
+    let mut warnings = Vec::new();
+    let mut errors = Vec::new();
+
+    for symbol in &active_symbols {
+        let config = load_symbol_config(input.config_path, symbol, input.live)?;
+        match &interval {
+            Some(current_interval) if current_interval != &config.engine.interval => {
+                anyhow::bail!(
+                    "paper cycle requires a shared interval; {} resolved to {} but prior symbols use {}",
+                    symbol,
+                    config.engine.interval,
+                    current_interval
+                );
+            }
+            None => interval = Some(config.engine.interval.clone()),
+            _ => {}
+        }
+        let prepared = prepare_symbol_step(
+            &config,
+            initial_positions.get(symbol),
+            input.candles_db,
+            symbol,
+            &input.btc_symbol.trim().to_ascii_uppercase(),
+            input.lookback_bars,
+            Some(input.step_close_ts_ms),
+        )?;
+        let pre_state = current_state.clone();
+        let (decision, execution_plan) = crate::paper_run_once::execute_prepared_symbol_step(
+            &pre_state,
+            &prepared,
+            input.step_close_ts_ms,
+        );
+
+        if pre_state.positions.contains_key(symbol) {
+            if decision_consumes_entry_budget(&decision) && used_entry_budget >= max_entries {
+                let (budgeted_decision, mut budgeted_plan) =
+                    crate::paper_run_once::execute_prepared_symbol_step_with_allow_pyramid_override(
+                        &pre_state,
+                        &prepared,
+                        input.step_close_ts_ms,
+                        Some(false),
+                    );
+                let budget_warning = format!(
+                    "skip open-position entry for {}: max_entry_orders_per_loop {} exhausted",
+                    symbol, max_entries
+                );
+                warnings.push(budget_warning.clone());
+                budgeted_plan.warnings.push(budget_warning);
+                errors.extend(budgeted_decision.diagnostics.errors.clone());
+                warnings.extend(budgeted_plan.warnings.clone());
+                if !budgeted_decision.intents.is_empty() || !budgeted_decision.fills.is_empty() {
+                    current_state = budgeted_decision.state.clone();
+                    executed_steps.push(ExecutedStep {
+                        symbol: symbol.clone(),
+                        phase: "open_position",
+                        score: None,
+                        prepared,
+                        pre_state,
+                        decision: budgeted_decision,
+                        warnings: budgeted_plan.warnings,
+                    });
+                }
+                continue;
+            }
+            warnings.extend(execution_plan.warnings.clone());
+            errors.extend(decision.diagnostics.errors.clone());
+            if decision_consumes_entry_budget(&decision) {
+                used_entry_budget += 1;
+            }
+            current_state = decision.state.clone();
+            executed_steps.push(ExecutedStep {
+                symbol: symbol.clone(),
+                phase: "open_position",
+                score: None,
+                prepared,
+                pre_state,
+                decision,
+                warnings: execution_plan.warnings,
+            });
+            continue;
+        }
+
+        if decision
+            .intents
+            .iter()
+            .any(|intent| matches!(intent.kind, OrderIntentKind::Open | OrderIntentKind::Add))
+        {
+            let score = entry_score(prepared.execution_metadata.confidence, prepared.snap.adx);
+            candidate_entries.push(EntryCandidate { prepared, score });
+        } else {
+            warnings.extend(execution_plan.warnings);
+            errors.extend(decision.diagnostics.errors);
+        }
+    }
+
+    candidate_entries.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.prepared.symbol.cmp(&right.prepared.symbol))
+    });
+    let candidate_count = candidate_entries.len();
+    let mut executed_entry_count = 0usize;
+
+    for candidate in candidate_entries {
+        if used_entry_budget >= max_entries {
+            warnings.push(format!(
+                "paper cycle entry limit reached at {} candidate(s)",
+                max_entries
+            ));
+            break;
+        }
+        let pre_state = current_state.clone();
+        let (decision, execution_plan) =
+            crate::paper_run_once::execute_prepared_symbol_step(&pre_state, &candidate.prepared, input.step_close_ts_ms);
+        warnings.extend(execution_plan.warnings.clone());
+        errors.extend(decision.diagnostics.errors.clone());
+        if decision
+            .intents
+            .iter()
+            .any(|intent| matches!(intent.kind, OrderIntentKind::Open | OrderIntentKind::Add))
+        {
+            current_state = decision.state.clone();
+            used_entry_budget += 1;
+            executed_entry_count += 1;
+            executed_steps.push(ExecutedStep {
+                symbol: candidate.prepared.symbol.clone(),
+                phase: "ranked_entry",
+                score: Some(candidate.score),
+                prepared: candidate.prepared,
+                pre_state,
+                decision,
+                warnings: execution_plan.warnings,
+            });
+        }
+    }
+
+    let step_id = derive_step_id(
+        &input.runtime_bootstrap.config_fingerprint,
+        interval.as_deref().unwrap_or("unknown"),
+        input.step_close_ts_ms,
+        input.live,
+    );
+
+    let mut trades_written = 0usize;
+    let mut runtime_step_recorded = false;
+    if !input.dry_run {
+        let mut conn = Connection::open(input.paper_db)?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_cycle_tables(&tx)?;
+        if cycle_step_exists(&tx, &step_id)? {
+            anyhow::bail!("paper cycle step already applied: {}", step_id);
+        }
+
+        for execution in &executed_steps {
+            let (written, _, _) = apply_decision_projection_with_tx(
+                &tx,
+                &execution.symbol,
+                &execution.pre_state,
+                execution.prepared.prior_position.as_ref(),
+                &execution.decision.state,
+                &execution.decision.intents,
+                &execution.decision.fills,
+                &execution.prepared.snap,
+                execution.prepared.execution_metadata,
+                input.step_close_ts_ms,
+            )?;
+            trades_written += written;
+        }
+
+        record_cycle_step(
+            &tx,
+            &step_id,
+            input.step_close_ts_ms,
+            interval.as_deref().unwrap_or("unknown"),
+            &active_symbols,
+            snapshot.exported_at_ms,
+            executed_steps.len(),
+            trades_written,
+        )?;
+        tx.commit()?;
+        runtime_step_recorded = true;
+    }
+
+    let executions = executed_steps
+        .into_iter()
+        .map(|execution| PaperCycleSymbolReport {
+            symbol: execution.symbol.clone(),
+            phase: execution.phase.to_string(),
+            score: execution.score,
+            intent_count: execution.decision.intents.len(),
+            fill_count: execution.decision.fills.len(),
+            action_codes: action_codes_for_symbol(
+                &execution.symbol,
+                &execution.pre_state,
+                &execution.decision.intents,
+                &execution.decision.fills,
+            ),
+            warnings: execution
+                .warnings
+                .into_iter()
+                .chain(execution.decision.diagnostics.warnings)
+                .collect(),
+            errors: execution.decision.diagnostics.errors,
+        })
+        .collect::<Vec<_>>();
+
+    Ok(PaperCycleReport {
+        ok: errors.is_empty(),
+        dry_run: input.dry_run,
+        step_id,
+        step_close_ts_ms: input.step_close_ts_ms,
+        snapshot_exported_at_ms: snapshot.exported_at_ms,
+        interval: interval.unwrap_or_else(|| "unknown".to_string()),
+        runtime_bootstrap: input.runtime_bootstrap,
+        paper_bootstrap,
+        explicit_symbols,
+        active_symbols,
+        candidate_count,
+        executed_entry_count,
+        trades_written,
+        runtime_step_recorded,
+        executions,
+        warnings,
+        errors,
+    })
+}
+
+fn normalise_symbols(raw: &[String]) -> Vec<String> {
+    let mut symbols = raw
+        .iter()
+        .map(|symbol| symbol.trim().to_ascii_uppercase())
+        .filter(|symbol| !symbol.is_empty())
+        .collect::<Vec<_>>();
+    symbols.sort();
+    symbols.dedup();
+    symbols
+}
+
+fn load_symbol_config(config_path: &Path, symbol: &str, live: bool) -> Result<StrategyConfig> {
+    bt_core::config::load_config_checked(
+        config_path
+            .to_str()
+            .context("config path must be valid UTF-8")?,
+        if symbol == "__GLOBAL__" { None } else { Some(symbol) },
+        live,
+    )
+    .map_err(anyhow::Error::msg)
+}
+
+fn entry_score(confidence: Confidence, adx: f64) -> i32 {
+    let conf_rank = match confidence {
+        Confidence::Low => 0,
+        Confidence::Medium => 1,
+        Confidence::High => 2,
+    };
+    conf_rank * 100 + adx as i32
+}
+
+fn derive_step_id(
+    config_fingerprint: &str,
+    interval: &str,
+    step_close_ts_ms: i64,
+    live: bool,
+) -> String {
+    format!(
+        "paper_cycle:{}:{}:{}:{}",
+        interval,
+        step_close_ts_ms,
+        if live { "live" } else { "paper" },
+        config_fingerprint,
+    )
+}
+
+fn decision_consumes_entry_budget(decision: &decision_kernel::DecisionResult) -> bool {
+    decision
+        .intents
+        .iter()
+        .any(|intent| matches!(intent.kind, OrderIntentKind::Open | OrderIntentKind::Add))
+}
+
+fn ensure_cycle_tables(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS runtime_cycle_steps (
+            step_id TEXT PRIMARY KEY,
+            step_close_ts_ms INTEGER NOT NULL,
+            interval TEXT NOT NULL,
+            symbols_json TEXT NOT NULL,
+            snapshot_exported_at_ms INTEGER NOT NULL,
+            execution_count INTEGER NOT NULL,
+            trades_written INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        "#,
+    )?;
+    Ok(())
+}
+
+fn cycle_step_exists(tx: &rusqlite::Transaction<'_>, step_id: &str) -> Result<bool> {
+    let row = tx
+        .query_row(
+            "SELECT 1 FROM runtime_cycle_steps WHERE step_id = ?1 LIMIT 1",
+            [step_id],
+            |_| Ok(()),
+        )
+        .optional()?;
+    Ok(row.is_some())
+}
+
+fn record_cycle_step(
+    tx: &rusqlite::Transaction<'_>,
+    step_id: &str,
+    step_close_ts_ms: i64,
+    interval: &str,
+    active_symbols: &[String],
+    snapshot_exported_at_ms: i64,
+    execution_count: usize,
+    trades_written: usize,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO runtime_cycle_steps (step_id, step_close_ts_ms, interval, symbols_json, snapshot_exported_at_ms, execution_count, trades_written, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            step_id,
+            step_close_ts_ms,
+            interval,
+            serde_json::to_string(active_symbols)?,
+            snapshot_exported_at_ms,
+            execution_count as i64,
+            trades_written as i64,
+            iso_from_ms(snapshot_exported_at_ms),
+        ],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aiq_runtime_core::runtime::{build_bootstrap, RuntimeMode};
+    use rusqlite::Connection;
+    use tempfile::tempdir;
+
+    const FIXED_STEP_CLOSE_TS_MS: i64 = 1_773_424_200_000;
+    const FIXED_EXPORTED_AT_MS: i64 = 1_772_676_900_000;
+
+    fn seed_paper_db(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                symbol TEXT,
+                type TEXT,
+                action TEXT,
+                price REAL,
+                size REAL,
+                notional REAL,
+                reason TEXT,
+                reason_code TEXT,
+                confidence TEXT,
+                pnl REAL,
+                fee_usd REAL,
+                fee_token TEXT,
+                fee_rate REAL,
+                balance REAL,
+                entry_atr REAL,
+                leverage REAL,
+                margin_used REAL,
+                meta_json TEXT,
+                run_fingerprint TEXT,
+                fill_hash TEXT,
+                fill_tid INTEGER
+            );
+            CREATE TABLE position_state (
+                symbol TEXT PRIMARY KEY,
+                open_trade_id INTEGER,
+                trailing_sl REAL,
+                last_funding_time INTEGER,
+                adds_count INTEGER,
+                tp1_taken INTEGER,
+                last_add_time INTEGER,
+                entry_adx_threshold REAL,
+                updated_at TEXT
+            );
+            CREATE TABLE runtime_cooldowns (
+                symbol TEXT PRIMARY KEY,
+                last_entry_attempt_s REAL,
+                last_exit_attempt_s REAL,
+                updated_at TEXT
+            );
+            CREATE TABLE runtime_last_closes (
+                symbol TEXT PRIMARY KEY,
+                close_ts_ms INTEGER NOT NULL,
+                side TEXT NOT NULL,
+                reason TEXT,
+                updated_at TEXT NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO trades (timestamp,symbol,action,type,price,size,notional,reason,confidence,balance,pnl,fee_usd,fee_rate,entry_atr,leverage,margin_used,meta_json)
+             VALUES ('2026-03-05T10:00:00+00:00','ETH','OPEN','LONG',100.0,1.0,100.0,'seed','medium',1000.0,0.0,0.0,0.0,5.0,3.0,33.3,'{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO position_state VALUES ('ETH',1,95.0,1772676500000,0,0,1772676600000,22.0,'2026-03-05T10:08:20+00:00')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO runtime_cooldowns VALUES ('ETH',1772676500.0,1772676550.0,'2026-03-05T10:15:00+00:00')",
+            [],
+        )
+        .unwrap();
+    }
+
+    fn seed_btc_paper_db(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                symbol TEXT,
+                type TEXT,
+                action TEXT,
+                price REAL,
+                size REAL,
+                notional REAL,
+                reason TEXT,
+                reason_code TEXT,
+                confidence TEXT,
+                pnl REAL,
+                fee_usd REAL,
+                fee_token TEXT,
+                fee_rate REAL,
+                balance REAL,
+                entry_atr REAL,
+                leverage REAL,
+                margin_used REAL,
+                meta_json TEXT,
+                run_fingerprint TEXT,
+                fill_hash TEXT,
+                fill_tid INTEGER
+            );
+            CREATE TABLE position_state (
+                symbol TEXT PRIMARY KEY,
+                open_trade_id INTEGER,
+                trailing_sl REAL,
+                last_funding_time INTEGER,
+                adds_count INTEGER,
+                tp1_taken INTEGER,
+                last_add_time INTEGER,
+                entry_adx_threshold REAL,
+                updated_at TEXT
+            );
+            CREATE TABLE runtime_cooldowns (
+                symbol TEXT PRIMARY KEY,
+                last_entry_attempt_s REAL,
+                last_exit_attempt_s REAL,
+                updated_at TEXT
+            );
+            CREATE TABLE runtime_last_closes (
+                symbol TEXT PRIMARY KEY,
+                close_ts_ms INTEGER NOT NULL,
+                side TEXT NOT NULL,
+                reason TEXT,
+                updated_at TEXT NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO trades (timestamp,symbol,action,type,price,size,notional,reason,confidence,balance,pnl,fee_usd,fee_rate,entry_atr,leverage,margin_used,meta_json)
+             VALUES ('2026-03-05T10:00:00+00:00','BTC','OPEN','LONG',50000.0,0.02,1000.0,'seed','medium',1000.0,0.0,0.0,0.0,1000.0,3.0,333.3,'{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO position_state VALUES ('BTC',1,49000.0,1772676500000,0,0,0,22.0,'2026-03-05T10:08:20+00:00')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO runtime_cooldowns VALUES ('BTC',1772676500.0,1772676550.0,'2026-03-05T10:15:00+00:00')",
+            [],
+        )
+        .unwrap();
+    }
+
+    fn seed_candles_db(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE candles (
+                symbol TEXT,
+                interval TEXT,
+                t INTEGER,
+                t_close INTEGER,
+                o REAL,
+                h REAL,
+                l REAL,
+                c REAL,
+                v REAL,
+                n INTEGER
+            );
+            "#,
+        )
+        .unwrap();
+
+        let base = 1_772_670_000_000_i64;
+        for (symbol, start, drift) in [("ETH", 100.0, 0.25), ("BTC", 50_000.0, 20.0)] {
+            let mut price: f64 = start;
+            for idx in 0..420_i64 {
+                let t = base + (idx * 1_800_000);
+                let open: f64 = price;
+                let close: f64 = price + drift;
+                let high = open.max(close) + 0.5;
+                let low = open.min(close) - 0.5;
+                let volume = 1000.0 + idx as f64;
+                conn.execute(
+                    "INSERT INTO candles VALUES (?1, '30m', ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)",
+                    (symbol, t, t + 1_800_000, open, high, low, close, volume),
+                )
+                .unwrap();
+                price = close;
+            }
+        }
+    }
+
+    fn load_cfg(symbol: Option<&str>) -> StrategyConfig {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        bt_core::config::load_config_checked(
+            repo_root
+                .join("config/strategy_overrides.yaml.example")
+                .to_str()
+                .unwrap(),
+            symbol,
+            false,
+        )
+        .unwrap()
+    }
+
+    fn config_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("config/strategy_overrides.yaml.example")
+    }
+
+    #[test]
+    fn cycle_rejects_duplicate_step_replay() {
+        let dir = tempdir().unwrap();
+        let paper_db = dir.path().join("paper.db");
+        let candles_db = dir.path().join("candles.db");
+        seed_paper_db(&paper_db);
+        seed_candles_db(&candles_db);
+
+        let base_cfg = load_cfg(None);
+        let runtime_bootstrap = build_bootstrap(&base_cfg, RuntimeMode::Paper, None).unwrap();
+        let cfg_path = config_path();
+        let input = PaperCycleInput {
+            runtime_bootstrap,
+            config_path: &cfg_path,
+            live: false,
+            paper_db: &paper_db,
+            candles_db: &candles_db,
+            explicit_symbols: &["ETH".to_string()],
+            btc_symbol: "BTC",
+            lookback_bars: 400,
+            step_close_ts_ms: FIXED_STEP_CLOSE_TS_MS,
+            exported_at_ms: Some(FIXED_EXPORTED_AT_MS),
+            dry_run: false,
+        };
+
+        let first = run_cycle(input).unwrap();
+        assert!(first.runtime_step_recorded);
+        assert!(first.trades_written > 0);
+        let conn = Connection::open(&paper_db).unwrap();
+        let before_counts = (
+            conn.query_row("SELECT COUNT(*) FROM trades", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            conn.query_row("SELECT COUNT(*) FROM runtime_cycle_steps", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        );
+        conn.close().unwrap();
+
+        let runtime_bootstrap = build_bootstrap(&base_cfg, RuntimeMode::Paper, None).unwrap();
+        let cfg_path = config_path();
+        let err = run_cycle(PaperCycleInput {
+            runtime_bootstrap,
+            config_path: &cfg_path,
+            live: false,
+            paper_db: &paper_db,
+            candles_db: &candles_db,
+            explicit_symbols: &["ETH".to_string(), "BTC".to_string()],
+            btc_symbol: "BTC",
+            lookback_bars: 400,
+            step_close_ts_ms: FIXED_STEP_CLOSE_TS_MS,
+            exported_at_ms: Some(FIXED_EXPORTED_AT_MS),
+            dry_run: false,
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("already applied"));
+        let conn = Connection::open(&paper_db).unwrap();
+        let after_counts = (
+            conn.query_row("SELECT COUNT(*) FROM trades", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            conn.query_row("SELECT COUNT(*) FROM runtime_cycle_steps", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        );
+        assert_eq!(before_counts, after_counts);
+    }
+
+    #[test]
+    fn cycle_persists_step_time_not_exported_time() {
+        let dir = tempdir().unwrap();
+        let paper_db = dir.path().join("paper.db");
+        let candles_db = dir.path().join("candles.db");
+        seed_paper_db(&paper_db);
+        seed_candles_db(&candles_db);
+
+        let base_cfg = load_cfg(None);
+        let runtime_bootstrap = build_bootstrap(&base_cfg, RuntimeMode::Paper, None).unwrap();
+        let cfg_path = config_path();
+        let report = run_cycle(PaperCycleInput {
+            runtime_bootstrap,
+            config_path: &cfg_path,
+            live: false,
+            paper_db: &paper_db,
+            candles_db: &candles_db,
+            explicit_symbols: &["ETH".to_string()],
+            btc_symbol: "BTC",
+            lookback_bars: 400,
+            step_close_ts_ms: FIXED_STEP_CLOSE_TS_MS,
+            exported_at_ms: Some(FIXED_EXPORTED_AT_MS),
+            dry_run: false,
+        })
+        .unwrap();
+
+        assert_eq!(report.step_close_ts_ms, FIXED_STEP_CLOSE_TS_MS);
+        let conn = Connection::open(&paper_db).unwrap();
+        let latest_trade_ts: String = conn
+            .query_row(
+                "SELECT timestamp FROM trades WHERE symbol = 'ETH' ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(latest_trade_ts, iso_from_ms(FIXED_STEP_CLOSE_TS_MS));
+        let last_exit_attempt_s: Option<f64> = conn
+            .query_row(
+                "SELECT last_exit_attempt_s FROM runtime_cooldowns WHERE symbol = 'ETH'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(last_exit_attempt_s, Some((FIXED_STEP_CLOSE_TS_MS as f64) / 1000.0));
+    }
+
+    #[test]
+    fn cycle_dry_run_keeps_db_unchanged() {
+        let dir = tempdir().unwrap();
+        let paper_db = dir.path().join("paper.db");
+        let candles_db = dir.path().join("candles.db");
+        seed_paper_db(&paper_db);
+        seed_candles_db(&candles_db);
+
+        let conn = Connection::open(&paper_db).unwrap();
+        let before_trades: i64 = conn
+            .query_row("SELECT COUNT(*) FROM trades", [], |row| row.get(0))
+            .unwrap();
+        conn.close().unwrap();
+
+        let base_cfg = load_cfg(None);
+        let runtime_bootstrap = build_bootstrap(&base_cfg, RuntimeMode::Paper, None).unwrap();
+        let cfg_path = config_path();
+        let report = run_cycle(PaperCycleInput {
+            runtime_bootstrap,
+            config_path: &cfg_path,
+            live: false,
+            paper_db: &paper_db,
+            candles_db: &candles_db,
+            explicit_symbols: &["ETH".to_string()],
+            btc_symbol: "BTC",
+            lookback_bars: 400,
+            step_close_ts_ms: FIXED_STEP_CLOSE_TS_MS,
+            exported_at_ms: Some(FIXED_EXPORTED_AT_MS),
+            dry_run: true,
+        })
+        .unwrap();
+
+        assert!(report.dry_run);
+        assert_eq!(report.trades_written, 0);
+        let conn = Connection::open(&paper_db).unwrap();
+        let after_trades: i64 = conn
+            .query_row("SELECT COUNT(*) FROM trades", [], |row| row.get(0))
+            .unwrap();
+        let step_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'runtime_cycle_steps'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(before_trades, after_trades);
+        assert_eq!(step_count, 0);
+    }
+
+    #[test]
+    fn cycle_includes_open_btc_positions_even_when_btc_is_anchor() {
+        let dir = tempdir().unwrap();
+        let paper_db = dir.path().join("paper.db");
+        let candles_db = dir.path().join("candles.db");
+        seed_btc_paper_db(&paper_db);
+        seed_candles_db(&candles_db);
+
+        let base_cfg = load_cfg(None);
+        let runtime_bootstrap = build_bootstrap(&base_cfg, RuntimeMode::Paper, None).unwrap();
+        let cfg_path = config_path();
+        let report = run_cycle(PaperCycleInput {
+            runtime_bootstrap,
+            config_path: &cfg_path,
+            live: false,
+            paper_db: &paper_db,
+            candles_db: &candles_db,
+            explicit_symbols: &[],
+            btc_symbol: "BTC",
+            lookback_bars: 400,
+            step_close_ts_ms: FIXED_STEP_CLOSE_TS_MS,
+            exported_at_ms: Some(FIXED_EXPORTED_AT_MS),
+            dry_run: true,
+        })
+        .unwrap();
+
+        assert!(report.active_symbols.iter().any(|symbol| symbol == "BTC"));
+    }
+}

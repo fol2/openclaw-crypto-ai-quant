@@ -119,9 +119,15 @@ cargo run --manifest-path Cargo.toml -p aiq-runtime -- \
 ## Paper Runtime Execution Rules
 
 - `paper run-once` must start from the same restored state that `paper doctor` reports.
-- The command is single-shot only in this phase; long-running paper loops remain out of scope.
+- `paper cycle` must also start from the same restored state, but it executes one explicit multi-symbol cycle with a required `--step-close-ts-ms`.
+- Both commands remain shell surfaces only in this phase; long-running paper loops remain out of scope.
 - Default write timestamps follow execution time for DB parity; pass `--exported-at-ms` when you need reproducible artefacts.
-- DB projection after a successful run-once step is limited to the Rust-owned paper projection surface for this phase.
+- DB projection after a successful `paper run-once` or `paper cycle` step is limited to the Rust-owned paper projection surface for this phase:
+  - `trades`
+  - `position_state`
+  - `runtime_cooldowns`
+  - `runtime_last_closes`
+- `paper cycle` also records a rerun guard row in `runtime_cycle_steps` and fails closed if the same step identity is applied twice.
 
 ## Backward Compatibility
 
