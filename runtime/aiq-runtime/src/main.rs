@@ -10,6 +10,7 @@ mod paper_cycle;
 mod paper_daemon;
 mod paper_export;
 mod paper_loop;
+mod paper_manifest;
 mod paper_run_once;
 mod paper_seed;
 
@@ -131,6 +132,8 @@ enum SnapshotCommand {
 
 #[derive(Debug, Subcommand)]
 enum PaperCommand {
+    /// Resolve the Rust paper daemon service/env contract without executing any steps.
+    Manifest(PaperManifestArgs),
     /// Restore paper state from the DB through the Rust snapshot/bootstrap path.
     Doctor(PaperDoctorArgs),
     /// Execute one Rust paper step for a single symbol.
@@ -141,6 +144,43 @@ enum PaperCommand {
     Loop(PaperLoopArgs),
     /// Execute an opt-in long-running Rust paper daemon with scheduler-owned watchlist orchestration.
     Daemon(PaperDaemonArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+struct PaperManifestArgs {
+    /// Optional YAML config path override. Falls back to AI_QUANT_STRATEGY_YAML or strategy_overrides.yaml.
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Apply the live overlay when loading config.
+    #[arg(long)]
+    live: bool,
+    /// Override the runtime pipeline profile.
+    #[arg(long)]
+    profile: Option<String>,
+    /// Optional paper DB override. Falls back to AI_QUANT_DB_PATH or trading_engine.db.
+    #[arg(long)]
+    db: Option<PathBuf>,
+    /// Optional candle DB override. Falls back to AI_QUANT_CANDLES_DB_PATH or AI_QUANT_CANDLES_DB_DIR + interval.
+    #[arg(long)]
+    candles_db: Option<PathBuf>,
+    /// Explicit symbol list override (comma-delimited). Falls back to AI_QUANT_SYMBOLS when empty.
+    #[arg(long, value_delimiter = ',')]
+    symbols: Vec<String>,
+    /// Optional file containing one symbol per line. Falls back to AI_QUANT_SYMBOLS_FILE.
+    #[arg(long)]
+    symbols_file: Option<PathBuf>,
+    /// BTC anchor symbol for alignment context.
+    #[arg(long, default_value = "BTC")]
+    btc_symbol: String,
+    /// Optional lookback override. Falls back to AI_QUANT_LOOKBACK_BARS or 400.
+    #[arg(long)]
+    lookback_bars: Option<usize>,
+    /// Optional daemon lock path override. Falls back to AI_QUANT_LOCK_PATH or the default paper lock.
+    #[arg(long)]
+    lock_path: Option<PathBuf>,
+    /// Emit machine-readable JSON instead of a human summary.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -479,6 +519,45 @@ fn run_snapshot(command: SnapshotCommand) -> Result<()> {
 
 fn run_paper(command: PaperCommand) -> Result<()> {
     match command {
+        PaperCommand::Manifest(args) => {
+            let report = paper_manifest::build_manifest(paper_manifest::PaperManifestInput {
+                config: args.config.as_deref(),
+                live: args.live,
+                profile: args.profile.as_deref(),
+                db: args.db.as_deref(),
+                candles_db: args.candles_db.as_deref(),
+                symbols: &args.symbols,
+                symbols_file: args.symbols_file.as_deref(),
+                btc_symbol: &args.btc_symbol,
+                lookback_bars: args.lookback_bars,
+                lock_path: args.lock_path.as_deref(),
+            })?;
+
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "paper manifest ok: profile={}",
+                    report.runtime_bootstrap.pipeline.profile
+                );
+                println!("config_path: {}", report.config_path);
+                println!("paper_db: {}", report.paper_db);
+                println!("candles_db: {}", report.candles_db);
+                println!("interval: {}", report.interval);
+                println!("lookback_bars: {}", report.lookback_bars);
+                println!("symbols: {}", report.symbols.join(","));
+                if let Some(symbols_file) = report.symbols_file.as_deref() {
+                    println!("symbols_file: {}", symbols_file);
+                }
+                println!("lock_path: {}", report.lock_path);
+                if !report.warnings.is_empty() {
+                    println!("warnings:");
+                    for warning in &report.warnings {
+                        println!("  - {}", warning);
+                    }
+                }
+            }
+        }
         PaperCommand::Doctor(args) => {
             let config_path = resolve_config_path(&args.common.paper.config);
             let config = bt_core::config::load_config_checked(

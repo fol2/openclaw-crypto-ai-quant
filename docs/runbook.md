@@ -839,6 +839,30 @@ Operational expectations:
 - `--dry-run` remains the safest bring-up path while the surface is still opt-in
 - if you only need bounded catch-up or a short follow poll budget, use `paper loop` directly instead of `paper daemon`
 
+### Inspect the Rust paper daemon service manifest
+
+Use when: you want to verify how the current `AI_QUANT_*` service env would map
+onto the Rust paper daemon before attempting any systemd cutover.
+
+```bash
+AI_QUANT_STRATEGY_YAML=./config/strategy_overrides.paper1.yaml \
+AI_QUANT_DB_PATH=./trading_engine_v8_paper1.db \
+AI_QUANT_CANDLES_DB_DIR=./candles_dbs \
+AI_QUANT_SYMBOLS=BTC,ETH,SOL \
+AI_QUANT_LOOKBACK_BARS=200 \
+cargo run -p aiq-runtime -- \
+  paper manifest \
+  --json
+```
+
+Manifest expectations:
+
+- `paper manifest` is read-only; it never writes the paper DB or starts follow-mode polling
+- `--config`, `--db`, `--candles-db`, `--symbols`, `--symbols-file`, `--lookback-bars`, and `--lock-path` may override the corresponding env-derived values
+- if `AI_QUANT_CANDLES_DB_PATH` is unset, the manifest derives the candle DB path from `AI_QUANT_CANDLES_DB_DIR` plus the resolved config interval
+- if `AI_QUANT_INTERVAL` disagrees with the resolved config interval, the manifest returns a warning instead of silently changing the Rust runtime interval
+- the emitted `daemon_command` is the exact Rust paper daemon launch contract for the current env/CLI combination; it is intended for operator review, not as evidence of cutover
+
 ---
 
 ## 7. Factory Stage Gate (dry -> smoke -> real)
