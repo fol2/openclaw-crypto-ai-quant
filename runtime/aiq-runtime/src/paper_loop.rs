@@ -96,6 +96,7 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
     let mut latest_common_close_ts_ms = None;
     let mut next_due_step_close_ts_ms = None;
     let mut idle_polls = 0usize;
+    let mut idle_notice_emitted = false;
 
     loop {
         if steps.len() >= input.max_steps {
@@ -152,18 +153,19 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
         };
         next_due_step_close_ts_ms = Some(candidate_next_due);
         if candidate_next_due > context.latest_common_close_ts_ms {
-            if steps.is_empty() {
+            if steps.is_empty() && !idle_notice_emitted {
                 warnings.push(format!(
                     "paper loop idle: next due step {} is newer than latest common close {}",
                     candidate_next_due, context.latest_common_close_ts_ms
                 ));
+                idle_notice_emitted = true;
             }
             if !input.follow {
                 break;
             }
 
             idle_polls = idle_polls.saturating_add(1);
-            if input.max_idle_polls > 0 && idle_polls > input.max_idle_polls {
+            if input.max_idle_polls > 0 && idle_polls >= input.max_idle_polls {
                 warnings.push(format!(
                     "paper loop follow exhausted after {} idle poll(s)",
                     input.max_idle_polls
@@ -202,6 +204,7 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
             input.dry_run,
         ));
         idle_polls = 0;
+        idle_notice_emitted = false;
     }
 
     let final_context = inspect_loop_context(
@@ -993,11 +996,19 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.executed_steps, 0);
-        assert_eq!(report.idle_polls, 2);
+        assert_eq!(report.idle_polls, 1);
         assert!(report.follow);
         assert!(report
             .warnings
             .iter()
             .any(|warning| warning.contains("follow exhausted")));
+        assert_eq!(
+            report
+                .warnings
+                .iter()
+                .filter(|warning| warning.contains("paper loop idle"))
+                .count(),
+            1
+        );
     }
 }
