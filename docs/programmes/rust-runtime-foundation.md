@@ -41,6 +41,14 @@ The current delivered slice extends that further with a repeatable Rust paper or
 - multi-symbol cycle execution across explicit symbols plus open paper positions
 - still no daemon/systemd cutover
 
+The current delivered slice extends that again with the first Rust-owned boundary loop shell:
+
+- `paper loop`
+- optional `--start-step-close-ts-ms` for bounded catch-up and deterministic testing
+- `--settle-delay-ms` so a step is only eligible shortly after its nominal bar close
+- duplicate-step skips are handled inside the loop rather than aborting the whole process
+- still no daemon/systemd cutover
+
 Python paper execution is still the active runtime path, but Python paper bootstrap is no longer the only continuity surface.
 
 ## Runtime Contract

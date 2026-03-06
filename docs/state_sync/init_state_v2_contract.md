@@ -120,14 +120,16 @@ cargo run --manifest-path Cargo.toml -p aiq-runtime -- \
 
 - `paper run-once` must start from the same restored state that `paper doctor` reports.
 - `paper cycle` must also start from the same restored state, but it executes one explicit multi-symbol cycle with a required `--step-close-ts-ms`.
-- Both commands remain shell surfaces only in this phase; long-running paper loops remain out of scope.
+- `paper loop` reuses the same restored state contract, but it sequences one or more `paper cycle` steps and waits for bar-close eligibility via `--settle-delay-ms`.
+- All three commands remain shell surfaces only in this phase; full daemon/service ownership remains out of scope.
 - Default write timestamps follow execution time for DB parity; pass `--exported-at-ms` when you need reproducible artefacts.
-- DB projection after a successful `paper run-once` or `paper cycle` step is limited to the Rust-owned paper projection surface for this phase:
+- DB projection after a successful `paper run-once`, `paper cycle`, or `paper loop` step is limited to the Rust-owned paper projection surface for this phase:
   - `trades`
   - `position_state`
   - `runtime_cooldowns`
   - `runtime_last_closes`
-- `paper cycle` also records a rerun guard row in `runtime_cycle_steps` and fails closed if the same step identity is applied twice.
+- `paper cycle` records a rerun guard row in `runtime_cycle_steps` and fails closed if the same step identity is applied twice.
+- `paper loop` consumes the same guard and reports pre-existing steps as `duplicate_skipped` instead of aborting the entire bounded run.
 
 ## Backward Compatibility
 

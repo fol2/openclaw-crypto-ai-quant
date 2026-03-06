@@ -19,6 +19,7 @@ Current runtime-owned paper surfaces:
 | `paper doctor` | Restore Rust-owned paper state and inspect bootstrap markers | Non-mutating |
 | `paper run-once` | Execute one single-symbol Rust paper step | Single-shot shell |
 | `paper cycle` | Execute one repeatable multi-symbol Rust paper cycle | Explicit `--step-close-ts-ms`, not a daemon |
+| `paper loop` | Execute repeatable Rust paper cycles on interval boundaries | Uses settle delay + optional bounded catch-up, still not a daemon |
 
 The runtime slice is still intentionally narrow. It does not yet own a long-running
 paper daemon or any live execution path, but it already establishes the contracts
@@ -30,3 +31,4 @@ that later slices will build on:
   `stage_debug`
 - a single Rust-owned entry binary that future modes will converge on
 - repeatable paper-step/cycle contracts with explicit step identity
+- boundary-driven paper loop orchestration without handing control back to Python

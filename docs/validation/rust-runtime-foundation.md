@@ -15,6 +15,7 @@ green:
 - paper snapshot seed
 - paper runtime bootstrap shell
 - paper runtime one-shot execution shell
+- paper runtime bounded loop shell
 - bt-core init-state compatibility
 
 ## Commands
@@ -37,6 +38,7 @@ cargo run -q -p aiq-runtime -- snapshot validate --path <snapshot_v2_valid.json>
 cargo run -q -p aiq-runtime -- snapshot seed-paper --snapshot <snapshot_v2_valid.json> --target-db <paper_fixture.db> --strict-replace --json
 cargo run -q -p aiq-runtime -- paper doctor --db <paper_fixture.db> --json
 cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-db <candles_fixture.db> --target-symbol ETH --exported-at-ms 1772676900000 --dry-run --json
+cargo run -q -p aiq-runtime -- paper loop --db <paper_fixture.db> --candles-db <candles_fixture.db> --symbols ETH --start-step-close-ts-ms 1772676000000 --max-cycles 1 --dry-run --json
 cargo run -q -p aiq-runtime -- paper doctor --db <paper_fixture.db> --live --json
 cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-db <candles_fixture.db> --target-symbol ETH --exported-at-ms 1772676900000 --live --dry-run --json
 ```
@@ -55,6 +57,7 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
 - `aiq-runtime paper run-once` can restore paper state, execute one single-shot step, and report projected action codes and write-back counts.
 - `paper run-once` reproducibility requires a fixed `--exported-at-ms`; otherwise write timestamps follow execution time for current DB parity.
 - `aiq-runtime paper cycle` can execute one explicit multi-symbol cycle with `--step-close-ts-ms`, record a rerun guard in `runtime_cycle_steps`, and fail closed on duplicate re-apply.
+- `aiq-runtime paper loop` can execute one or more bounded loop steps, honour `--settle-delay-ms`, and treat already-applied steps as duplicate skips instead of aborting the full loop.
 
 ## Fixture Guidance
 
@@ -62,4 +65,5 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
 - Use v2 JSON fixtures with `runtime.entry_attempt_ms_by_symbol` and `runtime.exit_attempt_ms_by_symbol` for init-state compatibility checks.
 - `paper run-once` fixtures must provide bars for both the target symbol and the BTC anchor symbol at the resolved `engine.interval`.
 - `paper cycle` validation should include one write run plus one duplicate-step rerun that hard-fails without changing `trades`, `position_state`, `runtime_cooldowns`, `runtime_last_closes`, or `runtime_cycle_steps`.
+- `paper loop` validation should include a bounded run (`--max-cycles`) so CI never waits for a future boundary, plus at least one duplicate-step loop report if `runtime_cycle_steps` already contains the target step.
 - Keep fixtures deterministic: one open position, one add, one last-close marker, and one runtime cooldown marker is enough for the foundation slice.

@@ -756,6 +756,29 @@ Operational expectations:
 - all resolved cycle symbols must share the same `engine.interval`; mixed per-symbol interval overrides fail closed
 - the write path refreshes `trades`, `position_state`, `runtime_cooldowns`, and `runtime_last_closes` inside one immediate transaction
 
+### Execute a bounded Rust paper loop
+
+Use when: you want Rust to own repeated paper-cycle orchestration across interval boundaries, but you still want an operator-facing shell rather than a full daemon/service cutover.
+
+```bash
+cargo run -p aiq-runtime -- \
+  paper loop \
+  --db ./trading_engine.db \
+  --candles-db ./candles_dbs/candles_30m.db \
+  --symbols ETH,SOL \
+  --max-cycles 2 \
+  --settle-delay-ms 5000 \
+  --json
+```
+
+Operational expectations:
+
+- `paper loop` is still a shell, not a daemon or systemd service
+- when `--start-step-close-ts-ms` is omitted, the loop starts from the latest bar close that has aged past `--settle-delay-ms`
+- `--start-step-close-ts-ms` is useful for bounded catch-up runs and deterministic tests
+- duplicate steps already recorded in `runtime_cycle_steps` are counted as `duplicate_skipped`, not fatal loop errors
+- `--max-cycles` should be the default bring-up mode; omit it only when you intentionally want a long-running shell
+
 ---
 
 ## 7. Factory Stage Gate (dry -> smoke -> real)

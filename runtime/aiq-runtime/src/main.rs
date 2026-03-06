@@ -6,8 +6,9 @@ use chrono::Utc;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 
-mod paper_export;
 mod paper_cycle;
+mod paper_export;
+mod paper_loop;
 mod paper_run_once;
 mod paper_seed;
 
@@ -110,6 +111,8 @@ enum PaperCommand {
     RunOnce(PaperRunOnceArgs),
     /// Execute one repeatable Rust paper cycle across explicit symbols plus open paper positions.
     Cycle(PaperCycleArgs),
+    /// Execute a repeatable Rust paper loop on interval boundaries.
+    Loop(PaperLoopArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -180,6 +183,45 @@ struct PaperCycleArgs {
     #[arg(long)]
     exported_at_ms: Option<i64>,
     /// Resolve the cycle but do not write any DB projections.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+struct PaperLoopArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+    /// Paper DB path to restore from and project back into.
+    #[arg(long, default_value = "trading_engine.db")]
+    db: PathBuf,
+    /// Candle SQLite DB path used for each loop cycle.
+    #[arg(long)]
+    candles_db: PathBuf,
+    /// Explicit symbol list (comma-delimited). Open paper positions are always included.
+    #[arg(long, value_delimiter = ',')]
+    symbols: Vec<String>,
+    /// Optional file containing one symbol per line. Re-read before each loop step.
+    #[arg(long)]
+    symbols_file: Option<PathBuf>,
+    /// BTC anchor symbol for alignment context.
+    #[arg(long, default_value = "BTC")]
+    btc_symbol: String,
+    /// Number of bars to load for indicator warm-up.
+    #[arg(long, default_value_t = 400)]
+    lookback_bars: usize,
+    /// Optional explicit first step close timestamp in ms. Useful for catch-up runs and deterministic tests.
+    #[arg(long)]
+    start_step_close_ts_ms: Option<i64>,
+    /// Additional delay after the nominal bar close before a step becomes eligible.
+    #[arg(long, default_value_t = 5_000)]
+    settle_delay_ms: u64,
+    /// Maximum number of loop steps to attempt before exiting. Omit to run continuously.
+    #[arg(long)]
+    max_cycles: Option<usize>,
+    /// Override exported_at_ms for reproducible artefacts.
+    #[arg(long)]
+    exported_at_ms: Option<i64>,
+    /// Resolve the loop but do not write any DB projections.
     #[arg(long)]
     dry_run: bool,
 }
@@ -431,9 +473,12 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 args.common.live,
             )
             .map_err(anyhow::Error::msg)?;
-            let runtime_bootstrap =
-                build_bootstrap(&base_cfg, RuntimeMode::Paper, args.common.profile.as_deref())
-                    .map_err(anyhow::Error::msg)?;
+            let runtime_bootstrap = build_bootstrap(
+                &base_cfg,
+                RuntimeMode::Paper,
+                args.common.profile.as_deref(),
+            )
+            .map_err(anyhow::Error::msg)?;
             let mut symbols = args.symbols;
             if let Some(symbols_file) = args.symbols_file.as_ref() {
                 let file_symbols = std::fs::read_to_string(symbols_file)?
@@ -466,6 +511,37 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                     report.step_id,
                     report.active_symbols.len(),
                     report.trades_written,
+                    report.dry_run,
+                );
+            }
+        }
+        PaperCommand::Loop(args) => {
+            let config_path = resolve_config_path(&args.common.config);
+            let report = paper_loop::run_loop(paper_loop::PaperLoopInput {
+                config_path: &config_path,
+                live: args.common.live,
+                profile_override: args.common.profile.as_deref(),
+                paper_db: &args.db,
+                candles_db: &args.candles_db,
+                explicit_symbols: &args.symbols,
+                symbols_file: args.symbols_file.as_deref(),
+                btc_symbol: &args.btc_symbol,
+                lookback_bars: args.lookback_bars,
+                start_step_close_ts_ms: args.start_step_close_ts_ms,
+                settle_delay_ms: args.settle_delay_ms,
+                max_cycles: args.max_cycles,
+                exported_at_ms: args.exported_at_ms,
+                dry_run: args.dry_run,
+            })?;
+
+            if args.common.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "paper loop ok: steps={} executed={} duplicate_skips={} dry_run={}",
+                    report.cycles_attempted,
+                    report.cycles_executed,
+                    report.cycles_duplicate_skipped,
                     report.dry_run,
                 );
             }

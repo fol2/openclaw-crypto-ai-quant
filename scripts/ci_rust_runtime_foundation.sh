@@ -39,8 +39,11 @@ for path in (
     Path("/tmp/aiq-runtime-pipeline.json"),
     Path("/tmp/aiq-runtime-snapshot-validate.json"),
     Path("/tmp/aiq-runtime-seed-paper.json"),
+    Path("/tmp/aiq-runtime-paper-doctor.json"),
     Path("/tmp/aiq-runtime-paper-run-once.json"),
     Path("/tmp/aiq-runtime-paper-cycle.json"),
+    Path("/tmp/aiq-runtime-paper-loop.json"),
+    Path("/tmp/aiq-runtime-paper-loop-duplicate.json"),
 ):
     if path.exists():
         path.unlink()
@@ -187,10 +190,12 @@ cargo run -q -p aiq-runtime -- snapshot validate --path /tmp/aiq-runtime-seed-sn
 cargo run -q -p aiq-runtime -- snapshot seed-paper --snapshot /tmp/aiq-runtime-seed-snapshot.json --target-db /tmp/aiq-runtime-paper.db --strict-replace --json >/tmp/aiq-runtime-seed-paper.json
 cargo run -q -p aiq-runtime -- paper doctor --db /tmp/aiq-runtime-paper.db --json >/tmp/aiq-runtime-paper-doctor.json
 cargo run -q -p aiq-runtime -- paper run-once --db /tmp/aiq-runtime-paper.db --candles-db /tmp/aiq-runtime-candles.db --target-symbol ETH --exported-at-ms 1772676900000 --dry-run --json >/tmp/aiq-runtime-paper-run-once.json
-cargo run -q -p aiq-runtime -- paper cycle --db /tmp/aiq-runtime-paper.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --step-close-ts-ms 1773426000000 --exported-at-ms 1772676900000 --json >/tmp/aiq-runtime-paper-cycle.json
+cargo run -q -p aiq-runtime -- paper cycle --db /tmp/aiq-runtime-paper.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --step-close-ts-ms 1772676000000 --exported-at-ms 1772676900000 --json >/tmp/aiq-runtime-paper-cycle.json
+cargo run -q -p aiq-runtime -- paper loop --db /tmp/aiq-runtime-paper.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --start-step-close-ts-ms 1772674200000 --max-cycles 1 --dry-run --json >/tmp/aiq-runtime-paper-loop.json
+cargo run -q -p aiq-runtime -- paper loop --db /tmp/aiq-runtime-paper.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --start-step-close-ts-ms 1772676000000 --max-cycles 1 --json >/tmp/aiq-runtime-paper-loop-duplicate.json
 cargo run -q -p aiq-runtime -- paper doctor --db /tmp/aiq-runtime-paper.db --live --json >/tmp/aiq-runtime-paper-doctor-live.json
 cargo run -q -p aiq-runtime -- paper run-once --db /tmp/aiq-runtime-paper.db --candles-db /tmp/aiq-runtime-candles.db --target-symbol ETH --exported-at-ms 1772676900000 --live --dry-run --json >/tmp/aiq-runtime-paper-run-once-live.json
-if cargo run -q -p aiq-runtime -- paper cycle --db /tmp/aiq-runtime-paper.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --step-close-ts-ms 1773426000000 --exported-at-ms 1772676900000 --json >/tmp/aiq-runtime-paper-cycle-rerun.json 2>/tmp/aiq-runtime-paper-cycle-rerun.stderr; then
+if cargo run -q -p aiq-runtime -- paper cycle --db /tmp/aiq-runtime-paper.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --step-close-ts-ms 1772676000000 --exported-at-ms 1772676900000 --json >/tmp/aiq-runtime-paper-cycle-rerun.json 2>/tmp/aiq-runtime-paper-cycle-rerun.stderr; then
   echo "paper cycle rerun guard did not fail closed" >&2
   exit 1
 fi
@@ -203,8 +208,15 @@ report = json.loads(Path("/tmp/aiq-runtime-paper-run-once.json").read_text(encod
 assert report["snapshot_exported_at_ms"] == 1772676900000
 assert report["symbol"] == "ETH"
 cycle = json.loads(Path("/tmp/aiq-runtime-paper-cycle.json").read_text(encoding="utf-8"))
-assert cycle["step_close_ts_ms"] == 1773426000000
+assert cycle["step_close_ts_ms"] == 1772676000000
 assert cycle["runtime_step_recorded"] is True
+loop = json.loads(Path("/tmp/aiq-runtime-paper-loop.json").read_text(encoding="utf-8"))
+assert loop["cycles_attempted"] == 1
+assert loop["cycles_executed"] == 1
+assert loop["steps"][0]["status"] == "executed"
+dup_loop = json.loads(Path("/tmp/aiq-runtime-paper-loop-duplicate.json").read_text(encoding="utf-8"))
+assert dup_loop["cycles_duplicate_skipped"] == 1
+assert dup_loop["steps"][0]["status"] == "duplicate_skipped"
 doctor = json.loads(Path("/tmp/aiq-runtime-paper-doctor.json").read_text(encoding="utf-8"))
 assert doctor["paper_bootstrap"]["runtime_close_markers"] == 1
 PY
