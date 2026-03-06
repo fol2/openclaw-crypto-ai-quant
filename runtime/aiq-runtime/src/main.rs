@@ -139,7 +139,7 @@ enum PaperCommand {
     Cycle(PaperCycleArgs),
     /// Execute a bounded Rust paper catch-up loop across unapplied cycle steps.
     Loop(PaperLoopArgs),
-    /// Execute an opt-in long-running Rust paper daemon wrapper around paper loop follow mode.
+    /// Execute an opt-in long-running Rust paper daemon with a Rust-owned outer scheduler.
     Daemon(PaperDaemonArgs),
 }
 
@@ -273,7 +273,7 @@ struct PaperDaemonArgs {
     /// Explicit symbol list (comma-delimited). Open paper positions are always included.
     #[arg(long, value_delimiter = ',')]
     symbols: Vec<String>,
-    /// Optional file containing one symbol per line. Re-read on each loop iteration.
+    /// Optional file containing one symbol per line. Re-read on each daemon scheduler iteration.
     #[arg(long)]
     symbols_file: Option<PathBuf>,
     /// BTC anchor symbol for alignment context.
@@ -687,11 +687,12 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!(
-                    "paper daemon ok: pid={} lock={} steps={} symbol_reloads={} stop_requested={} dry_run={}",
+                    "paper daemon ok: pid={} lock={} steps={} symbol_reloads={} symbol_reload_failures={} stop_requested={} dry_run={}",
                     report.pid,
                     report.lock_path,
                     report.loop_report.executed_steps,
                     report.loop_report.symbols_file_reload_count,
+                    report.manifest.reload_failures,
                     report.stop_requested,
                     report.dry_run,
                 );

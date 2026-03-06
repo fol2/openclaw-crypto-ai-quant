@@ -71,11 +71,11 @@ pub struct PaperLoopReport {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct LoopContext {
-    active_symbols: Vec<String>,
-    interval: String,
-    latest_common_close_ts_ms: i64,
-    last_applied_step_close_ts_ms: Option<i64>,
+pub(crate) struct LoopContext {
+    pub(crate) active_symbols: Vec<String>,
+    pub(crate) interval: String,
+    pub(crate) latest_common_close_ts_ms: i64,
+    pub(crate) last_applied_step_close_ts_ms: Option<i64>,
 }
 
 struct WorkingPaperDb {
@@ -378,7 +378,7 @@ impl Drop for WorkingPaperDb {
     }
 }
 
-fn inspect_loop_context(
+pub(crate) fn inspect_loop_context(
     runtime_bootstrap: &RuntimeBootstrap,
     config_path: &Path,
     live: bool,
@@ -625,7 +625,7 @@ fn ensure_exact_step_candle_coverage(
     Ok(())
 }
 
-fn interval_to_ms(interval: &str) -> Result<i64> {
+pub(crate) fn interval_to_ms(interval: &str) -> Result<i64> {
     let trimmed = interval.trim();
     if trimmed.len() < 2 {
         anyhow::bail!("invalid interval: {}", interval);
@@ -642,13 +642,13 @@ fn interval_to_ms(interval: &str) -> Result<i64> {
     Ok(ms)
 }
 
-fn is_stop_requested(stop_flag: Option<&AtomicBool>) -> bool {
+pub(crate) fn is_stop_requested(stop_flag: Option<&AtomicBool>) -> bool {
     stop_flag
         .map(|flag| flag.load(Ordering::SeqCst))
         .unwrap_or(false)
 }
 
-fn sleep_with_stop_flag(duration_ms: u64, stop_flag: Option<&AtomicBool>) {
+pub(crate) fn sleep_with_stop_flag(duration_ms: u64, stop_flag: Option<&AtomicBool>) {
     if duration_ms == 0 {
         return;
     }
@@ -663,7 +663,7 @@ fn sleep_with_stop_flag(duration_ms: u64, stop_flag: Option<&AtomicBool>) {
     }
 }
 
-fn normalise_symbols(raw: &[String]) -> Vec<String> {
+pub(crate) fn normalise_symbols(raw: &[String]) -> Vec<String> {
     let mut symbols = raw
         .iter()
         .map(|symbol| symbol.trim().to_ascii_uppercase())

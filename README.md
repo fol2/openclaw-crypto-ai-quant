@@ -15,10 +15,12 @@ four paper-facing shells (`paper doctor`, `paper run-once`, `paper cycle`, and
 them: `paper daemon`. `paper cycle` still runs one explicit multi-symbol cycle
 with `--step-close-ts-ms` and a rerun guard, `paper loop` still resumes from
 `runtime_cycle_steps` to catch up unapplied bar-close steps, and `paper daemon`
-is only a long-running wrapper around the same `paper loop --follow` /
-`paper cycle` contracts. `paper loop` / `paper daemon` now also re-read an
-optional `--symbols-file` between scheduling inspections so Rust can wait on an
-empty watchlist and pick up later watchlist refreshes without restarting.
+now owns a Rust-side outer scheduler while still keeping the same
+`paper loop --follow` / `paper cycle` write contracts. `paper loop` /
+`paper daemon` re-read an optional `--symbols-file` between scheduling
+inspections so Rust can wait on an empty watchlist, pick up later watchlist
+refreshes without restarting, and retain the last good manifest if a later
+symbols-file write is torn or invalid.
 Python paper execution remains the active production path, so this does not
 claim paper cutover.
 

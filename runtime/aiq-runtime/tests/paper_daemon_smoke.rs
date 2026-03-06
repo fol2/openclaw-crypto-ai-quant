@@ -323,6 +323,79 @@ fn paper_daemon_can_idle_on_empty_symbols_file_until_a_due_step_becomes_runnable
     );
 }
 
+#[test]
+fn paper_daemon_retains_last_good_manifest_after_invalid_symbols_file_reload() {
+    let fixture = prepare_idle_fixture();
+    let before = snapshot_db(&fixture.paper_db);
+    let symbols_file = fixture._dir.path().join("symbols-invalid-after-load.txt");
+    fs::write(&symbols_file, "ETH\n").expect("initial symbols file should be written");
+
+    let child = daemon_command_with_symbols_file(&fixture, &symbols_file)
+        .arg("--idle-sleep-ms")
+        .arg("40")
+        .arg("--max-idle-polls")
+        .arg("4")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("paper daemon invalid-reload smoke should spawn");
+
+    let child = wait_for_lock_file(child, &fixture.lock_path, Duration::from_secs(5));
+    thread::sleep(Duration::from_millis(10));
+    fs::write(&symbols_file, [0xff_u8, 0xfe_u8]).expect("symbols file should become invalid UTF-8");
+
+    let output = wait_with_timeout(child, Duration::from_secs(5));
+    assert!(
+        output.status.success(),
+        "paper daemon should retain the last good manifest after an invalid reload; output:\n{}",
+        combined_output(&output)
+    );
+
+    let report = parse_json_output(&output);
+    assert_eq!(
+        report
+            .pointer("/manifest/reload_failures")
+            .and_then(Value::as_u64),
+        Some(1),
+        "paper daemon should count the failed symbols-file reload",
+    );
+    assert_eq!(
+        report
+            .pointer("/manifest/reload_count")
+            .and_then(Value::as_u64),
+        Some(0),
+        "paper daemon should not count a failed reload as a successful manifest refresh",
+    );
+    assert_eq!(
+        report
+            .pointer("/manifest/manifest_symbols")
+            .and_then(Value::as_array)
+            .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>()),
+        Some(vec!["ETH"]),
+        "paper daemon should retain the last good manifest symbols after a reload failure",
+    );
+    assert!(
+        report
+            .pointer("/loop_report/warnings")
+            .and_then(Value::as_array)
+            .is_some_and(|warnings| warnings.iter().any(|warning| {
+                warning
+                    .as_str()
+                    .is_some_and(|text| text.contains("retained last good symbols manifest"))
+            })),
+        "paper daemon should surface the retained-manifest warning after an invalid reload",
+    );
+    assert_eq!(
+        before,
+        snapshot_db(&fixture.paper_db),
+        "an invalid symbols-file reload must not mutate the paper DB when the daemon is already caught up",
+    );
+    assert!(
+        try_exclusive_lock(&fixture.lock_path).is_some(),
+        "paper daemon should release its lock after the invalid-reload exit",
+    );
+}
+
 fn prepare_idle_fixture() -> Fixture {
     let fixture = seed_fixture();
     let output = loop_command(&fixture)

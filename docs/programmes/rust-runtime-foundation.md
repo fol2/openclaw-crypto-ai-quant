@@ -68,8 +68,17 @@ ownership step:
 - explicit `--symbols` are still unioned with the refreshed file contents
 - still no paper/systemd cutover
 
+The current delivered slice extends that again with a daemon-owned outer
+scheduler step:
+
+- `paper daemon` now owns follow-mode scheduling instead of delegating the whole long-running lane to `paper loop`
+- daemon JSON reports now surface manifest metadata, including the watched `symbols_file`, reload counts, and the latest effective explicit symbols
+- a bad `--symbols-file` reload no longer clears the Rust lane; the daemon retains the last good manifest and reports the reload failure
+- step execution still reuses the same `paper loop` / `paper cycle` contracts and `runtime_cycle_steps` rerun guard
+- still no paper/systemd cutover
+
 Python paper execution is still the active runtime path, and the opt-in Rust
-paper daemon wrapper does not change that. Python paper bootstrap is no longer
+paper daemon surface does not change that. Python paper bootstrap is no longer
 the only continuity surface.
 
 ## Runtime Contract

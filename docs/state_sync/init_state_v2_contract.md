@@ -125,8 +125,9 @@ cargo run --manifest-path Cargo.toml -p aiq-runtime -- \
 - `paper loop` must also start from the same restored state, but it derives each next due `step_close_ts_ms` from `runtime_cycle_steps` or the bootstrap `--start-step-close-ts-ms` on the first run, can optionally remain in follow mode while waiting for the next due step, and repeatedly reuses the `paper cycle` write path.
 - when `paper loop` is given a `--symbols-file`, it re-reads that file on each loop iteration so the next eligible step can pick up a refreshed explicit symbol lane without changing the rerun guard or widening DB projections.
 - in follow mode, an initially empty `--symbols-file` is treated as an idle watchlist state; the loop may remain alive until later symbols arrive or the idle poll budget is exhausted.
-- `paper daemon` must also start from the same restored state, but it runs the same follow-mode `paper loop` discovery path as a long-running wrapper and keeps reusing the same `paper cycle` write path between idle polls.
-- when `paper daemon` is given a `--symbols-file`, it inherits the same per-iteration refresh behaviour from `paper loop`; explicit `--symbols` remain additive and open paper positions are still unioned at execution time.
+- `paper daemon` must also start from the same restored state, but it now owns the long-running outer scheduler itself while still reusing the same `paper loop` discovery rules and `paper cycle` write path between idle polls.
+- when `paper daemon` is given a `--symbols-file`, it refreshes the manifest between scheduler iterations; explicit `--symbols` remain additive and open paper positions are still unioned at execution time.
+- if a later `--symbols-file` reload is invalid, the daemon retains the last good manifest and reports the failure instead of clearing the Rust lane.
 - `paper daemon` may take an explicit `--lock-path` to isolate an opt-in lane, but lock acquisition does not alter step identity, projection scope, or snapshot semantics.
 - All four commands remain additive Rust paper surfaces only in this phase; Python daemon/systemd ownership remains the active runtime path.
 - Default write timestamps follow execution time for DB parity; pass `--exported-at-ms` when you need reproducible artefacts.

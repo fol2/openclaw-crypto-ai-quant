@@ -805,13 +805,14 @@ Follow-mode expectations:
 - `--max-idle-polls 1` exits on the first no-work poll, so `idle_polls` reports `1` and the shell does not sleep again before returning
 - when `--symbols-file` is supplied, the shell re-reads that file on each loop iteration; in follow mode this means refreshed symbols are picked up between idle polls and remain additive with any explicit `--symbols`
 - when `--follow` is paired with `--symbols-file`, an initially empty file is treated as an idle watchlist state; the shell waits for later symbols until the idle poll budget is exhausted
-- this exact follow-mode contract is what the opt-in `paper daemon` wrapper reuses; it does not create a new step identity or write surface
+- this exact follow-mode contract is what the opt-in `paper daemon` surface reuses for step execution; it still does not create a new step identity or write surface
 
-### Run the opt-in Rust paper daemon wrapper
+### Run the opt-in Rust paper daemon
 
-Use when: you want a long-running Rust paper orchestration lane that keeps the
-existing `paper loop --follow` / `paper cycle` contracts alive between due
-steps, without claiming Python daemon cutover.
+Use when: you want a long-running Rust paper orchestration lane with a
+Rust-owned outer scheduler that keeps the existing `paper loop --follow` /
+`paper cycle` contracts alive between due steps, without claiming Python daemon
+cutover.
 
 ```bash
 cargo run -p aiq-runtime -- \
@@ -828,9 +829,11 @@ cargo run -p aiq-runtime -- \
 Operational expectations:
 
 - `paper daemon` is opt-in orchestration only; Python `engine.daemon` remains the active paper runtime path in this phase
-- the wrapper reuses the same restored state contract as `paper doctor`, the same step discovery rules as `paper loop`, and the same rerun guard / DB write contract as `paper cycle`
-- when `--symbols-file` is supplied, the wrapper re-reads that file on each loop iteration; in follow mode the refreshed symbols apply before the next eligible Rust cycle step and are still unioned with any explicit `--symbols`
-- if that `--symbols-file` is initially empty, the wrapper stays idle and keeps polling for a later watchlist update until the configured idle budget is exhausted
+- the daemon reuses the same restored state contract as `paper doctor`, the same step discovery rules as `paper loop`, and the same rerun guard / DB write contract as `paper cycle`
+- when `--symbols-file` is supplied, the daemon re-reads that file between scheduler iterations; in follow mode the refreshed symbols apply before the next eligible Rust cycle step and are still unioned with any explicit `--symbols`
+- if that `--symbols-file` is initially empty, the daemon stays idle and keeps polling for a later watchlist update until the configured idle budget is exhausted
+- if a later `--symbols-file` reload is torn or invalid, the daemon retains the last good manifest, increments the manifest reload-failure count, and reports the warning in JSON output
+- JSON reports now expose both `loop_report.symbols_file_reload_count` and a top-level `manifest` block so operators can distinguish the latest explicit symbol set from manifest health
 - `--start-step-close-ts-ms` is required only when no prior matching `runtime_cycle_steps` rows exist for the current config fingerprint / interval / live lane
 - `--lock-path` may be supplied when the Rust daemon lane needs an isolated lock namespace; changing the lock path does not widen DB projections
 - `--dry-run` remains the safest bring-up path while the surface is still opt-in
