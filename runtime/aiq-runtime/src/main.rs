@@ -13,6 +13,7 @@ mod paper_loop;
 mod paper_manifest;
 mod paper_run_once;
 mod paper_seed;
+mod paper_service_config;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "Rust runtime foundation for AI Quant")]
@@ -556,6 +557,10 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                     report.runtime_bootstrap.pipeline.profile
                 );
                 println!("config_path: {}", report.config_path);
+                println!("effective_config_path: {}", report.effective_config_path);
+                if let Some(promoted_config_path) = report.promoted_config_path.as_deref() {
+                    println!("promoted_config_path: {}", promoted_config_path);
+                }
                 println!("paper_db: {}", report.paper_db);
                 println!("candles_db: {}", report.candles_db);
                 println!("interval: {}", report.interval);
@@ -596,15 +601,11 @@ fn run_paper(command: PaperCommand) -> Result<()> {
             }
         }
         PaperCommand::Doctor(args) => {
-            let config_path = resolve_config_path(&args.common.paper.config);
-            let config = bt_core::config::load_config_checked(
-                config_path
-                    .to_str()
-                    .context("config path must be valid UTF-8")?,
-                args.common.symbol.as_deref(),
-                args.common.paper.live,
-            )
-            .map_err(anyhow::Error::msg)?;
+            let service_config = paper_service_config::resolve_paper_service_config(Some(
+                &args.common.paper.config,
+            ))?;
+            let config = service_config
+                .load_config(args.common.symbol.as_deref(), args.common.paper.live)?;
             let runtime_bootstrap = build_bootstrap(
                 &config,
                 RuntimeMode::Paper,
@@ -638,19 +639,14 @@ fn run_paper(command: PaperCommand) -> Result<()> {
             }
         }
         PaperCommand::RunOnce(args) => {
-            let config_path = resolve_config_path(&args.common.config);
-            let config = bt_core::config::load_config_checked(
-                config_path
-                    .to_str()
-                    .context("config path must be valid UTF-8")?,
-                Some(args.target_symbol.as_str()),
-                args.common.live,
-            )
-            .map_err(anyhow::Error::msg)?;
+            let service_config =
+                paper_service_config::resolve_paper_service_config(Some(&args.common.config))?;
+            let config =
+                service_config.load_config(Some(args.target_symbol.as_str()), args.common.live)?;
             let runtime_bootstrap =
                 build_bootstrap(&config, RuntimeMode::Paper, args.common.profile.as_deref())
                     .map_err(anyhow::Error::msg)?;
-            let report = paper_run_once::run_once(paper_run_once::PaperRunOnceInput {
+            let mut report = paper_run_once::run_once(paper_run_once::PaperRunOnceInput {
                 config: &config,
                 runtime_bootstrap,
                 paper_db: &args.db,
@@ -661,6 +657,9 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 exported_at_ms: args.exported_at_ms,
                 dry_run: args.dry_run,
             })?;
+            report
+                .warnings
+                .extend(service_config.warnings().iter().cloned());
 
             if args.common.json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
@@ -676,15 +675,9 @@ fn run_paper(command: PaperCommand) -> Result<()> {
             }
         }
         PaperCommand::Cycle(args) => {
-            let config_path = resolve_config_path(&args.common.config);
-            let base_cfg = bt_core::config::load_config_checked(
-                config_path
-                    .to_str()
-                    .context("config path must be valid UTF-8")?,
-                None,
-                args.common.live,
-            )
-            .map_err(anyhow::Error::msg)?;
+            let service_config =
+                paper_service_config::resolve_paper_service_config(Some(&args.common.config))?;
+            let base_cfg = service_config.load_config(None, args.common.live)?;
             let runtime_bootstrap = build_bootstrap(
                 &base_cfg,
                 RuntimeMode::Paper,
@@ -692,9 +685,10 @@ fn run_paper(command: PaperCommand) -> Result<()> {
             )
             .map_err(anyhow::Error::msg)?;
             let symbols = load_symbols(args.symbols, args.symbols_file.as_deref())?;
-            let report = paper_cycle::run_cycle(paper_cycle::PaperCycleInput {
+            let mut report = paper_cycle::run_cycle(paper_cycle::PaperCycleInput {
                 runtime_bootstrap,
-                config_path: &config_path,
+                config_path: service_config.effective_config_path(),
+                strategy_mode: service_config.strategy_mode(),
                 live: args.common.live,
                 paper_db: &args.db,
                 candles_db: &args.candles_db,
@@ -705,6 +699,9 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 exported_at_ms: args.exported_at_ms,
                 dry_run: args.dry_run,
             })?;
+            report
+                .warnings
+                .extend(service_config.warnings().iter().cloned());
 
             if args.common.json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
@@ -719,24 +716,19 @@ fn run_paper(command: PaperCommand) -> Result<()> {
             }
         }
         PaperCommand::Loop(args) => {
-            let config_path = resolve_config_path(&args.common.config);
-            let base_cfg = bt_core::config::load_config_checked(
-                config_path
-                    .to_str()
-                    .context("config path must be valid UTF-8")?,
-                None,
-                args.common.live,
-            )
-            .map_err(anyhow::Error::msg)?;
+            let service_config =
+                paper_service_config::resolve_paper_service_config(Some(&args.common.config))?;
+            let base_cfg = service_config.load_config(None, args.common.live)?;
             let runtime_bootstrap = build_bootstrap(
                 &base_cfg,
                 RuntimeMode::Paper,
                 args.common.profile.as_deref(),
             )
             .map_err(anyhow::Error::msg)?;
-            let report = paper_loop::run_loop(paper_loop::PaperLoopInput {
+            let mut report = paper_loop::run_loop(paper_loop::PaperLoopInput {
                 runtime_bootstrap,
-                config_path: &config_path,
+                config_path: service_config.effective_config_path(),
+                strategy_mode: service_config.strategy_mode(),
                 live: args.common.live,
                 paper_db: &args.db,
                 candles_db: &args.candles_db,
@@ -753,6 +745,9 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 dry_run: args.dry_run,
                 stop_flag: None,
             })?;
+            report
+                .warnings
+                .extend(service_config.warnings().iter().cloned());
 
             if args.common.json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
@@ -767,24 +762,19 @@ fn run_paper(command: PaperCommand) -> Result<()> {
             }
         }
         PaperCommand::Daemon(args) => {
-            let config_path = resolve_config_path(&args.common.config);
-            let base_cfg = bt_core::config::load_config_checked(
-                config_path
-                    .to_str()
-                    .context("config path must be valid UTF-8")?,
-                None,
-                args.common.live,
-            )
-            .map_err(anyhow::Error::msg)?;
+            let service_config =
+                paper_service_config::resolve_paper_service_config(Some(&args.common.config))?;
+            let base_cfg = service_config.load_config(None, args.common.live)?;
             let runtime_bootstrap = build_bootstrap(
                 &base_cfg,
                 RuntimeMode::Paper,
                 args.common.profile.as_deref(),
             )
             .map_err(anyhow::Error::msg)?;
-            let report = paper_daemon::run_daemon(paper_daemon::PaperDaemonInput {
+            let mut report = paper_daemon::run_daemon(paper_daemon::PaperDaemonInput {
                 runtime_bootstrap,
-                config_path: &config_path,
+                config_path: service_config.effective_config_path(),
+                strategy_mode: service_config.strategy_mode(),
                 live: args.common.live,
                 paper_db: &args.db,
                 candles_db: &args.candles_db,
@@ -802,6 +792,10 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 watch_symbols_file: args.watch_symbols_file,
                 emit_progress: !args.common.json,
             })?;
+            report
+                .loop_report
+                .warnings
+                .extend(service_config.warnings().iter().cloned());
 
             if args.common.json {
                 println!("{}", serde_json::to_string_pretty(&report)?);

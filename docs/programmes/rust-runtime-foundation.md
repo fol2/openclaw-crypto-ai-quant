@@ -77,6 +77,14 @@ service manifest surface:
 - derives the candle DB path from `AI_QUANT_CANDLES_DB_DIR` + resolved interval when needed
 - emits the resolved Rust daemon command, warnings, and runtime bootstrap metadata without executing any paper steps
 
+The current delivered slice extends that again with effective-config parity for
+the Rust paper service contract:
+
+- `paper manifest` and `paper daemon` now resolve the same effective config inputs as the current paper service lane
+- promoted configs discovered through `AI_QUANT_PROMOTED_ROLE` are merged before Rust config loading
+- `AI_QUANT_STRATEGY_MODE` (or `AI_QUANT_STRATEGY_MODE_FILE` when the env var is unset) now applies the same post-live mode overlay ordering as the Python service
+- manifests now surface both the base config path and the effective config path for operator review
+
 The current delivered slice extends that again with a service-grade launch and
 resume contract for the same manifest surface:
 

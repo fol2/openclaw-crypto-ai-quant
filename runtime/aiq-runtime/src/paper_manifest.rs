@@ -6,8 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::paper_daemon;
 use crate::paper_loop;
-
-const DEFAULT_CONFIG_PATH: &str = "config/strategy_overrides.yaml";
+use crate::paper_service_config;
 const DEFAULT_PAPER_DB_PATH: &str = "trading_engine.db";
 const DEFAULT_LOOKBACK_BARS: usize = 400;
 
@@ -53,6 +52,8 @@ pub struct PaperManifestReport {
     pub ok: bool,
     pub runtime_bootstrap: RuntimeBootstrap,
     pub config_path: String,
+    pub effective_config_path: String,
+    pub promoted_config_path: Option<String>,
     pub paper_db: String,
     pub paper_db_exists: bool,
     pub candles_db: String,
@@ -76,15 +77,9 @@ pub struct PaperManifestReport {
 
 pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestReport> {
     let mut warnings = Vec::new();
-    let config_path = resolve_config_path(input.config);
-    let config = bt_core::config::load_config_checked(
-        config_path
-            .to_str()
-            .context("config path must be valid UTF-8")?,
-        None,
-        input.live,
-    )
-    .map_err(anyhow::Error::msg)?;
+    let resolved_config = paper_service_config::resolve_paper_service_config(input.config)?;
+    warnings.extend(resolved_config.warnings().iter().cloned());
+    let config = resolved_config.load_config(None, input.live)?;
     let runtime_bootstrap =
         build_bootstrap(&config, RuntimeMode::Paper, input.profile).map_err(anyhow::Error::msg)?;
 
@@ -98,7 +93,12 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
     let interval = if interval_symbols.is_empty() {
         config.engine.interval.trim().to_string()
     } else {
-        paper_loop::resolve_shared_interval(&config_path, &interval_symbols, input.live)?
+        paper_loop::resolve_shared_interval(
+            resolved_config.effective_config_path(),
+            &interval_symbols,
+            input.live,
+            resolved_config.strategy_mode(),
+        )?
     };
     if let Some(env_interval) = env_string("AI_QUANT_INTERVAL") {
         let env_interval = env_interval.trim().to_string();
@@ -165,7 +165,8 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
     let resume = resolve_resume_state(
         &mut warnings,
         &runtime_bootstrap,
-        &config_path,
+        resolved_config.effective_config_path(),
+        resolved_config.strategy_mode(),
         input.live,
         &paper_db,
         &candles_db,
@@ -181,7 +182,7 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
         "paper".to_string(),
         "daemon".to_string(),
         "--config".to_string(),
-        config_path.display().to_string(),
+        resolved_config.base_config_path().display().to_string(),
         "--db".to_string(),
         paper_db.display().to_string(),
         "--candles-db".to_string(),
@@ -225,7 +226,14 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
     Ok(PaperManifestReport {
         ok: true,
         runtime_bootstrap,
-        config_path: config_path.display().to_string(),
+        config_path: resolved_config.base_config_path().display().to_string(),
+        effective_config_path: resolved_config
+            .effective_config_path()
+            .display()
+            .to_string(),
+        promoted_config_path: resolved_config
+            .promoted_config_path()
+            .map(|path| path.display().to_string()),
         paper_db: paper_db.display().to_string(),
         paper_db_exists: paper_db.exists(),
         candles_db: candles_db.display().to_string(),
@@ -240,8 +248,8 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
         lock_path: lock_path.display().to_string(),
         status_path: status_path.display().to_string(),
         instance_tag: env_string("AI_QUANT_INSTANCE_TAG"),
-        promoted_role: env_string("AI_QUANT_PROMOTED_ROLE"),
-        strategy_mode: env_string("AI_QUANT_STRATEGY_MODE"),
+        promoted_role: resolved_config.promoted_role().map(ToOwned::to_owned),
+        strategy_mode: resolved_config.strategy_mode().map(ToOwned::to_owned),
         resume,
         warnings,
         daemon_command,
@@ -252,6 +260,7 @@ fn resolve_resume_state(
     warnings: &mut Vec<String>,
     runtime_bootstrap: &RuntimeBootstrap,
     config_path: &Path,
+    strategy_mode: Option<&str>,
     live: bool,
     paper_db: &Path,
     candles_db: &Path,
@@ -280,6 +289,7 @@ fn resolve_resume_state(
     let Some(context) = (match paper_loop::inspect_loop_context(
         runtime_bootstrap,
         config_path,
+        strategy_mode,
         live,
         paper_db,
         candles_db,
@@ -364,25 +374,6 @@ fn resolve_resume_state(
 
     resume
 }
-
-fn resolve_config_path(config: Option<&Path>) -> PathBuf {
-    let configured = config
-        .map(Path::to_path_buf)
-        .or_else(|| env_path("AI_QUANT_STRATEGY_YAML"))
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
-
-    if configured.exists() {
-        return configured;
-    }
-
-    let fallback = PathBuf::from(format!("{}.example", configured.display()));
-    if fallback.exists() {
-        return fallback;
-    }
-
-    configured
-}
-
 fn resolve_candles_db(candles_db: Option<&Path>, interval: &str) -> Result<PathBuf> {
     if let Some(candles_db) = candles_db {
         return Ok(candles_db.to_path_buf());
@@ -484,10 +475,7 @@ mod tests {
     use chrono::Utc;
     use rusqlite::{params, Connection};
     use std::fs;
-    use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
-
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     struct EnvGuard {
         saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
@@ -516,10 +504,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    fn env_lock() -> &'static Mutex<()> {
-        ENV_LOCK.get_or_init(|| Mutex::new(()))
     }
 
     fn write_config(path: &Path, interval: &str) {
@@ -635,7 +619,7 @@ mod tests {
 
     #[test]
     fn manifest_uses_env_defaults_and_derives_candles_db() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = crate::paper_service_config::test_env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("strategy.yaml");
         let paper_db = dir.path().join("paper.db");
@@ -689,6 +673,10 @@ mod tests {
         assert_eq!(report.lookback_bars, 200);
         assert_eq!(report.symbols, vec!["BTC", "ETH"]);
         assert_eq!(report.config_path, config_path.display().to_string());
+        assert_eq!(
+            report.effective_config_path,
+            config_path.display().to_string()
+        );
         assert_eq!(report.paper_db, paper_db.display().to_string());
         assert_eq!(
             report.candles_db,
@@ -711,7 +699,7 @@ mod tests {
 
     #[test]
     fn manifest_warns_when_interval_env_disagrees_with_config() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = crate::paper_service_config::test_env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("strategy.yaml");
         let candles_dir = dir.path().join("candles");
@@ -767,7 +755,7 @@ mod tests {
 
     #[test]
     fn manifest_uses_symbol_specific_shared_interval_for_candles_db() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = crate::paper_service_config::test_env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("strategy.yaml");
         let candles_dir = dir.path().join("candles");
@@ -823,8 +811,153 @@ mod tests {
     }
 
     #[test]
+    fn manifest_applies_strategy_mode_to_resolved_interval() {
+        let _guard = crate::paper_service_config::test_env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("strategy.yaml");
+        let candles_dir = dir.path().join("candles");
+        fs::create_dir_all(&candles_dir).unwrap();
+        fs::write(
+            &config_path,
+            r#"
+global:
+  engine:
+    interval: 30m
+modes:
+  primary:
+    global:
+      engine:
+        interval: 1h
+"#,
+        )
+        .unwrap();
+
+        let _env = EnvGuard::set(&[
+            (
+                "AI_QUANT_STRATEGY_YAML",
+                Some(config_path.to_str().unwrap()),
+            ),
+            (
+                "AI_QUANT_CANDLES_DB_DIR",
+                Some(candles_dir.to_str().unwrap()),
+            ),
+            ("AI_QUANT_STRATEGY_MODE", Some("primary")),
+            ("AI_QUANT_STRATEGY_MODE_FILE", None),
+            ("AI_QUANT_DB_PATH", None),
+            ("AI_QUANT_SYMBOLS", None),
+            ("AI_QUANT_SYMBOLS_FILE", None),
+            ("AI_QUANT_LOOKBACK_BARS", None),
+            ("AI_QUANT_LOCK_PATH", None),
+            ("AI_QUANT_CANDLES_DB_PATH", None),
+            ("AI_QUANT_INTERVAL", None),
+            ("AI_QUANT_PROMOTED_ROLE", None),
+        ]);
+
+        let report = build_manifest(PaperManifestInput {
+            config: None,
+            live: false,
+            profile: None,
+            db: None,
+            candles_db: None,
+            symbols: &[],
+            symbols_file: None,
+            watch_symbols_file: false,
+            btc_symbol: "BTC",
+            lookback_bars: None,
+            start_step_close_ts_ms: None,
+            lock_path: None,
+            status_path: None,
+        })
+        .unwrap();
+
+        assert_eq!(report.interval, "1h");
+        assert_eq!(report.strategy_mode.as_deref(), Some("primary"));
+    }
+
+    #[test]
+    fn manifest_reports_promoted_effective_config_path() {
+        let _guard = crate::paper_service_config::test_env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("strategy.yaml");
+        let artifacts_dir = dir.path().join("artifacts");
+        let promoted_dir = artifacts_dir
+            .join("2026-03-06")
+            .join("run_nightly_20260306T010000Z")
+            .join("promoted_configs");
+        let candles_dir = dir.path().join("candles");
+        fs::create_dir_all(&promoted_dir).unwrap();
+        fs::create_dir_all(&candles_dir).unwrap();
+        fs::write(candles_dir.join("candles_30m.db"), b"").unwrap();
+        fs::write(
+            &config_path,
+            "global:\n  engine:\n    interval: 30m\n  trade:\n    leverage: 2.0\n",
+        )
+        .unwrap();
+        fs::write(
+            promoted_dir.join("primary.yaml"),
+            "global:\n  trade:\n    leverage: 6.0\n",
+        )
+        .unwrap();
+
+        let _env = EnvGuard::set(&[
+            (
+                "AI_QUANT_STRATEGY_YAML",
+                Some(config_path.to_str().unwrap()),
+            ),
+            (
+                "AI_QUANT_ARTIFACTS_DIR",
+                Some(artifacts_dir.to_str().unwrap()),
+            ),
+            ("AI_QUANT_PROMOTED_ROLE", Some("primary")),
+            (
+                "AI_QUANT_CANDLES_DB_DIR",
+                Some(candles_dir.to_str().unwrap()),
+            ),
+            ("AI_QUANT_DB_PATH", None),
+            ("AI_QUANT_SYMBOLS", None),
+            ("AI_QUANT_SYMBOLS_FILE", None),
+            ("AI_QUANT_LOOKBACK_BARS", None),
+            ("AI_QUANT_LOCK_PATH", None),
+            ("AI_QUANT_CANDLES_DB_PATH", None),
+            ("AI_QUANT_INTERVAL", None),
+            ("AI_QUANT_STRATEGY_MODE", None),
+            ("AI_QUANT_STRATEGY_MODE_FILE", None),
+        ]);
+
+        let report = build_manifest(PaperManifestInput {
+            config: None,
+            live: false,
+            profile: None,
+            db: None,
+            candles_db: None,
+            symbols: &[],
+            symbols_file: None,
+            watch_symbols_file: false,
+            btc_symbol: "BTC",
+            lookback_bars: None,
+            start_step_close_ts_ms: None,
+            lock_path: None,
+            status_path: None,
+        })
+        .unwrap();
+
+        assert_eq!(report.promoted_role.as_deref(), Some("primary"));
+        assert_ne!(report.effective_config_path, report.config_path);
+        assert_eq!(
+            report.promoted_config_path.as_deref(),
+            Some(
+                promoted_dir
+                    .join("primary.yaml")
+                    .display()
+                    .to_string()
+                    .as_str()
+            )
+        );
+    }
+
+    #[test]
     fn env_path_treats_empty_values_as_unset() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = crate::paper_service_config::test_env_lock().lock().unwrap();
         let _env = EnvGuard::set(&[("AI_QUANT_DB_PATH", Some(""))]);
 
         assert_eq!(env_path("AI_QUANT_DB_PATH"), None);
@@ -832,7 +965,7 @@ mod tests {
 
     #[test]
     fn manifest_reports_bootstrap_required_without_prior_runtime_steps() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = crate::paper_service_config::test_env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("strategy.yaml");
         let paper_db = dir.path().join("paper.db");
@@ -883,7 +1016,7 @@ mod tests {
 
     #[test]
     fn manifest_reports_bootstrap_ready_and_emits_start_step() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = crate::paper_service_config::test_env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("strategy.yaml");
         let paper_db = dir.path().join("paper.db");
@@ -928,7 +1061,7 @@ mod tests {
 
     #[test]
     fn manifest_reports_resume_ready_from_runtime_cycle_steps() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = crate::paper_service_config::test_env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("strategy.yaml");
         let paper_db = dir.path().join("paper.db");
@@ -1001,7 +1134,7 @@ mod tests {
 
     #[test]
     fn manifest_blocks_watch_mode_without_symbols_file_source() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = crate::paper_service_config::test_env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("strategy.yaml");
         let paper_db = dir.path().join("paper.db");
@@ -1049,7 +1182,7 @@ mod tests {
 
     #[test]
     fn manifest_derives_default_status_path_from_lock_path() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = crate::paper_service_config::test_env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("strategy.yaml");
         let candles_dir = dir.path().join("candles");
