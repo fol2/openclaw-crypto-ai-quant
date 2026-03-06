@@ -5,6 +5,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 use crate::paper_daemon;
+use crate::paper_loop;
 
 const DEFAULT_CONFIG_PATH: &str = "config/strategy_overrides.yaml";
 const DEFAULT_PAPER_DB_PATH: &str = "trading_engine.db";
@@ -59,7 +60,17 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
     let runtime_bootstrap =
         build_bootstrap(&config, RuntimeMode::Paper, input.profile).map_err(anyhow::Error::msg)?;
 
-    let interval = config.engine.interval.trim().to_string();
+    let symbols = resolve_symbols(input.symbols);
+    let symbols_file = input
+        .symbols_file
+        .map(Path::to_path_buf)
+        .or_else(|| env_path("AI_QUANT_SYMBOLS_FILE"));
+    let interval_symbols = resolve_interval_symbols(&symbols, symbols_file.as_deref())?;
+    let interval = if interval_symbols.is_empty() {
+        config.engine.interval.trim().to_string()
+    } else {
+        paper_loop::resolve_shared_interval(&config_path, &interval_symbols, input.live)?
+    };
     if let Some(env_interval) = env_string("AI_QUANT_INTERVAL") {
         let env_interval = env_interval.trim().to_string();
         if !env_interval.is_empty() && env_interval != interval {
@@ -77,11 +88,6 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
         .unwrap_or_else(|| PathBuf::from(DEFAULT_PAPER_DB_PATH));
 
     let candles_db = resolve_candles_db(input.candles_db, &interval)?;
-    let symbols = resolve_symbols(input.symbols);
-    let symbols_file = input
-        .symbols_file
-        .map(Path::to_path_buf)
-        .or_else(|| env_path("AI_QUANT_SYMBOLS_FILE"));
     let lookback_bars = input
         .lookback_bars
         .or_else(|| env_usize("AI_QUANT_LOOKBACK_BARS"))
@@ -224,6 +230,26 @@ fn resolve_symbols(cli_symbols: &[String]) -> Vec<String> {
     symbols
 }
 
+fn resolve_interval_symbols(symbols: &[String], symbols_file: Option<&Path>) -> Result<Vec<String>> {
+    let mut merged = symbols.to_vec();
+    if let Some(symbols_file) = symbols_file {
+        let file_symbols = std::fs::read_to_string(symbols_file).with_context(|| {
+            format!(
+                "failed to read symbols file while resolving manifest: {}",
+                symbols_file.display()
+            )
+        })?;
+        merged.extend(parse_symbol_list(&file_symbols));
+    }
+    let mut symbols = merged
+        .into_iter()
+        .filter_map(normalise_symbol)
+        .collect::<Vec<_>>();
+    symbols.sort();
+    symbols.dedup();
+    Ok(symbols)
+}
+
 fn parse_symbol_list(raw: &str) -> Vec<String> {
     raw.replace('\n', ",")
         .split(',')
@@ -246,7 +272,7 @@ fn env_string(name: &str) -> Option<String> {
 }
 
 fn env_path(name: &str) -> Option<PathBuf> {
-    env::var_os(name).map(PathBuf::from)
+    env_string(name).map(PathBuf::from)
 }
 
 fn env_usize(name: &str) -> Option<usize> {
@@ -419,5 +445,63 @@ mod tests {
             candles_dir.join("candles_30m.db").display().to_string()
         );
         assert_eq!(report.runtime_bootstrap.pipeline.profile, "production");
+    }
+
+    #[test]
+    fn manifest_uses_symbol_specific_shared_interval_for_candles_db() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("strategy.yaml");
+        let candles_dir = dir.path().join("candles");
+        fs::create_dir_all(&candles_dir).unwrap();
+        write_config(&config_path, "30m");
+        fs::write(
+            &config_path,
+            "global:\n  engine:\n    interval: 30m\nsymbols:\n  BTC:\n    engine:\n      interval: 1h\n",
+        )
+        .unwrap();
+
+        let _env = EnvGuard::set(&[
+            ("AI_QUANT_STRATEGY_YAML", Some(config_path.to_str().unwrap())),
+            (
+                "AI_QUANT_CANDLES_DB_DIR",
+                Some(candles_dir.to_str().unwrap()),
+            ),
+            ("AI_QUANT_SYMBOLS", Some("BTC")),
+            ("AI_QUANT_DB_PATH", None),
+            ("AI_QUANT_SYMBOLS_FILE", None),
+            ("AI_QUANT_LOOKBACK_BARS", None),
+            ("AI_QUANT_LOCK_PATH", None),
+            ("AI_QUANT_CANDLES_DB_PATH", None),
+            ("AI_QUANT_INTERVAL", None),
+        ]);
+
+        let report = build_manifest(PaperManifestInput {
+            config: None,
+            live: false,
+            profile: None,
+            db: None,
+            candles_db: None,
+            symbols: &[],
+            symbols_file: None,
+            btc_symbol: "BTC",
+            lookback_bars: None,
+            lock_path: None,
+        })
+        .unwrap();
+
+        assert_eq!(report.interval, "1h");
+        assert_eq!(
+            report.candles_db,
+            candles_dir.join("candles_1h.db").display().to_string()
+        );
+    }
+
+    #[test]
+    fn env_path_treats_empty_values_as_unset() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::set(&[("AI_QUANT_DB_PATH", Some(""))]);
+
+        assert_eq!(env_path("AI_QUANT_DB_PATH"), None);
     }
 }

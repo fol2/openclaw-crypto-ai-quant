@@ -352,7 +352,7 @@ pub(crate) fn resolve_symbols_for_inspection(
     Ok(normalise_symbols(&merged))
 }
 
-fn resolve_shared_interval(
+pub(crate) fn resolve_shared_interval(
     config_path: &Path,
     active_symbols: &[String],
     live: bool,
