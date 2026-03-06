@@ -14,6 +14,7 @@ use tempfile::{tempdir, TempDir};
 
 const START_STEP_CLOSE_TS_MS: i64 = 1_773_422_400_000;
 const LAST_STEP_CLOSE_TS_MS: i64 = 1_773_426_000_000;
+const NEXT_STEP_CLOSE_TS_MS: i64 = LAST_STEP_CLOSE_TS_MS + 1_800_000;
 
 #[derive(Debug)]
 struct Fixture {
@@ -250,6 +251,58 @@ fn paper_daemon_writes_status_file_for_running_and_stopped_lifecycle() {
             .and_then(Value::as_i64)
             .is_some(),
         "persisted status should include a stopped timestamp",
+    );
+}
+
+#[test]
+fn paper_daemon_resumed_start_step_does_not_trip_status_restart_required() {
+    let fixture = prepare_idle_fixture();
+    let child = daemon_command(&fixture)
+        .arg("--start-step-close-ts-ms")
+        .arg(NEXT_STEP_CLOSE_TS_MS.to_string())
+        .arg("--idle-sleep-ms")
+        .arg("250")
+        .arg("--max-idle-polls")
+        .arg("0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("paper daemon resumed start-step smoke should spawn");
+
+    let child = wait_for_lock_file(child, &fixture.lock_path, Duration::from_secs(5));
+    let _running_status = wait_for_status_file(&fixture.status_path, Duration::from_secs(5));
+
+    let output = status_command(&fixture)
+        .arg("--stale-after-ms")
+        .arg("60000")
+        .output()
+        .expect("paper status smoke should spawn");
+    assert!(
+        output.status.success(),
+        "paper status smoke should exit successfully for a resumed daemon lane; output:\n{}",
+        combined_output(&output)
+    );
+
+    let report = parse_json_output(&output);
+    assert_eq!(
+        report.pointer("/service_state").and_then(Value::as_str),
+        Some("running"),
+        "resumed lanes should not be marked restart-required just because the daemon was started with a redundant start-step flag",
+    );
+    assert_eq!(
+        report
+            .pointer("/contract_matches_status")
+            .and_then(Value::as_bool),
+        Some(true),
+        "resumed lanes should still match the launch contract when the supervisor omits a redundant start-step flag",
+    );
+
+    send_sigterm(&child);
+    let stopped = wait_with_timeout(child, Duration::from_secs(5));
+    assert!(
+        stopped.status.success(),
+        "paper daemon should exit cleanly after the resumed-lane smoke; output:\n{}",
+        combined_output(&stopped)
     );
 }
 
@@ -758,6 +811,27 @@ fn daemon_command(fixture: &Fixture) -> Command {
     command
         .arg("paper")
         .arg("daemon")
+        .arg("--config")
+        .arg(config_path())
+        .arg("--db")
+        .arg(&fixture.paper_db)
+        .arg("--candles-db")
+        .arg(&fixture.candles_db)
+        .arg("--symbols")
+        .arg("ETH")
+        .arg("--lock-path")
+        .arg(&fixture.lock_path)
+        .arg("--status-path")
+        .arg(&fixture.status_path)
+        .arg("--json");
+    command
+}
+
+fn status_command(fixture: &Fixture) -> Command {
+    let mut command = runtime_command();
+    command
+        .arg("paper")
+        .arg("status")
         .arg("--config")
         .arg(config_path())
         .arg("--db")

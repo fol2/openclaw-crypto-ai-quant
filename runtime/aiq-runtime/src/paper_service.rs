@@ -80,11 +80,21 @@ fn derive_action(status: &PaperStatusReport) -> (PaperSupervisorAction, String) 
             PaperSupervisorAction::Hold,
             "current launch contract is blocked and should not be supervised yet".to_string(),
         ),
-        PaperServiceState::IdleNoSymbols => (
-            PaperSupervisorAction::Hold,
-            "no active symbols or open paper positions are currently available for this lane"
-                .to_string(),
-        ),
+        PaperServiceState::IdleNoSymbols => {
+            if status.manifest.resume.launch_ready {
+                (
+                    PaperSupervisorAction::Start,
+                    "launch contract is launch-ready but currently has no active symbols; the Rust daemon may start and wait for a watched symbols file or future open positions"
+                        .to_string(),
+                )
+            } else {
+                (
+                    PaperSupervisorAction::Hold,
+                    "no active symbols or open paper positions are currently available for this lane"
+                        .to_string(),
+                )
+            }
+        }
         PaperServiceState::BootstrapRequired => (
             PaperSupervisorAction::Hold,
             "first launch still requires --start-step-close-ts-ms or AI_QUANT_PAPER_START_STEP_CLOSE_TS_MS"
@@ -168,10 +178,10 @@ mod tests {
         let runtime_bootstrap =
             build_bootstrap(&config, RuntimeMode::Paper, Some("production")).unwrap();
 
-        let launch_state = if launch_ready {
-            PaperManifestLaunchState::ResumeReady
-        } else {
-            PaperManifestLaunchState::BootstrapRequired
+        let launch_state = match service_state {
+            PaperServiceState::IdleNoSymbols => PaperManifestLaunchState::IdleNoSymbols,
+            _ if launch_ready => PaperManifestLaunchState::ResumeReady,
+            _ => PaperManifestLaunchState::BootstrapRequired,
         };
 
         let manifest = PaperManifestReport {
@@ -261,6 +271,24 @@ mod tests {
 
         assert_eq!(action, PaperSupervisorAction::Hold);
         assert!(reason.contains("start-step-close-ts-ms"));
+    }
+
+    #[test]
+    fn service_reports_start_for_launch_ready_idle_watch_lane() {
+        let report = build_manifest_report(PaperServiceState::IdleNoSymbols, true);
+        let (action, reason) = derive_action(&report);
+
+        assert_eq!(action, PaperSupervisorAction::Start);
+        assert!(reason.contains("wait for a watched symbols file"));
+    }
+
+    #[test]
+    fn service_reports_hold_for_non_ready_idle_lane() {
+        let report = build_manifest_report(PaperServiceState::IdleNoSymbols, false);
+        let (action, reason) = derive_action(&report);
+
+        assert_eq!(action, PaperSupervisorAction::Hold);
+        assert!(reason.contains("no active symbols"));
     }
 
     #[test]
