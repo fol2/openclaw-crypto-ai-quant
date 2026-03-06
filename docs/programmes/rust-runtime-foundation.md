@@ -86,6 +86,14 @@ resume contract for the same manifest surface:
 - exposes the current active symbols plus `last_applied_step_close_ts_ms`, `next_due_step_close_ts_ms`, and `latest_common_close_ts_ms` when the paper DB and candles DB are inspectable
 - resolves the daemon `status_path` so later service supervision can observe the same lane lifecycle contract
 
+The current delivered slice extends that again with a read-only Rust paper
+service status surface:
+
+- `paper status`
+- reuses the same launch/resume contract from `paper manifest`
+- reads the persisted daemon lifecycle JSON from the resolved `status_path`
+- reports whether the current lane is running, stale, stopped, restart-required, or merely launch-ready without starting the daemon
+
 The current delivered slice extends that again with a daemon lifecycle status
 surface:
 
