@@ -898,6 +898,32 @@ Status expectations:
 - when the running daemon status no longer matches the current launch contract (for example config fingerprint, lock path, or symbols-file wiring drifted), `service_state` becomes `restart_required`
 - when the persisted daemon lifecycle JSON reports `running=false`, `service_state` becomes `stopped`
 
+### Inspect the Rust paper daemon service action
+
+Use when: you want a read-only supervision answer for the current Rust lane,
+without actually starting, stopping, or restarting the daemon.
+
+```bash
+AI_QUANT_STRATEGY_YAML=./config/strategy_overrides.paper1.yaml \
+AI_QUANT_DB_PATH=./trading_engine_v8_paper1.db \
+AI_QUANT_CANDLES_DB_DIR=./candles_dbs \
+AI_QUANT_SYMBOLS=BTC,ETH,SOL \
+AI_QUANT_STATUS_STALE_AFTER_MS=30000 \
+cargo run -p aiq-runtime -- \
+  paper service \
+  --json
+```
+
+Service-action expectations:
+
+- `paper service` is read-only; it never starts, stops, or restarts the daemon
+- `desired_action = hold` means the current lane should stay unsupervised until the launch contract becomes valid
+- `desired_action = start` means the current lane is launch-ready but no healthy Rust daemon is supervising it right now
+- `desired_action = restart` means the lane is supervised by a stale or drifted daemon contract and later orchestration should recycle it
+- `desired_action = monitor` means the current daemon status still matches the live launch contract and supervision can keep watching it
+- `action_reason` gives the operator-facing explanation for that recommendation without requiring manual JSON diffing
+- `daemon_command` is carried through as the exact launch command the later service surface would supervise
+
 ---
 
 ## 7. Factory Stage Gate (dry -> smoke -> real)

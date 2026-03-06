@@ -33,6 +33,10 @@ launch contract with the persisted daemon status JSON so operators can see
 whether the current Rust lane is merely launch-ready, actively running, stale,
 stopped, or in need of a restart because the live daemon contract drifted from
 the current config/env plan.
+Rust now also ships a read-only `paper service` surface that builds on top of
+that status view and tells later supervision whether the lane should be held,
+started, restarted, or simply monitored, still without claiming any systemd or
+production cutover.
 
 ## Screenshots
 
