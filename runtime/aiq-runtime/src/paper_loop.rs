@@ -420,13 +420,7 @@ fn prepare_working_paper_db(paper_db: &Path, dry_run: bool) -> Result<WorkingPap
             .unwrap_or_else(|| Utc::now().timestamp_micros() * 1_000)
     );
     let temp_path = std::env::temp_dir().join(temp_name);
-    std::fs::copy(paper_db, &temp_path).with_context(|| {
-        format!(
-            "failed to copy paper db {} to temporary dry-run db {}",
-            paper_db.display(),
-            temp_path.display()
-        )
-    })?;
+    snapshot_sqlite_db(paper_db, &temp_path)?;
     Ok(WorkingPaperDb {
         path: temp_path,
         cleanup: true,
@@ -466,6 +460,31 @@ fn ensure_exact_step_candle_coverage(
         }
     }
 
+    Ok(())
+}
+
+fn snapshot_sqlite_db(source_path: &Path, target_path: &Path) -> Result<()> {
+    if target_path.exists() {
+        std::fs::remove_file(target_path).with_context(|| {
+            format!(
+                "failed to remove existing temporary sqlite snapshot {}",
+                target_path.display()
+            )
+        })?;
+    }
+
+    let conn = Connection::open(source_path)?;
+    let quoted_target_path = target_path
+        .to_string_lossy()
+        .replace('\'', "''");
+    conn.execute_batch(&format!("VACUUM main INTO '{}';", quoted_target_path))
+        .with_context(|| {
+            format!(
+                "failed to snapshot sqlite db {} into {}",
+                source_path.display(),
+                target_path.display()
+            )
+        })?;
     Ok(())
 }
 
@@ -884,5 +903,39 @@ mod tests {
             err.to_string()
                 .contains("requires an exact candle close at 1772833800000")
         );
+    }
+
+    #[test]
+    fn prepare_working_paper_db_snapshots_wal_state_for_dry_run() {
+        let dir = tempdir().unwrap();
+        let paper_db = dir.path().join("paper.db");
+
+        let conn = Connection::open(&paper_db).unwrap();
+        conn.execute_batch(
+            r#"
+            PRAGMA journal_mode=WAL;
+            CREATE TABLE position_state (
+                symbol TEXT PRIMARY KEY,
+                open_trade_id INTEGER,
+                trailing_sl REAL,
+                last_funding_time INTEGER,
+                adds_count INTEGER,
+                tp1_taken INTEGER,
+                last_add_time INTEGER,
+                entry_adx_threshold REAL,
+                updated_at TEXT
+            );
+            INSERT INTO position_state VALUES ('ETH',1,95.0,1772676500000,0,0,1772676600000,22.0,'2026-03-05T10:08:20+00:00');
+            "#,
+        )
+        .unwrap();
+        conn.close().unwrap();
+
+        let working = prepare_working_paper_db(&paper_db, true).unwrap();
+        let cloned = Connection::open(working.path()).unwrap();
+        let row_count: i64 = cloned
+            .query_row("SELECT COUNT(*) FROM position_state", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(row_count, 1);
     }
 }
