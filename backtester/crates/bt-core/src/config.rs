@@ -1,7 +1,7 @@
 //! Strategy configuration for the backtesting simulator.
 //!
 //! Mirrors the Python `_DEFAULT_STRATEGY_CONFIG` dict from `mei_alpha_v1.py` (lines 226-408).
-//! YAML merge hierarchy: defaults <- global <- per-symbol <- live.
+//! YAML merge hierarchy: defaults <- global <- per-symbol <- live <- mode overlay.
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -668,6 +668,10 @@ impl StrategyConfig {
 //   thresholds: { ... }
 //   runtime: { ... }      # additive, Rust-only runtime settings
 //   pipeline: { ... }     # additive, stage graph / ranker settings
+// modes:
+//   primary:
+//     global: { ... }     # optional global overlay, applied after live
+//     symbols: { BTC: ... }  # optional per-symbol overlay, applied after live
 // symbols:
 //   BTC:
 //     trade: { ... }
@@ -694,6 +698,8 @@ struct YamlRoot {
     symbols: serde_yaml::Value,
     #[serde(default)]
     live: serde_yaml::Value,
+    #[serde(default)]
+    modes: serde_yaml::Value,
 }
 
 // ---------------------------------------------------------------------------
@@ -1023,6 +1029,23 @@ pub fn load_config_checked(
     symbol: Option<&str>,
     is_live: bool,
 ) -> Result<StrategyConfig, String> {
+    load_config_checked_with_mode(yaml_path, symbol, is_live, None)
+}
+
+/// Strict config loader with an optional strategy-mode overlay.
+///
+/// Merge hierarchy:
+///
+///   defaults <- global <- symbols.<symbol> <- live (if `is_live`) <- modes.<mode>
+///
+/// Returns a descriptive error when the file is missing, unreadable, invalid YAML,
+/// or fails typed deserialization after merge.
+pub fn load_config_checked_with_mode(
+    yaml_path: &str,
+    symbol: Option<&str>,
+    is_live: bool,
+    strategy_mode: Option<&str>,
+) -> Result<StrategyConfig, String> {
     let path = Path::new(yaml_path);
     match std::fs::metadata(path) {
         Ok(_) => {}
@@ -1081,6 +1104,10 @@ pub fn load_config_checked(
         deep_merge(&mut merged, &root.live);
     }
 
+    if let Some(mode_overlay) = resolve_mode_overlay(&root.modes, strategy_mode, symbol) {
+        deep_merge(&mut merged, &mode_overlay);
+    }
+
     // Deserialize the merged Value into the typed config.
     match serde_yaml::from_value(merged) {
         Ok(mut cfg) => {
@@ -1089,6 +1116,59 @@ pub fn load_config_checked(
         }
         Err(e) => Err(format!("failed to deserialize merged config: {e}")),
     }
+}
+
+fn resolve_mode_overlay(
+    modes: &serde_yaml::Value,
+    strategy_mode: Option<&str>,
+    symbol: Option<&str>,
+) -> Option<serde_yaml::Value> {
+    let mode_key = strategy_mode
+        .map(str::trim)
+        .filter(|mode| !mode.is_empty())?;
+    let serde_yaml::Value::Mapping(modes_map) = modes else {
+        return None;
+    };
+
+    let mode_overlay = lookup_mapping_value(modes_map, mode_key)?;
+    let serde_yaml::Value::Mapping(mode_map) = mode_overlay else {
+        return Some(mode_overlay.clone());
+    };
+
+    let global_key = serde_yaml::Value::String("global".to_string());
+    let symbols_key = serde_yaml::Value::String("symbols".to_string());
+    let has_scoped_overlay =
+        mode_map.contains_key(&global_key) || mode_map.contains_key(&symbols_key);
+    if !has_scoped_overlay {
+        return Some(mode_overlay.clone());
+    }
+
+    let mut overlay = serde_yaml::Value::Mapping(Default::default());
+    if let Some(global_overlay) = mode_map.get(&global_key) {
+        deep_merge(&mut overlay, global_overlay);
+    }
+
+    if let Some(sym) = symbol {
+        if let Some(serde_yaml::Value::Mapping(symbols_map)) = mode_map.get(&symbols_key) {
+            if let Some(sym_overlay) = lookup_mapping_value(symbols_map, sym) {
+                deep_merge(&mut overlay, sym_overlay);
+            }
+        }
+    }
+
+    Some(overlay)
+}
+
+fn lookup_mapping_value<'a>(
+    map: &'a serde_yaml::Mapping,
+    key: &str,
+) -> Option<&'a serde_yaml::Value> {
+    let exact = serde_yaml::Value::String(key.to_string());
+    let upper = serde_yaml::Value::String(key.to_ascii_uppercase());
+    let lower = serde_yaml::Value::String(key.to_ascii_lowercase());
+    map.get(&exact)
+        .or_else(|| map.get(&upper))
+        .or_else(|| map.get(&lower))
 }
 
 /// Backwards-compatible permissive loader.
@@ -1373,6 +1453,65 @@ live:
 
         let cfg_live = load_config(tmp.to_str().unwrap(), Some("BTC"), true);
         assert_eq!(cfg_live.runtime.profile, "production_live");
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn test_load_yaml_mode_overlay_applies_after_live() {
+        let yaml = r#"
+global:
+  trade:
+    leverage: 2.0
+live:
+  trade:
+    leverage: 4.0
+modes:
+  primary:
+    global:
+      trade:
+        leverage: 7.5
+"#;
+        let tmp = std::env::temp_dir().join("bt_config_test_mode_overlay_after_live.yaml");
+        std::fs::write(&tmp, yaml).unwrap();
+
+        let cfg = load_config_checked_with_mode(tmp.to_str().unwrap(), None, true, Some("primary"))
+            .unwrap();
+        assert!((cfg.trade.leverage - 7.5).abs() < f64::EPSILON);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn test_load_yaml_mode_overlay_supports_symbol_scope() {
+        let yaml = r#"
+global:
+  trade:
+    leverage: 2.0
+symbols:
+  ETH:
+    trade:
+      leverage: 3.0
+modes:
+  fallback:
+    global:
+      trade:
+        allocation_pct: 0.04
+    symbols:
+      ETH:
+        trade:
+          leverage: 9.0
+"#;
+        let tmp = std::env::temp_dir().join("bt_config_test_mode_overlay_symbol.yaml");
+        std::fs::write(&tmp, yaml).unwrap();
+
+        let cfg = load_config_checked_with_mode(
+            tmp.to_str().unwrap(),
+            Some("ETH"),
+            false,
+            Some("fallback"),
+        )
+        .unwrap();
+        assert!((cfg.trade.leverage - 9.0).abs() < f64::EPSILON);
+        assert!((cfg.trade.allocation_pct - 0.04).abs() < f64::EPSILON);
         std::fs::remove_file(&tmp).ok();
     }
 }

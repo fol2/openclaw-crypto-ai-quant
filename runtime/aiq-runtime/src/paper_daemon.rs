@@ -17,6 +17,7 @@ use crate::paper_loop::{self, PaperLoopReport, PaperLoopStepReport};
 pub struct PaperDaemonInput<'a> {
     pub runtime_bootstrap: RuntimeBootstrap,
     pub config_path: &'a Path,
+    pub strategy_mode: Option<&'a str>,
     pub live: bool,
     pub paper_db: &'a Path,
     pub candles_db: &'a Path,
@@ -370,6 +371,7 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
                 match paper_loop::inspect_loop_context(
                     &input.runtime_bootstrap,
                     input.config_path,
+                    input.strategy_mode,
                     input.live,
                     working_paper_db.path(),
                     input.candles_db,
@@ -389,6 +391,7 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
         let maybe_context = paper_loop::inspect_loop_context(
             &input.runtime_bootstrap,
             input.config_path,
+            input.strategy_mode,
             input.live,
             working_paper_db.path(),
             input.candles_db,
@@ -553,6 +556,7 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
         let cycle_report = paper_cycle::run_cycle(PaperCycleInput {
             runtime_bootstrap: input.runtime_bootstrap.clone(),
             config_path: input.config_path,
+            strategy_mode: input.strategy_mode,
             live: input.live,
             paper_db: working_paper_db.path(),
             candles_db: input.candles_db,
@@ -595,6 +599,7 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
     let final_context = paper_loop::inspect_loop_context(
         &input.runtime_bootstrap,
         input.config_path,
+        input.strategy_mode,
         input.live,
         working_paper_db.path(),
         input.candles_db,

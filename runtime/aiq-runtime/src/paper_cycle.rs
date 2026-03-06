@@ -18,6 +18,7 @@ use crate::paper_run_once::{
 pub struct PaperCycleInput<'a> {
     pub runtime_bootstrap: RuntimeBootstrap,
     pub config_path: &'a Path,
+    pub strategy_mode: Option<&'a str>,
     pub live: bool,
     pub paper_db: &'a Path,
     pub candles_db: &'a Path,
@@ -109,7 +110,12 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
     }
     explicit_symbols.sort();
     let active_symbols = active_symbols.into_iter().collect::<Vec<_>>();
-    let base_cfg = load_symbol_config(input.config_path, "__GLOBAL__", input.live)?;
+    let base_cfg = load_symbol_config(
+        input.config_path,
+        "__GLOBAL__",
+        input.live,
+        input.strategy_mode,
+    )?;
     let max_entries = base_cfg.trade.max_entry_orders_per_loop;
     let mut used_entry_budget = 0usize;
 
@@ -120,7 +126,8 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
     let mut errors = Vec::new();
 
     for symbol in &active_symbols {
-        let config = load_symbol_config(input.config_path, symbol, input.live)?;
+        let config =
+            load_symbol_config(input.config_path, symbol, input.live, input.strategy_mode)?;
         match &interval {
             Some(current_interval) if current_interval != &config.engine.interval => {
                 anyhow::bail!(
@@ -358,8 +365,13 @@ fn normalise_symbols(raw: &[String]) -> Vec<String> {
     symbols
 }
 
-fn load_symbol_config(config_path: &Path, symbol: &str, live: bool) -> Result<StrategyConfig> {
-    bt_core::config::load_config_checked(
+fn load_symbol_config(
+    config_path: &Path,
+    symbol: &str,
+    live: bool,
+    strategy_mode: Option<&str>,
+) -> Result<StrategyConfig> {
+    bt_core::config::load_config_checked_with_mode(
         config_path
             .to_str()
             .context("config path must be valid UTF-8")?,
@@ -369,6 +381,7 @@ fn load_symbol_config(config_path: &Path, symbol: &str, live: bool) -> Result<St
             Some(symbol)
         },
         live,
+        strategy_mode,
     )
     .map_err(anyhow::Error::msg)
 }
@@ -694,6 +707,7 @@ mod tests {
         let input = PaperCycleInput {
             runtime_bootstrap,
             config_path: &cfg_path,
+            strategy_mode: None,
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -726,6 +740,7 @@ mod tests {
         let err = run_cycle(PaperCycleInput {
             runtime_bootstrap,
             config_path: &cfg_path,
+            strategy_mode: None,
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -766,6 +781,7 @@ mod tests {
         let report = run_cycle(PaperCycleInput {
             runtime_bootstrap,
             config_path: &cfg_path,
+            strategy_mode: None,
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -821,6 +837,7 @@ mod tests {
         let report = run_cycle(PaperCycleInput {
             runtime_bootstrap,
             config_path: &cfg_path,
+            strategy_mode: None,
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -864,6 +881,7 @@ mod tests {
         let report = run_cycle(PaperCycleInput {
             runtime_bootstrap,
             config_path: &cfg_path,
+            strategy_mode: None,
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,

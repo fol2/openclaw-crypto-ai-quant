@@ -16,6 +16,7 @@ use crate::paper_export;
 pub struct PaperLoopInput<'a> {
     pub runtime_bootstrap: RuntimeBootstrap,
     pub config_path: &'a Path,
+    pub strategy_mode: Option<&'a str>,
     pub live: bool,
     pub paper_db: &'a Path,
     pub candles_db: &'a Path,
@@ -117,6 +118,7 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
         let maybe_context = inspect_loop_context(
             &input.runtime_bootstrap,
             input.config_path,
+            input.strategy_mode,
             input.live,
             working_paper_db.path(),
             input.candles_db,
@@ -197,6 +199,7 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
         let cycle_report = paper_cycle::run_cycle(PaperCycleInput {
             runtime_bootstrap: input.runtime_bootstrap.clone(),
             config_path: input.config_path,
+            strategy_mode: input.strategy_mode,
             live: input.live,
             paper_db: working_paper_db.path(),
             candles_db: input.candles_db,
@@ -219,6 +222,7 @@ pub fn run_loop(input: PaperLoopInput<'_>) -> Result<PaperLoopReport> {
     let final_context = inspect_loop_context(
         &input.runtime_bootstrap,
         input.config_path,
+        input.strategy_mode,
         input.live,
         working_paper_db.path(),
         input.candles_db,
@@ -299,6 +303,7 @@ impl Drop for WorkingPaperDb {
 pub(crate) fn inspect_loop_context(
     runtime_bootstrap: &RuntimeBootstrap,
     config_path: &Path,
+    strategy_mode: Option<&str>,
     live: bool,
     paper_db: &Path,
     candles_db: &Path,
@@ -316,7 +321,7 @@ pub(crate) fn inspect_loop_context(
         return Ok(None);
     }
 
-    let interval = resolve_shared_interval(config_path, &active_symbols, live)?;
+    let interval = resolve_shared_interval(config_path, &active_symbols, live, strategy_mode)?;
     let latest_common_close_ts_ms =
         latest_common_close_ts_ms(candles_db, &interval, &active_symbols, btc_symbol)?;
     let last_applied_step_close_ts_ms = load_last_applied_step_close_ts_ms(
@@ -356,15 +361,17 @@ pub(crate) fn resolve_shared_interval(
     config_path: &Path,
     active_symbols: &[String],
     live: bool,
+    strategy_mode: Option<&str>,
 ) -> Result<String> {
     let mut interval = None;
     for symbol in active_symbols {
-        let config = bt_core::config::load_config_checked(
+        let config = bt_core::config::load_config_checked_with_mode(
             config_path
                 .to_str()
                 .context("config path must be valid UTF-8")?,
             Some(symbol),
             live,
+            strategy_mode,
         )
         .map_err(anyhow::Error::msg)?;
         match interval.as_deref() {
@@ -843,6 +850,7 @@ mod tests {
         let err = run_loop(PaperLoopInput {
             runtime_bootstrap: runtime_bootstrap(),
             config_path: &base_cfg_path(),
+            strategy_mode: None,
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -877,6 +885,7 @@ mod tests {
         let first = run_loop(PaperLoopInput {
             runtime_bootstrap: runtime_bootstrap(),
             config_path: &base_cfg_path(),
+            strategy_mode: None,
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -916,6 +925,7 @@ mod tests {
         let second = run_loop(PaperLoopInput {
             runtime_bootstrap: runtime_bootstrap(),
             config_path: &base_cfg_path(),
+            strategy_mode: None,
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -947,6 +957,7 @@ mod tests {
         let third = run_loop(PaperLoopInput {
             runtime_bootstrap: runtime_bootstrap(),
             config_path: &base_cfg_path(),
+            strategy_mode: None,
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -984,6 +995,7 @@ mod tests {
         let report = run_loop(PaperLoopInput {
             runtime_bootstrap: runtime_bootstrap(),
             config_path: &base_cfg_path(),
+            strategy_mode: None,
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -1043,6 +1055,7 @@ mod tests {
         let err = run_loop(PaperLoopInput {
             runtime_bootstrap: runtime_bootstrap(),
             config_path: &base_cfg_path(),
+            strategy_mode: None,
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -1079,6 +1092,7 @@ mod tests {
         let caught_up = run_loop(PaperLoopInput {
             runtime_bootstrap: bootstrap.clone(),
             config_path: &cfg_path,
+            strategy_mode: None,
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -1101,6 +1115,7 @@ mod tests {
         let report = run_loop(PaperLoopInput {
             runtime_bootstrap: bootstrap,
             config_path: &cfg_path,
+            strategy_mode: None,
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -1149,6 +1164,7 @@ mod tests {
         let report = run_loop(PaperLoopInput {
             runtime_bootstrap: runtime_bootstrap(),
             config_path: &base_cfg_path(),
+            strategy_mode: None,
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -1185,6 +1201,7 @@ mod tests {
         let caught_up = run_loop(PaperLoopInput {
             runtime_bootstrap: bootstrap.clone(),
             config_path: &cfg_path,
+            strategy_mode: None,
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
@@ -1208,6 +1225,7 @@ mod tests {
         let report = run_loop(PaperLoopInput {
             runtime_bootstrap: bootstrap,
             config_path: &cfg_path,
+            strategy_mode: None,
             live: false,
             paper_db: &paper_db,
             candles_db: &candles_db,
