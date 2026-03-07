@@ -847,8 +847,38 @@ Operational expectations:
 - `--lock-path` may be supplied when the Rust daemon lane needs an isolated lock namespace; changing the lock path does not widen DB projections
 - `--status-path` may be supplied when operators want the daemon lifecycle JSON in a specific location; otherwise the daemon derives it from the resolved lock path or `AI_QUANT_STATUS_PATH`
 - `--dry-run` remains the safest bring-up path while the surface is still opt-in
-- manual `paper daemon` launch is still supported, but when you want Rust to own lane lifecycle directly the preferred entrypoint is now `paper service apply` rather than manually retyping `daemon_command`
+- manual `paper daemon` launch is still supported, but the preferred conventional lane entrypoint is now `paper lane daemon --lane <paper1|paper2|paper3|livepaper>` so the example service contract is resolved by Rust instead of being retyped by hand
 - if you only need bounded catch-up or a short follow poll budget, use `paper loop` directly instead of `paper daemon`
+
+### Run the conventional Rust paper lane wrapper
+
+Use when: you want the standard `paper1` / `paper2` / `paper3` / `livepaper`
+service contract resolved from a worktree root, without reconstructing the YAML
+/ DB / lock / status mapping by hand. This is the launch path used by the
+example paper systemd units in this phase.
+
+```bash
+mkdir -p ./artifacts/state
+touch ./artifacts/state/paper_watchlist_paper1.txt
+
+cargo run -p aiq-runtime -- \
+  paper lane daemon \
+  --lane paper1 \
+  --project-dir . \
+  --symbols-file ./artifacts/state/paper_watchlist_paper1.txt \
+  --watch-symbols-file \
+  --lookback-bars 200 \
+  --json
+```
+
+Conventional lane expectations:
+
+- `paper lane` resolves `paper1`, `paper2`, `paper3`, and `livepaper` onto the conventional `config/strategy_overrides.<lane>.yaml`, `trading_engine_v8_<lane>.db`, `ai_quant_paper_v8_<lane>.lock`, `ai_quant_paper_v8_<lane>.status.json`, and `artifacts/state/strategy_mode_v8_<lane>.txt` contracts under the selected `--project-dir`
+- `paper lane daemon` still executes the same Rust `paper daemon` write path; it simply binds the example lane mapping before launch
+- `paper lane manifest` / `status` / `service` / `apply` mirror the underlying Rust service planner and supervisor surfaces for the same conventional lane contract
+- `paper1` / `paper2` / `paper3` automatically inject the conventional promoted-role and strategy-mode pair (`primary`, `fallback`, `conservative`); `livepaper` intentionally leaves both unset
+- `--symbols-file` plus `--watch-symbols-file` remains the preferred lane watchlist path for the example services because an absent watchlist file would otherwise fail the daemon at start-up
+- this cutover only moves the example paper service launch ownership into Rust; active production paper cutover is still a later step
 
 ### Inspect the Rust paper daemon service manifest
 

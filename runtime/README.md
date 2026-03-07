@@ -26,6 +26,7 @@ Current runtime-owned paper surfaces and the paired opt-in wrapper:
 | `paper service` | Resolve the current Rust paper daemon supervisor action | Read-only status + launch-contract view that tells supervision whether to hold, start, restart, or monitor the lane while failing closed on unhealthy or drifted daemon status |
 | `paper service apply` | Apply the current Rust paper daemon supervisor action | Opt-in side-effecting supervisor for Rust paper daemon start/restart/resume/stop only; reuses the same manifest/status contract and fails closed on unhealthy, drifted, or unproven lane ownership |
 | `paper daemon` | Execute an opt-in long-running Rust paper orchestration wrapper | Owns the outer scheduler, can optionally watch `--symbols-file` for reloads, writes a lane status JSON, and keeps the same `paper cycle` write contract while using the same effective config contract as `paper manifest`; not cutover |
+| `paper lane <manifest|status|service|apply|daemon>` | Resolve or launch one of the conventional paper lanes | Maps `paper1` / `paper2` / `paper3` / `livepaper` onto the conventional YAML / DB / lock / status contracts for a worktree, so example systemd units can launch the Rust paper lane directly without retyping the service contract |
 
 The runtime slice is still intentionally narrow. It does not yet own any live
 execution path, and Python paper execution is still the active production
@@ -48,4 +49,5 @@ slices will build on:
 - a read-only supervisor action surface so operators can inspect whether the lane should be held, started, restarted, or simply monitored
 - an opt-in side-effecting `paper service apply` surface that can enact that recommendation for the Rust paper daemon without claiming service cutover
 - an opt-in daemon wrapper that owns scheduler/watchlist reload orchestration without claiming service cutover
+- a conventional `paper lane` control-plane wrapper that binds the example `paper1` / `paper2` / `paper3` / `livepaper` services to Rust-owned launch contracts from a project root
 - a durable daemon `status_path` contract that later service supervision can build on

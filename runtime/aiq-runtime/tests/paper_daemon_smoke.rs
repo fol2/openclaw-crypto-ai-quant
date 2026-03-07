@@ -1596,6 +1596,172 @@ fn paper_daemon_keeps_open_positions_in_active_symbols_after_manifest_reload() {
     );
 }
 
+#[test]
+fn paper_lane_manifest_resolves_conventional_candidate_contract() {
+    let lane_fixture = seed_lane_project("paper2");
+
+    let output = lane_manifest_command(&lane_fixture, "paper2")
+        .arg("--symbols")
+        .arg("ETH")
+        .output()
+        .expect("paper lane manifest smoke should spawn");
+
+    assert!(
+        output.status.success(),
+        "paper lane manifest should succeed for the conventional paper2 lane; output:\n{}",
+        combined_output(&output)
+    );
+
+    let report = parse_json_output(&output);
+    assert_eq!(
+        report.pointer("/lane/service_name").and_then(Value::as_str),
+        Some("openclaw-ai-quant-trader-v8-paper2"),
+    );
+    assert_eq!(
+        report.pointer("/lane/instance_tag").and_then(Value::as_str),
+        Some("v8-paper2"),
+    );
+    assert_eq!(
+        report
+            .pointer("/lane/promoted_role")
+            .and_then(Value::as_str),
+        Some("fallback"),
+    );
+    assert_eq!(
+        report
+            .pointer("/lane/strategy_mode")
+            .and_then(Value::as_str),
+        Some("fallback"),
+    );
+    assert_eq!(
+        report
+            .pointer("/manifest/instance_tag")
+            .and_then(Value::as_str),
+        Some("v8-paper2"),
+    );
+    assert_eq!(
+        report.pointer("/manifest/paper_db").and_then(Value::as_str),
+        Some(lane_fixture.paper_db.to_string_lossy().as_ref()),
+    );
+    assert_eq!(
+        report
+            .pointer("/manifest/status_path")
+            .and_then(Value::as_str),
+        Some(lane_fixture.status_path.to_string_lossy().as_ref()),
+    );
+}
+
+#[test]
+fn paper_lane_apply_starts_conventional_primary_lane() {
+    let lane_fixture = seed_lane_project("paper1");
+
+    let output = lane_apply_command(&lane_fixture, "paper1")
+        .arg("--symbols")
+        .arg("ETH")
+        .arg("--start-step-close-ts-ms")
+        .arg(START_STEP_CLOSE_TS_MS.to_string())
+        .arg("--action")
+        .arg("auto")
+        .output()
+        .expect("paper lane apply smoke should spawn");
+
+    assert!(
+        output.status.success(),
+        "paper lane apply should start the conventional paper1 lane; output:\n{}",
+        combined_output(&output)
+    );
+
+    let report = parse_json_output(&output);
+    assert_eq!(
+        report.pointer("/lane/service_name").and_then(Value::as_str),
+        Some("openclaw-ai-quant-trader-v8-paper1"),
+    );
+    assert_eq!(
+        report
+            .pointer("/service_apply/final_service/status/service_state")
+            .and_then(Value::as_str),
+        Some("running"),
+    );
+
+    let running_status = wait_for_status_file(&lane_fixture.status_path, Duration::from_secs(5));
+    assert_eq!(
+        running_status.pointer("/running").and_then(Value::as_bool),
+        Some(true),
+        "lane apply should publish a running conventional status file",
+    );
+    assert_eq!(
+        running_status
+            .pointer("/config_path")
+            .and_then(Value::as_str),
+        Some(
+            lane_fixture
+                .project_dir
+                .join("config/strategy_overrides._promoted_primary.yaml")
+                .to_string_lossy()
+                .as_ref()
+        ),
+    );
+
+    let pid = running_status
+        .pointer("/pid")
+        .and_then(Value::as_u64)
+        .expect("running status should expose the daemon pid") as i32;
+    unsafe {
+        assert_eq!(
+            kill(pid, SIGTERM),
+            0,
+            "SIGTERM should stop the spawned lane daemon"
+        );
+    }
+    let stopped_status = wait_for_stopped_status(&lane_fixture.status_path, Duration::from_secs(5));
+    assert_eq!(
+        stopped_status.pointer("/running").and_then(Value::as_bool),
+        Some(false),
+        "conventional lane daemon should persist a stopped status after SIGTERM",
+    );
+}
+
+#[test]
+fn paper_lane_daemon_runs_livepaper_convention_directly() {
+    let lane_fixture = seed_lane_project("livepaper");
+
+    let output = lane_daemon_command(&lane_fixture, "livepaper")
+        .arg("--symbols")
+        .arg("ETH")
+        .arg("--start-step-close-ts-ms")
+        .arg(START_STEP_CLOSE_TS_MS.to_string())
+        .arg("--idle-sleep-ms")
+        .arg("1")
+        .arg("--max-idle-polls")
+        .arg("1")
+        .arg("--dry-run")
+        .output()
+        .expect("paper lane daemon smoke should spawn");
+
+    assert!(
+        output.status.success(),
+        "paper lane daemon should run directly for the conventional livepaper lane; output:\n{}",
+        combined_output(&output)
+    );
+
+    let report = parse_json_output(&output);
+    assert_eq!(
+        report.pointer("/lane/service_name").and_then(Value::as_str),
+        Some("openclaw-ai-quant-trader-v8-livepaper"),
+    );
+    assert_eq!(
+        report
+            .pointer("/lane/promoted_role")
+            .and_then(Value::as_str),
+        None,
+        "livepaper should not inject a promoted role by convention",
+    );
+    assert_eq!(
+        report.pointer("/daemon/dry_run").and_then(Value::as_bool),
+        Some(true),
+    );
+}
+
 fn seed_fixture() -> Fixture {
     let dir = tempdir().expect("fixture tempdir should be created");
     let paper_db = dir.path().join("paper.db");
@@ -1627,6 +1793,65 @@ fn seed_empty_fixture() -> Fixture {
         candles_db,
         lock_path,
         status_path,
+    }
+}
+
+#[derive(Debug)]
+struct LaneFixture {
+    _dir: TempDir,
+    project_dir: PathBuf,
+    paper_db: PathBuf,
+    status_path: PathBuf,
+}
+
+fn seed_lane_project(lane: &str) -> LaneFixture {
+    let dir = tempdir().expect("lane fixture tempdir should be created");
+    let project_dir = dir.path().to_path_buf();
+    fs::create_dir_all(project_dir.join("config")).unwrap();
+    fs::create_dir_all(project_dir.join("candles_dbs")).unwrap();
+    fs::create_dir_all(project_dir.join("artifacts/state")).unwrap();
+    fs::create_dir_all(project_dir.join("artifacts/2026-03-07/run_lane/promoted_configs")).unwrap();
+
+    let config_path = project_dir
+        .join("config")
+        .join(format!("strategy_overrides.{lane}.yaml"));
+    fs::write(
+        &config_path,
+        r#"
+global:
+  engine:
+    interval: 30m
+  runtime:
+    profile: production
+symbols:
+  ETH:
+    runtime:
+      profile: parity_baseline
+"#,
+    )
+    .unwrap();
+
+    for role in ["primary", "fallback", "conservative"] {
+        fs::write(
+            project_dir
+                .join("artifacts/2026-03-07/run_lane/promoted_configs")
+                .join(format!("{role}.yaml")),
+            "global:\n  runtime:\n    profile: parity_baseline\n",
+        )
+        .unwrap();
+    }
+
+    let paper_db = project_dir.join(format!("trading_engine_v8_{lane}.db"));
+    seed_empty_paper_db(&paper_db);
+
+    let candles_db = project_dir.join("candles_dbs/candles_30m.db");
+    seed_candles_db(&candles_db);
+
+    LaneFixture {
+        _dir: dir,
+        project_dir: project_dir.clone(),
+        paper_db,
+        status_path: project_dir.join(format!("ai_quant_paper_v8_{lane}.status.json")),
     }
 }
 
@@ -1744,6 +1969,54 @@ fn service_apply_command(fixture: &Fixture) -> Command {
     command
 }
 
+fn lane_manifest_command(fixture: &LaneFixture, lane: &str) -> Command {
+    let mut command = runtime_command();
+    command
+        .arg("paper")
+        .arg("lane")
+        .arg("manifest")
+        .arg("--lane")
+        .arg(lane)
+        .arg("--project-dir")
+        .arg(&fixture.project_dir)
+        .arg("--json");
+    command
+}
+
+fn lane_apply_command(fixture: &LaneFixture, lane: &str) -> Command {
+    let mut command = runtime_command();
+    command
+        .arg("paper")
+        .arg("lane")
+        .arg("apply")
+        .arg("--lane")
+        .arg(lane)
+        .arg("--project-dir")
+        .arg(&fixture.project_dir)
+        .arg("--start-wait-ms")
+        .arg("5000")
+        .arg("--stop-wait-ms")
+        .arg("5000")
+        .arg("--poll-ms")
+        .arg("50")
+        .arg("--json");
+    command
+}
+
+fn lane_daemon_command(fixture: &LaneFixture, lane: &str) -> Command {
+    let mut command = runtime_command();
+    command
+        .arg("paper")
+        .arg("lane")
+        .arg("daemon")
+        .arg("--lane")
+        .arg(lane)
+        .arg("--project-dir")
+        .arg(&fixture.project_dir)
+        .arg("--json");
+    command
+}
+
 fn watchlist_daemon_command(fixture: &Fixture, symbols_file: &Path) -> Command {
     let mut command = runtime_command();
     command
@@ -1813,6 +2086,24 @@ fn wait_for_status_file(path: &Path, timeout: Duration) -> Value {
         assert!(
             Instant::now() <= deadline,
             "paper daemon did not materialise the status file {} before timeout",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_for_stopped_status(path: &Path, timeout: Duration) -> Value {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if path.exists() {
+            let value = read_json_file(path);
+            if value.pointer("/running").and_then(Value::as_bool) == Some(false) {
+                return value;
+            }
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "paper daemon did not persist a stopped status file {} before timeout",
             path.display()
         );
         thread::sleep(Duration::from_millis(20));

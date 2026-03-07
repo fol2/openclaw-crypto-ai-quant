@@ -1,5 +1,5 @@
 [Unit]
-Description=OpenClaw AI Quant Paper Trader Daemon (v8 paper1)
+Description=OpenClaw AI Quant Paper Trader Daemon (v8 paper3)
 After=network-online.target openclaw-ai-quant-ws-sidecar.service
 Wants=network-online.target
 Requires=openclaw-ai-quant-ws-sidecar.service
@@ -9,11 +9,11 @@ Type=simple
 WorkingDirectory=$PROJECT_DIR
 EnvironmentFile=-%h/.config/openclaw/ai-quant-universe-v8.env
 EnvironmentFile=-%h/.config/openclaw/ai-quant-v8.env
-EnvironmentFile=-%h/.config/openclaw/ai-quant-trader-v8-paper1.env
+EnvironmentFile=-%h/.config/openclaw/ai-quant-trader-v8-paper3.env
 ExecStartPre=/usr/bin/test -x $PROJECT_DIR/target/release/aiq-runtime
 ExecStartPre=/usr/bin/mkdir -p $PROJECT_DIR/artifacts/state
-ExecStartPre=/usr/bin/touch $PROJECT_DIR/artifacts/state/paper_watchlist_paper1.txt
-ExecStart=$PROJECT_DIR/target/release/aiq-runtime paper lane daemon --lane paper1 --project-dir $PROJECT_DIR --symbols-file $PROJECT_DIR/artifacts/state/paper_watchlist_paper1.txt --watch-symbols-file --lookback-bars 200
+ExecStartPre=/usr/bin/touch $PROJECT_DIR/artifacts/state/paper_watchlist_paper3.txt
+ExecStart=$PROJECT_DIR/target/release/aiq-runtime paper lane daemon --lane paper3 --project-dir $PROJECT_DIR --symbols-file $PROJECT_DIR/artifacts/state/paper_watchlist_paper3.txt --watch-symbols-file --lookback-bars 200
 Restart=always
 RestartSec=5
 KillMode=process

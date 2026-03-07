@@ -26,6 +26,13 @@ uv sync --dev
 
 ## 2. Build Binaries
 
+### Rust Runtime
+
+```bash
+cd ~/openclaw-plugins/ai_quant_wt/parallel-runtime
+cargo build --release -p aiq-runtime
+```
+
 ### WS Sidecar
 
 ```bash
@@ -86,11 +93,33 @@ Set each trader service to its own YAML via `AI_QUANT_STRATEGY_YAML`.
 
 The factory service should run with `--candidate-count 3`, `--candidate-services`, and `--candidate-yaml-paths` for the candidate lanes.
 
+### Per-Lane Watchlists
+
+The Rust paper lane services expect a per-lane watchlist file. Create the files
+before the first launch so the daemon can start in watched follow mode even
+when a lane is initially idle.
+
+```bash
+mkdir -p "$PROJECT_DIR/artifacts/state"
+touch "$PROJECT_DIR/artifacts/state/paper_watchlist_paper1.txt"
+touch "$PROJECT_DIR/artifacts/state/paper_watchlist_paper2.txt"
+touch "$PROJECT_DIR/artifacts/state/paper_watchlist_paper3.txt"
+touch "$PROJECT_DIR/artifacts/state/paper_watchlist_livepaper.txt"
+```
+
+The example trader units now launch `aiq-runtime paper lane daemon` directly.
+That gives the conventional `paper1` / `paper2` / `paper3` / `livepaper` lanes
+Rust-owned YAML / DB / lock / status contracts, while Python production cutover
+still remains a separate later step.
+
 ### Enable and Start
 
 ```bash
 systemctl --user enable --now openclaw-ai-quant-ws-sidecar-v8.service
 systemctl --user enable --now openclaw-ai-quant-trader-v8-paper1.service
+systemctl --user enable --now openclaw-ai-quant-trader-v8-paper2.service
+systemctl --user enable --now openclaw-ai-quant-trader-v8-paper3.service
+systemctl --user enable --now openclaw-ai-quant-trader-v8-livepaper.service
 systemctl --user enable --now openclaw-ai-quant-monitor-v8.service
 systemctl --user enable --now openclaw-ai-quant-funding-v8.timer
 systemctl --user enable --now openclaw-ai-quant-factory-v8.timer
@@ -110,6 +139,9 @@ Logs:
 ```bash
 journalctl --user -u openclaw-ai-quant-ws-sidecar-v8.service -f
 journalctl --user -u openclaw-ai-quant-trader-v8-paper1.service -f
+journalctl --user -u openclaw-ai-quant-trader-v8-paper2.service -f
+journalctl --user -u openclaw-ai-quant-trader-v8-paper3.service -f
+journalctl --user -u openclaw-ai-quant-trader-v8-livepaper.service -f
 journalctl --user -u openclaw-ai-quant-factory-v8.service -f
 ```
 
