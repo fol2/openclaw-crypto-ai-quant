@@ -115,7 +115,7 @@ global:
       ave_atr_ratio_gt: 1.4198122781117997
       ave_adx_mult: 1.3711214409952304
       ave_avg_atr_window: 40
-      macd_hist_entry_mode: '0.3735934394044622'
+      macd_hist_entry_mode: accel
       enable_pullback_entries: false
       pullback_confidence: medium
       pullback_min_adx: 25.7067610256506

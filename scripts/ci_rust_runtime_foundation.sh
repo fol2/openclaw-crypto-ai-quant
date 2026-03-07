@@ -56,6 +56,7 @@ for path in (
     Path("/tmp/aiq-runtime-paper-status-bootstrap.json"),
     Path("/tmp/aiq-runtime-paper-service-bootstrap.json"),
     Path("/tmp/aiq-runtime-paper-bootstrap.status.json"),
+    Path("/tmp/aiq-runtime-paper-daemon.lock"),
     Path("/tmp/aiq-runtime-paper-status-stopped.json"),
     Path("/tmp/aiq-runtime-paper-service-stopped.json"),
     Path("/tmp/aiq-runtime-paper-service-apply.json"),
@@ -278,6 +279,7 @@ PY
 AI_QUANT_STRATEGY_MODE= \
 cargo run -q -p aiq-runtime -- paper effective-config --config /tmp/aiq-runtime-effective-config.yaml --json >/tmp/aiq-runtime-paper-effective-config-base.json
 cargo run -q -p aiq-runtime -- paper effective-config --config /tmp/aiq-runtime-effective-config.yaml --lane paper2 --json >/tmp/aiq-runtime-paper-effective-config-lane.json
+cargo run -q -p aiq-runtime -- paper effective-config --lane livepaper --project-dir "$ROOT_DIR" --json >/tmp/aiq-runtime-paper-effective-config-livepaper.json
 AI_QUANT_STRATEGY_MODE=primary \
 cargo run -q -p aiq-runtime -- paper effective-config --config /tmp/aiq-runtime-effective-config.yaml --json >/tmp/aiq-runtime-paper-effective-config-primary.json
 AI_QUANT_STRATEGY_MODE=fallback \
@@ -289,6 +291,7 @@ from pathlib import Path
 
 base = json.loads(Path("/tmp/aiq-runtime-paper-effective-config-base.json").read_text(encoding="utf-8"))
 lane = json.loads(Path("/tmp/aiq-runtime-paper-effective-config-lane.json").read_text(encoding="utf-8"))
+livepaper = json.loads(Path("/tmp/aiq-runtime-paper-effective-config-livepaper.json").read_text(encoding="utf-8"))
 primary = json.loads(Path("/tmp/aiq-runtime-paper-effective-config-primary.json").read_text(encoding="utf-8"))
 fallback = json.loads(Path("/tmp/aiq-runtime-paper-effective-config-fallback.json").read_text(encoding="utf-8"))
 
@@ -296,6 +299,8 @@ assert base["interval"] == "30m"
 assert lane["strategy_mode"] == "fallback"
 assert lane["strategy_mode_source"] == "lane_default"
 assert lane["promoted_role"] == "fallback"
+assert livepaper["promoted_role"] is None
+assert livepaper["strategy_mode"] is None
 assert primary["interval"] == "5m"
 assert fallback["interval"] == "1h"
 assert base["config_id"] != primary["config_id"]
@@ -331,10 +336,10 @@ cargo run -q -p aiq-runtime -- paper loop --db /tmp/aiq-runtime-paper-loop.db --
 cargo run -q -p aiq-runtime -- paper loop --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --max-steps 2 --json >/tmp/aiq-runtime-paper-loop-resume.json
 cargo run -q -p aiq-runtime -- paper loop --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --max-steps 1 --json >/tmp/aiq-runtime-paper-loop-idle.json
 cargo run -q -p aiq-runtime -- paper loop --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --follow --idle-sleep-ms 1 --max-idle-polls 1 --max-steps 1 --json >/tmp/aiq-runtime-paper-loop-follow.json
-cargo run -q -p aiq-runtime -- paper daemon --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --status-path /tmp/aiq-runtime-paper-daemon.status.json --idle-sleep-ms 1 --max-idle-polls 1 --json >/tmp/aiq-runtime-paper-daemon.json
-cargo run -q -p aiq-runtime -- paper status --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --status-path /tmp/aiq-runtime-paper-daemon.status.json --json >/tmp/aiq-runtime-paper-status-stopped.json
-cargo run -q -p aiq-runtime -- paper service --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --status-path /tmp/aiq-runtime-paper-daemon.status.json --json >/tmp/aiq-runtime-paper-service-stopped.json
-cargo run -q -p aiq-runtime -- paper service apply --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --status-path /tmp/aiq-runtime-paper-daemon.status.json --action resume --json >/tmp/aiq-runtime-paper-service-apply.json
+cargo run -q -p aiq-runtime -- paper daemon --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --lock-path /tmp/aiq-runtime-paper-daemon.lock --status-path /tmp/aiq-runtime-paper-daemon.status.json --idle-sleep-ms 1 --max-idle-polls 1 --json >/tmp/aiq-runtime-paper-daemon.json
+cargo run -q -p aiq-runtime -- paper status --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --lock-path /tmp/aiq-runtime-paper-daemon.lock --status-path /tmp/aiq-runtime-paper-daemon.status.json --json >/tmp/aiq-runtime-paper-status-stopped.json
+cargo run -q -p aiq-runtime -- paper service --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --lock-path /tmp/aiq-runtime-paper-daemon.lock --status-path /tmp/aiq-runtime-paper-daemon.status.json --json >/tmp/aiq-runtime-paper-service-stopped.json
+cargo run -q -p aiq-runtime -- paper service apply --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --lock-path /tmp/aiq-runtime-paper-daemon.lock --status-path /tmp/aiq-runtime-paper-daemon.status.json --action resume --json >/tmp/aiq-runtime-paper-service-apply.json
 cargo test -q -p aiq-runtime --test paper_daemon_smoke paper_daemon_lane_defaults_idle_cleanly_without_watchlist_file
 AI_QUANT_RUNTIME_BIN=/bin/echo ./scripts/run_paper_lane.sh paper2 --idle-sleep-ms 1 >/tmp/aiq-runtime-paper-lane-launch.txt
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example \
@@ -410,8 +415,8 @@ assert lane_manifest["watch_symbols_file"] is True
 assert lane_manifest["symbols_file"].endswith("artifacts/state/paper_watchlist_paper3.txt")
 assert lane_manifest["paper_db"].endswith("trading_engine_v8_paper3.db")
 assert lane_manifest["lock_path"].endswith("ai_quant_paper_v8_paper3.lock")
-assert lane_manifest["resume"]["launch_state"] == "idle_no_symbols"
-assert lane_manifest["resume"]["launch_ready"] is True
+assert lane_manifest["resume"]["launch_state"] == "blocked"
+assert lane_manifest["resume"]["launch_ready"] is False
 status_bootstrap = json.loads(Path("/tmp/aiq-runtime-paper-status-bootstrap.json").read_text(encoding="utf-8"))
 assert status_bootstrap["service_state"] == "bootstrap_required"
 assert status_bootstrap["status_file_present"] is False
