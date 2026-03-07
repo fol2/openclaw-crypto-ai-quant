@@ -3,6 +3,7 @@
 **Date:** 2026-03-07  
 **Status:** Working summary for phase execution and every-5-PR checkpoint reviews  
 **Companion document:** `docs/rust_full_runtime_cutover_programme.md`
+**Execution checklist:** `docs/programmes/rust_runtime_phase0_cutover_checklist.md`
 
 ## 1. North Star
 
