@@ -195,12 +195,18 @@ def test_rust_effective_config_parity_matrix(
     if strategy_mode:
         expected_document = _apply_mode_overlay(expected_document, strategy_mode)
 
-    resolved_path = Path(resolved.config_path)
-    resolved_document = yaml.safe_load(resolved_path.read_text(encoding="utf-8")) or {}
+    runtime_path = Path(resolved.config_path)
+    runtime_document = yaml.safe_load(runtime_path.read_text(encoding="utf-8")) or {}
+    effective_document = yaml.safe_load(Path(resolved.effective_yaml_path).read_text(encoding="utf-8")) or {}
 
     assert resolved.base_config_path == str(base_config_path.resolve()), case_name
-    assert resolved_document == expected_document, case_name
-    assert config_id_from_yaml_file(resolved_path) == resolved.config_id, case_name
+    assert effective_document == expected_document, case_name
+    assert config_id_from_yaml_file(runtime_path) == resolved.config_id, case_name
+    assert (runtime_document.get("global") or {}).get("engine", {}).get("interval") == expected_interval, case_name
+    assert (
+        float(((runtime_document.get("symbols") or {}).get("BTC", {}).get("trade") or {}).get("leverage", 0.0))
+        == expected_leverage
+    ), case_name
 
     monkeypatch.setenv("AI_QUANT_EFFECTIVE_CONFIG_OWNER", "rust")
     monkeypatch.setenv(
@@ -214,7 +220,7 @@ def test_rust_effective_config_parity_matrix(
 
     manager = StrategyManager.bootstrap(
         defaults={"trade": {}, "indicators": {}, "filters": {}, "thresholds": {}, "engine": {}},
-        yaml_path=str(resolved_path),
+        yaml_path=str(runtime_path),
         changelog_path=None,
     )
     cfg = manager.get_config("BTC")
@@ -235,6 +241,6 @@ def test_rust_effective_config_parity_matrix(
 
     if strategy_mode:
         assert Path(resolved.effective_yaml_path).parent == output_root / "artifacts" / "_effective_configs", case_name
-        assert Path(resolved.config_path) == Path(resolved.effective_yaml_path), case_name
+        assert Path(resolved.config_path).parent == output_root / "artifacts" / "_runtime_configs", case_name
     else:
-        assert Path(resolved.config_path) == Path(resolved.active_yaml_path), case_name
+        assert Path(resolved.config_path).parent == output_root / "artifacts" / "_runtime_configs", case_name

@@ -81,6 +81,11 @@ _CFG_CACHE: dict[str, Any] = {"mtime_ns": None, "config_id": ""}
 
 
 def _current_config_id() -> str:
+    if _env_str("AI_QUANT_EFFECTIVE_CONFIG_OWNER", "").strip().lower() == "rust":
+        resolved = _env_str("AI_QUANT_EFFECTIVE_CONFIG_ID", "").strip()
+        if resolved:
+            return resolved
+
     path = _strategy_yaml_path()
     try:
         st = path.stat()

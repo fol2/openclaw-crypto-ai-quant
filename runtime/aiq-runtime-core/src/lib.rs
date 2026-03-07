@@ -13,8 +13,8 @@ pub use paper::{
     PaperPositionState,
 };
 pub use pipeline::{
-    resolve_pipeline, PipelinePlan, PipelineResolveError, StageDescriptor, StageId, StagePlan,
-    StageRegistry, DEFAULT_PROFILE, DEFAULT_RANKER,
+    resolve_pipeline, PipelinePlan, PipelineResolveError, RankerDescriptor, RankerRegistry,
+    StageDescriptor, StageId, StagePlan, StageRegistry, DEFAULT_PROFILE, DEFAULT_RANKER,
 };
 pub use runtime::{build_bootstrap, RuntimeBootstrap, RuntimeMode};
 pub use snapshot::{

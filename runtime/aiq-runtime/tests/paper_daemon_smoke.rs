@@ -8,6 +8,7 @@ use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::{tempdir, TempDir};
@@ -16,13 +17,18 @@ const START_STEP_CLOSE_TS_MS: i64 = 1_773_422_400_000;
 const LAST_STEP_CLOSE_TS_MS: i64 = 1_773_426_000_000;
 const NEXT_STEP_CLOSE_TS_MS: i64 = LAST_STEP_CLOSE_TS_MS + 1_800_000;
 
-#[derive(Debug)]
 struct Fixture {
+    _suite_guard: MutexGuard<'static, ()>,
     _dir: TempDir,
     paper_db: PathBuf,
     candles_db: PathBuf,
     lock_path: PathBuf,
     status_path: PathBuf,
+}
+
+fn smoke_lock() -> &'static Mutex<()> {
+    static SMOKE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    SMOKE_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -266,7 +272,7 @@ fn paper_daemon_writes_status_file_for_running_and_stopped_lifecycle() {
     let fixture = prepare_idle_fixture();
     let child = daemon_command(&fixture)
         .arg("--idle-sleep-ms")
-        .arg("250")
+        .arg("10000")
         .arg("--max-idle-polls")
         .arg("0")
         .stdout(Stdio::piped())
@@ -1667,6 +1673,9 @@ fn paper_daemon_keeps_open_positions_in_active_symbols_after_manifest_reload() {
 }
 
 fn seed_fixture() -> Fixture {
+    let suite_guard = smoke_lock()
+        .lock()
+        .expect("paper daemon smoke fixture lock should not be poisoned");
     let dir = tempdir().expect("fixture tempdir should be created");
     let paper_db = dir.path().join("paper.db");
     let candles_db = dir.path().join("candles.db");
@@ -1675,6 +1684,7 @@ fn seed_fixture() -> Fixture {
     seed_paper_db(&paper_db);
     seed_candles_db(&candles_db);
     Fixture {
+        _suite_guard: suite_guard,
         _dir: dir,
         paper_db,
         candles_db,
@@ -1684,6 +1694,9 @@ fn seed_fixture() -> Fixture {
 }
 
 fn seed_empty_fixture() -> Fixture {
+    let suite_guard = smoke_lock()
+        .lock()
+        .expect("paper daemon smoke fixture lock should not be poisoned");
     let dir = tempdir().expect("fixture tempdir should be created");
     let paper_db = dir.path().join("paper.db");
     let candles_db = dir.path().join("candles.db");
@@ -1692,6 +1705,7 @@ fn seed_empty_fixture() -> Fixture {
     seed_empty_paper_db(&paper_db);
     seed_candles_db(&candles_db);
     Fixture {
+        _suite_guard: suite_guard,
         _dir: dir,
         paper_db,
         candles_db,

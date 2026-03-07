@@ -1,5 +1,6 @@
 use aiq_runtime_core::paper::{restore_paper_state, PaperBootstrapReport};
 use aiq_runtime_core::runtime::RuntimeBootstrap;
+use aiq_runtime_core::StageId;
 use anyhow::Result;
 use bt_core::config::Confidence;
 use bt_core::decision_kernel::{self, OrderIntentKind, StrategyState};
@@ -34,12 +35,20 @@ pub struct PaperCycleInput<'a> {
 pub struct PaperCycleSymbolReport {
     pub symbol: String,
     pub phase: String,
-    pub score: Option<i32>,
+    pub score: Option<f64>,
     pub intent_count: usize,
     pub fill_count: usize,
     pub action_codes: Vec<String>,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PaperCycleStageTrace {
+    pub stage: StageId,
+    pub enabled: bool,
+    pub status: String,
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -59,6 +68,7 @@ pub struct PaperCycleReport {
     pub trades_written: usize,
     pub runtime_step_recorded: bool,
     pub executions: Vec<PaperCycleSymbolReport>,
+    pub pipeline_trace: Vec<PaperCycleStageTrace>,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
 }
@@ -66,14 +76,15 @@ pub struct PaperCycleReport {
 #[derive(Debug, Clone)]
 struct EntryCandidate {
     prepared: PreparedSymbolStep,
-    score: i32,
+    score: f64,
+    requested_notional_usd: f64,
 }
 
 #[derive(Debug, Clone)]
 struct ExecutedStep {
     symbol: String,
     phase: &'static str,
-    score: Option<i32>,
+    score: Option<f64>,
     prepared: PreparedSymbolStep,
     pre_state: StrategyState,
     decision: decision_kernel::DecisionResult,
@@ -113,12 +124,92 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
     let base_cfg = input.effective_config.load_config(None, input.live)?;
     let max_entries = base_cfg.trade.max_entry_orders_per_loop;
     let mut used_entry_budget = 0usize;
+    let pipeline = &input.runtime_bootstrap.pipeline;
+    let ordered_stage_ids = pipeline.ordered_stage_ids();
+    let ranking_order_supported = !pipeline.is_enabled(StageId::Ranking)
+        || !pipeline.is_enabled(StageId::IntentGeneration)
+        || stage_precedes(
+            &ordered_stage_ids,
+            StageId::Ranking,
+            StageId::IntentGeneration,
+        );
+    let state_order_supported = !pipeline.is_enabled(StageId::IntentGeneration)
+        || !pipeline.is_enabled(StageId::OmsTransition)
+        || stage_precedes(
+            &ordered_stage_ids,
+            StageId::IntentGeneration,
+            StageId::OmsTransition,
+        );
+    let broker_order_supported = !pipeline.is_enabled(StageId::BrokerExecution)
+        || !pipeline.is_enabled(StageId::FillReconciliation)
+        || stage_precedes(
+            &ordered_stage_ids,
+            StageId::BrokerExecution,
+            StageId::FillReconciliation,
+        );
+    let persistence_order_supported = !pipeline.is_enabled(StageId::PersistenceAudit)
+        || ((!pipeline.is_enabled(StageId::OmsTransition)
+            || stage_precedes(
+                &ordered_stage_ids,
+                StageId::OmsTransition,
+                StageId::PersistenceAudit,
+            ))
+            && (!pipeline.is_enabled(StageId::FillReconciliation)
+                || stage_precedes(
+                    &ordered_stage_ids,
+                    StageId::FillReconciliation,
+                    StageId::PersistenceAudit,
+                )));
+    let ranking_applied = pipeline.is_enabled(StageId::Ranking) && ranking_order_supported;
+    let intent_enabled = pipeline.is_enabled(StageId::IntentGeneration);
+    let state_progression_enabled =
+        intent_enabled && pipeline.is_enabled(StageId::OmsTransition) && state_order_supported;
+    let projection_enabled = state_progression_enabled
+        && pipeline.is_enabled(StageId::BrokerExecution)
+        && pipeline.is_enabled(StageId::FillReconciliation)
+        && broker_order_supported;
+    let persistence_enabled = pipeline.is_enabled(StageId::PersistenceAudit)
+        && !input.dry_run
+        && persistence_order_supported;
 
     let mut interval: Option<String> = None;
     let mut candidate_entries = Vec::new();
     let mut executed_steps = Vec::new();
     let mut warnings = Vec::new();
     let mut errors = Vec::new();
+
+    if pipeline.is_enabled(StageId::Ranking) && !ranking_order_supported {
+        warnings.push(format!(
+            "pipeline profile {} orders ranking after intent_generation; paper cycle fell back to collection order",
+            pipeline.profile
+        ));
+    }
+    if intent_enabled && pipeline.is_enabled(StageId::OmsTransition) && !state_order_supported {
+        warnings.push(format!(
+            "pipeline profile {} orders oms_transition before intent_generation; paper cycle stayed preview-only for state progression",
+            pipeline.profile
+        ));
+    }
+    if pipeline.is_enabled(StageId::BrokerExecution)
+        && pipeline.is_enabled(StageId::FillReconciliation)
+        && !broker_order_supported
+    {
+        warnings.push(format!(
+            "pipeline profile {} orders fill_reconciliation before broker_execution; paper cycle disabled trade projection writes",
+            pipeline.profile
+        ));
+    }
+    if pipeline.is_enabled(StageId::PersistenceAudit) && !persistence_order_supported {
+        warnings.push(format!(
+            "pipeline profile {} orders persistence_audit before upstream execution stages; paper cycle deferred persistence",
+            pipeline.profile
+        ));
+    }
+    if !pipeline.is_enabled(StageId::RiskChecks) && state_progression_enabled {
+        warnings.push(
+            "pipeline disables risk_checks, but paper cycle still uses the kernel risk path while execution remains enabled".to_string(),
+        );
+    }
 
     for symbol in &active_symbols {
         let config = input
@@ -153,7 +244,10 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
         );
 
         if pre_state.positions.contains_key(symbol) {
-            if decision_consumes_entry_budget(&decision) && used_entry_budget >= max_entries {
+            if state_progression_enabled
+                && decision_consumes_entry_budget(&decision)
+                && used_entry_budget >= max_entries
+            {
                 let (budgeted_decision, mut budgeted_plan) =
                     crate::paper_run_once::execute_prepared_symbol_step_with_allow_pyramid_override(
                         &pre_state,
@@ -170,10 +264,25 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
                 errors.extend(budgeted_decision.diagnostics.errors.clone());
                 warnings.extend(budgeted_plan.warnings.clone());
                 if !budgeted_decision.intents.is_empty() || !budgeted_decision.fills.is_empty() {
-                    current_state = budgeted_decision.state.clone();
+                    if state_progression_enabled {
+                        current_state = budgeted_decision.state.clone();
+                    }
+                    if !state_progression_enabled {
+                        budgeted_plan.warnings.push(execution_disabled_warning(
+                            pipeline.profile.as_str(),
+                            projection_enabled,
+                            state_progression_enabled,
+                        ));
+                    }
                     executed_steps.push(ExecutedStep {
                         symbol: symbol.clone(),
-                        phase: "open_position",
+                        phase: if projection_enabled {
+                            "open_position"
+                        } else if state_progression_enabled {
+                            "open_position_staged"
+                        } else {
+                            "open_position_preview"
+                        },
                         score: None,
                         prepared,
                         pre_state,
@@ -185,19 +294,36 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
             }
             warnings.extend(execution_plan.warnings.clone());
             errors.extend(decision.diagnostics.errors.clone());
-            if decision_consumes_entry_budget(&decision) {
+            if state_progression_enabled && decision_consumes_entry_budget(&decision) {
                 used_entry_budget += 1;
             }
-            current_state = decision.state.clone();
-            executed_steps.push(ExecutedStep {
-                symbol: symbol.clone(),
-                phase: "open_position",
-                score: None,
-                prepared,
-                pre_state,
-                decision,
-                warnings: execution_plan.warnings,
-            });
+            if !decision.intents.is_empty() || !decision.fills.is_empty() {
+                let mut execution_warnings = execution_plan.warnings;
+                if state_progression_enabled {
+                    current_state = decision.state.clone();
+                } else {
+                    execution_warnings.push(execution_disabled_warning(
+                        pipeline.profile.as_str(),
+                        projection_enabled,
+                        state_progression_enabled,
+                    ));
+                }
+                executed_steps.push(ExecutedStep {
+                    symbol: symbol.clone(),
+                    phase: if projection_enabled {
+                        "open_position"
+                    } else if state_progression_enabled {
+                        "open_position_staged"
+                    } else {
+                        "open_position_preview"
+                    },
+                    score: None,
+                    prepared,
+                    pre_state,
+                    decision,
+                    warnings: execution_warnings,
+                });
+            }
             continue;
         }
 
@@ -207,24 +333,25 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
             .any(|intent| matches!(intent.kind, OrderIntentKind::Open | OrderIntentKind::Add))
         {
             let score = entry_score(prepared.execution_metadata.confidence, prepared.snap.adx);
-            candidate_entries.push(EntryCandidate { prepared, score });
+            candidate_entries.push(EntryCandidate {
+                prepared,
+                score,
+                requested_notional_usd: execution_plan.requested_notional_usd.unwrap_or(0.0),
+            });
         } else {
             warnings.extend(execution_plan.warnings);
             errors.extend(decision.diagnostics.errors);
         }
     }
 
-    candidate_entries.sort_by(|left, right| {
-        right
-            .score
-            .cmp(&left.score)
-            .then_with(|| left.prepared.symbol.cmp(&right.prepared.symbol))
-    });
+    if ranking_applied {
+        sort_entry_candidates(pipeline.ranker.as_str(), &mut candidate_entries);
+    }
     let candidate_count = candidate_entries.len();
     let mut executed_entry_count = 0usize;
 
     for candidate in candidate_entries {
-        if used_entry_budget >= max_entries {
+        if state_progression_enabled && used_entry_budget >= max_entries {
             warnings.push(format!(
                 "paper cycle entry limit reached at {} candidate(s)",
                 max_entries
@@ -244,17 +371,46 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
             .iter()
             .any(|intent| matches!(intent.kind, OrderIntentKind::Open | OrderIntentKind::Add))
         {
-            current_state = decision.state.clone();
-            used_entry_budget += 1;
-            executed_entry_count += 1;
+            let mut execution_warnings = execution_plan.warnings;
+            if state_progression_enabled {
+                current_state = decision.state.clone();
+                used_entry_budget += 1;
+                executed_entry_count += 1;
+            } else {
+                execution_warnings.push(execution_disabled_warning(
+                    pipeline.profile.as_str(),
+                    projection_enabled,
+                    state_progression_enabled,
+                ));
+            }
             executed_steps.push(ExecutedStep {
                 symbol: candidate.prepared.symbol.clone(),
-                phase: "ranked_entry",
-                score: Some(candidate.score),
+                phase: if projection_enabled {
+                    if ranking_applied {
+                        "ranked_entry"
+                    } else {
+                        "entry"
+                    }
+                } else if state_progression_enabled {
+                    if ranking_applied {
+                        "ranked_entry_staged"
+                    } else {
+                        "entry_staged"
+                    }
+                } else if ranking_applied {
+                    "ranked_entry_preview"
+                } else {
+                    "entry_preview"
+                },
+                score: if ranking_applied {
+                    Some(candidate.score)
+                } else {
+                    None
+                },
                 prepared: candidate.prepared,
                 pre_state,
                 decision,
-                warnings: execution_plan.warnings,
+                warnings: execution_warnings,
             });
         }
     }
@@ -268,7 +424,7 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
 
     let mut trades_written = 0usize;
     let mut runtime_step_recorded = false;
-    if !input.dry_run {
+    if persistence_enabled {
         let mut conn = Connection::open(input.paper_db)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         ensure_cycle_tables(&tx)?;
@@ -276,20 +432,22 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
             anyhow::bail!("paper cycle step already applied: {}", step_id);
         }
 
-        for execution in &executed_steps {
-            let (written, _, _) = apply_decision_projection_with_tx(
-                &tx,
-                &execution.symbol,
-                &execution.pre_state,
-                execution.prepared.prior_position.as_ref(),
-                &execution.decision.state,
-                &execution.decision.intents,
-                &execution.decision.fills,
-                &execution.prepared.snap,
-                execution.prepared.execution_metadata,
-                input.step_close_ts_ms,
-            )?;
-            trades_written += written;
+        if projection_enabled {
+            for execution in &executed_steps {
+                let (written, _, _) = apply_decision_projection_with_tx(
+                    &tx,
+                    &execution.symbol,
+                    &execution.pre_state,
+                    execution.prepared.prior_position.as_ref(),
+                    &execution.decision.state,
+                    &execution.decision.intents,
+                    &execution.decision.fills,
+                    &execution.prepared.snap,
+                    execution.prepared.execution_metadata,
+                    input.step_close_ts_ms,
+                )?;
+                trades_written += written;
+            }
         }
 
         record_cycle_step(
@@ -304,6 +462,15 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
         )?;
         tx.commit()?;
         runtime_step_recorded = true;
+    } else if input.dry_run {
+        warnings.push(
+            "persistence_audit disabled by dry_run; no runtime cycle step was recorded".to_string(),
+        );
+    } else if !pipeline.is_enabled(StageId::PersistenceAudit) {
+        warnings.push(format!(
+            "pipeline profile {} disabled persistence_audit; paper cycle stayed non-persistent",
+            pipeline.profile
+        ));
     }
 
     let executions = executed_steps
@@ -328,6 +495,15 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
             errors: execution.decision.diagnostics.errors,
         })
         .collect::<Vec<_>>();
+    let pipeline_trace = build_pipeline_trace(
+        pipeline,
+        candidate_count,
+        executed_entry_count,
+        ranking_applied,
+        state_progression_enabled,
+        projection_enabled,
+        persistence_enabled,
+    );
 
     Ok(PaperCycleReport {
         ok: errors.is_empty(),
@@ -345,6 +521,7 @@ pub fn run_cycle(input: PaperCycleInput<'_>) -> Result<PaperCycleReport> {
         trades_written,
         runtime_step_recorded,
         executions,
+        pipeline_trace,
         warnings,
         errors,
     })
@@ -361,13 +538,176 @@ fn normalise_symbols(raw: &[String]) -> Vec<String> {
     symbols
 }
 
-fn entry_score(confidence: Confidence, adx: f64) -> i32 {
+fn entry_score(confidence: Confidence, adx: f64) -> f64 {
     let conf_rank = match confidence {
         Confidence::Low => 0,
         Confidence::Medium => 1,
         Confidence::High => 2,
     };
-    conf_rank * 100 + adx as i32
+    f64::from(conf_rank * 100) + adx
+}
+
+fn sort_entry_candidates(ranker: &str, candidates: &mut [EntryCandidate]) {
+    match ranker.trim() {
+        "raw_notional_desc" => candidates.sort_by(|left, right| {
+            right
+                .requested_notional_usd
+                .partial_cmp(&left.requested_notional_usd)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.prepared.symbol.cmp(&right.prepared.symbol))
+        }),
+        _ => candidates.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.prepared.symbol.cmp(&right.prepared.symbol))
+        }),
+    }
+}
+
+fn execution_disabled_warning(
+    profile: &str,
+    projection_enabled: bool,
+    state_progression_enabled: bool,
+) -> String {
+    if state_progression_enabled && !projection_enabled {
+        format!(
+            "pipeline profile {} disabled broker/fill projection stages; this cycle advanced intents/OMS in memory without trade writes",
+            profile
+        )
+    } else {
+        format!(
+            "pipeline profile {} disabled one or more execution stages; this cycle ran in preview-only mode",
+            profile
+        )
+    }
+}
+
+fn stage_precedes(ordered_stage_ids: &[StageId], left: StageId, right: StageId) -> bool {
+    let left_index = ordered_stage_ids.iter().position(|stage| *stage == left);
+    let right_index = ordered_stage_ids.iter().position(|stage| *stage == right);
+    match (left_index, right_index) {
+        (Some(left_index), Some(right_index)) => left_index < right_index,
+        _ => false,
+    }
+}
+
+fn build_pipeline_trace(
+    pipeline: &aiq_runtime_core::PipelinePlan,
+    candidate_count: usize,
+    executed_entry_count: usize,
+    ranking_applied: bool,
+    state_progression_enabled: bool,
+    projection_enabled: bool,
+    persistence_enabled: bool,
+) -> Vec<PaperCycleStageTrace> {
+    pipeline
+        .stages
+        .iter()
+        .map(|stage| {
+            let (status, detail) = match stage.id {
+                StageId::MarketDataNormalisation => (
+                    "executed",
+                    "resolved paper snapshot and symbol universe for this cycle".to_string(),
+                ),
+                StageId::IndicatorBuild => (
+                    "executed",
+                    "built indicator snapshots during symbol preparation".to_string(),
+                ),
+                StageId::GateEvaluation => (
+                    "executed",
+                    "evaluated pre-signal gates during symbol preparation".to_string(),
+                ),
+                StageId::SignalGeneration => (
+                    "executed",
+                    format!("prepared {} candidate symbol(s) for this cycle", candidate_count),
+                ),
+                StageId::Ranking => {
+                    if stage.enabled && ranking_applied {
+                        (
+                            "executed",
+                            format!("ranker={} candidates={candidate_count}", pipeline.ranker),
+                        )
+                    } else if stage.enabled {
+                        (
+                            "deferred",
+                            "ranking is enabled in the plan, but the configured stage order keeps it out of the active execution path".to_string(),
+                        )
+                    } else {
+                        (
+                            "skipped",
+                            "ranking disabled; candidate order remained collection order".to_string(),
+                        )
+                    }
+                }
+                StageId::RiskChecks => {
+                    if stage.enabled {
+                        (
+                            "executed",
+                            "paper cycle kept kernel risk checks enabled".to_string(),
+                        )
+                    } else {
+                        (
+                            "deferred",
+                            "paper cycle still keeps kernel risk semantics active unless execution is fully disabled".to_string(),
+                        )
+                    }
+                }
+                StageId::IntentGeneration | StageId::OmsTransition | StageId::BrokerExecution | StageId::FillReconciliation => {
+                    match stage.id {
+                        StageId::IntentGeneration | StageId::OmsTransition => {
+                            if stage.enabled && state_progression_enabled {
+                                (
+                                    "executed",
+                                    format!("executed_entries={executed_entry_count}"),
+                                )
+                            } else {
+                                (
+                                    "skipped",
+                                    "intent/OMS progression disabled; cycle remained preview-only".to_string(),
+                                )
+                            }
+                        }
+                        StageId::BrokerExecution | StageId::FillReconciliation => {
+                            if stage.enabled && projection_enabled {
+                                (
+                                    "executed",
+                                    format!("executed_entries={executed_entry_count}"),
+                                )
+                            } else {
+                                (
+                                    "skipped",
+                                    "trade projection disabled; cycle avoided broker/fill writes".to_string(),
+                                )
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                StageId::PersistenceAudit => {
+                    if persistence_enabled {
+                        (
+                            "executed",
+                            "persisted paper projections and runtime_cycle_steps".to_string(),
+                        )
+                    } else {
+                        (
+                            "skipped",
+                            "persistence disabled by profile or dry-run".to_string(),
+                        )
+                    }
+                }
+            };
+
+            PaperCycleStageTrace {
+                stage: stage.id,
+                enabled: stage.enabled,
+                status: status.to_string(),
+                detail,
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn derive_step_id(
@@ -870,5 +1210,199 @@ mod tests {
         .unwrap();
 
         assert!(report.active_symbols.iter().any(|symbol| symbol == "BTC"));
+    }
+
+    #[test]
+    fn stage_debug_profile_runs_preview_only_and_skips_persistence() {
+        let dir = tempdir().unwrap();
+        let paper_db = dir.path().join("paper.db");
+        let candles_db = dir.path().join("candles.db");
+        seed_paper_db(&paper_db);
+        seed_candles_db(&candles_db);
+
+        let base_cfg = load_cfg(None);
+        let runtime_bootstrap =
+            build_bootstrap(&base_cfg, RuntimeMode::Paper, Some("stage_debug")).unwrap();
+        let cfg_path = config_path();
+        let report = run_cycle(PaperCycleInput {
+            effective_config: effective_config(&cfg_path),
+            runtime_bootstrap,
+            live: false,
+            paper_db: &paper_db,
+            candles_db: &candles_db,
+            explicit_symbols: &["ETH".to_string()],
+            btc_symbol: "BTC",
+            lookback_bars: 400,
+            step_close_ts_ms: FIXED_STEP_CLOSE_TS_MS,
+            exported_at_ms: Some(FIXED_EXPORTED_AT_MS),
+            dry_run: false,
+        })
+        .unwrap();
+
+        assert_eq!(report.runtime_bootstrap.pipeline.profile, "stage_debug");
+        assert_eq!(report.trades_written, 0);
+        assert!(!report.runtime_step_recorded);
+        assert!(report
+            .executions
+            .iter()
+            .all(|execution| execution.phase.ends_with("_preview")));
+        assert!(report
+            .pipeline_trace
+            .iter()
+            .any(|trace| trace.stage == StageId::Ranking && trace.status == "skipped"));
+        assert!(report.pipeline_trace.iter().any(|trace| {
+            trace.stage == StageId::PersistenceAudit && trace.status == "skipped"
+        }));
+    }
+
+    #[test]
+    fn sort_entry_candidates_honours_configured_ranker() {
+        let dir = tempdir().unwrap();
+        let candles_db = dir.path().join("candles.db");
+        seed_candles_db(&candles_db);
+
+        let btc = EntryCandidate {
+            prepared: prepare_symbol_step(
+                &load_cfg(Some("BTC")),
+                None,
+                &candles_db,
+                "BTC",
+                "BTC",
+                400,
+                Some(FIXED_STEP_CLOSE_TS_MS),
+            )
+            .unwrap(),
+            score: 10.0,
+            requested_notional_usd: 50.0,
+        };
+        let eth = EntryCandidate {
+            prepared: prepare_symbol_step(
+                &load_cfg(Some("ETH")),
+                None,
+                &candles_db,
+                "ETH",
+                "BTC",
+                400,
+                Some(FIXED_STEP_CLOSE_TS_MS),
+            )
+            .unwrap(),
+            score: 20.0,
+            requested_notional_usd: 25.0,
+        };
+
+        let mut by_score = vec![btc.clone(), eth.clone()];
+        sort_entry_candidates("confidence_adx", &mut by_score);
+        assert_eq!(by_score[0].prepared.symbol, "ETH");
+
+        let mut by_notional = vec![btc, eth];
+        sort_entry_candidates("raw_notional_desc", &mut by_notional);
+        assert_eq!(by_notional[0].prepared.symbol, "BTC");
+    }
+
+    #[test]
+    fn parity_baseline_keeps_intent_and_oms_stages_active() {
+        let dir = tempdir().unwrap();
+        let paper_db = dir.path().join("paper.db");
+        let candles_db = dir.path().join("candles.db");
+        seed_paper_db(&paper_db);
+        seed_candles_db(&candles_db);
+
+        let base_cfg = load_cfg(None);
+        let runtime_bootstrap =
+            build_bootstrap(&base_cfg, RuntimeMode::Paper, Some("parity_baseline")).unwrap();
+        let cfg_path = config_path();
+        let report = run_cycle(PaperCycleInput {
+            effective_config: effective_config(&cfg_path),
+            runtime_bootstrap,
+            live: false,
+            paper_db: &paper_db,
+            candles_db: &candles_db,
+            explicit_symbols: &["ETH".to_string()],
+            btc_symbol: "BTC",
+            lookback_bars: 400,
+            step_close_ts_ms: FIXED_STEP_CLOSE_TS_MS,
+            exported_at_ms: Some(FIXED_EXPORTED_AT_MS),
+            dry_run: false,
+        })
+        .unwrap();
+
+        assert_eq!(report.runtime_bootstrap.pipeline.profile, "parity_baseline");
+        assert!(report.runtime_step_recorded);
+        assert_eq!(report.trades_written, 0);
+        assert!(report.pipeline_trace.iter().any(|trace| {
+            trace.stage == StageId::IntentGeneration && trace.status == "executed"
+        }));
+        assert!(report
+            .pipeline_trace
+            .iter()
+            .any(|trace| { trace.stage == StageId::OmsTransition && trace.status == "executed" }));
+        assert!(report
+            .pipeline_trace
+            .iter()
+            .any(|trace| { trace.stage == StageId::BrokerExecution && trace.status == "skipped" }));
+    }
+
+    #[test]
+    fn custom_stage_order_can_defer_ranking_in_execution() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("strategy.yaml");
+        let paper_db = dir.path().join("paper.db");
+        let candles_db = dir.path().join("candles.db");
+        seed_paper_db(&paper_db);
+        seed_candles_db(&candles_db);
+        std::fs::write(
+            &config_path,
+            r#"
+global:
+  engine:
+    interval: 30m
+  runtime:
+    profile: late_ranker
+  pipeline:
+    profiles:
+      late_ranker:
+        stage_order:
+          - market_data_normalisation
+          - indicator_build
+          - gate_evaluation
+          - signal_generation
+          - intent_generation
+          - ranking
+          - risk_checks
+          - oms_transition
+          - broker_execution
+          - fill_reconciliation
+          - persistence_audit
+"#,
+        )
+        .unwrap();
+
+        let effective = PaperEffectiveConfig::resolve(Some(&config_path), None, None).unwrap();
+        let base_cfg = effective.load_config(None, false).unwrap();
+        let runtime_bootstrap =
+            build_bootstrap(&base_cfg, RuntimeMode::Paper, Some("late_ranker")).unwrap();
+        let report = run_cycle(PaperCycleInput {
+            effective_config: effective,
+            runtime_bootstrap,
+            live: false,
+            paper_db: &paper_db,
+            candles_db: &candles_db,
+            explicit_symbols: &["BTC".to_string()],
+            btc_symbol: "BTC",
+            lookback_bars: 400,
+            step_close_ts_ms: FIXED_STEP_CLOSE_TS_MS,
+            exported_at_ms: Some(FIXED_EXPORTED_AT_MS),
+            dry_run: true,
+        })
+        .unwrap();
+
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("orders ranking after intent_generation")));
+        assert!(report
+            .pipeline_trace
+            .iter()
+            .any(|trace| { trace.stage == StageId::Ranking && trace.status == "deferred" }));
     }
 }

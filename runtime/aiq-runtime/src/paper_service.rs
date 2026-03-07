@@ -614,8 +614,9 @@ fn stop_daemon(
         let status_written = paper_daemon::load_status_file(status_path)?.is_some_and(|status| {
             !status.running && status.pid == pid && status.stopped_at_ms.is_some()
         });
+        let pid_exited = !process_exists(pid)?;
 
-        if lock_owner_pid.is_none() && status_written {
+        if lock_owner_pid.is_none() && (status_written || pid_exited) {
             return Ok(());
         }
 

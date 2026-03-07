@@ -747,6 +747,12 @@ fn defaults_as_value() -> serde_yaml::Value {
     serde_yaml::from_str(&json_str).expect("JSON round-trip to YAML Value")
 }
 
+pub fn strategy_config_to_yaml_value(cfg: &StrategyConfig) -> serde_yaml::Value {
+    let json_str = serde_json::to_string(&SerializableConfig::from(cfg.clone()))
+        .expect("strategy config serialises to JSON");
+    serde_yaml::from_str(&json_str).expect("JSON round-trip to YAML Value")
+}
+
 pub fn normalise_strategy_mode_key(raw: &str) -> Option<String> {
     let mode = raw.trim().to_ascii_lowercase();
     if mode.is_empty() {
@@ -1180,6 +1186,56 @@ pub fn load_config_document_checked(
             Ok(cfg)
         }
         Err(e) => Err(format!("failed to deserialize merged config: {e}")),
+    }
+}
+
+pub fn materialise_runtime_document(
+    document: &serde_yaml::Value,
+    is_live: bool,
+    strategy_mode: Option<&str>,
+) -> Result<serde_yaml::Value, String> {
+    let root: YamlRoot = serde_yaml::from_value(document.clone())
+        .map_err(|e| format!("failed to parse YAML document: {e}"))?;
+
+    let global_cfg = load_config_document_checked(document, None, is_live, strategy_mode)?;
+    let mut output = serde_yaml::Mapping::new();
+    output.insert(
+        serde_yaml::Value::String("global".to_string()),
+        strategy_config_to_yaml_value(&global_cfg),
+    );
+
+    if let serde_yaml::Value::Mapping(symbols_map) = &root.symbols {
+        let mut materialised_symbols = serde_yaml::Mapping::new();
+        for key in symbols_map.keys() {
+            let symbol = yaml_key_to_string(key);
+            if symbol.is_empty() {
+                continue;
+            }
+            let symbol_cfg =
+                load_config_document_checked(document, Some(symbol.as_str()), is_live, strategy_mode)?;
+            materialised_symbols.insert(
+                serde_yaml::Value::String(symbol.to_ascii_uppercase()),
+                strategy_config_to_yaml_value(&symbol_cfg),
+            );
+        }
+        if !materialised_symbols.is_empty() {
+            output.insert(
+                serde_yaml::Value::String("symbols".to_string()),
+                serde_yaml::Value::Mapping(materialised_symbols),
+            );
+        }
+    }
+
+    Ok(serde_yaml::Value::Mapping(output))
+}
+
+fn yaml_key_to_string(value: &serde_yaml::Value) -> String {
+    match value {
+        serde_yaml::Value::String(value) => value.clone(),
+        other => serde_yaml::to_string(other)
+            .unwrap_or_else(|_| format!("{other:?}"))
+            .trim()
+            .to_string(),
     }
 }
 

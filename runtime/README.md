@@ -16,10 +16,10 @@ Current runtime-owned paper surfaces and the paired opt-in wrapper:
 |---|---|---|
 | `snapshot export-paper` | Export a v2 Rust paper continuation snapshot | Bootstrap/export only |
 | `snapshot seed-paper` | Seed a paper DB from a v2 snapshot | Deterministic bootstrap path |
-| `paper effective-config` | Resolve the shared paper control-plane config contract | Read-only config surface for Python paper start-up and factory materialisation; also accepts `--lane paper1|paper2|paper3|livepaper` plus optional `--project-dir` so Rust can own the conventional lane defaults |
+| `paper effective-config` | Resolve the shared paper control-plane config contract | Read-only config surface for Python paper start-up and factory materialisation; `config_path` now points at a Rust-owned runtime-facing materialised YAML with defaults, promoted overlays, and strategy-mode overlays already expanded, while `active_yaml_path` / `effective_yaml_path` remain audit artefacts; also accepts `--lane paper1|paper2|paper3|livepaper` plus optional `--project-dir` so Rust can own the conventional lane defaults |
 | `paper doctor` | Restore Rust-owned paper state and inspect bootstrap markers | Non-mutating |
 | `paper run-once` | Execute one single-symbol Rust paper step | Single-shot shell |
-| `paper cycle` | Execute one repeatable multi-symbol Rust paper cycle | Explicit `--step-close-ts-ms`, not a daemon |
+| `paper cycle` | Execute one repeatable multi-symbol Rust paper cycle | Explicit `--step-close-ts-ms`, not a daemon; now honours runtime pipeline profile stage toggles for ranking, execution preview, and persistence while emitting a per-stage trace |
 | `paper loop` | Execute a bounded Rust paper catch-up loop | Resumes from `runtime_cycle_steps`, optional follow polling, and only loads `--symbols-file` once at start-up |
 | `paper manifest` | Resolve the current Rust paper daemon service contract | Read-only env/CLI manifest, including launch readiness, restart/resume state, resolved lane `status_path`, lane preset metadata, and effective config selection from promoted-role plus strategy-mode inputs |
 | `paper status` | Resolve the current Rust paper daemon service state | Read-only manifest + status-file view, including restart-required / stale detection plus health / launch-identity drift detection for the current lane |
@@ -44,9 +44,11 @@ slices will build on:
 - one-shot `--symbols-file` loading for bounded loop shells
 - a read-only service manifest so operators can inspect the resolved Rust daemon launch contract, bootstrap requirement, restart/resume state, lifecycle `status_path`, promoted config selection, and strategy-mode file fallback before cutover
 - a read-only effective-config surface that Python paper start-up and factory materialisation now share with the Rust paper shells
+- a Rust-owned runtime materialisation step so Python paper consumers stop reapplying Python defaults when the resolver already owns the active config identity
 - a read-only service status surface so operators can compare the current launch contract against the persisted daemon lifecycle JSON, including daemon health and launch-identity drift, without parsing files by hand
 - a read-only supervisor action surface so operators can inspect whether the lane should be held, started, restarted, or simply monitored
 - an opt-in side-effecting `paper service apply` surface that can enact that recommendation for the Rust paper daemon without claiming service cutover
 - an opt-in daemon wrapper that owns scheduler/watchlist reload orchestration without claiming service cutover
 - Rust-owned conventional lane presets (`paper1`, `paper2`, `paper3`, `livepaper`) that bundle the default config path, promoted-role / strategy-mode selection, watchlist file path, candle DB directory, DB path, and lock/status paths for paper orchestration
 - a durable daemon `status_path` contract that later service supervision can build on
+- a first live execution slice where `paper cycle` reads the resolved stage graph and configured ranker instead of treating the pipeline plan as metadata only

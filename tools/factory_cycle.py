@@ -251,7 +251,7 @@ def _materialise_effective_config_via_rust(
     ):
         raise KeyError(f"strategy mode not found in YAML: {requested_mode}")
 
-    source_path = Path(str(resolved.effective_yaml_path)).expanduser().resolve()
+    source_path = Path(str(resolved.config_path)).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     text = source_path.read_text(encoding="utf-8")
     output_path.write_text(text if text.endswith("\n") else f"{text}\n", encoding="utf-8")

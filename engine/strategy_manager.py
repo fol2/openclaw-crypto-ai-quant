@@ -29,6 +29,10 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _rust_effective_config_owner() -> bool:
+    return _env_str("AI_QUANT_EFFECTIVE_CONFIG_OWNER", "").strip().lower() == "rust"
+
+
 def _norm_mode_key(raw: str) -> str:
     s = str(raw or "").strip().lower()
     if not s:
@@ -158,6 +162,8 @@ class StrategyManager:
             )
 
             def defaults_provider() -> dict[str, Any]:
+                if _rust_effective_config_owner():
+                    return {}
                 try:
                     import strategy.mei_alpha_v1 as mei_alpha_v1
 
@@ -281,8 +287,12 @@ class StrategyManager:
                 if overrides is not None:
                     self._yaml_mtime = yaml_mtime
                     self._overrides = overrides
-                    self._overrides_sha1 = str(overrides_sha1)
-                    self._config_id = str(config_id or "")
+                    if _rust_effective_config_owner():
+                        self._overrides_sha1 = _env_str("AI_QUANT_EFFECTIVE_STRATEGY_SHA", str(overrides_sha1))
+                        self._config_id = _env_str("AI_QUANT_EFFECTIVE_CONFIG_ID", str(config_id or ""))
+                    else:
+                        self._overrides_sha1 = str(overrides_sha1)
+                        self._config_id = str(config_id or "")
                 elif not changelog_needs_reload:
                     return
 

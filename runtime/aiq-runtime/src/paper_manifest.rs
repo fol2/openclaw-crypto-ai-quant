@@ -231,7 +231,7 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
         "paper".to_string(),
         "daemon".to_string(),
         "--config".to_string(),
-        effective_config.config_path().display().to_string(),
+        effective_config.base_config_path().display().to_string(),
         "--db".to_string(),
         paper_db.display().to_string(),
         "--candles-db".to_string(),
@@ -245,6 +245,18 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
         "--status-path".to_string(),
         status_path.display().to_string(),
     ];
+    if let Some(lane) = input.lane {
+        daemon_command.push("--lane".to_string());
+        daemon_command.push(lane.as_str().to_string());
+    }
+    if let Some(project_dir) = lane_defaults
+        .as_ref()
+        .map(|defaults| defaults.project_dir.as_path())
+        .or(input.project_dir)
+    {
+        daemon_command.push("--project-dir".to_string());
+        daemon_command.push(project_dir.display().to_string());
+    }
     if input.live {
         daemon_command.push("--live".to_string());
     }
@@ -758,7 +770,13 @@ mod tests {
         assert_eq!(report.interval, "30m");
         assert_eq!(report.lookback_bars, 200);
         assert_eq!(report.symbols, vec!["BTC", "ETH"]);
-        assert_eq!(report.config_path, config_path.display().to_string());
+        assert_eq!(
+            report.config_path,
+            dir.path()
+                .join("artifacts/_runtime_configs/strategy.primary.primary.runtime.yaml")
+                .display()
+                .to_string()
+        );
         assert_eq!(report.paper_db, paper_db.display().to_string());
         assert_eq!(
             report.candles_db,
@@ -972,6 +990,14 @@ mod tests {
             .is_some_and(|path| path.ends_with("artifacts/state/paper_watchlist_paper3.txt")));
         assert!(report.watch_symbols_file);
         assert_eq!(report.lookback_bars, 200);
+        assert!(report
+            .daemon_command
+            .windows(2)
+            .any(|window| window == ["--lane", "paper3"]));
+        assert!(report
+            .daemon_command
+            .windows(2)
+            .any(|window| { window == ["--project-dir", dir.path().to_str().unwrap()] }));
         assert_eq!(
             report.resume.launch_state,
             PaperManifestLaunchState::Blocked
