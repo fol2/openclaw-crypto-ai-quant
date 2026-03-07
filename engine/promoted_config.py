@@ -46,6 +46,10 @@ MAX_PROMOTED_SCAN_LIMIT = 10000
 #   run_<run_id>  e.g.  run_nightly_20260214T014625Z
 _RUN_DIR_RE = re.compile(r"^run_")
 
+# Legacy helper cluster below this point is frozen compatibility surface only.
+# New paper/factory control-plane ownership must go through the Rust resolver
+# wrappers further down in this module.
+
 
 def _default_artifacts_dir() -> Path:
     """Return the default artifacts root: <project_root>/artifacts."""

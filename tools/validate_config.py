@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Validate config parity between Python defaults, YAML, and Rust defaults.
+"""Validate legacy config parity between Python/YAML mirrors and Rust defaults.
 
-Checks that strategy_overrides.yaml is fully explicit and that Python
-_DEFAULT_STRATEGY_CONFIG matches Rust backtester defaults for all keys.
+This script audits the older default mirrors that still exist in Python while
+the Rust runtime takes over effective-config ownership. It does not define the
+active paper control-plane contract.
 """
 
 import sys

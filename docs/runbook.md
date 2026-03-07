@@ -234,6 +234,8 @@ The engine supports an optional strategy-mode overlay selected via `AI_QUANT_STR
 - `flat`: safety profile (use with a kill-switch when needed)
 
 Mode overlays are defined under `modes:` in `config/strategy_overrides.yaml`.
+For paper lanes, mode changes now re-resolve through the Rust `paper effective-config`
+contract before `StrategyManager` switches to the new materialised YAML path.
 
 ### Manual mode change
 
@@ -868,6 +870,7 @@ cargo run -p aiq-runtime -- \
 Manifest expectations:
 
 - `paper effective-config` is the narrower read-only control-plane surface for Python paper start-up and factory materialisation; `paper manifest` builds on top of that same resolver contract and adds daemon launch/resume inspection
+- if `paper` start-up or factory materialisation drifts, run `aiq-runtime paper effective-config --json` first; set `AI_QUANT_RUNTIME_BIN` explicitly when the Python wrapper cannot discover the runtime binary
 - `paper manifest` is read-only; it never writes the paper DB or starts follow-mode polling
 - `--config`, `--db`, `--candles-db`, `--symbols`, `--symbols-file`, `--watch-symbols-file`, `--lookback-bars`, `--start-step-close-ts-ms`, `--lock-path`, and `--status-path` may override the corresponding env-derived values
 - `AI_QUANT_PROMOTED_ROLE` is applied to the effective Rust paper config before the manifest resolves interval, pipeline profile, or daemon command

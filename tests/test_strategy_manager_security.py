@@ -104,3 +104,24 @@ def test_snapshot_identity_tracks_reloaded_yaml_contents(tmp_path, monkeypatch: 
 
     assert (manager.get_config("BTC").get("engine") or {}).get("interval") == "5m"
     assert manager.snapshot.config_id != first_config_id
+
+
+def test_materialised_rust_yaml_does_not_reapply_python_modes(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    yaml_path = tmp_path / "effective.yaml"
+    yaml_path.write_text(
+        "global:\n  engine:\n    interval: 5m\nmodes:\n  primary:\n    global:\n      engine:\n        interval: 1m\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("AI_QUANT_EFFECTIVE_CONFIG_OWNER", "rust")
+    monkeypatch.setenv("AI_QUANT_EFFECTIVE_CONFIG_MATERIALISED", "1")
+    monkeypatch.setenv("AI_QUANT_STRATEGY_MODE", "primary")
+
+    manager = StrategyManager.bootstrap(
+        defaults={"trade": {}, "indicators": {}, "filters": {}, "thresholds": {}, "engine": {}},
+        yaml_path=str(yaml_path),
+        changelog_path=None,
+    )
+
+    cfg = manager.get_config("BTC")
+    assert (cfg.get("engine") or {}).get("interval") == "5m"
