@@ -128,6 +128,17 @@ ownership for Python paper start-up and factory deployment flows:
 - now has a fixture-backed parity boundary that proves Python consumers only read the resolver-selected YAML and identity surface, rather than re-owning the merge path
 - keeps paper execution itself on Python; this slice only moves config/control-plane ownership
 
+The current delivered slice extends that again with conventional Rust paper
+lane ownership:
+
+- `paper lane manifest`
+- `paper lane status`
+- `paper lane service`
+- `paper lane apply`
+- `paper lane daemon`
+- maps the conventional `paper1` / `paper2` / `paper3` / `livepaper` service name, instance tag, promoted-role, strategy-mode, DB path, lock path, status path, and effective-config output root inside Rust
+- keeps Python paper production cutover for the next slice, but removes the need to reconstruct those lane contracts from ad hoc env bundles just to use the Rust paper runtime surfaces
+
 Python paper execution is still the active runtime path, and the opt-in Rust
 paper daemon wrapper does not change that. Python paper bootstrap is no longer
 the only continuity surface.

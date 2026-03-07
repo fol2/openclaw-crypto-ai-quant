@@ -25,6 +25,7 @@ Current runtime-owned paper surfaces and the paired opt-in wrapper:
 | `paper status` | Resolve the current Rust paper daemon service state | Read-only manifest + status-file view, including restart-required / stale detection plus health / launch-identity drift detection for the current lane |
 | `paper service` | Resolve the current Rust paper daemon supervisor action | Read-only status + launch-contract view that tells supervision whether to hold, start, restart, or monitor the lane while failing closed on unhealthy or drifted daemon status |
 | `paper service apply` | Apply the current Rust paper daemon supervisor action | Opt-in side-effecting supervisor for Rust paper daemon start/restart/resume/stop only; reuses the same manifest/status contract and fails closed on unhealthy, drifted, or unproven lane ownership |
+| `paper lane …` | Resolve or execute the conventional paper lane contract | Lane-aware wrapper for `paper1` / `paper2` / `paper3` / `livepaper`; owns the conventional service name, instance tag, promoted-role, strategy-mode, DB, lock, and status-path mapping without retyping env sprawl |
 | `paper daemon` | Execute an opt-in long-running Rust paper orchestration wrapper | Owns the outer scheduler, can optionally watch `--symbols-file` for reloads, writes a lane status JSON, and keeps the same `paper cycle` write contract while using the same effective config contract as `paper manifest`; not cutover |
 
 The runtime slice is still intentionally narrow. It does not yet own any live
@@ -47,5 +48,6 @@ slices will build on:
 - a read-only service status surface so operators can compare the current launch contract against the persisted daemon lifecycle JSON, including daemon health and launch-identity drift, without parsing files by hand
 - a read-only supervisor action surface so operators can inspect whether the lane should be held, started, restarted, or simply monitored
 - an opt-in side-effecting `paper service apply` surface that can enact that recommendation for the Rust paper daemon without claiming service cutover
+- a conventional `paper lane` wrapper so `paper1` / `paper2` / `paper3` / `livepaper` no longer need hand-built `AI_QUANT_*` launch bundles just to reach the Rust paper surfaces
 - an opt-in daemon wrapper that owns scheduler/watchlist reload orchestration without claiming service cutover
 - a durable daemon `status_path` contract that later service supervision can build on

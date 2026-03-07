@@ -11,6 +11,7 @@ mod paper_config;
 mod paper_cycle;
 mod paper_daemon;
 mod paper_export;
+mod paper_lane;
 mod paper_loop;
 mod paper_manifest;
 mod paper_run_once;
@@ -152,6 +153,11 @@ enum SnapshotCommand {
 
 #[derive(Debug, Subcommand)]
 enum PaperCommand {
+    /// Resolve conventional paper lane mapping and launch contracts.
+    Lane {
+        #[command(subcommand)]
+        command: PaperLaneCommand,
+    },
     /// Resolve the shared Rust effective-config contract for paper control-plane consumers.
     EffectiveConfig(PaperEffectiveConfigArgs),
     /// Resolve the Rust paper daemon service/env contract without executing any steps.
@@ -268,6 +274,28 @@ enum PaperServiceCommand {
     Apply(PaperServiceApplyArgs),
 }
 
+#[derive(Debug, Clone, Subcommand)]
+enum PaperLaneCommand {
+    /// Resolve the conventional Rust paper lane launch contract.
+    Manifest(PaperLaneManifestArgs),
+    /// Resolve the conventional Rust paper lane state from manifest plus status file.
+    Status(PaperLaneStatusArgs),
+    /// Resolve the conventional Rust paper lane supervisor action without mutating runtime state.
+    Service(PaperLaneStatusArgs),
+    /// Apply the conventional Rust paper lane supervisor action.
+    Apply(PaperLaneApplyArgs),
+    /// Execute a conventional Rust paper lane daemon directly.
+    Daemon(PaperLaneDaemonArgs),
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PaperLaneArg {
+    Paper1,
+    Paper2,
+    Paper3,
+    Livepaper,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum PaperServiceApplyActionArg {
     Auto,
@@ -287,6 +315,91 @@ struct PaperDoctorArgs {
     /// Override exported_at_ms for reproducible bootstrap reports.
     #[arg(long)]
     exported_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct PaperLaneCommonArgs {
+    /// Conventional paper lane identity.
+    #[arg(long, value_enum, default_value = "paper1")]
+    lane: PaperLaneArg,
+    /// Optional project/worktree root override. Defaults to the current working directory.
+    #[arg(long)]
+    project_dir: Option<PathBuf>,
+    /// Override the runtime pipeline profile.
+    #[arg(long)]
+    profile: Option<String>,
+    /// Explicit symbol list (comma-delimited). Open paper positions are always included.
+    #[arg(long, value_delimiter = ',')]
+    symbols: Vec<String>,
+    /// Optional file containing one symbol per line.
+    #[arg(long)]
+    symbols_file: Option<PathBuf>,
+    /// Reload the symbols file when its metadata changes, without restarting the daemon.
+    #[arg(long, requires = "symbols_file")]
+    watch_symbols_file: bool,
+    /// BTC anchor symbol for alignment context.
+    #[arg(long, default_value = "BTC")]
+    btc_symbol: String,
+    /// Number of bars to load for indicator warm-up.
+    #[arg(long)]
+    lookback_bars: Option<usize>,
+    /// Required bootstrap step identity when no prior runtime_cycle_steps exist.
+    #[arg(long)]
+    start_step_close_ts_ms: Option<i64>,
+    /// Emit machine-readable JSON instead of a human summary.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+struct PaperLaneManifestArgs {
+    #[command(flatten)]
+    common: PaperLaneCommonArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+struct PaperLaneStatusArgs {
+    #[command(flatten)]
+    common: PaperLaneCommonArgs,
+    /// Optional staleness threshold for the daemon status file in milliseconds.
+    #[arg(long)]
+    stale_after_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct PaperLaneApplyArgs {
+    #[command(flatten)]
+    status: PaperLaneStatusArgs,
+    /// Requested supervisor action. `auto` reuses the read-only paper service recommendation.
+    #[arg(long, value_enum, default_value = "auto")]
+    action: PaperServiceApplyActionArg,
+    /// Maximum time to wait for a newly spawned daemon to publish a running status contract.
+    #[arg(long, default_value_t = 5_000)]
+    start_wait_ms: u64,
+    /// Maximum time to wait for a supervised stop before failing closed.
+    #[arg(long, default_value_t = 30_000)]
+    stop_wait_ms: u64,
+    /// Poll interval for status/lock checks while supervising a lane.
+    #[arg(long, default_value_t = 100)]
+    poll_ms: u64,
+}
+
+#[derive(Debug, Clone, Args)]
+struct PaperLaneDaemonArgs {
+    #[command(flatten)]
+    common: PaperLaneCommonArgs,
+    /// Sleep duration between idle follow polls.
+    #[arg(long, default_value_t = 5_000)]
+    idle_sleep_ms: u64,
+    /// Maximum number of idle polls before exiting. Zero means unbounded.
+    #[arg(long, default_value_t = 0)]
+    max_idle_polls: usize,
+    /// Override exported_at_ms for reproducible artefacts; defaults to each step close.
+    #[arg(long)]
+    exported_at_ms: Option<i64>,
+    /// Resolve the daemon lane but do not write any DB projections.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -699,6 +812,7 @@ fn run_snapshot(command: SnapshotCommand) -> Result<()> {
 
 fn run_paper(command: PaperCommand) -> Result<()> {
     match command {
+        PaperCommand::Lane { command } => run_paper_lane(command)?,
         PaperCommand::EffectiveConfig(args) => {
             let effective_config =
                 paper_config::PaperEffectiveConfig::resolve(args.config.as_deref())?;
@@ -1188,4 +1302,145 @@ fn run_paper(command: PaperCommand) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn run_paper_lane(command: PaperLaneCommand) -> Result<()> {
+    match command {
+        PaperLaneCommand::Manifest(args) => {
+            let report = paper_lane::build_manifest(build_lane_input(&args.common))?;
+            if args.common.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "paper lane manifest ok: lane={} profile={} state={:?}",
+                    report.lane.lane.as_str(),
+                    report.manifest.runtime_bootstrap.pipeline.profile,
+                    report.manifest.resume.launch_state,
+                );
+                println!("service_name: {}", report.lane.service_name);
+                println!("config_path: {}", report.lane.config_path);
+                println!("paper_db: {}", report.lane.paper_db);
+                println!("status_path: {}", report.lane.status_path);
+            }
+        }
+        PaperLaneCommand::Status(args) => {
+            let report = paper_lane::build_status(paper_lane::PaperLaneStatusInput {
+                lane: build_lane_input(&args.common),
+                stale_after_ms: args.stale_after_ms,
+            })?;
+            if args.common.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "paper lane status ok: lane={} state={:?}",
+                    report.lane.lane.as_str(),
+                    report.status.service_state,
+                );
+                println!("service_name: {}", report.lane.service_name);
+                println!("status_path: {}", report.lane.status_path);
+            }
+        }
+        PaperLaneCommand::Service(args) => {
+            let report = paper_lane::build_service(paper_lane::PaperLaneStatusInput {
+                lane: build_lane_input(&args.common),
+                stale_after_ms: args.stale_after_ms,
+            })?;
+            if args.common.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "paper lane service ok: lane={} action={:?} state={:?}",
+                    report.lane.lane.as_str(),
+                    report.service.desired_action,
+                    report.service.status.service_state,
+                );
+                println!("service_name: {}", report.lane.service_name);
+                println!("status_path: {}", report.lane.status_path);
+            }
+        }
+        PaperLaneCommand::Apply(args) => {
+            let report = paper_lane::apply_service(paper_lane::PaperLaneApplyInput {
+                lane: paper_lane::PaperLaneStatusInput {
+                    lane: build_lane_input(&args.status.common),
+                    stale_after_ms: args.status.stale_after_ms,
+                },
+                requested_action: match args.action {
+                    PaperServiceApplyActionArg::Auto => {
+                        paper_service::PaperServiceApplyRequestedAction::Auto
+                    }
+                    PaperServiceApplyActionArg::Start => {
+                        paper_service::PaperServiceApplyRequestedAction::Start
+                    }
+                    PaperServiceApplyActionArg::Restart => {
+                        paper_service::PaperServiceApplyRequestedAction::Restart
+                    }
+                    PaperServiceApplyActionArg::Stop => {
+                        paper_service::PaperServiceApplyRequestedAction::Stop
+                    }
+                    PaperServiceApplyActionArg::Resume => {
+                        paper_service::PaperServiceApplyRequestedAction::Resume
+                    }
+                },
+                start_wait_ms: args.start_wait_ms,
+                stop_wait_ms: args.stop_wait_ms,
+                poll_ms: args.poll_ms,
+            })?;
+            if args.status.common.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "paper lane apply ok: lane={} requested={:?} applied={:?}",
+                    report.lane.lane.as_str(),
+                    report.service_apply.requested_action,
+                    report.service_apply.applied_action,
+                );
+                println!("service_name: {}", report.lane.service_name);
+                println!("status_path: {}", report.lane.status_path);
+            }
+        }
+        PaperLaneCommand::Daemon(args) => {
+            let report = paper_lane::run_daemon(paper_lane::PaperLaneDaemonInput {
+                lane: build_lane_input(&args.common),
+                idle_sleep_ms: args.idle_sleep_ms,
+                max_idle_polls: args.max_idle_polls,
+                exported_at_ms: args.exported_at_ms,
+                dry_run: args.dry_run,
+            })?;
+            if args.common.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "paper lane daemon ok: lane={} pid={} lock={} status={} steps={} stop_requested={} dry_run={}",
+                    report.lane.lane.as_str(),
+                    report.daemon.pid,
+                    report.daemon.lock_path,
+                    report.daemon.status_path,
+                    report.daemon.loop_report.executed_steps,
+                    report.daemon.stop_requested,
+                    report.daemon.dry_run,
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn build_lane_input(args: &PaperLaneCommonArgs) -> paper_lane::PaperLaneInput<'_> {
+    paper_lane::PaperLaneInput {
+        lane: match args.lane {
+            PaperLaneArg::Paper1 => paper_lane::PaperLaneName::Paper1,
+            PaperLaneArg::Paper2 => paper_lane::PaperLaneName::Paper2,
+            PaperLaneArg::Paper3 => paper_lane::PaperLaneName::Paper3,
+            PaperLaneArg::Livepaper => paper_lane::PaperLaneName::Livepaper,
+        },
+        project_dir: args.project_dir.as_deref(),
+        profile: args.profile.as_deref(),
+        symbols: &args.symbols,
+        symbols_file: args.symbols_file.as_deref(),
+        watch_symbols_file: args.watch_symbols_file,
+        btc_symbol: &args.btc_symbol,
+        lookback_bars: args.lookback_bars,
+        start_step_close_ts_ms: args.start_step_close_ts_ms,
+    }
 }

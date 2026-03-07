@@ -28,6 +28,7 @@ import json
 import os
 import signal
 import sqlite3
+import shutil
 import time
 from pathlib import Path
 
@@ -37,6 +38,7 @@ loop_db_path = Path("/tmp/aiq-runtime-paper-loop.db")
 bars_path = Path("/tmp/aiq-runtime-candles.db")
 gap_db_path = Path("/tmp/aiq-runtime-paper-loop-gap.db")
 gap_bars_path = Path("/tmp/aiq-runtime-paper-loop-gap-candles.db")
+lane_project_dir = Path("/tmp/aiq-runtime-paper-lane-project")
 for path in (
     snap_path,
     db_path,
@@ -59,6 +61,9 @@ for path in (
     Path("/tmp/aiq-runtime-paper-service-apply.json"),
     Path("/tmp/aiq-runtime-paper-daemon.json"),
     Path("/tmp/aiq-runtime-paper-daemon.status.json"),
+    Path("/tmp/aiq-runtime-paper-lane-manifest.json"),
+    Path("/tmp/aiq-runtime-paper-lane-apply.json"),
+    Path("/tmp/aiq-runtime-paper-lane-daemon.json"),
     Path("/tmp/aiq-runtime-snapshot-validate.json"),
     Path("/tmp/aiq-runtime-seed-paper.json"),
     Path("/tmp/aiq-runtime-seed-paper-loop.json"),
@@ -74,6 +79,8 @@ for path in (
 ):
     if path.exists():
         path.unlink()
+if lane_project_dir.exists():
+    shutil.rmtree(lane_project_dir)
 
 payload = {
     "version": 2,
@@ -178,6 +185,75 @@ for db in (db_path, loop_db_path, gap_db_path):
     )
     conn.close()
 
+for lane_db in (
+    lane_project_dir / "trading_engine_v8_paper1.db",
+    lane_project_dir / "trading_engine_v8_livepaper.db",
+):
+    lane_db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(lane_db)
+    conn.executescript(
+        """
+        CREATE TABLE trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            symbol TEXT,
+            type TEXT,
+            action TEXT,
+            price REAL,
+            size REAL,
+            notional REAL,
+            reason TEXT,
+            reason_code TEXT,
+            confidence TEXT,
+            pnl REAL,
+            fee_usd REAL,
+            fee_token TEXT,
+            fee_rate REAL,
+            balance REAL,
+            entry_atr REAL,
+            leverage REAL,
+            margin_used REAL,
+            meta_json TEXT,
+            run_fingerprint TEXT,
+            fill_hash TEXT,
+            fill_tid INTEGER
+        );
+        CREATE TABLE position_state (
+            symbol TEXT PRIMARY KEY,
+            open_trade_id INTEGER,
+            trailing_sl REAL,
+            last_funding_time INTEGER,
+            adds_count INTEGER,
+            tp1_taken INTEGER,
+            last_add_time INTEGER,
+            entry_adx_threshold REAL,
+            updated_at TEXT
+        );
+        CREATE TABLE position_state_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_ts_ms INTEGER NOT NULL,
+            updated_at TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            open_trade_id INTEGER,
+            trailing_sl REAL,
+            last_funding_time INTEGER,
+            adds_count INTEGER,
+            tp1_taken INTEGER,
+            last_add_time INTEGER,
+            entry_adx_threshold REAL,
+            event_type TEXT NOT NULL,
+            run_fingerprint TEXT
+        );
+        CREATE TABLE runtime_cooldowns (
+            symbol TEXT PRIMARY KEY,
+            last_entry_attempt_s REAL,
+            last_exit_attempt_s REAL,
+            updated_at TEXT
+        );
+        """
+    )
+    conn.close()
+
 conn = sqlite3.connect(bars_path)
 conn.executescript(
     """
@@ -212,6 +288,35 @@ for symbol, start, drift in (("ETH", 100.0, 0.25), ("SOL", 150.0, 0.4), ("BTC", 
         price = close
 conn.commit()
 conn.close()
+
+(lane_project_dir / "config").mkdir(parents=True, exist_ok=True)
+(lane_project_dir / "candles_dbs").mkdir(parents=True, exist_ok=True)
+(lane_project_dir / "artifacts/state").mkdir(parents=True, exist_ok=True)
+(lane_project_dir / "artifacts/2026-03-07/run_lane/promoted_configs").mkdir(parents=True, exist_ok=True)
+shutil.copyfile(bars_path, lane_project_dir / "candles_dbs/candles_30m.db")
+for lane in ("paper1", "livepaper"):
+    (lane_project_dir / "config" / f"strategy_overrides.{lane}.yaml").write_text(
+        "\n".join(
+            [
+                "global:",
+                "  engine:",
+                "    interval: 30m",
+                "  runtime:",
+                "    profile: production",
+                "symbols:",
+                "  ETH:",
+                "    runtime:",
+                "      profile: parity_baseline",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+for role in ("primary", "fallback", "conservative"):
+    (lane_project_dir / "artifacts/2026-03-07/run_lane/promoted_configs" / f"{role}.yaml").write_text(
+        "global:\n  runtime:\n    profile: parity_baseline\n",
+        encoding="utf-8",
+    )
 
 conn = sqlite3.connect(gap_bars_path)
 conn.executescript(
@@ -325,6 +430,9 @@ cargo run -q -p aiq-runtime -- paper daemon --db /tmp/aiq-runtime-paper-loop.db 
 cargo run -q -p aiq-runtime -- paper status --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --status-path /tmp/aiq-runtime-paper-daemon.status.json --json >/tmp/aiq-runtime-paper-status-stopped.json
 cargo run -q -p aiq-runtime -- paper service --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --status-path /tmp/aiq-runtime-paper-daemon.status.json --json >/tmp/aiq-runtime-paper-service-stopped.json
 cargo run -q -p aiq-runtime -- paper service apply --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --status-path /tmp/aiq-runtime-paper-daemon.status.json --action resume --json >/tmp/aiq-runtime-paper-service-apply.json
+cargo run -q -p aiq-runtime -- paper lane manifest --lane paper1 --project-dir /tmp/aiq-runtime-paper-lane-project --symbols ETH --json >/tmp/aiq-runtime-paper-lane-manifest.json
+cargo run -q -p aiq-runtime -- paper lane apply --lane paper1 --project-dir /tmp/aiq-runtime-paper-lane-project --symbols ETH --start-step-close-ts-ms 1773422400000 --action auto --json >/tmp/aiq-runtime-paper-lane-apply.json
+cargo run -q -p aiq-runtime -- paper lane daemon --lane livepaper --project-dir /tmp/aiq-runtime-paper-lane-project --symbols ETH --start-step-close-ts-ms 1773422400000 --idle-sleep-ms 1 --max-idle-polls 1 --dry-run --json >/tmp/aiq-runtime-paper-lane-daemon.json
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example \
 AI_QUANT_DB_PATH=/tmp/aiq-runtime-paper-loop.db \
 AI_QUANT_CANDLES_DB_PATH=/tmp/aiq-runtime-candles.db \
@@ -430,6 +538,34 @@ while True:
         break
     assert time.time() <= deadline, "paper service apply cleanup did not publish a stopped status in time"
     time.sleep(0.05)
+lane_manifest = json.loads(Path("/tmp/aiq-runtime-paper-lane-manifest.json").read_text(encoding="utf-8"))
+assert lane_manifest["lane"]["service_name"] == "openclaw-ai-quant-trader-v8-paper1"
+assert lane_manifest["lane"]["promoted_role"] == "primary"
+assert lane_manifest["manifest"]["instance_tag"] == "v8-paper1"
+lane_apply = json.loads(Path("/tmp/aiq-runtime-paper-lane-apply.json").read_text(encoding="utf-8"))
+assert lane_apply["lane"]["service_name"] == "openclaw-ai-quant-trader-v8-paper1"
+assert lane_apply["service_apply"]["final_service"]["status"]["service_state"] == "running"
+lane_status_path = Path("/tmp/aiq-runtime-paper-lane-project/ai_quant_paper_v8_paper1.status.json")
+deadline = time.time() + 5.0
+while True:
+    lane_running_status = json.loads(lane_status_path.read_text(encoding="utf-8"))
+    if lane_running_status["running"] is True:
+        break
+    assert time.time() <= deadline, "paper lane apply did not publish a running conventional status in time"
+    time.sleep(0.05)
+lane_pid = lane_running_status["pid"]
+os.kill(lane_pid, signal.SIGTERM)
+deadline = time.time() + 5.0
+while True:
+    lane_stopped_status = json.loads(lane_status_path.read_text(encoding="utf-8"))
+    if lane_stopped_status["pid"] == lane_pid and lane_stopped_status["running"] is False:
+        break
+    assert time.time() <= deadline, "paper lane apply cleanup did not publish a stopped conventional status in time"
+    time.sleep(0.05)
+lane_daemon = json.loads(Path("/tmp/aiq-runtime-paper-lane-daemon.json").read_text(encoding="utf-8"))
+assert lane_daemon["lane"]["service_name"] == "openclaw-ai-quant-trader-v8-livepaper"
+assert lane_daemon["lane"]["promoted_role"] is None
+assert lane_daemon["daemon"]["dry_run"] is True
 PY
 
 echo "[runtime-foundation] ok"

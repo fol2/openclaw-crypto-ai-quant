@@ -46,6 +46,12 @@ side-effecting supervisor that can enact that recommendation against the Rust
 `paper daemon` only. The apply surface reuses the same manifest/status
 contract, fails closed on unhealthy or drifted lanes, and still does not claim
 any Python paper or systemd cutover.
+Rust now also ships a lane-aware `paper lane` wrapper so the conventional
+`paper1` / `paper2` / `paper3` / `livepaper` mappings live in Rust instead of
+being reconstructed from ad hoc env bundles. The lane wrapper can resolve or
+run the same manifest / status / service / apply / daemon surfaces with the
+conventional service name, instance tag, promoted-role, strategy-mode, DB, and
+status-path contract for each paper lane.
 
 ## Screenshots
 

@@ -18,6 +18,7 @@ green:
 - paper daemon service status resolution
 - paper daemon service action resolution
 - paper daemon service action application
+- conventional paper lane mapping and launch ownership
 - paper runtime bootstrap shell
 - paper runtime one-shot execution shell
 - paired opt-in paper daemon orchestration wrapper
@@ -47,6 +48,9 @@ AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example AI_QUANT_DB_PATH=<
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example AI_QUANT_DB_PATH=<paper_fixture.db> AI_QUANT_CANDLES_DB_PATH=<candles_fixture.db> AI_QUANT_SYMBOLS=ETH AI_QUANT_STATUS_STALE_AFTER_MS=30000 cargo run -q -p aiq-runtime -- paper status --json
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example AI_QUANT_DB_PATH=<paper_fixture.db> AI_QUANT_CANDLES_DB_PATH=<candles_fixture.db> AI_QUANT_SYMBOLS=ETH AI_QUANT_STATUS_STALE_AFTER_MS=30000 cargo run -q -p aiq-runtime -- paper service --json
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example AI_QUANT_DB_PATH=<paper_fixture.db> AI_QUANT_CANDLES_DB_PATH=<candles_fixture.db> AI_QUANT_SYMBOLS=ETH AI_QUANT_STATUS_STALE_AFTER_MS=30000 cargo run -q -p aiq-runtime -- paper service apply --action auto --json
+cargo run -q -p aiq-runtime -- paper lane manifest --lane paper1 --project-dir <paper_lane_project> --symbols ETH --json
+cargo run -q -p aiq-runtime -- paper lane apply --lane paper1 --project-dir <paper_lane_project> --symbols ETH --start-step-close-ts-ms 1773422400000 --action auto --json
+cargo run -q -p aiq-runtime -- paper lane daemon --lane livepaper --project-dir <paper_lane_project> --symbols ETH --start-step-close-ts-ms 1773422400000 --idle-sleep-ms 1 --max-idle-polls 1 --dry-run --json
 cargo run -q -p aiq-runtime -- snapshot validate --path <snapshot_v2_valid.json> --json
 cargo run -q -p aiq-runtime -- snapshot seed-paper --snapshot <snapshot_v2_valid.json> --target-db <paper_fixture.db> --strict-replace --json
 cargo run -q -p aiq-runtime -- paper doctor --db <paper_fixture.db> --json
@@ -75,6 +79,9 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
 - `paper status --json` combines that same launch contract with the persisted daemon lifecycle JSON and reports whether the lane is running, stale, stopped, restart-required, or merely launch-ready when no daemon status exists yet. Running lanes must now fail closed when the daemon reports unhealthy runtime errors or when the launch identity drifts (`profile`, DB paths, BTC anchor, lookback, explicit symbols, the bootstrap step while the lane is still fresh, or path wiring).
 - `paper service --json` reuses the same read-only status view and reports whether later supervision should hold, start, restart, or merely monitor the lane, together with an operator-facing `action_reason`. Idle watchlist-owned lanes that are launch-ready should now map to `start` instead of a permanent `hold`.
 - `paper service apply --json` is the only side-effecting paper service surface in this slice. It must either keep the lane untouched (`noop`), start/resume the Rust daemon, restart a stale or drifted Rust daemon, or stop a proven Rust owner while keeping the same launch/status contract.
+- `paper lane … --json` must map the conventional `paper1` / `paper2` / `paper3` / `livepaper` identities to the same service name, instance tag, promoted-role, strategy-mode, DB path, lock path, status path, and effective-config output root that operators previously carried via ad hoc env bundles.
+- `paper lane apply --json` must be able to start the conventional `paper1` lane without retyping explicit `AI_QUANT_*` env, and the spawned daemon must persist the conventional status contract for that lane.
+- `paper lane daemon --json` must be able to run the conventional `livepaper` lane directly while omitting any promoted-role injection by default.
 - `bt-core` accepts snapshots with `version = 2` and runtime cooldown markers.
 - `aiq-runtime` can export a v2 paper snapshot from SQLite and re-validate it through the same Rust snapshot contract.
 - `aiq-runtime` can seed a paper DB from a v2 snapshot and report deterministic write counts for `trades`, `position_state`, `runtime_cooldowns`, and `runtime_last_closes`.
@@ -106,6 +113,7 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
 - status validation should include one fixture with no daemon status file yet, one stopped daemon status fixture, one stale running status fixture, one unhealthy running status fixture, and one running-but-mismatched status fixture that reports `restart_required`.
 - service-action validation should map at least one launch-blocked fixture to `hold`, one launch-ready or stopped fixture to `start`, one launch-ready idle watchlist fixture to `start`, one stale / unhealthy / mismatched running fixture to `restart`, and one healthy running fixture to `monitor`.
 - service-apply validation should cover at least one bootstrap/start or resume case, one healthy `monitor -> noop` case, one stale/drifted `restart` case, one explicit `stop` case, and one fail-closed corrupt-status case.
+- lane validation should cover one candidate lane (`paper2`) manifest mapping, one primary lane (`paper1`) `apply` start smoke, and one direct `livepaper` daemon smoke.
 - `paper run-once` fixtures must provide bars for both the target symbol and the BTC anchor symbol at the resolved `engine.interval`.
 - `paper cycle` validation should include one write run plus one duplicate-step rerun that hard-fails without changing `trades`, `position_state`, `runtime_cooldowns`, `runtime_last_closes`, or `runtime_cycle_steps`.
 - `paper loop` validation should include one bootstrap run on a fresh DB with `--start-step-close-ts-ms`, one follow-up resume run without the bootstrap flag, and one idle run that exits with `executed_steps == 0` because the next due step is newer than the latest common candle close.

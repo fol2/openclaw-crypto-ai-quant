@@ -847,8 +847,31 @@ Operational expectations:
 - `--lock-path` may be supplied when the Rust daemon lane needs an isolated lock namespace; changing the lock path does not widen DB projections
 - `--status-path` may be supplied when operators want the daemon lifecycle JSON in a specific location; otherwise the daemon derives it from the resolved lock path or `AI_QUANT_STATUS_PATH`
 - `--dry-run` remains the safest bring-up path while the surface is still opt-in
-- manual `paper daemon` launch is still supported, but when you want Rust to own lane lifecycle directly the preferred entrypoint is now `paper service apply` rather than manually retyping `daemon_command`
+- manual `paper daemon` launch is still supported, but when you want Rust to own a conventional `paper1` / `paper2` / `paper3` / `livepaper` lane directly the preferred entrypoint is now `paper lane …` rather than rebuilding that lane contract from ad hoc env bundles
 - if you only need bounded catch-up or a short follow poll budget, use `paper loop` directly instead of `paper daemon`
+
+### Resolve a conventional Rust paper lane
+
+Use when: you want Rust to own the conventional `paper1` / `paper2` /
+`paper3` / `livepaper` lane mapping directly, including the service name,
+instance tag, promoted-role, strategy-mode, DB path, lock path, and status
+path.
+
+```bash
+cargo run -p aiq-runtime -- \
+  paper lane manifest \
+  --lane paper1 \
+  --project-dir "$PROJECT_DIR" \
+  --symbols ETH \
+  --json
+```
+
+Lane-wrapper expectations:
+
+- `paper lane manifest` is the lane-aware equivalent of `paper manifest`; it applies the conventional lane contract in Rust before resolving the daemon launch plan
+- `paper lane service` and `paper lane apply` do the same for supervision, so operators no longer need to type the per-lane `AI_QUANT_*` bundle by hand just to reach the Rust paper surfaces
+- `paper lane daemon` is the direct long-running Rust lane entrypoint when you want to run `paper1` / `paper2` / `paper3` / `livepaper` without spelling out the conventional DB, lock, status, role, and mode paths yourself
+- `livepaper` intentionally omits promoted-role injection by default; it keeps its own lane YAML path instead of reusing the promoted candidate role mapping
 
 ### Inspect the Rust paper daemon service manifest
 
