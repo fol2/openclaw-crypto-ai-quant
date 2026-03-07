@@ -501,8 +501,41 @@ fn matches_legacy_paper_service_help(args: &[OsString]) -> bool {
     ) {
         return false;
     }
-    tail.iter()
-        .any(|value| matches!(value.to_str(), Some("-h" | "--help")))
+    let mut saw_help = false;
+    let mut index = 0usize;
+    while index < tail.len() {
+        let Some(token) = tail[index].to_str() else {
+            return false;
+        };
+        match token {
+            "-h" | "--help" => {
+                saw_help = true;
+                index += 1;
+            }
+            "--live" | "--watch-symbols-file" | "--json" => {
+                index += 1;
+            }
+            "--config"
+            | "--profile"
+            | "--db"
+            | "--candles-db"
+            | "--symbols"
+            | "--symbols-file"
+            | "--btc-symbol"
+            | "--lookback-bars"
+            | "--start-step-close-ts-ms"
+            | "--lock-path"
+            | "--status-path"
+            | "--stale-after-ms" => {
+                index += 2;
+                if index > tail.len() {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    saw_help
 }
 
 fn preprocess_cli_args(mut args: Vec<OsString>) -> Vec<OsString> {

@@ -1070,6 +1070,18 @@ fn paper_service_help_preserves_read_only_flags() {
         !stdout.contains("inspect"),
         "flagged paper service help should not require the hidden inspect shim either",
     );
+
+    let output = runtime_command()
+        .arg("paper")
+        .arg("service")
+        .arg("bogus")
+        .arg("--help")
+        .output()
+        .expect("paper service bogus help smoke should spawn");
+    assert!(
+        !output.status.success(),
+        "unexpected paper service arguments should still fail closed even when --help is present",
+    );
 }
 
 #[test]
