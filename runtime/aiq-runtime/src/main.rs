@@ -494,10 +494,15 @@ fn matches_legacy_paper_service_help(args: &[OsString]) -> bool {
     if args.get(2).and_then(|value| value.to_str()) != Some("service") {
         return false;
     }
-    matches!(
-        args.get(3).and_then(|value| value.to_str()),
-        Some("-h" | "--help")
-    )
+    let tail = &args[3..];
+    if matches!(
+        tail.first().and_then(|value| value.to_str()),
+        Some("inspect" | "apply")
+    ) {
+        return false;
+    }
+    tail.iter()
+        .any(|value| matches!(value.to_str(), Some("-h" | "--help")))
 }
 
 fn preprocess_cli_args(mut args: Vec<OsString>) -> Vec<OsString> {

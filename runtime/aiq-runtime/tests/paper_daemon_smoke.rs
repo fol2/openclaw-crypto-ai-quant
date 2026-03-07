@@ -1047,6 +1047,29 @@ fn paper_service_help_preserves_read_only_flags() {
         !stdout.contains("inspect"),
         "plain paper service help should not require operators to know the hidden inspect shim",
     );
+
+    let output = runtime_command()
+        .arg("paper")
+        .arg("service")
+        .arg("--json")
+        .arg("--help")
+        .output()
+        .expect("paper service help with flags should spawn");
+    assert!(
+        output.status.success(),
+        "paper service --json --help should still resolve the read-only help; output:\n{}",
+        combined_output(&output)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Usage: aiq-runtime paper service [OPTIONS]"),
+        "flagged paper service help should still render the legacy read-only usage line",
+    );
+    assert!(
+        !stdout.contains("inspect"),
+        "flagged paper service help should not require the hidden inspect shim either",
+    );
 }
 
 #[test]
