@@ -14,6 +14,7 @@ bt-core = { path = "../../backtester/crates/bt-core" }
 chrono = { version = "0.4", features = ["clock"] }
 clap = { workspace = true }
 fs2 = "0.4"
+libc = "0.2"
 risk-core = { path = "../../backtester/crates/risk-core" }
 rusqlite = { version = "0.33", features = ["backup", "bundled"] }
 serde = { workspace = true }
@@ -24,5 +25,4 @@ signal-hook = "0.3"
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-libc = "0.2"
 tempfile = "3"

@@ -39,11 +39,13 @@ launch contract with the persisted daemon status JSON so operators can see
 whether the current Rust lane is merely launch-ready, actively running, stale,
 stopped, or in need of a restart because the live daemon contract drifted from
 the current config/env plan.
-Rust now also ships a read-only `paper service` surface that builds on top of
-that status view and tells later supervision whether the lane should be held,
-started, restarted, or simply monitored. It now also fail-closes when the
-running daemon reports an unhealthy status or no longer matches the current
-launch identity, still without claiming any systemd or production cutover.
+Rust now also ships a split paper supervision surface: `paper service` remains
+read-only and tells operators whether the lane should be held, started,
+restarted, or simply monitored, while `paper service apply` is the new opt-in
+side-effecting supervisor that can enact that recommendation against the Rust
+`paper daemon` only. The apply surface reuses the same manifest/status
+contract, fails closed on unhealthy or drifted lanes, and still does not claim
+any Python paper or systemd cutover.
 
 ## Screenshots
 

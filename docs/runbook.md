@@ -847,6 +847,7 @@ Operational expectations:
 - `--lock-path` may be supplied when the Rust daemon lane needs an isolated lock namespace; changing the lock path does not widen DB projections
 - `--status-path` may be supplied when operators want the daemon lifecycle JSON in a specific location; otherwise the daemon derives it from the resolved lock path or `AI_QUANT_STATUS_PATH`
 - `--dry-run` remains the safest bring-up path while the surface is still opt-in
+- manual `paper daemon` launch is still supported, but when you want Rust to own lane lifecycle directly the preferred entrypoint is now `paper service apply` rather than manually retyping `daemon_command`
 - if you only need bounded catch-up or a short follow poll budget, use `paper loop` directly instead of `paper daemon`
 
 ### Inspect the Rust paper daemon service manifest
@@ -872,6 +873,7 @@ Manifest expectations:
 - `paper effective-config` is the narrower read-only control-plane surface for Python paper start-up and factory materialisation; `paper manifest` builds on top of that same resolver contract and adds daemon launch/resume inspection
 - if `paper` start-up or factory materialisation drifts, run `aiq-runtime paper effective-config --json` first; set `AI_QUANT_RUNTIME_BIN` explicitly when the Python wrapper cannot discover the runtime binary
 - `paper manifest` is read-only; it never writes the paper DB or starts follow-mode polling
+- `paper manifest` is the preflight launch contract; `paper status` shows the current lane state, `paper service` previews the recommended supervision action, and `paper service apply` is the mutating surface that can enact that recommendation
 - `--config`, `--db`, `--candles-db`, `--symbols`, `--symbols-file`, `--watch-symbols-file`, `--lookback-bars`, `--start-step-close-ts-ms`, `--lock-path`, and `--status-path` may override the corresponding env-derived values
 - `AI_QUANT_PROMOTED_ROLE` is applied to the effective Rust paper config before the manifest resolves interval, pipeline profile, or daemon command
 - `AI_QUANT_STRATEGY_MODE` remains the first strategy-mode selector; when it is unset, `AI_QUANT_STRATEGY_MODE_FILE` provides the same persisted fallback used by the Python paper service
@@ -905,6 +907,7 @@ cargo run -p aiq-runtime -- \
 Status expectations:
 
 - `paper status` is read-only; it never starts the daemon or writes the paper DB
+- `paper status` is the current lane-state view; pair it with `paper manifest` when you need the preflight contract or with `paper service` / `paper service apply` when deciding what to do next
 - when no daemon lifecycle JSON exists yet, `service_state` falls back to the current launch contract (`blocked`, `bootstrap_required`, `bootstrap_ready`, `resume_ready`, or `caught_up_idle`)
 - when a matching daemon status JSON exists and still reports `running=true`, `service_state` becomes `running`
 - when the running status JSON is older than the configured staleness threshold, `service_state` becomes `status_stale`
@@ -931,12 +934,40 @@ cargo run -p aiq-runtime -- \
 Service-action expectations:
 
 - `paper service` is read-only; it never starts, stops, or restarts the daemon
+- `paper service` is the recommendation preview; `paper service apply` is the separate mutating entrypoint that can enact that recommendation against the Rust paper daemon
 - `desired_action = hold` means the current lane should stay unsupervised until the launch contract becomes valid
 - `desired_action = start` means the current lane is launch-ready but no healthy Rust daemon is supervising it right now; this also covers watchlist-owned idle lanes that are allowed to start and wait for symbols later
 - `desired_action = restart` means the lane is supervised by a stale or drifted daemon contract and later orchestration should recycle it
 - `desired_action = monitor` means the current daemon status still matches the live launch contract and supervision can keep watching it
 - `action_reason` gives the operator-facing explanation for that recommendation without requiring manual JSON diffing
 - `daemon_command` is carried through as the exact launch command the later service surface would supervise
+
+### Apply the Rust paper daemon service action
+
+Use when: you want Rust to supervise the current paper lane directly without
+claiming Python paper or systemd cutover yet.
+
+```bash
+AI_QUANT_STRATEGY_YAML=./config/strategy_overrides.paper1.yaml \
+AI_QUANT_DB_PATH=./trading_engine_v8_paper1.db \
+AI_QUANT_CANDLES_DB_DIR=./candles_dbs \
+AI_QUANT_SYMBOLS=BTC,ETH,SOL \
+AI_QUANT_STATUS_STALE_AFTER_MS=30000 \
+cargo run -p aiq-runtime -- \
+  paper service apply \
+  --action auto \
+  --json
+```
+
+Service-apply expectations:
+
+- `paper service` remains read-only; only `paper service apply` mutates daemon lifecycle
+- `--action auto` reuses the current read-only `paper service` recommendation
+- `--action start` / `resume` launches the current `daemon_command` only when the lane is launch-ready and the lock is free
+- `--action restart` recycles a stale, unhealthy, or drifted Rust daemon owner; when the lane lock is already free it collapses to `start`
+- `--action stop` only signals a daemon when the current Rust status JSON and the active lock owner prove the same Rust pid owns the lane
+- `hold` and healthy `monitor` lanes are no-op outcomes under `--action auto`
+- the apply surface reuses the same `lock_path`, `status_path`, and launch contract from `paper manifest` / `paper status`, and it fails closed when status JSON is corrupt, daemon ownership cannot be proven, or the lane is not launch-ready
 
 ---
 

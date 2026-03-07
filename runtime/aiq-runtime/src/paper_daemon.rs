@@ -5,7 +5,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use signal_hook::{consts::signal::SIGINT, consts::signal::SIGTERM, flag, SigId};
 use std::fs::{File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -401,6 +401,43 @@ pub(crate) fn load_status_file(status_path: &Path) -> Result<Option<PaperDaemonS
     Ok(Some(status))
 }
 
+pub(crate) fn probe_lock_owner(lock_path: &Path) -> Result<Option<u32>> {
+    if !lock_path.exists() {
+        return Ok(None);
+    }
+
+    let mut lock_file = OpenOptions::new()
+        .create(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .with_context(|| format!("failed to open daemon lock file: {}", lock_path.display()))?;
+    match lock_file.try_lock_exclusive() {
+        Ok(()) => {
+            lock_file.unlock().with_context(|| {
+                format!(
+                    "failed to unlock daemon probe file: {}",
+                    lock_path.display()
+                )
+            })?;
+            Ok(None)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+            let pid = read_pid(&mut lock_file)?.context(format!(
+                "paper daemon lock is held but its pid file is empty or invalid: {}",
+                lock_path.display()
+            ))?;
+            Ok(Some(pid))
+        }
+        Err(err) => Err(err).with_context(|| {
+            format!(
+                "failed to probe the paper daemon lock owner: {}",
+                lock_path.display()
+            )
+        }),
+    }
+}
+
 pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
     if !input.paper_db.exists() {
         anyhow::bail!("paper db not found: {}", input.paper_db.display());
@@ -420,6 +457,27 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
         input.explicit_symbols,
         input.symbols_file,
         input.watch_symbols_file,
+    )?;
+
+    write_status_snapshot(
+        &input,
+        &input.runtime_bootstrap,
+        &lock_path,
+        &manifest_state,
+        StatusSnapshot {
+            status_path: &status_path,
+            started_at_ms,
+            stopped_at_ms: None,
+            stop_requested: false,
+            last_active_symbols: &[],
+            initial_last_applied_step_close_ts_ms: None,
+            latest_common_close_ts_ms: None,
+            next_due_step_close_ts_ms: None,
+            idle_polls: 0,
+            executed_steps: 0,
+            warnings: &[],
+            errors: &[],
+        },
     )?;
 
     if input.emit_progress {
@@ -916,6 +974,24 @@ fn write_pid(lock_file: &mut File) -> Result<()> {
         .flush()
         .context("failed to flush daemon lock pid")?;
     Ok(())
+}
+
+fn read_pid(lock_file: &mut File) -> Result<Option<u32>> {
+    let mut payload = String::new();
+    lock_file
+        .seek(SeekFrom::Start(0))
+        .context("failed to seek daemon lock file while reading its pid")?;
+    lock_file
+        .read_to_string(&mut payload)
+        .context("failed to read daemon lock pid")?;
+    let payload = payload.trim();
+    if payload.is_empty() {
+        return Ok(None);
+    }
+    let pid = payload
+        .parse::<u32>()
+        .with_context(|| format!("failed to parse daemon lock pid: {payload}"))?;
+    Ok(Some(pid))
 }
 
 struct SignalHandlerGuard {
