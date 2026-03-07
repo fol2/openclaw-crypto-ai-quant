@@ -47,7 +47,9 @@ for path in (
     Path("/tmp/aiq-runtime-doctor.json"),
     Path("/tmp/aiq-runtime-pipeline.json"),
     Path("/tmp/aiq-runtime-paper-manifest.json"),
+    Path("/tmp/aiq-runtime-paper-manifest-lane.json"),
     Path("/tmp/aiq-runtime-paper-effective-config-base.json"),
+    Path("/tmp/aiq-runtime-paper-effective-config-lane.json"),
     Path("/tmp/aiq-runtime-paper-effective-config-primary.json"),
     Path("/tmp/aiq-runtime-paper-effective-config-fallback.json"),
     Path("/tmp/aiq-runtime-paper-manifest-resume.json"),
@@ -70,6 +72,7 @@ for path in (
     Path("/tmp/aiq-runtime-paper-loop-idle.json"),
     Path("/tmp/aiq-runtime-paper-loop-follow.json"),
     Path("/tmp/aiq-runtime-paper-loop-gap.stderr"),
+    Path("/tmp/aiq-runtime-paper-lane-launch.txt"),
     Path("/tmp/aiq-runtime-effective-config.yaml"),
 ):
     if path.exists():
@@ -274,6 +277,7 @@ PY
 
 AI_QUANT_STRATEGY_MODE= \
 cargo run -q -p aiq-runtime -- paper effective-config --config /tmp/aiq-runtime-effective-config.yaml --json >/tmp/aiq-runtime-paper-effective-config-base.json
+cargo run -q -p aiq-runtime -- paper effective-config --config /tmp/aiq-runtime-effective-config.yaml --lane paper2 --json >/tmp/aiq-runtime-paper-effective-config-lane.json
 AI_QUANT_STRATEGY_MODE=primary \
 cargo run -q -p aiq-runtime -- paper effective-config --config /tmp/aiq-runtime-effective-config.yaml --json >/tmp/aiq-runtime-paper-effective-config-primary.json
 AI_QUANT_STRATEGY_MODE=fallback \
@@ -284,10 +288,14 @@ import json
 from pathlib import Path
 
 base = json.loads(Path("/tmp/aiq-runtime-paper-effective-config-base.json").read_text(encoding="utf-8"))
+lane = json.loads(Path("/tmp/aiq-runtime-paper-effective-config-lane.json").read_text(encoding="utf-8"))
 primary = json.loads(Path("/tmp/aiq-runtime-paper-effective-config-primary.json").read_text(encoding="utf-8"))
 fallback = json.loads(Path("/tmp/aiq-runtime-paper-effective-config-fallback.json").read_text(encoding="utf-8"))
 
 assert base["interval"] == "30m"
+assert lane["strategy_mode"] == "fallback"
+assert lane["strategy_mode_source"] == "lane_default"
+assert lane["promoted_role"] == "fallback"
 assert primary["interval"] == "5m"
 assert fallback["interval"] == "1h"
 assert base["config_id"] != primary["config_id"]
@@ -300,6 +308,8 @@ AI_QUANT_CANDLES_DB_PATH=/tmp/aiq-runtime-candles.db \
 AI_QUANT_SYMBOLS=ETH,SOL \
 AI_QUANT_LOOKBACK_BARS=200 \
 cargo run -q -p aiq-runtime -- paper manifest --json >/tmp/aiq-runtime-paper-manifest.json
+AI_QUANT_CANDLES_DB_PATH=/tmp/aiq-runtime-candles.db \
+cargo run -q -p aiq-runtime -- paper manifest --lane paper3 --json >/tmp/aiq-runtime-paper-manifest-lane.json
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example \
 AI_QUANT_DB_PATH=/tmp/aiq-runtime-paper.db \
 AI_QUANT_CANDLES_DB_PATH=/tmp/aiq-runtime-candles.db \
@@ -325,6 +335,8 @@ cargo run -q -p aiq-runtime -- paper daemon --db /tmp/aiq-runtime-paper-loop.db 
 cargo run -q -p aiq-runtime -- paper status --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --status-path /tmp/aiq-runtime-paper-daemon.status.json --json >/tmp/aiq-runtime-paper-status-stopped.json
 cargo run -q -p aiq-runtime -- paper service --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --status-path /tmp/aiq-runtime-paper-daemon.status.json --json >/tmp/aiq-runtime-paper-service-stopped.json
 cargo run -q -p aiq-runtime -- paper service apply --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --status-path /tmp/aiq-runtime-paper-daemon.status.json --action resume --json >/tmp/aiq-runtime-paper-service-apply.json
+cargo test -q -p aiq-runtime --test paper_daemon_smoke paper_daemon_lane_defaults_idle_cleanly_without_watchlist_file
+AI_QUANT_RUNTIME_BIN=/bin/echo ./scripts/run_paper_lane.sh paper2 --idle-sleep-ms 1 >/tmp/aiq-runtime-paper-lane-launch.txt
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example \
 AI_QUANT_DB_PATH=/tmp/aiq-runtime-paper-loop.db \
 AI_QUANT_CANDLES_DB_PATH=/tmp/aiq-runtime-candles.db \
@@ -390,6 +402,16 @@ assert manifest["resume"]["launch_state"] == "bootstrap_required"
 assert manifest["resume"]["launch_ready"] is False
 assert manifest["status_path"].endswith(".status.json")
 assert "--status-path" in manifest["daemon_command"]
+lane_manifest = json.loads(Path("/tmp/aiq-runtime-paper-manifest-lane.json").read_text(encoding="utf-8"))
+assert lane_manifest["lane"] == "paper3"
+assert lane_manifest["service_name"] == "openclaw-ai-quant-trader-v8-paper3"
+assert lane_manifest["instance_tag"] == "v8-paper3"
+assert lane_manifest["watch_symbols_file"] is True
+assert lane_manifest["symbols_file"].endswith("artifacts/state/paper_watchlist_paper3.txt")
+assert lane_manifest["paper_db"].endswith("trading_engine_v8_paper3.db")
+assert lane_manifest["lock_path"].endswith("ai_quant_paper_v8_paper3.lock")
+assert lane_manifest["resume"]["launch_state"] == "idle_no_symbols"
+assert lane_manifest["resume"]["launch_ready"] is True
 status_bootstrap = json.loads(Path("/tmp/aiq-runtime-paper-status-bootstrap.json").read_text(encoding="utf-8"))
 assert status_bootstrap["service_state"] == "bootstrap_required"
 assert status_bootstrap["status_file_present"] is False
@@ -430,6 +452,9 @@ while True:
         break
     assert time.time() <= deadline, "paper service apply cleanup did not publish a stopped status in time"
     time.sleep(0.05)
+lane_launch = Path("/tmp/aiq-runtime-paper-lane-launch.txt").read_text(encoding="utf-8").strip()
+assert "paper daemon --lane paper2 --project-dir " in lane_launch
+assert "--idle-sleep-ms 1" in lane_launch
 PY
 
 echo "[runtime-foundation] ok"

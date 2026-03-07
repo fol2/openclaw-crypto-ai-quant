@@ -811,7 +811,7 @@ mod tests {
     }
 
     fn effective_config(path: &Path) -> PaperEffectiveConfig {
-        PaperEffectiveConfig::resolve(Some(path)).unwrap()
+        PaperEffectiveConfig::resolve(Some(path), None, None).unwrap()
     }
 
     #[test]

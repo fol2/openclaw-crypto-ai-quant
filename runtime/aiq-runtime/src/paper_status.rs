@@ -5,12 +5,15 @@ use std::env;
 use std::path::Path;
 
 use crate::paper_daemon::{self, PaperDaemonStatusSnapshot};
+use crate::paper_lane::PaperLane;
 use crate::paper_manifest::{
     self, PaperManifestInput, PaperManifestLaunchState, PaperManifestReport,
 };
 
 pub struct PaperStatusInput<'a> {
     pub config: Option<&'a Path>,
+    pub lane: Option<PaperLane>,
+    pub project_dir: Option<&'a Path>,
     pub live: bool,
     pub profile: Option<&'a str>,
     pub db: Option<&'a Path>,
@@ -58,6 +61,8 @@ pub struct PaperStatusReport {
 pub fn build_status(input: PaperStatusInput<'_>) -> Result<PaperStatusReport> {
     let manifest = paper_manifest::build_manifest(PaperManifestInput {
         config: input.config,
+        lane: input.lane,
+        project_dir: input.project_dir,
         live: input.live,
         profile: input.profile,
         db: input.db,
@@ -271,7 +276,9 @@ fn bootstrap_step_is_contract(
             && status.executed_steps == 0
             && status
                 .next_due_step_close_ts_ms
-                .map(|next_due_step_close_ts_ms| Some(next_due_step_close_ts_ms) == status.start_step_close_ts_ms)
+                .map(|next_due_step_close_ts_ms| {
+                    Some(next_due_step_close_ts_ms) == status.start_step_close_ts_ms
+                })
                 .unwrap_or(true)
 }
 
@@ -456,6 +463,8 @@ mod tests {
 
         let manifest = paper_manifest::build_manifest(PaperManifestInput {
             config: Some(&config_path),
+            lane: None,
+            project_dir: None,
             live: false,
             profile: Some("production"),
             db: Some(&paper_db),
@@ -532,6 +541,8 @@ mod tests {
 
         let report = build_status(PaperStatusInput {
             config: Some(&config_path),
+            lane: None,
+            project_dir: None,
             live: false,
             profile: Some("production"),
             db: Some(&paper_db),
@@ -571,6 +582,8 @@ mod tests {
 
         let report = build_status(PaperStatusInput {
             config: Some(&config_path),
+            lane: None,
+            project_dir: None,
             live: false,
             profile: Some("production"),
             db: Some(&paper_db),
@@ -609,6 +622,8 @@ mod tests {
 
         let report = build_status(PaperStatusInput {
             config: Some(&config_path),
+            lane: None,
+            project_dir: None,
             live: false,
             profile: Some("production"),
             db: Some(&paper_db),
@@ -649,6 +664,8 @@ mod tests {
 
         let report = build_status(PaperStatusInput {
             config: Some(&config_path),
+            lane: None,
+            project_dir: None,
             live: false,
             profile: Some("production"),
             db: Some(&paper_db),
@@ -694,6 +711,8 @@ mod tests {
 
         let report = build_status(PaperStatusInput {
             config: Some(&config_path),
+            lane: None,
+            project_dir: None,
             live: false,
             profile: Some("production"),
             db: Some(&paper_db),
@@ -757,6 +776,8 @@ mod tests {
 
         let report = build_status(PaperStatusInput {
             config: Some(&config_path),
+            lane: None,
+            project_dir: None,
             live: false,
             profile: Some("production"),
             db: Some(&paper_db),
@@ -801,6 +822,8 @@ mod tests {
 
         let report = build_status(PaperStatusInput {
             config: Some(&config_path),
+            lane: None,
+            project_dir: None,
             live: false,
             profile: Some("production"),
             db: Some(&paper_db),
@@ -846,6 +869,8 @@ mod tests {
 
         let report = build_status(PaperStatusInput {
             config: Some(&config_path),
+            lane: None,
+            project_dir: None,
             live: false,
             profile: Some("production"),
             db: Some(&paper_db),
@@ -889,6 +914,8 @@ mod tests {
 
         let report = build_status(PaperStatusInput {
             config: Some(&config_path),
+            lane: None,
+            project_dir: None,
             live: false,
             profile: Some("production"),
             db: Some(&paper_db),
@@ -922,6 +949,8 @@ mod tests {
 
         let report = build_status(PaperStatusInput {
             config: Some(&config_path),
+            lane: None,
+            project_dir: None,
             live: false,
             profile: Some("production"),
             db: Some(&paper_db),

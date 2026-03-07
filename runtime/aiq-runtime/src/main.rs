@@ -11,6 +11,7 @@ mod paper_config;
 mod paper_cycle;
 mod paper_daemon;
 mod paper_export;
+mod paper_lane;
 mod paper_loop;
 mod paper_manifest;
 mod paper_run_once;
@@ -68,8 +69,14 @@ struct CommonArgs {
 #[derive(Debug, Clone, Args)]
 struct PaperCommonArgs {
     /// YAML config path. Backward-compatible with strategy_overrides.yaml.
-    #[arg(long, default_value = "config/strategy_overrides.yaml")]
-    config: PathBuf,
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Conventional paper lane preset. Resolves paper1/paper2/paper3/livepaper defaults in Rust.
+    #[arg(long, value_enum)]
+    lane: Option<PaperLaneArg>,
+    /// Optional project/worktree root for lane-default paths. Falls back to the current working directory.
+    #[arg(long)]
+    project_dir: Option<PathBuf>,
     /// Apply the live overlay when loading config.
     #[arg(long)]
     live: bool,
@@ -95,6 +102,12 @@ struct PaperEffectiveConfigArgs {
     /// Optional YAML config path override. Falls back to AI_QUANT_STRATEGY_YAML or strategy_overrides.yaml.
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Conventional paper lane preset. Resolves paper1/paper2/paper3/livepaper defaults in Rust.
+    #[arg(long, value_enum)]
+    lane: Option<PaperLaneArg>,
+    /// Optional project/worktree root for lane-default paths. Falls back to the current working directory.
+    #[arg(long)]
+    project_dir: Option<PathBuf>,
     /// Apply the live overlay when loading config.
     #[arg(long)]
     live: bool,
@@ -180,6 +193,12 @@ struct PaperManifestArgs {
     /// Optional YAML config path override. Falls back to AI_QUANT_STRATEGY_YAML or strategy_overrides.yaml.
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Conventional paper lane preset. Resolves paper1/paper2/paper3/livepaper defaults in Rust.
+    #[arg(long, value_enum)]
+    lane: Option<PaperLaneArg>,
+    /// Optional project/worktree root for lane-default paths. Falls back to the current working directory.
+    #[arg(long)]
+    project_dir: Option<PathBuf>,
     /// Apply the live overlay when loading config.
     #[arg(long)]
     live: bool,
@@ -275,6 +294,14 @@ enum PaperServiceApplyActionArg {
     Restart,
     Stop,
     Resume,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PaperLaneArg {
+    Paper1,
+    Paper2,
+    Paper3,
+    Livepaper,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -399,11 +426,11 @@ struct PaperDaemonArgs {
     #[command(flatten)]
     common: PaperCommonArgs,
     /// Paper DB path to restore from and project back into.
-    #[arg(long, default_value = "trading_engine.db")]
-    db: PathBuf,
+    #[arg(long)]
+    db: Option<PathBuf>,
     /// Candle SQLite DB path used for this daemon lane.
     #[arg(long)]
-    candles_db: PathBuf,
+    candles_db: Option<PathBuf>,
     /// Explicit symbol list (comma-delimited). Open paper positions are always included.
     #[arg(long, value_delimiter = ',')]
     symbols: Vec<String>,
@@ -417,8 +444,8 @@ struct PaperDaemonArgs {
     #[arg(long, default_value = "BTC")]
     btc_symbol: String,
     /// Number of bars to load for indicator warm-up.
-    #[arg(long, default_value_t = 400)]
-    lookback_bars: usize,
+    #[arg(long)]
+    lookback_bars: Option<usize>,
     /// Required bootstrap step identity when no prior runtime_cycle_steps exist.
     #[arg(long)]
     start_step_close_ts_ms: Option<i64>,
@@ -452,6 +479,17 @@ impl From<ModeArg> for RuntimeMode {
             ModeArg::SweepCpu => RuntimeMode::SweepCpu,
             ModeArg::Doctor => RuntimeMode::Doctor,
             ModeArg::Migrate => RuntimeMode::Migrate,
+        }
+    }
+}
+
+impl From<PaperLaneArg> for paper_lane::PaperLane {
+    fn from(value: PaperLaneArg) -> Self {
+        match value {
+            PaperLaneArg::Paper1 => Self::Paper1,
+            PaperLaneArg::Paper2 => Self::Paper2,
+            PaperLaneArg::Paper3 => Self::Paper3,
+            PaperLaneArg::Livepaper => Self::Livepaper,
         }
     }
 }
@@ -700,8 +738,11 @@ fn run_snapshot(command: SnapshotCommand) -> Result<()> {
 fn run_paper(command: PaperCommand) -> Result<()> {
     match command {
         PaperCommand::EffectiveConfig(args) => {
-            let effective_config =
-                paper_config::PaperEffectiveConfig::resolve(args.config.as_deref())?;
+            let effective_config = paper_config::PaperEffectiveConfig::resolve(
+                args.config.as_deref(),
+                args.lane.map(Into::into),
+                args.project_dir.as_deref(),
+            )?;
             let report = effective_config.build_report(args.symbol.as_deref(), args.live)?;
 
             if args.json {
@@ -741,6 +782,8 @@ fn run_paper(command: PaperCommand) -> Result<()> {
         PaperCommand::Manifest(args) => {
             let report = paper_manifest::build_manifest(paper_manifest::PaperManifestInput {
                 config: args.config.as_deref(),
+                lane: args.lane.map(Into::into),
+                project_dir: args.project_dir.as_deref(),
                 live: args.live,
                 profile: args.profile.as_deref(),
                 db: args.db.as_deref(),
@@ -770,6 +813,12 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 println!("candles_db: {}", report.candles_db);
                 println!("interval: {}", report.interval);
                 println!("lookback_bars: {}", report.lookback_bars);
+                if let Some(lane) = report.lane.as_deref() {
+                    println!("lane: {}", lane);
+                }
+                if let Some(service_name) = report.service_name.as_deref() {
+                    println!("service_name: {}", service_name);
+                }
                 println!("symbols: {}", report.symbols.join(","));
                 if let Some(symbols_file) = report.symbols_file.as_deref() {
                     println!("symbols_file: {}", symbols_file);
@@ -825,6 +874,8 @@ fn run_paper(command: PaperCommand) -> Result<()> {
         PaperCommand::Status(args) => {
             let report = paper_status::build_status(paper_status::PaperStatusInput {
                 config: args.manifest.config.as_deref(),
+                lane: args.manifest.lane.map(Into::into),
+                project_dir: args.manifest.project_dir.as_deref(),
                 live: args.manifest.live,
                 profile: args.manifest.profile.as_deref(),
                 db: args.manifest.db.as_deref(),
@@ -876,6 +927,8 @@ fn run_paper(command: PaperCommand) -> Result<()> {
             PaperServiceCommand::Inspect(args) => {
                 let report = paper_service::build_service(paper_service::PaperServiceInput {
                     config: args.status.manifest.config.as_deref(),
+                    lane: args.status.manifest.lane.map(Into::into),
+                    project_dir: args.status.manifest.project_dir.as_deref(),
                     live: args.status.manifest.live,
                     profile: args.status.manifest.profile.as_deref(),
                     db: args.status.manifest.db.as_deref(),
@@ -944,6 +997,8 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 let report = paper_service::apply_service(paper_service::PaperServiceApplyInput {
                     service: paper_service::PaperServiceInput {
                         config: args.service.status.manifest.config.as_deref(),
+                        lane: args.service.status.manifest.lane.map(Into::into),
+                        project_dir: args.service.status.manifest.project_dir.as_deref(),
                         live: args.service.status.manifest.live,
                         profile: args.service.status.manifest.profile.as_deref(),
                         db: args.service.status.manifest.db.as_deref(),
@@ -993,8 +1048,11 @@ fn run_paper(command: PaperCommand) -> Result<()> {
             }
         },
         PaperCommand::Doctor(args) => {
-            let effective_config =
-                paper_config::PaperEffectiveConfig::resolve(Some(&args.common.paper.config))?;
+            let effective_config = paper_config::PaperEffectiveConfig::resolve(
+                args.common.paper.config.as_deref(),
+                args.common.paper.lane.map(Into::into),
+                args.common.paper.project_dir.as_deref(),
+            )?;
             let runtime_bootstrap = effective_config.build_runtime_bootstrap(
                 args.common.symbol.as_deref(),
                 args.common.paper.live,
@@ -1027,8 +1085,11 @@ fn run_paper(command: PaperCommand) -> Result<()> {
             }
         }
         PaperCommand::RunOnce(args) => {
-            let effective_config =
-                paper_config::PaperEffectiveConfig::resolve(Some(&args.common.config))?;
+            let effective_config = paper_config::PaperEffectiveConfig::resolve(
+                args.common.config.as_deref(),
+                args.common.lane.map(Into::into),
+                args.common.project_dir.as_deref(),
+            )?;
             let config = effective_config
                 .load_config(Some(args.target_symbol.as_str()), args.common.live)?;
             let runtime_bootstrap = effective_config.build_runtime_bootstrap(
@@ -1062,8 +1123,11 @@ fn run_paper(command: PaperCommand) -> Result<()> {
             }
         }
         PaperCommand::Cycle(args) => {
-            let effective_config =
-                paper_config::PaperEffectiveConfig::resolve(Some(&args.common.config))?;
+            let effective_config = paper_config::PaperEffectiveConfig::resolve(
+                args.common.config.as_deref(),
+                args.common.lane.map(Into::into),
+                args.common.project_dir.as_deref(),
+            )?;
             let symbols = load_symbols(args.symbols, args.symbols_file.as_deref())?;
             let runtime_bootstrap = effective_config.build_runtime_bootstrap(
                 bootstrap_symbol_hint(&symbols),
@@ -1097,8 +1161,11 @@ fn run_paper(command: PaperCommand) -> Result<()> {
             }
         }
         PaperCommand::Loop(args) => {
-            let effective_config =
-                paper_config::PaperEffectiveConfig::resolve(Some(&args.common.config))?;
+            let effective_config = paper_config::PaperEffectiveConfig::resolve(
+                args.common.config.as_deref(),
+                args.common.lane.map(Into::into),
+                args.common.project_dir.as_deref(),
+            )?;
             let bootstrap_symbols =
                 load_symbols(args.symbols.clone(), args.symbols_file.as_deref())?;
             let runtime_bootstrap = effective_config.build_runtime_bootstrap(
@@ -1139,10 +1206,29 @@ fn run_paper(command: PaperCommand) -> Result<()> {
             }
         }
         PaperCommand::Daemon(args) => {
-            let effective_config =
-                paper_config::PaperEffectiveConfig::resolve(Some(&args.common.config))?;
-            let bootstrap_symbols =
-                load_symbols(args.symbols.clone(), args.symbols_file.as_deref())?;
+            let manifest = paper_manifest::build_manifest(paper_manifest::PaperManifestInput {
+                config: args.common.config.as_deref(),
+                lane: args.common.lane.map(Into::into),
+                project_dir: args.common.project_dir.as_deref(),
+                live: args.common.live,
+                profile: args.common.profile.as_deref(),
+                db: args.db.as_deref(),
+                candles_db: args.candles_db.as_deref(),
+                symbols: &args.symbols,
+                symbols_file: args.symbols_file.as_deref(),
+                watch_symbols_file: args.watch_symbols_file,
+                btc_symbol: &args.btc_symbol,
+                lookback_bars: args.lookback_bars,
+                start_step_close_ts_ms: args.start_step_close_ts_ms,
+                lock_path: args.lock_path.as_deref(),
+                status_path: args.status_path.as_deref(),
+            })?;
+            let effective_config = paper_config::PaperEffectiveConfig::resolve(
+                Some(Path::new(&manifest.base_config_path)),
+                args.common.lane.map(Into::into),
+                args.common.project_dir.as_deref(),
+            )?;
+            let bootstrap_symbols = manifest.resume.active_symbols.clone();
             let runtime_bootstrap = effective_config.build_runtime_bootstrap(
                 bootstrap_symbol_hint(&bootstrap_symbols),
                 args.common.live,
@@ -1153,20 +1239,20 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 runtime_bootstrap,
                 profile_override: args.common.profile.as_deref(),
                 live: args.common.live,
-                paper_db: &args.db,
-                candles_db: &args.candles_db,
-                explicit_symbols: &args.symbols,
-                symbols_file: args.symbols_file.as_deref(),
+                paper_db: Path::new(&manifest.paper_db),
+                candles_db: Path::new(&manifest.candles_db),
+                explicit_symbols: &manifest.symbols,
+                symbols_file: manifest.symbols_file.as_deref().map(Path::new),
                 btc_symbol: &args.btc_symbol,
-                lookback_bars: args.lookback_bars,
-                start_step_close_ts_ms: args.start_step_close_ts_ms,
+                lookback_bars: manifest.lookback_bars,
+                start_step_close_ts_ms: manifest.start_step_close_ts_ms,
                 idle_sleep_ms: args.idle_sleep_ms,
                 max_idle_polls: args.max_idle_polls,
                 exported_at_ms: args.exported_at_ms,
                 dry_run: args.dry_run,
-                lock_path: args.lock_path.as_deref(),
-                status_path: args.status_path.as_deref(),
-                watch_symbols_file: args.watch_symbols_file,
+                lock_path: Some(Path::new(&manifest.lock_path)),
+                status_path: Some(Path::new(&manifest.status_path)),
+                watch_symbols_file: manifest.watch_symbols_file,
                 emit_progress: !args.common.json,
             })?;
 

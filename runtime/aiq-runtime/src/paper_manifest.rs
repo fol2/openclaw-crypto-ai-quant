@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::paper_config::PaperEffectiveConfig;
 use crate::paper_daemon;
+use crate::paper_lane::PaperLane;
 use crate::paper_loop;
 
 const DEFAULT_PAPER_DB_PATH: &str = "trading_engine.db";
@@ -13,6 +14,8 @@ const DEFAULT_LOOKBACK_BARS: usize = 400;
 
 pub struct PaperManifestInput<'a> {
     pub config: Option<&'a Path>,
+    pub lane: Option<PaperLane>,
+    pub project_dir: Option<&'a Path>,
     pub live: bool,
     pub profile: Option<&'a str>,
     pub db: Option<&'a Path>,
@@ -70,6 +73,8 @@ pub struct PaperManifestReport {
     pub lock_path: String,
     pub status_path: String,
     pub instance_tag: Option<String>,
+    pub lane: Option<String>,
+    pub service_name: Option<String>,
     pub promoted_role: Option<String>,
     pub promoted_config_path: Option<String>,
     pub strategy_mode: Option<String>,
@@ -82,14 +87,30 @@ pub struct PaperManifestReport {
 }
 
 pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestReport> {
-    let effective_config = PaperEffectiveConfig::resolve(input.config)?;
+    let lane_defaults = match input.lane {
+        Some(lane) => Some(lane.defaults(input.project_dir)?),
+        None => None,
+    };
+    let effective_config =
+        PaperEffectiveConfig::resolve(input.config, input.lane, input.project_dir)?;
     let mut warnings = effective_config.warnings().to_vec();
     let symbols = resolve_symbols(input.symbols);
     let symbols_file = input
         .symbols_file
         .map(Path::to_path_buf)
+        .or_else(|| {
+            if symbols.is_empty() {
+                lane_defaults
+                    .as_ref()
+                    .map(|defaults| defaults.symbols_file.clone())
+            } else {
+                None
+            }
+        })
         .or_else(|| env_path("AI_QUANT_SYMBOLS_FILE"));
-    let watch_symbols_file = input.watch_symbols_file || env_bool("AI_QUANT_WATCH_SYMBOLS_FILE");
+    let watch_symbols_file = input.watch_symbols_file
+        || (input.symbols.is_empty() && input.symbols_file.is_none() && lane_defaults.is_some())
+        || env_bool("AI_QUANT_WATCH_SYMBOLS_FILE");
     let interval_symbols = resolve_interval_symbols(&symbols, symbols_file.as_deref())?;
     let runtime_bootstrap = effective_config.build_runtime_bootstrap(
         bootstrap_symbol_hint(&interval_symbols),
@@ -116,20 +137,46 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
     let paper_db = input
         .db
         .map(Path::to_path_buf)
+        .or_else(|| {
+            lane_defaults
+                .as_ref()
+                .map(|defaults| defaults.paper_db.clone())
+        })
         .or_else(|| env_path("AI_QUANT_DB_PATH"))
         .unwrap_or_else(|| PathBuf::from(DEFAULT_PAPER_DB_PATH));
 
-    let candles_db = resolve_candles_db(input.candles_db, &interval)?;
+    let candles_db = resolve_candles_db(input.candles_db, lane_defaults.as_ref(), &interval)?;
     let lookback_bars = input
         .lookback_bars
+        .or_else(|| {
+            lane_defaults
+                .as_ref()
+                .map(|defaults| defaults.lookback_bars)
+        })
         .or_else(|| env_usize("AI_QUANT_LOOKBACK_BARS"))
         .unwrap_or(DEFAULT_LOOKBACK_BARS);
     let btc_symbol = normalise_symbol(input.btc_symbol).unwrap_or_else(|| "BTC".to_string());
     let start_step_close_ts_ms = input
         .start_step_close_ts_ms
         .or_else(|| env_i64("AI_QUANT_PAPER_START_STEP_CLOSE_TS_MS"));
-    let lock_path = paper_daemon::resolve_lock_path(input.lock_path, input.live);
-    let status_path = paper_daemon::resolve_status_path(input.status_path, &lock_path);
+    let lock_path = input
+        .lock_path
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            lane_defaults
+                .as_ref()
+                .map(|defaults| defaults.lock_path.clone())
+        })
+        .unwrap_or_else(|| paper_daemon::resolve_lock_path(None, input.live));
+    let status_path = input
+        .status_path
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            lane_defaults
+                .as_ref()
+                .map(|defaults| defaults.status_path.clone())
+        })
+        .unwrap_or_else(|| paper_daemon::resolve_status_path(None, &lock_path));
 
     if symbols.is_empty() && symbols_file.is_none() {
         warnings.push(
@@ -245,7 +292,14 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
         start_step_close_ts_ms,
         lock_path: lock_path.display().to_string(),
         status_path: status_path.display().to_string(),
-        instance_tag: env_string("AI_QUANT_INSTANCE_TAG"),
+        instance_tag: lane_defaults
+            .as_ref()
+            .map(|defaults| defaults.instance_tag.clone())
+            .or_else(|| env_string("AI_QUANT_INSTANCE_TAG")),
+        lane: input.lane.map(|lane| lane.as_str().to_string()),
+        service_name: lane_defaults
+            .as_ref()
+            .map(|defaults| defaults.service_name.clone()),
         promoted_role: effective_config.promoted_role().map(ToOwned::to_owned),
         promoted_config_path: effective_config
             .promoted_config_path()
@@ -383,18 +437,25 @@ fn bootstrap_symbol_hint(symbols: &[String]) -> Option<&str> {
     (symbols.len() == 1).then(|| symbols[0].as_str())
 }
 
-fn resolve_candles_db(candles_db: Option<&Path>, interval: &str) -> Result<PathBuf> {
+fn resolve_candles_db(
+    candles_db: Option<&Path>,
+    lane_defaults: Option<&crate::paper_lane::PaperLaneDefaults>,
+    interval: &str,
+) -> Result<PathBuf> {
     if let Some(candles_db) = candles_db {
         return Ok(candles_db.to_path_buf());
     }
     if let Some(candles_db) = env_path("AI_QUANT_CANDLES_DB_PATH") {
         return Ok(candles_db);
     }
+    if let Some(candles_db_dir) = lane_defaults.map(|defaults| defaults.candles_db_dir.clone()) {
+        return Ok(candles_db_dir.join(format!("candles_{}.db", interval)));
+    }
     if let Some(candles_db_dir) = env_path("AI_QUANT_CANDLES_DB_DIR") {
         return Ok(candles_db_dir.join(format!("candles_{}.db", interval)));
     }
     anyhow::bail!(
-        "paper manifest requires --candles-db, AI_QUANT_CANDLES_DB_PATH, or AI_QUANT_CANDLES_DB_DIR"
+        "paper manifest requires --candles-db, AI_QUANT_CANDLES_DB_PATH, AI_QUANT_CANDLES_DB_DIR, or a lane/project-root default"
     );
 }
 
@@ -420,13 +481,18 @@ fn resolve_interval_symbols(
 ) -> Result<Vec<String>> {
     let mut merged = symbols.to_vec();
     if let Some(symbols_file) = symbols_file {
-        let file_symbols = std::fs::read_to_string(symbols_file).with_context(|| {
-            format!(
-                "failed to read symbols file while resolving manifest: {}",
-                symbols_file.display()
-            )
-        })?;
-        merged.extend(parse_symbol_list(&file_symbols));
+        match std::fs::read_to_string(symbols_file) {
+            Ok(file_symbols) => merged.extend(parse_symbol_list(&file_symbols)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "failed to read symbols file while resolving manifest: {}",
+                        symbols_file.display()
+                    )
+                })
+            }
+        }
     }
     let mut symbols = merged
         .into_iter()
@@ -486,6 +552,8 @@ mod tests {
     use std::fs;
     use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
+
+    use crate::paper_lane::PaperLane;
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -670,6 +738,8 @@ mod tests {
 
         let report = build_manifest(PaperManifestInput {
             config: None,
+            lane: None,
+            project_dir: None,
             live: false,
             profile: None,
             db: None,
@@ -739,6 +809,8 @@ mod tests {
 
         let report = build_manifest(PaperManifestInput {
             config: None,
+            lane: None,
+            project_dir: None,
             live: false,
             profile: Some("production"),
             db: None,
@@ -800,6 +872,8 @@ mod tests {
 
         let report = build_manifest(PaperManifestInput {
             config: None,
+            lane: None,
+            project_dir: None,
             live: false,
             profile: None,
             db: None,
@@ -831,6 +905,81 @@ mod tests {
     }
 
     #[test]
+    fn manifest_uses_lane_defaults_without_env() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        let config_path = config_dir.join("strategy_overrides.paper3.yaml");
+        let candles_dir = dir.path().join("candles_dbs");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::create_dir_all(&candles_dir).unwrap();
+        write_config(&config_path, "30m");
+
+        let _env = EnvGuard::set(&[
+            (
+                "AI_QUANT_CANDLES_DB_DIR",
+                Some(candles_dir.to_str().unwrap()),
+            ),
+            ("AI_QUANT_STRATEGY_YAML", None),
+            ("AI_QUANT_DB_PATH", None),
+            ("AI_QUANT_SYMBOLS", None),
+            ("AI_QUANT_SYMBOLS_FILE", None),
+            ("AI_QUANT_LOOKBACK_BARS", None),
+            ("AI_QUANT_LOCK_PATH", None),
+            ("AI_QUANT_STATUS_PATH", None),
+            ("AI_QUANT_PROMOTED_ROLE", None),
+            ("AI_QUANT_STRATEGY_MODE", None),
+            ("AI_QUANT_STRATEGY_MODE_FILE", None),
+        ]);
+
+        let report = build_manifest(PaperManifestInput {
+            config: None,
+            lane: Some(PaperLane::Paper3),
+            project_dir: Some(dir.path()),
+            live: false,
+            profile: None,
+            db: None,
+            candles_db: None,
+            symbols: &[],
+            symbols_file: None,
+            watch_symbols_file: false,
+            btc_symbol: "BTC",
+            lookback_bars: None,
+            start_step_close_ts_ms: None,
+            lock_path: None,
+            status_path: None,
+        })
+        .unwrap();
+
+        assert_eq!(report.lane.as_deref(), Some("paper3"));
+        assert_eq!(
+            report.service_name.as_deref(),
+            Some("openclaw-ai-quant-trader-v8-paper3")
+        );
+        assert_eq!(report.instance_tag.as_deref(), Some("v8-paper3"));
+        assert_eq!(report.promoted_role.as_deref(), Some("conservative"));
+        assert_eq!(report.strategy_mode.as_deref(), Some("conservative"));
+        assert_eq!(report.strategy_mode_source.as_deref(), Some("lane_default"));
+        assert_eq!(report.base_config_path, config_path.display().to_string());
+        assert!(report.paper_db.ends_with("trading_engine_v8_paper3.db"));
+        assert!(report.lock_path.ends_with("ai_quant_paper_v8_paper3.lock"));
+        assert!(report
+            .status_path
+            .ends_with("ai_quant_paper_v8_paper3.status.json"));
+        assert!(report
+            .symbols_file
+            .as_deref()
+            .is_some_and(|path| path.ends_with("artifacts/state/paper_watchlist_paper3.txt")));
+        assert!(report.watch_symbols_file);
+        assert_eq!(report.lookback_bars, 200);
+        assert_eq!(
+            report.resume.launch_state,
+            PaperManifestLaunchState::Blocked
+        );
+        assert!(!report.resume.launch_ready);
+    }
+
+    #[test]
     fn manifest_reports_bootstrap_required_without_prior_runtime_steps() {
         let _guard = env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
@@ -848,6 +997,8 @@ mod tests {
 
         let report = build_manifest(PaperManifestInput {
             config: Some(&config_path),
+            lane: None,
+            project_dir: None,
             live: false,
             profile: Some("production"),
             db: Some(&paper_db),
@@ -899,6 +1050,8 @@ mod tests {
 
         let report = build_manifest(PaperManifestInput {
             config: Some(&config_path),
+            lane: None,
+            project_dir: None,
             live: false,
             profile: None,
             db: Some(&paper_db),
@@ -968,6 +1121,8 @@ mod tests {
 
         let report = build_manifest(PaperManifestInput {
             config: Some(&config_path),
+            lane: None,
+            project_dir: None,
             live: false,
             profile: Some("production"),
             db: Some(&paper_db),
@@ -1017,6 +1172,8 @@ mod tests {
 
         let report = build_manifest(PaperManifestInput {
             config: Some(&config_path),
+            lane: None,
+            project_dir: None,
             live: false,
             profile: None,
             db: Some(&paper_db),
@@ -1079,6 +1236,8 @@ mod tests {
 
         let report = build_manifest(PaperManifestInput {
             config: None,
+            lane: None,
+            project_dir: None,
             live: false,
             profile: None,
             db: None,

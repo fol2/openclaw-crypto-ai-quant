@@ -823,6 +823,18 @@ watch a symbols manifest file, pick up later watchlist refreshes without
 restarting, and retain the last good manifest if a reload is invalid or
 runtime-invalid malformed.
 
+For the conventional v8 lanes, Rust now owns a built-in preset:
+
+```bash
+cargo run -p aiq-runtime -- \
+  paper daemon \
+  --lane paper1 \
+  --project-dir "$PWD" \
+  --idle-sleep-ms 5000 \
+  --max-idle-polls 0 \
+  --json
+```
+
 ```bash
 cargo run -p aiq-runtime -- \
   paper daemon \
@@ -839,6 +851,9 @@ cargo run -p aiq-runtime -- \
 Operational expectations:
 
 - `paper daemon` is opt-in orchestration only; Python `engine.daemon` remains the active paper runtime path in this phase
+- `--lane paper1|paper2|paper3|livepaper` resolves the conventional per-lane config path, promoted-role / strategy-mode contract, watched symbols file path, candle DB directory, DB path, and lock/status paths inside Rust
+- `--project-dir` lets operators point those lane defaults at a different worktree/root without rebuilding the binary
+- a lane-default watched symbols file may be absent at start-up; the daemon now idles cleanly and waits for later watchlist materialisation instead of failing before the first poll
 - the daemon reuses the same restored state contract as `paper doctor` and the same rerun guard / DB write contract as `paper cycle`
 - `--start-step-close-ts-ms` is required only when no prior matching `runtime_cycle_steps` rows exist for the current config fingerprint / interval / live lane
 - `--symbols-file` loads the daemon manifest once at start-up; add `--watch-symbols-file` when that manifest should reload on file changes without restarting the process
@@ -854,6 +869,16 @@ Operational expectations:
 
 Use when: you want to verify how the current `AI_QUANT_*` service env would map
 onto the Rust paper daemon before attempting any systemd cutover.
+
+Lane presets may also be inspected directly:
+
+```bash
+cargo run -p aiq-runtime -- \
+  paper manifest \
+  --lane paper2 \
+  --project-dir "$PWD" \
+  --json
+```
 
 ```bash
 AI_QUANT_STRATEGY_YAML=./config/strategy_overrides.paper1.yaml \
@@ -871,6 +896,7 @@ cargo run -p aiq-runtime -- \
 Manifest expectations:
 
 - `paper effective-config` is the narrower read-only control-plane surface for Python paper start-up and factory materialisation; `paper manifest` builds on top of that same resolver contract and adds daemon launch/resume inspection
+- `--lane` is the Rust-owned shortcut for the conventional v8 paper lanes; add `--project-dir` when the binary should resolve those defaults against a different worktree root, and explicit CLI overrides still win when operators need to inspect a non-standard launch contract
 - if `paper` start-up or factory materialisation drifts, run `aiq-runtime paper effective-config --json` first; set `AI_QUANT_RUNTIME_BIN` explicitly when the Python wrapper cannot discover the runtime binary
 - `paper manifest` is read-only; it never writes the paper DB or starts follow-mode polling
 - `paper manifest` is the preflight launch contract; `paper status` shows the current lane state, `paper service` previews the recommended supervision action, and `paper service apply` is the mutating surface that can enact that recommendation

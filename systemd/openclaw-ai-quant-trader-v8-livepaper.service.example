@@ -1,5 +1,5 @@
 [Unit]
-Description=OpenClaw AI Quant Rust Paper Lane (v8 paper1)
+Description=OpenClaw AI Quant Rust Paper Lane (v8 livepaper)
 After=network-online.target openclaw-ai-quant-ws-sidecar.service
 Wants=network-online.target
 Requires=openclaw-ai-quant-ws-sidecar.service
@@ -9,8 +9,8 @@ Type=simple
 WorkingDirectory=$PROJECT_DIR
 EnvironmentFile=-%h/.config/openclaw/ai-quant-universe-v8.env
 EnvironmentFile=-%h/.config/openclaw/ai-quant-v8.env
-EnvironmentFile=-%h/.config/openclaw/ai-quant-trader-v8-paper1.env
-ExecStart=$PROJECT_DIR/scripts/run_paper_lane.sh paper1
+EnvironmentFile=-%h/.config/openclaw/ai-quant-trader-v8-livepaper.env
+ExecStart=$PROJECT_DIR/scripts/run_paper_lane.sh livepaper
 Restart=always
 RestartSec=5
 KillMode=process

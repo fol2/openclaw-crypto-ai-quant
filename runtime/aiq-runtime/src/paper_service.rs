@@ -3,11 +3,14 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 use crate::paper_daemon;
+use crate::paper_lane::PaperLane;
 use crate::paper_status::{self, PaperServiceState, PaperStatusInput, PaperStatusReport};
 
 #[derive(Clone, Copy)]
 pub struct PaperServiceInput<'a> {
     pub config: Option<&'a Path>,
+    pub lane: Option<PaperLane>,
+    pub project_dir: Option<&'a Path>,
     pub live: bool,
     pub profile: Option<&'a str>,
     pub db: Option<&'a Path>,
@@ -95,6 +98,8 @@ struct PaperServiceApplyPlan {
 pub fn build_service(input: PaperServiceInput<'_>) -> Result<PaperServiceReport> {
     let status = paper_status::build_status(PaperStatusInput {
         config: input.config,
+        lane: input.lane,
+        project_dir: input.project_dir,
         live: input.live,
         profile: input.profile,
         db: input.db,
@@ -769,6 +774,8 @@ mod tests {
             lock_path: dir.path().join("paper.lock").display().to_string(),
             status_path: dir.path().join("paper.status.json").display().to_string(),
             instance_tag: None,
+            lane: None,
+            service_name: None,
             promoted_role: None,
             strategy_mode: None,
             promoted_config_path: None,

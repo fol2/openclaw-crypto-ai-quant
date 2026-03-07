@@ -190,10 +190,15 @@ impl SymbolManifestState {
             reload_failure_count: 0,
         };
         if let Some(path) = state.symbols_file.clone() {
-            let stamp = file_stamp(&path)?;
-            let file_symbols = load_symbols_file(&path)?;
-            state.file_symbols = file_symbols;
-            state.last_seen_stamp = Some(stamp);
+            match file_stamp(&path) {
+                Ok(stamp) => {
+                    let file_symbols = load_symbols_file(&path)?;
+                    state.file_symbols = file_symbols;
+                    state.last_seen_stamp = Some(stamp);
+                }
+                Err(err) if is_missing_symbols_file_error(&err) => {}
+                Err(err) => return Err(err),
+            }
         }
         Ok(state)
     }
@@ -218,7 +223,20 @@ impl SymbolManifestState {
             return Ok(ManifestRefresh::NoChange);
         };
 
-        let current_stamp = file_stamp(&symbols_file)?;
+        let current_stamp = match file_stamp(&symbols_file) {
+            Ok(stamp) => stamp,
+            Err(err) if is_missing_symbols_file_error(&err) => {
+                if self.last_seen_stamp.is_none() && self.file_symbols.is_empty() {
+                    return Ok(ManifestRefresh::NoChange);
+                }
+                self.reload_failure_count = self.reload_failure_count.saturating_add(1);
+                return Ok(ManifestRefresh::Warning(format!(
+                    "paper daemon ignored missing symbols file reload; retaining last good manifest: {}",
+                    self.current_symbols().join(",")
+                )));
+            }
+            Err(err) => return Err(err),
+        };
         if self.last_seen_stamp.as_ref() == Some(&current_stamp) {
             return Ok(ManifestRefresh::NoChange);
         }
@@ -886,6 +904,11 @@ fn file_stamp(path: &Path) -> Result<FileStamp> {
         modified_ms,
         len: metadata.len(),
     })
+}
+
+fn is_missing_symbols_file_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<std::io::Error>()
+        .is_some_and(|io_err| io_err.kind() == std::io::ErrorKind::NotFound)
 }
 
 pub(crate) fn resolve_lock_path(lock_path: Option<&Path>, live: bool) -> PathBuf {

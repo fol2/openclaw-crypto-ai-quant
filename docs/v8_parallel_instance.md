@@ -82,7 +82,11 @@ cp "$PROJECT_DIR/config/strategy_overrides.yaml" "$PROJECT_DIR/config/strategy_o
 cp "$PROJECT_DIR/config/strategy_overrides.yaml" "$PROJECT_DIR/config/strategy_overrides.livepaper.yaml"
 ```
 
-Set each trader service to its own YAML via `AI_QUANT_STRATEGY_YAML`.
+Rust lane presets now own the conventional `paper1`, `paper2`, `paper3`, and
+`livepaper` YAML paths. The per-lane env files may still override them for
+non-standard bring-up, but the repo-owned v8 paper service examples now launch
+through `scripts/run_paper_lane.sh <lane>` instead of exporting
+`AI_QUANT_STRATEGY_YAML` by hand.
 
 The factory service should run with `--candidate-count 3`, `--candidate-services`, and `--candidate-yaml-paths` for the candidate lanes.
 
@@ -91,6 +95,9 @@ The factory service should run with `--candidate-count 3`, `--candidate-services
 ```bash
 systemctl --user enable --now openclaw-ai-quant-ws-sidecar-v8.service
 systemctl --user enable --now openclaw-ai-quant-trader-v8-paper1.service
+systemctl --user enable --now openclaw-ai-quant-trader-v8-paper2.service
+systemctl --user enable --now openclaw-ai-quant-trader-v8-paper3.service
+systemctl --user enable --now openclaw-ai-quant-trader-v8-livepaper.service
 systemctl --user enable --now openclaw-ai-quant-monitor-v8.service
 systemctl --user enable --now openclaw-ai-quant-funding-v8.timer
 systemctl --user enable --now openclaw-ai-quant-factory-v8.timer

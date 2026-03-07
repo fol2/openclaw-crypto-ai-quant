@@ -128,6 +128,16 @@ ownership for Python paper start-up and factory deployment flows:
 - now has a fixture-backed parity boundary that proves Python consumers only read the resolver-selected YAML and identity surface, rather than re-owning the merge path
 - keeps paper execution itself on Python; this slice only moves config/control-plane ownership
 
+The current delivered slice extends that again with Rust-owned conventional
+paper lane presets and launch examples:
+
+- `paper effective-config`, `paper manifest`, and `paper daemon`
+- now accept `--lane paper1|paper2|paper3|livepaper` plus optional `--project-dir`
+- lane presets resolve the conventional per-lane config path, promoted-role, default strategy-mode, watched symbols file path, candle DB directory, DB path, lock path, and status path inside Rust instead of requiring hand-written env duplication
+- the daemon now tolerates a missing lane-default watched symbols file at start-up, so a lane can launch idle and wait for later watchlist materialisation
+- `scripts/run_paper_lane.sh` plus the v8 paper systemd example units now point at the Rust lane runner instead of the Python daemon entrypoint
+- still no production cutover is claimed; this is repo-owned launch/orchestration convergence only
+
 Python paper execution is still the active runtime path, and the opt-in Rust
 paper daemon wrapper does not change that. Python paper bootstrap is no longer
 the only continuity surface.

@@ -41,7 +41,9 @@ cargo test --manifest-path backtester/Cargo.toml -p bt-core test_into_sim_state_
 cargo run -q -p aiq-runtime -- doctor --json
 cargo run -q -p aiq-runtime -- pipeline --json
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example cargo run -q -p aiq-runtime -- paper effective-config --json
+cargo run -q -p aiq-runtime -- paper effective-config --lane paper2 --project-dir "$PWD" --json
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example AI_QUANT_DB_PATH=<paper_fixture.db> AI_QUANT_CANDLES_DB_PATH=<candles_fixture.db> AI_QUANT_SYMBOLS=ETH,SOL AI_QUANT_LOOKBACK_BARS=200 cargo run -q -p aiq-runtime -- paper manifest --json
+cargo run -q -p aiq-runtime -- paper manifest --lane paper3 --project-dir "$PWD" --json
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example AI_QUANT_PROMOTED_ROLE=primary AI_QUANT_STRATEGY_MODE_FILE=<strategy_mode.txt> AI_QUANT_DB_PATH=<paper_fixture.db> AI_QUANT_CANDLES_DB_PATH=<candles_fixture.db> AI_QUANT_SYMBOLS=ETH cargo run -q -p aiq-runtime -- paper manifest --json
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example AI_QUANT_DB_PATH=<paper_fixture.db> AI_QUANT_CANDLES_DB_PATH=<candles_fixture.db> AI_QUANT_SYMBOLS=ETH AI_QUANT_PAPER_START_STEP_CLOSE_TS_MS=1773424200000 cargo run -q -p aiq-runtime -- paper manifest --json
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example AI_QUANT_DB_PATH=<paper_fixture.db> AI_QUANT_CANDLES_DB_PATH=<candles_fixture.db> AI_QUANT_SYMBOLS=ETH AI_QUANT_STATUS_STALE_AFTER_MS=30000 cargo run -q -p aiq-runtime -- paper status --json
@@ -55,6 +57,8 @@ cargo run -q -p aiq-runtime -- paper loop --db <paper_fixture.db> --candles-db <
 cargo run -q -p aiq-runtime -- paper loop --db <paper_fixture.db> --candles-db <candles_fixture.db> --symbols ETH --follow --idle-sleep-ms 1 --max-idle-polls 1 --max-steps 1 --json
 # Opt-in daemon wrapper smoke (paired CLI surface)
 cargo run -q -p aiq-runtime -- paper daemon --db <paper_fixture.db> --candles-db <candles_fixture.db> --symbols ETH --start-step-close-ts-ms 1773424200000 --idle-sleep-ms 1 --max-idle-polls 1 --dry-run --json
+cargo test -p aiq-runtime --test paper_daemon_smoke paper_daemon_lane_defaults_idle_cleanly_without_watchlist_file
+AI_QUANT_RUNTIME_BIN=/bin/echo ./scripts/run_paper_lane.sh paper2 --idle-sleep-ms 1
 # Follow-mode symbols-file refresh smoke
 cargo test -p aiq-runtime loop_follow_mode_reloads_symbols_file_between_idle_polls
 cargo test -p aiq-runtime --test paper_daemon_smoke paper_daemon_reloads_symbols_file_between_idle_polls
@@ -71,7 +75,9 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
 - `pipeline --json` resolves `production` cleanly against the example YAML when the tracked live YAML is absent.
 - `paper manifest --json` resolves the current daemon service/env contract without executing any paper steps, derives a candle DB path when only `AI_QUANT_CANDLES_DB_DIR` is present, emits a deterministic `daemon_command`, reports whether the current lane is blocked, bootstrap-ready, resumable, or merely idle caught up, and resolves the daemon `status_path`.
 - `paper effective-config --json` is the narrow read-only control-plane surface for Python paper start-up and factory materialisation, and it must emit the same `active_yaml_path`, `effective_yaml_path`, interval, `strategy_overrides_sha1`, and `config_id` that the broader paper surfaces later consume.
+- `paper effective-config --lane <lane> [--project-dir <root>]` must resolve the conventional per-lane YAML path plus promoted-role / strategy-mode defaults without relying on the older Python env mapping.
 - `paper manifest --json` also applies the same promoted-role / strategy-mode effective config contract used by the Rust paper surfaces, carries `base_config_path`, `active_yaml_path`, `effective_yaml_path`, `strategy_mode_source`, `strategy_overrides_sha1`, and `config_id`, and resolves the interval from that effective config instead of raw env assumptions.
+- `paper manifest --lane <lane> [--project-dir <root>]` must emit the conventional lane metadata (`lane`, `service_name`, `instance_tag`) together with the lane-default candle DB, DB, lock, status, and watched symbols file paths.
 - `paper status --json` combines that same launch contract with the persisted daemon lifecycle JSON and reports whether the lane is running, stale, stopped, restart-required, or merely launch-ready when no daemon status exists yet. Running lanes must now fail closed when the daemon reports unhealthy runtime errors or when the launch identity drifts (`profile`, DB paths, BTC anchor, lookback, explicit symbols, the bootstrap step while the lane is still fresh, or path wiring).
 - `paper service --json` reuses the same read-only status view and reports whether later supervision should hold, start, restart, or merely monitor the lane, together with an operator-facing `action_reason`. Idle watchlist-owned lanes that are launch-ready should now map to `start` instead of a permanent `hold`.
 - `paper service apply --json` is the only side-effecting paper service surface in this slice. It must either keep the lane untouched (`noop`), start/resume the Rust daemon, restart a stale or drifted Rust daemon, or stop a proven Rust owner while keeping the same launch/status contract.
@@ -90,7 +96,9 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
 - Python paper start-up and factory deployment must resolve the same `config_id`, interval, promoted-config path, and strategy-mode source as `aiq-runtime paper effective-config` / `paper manifest` for the same env.
 - dedicated parity fixtures must prove the resolver-selected YAML object itself, `config_id`, and the `StrategyManager` consumer snapshot all match across base-only, promoted-only, mode-via-env, mode-via-file, and promoted-plus-mode cases.
 - the opt-in `aiq-runtime paper daemon` wrapper must reuse the same `paper loop --follow` / `paper cycle` contracts, expose lock metadata, and avoid claiming Python daemon cutover or widening DB projections.
+- the opt-in `paper daemon` wrapper must also accept `--lane` plus optional `--project-dir` and use the Rust-owned lane defaults for config, promoted-role / strategy-mode, watched symbols file, candle DB directory, DB path, and lock/status paths when explicit overrides are absent.
 - the opt-in `paper daemon` wrapper must own per-iteration `--watch-symbols-file` refresh behaviour so operators can refresh the Rust symbol lane without restarting the daemon.
+- the opt-in `paper daemon` wrapper must also idle cleanly when a lane-default watched symbols file has not been created yet.
 - the opt-in `paper daemon` wrapper must also stay alive across an initially empty `--symbols-file`, then execute the next due step once a later watchlist update makes work available.
 - the opt-in `paper daemon` wrapper must retain the last good manifest when a later `--watch-symbols-file` payload is invalid or runtime-invalid malformed, and must report that failure without incrementing the successful reload count.
 - the opt-in `paper daemon` wrapper must write a durable lifecycle status JSON that shows `running=true` while the daemon holds the lane and flips to `running=false` with a `stopped_at_ms` timestamp on exit.
