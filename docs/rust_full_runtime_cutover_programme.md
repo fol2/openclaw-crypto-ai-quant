@@ -126,14 +126,14 @@ The programme should run as eight coordinated workstreams.
 
 ### Workstream A. Runtime Foundation Landing
 
-Goal: move the current Rust runtime foundation onto `master` in atomic slices without claiming full cutover too early.
+Goal: merge the current Rust runtime foundation into `master` via atomic PRs from non-`master` worktrees without claiming full cutover too early.
 
 Deliverables:
 
-1. land `runtime/aiq-runtime-core`
-2. land `runtime/aiq-runtime`
-3. land paper effective-config / manifest / status / service / daemon contracts
-4. land a production-safe runtime ledger and cutover checklist on `master`
+1. merge `runtime/aiq-runtime-core` into `master` via atomic PR
+2. merge `runtime/aiq-runtime` into `master` via atomic PR
+3. merge paper effective-config / manifest / status / service / service apply / daemon contracts via atomic PRs
+4. merge a production-safe runtime ledger and cutover checklist into `master` via atomic PRs
 
 Definition of done:
 
@@ -192,8 +192,14 @@ Deliverables:
 Definition of done:
 
 1. paper production services no longer depend on Python runtime execution
-2. parity and operational gates are green across a sustained burn-in period
-3. deletion PRs remove obsolete Python paper runtime surfaces
+2. paper cutover meets the existing quantitative promotion gate:
+   - at least 1 full trading day or 20 trades
+   - profit factor >= 1.2
+   - max drawdown < 10%
+   - slippage stress at 20 bps remains net positive
+   - zero kill-switch triggers during the paper run
+3. the fail-closed replay alignment gate is green and release blocker status is clear by default unless an emergency override is explicitly approved
+4. deletion PRs remove obsolete Python paper runtime surfaces
 
 ### Workstream E. Rust Live Cutover
 
@@ -210,8 +216,13 @@ Deliverables:
 Definition of done:
 
 1. live trading runtime no longer depends on Python daemon orchestration
-2. live cutover runbooks and kill-switch behaviour are validated
-3. Python live runtime paths are deletion-ready
+2. live cutover uses the existing staged ramp and rollback safeguards:
+   - 25% size for 1 day with zero kill-switch triggers
+   - 50% size for 1 day with zero kill-switch triggers
+   - 100% size only after the ramp gate is green
+   - immediate step-down, pause, or flatten path remains documented and validated
+3. the fail-closed replay alignment gate remains green and release blocker status is respected by default through the cutover window
+4. Python live runtime paths are deletion-ready only after the staged ramp completes successfully
 
 ### Workstream F. Parity Harness and Stage-by-Stage Validation
 
@@ -285,21 +296,21 @@ Budget: **6 PRs**
 Cumulative budget: **6 / 30**
 
 Goal:
-stop the current drift pattern and land the Rust runtime/control-plane baseline on `master`.
+stop the current drift pattern and merge the Rust runtime/control-plane baseline into `master` via atomic PRs.
 
 Target PR themes:
 
-1. runtime workspace landing
-2. paper control-plane surfaces landing
-3. programme docs + runtime ledger
-4. effective-config landing path
-5. pipeline contract bootstrap
-6. cutover checklist + burn-in lane wiring
+1. runtime workspace merge
+2. paper control-plane surfaces merge
+3. programme docs + runtime ledger merge
+4. effective-config landing path merge
+5. pipeline contract bootstrap merge
+6. cutover checklist + burn-in lane wiring merge
 
 Hard exit criteria:
 
-1. `runtime/` exists on `master`
-2. runtime ledger exists on `master`
+1. `runtime/` exists on `master` via approved PR merges
+2. runtime ledger exists on `master` via approved PR merges
 3. every subsequent PR is traceable to a phase checklist item
 
 #### Phase 1. Modular Pipeline and Config SSOT
@@ -350,7 +361,14 @@ Hard exit criteria:
 
 1. production paper lane runs on Rust
 2. Python paper execution is no longer authoritative
-3. paper deletion tranche is merged, not just planned
+3. the paper gate is met using the current repo thresholds:
+   - at least 1 full trading day or 20 trades
+   - profit factor >= 1.2
+   - max drawdown < 10%
+   - net positive outcome under 20 bps slippage stress
+   - zero kill-switch triggers
+4. the replay alignment gate is green and release blocker status remains clear by default
+5. paper deletion tranche is merged, not just planned
 
 #### Phase 3. Rust Live/OMS/Risk Cutover and Python Retirement
 
@@ -374,8 +392,13 @@ Target PR themes:
 Hard exit criteria:
 
 1. live and paper both run through the Rust runtime
-2. Python is no longer a production runtime dependency
-3. the remaining Python footprint is either archival or explicitly non-runtime
+2. the live ramp is completed under the current staged policy:
+   - 25% for 1 day with zero kill-switch triggers
+   - 50% for 1 day with zero kill-switch triggers
+   - 100% only after both prior stages pass
+3. the replay alignment gate remains green and release blocker status stays clear by default during cutover
+4. Python is no longer a production runtime dependency
+5. the remaining Python footprint is either archival or explicitly non-runtime
 
 #### Budget Enforcement Rules
 
@@ -383,12 +406,19 @@ Hard exit criteria:
 2. A phase may not spend more than **2 hardening-only PRs in a row**. The third such PR forces a root-cause review and either a design reset, deletion tranche, or scope merge.
 3. If a phase misses its exit criteria at budget, the team must stop local optimisations and open a **phase-reset PR** that explains whether the problem is foundation quality, wrong sequencing, or wrong scope.
 4. Every PR must map to exactly one phase goal and one exit-criteria line item.
-5. Every **5 PRs** the main agent runs a checkpoint review:
+5. Every successful PR must still follow the mandatory repo flow:
+   - implemented from a non-`master` worktree
+   - merged into `master` only via atomic PR
+   - reviewed by a reviewer subagent before merge
+   - merged only after the review is acceptable
+   - cleaned up after merge if the branch/worktree belongs to the current session
+6. Every **5 PRs** the main agent runs a checkpoint review:
    - budget spent
    - exit criteria status
    - blockers
    - whether to continue, collapse, or rewrite the current slice
-6. Hardening is allowed only when it directly unlocks a phase exit. “Maybe useful later” hardening does not consume roadmap budget.
+7. A mandatory **phase-exit review** is required at cumulative PR `6`, `14`, `22`, and `30`, even if that does not line up with the every-5-PR cadence.
+8. Hardening is allowed only when it directly unlocks a phase exit. “Maybe useful later” hardening does not consume roadmap budget.
 
 ## 6. Immediate Next Move
 
@@ -396,19 +426,19 @@ The next move should not be “start Rust live adapter immediately”.
 
 The next move should be:
 
-1. land the Rust runtime foundation on `master`
+1. merge the Rust runtime foundation into `master` via atomic PRs from non-`master` worktrees
 2. promote the modular pipeline contract to a first-class programme artifact
 3. define the Python retirement ledger and deletion gates
 4. execute the paper cutover first
 
 Recommended first delivery tranche:
 
-1. **PR-01:** land `runtime/aiq-runtime-core` and `runtime/aiq-runtime` foundation with no service cutover
-2. **PR-02:** land paper control-plane commands on `master` (`effective-config`, `manifest`, `status`, `service`, `daemon`)
-3. **PR-03:** land the runtime ledger, programme docs, and cutover/deletion policy
-4. **PR-04:** wire Rust effective-config as the shared authority for paper start-up and factory materialisation
-5. **PR-05:** land the first modular pipeline execution slice behind a non-default runtime profile
-6. **PR-06:** run a Rust paper burn-in lane with explicit cutover checklist and rollback contract
+1. **PR-01:** merge `runtime/aiq-runtime-core` and `runtime/aiq-runtime` foundation via atomic PR with no service cutover
+2. **PR-02:** merge paper control-plane commands via atomic PR (`effective-config`, `manifest`, `status`, `service`, `service apply`, `daemon`)
+3. **PR-03:** merge the runtime ledger, programme docs, and cutover/deletion policy via atomic PR
+4. **PR-04:** merge Rust effective-config as the shared authority for paper start-up and factory materialisation
+5. **PR-05:** merge the first modular pipeline execution slice behind a non-default runtime profile
+6. **PR-06:** run a Rust paper burn-in lane with explicit paper-gate evidence, replay-gate evidence, cutover checklist, and rollback contract
 
 ## 7. Milestones
 
@@ -423,6 +453,7 @@ Exit criteria:
 2. one runtime ledger on `master`
 3. one team topology for execution, validation, review, testing, documentation, and housekeeping
 4. one bounded PR roadmap with enforced phase budgets
+5. one explicit statement that every successful PR still requires reviewer-subagent review before merge
 
 ### Milestone 1. Runtime Foundation on `master`
 
@@ -432,7 +463,7 @@ make the Rust runtime control plane part of the production baseline.
 Exit criteria:
 
 1. `runtime/` exists on `master`
-2. `paper effective-config`, `manifest`, `status`, `service`, and `daemon` are buildable and documented
+2. `paper effective-config`, `manifest`, `status`, `service`, `service apply`, and `daemon` are buildable and documented
 3. no active service cutover yet
 
 ### Milestone 2. Modular Rust Pipeline
@@ -455,7 +486,13 @@ Exit criteria:
 
 1. Rust paper daemon runs the production paper lane
 2. Python paper daemon is disabled, then removed
-3. paper parity and runbooks are green
+3. paper cutover satisfies the current quantitative gate:
+   - at least 1 full trading day or 20 trades
+   - profit factor >= 1.2
+   - max drawdown < 10%
+   - net positive at 20 bps slippage stress
+   - zero kill-switch triggers
+4. replay alignment gate is green and release blocker status is clear by default
 
 ### Milestone 4. Live/OMS/Risk Cutover
 
@@ -465,8 +502,9 @@ move live execution, OMS, reconciliation, and risk into Rust.
 Exit criteria:
 
 1. Rust owns live runtime end to end
-2. Python live runtime surfaces become deletion-ready
-3. kill-switch and operational runbooks are re-validated
+2. Python live runtime surfaces become deletion-ready only after the existing 25% / 50% / 100% staged ramp passes
+3. replay alignment gate remains green and release blocker status remains clear by default through the cutover window
+4. kill-switch, flatten, pause, and rollback runbooks are re-validated
 
 ### Milestone 5. Rust-Native Parity Harness
 
@@ -632,8 +670,8 @@ Required documents:
 
 ### Week 1
 
-1. land the programme/ledger/docs baseline
-2. land the current Rust runtime foundation on `master`
+1. merge the programme/ledger/docs baseline via atomic PRs
+2. merge the current Rust runtime foundation into `master` via atomic PRs
 3. define service and config ownership boundaries
 
 ### Week 2
@@ -650,7 +688,7 @@ Required documents:
 
 ### Week 4
 
-1. decide whether Rust paper cutover gate is met
+1. decide whether the current quantitative Rust paper cutover gate is met
 2. if yes, prepare the switch and deletion tranche
 3. if not, use stage-level parity artefacts to isolate the exact blocker
 

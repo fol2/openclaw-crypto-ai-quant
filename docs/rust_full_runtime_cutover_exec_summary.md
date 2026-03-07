@@ -31,8 +31,8 @@ Python may remain temporarily as compatibility scaffolding, but not as a permane
 
 The sequence is fixed unless a phase-reset PR says otherwise:
 
-1. land Rust runtime foundation on `master`
-2. land modular pipeline and Rust config authority
+1. merge Rust runtime foundation into `master` via atomic PRs from non-`master` worktrees
+2. merge modular pipeline and Rust config authority via the same PR flow
 3. cut over paper to Rust
 4. cut over live/OMS/risk to Rust
 5. retire Python runtime ownership
@@ -47,8 +47,8 @@ Core Python-retirement path budget: **30 PRs maximum**
 - Budget: `6 PRs`
 - Cumulative: `6 / 30`
 - Exit:
-  - `runtime/` exists on `master`
-  - runtime ledger exists on `master`
+  - `runtime/` exists on `master` via approved PR merges
+  - runtime ledger exists on `master` via approved PR merges
   - all subsequent PRs map to a checklist item
 
 ### Phase 1. Modular Pipeline and Config SSOT
@@ -67,6 +67,13 @@ Core Python-retirement path budget: **30 PRs maximum**
 - Exit:
   - production paper lane runs on Rust
   - Python paper execution is no longer authoritative
+  - paper gate meets the current quantitative threshold:
+    - at least 1 full trading day or 20 trades
+    - profit factor >= 1.2
+    - max drawdown < 10%
+    - net positive under 20 bps slippage stress
+    - zero kill-switch triggers
+  - replay alignment gate is green and release blocker status is clear by default
   - paper deletion tranche is merged
 
 ### Phase 3. Rust Live/OMS/Risk Cutover and Python Retirement
@@ -75,6 +82,11 @@ Core Python-retirement path budget: **30 PRs maximum**
 - Cumulative: `30 / 30`
 - Exit:
   - live and paper both run through the Rust runtime
+  - live ramp follows the current staged policy:
+    - 25% size for 1 day with zero kill-switch triggers
+    - 50% size for 1 day with zero kill-switch triggers
+    - 100% only after the ramp gate is green
+  - replay alignment gate remains green and release blocker status stays clear by default during cutover
   - Python is no longer a production runtime dependency
   - remaining Python is archival or explicitly non-runtime
 
@@ -84,39 +96,46 @@ Core Python-retirement path budget: **30 PRs maximum**
 2. No phase may spend more than `2` hardening-only PRs in a row.
 3. The third consecutive hardening-only PR forces a root-cause review or phase-reset PR.
 4. Every PR must map to one phase and one exit-criteria line item.
-5. Every `5 PRs` the main agent must run the checkpoint review below.
+5. Every successful PR still requires the mandatory repo flow:
+   - implemented from a non-`master` worktree
+   - merged into `master` only via atomic PR
+   - reviewed by a reviewer subagent before merge
+   - merged only after the review is acceptable
+6. Every `5 PRs` the main agent must run the checkpoint review below.
+7. A mandatory phase-exit review is also required at cumulative PR `6`, `14`, `22`, and `30`.
 
 ## 6. First Delivery Tranche
 
 ### PR-01
 
-Land `runtime/aiq-runtime-core` and `runtime/aiq-runtime` foundation on `master` without service cutover.
+Merge `runtime/aiq-runtime-core` and `runtime/aiq-runtime` foundation into `master` via atomic PR without service cutover.
 
 ### PR-02
 
-Land paper control-plane commands on `master`:
+Merge paper control-plane commands into `master` via atomic PR:
 
 1. `paper effective-config`
 2. `paper manifest`
 3. `paper status`
 4. `paper service`
-5. `paper daemon`
+5. `paper service apply`
+6. `paper daemon`
 
 ### PR-03
 
-Land the runtime ledger, programme docs, and cutover/deletion policy.
+Merge the runtime ledger, programme docs, and cutover/deletion policy via atomic PR.
 
 ### PR-04
 
-Make Rust the shared effective-config authority for paper start-up and factory materialisation.
+Make Rust the shared effective-config authority for paper start-up and factory materialisation via atomic PR.
 
 ### PR-05
 
-Land the first modular pipeline execution slice behind a non-default runtime profile.
+Merge the first modular pipeline execution slice behind a non-default runtime profile.
 
 ### PR-06
 
-Run a Rust paper burn-in lane with explicit cutover checklist and rollback contract.
+Run a Rust paper burn-in lane with explicit paper-gate evidence, replay-gate evidence, cutover checklist, and rollback contract.
 
 ## 7. Phase Checklist
 
@@ -134,6 +153,7 @@ Use this checklist at the start of each phase.
 - Are all planned PRs mapped to one phase outcome?
 - Is each PR atomic but still moving the phase forward?
 - Are we avoiding speculative hardening that does not unlock the phase exit?
+- Has the PR already been assigned its reviewer-subagent merge gate?
 
 ### Parity
 
@@ -150,6 +170,8 @@ Use this checklist at the start of each phase.
 ## 8. Every-5-PR Checkpoint Review
 
 Run this review after PR `5`, `10`, `15`, `20`, `25`, and `30`.
+
+Also run a mandatory phase-exit review at PR `6`, `14`, `22`, and `30`.
 
 ### Snapshot
 
