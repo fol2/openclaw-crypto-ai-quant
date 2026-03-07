@@ -9,6 +9,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::paper_lane::PaperLane;
+
 const DEFAULT_CONFIG_PATH: &str = "config/strategy_overrides.yaml";
 const VALID_PROMOTED_ROLES: &[&str] = &["primary", "fallback", "conservative"];
 const DEFAULT_PROMOTED_SCAN_DATE_DIRS: usize = 90;
@@ -49,9 +51,21 @@ pub struct PaperEffectiveConfigReport {
 }
 
 impl PaperEffectiveConfig {
-    pub fn resolve(config: Option<&Path>) -> Result<Self> {
-        let base_config_path = resolve_config_path(config);
-        let materialised_output_root = materialised_output_root(project_root().as_path());
+    pub fn resolve(
+        config: Option<&Path>,
+        lane: Option<PaperLane>,
+        project_dir: Option<&Path>,
+    ) -> Result<Self> {
+        let lane_defaults = match lane {
+            Some(lane) => Some(lane.defaults(project_dir)?),
+            None => None,
+        };
+        let base_config_path = resolve_config_path(config, lane_defaults.as_ref());
+        let resolved_project_root = lane_defaults
+            .as_ref()
+            .map(|defaults| defaults.project_dir.clone())
+            .unwrap_or_else(project_root);
+        let materialised_output_root = materialised_output_root(resolved_project_root.as_path());
         let mut warnings = Vec::new();
         let base_document = config::load_yaml_document_checked(
             base_config_path
@@ -61,8 +75,10 @@ impl PaperEffectiveConfig {
         .map_err(anyhow::Error::msg)?;
 
         let mut active_document = base_document.clone();
-        let requested_promoted_role =
-            env_string("AI_QUANT_PROMOTED_ROLE").map(|role| role.to_ascii_lowercase());
+        let requested_promoted_role = lane_defaults
+            .as_ref()
+            .and_then(|defaults| defaults.promoted_role.clone())
+            .or_else(|| env_string("AI_QUANT_PROMOTED_ROLE").map(|role| role.to_ascii_lowercase()));
         let promoted_role = requested_promoted_role.clone();
         let mut promoted_config_path = None;
 
@@ -73,7 +89,7 @@ impl PaperEffectiveConfig {
                 ));
             } else {
                 let artifacts_dir = env_path("AI_QUANT_ARTIFACTS_DIR")
-                    .unwrap_or_else(|| project_root().join("artifacts"));
+                    .unwrap_or_else(|| resolved_project_root.join("artifacts"));
                 if let Some(promoted_path) = find_latest_promoted_config(&artifacts_dir, role) {
                     match config::load_yaml_document_checked(
                         promoted_path
@@ -115,7 +131,8 @@ impl PaperEffectiveConfig {
             base_config_path.clone()
         };
 
-        let (strategy_mode, strategy_mode_source, strategy_mode_warning) = resolve_strategy_mode();
+        let (strategy_mode, strategy_mode_source, strategy_mode_warning) =
+            resolve_strategy_mode(lane_defaults.as_ref(), resolved_project_root.as_path());
         if let Some(strategy_mode_warning) = strategy_mode_warning {
             warnings.push(strategy_mode_warning);
         }
@@ -266,9 +283,13 @@ impl PaperEffectiveConfig {
     }
 }
 
-pub(crate) fn resolve_config_path(config: Option<&Path>) -> PathBuf {
+pub(crate) fn resolve_config_path(
+    config: Option<&Path>,
+    lane_defaults: Option<&crate::paper_lane::PaperLaneDefaults>,
+) -> PathBuf {
     let configured = config
         .map(Path::to_path_buf)
+        .or_else(|| lane_defaults.map(|defaults| defaults.config_path.clone()))
         .or_else(|| env_path("AI_QUANT_STRATEGY_YAML"))
         .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
 
@@ -276,9 +297,16 @@ pub(crate) fn resolve_config_path(config: Option<&Path>) -> PathBuf {
         return configured;
     }
 
-    let fallback = PathBuf::from(format!("{}.example", configured.display()));
-    if fallback.exists() {
-        return fallback;
+    let mut fallbacks = vec![PathBuf::from(format!("{}.example", configured.display()))];
+    if let Some(file_name) = configured.file_name().and_then(|name| name.to_str()) {
+        if let Some((stem, extension)) = file_name.rsplit_once('.') {
+            fallbacks.push(configured.with_file_name(format!("{stem}.example.{extension}")));
+        }
+    }
+    for fallback in fallbacks {
+        if fallback.exists() {
+            return fallback;
+        }
     }
 
     configured
@@ -289,7 +317,10 @@ fn project_root() -> PathBuf {
     path.canonicalize().unwrap_or(path)
 }
 
-fn resolve_strategy_mode() -> (Option<String>, Option<String>, Option<String>) {
+fn resolve_strategy_mode(
+    lane_defaults: Option<&crate::paper_lane::PaperLaneDefaults>,
+    project_root: &Path,
+) -> (Option<String>, Option<String>, Option<String>) {
     if let Some(strategy_mode) = env_string("AI_QUANT_STRATEGY_MODE") {
         return (
             config::normalise_strategy_mode_key(&strategy_mode),
@@ -299,8 +330,15 @@ fn resolve_strategy_mode() -> (Option<String>, Option<String>, Option<String>) {
     }
 
     let mode_file = env_path("AI_QUANT_STRATEGY_MODE_FILE")
-        .unwrap_or_else(|| project_root().join("artifacts/state/strategy_mode.txt"));
+        .or_else(|| lane_defaults.map(|defaults| defaults.strategy_mode_file.clone()))
+        .unwrap_or_else(|| project_root.join("artifacts/state/strategy_mode.txt"));
     if !mode_file.exists() {
+        if let Some(strategy_mode) = lane_defaults
+            .and_then(|defaults| defaults.default_strategy_mode.as_deref())
+            .and_then(config::normalise_strategy_mode_key)
+        {
+            return (Some(strategy_mode), Some("lane_default".to_string()), None);
+        }
         return (None, None, None);
     }
 
@@ -711,7 +749,7 @@ modes:
             ),
         ]);
 
-        let effective = PaperEffectiveConfig::resolve(Some(&config_path)).unwrap();
+        let effective = PaperEffectiveConfig::resolve(Some(&config_path), None, None).unwrap();
         let cfg = effective.load_config(None, false).unwrap();
 
         assert_eq!(effective.promoted_role(), Some("primary"));
@@ -750,7 +788,7 @@ modes:
             ),
         ]);
 
-        let effective = PaperEffectiveConfig::resolve(Some(&config_path)).unwrap();
+        let effective = PaperEffectiveConfig::resolve(Some(&config_path), None, None).unwrap();
         assert_eq!(effective.strategy_mode(), Some("primary"));
         assert_eq!(effective.strategy_mode_source(), Some("env"));
     }
@@ -800,7 +838,7 @@ modes:
             ),
         ]);
 
-        let effective = PaperEffectiveConfig::resolve(Some(&config_path)).unwrap();
+        let effective = PaperEffectiveConfig::resolve(Some(&config_path), None, None).unwrap();
 
         assert!(effective.active_yaml_path().starts_with(&output_root));
         assert!(effective.effective_yaml_path().starts_with(&output_root));
@@ -812,6 +850,55 @@ modes:
             effective.effective_yaml_path(),
             output_root.join("artifacts/_effective_configs/strategy.primary.fallback.yaml")
         );
+    }
+
+    #[test]
+    fn effective_config_uses_lane_defaults_without_env() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        let config_path = config_dir.join("strategy_overrides.paper2.yaml");
+        let output_root = dir.path().join("runtime-output");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            &config_path,
+            "global:\n  engine:\n    interval: 30m\nmodes:\n  fallback:\n    global:\n      engine:\n        interval: 1h\n",
+        )
+        .unwrap();
+        let _env = EnvGuard::set(&[
+            ("AI_QUANT_PROMOTED_ROLE", None),
+            ("AI_QUANT_STRATEGY_MODE", None),
+            ("AI_QUANT_STRATEGY_MODE_FILE", None),
+            (
+                "AI_QUANT_EFFECTIVE_CONFIG_OUTPUT_ROOT",
+                Some(output_root.to_str().unwrap()),
+            ),
+        ]);
+
+        let effective =
+            PaperEffectiveConfig::resolve(None, Some(PaperLane::Paper2), Some(dir.path())).unwrap();
+        let report = effective.build_report(None, false).unwrap();
+
+        assert_eq!(effective.base_config_path(), config_path.as_path());
+        assert_eq!(effective.promoted_role(), Some("fallback"));
+        assert_eq!(effective.strategy_mode(), Some("fallback"));
+        assert_eq!(effective.strategy_mode_source(), Some("lane_default"));
+        assert_eq!(report.promoted_role.as_deref(), Some("fallback"));
+        assert_eq!(report.strategy_mode.as_deref(), Some("fallback"));
+        assert_eq!(report.strategy_mode_source.as_deref(), Some("lane_default"));
+    }
+
+    #[test]
+    fn resolve_config_path_prefers_lane_example_fallbacks() {
+        let dir = tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+        let example_path = config_dir.join("strategy_overrides.paper2.example.yaml");
+        fs::write(&example_path, "global:\n  engine:\n    interval: 30m\n").unwrap();
+
+        let lane_defaults = PaperLane::Paper2.defaults(Some(dir.path())).unwrap();
+        let resolved = resolve_config_path(None, Some(&lane_defaults));
+        assert_eq!(resolved, example_path);
     }
 
     #[test]
@@ -863,11 +950,11 @@ modes:
         ]);
 
         env::remove_var("AI_QUANT_STRATEGY_MODE");
-        let base = PaperEffectiveConfig::resolve(Some(&config_path)).unwrap();
+        let base = PaperEffectiveConfig::resolve(Some(&config_path), None, None).unwrap();
         env::set_var("AI_QUANT_STRATEGY_MODE", "primary");
-        let primary = PaperEffectiveConfig::resolve(Some(&config_path)).unwrap();
+        let primary = PaperEffectiveConfig::resolve(Some(&config_path), None, None).unwrap();
         env::set_var("AI_QUANT_STRATEGY_MODE", "fallback");
-        let fallback = PaperEffectiveConfig::resolve(Some(&config_path)).unwrap();
+        let fallback = PaperEffectiveConfig::resolve(Some(&config_path), None, None).unwrap();
         env::remove_var("AI_QUANT_STRATEGY_MODE");
 
         assert_ne!(base.config_id(), primary.config_id());

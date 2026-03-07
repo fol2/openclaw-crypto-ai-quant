@@ -46,6 +46,13 @@ side-effecting supervisor that can enact that recommendation against the Rust
 `paper daemon` only. The apply surface reuses the same manifest/status
 contract, fails closed on unhealthy or drifted lanes, and still does not claim
 any Python paper or systemd cutover.
+Rust now also owns the conventional paper lane presets for `paper1`, `paper2`,
+`paper3`, and `livepaper`. `paper effective-config`, `paper manifest`, and
+`paper daemon` can all resolve those presets with `--lane` plus optional
+`--project-dir`, including the
+default config path, promoted-role / strategy-mode contract, per-lane DB and
+lock paths, and the watched symbols file that later lane launch scripts and
+systemd examples now share.
 
 ## Screenshots
 

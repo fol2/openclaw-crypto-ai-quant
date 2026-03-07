@@ -135,6 +135,76 @@ fn paper_daemon_idle_follow_poll_does_not_write_when_caught_up() {
 }
 
 #[test]
+fn paper_daemon_lane_defaults_idle_cleanly_without_watchlist_file() {
+    let fixture = seed_empty_fixture();
+    let before = snapshot_db(&fixture.paper_db);
+
+    let output = runtime_command()
+        .arg("paper")
+        .arg("daemon")
+        .arg("--lane")
+        .arg("paper1")
+        .arg("--config")
+        .arg(config_path())
+        .arg("--db")
+        .arg(&fixture.paper_db)
+        .arg("--candles-db")
+        .arg(&fixture.candles_db)
+        .arg("--lock-path")
+        .arg(&fixture.lock_path)
+        .arg("--status-path")
+        .arg(&fixture.status_path)
+        .arg("--idle-sleep-ms")
+        .arg("1")
+        .arg("--max-idle-polls")
+        .arg("1")
+        .arg("--json")
+        .output()
+        .expect("paper daemon lane-default smoke should spawn");
+
+    assert!(
+        output.status.success(),
+        "paper daemon should idle cleanly when the lane-default watchlist file is absent; output:\n{}",
+        combined_output(&output)
+    );
+
+    let report = parse_json_output(&output);
+    assert_eq!(
+        report
+            .pointer("/watch_symbols_file")
+            .and_then(Value::as_bool),
+        Some(true),
+        "lane defaults should enable the watched symbols file contract",
+    );
+    assert!(
+        report
+            .pointer("/symbols_file")
+            .and_then(Value::as_str)
+            .is_some_and(|path| path.ends_with("artifacts/state/paper_watchlist_paper1.txt")),
+        "lane defaults should resolve the conventional paper1 watchlist file path",
+    );
+    assert_eq!(
+        report
+            .pointer("/loop_report/executed_steps")
+            .and_then(Value::as_u64),
+        Some(0),
+        "missing lane-default watchlist should keep the daemon idle",
+    );
+    assert_eq!(
+        report
+            .pointer("/loop_report/idle_polls")
+            .and_then(Value::as_u64),
+        Some(1),
+        "max_idle_polls=1 should still stop on the first idle poll for lane defaults",
+    );
+    assert_eq!(
+        before,
+        snapshot_db(&fixture.paper_db),
+        "missing lane-default watchlist must not mutate the paper DB",
+    );
+}
+
+#[test]
 fn paper_daemon_sigterm_while_idle_stops_gracefully_without_writes() {
     let fixture = prepare_idle_fixture();
     let before = snapshot_db(&fixture.paper_db);

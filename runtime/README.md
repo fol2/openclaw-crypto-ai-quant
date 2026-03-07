@@ -16,16 +16,16 @@ Current runtime-owned paper surfaces and the paired opt-in wrapper:
 |---|---|---|
 | `snapshot export-paper` | Export a v2 Rust paper continuation snapshot | Bootstrap/export only |
 | `snapshot seed-paper` | Seed a paper DB from a v2 snapshot | Deterministic bootstrap path |
-| `paper effective-config` | Resolve the shared paper control-plane config contract | Read-only config surface for Python paper start-up and factory materialisation; emits `active_yaml_path`, `effective_yaml_path`, interval, `strategy_overrides_sha1`, and `config_id` |
+| `paper effective-config` | Resolve the shared paper control-plane config contract | Read-only config surface for Python paper start-up and factory materialisation; also accepts `--lane paper1|paper2|paper3|livepaper` plus optional `--project-dir` so Rust can own the conventional lane defaults |
 | `paper doctor` | Restore Rust-owned paper state and inspect bootstrap markers | Non-mutating |
 | `paper run-once` | Execute one single-symbol Rust paper step | Single-shot shell |
 | `paper cycle` | Execute one repeatable multi-symbol Rust paper cycle | Explicit `--step-close-ts-ms`, not a daemon |
 | `paper loop` | Execute a bounded Rust paper catch-up loop | Resumes from `runtime_cycle_steps`, optional follow polling, and only loads `--symbols-file` once at start-up |
-| `paper manifest` | Resolve the current Rust paper daemon service contract | Read-only env/CLI manifest, including launch readiness, restart/resume state, resolved lane `status_path`, and effective config selection from promoted-role plus strategy-mode inputs |
+| `paper manifest` | Resolve the current Rust paper daemon service contract | Read-only env/CLI manifest, including launch readiness, restart/resume state, resolved lane `status_path`, lane preset metadata, and effective config selection from promoted-role plus strategy-mode inputs |
 | `paper status` | Resolve the current Rust paper daemon service state | Read-only manifest + status-file view, including restart-required / stale detection plus health / launch-identity drift detection for the current lane |
 | `paper service` | Resolve the current Rust paper daemon supervisor action | Read-only status + launch-contract view that tells supervision whether to hold, start, restart, or monitor the lane while failing closed on unhealthy or drifted daemon status |
 | `paper service apply` | Apply the current Rust paper daemon supervisor action | Opt-in side-effecting supervisor for Rust paper daemon start/restart/resume/stop only; reuses the same manifest/status contract and fails closed on unhealthy, drifted, or unproven lane ownership |
-| `paper daemon` | Execute an opt-in long-running Rust paper orchestration wrapper | Owns the outer scheduler, can optionally watch `--symbols-file` for reloads, writes a lane status JSON, and keeps the same `paper cycle` write contract while using the same effective config contract as `paper manifest`; not cutover |
+| `paper daemon` | Execute an opt-in long-running Rust paper orchestration wrapper | Owns the outer scheduler, now accepts `--lane` for `paper1/paper2/paper3/livepaper` plus optional `--project-dir`, can watch the lane-default symbols file even before it exists, writes a lane status JSON, and keeps the same `paper cycle` write contract while using the same effective config contract as `paper manifest`; not cutover |
 
 The runtime slice is still intentionally narrow. It does not yet own any live
 execution path, and Python paper execution is still the active production
@@ -48,4 +48,5 @@ slices will build on:
 - a read-only supervisor action surface so operators can inspect whether the lane should be held, started, restarted, or simply monitored
 - an opt-in side-effecting `paper service apply` surface that can enact that recommendation for the Rust paper daemon without claiming service cutover
 - an opt-in daemon wrapper that owns scheduler/watchlist reload orchestration without claiming service cutover
+- Rust-owned conventional lane presets (`paper1`, `paper2`, `paper3`, `livepaper`) that bundle the default config path, promoted-role / strategy-mode selection, watchlist file path, candle DB directory, DB path, and lock/status paths for paper orchestration
 - a durable daemon `status_path` contract that later service supervision can build on
