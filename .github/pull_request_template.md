@@ -1,6 +1,14 @@
 ## Summary
 <!-- 1-3 bullet points describing the change -->
 
+## Programme Mapping
+<!-- Required for every Rust full-runtime cutover PR -->
+
+- Phase: `Phase 0` / `Phase 1` / `Phase 2` / `Phase 3` / `post-core tranche`
+- Checklist item(s):
+- Exit criterion advanced:
+- Deletion / retirement target (or `n/a`):
+
 ## Risk checklist
 
 > Complete this section for **every** PR. If any box is checked, `@fol2` review is required before merge.
