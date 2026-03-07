@@ -50,6 +50,7 @@ for path in (
     Path("/tmp/aiq-runtime-paper-manifest-lane.json"),
     Path("/tmp/aiq-runtime-paper-effective-config-base.json"),
     Path("/tmp/aiq-runtime-paper-effective-config-lane.json"),
+    Path("/tmp/aiq-runtime-paper-effective-config-livepaper.json"),
     Path("/tmp/aiq-runtime-paper-effective-config-primary.json"),
     Path("/tmp/aiq-runtime-paper-effective-config-fallback.json"),
     Path("/tmp/aiq-runtime-paper-manifest-resume.json"),
@@ -276,13 +277,15 @@ Path("/tmp/aiq-runtime-effective-config.yaml").write_text(
 )
 PY
 
-AI_QUANT_STRATEGY_MODE= \
+AI_QUANT_PROMOTED_ROLE= AI_QUANT_STRATEGY_MODE= \
 cargo run -q -p aiq-runtime -- paper effective-config --config /tmp/aiq-runtime-effective-config.yaml --json >/tmp/aiq-runtime-paper-effective-config-base.json
+AI_QUANT_PROMOTED_ROLE= AI_QUANT_STRATEGY_MODE= \
 cargo run -q -p aiq-runtime -- paper effective-config --config /tmp/aiq-runtime-effective-config.yaml --lane paper2 --json >/tmp/aiq-runtime-paper-effective-config-lane.json
+AI_QUANT_PROMOTED_ROLE= AI_QUANT_STRATEGY_MODE= \
 cargo run -q -p aiq-runtime -- paper effective-config --lane livepaper --project-dir "$ROOT_DIR" --json >/tmp/aiq-runtime-paper-effective-config-livepaper.json
-AI_QUANT_STRATEGY_MODE=primary \
+AI_QUANT_PROMOTED_ROLE= AI_QUANT_STRATEGY_MODE=primary \
 cargo run -q -p aiq-runtime -- paper effective-config --config /tmp/aiq-runtime-effective-config.yaml --json >/tmp/aiq-runtime-paper-effective-config-primary.json
-AI_QUANT_STRATEGY_MODE=fallback \
+AI_QUANT_PROMOTED_ROLE= AI_QUANT_STRATEGY_MODE=fallback \
 cargo run -q -p aiq-runtime -- paper effective-config --config /tmp/aiq-runtime-effective-config.yaml --json >/tmp/aiq-runtime-paper-effective-config-fallback.json
 
 python3 - <<'PY'
