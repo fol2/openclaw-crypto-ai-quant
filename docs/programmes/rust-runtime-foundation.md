@@ -117,6 +117,7 @@ ownership for Python paper start-up and factory deployment flows:
 - `paper effective-config`
 - emits the same `active_yaml_path`, `effective_yaml_path`, interval, promoted-config path, strategy-mode source, `strategy_overrides_sha1`, and `config_id` that paper control-plane consumers must now share
 - now drives Python paper start-up and factory materialisation through the same Rust resolver contract
+- now has a fixture-backed parity boundary that proves Python consumers only read the resolver-selected YAML and identity surface, rather than re-owning the merge path
 - keeps paper execution itself on Python; this slice only moves config/control-plane ownership
 
 Python paper execution is still the active runtime path, and the opt-in Rust

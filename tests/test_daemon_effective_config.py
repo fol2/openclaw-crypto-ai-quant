@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import os
+import sys
 import types
 
+import pytest
+
+import engine.daemon as daemon
 from engine.daemon import _build_run_fingerprint, StrategyModePolicy
 
 
@@ -58,3 +62,73 @@ def test_mode_policy_refreshes_rust_effective_config_on_switch(monkeypatch) -> N
 
     assert manager.yaml_path == "/tmp/fallback.yaml"
     assert os.environ["AI_QUANT_STRATEGY_MODE"] == "fallback"
+
+
+def test_main_resolves_rust_effective_config_before_strategy_manager(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[str] = []
+
+    class StopBootstrap(RuntimeError):
+        pass
+
+    monkeypatch.setenv("AI_QUANT_MODE", "paper")
+    monkeypatch.setenv("AI_QUANT_DB_PATH", str(tmp_path / "paper.db"))
+    monkeypatch.setenv("AI_QUANT_LOCK_PATH", str(tmp_path / "paper.lock"))
+    monkeypatch.setattr(daemon, "_enforce_v8_only_runtime", lambda mode: None)
+    monkeypatch.setattr(daemon, "acquire_lock_or_exit", lambda lock_path: object())
+    monkeypatch.setattr(daemon, "_register_lock_cleanup", lambda lock: None)
+    monkeypatch.setattr(daemon, "_harden_db_permissions", lambda *paths: None)
+
+    def _unexpected_legacy_merge() -> None:
+        raise AssertionError("legacy Python merge path must not be used")
+
+    def _resolve() -> object:
+        events.append("resolve")
+        os.environ["AI_QUANT_EFFECTIVE_CONFIG_OWNER"] = "rust"
+        return types.SimpleNamespace(promoted_role="primary", config_path=str(tmp_path / "effective.yaml"))
+
+    monkeypatch.setattr("engine.promoted_config.maybe_apply_promoted_config", _unexpected_legacy_merge)
+
+    monkeypatch.setattr(
+        "engine.promoted_config.apply_paper_effective_config",
+        _resolve,
+    )
+
+    def _stop_after_get() -> object:
+        events.append("get")
+        raise StopBootstrap("stop after StrategyManager.get")
+
+    monkeypatch.setattr(daemon.StrategyManager, "get", staticmethod(_stop_after_get))
+    monkeypatch.setitem(
+        sys.modules,
+        "strategy.mei_alpha_v1",
+        types.SimpleNamespace(DB_PATH=str(tmp_path / "paper.db"), INTERVAL="5m", LOOKBACK_HOURS=400),
+    )
+
+    with pytest.raises(StopBootstrap, match="stop after StrategyManager.get"):
+        daemon.main()
+
+    assert events == ["resolve", "get"]
+    assert os.environ["AI_QUANT_EFFECTIVE_CONFIG_OWNER"] == "rust"
+
+
+def test_main_aborts_when_rust_resolver_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    strategy_manager_called = False
+
+    monkeypatch.setenv("AI_QUANT_MODE", "paper")
+    monkeypatch.setattr(daemon, "_enforce_v8_only_runtime", lambda mode: None)
+    monkeypatch.setattr(
+        "engine.promoted_config.apply_paper_effective_config",
+        lambda: (_ for _ in ()).throw(RuntimeError("resolver boom")),
+    )
+
+    def _mark_called() -> object:
+        nonlocal strategy_manager_called
+        strategy_manager_called = True
+        return object()
+
+    monkeypatch.setattr(daemon.StrategyManager, "get", staticmethod(_mark_called))
+
+    with pytest.raises(RuntimeError, match="paper effective-config resolution failed before daemon bootstrap"):
+        daemon.main()
+
+    assert strategy_manager_called is False

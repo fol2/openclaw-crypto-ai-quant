@@ -51,6 +51,7 @@ pub struct PaperEffectiveConfigReport {
 impl PaperEffectiveConfig {
     pub fn resolve(config: Option<&Path>) -> Result<Self> {
         let base_config_path = resolve_config_path(config);
+        let materialised_output_root = materialised_output_root(project_root().as_path());
         let mut warnings = Vec::new();
         let base_document = config::load_yaml_document_checked(
             base_config_path
@@ -99,7 +100,8 @@ impl PaperEffectiveConfig {
         }
 
         let active_yaml_path = if promoted_config_path.is_some() {
-            let path = promoted_output_path(project_root().as_path(), promoted_role.as_deref());
+            let path =
+                promoted_output_path(materialised_output_root.as_path(), promoted_role.as_deref());
             write_yaml_document(
                 &path,
                 active_document_header(
@@ -122,7 +124,7 @@ impl PaperEffectiveConfig {
             apply_strategy_mode_overlay(&active_document, strategy_mode.as_deref(), &mut warnings)?;
         let effective_yaml_path = if mode_applied {
             let path = effective_output_path(
-                project_root().as_path(),
+                materialised_output_root.as_path(),
                 &base_config_path,
                 promoted_role.as_deref(),
                 strategy_mode.as_deref(),
@@ -405,15 +407,19 @@ fn lookup_mapping_value<'a>(
         .or_else(|| map.get(&lower))
 }
 
-fn promoted_output_path(project_root: &Path, role: Option<&str>) -> PathBuf {
+fn materialised_output_root(project_root: &Path) -> PathBuf {
+    env_path("AI_QUANT_EFFECTIVE_CONFIG_OUTPUT_ROOT").unwrap_or_else(|| project_root.to_path_buf())
+}
+
+fn promoted_output_path(output_root: &Path, role: Option<&str>) -> PathBuf {
     let role = role.unwrap_or("unknown");
-    project_root
+    output_root
         .join("config")
         .join(format!("strategy_overrides._promoted_{role}.yaml"))
 }
 
 fn effective_output_path(
-    project_root: &Path,
+    output_root: &Path,
     base_config_path: &Path,
     promoted_role: Option<&str>,
     strategy_mode: Option<&str>,
@@ -424,7 +430,7 @@ fn effective_output_path(
         .unwrap_or("strategy_overrides");
     let role_part = promoted_role.unwrap_or("base");
     let mode_part = strategy_mode.unwrap_or("none");
-    project_root
+    output_root
         .join("artifacts")
         .join("_effective_configs")
         .join(format!("{stem}.{role_part}.{mode_part}.yaml"))
@@ -747,6 +753,65 @@ modes:
         let effective = PaperEffectiveConfig::resolve(Some(&config_path)).unwrap();
         assert_eq!(effective.strategy_mode(), Some("primary"));
         assert_eq!(effective.strategy_mode_source(), Some("env"));
+    }
+
+    #[test]
+    fn effective_config_respects_output_root_override() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("strategy.yaml");
+        let output_root = dir.path().join("runtime-output");
+        let artifacts_dir = dir.path().join("artifacts");
+        let promoted_dir = artifacts_dir.join("2026-03-06/run_nightly/promoted_configs");
+        fs::create_dir_all(&promoted_dir).unwrap();
+        fs::write(
+            &config_path,
+            r#"
+global:
+  engine:
+    interval: 30m
+  trade:
+    leverage: 2.0
+modes:
+  fallback:
+    global:
+      engine:
+        interval: 1h
+"#,
+        )
+        .unwrap();
+        fs::write(
+            promoted_dir.join("primary.yaml"),
+            "global:\n  trade:\n    leverage: 7.5\n",
+        )
+        .unwrap();
+
+        let _env = EnvGuard::set(&[
+            ("AI_QUANT_PROMOTED_ROLE", Some("primary")),
+            (
+                "AI_QUANT_ARTIFACTS_DIR",
+                Some(artifacts_dir.to_str().unwrap()),
+            ),
+            ("AI_QUANT_STRATEGY_MODE", Some("fallback")),
+            ("AI_QUANT_STRATEGY_MODE_FILE", None),
+            (
+                "AI_QUANT_EFFECTIVE_CONFIG_OUTPUT_ROOT",
+                Some(output_root.to_str().unwrap()),
+            ),
+        ]);
+
+        let effective = PaperEffectiveConfig::resolve(Some(&config_path)).unwrap();
+
+        assert!(effective.active_yaml_path().starts_with(&output_root));
+        assert!(effective.effective_yaml_path().starts_with(&output_root));
+        assert_eq!(
+            effective.active_yaml_path(),
+            output_root.join("config/strategy_overrides._promoted_primary.yaml")
+        );
+        assert_eq!(
+            effective.effective_yaml_path(),
+            output_root.join("artifacts/_effective_configs/strategy.primary.fallback.yaml")
+        );
     }
 
     #[test]

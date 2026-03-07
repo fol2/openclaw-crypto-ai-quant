@@ -23,6 +23,30 @@ def _iso(ts: datetime.datetime) -> str:
     return ts.isoformat().replace("+00:00", "Z")
 
 
+def _factory_main_argv(*, tmp_path, run_id: str, base_cfg, target_yaml, extra: list[str] | None = None) -> list[str]:
+    return [
+        "--run-id",
+        run_id,
+        "--artifacts-dir",
+        str(tmp_path),
+        "--config",
+        str(base_cfg),
+        "--service",
+        "svc-test",
+        "--yaml-path",
+        str(target_yaml),
+        "--candidate-services",
+        "svc-test",
+        "--candidate-yaml-paths",
+        str(target_yaml),
+        "--candidate-count",
+        "1",
+        "--discord-target",
+        "",
+        *(extra or []),
+    ]
+
+
 def _write_deploy_event(*, root, stamp: str, service: str, config_id: str, ts_utc: str) -> None:
     ev_dir = root / "deployments" / "paper" / stamp
     ev_dir.mkdir(parents=True, exist_ok=True)
@@ -139,6 +163,192 @@ def test_materialise_effective_config_via_rust_rejects_missing_base_config(tmp_p
             output_path=tmp_path / "run" / "effective.yaml",
             strategy_mode="primary",
         )
+
+
+def test_main_ignores_inherited_promoted_and_mode_env_without_strategy_mode(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = "cfg-env-sanitised"
+    base_cfg = tmp_path / "base.yaml"
+    target_yaml = tmp_path / "target.yaml"
+    base_cfg.write_text("global:\n  engine:\n    interval: 30m\n", encoding="utf-8")
+    target_yaml.write_text("global:\n  engine:\n    interval: 30m\n", encoding="utf-8")
+
+    seen_env: dict[str, str] = {}
+    captured_argv: list[str] = []
+
+    def _fake_resolve_effective_config(**kwargs):  # noqa: ANN003
+        seen_env.update(kwargs["env"])
+        return ResolvedEffectiveConfig(
+            base_config_path=str(base_cfg),
+            config_path=str(base_cfg),
+            active_yaml_path=str(base_cfg),
+            effective_yaml_path=str(base_cfg),
+            interval="5m",
+            promoted_role=None,
+            promoted_config_path=None,
+            strategy_mode=None,
+            strategy_mode_source=None,
+            strategy_overrides_sha1="a" * 64,
+            config_id="b" * 64,
+            warnings=(),
+        )
+
+    def _fake_factory_run(argv=None):  # noqa: ANN001
+        captured_argv[:] = list(argv or [])
+        return 7
+
+    monkeypatch.setenv("AI_QUANT_PROMOTED_ROLE", "primary")
+    monkeypatch.setenv("AI_QUANT_STRATEGY_MODE", "fallback")
+    monkeypatch.setenv("AI_QUANT_STRATEGY_MODE_FILE", str(tmp_path / "strategy_mode.txt"))
+    monkeypatch.setattr(factory_cycle, "resolve_effective_config", _fake_resolve_effective_config)
+    monkeypatch.setattr(factory_cycle.factory_run, "main", _fake_factory_run)
+    monkeypatch.setattr(factory_cycle, "_send_discord", lambda **kwargs: None)
+    monkeypatch.setattr(factory_cycle, "_send_discord_chunks", lambda **kwargs: None)
+
+    rc = factory_cycle.main(
+        _factory_main_argv(tmp_path=tmp_path, run_id=run_id, base_cfg=base_cfg, target_yaml=target_yaml)
+    )
+
+    assert rc == 7
+    assert "AI_QUANT_PROMOTED_ROLE" not in seen_env
+    assert "AI_QUANT_STRATEGY_MODE" not in seen_env
+    assert "AI_QUANT_STRATEGY_MODE_FILE" not in seen_env
+    assert captured_argv[captured_argv.index("--config") + 1] == str(base_cfg)
+    assert captured_argv[captured_argv.index("--interval") + 1] == "5m"
+
+
+def test_main_materialises_run_scoped_yaml_from_rust_only(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    run_id = "cfg-materialised"
+    base_cfg = tmp_path / "base.yaml"
+    target_yaml = tmp_path / "target.yaml"
+    source_yaml = tmp_path / "resolved-fallback.yaml"
+    base_cfg.write_text("global:\n  engine:\n    interval: 30m\n", encoding="utf-8")
+    target_yaml.write_text("global:\n  engine:\n    interval: 30m\n", encoding="utf-8")
+    source_yaml.write_text("global:\n  engine:\n    interval: 1h\n", encoding="utf-8")
+
+    captured_argv: list[str] = []
+
+    def _unexpected_python_overlay(*, base, strategy_mode):  # noqa: ANN001
+        raise AssertionError("legacy Python mode overlay must not be used")
+
+    def _fake_resolve_effective_config(**kwargs):  # noqa: ANN003
+        return ResolvedEffectiveConfig(
+            base_config_path=str(base_cfg),
+            config_path=str(base_cfg),
+            active_yaml_path=str(base_cfg),
+            effective_yaml_path=str(base_cfg),
+            interval="30m",
+            promoted_role=None,
+            promoted_config_path=None,
+            strategy_mode="fallback",
+            strategy_mode_source="env",
+            strategy_overrides_sha1="a" * 64,
+            config_id="b" * 64,
+            warnings=(),
+        )
+
+    def _fake_materialise_effective_config_via_rust(*, base_config_path, output_path, strategy_mode):  # noqa: ANN001
+        assert base_config_path == base_cfg
+        assert strategy_mode == "fallback"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(source_yaml.read_text(encoding="utf-8"), encoding="utf-8")
+        return output_path, ResolvedEffectiveConfig(
+            base_config_path=str(base_cfg),
+            config_path=str(output_path),
+            active_yaml_path=str(base_cfg),
+            effective_yaml_path=str(output_path),
+            interval="1h",
+            promoted_role=None,
+            promoted_config_path=None,
+            strategy_mode="fallback",
+            strategy_mode_source="env",
+            strategy_overrides_sha1="c" * 64,
+            config_id="d" * 64,
+            warnings=(),
+        )
+
+    def _fake_factory_run(argv=None):  # noqa: ANN001
+        captured_argv[:] = list(argv or [])
+        return 7
+
+    monkeypatch.setattr(factory_cycle, "_apply_strategy_mode_overlay", _unexpected_python_overlay)
+    monkeypatch.setattr(factory_cycle, "resolve_effective_config", _fake_resolve_effective_config)
+    monkeypatch.setattr(
+        factory_cycle,
+        "_materialise_effective_config_via_rust",
+        _fake_materialise_effective_config_via_rust,
+    )
+    monkeypatch.setattr(factory_cycle.factory_run, "main", _fake_factory_run)
+    monkeypatch.setattr(factory_cycle, "_send_discord", lambda **kwargs: None)
+    monkeypatch.setattr(factory_cycle, "_send_discord_chunks", lambda **kwargs: None)
+
+    rc = factory_cycle.main(
+        _factory_main_argv(
+            tmp_path=tmp_path,
+            run_id=run_id,
+            base_cfg=base_cfg,
+            target_yaml=target_yaml,
+            extra=["--strategy-mode", "fallback"],
+        )
+    )
+
+    expected_effective = (tmp_path / "_effective_configs" / f"{run_id}.yaml").resolve()
+    assert rc == 7
+    assert expected_effective.read_text(encoding="utf-8") == source_yaml.read_text(encoding="utf-8")
+    assert captured_argv[captured_argv.index("--config") + 1] == str(expected_effective)
+    assert captured_argv[captured_argv.index("--interval") + 1] == "1h"
+
+
+def test_main_fails_closed_on_unknown_strategy_mode(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    base_cfg = tmp_path / "base.yaml"
+    target_yaml = tmp_path / "target.yaml"
+    base_cfg.write_text("global:\n  engine:\n    interval: 30m\n", encoding="utf-8")
+    target_yaml.write_text("global:\n  engine:\n    interval: 30m\n", encoding="utf-8")
+
+    called_factory_run = False
+
+    def _fake_resolve_effective_config(**kwargs):  # noqa: ANN003
+        return ResolvedEffectiveConfig(
+            base_config_path=str(base_cfg),
+            config_path=str(base_cfg),
+            active_yaml_path=str(base_cfg),
+            effective_yaml_path=str(base_cfg),
+            interval="30m",
+            promoted_role=None,
+            promoted_config_path=None,
+            strategy_mode=None,
+            strategy_mode_source=None,
+            strategy_overrides_sha1="a" * 64,
+            config_id="b" * 64,
+            warnings=(),
+        )
+
+    def _fake_factory_run(argv=None):  # noqa: ANN001
+        nonlocal called_factory_run
+        called_factory_run = True
+        return 0
+
+    monkeypatch.setattr(factory_cycle, "resolve_effective_config", _fake_resolve_effective_config)
+    monkeypatch.setattr(
+        factory_cycle,
+        "_materialise_effective_config_via_rust",
+        lambda **kwargs: (_ for _ in ()).throw(KeyError("strategy mode not found in YAML: fallback")),
+    )
+    monkeypatch.setattr(factory_cycle.factory_run, "main", _fake_factory_run)
+
+    with pytest.raises(KeyError, match="strategy mode not found in YAML"):
+        factory_cycle.main(
+            _factory_main_argv(
+                tmp_path=tmp_path,
+                run_id="cfg-unknown-mode",
+                base_cfg=base_cfg,
+                target_yaml=target_yaml,
+                extra=["--strategy-mode", "fallback"],
+            )
+        )
+
+    assert called_factory_run is False
 
 
 def test_stable_promotion_since_tracks_oldest_timestamp_for_contiguous_config_segment(tmp_path) -> None:

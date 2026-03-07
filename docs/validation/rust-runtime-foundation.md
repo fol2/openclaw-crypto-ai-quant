@@ -85,6 +85,7 @@ cargo run -q -p aiq-runtime -- paper run-once --db <paper_fixture.db> --candles-
 - `paper loop --follow` must continue to honour that one-shot symbols-file load; an empty start-up manifest without open positions is still a fail-closed configuration for the bounded loop surface.
 - `paper manifest`, `paper doctor`, `paper cycle`, `paper loop`, and `paper daemon` must all resolve the same effective config when `AI_QUANT_PROMOTED_ROLE` and `AI_QUANT_STRATEGY_MODE` / `AI_QUANT_STRATEGY_MODE_FILE` are present.
 - Python paper start-up and factory deployment must resolve the same `config_id`, interval, promoted-config path, and strategy-mode source as `aiq-runtime paper effective-config` / `paper manifest` for the same env.
+- dedicated parity fixtures must prove the resolver-selected YAML object itself, `config_id`, and the `StrategyManager` consumer snapshot all match across base-only, promoted-only, mode-via-env, mode-via-file, and promoted-plus-mode cases.
 - the opt-in `aiq-runtime paper daemon` wrapper must reuse the same `paper loop --follow` / `paper cycle` contracts, expose lock metadata, and avoid claiming Python daemon cutover or widening DB projections.
 - the opt-in `paper daemon` wrapper must own per-iteration `--watch-symbols-file` refresh behaviour so operators can refresh the Rust symbol lane without restarting the daemon.
 - the opt-in `paper daemon` wrapper must also stay alive across an initially empty `--symbols-file`, then execute the next due step once a later watchlist update makes work available.

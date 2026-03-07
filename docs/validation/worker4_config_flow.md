@@ -1,5 +1,10 @@
 # Worker 4 — End-to-End Config Flow Validation
 
+> Historical note: this document captures the pre-`paper effective-config`
+> ownership audit. After PR #907 and the follow-up parity freeze work, Rust is
+> the active paper/factory effective-config owner and Python is the consumer of
+> the resolver-selected YAML path.
+
 **Date:** 2026-02-14T22:09Z  
 **Scope:** YAML config flow through Rust backtester and Python engine, deep-merge parity, symbol overrides, live section, hot-reload, regime gate keys, tp_partial_atr_mult.
 

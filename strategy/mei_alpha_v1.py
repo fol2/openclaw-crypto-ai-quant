@@ -2030,6 +2030,9 @@ def _load_strategy_overrides() -> dict:
 
 # Legacy path (used only if StrategyManager failed to bootstrap):
 # overrides are loaded once at import time and will NOT hot-reload.
+# Do not extend this fallback with new ownership; Rust now owns the shared
+# paper effective-config selection contract, and StrategyManager owns the
+# active YAML consumer path.
 _STRATEGY_OVERRIDES = _load_strategy_overrides()
 
 
@@ -2040,6 +2043,8 @@ def get_strategy_config(symbol: str) -> dict:
     if _strategy_mgr is not None:
         cfg = _strategy_mgr.get_config(symbol)
     else:
+        # Compatibility-only fallback for bootstrap failures. Keep behaviour
+        # stable, but do not add new config/control-plane logic here.
         cfg = copy.deepcopy(_DEFAULT_STRATEGY_CONFIG)
         overrides = _STRATEGY_OVERRIDES or {}
 
