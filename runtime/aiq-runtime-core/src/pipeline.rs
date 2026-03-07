@@ -89,6 +89,12 @@ pub struct StageDescriptor {
     pub description: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RankerDescriptor {
+    pub id: &'static str,
+    pub description: &'static str,
+}
+
 #[derive(Debug, Clone)]
 pub struct StageRegistry {
     descriptors: BTreeMap<StageId, StageDescriptor>,
@@ -172,6 +178,49 @@ impl StageRegistry {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct RankerRegistry {
+    descriptors: BTreeMap<&'static str, RankerDescriptor>,
+}
+
+impl Default for RankerRegistry {
+    fn default() -> Self {
+        let descriptors = [
+            (
+                "confidence_adx",
+                "Rank entry candidates by confidence tier, then ADX, then symbol.",
+            ),
+            (
+                "raw_notional_desc",
+                "Rank entry candidates by requested notional descending, then symbol.",
+            ),
+        ]
+        .into_iter()
+        .map(|(id, description)| (id, RankerDescriptor { id, description }))
+        .collect();
+
+        Self { descriptors }
+    }
+}
+
+impl RankerRegistry {
+    pub fn core() -> Self {
+        Self::default()
+    }
+
+    pub fn descriptors(&self) -> impl Iterator<Item = &RankerDescriptor> {
+        self.descriptors.values()
+    }
+
+    pub fn descriptor(&self, ranker_id: &str) -> Option<&RankerDescriptor> {
+        self.descriptors.get(ranker_id.trim())
+    }
+
+    pub fn contains(&self, ranker_id: &str) -> bool {
+        self.descriptor(ranker_id).is_some()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StagePlan {
     pub id: StageId,
@@ -188,10 +237,34 @@ pub struct PipelinePlan {
     pub stages: Vec<StagePlan>,
 }
 
+impl PipelinePlan {
+    pub fn ordered_stage_ids(&self) -> Vec<StageId> {
+        self.stages.iter().map(|stage| stage.id).collect()
+    }
+
+    pub fn enabled_stage_ids(&self) -> Vec<StageId> {
+        self.stages
+            .iter()
+            .filter(|stage| stage.enabled)
+            .map(|stage| stage.id)
+            .collect()
+    }
+
+    pub fn is_enabled(&self, stage_id: StageId) -> bool {
+        self.stages
+            .iter()
+            .find(|stage| stage.id == stage_id)
+            .map(|stage| stage.enabled)
+            .unwrap_or(false)
+    }
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PipelineResolveError {
     #[error("unknown pipeline stage `{stage}` in profile `{profile}`")]
     UnknownStage { profile: String, stage: String },
+    #[error("unknown pipeline ranker `{ranker}` in profile `{profile}`")]
+    UnknownRanker { profile: String, ranker: String },
     #[error("profile `{profile}` lists conflicting enabled/disabled stage `{stage}`")]
     ConflictingStage { profile: String, stage: String },
     #[error("profile `{profile}` stage_order must be a complete permutation of all known stages")]
@@ -221,6 +294,15 @@ pub fn resolve_pipeline(
         });
 
     let effective_profile = build_effective_profile(config, &profile);
+    let ranker_registry = RankerRegistry::core();
+    let ranker = if effective_profile.ranker.trim().is_empty() {
+        DEFAULT_RANKER.to_string()
+    } else {
+        effective_profile.ranker.trim().to_string()
+    };
+    if !ranker_registry.contains(&ranker) {
+        return Err(PipelineResolveError::UnknownRanker { profile, ranker });
+    }
     let stage_order = resolve_stage_order(&profile, &effective_profile, registry)?;
     let disabled = parse_stage_set(&profile, &effective_profile.disabled_stages, registry)?;
     let enabled = parse_stage_set(&profile, &effective_profile.enabled_stages, registry)?;
@@ -252,11 +334,7 @@ pub fn resolve_pipeline(
 
     Ok(PipelinePlan {
         profile,
-        ranker: if effective_profile.ranker.trim().is_empty() {
-            DEFAULT_RANKER.to_string()
-        } else {
-            effective_profile.ranker.trim().to_string()
-        },
+        ranker,
         state_backend: config.runtime.state_backend.trim().to_string(),
         audit_sink: config.runtime.audit_sink.trim().to_string(),
         stages,
@@ -471,5 +549,42 @@ mod tests {
                 profile: "broken".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn rejects_unknown_ranker() {
+        let registry = StageRegistry::default();
+        let mut config = config_with_runtime();
+        config.runtime.profile = "broken".to_string();
+        config.pipeline.profiles = BTreeMap::from([(
+            "broken".to_string(),
+            PipelineProfileConfig {
+                ranker: "not_real".to_string(),
+                ..PipelineProfileConfig::default()
+            },
+        )]);
+
+        let err = resolve_pipeline(&config, None, &registry).unwrap_err();
+        assert_eq!(
+            err,
+            PipelineResolveError::UnknownRanker {
+                profile: "broken".to_string(),
+                ranker: "not_real".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn pipeline_plan_reports_enabled_and_ordered_stage_ids() {
+        let registry = StageRegistry::default();
+        let mut config = config_with_runtime();
+        config.runtime.profile = "parity_baseline".to_string();
+        let plan = resolve_pipeline(&config, None, &registry).unwrap();
+
+        assert_eq!(plan.ordered_stage_ids().len(), StageId::ALL.len());
+        assert!(plan.is_enabled(StageId::Ranking));
+        assert!(!plan.is_enabled(StageId::BrokerExecution));
+        assert!(plan.enabled_stage_ids().contains(&StageId::Ranking));
+        assert!(!plan.enabled_stage_ids().contains(&StageId::BrokerExecution));
     }
 }

@@ -231,7 +231,7 @@ pub fn build_manifest(input: PaperManifestInput<'_>) -> Result<PaperManifestRepo
         "paper".to_string(),
         "daemon".to_string(),
         "--config".to_string(),
-        effective_config.config_path().display().to_string(),
+        effective_config.base_config_path().display().to_string(),
         "--db".to_string(),
         paper_db.display().to_string(),
         "--candles-db".to_string(),
@@ -758,7 +758,13 @@ mod tests {
         assert_eq!(report.interval, "30m");
         assert_eq!(report.lookback_bars, 200);
         assert_eq!(report.symbols, vec!["BTC", "ETH"]);
-        assert_eq!(report.config_path, config_path.display().to_string());
+        assert_eq!(
+            report.config_path,
+            dir.path()
+                .join("artifacts/_runtime_configs/strategy.primary.primary.runtime.yaml")
+                .display()
+                .to_string()
+        );
         assert_eq!(report.paper_db, paper_db.display().to_string());
         assert_eq!(
             report.candles_db,
