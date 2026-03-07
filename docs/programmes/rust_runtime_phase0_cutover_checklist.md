@@ -24,7 +24,7 @@ Mark every line with evidence before calling `Phase 0` complete.
 
 - [ ] `runtime/` exists on `master`
 - [ ] runtime ledger exists on `master`
-- [ ] PR template requires `phase`, `checklist item`, `exit criterion`, and
+- [ ] PR gate enforces `phase`, `checklist item`, `exit criterion`, and
   `deletion target`
 - [ ] the Rust runtime foundation docs are linked from the architecture /
   programme surfaces

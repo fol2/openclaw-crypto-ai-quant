@@ -1,0 +1,58 @@
+name: Rust Runtime PR Traceability
+
+on:
+  pull_request:
+    branches:
+      - master
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+
+jobs:
+  validate-pr-body:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate programme mapping fields
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          body = os.environ.get("PR_BODY") or ""
+          checks = {
+              "Phase": r"(?mi)^\s*-\s*Phase:\s*(.+?)\s*$",
+              "Checklist item(s)": r"(?mi)^\s*-\s*Checklist item\(s\):\s*(.+?)\s*$",
+              "Exit criterion advanced": r"(?mi)^\s*-\s*Exit criterion advanced:\s*(.+?)\s*$",
+              "Deletion / retirement target": r"(?mi)^\s*-\s*Deletion / retirement target \(or `n/a`\):\s*(.+?)\s*$",
+          }
+          placeholders = {
+              "Phase": {"`Phase 0` / `Phase 1` / `Phase 2` / `Phase 3` / `post-core tranche`"},
+              "Checklist item(s)": {""},
+              "Exit criterion advanced": {""},
+              "Deletion / retirement target": {""},
+          }
+
+          failures = []
+          for label, pattern in checks.items():
+              match = re.search(pattern, body)
+              if not match:
+                  failures.append(f"Missing PR body field: {label}")
+                  continue
+              value = match.group(1).strip()
+              if not value or value in placeholders.get(label, set()):
+                  failures.append(f"PR body field must be filled: {label}")
+
+          if failures:
+              print("Rust runtime PR traceability gate failed:")
+              for failure in failures:
+                  print(f"- {failure}")
+              sys.exit(1)
+
+          print("Rust runtime PR traceability gate passed.")
+          PY
