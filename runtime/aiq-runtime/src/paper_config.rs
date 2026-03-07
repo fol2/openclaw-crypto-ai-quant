@@ -575,6 +575,11 @@ fn write_yaml_document(path: &Path, header: String, document: &serde_yaml::Value
     }
     let payload =
         header + &serde_yaml::to_string(document).context("failed to serialise YAML document")?;
+    if let Ok(existing) = fs::read_to_string(path) {
+        if existing == payload {
+            return Ok(());
+        }
+    }
     let unique_suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
@@ -959,6 +964,38 @@ modes:
         assert_eq!(report.promoted_role.as_deref(), Some("fallback"));
         assert_eq!(report.strategy_mode.as_deref(), Some("fallback"));
         assert_eq!(report.strategy_mode_source.as_deref(), Some("lane_default"));
+    }
+
+    #[test]
+    fn effective_config_does_not_rewrite_runtime_yaml_when_payload_is_unchanged() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("strategy.yaml");
+        let output_root = dir.path().join("runtime-output");
+        fs::write(&config_path, "global:\n  engine:\n    interval: 30m\n").unwrap();
+
+        let _env = EnvGuard::set(&[
+            ("AI_QUANT_PROMOTED_ROLE", None),
+            ("AI_QUANT_STRATEGY_MODE", None),
+            ("AI_QUANT_STRATEGY_MODE_FILE", None),
+            (
+                "AI_QUANT_EFFECTIVE_CONFIG_OUTPUT_ROOT",
+                Some(output_root.to_str().unwrap()),
+            ),
+        ]);
+
+        let first = PaperEffectiveConfig::resolve(Some(&config_path), None, None).unwrap();
+        let first_modified = fs::metadata(first.config_path())
+            .and_then(|meta| meta.modified())
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let second = PaperEffectiveConfig::resolve(Some(&config_path), None, None).unwrap();
+        let second_modified = fs::metadata(second.config_path())
+            .and_then(|meta| meta.modified())
+            .unwrap();
+
+        assert_eq!(first.config_path(), second.config_path());
+        assert_eq!(first_modified, second_modified);
     }
 
     #[test]
