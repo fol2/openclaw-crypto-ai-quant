@@ -111,6 +111,14 @@ service action surface:
 - fails closed when the running daemon reports an unhealthy status or drifts from the current launch identity (`profile`, DB paths, BTC anchor, lookback, explicit symbols, watch wiring, or the bootstrap step while the lane is still fresh)
 - keeps the service action contract read-only with respect to daemon control; it does not perform real start/stop side effects or claim systemd cutover
 
+The current delivered slice extends that again with an opt-in Rust paper
+service executor:
+
+- `paper service apply`
+- reuses the same manifest/status contract and read-only `paper service` recommendation, while also supporting explicit `start`, `restart`, `resume`, and `stop` requests
+- performs side effects only against the Rust `paper daemon`, using the current launch contract plus lock/status provenance to fail closed when ownership cannot be proven
+- writes no new trading semantics and still does not claim Python paper or systemd cutover
+
 The current delivered slice extends that again with shared effective-config
 ownership for Python paper start-up and factory deployment flows:
 

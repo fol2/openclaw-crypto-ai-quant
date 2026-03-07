@@ -25,7 +25,10 @@ cargo run -q -p aiq-runtime -- pipeline --json >/tmp/aiq-runtime-pipeline.json
 
 python3 - <<'PY'
 import json
+import os
+import signal
 import sqlite3
+import time
 from pathlib import Path
 
 snap_path = Path("/tmp/aiq-runtime-seed-snapshot.json")
@@ -53,6 +56,7 @@ for path in (
     Path("/tmp/aiq-runtime-paper-bootstrap.status.json"),
     Path("/tmp/aiq-runtime-paper-status-stopped.json"),
     Path("/tmp/aiq-runtime-paper-service-stopped.json"),
+    Path("/tmp/aiq-runtime-paper-service-apply.json"),
     Path("/tmp/aiq-runtime-paper-daemon.json"),
     Path("/tmp/aiq-runtime-paper-daemon.status.json"),
     Path("/tmp/aiq-runtime-snapshot-validate.json"),
@@ -320,6 +324,7 @@ cargo run -q -p aiq-runtime -- paper loop --db /tmp/aiq-runtime-paper-loop.db --
 cargo run -q -p aiq-runtime -- paper daemon --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --status-path /tmp/aiq-runtime-paper-daemon.status.json --idle-sleep-ms 1 --max-idle-polls 1 --json >/tmp/aiq-runtime-paper-daemon.json
 cargo run -q -p aiq-runtime -- paper status --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --status-path /tmp/aiq-runtime-paper-daemon.status.json --json >/tmp/aiq-runtime-paper-status-stopped.json
 cargo run -q -p aiq-runtime -- paper service --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --status-path /tmp/aiq-runtime-paper-daemon.status.json --json >/tmp/aiq-runtime-paper-service-stopped.json
+cargo run -q -p aiq-runtime -- paper service apply --db /tmp/aiq-runtime-paper-loop.db --candles-db /tmp/aiq-runtime-candles.db --symbols ETH --status-path /tmp/aiq-runtime-paper-daemon.status.json --action resume --json >/tmp/aiq-runtime-paper-service-apply.json
 AI_QUANT_STRATEGY_YAML=config/strategy_overrides.yaml.example \
 AI_QUANT_DB_PATH=/tmp/aiq-runtime-paper-loop.db \
 AI_QUANT_CANDLES_DB_PATH=/tmp/aiq-runtime-candles.db \
@@ -338,7 +343,10 @@ fi
 
 python3 - <<'PY'
 import json
+import os
+import signal
 import sqlite3
+import time
 from pathlib import Path
 
 report = json.loads(Path("/tmp/aiq-runtime-paper-run-once.json").read_text(encoding="utf-8"))
@@ -401,6 +409,27 @@ service_stopped = json.loads(Path("/tmp/aiq-runtime-paper-service-stopped.json")
 assert service_stopped["desired_action"] == "start"
 assert service_stopped["status"]["service_state"] == "stopped"
 assert service_stopped["daemon_command"][0:3] == ["aiq-runtime", "paper", "daemon"]
+service_apply = json.loads(Path("/tmp/aiq-runtime-paper-service-apply.json").read_text(encoding="utf-8"))
+assert service_apply["requested_action"] == "resume"
+assert service_apply["applied_action"] == "start"
+spawned_pid = service_apply["spawned_pid"]
+assert isinstance(spawned_pid, int) and spawned_pid > 0
+status_path = Path("/tmp/aiq-runtime-paper-daemon.status.json")
+deadline = time.time() + 5.0
+while True:
+    running_status = json.loads(status_path.read_text(encoding="utf-8"))
+    if running_status["pid"] == spawned_pid and running_status["running"] is True:
+        break
+    assert time.time() <= deadline, "paper service apply did not publish a running status in time"
+    time.sleep(0.05)
+os.kill(spawned_pid, signal.SIGTERM)
+deadline = time.time() + 5.0
+while True:
+    stopped_status = json.loads(status_path.read_text(encoding="utf-8"))
+    if stopped_status["pid"] == spawned_pid and stopped_status["running"] is False:
+        break
+    assert time.time() <= deadline, "paper service apply cleanup did not publish a stopped status in time"
+    time.sleep(0.05)
 PY
 
 echo "[runtime-foundation] ok"

@@ -4,6 +4,7 @@ use aiq_runtime_core::snapshot::{load_snapshot, snapshot_to_pretty_json};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 mod paper_config;
@@ -157,8 +158,11 @@ enum PaperCommand {
     Manifest(PaperManifestArgs),
     /// Resolve the current Rust paper daemon service state from the launch contract plus status file.
     Status(PaperStatusArgs),
-    /// Resolve the supervisor action for the current Rust paper daemon lane without mutating runtime state.
-    Service(PaperServiceArgs),
+    /// Resolve or apply the Rust paper daemon supervisor contract.
+    Service {
+        #[command(subcommand)]
+        command: PaperServiceCommand,
+    },
     /// Restore paper state from the DB through the Rust snapshot/bootstrap path.
     Doctor(PaperDoctorArgs),
     /// Execute one Rust paper step for a single symbol.
@@ -230,6 +234,41 @@ struct PaperStatusArgs {
 struct PaperServiceArgs {
     #[command(flatten)]
     status: PaperStatusArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+struct PaperServiceApplyArgs {
+    #[command(flatten)]
+    service: PaperServiceArgs,
+    /// Requested supervisor action. `auto` reuses the read-only paper service recommendation.
+    #[arg(long, value_enum, default_value = "auto")]
+    action: PaperServiceApplyActionArg,
+    /// Maximum time to wait for a newly spawned daemon to publish a running status contract.
+    #[arg(long, default_value_t = 5_000)]
+    start_wait_ms: u64,
+    /// Maximum time to wait for a supervised stop before failing closed.
+    #[arg(long, default_value_t = 30_000)]
+    stop_wait_ms: u64,
+    /// Poll interval for status/lock checks while supervising a lane.
+    #[arg(long, default_value_t = 100)]
+    poll_ms: u64,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum PaperServiceCommand {
+    /// Resolve the current Rust paper daemon supervisor action without mutating runtime state.
+    Inspect(PaperServiceArgs),
+    /// Apply the current Rust paper daemon supervisor action via an opt-in side-effecting supervisor.
+    Apply(PaperServiceApplyArgs),
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PaperServiceApplyActionArg {
+    Auto,
+    Start,
+    Restart,
+    Stop,
+    Resume,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -412,12 +451,33 @@ impl From<ModeArg> for RuntimeMode {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(preprocess_cli_args(std::env::args_os().collect()));
 
     match cli.command {
         Command::Pipeline(args) | Command::Doctor(args) => run_bootstrap(args),
         Command::Snapshot { command } => run_snapshot(command),
         Command::Paper { command } => run_paper(command),
+    }
+}
+
+fn preprocess_cli_args(mut args: Vec<OsString>) -> Vec<OsString> {
+    if should_insert_paper_service_inspect(&args) {
+        args.insert(3, OsString::from("inspect"));
+    }
+    args
+}
+
+fn should_insert_paper_service_inspect(args: &[OsString]) -> bool {
+    if args.get(1).and_then(|value| value.to_str()) != Some("paper") {
+        return false;
+    }
+    if args.get(2).and_then(|value| value.to_str()) != Some("service") {
+        return false;
+    }
+    match args.get(3).and_then(|value| value.to_str()) {
+        None => true,
+        Some("inspect" | "apply" | "-h" | "--help") => false,
+        Some(_) => true,
     }
 }
 
@@ -748,56 +808,126 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 }
             }
         }
-        PaperCommand::Service(args) => {
-            let report = paper_service::build_service(paper_service::PaperServiceInput {
-                config: args.status.manifest.config.as_deref(),
-                live: args.status.manifest.live,
-                profile: args.status.manifest.profile.as_deref(),
-                db: args.status.manifest.db.as_deref(),
-                candles_db: args.status.manifest.candles_db.as_deref(),
-                symbols: &args.status.manifest.symbols,
-                symbols_file: args.status.manifest.symbols_file.as_deref(),
-                watch_symbols_file: args.status.manifest.watch_symbols_file,
-                btc_symbol: &args.status.manifest.btc_symbol,
-                lookback_bars: args.status.manifest.lookback_bars,
-                start_step_close_ts_ms: args.status.manifest.start_step_close_ts_ms,
-                lock_path: args.status.manifest.lock_path.as_deref(),
-                status_path: args.status.manifest.status_path.as_deref(),
-                stale_after_ms: args.status.stale_after_ms,
-            })?;
+        PaperCommand::Service { command } => match command {
+            PaperServiceCommand::Inspect(args) => {
+                let report = paper_service::build_service(paper_service::PaperServiceInput {
+                    config: args.status.manifest.config.as_deref(),
+                    live: args.status.manifest.live,
+                    profile: args.status.manifest.profile.as_deref(),
+                    db: args.status.manifest.db.as_deref(),
+                    candles_db: args.status.manifest.candles_db.as_deref(),
+                    symbols: &args.status.manifest.symbols,
+                    symbols_file: args.status.manifest.symbols_file.as_deref(),
+                    watch_symbols_file: args.status.manifest.watch_symbols_file,
+                    btc_symbol: &args.status.manifest.btc_symbol,
+                    lookback_bars: args.status.manifest.lookback_bars,
+                    start_step_close_ts_ms: args.status.manifest.start_step_close_ts_ms,
+                    lock_path: args.status.manifest.lock_path.as_deref(),
+                    status_path: args.status.manifest.status_path.as_deref(),
+                    stale_after_ms: args.status.stale_after_ms,
+                })?;
 
-            if args.status.manifest.json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                println!(
-                    "paper service ok: action={:?} state={:?}",
-                    report.desired_action, report.status.service_state
-                );
-                println!("action_reason: {}", report.action_reason);
-                println!("status_path: {}", report.status.manifest.status_path);
-                println!("lock_path: {}", report.status.manifest.lock_path);
-                println!(
-                    "contract_matches_status: {}",
-                    report.status.contract_matches_status
-                );
-                println!(
-                    "launch_ready: {}",
-                    report.status.manifest.resume.launch_ready
-                );
-                if !report.status.mismatch_reasons.is_empty() {
-                    println!("mismatch_reasons:");
-                    for reason in &report.status.mismatch_reasons {
-                        println!("  - {}", reason);
+                if args.status.manifest.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    println!(
+                        "paper service ok: action={:?} state={:?}",
+                        report.desired_action, report.status.service_state
+                    );
+                    println!("action_reason: {}", report.action_reason);
+                    println!("status_path: {}", report.status.manifest.status_path);
+                    println!("lock_path: {}", report.status.manifest.lock_path);
+                    println!(
+                        "contract_matches_status: {}",
+                        report.status.contract_matches_status
+                    );
+                    println!(
+                        "launch_ready: {}",
+                        report.status.manifest.resume.launch_ready
+                    );
+                    if !report.status.mismatch_reasons.is_empty() {
+                        println!("mismatch_reasons:");
+                        for reason in &report.status.mismatch_reasons {
+                            println!("  - {}", reason);
+                        }
                     }
-                }
-                if !report.warnings.is_empty() {
-                    println!("warnings:");
-                    for warning in &report.warnings {
-                        println!("  - {}", warning);
+                    if !report.warnings.is_empty() {
+                        println!("warnings:");
+                        for warning in &report.warnings {
+                            println!("  - {}", warning);
+                        }
                     }
                 }
             }
-        }
+            PaperServiceCommand::Apply(args) => {
+                let requested_action = match args.action {
+                    PaperServiceApplyActionArg::Auto => {
+                        paper_service::PaperServiceApplyRequestedAction::Auto
+                    }
+                    PaperServiceApplyActionArg::Start => {
+                        paper_service::PaperServiceApplyRequestedAction::Start
+                    }
+                    PaperServiceApplyActionArg::Restart => {
+                        paper_service::PaperServiceApplyRequestedAction::Restart
+                    }
+                    PaperServiceApplyActionArg::Stop => {
+                        paper_service::PaperServiceApplyRequestedAction::Stop
+                    }
+                    PaperServiceApplyActionArg::Resume => {
+                        paper_service::PaperServiceApplyRequestedAction::Resume
+                    }
+                };
+                let report = paper_service::apply_service(paper_service::PaperServiceApplyInput {
+                    service: paper_service::PaperServiceInput {
+                        config: args.service.status.manifest.config.as_deref(),
+                        live: args.service.status.manifest.live,
+                        profile: args.service.status.manifest.profile.as_deref(),
+                        db: args.service.status.manifest.db.as_deref(),
+                        candles_db: args.service.status.manifest.candles_db.as_deref(),
+                        symbols: &args.service.status.manifest.symbols,
+                        symbols_file: args.service.status.manifest.symbols_file.as_deref(),
+                        watch_symbols_file: args.service.status.manifest.watch_symbols_file,
+                        btc_symbol: &args.service.status.manifest.btc_symbol,
+                        lookback_bars: args.service.status.manifest.lookback_bars,
+                        start_step_close_ts_ms: args.service.status.manifest.start_step_close_ts_ms,
+                        lock_path: args.service.status.manifest.lock_path.as_deref(),
+                        status_path: args.service.status.manifest.status_path.as_deref(),
+                        stale_after_ms: args.service.status.stale_after_ms,
+                    },
+                    requested_action,
+                    start_wait_ms: args.start_wait_ms,
+                    stop_wait_ms: args.stop_wait_ms,
+                    poll_ms: args.poll_ms,
+                })?;
+
+                if args.service.status.manifest.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    println!(
+                        "paper service apply ok: requested={:?} applied={:?} final_action={:?} final_state={:?}",
+                        report.requested_action,
+                        report.applied_action,
+                        report.final_service.desired_action,
+                        report.final_service.status.service_state
+                    );
+                    println!("action_reason: {}", report.action_reason);
+                    if let Some(previous_pid) = report.previous_pid {
+                        println!("previous_pid: {}", previous_pid);
+                    }
+                    if let Some(spawned_pid) = report.spawned_pid {
+                        println!("spawned_pid: {}", spawned_pid);
+                    }
+                    println!("status_path: {}", report.final_service.status_path);
+                    println!("lock_path: {}", report.final_service.lock_path);
+                    if !report.final_service.warnings.is_empty() {
+                        println!("warnings:");
+                        for warning in &report.final_service.warnings {
+                            println!("  - {}", warning);
+                        }
+                    }
+                }
+            }
+        },
         PaperCommand::Doctor(args) => {
             let effective_config =
                 paper_config::PaperEffectiveConfig::resolve(Some(&args.common.paper.config))?;

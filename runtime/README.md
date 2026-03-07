@@ -24,6 +24,7 @@ Current runtime-owned paper surfaces and the paired opt-in wrapper:
 | `paper manifest` | Resolve the current Rust paper daemon service contract | Read-only env/CLI manifest, including launch readiness, restart/resume state, resolved lane `status_path`, and effective config selection from promoted-role plus strategy-mode inputs |
 | `paper status` | Resolve the current Rust paper daemon service state | Read-only manifest + status-file view, including restart-required / stale detection plus health / launch-identity drift detection for the current lane |
 | `paper service` | Resolve the current Rust paper daemon supervisor action | Read-only status + launch-contract view that tells supervision whether to hold, start, restart, or monitor the lane while failing closed on unhealthy or drifted daemon status |
+| `paper service apply` | Apply the current Rust paper daemon supervisor action | Opt-in side-effecting supervisor for Rust paper daemon start/restart/resume/stop only; reuses the same manifest/status contract and fails closed on unhealthy, drifted, or unproven lane ownership |
 | `paper daemon` | Execute an opt-in long-running Rust paper orchestration wrapper | Owns the outer scheduler, can optionally watch `--symbols-file` for reloads, writes a lane status JSON, and keeps the same `paper cycle` write contract while using the same effective config contract as `paper manifest`; not cutover |
 
 The runtime slice is still intentionally narrow. It does not yet own any live
@@ -44,6 +45,7 @@ slices will build on:
 - a read-only service manifest so operators can inspect the resolved Rust daemon launch contract, bootstrap requirement, restart/resume state, lifecycle `status_path`, promoted config selection, and strategy-mode file fallback before cutover
 - a read-only effective-config surface that Python paper start-up and factory materialisation now share with the Rust paper shells
 - a read-only service status surface so operators can compare the current launch contract against the persisted daemon lifecycle JSON, including daemon health and launch-identity drift, without parsing files by hand
-- a read-only supervisor action surface so later service orchestration can decide whether to hold, start, restart, or simply monitor the lane, while still failing closed on unhealthy daemon status
+- a read-only supervisor action surface so operators can inspect whether the lane should be held, started, restarted, or simply monitored
+- an opt-in side-effecting `paper service apply` surface that can enact that recommendation for the Rust paper daemon without claiming service cutover
 - an opt-in daemon wrapper that owns scheduler/watchlist reload orchestration without claiming service cutover
 - a durable daemon `status_path` contract that later service supervision can build on

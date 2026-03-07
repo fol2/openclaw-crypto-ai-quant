@@ -602,6 +602,373 @@ fn prepare_idle_fixture() -> Fixture {
 }
 
 #[test]
+fn paper_service_apply_starts_bootstrap_ready_lane() {
+    let fixture = seed_empty_fixture();
+
+    let output = service_apply_command(&fixture)
+        .arg("--start-step-close-ts-ms")
+        .arg(START_STEP_CLOSE_TS_MS.to_string())
+        .arg("--action")
+        .arg("auto")
+        .output()
+        .expect("paper service apply bootstrap smoke should spawn");
+
+    assert!(
+        output.status.success(),
+        "paper service apply should start a bootstrap-ready lane; output:\n{}",
+        combined_output(&output)
+    );
+
+    let report = parse_json_output(&output);
+    let spawned_pid = report
+        .pointer("/spawned_pid")
+        .and_then(Value::as_u64)
+        .expect("apply should report the spawned pid") as i32;
+    assert_eq!(
+        report.pointer("/applied_action").and_then(Value::as_str),
+        Some("start"),
+        "bootstrap-ready apply should execute a start action",
+    );
+    let running_status = wait_for_status_pid(
+        &fixture.status_path,
+        spawned_pid as u32,
+        true,
+        Duration::from_secs(5),
+    );
+    assert_eq!(
+        running_status.pointer("/running").and_then(Value::as_bool),
+        Some(true),
+        "the supervised daemon should publish a running status contract",
+    );
+
+    let service = parse_json_output(
+        &service_command(&fixture)
+            .arg("--start-step-close-ts-ms")
+            .arg(START_STEP_CLOSE_TS_MS.to_string())
+            .output()
+            .expect("paper service follow-up should spawn"),
+    );
+    assert_eq!(
+        service.pointer("/desired_action").and_then(Value::as_str),
+        Some("monitor"),
+        "once the daemon is running, the read-only service view should become monitor",
+    );
+
+    send_sigterm_pid(spawned_pid);
+    let stopped_status = wait_for_status_pid(
+        &fixture.status_path,
+        spawned_pid as u32,
+        false,
+        Duration::from_secs(5),
+    );
+    assert_eq!(
+        stopped_status.pointer("/running").and_then(Value::as_bool),
+        Some(false),
+        "the bootstrap smoke daemon should stop cleanly during test cleanup",
+    );
+}
+
+#[test]
+fn paper_service_apply_resumes_stopped_lane() {
+    let fixture = prepare_idle_fixture();
+    let child = daemon_command(&fixture)
+        .arg("--idle-sleep-ms")
+        .arg("250")
+        .arg("--max-idle-polls")
+        .arg("0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("paper daemon resume fixture should spawn");
+    let child = wait_for_lock_file(child, &fixture.lock_path, Duration::from_secs(5));
+    let running_status = wait_for_status_file(&fixture.status_path, Duration::from_secs(5));
+    let previous_pid = running_status
+        .pointer("/pid")
+        .and_then(Value::as_u64)
+        .expect("running daemon pid should be present") as i32;
+    send_sigterm(&child);
+    let stopped = wait_with_timeout(child, Duration::from_secs(5));
+    assert!(
+        stopped.status.success(),
+        "the resume fixture daemon should stop cleanly; output:\n{}",
+        combined_output(&stopped)
+    );
+
+    let output = service_apply_command(&fixture)
+        .arg("--action")
+        .arg("resume")
+        .output()
+        .expect("paper service resume smoke should spawn");
+    assert!(
+        output.status.success(),
+        "paper service apply should resume a stopped launch-ready lane; output:\n{}",
+        combined_output(&output)
+    );
+
+    let report = parse_json_output(&output);
+    let resumed_pid = report
+        .pointer("/spawned_pid")
+        .and_then(Value::as_u64)
+        .expect("resume should report a spawned pid") as i32;
+    assert_ne!(
+        resumed_pid, previous_pid,
+        "resume should relaunch the lane under a new daemon pid",
+    );
+    assert_eq!(
+        report.pointer("/applied_action").and_then(Value::as_str),
+        Some("start"),
+        "resume is modelled as a supervised start of the stopped lane",
+    );
+
+    send_sigterm_pid(resumed_pid);
+    let stopped_status = wait_for_status_pid(
+        &fixture.status_path,
+        resumed_pid as u32,
+        false,
+        Duration::from_secs(5),
+    );
+    assert_eq!(
+        stopped_status.pointer("/running").and_then(Value::as_bool),
+        Some(false),
+        "the resumed daemon should stop cleanly during test cleanup",
+    );
+}
+
+#[test]
+fn paper_service_apply_is_noop_for_healthy_running_lane() {
+    let fixture = prepare_idle_fixture();
+    let child = daemon_command(&fixture)
+        .arg("--idle-sleep-ms")
+        .arg("250")
+        .arg("--max-idle-polls")
+        .arg("0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("paper daemon noop fixture should spawn");
+    let child = wait_for_lock_file(child, &fixture.lock_path, Duration::from_secs(5));
+    let running_status = wait_for_status_file(&fixture.status_path, Duration::from_secs(5));
+    let running_pid = running_status
+        .pointer("/pid")
+        .and_then(Value::as_u64)
+        .expect("running daemon pid should be present") as i32;
+
+    let output = service_apply_command(&fixture)
+        .arg("--action")
+        .arg("auto")
+        .output()
+        .expect("paper service noop smoke should spawn");
+    assert!(
+        output.status.success(),
+        "paper service apply should no-op for a healthy running lane; output:\n{}",
+        combined_output(&output)
+    );
+    let report = parse_json_output(&output);
+    assert_eq!(
+        report.pointer("/applied_action").and_then(Value::as_str),
+        Some("noop"),
+        "healthy running lanes should stay on the read-only monitor action",
+    );
+    assert_eq!(
+        report.pointer("/previous_pid").and_then(Value::as_u64),
+        Some(running_pid as u64),
+        "no-op supervision should keep the same running pid",
+    );
+    assert!(
+        report
+            .pointer("/spawned_pid")
+            .and_then(Value::as_u64)
+            .is_none(),
+        "no-op supervision must not spawn a replacement daemon",
+    );
+
+    send_sigterm(&child);
+    let stopped = wait_with_timeout(child, Duration::from_secs(5));
+    assert!(
+        stopped.status.success(),
+        "the noop fixture daemon should stop cleanly; output:\n{}",
+        combined_output(&stopped)
+    );
+}
+
+#[test]
+fn paper_service_apply_restarts_stale_running_lane() {
+    let fixture = prepare_idle_fixture();
+    let child = daemon_command(&fixture)
+        .arg("--idle-sleep-ms")
+        .arg("250")
+        .arg("--max-idle-polls")
+        .arg("0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("paper daemon restart fixture should spawn");
+    let child = wait_for_lock_file(child, &fixture.lock_path, Duration::from_secs(5));
+    let mut running_status = wait_for_status_file(&fixture.status_path, Duration::from_secs(5));
+    let previous_pid = running_status
+        .pointer("/pid")
+        .and_then(Value::as_u64)
+        .expect("running daemon pid should be present") as i32;
+    running_status["updated_at_ms"] = Value::from(1);
+    fs::write(
+        &fixture.status_path,
+        serde_json::to_vec_pretty(&running_status).expect("stale status should serialise"),
+    )
+    .expect("stale status should be written");
+
+    let output = service_apply_command(&fixture)
+        .arg("--action")
+        .arg("auto")
+        .arg("--stale-after-ms")
+        .arg("1000")
+        .output()
+        .expect("paper service restart smoke should spawn");
+    assert!(
+        output.status.success(),
+        "paper service apply should restart a stale running lane; output:\n{}",
+        combined_output(&output)
+    );
+
+    let report = parse_json_output(&output);
+    let restarted_pid = report
+        .pointer("/spawned_pid")
+        .and_then(Value::as_u64)
+        .expect("restart should report a spawned pid") as i32;
+    assert_ne!(
+        restarted_pid, previous_pid,
+        "restart should replace the stale daemon owner with a new pid",
+    );
+    assert_eq!(
+        report.pointer("/applied_action").and_then(Value::as_str),
+        Some("restart"),
+        "stale supervision should execute a restart action",
+    );
+    let stopped = wait_with_timeout(child, Duration::from_secs(5));
+    assert!(
+        stopped.status.success(),
+        "the stale daemon should exit cleanly after supervision; output:\n{}",
+        combined_output(&stopped)
+    );
+
+    let follow_up = parse_json_output(
+        &service_command(&fixture)
+            .arg("--stale-after-ms")
+            .arg("60000")
+            .output()
+            .expect("paper service follow-up should spawn"),
+    );
+    assert_eq!(
+        follow_up.pointer("/desired_action").and_then(Value::as_str),
+        Some("monitor"),
+        "the replacement daemon should settle into monitor state",
+    );
+
+    send_sigterm_pid(restarted_pid);
+    let stopped_status = wait_for_status_pid(
+        &fixture.status_path,
+        restarted_pid as u32,
+        false,
+        Duration::from_secs(5),
+    );
+    assert_eq!(
+        stopped_status.pointer("/running").and_then(Value::as_bool),
+        Some(false),
+        "the restarted daemon should stop cleanly during test cleanup",
+    );
+}
+
+#[test]
+fn paper_service_apply_stops_running_lane_when_requested() {
+    let fixture = prepare_idle_fixture();
+    let child = daemon_command(&fixture)
+        .arg("--idle-sleep-ms")
+        .arg("250")
+        .arg("--max-idle-polls")
+        .arg("0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("paper daemon stop fixture should spawn");
+    let child = wait_for_lock_file(child, &fixture.lock_path, Duration::from_secs(5));
+    let running_status = wait_for_status_file(&fixture.status_path, Duration::from_secs(5));
+    let previous_pid = running_status
+        .pointer("/pid")
+        .and_then(Value::as_u64)
+        .expect("running daemon pid should be present") as i32;
+
+    let output = service_apply_command(&fixture)
+        .arg("--action")
+        .arg("stop")
+        .output()
+        .expect("paper service stop smoke should spawn");
+    assert!(
+        output.status.success(),
+        "paper service apply should stop a healthy running lane when requested; output:\n{}",
+        combined_output(&output)
+    );
+
+    let report = parse_json_output(&output);
+    assert_eq!(
+        report.pointer("/applied_action").and_then(Value::as_str),
+        Some("stop"),
+        "explicit stop should execute a stop action",
+    );
+    assert_eq!(
+        report.pointer("/previous_pid").and_then(Value::as_u64),
+        Some(previous_pid as u64),
+        "explicit stop should target the current daemon owner",
+    );
+    let stopped_status = wait_for_status_pid(
+        &fixture.status_path,
+        previous_pid as u32,
+        false,
+        Duration::from_secs(5),
+    );
+    assert_eq!(
+        stopped_status
+            .pointer("/stop_requested")
+            .and_then(Value::as_bool),
+        Some(true),
+        "explicit stop should persist a graceful stop request in the status contract",
+    );
+    assert!(
+        try_exclusive_lock(&fixture.lock_path).is_some(),
+        "explicit stop should release the daemon lock",
+    );
+
+    let stopped = wait_with_timeout(child, Duration::from_secs(5));
+    assert!(
+        stopped.status.success(),
+        "the stop fixture daemon should exit cleanly after supervision; output:\n{}",
+        combined_output(&stopped)
+    );
+}
+
+#[test]
+fn paper_service_apply_fails_closed_on_corrupt_status_file() {
+    let fixture = prepare_idle_fixture();
+    fs::write(&fixture.status_path, b"{not-json").expect("corrupt status should be written");
+
+    let output = service_apply_command(&fixture)
+        .arg("--action")
+        .arg("auto")
+        .output()
+        .expect("paper service corrupt-status smoke should spawn");
+
+    assert!(
+        !output.status.success(),
+        "paper service apply must fail closed on a corrupt status file; output:\n{}",
+        combined_output(&output)
+    );
+    assert!(
+        combined_output(&output)
+            .to_ascii_lowercase()
+            .contains("status"),
+        "the corrupt-status failure should mention the status contract",
+    );
+}
+
+#[test]
 fn paper_daemon_reloads_symbols_file_after_empty_watchlist() {
     let fixture = seed_empty_fixture();
     let before = snapshot_db(&fixture.paper_db);
@@ -1207,6 +1574,55 @@ fn status_command(fixture: &Fixture) -> Command {
     command
 }
 
+fn service_command(fixture: &Fixture) -> Command {
+    let mut command = runtime_command();
+    command
+        .arg("paper")
+        .arg("service")
+        .arg("--config")
+        .arg(config_path())
+        .arg("--db")
+        .arg(&fixture.paper_db)
+        .arg("--candles-db")
+        .arg(&fixture.candles_db)
+        .arg("--symbols")
+        .arg("ETH")
+        .arg("--lock-path")
+        .arg(&fixture.lock_path)
+        .arg("--status-path")
+        .arg(&fixture.status_path)
+        .arg("--json");
+    command
+}
+
+fn service_apply_command(fixture: &Fixture) -> Command {
+    let mut command = runtime_command();
+    command
+        .arg("paper")
+        .arg("service")
+        .arg("apply")
+        .arg("--config")
+        .arg(config_path())
+        .arg("--db")
+        .arg(&fixture.paper_db)
+        .arg("--candles-db")
+        .arg(&fixture.candles_db)
+        .arg("--symbols")
+        .arg("ETH")
+        .arg("--lock-path")
+        .arg(&fixture.lock_path)
+        .arg("--status-path")
+        .arg(&fixture.status_path)
+        .arg("--start-wait-ms")
+        .arg("5000")
+        .arg("--stop-wait-ms")
+        .arg("5000")
+        .arg("--poll-ms")
+        .arg("50")
+        .arg("--json");
+    command
+}
+
 fn watchlist_daemon_command(fixture: &Fixture, symbols_file: &Path) -> Command {
     let mut command = runtime_command();
     command
@@ -1277,6 +1693,28 @@ fn wait_for_status_file(path: &Path, timeout: Duration) -> Value {
             Instant::now() <= deadline,
             "paper daemon did not materialise the status file {} before timeout",
             path.display()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_for_status_pid(path: &Path, pid: u32, running: bool, timeout: Duration) -> Value {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if path.exists() {
+            let value = read_json_file(path);
+            if value.pointer("/running").and_then(Value::as_bool) == Some(running)
+                && value.pointer("/pid").and_then(Value::as_u64) == Some(pid as u64)
+            {
+                return value;
+            }
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "paper daemon status {} did not reach pid={} running={} before timeout",
+            path.display(),
+            pid,
+            running
         );
         thread::sleep(Duration::from_millis(20));
     }
@@ -1388,6 +1826,17 @@ fn send_sigterm(child: &Child) {
         rc,
         0,
         "SIGTERM should be delivered to the paper daemon: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
+fn send_sigterm_pid(pid: i32) {
+    let rc = unsafe { kill(pid, SIGTERM) };
+    assert_eq!(
+        rc,
+        0,
+        "SIGTERM should be delivered to the paper daemon pid {}: {}",
+        pid,
         std::io::Error::last_os_error()
     );
 }
