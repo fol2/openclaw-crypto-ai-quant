@@ -471,8 +471,14 @@ fn main() -> Result<()> {
 }
 
 fn maybe_print_legacy_paper_service_help(args: &[OsString]) -> Result<bool> {
-    if !matches_legacy_paper_service_help(args) {
+    let Some(compat_args) = legacy_paper_service_help_args(args) else {
         return Ok(false);
+    };
+
+    if let Err(err) = PaperServiceInspectCompatCli::try_parse_from(compat_args) {
+        err.print()
+            .context("failed to print the legacy paper service help error")?;
+        std::process::exit(err.exit_code());
     }
 
     let mut command = PaperServiceInspectCompatCli::command();
@@ -487,55 +493,35 @@ fn maybe_print_legacy_paper_service_help(args: &[OsString]) -> Result<bool> {
     Ok(true)
 }
 
-fn matches_legacy_paper_service_help(args: &[OsString]) -> bool {
+fn legacy_paper_service_help_args(args: &[OsString]) -> Option<Vec<OsString>> {
     if args.get(1).and_then(|value| value.to_str()) != Some("paper") {
-        return false;
+        return None;
     }
     if args.get(2).and_then(|value| value.to_str()) != Some("service") {
-        return false;
+        return None;
     }
     let tail = &args[3..];
     if matches!(
         tail.first().and_then(|value| value.to_str()),
         Some("inspect" | "apply")
     ) {
-        return false;
+        return None;
     }
-    let mut saw_help = false;
-    let mut index = 0usize;
-    while index < tail.len() {
-        let Some(token) = tail[index].to_str() else {
-            return false;
-        };
-        match token {
-            "-h" | "--help" => {
-                saw_help = true;
-                index += 1;
-            }
-            "--live" | "--watch-symbols-file" | "--json" => {
-                index += 1;
-            }
-            "--config"
-            | "--profile"
-            | "--db"
-            | "--candles-db"
-            | "--symbols"
-            | "--symbols-file"
-            | "--btc-symbol"
-            | "--lookback-bars"
-            | "--start-step-close-ts-ms"
-            | "--lock-path"
-            | "--status-path"
-            | "--stale-after-ms" => {
-                index += 2;
-                if index > tail.len() {
-                    return false;
-                }
-            }
-            _ => return false,
+    if !tail
+        .iter()
+        .any(|value| matches!(value.to_str(), Some("-h" | "--help")))
+    {
+        return None;
+    }
+
+    let mut compat_args = vec![OsString::from("aiq-runtime paper service")];
+    for token in tail {
+        if matches!(token.to_str(), Some("-h" | "--help")) {
+            continue;
         }
+        compat_args.push(token.clone());
     }
-    saw_help
+    Some(compat_args)
 }
 
 fn preprocess_cli_args(mut args: Vec<OsString>) -> Vec<OsString> {

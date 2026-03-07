@@ -1082,6 +1082,11 @@ fn paper_service_help_preserves_read_only_flags() {
         !output.status.success(),
         "unexpected paper service arguments should still fail closed even when --help is present",
     );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Usage: aiq-runtime paper service [OPTIONS]"),
+        "unexpected paper service help should still render the legacy read-only usage line",
+    );
 }
 
 #[test]
