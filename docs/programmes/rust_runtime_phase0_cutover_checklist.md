@@ -90,7 +90,8 @@ Reason threshold for rollback:
 
 ## 6. PR Mapping Rules
 
-For every PR in the Rust full-runtime cutover programme:
+For every PR merged to `master` while the Rust full-runtime cutover programme is
+active:
 
 1. fill in the PR template `Programme Mapping` section
 2. map the PR to one checklist item in the active phase

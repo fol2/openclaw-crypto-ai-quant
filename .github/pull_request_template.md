@@ -2,7 +2,7 @@
 <!-- 1-3 bullet points describing the change -->
 
 ## Programme Mapping
-<!-- Required for every Rust full-runtime cutover PR -->
+<!-- Required for every PR merged to master while the Rust full-runtime cutover programme is active -->
 
 - Phase: `Phase 0` / `Phase 1` / `Phase 2` / `Phase 3` / `post-core tranche`
 - Checklist item(s):
