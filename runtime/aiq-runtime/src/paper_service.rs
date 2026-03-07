@@ -476,7 +476,16 @@ fn rust_owned_running_pid(
             status.pid,
             lock_owner_pid
         ),
-        None => Ok(None),
+        None => {
+            if status_pid_is_alive(status.pid)? {
+                anyhow::bail!(
+                    "paper service apply found a running Rust daemon pid {} but could not prove lock ownership through {}",
+                    status.pid,
+                    preview.lock_path
+                );
+            }
+            Ok(None)
+        }
     }
 }
 
@@ -657,6 +666,16 @@ fn process_exists(pid: u32) -> Result<bool> {
         Some(code) if code == libc::EPERM => Ok(true),
         _ => Err(err).with_context(|| format!("failed to probe pid {}", pid)),
     }
+}
+
+#[cfg(unix)]
+fn status_pid_is_alive(pid: u32) -> Result<bool> {
+    process_exists(pid)
+}
+
+#[cfg(not(unix))]
+fn status_pid_is_alive(_pid: u32) -> Result<bool> {
+    Ok(false)
 }
 
 #[cfg(unix)]
@@ -947,7 +966,7 @@ mod tests {
 
     #[test]
     fn apply_auto_collapses_restart_to_start_when_lock_is_free() {
-        let mut preview = running_status_report(PaperServiceState::RestartRequired, 4242);
+        let mut preview = running_status_report(PaperServiceState::RestartRequired, 2_000_000_000);
         preview.desired_action = PaperSupervisorAction::Restart;
         preview.status.mismatch_reasons = vec!["config fingerprint mismatch".to_string()];
         preview.status.contract_matches_status = false;
@@ -984,9 +1003,13 @@ mod tests {
 
     #[test]
     fn apply_stop_requires_rust_lock_ownership_proof() {
-        let preview = running_status_report(PaperServiceState::Running, 4242);
-        let err = build_apply_plan(&preview, PaperServiceApplyRequestedAction::Stop, Some(9999))
-            .unwrap_err();
+        let preview = running_status_report(PaperServiceState::Running, 2_000_000_000);
+        let err = build_apply_plan(
+            &preview,
+            PaperServiceApplyRequestedAction::Stop,
+            Some(2_000_000_001),
+        )
+        .unwrap_err();
 
         assert!(err.to_string().contains("lock owner pid mismatch"));
     }

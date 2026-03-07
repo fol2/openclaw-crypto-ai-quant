@@ -969,6 +969,87 @@ fn paper_service_apply_fails_closed_on_corrupt_status_file() {
 }
 
 #[test]
+fn paper_service_apply_fails_closed_without_lock_ownership_proof() {
+    let fixture = prepare_idle_fixture();
+    let child = daemon_command(&fixture)
+        .arg("--idle-sleep-ms")
+        .arg("250")
+        .arg("--max-idle-polls")
+        .arg("0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("paper daemon ownership-proof fixture should spawn");
+    let child = wait_for_lock_file(child, &fixture.lock_path, Duration::from_secs(5));
+    let running_status = wait_for_status_file(&fixture.status_path, Duration::from_secs(5));
+    let running_pid = running_status
+        .pointer("/pid")
+        .and_then(Value::as_u64)
+        .expect("running daemon pid should be present") as i32;
+    fs::remove_file(&fixture.lock_path)
+        .expect("lock path should be removable for the ownership-proof smoke");
+
+    let auto_output = service_apply_command(&fixture)
+        .arg("--action")
+        .arg("auto")
+        .output()
+        .expect("paper service ownership-proof auto smoke should spawn");
+    assert!(
+        !auto_output.status.success(),
+        "paper service apply must fail closed when a running daemon has no provable lock owner; output:\n{}",
+        combined_output(&auto_output)
+    );
+    assert!(
+        process_is_alive(running_pid),
+        "the original daemon should still be alive after the ownership-proof failure",
+    );
+
+    let stop_output = service_apply_command(&fixture)
+        .arg("--action")
+        .arg("stop")
+        .output()
+        .expect("paper service ownership-proof stop smoke should spawn");
+    assert!(
+        !stop_output.status.success(),
+        "explicit stop must also fail closed without lock ownership proof; output:\n{}",
+        combined_output(&stop_output)
+    );
+
+    send_sigterm(&child);
+    let stopped = wait_with_timeout(child, Duration::from_secs(5));
+    assert!(
+        stopped.status.success(),
+        "the ownership-proof fixture daemon should stop cleanly during test cleanup; output:\n{}",
+        combined_output(&stopped)
+    );
+}
+
+#[test]
+fn paper_service_help_preserves_read_only_flags() {
+    let output = runtime_command()
+        .arg("paper")
+        .arg("service")
+        .arg("--help")
+        .output()
+        .expect("paper service help should spawn");
+    assert!(
+        output.status.success(),
+        "paper service --help should succeed; output:\n{}",
+        combined_output(&output)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("--db <DB>"),
+        "plain paper service help should still expose the read-only service flags",
+    );
+    assert!(
+        !stdout.contains("inspect"),
+        "plain paper service help should not require operators to know the hidden inspect shim",
+    );
+}
+
+#[test]
 fn paper_daemon_reloads_symbols_file_after_empty_watchlist() {
     let fixture = seed_empty_fixture();
     let before = snapshot_db(&fixture.paper_db);
@@ -1839,6 +1920,14 @@ fn send_sigterm_pid(pid: i32) {
         pid,
         std::io::Error::last_os_error()
     );
+}
+
+fn process_is_alive(pid: i32) -> bool {
+    let rc = unsafe { kill(pid, 0) };
+    if rc == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
 fn wait_with_timeout(mut child: Child, timeout: Duration) -> Output {

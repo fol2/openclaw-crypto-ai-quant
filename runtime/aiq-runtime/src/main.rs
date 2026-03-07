@@ -3,7 +3,7 @@ use aiq_runtime_core::runtime::{build_bootstrap, RuntimeMode};
 use aiq_runtime_core::snapshot::{load_snapshot, snapshot_to_pretty_json};
 use anyhow::{Context, Result};
 use chrono::Utc;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -254,6 +254,12 @@ struct PaperServiceApplyArgs {
     poll_ms: u64,
 }
 
+#[derive(Debug, Parser)]
+struct PaperServiceInspectCompatCli {
+    #[command(flatten)]
+    args: PaperServiceArgs,
+}
+
 #[derive(Debug, Clone, Subcommand)]
 enum PaperServiceCommand {
     /// Resolve the current Rust paper daemon supervisor action without mutating runtime state.
@@ -451,13 +457,47 @@ impl From<ModeArg> for RuntimeMode {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse_from(preprocess_cli_args(std::env::args_os().collect()));
+    let raw_args = std::env::args_os().collect::<Vec<_>>();
+    if maybe_print_legacy_paper_service_help(&raw_args)? {
+        return Ok(());
+    }
+    let cli = Cli::parse_from(preprocess_cli_args(raw_args));
 
     match cli.command {
         Command::Pipeline(args) | Command::Doctor(args) => run_bootstrap(args),
         Command::Snapshot { command } => run_snapshot(command),
         Command::Paper { command } => run_paper(command),
     }
+}
+
+fn maybe_print_legacy_paper_service_help(args: &[OsString]) -> Result<bool> {
+    if !matches_legacy_paper_service_help(args) {
+        return Ok(false);
+    }
+
+    let mut command = PaperServiceInspectCompatCli::command();
+    command = command
+        .name("aiq-runtime paper service")
+        .bin_name("aiq-runtime paper service")
+        .about("Resolve the current Rust paper daemon supervisor action without mutating runtime state");
+    command
+        .print_help()
+        .context("failed to print legacy paper service help")?;
+    println!();
+    Ok(true)
+}
+
+fn matches_legacy_paper_service_help(args: &[OsString]) -> bool {
+    if args.get(1).and_then(|value| value.to_str()) != Some("paper") {
+        return false;
+    }
+    if args.get(2).and_then(|value| value.to_str()) != Some("service") {
+        return false;
+    }
+    matches!(
+        args.get(3).and_then(|value| value.to_str()),
+        Some("-h" | "--help")
+    )
 }
 
 fn preprocess_cli_args(mut args: Vec<OsString>) -> Vec<OsString> {
@@ -476,7 +516,7 @@ fn should_insert_paper_service_inspect(args: &[OsString]) -> bool {
     }
     match args.get(3).and_then(|value| value.to_str()) {
         None => true,
-        Some("inspect" | "apply" | "-h" | "--help") => false,
+        Some("inspect" | "apply") => false,
         Some(_) => true,
     }
 }
