@@ -23,6 +23,7 @@ from engine.promoted_config import (
     VALID_ROLES,
     _find_latest_promoted_config,
     _write_text_atomic,
+    apply_live_effective_config,
     apply_paper_effective_config,
     load_promoted_config,
     maybe_apply_promoted_config,
@@ -589,6 +590,53 @@ class TestRustEffectiveConfigWrapper:
             assert os.environ["AI_QUANT_EFFECTIVE_STRATEGY_YAML"] == str(cfg)
             assert os.environ["AI_QUANT_EFFECTIVE_CONFIG_ID"] == "d" * 64
             assert os.environ["AI_QUANT_INTERVAL"] == "5m"
+            assert os.environ["AI_QUANT_STRATEGY_MODE"] == "primary"
+        finally:
+            for key, value in tracked.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    def test_apply_live_effective_config_exports_runtime_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = tmp_path / "live-effective.yaml"
+        cfg.write_text("global:\n  engine:\n    interval: 30m\n", encoding="utf-8")
+
+        monkeypatch.setattr(
+            "engine.promoted_config.resolve_effective_config",
+            lambda **kwargs: ResolvedEffectiveConfig(
+                base_config_path=str(tmp_path / "base-live.yaml"),
+                config_path=str(cfg),
+                active_yaml_path=str(tmp_path / "active-live.yaml"),
+                effective_yaml_path=str(cfg),
+                interval="30m",
+                promoted_role=None,
+                promoted_config_path=None,
+                strategy_mode="primary",
+                strategy_mode_source="env",
+                strategy_overrides_sha1="e" * 64,
+                config_id="f" * 64,
+                warnings=(),
+            ),
+        )
+
+        tracked = {
+            "AI_QUANT_STRATEGY_YAML": os.environ.get("AI_QUANT_STRATEGY_YAML"),
+            "AI_QUANT_EFFECTIVE_STRATEGY_YAML": os.environ.get("AI_QUANT_EFFECTIVE_STRATEGY_YAML"),
+            "AI_QUANT_EFFECTIVE_CONFIG_ID": os.environ.get("AI_QUANT_EFFECTIVE_CONFIG_ID"),
+            "AI_QUANT_INTERVAL": os.environ.get("AI_QUANT_INTERVAL"),
+            "AI_QUANT_STRATEGY_MODE": os.environ.get("AI_QUANT_STRATEGY_MODE"),
+        }
+        try:
+            resolved = apply_live_effective_config(config_path=cfg)
+
+            assert resolved.config_path == str(cfg)
+            assert os.environ["AI_QUANT_STRATEGY_YAML"] == str(cfg)
+            assert os.environ["AI_QUANT_EFFECTIVE_STRATEGY_YAML"] == str(cfg)
+            assert os.environ["AI_QUANT_EFFECTIVE_CONFIG_ID"] == "f" * 64
+            assert os.environ["AI_QUANT_INTERVAL"] == "30m"
             assert os.environ["AI_QUANT_STRATEGY_MODE"] == "primary"
         finally:
             for key, value in tracked.items():

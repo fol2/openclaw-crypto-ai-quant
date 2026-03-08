@@ -14,14 +14,14 @@ cutover.
 
 - **Daemon** (`engine/daemon.py`): Entrypoint for `dry_live` / `live`, plus the legacy Python paper recovery/debug path.
 - **UnifiedEngine** (`engine/core.py`): Main trading loop — polls candle keys per symbol, runs strategy analysis only when data changes, two-phase collect-rank-execute for entries.
-- **StrategyManager** (`engine/strategy_manager.py`): Hot-reloads the resolver-selected strategy YAML path via mtime polling for the active Python daemon. It does not define the paper effective-config contract, and when `AI_QUANT_EFFECTIVE_CONFIG_OWNER=rust` it now treats the Rust materialised runtime YAML as the authoritative config/identity source instead of reapplying Python defaults.
+- **StrategyManager** (`engine/strategy_manager.py`): Hot-reloads the resolver-selected strategy YAML path via mtime polling for the active Python daemon. It does not define the effective-config contract, and when `AI_QUANT_EFFECTIVE_CONFIG_OWNER=rust` it now treats the Rust materialised runtime YAML as the authoritative config/identity source instead of reapplying Python defaults.
 - **MarketDataHub** (`engine/market_data.py`): Reads mids and candles from WS sidecar first, falls back to SQLite candles table, then REST `candleSnapshot`.
 - **RiskManager** (`engine/risk.py`): Rate limiting (global + per-symbol entries, exits, cancels), drawdown kill-switch, daily loss limits, notional caps, slippage guard, file-based and env-based kill-switch polling.
 - **LiveOms** (`engine/oms.py`): Durable Order Management System for live trading — intent rows (restart-safe dedupe), orders, fills (deduped by hash+tid), fill-to-intent matching via `client_order_id` with time-proximity fallback.
 - **OMS Reconciler** (`engine/oms_reconciler.py`): Reconciles OMS state against exchange positions/fills.
 - **Alerting** (`engine/alerting.py`): Discord / Telegram notifications via `openclaw message send`.
 - **Event Logger** (`engine/event_logger.py`): Decision + trade event logging for audit trail.
-- **Promoted Config** (`engine/promoted_config.py`): Compatibility shim that now shells out to the shared Rust `paper effective-config` resolver for paper start-up and factory materialisation, exporting the Rust-owned runtime-facing `config_path` plus audit-only `active_yaml_path` / `effective_yaml_path`.
+- **Promoted Config** (`engine/promoted_config.py`): Compatibility shim that now shells out to the shared Rust effective-config resolver for paper, dry-live, live, and factory control-plane start-up, exporting the Rust-owned runtime-facing `config_path` plus audit-only `active_yaml_path` / `effective_yaml_path`.
 - **SQLite Logger** (`engine/sqlite_logger.py`): Trade, candle, and position state persistence.
 - **REST Client** (`engine/rest_client.py`): Hyperliquid REST API client.
 - **Systemd Watchdog** (`engine/systemd_watchdog.py`): `sd_notify` integration.

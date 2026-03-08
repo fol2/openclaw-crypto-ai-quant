@@ -1,10 +1,10 @@
-"""Compatibility helpers around paper effective-config selection.
+"""Compatibility helpers around Rust-owned effective-config selection.
 
-Rust now owns the authoritative effective-config contract for paper control-plane
-consumers. This module keeps the older Python promoted-config helpers for
-backward-compatible tests, while also exposing thin wrappers that shell out to
-`aiq-runtime paper effective-config` for the active paper start-up and factory
-materialisation paths.
+Rust now owns the authoritative effective-config contract for paper and
+live-facing control-plane consumers. This module keeps the older Python
+promoted-config helpers for backward-compatible tests, while also exposing thin
+wrappers that shell out to `aiq-runtime paper effective-config` for the active
+runtime start-up and factory materialisation paths.
 
 Mapping (conventional):
     paper1  → AI_QUANT_PROMOTED_ROLE=primary
@@ -388,7 +388,7 @@ def resolve_effective_config(
     symbol: str | None = None,
     env: Mapping[str, str] | None = None,
 ) -> ResolvedEffectiveConfig:
-    """Resolve the active Rust-owned effective config for paper consumers."""
+    """Resolve the active Rust-owned effective config for runtime consumers."""
 
     runtime_env = dict(os.environ if env is None else env)
     command = _effective_config_command(
@@ -425,6 +425,25 @@ def apply_paper_effective_config(
     """Resolve the paper effective config via Rust and apply it to the process env."""
 
     resolved = resolve_effective_config(config_path=config_path, live=False, symbol=symbol)
+    _apply_effective_config_env(resolved)
+    return resolved
+
+
+def apply_live_effective_config(
+    *,
+    config_path: str | Path | None = None,
+    symbol: str | None = None,
+) -> ResolvedEffectiveConfig:
+    """Resolve the live/dry-live effective config via Rust and apply it to the process env."""
+
+    resolved = resolve_effective_config(config_path=config_path, live=True, symbol=symbol)
+    _apply_effective_config_env(resolved)
+    return resolved
+
+
+def _apply_effective_config_env(resolved: ResolvedEffectiveConfig) -> None:
+    """Export the Rust-owned effective-config contract into the current process env."""
+
     os.environ["AI_QUANT_STRATEGY_YAML"] = str(resolved.config_path)
     os.environ["AI_QUANT_ACTIVE_STRATEGY_YAML"] = str(resolved.active_yaml_path)
     os.environ["AI_QUANT_EFFECTIVE_STRATEGY_YAML"] = str(resolved.effective_yaml_path)
@@ -462,4 +481,3 @@ def apply_paper_effective_config(
         mode_source = resolved.strategy_mode_source or "env"
         print(f"📋 promoted_config: strategy_mode='{resolved.strategy_mode}' source={mode_source}")
     print(f"📋 promoted_config: AI_QUANT_STRATEGY_YAML → {resolved.config_path}")
-    return resolved
