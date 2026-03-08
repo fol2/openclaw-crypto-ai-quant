@@ -1379,6 +1379,7 @@ def main() -> int:
         env["AQC_REQUIRE_OMS_STRATEGY_PROVENANCE"] = "1" if require_oms_strategy_provenance else "0"
         env["AQC_SKIP_TRADE_AXIS"] = "1"
         env["AQC_SKIP_ACTION_AXIS"] = "1"
+        env["AQC_SKIP_GPU_PARITY"] = "1"
         if strategy_config_resolution is None:
             strategy_config_resolution = {}
         strategy_config_resolution["require_oms_strategy_provenance"] = bool(require_oms_strategy_provenance)
