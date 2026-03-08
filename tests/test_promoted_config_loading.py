@@ -478,6 +478,38 @@ class TestRustEffectiveConfigWrapper:
         assert resolved.config_id == "b" * 64
         assert resolved.warnings == ("resolver warning",)
 
+    def test_resolve_effective_config_uses_live_cli_surface_when_requested(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = tmp_path / "strategy.yaml"
+        cfg.write_text("global:\n  engine:\n    interval: 30m\n", encoding="utf-8")
+
+        monkeypatch.setattr("engine.promoted_config._runtime_command", lambda: ["/tmp/aiq-runtime"])
+
+        def _fake_run(cmd, **kwargs):  # noqa: ANN001
+            assert cmd[:3] == ["/tmp/aiq-runtime", "live", "effective-config"]
+            payload = {
+                "base_config_path": str(cfg),
+                "config_path": str(cfg),
+                "active_yaml_path": str(cfg),
+                "effective_yaml_path": str(cfg),
+                "interval": "30m",
+                "promoted_role": None,
+                "promoted_config_path": None,
+                "strategy_mode": "primary",
+                "strategy_mode_source": "env",
+                "strategy_overrides_sha1": "a" * 64,
+                "config_id": "b" * 64,
+                "warnings": [],
+            }
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload), stderr="")
+
+        monkeypatch.setattr("engine.promoted_config.subprocess.run", _fake_run)
+
+        resolved = resolve_effective_config(config_path=cfg, live=True, env={})
+
+        assert resolved.base_config_path == str(cfg)
+
     def test_resolve_effective_config_uses_env_yaml_when_config_arg_is_unset(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

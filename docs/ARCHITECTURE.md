@@ -21,7 +21,7 @@ cutover.
 - **OMS Reconciler** (`engine/oms_reconciler.py`): Reconciles OMS state against exchange positions/fills.
 - **Alerting** (`engine/alerting.py`): Discord / Telegram notifications via `openclaw message send`.
 - **Event Logger** (`engine/event_logger.py`): Decision + trade event logging for audit trail.
-- **Promoted Config** (`engine/promoted_config.py`): Compatibility shim that now shells out to the shared Rust effective-config resolver for paper, dry-live, live, and factory control-plane start-up, exporting the Rust-owned runtime-facing `config_path` plus audit-only `active_yaml_path` / `effective_yaml_path`.
+- **Promoted Config** (`engine/promoted_config.py`): Compatibility shim that now shells out to the shared Rust effective-config resolver (`aiq-runtime paper effective-config` / `aiq-runtime live effective-config`) for paper, dry-live, live, and factory control-plane start-up, exporting the Rust-owned runtime-facing `config_path` plus audit-only `active_yaml_path` / `effective_yaml_path`.
 - **SQLite Logger** (`engine/sqlite_logger.py`): Trade, candle, and position state persistence.
 - **REST Client** (`engine/rest_client.py`): Hyperliquid REST API client.
 - **Systemd Watchdog** (`engine/systemd_watchdog.py`): `sd_notify` integration.

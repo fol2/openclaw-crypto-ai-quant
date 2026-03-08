@@ -3,8 +3,9 @@
 Rust now owns the authoritative effective-config contract for paper and
 live-facing control-plane consumers. This module keeps the older Python
 promoted-config helpers for backward-compatible tests, while also exposing thin
-wrappers that shell out to `aiq-runtime paper effective-config` for the active
-runtime start-up and factory materialisation paths.
+wrappers that shell out to `aiq-runtime paper effective-config` /
+`aiq-runtime live effective-config` for the active runtime start-up and factory
+materialisation paths.
 
 Mapping (conventional):
     paper1  → AI_QUANT_PROMOTED_ROLE=primary
@@ -340,7 +341,7 @@ def _effective_config_command(
     env: Mapping[str, str],
 ) -> list[str]:
     cmd = list(_runtime_command())
-    cmd += ["paper", "effective-config", "--json"]
+    cmd += ["live" if live else "paper", "effective-config", "--json"]
     selected_config = config_path
     if selected_config is None:
         selected_config = (
@@ -350,8 +351,6 @@ def _effective_config_command(
         )
     if selected_config is not None:
         cmd += ["--config", str(Path(selected_config).expanduser().resolve())]
-    if live:
-        cmd.append("--live")
     if symbol:
         cmd += ["--symbol", str(symbol).strip().upper()]
     return cmd

@@ -42,6 +42,11 @@ enum Command {
         #[command(subcommand)]
         command: PaperCommand,
     },
+    /// Resolve Rust-owned live control-plane config surfaces without executing orders.
+    Live {
+        #[command(subcommand)]
+        command: LiveCommand,
+    },
 }
 
 #[derive(Debug, Clone, Args)]
@@ -119,6 +124,19 @@ struct PaperEffectiveConfigArgs {
     json: bool,
 }
 
+#[derive(Debug, Clone, Args)]
+struct LiveEffectiveConfigArgs {
+    /// Optional YAML config path override. Falls back to AI_QUANT_STRATEGY_YAML or strategy_overrides.yaml.
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Optional symbol override for per-symbol config resolution.
+    #[arg(long)]
+    symbol: Option<String>,
+    /// Emit machine-readable JSON instead of a human summary.
+    #[arg(long)]
+    json: bool,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ModeArg {
     Live,
@@ -186,6 +204,12 @@ enum PaperCommand {
     Loop(PaperLoopArgs),
     /// Execute an opt-in long-running Rust paper daemon with scheduler-owned watchlist orchestration.
     Daemon(PaperDaemonArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum LiveCommand {
+    /// Resolve the shared Rust effective-config contract for live-facing control-plane consumers.
+    EffectiveConfig(LiveEffectiveConfigArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -511,6 +535,7 @@ fn main() -> Result<()> {
         Command::Pipeline(args) | Command::Doctor(args) => run_bootstrap(args),
         Command::Snapshot { command } => run_snapshot(command),
         Command::Paper { command } => run_paper(command),
+        Command::Live { command } => run_live(command),
     }
 }
 
@@ -754,35 +779,7 @@ fn run_paper(command: PaperCommand) -> Result<()> {
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
-                println!("paper effective-config ok");
-                println!("base_config_path: {}", report.base_config_path);
-                println!("config_path: {}", report.config_path);
-                println!("active_yaml_path: {}", report.active_yaml_path);
-                println!("effective_yaml_path: {}", report.effective_yaml_path);
-                println!("interval: {}", report.interval);
-                println!(
-                    "strategy_overrides_sha1: {}",
-                    report.strategy_overrides_sha1
-                );
-                println!("config_id: {}", report.config_id);
-                if let Some(promoted_role) = report.promoted_role.as_deref() {
-                    println!("promoted_role: {}", promoted_role);
-                }
-                if let Some(promoted_config_path) = report.promoted_config_path.as_deref() {
-                    println!("promoted_config_path: {}", promoted_config_path);
-                }
-                if let Some(strategy_mode) = report.strategy_mode.as_deref() {
-                    println!("strategy_mode: {}", strategy_mode);
-                }
-                if let Some(strategy_mode_source) = report.strategy_mode_source.as_deref() {
-                    println!("strategy_mode_source: {}", strategy_mode_source);
-                }
-                if !report.warnings.is_empty() {
-                    println!("warnings:");
-                    for warning in &report.warnings {
-                        println!("  - {}", warning);
-                    }
-                }
+                print_effective_config_report("paper", &report);
             }
         }
         PaperCommand::Manifest(args) => {
@@ -1293,4 +1290,71 @@ fn run_paper(command: PaperCommand) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn run_live(command: LiveCommand) -> Result<()> {
+    match command {
+        LiveCommand::EffectiveConfig(args) => {
+            let effective_config =
+                paper_config::PaperEffectiveConfig::resolve(args.config.as_deref(), None, None)?;
+            let report = effective_config.build_report(args.symbol.as_deref(), true)?;
+
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print_effective_config_report("live", &report);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn print_effective_config_report(
+    surface: &str,
+    report: &paper_config::PaperEffectiveConfigReport,
+) {
+    println!("{surface} effective-config ok");
+    println!("base_config_path: {}", report.base_config_path);
+    println!("config_path: {}", report.config_path);
+    println!("active_yaml_path: {}", report.active_yaml_path);
+    println!("effective_yaml_path: {}", report.effective_yaml_path);
+    println!("interval: {}", report.interval);
+    println!("strategy_overrides_sha1: {}", report.strategy_overrides_sha1);
+    println!("config_id: {}", report.config_id);
+    if let Some(promoted_role) = report.promoted_role.as_deref() {
+        println!("promoted_role: {}", promoted_role);
+    }
+    if let Some(promoted_config_path) = report.promoted_config_path.as_deref() {
+        println!("promoted_config_path: {}", promoted_config_path);
+    }
+    if let Some(strategy_mode) = report.strategy_mode.as_deref() {
+        println!("strategy_mode: {}", strategy_mode);
+    }
+    if let Some(strategy_mode_source) = report.strategy_mode_source.as_deref() {
+        println!("strategy_mode_source: {}", strategy_mode_source);
+    }
+    if !report.warnings.is_empty() {
+        println!("warnings:");
+        for warning in &report.warnings {
+            println!("  - {}", warning);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_parses_live_effective_config_surface() {
+        let cli = Cli::try_parse_from(["aiq-runtime", "live", "effective-config", "--json"])
+            .expect("live effective-config should parse");
+        match cli.command {
+            Command::Live {
+                command: LiveCommand::EffectiveConfig(args),
+            } => assert!(args.json),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
 }
