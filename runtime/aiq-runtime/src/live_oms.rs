@@ -110,6 +110,12 @@ pub struct FillMatch {
     pub matched_via: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntentReason {
+    pub reason: Option<String>,
+    pub reason_code: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct LiveOms {
     store: OmsStore,
@@ -217,6 +223,10 @@ impl LiveOms {
             dedupe_key: Some(dedupe_key_value),
             duplicate: true,
         })
+    }
+
+    pub fn load_intent_reason(&self, intent_id: &str) -> Result<Option<IntentReason>> {
+        self.store.load_intent_reason(intent_id)
     }
 
     pub fn mark_would(&self, intent: &IntentHandle, note: Option<&str>) -> Result<()> {
@@ -583,6 +593,42 @@ impl OmsStore {
         )
         .optional()
         .context("failed to query OMS intent by dedupe key")
+    }
+
+    fn load_intent_reason(&self, intent_id: &str) -> Result<Option<IntentReason>> {
+        let intent_id = intent_id.trim();
+        if intent_id.is_empty() {
+            return Ok(None);
+        }
+        let conn = self.open()?;
+        conn.query_row(
+            "
+            SELECT reason, meta_json
+            FROM oms_intents
+            WHERE intent_id = ?
+            LIMIT 1
+            ",
+            params![intent_id],
+            |row| {
+                let reason: Option<String> = row.get(0)?;
+                let meta_json: Option<String> = row.get(1)?;
+                let reason_code = meta_json
+                    .as_deref()
+                    .and_then(|payload| serde_json::from_str::<Value>(payload).ok())
+                    .and_then(|value| {
+                        value
+                            .get("reason_code")
+                            .and_then(Value::as_str)
+                            .map(ToOwned::to_owned)
+                    });
+                Ok(IntentReason {
+                    reason,
+                    reason_code,
+                })
+            },
+        )
+        .optional()
+        .context("failed to query OMS intent reason")
     }
 
     fn set_intent_client_order_id(&self, intent_id: &str, client_order_id: &str) -> Result<()> {

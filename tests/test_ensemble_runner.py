@@ -45,6 +45,8 @@ def test_build_launch_plan_writes_derived_yaml(tmp_path: Path):
         obj = yaml.safe_load(p.derived_yaml_path.read_text(encoding="utf-8"))
         assert obj["global"]["trade"]["size_multiplier"] in {0.5, 0.25}
         assert p.env["AI_QUANT_MODE"] == "dry_live"
+        assert p.env["AI_QUANT_LIVE_ENABLE"] == "0"
+        assert p.env["AI_QUANT_LIVE_CONFIRM"] == ""
         assert p.env["AI_QUANT_STRATEGY_YAML"] == str(p.derived_yaml_path)
 
 

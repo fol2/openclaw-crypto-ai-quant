@@ -16,6 +16,11 @@ pub struct LiveManifestInput<'a> {
     pub profile: Option<&'a str>,
     pub db: Option<&'a Path>,
     pub market_db: Option<&'a Path>,
+    pub candles_db: Option<&'a Path>,
+    pub symbols: &'a [String],
+    pub symbols_file: Option<&'a Path>,
+    pub btc_symbol: &'a str,
+    pub secrets_path: Option<&'a Path>,
     pub lock_path: Option<&'a Path>,
     pub status_path: Option<&'a Path>,
     pub lookback_bars: Option<usize>,
@@ -44,8 +49,15 @@ pub struct LiveManifestReport {
     pub market_db_exists: bool,
     pub candles_db_dir: String,
     pub candles_db_dir_exists: bool,
+    pub candles_db: String,
+    pub candles_db_exists: bool,
     pub interval: String,
+    pub btc_symbol: String,
     pub lookback_bars: usize,
+    pub explicit_symbols: Vec<String>,
+    pub symbols_file: Option<String>,
+    pub secrets_path: String,
+    pub secrets_path_exists: bool,
     pub lock_path: String,
     pub status_path: String,
     pub service_name: String,
@@ -120,6 +132,21 @@ pub fn build_manifest(input: LiveManifestInput<'_>) -> Result<LiveManifestReport
         .unwrap_or(DEFAULT_LOOKBACK_BARS);
     let candles_db_dir =
         env_path("AI_QUANT_CANDLES_DB_DIR").unwrap_or_else(|| defaults.candles_db_dir.clone());
+    let candles_db = input
+        .candles_db
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| candles_db_dir.join(format!("candles_{}.db", interval)));
+    let explicit_symbols = resolve_symbols(input.symbols);
+    let symbols_file = input
+        .symbols_file
+        .map(Path::to_path_buf)
+        .or_else(|| env_path("AI_QUANT_SYMBOLS_FILE"));
+    let btc_symbol = canonical_symbol(input.btc_symbol);
+    let secrets_path = input
+        .secrets_path
+        .map(Path::to_path_buf)
+        .or_else(|| env_path("AI_QUANT_SECRETS_PATH"))
+        .unwrap_or_else(default_live_secrets_path);
     let strategy_mode_file = env_path("AI_QUANT_STRATEGY_MODE_FILE")
         .unwrap_or_else(|| defaults.strategy_mode_file.clone());
     let event_log_dir =
@@ -159,29 +186,73 @@ pub fn build_manifest(input: LiveManifestInput<'_>) -> Result<LiveManifestReport
             candles_db_dir.display()
         ));
     }
+    if !candles_db.exists() {
+        warnings.push(format!(
+            "candles db does not exist yet: {}",
+            candles_db.display()
+        ));
+    }
     if !strategy_mode_file.exists() {
         warnings.push(format!(
             "strategy-mode file does not exist yet: {}",
             strategy_mode_file.display()
         ));
     }
+    if let Some(symbols_file) = symbols_file.as_ref().filter(|path| !path.exists()) {
+        warnings.push(format!(
+            "symbols-file does not exist yet: {}",
+            symbols_file.display()
+        ));
+    }
+    if !secrets_path.exists() {
+        warnings.push(format!(
+            "live secrets path does not exist yet: {}",
+            secrets_path.display()
+        ));
+    }
 
-    let daemon_command = vec![
-        defaults
-            .project_dir
-            .join(".venv")
-            .join("bin")
-            .join("python3")
-            .display()
-            .to_string(),
-        "-u".to_string(),
-        "-m".to_string(),
-        "engine.daemon".to_string(),
+    let runtime_bin = env_path("AI_QUANT_RUNTIME_BIN")
+        .unwrap_or_else(|| PathBuf::from("aiq-runtime"))
+        .display()
+        .to_string();
+    let mut daemon_command = vec![
+        runtime_bin,
+        "live".to_string(),
+        "daemon".to_string(),
+        "--config".to_string(),
+        effective_config.base_config_path().display().to_string(),
+        "--db".to_string(),
+        live_db.display().to_string(),
+        "--lock-path".to_string(),
+        lock_path.display().to_string(),
+        "--status-path".to_string(),
+        status_path.display().to_string(),
+        "--candles-db".to_string(),
+        candles_db.display().to_string(),
+        "--btc-symbol".to_string(),
+        btc_symbol.clone(),
     ];
+    if !explicit_symbols.is_empty() {
+        daemon_command.push("--symbols".to_string());
+        daemon_command.push(explicit_symbols.join(","));
+    }
+    if let Some(symbols_file) = symbols_file.as_ref() {
+        daemon_command.push("--symbols-file".to_string());
+        daemon_command.push(symbols_file.display().to_string());
+    }
+    daemon_command.push("--secrets-path".to_string());
+    daemon_command.push(secrets_path.display().to_string());
+    if let Some(lookback_bars) = input
+        .lookback_bars
+        .or_else(|| env_usize("AI_QUANT_LOOKBACK_BARS"))
+    {
+        daemon_command.push("--lookback-bars".to_string());
+        daemon_command.push(lookback_bars.to_string());
+    }
 
     Ok(LiveManifestReport {
         ok: safety_gate_ready,
-        runtime_owner: "python".to_string(),
+        runtime_owner: "rust".to_string(),
         launch_state,
         runtime_bootstrap,
         base_config_path: effective_config.base_config_path().display().to_string(),
@@ -194,8 +265,15 @@ pub fn build_manifest(input: LiveManifestInput<'_>) -> Result<LiveManifestReport
         market_db_exists: market_db.exists(),
         candles_db_dir: candles_db_dir.display().to_string(),
         candles_db_dir_exists: candles_db_dir.exists(),
+        candles_db: candles_db.display().to_string(),
+        candles_db_exists: candles_db.exists(),
         interval,
+        btc_symbol,
         lookback_bars,
+        explicit_symbols,
+        symbols_file: symbols_file.as_ref().map(|path| path.display().to_string()),
+        secrets_path: secrets_path.display().to_string(),
+        secrets_path_exists: secrets_path.exists(),
         lock_path: lock_path.display().to_string(),
         status_path: status_path.display().to_string(),
         service_name,
@@ -241,6 +319,42 @@ fn env_usize(name: &str) -> Option<usize> {
     env::var(name)
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
+}
+
+fn resolve_symbols(explicit_symbols: &[String]) -> Vec<String> {
+    let mut symbols = explicit_symbols.to_vec();
+    if symbols.is_empty() {
+        if let Some(raw) = env_string("AI_QUANT_SYMBOLS") {
+            symbols.extend(
+                raw.split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned),
+            );
+        }
+    }
+    symbols
+        .into_iter()
+        .map(|symbol| canonical_symbol(&symbol))
+        .filter(|symbol| !symbol.is_empty())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn canonical_symbol(value: &str) -> String {
+    value.trim().to_ascii_uppercase()
+}
+
+fn default_live_secrets_path() -> PathBuf {
+    env::var("HOME")
+        .map(PathBuf::from)
+        .map(|home| {
+            home.join(".config")
+                .join("openclaw")
+                .join("ai-quant-secrets.json")
+        })
+        .unwrap_or_else(|_| PathBuf::from("~/.config/openclaw/ai-quant-secrets.json"))
 }
 
 #[cfg(test)]
@@ -293,13 +407,18 @@ mod tests {
             profile: None,
             db: None,
             market_db: None,
+            candles_db: None,
+            symbols: &[],
+            symbols_file: None,
+            btc_symbol: "BTC",
+            secrets_path: None,
             lock_path: None,
             status_path: None,
             lookback_bars: None,
         })
         .unwrap();
 
-        assert_eq!(report.runtime_owner, "python");
+        assert_eq!(report.runtime_owner, "rust");
         assert_eq!(report.launch_state, LiveManifestLaunchState::Blocked);
         assert_eq!(report.service_name, "openclaw-ai-quant-live-v8");
         assert_eq!(report.instance_tag, "v8-LIVE");
@@ -309,10 +428,10 @@ mod tests {
         assert!(report.market_db.ends_with("market_data_v8_live.db"));
         assert!(report.lock_path.ends_with("ai_quant_v8_live.lock"));
         assert!(report.status_path.ends_with("ai_quant_v8_live.status.json"));
-        assert!(report.daemon_command.ends_with(&[
-            "-u".to_string(),
-            "-m".to_string(),
-            "engine.daemon".to_string()
+        assert!(report.daemon_command.starts_with(&[
+            "aiq-runtime".to_string(),
+            "live".to_string(),
+            "daemon".to_string()
         ]));
         assert!(report
             .warnings
@@ -356,6 +475,11 @@ mod tests {
             profile: Some("production"),
             db: None,
             market_db: None,
+            candles_db: None,
+            symbols: &[],
+            symbols_file: None,
+            btc_symbol: "BTC",
+            secrets_path: None,
             lock_path: None,
             status_path: None,
             lookback_bars: Some(200),
@@ -414,6 +538,11 @@ mod tests {
             profile: None,
             db: None,
             market_db: None,
+            candles_db: None,
+            symbols: &[],
+            symbols_file: None,
+            btc_symbol: "BTC",
+            secrets_path: None,
             lock_path: None,
             status_path: None,
             lookback_bars: None,

@@ -9,7 +9,7 @@ Procedures for common operational scenarios. When the bot misbehaves, follow the
 | Paper trader (primary) | `openclaw-ai-quant-trader-v8-paper1` | Primary Rust paper trading daemon |
 | Paper trader (candidate #2) | `openclaw-ai-quant-trader-v8-paper2` | Candidate Rust paper trading daemon |
 | Paper trader (candidate #3) | `openclaw-ai-quant-trader-v8-paper3` | Candidate Rust paper trading daemon |
-| Live trader | `openclaw-ai-quant-live-v8` | Live trading daemon |
+| Live trader | `openclaw-ai-quant-live-v8` | Primary Rust live trading daemon |
 | WS sidecar | `openclaw-ai-quant-ws-sidecar` | Market data WebSocket |
 | Monitor | `openclaw-ai-quant-monitor` | Real-time dashboard |
 
@@ -853,6 +853,7 @@ cargo run -p aiq-runtime -- \
 Operational expectations:
 
 - `paper daemon` is the active paper runtime path; Python `engine.daemon` remains a legacy recovery/debug path and is no longer the authoritative paper service
+- `live daemon` is the authoritative live runtime path; Python `engine.daemon` / `live.trader` remain archival recovery/debug surfaces only
 - `--lane paper1|paper2|paper3|livepaper` resolves the conventional per-lane config path, promoted-role / strategy-mode contract, watched symbols file path, candle DB directory, DB path, and lock/status paths inside Rust
 - `--project-dir` lets operators point those lane defaults at a different worktree/root without rebuilding the binary
 - a lane-default watched symbols file may be absent at start-up; the daemon now idles cleanly and waits for later watchlist materialisation instead of failing before the first poll
@@ -999,6 +1000,34 @@ Service-apply expectations:
 - `--action stop` only signals a daemon when the current Rust status JSON and the active lock owner prove the same Rust pid owns the lane
 - `hold` and healthy `monitor` lanes are no-op outcomes under `--action auto`
 - the apply surface reuses the same `lock_path`, `status_path`, and launch contract from `paper manifest` / `paper status`, and it fails closed when status JSON is corrupt, daemon ownership cannot be proven, or the lane is not launch-ready
+
+---
+
+## 6b. Rust Live Service Contract
+
+Use when: you want to inspect or supervise the authoritative Rust live lane
+before a staged ramp, during a rollback check, or after a restart.
+
+```bash
+cargo run -p aiq-runtime -- live manifest --project-dir "$PWD" --json
+cargo run -p aiq-runtime -- live status --project-dir "$PWD" --json
+cargo run -p aiq-runtime -- live service inspect --project-dir "$PWD" --json
+```
+
+For supervised cutover or recovery:
+
+```bash
+cargo run -p aiq-runtime -- live service apply --project-dir "$PWD" --action auto --json
+```
+
+Live-service expectations:
+
+- `live manifest` is the preflight contract for the Rust live daemon, including the resolved candle DB, symbols wiring, secrets path, safety-gate state, and `daemon_command`
+- `live status` combines that launch contract with the persisted live status JSON so operators can detect drift, stale status, stopped lanes, or mismatched DB / profile / symbols wiring before restarting
+- `live service inspect` is read-only and tells you whether the live lane should be held, started, restarted, or simply monitored
+- `live service apply` is the mutating supervisor; it fails closed unless the Rust lock owner and status contract agree on the active pid
+- live cutover still follows the staged ramp policy: 25% size for 1 day, then 50% size for 1 day, then 100% only after the ramp gate remains green with zero kill-switch triggers
+- rollback remains immediate: use the existing pause / flatten workflow first, then inspect or restart the Rust live lane from the same service contract instead of falling back to the retired Python production path
 
 ---
 

@@ -88,7 +88,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed component descript
 
 | | |
 |---|---|
-| **Trading** | Unified paper / dry_live / live daemon with hot-reloadable YAML config |
+| **Trading** | Rust-owned paper + live runtime with hot-reloadable YAML config and archived Python recovery paths |
 | **Strategy** | Mei Alpha v1 — multi-indicator, confidence-ranked entries, ATR-based risk |
 | **Decision Kernel** | Shared Rust signal logic (`bt-signals`) across backtester, GPU sweep, and live trading via PyO3 bridge |
 | **Backtester** | CPU replay + CUDA GPU sweeps (60K param combos in ~3 s) + TPE Bayesian optimisation |
@@ -111,16 +111,19 @@ source .venv/bin/activate
 cp .env.example .env
 
 # Run paper trader
-AI_QUANT_MODE=paper python -m engine.daemon
+cargo run -p aiq-runtime -- paper daemon --lane paper1 --project-dir "$PWD"
 ```
 
-For live trading, copy secrets outside the repo and set safety flags:
+For live trading, copy secrets outside the repo and set safety flags. The
+authoritative live entrypoint is now the Rust runtime:
 
 ```bash
 mkdir -p ~/.config/openclaw
 cp config/secrets.json.example ~/.config/openclaw/ai-quant-secrets.json
 chmod 600 ~/.config/openclaw/ai-quant-secrets.json
-# Edit .env: AI_QUANT_MODE=live, AI_QUANT_LIVE_ENABLE=1, AI_QUANT_LIVE_CONFIRM=...
+# Edit the live env: AI_QUANT_LIVE_ENABLE=1, AI_QUANT_LIVE_CONFIRM=...
+cargo run -p aiq-runtime -- live manifest --project-dir "$PWD" --json
+cargo run -p aiq-runtime -- live service inspect --project-dir "$PWD" --json
 ```
 
 ## Backtester
