@@ -31,6 +31,7 @@ import os
 import time
 from collections import deque
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .core import UnifiedEngine, _build_default_decision_provider
 from .market_data import MarketDataHub
@@ -39,6 +40,9 @@ from .oms import LiveOms
 from .oms_reconciler import LiveOmsReconciler
 from .risk import RiskManager
 from . import alerting
+
+if TYPE_CHECKING:
+    from exchange.executor import HyperliquidLiveExecutor, LiveAccountSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -187,18 +191,22 @@ class StrategyModePolicy:
         return self._ORDER[min(i + 1, len(self._ORDER) - 1)]
 
     def _refresh_rust_effective_config(self) -> bool:
-        if _mode() != "paper":
+        mode = _mode()
+        if mode not in {"paper", "live", "dry_live"}:
             return True
         if str(os.getenv("AI_QUANT_EFFECTIVE_CONFIG_OWNER", "") or "").strip().lower() != "rust":
             return True
         try:
-            from .promoted_config import apply_paper_effective_config
+            from .promoted_config import apply_live_effective_config, apply_paper_effective_config
 
-            resolved = apply_paper_effective_config()
+            if mode == "paper":
+                resolved = apply_paper_effective_config()
+            else:
+                resolved = apply_live_effective_config()
             StrategyManager.get().replace_yaml_path(str(resolved.config_path))
             return True
         except Exception:
-            logger.warning("paper mode switch failed to refresh the Rust effective config", exc_info=True)
+            logger.warning("%s mode switch failed to refresh the Rust effective config", mode, exc_info=True)
             return False
 
     def maybe_switch(self) -> None:
@@ -1504,20 +1512,24 @@ def main() -> None:
         stream=sys.stdout,
     )
 
-    # Rust now owns the paper effective-config resolver contract. Resolve it
-    # before StrategyManager/bootstrap consumers import strategy defaults.
+    # Rust now owns the effective-config resolver contract for active runtime
+    # start-up. Resolve it before StrategyManager/bootstrap consumers import
+    # strategy defaults.
     promoted_role: str | None = None
-    if mode == "paper":
+    if mode in {"paper", "live", "dry_live"}:
         try:
-            from .promoted_config import apply_paper_effective_config
+            from .promoted_config import apply_live_effective_config, apply_paper_effective_config
 
-            resolved = apply_paper_effective_config()
+            if mode == "paper":
+                resolved = apply_paper_effective_config()
+            else:
+                resolved = apply_live_effective_config()
             promoted_role = resolved.promoted_role
         except Exception:
             import traceback
 
             raise RuntimeError(
-                f"paper effective-config resolution failed before daemon bootstrap\n{traceback.format_exc()}"
+                f"{mode} effective-config resolution failed before daemon bootstrap\n{traceback.format_exc()}"
             ) from None
 
     # Sync balance from live Hyperliquid account on startup.

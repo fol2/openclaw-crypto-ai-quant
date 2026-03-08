@@ -31,7 +31,7 @@ File lock prevents duplicate daemons: `ai_quant_paper.lock` / `ai_quant_live.loc
 | `oms_reconciler.py` | OMS state reconciliation against exchange positions/fills |
 | `alerting.py` | Discord / Telegram notifications via `openclaw message send` |
 | `event_logger.py` | Decision + trade event logging for audit trail |
-| `promoted_config.py` | Compatibility shim that calls the shared Rust `paper effective-config` resolver for paper start-up and factory materialisation |
+| `promoted_config.py` | Compatibility shim that calls the shared Rust effective-config resolver for paper, dry-live, live, and factory control-plane materialisation |
 | `sqlite_logger.py` | Trade, candle, and position state persistence |
 | `rest_client.py` | Hyperliquid REST API client |
 | `systemd_watchdog.py` | `sd_notify` integration for systemd services |
@@ -64,9 +64,10 @@ Durable OMS for live trading:
 `StrategyManager` watches the resolver-selected strategy YAML path via mtime
 polling. In the active Python compatibility path this remains the hot-reload
 surface, but the effective-config owner is now Rust:
-`aiq-runtime paper effective-config` resolves promoted-role discovery,
-strategy-mode selection, config identity, and the materialised YAML path before
-legacy paper recovery or factory materialisation continue.
+`aiq-runtime paper effective-config` is the shared resolver for paper and
+live-facing startup, resolving promoted-role discovery, strategy-mode
+selection, config identity, and the materialised YAML path before legacy Python
+runtime consumers continue.
 The `engine.interval` parameter is NOT hot-reloadable (requires service
 restart).
 
@@ -94,11 +95,11 @@ restart).
 | Variable | Description |
 |----------|-------------|
 | `AI_QUANT_LOCK_PATH` | Custom lock file path |
-| `AI_QUANT_STRATEGY_YAML` | Base strategy YAML input for the Rust resolver; paper start-up then switches to the resolver-selected materialised path |
+| `AI_QUANT_STRATEGY_YAML` | Base strategy YAML input for the Rust resolver; paper, dry-live, and live start-up then switch to the resolver-selected materialised path |
 | `AI_QUANT_PROMOTED_ROLE` | Promoted config selector (`primary` / `fallback` / `conservative`) |
 | `AI_QUANT_STRATEGY_MODE` | Strategy-mode selector; env wins over `AI_QUANT_STRATEGY_MODE_FILE` |
 | `AI_QUANT_STRATEGY_MODE_FILE` | File-backed strategy-mode fallback when the env var is unset |
-| `AI_QUANT_RUNTIME_BIN` | Optional absolute path to the `aiq-runtime` binary for paper start-up / factory control-plane resolution |
+| `AI_QUANT_RUNTIME_BIN` | Optional absolute path to the `aiq-runtime` binary for paper/live start-up and factory control-plane resolution |
 | `AI_QUANT_WS_ENABLE_BBO` | Enable BBO subscription (`0` to disable) |
 
 See `.env.example` for the full list.
