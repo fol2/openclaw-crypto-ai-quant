@@ -67,8 +67,14 @@ pub struct LiveManifestReport {
 
 pub fn build_manifest(input: LiveManifestInput<'_>) -> Result<LiveManifestReport> {
     let defaults = live_lane::defaults(input.project_dir)?;
+    let base_config_path = input
+        .config
+        .map(Path::to_path_buf)
+        .or_else(|| env_path("AI_QUANT_BASE_STRATEGY_YAML"))
+        .or_else(|| env_path("AI_QUANT_STRATEGY_YAML"))
+        .unwrap_or_else(|| defaults.config_path.clone());
     let effective_config = PaperEffectiveConfig::resolve(
-        input.config.or(Some(defaults.config_path.as_path())),
+        Some(base_config_path.as_path()),
         None,
         Some(defaults.project_dir.as_path()),
     )?;
@@ -364,5 +370,60 @@ mod tests {
             report.runtime_bootstrap.mode,
             aiq_runtime_core::runtime::RuntimeMode::Live
         );
+    }
+
+    #[test]
+    fn manifest_prefers_env_strategy_yaml_over_live_default() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempdir().unwrap();
+        let default_config_path = dir
+            .path()
+            .join("config")
+            .join("strategy_overrides.live.yaml");
+        let env_config_path = dir.path().join("config").join("custom-live.yaml");
+        write_config(&default_config_path, "30m");
+        write_config(&env_config_path, "15m");
+
+        let _env = EnvGuard::set(&[
+            (
+                "AI_QUANT_STRATEGY_YAML",
+                Some(env_config_path.to_str().unwrap()),
+            ),
+            ("AI_QUANT_BASE_STRATEGY_YAML", None),
+            ("AI_QUANT_LIVE_ENABLE", Some("1")),
+            (
+                "AI_QUANT_LIVE_CONFIRM",
+                Some("I_UNDERSTAND_THIS_CAN_LOSE_MONEY"),
+            ),
+            ("AI_QUANT_DB_PATH", None),
+            ("AI_QUANT_MARKET_DB_PATH", None),
+            ("AI_QUANT_LOCK_PATH", None),
+            ("AI_QUANT_STATUS_PATH", None),
+            ("AI_QUANT_CANDLES_DB_DIR", None),
+            ("AI_QUANT_STRATEGY_MODE_FILE", None),
+            ("AI_QUANT_EVENT_LOG_DIR", None),
+            ("AI_QUANT_INSTANCE_TAG", None),
+            ("AI_QUANT_LIVE_SERVICE_NAME", None),
+        ]);
+
+        let report = build_manifest(LiveManifestInput {
+            config: None,
+            project_dir: Some(dir.path()),
+            profile: None,
+            db: None,
+            market_db: None,
+            lock_path: None,
+            status_path: None,
+            lookback_bars: None,
+        })
+        .unwrap();
+
+        assert_eq!(
+            report.base_config_path,
+            env_config_path.display().to_string()
+        );
+        assert_eq!(report.interval, "15m");
     }
 }
