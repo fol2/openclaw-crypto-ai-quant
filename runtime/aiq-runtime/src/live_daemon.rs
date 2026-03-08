@@ -31,6 +31,8 @@ use crate::live_state::{
 };
 use crate::paper_config::PaperEffectiveConfig;
 
+const DEFAULT_FILL_CURSOR_LOOKBACK_MS: i64 = 2 * 60 * 60 * 1000;
+
 pub struct LiveDaemonInput<'a> {
     pub effective_config: PaperEffectiveConfig,
     pub runtime_bootstrap: aiq_runtime_core::runtime::RuntimeBootstrap,
@@ -221,7 +223,7 @@ pub fn run_daemon(input: LiveDaemonInput<'_>) -> Result<LiveDaemonReport> {
     let mut stop_requested = false;
     let mut idle_polls = 0usize;
     let mut last_step_close_ts_ms = None;
-    let mut last_fill_cursor_ms = Utc::now().timestamp_millis() - 2 * 60 * 60 * 1000;
+    let mut last_fill_cursor_ms = initial_fill_cursor_ms(input.live_db, &status_path)?;
     let mut last_cycle = None;
 
     ensure_live_runtime_tables(&rusqlite::Connection::open(input.live_db)?)?;
@@ -662,6 +664,38 @@ fn ingest_recent_fills(
     *last_fill_cursor_ms = now_ms;
     ensure_live_runtime_tables(&rusqlite::Connection::open(live_db)?)?;
     Ok(())
+}
+
+fn initial_fill_cursor_ms(live_db: &Path, status_path: &Path) -> Result<i64> {
+    let default_cursor_ms = Utc::now().timestamp_millis() - DEFAULT_FILL_CURSOR_LOOKBACK_MS;
+    let persisted_cursor_ms = load_status_file(status_path)?
+        .filter(|status| status.live_db == live_db.display().to_string())
+        .map(|status| status.last_fill_cursor_ms)
+        .filter(|cursor_ms| *cursor_ms > 0);
+    let db_cursor_ms = load_max_fill_ts_ms(live_db)?;
+
+    Ok(persisted_cursor_ms
+        .into_iter()
+        .chain(db_cursor_ms)
+        .max()
+        .unwrap_or(default_cursor_ms))
+}
+
+fn load_max_fill_ts_ms(live_db: &Path) -> Result<Option<i64>> {
+    let conn = rusqlite::Connection::open(live_db)?;
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(1) FROM sqlite_master WHERE type = 'table' AND name = 'oms_fills'",
+        [],
+        |row| row.get(0),
+    )?;
+    if exists == 0 {
+        return Ok(None);
+    }
+
+    conn.query_row("SELECT MAX(ts_ms) FROM oms_fills", [], |row| {
+        row.get::<_, Option<i64>>(0)
+    })
+    .map_err(Into::into)
 }
 
 struct ParsedFillInput {
@@ -1156,6 +1190,9 @@ fn write_status(status_path: &Path, status: &LiveDaemonStatus) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
+
+    use crate::live_oms::{InsertFillRequest, LiveOms};
 
     #[test]
     fn classify_fill_direction_maps_open_and_close_actions() {
@@ -1222,5 +1259,114 @@ mod tests {
             resolve_status_path(Some(explicit.as_path()), &lock_path),
             explicit
         );
+    }
+
+    #[test]
+    fn initial_fill_cursor_prefers_matching_status_cursor() {
+        let dir = tempdir().unwrap();
+        let live_db = dir.path().join("live.db");
+        std::fs::write(&live_db, []).unwrap();
+        let status_path = dir.path().join("live.status.json");
+        let status = LiveDaemonStatusSnapshot {
+            ok: true,
+            running: false,
+            pid: 42,
+            config_path: "config.yaml".to_string(),
+            live_db: live_db.display().to_string(),
+            candles_db: "candles.db".to_string(),
+            lock_path: "lock".to_string(),
+            status_path: status_path.display().to_string(),
+            started_at_ms: 1,
+            updated_at_ms: 2,
+            stopped_at_ms: Some(3),
+            stop_requested: false,
+            runtime_bootstrap: LiveDaemonStatusRuntimeBootstrap {
+                config_fingerprint: "fingerprint".to_string(),
+                pipeline: LiveDaemonStatusRuntimePipeline {
+                    profile: "production".to_string(),
+                },
+            },
+            btc_symbol: "BTC".to_string(),
+            lookback_bars: 200,
+            explicit_symbols: vec!["BTC".to_string()],
+            symbols_file: None,
+            latest_common_close_ts_ms: None,
+            last_step_close_ts_ms: None,
+            last_fill_cursor_ms: 1_700_000_000_000_i64,
+            last_plans_count: 0,
+            warnings: Vec::new(),
+            errors: Vec::new(),
+        };
+        std::fs::write(&status_path, serde_json::to_vec_pretty(&status).unwrap()).unwrap();
+
+        let cursor_ms = initial_fill_cursor_ms(&live_db, &status_path).unwrap();
+        assert_eq!(cursor_ms, 1_700_000_000_000_i64);
+    }
+
+    #[test]
+    fn initial_fill_cursor_ignores_mismatched_status_db_and_uses_db_fill_ts() {
+        let dir = tempdir().unwrap();
+        let live_db = dir.path().join("live.db");
+        let status_path = dir.path().join("live.status.json");
+        let oms = LiveOms::new(&live_db).unwrap();
+        oms.insert_fill(InsertFillRequest {
+            ts_ms: 1_700_000_100_000_i64,
+            symbol: "BTC",
+            intent_id: Some("intent-1"),
+            order_id: Some(1),
+            action: Some("CLOSE"),
+            side: Some("SELL"),
+            pos_type: Some("LONG"),
+            price: 40_000.0,
+            size: 0.1,
+            notional: 4_000.0,
+            fee_usd: Some(1.5),
+            fee_token: None,
+            fee_rate: None,
+            pnl_usd: Some(12.0),
+            fill_hash: Some("0xfill"),
+            fill_tid: Some(7),
+            matched_via: Some("client_order_id"),
+            raw: None,
+        })
+        .unwrap();
+        let mismatched_status = LiveDaemonStatusSnapshot {
+            ok: true,
+            running: false,
+            pid: 42,
+            config_path: "config.yaml".to_string(),
+            live_db: dir.path().join("other.db").display().to_string(),
+            candles_db: "candles.db".to_string(),
+            lock_path: "lock".to_string(),
+            status_path: status_path.display().to_string(),
+            started_at_ms: 1,
+            updated_at_ms: 2,
+            stopped_at_ms: Some(3),
+            stop_requested: false,
+            runtime_bootstrap: LiveDaemonStatusRuntimeBootstrap {
+                config_fingerprint: "fingerprint".to_string(),
+                pipeline: LiveDaemonStatusRuntimePipeline {
+                    profile: "production".to_string(),
+                },
+            },
+            btc_symbol: "BTC".to_string(),
+            lookback_bars: 200,
+            explicit_symbols: vec!["BTC".to_string()],
+            symbols_file: None,
+            latest_common_close_ts_ms: None,
+            last_step_close_ts_ms: None,
+            last_fill_cursor_ms: 1_800_000_000_000_i64,
+            last_plans_count: 0,
+            warnings: Vec::new(),
+            errors: Vec::new(),
+        };
+        std::fs::write(
+            &status_path,
+            serde_json::to_vec_pretty(&mismatched_status).unwrap(),
+        )
+        .unwrap();
+
+        let cursor_ms = initial_fill_cursor_ms(&live_db, &status_path).unwrap();
+        assert_eq!(cursor_ms, 1_700_000_100_000_i64);
     }
 }
