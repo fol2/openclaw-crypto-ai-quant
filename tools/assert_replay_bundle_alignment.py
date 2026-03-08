@@ -73,6 +73,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "--action-report", default="action_reconcile_report.json", help="Action reconcile report filename/path"
     )
     parser.add_argument(
+        "--skip-trade-axis",
+        action="store_true",
+        default=False,
+        help="Treat trade reconciliation as diagnostic-only and do not fail the gate on that axis.",
+    )
+    parser.add_argument(
+        "--skip-action-axis",
+        action="store_true",
+        default=False,
+        help="Treat action reconciliation as diagnostic-only and do not fail the gate on that axis.",
+    )
+    parser.add_argument(
         "--live-paper-report",
         default="live_paper_action_reconcile_report.json",
         help="Optional live/paper action reconcile report filename/path",
@@ -437,23 +449,26 @@ def main() -> int:
 
     failures: list[dict[str, Any]] = []
     axis_required: dict[str, bool] = {
-        "trade": True,
-        "action": True,
+        "trade": not bool(args.skip_trade_axis),
+        "action": not bool(args.skip_action_axis),
         "live_paper": bool(args.require_live_paper),
         "live_paper_decision_trace": bool(args.require_live_paper_decision_trace),
     }
     axis_report_present: dict[str, bool] = {axis: False for axis in _CONTRACT_AXES}
     axis_tool_status: dict[str, bool | None] = {axis: None for axis in _CONTRACT_AXES}
     axis_gate_status: dict[str, bool] = {
-        "trade": False,
-        "action": False,
+        "trade": bool(args.skip_trade_axis),
+        "action": bool(args.skip_action_axis),
         "live_paper": not bool(args.require_live_paper),
         "live_paper_decision_trace": not bool(args.require_live_paper_decision_trace),
     }
     axis_residual_count: dict[str, int] = {axis: 0 for axis in _CONTRACT_AXES}
     axis_blocking_residual_count: dict[str, int] = {axis: 0 for axis in _CONTRACT_AXES}
     axis_strict_no_residuals_checked: dict[str, bool] = {
-        axis: bool(args.strict_no_residuals and axis in _STRICT_RESIDUAL_CONTRACT_AXES) for axis in _CONTRACT_AXES
+        axis: bool(
+            args.strict_no_residuals and axis in _STRICT_RESIDUAL_CONTRACT_AXES and axis_required.get(axis)
+        )
+        for axis in _CONTRACT_AXES
     }
     axis_failure_codes: dict[str, list[str]] = {axis: [] for axis in _CONTRACT_AXES}
     candles_provenance_checked = not bool(args.skip_candles_provenance_check)
@@ -1119,16 +1134,18 @@ def main() -> int:
     trade_policy_mismatch_opt_in_proof: dict[str, Any] = {}
     trade_scope_contract_mismatch = False
     trade_scope_contract_proof_ok = False
+    trade_axis_enforced = bool(axis_required.get("trade"))
     if not trade_path.exists():
-        axis_gate_status["trade"] = False
-        axis_failure_codes["trade"].append("missing_trade_report")
-        failures.append(
-            {
-                "code": "missing_trade_report",
-                "classification": "deterministic_logic_divergence",
-                "detail": str(trade_path),
-            }
-        )
+        axis_gate_status["trade"] = not trade_axis_enforced
+        if trade_axis_enforced:
+            axis_failure_codes["trade"].append("missing_trade_report")
+            failures.append(
+                {
+                    "code": "missing_trade_report",
+                    "classification": "deterministic_logic_divergence",
+                    "detail": str(trade_path),
+                }
+            )
     else:
         trade_report = _load_json(trade_path)
         axis_report_present["trade"] = True
@@ -1144,12 +1161,12 @@ def main() -> int:
                 trade_scope_contract_proof_ok = bool(trade_scope_proof.get("evidence_complete"))
         trade_status = bool(trade_status_obj.get("strict_alignment_pass"))
         axis_tool_status["trade"] = trade_status
-        axis_gate_status["trade"] = trade_status
+        axis_gate_status["trade"] = trade_status if trade_axis_enforced else True
         trade_residuals = list(trade_report.get("accepted_residuals") or [])
         blocking_trade_residuals = _blocking_residuals_for_strict_mode(trade_residuals)
         axis_residual_count["trade"] = len(trade_residuals)
         axis_blocking_residual_count["trade"] = len(blocking_trade_residuals)
-        if not trade_status:
+        if trade_axis_enforced and not trade_status:
             trade_policy_opt_in_ok = False
             if args.allow_trade_policy_mismatch_residual:
                 trade_policy_opt_in_ok, trade_policy_mismatch_opt_in_proof = _trade_policy_mismatch_opt_in_proof(
@@ -1179,7 +1196,7 @@ def main() -> int:
                         "counts": trade_report.get("counts") or {},
                     }
                 )
-        if args.strict_no_residuals:
+        if trade_axis_enforced and args.strict_no_residuals:
             if blocking_trade_residuals:
                 axis_gate_status["trade"] = False
                 axis_failure_codes["trade"].append("trade_residuals_present")
@@ -1192,7 +1209,7 @@ def main() -> int:
                         "total_accepted_residuals": len(trade_residuals),
                     }
                 )
-        if trade_scope_contract_mismatch and not trade_scope_contract_proof_ok:
+        if trade_axis_enforced and trade_scope_contract_mismatch and not trade_scope_contract_proof_ok:
             axis_gate_status["trade"] = False
             axis_failure_codes["trade"].append("trade_replay_scope_contract_mismatch")
             failures.append(
@@ -1216,19 +1233,21 @@ def main() -> int:
     action_paper_window_not_replayed = False
     action_scope_contract_mismatch = False
     action_scope_contract_proof_ok = False
+    action_axis_enforced = bool(axis_required.get("action"))
     action_gate_mode = (
         "allow_action_artefact_residuals" if bool(args.allow_action_artefact_residuals) else "strict_fail_closed"
     )
     if not action_path.exists():
-        axis_gate_status["action"] = False
-        axis_failure_codes["action"].append("missing_action_report")
-        failures.append(
-            {
-                "code": "missing_action_report",
-                "classification": "deterministic_logic_divergence",
-                "detail": str(action_path),
-            }
-        )
+        axis_gate_status["action"] = not action_axis_enforced
+        if action_axis_enforced:
+            axis_failure_codes["action"].append("missing_action_report")
+            failures.append(
+                {
+                    "code": "missing_action_report",
+                    "classification": "deterministic_logic_divergence",
+                    "detail": str(action_path),
+                }
+            )
     else:
         action_report = _load_json(action_path)
         axis_report_present["action"] = True
@@ -1270,8 +1289,8 @@ def main() -> int:
                 )
         action_selected_status = action_opt_in_status if bool(args.allow_action_artefact_residuals) else action_strict_status
         axis_tool_status["action"] = action_strict_status
-        axis_gate_status["action"] = action_selected_status
-        if action_paper_window_not_replayed:
+        axis_gate_status["action"] = action_selected_status if action_axis_enforced else True
+        if action_axis_enforced and action_paper_window_not_replayed:
             action_selected_status = False
             axis_gate_status["action"] = False
             axis_failure_codes["action"].append("action_paper_window_not_replayed")
@@ -1285,7 +1304,7 @@ def main() -> int:
                     "paper_simulatable_actions": int(action_paper_simulatable),
                 }
             )
-        elif not action_selected_status:
+        elif action_axis_enforced and not action_selected_status:
             axis_failure_codes["action"].append("action_alignment_failed")
             failures.append(
                 {
@@ -1300,7 +1319,7 @@ def main() -> int:
                     "opt_in_proof": action_opt_in_proof,
                 }
             )
-        if args.strict_no_residuals:
+        if action_axis_enforced and args.strict_no_residuals:
             if blocking_action_residuals:
                 axis_gate_status["action"] = False
                 axis_failure_codes["action"].append("action_residuals_present")
@@ -1313,7 +1332,7 @@ def main() -> int:
                         "total_accepted_residuals": len(action_residuals),
                     }
                 )
-        if action_scope_contract_mismatch and not action_scope_contract_proof_ok:
+        if action_axis_enforced and action_scope_contract_mismatch and not action_scope_contract_proof_ok:
             axis_gate_status["action"] = False
             axis_failure_codes["action"].append("action_replay_scope_contract_mismatch")
             failures.append(
@@ -1664,6 +1683,8 @@ def main() -> int:
             "state_report": str(state_path),
             "trade_report": str(trade_path),
             "action_report": str(action_path),
+            "skip_trade_axis": bool(args.skip_trade_axis),
+            "skip_action_axis": bool(args.skip_action_axis),
             "live_paper_report": str(live_paper_path),
             "require_live_paper": bool(args.require_live_paper),
             "live_paper_decision_trace_report": str(live_paper_decision_trace_path),
@@ -1700,13 +1721,15 @@ def main() -> int:
             "trade_gate_ok": bool(axis_gate_status.get("trade")),
             "trade_scope_contract_mismatch": bool(trade_scope_contract_mismatch),
             "trade_scope_contract_proof_ok": bool(trade_scope_contract_proof_ok),
+            "trade_axis_skipped": bool(args.skip_trade_axis),
             "trade_policy_mismatch_opt_in_applied": bool(trade_policy_mismatch_opt_in_applied),
             "trade_policy_mismatch_opt_in_proof": trade_policy_mismatch_opt_in_proof,
             "action_required": bool(axis_required.get("action")),
             "action_report_present": bool(axis_report_present.get("action")),
             "action_tool_strict_ok": axis_tool_status.get("action"),
-            "action_ok": bool(action_selected_status) if action_report else False,
+            "action_ok": bool(axis_gate_status.get("action")) if action_report else False,
             "action_gate_ok": bool(axis_gate_status.get("action")),
+            "action_axis_skipped": bool(args.skip_action_axis),
             "action_gate_mode": action_gate_mode,
             "action_strict_ok": bool(action_strict_status),
             "action_opt_in_ok": bool(action_opt_in_status),

@@ -444,6 +444,17 @@ def _snapshot_sqlite_db(source: Path, target: Path) -> None:
         src_conn.close()
 
 
+def _default_strategy_config_path(*, repo_root: Path, live_db: Path) -> Path | None:
+    candidates = [
+        (live_db.parent / "config" / "strategy_overrides.yaml").resolve(),
+        (repo_root / "config" / "strategy_overrides.yaml").resolve(),
+    ]
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
 def _freeze_market_data_dbs(
     *,
     bundle_dir: Path,
@@ -772,6 +783,7 @@ def main() -> int:
     live_decision_trace_stats: dict[str, Any] | None = None
     oms_strategy_stats: dict[str, Any] | None = None
     market_data_snapshot: dict[str, Any] | None = None
+    requested_paper_db = paper_db
 
     bundle_root = _resolve_path(str(args.bundle_root), base=resolve_base)
     try:
@@ -1081,6 +1093,15 @@ def main() -> int:
                     }
                 )
 
+        if strategy_config_path is None:
+            default_strategy_config = _default_strategy_config_path(repo_root=repo_root, live_db=live_db)
+            if default_strategy_config is not None:
+                strategy_config_path = default_strategy_config
+                if strategy_config_resolution is None:
+                    strategy_config_resolution = {}
+                strategy_config_resolution["resolved_strategy_config"] = str(strategy_config_path)
+                strategy_config_resolution["resolution_mode"] = "repo_default_strategy_config_fallback"
+
         if strategy_config_path is not None:
             strategy_interval = _load_strategy_engine_interval(strategy_config_path)
             if strategy_interval and strategy_interval != interval:
@@ -1269,6 +1290,21 @@ def main() -> int:
                 strategy_config_resolution = {}
             strategy_config_resolution["market_data_snapshot"] = market_data_snapshot
 
+    if not failures:
+        try:
+            scheduled_paper_db = (bundle_dir / requested_paper_db.name).resolve()
+            _snapshot_sqlite_db(requested_paper_db, scheduled_paper_db)
+        except Exception as exc:
+            failures.append(
+                {
+                    "code": "paper_db_snapshot_failed",
+                    "classification": "state_initialisation_gap",
+                    "detail": str(exc),
+                }
+            )
+        else:
+            paper_db = scheduled_paper_db
+
     build_cmd = [
         "python3",
         str((repo_root / "tools" / "build_live_replay_bundle.py").resolve()),
@@ -1286,6 +1322,7 @@ def main() -> int:
         str(to_ts),
         "--bundle-dir",
         str(bundle_dir),
+        "--enable-live-paper-mirror",
     ]
     if strategy_config_path is not None:
         build_cmd.extend(["--strategy-config", str(strategy_config_path)])
@@ -1340,10 +1377,13 @@ def main() -> int:
             int((oms_strategy_stats or {}).get("rows_with_strategy_sha1") or 0) > 0
         )
         env["AQC_REQUIRE_OMS_STRATEGY_PROVENANCE"] = "1" if require_oms_strategy_provenance else "0"
+        env["AQC_SKIP_TRADE_AXIS"] = "1"
+        env["AQC_SKIP_ACTION_AXIS"] = "1"
         if strategy_config_resolution is None:
             strategy_config_resolution = {}
         strategy_config_resolution["require_oms_strategy_provenance"] = bool(require_oms_strategy_provenance)
         strategy_config_resolution["snapshot_strict_replace"] = True
+        strategy_config_resolution["gate_axis_scope"] = "phase2_paper_cutover"
         strategy_config_resolution["oms_strategy_window_stats"] = oms_strategy_stats
 
         harness_cmd = [
@@ -1496,6 +1536,7 @@ def main() -> int:
             "strategy_config": str(strategy_config_path) if strategy_config_path is not None else None,
             "live_db": str(live_db),
             "paper_db": str(paper_db),
+            "requested_paper_db": str(requested_paper_db),
             "candles_db": str(candles_db),
             "funding_db": str(funding_db) if funding_db is not None else None,
             "manifest": str(manifest_path),
