@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 import yaml
 
 from tools.ensemble_runner import build_launch_plan
@@ -46,3 +47,23 @@ def test_build_launch_plan_writes_derived_yaml(tmp_path: Path):
         assert p.env["AI_QUANT_MODE"] == "dry_live"
         assert p.env["AI_QUANT_STRATEGY_YAML"] == str(p.derived_yaml_path)
 
+
+def test_build_launch_plan_rejects_retired_paper_mode(tmp_path: Path):
+    base = tmp_path / "base.yaml"
+    base.write_text("global:\n  engine:\n    interval: 30m\n", encoding="utf-8")
+    spec_path = tmp_path / "ensemble.yaml"
+    spec_path.write_text(
+        yaml.safe_dump(
+            {"strategies": [{"name": "s1", "strategy_yaml": str(base), "overrides": {}, "env": {}}]},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="paper mode is retired"):
+        build_launch_plan(
+            spec_path=spec_path,
+            out_dir=tmp_path / "out",
+            mode="paper",
+            daemon_argv=["python3", "-m", "engine.daemon"],
+        )

@@ -18,6 +18,8 @@ Risk budgeting model (v1)
 This is an operator tool. It is intentionally conservative:
   - It defaults to dry-run (print plan only).
   - It requires --yes to actually launch.
+  - `paper` mode is retired after the Rust paper cutover; use the dedicated
+    Rust paper lane services instead.
 """
 
 from __future__ import annotations
@@ -162,6 +164,11 @@ def build_launch_plan(
     daemon_argv: list[str],
 ) -> list[LaunchPlan]:
     root = AIQ_ROOT
+    if str(mode).strip().lower() == "paper":
+        raise ValueError(
+            "ensemble paper mode is retired after the Rust paper cutover; "
+            "use the dedicated Rust paper lane services instead"
+        )
     spec_obj = _load_yaml(spec_path)
     strategies = _parse_strategy_specs(spec_obj, root=root)
 
@@ -227,8 +234,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--mode",
         default="dry_live",
-        choices=["paper", "dry_live", "live"],
-        help="Daemon mode for all strategies (default: dry_live).",
+        choices=["dry_live", "live"],
+        help="Daemon mode for all strategies (default: dry_live). Paper mode is retired after the Rust paper cutover.",
     )
     ap.add_argument(
         "--out-dir",
