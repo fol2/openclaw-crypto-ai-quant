@@ -166,22 +166,36 @@ pub fn build_manifest(input: LiveManifestInput<'_>) -> Result<LiveManifestReport
         ));
     }
 
-    let daemon_command = vec![
-        defaults
-            .project_dir
-            .join(".venv")
-            .join("bin")
-            .join("python3")
-            .display()
-            .to_string(),
-        "-u".to_string(),
-        "-m".to_string(),
-        "engine.daemon".to_string(),
+    let runtime_bin = env_path("AI_QUANT_RUNTIME_BIN")
+        .unwrap_or_else(|| PathBuf::from("aiq-runtime"))
+        .display()
+        .to_string();
+    let mut daemon_command = vec![
+        runtime_bin,
+        "live".to_string(),
+        "daemon".to_string(),
+        "--config".to_string(),
+        effective_config.base_config_path().display().to_string(),
+        "--db".to_string(),
+        live_db.display().to_string(),
+        "--lock-path".to_string(),
+        lock_path.display().to_string(),
+        "--status-path".to_string(),
+        status_path.display().to_string(),
+        "--btc-symbol".to_string(),
+        "BTC".to_string(),
     ];
+    if let Some(lookback_bars) = input
+        .lookback_bars
+        .or_else(|| env_usize("AI_QUANT_LOOKBACK_BARS"))
+    {
+        daemon_command.push("--lookback-bars".to_string());
+        daemon_command.push(lookback_bars.to_string());
+    }
 
     Ok(LiveManifestReport {
         ok: safety_gate_ready,
-        runtime_owner: "python".to_string(),
+        runtime_owner: "rust".to_string(),
         launch_state,
         runtime_bootstrap,
         base_config_path: effective_config.base_config_path().display().to_string(),
@@ -299,7 +313,7 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(report.runtime_owner, "python");
+        assert_eq!(report.runtime_owner, "rust");
         assert_eq!(report.launch_state, LiveManifestLaunchState::Blocked);
         assert_eq!(report.service_name, "openclaw-ai-quant-live-v8");
         assert_eq!(report.instance_tag, "v8-LIVE");
@@ -309,10 +323,10 @@ mod tests {
         assert!(report.market_db.ends_with("market_data_v8_live.db"));
         assert!(report.lock_path.ends_with("ai_quant_v8_live.lock"));
         assert!(report.status_path.ends_with("ai_quant_v8_live.status.json"));
-        assert!(report.daemon_command.ends_with(&[
-            "-u".to_string(),
-            "-m".to_string(),
-            "engine.daemon".to_string()
+        assert!(report.daemon_command.starts_with(&[
+            "aiq-runtime".to_string(),
+            "live".to_string(),
+            "daemon".to_string()
         ]));
         assert!(report
             .warnings

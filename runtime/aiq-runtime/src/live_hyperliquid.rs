@@ -177,7 +177,7 @@ impl HyperliquidClient {
 
         #[derive(Debug, Deserialize)]
         struct LeveragePayload {
-            value: Option<String>,
+            value: Option<serde_json::Value>,
         }
 
         let response: Response =
@@ -203,8 +203,8 @@ impl HyperliquidClient {
                 .position
                 .leverage
                 .as_ref()
-                .and_then(|payload| payload.value.as_deref())
-                .map(|value| parse_number(value, "leverage"))
+                .and_then(|payload| payload.value.as_ref())
+                .map(|value| parse_json_number(value, "leverage"))
                 .transpose()?
                 .unwrap_or(1.0)
                 .max(1.0);
@@ -754,6 +754,18 @@ fn parse_number(raw: &str, field: &str) -> Result<f64> {
         .with_context(|| format!("failed to parse Hyperliquid numeric field {field}: {raw}"))
 }
 
+fn parse_json_number(raw: &serde_json::Value, field: &str) -> Result<f64> {
+    match raw {
+        serde_json::Value::String(value) => parse_number(value, field),
+        serde_json::Value::Number(value) => value
+            .as_f64()
+            .with_context(|| format!("failed to parse Hyperliquid numeric field {field}: {value}")),
+        other => anyhow::bail!(
+            "failed to parse Hyperliquid numeric field {field}: expected string/number, got {other}"
+        ),
+    }
+}
+
 fn map_value(entries: Vec<(&str, Value)>) -> Value {
     Value::Map(
         entries
@@ -907,6 +919,18 @@ mod tests {
     fn local_slippage_uses_buy_round_up_and_sell_round_down() {
         assert_eq!(local_slippage_limit_px(100.0, true, 0.01), Some(101.0));
         assert_eq!(local_slippage_limit_px(100.0, false, 0.01), Some(99.0));
+    }
+
+    #[test]
+    fn parse_json_number_accepts_strings_and_integers() {
+        assert_eq!(
+            parse_json_number(&serde_json::Value::String("7".to_string()), "leverage").unwrap(),
+            7.0
+        );
+        assert_eq!(
+            parse_json_number(&serde_json::Value::from(4_i64), "leverage").unwrap(),
+            4.0
+        );
     }
 
     #[test]

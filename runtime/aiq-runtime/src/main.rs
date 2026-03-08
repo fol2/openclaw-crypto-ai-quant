@@ -7,6 +7,10 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+#[allow(dead_code)]
+mod live_cycle;
+#[allow(dead_code)]
+mod live_daemon;
 mod live_hyperliquid;
 mod live_lane;
 mod live_manifest;
@@ -16,6 +20,8 @@ mod live_oms;
 mod live_risk;
 mod live_safety;
 mod live_secrets;
+#[allow(dead_code)]
+mod live_state;
 mod paper_config;
 mod paper_cycle;
 mod paper_daemon;
@@ -179,6 +185,55 @@ struct LiveManifestArgs {
     json: bool,
 }
 
+#[derive(Debug, Clone, Args)]
+struct LiveDaemonArgs {
+    /// Optional YAML config path override. Falls back to the conventional live config path.
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Optional project/worktree root for live-default paths. Falls back to the current working directory.
+    #[arg(long)]
+    project_dir: Option<PathBuf>,
+    /// Override the runtime pipeline profile.
+    #[arg(long)]
+    profile: Option<String>,
+    /// Optional live DB override. Falls back to AI_QUANT_DB_PATH or the conventional live DB path.
+    #[arg(long)]
+    db: Option<PathBuf>,
+    /// Optional candle DB override. Falls back to AI_QUANT_CANDLES_DB_DIR + the resolved interval.
+    #[arg(long)]
+    candles_db: Option<PathBuf>,
+    /// Explicit symbol list override (comma-delimited). Falls back to AI_QUANT_SYMBOLS when empty.
+    #[arg(long, value_delimiter = ',')]
+    symbols: Vec<String>,
+    /// Optional file containing one symbol per line. Loaded on each daemon iteration.
+    #[arg(long)]
+    symbols_file: Option<PathBuf>,
+    /// BTC anchor symbol for alignment context.
+    #[arg(long, default_value = "BTC")]
+    btc_symbol: String,
+    /// Optional lookback override. Falls back to AI_QUANT_LOOKBACK_BARS or 400.
+    #[arg(long)]
+    lookback_bars: Option<usize>,
+    /// Optional live secrets path. Falls back to AI_QUANT_SECRETS_PATH or ~/.config/openclaw/ai-quant-secrets.json.
+    #[arg(long)]
+    secrets_path: Option<PathBuf>,
+    /// Optional daemon lock path override. Falls back to AI_QUANT_LOCK_PATH or the conventional live lock path.
+    #[arg(long)]
+    lock_path: Option<PathBuf>,
+    /// Optional daemon status path override. Falls back to AI_QUANT_STATUS_PATH or the lock-derived default.
+    #[arg(long)]
+    status_path: Option<PathBuf>,
+    /// Sleep duration between live daemon polls.
+    #[arg(long, default_value_t = 5_000)]
+    idle_sleep_ms: u64,
+    /// Maximum number of idle polls before exiting. Zero means unbounded.
+    #[arg(long, default_value_t = 0)]
+    max_idle_polls: usize,
+    /// Emit machine-readable JSON instead of a human summary.
+    #[arg(long)]
+    json: bool,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ModeArg {
     Live,
@@ -254,6 +309,8 @@ enum LiveCommand {
     EffectiveConfig(LiveEffectiveConfigArgs),
     /// Resolve the current live launch contract and safety-gate state.
     Manifest(LiveManifestArgs),
+    /// Execute the Rust live daemon owner for the production live lane.
+    Daemon(LiveDaemonArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -723,6 +780,28 @@ fn load_symbols(symbols: Vec<String>, symbols_file: Option<&Path>) -> Result<Vec
 
 fn bootstrap_symbol_hint(symbols: &[String]) -> Option<&str> {
     (symbols.len() == 1).then(|| symbols[0].as_str())
+}
+
+fn default_live_secrets_path() -> PathBuf {
+    std::env::var("AI_QUANT_SECRETS_PATH")
+        .ok()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("~/.config/openclaw/ai-quant-secrets.json"))
+}
+
+fn resolve_live_candles_db(candles_db: Option<&Path>, interval: &str) -> PathBuf {
+    if let Some(candles_db) = candles_db {
+        return candles_db.to_path_buf();
+    }
+    if let Ok(path) = std::env::var("AI_QUANT_CANDLES_DB_PATH") {
+        if !path.trim().is_empty() {
+            return PathBuf::from(path);
+        }
+    }
+    let candles_dir = std::env::var("AI_QUANT_CANDLES_DB_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("candles_dbs"));
+    candles_dir.join(format!("candles_{interval}.db"))
 }
 
 fn run_snapshot(command: SnapshotCommand) -> Result<()> {
@@ -1389,6 +1468,64 @@ fn run_live(command: LiveCommand) -> Result<()> {
                 }
             }
         }
+        LiveCommand::Daemon(args) => {
+            let report = live_manifest::build_manifest(live_manifest::LiveManifestInput {
+                config: args.config.as_deref(),
+                project_dir: args.project_dir.as_deref(),
+                profile: args.profile.as_deref(),
+                db: args.db.as_deref(),
+                market_db: None,
+                lock_path: args.lock_path.as_deref(),
+                status_path: args.status_path.as_deref(),
+                lookback_bars: args.lookback_bars,
+            })?;
+            let effective_config = paper_config::PaperEffectiveConfig::resolve(
+                Some(Path::new(&report.base_config_path)),
+                None,
+                args.project_dir.as_deref(),
+            )?;
+            let runtime_bootstrap =
+                effective_config.build_runtime_bootstrap(None, true, args.profile.as_deref())?;
+            let symbols = load_symbols(args.symbols.clone(), args.symbols_file.as_deref())?;
+            let candles_db = resolve_live_candles_db(args.candles_db.as_deref(), &report.interval);
+            let secrets_path = args
+                .secrets_path
+                .clone()
+                .unwrap_or_else(default_live_secrets_path);
+            let daemon_report = live_daemon::run_daemon(live_daemon::LiveDaemonInput {
+                effective_config,
+                runtime_bootstrap,
+                live_db: Path::new(&report.live_db),
+                candles_db: &candles_db,
+                explicit_symbols: &symbols,
+                symbols_file: args.symbols_file.as_deref(),
+                btc_symbol: &args.btc_symbol,
+                lookback_bars: args.lookback_bars.unwrap_or(400),
+                secrets_path: &secrets_path,
+                lock_path: Some(Path::new(&report.lock_path)),
+                status_path: Some(Path::new(&report.status_path)),
+                idle_sleep_ms: args.idle_sleep_ms,
+                max_idle_polls: args.max_idle_polls,
+            })?;
+
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&daemon_report)?);
+            } else {
+                println!(
+                    "live daemon ok: pid={} lock={} status={} last_fill_cursor_ms={} stop_requested={} plans={}",
+                    daemon_report.pid,
+                    daemon_report.lock_path,
+                    daemon_report.status_path,
+                    daemon_report.last_fill_cursor_ms,
+                    daemon_report.stop_requested,
+                    daemon_report
+                        .last_cycle
+                        .as_ref()
+                        .map(|cycle| cycle.plans.len())
+                        .unwrap_or(0)
+                );
+            }
+        }
     }
 
     Ok(())
@@ -1449,6 +1586,18 @@ mod tests {
         match cli.command {
             Command::Live {
                 command: LiveCommand::Manifest(args),
+            } => assert!(args.json),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_live_daemon_surface() {
+        let cli = Cli::try_parse_from(["aiq-runtime", "live", "daemon", "--json"])
+            .expect("live daemon should parse");
+        match cli.command {
+            Command::Live {
+                command: LiveCommand::Daemon(args),
             } => assert!(args.json),
             other => panic!("unexpected command: {other:?}"),
         }

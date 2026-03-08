@@ -309,7 +309,19 @@ impl LiveRiskManager {
 
     pub fn refresh(&mut self, now_ms: i64, equity_usd: Option<f64>) {
         if self.env_runtime_enabled {
+            let prior_entry_per_min = self.config.max_entry_orders_per_min;
+            let prior_exit_per_min = self.config.max_exit_orders_per_min;
+            let prior_cancel_per_min = self.config.max_cancels_per_min;
             self.config.apply_env_overrides();
+            if self.config.max_entry_orders_per_min != prior_entry_per_min {
+                self.entry_bucket = TokenBucket::per_minute(self.config.max_entry_orders_per_min);
+            }
+            if self.config.max_exit_orders_per_min != prior_exit_per_min {
+                self.exit_bucket = TokenBucket::per_minute(self.config.max_exit_orders_per_min);
+            }
+            if self.config.max_cancels_per_min != prior_cancel_per_min {
+                self.cancel_bucket = TokenBucket::per_minute(self.config.max_cancels_per_min);
+            }
             self.trim_slippage_window();
         }
         self.refresh_manual_kill(now_ms);
@@ -798,6 +810,110 @@ mod tests {
         });
         assert!(!second_cancel.allowed);
         assert_eq!(second_cancel.reason, "cancel_rate");
+    }
+
+    #[test]
+    fn env_refresh_rebuilds_rate_limit_buckets_when_limits_change() {
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let day_one_ms = utc_ms(2025, 3, 8);
+        let initial_env = EnvGuard::set(&[
+            ("AI_QUANT_RISK_MAX_ENTRY_ORDERS_PER_MIN", Some("1")),
+            ("AI_QUANT_RISK_MAX_EXIT_ORDERS_PER_MIN", Some("1")),
+            ("AI_QUANT_RISK_MAX_CANCELS_PER_MIN", Some("1")),
+        ]);
+
+        let mut risk = LiveRiskManager::from_env();
+        assert!(
+            risk.allow_order(OrderCheck {
+                now_ms: day_one_ms,
+                symbol: "BTC",
+                action: OrderAction::Open,
+                reduce_risk: false,
+            })
+            .allowed
+        );
+        assert!(
+            risk.allow_order(OrderCheck {
+                now_ms: day_one_ms,
+                symbol: "BTC",
+                action: OrderAction::Close,
+                reduce_risk: true,
+            })
+            .allowed
+        );
+        assert!(
+            risk.allow_cancel(CancelCheck {
+                now_ms: day_one_ms,
+                symbol: "BTC",
+                exchange_order_id: Some("1"),
+            })
+            .allowed
+        );
+
+        assert_eq!(
+            risk.allow_order(OrderCheck {
+                now_ms: day_one_ms + 1,
+                symbol: "BTC",
+                action: OrderAction::Add,
+                reduce_risk: false,
+            })
+            .reason,
+            "entry_rate"
+        );
+        assert_eq!(
+            risk.allow_order(OrderCheck {
+                now_ms: day_one_ms + 1,
+                symbol: "BTC",
+                action: OrderAction::Reduce,
+                reduce_risk: true,
+            })
+            .reason,
+            "exit_rate"
+        );
+        assert_eq!(
+            risk.allow_cancel(CancelCheck {
+                now_ms: day_one_ms + 1,
+                symbol: "BTC",
+                exchange_order_id: Some("2"),
+            })
+            .reason,
+            "cancel_rate"
+        );
+
+        drop(initial_env);
+        let _updated_env = EnvGuard::set(&[
+            ("AI_QUANT_RISK_MAX_ENTRY_ORDERS_PER_MIN", Some("2")),
+            ("AI_QUANT_RISK_MAX_EXIT_ORDERS_PER_MIN", Some("2")),
+            ("AI_QUANT_RISK_MAX_CANCELS_PER_MIN", Some("2")),
+        ]);
+        risk.refresh(day_one_ms + 5_000, Some(1_000.0));
+
+        assert!(
+            risk.allow_order(OrderCheck {
+                now_ms: day_one_ms + 5_001,
+                symbol: "BTC",
+                action: OrderAction::Add,
+                reduce_risk: false,
+            })
+            .allowed
+        );
+        assert!(
+            risk.allow_order(OrderCheck {
+                now_ms: day_one_ms + 5_001,
+                symbol: "BTC",
+                action: OrderAction::Reduce,
+                reduce_risk: true,
+            })
+            .allowed
+        );
+        assert!(
+            risk.allow_cancel(CancelCheck {
+                now_ms: day_one_ms + 5_001,
+                symbol: "BTC",
+                exchange_order_id: Some("3"),
+            })
+            .allowed
+        );
     }
 
     #[test]
