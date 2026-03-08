@@ -142,9 +142,7 @@ def _ensure_audit_table(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_events_ts ON audit_events(timestamp)")
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_audit_events_symbol_ts ON audit_events(symbol, timestamp)"
-    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_events_symbol_ts ON audit_events(symbol, timestamp)")
     conn.commit()
 
 
@@ -183,7 +181,7 @@ _DIR_MAP: dict[str, tuple[str, str]] = {
 }
 
 
-def _dir_to_pos_action(dir_s: str, start_pos: float) -> tuple[str, str]:
+def _dir_to_pos_action(dir_s: str, start_pos: float, fill_size: float | None = None) -> tuple[str, str]:
     """Convert HL fill direction to (pos_type, action).
 
     Handles HL formats: "Open Long", "openLong", "close short", etc.
@@ -200,6 +198,18 @@ def _dir_to_pos_action(dir_s: str, start_pos: float) -> tuple[str, str]:
     if act == "OPEN" and abs(start_pos) > 1e-12:
         return (pt, "ADD")
     if act == "CLOSE" and abs(start_pos) > 1e-12:
+        try:
+            fs = abs(float(fill_size or 0.0))
+        except Exception:
+            fs = 0.0
+        if fs > 0:
+            # Hyperliquid reports a signed startPosition and a positive fill size.
+            # A fill that moves the signed position back to ~0 is the terminal CLOSE leg,
+            # even when it is not the first fill returned for the order.
+            end_pos = (float(start_pos) - fs) if pt == "LONG" else (float(start_pos) + fs)
+            tol = max(1e-9, abs(float(start_pos)) * 1e-9, fs * 1e-9)
+            if abs(end_pos) <= tol:
+                return (pt, "CLOSE")
         return (pt, "REDUCE")
     return (pt, act)
 
@@ -211,46 +221,124 @@ def _action_side(pos_type: str, action: str) -> str:
         return "SELL" if action in ("OPEN", "ADD") else "BUY"
 
 
-def _poll_fill(
+def _fill_identity(fill: dict[str, Any]) -> tuple[Any, ...]:
+    fill_hash = str(fill.get("hash") or "").strip()
+    tid = fill.get("tid")
+    if fill_hash and tid is not None:
+        return ("hash_tid", fill_hash, int(tid))
+    return (
+        "fallback",
+        str(fill.get("oid") or ""),
+        str(fill.get("time") or ""),
+        str(fill.get("px") or ""),
+        str(fill.get("sz") or ""),
+        str(fill.get("dir") or ""),
+        str(fill.get("startPosition") or ""),
+    )
+
+
+def _fill_sort_key(fill: dict[str, Any]) -> tuple[int, int, str]:
+    try:
+        t_ms = int(fill.get("time") or 0)
+    except Exception:
+        t_ms = 0
+    try:
+        tid = int(fill.get("tid") or 0)
+    except Exception:
+        tid = 0
+    return (t_ms, tid, str(fill.get("hash") or ""))
+
+
+def _fill_matches(
+    fill: dict[str, Any],
+    *,
+    cloid: str,
+    symbol: str,
+    exchange_order_id: str | None = None,
+) -> bool:
+    f_cloid = str(fill.get("cloid") or "").strip()
+    if f_cloid and f_cloid == cloid:
+        return True
+
+    f_coin = str(fill.get("coin") or "").strip().upper()
+    f_oid = str(fill.get("oid") or "").strip()
+    if f_coin != str(symbol or "").strip().upper():
+        return False
+    if exchange_order_id and f_oid == str(exchange_order_id).strip():
+        return True
+    return False
+
+
+def _poll_fills(
     executor: Any,
     cloid: str,
     symbol: str,
     start_ms: int,
     *,
+    exchange_order_id: str | None = None,
     max_wait_s: float = 8.0,
     poll_interval_s: float = 0.8,
-) -> dict[str, Any] | None:
-    """Poll exchange for a fill matching our CLOID.  Returns raw fill dict or None."""
-    import time as _time
-
-    deadline = _time.monotonic() + max_wait_s
-    while _time.monotonic() < deadline:
-        _time.sleep(poll_interval_s)
-        now_ms = int(_time.time() * 1000)
+    quiet_polls_after_first: int = 1,
+) -> list[dict[str, Any]]:
+    """Poll exchange for all fills that belong to this order."""
+    deadline = time.monotonic() + max_wait_s
+    matched: dict[tuple[Any, ...], dict[str, Any]] = {}
+    quiet_polls = 0
+    while time.monotonic() < deadline:
+        time.sleep(poll_interval_s)
+        now_ms = int(time.time() * 1000)
         try:
-            fills = executor._info.user_fills_by_time(
-                executor.main_address, start_ms, now_ms,
-                aggregate_by_time=False,
-            ) or []
+            fills = (
+                executor._info.user_fills_by_time(
+                    executor.main_address,
+                    start_ms,
+                    now_ms,
+                    aggregate_by_time=False,
+                )
+                or []
+            )
         except Exception as exc:
             logger.warning("fill poll error: %s", exc)
             continue
+        before = len(matched)
         for f in fills:
             if not isinstance(f, dict):
                 continue
-            f_cloid = str(f.get("cloid") or "").strip()
-            if f_cloid and f_cloid == cloid:
-                return f
-            # Also match by coin if cloid not present in fill
-            f_coin = str(f.get("coin") or "").strip().upper()
-            f_oid = str(f.get("oid") or "")
-            if f_coin == symbol and f_oid:
-                # Check order status by oid to see if it matches our cloid
-                # (fallback for exchanges that don't echo cloid in fills)
-                pass
-        # For market/IOC orders, if we see ANY fill for the symbol after our
-        # submission time, it's very likely ours — but we only trust cloid match.
-    return None
+            if not _fill_matches(
+                f,
+                cloid=cloid,
+                symbol=symbol,
+                exchange_order_id=exchange_order_id,
+            ):
+                continue
+            matched[_fill_identity(f)] = f
+        if matched:
+            if len(matched) == before:
+                quiet_polls += 1
+            else:
+                quiet_polls = 0
+            if quiet_polls >= max(0, int(quiet_polls_after_first)):
+                break
+    return sorted(matched.values(), key=_fill_sort_key)
+
+
+def _summarise_fills(fills: list[dict[str, Any]]) -> dict[str, float | None]:
+    total_size = 0.0
+    total_notional = 0.0
+    total_pnl = 0.0
+    for fill in fills:
+        sz = _safe_float(fill.get("sz")) or 0.0
+        px = _safe_float(fill.get("px")) or 0.0
+        total_size += sz
+        if px > 0 and sz > 0:
+            total_notional += sz * px
+        total_pnl += _safe_float(fill.get("closedPnl")) or 0.0
+    filled_price = (total_notional / total_size) if total_size > 0 else None
+    return {
+        "filled_size": total_size,
+        "filled_price": filled_price,
+        "closed_pnl": total_pnl,
+    }
 
 
 def _ensure_oms_fills_table(conn: sqlite3.Connection) -> None:
@@ -279,12 +367,8 @@ def _ensure_oms_fills_table(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_oms_fills_hash_tid ON oms_fills(fill_hash, fill_tid)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_oms_fills_intent ON oms_fills(intent_id)"
-    )
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_oms_fills_hash_tid ON oms_fills(fill_hash, fill_tid)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_oms_fills_intent ON oms_fills(intent_id)")
     conn.commit()
 
 
@@ -342,7 +426,7 @@ def _record_fill(
     start_pos = _safe_float(fill.get("startPosition"))
     oid = fill.get("oid")
 
-    pos_type, action = _dir_to_pos_action(dir_s, start_pos)
+    pos_type, action = _dir_to_pos_action(dir_s, start_pos, sz)
     side = _action_side(pos_type, action)
     notional = abs(sz) * px if px > 0 else 0.0
     fee_rate = (fee / notional) if notional > 0 else 0.0
@@ -372,9 +456,24 @@ def _record_fill(
                     fill_hash, fill_tid, matched_via, raw_json)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    t_ms, sym, intent_id, oid, action, side, pos_type,
-                    px, sz, notional, fee, fee_token, fee_rate, closed_pnl,
-                    fill_hash, tid, "cloid", meta,
+                    t_ms,
+                    sym,
+                    intent_id,
+                    oid,
+                    action,
+                    side,
+                    pos_type,
+                    px,
+                    sz,
+                    notional,
+                    fee,
+                    fee_token,
+                    fee_rate,
+                    closed_pnl,
+                    fill_hash,
+                    tid,
+                    "cloid",
+                    meta,
                 ),
             )
 
@@ -388,10 +487,26 @@ def _record_fill(
                         meta_json, fill_hash, fill_tid)
                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
-                        ts_iso, sym, pos_type, action, px, sz, notional,
-                        "manual_trade", "MANUAL", closed_pnl, fee, fee_token, fee_rate,
-                        account_value, None, leverage, margin_used,
-                        meta, fill_hash, tid,
+                        ts_iso,
+                        sym,
+                        pos_type,
+                        action,
+                        px,
+                        sz,
+                        notional,
+                        "manual_trade",
+                        "MANUAL",
+                        closed_pnl,
+                        fee,
+                        fee_token,
+                        fee_rate,
+                        account_value,
+                        None,
+                        leverage,
+                        margin_used,
+                        meta,
+                        fill_hash,
+                        tid,
                     ),
                 )
             else:
@@ -402,9 +517,24 @@ def _record_fill(
                         balance, entry_atr, leverage, margin_used, meta_json)
                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
-                        ts_iso, sym, pos_type, action, px, sz, notional,
-                        "manual_trade", "MANUAL", closed_pnl, fee, fee_token, fee_rate,
-                        account_value, None, leverage, margin_used, meta,
+                        ts_iso,
+                        sym,
+                        pos_type,
+                        action,
+                        px,
+                        sz,
+                        notional,
+                        "manual_trade",
+                        "MANUAL",
+                        closed_pnl,
+                        fee,
+                        fee_token,
+                        fee_rate,
+                        account_value,
+                        None,
+                        leverage,
+                        margin_used,
+                        meta,
                     ),
                 )
             conn.commit()
@@ -462,9 +592,7 @@ def _action_preview(args: argparse.Namespace) -> dict[str, Any]:
     # Check max leverage for this symbol
     max_lev = _meta_mod.max_leverage(symbol, notional)
     if max_lev is not None and leverage > max_lev:
-        return _err(
-            f"Leverage {leverage}x exceeds max {max_lev:.0f}x for {symbol} at ${notional:.0f} notional"
-        )
+        return _err(f"Leverage {leverage}x exceeds max {max_lev:.0f}x for {symbol} at ${notional:.0f} notional")
 
     # Fetch mid price
     mids = executor._info.all_mids() or {}
@@ -550,9 +678,7 @@ def _action_execute(args: argparse.Namespace) -> dict[str, Any]:
 
     max_lev = _meta_mod.max_leverage(symbol, notional)
     if max_lev is not None and leverage > max_lev:
-        return _err(
-            f"Leverage {leverage}x exceeds max {max_lev:.0f}x for {symbol} at ${notional:.0f} notional"
-        )
+        return _err(f"Leverage {leverage}x exceeds max {max_lev:.0f}x for {symbol} at ${notional:.0f} notional")
 
     # Fetch mid price
     mids = executor._info.all_mids() or {}
@@ -704,30 +830,49 @@ def _action_execute(args: argparse.Namespace) -> dict[str, Any]:
     # GTC: may not fill — brief 3s check, leave as SENT if unfilled
     is_gtc = order_type == "limit_gtc"
     poll_wait = 3.0 if is_gtc else 8.0
-    fill = _poll_fill(executor, cloid, symbol, submit_ms, max_wait_s=poll_wait)
+    fills = _poll_fills(
+        executor,
+        cloid,
+        symbol,
+        submit_ms,
+        exchange_order_id=exchange_order_id,
+        max_wait_s=poll_wait,
+    )
 
     filled_size = est_size
     filled_price: float | None = None
-    if fill:
-        filled_price = _safe_float(fill.get("px"))
-        filled_size = _safe_float(fill.get("sz")) or est_size
-        oms_status = "FILLED"
-        store.update_intent(intent_id, status="FILLED")
+    if fills:
+        summary = _summarise_fills(fills)
+        filled_size = float(summary["filled_size"] or 0.0) or est_size
+        filled_price = _safe_float(summary["filled_price"])
+        if filled_size >= (est_size * 0.999):
+            oms_status = "FILLED"
+        else:
+            oms_status = "PARTIAL"
+        store.update_intent(intent_id, status=oms_status)
         # Write oms_fills + trades records
         try:
             snap = executor.account_snapshot(force=True)
             acct_val = snap.account_value_usd
         except Exception:
             acct_val = 0.0
-        _record_fill(
-            args.db_path,
-            fill=fill,
-            intent_id=intent_id,
-            cloid=cloid,
-            leverage=float(leverage),
-            account_value=acct_val,
+        for fill in fills:
+            _record_fill(
+                args.db_path,
+                fill=fill,
+                intent_id=intent_id,
+                cloid=cloid,
+                leverage=float(leverage),
+                account_value=acct_val,
+            )
+        logger.info(
+            "Fill confirmed for %s: fills=%d sz=%.6f px=%.4f status=%s",
+            symbol,
+            len(fills),
+            filled_size,
+            filled_price or 0,
+            oms_status,
         )
-        logger.info("Fill confirmed for %s: sz=%.6f px=%.4f", symbol, filled_size, filled_price or 0)
     elif not is_gtc:
         logger.warning("No fill found for %s after %.1fs polling (cloid=%s)", symbol, poll_wait, cloid)
 
@@ -844,7 +989,11 @@ def _action_close(args: argparse.Namespace) -> dict[str, Any]:
 
     logger.info(
         "Created OMS close intent %s for %s %s sz=%.6f (%.1f%%)",
-        intent_id, symbol, side, close_size, close_pct,
+        intent_id,
+        symbol,
+        side,
+        close_size,
+        close_pct,
     )
 
     # Submit order
@@ -931,32 +1080,52 @@ def _action_close(args: argparse.Namespace) -> dict[str, Any]:
     # Poll for fill confirmation
     is_gtc = order_type == "limit_gtc"
     poll_wait = 3.0 if is_gtc else 8.0
-    fill = _poll_fill(executor, cloid, symbol, submit_ms, max_wait_s=poll_wait)
+    fills = _poll_fills(
+        executor,
+        cloid,
+        symbol,
+        submit_ms,
+        exchange_order_id=exchange_order_id,
+        max_wait_s=poll_wait,
+    )
 
     oms_status = "SENT"
     filled_size = close_size
     filled_price: float | None = None
     closed_pnl: float | None = None
-    if fill:
-        filled_price = _safe_float(fill.get("px"))
-        filled_size = _safe_float(fill.get("sz")) or close_size
-        closed_pnl = _safe_float(fill.get("closedPnl"))
-        oms_status = "FILLED"
-        store.update_intent(intent_id, status="FILLED")
+    if fills:
+        summary = _summarise_fills(fills)
+        filled_size = float(summary["filled_size"] or 0.0) or close_size
+        filled_price = _safe_float(summary["filled_price"])
+        closed_pnl = _safe_float(summary["closed_pnl"])
+        if filled_size >= (close_size * 0.999):
+            oms_status = "FILLED"
+        else:
+            oms_status = "PARTIAL"
+        store.update_intent(intent_id, status=oms_status)
         try:
             snap = executor.account_snapshot(force=True)
             acct_val = snap.account_value_usd
         except Exception:
             acct_val = 0.0
-        _record_fill(
-            args.db_path,
-            fill=fill,
-            intent_id=intent_id,
-            cloid=cloid,
-            leverage=pos_leverage,
-            account_value=acct_val,
+        for fill in fills:
+            _record_fill(
+                args.db_path,
+                fill=fill,
+                intent_id=intent_id,
+                cloid=cloid,
+                leverage=pos_leverage,
+                account_value=acct_val,
+            )
+        logger.info(
+            "Close fill confirmed for %s: fills=%d sz=%.6f px=%.4f pnl=%.2f status=%s",
+            symbol,
+            len(fills),
+            filled_size,
+            filled_price or 0,
+            closed_pnl or 0,
+            oms_status,
         )
-        logger.info("Close fill confirmed for %s: sz=%.6f px=%.4f pnl=%.2f", symbol, filled_size, filled_price or 0, closed_pnl or 0)
     elif not is_gtc:
         logger.warning("No close fill found for %s after %.1fs polling (cloid=%s)", symbol, poll_wait, cloid)
 
@@ -1126,6 +1295,7 @@ def _make_cloid_obj(cloid: str | None) -> Any:
         return None
     try:
         from hyperliquid.utils import types
+
         return types.Cloid(str(cloid))
     except Exception:
         return None
@@ -1182,7 +1352,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Order type.",
     )
     ap.add_argument("--limit-price", type=float, default=None, help="Limit price (for limit orders).")
-    ap.add_argument("--close-pct", type=float, default=100.0, help="Percentage of position to close (for close action).")
+    ap.add_argument(
+        "--close-pct", type=float, default=100.0, help="Percentage of position to close (for close action)."
+    )
     ap.add_argument("--oid", default="", help="Exchange order ID (for cancel action).")
     ap.add_argument("--intent-id", default="", help="OMS intent_id (for cancel action).")
     ap.add_argument("--confirm-token", default="", help="Confirm token from preview (for execute action).")
