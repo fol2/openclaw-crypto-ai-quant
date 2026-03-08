@@ -4,6 +4,7 @@ use chrono::Utc;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use signal_hook::{consts::signal::SIGINT, consts::signal::SIGTERM, flag, SigId};
+use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -27,6 +28,7 @@ pub struct PaperDaemonInput<'a> {
     pub btc_symbol: &'a str,
     pub lookback_bars: usize,
     pub start_step_close_ts_ms: Option<i64>,
+    pub bootstrap_from_latest_common_close: bool,
     pub idle_sleep_ms: u64,
     pub max_idle_polls: usize,
     pub exported_at_ms: Option<i64>,
@@ -312,6 +314,7 @@ fn write_status_snapshot(
     runtime_bootstrap: &RuntimeBootstrap,
     lock_path: &Path,
     manifest_state: &SymbolManifestState,
+    effective_start_step_close_ts_ms: Option<i64>,
     snapshot: StatusSnapshot<'_>,
 ) -> Result<()> {
     let status = PaperDaemonStatus {
@@ -334,7 +337,7 @@ fn write_status_snapshot(
         explicit_symbols: paper_loop::normalise_symbols(input.explicit_symbols),
         watch_symbols_file: input.watch_symbols_file,
         symbols_file: manifest_state.symbols_file_display(),
-        start_step_close_ts_ms: input.start_step_close_ts_ms,
+        start_step_close_ts_ms: effective_start_step_close_ts_ms,
         manifest_symbols: manifest_state.current_symbols(),
         last_active_symbols: snapshot.last_active_symbols.to_vec(),
         manifest_reload_count: manifest_state.reload_count,
@@ -476,12 +479,16 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
         input.symbols_file,
         input.watch_symbols_file,
     )?;
+    let bootstrap_from_latest_common_close = input.bootstrap_from_latest_common_close
+        || env_bool("AI_QUANT_PAPER_BOOTSTRAP_FROM_LATEST_COMMON_CLOSE");
+    let mut effective_start_step_close_ts_ms = input.start_step_close_ts_ms;
 
     write_status_snapshot(
         &input,
         &input.runtime_bootstrap,
         &lock_path,
         &manifest_state,
+        effective_start_step_close_ts_ms,
         StatusSnapshot {
             status_path: &status_path,
             started_at_ms,
@@ -586,6 +593,7 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
                 &current_runtime_bootstrap,
                 &lock_path,
                 &manifest_state,
+                effective_start_step_close_ts_ms,
                 StatusSnapshot {
                     status_path: &status_path,
                     started_at_ms,
@@ -611,6 +619,7 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
                     &current_runtime_bootstrap,
                     &lock_path,
                     &manifest_state,
+                    effective_start_step_close_ts_ms,
                     StatusSnapshot {
                         status_path: &status_path,
                         started_at_ms,
@@ -651,22 +660,17 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
                 let expected_next = last_applied_step_close_ts_ms
                     .checked_add(interval_ms)
                     .context("paper daemon interval overflow")?;
-                if steps.is_empty() {
-                    if let Some(start_step_close_ts_ms) = input.start_step_close_ts_ms {
-                        if start_step_close_ts_ms != expected_next {
-                            anyhow::bail!(
-                                "paper daemon start_step_close_ts_ms {} does not match next unapplied step {}",
-                                start_step_close_ts_ms,
-                                expected_next
-                            );
-                        }
-                    }
-                }
+                effective_start_step_close_ts_ms = None;
                 expected_next
             }
-            None => input.start_step_close_ts_ms.context(
-                "paper daemon requires --start-step-close-ts-ms when no prior runtime_cycle_steps exist",
-            )?,
+            None => {
+                effective_start_step_close_ts_ms = input.start_step_close_ts_ms.or_else(|| {
+                    bootstrap_from_latest_common_close.then_some(context.latest_common_close_ts_ms)
+                });
+                effective_start_step_close_ts_ms.context(
+                    "paper daemon requires --start-step-close-ts-ms or AI_QUANT_PAPER_BOOTSTRAP_FROM_LATEST_COMMON_CLOSE when no prior runtime_cycle_steps exist",
+                )?
+            }
         };
         next_due_step_close_ts_ms = Some(candidate_next_due);
 
@@ -684,6 +688,7 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
                 &current_runtime_bootstrap,
                 &lock_path,
                 &manifest_state,
+                effective_start_step_close_ts_ms,
                 StatusSnapshot {
                     status_path: &status_path,
                     started_at_ms,
@@ -709,6 +714,7 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
                     &current_runtime_bootstrap,
                     &lock_path,
                     &manifest_state,
+                    effective_start_step_close_ts_ms,
                     StatusSnapshot {
                         status_path: &status_path,
                         started_at_ms,
@@ -756,6 +762,7 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
             &current_runtime_bootstrap,
             &lock_path,
             &manifest_state,
+            effective_start_step_close_ts_ms,
             StatusSnapshot {
                 status_path: &status_path,
                 started_at_ms,
@@ -799,7 +806,7 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
             .and_then(|last_applied_step_close_ts_ms| {
                 last_applied_step_close_ts_ms.checked_add(interval_ms)
             })
-            .or(input.start_step_close_ts_ms);
+            .or(effective_start_step_close_ts_ms);
     }
 
     let loop_report = PaperLoopReport {
@@ -827,6 +834,7 @@ pub fn run_daemon(input: PaperDaemonInput<'_>) -> Result<PaperDaemonReport> {
         &final_runtime_bootstrap,
         &lock_path,
         &manifest_state,
+        effective_start_step_close_ts_ms,
         StatusSnapshot {
             status_path: &status_path,
             started_at_ms,
@@ -890,6 +898,14 @@ fn load_symbols_file(symbols_file: &Path) -> Result<Vec<String>> {
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
     Ok(paper_loop::normalise_symbols(&symbols))
+}
+
+fn env_bool(name: &str) -> bool {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
 }
 
 fn file_stamp(path: &Path) -> Result<FileStamp> {

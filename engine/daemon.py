@@ -13,6 +13,11 @@ The goal is to keep ONE orchestration loop, and let PaperTrader / LiveTrader foc
 - strategy decision logic
 - execution (paper vs real orders)
 
+Phase 2 note:
+- Rust now owns the production paper runtime.
+- This Python paper entrypoint remains a legacy recovery/debug path and is no
+  longer the authoritative paper service.
+
 YAML config hot-reload is handled by StrategyManager, without reloading mei_alpha_v1 each loop.
 """
 
@@ -318,8 +323,6 @@ def _enforce_v8_only_runtime(mode: str) -> None:
         f"{detail}. "
         "Set AI_QUANT_ALLOW_LEGACY_ENGINE=1 only for one-off recovery/debug workflows."
     )
-
-
 def _config_file_sha1() -> str:
     """SHA-1 of the active strategy YAML (after promoted_config merge)."""
     import hashlib

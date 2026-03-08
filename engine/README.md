@@ -1,11 +1,12 @@
 # Unified Trading Engine
 
-The core Python daemon that runs paper, dry_live, and live trading modes from a single entrypoint.
+The core Python daemon now owns `dry_live` and `live`, while `paper` mode is a
+legacy recovery-only path after the Rust paper cutover.
 
 ## Running
 
 ```bash
-# Paper trading
+# Paper trading legacy recovery/debug only
 AI_QUANT_MODE=paper python -m engine.daemon
 
 # Dry live (real data, no real orders)
@@ -21,7 +22,7 @@ File lock prevents duplicate daemons: `ai_quant_paper.lock` / `ai_quant_live.loc
 
 | Module | Purpose |
 |--------|---------|
-| `daemon.py` | Entrypoint — mode selection via `AI_QUANT_MODE`, subsystem initialisation |
+| `daemon.py` | Entrypoint for live/dry_live plus the legacy paper recovery path |
 | `core.py` | `UnifiedEngine` — main trading loop, two-phase collect-rank-execute |
 | `strategy_manager.py` | Hot-reloads the resolver-selected strategy YAML path via mtime polling for the active Python daemon compatibility path |
 | `market_data.py` | `MarketDataHub` — candle + mid data from WS sidecar / SQLite / REST fallback |
@@ -61,11 +62,11 @@ Durable OMS for live trading:
 ### Configuration Hot-Reload
 
 `StrategyManager` watches the resolver-selected strategy YAML path via mtime
-polling. In the active Python daemon this remains the hot-reload path, but the
-effective-config owner is now Rust: `aiq-runtime paper effective-config`
-resolves promoted-role discovery, strategy-mode selection, config identity, and
-the materialised YAML path before Python paper start-up or factory
-materialisation continue.
+polling. In the active Python compatibility path this remains the hot-reload
+surface, but the effective-config owner is now Rust:
+`aiq-runtime paper effective-config` resolves promoted-role discovery,
+strategy-mode selection, config identity, and the materialised YAML path before
+legacy paper recovery or factory materialisation continue.
 The `engine.interval` parameter is NOT hot-reloadable (requires service
 restart).
 

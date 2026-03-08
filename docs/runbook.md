@@ -6,9 +6,9 @@ Procedures for common operational scenarios. When the bot misbehaves, follow the
 
 | Service | Unit name | Purpose |
 |---------|-----------|---------|
-| Paper trader (primary) | `openclaw-ai-quant-trader-v8-paper1` | Primary paper trading daemon |
-| Paper trader (candidate #2) | `openclaw-ai-quant-trader-v8-paper2` | Candidate paper trading daemon |
-| Paper trader (candidate #3) | `openclaw-ai-quant-trader-v8-paper3` | Candidate paper trading daemon |
+| Paper trader (primary) | `openclaw-ai-quant-trader-v8-paper1` | Primary Rust paper trading daemon |
+| Paper trader (candidate #2) | `openclaw-ai-quant-trader-v8-paper2` | Candidate Rust paper trading daemon |
+| Paper trader (candidate #3) | `openclaw-ai-quant-trader-v8-paper3` | Candidate Rust paper trading daemon |
 | Live trader | `openclaw-ai-quant-live-v8` | Live trading daemon |
 | WS sidecar | `openclaw-ai-quant-ws-sidecar` | Market data WebSocket |
 | Monitor | `openclaw-ai-quant-monitor` | Real-time dashboard |
@@ -270,6 +270,7 @@ This is implemented as a process runner (`tools/ensemble_runner.py`), not an in-
 
 - Each strategy has its own sizing budget via config overrides (e.g. `global.trade.size_multiplier`).
 - Global risk caps (portfolio heat/exposure/kill-switch) are enforced by the existing RiskManager logic.
+- After the Rust paper cutover, this runner is for `dry_live` / `live` only.
 - Start with `dry_live` until you are confident the ensemble behaves as expected.
 
 ### Example
@@ -814,14 +815,13 @@ Follow-mode expectations:
 - `--symbols-file` still behaves as a one-shot start-up manifest in follow mode; use `paper daemon --watch-symbols-file` when you need reloadable watchlist orchestration
 - `paper loop --follow` still shares the same step identity and write contract as `paper cycle`, but it is no longer the owner of watchlist reload semantics
 
-### Run the opt-in Rust paper daemon wrapper
+### Run the Rust paper daemon
 
 Use when: you want a long-running Rust paper orchestration lane that keeps the
-existing `paper cycle` contract alive between due steps, without claiming
-Python daemon cutover. This is also the first Rust lane that can optionally
-watch a symbols manifest file, pick up later watchlist refreshes without
-restarting, and retain the last good manifest if a reload is invalid or
-runtime-invalid malformed.
+existing `paper cycle` contract alive between due steps as the active paper
+runtime. This lane can optionally watch a symbols manifest file, pick up later
+watchlist refreshes without restarting, and retain the last good manifest if a
+reload is invalid or runtime-invalid malformed.
 
 For the conventional v8 lanes, Rust now owns a built-in preset:
 
@@ -850,18 +850,21 @@ cargo run -p aiq-runtime -- \
 
 Operational expectations:
 
-- `paper daemon` is opt-in orchestration only; Python `engine.daemon` remains the active paper runtime path in this phase
+- `paper daemon` is the active paper runtime path; Python `engine.daemon` remains a legacy recovery/debug path and is no longer the authoritative paper service
 - `--lane paper1|paper2|paper3|livepaper` resolves the conventional per-lane config path, promoted-role / strategy-mode contract, watched symbols file path, candle DB directory, DB path, and lock/status paths inside Rust
 - `--project-dir` lets operators point those lane defaults at a different worktree/root without rebuilding the binary
 - a lane-default watched symbols file may be absent at start-up; the daemon now idles cleanly and waits for later watchlist materialisation instead of failing before the first poll
 - the daemon reuses the same restored state contract as `paper doctor` and the same rerun guard / DB write contract as `paper cycle`
-- `--start-step-close-ts-ms` is required only when no prior matching `runtime_cycle_steps` rows exist for the current config fingerprint / interval / live lane
+- the first Rust launch may be unlocked either by `--start-step-close-ts-ms` / `AI_QUANT_PAPER_START_STEP_CLOSE_TS_MS` or by `AI_QUANT_PAPER_BOOTSTRAP_FROM_LATEST_COMMON_CLOSE=1`
+- `AI_QUANT_PAPER_START_STEP_CLOSE_TS_MS` is a one-shot bootstrap override; once matching `runtime_cycle_steps` exist it is ignored on later restarts
+- `AI_QUANT_PAPER_BOOTSTRAP_FROM_LATEST_COMMON_CLOSE=1` is the preferred service-friendly bootstrap for an existing Python-owned paper DB because it derives the first Rust step automatically and then becomes inert after the first successful Rust step
+- explicit `AI_QUANT_SYMBOLS` or `--symbols` no longer force watch mode by themselves; `--watch-symbols-file` should be used only when a real symbols-file source exists
 - `--symbols-file` loads the daemon manifest once at start-up; add `--watch-symbols-file` when that manifest should reload on file changes without restarting the process
 - reload failures do not clear the lane: the daemon retains the last good manifest and emits a warning instead, including runtime-invalid but still UTF-8-clean payloads that fail daemon preflight
 - active symbols remain `manifest ∪ open paper positions`, so exit coverage is preserved while the manifest changes
 - `--lock-path` may be supplied when the Rust daemon lane needs an isolated lock namespace; changing the lock path does not widen DB projections
 - `--status-path` may be supplied when operators want the daemon lifecycle JSON in a specific location; otherwise the daemon derives it from the resolved lock path or `AI_QUANT_STATUS_PATH`
-- `--dry-run` remains the safest bring-up path while the surface is still opt-in
+- `--dry-run` remains the safest bring-up path when testing a lane before service rollout
 - manual `paper daemon` launch is still supported, but when you want Rust to own lane lifecycle directly the preferred entrypoint is now `paper service apply` rather than manually retyping `daemon_command`
 - if you only need bounded catch-up or a short follow poll budget, use `paper loop` directly instead of `paper daemon`
 
@@ -886,10 +889,9 @@ AI_QUANT_DB_PATH=./trading_engine_v8_paper1.db \
 AI_QUANT_CANDLES_DB_DIR=./candles_dbs \
 AI_QUANT_SYMBOLS=BTC,ETH,SOL \
 AI_QUANT_LOOKBACK_BARS=200 \
-AI_QUANT_PAPER_START_STEP_CLOSE_TS_MS=1773424200000 \
+AI_QUANT_PAPER_BOOTSTRAP_FROM_LATEST_COMMON_CLOSE=1 \
 cargo run -p aiq-runtime -- \
   paper manifest \
-  --watch-symbols-file \
   --json
 ```
 
@@ -901,6 +903,7 @@ Manifest expectations:
 - `paper manifest` is read-only; it never writes the paper DB or starts follow-mode polling
 - `paper manifest` is the preflight launch contract; `paper status` shows the current lane state, `paper service` previews the recommended supervision action, and `paper service apply` is the mutating surface that can enact that recommendation
 - `--config`, `--db`, `--candles-db`, `--symbols`, `--symbols-file`, `--watch-symbols-file`, `--lookback-bars`, `--start-step-close-ts-ms`, `--lock-path`, and `--status-path` may override the corresponding env-derived values
+- `AI_QUANT_PAPER_BOOTSTRAP_FROM_LATEST_COMMON_CLOSE=1` may be used for the first Rust cutover when the DB has no `runtime_cycle_steps` yet; once Rust has written those rows, later restarts ignore the bootstrap flag automatically
 - `AI_QUANT_PROMOTED_ROLE` is applied to the effective Rust paper config before the manifest resolves interval, pipeline profile, or daemon command
 - `AI_QUANT_STRATEGY_MODE` remains the first strategy-mode selector; when it is unset, `AI_QUANT_STRATEGY_MODE_FILE` provides the same persisted fallback used by the Python paper service
 - if `AI_QUANT_CANDLES_DB_PATH` is unset, the manifest derives the candle DB path from `AI_QUANT_CANDLES_DB_DIR` plus the resolved config interval
@@ -970,8 +973,8 @@ Service-action expectations:
 
 ### Apply the Rust paper daemon service action
 
-Use when: you want Rust to supervise the current paper lane directly without
-claiming Python paper or systemd cutover yet.
+Use when: you want Rust to supervise the current paper lane directly through the
+active paper service contract.
 
 ```bash
 AI_QUANT_STRATEGY_YAML=./config/strategy_overrides.paper1.yaml \

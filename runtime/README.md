@@ -1,7 +1,7 @@
 # Rust Runtime Foundation
 
-This directory hosts the first Rust-native runtime scaffolding that will
-eventually replace the Python trading daemon.
+This directory hosts the Rust-native runtime that now owns the production paper
+lane and is replacing the remaining Python runtime surfaces step by step.
 
 Current contents:
 
@@ -10,7 +10,7 @@ Current contents:
 - `aiq-runtime`: foundation CLI for config loading, pipeline inspection, and
   runtime migration entrypoints
 
-Current runtime-owned paper surfaces and the paired opt-in wrapper:
+Current runtime-owned paper surfaces:
 
 | Command | Purpose | Notes |
 |---|---|---|
@@ -21,18 +21,17 @@ Current runtime-owned paper surfaces and the paired opt-in wrapper:
 | `paper run-once` | Execute one single-symbol Rust paper step | Single-shot shell |
 | `paper cycle` | Execute one repeatable multi-symbol Rust paper cycle | Explicit `--step-close-ts-ms`, not a daemon; now honours runtime pipeline profile stage toggles for ranking, execution preview, and persistence while emitting a per-stage trace |
 | `paper loop` | Execute a bounded Rust paper catch-up loop | Resumes from `runtime_cycle_steps`, optional follow polling, and only loads `--symbols-file` once at start-up |
-| `paper manifest` | Resolve the current Rust paper daemon service contract | Read-only env/CLI manifest, including launch readiness, restart/resume state, resolved lane `status_path`, lane preset metadata, and effective config selection from promoted-role plus strategy-mode inputs |
+| `paper manifest` | Resolve the current Rust paper daemon service contract | Read-only env/CLI manifest, including launch readiness, restart/resume state, resolved lane `status_path`, lane preset metadata, effective config selection from promoted-role plus strategy-mode inputs, and one-shot bootstrap support through `AI_QUANT_PAPER_BOOTSTRAP_FROM_LATEST_COMMON_CLOSE=1` |
 | `paper status` | Resolve the current Rust paper daemon service state | Read-only manifest + status-file view, including restart-required / stale detection plus health / launch-identity drift detection for the current lane |
 | `paper service` | Resolve the current Rust paper daemon supervisor action | Read-only status + launch-contract view that tells supervision whether to hold, start, restart, or monitor the lane while failing closed on unhealthy or drifted daemon status |
-| `paper service apply` | Apply the current Rust paper daemon supervisor action | Opt-in side-effecting supervisor for Rust paper daemon start/restart/resume/stop only; reuses the same manifest/status contract and fails closed on unhealthy, drifted, or unproven lane ownership |
-| `paper daemon` | Execute an opt-in long-running Rust paper orchestration wrapper | Owns the outer scheduler, now accepts `--lane` for `paper1/paper2/paper3/livepaper` plus optional `--project-dir`, can watch the lane-default symbols file even before it exists, writes a lane status JSON, and keeps the same `paper cycle` write contract while using the same effective config contract as `paper manifest`; not cutover |
+| `paper service apply` | Apply the current Rust paper daemon supervisor action | Side-effecting supervisor for the active Rust paper daemon start/restart/resume/stop path; reuses the same manifest/status contract and fails closed on unhealthy, drifted, or unproven lane ownership |
+| `paper daemon` | Execute the long-running Rust paper orchestration wrapper | Owns the active production paper scheduler, accepts `--lane` for `paper1/paper2/paper3/livepaper` plus optional `--project-dir`, can watch a symbols file when one is configured, writes a lane status JSON, and keeps the same `paper cycle` write contract while using the same effective config contract as `paper manifest` |
 
-The runtime slice is still intentionally narrow. It does not yet own any live
-execution path, and Python paper execution is still the active production
-daemon. The paired opt-in `paper daemon` surface now owns the Rust-side outer
-scheduler for the existing paper cycle contract, but it still does not claim
-paper daemon cutover. Even so, it already establishes the contracts that later
-slices will build on:
+The runtime slice is still intentionally narrow for live mode. It does not yet
+own any live execution path, but it is now the active production paper daemon.
+Python paper execution remains available only as an explicit recovery/debug
+fallback. The Rust paper surfaces now establish the contracts that later slices
+will build on:
 
 - backward-compatible YAML loading through Rust
 - stable stage identifiers for parity debugging
@@ -47,8 +46,9 @@ slices will build on:
 - a Rust-owned runtime materialisation step so Python paper consumers stop reapplying Python defaults when the resolver already owns the active config identity
 - a read-only service status surface so operators can compare the current launch contract against the persisted daemon lifecycle JSON, including daemon health and launch-identity drift, without parsing files by hand
 - a read-only supervisor action surface so operators can inspect whether the lane should be held, started, restarted, or simply monitored
-- an opt-in side-effecting `paper service apply` surface that can enact that recommendation for the Rust paper daemon without claiming service cutover
-- an opt-in daemon wrapper that owns scheduler/watchlist reload orchestration without claiming service cutover
+- a side-effecting `paper service apply` surface that can enact that recommendation for the active Rust paper daemon
+- the active daemon wrapper that owns scheduler/watchlist reload orchestration for the production paper lanes
 - Rust-owned conventional lane presets (`paper1`, `paper2`, `paper3`, `livepaper`) that bundle the default config path, promoted-role / strategy-mode selection, watchlist file path, candle DB directory, DB path, and lock/status paths for paper orchestration
 - a durable daemon `status_path` contract that later service supervision can build on
 - a first live execution slice where `paper cycle` reads the resolved stage graph and configured ranker instead of treating the pipeline plan as metadata only
+- a one-shot bootstrap contract where `AI_QUANT_PAPER_START_STEP_CLOSE_TS_MS` or `AI_QUANT_PAPER_BOOTSTRAP_FROM_LATEST_COMMON_CLOSE=1` can unlock the very first Rust launch, and later restarts ignore that bootstrap value once `runtime_cycle_steps` exist

@@ -229,6 +229,9 @@ struct PaperManifestArgs {
     /// Optional bootstrap step identity override. Falls back to AI_QUANT_PAPER_START_STEP_CLOSE_TS_MS.
     #[arg(long)]
     start_step_close_ts_ms: Option<i64>,
+    /// Derive the first bootstrap step from the latest common candle close when no prior Rust steps exist.
+    #[arg(long)]
+    bootstrap_from_latest_common_close: bool,
     /// Optional daemon lock path override. Falls back to AI_QUANT_LOCK_PATH or the default paper lock.
     #[arg(long)]
     lock_path: Option<PathBuf>,
@@ -449,6 +452,9 @@ struct PaperDaemonArgs {
     /// Required bootstrap step identity when no prior runtime_cycle_steps exist.
     #[arg(long)]
     start_step_close_ts_ms: Option<i64>,
+    /// Derive the first bootstrap step from the latest common candle close when no prior Rust steps exist.
+    #[arg(long)]
+    bootstrap_from_latest_common_close: bool,
     /// Sleep duration between idle follow polls.
     #[arg(long, default_value_t = 5_000)]
     idle_sleep_ms: u64,
@@ -794,6 +800,7 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 btc_symbol: &args.btc_symbol,
                 lookback_bars: args.lookback_bars,
                 start_step_close_ts_ms: args.start_step_close_ts_ms,
+                bootstrap_from_latest_common_close: args.bootstrap_from_latest_common_close,
                 lock_path: args.lock_path.as_deref(),
                 status_path: args.status_path.as_deref(),
             })?;
@@ -886,6 +893,7 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 btc_symbol: &args.manifest.btc_symbol,
                 lookback_bars: args.manifest.lookback_bars,
                 start_step_close_ts_ms: args.manifest.start_step_close_ts_ms,
+                bootstrap_from_latest_common_close: args.manifest.bootstrap_from_latest_common_close,
                 lock_path: args.manifest.lock_path.as_deref(),
                 status_path: args.manifest.status_path.as_deref(),
                 stale_after_ms: args.stale_after_ms,
@@ -939,6 +947,10 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                     btc_symbol: &args.status.manifest.btc_symbol,
                     lookback_bars: args.status.manifest.lookback_bars,
                     start_step_close_ts_ms: args.status.manifest.start_step_close_ts_ms,
+                    bootstrap_from_latest_common_close: args
+                        .status
+                        .manifest
+                        .bootstrap_from_latest_common_close,
                     lock_path: args.status.manifest.lock_path.as_deref(),
                     status_path: args.status.manifest.status_path.as_deref(),
                     stale_after_ms: args.status.stale_after_ms,
@@ -1009,6 +1021,11 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                         btc_symbol: &args.service.status.manifest.btc_symbol,
                         lookback_bars: args.service.status.manifest.lookback_bars,
                         start_step_close_ts_ms: args.service.status.manifest.start_step_close_ts_ms,
+                        bootstrap_from_latest_common_close: args
+                            .service
+                            .status
+                            .manifest
+                            .bootstrap_from_latest_common_close,
                         lock_path: args.service.status.manifest.lock_path.as_deref(),
                         status_path: args.service.status.manifest.status_path.as_deref(),
                         stale_after_ms: args.service.status.stale_after_ms,
@@ -1220,6 +1237,7 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 btc_symbol: &args.btc_symbol,
                 lookback_bars: args.lookback_bars,
                 start_step_close_ts_ms: args.start_step_close_ts_ms,
+                bootstrap_from_latest_common_close: args.bootstrap_from_latest_common_close,
                 lock_path: args.lock_path.as_deref(),
                 status_path: args.status_path.as_deref(),
             })?;
@@ -1246,6 +1264,7 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 btc_symbol: &args.btc_symbol,
                 lookback_bars: manifest.lookback_bars,
                 start_step_close_ts_ms: manifest.start_step_close_ts_ms,
+                bootstrap_from_latest_common_close: args.bootstrap_from_latest_common_close,
                 idle_sleep_ms: args.idle_sleep_ms,
                 max_idle_polls: args.max_idle_polls,
                 exported_at_ms: args.exported_at_ms,
