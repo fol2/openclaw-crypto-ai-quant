@@ -7,6 +7,8 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+mod live_lane;
+mod live_manifest;
 mod paper_config;
 mod paper_cycle;
 mod paper_daemon;
@@ -18,6 +20,8 @@ mod paper_run_once;
 mod paper_seed;
 mod paper_service;
 mod paper_status;
+#[cfg(test)]
+mod test_support;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "Rust runtime foundation for AI Quant")]
@@ -137,6 +141,37 @@ struct LiveEffectiveConfigArgs {
     json: bool,
 }
 
+#[derive(Debug, Clone, Args)]
+struct LiveManifestArgs {
+    /// Optional YAML config path override. Falls back to the conventional live config path.
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Optional project/worktree root for live-default paths. Falls back to the current working directory.
+    #[arg(long)]
+    project_dir: Option<PathBuf>,
+    /// Override the runtime pipeline profile.
+    #[arg(long)]
+    profile: Option<String>,
+    /// Optional live DB override. Falls back to AI_QUANT_DB_PATH or the conventional live DB path.
+    #[arg(long)]
+    db: Option<PathBuf>,
+    /// Optional market DB override. Falls back to AI_QUANT_MARKET_DB_PATH or the conventional live market DB path.
+    #[arg(long)]
+    market_db: Option<PathBuf>,
+    /// Optional daemon lock path override. Falls back to AI_QUANT_LOCK_PATH or the conventional live lock path.
+    #[arg(long)]
+    lock_path: Option<PathBuf>,
+    /// Optional daemon status path override. Falls back to AI_QUANT_STATUS_PATH or the lock-derived default.
+    #[arg(long)]
+    status_path: Option<PathBuf>,
+    /// Optional lookback override. Falls back to AI_QUANT_LOOKBACK_BARS or 200.
+    #[arg(long)]
+    lookback_bars: Option<usize>,
+    /// Emit machine-readable JSON instead of a human summary.
+    #[arg(long)]
+    json: bool,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ModeArg {
     Live,
@@ -210,6 +245,8 @@ enum PaperCommand {
 enum LiveCommand {
     /// Resolve the shared Rust effective-config contract for live-facing control-plane consumers.
     EffectiveConfig(LiveEffectiveConfigArgs),
+    /// Resolve the current live launch contract and safety-gate state.
+    Manifest(LiveManifestArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -890,7 +927,9 @@ fn run_paper(command: PaperCommand) -> Result<()> {
                 btc_symbol: &args.manifest.btc_symbol,
                 lookback_bars: args.manifest.lookback_bars,
                 start_step_close_ts_ms: args.manifest.start_step_close_ts_ms,
-                bootstrap_from_latest_common_close: args.manifest.bootstrap_from_latest_common_close,
+                bootstrap_from_latest_common_close: args
+                    .manifest
+                    .bootstrap_from_latest_common_close,
                 lock_path: args.manifest.lock_path.as_deref(),
                 status_path: args.manifest.status_path.as_deref(),
                 stale_after_ms: args.stale_after_ms,
@@ -1305,22 +1344,60 @@ fn run_live(command: LiveCommand) -> Result<()> {
                 print_effective_config_report("live", &report);
             }
         }
+        LiveCommand::Manifest(args) => {
+            let report = live_manifest::build_manifest(live_manifest::LiveManifestInput {
+                config: args.config.as_deref(),
+                project_dir: args.project_dir.as_deref(),
+                profile: args.profile.as_deref(),
+                db: args.db.as_deref(),
+                market_db: args.market_db.as_deref(),
+                lock_path: args.lock_path.as_deref(),
+                status_path: args.status_path.as_deref(),
+                lookback_bars: args.lookback_bars,
+            })?;
+
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("live manifest ok");
+                println!("runtime_owner: {}", report.runtime_owner);
+                println!("launch_state: {:?}", report.launch_state);
+                println!("service_name: {}", report.service_name);
+                println!("instance_tag: {}", report.instance_tag);
+                println!("config_path: {}", report.config_path);
+                println!("live_db: {}", report.live_db);
+                println!("market_db: {}", report.market_db);
+                println!("lock_path: {}", report.lock_path);
+                println!("status_path: {}", report.status_path);
+                println!("interval: {}", report.interval);
+                println!("lookback_bars: {}", report.lookback_bars);
+                println!("safety_gate_ready: {}", report.safety_gate_ready);
+                println!("live_enable: {}", report.live_enable);
+                println!("live_confirmed: {}", report.live_confirmed);
+                if !report.warnings.is_empty() {
+                    println!("warnings:");
+                    for warning in &report.warnings {
+                        println!("  - {}", warning);
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
 }
 
-fn print_effective_config_report(
-    surface: &str,
-    report: &paper_config::PaperEffectiveConfigReport,
-) {
+fn print_effective_config_report(surface: &str, report: &paper_config::PaperEffectiveConfigReport) {
     println!("{surface} effective-config ok");
     println!("base_config_path: {}", report.base_config_path);
     println!("config_path: {}", report.config_path);
     println!("active_yaml_path: {}", report.active_yaml_path);
     println!("effective_yaml_path: {}", report.effective_yaml_path);
     println!("interval: {}", report.interval);
-    println!("strategy_overrides_sha1: {}", report.strategy_overrides_sha1);
+    println!(
+        "strategy_overrides_sha1: {}",
+        report.strategy_overrides_sha1
+    );
     println!("config_id: {}", report.config_id);
     if let Some(promoted_role) = report.promoted_role.as_deref() {
         println!("promoted_role: {}", promoted_role);
@@ -1353,6 +1430,18 @@ mod tests {
         match cli.command {
             Command::Live {
                 command: LiveCommand::EffectiveConfig(args),
+            } => assert!(args.json),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_live_manifest_surface() {
+        let cli = Cli::try_parse_from(["aiq-runtime", "live", "manifest", "--json"])
+            .expect("live manifest should parse");
+        match cli.command {
+            Command::Live {
+                command: LiveCommand::Manifest(args),
             } => assert!(args.json),
             other => panic!("unexpected command: {other:?}"),
         }
