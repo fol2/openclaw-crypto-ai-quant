@@ -568,45 +568,10 @@ mod tests {
     use chrono::Utc;
     use rusqlite::{params, Connection};
     use std::fs;
-    use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
 
     use crate::paper_lane::PaperLane;
-
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-    struct EnvGuard {
-        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
-    }
-
-    impl EnvGuard {
-        fn set(vars: &[(&'static str, Option<&str>)]) -> Self {
-            let mut saved = Vec::new();
-            for (name, value) in vars {
-                saved.push((*name, env::var_os(name)));
-                match value {
-                    Some(value) => env::set_var(name, value),
-                    None => env::remove_var(name),
-                }
-            }
-            Self { saved }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            for (name, value) in self.saved.drain(..) {
-                match value {
-                    Some(value) => env::set_var(name, value),
-                    None => env::remove_var(name),
-                }
-            }
-        }
-    }
-
-    fn env_lock() -> &'static Mutex<()> {
-        ENV_LOCK.get_or_init(|| Mutex::new(()))
-    }
+    use crate::test_support::{env_lock, EnvGuard};
 
     fn write_config(path: &Path, interval: &str) {
         fs::write(

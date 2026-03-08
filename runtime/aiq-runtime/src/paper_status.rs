@@ -291,16 +291,10 @@ mod tests {
     use chrono::Utc;
     use rusqlite::{params, Connection};
     use std::fs;
-    use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
 
     use crate::paper_daemon::{PaperDaemonStatus, PaperDaemonStatusSnapshot};
-
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-    fn env_lock() -> &'static Mutex<()> {
-        ENV_LOCK.get_or_init(|| Mutex::new(()))
-    }
+    use crate::test_support::env_lock;
 
     fn write_config(path: &Path, interval: &str) {
         fs::write(

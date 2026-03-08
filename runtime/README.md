@@ -27,8 +27,17 @@ Current runtime-owned paper surfaces:
 | `paper service apply` | Apply the current Rust paper daemon supervisor action | Side-effecting supervisor for the active Rust paper daemon start/restart/resume/stop path; reuses the same manifest/status contract and fails closed on unhealthy, drifted, or unproven lane ownership |
 | `paper daemon` | Execute the long-running Rust paper orchestration wrapper | Owns the active production paper scheduler, accepts `--lane` for `paper1/paper2/paper3/livepaper` plus optional `--project-dir`, can watch a symbols file when one is configured, writes a lane status JSON, and keeps the same `paper cycle` write contract while using the same effective config contract as `paper manifest` |
 
+Current live-facing Rust control-plane surfaces:
+
+| Command | Purpose | Notes |
+|---|---|---|
+| `live effective-config` | Resolve the shared Rust effective-config contract for live / dry-live start-up | Dedicated live-facing CLI surface; no longer relies on the paper-named compatibility path |
+| `live manifest` | Resolve the current live launch contract, config identity, and safety-gate state | Read-only contract surface; currently reports that the live runtime owner remains Python until the Rust live daemon lands |
+
 The runtime slice is still intentionally narrow for live mode. It does not yet
-own any live execution path, but it is now the active production paper daemon.
+own any live execution path, but it now owns the live effective-config and
+launch-manifest control-plane surfaces while paper remains the only active Rust
+daemon.
 Python paper execution remains available only as an explicit recovery/debug
 fallback. The Rust paper surfaces now establish the contracts that later slices
 will build on:
