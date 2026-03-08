@@ -22,6 +22,8 @@ Example service/timer templates live under `systemd/`:
 - `openclaw-ai-quant-factory-v8.{service,timer}.example` runs `factory_run.py` nightly.
 - `openclaw-ai-quant-prune-runtime-logs-v8.{service,timer}.example` prunes SQLite `runtime_logs` daily.
 - `openclaw-ai-quant-replay-alignment-gate.{service,timer}.example` runs deterministic replay alignment checks and writes a release-blocker status file.
+  - For the Rust paper cutover gate, the scheduler snapshots an isolated paper DB inside the replay bundle before seeding/mirroring. The active paper lane DB is not used as the mutable harness target.
+  - The default scheduled Phase 2 gate keeps backtester trade/action reconciliation as diagnostic evidence, but the release blocker is driven by the paper-cutover contract axes: `state`, `live_paper`, `live_paper_decision_trace`, `event_order`, and `gpu smoke`.
 
 Install (example):
 

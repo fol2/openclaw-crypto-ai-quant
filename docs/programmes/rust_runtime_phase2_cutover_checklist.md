@@ -55,6 +55,8 @@ It does **not** claim live, OMS, or risk cutover.
 
 - [ ] release blocker file exists
 - [ ] release blocker status is green / clear by default
+- [ ] scheduled gate snapshots an isolated paper DB for the replay bundle; it must not mutate the active paper lane DB
+- [ ] scheduled gate enforces the Phase 2 paper-cutover axes (`state`, `live_paper`, `live_paper_decision_trace`, `event_order`, `gpu smoke`) while keeping backtester trade/action reports as diagnostics
 - [ ] emergency override path is documented separately from the default path
 
 ## 6. Rollback Contract

@@ -1533,6 +1533,12 @@ def main() -> int:
         'if [ "${AQC_ALLOW_ACTION_ARTEFACT_RESIDUALS:-0}" = "1" ]; then\n'
         "  GATE_ARGS+=(--allow-action-artefact-residuals)\n"
         "fi\n"
+        'if [ "${AQC_SKIP_TRADE_AXIS:-0}" = "1" ]; then\n'
+        "  GATE_ARGS+=(--skip-trade-axis)\n"
+        "fi\n"
+        'if [ "${AQC_SKIP_ACTION_AXIS:-0}" = "1" ]; then\n'
+        "  GATE_ARGS+=(--skip-action-axis)\n"
+        "fi\n"
         'python3 "$REPO_ROOT/tools/assert_replay_bundle_alignment.py" "${GATE_ARGS[@]}" '
         f'--output "$BUNDLE_DIR/{alignment_gate_path.name}"'
     )
