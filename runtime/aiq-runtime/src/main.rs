@@ -10,6 +10,10 @@ use std::path::{Path, PathBuf};
 mod live_hyperliquid;
 mod live_lane;
 mod live_manifest;
+#[allow(dead_code)]
+mod live_oms;
+#[allow(dead_code)]
+mod live_risk;
 mod live_safety;
 mod live_secrets;
 mod paper_config;
