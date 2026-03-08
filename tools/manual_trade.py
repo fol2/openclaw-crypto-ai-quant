@@ -276,14 +276,19 @@ def _poll_fills(
     start_ms: int,
     *,
     exchange_order_id: str | None = None,
+    expected_size: float | None = None,
     max_wait_s: float = 8.0,
     poll_interval_s: float = 0.8,
-    quiet_polls_after_first: int = 1,
+    quiet_polls_after_complete: int = 1,
 ) -> list[dict[str, Any]]:
     """Poll exchange for all fills that belong to this order."""
     deadline = time.monotonic() + max_wait_s
     matched: dict[tuple[Any, ...], dict[str, Any]] = {}
     quiet_polls = 0
+    try:
+        expected_total = abs(float(expected_size or 0.0))
+    except Exception:
+        expected_total = 0.0
     while time.monotonic() < deadline:
         time.sleep(poll_interval_s)
         now_ms = int(time.time() * 1000)
@@ -313,11 +318,15 @@ def _poll_fills(
                 continue
             matched[_fill_identity(f)] = f
         if matched:
+            total_seen = float(_summarise_fills(list(matched.values()))["filled_size"] or 0.0)
+            if expected_total > 0 and total_seen < (expected_total * 0.999):
+                quiet_polls = 0
+                continue
             if len(matched) == before:
                 quiet_polls += 1
             else:
                 quiet_polls = 0
-            if quiet_polls >= max(0, int(quiet_polls_after_first)):
+            if quiet_polls >= max(0, int(quiet_polls_after_complete)):
                 break
     return sorted(matched.values(), key=_fill_sort_key)
 
@@ -836,6 +845,7 @@ def _action_execute(args: argparse.Namespace) -> dict[str, Any]:
         symbol,
         submit_ms,
         exchange_order_id=exchange_order_id,
+        expected_size=est_size,
         max_wait_s=poll_wait,
     )
 
@@ -1086,6 +1096,7 @@ def _action_close(args: argparse.Namespace) -> dict[str, Any]:
         symbol,
         submit_ms,
         exchange_order_id=exchange_order_id,
+        expected_size=close_size,
         max_wait_s=poll_wait,
     )
 

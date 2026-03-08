@@ -93,6 +93,7 @@ def test_poll_fills_collects_all_partial_fills(monkeypatch: pytest.MonkeyPatch):
         "PUMP",
         1772719459000,
         exchange_order_id="339230023584",
+        expected_size=47460.0,
         max_wait_s=1.0,
         poll_interval_s=0.01,
     )
@@ -102,6 +103,60 @@ def test_poll_fills_collects_all_partial_fills(monkeypatch: pytest.MonkeyPatch):
     assert summary["filled_size"] == pytest.approx(47460.0)
     assert summary["filled_price"] == pytest.approx(0.002067)
     assert summary["closed_pnl"] == pytest.approx(1.85094)
+
+
+def test_poll_fills_waits_for_delayed_sibling_fill_until_expected_size_is_reached(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    cloid = "0x6d616e5fed92369a17de46f495862bf7"
+    first = _fake_fill(cloid=cloid, sz="1423.0", start_position="-47460.0", fill_hash="0xb843", tid=1)
+    second = _fake_fill(
+        cloid=cloid,
+        sz="46037.0",
+        start_position="-46037.0",
+        closed_pnl="1.795443",
+        fill_hash="0xb843",
+        tid=2,
+    )
+    fills_by_call = [
+        [first],
+        [first],
+        [first, second],
+        [first, second],
+    ]
+
+    class _FakeInfo:
+        def __init__(self):
+            self.calls = 0
+
+        def user_fills_by_time(self, *_args, **_kwargs):
+            idx = min(self.calls, len(fills_by_call) - 1)
+            self.calls += 1
+            return fills_by_call[idx]
+
+    class _FakeExecutor:
+        main_address = "0xabc"
+
+        def __init__(self):
+            self._info = _FakeInfo()
+
+    clock = itertools.count()
+    monkeypatch.setattr(manual_trade.time, "sleep", lambda _secs: None)
+    monkeypatch.setattr(manual_trade.time, "monotonic", lambda: next(clock) * 0.1)
+    monkeypatch.setattr(manual_trade.time, "time", lambda: 1772719461.174)
+
+    fills = manual_trade._poll_fills(
+        _FakeExecutor(),
+        cloid,
+        "PUMP",
+        1772719459000,
+        exchange_order_id="339230023584",
+        expected_size=47460.0,
+        max_wait_s=1.0,
+        poll_interval_s=0.01,
+    )
+
+    assert [int(f["tid"]) for f in fills] == [1, 2]
 
 
 def test_poll_fills_can_match_by_exchange_order_id_when_fill_lacks_cloid(
@@ -142,6 +197,7 @@ def test_poll_fills_can_match_by_exchange_order_id_when_fill_lacks_cloid(
         "SOL",
         1772723529000,
         exchange_order_id="339315249361",
+        expected_size=0.39,
         max_wait_s=0.5,
         poll_interval_s=0.01,
     )
