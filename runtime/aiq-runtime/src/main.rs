@@ -7,8 +7,11 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+mod live_hyperliquid;
 mod live_lane;
 mod live_manifest;
+mod live_safety;
+mod live_secrets;
 mod paper_config;
 mod paper_cycle;
 mod paper_daemon;
