@@ -7,6 +7,10 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+#[allow(dead_code)]
+mod live_cycle;
+#[allow(dead_code)]
+mod live_daemon;
 mod live_hyperliquid;
 mod live_lane;
 mod live_manifest;
@@ -16,6 +20,10 @@ mod live_oms;
 mod live_risk;
 mod live_safety;
 mod live_secrets;
+mod live_service;
+#[allow(dead_code)]
+mod live_state;
+mod live_status;
 mod paper_config;
 mod paper_cycle;
 mod paper_daemon;
@@ -165,6 +173,21 @@ struct LiveManifestArgs {
     /// Optional market DB override. Falls back to AI_QUANT_MARKET_DB_PATH or the conventional live market DB path.
     #[arg(long)]
     market_db: Option<PathBuf>,
+    /// Optional candle DB override. Falls back to AI_QUANT_CANDLES_DB_DIR + the resolved interval.
+    #[arg(long)]
+    candles_db: Option<PathBuf>,
+    /// Explicit symbol list override (comma-delimited). Falls back to AI_QUANT_SYMBOLS when empty.
+    #[arg(long, value_delimiter = ',')]
+    symbols: Vec<String>,
+    /// Optional file containing one symbol per line. Falls back to AI_QUANT_SYMBOLS_FILE.
+    #[arg(long)]
+    symbols_file: Option<PathBuf>,
+    /// BTC anchor symbol for alignment context.
+    #[arg(long, default_value = "BTC")]
+    btc_symbol: String,
+    /// Optional live secrets path. Falls back to AI_QUANT_SECRETS_PATH or ~/.config/openclaw/ai-quant-secrets.json.
+    #[arg(long)]
+    secrets_path: Option<PathBuf>,
     /// Optional daemon lock path override. Falls back to AI_QUANT_LOCK_PATH or the conventional live lock path.
     #[arg(long)]
     lock_path: Option<PathBuf>,
@@ -174,6 +197,88 @@ struct LiveManifestArgs {
     /// Optional lookback override. Falls back to AI_QUANT_LOOKBACK_BARS or 200.
     #[arg(long)]
     lookback_bars: Option<usize>,
+    /// Emit machine-readable JSON instead of a human summary.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+struct LiveStatusArgs {
+    #[command(flatten)]
+    manifest: LiveManifestArgs,
+    /// Optional staleness threshold for the daemon status file in milliseconds.
+    #[arg(long)]
+    stale_after_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct LiveServiceArgs {
+    #[command(flatten)]
+    status: LiveStatusArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+struct LiveServiceApplyArgs {
+    #[command(flatten)]
+    service: LiveServiceArgs,
+    /// Requested supervisor action. `auto` reuses the read-only live service recommendation.
+    #[arg(long, value_enum, default_value = "auto")]
+    action: LiveServiceApplyActionArg,
+    /// Maximum time to wait for a newly spawned daemon to publish a running status contract.
+    #[arg(long, default_value_t = 5_000)]
+    start_wait_ms: u64,
+    /// Maximum time to wait for a supervised stop before failing closed.
+    #[arg(long, default_value_t = 30_000)]
+    stop_wait_ms: u64,
+    /// Poll interval for status/lock checks while supervising a lane.
+    #[arg(long, default_value_t = 100)]
+    poll_ms: u64,
+}
+
+#[derive(Debug, Clone, Args)]
+struct LiveDaemonArgs {
+    /// Optional YAML config path override. Falls back to the conventional live config path.
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Optional project/worktree root for live-default paths. Falls back to the current working directory.
+    #[arg(long)]
+    project_dir: Option<PathBuf>,
+    /// Override the runtime pipeline profile.
+    #[arg(long)]
+    profile: Option<String>,
+    /// Optional live DB override. Falls back to AI_QUANT_DB_PATH or the conventional live DB path.
+    #[arg(long)]
+    db: Option<PathBuf>,
+    /// Optional candle DB override. Falls back to AI_QUANT_CANDLES_DB_DIR + the resolved interval.
+    #[arg(long)]
+    candles_db: Option<PathBuf>,
+    /// Explicit symbol list override (comma-delimited). Falls back to AI_QUANT_SYMBOLS when empty.
+    #[arg(long, value_delimiter = ',')]
+    symbols: Vec<String>,
+    /// Optional file containing one symbol per line. Loaded on each daemon iteration.
+    #[arg(long)]
+    symbols_file: Option<PathBuf>,
+    /// BTC anchor symbol for alignment context.
+    #[arg(long, default_value = "BTC")]
+    btc_symbol: String,
+    /// Optional lookback override. Falls back to AI_QUANT_LOOKBACK_BARS or 400.
+    #[arg(long)]
+    lookback_bars: Option<usize>,
+    /// Optional live secrets path. Falls back to AI_QUANT_SECRETS_PATH or ~/.config/openclaw/ai-quant-secrets.json.
+    #[arg(long)]
+    secrets_path: Option<PathBuf>,
+    /// Optional daemon lock path override. Falls back to AI_QUANT_LOCK_PATH or the conventional live lock path.
+    #[arg(long)]
+    lock_path: Option<PathBuf>,
+    /// Optional daemon status path override. Falls back to AI_QUANT_STATUS_PATH or the lock-derived default.
+    #[arg(long)]
+    status_path: Option<PathBuf>,
+    /// Sleep duration between live daemon polls.
+    #[arg(long, default_value_t = 5_000)]
+    idle_sleep_ms: u64,
+    /// Maximum number of idle polls before exiting. Zero means unbounded.
+    #[arg(long, default_value_t = 0)]
+    max_idle_polls: usize,
     /// Emit machine-readable JSON instead of a human summary.
     #[arg(long)]
     json: bool,
@@ -254,6 +359,15 @@ enum LiveCommand {
     EffectiveConfig(LiveEffectiveConfigArgs),
     /// Resolve the current live launch contract and safety-gate state.
     Manifest(LiveManifestArgs),
+    /// Resolve the current Rust live daemon service state from the launch contract plus status file.
+    Status(LiveStatusArgs),
+    /// Resolve or apply the Rust live daemon supervisor contract.
+    Service {
+        #[command(subcommand)]
+        command: LiveServiceCommand,
+    },
+    /// Execute the Rust live daemon owner for the production live lane.
+    Daemon(LiveDaemonArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -350,6 +464,12 @@ struct PaperServiceInspectCompatCli {
     args: PaperServiceArgs,
 }
 
+#[derive(Debug, Parser)]
+struct LiveServiceInspectCompatCli {
+    #[command(flatten)]
+    args: LiveServiceArgs,
+}
+
 #[derive(Debug, Clone, Subcommand)]
 enum PaperServiceCommand {
     /// Resolve the current Rust paper daemon supervisor action without mutating runtime state.
@@ -360,6 +480,23 @@ enum PaperServiceCommand {
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum PaperServiceApplyActionArg {
+    Auto,
+    Start,
+    Restart,
+    Stop,
+    Resume,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum LiveServiceCommand {
+    /// Resolve the current Rust live daemon supervisor action without mutating runtime state.
+    Inspect(LiveServiceArgs),
+    /// Apply the current Rust live daemon supervisor action via an opt-in side-effecting supervisor.
+    Apply(LiveServiceApplyArgs),
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum LiveServiceApplyActionArg {
     Auto,
     Start,
     Restart,
@@ -573,6 +710,9 @@ fn main() -> Result<()> {
     if maybe_print_legacy_paper_service_help(&raw_args)? {
         return Ok(());
     }
+    if maybe_print_legacy_live_service_help(&raw_args)? {
+        return Ok(());
+    }
     let cli = Cli::parse_from(preprocess_cli_args(raw_args));
 
     match cli.command {
@@ -602,6 +742,31 @@ fn maybe_print_legacy_paper_service_help(args: &[OsString]) -> Result<bool> {
     command
         .print_help()
         .context("failed to print legacy paper service help")?;
+    println!();
+    Ok(true)
+}
+
+fn maybe_print_legacy_live_service_help(args: &[OsString]) -> Result<bool> {
+    let Some(compat_args) = legacy_live_service_help_args(args) else {
+        return Ok(false);
+    };
+
+    if let Err(err) = LiveServiceInspectCompatCli::try_parse_from(compat_args) {
+        err.print()
+            .context("failed to print the legacy live service help error")?;
+        std::process::exit(err.exit_code());
+    }
+
+    let mut command = LiveServiceInspectCompatCli::command();
+    command = command
+        .name("aiq-runtime live service")
+        .bin_name("aiq-runtime live service")
+        .about(
+            "Resolve the current Rust live daemon supervisor action without mutating runtime state",
+        );
+    command
+        .print_help()
+        .context("failed to print legacy live service help")?;
     println!();
     Ok(true)
 }
@@ -637,8 +802,42 @@ fn legacy_paper_service_help_args(args: &[OsString]) -> Option<Vec<OsString>> {
     Some(compat_args)
 }
 
+fn legacy_live_service_help_args(args: &[OsString]) -> Option<Vec<OsString>> {
+    if args.get(1).and_then(|value| value.to_str()) != Some("live") {
+        return None;
+    }
+    if args.get(2).and_then(|value| value.to_str()) != Some("service") {
+        return None;
+    }
+    let tail = &args[3..];
+    if matches!(
+        tail.first().and_then(|value| value.to_str()),
+        Some("inspect" | "apply")
+    ) {
+        return None;
+    }
+    if !tail
+        .iter()
+        .any(|value| matches!(value.to_str(), Some("-h" | "--help")))
+    {
+        return None;
+    }
+
+    let mut compat_args = vec![OsString::from("aiq-runtime live service")];
+    for token in tail {
+        if matches!(token.to_str(), Some("-h" | "--help")) {
+            continue;
+        }
+        compat_args.push(token.clone());
+    }
+    Some(compat_args)
+}
+
 fn preprocess_cli_args(mut args: Vec<OsString>) -> Vec<OsString> {
     if should_insert_paper_service_inspect(&args) {
+        args.insert(3, OsString::from("inspect"));
+    }
+    if should_insert_live_service_inspect(&args) {
         args.insert(3, OsString::from("inspect"));
     }
     args
@@ -646,6 +845,20 @@ fn preprocess_cli_args(mut args: Vec<OsString>) -> Vec<OsString> {
 
 fn should_insert_paper_service_inspect(args: &[OsString]) -> bool {
     if args.get(1).and_then(|value| value.to_str()) != Some("paper") {
+        return false;
+    }
+    if args.get(2).and_then(|value| value.to_str()) != Some("service") {
+        return false;
+    }
+    match args.get(3).and_then(|value| value.to_str()) {
+        None => true,
+        Some("inspect" | "apply") => false,
+        Some(_) => true,
+    }
+}
+
+fn should_insert_live_service_inspect(args: &[OsString]) -> bool {
+    if args.get(1).and_then(|value| value.to_str()) != Some("live") {
         return false;
     }
     if args.get(2).and_then(|value| value.to_str()) != Some("service") {
@@ -1358,6 +1571,11 @@ fn run_live(command: LiveCommand) -> Result<()> {
                 profile: args.profile.as_deref(),
                 db: args.db.as_deref(),
                 market_db: args.market_db.as_deref(),
+                candles_db: args.candles_db.as_deref(),
+                symbols: &args.symbols,
+                symbols_file: args.symbols_file.as_deref(),
+                btc_symbol: &args.btc_symbol,
+                secrets_path: args.secrets_path.as_deref(),
                 lock_path: args.lock_path.as_deref(),
                 status_path: args.status_path.as_deref(),
                 lookback_bars: args.lookback_bars,
@@ -1374,9 +1592,11 @@ fn run_live(command: LiveCommand) -> Result<()> {
                 println!("config_path: {}", report.config_path);
                 println!("live_db: {}", report.live_db);
                 println!("market_db: {}", report.market_db);
+                println!("candles_db: {}", report.candles_db);
                 println!("lock_path: {}", report.lock_path);
                 println!("status_path: {}", report.status_path);
                 println!("interval: {}", report.interval);
+                println!("btc_symbol: {}", report.btc_symbol);
                 println!("lookback_bars: {}", report.lookback_bars);
                 println!("safety_gate_ready: {}", report.safety_gate_ready);
                 println!("live_enable: {}", report.live_enable);
@@ -1387,6 +1607,178 @@ fn run_live(command: LiveCommand) -> Result<()> {
                         println!("  - {}", warning);
                     }
                 }
+            }
+        }
+        LiveCommand::Status(args) => {
+            let report = live_status::build_status(live_status::LiveStatusInput {
+                config: args.manifest.config.as_deref(),
+                project_dir: args.manifest.project_dir.as_deref(),
+                profile: args.manifest.profile.as_deref(),
+                db: args.manifest.db.as_deref(),
+                market_db: args.manifest.market_db.as_deref(),
+                candles_db: args.manifest.candles_db.as_deref(),
+                symbols: &args.manifest.symbols,
+                symbols_file: args.manifest.symbols_file.as_deref(),
+                btc_symbol: &args.manifest.btc_symbol,
+                secrets_path: args.manifest.secrets_path.as_deref(),
+                lock_path: args.manifest.lock_path.as_deref(),
+                status_path: args.manifest.status_path.as_deref(),
+                lookback_bars: args.manifest.lookback_bars,
+                stale_after_ms: args.stale_after_ms,
+            })?;
+
+            if args.manifest.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "live status ok: state={:?} status_file_present={} contract_matches_status={}",
+                    report.service_state,
+                    report.status_file_present,
+                    report.contract_matches_status
+                );
+            }
+        }
+        LiveCommand::Service { command } => match command {
+            LiveServiceCommand::Inspect(args) => {
+                let report = live_service::build_service(live_service::LiveServiceInput {
+                    config: args.status.manifest.config.as_deref(),
+                    project_dir: args.status.manifest.project_dir.as_deref(),
+                    profile: args.status.manifest.profile.as_deref(),
+                    db: args.status.manifest.db.as_deref(),
+                    market_db: args.status.manifest.market_db.as_deref(),
+                    candles_db: args.status.manifest.candles_db.as_deref(),
+                    symbols: &args.status.manifest.symbols,
+                    symbols_file: args.status.manifest.symbols_file.as_deref(),
+                    btc_symbol: &args.status.manifest.btc_symbol,
+                    secrets_path: args.status.manifest.secrets_path.as_deref(),
+                    lock_path: args.status.manifest.lock_path.as_deref(),
+                    status_path: args.status.manifest.status_path.as_deref(),
+                    lookback_bars: args.status.manifest.lookback_bars,
+                    stale_after_ms: args.status.stale_after_ms,
+                })?;
+
+                if args.status.manifest.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    println!(
+                        "live service ok: action={:?} state={:?}",
+                        report.desired_action, report.status.service_state
+                    );
+                }
+            }
+            LiveServiceCommand::Apply(args) => {
+                let report = live_service::apply_service(live_service::LiveServiceApplyInput {
+                    service: live_service::LiveServiceInput {
+                        config: args.service.status.manifest.config.as_deref(),
+                        project_dir: args.service.status.manifest.project_dir.as_deref(),
+                        profile: args.service.status.manifest.profile.as_deref(),
+                        db: args.service.status.manifest.db.as_deref(),
+                        market_db: args.service.status.manifest.market_db.as_deref(),
+                        candles_db: args.service.status.manifest.candles_db.as_deref(),
+                        symbols: &args.service.status.manifest.symbols,
+                        symbols_file: args.service.status.manifest.symbols_file.as_deref(),
+                        btc_symbol: &args.service.status.manifest.btc_symbol,
+                        secrets_path: args.service.status.manifest.secrets_path.as_deref(),
+                        lock_path: args.service.status.manifest.lock_path.as_deref(),
+                        status_path: args.service.status.manifest.status_path.as_deref(),
+                        lookback_bars: args.service.status.manifest.lookback_bars,
+                        stale_after_ms: args.service.status.stale_after_ms,
+                    },
+                    requested_action: match args.action {
+                        LiveServiceApplyActionArg::Auto => {
+                            live_service::LiveServiceApplyRequestedAction::Auto
+                        }
+                        LiveServiceApplyActionArg::Start => {
+                            live_service::LiveServiceApplyRequestedAction::Start
+                        }
+                        LiveServiceApplyActionArg::Restart => {
+                            live_service::LiveServiceApplyRequestedAction::Restart
+                        }
+                        LiveServiceApplyActionArg::Stop => {
+                            live_service::LiveServiceApplyRequestedAction::Stop
+                        }
+                        LiveServiceApplyActionArg::Resume => {
+                            live_service::LiveServiceApplyRequestedAction::Resume
+                        }
+                    },
+                    start_wait_ms: args.start_wait_ms,
+                    stop_wait_ms: args.stop_wait_ms,
+                    poll_ms: args.poll_ms,
+                })?;
+
+                if args.service.status.manifest.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    println!(
+                        "live service apply ok: requested={:?} applied={:?} final_action={:?} final_state={:?}",
+                        report.requested_action,
+                        report.applied_action,
+                        report.final_service.desired_action,
+                        report.final_service.status.service_state,
+                    );
+                }
+            }
+        },
+        LiveCommand::Daemon(args) => {
+            let report = live_manifest::build_manifest(live_manifest::LiveManifestInput {
+                config: args.config.as_deref(),
+                project_dir: args.project_dir.as_deref(),
+                profile: args.profile.as_deref(),
+                db: args.db.as_deref(),
+                market_db: None,
+                candles_db: args.candles_db.as_deref(),
+                symbols: &args.symbols,
+                symbols_file: args.symbols_file.as_deref(),
+                btc_symbol: &args.btc_symbol,
+                secrets_path: args.secrets_path.as_deref(),
+                lock_path: args.lock_path.as_deref(),
+                status_path: args.status_path.as_deref(),
+                lookback_bars: args.lookback_bars,
+            })?;
+            let effective_config = paper_config::PaperEffectiveConfig::resolve(
+                Some(Path::new(&report.base_config_path)),
+                None,
+                args.project_dir.as_deref(),
+            )?;
+            let runtime_bootstrap =
+                effective_config.build_runtime_bootstrap(None, true, args.profile.as_deref())?;
+            let symbols = if args.symbols_file.is_some() {
+                load_symbols(args.symbols.clone(), args.symbols_file.as_deref())?
+            } else {
+                report.explicit_symbols.clone()
+            };
+            let daemon_report = live_daemon::run_daemon(live_daemon::LiveDaemonInput {
+                effective_config,
+                runtime_bootstrap,
+                live_db: Path::new(&report.live_db),
+                candles_db: Path::new(&report.candles_db),
+                explicit_symbols: &symbols,
+                symbols_file: args.symbols_file.as_deref(),
+                btc_symbol: &args.btc_symbol,
+                lookback_bars: report.lookback_bars,
+                secrets_path: Path::new(&report.secrets_path),
+                lock_path: Some(Path::new(&report.lock_path)),
+                status_path: Some(Path::new(&report.status_path)),
+                idle_sleep_ms: args.idle_sleep_ms,
+                max_idle_polls: args.max_idle_polls,
+            })?;
+
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&daemon_report)?);
+            } else {
+                println!(
+                    "live daemon ok: pid={} lock={} status={} last_fill_cursor_ms={} stop_requested={} plans={}",
+                    daemon_report.pid,
+                    daemon_report.lock_path,
+                    daemon_report.status_path,
+                    daemon_report.last_fill_cursor_ms,
+                    daemon_report.stop_requested,
+                    daemon_report
+                        .last_cycle
+                        .as_ref()
+                        .map(|cycle| cycle.plans.len())
+                        .unwrap_or(0)
+                );
             }
         }
     }
@@ -1449,6 +1841,60 @@ mod tests {
         match cli.command {
             Command::Live {
                 command: LiveCommand::Manifest(args),
+            } => assert!(args.json),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_live_status_surface() {
+        let cli = Cli::try_parse_from(["aiq-runtime", "live", "status", "--json"])
+            .expect("live status should parse");
+        match cli.command {
+            Command::Live {
+                command: LiveCommand::Status(args),
+            } => assert!(args.manifest.json),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_live_service_inspect_surface() {
+        let cli = Cli::try_parse_from(["aiq-runtime", "live", "service", "inspect", "--json"])
+            .expect("live service inspect should parse");
+        match cli.command {
+            Command::Live {
+                command:
+                    LiveCommand::Service {
+                        command: LiveServiceCommand::Inspect(args),
+                    },
+            } => assert!(args.status.manifest.json),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_live_service_apply_surface() {
+        let cli = Cli::try_parse_from(["aiq-runtime", "live", "service", "apply", "--json"])
+            .expect("live service apply should parse");
+        match cli.command {
+            Command::Live {
+                command:
+                    LiveCommand::Service {
+                        command: LiveServiceCommand::Apply(args),
+                    },
+            } => assert!(args.service.status.manifest.json),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_live_daemon_surface() {
+        let cli = Cli::try_parse_from(["aiq-runtime", "live", "daemon", "--json"])
+            .expect("live daemon should parse");
+        match cli.command {
+            Command::Live {
+                command: LiveCommand::Daemon(args),
             } => assert!(args.json),
             other => panic!("unexpected command: {other:?}"),
         }

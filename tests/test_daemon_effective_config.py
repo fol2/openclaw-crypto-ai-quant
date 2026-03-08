@@ -142,6 +142,7 @@ def test_main_resolves_live_rust_effective_config_before_strategy_manager(
         pass
 
     monkeypatch.setenv("AI_QUANT_MODE", "live")
+    monkeypatch.setenv("AI_QUANT_ALLOW_LEGACY_PYTHON_LIVE", "1")
     monkeypatch.setenv("AI_QUANT_DB_PATH", str(tmp_path / "live.db"))
     monkeypatch.setenv("AI_QUANT_LOCK_PATH", str(tmp_path / "live.lock"))
     monkeypatch.setattr(daemon, "_enforce_v8_only_runtime", lambda mode: None)
@@ -214,6 +215,7 @@ def test_main_aborts_when_live_rust_resolver_fails(monkeypatch: pytest.MonkeyPat
     strategy_manager_called = False
 
     monkeypatch.setenv("AI_QUANT_MODE", "live")
+    monkeypatch.setenv("AI_QUANT_ALLOW_LEGACY_PYTHON_LIVE", "1")
     monkeypatch.setattr(daemon, "_enforce_v8_only_runtime", lambda mode: None)
     monkeypatch.setattr(
         "engine.promoted_config.apply_live_effective_config",
@@ -231,3 +233,12 @@ def test_main_aborts_when_live_rust_resolver_fails(monkeypatch: pytest.MonkeyPat
         daemon.main()
 
     assert strategy_manager_called is False
+
+
+def test_main_blocks_live_python_runtime_without_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AI_QUANT_MODE", "live")
+    monkeypatch.delenv("AI_QUANT_ALLOW_LEGACY_PYTHON_LIVE", raising=False)
+    monkeypatch.setattr(daemon, "_enforce_v8_only_runtime", lambda mode: None)
+
+    with pytest.raises(SystemExit, match="Python live runtime is retired"):
+        daemon.main()

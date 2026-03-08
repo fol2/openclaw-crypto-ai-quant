@@ -244,8 +244,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument(
         "--daemon-cmd",
-        default="python3 -m engine.daemon",
-        help="Daemon command to launch (default: python3 -m engine.daemon).",
+        default="./target/release/aiq-runtime live daemon",
+        help="Daemon command to launch (default: ./target/release/aiq-runtime live daemon).",
     )
     ap.add_argument("--yes", action="store_true", help="Actually launch processes (otherwise dry-run).")
     ap.add_argument("--terminate-timeout-s", type=float, default=10.0, help="Graceful shutdown timeout (default: 10s).")

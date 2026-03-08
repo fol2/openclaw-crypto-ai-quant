@@ -32,15 +32,19 @@ Current live-facing Rust control-plane surfaces:
 | Command | Purpose | Notes |
 |---|---|---|
 | `live effective-config` | Resolve the shared Rust effective-config contract for live / dry-live start-up | Dedicated live-facing CLI surface; no longer relies on the paper-named compatibility path |
-| `live manifest` | Resolve the current live launch contract, config identity, and safety-gate state | Read-only contract surface; currently reports that the live runtime owner remains Python until the Rust live daemon lands |
+| `live manifest` | Resolve the current live launch contract, config identity, and safety-gate state | Read-only contract surface for the Rust live daemon, including the resolved candle DB, symbols, secrets path, and daemon command |
+| `live status` | Resolve the current Rust live daemon service state | Read-only manifest + status-file view, including restart-required / stale detection plus launch-identity drift detection for the live lane |
+| `live service` | Resolve the current Rust live daemon supervisor action | Read-only status + launch-contract view that tells supervision whether to hold, start, restart, or monitor the live lane while failing closed on unhealthy or drifted daemon status |
+| `live service apply` | Apply the current Rust live daemon supervisor action | Side-effecting supervisor for the Rust live daemon start/restart/resume/stop path; reuses the same manifest/status contract and fails closed on unhealthy, drifted, or unproven lane ownership |
+| `live daemon` | Execute the long-running Rust live orchestration wrapper | Owns live state restore, strategy-state build, pipeline execution, OMS intent/order/fill transitions, risk enforcement, broker submission, fill backfill, and status-file publication |
 
-The runtime slice is still intentionally narrow for live mode. It does not yet
-own any live execution path, but it now owns the live effective-config and
-launch-manifest control-plane surfaces while paper remains the only active Rust
-daemon.
-Python paper execution remains available only as an explicit recovery/debug
-fallback. The Rust paper surfaces now establish the contracts that later slices
-will build on:
+The Rust runtime now owns both the active paper lanes and the authoritative
+live service path. Python paper execution remains available only as an explicit
+recovery/debug fallback, while Python live / dry-live entrypoints are now
+archival recovery surfaces gated behind an explicit opt-in.
+
+The Rust runtime surfaces now establish one shared contract across paper and
+live:
 
 - backward-compatible YAML loading through Rust
 - stable stage identifiers for parity debugging
@@ -57,7 +61,9 @@ will build on:
 - a read-only supervisor action surface so operators can inspect whether the lane should be held, started, restarted, or simply monitored
 - a side-effecting `paper service apply` surface that can enact that recommendation for the active Rust paper daemon
 - the active daemon wrapper that owns scheduler/watchlist reload orchestration for the production paper lanes
+- a matching `live manifest` / `live status` / `live service` / `live service apply` contract for the production live lane
+- a Rust live daemon that owns the exchange-facing runtime loop, OMS/risk transitions, and broker submission contract
 - Rust-owned conventional lane presets (`paper1`, `paper2`, `paper3`, `livepaper`) that bundle the default config path, promoted-role / strategy-mode selection, watchlist file path, candle DB directory, DB path, and lock/status paths for paper orchestration
 - a durable daemon `status_path` contract that later service supervision can build on
-- a first live execution slice where `paper cycle` reads the resolved stage graph and configured ranker instead of treating the pipeline plan as metadata only
+- a live execution slice where the Rust daemon reads the resolved stage graph and configured ranker instead of relying on the retired Python live loop
 - a one-shot bootstrap contract where `AI_QUANT_PAPER_START_STEP_CLOSE_TS_MS` or `AI_QUANT_PAPER_BOOTSTRAP_FROM_LATEST_COMMON_CLOSE=1` can unlock the very first Rust launch, and later restarts ignore that bootstrap value once `runtime_cycle_steps` exist

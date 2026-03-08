@@ -1,9 +1,9 @@
-"""Unified daemon entrypoint (paper + live).
+"""Unified daemon entrypoint (paper + legacy live recovery).
 
 Usage:
   AI_QUANT_MODE=paper python -m engine.daemon
-  AI_QUANT_MODE=dry_live python -m engine.daemon
-  AI_QUANT_MODE=live python -m engine.daemon
+  AI_QUANT_MODE=dry_live AI_QUANT_ALLOW_LEGACY_PYTHON_LIVE=1 python -m engine.daemon
+  AI_QUANT_MODE=live AI_QUANT_ALLOW_LEGACY_PYTHON_LIVE=1 python -m engine.daemon
 
 What this replaces:
 - trader_daemon.py (paper loop)
@@ -17,6 +17,11 @@ Phase 2 note:
 - Rust now owns the production paper runtime.
 - This Python paper entrypoint remains a legacy recovery/debug path and is no
   longer the authoritative paper service.
+
+Phase 3 note:
+- Rust now owns the production live / dry-live runtime as well.
+- Python live / dry-live execution is archival-only and requires
+  AI_QUANT_ALLOW_LEGACY_PYTHON_LIVE=1 as an explicit override.
 
 YAML config hot-reload is handled by StrategyManager, without reloading mei_alpha_v1 each loop.
 """
@@ -56,6 +61,25 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 def _mode() -> str:
     return str(os.getenv("AI_QUANT_MODE", "paper") or "paper").strip().lower()
+
+
+def _legacy_python_live_override_enabled() -> bool:
+    return _env_bool("AI_QUANT_ALLOW_LEGACY_PYTHON_LIVE", False)
+
+
+def _require_rust_live_runtime_owner(mode: str) -> None:
+    if mode not in {"live", "dry_live"}:
+        return
+    if _legacy_python_live_override_enabled():
+        logger.warning(
+            "legacy Python %s runtime override enabled; Rust remains the authoritative production owner",
+            mode,
+        )
+        return
+    raise SystemExit(
+        "Python live runtime is retired. Use `aiq-runtime live daemon` or `scripts/run_live.sh`. "
+        "Set AI_QUANT_ALLOW_LEGACY_PYTHON_LIVE=1 only for archival recovery."
+    )
 
 
 def _default_secrets_path() -> str:
@@ -1497,6 +1521,7 @@ def main() -> None:
 
     mode = _mode()
     _enforce_v8_only_runtime(mode)
+    _require_rust_live_runtime_owner(mode)
     try:
         from .sqlite_logger import install_sqlite_stdio_logger
 
