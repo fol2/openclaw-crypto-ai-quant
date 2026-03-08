@@ -6,6 +6,7 @@ from pathlib import Path
 
 from tools import assert_replay_bundle_alignment as gate_tool
 from tools import build_live_replay_bundle as replay_bundle_builder
+from tools import run_paper_deterministic_replay as paper_harness
 from tools import run_scheduled_replay_alignment_gate as scheduled_gate
 
 
@@ -252,3 +253,57 @@ def test_build_bundle_alignment_script_wires_skip_axis_env_flags(
     assert 'GATE_ARGS+=(--skip-trade-axis)' in script
     assert 'if [ "${AQC_SKIP_ACTION_AXIS:-0}" = "1" ]; then' in script
     assert 'GATE_ARGS+=(--skip-action-axis)' in script
+    assert 'if [ "${AQC_SKIP_GPU_PARITY:-0}" != "1" ]; then' in script
+    assert 'GATE_ARGS+=(--gpu-parity-report "$BUNDLE_DIR/gpu_smoke_parity_report.json" --require-gpu-parity)' in script
+
+
+def test_paper_harness_skips_gpu_parity_when_env_flag_is_set(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    output = bundle_dir / "paper_deterministic_replay_run.json"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+
+    for script_name in (
+        "run_01_export_and_seed.sh",
+        "run_02_replay.sh",
+        "run_03_audit.sh",
+        "run_03b_mirror_live_window_to_paper.sh",
+        "run_04_trade_reconcile.sh",
+        "run_05_action_reconcile.sh",
+        "run_06_live_paper_action_reconcile.sh",
+        "run_07_live_paper_decision_trace_reconcile.sh",
+        "run_07b_event_order_parity.sh",
+        "run_08_assert_alignment.sh",
+    ):
+        path = bundle_dir / script_name
+        path.write_text("#!/usr/bin/env bash\nset -euo pipefail\n", encoding="utf-8")
+        path.chmod(0o755)
+
+    skipped_gpu = bundle_dir / "run_07c_gpu_parity.sh"
+    skipped_gpu.write_text("#!/usr/bin/env bash\nexit 99\n", encoding="utf-8")
+    skipped_gpu.chmod(0o755)
+
+    monkeypatch.setenv("AQC_SKIP_GPU_PARITY", "1")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_paper_deterministic_replay.py",
+            "--bundle-dir",
+            str(bundle_dir),
+            "--repo-root",
+            str(tmp_path),
+            "--output",
+            str(output),
+        ],
+    )
+
+    rc = paper_harness.main()
+    report = json.loads(output.read_text(encoding="utf-8"))
+
+    assert rc == 0
+    assert report["ok"] is True
+    assert "gpu_parity" not in report["planned_steps"]
+    assert all(step["step"] != "gpu_parity" for step in report["steps"])

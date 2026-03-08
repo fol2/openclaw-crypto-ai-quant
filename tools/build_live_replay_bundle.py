@@ -1513,8 +1513,6 @@ def main() -> int:
         "  --require-live-paper-decision-trace\n"
         f'  --event-order-report "$BUNDLE_DIR/{event_order_parity_path.name}"\n'
         "  --require-event-order\n"
-        f'  --gpu-parity-report "$BUNDLE_DIR/{gpu_parity_report_path.name}"\n'
-        "  --require-gpu-parity\n"
         "  --require-runtime-strategy-provenance\n"
         '  --max-strategy-sha1-distinct "$MAX_STRATEGY_SHA1_DISTINCT"\n'
         "  --require-live-run-fingerprint-provenance\n"
@@ -1538,6 +1536,9 @@ def main() -> int:
         "fi\n"
         'if [ "${AQC_SKIP_ACTION_AXIS:-0}" = "1" ]; then\n'
         "  GATE_ARGS+=(--skip-action-axis)\n"
+        "fi\n"
+        'if [ "${AQC_SKIP_GPU_PARITY:-0}" != "1" ]; then\n'
+        f'  GATE_ARGS+=(--gpu-parity-report "$BUNDLE_DIR/{gpu_parity_report_path.name}" --require-gpu-parity)\n'
         "fi\n"
         'python3 "$REPO_ROOT/tools/assert_replay_bundle_alignment.py" "${GATE_ARGS[@]}" '
         f'--output "$BUNDLE_DIR/{alignment_gate_path.name}"'

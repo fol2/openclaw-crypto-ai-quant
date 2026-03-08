@@ -47,6 +47,13 @@ def _now_ms() -> int:
     return int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if not raw:
+        return bool(default)
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _run_step(
     *,
     step_name: str,
@@ -121,8 +128,9 @@ def main() -> int:
         ("live_paper_action_reconcile", bundle_dir / "run_06_live_paper_action_reconcile.sh"),
         ("live_paper_decision_trace_reconcile", bundle_dir / "run_07_live_paper_decision_trace_reconcile.sh"),
         ("event_order_parity", bundle_dir / "run_07b_event_order_parity.sh"),
-        ("gpu_parity", bundle_dir / "run_07c_gpu_parity.sh"),
     ]
+    if not _env_bool("AQC_SKIP_GPU_PARITY", default=False):
+        script_steps.append(("gpu_parity", bundle_dir / "run_07c_gpu_parity.sh"))
     planned_steps = [step_name for step_name, _ in script_steps] + ["alignment_gate"]
 
     steps: list[dict[str, Any]] = []
