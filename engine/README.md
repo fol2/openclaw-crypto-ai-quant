@@ -64,10 +64,11 @@ Durable OMS for live trading:
 `StrategyManager` watches the resolver-selected strategy YAML path via mtime
 polling. In the active Python compatibility path this remains the hot-reload
 surface, but the effective-config owner is now Rust:
-`aiq-runtime paper effective-config` is the shared resolver for paper and
-live-facing startup, resolving promoted-role discovery, strategy-mode
-selection, config identity, and the materialised YAML path before legacy Python
-runtime consumers continue.
+`aiq-runtime paper effective-config` and `aiq-runtime live effective-config`
+resolve the shared Rust-owned startup contract for paper and live-facing
+runtime consumers, covering promoted-role discovery, strategy-mode selection,
+config identity, and the materialised YAML path before legacy Python runtime
+consumers continue.
 The `engine.interval` parameter is NOT hot-reloadable (requires service
 restart).
 
