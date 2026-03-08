@@ -187,6 +187,12 @@ def build_launch_plan(
         env["AI_QUANT_MODE"] = str(mode)
         env["AI_QUANT_STRATEGY_YAML"] = str(derived_path)
         env["AI_QUANT_RUN_ID"] = env.get("AI_QUANT_RUN_ID") or f"ensemble:{s.name}"
+        if str(mode).strip().lower() == "dry_live":
+            # Rust live runtime does not key order submission off AI_QUANT_MODE alone.
+            # Force live sends off for the ensemble dry-live contract even if the caller
+            # inherited live production env vars.
+            env["AI_QUANT_LIVE_ENABLE"] = "0"
+            env["AI_QUANT_LIVE_CONFIRM"] = ""
 
         # Split event logs per strategy (defaults to artifacts/events/events.jsonl otherwise).
         env.setdefault("AI_QUANT_EVENT_LOG_DIR", str((AIQ_ROOT / "artifacts" / "events" / f"ensemble_{s.name}").resolve()))
