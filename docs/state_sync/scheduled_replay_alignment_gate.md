@@ -38,6 +38,12 @@ Default output locations:
 - run report: `<bundle-dir>/scheduled_alignment_gate_run.json`
 - blocker status: `<bundle-root>/release_blocker.json`
 
+When run via the systemd service example, `tools/run_scheduled_replay_alignment_gate_service.py`
+pre-creates the bundle root under `/tmp/openclaw-ai-quant/replay_gate` and keeps the
+oneshot unit green only for the expected live-off blocker case
+(`missing_live_decision_events_in_window`). The blocker file remains the source
+of truth for rollout decisions.
+
 ## Environment Variables
 
 You may configure the scheduler via environment variables:
