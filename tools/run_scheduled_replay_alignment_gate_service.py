@@ -18,6 +18,12 @@ import sys
 import time
 from typing import Any
 
+_EXPECTED_BLOCKER_REASON_CODES = frozenset(
+    {
+        "missing_live_decision_events_in_window",
+    }
+)
+
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -42,7 +48,7 @@ def _read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _is_fresh_blocker_update(path: Path, *, start_ms: int) -> bool:
+def _is_fresh_expected_blocker_update(path: Path, *, start_ms: int) -> bool:
     try:
         payload = _read_json(path)
     except Exception:
@@ -58,6 +64,13 @@ def _is_fresh_blocker_update(path: Path, *, start_ms: int) -> bool:
 
     report_path_raw = str(payload.get("report_path") or "").strip()
     if not report_path_raw:
+        return False
+
+    reason_codes = payload.get("reason_codes")
+    if not isinstance(reason_codes, list) or not reason_codes:
+        return False
+    reason_code_set = {str(code or "").strip() for code in reason_codes if str(code or "").strip()}
+    if reason_code_set != _EXPECTED_BLOCKER_REASON_CODES:
         return False
 
     report_path = Path(report_path_raw).expanduser()
@@ -77,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
     proc = subprocess.run(cmd, cwd=repo_root)
     rc = int(proc.returncode)
 
-    if rc == 1 and _is_fresh_blocker_update(_resolve_blocker_path(cwd=repo_root), start_ms=start_ms):
+    if rc == 1 and _is_fresh_expected_blocker_update(_resolve_blocker_path(cwd=repo_root), start_ms=start_ms):
         return 0
     return rc
 

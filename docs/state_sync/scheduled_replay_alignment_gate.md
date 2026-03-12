@@ -40,9 +40,9 @@ Default output locations:
 
 When run via the systemd service example, `tools/run_scheduled_replay_alignment_gate_service.py`
 pre-creates the bundle root under `/tmp/openclaw-ai-quant/replay_gate` and keeps the
-oneshot unit green when the scheduler writes a fresh blocker JSON for an expected
-`blocked = true` result. The blocker file remains the source of truth for rollout
-decisions.
+oneshot unit green only for the expected live-off blocker case
+(`missing_live_decision_events_in_window`). The blocker file remains the source
+of truth for rollout decisions.
 
 ## Environment Variables
 

@@ -6,7 +6,7 @@ from pathlib import Path
 import tools.run_scheduled_replay_alignment_gate_service as replay_gate_service
 
 
-def test_is_fresh_blocker_update_accepts_blocked_schema_v2_payload(tmp_path: Path) -> None:
+def test_is_fresh_expected_blocker_update_accepts_live_off_blocker(tmp_path: Path) -> None:
     report_path = tmp_path / "scheduled_alignment_gate_run.json"
     blocker_path = tmp_path / "release_blocker.json"
     report_path.write_text("{}", encoding="utf-8")
@@ -17,15 +17,16 @@ def test_is_fresh_blocker_update_accepts_blocked_schema_v2_payload(tmp_path: Pat
                 "generated_at_ms": 5_000,
                 "blocked": True,
                 "report_path": str(report_path),
+                "reason_codes": ["missing_live_decision_events_in_window"],
             }
         ),
         encoding="utf-8",
     )
 
-    assert replay_gate_service._is_fresh_blocker_update(blocker_path, start_ms=4_000) is True
+    assert replay_gate_service._is_fresh_expected_blocker_update(blocker_path, start_ms=4_000) is True
 
 
-def test_is_fresh_blocker_update_rejects_fallback_exception_payload(tmp_path: Path) -> None:
+def test_is_fresh_expected_blocker_update_rejects_fallback_exception_payload(tmp_path: Path) -> None:
     blocker_path = tmp_path / "release_blocker.json"
     blocker_path.write_text(
         json.dumps(
@@ -39,7 +40,27 @@ def test_is_fresh_blocker_update_rejects_fallback_exception_payload(tmp_path: Pa
         encoding="utf-8",
     )
 
-    assert replay_gate_service._is_fresh_blocker_update(blocker_path, start_ms=4_000) is False
+    assert replay_gate_service._is_fresh_expected_blocker_update(blocker_path, start_ms=4_000) is False
+
+
+def test_is_fresh_expected_blocker_update_rejects_real_gate_failures(tmp_path: Path) -> None:
+    report_path = tmp_path / "scheduled_alignment_gate_run.json"
+    blocker_path = tmp_path / "release_blocker.json"
+    report_path.write_text("{}", encoding="utf-8")
+    blocker_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "generated_at_ms": 5_000,
+                "blocked": True,
+                "report_path": str(report_path),
+                "reason_codes": ["bundle_build_failed"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert replay_gate_service._is_fresh_expected_blocker_update(blocker_path, start_ms=4_000) is False
 
 
 def test_main_normalises_blocked_exit_to_success(tmp_path: Path, monkeypatch) -> None:
@@ -53,6 +74,7 @@ def test_main_normalises_blocked_exit_to_success(tmp_path: Path, monkeypatch) ->
                 "generated_at_ms": 5_000,
                 "blocked": True,
                 "report_path": str(report_path),
+                "reason_codes": ["missing_live_decision_events_in_window"],
             }
         ),
         encoding="utf-8",
@@ -77,6 +99,7 @@ def test_main_preserves_non_blocker_failures(tmp_path: Path, monkeypatch) -> Non
                 "schema_version": 1,
                 "generated_at_ms": 5_000,
                 "blocked": True,
+                "reason_codes": ["scheduler_unhandled_exception"],
             }
         ),
         encoding="utf-8",
