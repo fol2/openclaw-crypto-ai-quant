@@ -24,6 +24,7 @@ Example service/timer templates live under `systemd/`:
 - `openclaw-ai-quant-replay-alignment-gate.{service,timer}.example` runs deterministic replay alignment checks and writes a release-blocker status file.
   - For the Rust paper cutover gate, the scheduler snapshots an isolated paper DB inside the replay bundle before seeding/mirroring. The active paper lane DB is not used as the mutable harness target.
   - The default scheduled Phase 2 gate keeps backtester trade/action reconciliation and GPU parity as diagnostic evidence, but the release blocker is driven by the paper-cutover contract axes: `state`, `live_paper`, `live_paper_decision_trace`, and `event_order`.
+  - The service wrapper treats a fresh, well-formed `blocked = true` blocker update as an operationally successful oneshot run. Inspect `release_blocker.json`, not the unit result alone, when judging rollout readiness.
 
 Install (example):
 
@@ -78,6 +79,9 @@ Check blocker status:
 ```bash
 cat /tmp/openclaw-ai-quant/replay_gate/release_blocker.json
 ```
+
+The example service also creates `/tmp/openclaw-ai-quant/replay_gate` before the
+Python scheduler starts so `ProtectSystem=strict` does not fail during namespace setup.
 
 Deployment tooling is fail-closed against this blocker by default:
 
