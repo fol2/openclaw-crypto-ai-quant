@@ -658,7 +658,7 @@ fn run_factory_cycle(args: RunArgs) -> Result<FactoryRunSummary> {
             paths.artifacts_root.as_path().display()
         )
     })?;
-    let _factory_lock = acquire_factory_lock(&paths.artifacts_root)?;
+    let _factory_lock = acquire_factory_lock(&paths.project_dir)?;
 
     let now = Utc::now();
     let run_stamp = now.format("%Y%m%dT%H%M%SZ").to_string();
@@ -807,8 +807,8 @@ fn load_factory_defaults(settings_path: &Path) -> Result<FactoryDefaults> {
     Ok(loaded)
 }
 
-fn acquire_factory_lock(artifacts_root: &Path) -> Result<FactoryRunLock> {
-    let lock_dir = artifacts_root.join("_locks");
+fn acquire_factory_lock(project_dir: &Path) -> Result<FactoryRunLock> {
+    let lock_dir = project_dir.join("artifacts").join("_locks");
     fs::create_dir_all(&lock_dir).with_context(|| format!("create {}", lock_dir.display()))?;
     let lock_path = lock_dir.join("factory_cycle.lock");
     let file = std::fs::OpenOptions::new()
