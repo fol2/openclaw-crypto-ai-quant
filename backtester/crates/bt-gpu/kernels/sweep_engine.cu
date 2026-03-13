@@ -222,8 +222,13 @@ struct GpuComboConfig {
     unsigned int entry_cooldown_s;  unsigned int exit_cooldown_s;
     unsigned int signal_mode_behaviour_mask;
     unsigned int signal_mode_order_0;  unsigned int signal_mode_order_1;  unsigned int signal_mode_order_2;
+    unsigned int exit_order_0;  unsigned int exit_order_1;  unsigned int exit_order_2;  unsigned int exit_order_3;
+    unsigned int exit_order_4;  unsigned int exit_order_5;  unsigned int exit_order_6;  unsigned int exit_order_7;
+    unsigned int exit_order_8;  unsigned int exit_order_9;  unsigned int exit_order_10; unsigned int exit_order_11;
+    unsigned int exit_order_12; unsigned int exit_order_13; unsigned int exit_order_14; unsigned int exit_order_15;
+    unsigned int exit_order_16; unsigned int exit_order_17;
 };
-static_assert(sizeof(GpuComboConfig) == 580, "GpuComboConfig layout mismatch");
+static_assert(sizeof(GpuComboConfig) == 652, "GpuComboConfig layout mismatch");
 
 struct GpuComboState {
     double balance;  unsigned int num_open;  unsigned int entries_this_bar;

@@ -1,8 +1,7 @@
 use crate::behaviour::ResolvedBehaviourPlan;
 use crate::behaviour::{
     DEFAULT_ENGINE_BEHAVIOURS, DEFAULT_ENTRY_PROGRESSION_BEHAVIOURS,
-    DEFAULT_ENTRY_SIZING_BEHAVIOURS, DEFAULT_EXIT_BEHAVIOURS,
-    DEFAULT_EXIT_SMART_EXTENDED_BEHAVIOURS, DEFAULT_RISK_BEHAVIOURS,
+    DEFAULT_ENTRY_SIZING_BEHAVIOURS, DEFAULT_RISK_BEHAVIOURS,
 };
 use crate::config::StrategyConfig;
 use bt_signals::behaviour::{
@@ -274,10 +273,6 @@ fn validate_gpu_behaviour_contract(
         ordered_ids(&DEFAULT_RISK_BEHAVIOURS),
         &behaviour_plan.risk,
     )?;
-    let mut default_exit_ids = ordered_ids(&DEFAULT_EXIT_BEHAVIOURS);
-    default_exit_ids.extend(ordered_ids(&DEFAULT_EXIT_SMART_EXTENDED_BEHAVIOURS));
-    validate_canonical_order("exits", default_exit_ids, &behaviour_plan.exits)?;
-
     validate_supported_disable(
         "gates",
         &behaviour_plan.gates,
@@ -409,9 +404,7 @@ fn validate_supported_disable(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        resolve_execution_config, resolve_gpu_execution_config, GpuExecutionContractError,
-    };
+    use super::{resolve_execution_config, resolve_gpu_execution_config};
     use crate::config::{
         BehaviourGroupConfig, BehaviourProfileConfig, PipelineConfig, PipelineProfileConfig,
         RuntimeConfig, StrategyConfig,
@@ -593,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_gpu_execution_config_rejects_non_canonical_exit_order() {
+    fn resolve_gpu_execution_config_accepts_supported_exit_reorder() {
         let profile = "gpu_reorder";
         let mut cfg = StrategyConfig::default();
         cfg.runtime.profile = profile.to_string();
@@ -603,8 +596,17 @@ mod tests {
                 behaviours: BehaviourProfileConfig {
                     exits: BehaviourGroupConfig {
                         order: vec![
-                            "exit.take_profit.full".to_string(),
+                            "exit.stop_loss.ase".to_string(),
+                            "exit.stop_loss.dase".to_string(),
+                            "exit.stop_loss.slb".to_string(),
                             "exit.stop_loss.base".to_string(),
+                            "exit.stop_loss.breakeven".to_string(),
+                            "exit.trailing.low_conf_override".to_string(),
+                            "exit.trailing.vol_buffer".to_string(),
+                            "exit.trailing.base".to_string(),
+                            "exit.smart.trend_breakdown".to_string(),
+                            "exit.take_profit.full".to_string(),
+                            "exit.take_profit.partial".to_string(),
                         ],
                         ..BehaviourGroupConfig::default()
                     },
@@ -614,11 +616,36 @@ mod tests {
             },
         );
 
-        let err = resolve_gpu_execution_config(&cfg, None).unwrap_err();
-        assert!(matches!(
-            err,
-            GpuExecutionContractError::UnsupportedOrder { group: "exits", .. }
-        ));
+        let resolved = resolve_gpu_execution_config(&cfg, None)
+            .expect("supported exit reorder should resolve");
+        assert_eq!(resolved.active_profile, profile);
+    }
+
+    #[test]
+    fn resolve_gpu_execution_config_accepts_stop_loss_internal_reorder() {
+        let profile = "gpu_bad_stop_order";
+        let mut cfg = StrategyConfig::default();
+        cfg.runtime.profile = profile.to_string();
+        cfg.pipeline.profiles.insert(
+            profile.to_string(),
+            PipelineProfileConfig {
+                behaviours: BehaviourProfileConfig {
+                    exits: BehaviourGroupConfig {
+                        order: vec![
+                            "exit.stop_loss.base".to_string(),
+                            "exit.stop_loss.ase".to_string(),
+                        ],
+                        ..BehaviourGroupConfig::default()
+                    },
+                    ..BehaviourProfileConfig::default()
+                },
+                ..PipelineProfileConfig::default()
+            },
+        );
+
+        let resolved = resolve_gpu_execution_config(&cfg, None)
+            .expect("stop-loss internal reorder should resolve");
+        assert_eq!(resolved.active_profile, profile);
     }
 
     #[test]
