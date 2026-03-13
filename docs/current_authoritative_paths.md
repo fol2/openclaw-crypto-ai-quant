@@ -40,6 +40,9 @@ housekeeping or deletion follow-through:
 3. Remove `backtester/crates/bt-runtime` once no runtime compatibility tooling depends on the PyO3 bridge.
 4. Delete archival Python recovery surfaces only when rollback policy and acceptance evidence no longer require them.
 
+The active cleanup sequence for those items is tracked in
+`docs/programmes/rust_runtime_final_cleanup_plan.md`.
+
 ## Related Documents
 
 - `docs/runbook.md`
@@ -47,3 +50,4 @@ housekeeping or deletion follow-through:
 - `docs/ARCHITECTURE.md`
 - `docs/housekeeping/legacy-runtime-ledger.md`
 - `docs/rust_full_runtime_cutover_programme.md`
+- `docs/programmes/rust_runtime_final_cleanup_plan.md`

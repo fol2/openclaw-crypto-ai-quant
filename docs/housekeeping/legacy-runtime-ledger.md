@@ -7,7 +7,9 @@ Rust runtime replaces them.
 
 Production ownership has already moved to Rust. This ledger now tracks the
 remaining compatibility and deletion backlog only. See
-`docs/current_authoritative_paths.md` for the current production ownership map.
+`docs/current_authoritative_paths.md` for the current production ownership map
+and `docs/programmes/rust_runtime_final_cleanup_plan.md` for the active final
+cleanup sequence.
 
 ## Compatibility And Deletion Targets
 
