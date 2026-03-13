@@ -1552,7 +1552,7 @@ pub fn recover_unknown_manual_intents(
             )?;
             let requested_size = intent.requested_size.unwrap_or(fill_summary.filled_size);
             let status = if fill_summary.parse_failures > 0 {
-                "UNKNOWN"
+                "UNKNOWN_RECONCILED"
             } else if fill_summary.filled_size + 1e-9 >= requested_size {
                 "FILLED"
             } else {
@@ -1604,11 +1604,16 @@ pub fn recover_unknown_manual_intents(
                 &conn,
                 "manual_unknown_recovery",
                 Some(&intent.symbol),
-                "fills_recovered",
+                if fill_summary.parse_failures > 0 {
+                    "fills_parse_failed"
+                } else {
+                    "fills_recovered"
+                },
                 json!({
                     "intent_id": &intent.intent_id,
                     "status": status,
                     "observed_fills": fill_summary.observed_fills,
+                    "parse_failures": fill_summary.parse_failures,
                 }),
             )?;
             recovered_fills += 1;
