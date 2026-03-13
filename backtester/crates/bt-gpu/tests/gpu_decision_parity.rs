@@ -837,6 +837,18 @@ fn test_sl_codegen_modifier_ordering() {
 }
 
 #[test]
+fn test_sl_codegen_reapplies_breakeven_when_base_appears_later() {
+    let src = get_sl_cuda_source();
+    assert!(
+        src.contains("bool sl_price_set = false;") &&
+        src.contains("if (breakeven_active)") &&
+        src.contains("sl_price = fmax(sl_price, entry_price + be_buffer)") &&
+        src.contains("sl_price = fmin(sl_price, entry_price - be_buffer)"),
+        "SL codegen must carry a pre-activated breakeven state into later raw-SL recomputes without relying on sl_price > 0"
+    );
+}
+
+#[test]
 fn test_sl_numerical_parity_with_fixtures() {
     // For each fixture, compute SL using the Rust reference and verify that
     // the CUDA codegen would produce the same result (given same inputs and
@@ -3129,6 +3141,38 @@ fn test_all_exits_priority_ordering() {
     assert!(sl_pos < trail_pos, "SL must be checked before Trailing");
     assert!(trail_pos < tp_pos, "Trailing must be checked before TP");
     assert!(tp_pos < smart_pos, "TP must be checked before Smart Exits");
+}
+
+#[test]
+fn test_all_exits_recomputes_stop_loss_after_base_seen_modifier() {
+    let src = get_decision_cuda_source();
+    assert!(
+        src.contains("case GPU_EXIT_ORDER_ID_STOP_LOSS_ASE:")
+            && src.contains("case GPU_EXIT_ORDER_ID_STOP_LOSS_DASE:")
+            && src.contains("case GPU_EXIT_ORDER_ID_STOP_LOSS_SLB:"),
+        "all-exits orchestrator must route late stop-loss modifiers through the stop-loss dispatch block"
+    );
+    assert!(
+        src.contains("if ((active_stop_mask & GPU_EXIT_MASK_STOP_LOSS_BASE) == 0u)")
+            && src.contains("double sl_price = compute_sl_price_codegen("),
+        "stop-loss dispatch must recompute once base has been seen"
+    );
+}
+
+#[test]
+fn test_all_exits_recomputes_trailing_after_base_seen_modifier() {
+    let src = get_decision_cuda_source();
+    assert!(
+        src.contains("case GPU_EXIT_ORDER_ID_TRAILING_LOW_CONF_OVERRIDE:")
+            && src.contains("case GPU_EXIT_ORDER_ID_TRAILING_VOL_BUFFER:")
+            && src.contains("case GPU_EXIT_ORDER_ID_TRAILING_BASE:"),
+        "all-exits orchestrator must route trailing modifiers through the trailing dispatch block"
+    );
+    assert!(
+        src.contains("if ((active_trailing_mask & GPU_EXIT_MASK_TRAILING_BASE) == 0u)")
+            && src.contains("double trail_price = compute_trailing_codegen("),
+        "trailing dispatch must recompute once trailing.base has been seen"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
