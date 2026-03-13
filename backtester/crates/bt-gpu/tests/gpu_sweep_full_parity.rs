@@ -175,12 +175,12 @@ fn random_gpu_combo_config(rng: &mut StdRng) -> GpuComboConfig {
         reef_long_rsi_extreme_gt: rng.gen_range(75.0_f32..90.0),
         reef_short_rsi_extreme_lt: rng.gen_range(10.0_f32..25.0),
 
-        // Dynamic leverage (always enabled; _reserved10 replaces former flag)
-        _reserved10: 0,
+        // Dynamic leverage + behaviour masks
+        smart_exit_behaviour_mask: bt_gpu::buffers::GPU_SMART_EXIT_MASK_ALL,
         leverage_low: rng.gen_range(1.0_f32..2.0),
         leverage_medium: rng.gen_range(1.5_f32..3.0),
         leverage_high: rng.gen_range(2.0_f32..5.0),
-        _reserved14: 0.0,
+        exit_behaviour_mask: bt_gpu::buffers::GPU_EXIT_MASK_ALL,
         trailing_rsi_floor_default: rng.gen_range(0.3_f32..0.7),
 
         // Execution
@@ -1441,7 +1441,7 @@ fn random_configs_survive_f32_roundtrip() {
             ("confidence_mult_high", cfg.confidence_mult_high),
             ("confidence_mult_low", cfg.confidence_mult_low),
             ("vol_baseline_pct", cfg.vol_baseline_pct),
-            ("_reserved14", cfg._reserved14),
+            ("exit_behaviour_mask", cfg.exit_behaviour_mask as f32),
             ("tp_mult_strong", cfg.tp_mult_strong),
             ("tp_mult_weak", cfg.tp_mult_weak),
             ("ranging_adx_lt", cfg.ranging_adx_lt),
