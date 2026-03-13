@@ -121,11 +121,35 @@ struct ManualOrderSubmission<'a> {
     raw_json: String,
 }
 
+struct ManualCancelAudit<'a> {
+    intent_id: Option<&'a str>,
+    symbol: &'a str,
+    side: Option<&'a str>,
+    order_type: &'a str,
+    requested_size: Option<f64>,
+    reduce_only: Option<bool>,
+    client_order_id: Option<&'a str>,
+    exchange_order_id: Option<&'a str>,
+    status: &'a str,
+    raw_json: String,
+}
+
 struct FillWriteSummary {
     observed_fills: usize,
     parsed_trade_rows: usize,
     parse_failures: usize,
     filled_size: f64,
+}
+
+#[derive(Clone)]
+struct ManualCancelContext {
+    intent_id: Option<String>,
+    side: Option<String>,
+    current_status: Option<String>,
+    requested_size: Option<f64>,
+    reduce_only: Option<bool>,
+    client_order_id: Option<String>,
+    exchange_order_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -872,28 +896,143 @@ pub fn cancel_order(
     request: &ManualTradeCancelRequest,
 ) -> Result<Value, HubError> {
     enforce_manual_trade_ready(cfg, true)?;
-    let client = build_client(cfg)?;
     let symbol = request.symbol.trim().to_ascii_uppercase();
+    let conn = open_manual_trade_db(&cfg.live_db)?;
 
     if let Some(oid) = request
         .oid
         .as_deref()
         .filter(|value| !value.trim().is_empty())
     {
+        let order_id_text = oid.trim().to_string();
         let parsed_oid = oid
             .trim()
             .parse::<u64>()
             .map_err(|_| HubError::BadRequest("oid must be a positive integer".into()))?;
-        let response = client
-            .cancel_order(&symbol, parsed_oid)
-            .map_err(|error| HubError::BadRequest(error.to_string()))?;
+        let cancel_context = load_manual_cancel_context_by_exchange_order_id(
+            &conn,
+            &symbol,
+            &order_id_text,
+        )?;
+        write_manual_runtime_log(
+            &conn,
+            "INFO",
+            &format!(
+                "manual_trade cancel_requested symbol={} exchange_order_id={} intent_id={}",
+                symbol,
+                order_id_text,
+                cancel_context
+                    .as_ref()
+                    .and_then(|item| item.intent_id.as_deref())
+                    .unwrap_or("unknown")
+            ),
+        )?;
+        let client = build_client(cfg)?;
+        let response = match client.cancel_order(&symbol, parsed_oid) {
+            Ok(response) => response,
+            Err(error) => {
+                let error_text = error.to_string();
+                record_manual_cancel_audit(
+                    &conn,
+                    cancel_context.as_ref(),
+                    ManualCancelAudit {
+                        intent_id: cancel_context
+                            .as_ref()
+                            .and_then(|item| item.intent_id.as_deref()),
+                        symbol: &symbol,
+                        side: cancel_context.as_ref().and_then(|item| item.side.as_deref()),
+                        order_type: "cancel_by_oid",
+                        requested_size: cancel_context.as_ref().and_then(|item| item.requested_size),
+                        reduce_only: cancel_context.as_ref().and_then(|item| item.reduce_only),
+                        client_order_id: cancel_context
+                            .as_ref()
+                            .and_then(|item| item.client_order_id.as_deref()),
+                        exchange_order_id: Some(order_id_text.as_str()),
+                        status: "ERROR",
+                        raw_json: error_text.clone(),
+                    },
+                )?;
+                write_manual_runtime_log(
+                    &conn,
+                    "ERROR",
+                    &format!(
+                        "manual_trade cancel_failed symbol={} exchange_order_id={} error={}",
+                        symbol, order_id_text, error_text
+                    ),
+                )?;
+                return Err(HubError::BadRequest(error_text));
+            }
+        };
+        let response_text = response.to_string();
         if response_has_embedded_error(&response) {
-            return Err(HubError::BadRequest(response.to_string()));
+            record_manual_cancel_audit(
+                &conn,
+                cancel_context.as_ref(),
+                ManualCancelAudit {
+                    intent_id: cancel_context
+                        .as_ref()
+                        .and_then(|item| item.intent_id.as_deref()),
+                    symbol: &symbol,
+                    side: cancel_context.as_ref().and_then(|item| item.side.as_deref()),
+                    order_type: "cancel_by_oid",
+                    requested_size: cancel_context.as_ref().and_then(|item| item.requested_size),
+                    reduce_only: cancel_context.as_ref().and_then(|item| item.reduce_only),
+                    client_order_id: cancel_context
+                        .as_ref()
+                        .and_then(|item| item.client_order_id.as_deref()),
+                    exchange_order_id: Some(order_id_text.as_str()),
+                    status: "REJECTED",
+                    raw_json: response_text.clone(),
+                },
+            )?;
+            write_manual_runtime_log(
+                &conn,
+                "ERROR",
+                &format!(
+                    "manual_trade cancel_rejected symbol={} exchange_order_id={} response={}",
+                    symbol, order_id_text, response_text
+                ),
+            )?;
+            return Err(HubError::BadRequest(response_text));
         }
+        record_manual_cancel_audit(
+            &conn,
+            cancel_context.as_ref(),
+            ManualCancelAudit {
+                intent_id: cancel_context
+                    .as_ref()
+                    .and_then(|item| item.intent_id.as_deref()),
+                symbol: &symbol,
+                side: cancel_context.as_ref().and_then(|item| item.side.as_deref()),
+                order_type: "cancel_by_oid",
+                requested_size: cancel_context.as_ref().and_then(|item| item.requested_size),
+                reduce_only: cancel_context.as_ref().and_then(|item| item.reduce_only),
+                client_order_id: cancel_context
+                    .as_ref()
+                    .and_then(|item| item.client_order_id.as_deref()),
+                exchange_order_id: Some(order_id_text.as_str()),
+                status: "CANCELLED",
+                raw_json: response_text.clone(),
+            },
+        )?;
+        write_manual_runtime_log(
+            &conn,
+            "INFO",
+            &format!(
+                "manual_trade cancelled symbol={} exchange_order_id={} intent_id={}",
+                symbol,
+                order_id_text,
+                cancel_context
+                    .as_ref()
+                    .and_then(|item| item.intent_id.as_deref())
+                    .unwrap_or("unknown")
+            ),
+        )?;
         return Ok(json!({
             "ok": true,
             "symbol": symbol,
             "oid": parsed_oid,
+            "intent_id": cancel_context.and_then(|item| item.intent_id),
             "response": response,
         }));
     }
@@ -904,12 +1043,108 @@ pub fn cancel_order(
         .filter(|value| !value.trim().is_empty())
     {
         let cloid = manual_cloid_from_intent_id(intent_id);
-        let response = client
-            .cancel_order_by_cloid(&symbol, &cloid)
-            .map_err(|error| HubError::BadRequest(error.to_string()))?;
+        let cancel_context = load_manual_cancel_context_by_intent_id(&conn, intent_id)?
+            .unwrap_or_else(|| ManualCancelContext {
+                intent_id: Some(intent_id.to_string()),
+                side: None,
+                current_status: None,
+                requested_size: None,
+                reduce_only: None,
+                client_order_id: Some(cloid.clone()),
+                exchange_order_id: None,
+            });
+        write_manual_runtime_log(
+            &conn,
+            "INFO",
+            &format!(
+                "manual_trade cancel_requested symbol={} intent_id={} client_order_id={}",
+                symbol, intent_id, cloid
+            ),
+        )?;
+        let client = build_client(cfg)?;
+        let response = match client.cancel_order_by_cloid(&symbol, &cloid) {
+            Ok(response) => response,
+            Err(error) => {
+                let error_text = error.to_string();
+                record_manual_cancel_audit(
+                    &conn,
+                    Some(&cancel_context),
+                    ManualCancelAudit {
+                        intent_id: cancel_context.intent_id.as_deref(),
+                        symbol: &symbol,
+                        side: cancel_context.side.as_deref(),
+                        order_type: "cancel_by_cloid",
+                        requested_size: cancel_context.requested_size,
+                        reduce_only: cancel_context.reduce_only,
+                        client_order_id: Some(cloid.as_str()),
+                        exchange_order_id: cancel_context.exchange_order_id.as_deref(),
+                        status: "ERROR",
+                        raw_json: error_text.clone(),
+                    },
+                )?;
+                write_manual_runtime_log(
+                    &conn,
+                    "ERROR",
+                    &format!(
+                        "manual_trade cancel_failed symbol={} intent_id={} error={}",
+                        symbol, intent_id, error_text
+                    ),
+                )?;
+                return Err(HubError::BadRequest(error_text));
+            }
+        };
+        let response_text = response.to_string();
         if response_has_embedded_error(&response) {
-            return Err(HubError::BadRequest(response.to_string()));
+            record_manual_cancel_audit(
+                &conn,
+                Some(&cancel_context),
+                ManualCancelAudit {
+                    intent_id: cancel_context.intent_id.as_deref(),
+                    symbol: &symbol,
+                    side: cancel_context.side.as_deref(),
+                    order_type: "cancel_by_cloid",
+                    requested_size: cancel_context.requested_size,
+                    reduce_only: cancel_context.reduce_only,
+                    client_order_id: Some(cloid.as_str()),
+                    exchange_order_id: cancel_context.exchange_order_id.as_deref(),
+                    status: "REJECTED",
+                    raw_json: response_text.clone(),
+                },
+            )?;
+            write_manual_runtime_log(
+                &conn,
+                "ERROR",
+                &format!(
+                    "manual_trade cancel_rejected symbol={} intent_id={} response={}",
+                    symbol, intent_id, response_text
+                ),
+            )?;
+            return Err(HubError::BadRequest(response_text));
         }
+        record_manual_cancel_audit(
+            &conn,
+            Some(&cancel_context),
+            ManualCancelAudit {
+                intent_id: cancel_context.intent_id.as_deref(),
+                symbol: &symbol,
+                side: cancel_context.side.as_deref(),
+                order_type: "cancel_by_cloid",
+                requested_size: cancel_context.requested_size,
+                reduce_only: cancel_context.reduce_only,
+                client_order_id: Some(cloid.as_str()),
+                exchange_order_id: cancel_context.exchange_order_id.as_deref(),
+                status: "CANCELLED",
+                raw_json: response_text.clone(),
+            },
+        )?;
+        write_manual_runtime_log(
+            &conn,
+            "INFO",
+            &format!(
+                "manual_trade cancelled symbol={} intent_id={} client_order_id={}",
+                symbol, intent_id, cloid
+            ),
+        )?;
         return Ok(json!({
             "ok": true,
             "symbol": symbol,
@@ -1200,6 +1435,81 @@ fn load_existing_manual_intent_by_dedupe_key(
     }
 }
 
+fn load_manual_cancel_context_by_intent_id(
+    conn: &Connection,
+    intent_id: &str,
+) -> Result<Option<ManualCancelContext>, HubError> {
+    let mut stmt = conn.prepare(
+        "SELECT symbol, side, status, requested_size, action, client_order_id, exchange_order_id
+         FROM oms_intents
+         WHERE intent_id = ?1
+         LIMIT 1",
+    )?;
+    let row = stmt.query_row([intent_id], |row| {
+        let action = row.get::<_, Option<String>>(4)?;
+        Ok(ManualCancelContext {
+            intent_id: Some(intent_id.to_string()),
+            side: row.get(1)?,
+            current_status: row.get(2)?,
+            requested_size: row.get(3)?,
+            reduce_only: action
+                .as_deref()
+                .map(|value| matches!(value, "CLOSE" | "REDUCE")),
+            client_order_id: row.get(5)?,
+            exchange_order_id: row.get(6)?,
+        })
+    });
+    match row {
+        Ok(value) => Ok(Some(value)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(HubError::Db(error.to_string())),
+    }
+}
+
+fn load_manual_cancel_context_by_exchange_order_id(
+    conn: &Connection,
+    symbol: &str,
+    exchange_order_id: &str,
+) -> Result<Option<ManualCancelContext>, HubError> {
+    let mut stmt = conn.prepare(
+        "SELECT intent_id, side, status, requested_size, action, client_order_id, exchange_order_id
+         FROM oms_intents
+         WHERE symbol = ?1 AND exchange_order_id = ?2
+         ORDER BY sent_ts_ms DESC
+         LIMIT 1",
+    )?;
+    let row = stmt.query_row(params![symbol, exchange_order_id], |row| {
+        let action = row.get::<_, Option<String>>(4)?;
+        Ok(ManualCancelContext {
+            intent_id: row.get(0)?,
+            side: row.get(1)?,
+            current_status: row.get(2)?,
+            requested_size: row.get(3)?,
+            reduce_only: action
+                .as_deref()
+                .map(|value| matches!(value, "CLOSE" | "REDUCE")),
+            client_order_id: row.get(5)?,
+            exchange_order_id: row.get(6)?,
+        })
+    });
+    match row {
+        Ok(value) => Ok(Some(value)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(HubError::Db(error.to_string())),
+    }
+}
+
+fn cancelled_intent_status(current_status: Option<&str>) -> Option<&'static str> {
+    let status = current_status?
+        .trim()
+        .to_ascii_uppercase();
+    match status.as_str() {
+        "PARTIAL" => Some("PARTIAL_CANCELLED"),
+        "NEW" | "SENT" | "UNKNOWN" => Some("CANCELLED"),
+        _ => None,
+    }
+}
+
 fn existing_intent_cloid(existing: &ExistingManualIntent) -> String {
     existing
         .client_order_id
@@ -1209,6 +1519,23 @@ fn existing_intent_cloid(existing: &ExistingManualIntent) -> String {
 
 fn should_resume_existing_manual_submission(existing: &ExistingManualIntent) -> bool {
     existing.sent_ts_ms.is_none() && existing.status.eq_ignore_ascii_case("NEW")
+}
+
+fn update_manual_intent_last_error(
+    conn: &Connection,
+    intent_id: &str,
+    last_error: &str,
+) -> Result<(), HubError> {
+    let changed = conn.execute(
+        "UPDATE oms_intents SET last_error = ?1 WHERE intent_id = ?2",
+        params![last_error, intent_id],
+    )?;
+    if changed == 0 {
+        return Err(HubError::Internal(format!(
+            "failed to update manual OMS intent error for {intent_id}"
+        )));
+    }
+    Ok(())
 }
 
 fn existing_manual_execution_payload(kind: &str, existing: &ExistingManualIntent) -> Value {
@@ -1625,6 +1952,50 @@ fn record_manual_order_submission(
             submission.exchange_order_id,
             submission.status,
             submission.raw_json,
+        ],
+    )?;
+    Ok(())
+}
+
+fn record_manual_cancel_audit(
+    conn: &Connection,
+    context: Option<&ManualCancelContext>,
+    audit: ManualCancelAudit<'_>,
+) -> Result<(), HubError> {
+    let ts_ms = chrono::Utc::now().timestamp_millis();
+    if let Some(intent_id) = audit.intent_id {
+        match audit.status {
+            "CANCELLED" => {
+                if let Some(next_status) =
+                    cancelled_intent_status(context.and_then(|item| item.current_status.as_deref()))
+                {
+                    update_manual_intent_status(conn, intent_id, next_status, "")?;
+                }
+            }
+            "REJECTED" | "ERROR" => {
+                update_manual_intent_last_error(conn, intent_id, &audit.raw_json)?;
+            }
+            _ => {}
+        }
+    }
+
+    conn.execute(
+        "INSERT INTO oms_orders (
+            intent_id, created_ts_ms, symbol, side, order_type, requested_size,
+            reduce_only, client_order_id, exchange_order_id, status, raw_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            audit.intent_id,
+            ts_ms,
+            audit.symbol,
+            audit.side,
+            audit.order_type,
+            audit.requested_size,
+            audit.reduce_only.map(|value| if value { 1 } else { 0 }),
+            audit.client_order_id,
+            audit.exchange_order_id,
+            audit.status,
+            audit.raw_json,
         ],
     )?;
     Ok(())
@@ -2865,5 +3236,128 @@ mod tests {
         assert!(error
             .to_string()
             .contains("confirm token does not match parameters"));
+    }
+
+    #[test]
+    fn manual_cancel_audit_updates_intent_and_persists_order_row() {
+        let db = NamedTempFile::new().unwrap();
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        let intent_id = "manual_cancel_ok";
+        insert_manual_intent(
+            &conn,
+            ManualIntentRecord {
+                intent_id,
+                created_ts_ms: 1_773_500_100_000,
+                symbol: "ETH",
+                action: "OPEN",
+                side: "SELL",
+                requested_size: 0.0515,
+                requested_notional: 107.5629,
+                leverage: Some(10.0),
+                status: "SENT",
+                dedupe_key: None,
+                client_order_id: "0x6d616e5f1234567890abcdef12345678",
+                reason: "manual_trade",
+                confidence: "MANUAL",
+                meta_json: "{}".to_string(),
+            },
+        )
+        .unwrap();
+        let context = load_manual_cancel_context_by_intent_id(&conn, intent_id)
+            .unwrap()
+            .expect("cancel context should exist");
+        record_manual_cancel_audit(
+            &conn,
+            Some(&context),
+            ManualCancelAudit {
+                intent_id: Some(intent_id),
+                symbol: "ETH",
+                side: Some("SELL"),
+                order_type: "cancel_by_cloid",
+                requested_size: Some(0.0515),
+                reduce_only: Some(false),
+                client_order_id: Some("0x6d616e5f1234567890abcdef12345678"),
+                exchange_order_id: Some("348262211344"),
+                status: "CANCELLED",
+                raw_json: json!({"status":"ok"}).to_string(),
+            },
+        )
+        .unwrap();
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM oms_intents WHERE intent_id = ?1",
+                [intent_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let order_status: String = conn
+            .query_row(
+                "SELECT status FROM oms_orders WHERE intent_id = ?1 ORDER BY id DESC LIMIT 1",
+                [intent_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(status, "CANCELLED");
+        assert_eq!(order_status, "CANCELLED");
+    }
+
+    #[test]
+    fn manual_cancel_audit_preserves_status_on_reject() {
+        let db = NamedTempFile::new().unwrap();
+        let conn = open_manual_trade_db(db.path()).unwrap();
+        let intent_id = "manual_cancel_reject";
+        insert_manual_intent(
+            &conn,
+            ManualIntentRecord {
+                intent_id,
+                created_ts_ms: 1_773_500_200_000,
+                symbol: "ETH",
+                action: "OPEN",
+                side: "SELL",
+                requested_size: 0.0515,
+                requested_notional: 107.5629,
+                leverage: Some(10.0),
+                status: "SENT",
+                dedupe_key: None,
+                client_order_id: "0x6d616e5f1234567890abcdef12345678",
+                reason: "manual_trade",
+                confidence: "MANUAL",
+                meta_json: "{}".to_string(),
+            },
+        )
+        .unwrap();
+        let context = load_manual_cancel_context_by_intent_id(&conn, intent_id)
+            .unwrap()
+            .expect("cancel context should exist");
+        record_manual_cancel_audit(
+            &conn,
+            Some(&context),
+            ManualCancelAudit {
+                intent_id: Some(intent_id),
+                symbol: "ETH",
+                side: Some("SELL"),
+                order_type: "cancel_by_cloid",
+                requested_size: Some(0.0515),
+                reduce_only: Some(false),
+                client_order_id: Some("0x6d616e5f1234567890abcdef12345678"),
+                exchange_order_id: Some("348262211344"),
+                status: "REJECTED",
+                raw_json: "already gone".to_string(),
+            },
+        )
+        .unwrap();
+
+        let row: (String, String) = conn
+            .query_row(
+                "SELECT status, last_error FROM oms_intents WHERE intent_id = ?1",
+                [intent_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(row.0, "SENT");
+        assert!(row.1.contains("already gone"));
     }
 }
