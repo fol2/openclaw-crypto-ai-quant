@@ -4,8 +4,6 @@ on:
   pull_request:
     branches: [master]
     paths:
-      - "pyproject.toml"
-      - "uv.lock"
       - "backtester/Cargo.toml"
       - "backtester/Cargo.lock"
       - "backtester/**/Cargo.lock"
@@ -13,8 +11,6 @@ on:
   push:
     branches: [master]
     paths:
-      - "pyproject.toml"
-      - "uv.lock"
       - "backtester/Cargo.toml"
       - "backtester/Cargo.lock"
       - "backtester/**/Cargo.lock"
@@ -28,28 +24,19 @@ jobs:
   pip-audit:
     name: Python dependency audit
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install uv
+      - name: Verify zero-Python dependency surfaces
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install --quiet uv
-
-      - name: Sync dependencies
-        run: uv sync --frozen --dev
-
-      - name: Run pip-audit
-        run: |
-          uv export --frozen --format requirements-txt > requirements.audit.txt
-          uvx --from pip-audit pip-audit --progress-spinner off -r requirements.audit.txt
+          if find . -type f \( -name '*.py' -o -name 'pyproject.toml' -o -name 'uv.lock' \) | grep -q .; then
+            echo "Expected zero Python dependency surfaces, but found:"
+            find . -type f \( -name '*.py' -o -name 'pyproject.toml' -o -name 'uv.lock' \) | sort
+            exit 1
+          fi
+          echo "Zero Python dependency surface confirmed."
 
   cargo-audit:
     name: Rust dependency audit

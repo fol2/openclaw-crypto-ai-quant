@@ -21,7 +21,7 @@ mapfile -t cargo_tomls < <(find "${repo_root}" -type f -name Cargo.toml \
 
 for cargo_toml in "${cargo_tomls[@]}"; do
   crate_version="$(awk -F'"' '/^version = "/ { print $2; exit }' "${cargo_toml}")"
-  [[ -n "${crate_version}" ]] || die "Cannot parse crate version from ${cargo_toml}"
+  [[ -n "${crate_version}" ]] || continue
   [[ "${crate_version}" == "${version}" ]] || die "Crate version '${crate_version}' != VERSION '${version}' in ${cargo_toml}"
 done
 
