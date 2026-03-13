@@ -1,66 +1,23 @@
 # openclaw-crypto-ai-quant
 
-AI-powered crypto perpetual futures trading engine for [Hyperliquid DEX](https://hyperliquid.xyz), with a high-performance Rust backtester featuring CPU and CUDA GPU acceleration.
+Rust-native crypto perpetual futures stack for Hyperliquid DEX.
 
-The repository now runs both production paper and live services through the
-Rust `aiq-runtime`. Python runtime surfaces remain in the tree only as archival
-recovery/debug compatibility code; they are no longer authoritative production
-paths.
+The repository is now zero-Python. Production trading, backtesting, market-data
+ingestion, and operator-facing control surfaces all live in Rust or shell.
+Historical Python runtime and tooling surfaces have been removed from the tree.
 
-Use these documents as the current ownership map:
+## Components
 
-- [docs/current_authoritative_paths.md](docs/current_authoritative_paths.md)
-- [runtime/README.md](runtime/README.md)
-- [docs/runbook.md](docs/runbook.md)
-
-The Rust runtime owns the paper and live daemon contracts, effective-config
-resolution, service manifests, service status, supervision actions, and the
-production systemd wrappers. The cutover programme record remains available in
-[docs/rust_full_runtime_cutover_programme.md](docs/rust_full_runtime_cutover_programme.md),
-while the foundation-slice documents are retained as historical references.
-
-## Screenshots
-
-### Trade Dashboard
-Candlestick charts with trade overlays, live mid-prices, and full trade journal with PnL.
-
-![Trade Dashboard](docs/screenshots/dashboard-trades.png)
-
-### Service Management
-One-click start/stop/restart for all systemd services with live status indicators.
-
-![System Management](docs/screenshots/system-management.png)
-
-### Trades
-Trade journal with candlestick chart overlays, entry/exit markers, and per-trade PnL.
-
-![Trades](docs/screenshots/trades-view.png)
-
-### Grid View
-Live prices, candlestick sparklines, positions, and PnL across your entire watchlist.
-
-![Grid View](docs/screenshots/grid-view.gif)
-
-## Architecture
-
-<p align="center">
-  <img src="docs/diagrams/architecture.svg" alt="System Architecture" />
-</p>
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed component descriptions, data flow, and project structure.
-
-## Highlights
-
-| | |
-|---|---|
-| **Trading** | Rust-owned paper + live runtime with hot-reloadable YAML config and archived Python recovery paths |
-| **Strategy** | Mei Alpha v1 — multi-indicator, confidence-ranked entries, ATR-based risk |
-| **Decision Kernel** | Shared Rust signal logic (`bt-signals`) across backtester, GPU sweep, and live trading via PyO3 bridge |
-| **Backtester** | CPU replay + CUDA GPU sweeps (60K param combos in ~3 s) + TPE Bayesian optimisation |
-| **Factory** | Nightly pipeline: sweep → validate → deploy → paper → promote → live ramp (25% → 50% → 100%) |
-| **Risk** | Daily loss limits, drawdown kill-switch, rate limiting, exposure caps, slippage guard |
-| **Monitoring** | Python dashboard, Rust + Svelte hub, Discord / Telegram alerting |
-| **Data** | Rust WS sidecar streams Hyperliquid market data over Unix socket; maintains candle DBs |
+| Component | Path | Purpose |
+|---|---|---|
+| Runtime CLI | `runtime/aiq-runtime` | Paper/live control plane, daemon ownership, snapshots, service inspection |
+| Runtime core | `runtime/aiq-runtime-core` | Shared runtime pipeline and bootstrap contracts |
+| Backtester CLI | `backtester/crates/bt-cli` | Replay, sweep, and indicator dump commands |
+| Backtester core | `backtester/crates/bt-core` | Simulation engine, config, indicators, state |
+| GPU sweep | `backtester/crates/bt-gpu` | CUDA sweep acceleration and parity helpers |
+| Data loader | `backtester/crates/bt-data` | SQLite candle and universe-history loading |
+| WS sidecar | `ws_sidecar/` | Hyperliquid stream ingestion and candle persistence |
+| Hub | `hub/` | Rust + frontend operator dashboard and service controls |
 
 ## Quick Start
 
@@ -68,139 +25,63 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed component descript
 git clone https://github.com/fol2/openclaw-crypto-ai-quant.git
 cd openclaw-crypto-ai-quant
 
-# Python >=3.12 + uv required
-uv sync --dev
-source .venv/bin/activate
+cargo build --workspace
 
-# Configure core env (paper lanes usually need no exchange secrets)
-cp .env.example .env
-
-# Run the Rust paper lane
+# Paper lane
 cargo run -p aiq-runtime -- paper daemon --lane paper1 --project-dir "$PWD"
-```
 
-For live trading, copy secrets outside the repo and set safety flags. The
-authoritative live entrypoint is now the Rust runtime:
-
-```bash
-mkdir -p ~/.config/openclaw
-cp config/secrets.json.example ~/.config/openclaw/ai-quant-secrets.json
-chmod 600 ~/.config/openclaw/ai-quant-secrets.json
-# Edit the live env: AI_QUANT_LIVE_ENABLE=1, AI_QUANT_LIVE_CONFIRM=...
+# Inspect live contract without executing orders
 cargo run -p aiq-runtime -- live manifest --project-dir "$PWD" --json
-cargo run -p aiq-runtime -- live service inspect --project-dir "$PWD" --json
 ```
 
-## Backtester
+For release-style backtester binaries:
 
 ```bash
-# Build (CPU)
-python3 tools/build_mei_backtester.py
-
-# Build (GPU, requires CUDA)
-python3 tools/build_mei_backtester.py --gpu
-
-# Single replay
-mei-backtester replay --candles-db candles_dbs/candles_1h.db
-
-# Parameter sweep
-mei-backtester sweep --sweep-config sweeps/smoke.yaml
-
-# GPU sweep + TPE
-mei-backtester sweep --gpu --tpe --tpe-trials 5000 --sweep-spec sweep.yaml
+cargo build --release --manifest-path backtester/Cargo.toml -p bt-cli
+cargo build --release --manifest-path backtester/Cargo.toml -p bt-cli --features gpu
 ```
-
-See [backtester/README.md](backtester/README.md) for candle DB partitioning, universe filtering, GPU parity lanes, and the full config deploy pipeline.
-
-## Configuration
-
-Strategy parameters live in `config/strategy_overrides.yaml` and **hot-reload at runtime** (no restart needed). Merge order:
-
-```
-base YAML document (+ latest promoted YAML for AI_QUANT_PROMOTED_ROLE, if present)
-→ defaults ← global YAML ← per-symbol YAML ← live YAML ← modes.<mode>
-```
-
-Key sections: `trade` (sizing, SL/TP, pyramiding), `market_regime` (breadth, auto-reverse), `filters` (entry gates), `indicators` (EMA, ADX, BB windows), `engine` (intervals).
-
-For Rust paper surfaces, `AI_QUANT_STRATEGY_MODE` wins; when it is unset,
-`AI_QUANT_STRATEGY_MODE_FILE` is the file-backed fallback.
-
-See `.env.example` for all environment variables and safety controls.
-
-## Deployment
-
-Systemd user service templates in `systemd/`:
-
-| Service | Purpose |
-|---------|---------|
-| `openclaw-ai-quant-trader-v8-paper1` | Primary paper trading daemon |
-| `openclaw-ai-quant-trader-v8-paper2` | Candidate paper trading daemon |
-| `openclaw-ai-quant-trader-v8-paper3` | Candidate paper trading daemon |
-| `openclaw-ai-quant-live-v8` | Live trading daemon |
-| `openclaw-ai-quant-ws-sidecar` | Market data WebSocket sidecar |
-| `openclaw-ai-quant-monitor` | Real-time monitoring dashboard |
-| `openclaw-ai-quant-factory-v8` | Nightly strategy sweep (timer) |
-
-```bash
-cp systemd/<template>.example ~/.config/systemd/user/<unit-name>
-systemctl --user daemon-reload
-systemctl --user enable --now <unit-name>
-```
-
-See [docs/runbook.md](docs/runbook.md) for emergency stop, rollback, and diagnostics procedures.
 
 ## Development
 
 ```bash
-# Python
-uv sync --dev
-uv run pytest
-uv run ruff check engine strategy exchange live tools tests monitor
-uv run ruff format engine strategy exchange live tools tests monitor
-
-# Rust (backtester workspace)
-cargo build --release --manifest-path backtester/Cargo.toml
-cargo test --manifest-path backtester/Cargo.toml
-
-# Rust (root workspace: runtime foundation)
-cargo build --workspace
+# Full workspace
+cargo check --workspace
 cargo test --workspace
 
-# Rust runtime foundation
-cargo test -p aiq-runtime-core
-cargo run -p aiq-runtime -- pipeline --json
-cargo run -p aiq-runtime -- snapshot validate --path /tmp/paper_init_state_v2.json --json
-cargo run -p aiq-runtime -- snapshot seed-paper --snapshot /tmp/paper_init_state_v2.json --target-db trading_engine.db --strict-replace --json
-cargo run -p aiq-runtime -- paper doctor --db trading_engine.db --json
-cargo run -p aiq-runtime -- paper run-once --db trading_engine.db --candles-db candles_dbs/candles_30m.db --target-symbol ETH --exported-at-ms 1772676900000 --dry-run --json
-cargo run -p aiq-runtime -- paper cycle --db trading_engine.db --candles-db candles_dbs/candles_30m.db --symbols ETH,SOL --step-close-ts-ms 1773426000000 --exported-at-ms 1772676900000 --dry-run --json
-cargo run -p aiq-runtime -- paper loop --db trading_engine.db --candles-db candles_dbs/candles_30m.db --symbols ETH,SOL --start-step-close-ts-ms 1773424200000 --max-steps 2 --dry-run --json
+# Formatting and linting
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
+
+# Backtester-only
+cargo test --manifest-path backtester/Cargo.toml
 ```
 
-Version is governed by `VERSION` (single source of truth). See [docs/release_process.md](docs/release_process.md).
+Optional local helpers used by some scripts:
+
+- `jq`
+- `sqlite3`
+- CUDA toolkit for GPU sweeps
+
+## Operations
+
+Shell wrappers and systemd examples are provided for the Rust-owned runtime:
+
+- `scripts/run_paper_lane.sh`
+- `scripts/run_live.sh`
+- `scripts/run_paper.sh`
+- `systemd/openclaw-ai-quant-trader-v8-paper*.service.example`
+- `systemd/openclaw-ai-quant-live-v8.service.example`
+- `systemd/openclaw-ai-quant-ws-sidecar.service.example`
 
 ## Documentation
 
-| Document | Description |
-|----------|-------------|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design, components, and project structure |
-| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Development setup and guidelines |
-| [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Contribution guidelines |
-| [docs/runbook.md](docs/runbook.md) | Operations runbook (emergency stop, rollback, diagnostics) |
-| [docs/strategy_lifecycle.md](docs/strategy_lifecycle.md) | Config state machine (candidate → live) |
-| [docs/success_metrics.md](docs/success_metrics.md) | Risk limits and promotion criteria |
-| [docs/release_process.md](docs/release_process.md) | Version governance and tag-driven releases |
-| [docs/adr/ADR-0001-rust-runtime-foundation.md](docs/adr/ADR-0001-rust-runtime-foundation.md) | Rust runtime foundation decision record |
-| [docs/programmes/rust-runtime-foundation.md](docs/programmes/rust-runtime-foundation.md) | Rust runtime foundation programme and phase order |
-| [docs/teams/docs-team-charter.md](docs/teams/docs-team-charter.md) | Standing documentation team contract for migration waves |
-| [docs/housekeeping/legacy-runtime-ledger.md](docs/housekeeping/legacy-runtime-ledger.md) | Legacy runtime surfaces queued for quarantine and removal |
-| [docs/state_sync/init_state_v2_contract.md](docs/state_sync/init_state_v2_contract.md) | Canonical continuation contract for Rust-owned snapshots |
-| [docs/validation/rust-runtime-foundation.md](docs/validation/rust-runtime-foundation.md) | Validation matrix for the runtime foundation slice |
-| [backtester/README.md](backtester/README.md) | Backtester documentation |
-| [monitor/README.md](monitor/README.md) | Dashboard documentation |
-| [engine/README.md](engine/README.md) | Engine internals |
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
+- [docs/current_authoritative_paths.md](docs/current_authoritative_paths.md)
+- [docs/runbook.md](docs/runbook.md)
+- [runtime/README.md](runtime/README.md)
+- [backtester/README.md](backtester/README.md)
 
-## License
+## Licence
 
 MIT

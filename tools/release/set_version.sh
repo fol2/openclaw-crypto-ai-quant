@@ -25,14 +25,13 @@ version="$1"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 version_file="${repo_root}/VERSION"
-pyproject_file="${repo_root}/pyproject.toml"
-crates_root="${repo_root}/backtester/crates"
+mapfile -t cargo_tomls < <(find "${repo_root}" -type f -name Cargo.toml \
+  ! -path "${repo_root}/target/*" \
+  ! -path "${repo_root}/.git/*" | sort)
 
 printf '%s\n' "${version}" > "${version_file}"
-sed -E -i "0,/^version = \".*\"/s//version = \"${version}\"/" "${pyproject_file}"
 
-mapfile -t cargo_tomls < <(find "${crates_root}" -mindepth 2 -maxdepth 2 -type f -name Cargo.toml | sort)
-(( ${#cargo_tomls[@]} > 0 )) || die "No crate Cargo.toml files found under ${crates_root}"
+(( ${#cargo_tomls[@]} > 0 )) || die "No Cargo.toml files found under ${repo_root}"
 
 for cargo_toml in "${cargo_tomls[@]}"; do
   sed -E -i "0,/^version = \".*\"/s//version = \"${version}\"/" "${cargo_toml}"

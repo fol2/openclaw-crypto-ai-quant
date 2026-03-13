@@ -1,6 +1,4 @@
 pub mod backtester;
-pub mod factory;
-pub mod manual_trade;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -28,7 +26,7 @@ pub enum JobStatus {
 #[derive(Debug, Clone, Serialize)]
 pub struct JobInfo {
     pub id: JobId,
-    pub kind: String, // "backtest", "sweep", or "manual_trade"
+    pub kind: String,
     pub status: JobStatus,
     pub created_at: String,
     pub finished_at: Option<String>,

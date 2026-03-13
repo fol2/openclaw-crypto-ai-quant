@@ -35,7 +35,6 @@ if [[ ! -f "$BT" ]]; then
 fi
 if [[ ! -f "$MANIFEST" ]]; then
     echo "ERROR: Manifest not found at $MANIFEST"
-    echo "Generate with: python3 sweeps/generate_17phase_144v.py"
     exit 1
 fi
 if [[ ! -f "$CONFIG" ]]; then
@@ -47,27 +46,7 @@ if [[ "$USE_GPU" -eq 1 ]]; then
     export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:/usr/lib/wsl/lib"
 fi
 
-PHASE_INFO_JSON="$(python3 - "$MANIFEST" <<'PY'
-import json, sys, yaml
-m = yaml.safe_load(open(sys.argv[1], "r", encoding="utf-8").read()) or {}
-ph = m.get("phases", [])
-out = []
-for p in ph:
-    out.append({
-        "id": str(p.get("id", "")),
-        "file": str(p.get("file", "")),
-        "combo": int(p.get("combo", 0)),
-    })
-print(json.dumps(out))
-PY
-)"
-
-TOTAL_COMBOS="$(python3 - "$MANIFEST" <<'PY'
-import sys, yaml
-m = yaml.safe_load(open(sys.argv[1], "r", encoding="utf-8").read()) or {}
-print(int(m.get("total_combo", 0)))
-PY
-)"
+TOTAL_COMBOS="$(awk '/^total_combo:/ { print $2; exit }' "$MANIFEST")"
 
 mkdir -p "$OUTDIR"
 
@@ -119,11 +98,11 @@ for interval in $INTERVALS; do
         echo "${lines} done in ${elapsed}s"
         TOTAL_RUNS=$((TOTAL_RUNS + lines))
     done < <(
-        python3 - "$PHASE_INFO_JSON" <<'PY'
-import json, sys
-for p in json.loads(sys.argv[1]):
-    print(f"{p['id']}\t{p['file']}\t{p['combo']}")
-PY
+        awk '
+            $1 == "-" && $2 == "id:" { id = $3 }
+            $1 == "file:" { file = $2 }
+            $1 == "combo:" { combo = $2; print id "\t" file "\t" combo }
+        ' "$MANIFEST"
     )
 done
 

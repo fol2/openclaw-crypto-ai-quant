@@ -67,7 +67,7 @@ struct Args {
     #[arg(long)]
     funding_db: Option<String>,
 
-    /// Read initial balance from an export_state.py JSON file.
+    /// Read initial balance from a runtime snapshot JSON file.
     #[arg(long)]
     balance_from: Option<String>,
 
@@ -395,7 +395,7 @@ fn within_abs_or_rel(delta_abs: f64, lhs: f64, rhs: f64, abs_eps: f64, rel_eps: 
     delta_abs <= abs_eps.max(rel_eps * scale)
 }
 
-/// Read only the `balance` field from an export_state.py JSON file.
+/// Read only the `balance` field from a runtime snapshot JSON file.
 fn read_balance_from_json(path: &str) -> Result<f64, Box<dyn std::error::Error>> {
     let data = std::fs::read_to_string(path).map_err(|e| format!("Cannot read {:?}: {}", path, e))?;
     let json: serde_json::Value =

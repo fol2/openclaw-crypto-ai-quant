@@ -21,7 +21,7 @@ pub struct InitRuntimeState {
     pub exit_attempt_ms_by_symbol: FxHashMap<String, i64>,
 }
 
-/// Top-level init-state file (matches `export_state.py` output and v2 snapshots).
+/// Top-level init-state file for runtime snapshot exports and v2 snapshots.
 #[derive(Debug, Deserialize)]
 pub struct InitStateFile {
     pub version: u32,
