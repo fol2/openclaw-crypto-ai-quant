@@ -705,131 +705,6 @@ fn checked_f32(name: &str, val: f64) -> Result<f32, String> {
     Ok(f)
 }
 
-fn ensure_default_group_order(
-    group: &str,
-    actual: &bt_core::signals::behaviour::BehaviourGroupPlan,
-    expected: &bt_core::signals::behaviour::BehaviourGroupPlan,
-) -> Result<(), String> {
-    let actual_ids = actual.ordered_ids().collect::<Vec<_>>();
-    let expected_ids = expected.ordered_ids().collect::<Vec<_>>();
-    if actual_ids != expected_ids {
-        return Err(format!(
-            "GPU path only supports the default `{group}` behaviour order; got {:?}, expected {:?}",
-            actual_ids, expected_ids
-        ));
-    }
-    Ok(())
-}
-
-fn ensure_supported_disabled_behaviours(
-    group: &str,
-    plan: &bt_core::signals::behaviour::BehaviourGroupPlan,
-    supported: &[&str],
-) -> Result<(), String> {
-    for item in &plan.items {
-        if !item.enabled && !supported.contains(&item.id.as_str()) {
-            return Err(format!(
-                "GPU path does not yet support disabling behaviour `{}` in group `{group}`",
-                item.id
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn ensure_gpu_behaviour_plan_supported(
-    plan: &bt_core::behaviour::ResolvedBehaviourPlan,
-) -> Result<(), String> {
-    let production = bt_core::behaviour::ResolvedBehaviourPlan::production();
-    ensure_default_group_order("gates", &plan.gates, &production.gates)?;
-    ensure_default_group_order("signal_modes", &plan.signal_modes, &production.signal_modes)?;
-    ensure_default_group_order("engine", &plan.engine, &production.engine)?;
-    ensure_default_group_order("exits", &plan.exits, &production.exits)?;
-
-    ensure_supported_disabled_behaviours(
-        "gates",
-        &plan.gates,
-        &[
-            "gate.ranging_vote",
-            "gate.anomaly_filter",
-            "gate.extension_filter",
-            "gate.volume_confirmation",
-            "gate.adx_rising",
-            "gate.adx_floor",
-            "gate.alignment.macro",
-            "gate.alignment.btc",
-        ],
-    )?;
-    ensure_supported_disabled_behaviours(
-        "signal_modes",
-        &plan.signal_modes,
-        &["signal.mode.pullback", "signal.mode.slow_drift"],
-    )?;
-    ensure_supported_disabled_behaviours(
-        "signal_confidence",
-        &plan.signal_confidence,
-        &["signal.confidence.high_volume_upgrade"],
-    )?;
-    ensure_supported_disabled_behaviours(
-        "engine",
-        &plan.engine,
-        &[
-            "engine.atr_floor",
-            "engine.reverse_signal",
-            "engine.regime_filter",
-        ],
-    )?;
-    ensure_supported_disabled_behaviours(
-        "entry_sizing",
-        &plan.entry_sizing,
-        &[
-            "entry.sizing.dynamic",
-            "entry.sizing.confidence_multiplier",
-            "entry.sizing.adx_multiplier",
-            "entry.sizing.volatility_scalar",
-            "entry.sizing.min_notional_bump",
-        ],
-    )?;
-    ensure_supported_disabled_behaviours(
-        "entry_progression",
-        &plan.entry_progression,
-        &[
-            "entry.progression.pyramiding",
-            "entry.progression.add_cooldown",
-        ],
-    )?;
-    ensure_supported_disabled_behaviours(
-        "risk",
-        &plan.risk,
-        &["risk.entry_cooldown", "risk.exit_cooldown", "risk.pesc"],
-    )?;
-    ensure_supported_disabled_behaviours(
-        "exits",
-        &plan.exits,
-        &[
-            "exit.stop_loss.ase",
-            "exit.stop_loss.dase",
-            "exit.stop_loss.slb",
-            "exit.stop_loss.base",
-            "exit.stop_loss.breakeven",
-            "exit.trailing.low_conf_override",
-            "exit.trailing.vol_buffer",
-            "exit.trailing.base",
-            "exit.take_profit.partial",
-            "exit.take_profit.full",
-            "exit.smart.trend_breakdown",
-            "exit.smart.trend_exhaustion",
-            "exit.smart.ema_macro_breakdown",
-            "exit.smart.stagnation",
-            "exit.smart.funding_headwind",
-            "exit.smart.tsme",
-            "exit.smart.mmde",
-            "exit.smart.rsi_overextension",
-        ],
-    )?;
-    Ok(())
-}
-
 fn build_exit_behaviour_mask(plan: &bt_core::behaviour::ResolvedBehaviourPlan) -> u32 {
     let mut mask = GPU_EXIT_MASK_ALL;
     for item in &plan.exits.items {
@@ -879,9 +754,8 @@ impl GpuComboConfig {
     ///
     /// Returns `Err` if any price, size, or leverage value overflows f32.
     pub fn from_strategy_config(cfg: &bt_core::config::StrategyConfig) -> Result<Self, String> {
-        let resolved = bt_core::execution_contract::resolve_execution_config(cfg, None)
+        let resolved = bt_core::execution_contract::resolve_gpu_execution_config(cfg, None)
             .map_err(|err| format!("execution contract resolution failed: {err}"))?;
-        ensure_gpu_behaviour_plan_supported(&resolved.behaviour_plan)?;
         let exit_behaviour_mask = build_exit_behaviour_mask(&resolved.behaviour_plan);
         let smart_exit_behaviour_mask = build_smart_exit_behaviour_mask(&resolved.behaviour_plan);
         let cfg = &resolved.effective_cfg;
