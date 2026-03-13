@@ -88,6 +88,8 @@ sweep_full/results_*/
 strategy_changelog.json
 kernel_state*.json
 kernel_shadow_report*.json
+ai_quant*.status.json
+ai_quant*.status.json.tmp
 
 # Timestamped sweep configs (generated, not canonical)
 strategy_tpe_*.yaml
