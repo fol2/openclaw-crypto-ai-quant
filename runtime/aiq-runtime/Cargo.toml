@@ -12,10 +12,15 @@ path = "src/main.rs"
 name = "aiq-maintenance"
 path = "src/bin/aiq-maintenance.rs"
 
+[[bin]]
+name = "aiq-factory"
+path = "src/bin/aiq-factory.rs"
+
 [dependencies]
 aiq-runtime-core = { path = "../aiq-runtime-core" }
 anyhow = { workspace = true }
 bt-core = { path = "../../backtester/crates/bt-core" }
+bt-data = { path = "../../backtester/crates/bt-data" }
 chrono = { version = "0.4", features = ["clock"] }
 clap = { workspace = true }
 fs2 = "0.4"
